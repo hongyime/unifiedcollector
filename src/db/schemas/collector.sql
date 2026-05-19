@@ -1,0 +1,102 @@
+-- Core schema shared by all collectors.
+-- Run on every startup via init_db() — all statements are IF NOT EXISTS safe.
+
+CREATE TABLE IF NOT EXISTS media_items (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    source VARCHAR(20) NOT NULL,
+    entity_id VARCHAR(100) NOT NULL,
+    entity_name VARCHAR(255) NOT NULL,
+    content_type VARCHAR(50) NOT NULL,
+    content_id VARCHAR(100) NOT NULL,
+    filename VARCHAR(500) NOT NULL,
+    file_path VARCHAR(1000) NOT NULL,
+    file_size BIGINT,
+    width INTEGER,
+    height INTEGER,
+    sha256 VARCHAR(64),
+    collected_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    source_url TEXT,
+    metadata JSONB,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_media_source ON media_items(source);
+CREATE INDEX IF NOT EXISTS idx_media_entity ON media_items(source, entity_id);
+CREATE INDEX IF NOT EXISTS idx_media_collected ON media_items(collected_at);
+CREATE INDEX IF NOT EXISTS idx_media_sha256 ON media_items(source, sha256);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_media_source_content ON media_items(source, content_id);
+
+CREATE TABLE IF NOT EXISTS service_cursors (
+    service VARCHAR(50) PRIMARY KEY,
+    last_processed_id VARCHAR(100),
+    last_processed_at TIMESTAMP,
+    status VARCHAR(20) NOT NULL DEFAULT 'idle'
+);
+
+CREATE TABLE IF NOT EXISTS dead_letter_queue (
+    id SERIAL PRIMARY KEY,
+    source VARCHAR(20) NOT NULL,
+    entity_id VARCHAR(100),
+    content_id VARCHAR(100),
+    error_message TEXT,
+    retry_count INT NOT NULL DEFAULT 0,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_dlq_source ON dead_letter_queue(source, created_at);
+
+CREATE TABLE IF NOT EXISTS collection_targets (
+    id SERIAL PRIMARY KEY,
+    source VARCHAR(20) NOT NULL,
+    target_id VARCHAR(100) NOT NULL,
+    target_name VARCHAR(255),
+    target_type VARCHAR(50) DEFAULT 'user',
+    status VARCHAR(20) DEFAULT 'pending',
+    priority INT DEFAULT 0,
+    last_collection_at TIMESTAMP,
+    collection_count INT DEFAULT 0,
+    error_message TEXT,
+    metadata JSONB,
+    created_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(source, target_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_targets_source_status
+    ON collection_targets(source, status);
+CREATE INDEX IF NOT EXISTS idx_targets_priority
+    ON collection_targets(priority DESC);
+
+CREATE TABLE IF NOT EXISTS collection_runs (
+    id SERIAL PRIMARY KEY,
+    source VARCHAR(20) NOT NULL,
+    status VARCHAR(20) DEFAULT 'queued',
+    started_at TIMESTAMP DEFAULT NOW(),
+    completed_at TIMESTAMP,
+    items_collected INT DEFAULT 0,
+    items_failed INT DEFAULT 0,
+    error_message TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_runs_source ON collection_runs(source);
+CREATE INDEX IF NOT EXISTS idx_runs_status ON collection_runs(status);
+
+CREATE TABLE IF NOT EXISTS collection_schedules (
+    id SERIAL PRIMARY KEY,
+    source VARCHAR(20) UNIQUE NOT NULL,
+    interval_hours INT NOT NULL DEFAULT 24,
+    enabled BOOLEAN DEFAULT true,
+    last_run TIMESTAMP,
+    next_run TIMESTAMP,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_schedules_next_run
+    ON collection_schedules(next_run) WHERE enabled = true;
+
+CREATE TABLE IF NOT EXISTS dashboard_users (
+    id SERIAL PRIMARY KEY,
+    username VARCHAR(100) NOT NULL UNIQUE,
+    password_hash VARCHAR(255) NOT NULL,
+    role VARCHAR(20) NOT NULL DEFAULT 'viewer',
+    created_at TIMESTAMP NOT NULL DEFAULT NOW()
+);

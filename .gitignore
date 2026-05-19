@@ -1,0 +1,52 @@
+# Credentials (NEVER commit)
+.env
+!.env.example
+credentials/
+
+# Large model files
+models/dlib/*.dat
+models/dlib/*.bz2
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+*.egg/
+
+# Sessions
+*.session
+sessions/
+
+# Runtime data
+data/
+*.db
+*.db-wal
+*.db-shm
+storage/
+
+# Node
+node_modules/
+*.log
+
+# Build outputs
+dist/
+build/
+.vite/
+
+# Docker
+*.tar
+*.tar.gz
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Database dumps
+*.dump

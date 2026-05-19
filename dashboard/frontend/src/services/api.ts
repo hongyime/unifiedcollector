@@ -1,0 +1,140 @@
+import { API_BASE } from "../utils/constants";
+import type {
+  HealthStatus,
+  CollectorStatus,
+  CollectorDetail,
+  MediaItem,
+  MediaStats,
+  MediaBrowseResult,
+  DLQItem,
+  Target,
+  Schedule,
+  Run,
+  GraphData,
+  FaceIdentity,
+  WhatsAppUser,
+  UserHistoryEntry,
+  DiscoveredLink,
+  LinkStats,
+  AuthResponse,
+} from "./types";
+
+function getToken(): string | null {
+  return localStorage.getItem("auth_token");
+}
+
+function authHeaders(): HeadersInit {
+  const token = getToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+async function get<T>(path: string): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, { headers: authHeaders() });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json() as Promise<T>;
+}
+
+async function post<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json() as Promise<T>;
+}
+
+async function put<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json() as Promise<T>;
+}
+
+async function del<T>(path: string): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json() as Promise<T>;
+}
+
+export const api = {
+  health: () => get<HealthStatus>("/health"),
+  collectors: () => get<CollectorStatus[]>("/collectors"),
+  collectorDetail: (source: string) => get<CollectorDetail>(`/collectors/${source}`),
+
+  media: (source?: string, limit = 50) => {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (source) params.set("source", source);
+    return get<MediaItem[]>(`/media?${params}`);
+  },
+  mediaStats: () => get<MediaStats[]>("/media/stats"),
+  mediaBrowse: (opts: { source?: string; entity?: string; type?: string; page?: number; pageSize?: number }) => {
+    const params = new URLSearchParams();
+    if (opts.source) params.set("source", opts.source);
+    if (opts.entity) params.set("entity", opts.entity);
+    if (opts.type) params.set("content_type", opts.type);
+    params.set("page", String(opts.page ?? 1));
+    params.set("page_size", String(opts.pageSize ?? 24));
+    return get<MediaBrowseResult>(`/media/browse?${params}`);
+  },
+  thumbnailUrl: (id: number) => `${API_BASE}/media/${id}/thumbnail`,
+
+  dlq: (source?: string, limit = 50) => {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (source) params.set("source", source);
+    return get<DLQItem[]>(`/dlq?${params}`);
+  },
+
+  targets: (source?: string) => {
+    const params = source ? `?source=${source}` : "";
+    return get<Target[]>(`/targets${params}`);
+  },
+  createTarget: (source: string, target: string, priority = 0) =>
+    post("/targets", { source, target, priority }),
+  deleteTarget: (id: number) => del(`/targets/${id}`),
+
+  schedules: () => get<Schedule[]>("/schedules"),
+  updateSchedule: (source: string, interval_hours: number, enabled: boolean) =>
+    put(`/schedules/${source}`, { source, interval_hours, enabled }),
+
+  runs: (source?: string, limit = 20) => {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (source) params.set("source", source);
+    return get<Run[]>(`/runs?${params}`);
+  },
+  runDetail: (id: number) => get<Run>(`/runs/${id}`),
+
+  graph: (source = "github") => get<GraphData>(`/graph?source=${source}`),
+
+  faces: (limit = 50) => get<FaceIdentity[]>(`/whatsapp/faces?limit=${limit}`),
+  faceDetail: (id: string) => get<{ identity: FaceIdentity; embeddings: unknown[] }>(`/whatsapp/faces/${id}`),
+  labelFace: (id: string, label: string) => post(`/whatsapp/faces/${id}/label`, { label }),
+  mergeFaces: (sourceId: string, targetId: string) =>
+    post("/whatsapp/faces/merge", { source_id: sourceId, target_id: targetId }),
+
+  waUsers: (search?: string, limit = 50) => {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (search) params.set("search", search);
+    return get<WhatsAppUser[]>(`/whatsapp/users?${params}`);
+  },
+  waUserHistory: (jid: string) => get<UserHistoryEntry[]>(`/whatsapp/users/${jid}/history`),
+
+  waLinks: (opts?: { linkType?: string; status?: string; limit?: number }) => {
+    const params = new URLSearchParams();
+    if (opts?.linkType) params.set("link_type", opts.linkType);
+    if (opts?.status) params.set("status", opts.status);
+    params.set("limit", String(opts?.limit ?? 100));
+    return get<DiscoveredLink[]>(`/whatsapp/links?${params}`);
+  },
+  waLinkStats: () => get<LinkStats[]>("/whatsapp/links/stats"),
+
+  login: (username: string, password: string) =>
+    post<AuthResponse>("/auth/login", { username, password }),
+  me: () => get<{ username: string; role: string }>("/auth/me"),
+};

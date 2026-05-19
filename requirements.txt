@@ -1,0 +1,49 @@
+asyncpg>=0.29.0
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+httpx>=0.27.0
+aiofiles>=24.1.0
+python-dotenv>=1.0.0
+beautifulsoup4>=4.12.0
+Pillow>=10.4.0
+defusedxml>=0.7.1
+telethon>=1.36.0
+
+# Profile photo change detection (pHash)
+imagehash>=4.3.0
+
+# Instagram multi-account login + session management
+instaloader>=4.11.0
+
+# DuckDuckGo search (free, no API key)
+duckduckgo-search>=6.0.0
+
+# Video downloading (YouTube, TikTok)
+yt-dlp>=2024.1.0
+
+# Image/video downloading (TikTok primary tier)
+gallery-dl>=1.27.0
+
+# PDF to image extraction (website collector)
+PyMuPDF>=1.24.0
+
+# Browser automation fallback (TikTok)
+playwright>=1.40.0
+
+# WhatsApp real-time mode
+aio-pika>=9.4.0
+redis>=5.0.0
+
+# Human-like rate limiter
+aiohttp>=3.9.0
+
+# Dashboard JWT auth
+pyjwt>=2.8.0
+bcrypt>=4.1.0
+
+# YouTube OAuth token refresh
+google-auth>=2.29.0
+google-auth-oauthlib>=1.2.0
+
+# WhatsApp face recognition (pgvector similarity)
+pgvector>=0.3.0

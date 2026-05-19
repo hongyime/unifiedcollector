@@ -1,0 +1,113 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: unifiedcollector_postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: unifiedcollector
+    volumes:
+      - ./postgres/postgres.conf:/etc/postgresql/postgresql.conf
+      - z:/media/db:/var/lib/postgresql/data
+      - ./backups:/backups
+    command: postgres -c config_file=/etc/postgresql/postgresql.conf
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-collector}"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  collector:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: unifiedcollector_collector
+    command: python -m src.main worker --all
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      COLLECTOR_DRIVE_PATH: /media
+    volumes:
+      - z:/media:/media
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - ../.env
+    healthcheck:
+      test: ["CMD", "python", "-m", "src.core.health"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  scheduler:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: unifiedcollector_scheduler
+    command: python -m src.main scheduler
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - ../.env
+    healthcheck:
+      test: ["CMD", "python", "-m", "src.core.health"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  dashboard:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.dashboard
+    container_name: unifiedcollector_dashboard
+    ports:
+      - "8700:8700"
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - ../.env
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8700/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  backup:
+    image: postgres:16-alpine
+    container_name: unifiedcollector_backup
+    environment:
+      PGUSER: ${POSTGRES_USER}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGHOST: postgres
+      PGDATABASE: unifiedcollector
+    volumes:
+      - ./backups:/backups
+      - z:/media/db/wal_archive:/wal_archive
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        while true; do
+          pg_dump -Fc > /backups/unifiedcollector_$$(date +%Y%m%d_%H%M%S).dump
+          find /backups -name '*.dump' -mtime +7 -delete
+          sleep 86400
+        done
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
