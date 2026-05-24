@@ -1,19 +1,38 @@
 import asyncio
 import hashlib
+import html as html_lib
 import io
 import json
 import logging
 import os
 import re
+import tempfile
+from pathlib import Path
+from datetime import datetime, timezone
+from typing import Any, Optional
+from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 
 import httpx
 
 from src.core.base_collector import BaseCollector
 from src.core.human_rate_limiter import OperationType
+from src.core.file_naming import sanitize_name
 
 logger = logging.getLogger(__name__)
 
 API_BASE = "https://api.lemon8-app.com"
+LEMON8_BASE_URL = "https://www.lemon8-app.com"
+FEED_URL = f"{LEMON8_BASE_URL}/FEED/FORYOU"
+USER_URL_PATTERN = f"{LEMON8_BASE_URL}/@{{}}"
+TAG_URL_PATTERN = f"{LEMON8_BASE_URL}/topic/{{}}"
+
+# Optional pylemon8 integration — never required.
+try:  # pragma: no cover - optional dep
+    from pylemon8 import Lemon8 as _PyLemon8  # type: ignore
+    PYLEMON8_AVAILABLE = True
+except Exception:  # ImportError or downstream errors
+    _PyLemon8 = None
+    PYLEMON8_AVAILABLE = False
 
 
 def _enhance_image_url(url: str, target_width: int = 2160) -> str:
@@ -58,40 +77,36 @@ class Lemon8Collector(BaseCollector):
             with open(path) as f:
                 for line in f:
                     line = line.strip()
-                    if line.startswith("#") or not line:
-                        continue
+                    if line.startswith("#") or not line: continue
                     parts = line.split("\t")
-                    if len(parts) >= 7:
-                        cookies[parts[5]] = parts[6]
-        except Exception:
-            pass
+                    if len(parts) >= 7: cookies[parts[5]] = parts[6]
+        except Exception: pass
         return cookies
 
+    @property
+    def account_media_dir(self) -> Path:
+        acc_name = Path(self._cookies_file).stem if self._cookies_file else "default"
+        path = self.media_dir / f"account_{sanitize_name(acc_name)}"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
     def _headers(self) -> dict[str, str]:
-        return {
-            "User-Agent": self.user_agents.get_for_domain("lemon8-app.com"),
-            "Accept": "application/json",
-            "Referer": "https://www.lemon8-app.com/",
-        }
+        return {"User-Agent": self.user_agents.get_for_domain("lemon8-app.com"), "Accept": "application/json", "Referer": "https://www.lemon8-app.com/"}
 
     async def collect(self, targets: list[str]):
-        async with httpx.AsyncClient(
-            timeout=30, cookies=self._cookies, headers=self._headers(), follow_redirects=True,
-        ) as client:
+        async with httpx.AsyncClient(timeout=30, cookies=self._cookies, headers=self._headers(), follow_redirects=True) as client:
             if self._feed_enabled:
-                await self._collect_feed(client)
-
+                try:
+                    await self._collect_feed(client)
+                except Exception as e:
+                    logger.error("Feed collection failed: %s", e)
             for username in targets:
-                if self._stop.is_set():
-                    break
+                if self._stop.is_set(): break
                 if username.startswith("#"):
-                    logger.info("Collecting lemon8/tag/%s", username)
-                    try:
-                        await self._collect_tag(client, username.lstrip("#"))
+                    try: await self._collect_tag(client, username.lstrip("#"))
                     except Exception as e:
-                        logger.error("Failed lemon8/tag/%s: %s", username, e)
+                        logger.error("Tag collection failed for %s: %s", username, e)
                     continue
-
                 logger.info("Collecting lemon8/%s", username)
                 try:
                     await self._collect_user(client, username)
@@ -100,19 +115,155 @@ class Lemon8Collector(BaseCollector):
                     logger.error("Failed lemon8/%s: %s", username, e)
                     await self.send_to_dlq(username, username, str(e))
 
-            for discovered in list(self._discovered_users)[:20]:
-                if self._stop.is_set():
-                    break
-                if discovered not in targets:
-                    try:
-                        await self._collect_user(client, discovered)
-                    except Exception:
-                        pass
+        if os.getenv("LEMON8_SPIDER_ENABLED", "true").lower() == "true":
+            await self._process_spider_queue()
 
+    async def _process_spider_queue(self):
+        async with httpx.AsyncClient(timeout=30, cookies=self._cookies, headers=self._headers(), follow_redirects=True) as client:
+            while not self._stop.is_set():
+                async with self.pool.acquire() as conn:
+                    row = await conn.fetchrow("""
+                        UPDATE lemon8_spider_queue
+                        SET status = 'processing'
+                        WHERE id = (
+                            SELECT id FROM lemon8_spider_queue
+                            WHERE status = 'pending'
+                            ORDER BY priority ASC, collected_at ASC
+                            LIMIT 1
+                        )
+                        RETURNING platform_user_id
+                    """)
+                if not row: break
+                try:
+                    await self._collect_user(client, row['platform_user_id'])
+                    async with self.pool.acquire() as conn:
+                        await conn.execute("UPDATE lemon8_spider_queue SET status = 'completed' WHERE platform_user_id = $1", row['platform_user_id'])
+                except Exception:
+                    async with self.pool.acquire() as conn:
+                        await conn.execute("UPDATE lemon8_spider_queue SET status = 'failed' WHERE platform_user_id = $1", row['platform_user_id'])
+
+    async def _enqueue_spider_user(self, username: str, source: str = "feed"):
+        """Add a discovered user to the spider queue (best-effort)."""
+        if not username:
+            return
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute("""
+                    INSERT INTO lemon8_spider_queue (platform_user_id, source, priority, status, collected_at)
+                    VALUES ($1, $2, 5, 'pending', $3)
+                    ON CONFLICT (platform_user_id) DO NOTHING
+                """, username, source, datetime.now(timezone.utc))
+        except Exception as e:
+            logger.debug("spider enqueue skipped for %s: %s", username, e)
+
+    async def _upsert_profile(self, user_id: str, username: str, data: dict):
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO lemon8_profiles (
+                    platform_user_id, username, nickname, avatar_url, bio, updated_at
+                ) VALUES ($1, $2, $3, $4, $5, $6)
+                ON CONFLICT (platform_user_id) DO UPDATE SET
+                    username = EXCLUDED.username, nickname = EXCLUDED.nickname, updated_at = EXCLUDED.updated_at
+            """, user_id, username, data.get("nickname"), data.get("avatar_url"), data.get("signature"),
+                 datetime.now(timezone.utc))
+
+    @staticmethod
+    def _resolve_post_id(post_data: dict) -> Optional[str]:
+        """Best-effort extraction of a stable platform_post_id from heterogeneous
+        FYP / profile / topic card shapes. Falls back to a deterministic hash
+        of the post's primary URL(s) so FYP cards (which have no exposed id)
+        still upsert deterministically.
+        """
+        for key in (
+            "id", "itemId", "item_id", "note_id", "noteId",
+            "card_id", "cardId", "post_id", "postId",
+            "platform_post_id", "aweme_id",
+        ):
+            val = post_data.get(key)
+            if val:
+                s = str(val).strip()
+                if s and s.lower() not in ("none", "null", "0"):
+                    return s
+
+        # Synthesize from URLs / media so the same card maps to the same row.
+        seed_parts: list[str] = []
+        for k in ("share_url", "shareUrl", "url", "permalink"):
+            v = post_data.get(k)
+            if isinstance(v, str) and v:
+                seed_parts.append(v)
+        media = post_data.get("media") or []
+        if isinstance(media, list):
+            for m in media[:5]:
+                if isinstance(m, dict):
+                    u = m.get("url") or m.get("src")
+                    if isinstance(u, str) and u:
+                        seed_parts.append(u)
+        if not seed_parts:
+            # Last resort: stringified payload
+            try:
+                seed_parts.append(json.dumps(post_data, sort_keys=True, default=str)[:512])
+            except Exception:
+                return None
+        seed = "|".join(seed_parts)
+        return "fyp_" + hashlib.sha256(seed.encode("utf-8", "ignore")).hexdigest()[:32]
+
+    async def _upsert_post(self, user_id: str, post_data: dict):
+        platform_post_id = self._resolve_post_id(post_data)
+        if not platform_post_id:
+            logger.debug("lemon8 _upsert_post: skipped — no resolvable id; keys=%s",
+                         list(post_data.keys())[:10])
+            return
+
+        # Pull image / video URLs from attached media descriptors when present.
+        image_urls: list[str] = []
+        video_url: Optional[str] = None
+        for m in (post_data.get("media") or []):
+            if not isinstance(m, dict):
+                continue
+            u = m.get("url")
+            if not u:
+                continue
+            mtype = m.get("media_type") or m.get("content_type")
+            if mtype == "video" and not video_url:
+                video_url = u
+            else:
+                image_urls.append(u)
+
+        async with self.pool.acquire() as conn:
+            profile_row = await conn.fetchrow(
+                "SELECT id FROM lemon8_profiles WHERE platform_user_id = $1", user_id
+            )
+            profile_uuid = profile_row['id'] if profile_row else None
+            try:
+                await conn.execute("""
+                    INSERT INTO lemon8_posts (
+                        platform_post_id, profile_id, title, description,
+                        image_urls, video_url,
+                        like_count, comment_count, metadata
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    ON CONFLICT (platform_post_id) DO UPDATE SET
+                        like_count    = EXCLUDED.like_count,
+                        comment_count = EXCLUDED.comment_count,
+                        image_urls    = COALESCE(EXCLUDED.image_urls, lemon8_posts.image_urls),
+                        video_url     = COALESCE(EXCLUDED.video_url,  lemon8_posts.video_url),
+                        metadata      = EXCLUDED.metadata
+                """,
+                    platform_post_id, profile_uuid,
+                    post_data.get("title"), post_data.get("description"),
+                    image_urls or None, video_url,
+                    int(post_data.get("stats", {}).get("likeCount", 0) or 0),
+                    int(post_data.get("stats", {}).get("commentCount", 0) or 0),
+                    json.dumps(post_data, default=str))
+            except Exception as e:
+                logger.warning("lemon8 _upsert_post failed for %s: %s", platform_post_id, e)
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Collection entrypoints
+    # ──────────────────────────────────────────────────────────────────────
     async def _collect_user(self, client: httpx.AsyncClient, username: str):
         await self.rate_limiter.async_wait("lemon8-app.com", OperationType.PROFILE_VIEW)
-        profile_url = f"https://www.lemon8-app.com/{username}"
-        resp = await client.get(profile_url)
+        url = USER_URL_PATTERN.format(username.lstrip("@"))
+        resp = await client.get(url)
         resp.raise_for_status()
         html = resp.text
 
@@ -123,28 +274,278 @@ class Lemon8Collector(BaseCollector):
             end = html.find('"', idx + len(marker))
             user_id = html[idx + len(marker):end]
 
-        self.rate_limiter.record_success("lemon8-app.com")
+        avatar_url = self._extract_avatar(html) if self._profile_photos else None
+        await self._upsert_profile(user_id, username, {"nickname": username, "avatar_url": avatar_url})
 
-        if self._profile_photos:
-            avatar_url = self._extract_avatar(html)
-            if avatar_url:
-                await self.download_media({
-                    "entity_id": user_id,
-                    "entity_name": username,
-                    "content_type": "profile_photo",
-                    "content_id": f"profile_{user_id}",
-                    "url": avatar_url,
-                    "extension": "jpg",
-                })
+        if self._profile_photos and avatar_url:
+            await self.download_media({
+                "entity_id": user_id, "entity_name": username,
+                "content_type": "profile_photo",
+                "content_id": f"profile_{user_id}",
+                "url": avatar_url, "extension": "jpg",
+            })
 
         posts = self._extract_posts(html, user_id, username)
         for post in posts:
-            if self._stop.is_set():
-                break
+            if self._stop.is_set(): break
+            await self._upsert_post(user_id, post)
             for media_item in post.get("media", []):
                 if not self.is_known(media_item["content_id"]):
                     await self.download_media(media_item)
 
+    async def _collect_feed(self, client: httpx.AsyncClient):
+        """For-You-Page (FYP) feed scraping. Tries pylemon8 if available, falls back to web."""
+        pages = max(1, self._tag_pages)
+        result: dict[str, Any] = {}
+
+        # 1) Optional pylemon8 path
+        if PYLEMON8_AVAILABLE:
+            try:
+                result = await self._scrape_feed_with_api("foryou", pages)
+            except Exception as e:
+                logger.info("pylemon8 feed failed, falling back to web: %s", e)
+                result = {}
+
+        # 2) Web fallback
+        if not result or not result.get("media_items"):
+            try:
+                result = await self._scrape_feed_with_web(client, pages)
+            except Exception as e:
+                logger.error("Web feed scrape failed: %s", e)
+                return
+
+        media_items = result.get("media_items", []) or []
+        users = result.get("discovered_users", []) or []
+        tags = result.get("discovered_tags", []) or []
+
+        logger.info("Feed scraped: %d media, %d users, %d tags", len(media_items), len(users), len(tags))
+
+        for u in users:
+            self._discovered_users.add(u)
+            await self._enqueue_spider_user(u, source="feed")
+
+        for t in tags:
+            self._discovered_tags.add(t)
+
+        # Download media discovered from FYP. Skip profile photos unless enabled.
+        # Also upsert a structured row into lemon8_posts so FYP-derived data is
+        # queryable (synthesised id falls back to a hash when absent).
+        upserted_posts: set[str] = set()
+        for item in media_items[: max(50, pages * 30)]:
+            if self._stop.is_set(): break
+            url = item.get("url")
+            if not url:
+                continue
+            uname = item.get("username") or "feed"
+            entity_id = uname
+            content_id = "feed_" + hashlib.sha256(url.encode("utf-8", "ignore")).hexdigest()
+            ext = "mp4" if item.get("media_type") == "video" else "jpg"
+            ctype = "profile_photo" if item.get("is_profile_photo") else (
+                "video" if item.get("media_type") == "video" else "image"
+            )
+
+            # Upsert the FYP card as a post (skip for profile-photo-only items).
+            if not item.get("is_profile_photo"):
+                post_payload = {
+                    "url": url,
+                    "media": [{"url": url, "media_type": item.get("media_type") or "image"}],
+                    "title": "",
+                    "description": "",
+                    "stats": {"likeCount": 0, "commentCount": 0},
+                    "raw": item,
+                    "source": "fyp",
+                    "username": uname,
+                }
+                resolved = self._resolve_post_id(post_payload)
+                if resolved and resolved not in upserted_posts:
+                    upserted_posts.add(resolved)
+                    try:
+                        await self._upsert_post(entity_id, post_payload)
+                    except Exception as e:
+                        logger.debug("FYP post upsert skipped for %s: %s", resolved, e)
+
+            if self.is_known(content_id):
+                continue
+            await self.download_media({
+                "entity_id": entity_id,
+                "entity_name": uname,
+                "content_type": ctype,
+                "content_id": content_id,
+                "url": _enhance_image_url(url) if self._enhance_urls else url,
+                "extension": ext,
+                "raw": item,
+            })
+
+    async def _collect_tag(self, client: httpx.AsyncClient, tag_id: str):
+        """Scrape a topic/tag landing page using the same web-extraction pipeline as feed."""
+        tag_id = tag_id.strip().lstrip("#")
+        if not tag_id:
+            return
+        url = TAG_URL_PATTERN.format(tag_id)
+        await self.rate_limiter.async_wait("lemon8-app.com", OperationType.PROFILE_VIEW)
+        try:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            html_content = resp.text
+        except Exception as e:
+            logger.error("Tag fetch failed %s: %s", tag_id, e)
+            return
+
+        media_items = self._extract_media_items_from_feed_cards(html_content, include_profile_images=self._profile_photos)
+        if not media_items:
+            media_items = self._extract_media_items_from_html(html_content, include_profile_images=self._profile_photos)
+        users = self._extract_user_handles(html_content)
+
+        logger.info("Tag %s: %d media, %d users", tag_id, len(media_items), len(users))
+        for u in users:
+            await self._enqueue_spider_user(u, source=f"tag:{tag_id}")
+
+        for item in media_items[: max(50, self._tag_pages * 30)]:
+            if self._stop.is_set(): break
+            url = item.get("url")
+            if not url:
+                continue
+            uname = item.get("username") or f"tag_{tag_id}"
+            content_id = "tag_" + hashlib.sha256(url.encode("utf-8", "ignore")).hexdigest()
+            if self.is_known(content_id):
+                continue
+            ext = "mp4" if item.get("media_type") == "video" else "jpg"
+            ctype = "profile_photo" if item.get("is_profile_photo") else (
+                "video" if item.get("media_type") == "video" else "image"
+            )
+            await self.download_media({
+                "entity_id": uname,
+                "entity_name": uname,
+                "content_type": ctype,
+                "content_id": content_id,
+                "url": _enhance_image_url(url) if self._enhance_urls else url,
+                "extension": ext,
+                "raw": item,
+            })
+
+    # ──────────────────────────────────────────────────────────────────────
+    # FYP / feed scraping (ported from old toolkit)
+    # ──────────────────────────────────────────────────────────────────────
+    async def _scrape_feed_with_api(self, category: str = "foryou", pages: int = 1) -> dict[str, Any]:
+        """pylemon8 API feed fetch. Optional — only runs if pylemon8 is importable."""
+        if not PYLEMON8_AVAILABLE or _PyLemon8 is None:
+            raise RuntimeError("pylemon8 not available")
+
+        loop = asyncio.get_event_loop()
+
+        def _sync_fetch():
+            api = _PyLemon8()
+            feed_obj = api.feed(category)
+            all_media: list[dict] = []
+            users: set[str] = set()
+            tag_ids: set[str] = set()
+            for _ in range(pages):
+                items = feed_obj.get_items() or []
+                all_media.extend(self._extract_media_items_from_pylemon8_items(items, include_profile_images=self._profile_photos))
+                users.update(self._extract_users_from_pylemon8_items(items))
+            return all_media, users, tag_ids
+
+        await self.rate_limiter.async_wait("lemon8-app.com", OperationType.FEED_FETCH if hasattr(OperationType, "FEED_FETCH") else OperationType.PROFILE_VIEW)
+        all_media, users, tag_ids = await loop.run_in_executor(None, _sync_fetch)
+        unique_items = self._deduplicate_media_items(all_media)
+        return {
+            "feed_type": category,
+            "pages_scraped": pages,
+            "media_items": unique_items,
+            "media_urls": [i["url"] for i in unique_items],
+            "discovered_users": list(users),
+            "discovered_tags": list(tag_ids),
+            "scrape_timestamp": datetime.now(timezone.utc).isoformat(),
+            "total_media": len(unique_items),
+            "method": "pylemon8_api",
+        }
+
+    async def _scrape_feed_with_web(self, client: httpx.AsyncClient, pages: int = 1) -> dict[str, Any]:
+        """Traditional web scrape of /FEED/FORYOU with cursor-based pagination."""
+        all_media: list[dict] = []
+        all_users: set[str] = set()
+        all_tag_ids: set[str] = set()
+        current_cursor = "0"
+
+        for page in range(pages):
+            if self._stop.is_set():
+                break
+            url = FEED_URL
+            if page > 0 and current_cursor:
+                url = self._add_cursor_to_url(FEED_URL, current_cursor)
+
+            await self.rate_limiter.async_wait("lemon8-app.com", OperationType.PROFILE_VIEW)
+            try:
+                resp = await client.get(url, headers={**self._headers(), "Referer": FEED_URL})
+                resp.raise_for_status()
+                html_content = resp.text
+            except Exception as e:
+                logger.warning("Feed page %d fetch failed: %s", page + 1, e)
+                break
+
+            media_items = self._extract_media_items_from_feed_cards(html_content, include_profile_images=self._profile_photos)
+            if not media_items:
+                media_items = self._extract_media_items_from_html(html_content, include_profile_images=self._profile_photos)
+
+            if not any(item.get("username") for item in media_items):
+                dom_items = self._extract_media_items_from_dom(html_content)
+                if dom_items:
+                    by_url = {i["url"]: i for i in media_items}
+                    for di in dom_items:
+                        existing = by_url.get(di["url"])
+                        if existing:
+                            if not existing.get("username") and di.get("username"):
+                                existing["username"] = di["username"]
+                        else:
+                            media_items.append(di)
+
+            if media_items:
+                all_media.extend(media_items)
+            else:
+                for media_url in self._extract_media_urls(html_content):
+                    mi = self._build_media_item(media_url)
+                    if mi:
+                        all_media.append(mi)
+
+            all_users.update(self._extract_user_handles(html_content))
+            all_tag_ids.update(self._extract_tag_ids(html_content))
+
+            # Try to extract next cursor
+            try:
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(html_content, "html.parser")
+                found_cursor = False
+                for script in soup.find_all("script", {"type": "application/json"}):
+                    try:
+                        data = json.loads(script.string or "{}")
+                    except (json.JSONDecodeError, AttributeError, TypeError):
+                        continue
+                    cur = self._find_key_in_json(data, ["cursor", "max_cursor", "next_cursor"])
+                    if cur:
+                        current_cursor = str(cur)
+                        found_cursor = True
+                        break
+                if not found_cursor:
+                    current_cursor = str(len(all_media))
+            except Exception:
+                current_cursor = str(len(all_media))
+
+        unique_items = self._deduplicate_media_items(all_media)
+        return {
+            "feed_type": "foryou",
+            "pages_scraped": pages,
+            "media_items": unique_items,
+            "media_urls": [i["url"] for i in unique_items],
+            "discovered_users": list(all_users),
+            "discovered_tags": list(all_tag_ids),
+            "scrape_timestamp": datetime.now(timezone.utc).isoformat(),
+            "total_media": len(unique_items),
+            "method": "web_scraping",
+        }
+
+    # ──────────────────────────────────────────────────────────────────────
+    # HTML / JSON extraction helpers (ported)
+    # ──────────────────────────────────────────────────────────────────────
     def _extract_avatar(self, html: str) -> str | None:
         for marker in ['"avatar_url":"', '"avatarUrl":"', '"profile_image":"']:
             idx = html.find(marker)
@@ -156,300 +557,706 @@ class Lemon8Collector(BaseCollector):
         return None
 
     def _extract_posts(self, html: str, user_id: str, username: str) -> list[dict]:
+        """Extract posts (with media) from a profile/feed HTML page using embedded JSON."""
         posts: list[dict] = []
-
-        marker = '"itemList":'
-        idx = html.find(marker)
-        if idx == -1:
-            marker = '"postList":'
-            idx = html.find(marker)
-        if idx == -1:
-            return self._extract_images_from_html(html, user_id, username)
+        try:
+            from bs4 import BeautifulSoup
+        except ImportError:
+            logger.warning("bs4 not available — _extract_posts returning [].")
+            return posts
 
         try:
-            bracket = html.find("[", idx)
-            depth = 0
-            end = bracket
-            for i, ch in enumerate(html[bracket:], bracket):
-                if ch == "[":
-                    depth += 1
-                elif ch == "]":
-                    depth -= 1
-                    if depth == 0:
-                        end = i + 1
-                        break
-            items = json.loads(html[bracket:end])
+            soup = BeautifulSoup(html, "html.parser")
+            seen_post_ids: set[str] = set()
+            for script in soup.find_all("script", {"type": "application/json"}):
+                try:
+                    data = json.loads(script.string or "{}")
+                except (json.JSONDecodeError, AttributeError, TypeError):
+                    continue
+                for items in self._find_item_lists_in_json(data):
+                    for item in items:
+                        if not isinstance(item, dict):
+                            continue
+                        post_id = (
+                            item.get("itemId") or item.get("item_id") or item.get("id") or item.get("postId")
+                        )
+                        if not post_id:
+                            continue
+                        post_id = str(post_id)
+                        if post_id in seen_post_ids:
+                            continue
+                        seen_post_ids.add(post_id)
 
-            for item in items:
-                post_id = str(item.get("id", item.get("post_id", "")))
-                media_items = []
+                        media_descs = self._extract_media_items_from_pylemon8_items(
+                            [item], include_profile_images=False
+                        )
+                        media_for_db: list[dict] = []
+                        for m in media_descs:
+                            url = m.get("url")
+                            if not url:
+                                continue
+                            ext = "mp4" if m.get("media_type") == "video" else "jpg"
+                            ctype = "video" if m.get("media_type") == "video" else "image"
+                            cid = post_id + "_" + hashlib.sha256(url.encode("utf-8", "ignore")).hexdigest()
+                            media_for_db.append({
+                                "entity_id": user_id,
+                                "entity_name": username,
+                                "content_type": ctype,
+                                "content_id": cid,
+                                "url": _enhance_image_url(url) if self._enhance_urls else url,
+                                "extension": ext,
+                                "raw": m,
+                            })
 
-                image_list = item.get("image_list", item.get("images", []))
-                for i, img in enumerate(image_list):
-                    url = ""
-                    if isinstance(img, dict):
-                        url = (img.get("url_list", [None])[0]
-                               if img.get("url_list")
-                               else img.get("url", ""))
-                    elif isinstance(img, str):
-                        url = img
-                    if url:
-                        if self._enhance_urls:
-                            url = _enhance_image_url(url, self._hq_width)
-                        media_items.append({
+                        stats = {
+                            "likeCount": item.get("likeCount") or item.get("diggCount") or 0,
+                            "commentCount": item.get("commentCount") or 0,
+                        }
+                        posts.append({
+                            "id": post_id,
+                            "title": item.get("title") or "",
+                            "description": item.get("shortContent") or item.get("desc") or "",
+                            "stats": stats,
+                            "media": media_for_db,
+                            "raw": item,
+                        })
+        except Exception as e:
+            logger.warning("post extraction error for %s: %s", username, e)
+
+        # Fallback: if no posts via JSON, build pseudo-post from feed-card media
+        if not posts:
+            try:
+                media_items = self._extract_media_items_from_feed_cards(html, include_profile_images=False)
+                if media_items:
+                    media_for_db = []
+                    for m in media_items[:50]:
+                        url = m.get("url")
+                        if not url:
+                            continue
+                        ext = "mp4" if m.get("media_type") == "video" else "jpg"
+                        ctype = "video" if m.get("media_type") == "video" else "image"
+                        cid = "p_" + hashlib.sha256(url.encode("utf-8", "ignore")).hexdigest()
+                        media_for_db.append({
                             "entity_id": user_id,
                             "entity_name": username,
-                            "content_type": "post",
-                            "content_id": f"{post_id}_{i}",
-                            "url": url,
-                            "extension": "jpg",
+                            "content_type": ctype,
+                            "content_id": cid,
+                            "url": _enhance_image_url(url) if self._enhance_urls else url,
+                            "extension": ext,
+                            "raw": m,
                         })
-
-                video_list = item.get("video_list", item.get("videos", []))
-                for i, vid in enumerate(video_list):
-                    url = ""
-                    if isinstance(vid, dict):
-                        url = (vid.get("url_list", [None])[0]
-                               if vid.get("url_list")
-                               else vid.get("play_addr", {}).get("url_list", [None])[0]
-                               if isinstance(vid.get("play_addr"), dict)
-                               else vid.get("url", ""))
-                    elif isinstance(vid, str):
-                        url = vid
-                    if url:
-                        media_items.append({
-                            "entity_id": user_id,
-                            "entity_name": username,
-                            "content_type": "video",
-                            "content_id": f"{post_id}_v{i}",
-                            "url": url,
-                            "extension": "mp4",
+                    if media_for_db:
+                        posts.append({
+                            "id": f"profile_{user_id}",
+                            "title": "",
+                            "description": "",
+                            "stats": {"likeCount": 0, "commentCount": 0},
+                            "media": media_for_db,
+                            "raw": {},
                         })
-
-                posts.append({"post_id": post_id, "media": media_items})
-        except (json.JSONDecodeError, IndexError):
-            return self._extract_images_from_html(html, user_id, username)
-
+            except Exception:
+                pass
         return posts
 
-    def _extract_images_from_html(self, html: str, user_id: str, username: str) -> list[dict]:
-        from bs4 import BeautifulSoup
-        soup = BeautifulSoup(html, "html.parser")
-        media: list[dict] = []
+    # ── URL / media helpers ──────────────────────────────────────────────
+    def _normalize_username(self, value: Optional[str]) -> Optional[str]:
+        if not value or not isinstance(value, str):
+            return None
+        username = value.strip().strip("@").lower()
+        username = re.sub(r"[^a-z0-9._]+", "", username)
+        return username or None
 
-        for img in soup.find_all("img"):
-            src = img.get("src") or img.get("data-src")
-            if not src or "avatar" in src.lower() or "icon" in src.lower():
+    def _clean_media_url(self, url: str) -> str:
+        if not url:
+            return ""
+        return html_lib.unescape(url)
+
+    def _is_valid_media_url(self, url: str) -> bool:
+        if not url or not isinstance(url, str):
+            return False
+        if not url.startswith(("http://", "https://")):
+            return False
+        url_lower = url.lower()
+        excluded = [
+            ".js", ".css", ".json", ".xml", ".txt", ".html", ".htm",
+            "favicon", "logo", "icon", "sprite", "button", "badge",
+            "sdk-web", "slardar", "browser.", "_assets/", "static/css",
+            "static/js", ".svg", ".woff", ".ttf", ".eot", ".otf",
+        ]
+        if any(p in url_lower for p in excluded):
+            return False
+        video_ext = [".mp4", ".webm", ".m4v", ".mov", ".avi", ".flv", ".mkv"]
+        image_ext = [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"]
+        has_ext = any(url_lower.endswith(e) or f"{e}?" in url_lower for e in video_ext + image_ext)
+        cdn_pats = [
+            "tos-alisg-i-sdweummd6v-sg",
+            "tos-alisg-v-a3e477-sg",
+            "user-avatar-alisg",
+            "/post/",
+            "/item/",
+            "tplv-sdweummd6v",
+        ]
+        return has_ext or any(p in url_lower for p in cdn_pats)
+
+    def _is_small_image(self, url: str) -> bool:
+        if not url:
+            return False
+        url_lower = url.lower()
+        small_indicators = ["thumb", "avatar", "profile_pic", "icon", "favicon", "logo"]
+        if any(s in url_lower for s in small_indicators):
+            return True
+
+        def _small(w: int, h: int) -> bool:
+            dims = [v for v in (w, h) if v > 0]
+            return bool(dims) and min(dims) < 250
+
+        m = re.search(r"(\d+)x(\d+)", url_lower)
+        if m and _small(int(m.group(1)), int(m.group(2))):
+            return True
+        m = re.search(r":(\d+):(\d+)", url_lower)
+        if m and _small(int(m.group(1)), int(m.group(2))):
+            return True
+        m = re.search(r"width=(\d+)", url_lower)
+        if m and int(m.group(1)) < 250:
+            return True
+        return False
+
+    def _is_profile_photo_url(self, url: str) -> bool:
+        if not url:
+            return False
+        u = url.lower()
+        return any(t in u for t in [
+            "user-avatar", "avatar", "profile_photo", "profile-photo",
+            "profile_pic", "profile-image",
+        ])
+
+    def _build_media_item(self, url: str, username: Optional[str] = None,
+                          is_profile_photo: bool = False) -> Optional[dict]:
+        cleaned = self._clean_media_url(url)
+        if not cleaned or not self._is_valid_media_url(cleaned):
+            return None
+        norm_u = self._normalize_username(username) if username else None
+        return {
+            "url": cleaned,
+            "username": norm_u,
+            "is_profile_photo": is_profile_photo,
+            "media_type": "image" if any(
+                ext in cleaned.lower() for ext in [".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"]
+            ) else "video",
+        }
+
+    def _deduplicate_media_items(self, media_items: list[dict]) -> list[dict]:
+        out: dict[str, dict] = {}
+        for item in media_items:
+            url = item.get("url")
+            if not url:
                 continue
-            if self._enhance_urls:
-                src = _enhance_image_url(src, self._hq_width)
-            content_id = hashlib.sha256(src.encode()).hexdigest()[:16]
-            media.append({
-                "entity_id": user_id,
-                "entity_name": username,
-                "content_type": "post",
-                "content_id": content_id,
-                "url": src,
-                "extension": "jpg",
-            })
+            existing = out.get(url)
+            if existing is None:
+                out[url] = dict(item)
+                continue
+            if not existing.get("username") and item.get("username"):
+                existing["username"] = item["username"]
+            if not existing.get("is_profile_photo") and item.get("is_profile_photo"):
+                existing["is_profile_photo"] = True
+            if existing.get("media_type") != "video" and item.get("media_type") == "video":
+                existing["media_type"] = "video"
+        return list(out.values())
 
-        for vid in soup.find_all("video"):
-            src = vid.get("src") or vid.find("source", src=True)
-            if isinstance(src, str) and src:
-                content_id = hashlib.sha256(src.encode()).hexdigest()[:16]
-                media.append({
-                    "entity_id": user_id,
-                    "entity_name": username,
-                    "content_type": "video",
-                    "content_id": content_id,
-                    "url": src,
-                    "extension": "mp4",
-                })
+    def _add_cursor_to_url(self, base_url: str, cursor: str) -> str:
+        parsed = urlparse(base_url)
+        params = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        params["cursor"] = str(cursor)
+        return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, urlencode(params), parsed.fragment))
 
-        if media:
-            return [{"post_id": "html_extract", "media": media}]
-        return []
+    def _find_key_in_json(self, data: Any, keys: list[str]) -> Any:
+        if isinstance(data, dict):
+            for k in keys:
+                if k in data:
+                    return data[k]
+            for v in data.values():
+                r = self._find_key_in_json(v, keys)
+                if r is not None:
+                    return r
+        elif isinstance(data, list):
+            for it in data:
+                r = self._find_key_in_json(it, keys)
+                if r is not None:
+                    return r
+        return None
 
-    async def _collect_feed(self, client: httpx.AsyncClient):
-        try:
-            await self.rate_limiter.async_wait("lemon8-app.com", OperationType.PROFILE_VIEW)
-            resp = await client.get(f"{API_BASE}/api/feed/recommend/")
-            if resp.status_code != 200:
-                logger.debug("Feed API returned %d", resp.status_code)
-                return
-            data = resp.json()
-            items = data.get("data", {}).get("items", [])
-            for item in items:
-                if self._stop.is_set():
-                    break
-                self._extract_discoveries(item)
-            logger.info("Feed discovery: %d users, %d tags",
-                        len(self._discovered_users), len(self._discovered_tags))
-        except Exception as e:
-            logger.debug("Feed collection failed: %s", e)
+    def _find_item_lists_in_json(self, data: Any, found: Optional[list[list[dict]]] = None) -> list[list[dict]]:
+        if found is None:
+            found = []
+        if isinstance(data, dict):
+            for value in data.values():
+                if isinstance(value, list) and value and all(isinstance(it, dict) for it in value):
+                    first = value[0]
+                    if any(f in first for f in [
+                        "authorInfo", "author", "user", "imageResource", "imageList",
+                        "videoResource", "video", "videoList", "coverResource",
+                        "largeImage", "coverImage",
+                    ]):
+                        found.append(value)
+                if isinstance(value, (dict, list)):
+                    self._find_item_lists_in_json(value, found)
+        elif isinstance(data, list):
+            for it in data:
+                if isinstance(it, (dict, list)):
+                    self._find_item_lists_in_json(it, found)
+        return found
 
-    async def _collect_tag(self, client: httpx.AsyncClient, tag: str):
-        cursor = ""
-        for page in range(self._tag_pages):
-            if self._stop.is_set():
-                break
-            await self.rate_limiter.async_wait("lemon8-app.com", OperationType.PAGINATION)
-            try:
-                params = {"keyword": tag, "count": 20}
-                if cursor:
-                    params["cursor"] = cursor
-                resp = await client.get(f"{API_BASE}/api/feed/search/", params=params)
-                if resp.status_code != 200:
-                    break
-                data = resp.json()
-                items = data.get("data", {}).get("items", [])
-                if not items:
-                    break
-
-                for item in items:
-                    self._extract_discoveries(item)
-                    author = item.get("author", {})
-                    uid = str(author.get("user_id", ""))
-                    uname = author.get("unique_id", "") or author.get("nickname", "")
-                    if not uid or not uname:
-                        continue
-
-                    images = item.get("image_list", item.get("images", []))
-                    for i, img in enumerate(images):
-                        if self._stop.is_set():
-                            break
-                        url = ""
-                        if isinstance(img, dict):
-                            url = (img.get("url_list", [None])[0]
-                                   if img.get("url_list")
-                                   else img.get("url", ""))
-                        elif isinstance(img, str):
-                            url = img
-                        if url:
-                            if self._enhance_urls:
-                                url = _enhance_image_url(url, self._hq_width)
-                            post_id = str(item.get("id", item.get("post_id", "")))
-                            cid = f"{post_id}_{i}"
-                            if not self.is_known(cid):
-                                await self.download_media({
-                                    "entity_id": uid,
-                                    "entity_name": uname,
-                                    "content_type": "post",
-                                    "content_id": cid,
-                                    "url": url,
-                                    "extension": "jpg",
-                                })
-
-                cursor = data.get("data", {}).get("cursor", "")
-                if not cursor or not data.get("data", {}).get("has_more", False):
-                    break
-                self.rate_limiter.record_success("lemon8-app.com")
-            except Exception as e:
-                logger.debug("Tag page %d for '%s' failed: %s", page, tag, e)
-                break
-
-    def _extract_discoveries(self, item: dict):
-        author = item.get("author", {})
-        uid = author.get("unique_id", "") or author.get("nickname", "")
-        if uid:
-            self._discovered_users.add(uid)
-
-        for tag in item.get("hashtags", item.get("text_extra", [])):
-            if isinstance(tag, dict):
-                name = tag.get("hashtag_name", tag.get("name", ""))
-            elif isinstance(tag, str):
-                name = tag
+    def _extract_urls_from_resource_value(self, value: Any) -> list[str]:
+        urls: list[str] = []
+        if isinstance(value, str):
+            if self._is_valid_media_url(value):
+                urls.append(value)
+        elif isinstance(value, dict):
+            url_list = value.get("urlList")
+            if isinstance(url_list, list):
+                for it in url_list:
+                    urls.extend(self._extract_urls_from_resource_value(it))
             else:
-                continue
-            if name:
-                self._discovered_tags.add(name)
+                for k in ["url", "uri", "src", "playAddr"]:
+                    if k in value:
+                        urls.extend(self._extract_urls_from_resource_value(value[k]))
+        elif isinstance(value, list):
+            for it in value:
+                urls.extend(self._extract_urls_from_resource_value(it))
 
-    async def _persist_discoveries(self):
-        if not self._pool:
-            return
+        seen: set[str] = set()
+        out: list[str] = []
+        for u in urls:
+            cu = self._clean_media_url(u)
+            if cu and cu not in seen:
+                out.append(cu)
+                seen.add(cu)
+        return out
+
+    def _extract_profile_photo_urls_from_author(self, author_info: dict) -> list[str]:
+        if not isinstance(author_info, dict):
+            return []
+        keys = [
+            "avatar", "avatarLarger", "avatarLarge", "avatarMedium",
+            "avatarThumb", "avatarUrl", "profilePhoto", "profileImage",
+        ]
+        urls: list[str] = []
+        for k in keys:
+            if k in author_info:
+                urls.extend(self._extract_urls_from_resource_value(author_info[k]))
+        seen, out = set(), []
+        for u in urls:
+            if u and u not in seen:
+                out.append(u); seen.add(u)
+        return out
+
+    def _extract_username_from_author(self, author_info: Any) -> Optional[str]:
+        if not isinstance(author_info, dict):
+            return None
+        for k in ["uniqueId", "username", "userName", "screenName", "handle",
+                  "displayName", "linkName", "userId", "uid", "secUid", "nickName"]:
+            v = author_info.get(k)
+            if isinstance(v, str) and v.strip():
+                return self._normalize_username(v)
+        nested = self._find_key_in_json(author_info, [
+            "uniqueId", "username", "userName", "screenName", "handle",
+            "displayName", "linkName", "userId", "uid", "secUid", "nickName",
+        ])
+        if isinstance(nested, str) and nested.strip():
+            return self._normalize_username(nested)
+        return None
+
+    def _extract_username_from_item(self, item: dict) -> Optional[str]:
+        author = item.get("authorInfo") or item.get("author") or item.get("user") or {}
+        u = self._extract_username_from_author(author)
+        if u:
+            return u
+        for k in ["uniqueId", "username", "userName", "authorId", "linkName", "userId", "uid"]:
+            v = item.get(k)
+            if isinstance(v, str) and v.strip():
+                return self._normalize_username(v)
+        return None
+
+    def _extract_media_items_from_pylemon8_items(self, items: list, include_profile_images: bool = False) -> list[dict]:
+        out: list[dict] = []
         try:
-            async with self._pool.acquire() as conn:
-                for uid in self._discovered_users:
-                    await conn.execute(
-                        """
-                        INSERT INTO lemon8_discovered (entity_type, entity_id, entity_name, source)
-                        VALUES ('user', $1, $1, 'feed')
-                        ON CONFLICT (entity_id) DO NOTHING
-                        """,
-                        uid,
-                    )
-                for tag in self._discovered_tags:
-                    await conn.execute(
-                        """
-                        INSERT INTO lemon8_discovered (entity_type, entity_id, entity_name, source)
-                        VALUES ('tag', $1, $1, 'feed')
-                        ON CONFLICT (entity_id) DO NOTHING
-                        """,
-                        tag,
-                    )
-        except Exception as e:
-            logger.debug("Discovery persist failed: %s", e)
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                author = item.get("authorInfo") or item.get("author") or item.get("user") or {}
+                username = self._extract_username_from_item(item)
+                added = False
 
+                for vk in ["videoResource", "video", "videoList", "videoUrl", "playAddr"]:
+                    vr = item.get(vk)
+                    if not vr:
+                        continue
+                    vurls = self._extract_urls_from_resource_value(vr)
+                    if not vurls:
+                        continue
+                    mi = self._build_media_item(vurls[0], username=username)
+                    if mi:
+                        out.append(mi); added = True
+
+                for ik in ["imageResource", "imageList"]:
+                    ir = item.get(ik)
+                    if not ir:
+                        continue
+                    if isinstance(ir, list):
+                        for entry in ir:
+                            iurls = self._extract_urls_from_resource_value(entry)
+                            if iurls:
+                                mi = self._build_media_item(iurls[-1], username=username)
+                                if mi:
+                                    out.append(mi); added = True
+                    else:
+                        iurls = self._extract_urls_from_resource_value(ir)
+                        if iurls:
+                            mi = self._build_media_item(iurls[-1], username=username)
+                            if mi:
+                                out.append(mi); added = True
+
+                if not added:
+                    for ck in ["coverResource", "largeImage", "coverImage"]:
+                        cr = item.get(ck)
+                        if not cr:
+                            continue
+                        curls = self._extract_urls_from_resource_value(cr)
+                        if curls:
+                            mi = self._build_media_item(curls[-1], username=username)
+                            if mi:
+                                out.append(mi); added = True
+                            break
+
+                if include_profile_images and self._profile_photos:
+                    for au in self._extract_profile_photo_urls_from_author(author):
+                        mi = self._build_media_item(au, username=username, is_profile_photo=True)
+                        if mi:
+                            out.append(mi)
+        except Exception as e:
+            logger.debug("extract_media_items_from_pylemon8_items error: %s", e)
+        return self._deduplicate_media_items(out)
+
+    def _extract_users_from_pylemon8_items(self, items: list) -> set[str]:
+        users: set[str] = set()
+        try:
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                u = self._extract_username_from_item(item)
+                if u:
+                    users.add(u)
+                author = item.get("authorInfo") or item.get("author") or item.get("user") or {}
+                if isinstance(author, dict):
+                    for k in ["uniqueId", "linkName", "username", "userName", "userId"]:
+                        v = author.get(k)
+                        if isinstance(v, str) and v.strip():
+                            n = self._normalize_username(v)
+                            if n:
+                                users.add(n)
+                for fld in ("title", "shortContent", "desc"):
+                    val = item.get(fld)
+                    if isinstance(val, str):
+                        for m in re.findall(r"@([a-zA-Z0-9_\.]+)", val):
+                            users.add(m.lower())
+        except Exception:
+            pass
+        return users
+
+    def _extract_media_items_from_html(self, html_content: str, include_profile_images: bool = False) -> list[dict]:
+        out: list[dict] = []
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html_content, "html.parser")
+            for script in soup.find_all("script", {"type": "application/json"}):
+                try:
+                    data = json.loads(script.string or "{}")
+                except (json.JSONDecodeError, AttributeError, TypeError):
+                    continue
+                for items in self._find_item_lists_in_json(data):
+                    out.extend(self._extract_media_items_from_pylemon8_items(items, include_profile_images=include_profile_images))
+        except Exception as e:
+            logger.debug("extract_media_items_from_html: %s", e)
+        return self._deduplicate_media_items(out)
+
+    def _extract_media_items_from_feed_cards(self, html_content: str, include_profile_images: bool = False) -> list[dict]:
+        out: list[dict] = []
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html_content, "html.parser")
+            for card in soup.find_all("a", class_="article_card"):
+                href = card.get("href", "") or ""
+                m = re.search(r"/@([a-zA-Z0-9_.]{3,30})", href)
+                if not m:
+                    user_link = card.find("a", href=re.compile(r"/@[a-zA-Z0-9_.]{3,30}"))
+                    if user_link:
+                        m = re.search(r"/@([a-zA-Z0-9_.]{3,30})", user_link.get("href", "") or "")
+                if not m:
+                    continue
+                username = self._normalize_username(m.group(1))
+                for img in card.find_all("img", src=True):
+                    src = img.get("src")
+                    if not src or not self._is_valid_media_url(src):
+                        continue
+                    if self._is_small_image(src):
+                        if include_profile_images and self._is_profile_photo_url(src):
+                            mi = self._build_media_item(src, username=username, is_profile_photo=True)
+                            if mi:
+                                out.append(mi)
+                        continue
+                    mi = self._build_media_item(src, username=username)
+                    if mi:
+                        out.append(mi)
+        except Exception as e:
+            logger.debug("extract_media_items_from_feed_cards: %s", e)
+        return self._deduplicate_media_items(out)
+
+    def _extract_media_urls_from_fragment_html(self, fragment_html: str, include_small_images: bool = False) -> list[str]:
+        urls: list[str] = []
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(fragment_html, "html.parser")
+            for tag, attr in [("img", "src"), ("img", "data-src"), ("video", "src"),
+                              ("video", "data-src"), ("source", "src"), ("source", "data-src")]:
+                for el in soup.find_all(tag):
+                    v = el.get(attr)
+                    if not v or not self._is_valid_media_url(v):
+                        continue
+                    if tag == "img" and not include_small_images and self._is_small_image(v):
+                        continue
+                    urls.append(self._clean_media_url(v))
+            for pat in [r'https?://[^"\']*tiktokcdn[^"\']*', r'https?://[^"\']*byteimg[^"\']*']:
+                for m in re.findall(pat, fragment_html, re.IGNORECASE):
+                    if self._is_valid_media_url(m):
+                        if not include_small_images and self._is_small_image(m):
+                            continue
+                        urls.append(self._clean_media_url(m))
+        except Exception:
+            pass
+        seen, out = set(), []
+        for u in urls:
+            if u and u not in seen:
+                out.append(u); seen.add(u)
+        return out
+
+    def _extract_media_items_from_dom(self, html_content: str) -> list[dict]:
+        out: list[dict] = []
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html_content, "html.parser")
+            for link in soup.find_all("a", href=True):
+                href = link.get("href", "") or ""
+                m = re.search(r"/@([a-zA-Z0-9_.]{3,30})", href)
+                if not m:
+                    continue
+                username = self._normalize_username(m.group(1))
+                node = link
+                chosen: list[str] = []
+                for _ in range(6):
+                    node = node.parent
+                    if node is None:
+                        break
+                    candidate = self._extract_media_urls_from_fragment_html(str(node))
+                    if 0 < len(candidate) <= 8:
+                        chosen = candidate
+                        break
+                for u in chosen:
+                    mi = self._build_media_item(u, username=username)
+                    if mi:
+                        out.append(mi)
+        except Exception:
+            pass
+        return self._deduplicate_media_items(out)
+
+    def _extract_media_urls(self, html_content: str) -> list[str]:
+        urls: list[str] = []
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html_content, "html.parser")
+            for script in soup.find_all("script", {"type": "application/json"}):
+                try:
+                    data = json.loads(script.string or "{}")
+                except (json.JSONDecodeError, AttributeError, TypeError):
+                    continue
+                for u in self._extract_urls_from_json(data):
+                    urls.append(u)
+
+            patterns = [
+                r'"(https?://[^"]*tiktokcdn[^"]*)"',
+                r'"(https?://[^"]*byteimg[^"]*)"',
+                r'"(https?://[^"]*muscdn[^"]*)"',
+                r'"(https?://[^"]*\.(mp4|jpg|jpeg|png|gif|webm|m4v)[^"]*)"',
+                r'"(https?://[^"]*lemon8[^"]*\.(mp4|jpg|jpeg|png|gif)[^"]*)"',
+            ]
+            for pat in patterns:
+                for m in re.findall(pat, html_content, re.IGNORECASE):
+                    u = m[0] if isinstance(m, tuple) else m
+                    if self._is_valid_media_url(u):
+                        urls.append(u)
+        except Exception as e:
+            logger.debug("extract_media_urls: %s", e)
+        seen, out = set(), []
+        for u in urls:
+            cu = self._clean_media_url(u)
+            if cu and cu not in seen:
+                out.append(cu); seen.add(cu)
+        return out
+
+    def _extract_urls_from_json(self, data: Any, urls: Optional[list] = None) -> list[str]:
+        if urls is None:
+            urls = []
+        if isinstance(data, dict):
+            for v in data.values():
+                if isinstance(v, str) and self._is_valid_media_url(v):
+                    urls.append(v)
+                elif isinstance(v, (dict, list)):
+                    self._extract_urls_from_json(v, urls)
+        elif isinstance(data, list):
+            for it in data:
+                if isinstance(it, str) and self._is_valid_media_url(it):
+                    urls.append(it)
+                elif isinstance(it, (dict, list)):
+                    self._extract_urls_from_json(it, urls)
+        return urls
+
+    def _extract_user_handles(self, html_content: str) -> set[str]:
+        handles: set[str] = set()
+        try:
+            patterns = [
+                r"@([a-zA-Z0-9_\.]{3,30})",
+                r'"uniqueId":"([a-zA-Z0-9_\.]{3,30})"',
+                r'"username":"([a-zA-Z0-9_\.]{3,30})"',
+                r'"displayName":"@?([a-zA-Z0-9_\.]{3,30})"',
+            ]
+            excluded = {
+                "lemon8", "tiktok", "admin", "official", "font", "media",
+                "keyframes", "supports", "import", "charset", "root",
+                "container", "wrapper", "header", "footer", "sidebar",
+                "content", "article", "section", "button", "input",
+            }
+            for pat in patterns:
+                for m in re.findall(pat, html_content, re.IGNORECASE):
+                    n = m.strip("@").lower()
+                    if len(n) > 2 and n not in excluded:
+                        handles.add(n)
+
+            try:
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(html_content, "html.parser")
+                for link in soup.find_all("a", href=True):
+                    href = link.get("href") or ""
+                    for pat in [r"/@([a-zA-Z0-9_\.]{3,30})", r"/user/([a-zA-Z0-9_\.]{3,30})", r"user=([a-zA-Z0-9_\.]{3,30})"]:
+                        m = re.search(pat, href)
+                        if m:
+                            uname = m.group(1).lower()
+                            if len(uname) > 2:
+                                handles.add(uname)
+                for script in soup.find_all("script", {"type": "application/json"}):
+                    try:
+                        data = json.loads(script.string or "{}")
+                    except (json.JSONDecodeError, AttributeError, TypeError):
+                        continue
+                    self._extract_users_from_json(data, handles)
+            except Exception:
+                pass
+        except Exception as e:
+            logger.debug("extract_user_handles: %s", e)
+        return handles
+
+    def _extract_users_from_json(self, data: Any, users_set: set[str]):
+        if isinstance(data, dict):
+            for k in ["uniqueId", "username", "displayName", "authorId", "userId"]:
+                if k in data and isinstance(data[k], str):
+                    n = data[k].strip("@").lower()
+                    if len(n) > 2 and n.replace("_", "").replace(".", "").isalnum():
+                        users_set.add(n)
+            for v in data.values():
+                if isinstance(v, (dict, list)):
+                    self._extract_users_from_json(v, users_set)
+        elif isinstance(data, list):
+            for it in data:
+                if isinstance(it, (dict, list)):
+                    self._extract_users_from_json(it, users_set)
+
+    def _extract_tag_ids(self, html_content: str) -> set[str]:
+        tag_ids: set[str] = set()
+        try:
+            patterns = [
+                r"/topic/(\d+)", r'"topicId":"(\d+)"', r'"tagId":"(\d+)"',
+                r'"challengeId":"(\d+)"', r"topic=(\d+)", r"tag=(\d+)",
+            ]
+            for pat in patterns:
+                for m in re.findall(pat, html_content, re.IGNORECASE):
+                    if len(m) > 5:
+                        tag_ids.add(m)
+            try:
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(html_content, "html.parser")
+                for link in soup.find_all("a", href=True):
+                    href = link.get("href") or ""
+                    for pat in [r"/topic/(\d+)", r"/tag/(\d+)", r"/challenge/(\d+)",
+                                r"[?&]topic=(\d+)", r"[?&]tag=(\d+)"]:
+                        m = re.search(pat, href)
+                        if m and len(m.group(1)) > 5:
+                            tag_ids.add(m.group(1))
+                for script in soup.find_all("script", {"type": "application/json"}):
+                    try:
+                        data = json.loads(script.string or "{}")
+                    except (json.JSONDecodeError, AttributeError, TypeError):
+                        continue
+                    self._extract_tags_from_json(data, tag_ids)
+            except Exception:
+                pass
+        except Exception as e:
+            logger.debug("extract_tag_ids: %s", e)
+        return tag_ids
+
+    def _extract_tags_from_json(self, data: Any, tags_set: set[str]):
+        if isinstance(data, dict):
+            for k in ["topicId", "tagId", "challengeId", "hashtag", "topic"]:
+                if k in data:
+                    v = data[k]
+                    if isinstance(v, str) and v.isdigit() and len(v) > 5:
+                        tags_set.add(v)
+                    elif isinstance(v, (int, float)) and len(str(int(v))) > 5:
+                        tags_set.add(str(int(v)))
+            for v in data.values():
+                if isinstance(v, (dict, list)):
+                    self._extract_tags_from_json(v, tags_set)
+        elif isinstance(data, list):
+            for it in data:
+                if isinstance(it, (dict, list)):
+                    self._extract_tags_from_json(it, tags_set)
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Media download
+    # ──────────────────────────────────────────────────────────────────────
     async def download_media(self, item: dict):
         cid = item["content_id"]
-        if self.is_known(cid):
-            return
-
-        filename = self.build_filename(
-            entity_id=item["entity_id"],
-            entity_name=item["entity_name"],
-            content_type=item["content_type"],
-            content_id=cid,
-            extension=item.get("extension", "jpg"),
-        )
-
-        dest = self.media_dir / filename
-        if dest.exists():
-            return
-
+        if self.is_known(cid): return
+        filename = self.build_filename(item["entity_id"], item["entity_name"], item["content_type"], cid, extension=item.get("extension", "jpg"))
+        dest_dir = self.account_media_dir / item["content_type"]
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / filename
         try:
             await self.rate_limiter.async_wait("lemon8-app.com", OperationType.MEDIA_DOWNLOAD)
             async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
                 resp = await client.get(item["url"])
                 resp.raise_for_status()
                 data = resp.content
-
-            if len(data) < self._min_file_size:
-                return
-
-            is_video = item.get("extension") in ("mp4", "webm")
-            width, height = None, None
-
-            if not is_video:
-                try:
-                    from PIL import Image
-                    img = Image.open(io.BytesIO(data))
-                    width, height = img.size
-                    if width < self._min_width or height < self._min_height:
-                        return
-                except Exception:
-                    pass
-
+            if len(data) < self._min_file_size: return
             sha = self.sha256_bytes(data)
-            self.save_file(data, filename)
-            self.rate_limiter.record_success("lemon8-app.com")
-            self.circuit_breaker.record_success()
-
-            await self.insert_media_item(
-                entity_id=item["entity_id"],
-                entity_name=item["entity_name"],
-                content_type=item["content_type"],
-                content_id=cid,
-                filename=filename,
-                file_path=str(dest),
-                file_size=len(data),
-                width=width,
-                height=height,
-                sha256=sha,
-                source_url=item.get("url"),
-            )
+            fd, tmp_path = tempfile.mkstemp(dir=dest_dir, suffix=".tmp")
+            with os.fdopen(fd, "wb") as f:
+                f.write(data); f.flush(); os.fsync(f.fileno())
+            os.replace(tmp_path, dest)
+            metadata = {"entity_id": item["entity_id"], "entity_name": item["entity_name"], "content_type": item["content_type"], "content_id": cid, "collected_at": datetime.now(timezone.utc).isoformat(), "raw": item.get("raw", {})}
+            self.save_json(metadata, dest_dir / f"{Path(filename).stem}_metadata.json")
+            await self.insert_media_item(entity_id=item["entity_id"], entity_name=item["entity_name"], content_type=item["content_type"], content_id=cid, filename=filename, file_path=str(dest), file_size=len(data), sha256=sha, metadata=metadata)
+            self._known_ids.add(cid)
         except Exception as e:
-            self.rate_limiter.record_failure("lemon8-app.com")
-            self.circuit_breaker.record_failure()
             logger.error("Download failed %s: %s", cid, e)
             await self.send_to_dlq(item["entity_id"], cid, str(e))
+
+    async def cleanup(self):
+        pass

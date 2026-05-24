@@ -1,0 +1,964 @@
+:root {
+  font-family: "Inter", "Segoe UI", sans-serif;
+  color: #e0e0e0;
+  background: #1a1a2e;
+  --accent: #e94560;
+  --accent-soft: rgba(233, 69, 96, 0.15);
+  --bg: #1a1a2e;
+  --bg-secondary: #16213e;
+  --panel: #0f3460;
+  --panel-soft: #162447;
+  --border: #1a4a7a;
+  --border-strong: #2a6a9a;
+  --text-muted: #8899aa;
+  --map-overlay: rgba(15, 52, 96, 0.94);
+  --following: #2da86b;
+  --tracked: #d7a33d;
+
+  /* tab bar */
+  --tab-bg: #0f3460;
+  --tab-active-bg: #e94560;
+  --tab-active-color: #ffffff;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100vh;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: #e0e0e0;
+}
+
+button,
+select,
+input,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  border: 1px solid var(--border-strong);
+  background: #ffffff;
+  cursor: pointer;
+}
+
+button:disabled,
+select:disabled,
+input:disabled {
+  opacity: 0.56;
+  cursor: not-allowed;
+}
+
+.shell {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.panel,
+.mapPanel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.04);
+}
+
+.panel {
+  padding: 1rem 1.1rem;
+}
+
+.eyebrow {
+  margin: 0 0 0.45rem;
+  font-size: 0.72rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+h1,
+h2,
+p {
+  margin: 0;
+}
+
+.shell h1,
+.shell h2 {
+  font-weight: 700;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.field span,
+.microStatus,
+.selectedSummary,
+.rosterCardMeta,
+.mapSubhead,
+.mapStatusCard,
+.emptyState,
+.errorText {
+  color: var(--text-muted);
+}
+
+.field input,
+.field select,
+.compactField select {
+  width: 100%;
+  padding: 0.72rem 0.82rem;
+  border-radius: 12px;
+  border: 1px solid var(--border-strong);
+  background: #ffffff;
+}
+
+.field input:focus,
+.field select:focus,
+.compactField select:focus,
+.timelineSlider:focus-visible,
+.modeButton:focus-visible,
+.filterChip:focus-visible,
+.typeChip:focus-visible,
+.clearSelectionButton:focus-visible,
+.rosterCard:focus-visible,
+.playbackQuickControls button:focus-visible {
+  outline: 2px solid rgba(252, 82, 0, 0.7);
+  outline-offset: 2px;
+}
+
+.mapPanel {
+  position: relative;
+  min-height: 72vh;
+  margin: 1rem 1.25rem 0;
+  overflow: hidden;
+}
+
+.mapCanvas {
+  height: 72vh;
+  min-height: 560px;
+}
+
+.loadingPanel {
+  display: grid;
+  place-items: center;
+}
+
+.mapHeader {
+  position: absolute;
+  top: 1rem;
+  left: 1rem;
+  right: 1rem;
+  z-index: 2;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 0.85rem;
+  pointer-events: none;
+}
+
+.mapTitleCard,
+.mapStatusCard {
+  pointer-events: auto;
+  background: var(--map-overlay);
+  border: 1px solid rgba(229, 231, 235, 0.98);
+  border-radius: 14px;
+  padding: 0.85rem 0.95rem;
+  backdrop-filter: blur(8px);
+}
+
+.mapTitleCard h1 {
+  font-size: 1.35rem;
+  color: #18222d;
+}
+
+.mapSubhead {
+  margin-top: 0.32rem;
+}
+
+.mapStatusCard {
+  max-width: 360px;
+}
+
+.mapDock {
+  position: absolute;
+  left: 1rem;
+  right: 1rem;
+  bottom: 1rem;
+  z-index: 2;
+}
+
+.playbackDock {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  padding: 0.9rem 1rem;
+  border-radius: 16px;
+  border: 1px solid rgba(223, 229, 235, 0.98);
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(10px);
+}
+
+.playbackDockTop {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.playbackClock {
+  font-size: 1.3rem;
+  line-height: 1;
+  color: #18222d;
+}
+
+.playbackQuickControls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.playbackQuickControls button,
+.filterChip,
+.typeChip,
+.modeButton,
+.clearSelectionButton,
+.rosterCard {
+  border-radius: 12px;
+  transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
+}
+
+.playbackQuickControls button,
+.filterChip,
+.typeChip,
+.modeButton,
+.clearSelectionButton {
+  padding: 0.65rem 0.8rem;
+}
+
+.playbackQuickControls button:hover,
+.filterChip:hover,
+.typeChip:hover,
+.modeButton:hover,
+.clearSelectionButton:hover,
+.rosterCard:hover {
+  border-color: #c5d0db;
+  transform: translateY(-1px);
+}
+
+.modeToggle {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem;
+}
+
+.modeButton.selected,
+.filterChip.selected,
+.typeChip.selected,
+.clearSelectionButton.selected,
+.rosterCard.selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.compactField {
+  min-width: 130px;
+}
+
+.compactField span {
+  display: none;
+}
+
+.compactField select {
+  padding-right: 2rem;
+}
+
+.timelineDock {
+  display: flex;
+  flex-direction: column;
+}
+
+.timelineTrack {
+  position: relative;
+  height: 22px;
+}
+
+.timelineHeatmap {
+  display: flex;
+  height: 22px;
+  overflow: hidden;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: #f1f3f5;
+}
+
+.timelineSegment {
+  flex: 1;
+  min-width: 0;
+}
+
+.timelineSlider {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  margin: 0;
+  background: transparent;
+}
+
+.timelineSlider::-webkit-slider-runnable-track {
+  height: 22px;
+  background: transparent;
+}
+
+.timelineSlider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  margin-top: 3px;
+  border-radius: 999px;
+  border: 2px solid #ffffff;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px rgba(252, 82, 0, 0.25);
+}
+
+.timelineSlider::-moz-range-track {
+  height: 22px;
+  background: transparent;
+}
+
+.timelineSlider::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  border: 2px solid #ffffff;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px rgba(252, 82, 0, 0.25);
+}
+
+.controlsSection {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding: 1rem 1.25rem 1.5rem;
+}
+
+.controlsRow {
+  display: grid;
+  gap: 1rem;
+}
+
+.controlsRowPrimary {
+  grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
+}
+
+.controlCard {
+  min-height: 100%;
+}
+
+.panelHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 0.75rem;
+  margin-bottom: 0.9rem;
+}
+
+.controlGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.85rem;
+}
+
+.microStatus {
+  margin-top: 0.9rem;
+  font-size: 0.85rem;
+}
+
+.microStatus.isStored {
+  color: #2c9c62;
+}
+
+.microStatus.isEmpty {
+  color: #cb8a25;
+}
+
+.typeChips,
+.filterChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+}
+
+.typeChipsHeader {
+  justify-content: flex-end;
+  max-width: 70%;
+}
+
+.typeChip {
+  font-weight: 600;
+}
+
+.selectedSummary {
+  display: inline-block;
+  margin-top: 0.3rem;
+}
+
+.rosterPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.backfillStatusValue {
+  color: #475569;
+  font-weight: 600;
+}
+
+.backfillStatusValue.isDegraded {
+  color: #b45309;
+}
+
+.issueCard {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-top: 0.9rem;
+  padding: 0.85rem 0.95rem;
+  border-radius: 14px;
+  border: 1px solid rgba(217, 119, 6, 0.22);
+  background: rgba(245, 158, 11, 0.09);
+}
+
+.issueCardMeta,
+.detailNote {
+  color: #7c5a1c;
+  font-size: 0.9rem;
+}
+
+.rosterHeader,
+.rosterToolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.rosterToolbar {
+  flex-wrap: wrap;
+}
+
+.rosterCount {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  padding: 0.35rem 0.65rem;
+  border-radius: 999px;
+  background: #fff4ef;
+  border: 1px solid #ffd8c7;
+  color: var(--accent);
+}
+
+.rosterSearch {
+  min-width: 240px;
+  max-width: 320px;
+  width: 100%;
+}
+
+.rosterGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 0.8rem;
+}
+
+.rosterCard {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.65rem;
+  padding: 0.95rem;
+  width: 100%;
+  text-align: left;
+  background: #ffffff;
+  border: 1px solid var(--border);
+}
+
+.rosterCardTop {
+  display: flex;
+  width: 100%;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 0.75rem;
+}
+
+.rosterCardTop strong {
+  min-width: 0;
+  flex: 1;
+  line-height: 1.3;
+}
+
+.rosterCardMeta {
+  font-size: 0.9rem;
+}
+
+.statusTag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.22rem 0.52rem;
+  border-radius: 999px;
+  font-size: 0.74rem;
+  white-space: nowrap;
+  border: 1px solid transparent;
+}
+
+.statusTag.isFollowing {
+  border-color: rgba(45, 168, 107, 0.35);
+  background: rgba(45, 168, 107, 0.12);
+  color: #278858;
+}
+
+.statusTag.isTrackedOnly {
+  border-color: rgba(215, 163, 61, 0.35);
+  background: rgba(215, 163, 61, 0.12);
+  color: #a37013;
+}
+
+.emptyState,
+.errorText {
+  padding: 0.85rem 0;
+}
+
+.errorText {
+  color: #c74e1b;
+}
+
+.maplibregl-popup {
+  z-index: 4;
+}
+
+.maplibregl-popup-content {
+  padding: 0;
+  border-radius: 16px;
+  background: #ffffff;
+  border: 1px solid rgba(252, 82, 0, 0.35);
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.14);
+}
+
+.maplibregl-popup-tip {
+  border-top-color: #ffffff !important;
+  border-bottom-color: #ffffff !important;
+}
+
+.mapPopup {
+  width: 300px;
+  padding: 1rem;
+  color: #1f2933;
+}
+
+.mapPopupHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.mapPopupHeader strong {
+  font-size: 1rem;
+}
+
+.mapPopupHeader span {
+  color: var(--accent);
+  font-size: 0.83rem;
+}
+
+.mapPopupTitle {
+  margin-top: 0.5rem;
+  color: #18222d;
+  font-weight: 600;
+}
+
+.mapPopupMeta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem;
+  margin-top: 0.85rem;
+}
+
+.mapPopupMeta span {
+  display: flex;
+  flex-direction: column;
+  gap: 0.18rem;
+  font-size: 0.83rem;
+  color: #475569;
+}
+
+.mapPopupMeta strong {
+  color: #7b8794;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.popupWarning {
+  margin-top: 0.9rem;
+  padding: 0.7rem 0.8rem;
+  border-radius: 12px;
+  background: rgba(252, 82, 0, 0.08);
+  border: 1px solid rgba(252, 82, 0, 0.18);
+  color: #b44d1f;
+}
+
+@media (max-width: 980px) {
+  .mapPanel {
+    margin: 0.8rem 0.8rem 0;
+  }
+
+  .controlsSection {
+    padding: 0.8rem;
+  }
+
+  .controlsRowPrimary {
+    grid-template-columns: 1fr;
+  }
+
+  .rosterHeader,
+  .rosterToolbar,
+  .playbackDockTop,
+  .panelHeader {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .typeChipsHeader {
+    max-width: none;
+    justify-content: flex-start;
+  }
+
+  .playbackQuickControls {
+    justify-content: stretch;
+  }
+
+  .playbackQuickControls > * {
+    flex: 1 1 140px;
+  }
+
+  .rosterSearch {
+    max-width: none;
+  }
+
+  .mapCanvas {
+    min-height: 500px;
+  }
+}
+
+/* ── Tab bar ─────────────────────────────────────────────── */
+
+.tabBar {
+  display: flex;
+  gap: 0;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  padding: 0 1rem;
+  overflow-x: auto;
+}
+
+.tabBtn {
+  padding: 0.75rem 1.25rem;
+  background: transparent;
+  border: none;
+  border-bottom: 3px solid transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-weight: 500;
+  white-space: nowrap;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.tabBtn:hover {
+  color: #e0e0e0;
+}
+
+.tabBtnActive {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+/* ── Filter bar ──────────────────────────────────────────── */
+
+.filterBar {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.6rem 1rem;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.filterField {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.filterField select,
+.filterField input {
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  color: #e0e0e0;
+  padding: 0.3rem 0.6rem;
+  font-size: 0.85rem;
+}
+
+.filterClear {
+  padding: 0.3rem 0.8rem;
+  border-radius: 8px;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+/* ── Tab content areas ────────────────────────────────────── */
+
+.tabContent {
+  flex: 1;
+  overflow-y: auto;
+  padding: 1rem;
+  background: var(--bg);
+}
+
+.tabContentMap {
+  display: flex;
+  position: relative;
+  padding: 0;
+  height: calc(100vh - 110px);
+}
+
+.mapFill {
+  flex: 1;
+  height: 100%;
+}
+
+.tabOverlay {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: var(--panel);
+  padding: 1rem 1.5rem;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  z-index: 10;
+  color: #e0e0e0;
+}
+
+.tabError {
+  color: var(--accent);
+}
+
+.tabEmpty {
+  color: var(--text-muted);
+}
+
+.tabLoading {
+  padding: 2rem;
+  text-align: center;
+  color: var(--text-muted);
+}
+
+/* ── Playback layout ─────────────────────────────────────── */
+
+.playbackLayout {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+}
+
+/* ── Routes sidebar ──────────────────────────────────────── */
+
+.routesSidebar {
+  width: 260px;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  padding: 0.75rem;
+  z-index: 5;
+}
+
+.routesSidebar h3 {
+  margin: 0 0 0.75rem;
+  font-size: 0.9rem;
+  color: var(--text-muted);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.clusterList {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.clusterItem {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  padding: 0.4rem 0.5rem;
+  border-radius: 8px;
+  background: var(--panel-soft);
+  font-size: 0.83rem;
+}
+
+.clusterCount {
+  font-weight: 700;
+  color: var(--accent);
+  min-width: 28px;
+}
+
+.clusterType {
+  flex: 1;
+}
+
+.clusterAth {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+
+/* ── Athletes grid ───────────────────────────────────────── */
+
+.athleteGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 1rem;
+  padding: 1rem;
+}
+
+.athleteCard {
+  display: flex;
+  gap: 0.75rem;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 0.85rem;
+}
+
+.athleteAvatar {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+.athleteInfo {
+  flex: 1;
+  min-width: 0;
+}
+
+.athleteName {
+  font-weight: 600;
+  font-size: 0.95rem;
+  color: #e0e0e0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.athleteMeta {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin-top: 0.35rem;
+}
+
+.badge {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  background: var(--panel-soft);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+}
+
+.badgeFollowing {
+  background: rgba(45, 168, 107, 0.15);
+  border-color: rgba(45, 168, 107, 0.4);
+  color: #2da86b;
+}
+
+.athleteStats {
+  display: flex;
+  gap: 0.75rem;
+  margin-top: 0.5rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+/* ── Input/select dark overrides ─────────────────────────── */
+
+.field input,
+.field select,
+.compactField select {
+  background: var(--panel);
+  border-color: var(--border-strong);
+  color: #e0e0e0;
+}
+
+.rosterCard {
+  background: var(--panel);
+  border-color: var(--border);
+}
+
+.rosterCount {
+  background: var(--panel-soft);
+  border-color: var(--border);
+  color: var(--accent);
+}
+
+.backfillStatusValue {
+  color: #a0b4c8;
+}
+
+.issueCard {
+  background: rgba(245, 158, 11, 0.06);
+  border-color: rgba(245, 158, 11, 0.25);
+}
+
+.issueCardMeta,
+.detailNote {
+  color: #c8a050;
+}
+
+.mapPopupMeta span {
+  color: #a0b4c8;
+}
+
+.mapPopupMeta strong {
+  color: #7a9ab8;
+}
+
+.popupWarning {
+  background: rgba(233, 69, 96, 0.08);
+  border-color: rgba(233, 69, 96, 0.25);
+  color: #e94560;
+}

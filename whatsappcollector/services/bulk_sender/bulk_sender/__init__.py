@@ -1,0 +1,1 @@
+"""Bulk sender service package."""

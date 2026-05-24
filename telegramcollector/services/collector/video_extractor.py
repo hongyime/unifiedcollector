@@ -1,0 +1,218 @@
+"""
+Video Frame Extractor - Adaptive frame extraction from video files.
+
+Uses PyAV for efficient video processing with adaptive strategies
+based on video type and duration.
+"""
+import logging
+import asyncio
+import io
+import os
+from typing import List, Generator
+from concurrent.futures import ThreadPoolExecutor
+import numpy as np
+
+logger = logging.getLogger(__name__)
+
+
+class VideoFrameExtractor:
+    """
+    Extracts frames from video files using adaptive strategies.
+    
+    Strategies:
+    - Round videos (video notes): 2 fps for denser sampling
+    - Short videos (<30s): 1 fps fixed rate
+    - Long videos: Keyframe extraction with fallback
+    """
+    
+    _executor = ThreadPoolExecutor(max_workers=2)
+    
+    def __init__(self):
+        from shared.config import settings
+        import av
+        self.av = av
+        
+        # Configuration from environment
+        # Note: VIDEO_FRAME_RATE not currently in Settings, keeping logic or adding to Settings
+        # Adding simple fallback for now or we can add to Settings class if critical
+        self.default_fps = 1.0 
+        self.round_video_fps = 2.0  # Higher sampling for round videos
+        self.max_frames = 30  # Cap to prevent memory issues (30 frames * 1080p is ~180MB)
+        
+        logger.info(f"VideoFrameExtractor initialized. Default FPS: {self.default_fps}")
+    
+    async def extract_frames(
+        self, 
+        video_buffer: io.BytesIO, 
+        is_round_video: bool = False
+    ) -> List[np.ndarray]:
+        """
+        Extracts frames from a video buffer.
+        
+        Args:
+            video_buffer: BytesIO containing video data
+            is_round_video: True if this is a Telegram video note (round video)
+            
+        Returns:
+            List of numpy arrays in BGR format for face processing
+        """
+        loop = asyncio.get_event_loop()
+        frames = await loop.run_in_executor(
+            self._executor,
+            self._extract_frames_sync,
+            video_buffer,
+            is_round_video
+        )
+        return frames
+    
+    def _extract_frames_sync(
+        self, 
+        video_buffer: io.BytesIO, 
+        is_round_video: bool
+    ) -> List[np.ndarray]:
+        """Synchronous frame extraction (runs in thread pool)."""
+        container = None
+        raw_frames = []
+        
+        try:
+            video_buffer.seek(0)
+            container = self.av.open(video_buffer)
+            
+            # Get video stream
+            stream = container.streams.video[0]
+            stream.thread_type = 'AUTO'
+            
+            # Calculate video duration
+            duration = float(stream.duration * stream.time_base) if stream.duration else 30.0
+            
+            # Determine extraction strategy
+            if is_round_video:
+                raw_frames = self._extract_at_fps(container, stream, self.round_video_fps)
+            elif duration < 30:
+                raw_frames = self._extract_at_fps(container, stream, self.default_fps)
+            else:
+                raw_frames = self._extract_keyframes(container, stream, video_buffer)
+            
+            # Convert to BGR numpy arrays
+            bgr_frames = []
+            import cv2
+            for frame in raw_frames[:self.max_frames]:
+                rgb_array = frame.to_ndarray(format='rgb24')
+                bgr_array = cv2.cvtColor(rgb_array, cv2.COLOR_RGB2BGR)
+                bgr_frames.append(bgr_array)
+                
+                # Explicitly delete intermediate arrays
+                del rgb_array
+            
+            logger.info(f"Extracted {len(bgr_frames)} frames (round={is_round_video}, duration={duration:.1f}s)")
+            return bgr_frames
+            
+        except Exception as e:
+            logger.error(f"Frame extraction failed: {e}")
+            return []
+            
+        finally:
+            # Explicit cleanup to prevent memory leaks
+            if container:
+                container.close()
+            
+            # Clear raw frames
+            for frame in raw_frames:
+                del frame
+            raw_frames.clear()
+            
+            # Force garbage collection for large video buffers
+            import gc
+            gc.collect()
+            
+            # Reset buffer position for potential reuse
+            try:
+                video_buffer.seek(0)
+            except:
+                pass
+    
+    def _extract_at_fps(self, container, stream, target_fps: float) -> List:
+        """Extracts frames at a fixed FPS rate."""
+        frames = []
+        
+        video_fps = float(stream.average_rate) if stream.average_rate else 30.0
+        interval = max(1, int(video_fps / target_fps))
+        
+        for i, frame in enumerate(container.decode(stream)):
+            if i % interval == 0:
+                frames.append(frame)
+                
+            if len(frames) >= self.max_frames:
+                break
+        
+        return frames
+    
+    def _extract_keyframes(self, container, stream, video_buffer=None) -> List:
+        """Extracts only keyframes (I-frames) for long videos."""
+        frames = []
+        fallback_container = None
+
+        # First, try to decode only keyframes
+        for packet in container.demux(stream):
+            if packet.is_keyframe:
+                for frame in packet.decode():
+                    frames.append(frame)
+                    if len(frames) >= self.max_frames:
+                        break
+
+            if len(frames) >= self.max_frames:
+                break
+
+        # If too few keyframes, fall back to fixed rate by re-opening the container.
+        # We must NOT call container.seek(0) here — seek() requires a timestamp in
+        # stream time_base units, not a byte offset, and silently produces wrong results
+        # on many formats.  Re-opening from the buffer is the correct approach.
+        if len(frames) < 5:
+            logger.debug("Too few keyframes, falling back to fixed rate extraction")
+            if video_buffer is not None:
+                try:
+                    video_buffer.seek(0)
+                    fallback_container = self.av.open(video_buffer)
+                    fallback_stream = fallback_container.streams.video[0]
+                    fallback_stream.thread_type = 'AUTO'
+                    frames = self._extract_at_fps(fallback_container, fallback_stream, 0.5)
+                finally:
+                    if fallback_container is not None:
+                        fallback_container.close()
+            else:
+                # No buffer available — best-effort with the existing (exhausted) container
+                frames = self._extract_at_fps(container, stream, 0.5)
+
+        return frames
+    
+    def extract_frames_generator(
+        self, 
+        video_buffer: io.BytesIO,
+        target_fps: float = 1.0
+    ) -> Generator[np.ndarray, None, None]:
+        """
+        Memory-efficient generator that yields frames one at a time.
+        
+        Use this for very large videos to avoid loading all frames into memory.
+        """
+        try:
+            video_buffer.seek(0)
+            container = self.av.open(video_buffer)
+            stream = container.streams.video[0]
+            stream.thread_type = 'AUTO'
+            
+            video_fps = float(stream.average_rate) if stream.average_rate else 30.0
+            interval = max(1, int(video_fps / target_fps))
+            
+            import cv2
+            
+            for i, frame in enumerate(container.decode(stream)):
+                if i % interval == 0:
+                    rgb_array = frame.to_ndarray(format='rgb24')
+                    bgr_array = cv2.cvtColor(rgb_array, cv2.COLOR_RGB2BGR)
+                    yield bgr_array
+            
+            container.close()
+            
+        except Exception as e:
+            logger.error(f"Frame generator failed: {e}")

@@ -1,0 +1,80 @@
+# Git
+.git
+.gitignore
+.gitattributes
+.gitkeep
+
+# Python cache
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+.eggs/
+dist/
+build/
+wheels/
+
+# Virtual environments
+.venv
+.venv-test
+venv/
+env/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Testing / CI
+.pytest_cache/
+.hypothesis/
+.coverage
+htmlcov/
+test-results/
+junit*.xml
+
+# Sessions (sensitive — never ship into images)
+sessions/
+*.session
+*.session-journal
+
+# Logs and temp build artifacts
+logs/
+*.log
+*.tmp
+build.log
+build-up.log
+face_build.log
+rebuild.log
+
+# Large data directories
+media/
+data/
+
+# Docker meta files
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# Docs / markdown (not needed at runtime)
+*.md
+docs/
+
+# Kiro / agent artifacts
+.kiro/
+.agent/
+.qodo/
+.github/
+.deepsource.toml
+.sourcery.yml
+
+# Spec / test files (not needed in production images)
+tests/
+scripts/

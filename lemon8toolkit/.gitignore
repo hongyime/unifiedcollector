@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Backup directories
+data/backup_*/
+
+# IDE
+.codeflicker/
+.vscode/
+.idea/
+
+# Testing
+.pytest_cache/
+.coverage
+
+# Runtime data — never commit
+data/*.json
+data/*.log
+data/*.db
+!data/.gitkeep
+
+# Downloads
+downloads/
+downloads_*/
+downloads_tag_username_logic_unit/
+
+# Credentials
+cookies.txt
+.env
+*.session
+*.token
+
+# OS
+.DS_Store
+Thumbs.db
+
+# OneDrive sync artifacts
+*-Prawn-L390.*
+~$*

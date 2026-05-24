@@ -6,7 +6,9 @@ import logging
 import os
 import time
 import zipfile
+import tempfile
 from pathlib import Path
+from datetime import datetime, timezone
 
 import httpx
 
@@ -15,6 +17,7 @@ from src.core.change_tracker import ChangeTracker
 from src.core.link_extractor import extract_whatsapp_links
 from src.core.face_processor import FaceProcessor
 from src.core.face_matcher import FaceMatcher
+from src.core.file_naming import sanitize_name
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +82,14 @@ class WhatsappCollector(BaseCollector):
         self._bulk_daily_cap = int(os.getenv("WHATSAPP_BULK_DAILY_CAP", "200"))
         self._bulk_min_membership_hours = int(os.getenv("WHATSAPP_BULK_MIN_MEMBERSHIP_HOURS", "48"))
         self._bulk_send_counts: dict[str, list[float]] = {}
+
+    @property
+    def account_media_dir(self) -> Path:
+        # isolation by session name (first one if multiple)
+        session = self._session_names[0] if self._session_names else "default"
+        path = self.media_dir / f"session_{sanitize_name(session)}"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
 
     async def collect(self, targets: list[str]):
         if self._use_realtime:
@@ -175,16 +186,24 @@ class WhatsappCollector(BaseCollector):
         if await self._is_duplicate(msg_id, chat_jid):
             return
 
+        chat_name = event.get("chat_name") or event.get("pushName") or chat_jid.split("@")[0]
+        session = event.get("session_name", self._session_names[0] if self._session_names else "default")
+
+        # 1. Upsert Chat & User Info
+        await self._upsert_chat(chat_jid, chat_name, event)
+        sender_uuid = await self._track_user_profile(event)
+
+        # 2. Save Message (ALL messages)
+        await self._upsert_message(event, chat_jid, sender_uuid)
+
+        # 3. Handle Media if exists
         media_type = event.get("media_type") or event.get("messageType", "")
         has_media = media_type in ("imageMessage", "videoMessage", "audioMessage", "documentMessage", "stickerMessage")
 
         if not has_media:
-            media_url = event.get("media_url") or event.get("directPath")
-            if not media_url:
+            # Check if it has a media_url or directPath even if type is not explicit
+            if not (event.get("media_url") or event.get("directPath")):
                 return
-
-        chat_name = event.get("chat_name") or event.get("pushName") or chat_jid.split("@")[0]
-        session = event.get("session_name", self._session_names[0] if self._session_names else "")
 
         ext = self._media_type_to_ext(media_type)
         content_type = self._media_type_to_content_type(media_type)
@@ -213,7 +232,129 @@ class WhatsappCollector(BaseCollector):
             if text:
                 await self._discover_links(text, chat_jid)
 
-        await self._track_user_profile(event)
+    async def _upsert_chat(self, jid: str, name: str, event: dict):
+        is_group = "@g.us" in jid
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO whatsapp_chats (platform_chat_id, name, is_group, updated_at)
+                VALUES ($1, $2, $3, NOW())
+                ON CONFLICT (platform_chat_id) DO UPDATE SET
+                    name = EXCLUDED.name,
+                    updated_at = NOW()
+            """, jid, name, is_group)
+
+    async def _upsert_message(self, event: dict, chat_jid: str, sender_uuid: str | None):
+        msg_id = event.get("message_id") or event.get("key", {}).get("id", "")
+        text = event.get("body") or event.get("text") or event.get("caption")
+        timestamp = event.get("timestamp")
+        dt = datetime.fromtimestamp(timestamp, tz=timezone.utc) if timestamp else datetime.now(timezone.utc)
+        
+        async with self.pool.acquire() as conn:
+            chat_row = await conn.fetchrow("SELECT id FROM whatsapp_chats WHERE platform_chat_id = $1", chat_jid)
+            chat_uuid = chat_row['id'] if chat_row else None
+            
+            await conn.execute("""
+                INSERT INTO whatsapp_messages (
+                    platform_message_id, chat_id, sender_id, from_me,
+                    text, media_mime_type, timestamp, metadata
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                ON CONFLICT (platform_message_id) DO NOTHING
+            """,
+            msg_id, chat_uuid, sender_uuid, event.get("key", {}).get("fromMe", False),
+            text, event.get("mimetype"), dt, json.dumps(event)
+            )
+
+    async def _save_media(self, data: bytes, cid: str, chat_jid: str,
+                           chat_name: str, content_type: str, ext: str,
+                           event: dict | None = None):
+        entity_id = chat_jid.split("@")[0] if chat_jid else "unknown"
+
+        filename = self.build_filename(
+            entity_id=entity_id,
+            entity_name=chat_name,
+            content_type=content_type,
+            content_id=cid,
+            extension=ext,
+        )
+
+        dest_dir = self.account_media_dir / content_type
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / filename
+
+        if dest.exists():
+            return
+
+        try:
+            sha = self.sha256_bytes(data)
+            
+            # Atomic write
+            fd, tmp_path = tempfile.mkstemp(dir=dest_dir, suffix=".tmp")
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, dest)
+            
+            self.circuit_breaker.record_success()
+
+            metadata = {
+                "entity_id": entity_id,
+                "entity_name": chat_name,
+                "content_type": content_type,
+                "content_id": cid,
+                "collected_at": datetime.now(timezone.utc).isoformat(),
+                "raw": event or {}
+            }
+            self.save_json(metadata, dest_dir / f"{Path(filename).stem}_metadata.json")
+
+            await self.insert_media_item(
+                entity_id=entity_id,
+                entity_name=chat_name,
+                content_type=content_type,
+                content_id=cid,
+                filename=filename,
+                file_path=str(dest),
+                file_size=len(data),
+                sha256=sha,
+                metadata=metadata,
+            )
+            self._known_ids.add(cid)
+        except Exception as e:
+            self.circuit_breaker.record_failure()
+            logger.error("Save failed %s: %s", cid, e)
+            await self.send_to_dlq(entity_id, cid, str(e))
+
+    async def _track_user_profile(self, event: dict) -> str | None:
+        if not self._pool:
+            return None
+        sender_jid = event.get("sender_jid") or event.get("key", {}).get("participant", "")
+        if not sender_jid:
+            sender_jid = event.get("chat_jid", "")
+            if not sender_jid or "@g.us" in sender_jid:
+                return None
+
+        payload = {
+            "push_name": event.get("pushName", ""),
+            "display_name": event.get("verifiedBizName", "") or event.get("notify", ""),
+            "phone_number": sender_jid.split("@")[0] if "@" in sender_jid else "",
+            "is_business": event.get("isBusinessMessage", False),
+        }
+
+        try:
+            # Custom upsert to return the internal ID
+            async with self.pool.acquire() as conn:
+                row = await conn.fetchrow("""
+                    INSERT INTO whatsapp_users (platform_user_id, name, pushname, collected_at)
+                    VALUES ($1, $2, $3, NOW())
+                    ON CONFLICT (platform_user_id) DO UPDATE SET
+                        pushname = EXCLUDED.pushname,
+                        collected_at = NOW()
+                    RETURNING id
+                """, sender_jid, payload["display_name"], payload["push_name"])
+                return row['id']
+        except Exception as e:
+            logger.debug("User profile tracking failed: %s", e)
+            return None
 
     async def _poll_sessions(self, targets: list[str]):
         while not self._stop.is_set():
@@ -344,172 +485,6 @@ class WhatsappCollector(BaseCollector):
         if h["risk"] >= self._session_risk_threshold:
             h["cooldown_until"] = time.time() + self._session_cooldown
             logger.warning("Session %s cooled down for %ds (risk=%.1f)", session_name, self._session_cooldown, h["risk"])
-
-    async def _save_media(self, data: bytes, cid: str, chat_jid: str,
-                           chat_name: str, content_type: str, ext: str,
-                           event: dict | None = None):
-        entity_id = chat_jid.split("@")[0] if chat_jid else "unknown"
-
-        filename = self.build_filename(
-            entity_id=entity_id,
-            entity_name=chat_name,
-            content_type=content_type,
-            content_id=cid,
-            extension=ext,
-        )
-
-        dest = self.media_dir / filename
-        if dest.exists():
-            return
-
-        try:
-            sha = self.sha256_bytes(data)
-            self.save_file(data, filename)
-            self.circuit_breaker.record_success()
-
-            metadata = None
-            if event:
-                metadata = json.dumps({
-                    k: event.get(k) for k in
-                    ("pushName", "chat_name", "messageType", "timestamp", "session_name")
-                    if event.get(k)
-                })
-
-            await self.insert_media_item(
-                entity_id=entity_id,
-                entity_name=chat_name,
-                content_type=content_type,
-                content_id=cid,
-                filename=filename,
-                file_path=str(dest),
-                file_size=len(data),
-                sha256=sha,
-                metadata=metadata,
-            )
-        except Exception as e:
-            self.circuit_breaker.record_failure()
-            logger.error("Save failed %s: %s", cid, e)
-            await self.send_to_dlq(entity_id, cid, str(e))
-
-    async def _process_faces(self, data: bytes, content_id: str,
-                              entity_id: str, content_type: str):
-        if not self._face_processor or not self._face_processor.available or not self._pool:
-            return
-        try:
-            if content_type == "video":
-                embeddings = await asyncio.get_event_loop().run_in_executor(
-                    None, self._face_processor.encode_video, data,
-                )
-            else:
-                embeddings = self._face_processor.encode_image(data)
-
-            for emb in embeddings:
-                result = await self._face_matcher.match_or_create(self._pool, emb.embedding)
-                await self._face_matcher.store_embedding(
-                    self._pool, result.identity_id, emb.embedding,
-                    content_id, entity_id,
-                    frame_index=emb.frame_index,
-                    confidence=emb.confidence,
-                    bbox=emb.bbox,
-                )
-                if result.is_new:
-                    logger.debug("New face identity %s from %s", result.identity_id, content_id)
-        except Exception as e:
-            logger.debug("Face processing failed for %s: %s", content_id, e)
-
-    async def _discover_links(self, text: str, chat_jid: str):
-        if not self._pool:
-            return
-        links = extract_whatsapp_links(text)
-        if not links:
-            return
-        try:
-            async with self._pool.acquire() as conn:
-                for url, link_type in links:
-                    await conn.execute(
-                        """
-                        INSERT INTO wa_discovered_links (link, link_type, source_jid, status)
-                        VALUES ($1, $2, $3, 'new')
-                        ON CONFLICT (link) DO NOTHING
-                        """,
-                        url, link_type, chat_jid,
-                    )
-            logger.debug("Discovered %d links from %s", len(links), chat_jid)
-        except Exception as e:
-            logger.debug("Link discovery persist failed: %s", e)
-
-    async def _track_user_profile(self, event: dict):
-        if not self._pool:
-            return
-        sender_jid = event.get("sender_jid") or event.get("key", {}).get("participant", "")
-        if not sender_jid:
-            sender_jid = event.get("chat_jid", "")
-            if not sender_jid or "@g.us" in sender_jid:
-                return
-
-        payload = {
-            "push_name": event.get("pushName", ""),
-            "display_name": event.get("verifiedBizName", "") or event.get("notify", ""),
-            "phone_number": sender_jid.split("@")[0] if "@" in sender_jid else "",
-            "is_business": event.get("isBusinessMessage", False),
-        }
-
-        if not any(v for v in payload.values()):
-            return
-
-        try:
-            await self._change_tracker.track_and_persist(self._pool, sender_jid, payload)
-        except Exception as e:
-            logger.debug("User profile tracking failed: %s", e)
-
-    async def bulk_send(self, session_name: str, target_jid: str, content: str) -> bool:
-        if not self._bulk_send_enabled:
-            logger.warning("Bulk send is disabled")
-            return False
-
-        bridge_url = self._session_bridges.get(session_name)
-        if not bridge_url:
-            return False
-
-        now = time.time()
-        counts = self._bulk_send_counts.setdefault(session_name, [])
-        counts[:] = [t for t in counts if now - t < 86400]
-        hourly = sum(1 for t in counts if now - t < 3600)
-
-        if hourly >= self._bulk_hourly_cap:
-            logger.warning("Bulk send hourly cap reached (%d/%d)", hourly, self._bulk_hourly_cap)
-            return False
-        if len(counts) >= self._bulk_daily_cap:
-            logger.warning("Bulk send daily cap reached (%d/%d)", len(counts), self._bulk_daily_cap)
-            return False
-
-        try:
-            timestamp = str(int(now))
-            payload = f"send:{target_jid}:{timestamp}"
-            sig = hmac.new(
-                self._bridge_secret.encode(),
-                payload.encode(),
-                hashlib.sha256,
-            ).hexdigest()
-
-            async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.post(
-                    f"{bridge_url}/send/text",
-                    json={"jid": target_jid, "text": content},
-                    headers={
-                        **self._bridge_headers(),
-                        "X-Timestamp": timestamp,
-                        "X-Signature": sig,
-                    },
-                )
-                if resp.status_code == 200:
-                    counts.append(now)
-                    logger.info("Bulk send to %s via %s", target_jid, session_name)
-                    return True
-                logger.warning("Bulk send failed: %d", resp.status_code)
-        except Exception as e:
-            logger.error("Bulk send error: %s", e)
-        return False
 
     async def _cleanup_connections(self):
         if self._redis:

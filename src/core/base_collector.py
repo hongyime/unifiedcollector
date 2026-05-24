@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import tempfile
@@ -100,8 +101,28 @@ class BaseCollector(ABC):
 
     # --- File I/O ---
 
-    def save_file(self, data: bytes, filename: str) -> Path:
-        """Atomic write: temp file -> fsync -> rename into media_dir."""
+    def save_json(self, data: dict, filename: str) -> Path:
+        """Save a dictionary as a JSON file atomically."""
+        dest = self.media_dir / filename
+        content = json.dumps(data, indent=2, ensure_ascii=False, default=str)
+        fd, tmp_path = tempfile.mkstemp(dir=self.media_dir, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(content)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, dest)
+            logger.debug("Saved JSON %s", dest)
+            return dest
+        except BaseException:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            raise
+
+    def save_file(self, data: bytes, filename: str, metadata: dict | None = None) -> Path:
+        """Atomic write: temp file -> fsync -> rename into media_dir.
+        Also saves a _metadata.json and _raw.json if metadata is provided.
+        """
         dest = self.media_dir / filename
         fd, tmp_path = tempfile.mkstemp(dir=self.media_dir, suffix=".tmp")
         try:
@@ -110,6 +131,15 @@ class BaseCollector(ABC):
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp_path, dest)
+
+            if metadata:
+                stem = Path(filename).stem
+                # Save processed metadata
+                self.save_json(metadata, f"{stem}_metadata.json")
+                # Save raw API response if available
+                if "raw" in metadata:
+                    self.save_json(metadata["raw"], f"{stem}_raw.json")
+
             parsed = parse_filename(filename)
             if parsed:
                 self._known_ids.add(parsed["content_id"])
@@ -155,7 +185,7 @@ class BaseCollector(ABC):
                     """,
                     self.SOURCE_NAME, entity_id, entity_name, content_type, content_id,
                     filename, file_path, file_size, width, height,
-                    sha256, source_url, metadata,
+                    sha256, source_url, json.dumps(metadata, default=str) if metadata is not None else None,
                 )
             return True
         except Exception as e:

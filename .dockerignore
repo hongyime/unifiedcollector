@@ -1,0 +1,53 @@
+# Old toolkit folders (legacy V1, no longer used)
+instagramtoolkit/
+githubtoolkit/
+youtubetoolkit/
+tiktoktoolkit/
+whatsappcollector/
+telegramtoolkit/
+stravatoolkit/
+lemon8toolkit/
+
+# Per-platform venvs and caches
+**/.venv/
+**/venv/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+
+# Storage / data (mounted from Z:, never in image)
+data/
+backups/
+sessions/
+whatsapp_session/
+*.session
+*.session-journal
+*.db
+*.sqlite
+*.sqlite-*
+
+# Logs and temp
+logs/
+*.log
+tmp/
+.tmp/
+
+# Git / IDE
+.git/
+.gitignore
+.idea/
+.vscode/
+.claude/
+
+# Docs
+*.md
+!README.md
+docs/
+
+# OS / editor noise
+Thumbs.db
+.DS_Store
+desktop.ini

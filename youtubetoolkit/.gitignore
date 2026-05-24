@@ -1,0 +1,26 @@
+__pycache__/
+.pytest_cache/
+*.py[cod]
+
+# Virtual environment (exclude from git)
+.venv/
+
+# Downloads and data
+downloads/
+data/
+sessions/
+
+# Root-level empty placeholder folders
+common/
+logs/
+
+# Generated documentation and logs
+*.log
+AUDIT.md
+bugfix.md
+design.md
+tasks.md
+CHECKPOINT.md
+
+# Keep sessions folder (don't exclude)
+# sessions/

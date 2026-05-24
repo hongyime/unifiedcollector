@@ -1,0 +1,4 @@
+[tool.pytest.ini_options]
+markers = [
+    "integration: tests that call the real Instagram API (need --run-integration)",
+]

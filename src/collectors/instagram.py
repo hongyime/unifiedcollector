@@ -4,9 +4,10 @@ import logging
 import math
 import os
 import random
+import tempfile
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -49,6 +50,24 @@ CONTENT_DELAYS = {
     "profile_photo": 1.5,
 }
 
+# ---------------------------------------------------------------------------
+# Playwright (Mode β) — hybrid fallback when instaloader/Graph endpoints fail.
+#
+# *** STRICT 1-AT-A-TIME GLOBAL SEMAPHORE ***
+# WSL on this host is capped at 6GB and Docker has only 5.79GiB.  Each
+# Chromium instance, even with --single-process, eats ~250-400MB.  We MUST NOT
+# launch parallel browsers across account workers — doing so will OOM-kill
+# the collector container.  Increase only if RAM is bumped.
+# ---------------------------------------------------------------------------
+PLAYWRIGHT_SEMAPHORE = asyncio.Semaphore(1)
+PLAYWRIGHT_LAUNCH_ARGS = [
+    "--single-process",       # CRITICAL for low-RAM hosts
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--no-zygote",
+]
+
 
 class InstagramCollector(BaseCollector):
     SOURCE_NAME = "instagram"
@@ -84,18 +103,58 @@ class InstagramCollector(BaseCollector):
         proxy_url = os.getenv("PROXY_URL", "")
         self._global_proxy = proxy_url.strip() if proxy_url else None
         self._account_proxies: dict[str, str] = {}
-        self._account_browser_cookies: dict[str, str] = {}
+        self._account_browser_cookies: dict[str, str] = self._auto_discover_cookies()
+        self._account_priorities: dict[str, str] = {}
         for i in range(1, 20):
             name = os.getenv(f"INSTA_ACCOUNT_{i}_NAME", "")
             px = os.getenv(f"INSTA_ACCOUNT_{i}_PROXY", "")
             browser = os.getenv(f"INSTA_ACCOUNT_{i}_BROWSER", "")
-            if name and px:
-                self._account_proxies[name] = px.strip()
-            if name and browser:
-                self._account_browser_cookies[name] = browser.strip()
+            priority = os.getenv(f"INSTA_ACCOUNT_{i}_PRIORITY", os.getenv("INSTA_LOGIN_PRIORITY", "cookie"))
+            if name:
+                self._account_priorities[name] = priority
+                if px:
+                    self._account_proxies[name] = px.strip()
+                if browser:
+                    self._account_browser_cookies[name] = browser.strip()
 
         self._loader = None
         self._current_account = None
+
+    def _auto_discover_cookies(self) -> dict:
+        """Auto-discover cookie files for all accounts.
+
+        Searches both credentials/instagram/cookies/ (legacy) and
+        credentials/instagram/ (current layout). Files are mapped by:
+          1. exact account NAME match (e.g. shotsbyseah234.txt -> shotsbyseah234)
+          2. account_<N> pattern -> ACCOUNT_<N>
+          3. fallback: stem of filename
+        """
+        import re
+        discovered = {}
+        cookie_dirs = [
+            "credentials/instagram/cookies/",
+            "credentials/instagram/",
+        ]
+        for cookie_dir in cookie_dirs:
+            if not os.path.exists(cookie_dir):
+                continue
+            for filename in os.listdir(cookie_dir):
+                full = os.path.join(cookie_dir, filename)
+                if not os.path.isfile(full):
+                    continue
+                if not (filename.endswith('.txt') or filename.endswith('.json')):
+                    continue
+                match = re.search(r'account_(\d+)', filename)
+                if match:
+                    account_name = f"ACCOUNT_{match.group(1)}"
+                else:
+                    account_name = filename.rsplit('.', 1)[0]
+                # Don't overwrite if already discovered from the more-specific cookies/ dir
+                if account_name in discovered:
+                    continue
+                discovered[account_name] = full
+                logger.info("Auto-discovered cookie file for %s: %s", account_name, full)
+        return discovered
 
     def set_pool(self, pool):
         super().set_pool(pool)
@@ -126,16 +185,34 @@ class InstagramCollector(BaseCollector):
 
         username = account.credentials.get("user", "")
         password = account.credentials.get("pass", "")
-        if not username or not password:
+        if not username:
             return False
 
-        # Try browser cookie import first
+        priority = self._account_priorities.get(account.name, os.getenv("INSTA_LOGIN_PRIORITY", "cookie"))
+
+        if priority == "cookie":
+            if self._try_cookie_login(account, username):
+                return True
+            if password:
+                return self._password_login(account, username, password)
+            return False
+        else:
+            if password:
+                if self._password_login(account, username, password):
+                    return True
+            if self._try_cookie_login(account, username):
+                return True
+            return False
+
+    def _try_cookie_login(self, account, username: str) -> bool:
         if account.name in self._account_browser_cookies:
             cookie_path = self._account_browser_cookies[account.name]
             if self._login_from_cookies(username, cookie_path):
                 return True
-            logger.info("Cookie login failed for %s, falling back to session/password", username)
+            logger.info("Cookie login failed for %s", username)
+        return False
 
+    def _password_login(self, account, username: str, password: str) -> bool:
         session_file = self._session_dir / f"{username}.session"
         try:
             if session_file.exists() and self._check_session_age(username):
@@ -154,9 +231,85 @@ class InstagramCollector(BaseCollector):
             logger.info("Logged in as %s", username)
             return True
         except Exception as e:
+            # Detect 2FA challenge from instaloader.
+            err_text = str(e).lower()
+            cls_name = type(e).__name__
+            needs_2fa = (
+                cls_name == "TwoFactorAuthRequiredException"
+                or "two-factor" in err_text
+                or "two_factor" in err_text
+                or "2fa" in err_text
+            )
+            if needs_2fa:
+                code = self._resolve_2fa_code(username)
+                if code:
+                    try:
+                        self._loader.two_factor_login(code)
+                        self._loader.save_session_to_file(str(session_file))
+                        self._save_session_meta(username)
+                        logger.info("Logged in (2FA) as %s", username)
+                        # Consume the drop-file once used so a stale code can't be reused.
+                        self._consume_2fa_dropfile(username)
+                        return True
+                    except Exception as e2:
+                        logger.error("2FA login failed for %s: %s", username, e2)
+                        self.account_pool.record_error(account.name)
+                        return False
+                else:
+                    logger.error(
+                        "2FA required for %s but no code available. "
+                        "Set INSTA_ACCOUNT_<N>_TOTP_SECRET in .env, "
+                        "or drop a 6-digit code into credentials/instagram/2fa/%s.code",
+                        username, username,
+                    )
+                    self.account_pool.record_error(account.name)
+                    return False
             logger.error("Login failed for %s: %s", username, e)
             self.account_pool.record_error(account.name)
             return False
+
+    def _resolve_2fa_code(self, username: str) -> str:
+        """Resolve a 2FA code for `username` from (in order):
+          1. INSTA_ACCOUNT_<N>_TOTP_SECRET env (per matching account index)
+          2. credentials/instagram/2fa/<username>.code drop-file (one-shot)
+        Returns empty string if none available.
+        """
+        # 1. TOTP env var
+        for i in range(1, 20):
+            name = os.getenv(f"INSTA_ACCOUNT_{i}_NAME", "")
+            if name and name.lower() == username.lower():
+                secret = os.getenv(f"INSTA_ACCOUNT_{i}_TOTP_SECRET", "").strip()
+                if secret:
+                    try:
+                        import pyotp
+                        return pyotp.TOTP(secret).now()
+                    except ImportError:
+                        logger.warning("pyotp not installed; cannot use TOTP secret for %s", username)
+                    except Exception as e:
+                        logger.warning("TOTP generation failed for %s: %s", username, e)
+                break
+        # 2. Drop-file
+        drop = Path("credentials/instagram/2fa") / f"{username}.code"
+        if drop.exists():
+            try:
+                code = drop.read_text(encoding="utf-8").strip()
+                # Allow either bare 6 digits or first whitespace-separated token
+                code = code.split()[0] if code else ""
+                if code.isdigit() and 6 <= len(code) <= 8:
+                    logger.info("Using 2FA drop-file code for %s", username)
+                    return code
+            except Exception as e:
+                logger.warning("Failed to read 2FA drop-file for %s: %s", username, e)
+        return ""
+
+    def _consume_2fa_dropfile(self, username: str) -> None:
+        drop = Path("credentials/instagram/2fa") / f"{username}.code"
+        try:
+            if drop.exists():
+                drop.unlink()
+                logger.info("Consumed 2FA drop-file for %s", username)
+        except Exception:
+            pass
 
     def _login_from_cookies(self, username: str, cookie_path: str) -> bool:
         if not os.path.exists(cookie_path):
@@ -239,7 +392,7 @@ class InstagramCollector(BaseCollector):
         return self._global_proxy
 
     def _time_of_day_multiplier(self) -> float:
-        hour = datetime.now().hour
+        hour = datetime.now(timezone.utc).hour
         if hour in NIGHT_HOURS:
             return random.uniform(2.5, 4.0)
         if hour in RISKY_HOURS:
@@ -247,7 +400,7 @@ class InstagramCollector(BaseCollector):
         return 1.0
 
     def _check_daily_quota(self, account_name: str) -> bool:
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         key = f"{account_name}:{today}"
         views = self._daily_views.get(key, 0)
         actions = self._daily_actions.get(key, 0)
@@ -260,7 +413,7 @@ class InstagramCollector(BaseCollector):
         return True
 
     def _record_daily_action(self, account_name: str, views: int = 0, actions: int = 1):
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         key = f"{account_name}:{today}"
         self._daily_views[key] = self._daily_views.get(key, 0) + views
         self._daily_actions[key] = self._daily_actions.get(key, 0) + actions
@@ -280,6 +433,16 @@ class InstagramCollector(BaseCollector):
         jitter = random.uniform(0.8, 1.3)
         delay = base * jitter
         await asyncio.sleep(delay)
+
+    @property
+    def account_media_dir(self) -> Path:
+        if self._current_account:
+            acc_name = sanitize_name(self._current_account.name)
+            path = self.media_dir / f"account_{acc_name}"
+        else:
+            path = self.media_dir / "default"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
 
     async def collect(self, targets: list[str]):
         account = self.account_pool.get_next()
@@ -305,57 +468,94 @@ class InstagramCollector(BaseCollector):
 
         async with httpx.AsyncClient(**client_kwargs) as client:
             await self._warmup(client)
+            
+            # Process manual targets first
             for username in targets:
-                if self._stop.is_set():
-                    break
+                if self._stop.is_set(): break
+                await self._process_target(client, username)
 
-                if self._current_account and not self._check_daily_quota(self._current_account.name):
-                    next_acct = self.account_pool.get_next(exclude=self._current_account.name)
-                    if next_acct and self._check_daily_quota(next_acct.name):
-                        logger.info("Switching to %s (daily quota exceeded on %s)",
-                                    next_acct.name, self._current_account.name)
-                        await asyncio.sleep(random.uniform(ACCOUNT_SWITCH_DELAY_MIN, ACCOUNT_SWITCH_DELAY_MAX))
-                        self._current_account = next_acct
-                        await asyncio.get_event_loop().run_in_executor(
-                            None, self._login_account, next_acct,
-                        )
-                    else:
-                        logger.error("All accounts hit daily quota, stopping")
-                        break
+            # Then process spider queue if enabled
+            if os.getenv("INSTA_SPIDER_ENABLED", "true").lower() == "true":
+                await self._process_spider_queue(client)
 
-                if SLIDING_WINDOW_ENABLED and not self._sliding_limiter.check("instagram.com"):
-                    wait = self._sliding_limiter.time_until_allowed("instagram.com")
-                    logger.warning("Sliding window limit hit, waiting %.0fs", wait)
-                    await asyncio.sleep(min(wait, 600))
-                    if not self._sliding_limiter.check("instagram.com"):
-                        logger.error("Still rate-limited after wait, stopping")
-                        break
+    async def _process_target(self, client: httpx.AsyncClient, username: str):
+        if self._current_account and not self._check_daily_quota(self._current_account.name):
+            return
 
-                tod_mult = self._time_of_day_multiplier()
-                if tod_mult > 1.0:
-                    extra = self.rate_limiter.base_delay * (tod_mult - 1.0)
-                    logger.debug("Time-of-day multiplier %.1fx, extra delay %.1fs", tod_mult, extra)
-                    await asyncio.sleep(extra)
+        # §21 Hard gate: respect per-account emergency cooldown set by 429 responses.
+        # Without this the worker re-enters every 5min and re-triggers the cooldown.
+        # Now per-account isolated — only THIS account's cooldown blocks it.
+        if isinstance(self.rate_limiter, HumanLikeRateLimiter):
+            acct_name = self._current_account.name if self._current_account else None
+            remaining = self.rate_limiter.cooldown_remaining_seconds(
+                "instagram.com", account=acct_name,
+            )
+            if remaining > 30.0:
+                logger.warning(
+                    "Skipping instagram/%s — per-account cooldown active for %s (%.0fs remaining)",
+                    username, acct_name or "global", remaining,
+                )
+                return
 
-                logger.info("Collecting instagram/%s", username)
-                try:
-                    await self._collect_user(client, username)
-                    self._sliding_limiter.record("instagram.com")
-                    await self.checkpoint.save_progress(username)
-                    if self._current_account:
-                        self.account_pool.record_success(self._current_account.name)
-                        self._record_daily_action(self._current_account.name, views=1)
-                    await self._micro_pause()
-                except Exception as e:
-                    if "429" in str(e) or "rate" in str(e).lower():
-                        await self._handle_rate_limit(e)
-                    else:
-                        logger.error("Failed instagram/%s: %s", username, e)
-                        await self.send_to_dlq(username, username, str(e))
+        if SLIDING_WINDOW_ENABLED and not self._sliding_limiter.check("instagram.com"):
+            wait = self._sliding_limiter.time_until_allowed("instagram.com")
+            logger.warning("Sliding window limit hit, waiting %.0fs", wait)
+            await asyncio.sleep(min(wait, 600))
+
+        logger.info("Collecting instagram/%s", username)
+        try:
+            await self._collect_user(client, username)
+            self._sliding_limiter.record("instagram.com")
+            await self.checkpoint.save_progress(username)
+            if self._current_account:
+                self.account_pool.record_success(self._current_account.name)
+                self._record_daily_action(self._current_account.name, views=1)
+            await self._micro_pause()
+        except Exception as e:
+            if "429" in str(e) or "rate" in str(e).lower():
+                await self._handle_rate_limit(e)
+            else:
+                logger.error("Failed instagram/%s: %s", username, e)
+                await self.send_to_dlq(username, username, str(e))
+
+    async def _process_spider_queue(self, client: httpx.AsyncClient):
+        """Claim and process jobs from the spider queue."""
+        while not self._stop.is_set():
+            async with self.pool.acquire() as conn:
+                row = await conn.fetchrow("""
+                    UPDATE instagram_spider_queue
+                    SET status = 'processing',
+                        last_attempt = NOW(),
+                        attempts = attempts + 1
+                    WHERE id = (
+                        SELECT id FROM instagram_spider_queue
+                        WHERE status = 'pending' AND attempts < 3
+                        ORDER BY priority ASC, collected_at ASC
+                        LIMIT 1
+                    )
+                    RETURNING platform_user_id, username
+                """)
+            
+            if not row:
+                break
+            
+            target = row['username'] or row['platform_user_id']
+            try:
+                await self._process_target(client, target)
+                async with self.pool.acquire() as conn:
+                    await conn.execute("UPDATE instagram_spider_queue SET status = 'completed' WHERE platform_user_id = $1", row['platform_user_id'])
+            except Exception as e:
+                logger.error("Spider job failed for %s: %s", target, e)
+                async with self.pool.acquire() as conn:
+                    await conn.execute("UPDATE instagram_spider_queue SET status = 'failed', error_message = $1 WHERE platform_user_id = $2", str(e), row['platform_user_id'])
 
     async def _handle_rate_limit(self, error):
+        # Per-account cooldown (§22): isolate this account's 429 from siblings.
+        acct_name = self._current_account.name if self._current_account else None
         if isinstance(self.rate_limiter, HumanLikeRateLimiter):
-            self.rate_limiter.trigger_emergency_cooldown("instagram.com")
+            self.rate_limiter.trigger_emergency_cooldown(
+                "instagram.com", account=acct_name,
+            )
         if self._current_account:
             self.account_pool.cooldown(self._current_account.name, 900.0)
             next_acct = self.account_pool.get_next(exclude=self._current_account.name)
@@ -367,7 +567,10 @@ class InstagramCollector(BaseCollector):
                 )
 
     async def _collect_user(self, client: httpx.AsyncClient, username: str):
-        await self.rate_limiter.async_wait("instagram.com", OperationType.PROFILE_VIEW)
+        acct_name = self._current_account.name if self._current_account else None
+        await self.rate_limiter.async_wait(
+            "instagram.com", OperationType.PROFILE_VIEW, account=acct_name,
+        )
 
         resp = await client.get(
             f"{GRAPH_API}/users/web_profile_info/",
@@ -388,6 +591,9 @@ class InstagramCollector(BaseCollector):
         uid = user_data.get("id", username)
         entity_name = user_data.get("username", username)
 
+        # 1. Save Profile to Database
+        await self._upsert_profile(user_data)
+
         follower_count = user_data.get("edge_followed_by", {}).get("count", 0)
         if self._max_followers and follower_count > self._max_followers:
             logger.info("Skipping %s: %d followers > max %d", username, follower_count, self._max_followers)
@@ -395,10 +601,13 @@ class InstagramCollector(BaseCollector):
 
         self.rate_limiter.record_success("instagram.com")
 
+        # 2. Handle Profile Photo
         profile_pic = user_data.get("profile_pic_url_hd") or user_data.get("profile_pic_url")
         if profile_pic:
+            dest_dir = self.account_media_dir / "profiles"
+            dest_dir.mkdir(parents=True, exist_ok=True)
             changed, path = await self._photo_tracker.check_and_download(
-                profile_pic, uid, "instagram", self.media_dir / "profiles",
+                profile_pic, uid, "instagram", dest_dir,
             )
             if changed and path:
                 data = path.read_bytes()
@@ -411,31 +620,87 @@ class InstagramCollector(BaseCollector):
                     file_path=str(path),
                     file_size=len(data),
                     sha256=self.sha256_bytes(data),
+                    metadata={"raw": user_data}
                 )
-            elif not changed:
-                cid = f"profile_{uid}"
-                if not self.is_known(cid):
-                    await self.download_media({
-                        "entity_id": uid,
-                        "entity_name": entity_name,
-                        "content_type": "profile_photo",
-                        "content_id": cid,
-                        "url": profile_pic,
-                        "extension": "jpg",
-                    })
 
-        await self._collect_posts(client, uid, entity_name)
+        # 3. Spidering (if enabled)
+        if os.getenv("INSTA_SPIDER_FOLLOWERS", "false").lower() == "true":
+            await self._spider_followers(client, uid, entity_name)
+
+        # 4. Collect Content
+        # Probe instaloader/Graph first; if post enumeration explicitly fails
+        # (401/429/empty), fall back to Playwright (Mode β, §22 hybrid).
+        posts_ok = False
+        try:
+            posts_ok = await self._collect_posts(client, uid, entity_name)
+        except Exception as e:
+            logger.warning(
+                "instagram/%s: Graph post enumeration raised %s — Playwright fallback",
+                entity_name, type(e).__name__,
+            )
+            posts_ok = False
+
+        if not posts_ok:
+            try:
+                await self._collect_posts_playwright(uid, entity_name)
+            except Exception as e:
+                logger.warning(
+                    "instagram/%s: Playwright fallback failed: %s", entity_name, e,
+                )
+
         await self._collect_stories(uid, entity_name)
         await self._collect_highlights(client, uid, entity_name)
 
-    async def _collect_posts(self, client: httpx.AsyncClient, uid: str, entity_name: str):
+    async def _upsert_profile(self, data: dict):
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO instagram_profiles (
+                    platform_user_id, username, full_name, bio,
+                    followers_count, following_count, posts_count,
+                    is_verified, is_private, profile_pic_url,
+                    external_url, updated_at
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
+                ON CONFLICT (platform_user_id) DO UPDATE SET
+                    username = EXCLUDED.username,
+                    full_name = EXCLUDED.full_name,
+                    bio = EXCLUDED.bio,
+                    followers_count = EXCLUDED.followers_count,
+                    following_count = EXCLUDED.following_count,
+                    posts_count = EXCLUDED.posts_count,
+                    is_verified = EXCLUDED.is_verified,
+                    is_private = EXCLUDED.is_private,
+                    profile_pic_url = EXCLUDED.profile_pic_url,
+                    external_url = EXCLUDED.external_url,
+                    updated_at = NOW()
+            """, 
+            data.get("id"), data.get("username"), data.get("full_name"), data.get("biography"),
+            data.get("edge_followed_by", {}).get("count", 0),
+            data.get("edge_follow", {}).get("count", 0),
+            data.get("edge_owner_to_timeline_media", {}).get("count", 0),
+            data.get("is_verified", False), data.get("is_private", False),
+            data.get("profile_pic_url_hd"), data.get("external_url")
+            )
+
+    async def _spider_followers(self, client: httpx.AsyncClient, uid: str, username: str):
+        # Implementation for follower spidering would go here (requires GraphQL or Instaloader)
+        logger.debug("Spidering followers for %s (not fully implemented in this step)", username)
+
+    async def _collect_posts(self, client: httpx.AsyncClient, uid: str, entity_name: str) -> bool:
+        """Try to enumerate posts via the GraphQL endpoint.
+
+        Returns True on success (at least one page processed cleanly), False if
+        the endpoint signals auth/rate failure (401/429) or returns empty —
+        signal to caller to invoke the Playwright fallback.
+        """
         end_cursor = ""
         has_next = True
         page_depth = 0
+        any_success = False
 
         while has_next and not self._stop.is_set():
             await self.rate_limiter.async_wait(
                 "instagram.com", OperationType.PAGINATION, pagination_depth=page_depth,
+                account=(self._current_account.name if self._current_account else None),
             )
 
             params = {
@@ -453,15 +718,21 @@ class InstagramCollector(BaseCollector):
                         "https://www.instagram.com/graphql/query/",
                         params=params,
                     )
+                    if resp.status_code in (401, 403):
+                        logger.info(
+                            "instagram/%s: GraphQL %s — signalling Playwright fallback",
+                            entity_name, resp.status_code,
+                        )
+                        return False
                     if resp.status_code == 429:
                         await self._handle_rate_limit(Exception("429"))
-                        break
+                        return False
                     resp.raise_for_status()
                 except Exception as e:
                     self.rate_limiter.record_failure("instagram.com")
                     self.circuit_breaker.record_failure()
                     logger.error("GraphQL request failed: %s", e)
-                    break
+                    return any_success
 
             data = resp.json()
             media_data = (data.get("data", {})
@@ -476,11 +747,207 @@ class InstagramCollector(BaseCollector):
             self.circuit_breaker.record_success()
             page_depth += 1
 
+            if edges:
+                any_success = True
+
             for edge in edges:
                 if self._stop.is_set():
                     break
                 node = edge.get("node", {})
                 await self._process_post(node, uid, entity_name)
+
+        return any_success
+
+    # ------------------------------------------------------------------
+    # Playwright (Mode β) hybrid fallback
+    # ------------------------------------------------------------------
+    def _build_playwright_storage_state(self, account_name: str) -> dict | None:
+        """Convert the per-account Netscape cookie file to Playwright storage_state.
+
+        Returns None if no usable cookie file exists.
+        """
+        cookie_path = self._account_browser_cookies.get(account_name)
+        if not cookie_path or not os.path.exists(cookie_path):
+            return None
+
+        cookies: list[dict] = []
+        try:
+            # Support both Netscape .txt and JSON format
+            if cookie_path.endswith(".json"):
+                try:
+                    raw = json.loads(Path(cookie_path).read_text(encoding="utf-8"))
+                except Exception:
+                    return None
+                if isinstance(raw, list):
+                    for c in raw:
+                        if isinstance(c, dict) and "name" in c and "value" in c:
+                            cookies.append({
+                                "name": c["name"],
+                                "value": c["value"],
+                                "domain": c.get("domain", ".instagram.com"),
+                                "path": c.get("path", "/"),
+                                "expires": float(c.get("expirationDate", c.get("expires", -1))),
+                                "httpOnly": bool(c.get("httpOnly", False)),
+                                "secure": bool(c.get("secure", True)),
+                                "sameSite": c.get("sameSite", "Lax"),
+                            })
+            else:
+                with open(cookie_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith("#"):
+                            continue
+                        parts = line.split("\t")
+                        if len(parts) < 7:
+                            continue
+                        domain, _flag, path, secure, expires, name, value = parts[:7]
+                        try:
+                            expires_f = float(expires)
+                        except ValueError:
+                            expires_f = -1
+                        cookies.append({
+                            "name": name,
+                            "value": value,
+                            "domain": domain if domain.startswith(".") else f".{domain}",
+                            "path": path or "/",
+                            "expires": expires_f,
+                            "httpOnly": False,
+                            "secure": secure.upper() == "TRUE",
+                            "sameSite": "Lax",
+                        })
+        except Exception as e:
+            logger.warning("Failed to parse cookies for Playwright (%s): %s", account_name, e)
+            return None
+
+        if not cookies:
+            return None
+        return {"cookies": cookies, "origins": []}
+
+    async def _collect_posts_playwright(self, uid: str, entity_name: str):
+        """Mode β: spin up a single-process headless Chromium, navigate to the
+        profile, scrape ``window._sharedData`` / ``window.__additionalDataLoaded``,
+        and upsert any post nodes we find.
+
+        Concurrency: STRICT 1-at-a-time via the module-level ``PLAYWRIGHT_SEMAPHORE``.
+        Do NOT raise this without bumping host RAM (see comment near the semaphore).
+        """
+        try:
+            from playwright.async_api import async_playwright  # type: ignore
+        except ImportError:
+            logger.warning(
+                "Playwright not installed — cannot run Mode β fallback for %s",
+                entity_name,
+            )
+            return
+
+        acct_name = self._current_account.name if self._current_account else None
+        storage_state = self._build_playwright_storage_state(acct_name) if acct_name else None
+        ua = self.user_agents.get_for_domain("instagram.com")
+        if self._current_account and self._current_account.fingerprint.get("user_agent"):
+            ua = self._current_account.fingerprint["user_agent"]
+
+        url = f"https://www.instagram.com/{entity_name}/"
+
+        async with PLAYWRIGHT_SEMAPHORE:
+            logger.info(
+                "Playwright fallback launching Chromium for instagram/%s (account=%s)",
+                entity_name, acct_name or "anonymous",
+            )
+            playwright_ctx = await async_playwright().start()
+            browser = None
+            try:
+                browser = await playwright_ctx.chromium.launch(
+                    headless=True,
+                    args=PLAYWRIGHT_LAUNCH_ARGS,
+                )
+                context_kwargs: dict = {
+                    "user_agent": ua,
+                    "viewport": {"width": 1280, "height": 800},
+                    "locale": "en-US",
+                }
+                if storage_state:
+                    context_kwargs["storage_state"] = storage_state
+                context = await browser.new_context(**context_kwargs)
+                page = await context.new_page()
+
+                try:
+                    await page.goto(url, wait_until="networkidle", timeout=45000)
+                except Exception as e:
+                    logger.warning("Playwright goto failed for %s: %s", url, e)
+                    return
+
+                # IG layouts vary; try several extraction strategies.
+                payload = await page.evaluate(
+                    """() => {
+                        const out = {};
+                        try { out.shared = window._sharedData || null; } catch(e) {}
+                        try {
+                            const all = [];
+                            for (const k of Object.keys(window)) {
+                                if (k.startsWith('__additionalData')) all.push(window[k]);
+                            }
+                            out.additional = all;
+                        } catch(e) {}
+                        return out;
+                    }"""
+                )
+
+                edges = self._extract_post_edges_from_payload(payload)
+                if not edges:
+                    logger.info(
+                        "Playwright fallback: no post edges parsed for %s "
+                        "(IG layout may have changed)", entity_name,
+                    )
+                    return
+
+                logger.info(
+                    "Playwright fallback: extracted %d post nodes for %s",
+                    len(edges), entity_name,
+                )
+                for edge in edges:
+                    if self._stop.is_set():
+                        break
+                    node = edge.get("node", edge) if isinstance(edge, dict) else {}
+                    if node:
+                        try:
+                            await self._process_post(node, uid, entity_name)
+                        except Exception as e:
+                            logger.debug("process_post failed: %s", e)
+            finally:
+                # ALWAYS close the browser — leaks here will OOM the WSL host.
+                try:
+                    if browser is not None:
+                        await browser.close()
+                except Exception:
+                    pass
+                try:
+                    await playwright_ctx.stop()
+                except Exception:
+                    pass
+
+    @staticmethod
+    def _extract_post_edges_from_payload(payload: dict) -> list:
+        """Best-effort traversal of IG's nested JSON shapes to find post edges."""
+        edges: list = []
+        if not isinstance(payload, dict):
+            return edges
+
+        def walk(obj):
+            if isinstance(obj, dict):
+                # Common IG shape
+                etmm = obj.get("edge_owner_to_timeline_media")
+                if isinstance(etmm, dict):
+                    e = etmm.get("edges")
+                    if isinstance(e, list):
+                        edges.extend(e)
+                for v in obj.values():
+                    walk(v)
+            elif isinstance(obj, list):
+                for v in obj:
+                    walk(v)
+
+        walk(payload)
+        return edges
 
     async def _collect_stories(self, uid: str, entity_name: str):
         if not self._loader:
@@ -508,6 +975,7 @@ class InstagramCollector(BaseCollector):
                         "content_id": f"story_{item.mediaid}",
                         "url": url,
                         "extension": ext,
+                        "raw": item._asdict() if hasattr(item, "_asdict") else {}
                     })
         except Exception as e:
             logger.debug("Stories collection failed for %s: %s", entity_name, e)
@@ -541,6 +1009,7 @@ class InstagramCollector(BaseCollector):
                         "content_id": cid,
                         "url": url,
                         "extension": ext,
+                        "raw": item._asdict() if hasattr(item, "_asdict") else {}
                     })
         except Exception as e:
             logger.debug("Highlights collection failed for %s: %s", entity_name, e)
@@ -549,6 +1018,9 @@ class InstagramCollector(BaseCollector):
         shortcode = node.get("shortcode", "")
         typename = node.get("__typename", "")
 
+        # Save post metadata to database
+        await self._upsert_post(node, uid)
+
         if typename == "GraphSidecar":
             sidecar_edges = (node.get("edge_sidecar_to_children", {})
                              .get("edges", []))
@@ -556,12 +1028,42 @@ class InstagramCollector(BaseCollector):
                 child = se.get("node", {})
                 cid = f"{shortcode}_{i}"
                 if not self.is_known(cid):
-                    await self._download_node(child, uid, entity_name, cid)
+                    await self._download_node(child, uid, entity_name, cid, parent_node=node)
         else:
             if not self.is_known(shortcode):
                 await self._download_node(node, uid, entity_name, shortcode)
 
-    async def _download_node(self, node: dict, uid: str, entity_name: str, content_id: str):
+    async def _upsert_post(self, node: dict, uid: str):
+        caption = ""
+        edges = node.get("edge_media_to_caption", {}).get("edges", [])
+        if edges:
+            caption = edges[0].get("node", {}).get("text", "")
+
+        async with self.pool.acquire() as conn:
+            # First ensure profile exists (might be missing if we are spidering from a post)
+            profile_row = await conn.fetchrow("SELECT id FROM instagram_profiles WHERE platform_user_id = $1", uid)
+            profile_uuid = profile_row['id'] if profile_row else None
+
+            await conn.execute("""
+                INSERT INTO instagram_posts (
+                    platform_post_id, profile_id, media_type, caption,
+                    likes_count, comments_count, platform_created_at,
+                    collected_at, metadata
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), $8)
+                ON CONFLICT (platform_post_id) DO UPDATE SET
+                    likes_count = EXCLUDED.likes_count,
+                    comments_count = EXCLUDED.comments_count,
+                    caption = EXCLUDED.caption,
+                    metadata = EXCLUDED.metadata
+            """,
+            node.get("shortcode"), profile_uuid, node.get("__typename"), caption,
+            node.get("edge_media_preview_like", {}).get("count", 0),
+            node.get("edge_media_to_comment", {}).get("count", 0),
+            datetime.fromtimestamp(node.get("taken_at_timestamp", time.time())),
+            node
+            )
+
+    async def _download_node(self, node: dict, uid: str, entity_name: str, content_id: str, parent_node: dict | None = None):
         is_video = node.get("is_video", False)
 
         if is_video:
@@ -585,6 +1087,7 @@ class InstagramCollector(BaseCollector):
             "url": url,
             "extension": ext,
             "source_url": f"https://www.instagram.com/p/{content_id.split('_')[0]}/",
+            "raw": node if not parent_node else {"node": node, "parent": parent_node}
         })
 
     async def _warmup(self, client: httpx.AsyncClient):
@@ -649,7 +1152,11 @@ class InstagramCollector(BaseCollector):
             extension=item.get("extension", "jpg"),
         )
 
-        dest = self.media_dir / filename
+        # Per-account subdirectory isolation
+        dest_dir = self.account_media_dir / item["content_type"]
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / filename
+
         if dest.exists():
             return
 
@@ -664,7 +1171,43 @@ class InstagramCollector(BaseCollector):
                 data = resp.content
 
             sha = self.sha256_bytes(data)
-            self.save_file(data, filename)
+            
+            # Use updated save_file to also save metadata JSON
+            metadata = {
+                "entity_id": item["entity_id"],
+                "entity_name": item["entity_name"],
+                "content_type": item["content_type"],
+                "content_id": cid,
+                "source_url": item.get("source_url"),
+                "collected_at": datetime.now(timezone.utc).isoformat(),
+                "raw": item.get("raw", {})
+            }
+            
+            # Temporary override media_dir to use the account-specific one for save_file
+            old_media_dir = self.media_dir
+            try:
+                self.__dict__["media_dir_override"] = dest_dir
+                # Note: save_file uses self.media_dir internally. 
+                # We need a cleaner way or just use the Path directly.
+                # Let's use save_json and manual write for now to be safe.
+                
+                # Atomic write
+                fd, tmp_path = tempfile.mkstemp(dir=dest_dir, suffix=".tmp")
+                with os.fdopen(fd, "wb") as f:
+                    f.write(data)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp_path, dest)
+                
+                # Save metadata
+                self.save_json(metadata, dest_dir / f"{Path(filename).stem}_metadata.json")
+                if "raw" in metadata:
+                    self.save_json(metadata["raw"], dest_dir / f"{Path(filename).stem}_raw.json")
+                
+                self._known_ids.add(cid)
+            finally:
+                if "media_dir_override" in self.__dict__: del self.__dict__["media_dir_override"]
+
             self.rate_limiter.record_success("instagram.com")
 
             await self.insert_media_item(
@@ -677,6 +1220,7 @@ class InstagramCollector(BaseCollector):
                 file_size=len(data),
                 sha256=sha,
                 source_url=item.get("source_url"),
+                metadata=metadata
             )
         except Exception as e:
             self.rate_limiter.record_failure("instagram.com")

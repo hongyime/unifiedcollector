@@ -1,0 +1,192 @@
+# Implementation Plan
+
+- [x] 1. Write bug condition exploration test
+  - **Property 1: Bug Condition** - Predictable Timing Patterns Lead to Rate Limiting
+  - **CRITICAL**: This test MUST FAIL on unfixed code - failure confirms the bug exists
+  - **DO NOT attempt to fix the test or the code when it fails**
+  - **NOTE**: This test encodes the expected behavior - it will validate the fix when it passes after implementation
+  - **GOAL**: Surface counterexamples that demonstrate timing patterns are too predictable
+  - **Scoped PBT Approach**: Test concrete scenarios that demonstrate predictability (fixed ranges, regular intervals, single distribution)
+  - Test implementation details from Bug Condition in design:
+    - Generate 100 delays and verify they show fixed delay range pattern (all in [20.0, 40.0])
+    - Simulate processing 100 items and verify pauses occur at regular intervals (items 12, 24, 36, 48...)
+    - Generate 1000 delays and perform chi-square test showing uniform distribution dominance
+    - Generate delays for different operation types and verify insufficient differentiation
+    - Process 50 operations and verify absence of micro-pauses (count should be 0)
+    - Generate delays for profiles with varying content (10 posts vs 1000 posts) and verify no content awareness
+  - The test assertions should match the Expected Behavior Properties from design:
+    - Assert timing patterns have high entropy (≥4.5 bits) - will FAIL on unfixed code
+    - Assert no regular intervals detected - will FAIL on unfixed code
+    - Assert multiple distributions used (Gaussian 60%, Uniform 30%, Exponential 10%) - will FAIL on unfixed code
+    - Assert operation-specific variation exists - will FAIL on unfixed code
+    - Assert micro-pauses present in 70% of operations - will FAIL on unfixed code
+    - Assert content-aware delays scale with content volume - will FAIL on unfixed code
+  - Run test on UNFIXED code
+  - **EXPECTED OUTCOME**: Test FAILS (this is correct - it proves the bug exists)
+  - Document counterexamples found:
+    - Fixed delay ranges showing predictability
+    - Regular enumeration intervals at items 12, 24, 36...
+    - Single distribution type (uniform) detected
+    - Similar delays across different operations
+    - Zero micro-pauses between operations
+    - Identical delays regardless of content volume
+  - Mark task complete when test is written, run, and failure is documented
+  - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.7, 1.8_
+
+- [x] 2. Write preservation property tests (BEFORE implementing fix)
+  - **Property 2: Preservation** - Non-Timing Features Remain Unchanged
+  - **IMPORTANT**: Follow observation-first methodology
+  - Observe behavior on UNFIXED code for non-timing features:
+    - Observe that delays respect MIN_DELAY (20s) and MAX_DELAY (40s) bounds
+    - Observe that 429 errors trigger emergency cooldown for 15+ minutes
+    - Observe that smart scheduling applies 1.5x multiplier during risky hours (11 PM - 6 AM)
+    - Observe that Ctrl+C interrupts delays immediately and saves progress
+    - Observe that session statistics track operation counts and elapsed time
+    - Observe that human-readable messages display clear delay explanations
+    - Observe that countdown timers appear for waits ≥30 seconds
+    - Observe that account availability checking filters out cooldown accounts
+    - Observe that daily quotas enforce limits on profile views per account
+    - Observe that operation multipliers use PUBLIC (1.0x), FOLLOWING_REQUIRED (1.5x), MUTUAL_FOLLOWING (2.0x)
+  - Write property-based tests capturing observed behavior patterns from Preservation Requirements:
+    - Property: For all delay calculations, result is within [MIN_DELAY, MAX_DELAY] bounds
+    - Property: For all 429 errors, cooldown duration is ≥15 minutes
+    - Property: For all operations during risky hours, delay multiplier is 1.5x
+    - Property: For all shutdown requests, delays interrupt within 1 second
+    - Property: For all operations, statistics increment correctly
+    - Property: For all delays, human-readable message is displayed
+    - Property: For all waits ≥30s, countdown timer is shown
+    - Property: For all account selections, cooldown accounts are excluded
+    - Property: For all operations, daily quota is checked and enforced
+    - Property: For all operation types, correct multiplier is applied (1.0x/1.5x/2.0x)
+  - Property-based testing generates many test cases for stronger guarantees
+  - Run tests on UNFIXED code
+  - **EXPECTED OUTCOME**: Tests PASS (this confirms baseline behavior to preserve)
+  - Mark task complete when tests are written, run, and passing on unfixed code
+  - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8, 3.9, 3.10_
+
+- [ ] 3. Fix for predictable timing patterns causing rate limiting
+
+  - [x] 3.1 Add multiple randomization layers to src/rate_limiter.py
+    - Add `_variable_delay_range()` method that returns slightly different min/max for each call (±10% variation)
+    - Modify `_human_delay()` to accept distribution type parameter (gaussian, exponential, uniform)
+    - Add `_micro_pause()` method for 0.5-3s thinking time delays using exponential distribution
+    - Update `short_delay()` and `user_delay()` to use layered randomization (base + jitter + micro-pause)
+    - Add `_choose_distribution()` method that randomly selects distribution type with weights (60% Gaussian, 30% Uniform, 10% Exponential)
+    - Implement `_exponential_delay()` for occasional long pauses
+    - Enhance existing `_gaussian_delay()` to work with variable ranges
+    - _Bug_Condition: isBugCondition(timing_pattern) where hasFixedDelayRange(pattern) OR usesOnlyUniformDistribution(pattern) OR lacksMicroPauses(pattern)_
+    - _Expected_Behavior: timing patterns have high entropy (≥4.5 bits), use multiple distributions, include micro-pauses_
+    - _Preservation: Minimum/maximum bounds (3.1), shutdown handling (3.4), message display (3.6)_
+    - _Requirements: 2.1, 2.3, 2.7, 3.1, 3.4, 3.6_
+
+  - [x] 3.2 Implement variable enumeration pauses in src/rate_limiter.py
+    - Modify `periodic()` method to randomize the interval (not always every 12 items)
+    - Add instance variable `_next_enum_pause` that gets randomized after each pause (10-15 items)
+    - Randomize pause duration more aggressively (20-60s instead of 25-45s)
+    - Use mixed distributions for pause duration (Gaussian for most, exponential for occasional long breaks)
+    - _Bug_Condition: isBugCondition(timing_pattern) where hasRegularEnumerationInterval(pattern)_
+    - _Expected_Behavior: enumeration pauses occur at variable intervals (10-15 items) with variable durations (20-60s)_
+    - _Preservation: Countdown timers (3.7), shutdown handling (3.4)_
+    - _Requirements: 2.2, 3.4, 3.7_
+
+  - [x] 3.3 Create operation-specific delay strategies in src/rate_limiter.py
+    - Add `operation_type` parameter to delay methods
+    - Create delay strategy map: `_OPERATION_STRATEGIES` dictionary with entries for:
+      - profile_view: longer delays, prefer Gaussian, high micro-pause frequency
+      - list_scroll: shorter delays, prefer Uniform, medium micro-pause frequency
+      - media_download: medium delays, prefer Exponential, low micro-pause frequency
+      - account_switch: very long delays, prefer Gaussian with high variance
+    - Each strategy defines: base_range, distribution_preference, micro_pause_frequency
+    - Update `user_delay()` and `short_delay()` to use operation-specific strategies
+    - _Bug_Condition: isBugCondition(timing_pattern) where lacksOperationSpecificVariation(pattern)_
+    - _Expected_Behavior: different operations produce distinct timing patterns with appropriate delays_
+    - _Preservation: Operation multipliers (3.10), minimum/maximum bounds (3.1)_
+    - _Requirements: 2.4, 3.1, 3.10_
+
+  - [x] 3.4 Add micro-pauses between operations in src/rate_limiter.py
+    - Add `micro_pause()` method with 0.5-3s random delay using exponential distribution
+    - Call automatically in `track_operation()` with 70% probability
+    - Ensure micro-pauses respect shutdown requests (check for interruption)
+    - Add configuration for micro-pause probability and range
+    - _Bug_Condition: isBugCondition(timing_pattern) where lacksMicroPauses(pattern)_
+    - _Expected_Behavior: 70% of operations include micro-pauses in 0.5-3s range_
+    - _Preservation: Shutdown handling (3.4), statistics tracking (3.5)_
+    - _Requirements: 2.7, 3.4, 3.5_
+
+  - [x] 3.5 Implement content-aware delays in src/rate_limiter.py
+    - Add `content_aware_delay()` method accepting content metadata (post_count, follower_count, media_complexity)
+    - Adjust delays based on content volume using formula: `base_delay * (1 + log10(content_metric) * 0.1)`
+    - Cap multiplier at 2.0x to avoid excessive delays
+    - Integrate with `user_delay()` to apply content-aware adjustments automatically
+    - Add configuration flag to enable/disable content-aware delays
+    - _Bug_Condition: isBugCondition(timing_pattern) where lacksContentAwareDelays(pattern)_
+    - _Expected_Behavior: delays increase with content volume up to 2.0x multiplier_
+    - _Preservation: Minimum/maximum bounds (3.1), smart scheduling (3.3)_
+    - _Requirements: 2.8, 3.1, 3.3_
+
+  - [x] 3.6 Enhance src/conservative_rate_limiter.py with layered randomization
+    - Update `_base_delay()` to use variable ranges from `RateLimiter._variable_delay_range()`
+    - Enhance `_jitter()` to use multiple distribution types (not just uniform)
+    - Add micro-pause calls in `operation_delay()` with operation-specific frequency
+    - Expand `_DELAY_MULTIPLIERS` to include distribution preferences for each operation type
+    - Add operation-specific jitter ranges (more jitter for sensitive operations like profile views)
+    - Implement content-aware adjustments in `operation_delay()` by accepting content metadata
+    - _Bug_Condition: isBugCondition(timing_pattern) where hasFixedDelayRange(pattern) OR usesOnlyUniformDistribution(pattern)_
+    - _Expected_Behavior: conservative rate limiter uses same randomization layers as main rate limiter_
+    - _Preservation: Emergency cooldowns (3.2), operation multipliers (3.10)_
+    - _Requirements: 2.1, 2.3, 2.4, 2.7, 2.8, 3.2, 3.10_
+
+  - [x] 3.7 Add configuration parameters to src/config.py
+    - Add micro-pause configuration: MICRO_PAUSE_MIN = 0.5, MICRO_PAUSE_MAX = 3.0, MICRO_PAUSE_PROBABILITY = 0.7
+    - Add distribution mix configuration: DISTRIBUTION_GAUSSIAN_WEIGHT = 0.6, DISTRIBUTION_UNIFORM_WEIGHT = 0.3, DISTRIBUTION_EXPONENTIAL_WEIGHT = 0.1
+    - Add variable enumeration configuration: ENUM_PAUSE_INTERVAL_MIN = 10, ENUM_PAUSE_INTERVAL_MAX = 15, ENUM_PAUSE_DURATION_MIN = 20, ENUM_PAUSE_DURATION_MAX = 60
+    - Add content-aware configuration: CONTENT_AWARE_ENABLED = True, CONTENT_AWARE_MAX_MULTIPLIER = 2.0
+    - Add variable delay range configuration: DELAY_RANGE_VARIATION = 0.1 (±10%)
+    - Document each configuration parameter with comments explaining its purpose
+    - _Bug_Condition: N/A (configuration only)_
+    - _Expected_Behavior: new configuration parameters control randomization behavior_
+    - _Preservation: All existing configuration parameters remain unchanged (3.1, 3.2, 3.3, 3.9)_
+    - _Requirements: 2.1, 2.2, 2.3, 2.7, 2.8, 3.1, 3.2, 3.3, 3.9_
+
+  - [x] 3.8 Verify bug condition exploration test now passes
+    - **Property 1: Expected Behavior** - Human-Like Timing Patterns Avoid Rate Limiting
+    - **IMPORTANT**: Re-run the SAME test from task 1 - do NOT write a new test
+    - The test from task 1 encodes the expected behavior
+    - When this test passes, it confirms the expected behavior is satisfied
+    - Run bug condition exploration test from step 1
+    - Verify timing patterns now show:
+      - High entropy (≥4.5 bits) indicating unpredictability
+      - Variable delay ranges (not fixed [20.0, 40.0])
+      - Irregular enumeration intervals (not at items 12, 24, 36...)
+      - Multiple distributions used (Gaussian 60%, Uniform 30%, Exponential 10%)
+      - Operation-specific variation (different patterns for different operations)
+      - Micro-pauses present in ~70% of operations
+      - Content-aware delays scaling with content volume
+    - **EXPECTED OUTCOME**: Test PASSES (confirms bug is fixed)
+    - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.7, 2.8_
+
+  - [ ] 3.9 Verify preservation tests still pass
+    - **Property 2: Preservation** - Non-Timing Features Remain Unchanged
+    - **IMPORTANT**: Re-run the SAME tests from task 2 - do NOT write new tests
+    - Run preservation property tests from step 2
+    - Verify all non-timing features still work correctly:
+      - Delays respect MIN_DELAY and MAX_DELAY bounds
+      - 429 errors trigger 15+ minute cooldowns
+      - Smart scheduling applies 1.5x multiplier during risky hours
+      - Ctrl+C interrupts delays immediately
+      - Session statistics track correctly
+      - Human-readable messages display correctly
+      - Countdown timers appear for waits ≥30s
+      - Account availability filtering works correctly
+      - Daily quotas enforce correctly
+      - Operation multipliers apply correctly (1.0x/1.5x/2.0x)
+    - **EXPECTED OUTCOME**: Tests PASS (confirms no regressions)
+    - Confirm all tests still pass after fix (no regressions)
+    - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8, 3.9, 3.10_
+
+- [ ] 4. Checkpoint - Ensure all tests pass
+  - Run complete test suite including bug condition and preservation tests
+  - Verify all tests pass (both exploration test showing fix works and preservation tests showing no regressions)
+  - Review test coverage to ensure all requirements are validated
+  - If any tests fail, investigate root cause and fix before proceeding
+  - Ask the user if questions arise about test results or implementation

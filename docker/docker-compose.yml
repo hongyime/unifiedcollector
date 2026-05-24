@@ -1,8 +1,10 @@
 version: '3.8'
 
+name: unifiedcollector
+
 services:
   postgres:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     container_name: unifiedcollector_postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
@@ -10,7 +12,7 @@ services:
       POSTGRES_DB: unifiedcollector
     volumes:
       - ./postgres/postgres.conf:/etc/postgresql/postgresql.conf
-      - z:/media/db:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql/data
       - ./backups:/backups
     command: postgres -c config_file=/etc/postgresql/postgresql.conf
     healthcheck:
@@ -30,10 +32,15 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
     volumes:
-      - z:/media:/media
+      - z:/unifiedcollector/media:/media
+      - ../credentials:/app/credentials
+      - ../sessions:/app/sessions
+      - ../whatsapp_session:/app/whatsapp_session
     depends_on:
       postgres:
         condition: service_healthy
+      tor:
+        condition: service_started
     env_file:
       - ../.env
     healthcheck:
@@ -44,6 +51,21 @@ services:
       start_period: 30s
     restart: unless-stopped
 
+  tor:
+    # Tor SOCKS5 proxy sidecar for the search collector (DDG via Tor).
+    # Container exposes 9050/tcp on the internal docker network as `tor:9050`.
+    image: dperson/torproxy:latest
+    container_name: unifiedcollector_tor
+    restart: unless-stopped
+    # No ports published to host — only reachable within the compose network.
+    healthcheck:
+      # dperson/torproxy lacks `nc`/`curl`. Probe Tor by checking the SOCKS port via /proc.
+      test: ["CMD-SHELL", "test -e /proc/net/tcp && grep -q ':235A ' /proc/net/tcp || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
   scheduler:
     build:
       context: ..
@@ -52,6 +74,11 @@ services:
     command: python -m src.main scheduler
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      COLLECTOR_DRIVE_PATH: /media
+    volumes:
+      - z:/unifiedcollector/media:/media
+      - ../credentials:/app/credentials
+      - ../sessions:/app/sessions
     depends_on:
       postgres:
         condition: service_healthy
@@ -74,6 +101,10 @@ services:
       - "8700:8700"
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      COLLECTOR_DRIVE_PATH: /media
+    volumes:
+      - z:/unifiedcollector/media:/media
+      - ../credentials:/app/credentials
     depends_on:
       postgres:
         condition: service_healthy
@@ -111,3 +142,106 @@ services:
       postgres:
         condition: service_healthy
     restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: unifiedcollector_rabbitmq
+    init: true
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-wac_user}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-localdevrabbit123}
+      RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST:-/}
+    # Management UI port (15672) intentionally NOT exposed:
+    # blocked on Windows by reserved port range. AMQP (5672) stays internal-only on docker network.
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 15s
+      timeout: 15s
+      retries: 10
+      start_period: 60s
+
+  redis:
+    image: redis:7-alpine
+    container_name: unifiedcollector_redis
+    init: true
+    restart: unless-stopped
+    command: redis-server --requirepass ${REDIS_PASSWORD:-localdevredis123} --appendonly yes --appendfsync everysec
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-localdevredis123}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  wa-bridge-1:
+    build:
+      context: ../whatsappcollector/services/wa-client-ts
+    container_name: unifiedcollector_wa_bridge_1
+    init: true
+    restart: unless-stopped
+    environment:
+      SESSION_NAME: session_1
+      AUTH_STORAGE_PATH: /app/auth_info/account1
+      BROKER_TYPE: rabbitmq
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-wac_user}:${RABBITMQ_PASSWORD:-localdevrabbit123}@rabbitmq:5672/
+      REDIS_URL: redis://:${REDIS_PASSWORD:-localdevredis123}@redis:6379/0
+      MEDIA_BRIDGE_SECRET: ${WHATSAPP_MEDIA_BRIDGE_SECRET}
+      MEDIA_STORAGE_PATH: /data/media
+      FINDINGS_HUB_GROUP_JID: ${WHATSAPP_FINDINGS_HUB_GROUP_JID:-}
+      LOG_LEVEL: info
+    ports:
+      - "3011:3001"
+    volumes:
+      - ../whatsappcollector/services/wa-client-ts/auth_info:/app/auth_info
+      - z:/unifiedcollector/media/whatsapp:/data/media
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  wa-bridge-2:
+    build:
+      context: ../whatsappcollector/services/wa-client-ts
+    container_name: unifiedcollector_wa_bridge_2
+    init: true
+    restart: unless-stopped
+    environment:
+      SESSION_NAME: session_2
+      AUTH_STORAGE_PATH: /app/auth_info/account2
+      BROKER_TYPE: rabbitmq
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-wac_user}:${RABBITMQ_PASSWORD:-localdevrabbit123}@rabbitmq:5672/
+      REDIS_URL: redis://:${REDIS_PASSWORD:-localdevredis123}@redis:6379/0
+      MEDIA_BRIDGE_SECRET: ${WHATSAPP_MEDIA_BRIDGE_SECRET}
+      MEDIA_STORAGE_PATH: /data/media
+      FINDINGS_HUB_GROUP_JID: ${WHATSAPP_FINDINGS_HUB_GROUP_JID:-}
+      LOG_LEVEL: info
+    ports:
+      - "3012:3001"
+    volumes:
+      - ../whatsappcollector/services/wa-client-ts/auth_info:/app/auth_info
+      - z:/unifiedcollector/media/whatsapp:/data/media
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  pgdata:
+  rabbitmq_data:
+  redis_data:

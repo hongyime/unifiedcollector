@@ -71,6 +71,9 @@ class URLFilter:
 
     @classmethod
     def from_env(cls, allow_var: str = "", block_var: str = "") -> "URLFilter":
-        allow = [p.strip() for p in allow_var.split(",") if p.strip()] if allow_var else None
-        block = [p.strip() for p in block_var.split(",") if p.strip()] if block_var else None
+        import os
+        allow_val = os.getenv(allow_var, "") if allow_var else ""
+        block_val = os.getenv(block_var, "") if block_var else ""
+        allow = [p.strip() for p in allow_val.split(",") if p.strip()] if allow_val else None
+        block = [p.strip() for p in block_val.split(",") if p.strip()] if block_val else None
         return cls(allow_patterns=allow, block_patterns=block)

@@ -1,0 +1,112 @@
+{% extends "base.html" %}
+{% block title %}Collection{% endblock %}
+{% block header %}Collection{% endblock %}
+{% block content %}
+
+<div class="grid gap-3 mb-3" style="grid-template-columns:repeat(12,1fr)">
+  <div class="bento" style="grid-column:span 3">
+    <div class="bento-hd"><span class="bento-hd-label">Total Messages</span></div>
+    <div class="bento-body"><div class="bento-num">{{ "{:,}".format(total) }}</div></div>
+  </div>
+  {% set pending = backfill_jobs|selectattr("status","eq","pending")|list|length %}
+  {% set running = backfill_jobs|selectattr("status","eq","running")|list|length %}
+  {% set done    = backfill_jobs|selectattr("status","eq","completed")|list|length %}
+  {% set failed  = backfill_jobs|selectattr("status","eq","failed")|list|length %}
+  <div class="bento" style="grid-column:span 9">
+    <div class="bento-hd"><span class="bento-hd-label">Backfill Jobs</span></div>
+    <div class="bento-body flex items-center gap-4">
+      <div><div class="bento-num" style="font-size:1.5rem">{{ pending }}</div><div class="bento-sub">pending</div></div>
+      <div class="w-px h-8 bg-bg-border"></div>
+      <div><div class="bento-num" style="font-size:1.5rem;color:#7c6af7">{{ running }}</div><div class="bento-sub">running</div></div>
+      <div class="w-px h-8 bg-bg-border"></div>
+      <div><div class="bento-num" style="font-size:1.5rem;color:#22c55e">{{ done }}</div><div class="bento-sub">done</div></div>
+      <div class="w-px h-8 bg-bg-border"></div>
+      <div><div class="bento-num" style="font-size:1.5rem;color:#ef4444">{{ failed }}</div><div class="bento-sub">failed</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- Filters -->
+<div class="bento mb-3" style="padding:12px 16px">
+  <form method="get" class="flex items-center gap-3 flex-wrap">
+    <select name="chat_id" class="inp">
+      <option value="">All chats</option>
+      {% for cid in chats %}
+      <option value="{{ cid }}" {% if chat_id==cid|string %}selected{% endif %}>{{ cid }}</option>
+      {% endfor %}
+    </select>
+    <label class="flex items-center gap-2 text-sm text-tx-muted cursor-pointer">
+      <input type="checkbox" name="media_only" value="1" {% if media_only=='1' %}checked{% endif %}
+             class="rounded" style="accent-color:#7c6af7"/>
+      Media only
+    </label>
+    <button class="btn btn-pri">Apply</button>
+    <a href="/collection" class="btn btn-ghost">Reset</a>
+    <span class="text-xs text-tx-muted ml-auto">Page {{ page }} / {{ pages }} · {{ "{:,}".format(total) }} results</span>
+  </form>
+</div>
+
+<!-- Messages -->
+<div class="bento mb-3">
+  <div class="bento-hd"><span class="bento-hd-label">Messages</span></div>
+  <div style="padding:0">
+    <table class="tbl">
+      <thead><tr><th>ID</th><th>Chat</th><th>Sender</th><th>Type</th><th>Media</th><th>Collected</th></tr></thead>
+      <tbody>
+        {% for m in messages %}
+        <tr>
+          <td class="mono">{{ m.id }}</td>
+          <td class="mono">{{ m.chat_id }}</td>
+          <td class="mono text-tx-muted">{{ m.sender_id or '—' }}</td>
+          <td>
+            {% if m.message_type == 'photo' %}<span class="pill pill-acc">📷</span>
+            {% elif m.message_type == 'video' %}<span class="pill pill-acc">🎬</span>
+            {% elif m.message_type == 'circle_video' %}<span class="pill pill-acc">⭕</span>
+            {% else %}<span class="pill pill-muted">{{ m.message_type or 'text' }}</span>{% endif %}
+          </td>
+          <td>{% if m.has_media %}<span class="text-ok text-xs">✓</span>{% endif %}</td>
+          <td class="mono text-tx-muted">{{ m.collected_at.strftime('%m-%d %H:%M:%S') if m.collected_at else '—' }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6" class="text-center py-8 text-tx-muted">No messages found.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{% if pages > 1 %}
+<div class="flex items-center justify-center gap-2 mb-3">
+  {% if page > 1 %}<a href="?page={{ page-1 }}&chat_id={{ chat_id }}&media_only={{ media_only }}" class="btn btn-ghost">← Prev</a>{% endif %}
+  <span class="text-sm text-tx-muted">{{ page }} / {{ pages }}</span>
+  {% if page < pages %}<a href="?page={{ page+1 }}&chat_id={{ chat_id }}&media_only={{ media_only }}" class="btn btn-ghost">Next →</a>{% endif %}
+</div>
+{% endif %}
+
+{% if backfill_jobs %}
+<div class="bento">
+  <div class="bento-hd"><span class="bento-hd-label">Recent Backfill Jobs</span></div>
+  <div style="padding:0">
+    <table class="tbl">
+      <thead><tr><th>Account</th><th>Chat</th><th>Status</th><th>Done</th><th>Created</th></tr></thead>
+      <tbody>
+        {% for j in backfill_jobs %}
+        <tr>
+          <td class="mono text-xs">{{ j.phone_number or j.account_id }}</td>
+          <td class="mono text-xs">{{ j.chat_id }}</td>
+          <td>
+            {% if j.status=='pending' %}<span class="pill pill-warn">pending</span>
+            {% elif j.status=='running' %}<span class="pill pill-acc">running</span>
+            {% elif j.status=='completed' %}<span class="pill pill-ok">done</span>
+            {% else %}<span class="pill pill-err">{{ j.status }}</span>{% endif %}
+          </td>
+          <td>{{ "{:,}".format(j.messages_done or 0) }}</td>
+          <td class="mono text-tx-muted">{{ j.created_at.strftime('%m-%d %H:%M') if j.created_at else '—' }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+{% endblock %}

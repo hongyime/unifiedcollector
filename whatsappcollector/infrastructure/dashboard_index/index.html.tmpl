@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>whatsappcollector — Service Dashboards</title>
+  <style>
+    body { font-family: Segoe UI, Arial, sans-serif; font-size: 16px; background:#0f172a; color:#e2e8f0; margin:0; padding:16px 20px; }
+    h1 { margin:0 0 6px; font-size:1.8rem; }
+    p { margin:0 0 12px; color:#94a3b8; font-size:1rem; }
+    table { width:100%; border-collapse:collapse; background:#111827; border:1px solid #1f2937; margin-bottom: 12px; }
+    th, td { padding:10px 12px; border-bottom:1px solid #1f2937; text-align:left; font-size:1rem; }
+    th { color:#cbd5e1; font-weight:700; font-size:0.95rem; text-transform:uppercase; letter-spacing:0.04em; }
+    a { color:#93c5fd; text-decoration:none; font-size:1rem; }
+    a:hover { text-decoration:underline; }
+    .badge { display:inline-block; padding:5px 14px; border-radius:999px; font-size:0.9rem; font-weight:700; min-width: 64px; text-align: center; }
+    .up { background:#064e3b; color:#6ee7b7; }
+    .down { background:#7f1d1d; color:#fca5a5; }
+    .unknown { background:#334155; color:#cbd5e1; }
+    .footer { margin-top:10px; font-size:0.9rem; color:#94a3b8; }
+    .status-group { display: flex; gap: 10px; align-items: center; }
+    .service-name { font-size:1.05rem; font-weight:600; }
+  </style>
+</head>
+<body>
+  <h1>whatsappcollector — Service Dashboards</h1>
+  <p>Auto-refreshes every 30 seconds. Checks both backend (metrics) and frontend (dashboard) availability.</p>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Service</th>
+        <th>Dashboard URL</th>
+        <th>Backend Status</th>
+        <th>Frontend Status</th>
+      </tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+
+  <div class="footer" id="lastChecked">Last checked: never</div>
+
+  <script>
+    const services = [
+      { name: 'Collector',         dashPort: ${COLLECTOR_DASHBOARD_PORT},         metricsPort: ${COLLECTOR_METRICS_PORT} },
+      { name: 'Media Archival',    dashPort: ${MEDIA_ARCHIVAL_DASHBOARD_PORT},     metricsPort: ${MEDIA_ARCHIVAL_METRICS_PORT} },
+      { name: 'Face Recognition',  dashPort: ${FACE_RECOGNITION_DASHBOARD_PORT},   metricsPort: ${FACE_RECOGNITION_METRICS_PORT} },
+      { name: 'User Intelligence', dashPort: ${USER_INTELLIGENCE_DASHBOARD_PORT},  metricsPort: ${USER_INTELLIGENCE_METRICS_PORT} },
+      { name: 'Link Discovery',    dashPort: ${LINK_DISCOVERY_DASHBOARD_PORT},     metricsPort: ${LINK_DISCOVERY_METRICS_PORT} },
+      { name: 'Bulk Sender',       dashPort: ${BULK_SENDER_DASHBOARD_PORT},        metricsPort: ${BULK_SENDER_METRICS_PORT} }
+    ];
+
+    const rows = document.getElementById('rows');
+    const lastChecked = document.getElementById('lastChecked');
+
+    function renderInitial() {
+      rows.innerHTML = services.map((svc, i) => `
+        <tr id="row-${i}">
+          <td>${svc.name}</td>
+          <td><a href="http://localhost:${svc.dashPort}" target="_blank" rel="noopener noreferrer">http://localhost:${svc.dashPort}</a></td>
+          <td><span id="status-be-${i}" class="badge unknown">CHECKING</span></td>
+          <td><span id="status-fe-${i}" class="badge unknown">CHECKING</span></td>
+        </tr>
+      `).join('');
+    }
+
+    async function probe(url) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 4000);
+      try {
+        await fetch(url, { method: 'GET', mode: 'no-cors', signal: controller.signal });
+        return true;
+      } catch (_) {
+        return false;
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
+
+    async function checkService(svc, i) {
+      const beBadge = document.getElementById(`status-be-${i}`);
+      const feBadge = document.getElementById(`status-fe-${i}`);
+      
+      const beUp = await probe(`http://localhost:${svc.metricsPort}/metrics`);
+      beBadge.textContent = beUp ? 'UP' : 'DOWN';
+      beBadge.className = `badge ${beUp ? 'up' : 'down'}`;
+
+      const feUp = await probe(`http://localhost:${svc.dashPort}/`);
+      feBadge.textContent = feUp ? 'UP' : 'DOWN';
+      feBadge.className = `badge ${feUp ? 'up' : 'down'}`;
+    }
+
+    async function runChecks() {
+      await Promise.all(services.map((svc, i) => checkService(svc, i)));
+      lastChecked.textContent = `Last checked: ${new Date().toLocaleString()}`;
+    }
+
+    renderInitial();
+    runChecks();
+    setInterval(runChecks, 30000);
+  </script>
+</body>
+</html>

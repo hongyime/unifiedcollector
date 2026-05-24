@@ -1,0 +1,203 @@
+<div id="bento"
+     hx-get="/api/live"
+     hx-trigger="every 8s"
+     hx-swap="outerHTML"
+     hx-indicator=".htmx-indicator"
+     class="grid gap-3"
+     style="grid-template-columns: repeat(12, 1fr); grid-auto-rows: minmax(80px, auto);">
+
+  <!-- ── Row 1: Hero stats ── -->
+
+  <!-- Messages total -->
+  <div class="bento" style="grid-column:span 3">
+    <div class="bento-hd">
+      <span class="bento-hd-label">Total Messages</span>
+      <span class="pill pill-muted mono">all time</span>
+    </div>
+    <div class="bento-body">
+      <div class="bento-num">{{ "{:,}".format(stats.get("messages",0)) }}</div>
+      <div class="bento-sub flex items-center gap-2 mt-2">
+        <span class="pill pill-ok">+{{ "{:,}".format(stats.get("messages_1h",0)) }} / hr</span>
+        <span class="pill pill-acc">+{{ stats.get("messages_5m",0) }} / 5m</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Active accounts -->
+  <div class="bento" style="grid-column:span 2">
+    <div class="bento-hd">
+      <span class="bento-hd-label">Accounts</span>
+      <span class="pill pill-ok">● live</span>
+    </div>
+    <div class="bento-body">
+      <div class="bento-num">{{ stats.get("accounts",0) }}</div>
+      <div class="mt-2 space-y-1">
+        {% for acc in stats.get("accounts_list",[])[:3] %}
+        <div class="flex items-center gap-1.5">
+          <div class="w-1.5 h-1.5 rounded-full {% if acc.status=='active' %}bg-ok{% else %}bg-warn{% endif %} flex-shrink-0"></div>
+          <span class="text-2xs text-tx-muted truncate">{{ acc.display_name or acc.phone_number }}</span>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+
+  <!-- Identities / faces -->
+  <div class="bento" style="grid-column:span 2">
+    <div class="bento-hd">
+      <span class="bento-hd-label">Identities</span>
+    </div>
+    <div class="bento-body">
+      <div class="bento-num">{{ "{:,}".format(stats.get("identities",0)) }}</div>
+      <div class="bento-sub">{{ "{:,}".format(stats.get("embeddings",0)) }} embeddings</div>
+      <div class="mt-2">
+        <span class="pill pill-acc">{{ "{:,}".format(stats.get("processed_24h",0)) }} processed 24h</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Users -->
+  <div class="bento" style="grid-column:span 2">
+    <div class="bento-hd">
+      <span class="bento-hd-label">Users Seen</span>
+    </div>
+    <div class="bento-body">
+      <div class="bento-num">{{ "{:,}".format(stats.get("users",0)) }}</div>
+      <div class="bento-sub">unique profiles</div>
+    </div>
+  </div>
+
+  <!-- Media -->
+  <div class="bento" style="grid-column:span 1">
+    <div class="bento-hd">
+      <span class="bento-hd-label">Media 24h</span>
+    </div>
+    <div class="bento-body">
+      <div class="bento-num" style="font-size:1.6rem">{{ "{:,}".format(stats.get("media_24h",0)) }}</div>
+      <div class="bento-sub">photos / video</div>
+    </div>
+  </div>
+
+  <!-- Links -->
+  <div class="bento" style="grid-column:span 2">
+    <div class="bento-hd">
+      <span class="bento-hd-label">Links Found</span>
+    </div>
+    <div class="bento-body">
+      <div class="bento-num" style="font-size:1.6rem">{{ "{:,}".format(stats.get("links",0)) }}</div>
+      <div class="bento-sub">t.me/ links</div>
+    </div>
+  </div>
+
+  <!-- ── Row 2: Activity feed + Cursors ── -->
+
+  <!-- Recent messages feed -->
+  <div class="bento" style="grid-column:span 8; grid-row:span 2">
+    <div class="bento-hd">
+      <span class="bento-hd-label">Live Message Feed</span>
+      <span class="pill pill-ok">● streaming</span>
+    </div>
+    <div class="bento-body" style="padding:0">
+      <table class="tbl">
+        <thead>
+          <tr>
+            <th>Chat</th><th>Type</th><th>Media</th><th>Collected</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for m in stats.get("recent_msgs",[]) %}
+          <tr>
+            <td class="mono">{{ m.chat_id }}</td>
+            <td>
+              {% if m.message_type == 'photo' %}
+                <span class="pill pill-acc">📷</span>
+              {% elif m.message_type == 'video' %}
+                <span class="pill pill-acc">🎬</span>
+              {% elif m.message_type == 'circle_video' %}
+                <span class="pill pill-acc">⭕</span>
+              {% else %}
+                <span class="pill pill-muted">{{ m.message_type or 'text' }}</span>
+              {% endif %}
+            </td>
+            <td>{% if m.has_media %}<span class="text-ok text-xs">✓</span>{% endif %}</td>
+            <td class="mono text-tx-muted">{{ m.collected_at.strftime('%H:%M:%S') if m.collected_at else '—' }}</td>
+          </tr>
+          {% else %}
+          <tr><td colspan="4" class="text-center py-8 text-tx-muted">Waiting for messages…</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Service cursors -->
+  <div class="bento" style="grid-column:span 4; grid-row:span 2">
+    <div class="bento-hd">
+      <span class="bento-hd-label">Service Cursors</span>
+    </div>
+    <div class="bento-body space-y-4">
+      {% for c in stats.get("cursors",[]) %}
+      <div>
+        <div class="flex items-center justify-between mb-1">
+          <span class="text-xs text-tx font-medium">{{ c.service_name }}</span>
+          <span class="mono text-tx-muted">{{ "{:,}".format(c.last_message_id) }}</span>
+        </div>
+        <div class="h-1 bg-bg-border rounded-full overflow-hidden">
+          {% set pct = (c.last_message_id / (stats.get('messages') or 1) * 100) %}
+          <div class="h-full bg-acc rounded-full" style="width:{{ [pct, 100]|min|int }}%"></div>
+        </div>
+        <div class="text-2xs text-tx-faint mt-1">{{ c.updated_at.strftime('%H:%M:%S') if c.updated_at else 'never' }}</div>
+      </div>
+      {% else %}
+      <p class="text-tx-muted text-xs">No cursors yet</p>
+      {% endfor %}
+    </div>
+  </div>
+
+  <!-- ── Row 3: Top chats + Errors ── -->
+
+  <!-- Top active chats -->
+  <div class="bento" style="grid-column:span 6">
+    <div class="bento-hd">
+      <span class="bento-hd-label">Top Active Chats (1h)</span>
+    </div>
+    <div class="bento-body" style="padding:0">
+      {% set top = stats.get("top_chats",[]) %}
+      {% set max_cnt = top[0].cnt if top else 1 %}
+      {% for c in top %}
+      <div class="flex items-center gap-3 px-4 py-2.5 border-b border-bg-border last:border-0 hover:bg-bg-hover">
+        <span class="mono text-tx-muted text-xs w-32 truncate">{{ c.chat_id }}</span>
+        <div class="flex-1 h-1.5 bg-bg-border rounded-full overflow-hidden">
+          <div class="h-full bg-acc rounded-full" style="width:{{ (c.cnt / max_cnt * 100)|int }}%"></div>
+        </div>
+        <span class="text-xs font-semibold text-ok w-10 text-right">{{ c.cnt }}</span>
+      </div>
+      {% else %}
+      <div class="px-4 py-6 text-tx-muted text-sm">No activity in last hour</div>
+      {% endfor %}
+    </div>
+  </div>
+
+  <!-- Errors -->
+  <div class="bento" style="grid-column:span 6">
+    <div class="bento-hd">
+      <span class="bento-hd-label">Errors (24h)</span>
+      {% if stats.get("recent_errors") %}
+      <span class="pill pill-err">{{ stats.get("recent_errors")|length }} types</span>
+      {% else %}
+      <span class="pill pill-ok">✓ clean</span>
+      {% endif %}
+    </div>
+    <div class="bento-body" style="padding:0">
+      {% for e in stats.get("recent_errors",[]) %}
+      <div class="flex items-center justify-between px-4 py-2.5 border-b border-bg-border last:border-0 hover:bg-bg-hover">
+        <span class="text-xs text-err">{{ e.error_type }}</span>
+        <span class="pill pill-err">{{ e.n }}</span>
+      </div>
+      {% else %}
+      <div class="px-4 py-6 text-ok text-sm">No errors recorded</div>
+      {% endfor %}
+    </div>
+  </div>
+
+</div>

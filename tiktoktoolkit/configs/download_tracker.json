@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "users": {
+    "testuser": {
+      "testuser_2026-04-21_video": {
+        "first_downloaded": "2026-04-21T14:45:29Z",
+        "last_seen": "2026-04-21T15:59:19Z",
+        "filepath": "C:\\Users\\bryan\\AppData\\Local\\Temp\\pytest-of-bryan\\pytest-228\\test_successful_gallery_dl_ski0\\downloads\\username_testuser\\testuser_2026-04-21_video.mp4",
+        "size": 18
+      },
+      "testuser_2026-04-22_video": {
+        "first_downloaded": "2026-04-22T01:45:43Z",
+        "last_seen": "2026-04-22T02:18:40Z",
+        "filepath": "C:\\Users\\bryan\\AppData\\Local\\Temp\\pytest-of-bryan\\pytest-234\\test_successful_gallery_dl_ski0\\downloads\\username_testuser\\testuser_2026-04-22_video.mp4",
+        "size": 18
+      },
+      "video": {
+        "first_downloaded": "2026-04-22T02:22:03Z",
+        "last_seen": "2026-05-13T12:32:46Z",
+        "filepath": "C:\\Users\\bryan\\AppData\\Local\\Temp\\pytest-of-bryan\\pytest-43\\test_successful_gallery_dl_ski0\\downloads\\username_testuser\\video.mp4",
+        "size": 18
+      }
+    }
+  }
+}

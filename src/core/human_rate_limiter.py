@@ -51,6 +51,17 @@ def _jittered_delay(base: float) -> float:
     return random.expovariate(1.0 / base)
 
 
+def _cooldown_key(domain: str, account: str | None = None) -> str:
+    """Compose a per-account cooldown key. If no account, falls back to bare domain.
+
+    Use ``f"{domain}:{account_name}"`` style so callers can isolate account-level
+    cooldowns (e.g. one IG account hitting 429 must NOT freeze peers).
+    """
+    if account:
+        return f"{domain}:{account}"
+    return domain
+
+
 class HumanLikeRateLimiter(AdaptiveRateLimiter):
     """Rate limiter that mimics human browsing patterns.
 
@@ -58,6 +69,11 @@ class HumanLikeRateLimiter(AdaptiveRateLimiter):
     operation-type multipliers on top of AdaptiveRateLimiter's success/failure
     tracking.  Social-media collectors (Instagram, TikTok, Lemon8) should use
     this; API-based sources (GitHub, YouTube) should stick with the base class.
+
+    Cooldowns are tracked per-key (typically ``f"{domain}:{account}"``) so a
+    rate-limit on one account does NOT block sibling accounts of the same
+    platform.  Callers that don't care about per-account isolation can still
+    pass just ``domain`` and get the historical (degenerate) behaviour.
     """
 
     def __init__(
@@ -88,17 +104,42 @@ class HumanLikeRateLimiter(AdaptiveRateLimiter):
         self.time_of_day_enabled = time_of_day_enabled
         self.emergency_cooldown = emergency_cooldown
         self._op_counter: int = 0
-        self._in_emergency: float = 0
+        # Per-key cooldown clock: maps "domain" or "domain:account" -> expiry monotonic.
+        self._in_emergency: dict[str, float] = {}
+
+    # ---------- per-key cooldown helpers ----------
+    def is_in_cooldown(self, domain: str, account: str | None = None) -> bool:
+        key = _cooldown_key(domain, account)
+        expiry = self._in_emergency.get(key, 0.0)
+        if expiry and time.monotonic() < expiry:
+            return True
+        if expiry:
+            # expired — clean up
+            self._in_emergency.pop(key, None)
+        return False
+
+    def cooldown_remaining_seconds(self, domain: str, account: str | None = None) -> float:
+        key = _cooldown_key(domain, account)
+        expiry = self._in_emergency.get(key, 0.0)
+        if not expiry:
+            return 0.0
+        remaining = expiry - time.monotonic()
+        if remaining <= 0:
+            self._in_emergency.pop(key, None)
+            return 0.0
+        return remaining
 
     def compute_delay(
         self,
         domain: str,
         operation: OperationType = OperationType.PUBLIC,
         pagination_depth: int = 0,
+        account: str | None = None,
     ) -> float:
-        if self._in_emergency and time.monotonic() < self._in_emergency:
-            remaining = self._in_emergency - time.monotonic()
-            logger.info("Emergency cooldown active for %s (%.0fs remaining)", domain, remaining)
+        remaining = self.cooldown_remaining_seconds(domain, account)
+        if remaining > 0:
+            key = _cooldown_key(domain, account)
+            logger.info("Emergency cooldown active for %s (%.0fs remaining)", key, remaining)
             return remaining
 
         base = self.get_delay(domain)
@@ -131,8 +172,9 @@ class HumanLikeRateLimiter(AdaptiveRateLimiter):
         operation: OperationType = OperationType.PUBLIC,
         pagination_depth: int = 0,
         stop_event: asyncio.Event | None = None,
+        account: str | None = None,
     ):
-        delay = self.compute_delay(domain, operation, pagination_depth)
+        delay = self.compute_delay(domain, operation, pagination_depth, account=account)
         if delay <= 0:
             return
         if stop_event:
@@ -143,13 +185,22 @@ class HumanLikeRateLimiter(AdaptiveRateLimiter):
         else:
             await asyncio.sleep(delay)
 
-    def trigger_emergency_cooldown(self, domain: str):
-        self._in_emergency = time.monotonic() + self.emergency_cooldown
+    def trigger_emergency_cooldown(self, domain: str, account: str | None = None):
+        key = _cooldown_key(domain, account)
+        self._in_emergency[key] = time.monotonic() + self.emergency_cooldown
         logger.warning(
             "Emergency cooldown triggered for %s: %.0fs",
-            domain, self.emergency_cooldown,
+            key, self.emergency_cooldown,
         )
         self.record_failure(domain)
 
-    def record_rate_limit(self, domain: str):
-        self.trigger_emergency_cooldown(domain)
+    def record_rate_limit(self, domain: str, account: str | None = None):
+        self.trigger_emergency_cooldown(domain, account=account)
+
+    def clear_cooldown(self, domain: str | None = None, account: str | None = None):
+        """Clear cooldown for a specific key, or all if domain is None."""
+        if domain is None:
+            self._in_emergency.clear()
+            return
+        key = _cooldown_key(domain, account)
+        self._in_emergency.pop(key, None)

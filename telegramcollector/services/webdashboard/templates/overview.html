@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Overview{% endblock %}
+{% block header %}Overview{% endblock %}
+{% block header_extra %}
+<div class="flex items-center gap-2 text-2xs text-tx-muted">
+  <div class="w-1.5 h-1.5 rounded-full bg-ok"></div>
+  Live · updates every 8s
+</div>
+{% endblock %}
+
+{% block content %}
+{% include "partials/bento.html" %}
+{% endblock %}

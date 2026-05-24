@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}Config{% endblock %}
+{% block header %}Configuration{% endblock %}
+{% block content %}
+
+{% if settings %}
+<div class="bento mb-3">
+  <div class="bento-hd">
+    <span class="bento-hd-label">Runtime Settings</span>
+    <span class="pill pill-ok">DB-backed · no restart needed</span>
+  </div>
+  <div style="padding:0">
+    <table class="tbl">
+      <thead><tr><th>Key</th><th>Group</th><th>Value</th><th>Updated</th><th></th></tr></thead>
+      <tbody>
+        {% for s in settings %}
+        <tr x-data="{editing:false}">
+          <td class="mono text-acc">{{ s.config_key }}</td>
+          <td><span class="pill pill-muted">{{ s.group_name }}</span></td>
+          <td>
+            <div x-show="!editing" @click="editing=true" class="cursor-pointer hover:text-tx">
+              {% if s.is_sensitive %}<span class="text-tx-faint">••••••••</span>
+              {% else %}<span class="mono">{{ s.value_plain or '—' }}</span>{% endif %}
+            </div>
+            <form x-show="editing" method="post" action="/config/update"
+                  class="flex gap-2 items-center" @click.away="editing=false">
+              <input type="hidden" name="config_key" value="{{ s.config_key }}"/>
+              <input name="value" value="{{ s.value_plain or '' }}" class="inp" style="font-size:0.75rem;padding:4px 8px" autofocus/>
+              <button class="btn btn-pri" style="padding:4px 10px;font-size:0.75rem">Save</button>
+              <button type="button" @click="editing=false" class="btn btn-ghost" style="padding:4px 8px;font-size:0.75rem">✕</button>
+            </form>
+          </td>
+          <td class="mono text-tx-muted">{{ s.updated_at.strftime('%m-%d %H:%M') if s.updated_at else '—' }}</td>
+          <td><button @click="editing=!editing" class="btn btn-ghost" style="padding:3px 8px;font-size:0.7rem">Edit</button></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+<div class="bento">
+  <div class="bento-hd">
+    <span class="bento-hd-label">Environment Variables</span>
+    <span class="pill pill-muted">read-only · edit .env to change</span>
+  </div>
+  <div style="padding:0">
+    <table class="tbl">
+      <thead><tr><th>Variable</th><th>Value</th></tr></thead>
+      <tbody>
+        {% for k, v in env %}
+        <tr>
+          <td class="mono text-acc w-64">{{ k }}</td>
+          <td class="mono text-tx-muted break-all">{{ v }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="2" class="text-center py-6 text-tx-muted">No env vars matched.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

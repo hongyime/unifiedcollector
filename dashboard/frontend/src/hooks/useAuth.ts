@@ -21,31 +21,19 @@ export function useAuth() {
 }
 
 export function useAuthProvider(): AuthState {
-  const [user, setUser] = useState<AuthUser | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [user, setUser] = useState<AuthUser | null>({ username: "admin", role: "admin" });
+  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    const token = localStorage.getItem("auth_token");
-    if (token) {
-      api
-        .me()
-        .then((data) => setUser({ username: data.username, role: data.role as AuthUser["role"] }))
-        .catch(() => localStorage.removeItem("auth_token"))
-        .finally(() => setLoading(false));
-    } else {
-      setLoading(false);
-    }
+    // Auth bypassed
   }, []);
 
   const login = useCallback(async (username: string, password: string) => {
-    const res = await api.login(username, password);
-    localStorage.setItem("auth_token", res.token);
-    setUser({ username: res.username, role: res.role as AuthUser["role"] });
+    setUser({ username: "admin", role: "admin" });
   }, []);
 
   const logout = useCallback(() => {
-    localStorage.removeItem("auth_token");
-    setUser(null);
+    // Auth bypassed
   }, []);
 
   return { user, loading, login, logout };

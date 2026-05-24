@@ -1,0 +1,67 @@
+# Environment
+.env
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.egg
+
+# Build artifacts (generated - do not edit; edit source in core/)
+build/
+dist/
+*.spec
+
+# Credentials & cookies
+configs/tiktok_cookies.txt
+
+# Tracker database & temp files (KEEP THESE - user data!)
+# configs/download_tracker.sqlite
+# configs/download_tracker.json
+# configs/download_tracker.json.backup
+configs/download_tracker.sqlite-journal
+configs/download_tracker.sqlite-wal
+configs/download_tracker.sqlite-shm
+configs/download_tracker.sqlite.lock
+configs/tracker_json_*
+configs/*.lock
+*.lock
+
+# Backup directories created by destructive commands
+configs/backup_*/
+
+# Downloads & logs
+downloads/
+logs/
+latest_logs/
+test_downloads/
+
+# Testing
+.pytest_cache/
+.hypothesis/
+.coverage
+htmlcov/
+*.cover
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+.kiro/
+.qodo/
+
+# Development artifacts (archived in docs/archive/)
+PRODUCTION_AUDIT.md
+*_COMPLETE.md
+*_SUMMARY.md
+CHECKPOINT.md
+bugfix.md
+design.md
+tasks.md
+
+# Root-level temp test scripts (the real test suite lives under tests/)
+/test_*.bat
+/diagnose.bat
+/refresh_cookies.bat
+/verify_dedup.py

@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}Users{% endblock %}
+{% block header %}User Intelligence{% endblock %}
+{% block content %}
+
+<div class="grid gap-3 mb-3" style="grid-template-columns:repeat(12,1fr)">
+  <div class="bento" style="grid-column:span 3">
+    <div class="bento-hd"><span class="bento-hd-label">Total Users</span></div>
+    <div class="bento-body"><div class="bento-num">{{ "{:,}".format(total) }}</div></div>
+  </div>
+  <div class="bento" style="grid-column:span 3">
+    <div class="bento-hd"><span class="bento-hd-label">Sightings (24h)</span></div>
+    <div class="bento-body"><div class="bento-num">{{ "{:,}".format(sightings_24h) }}</div></div>
+  </div>
+  <div class="bento" style="grid-column:span 6">
+    <div class="bento-hd"><span class="bento-hd-label">Search</span></div>
+    <div class="bento-body">
+      <form method="get" class="flex gap-2">
+        <input name="search" value="{{ search }}" placeholder="username · name · phone" class="inp flex-1"/>
+        <button class="btn btn-pri">Search</button>
+        {% if search %}<a href="/users" class="btn btn-ghost">Clear</a>{% endif %}
+      </form>
+    </div>
+  </div>
+</div>
+
+<div class="bento">
+  <div class="bento-hd">
+    <span class="bento-hd-label">Users{% if search %} · "{{ search }}"{% endif %}</span>
+    <span class="pill pill-muted">{{ "{:,}".format(total) }}</span>
+  </div>
+  <div style="padding:0">
+    <table class="tbl">
+      <thead><tr><th>User</th><th>Username</th><th>Phone</th><th>Flags</th><th>First Seen</th><th>Last Seen</th></tr></thead>
+      <tbody>
+        {% for u in users %}
+        <tr>
+          <td>
+            <div class="flex items-center gap-2">
+              <div class="w-6 h-6 rounded-full bg-bg-raised flex items-center justify-center text-xs text-tx-muted flex-shrink-0">
+                {{ (u.first_name or u.username or '?')[0].upper() }}
+              </div>
+              <span class="font-medium text-tx">{{ u.first_name or '' }} {{ u.last_name or '' }}</span>
+            </div>
+          </td>
+          <td class="text-tx-muted">{% if u.username %}@{{ u.username }}{% else %}—{% endif %}</td>
+          <td class="mono">{{ u.phone or '—' }}</td>
+          <td class="text-xs">
+            {% if u.is_bot %}<span class="pill pill-muted">bot</span> {% endif %}
+            {% if u.is_verified %}<span class="pill pill-acc">✓</span> {% endif %}
+            {% if u.is_premium %}<span class="pill pill-warn">⭐</span>{% endif %}
+          </td>
+          <td class="mono text-tx-muted">{{ u.first_seen.strftime('%b %d') if u.first_seen else '—' }}</td>
+          <td class="mono text-tx-muted">{{ u.last_seen.strftime('%b %d %H:%M') if u.last_seen else '—' }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6" class="text-center py-8 text-tx-muted">No users found.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{% if pages > 1 %}
+<div class="flex items-center justify-center gap-2 mt-3">
+  {% if page>1 %}<a href="?page={{ page-1 }}&search={{ search }}" class="btn btn-ghost">← Prev</a>{% endif %}
+  <span class="text-sm text-tx-muted">{{ page }} / {{ pages }}</span>
+  {% if page<pages %}<a href="?page={{ page+1 }}&search={{ search }}" class="btn btn-ghost">Next →</a>{% endif %}
+</div>
+{% endif %}
+{% endblock %}

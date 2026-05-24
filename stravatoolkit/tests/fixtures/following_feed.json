@@ -1,0 +1,28 @@
+{
+  "entries": [
+    {
+      "activity": {
+        "id": 12345,
+        "name": "Morning Run",
+        "sport_type": "Run",
+        "start_date": "2026-04-06T00:30:00Z",
+        "start_date_local": "2026-04-06T08:30:00+08:00",
+        "elapsed_time": 3600,
+        "start_latlng": [1.301, 103.801],
+        "end_latlng": [1.312, 103.812],
+        "map": {
+          "summary_polyline": "abcd"
+        }
+      },
+      "athlete": {
+        "id": 99,
+        "firstname": "Taylor",
+        "lastname": "Tan",
+        "avatar_url": "https://example.com/avatar.jpg"
+      }
+    }
+  ],
+  "pagination": {
+    "cursor": 1712363400
+  }
+}

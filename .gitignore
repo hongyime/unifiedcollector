@@ -50,3 +50,5 @@ Thumbs.db
 
 # Database dumps
 *.dump
+client_secret.json
+*.pickle

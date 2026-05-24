@@ -1,0 +1,17 @@
+__pycache__/
+.venv/
+venv/
+.pytest_cache/
+.hypothesis/
+data/
+data/archive/
+logs/
+logs/backend_smoke.*
+logs/*.err
+.env
+*.db
+cookies.txt
+frontend/dist/
+frontend/node_modules/
+downloads/
+downloads/debug/
