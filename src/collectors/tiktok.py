@@ -351,33 +351,30 @@ class TiktokCollector(BaseCollector):
 
     async def _collect_via_gallery_dl(self, username: str, profile_url: str) -> bool:
         logger.info("tiktok fallback gallery-dl: starting for %s", username)
+        from src.core.subprocess_downloader import gallery_dl_download, managed_tempdir
         try:
-            with tempfile.TemporaryDirectory() as tmpdir:
-                cmd = ["gallery-dl", "--dest", tmpdir, "--no-mtime", "--write-metadata", "-v"]
-                if self._cookies_file:
-                    cmd.extend(["--cookies", self._cookies_file])
-                # `--` ensures a profile_url that begins with `--` is treated as a positional.
-                cmd.append("--")
-                cmd.append(profile_url)
-
-                loop = asyncio.get_event_loop()
-                proc = await loop.run_in_executor(
-                    None,
-                    lambda: subprocess.run(cmd, capture_output=True, text=True, timeout=self._timeout),
+            async with managed_tempdir("tiktok_gdl_") as tmpdir:
+                result = await gallery_dl_download(
+                    profile_url,
+                    cookies_file=self._cookies_file,
+                    timeout=self._timeout,
+                    tempdir=tmpdir,
+                    stop_event=self._stop if hasattr(self._stop, "wait") else None,
                 )
-
-                if proc.returncode != 0:
+                if not result.ok:
                     logger.warning(
-                        "tiktok fallback gallery-dl failed for %s: rc=%s stderr=%s stdout=%s",
-                        username, proc.returncode, (proc.stderr or "")[:800], (proc.stdout or "")[:400],
+                        "tiktok fallback gallery-dl failed for %s: rc=%s timed_out=%s "
+                        "stderr=%s stdout=%s",
+                        username, result.returncode, result.timed_out,
+                        result.err_summary(800), (result.stdout or "")[:400],
                     )
                     return False
 
-                files = list(Path(tmpdir).rglob("*"))
-                file_count = sum(1 for f in files if f.is_file())
-                logger.info("tiktok fallback gallery-dl: %s rc=0, downloaded %d files (stderr_tail=%s)",
-                            username, file_count, (proc.stderr or "")[-300:])
-                if file_count == 0:
+                logger.info(
+                    "tiktok fallback gallery-dl: %s rc=0, downloaded %d files (stderr_tail=%s)",
+                    username, result.file_count, result.err_summary(300),
+                )
+                if result.file_count == 0:
                     return False
                 await self._ingest_tmpdir(tmpdir, username)
                 return True
@@ -388,41 +385,31 @@ class TiktokCollector(BaseCollector):
 
     async def _collect_via_yt_dlp(self, username: str, profile_url: str) -> bool:
         logger.info("tiktok fallback yt-dlp: starting for %s", username)
+        from src.core.subprocess_downloader import yt_dlp_download, managed_tempdir
         try:
-            with tempfile.TemporaryDirectory() as tmpdir:
-                output_tmpl = os.path.join(tmpdir, "%(id)s.%(ext)s")
-                cmd = [
-                    "yt-dlp",
-                    "--impersonate", "chrome",
-                    "--write-thumbnail",
-                    "--no-overwrites",
-                    "-o", output_tmpl,
-                    "--max-downloads", "50",
-                    "--retries", str(self._retries),
-                    "--socket-timeout", "30",
-                ]
-                if self._cookies_file:
-                    cmd.extend(["--cookies", self._cookies_file])
-                cmd.append(profile_url)
-
-                loop = asyncio.get_event_loop()
-                proc = await loop.run_in_executor(
-                    None,
-                    lambda: subprocess.run(cmd, capture_output=True, text=True, timeout=self._timeout),
+            async with managed_tempdir("tiktok_ytdlp_") as tmpdir:
+                result = await yt_dlp_download(
+                    profile_url,
+                    cookies_file=self._cookies_file,
+                    timeout=self._timeout,
+                    retries=self._retries,
+                    tempdir=tmpdir,
+                    stop_event=self._stop if hasattr(self._stop, "wait") else None,
                 )
-
-                if proc.returncode not in (0, 101):
+                if not result.ok:
                     logger.warning(
-                        "tiktok fallback yt-dlp failed for %s: rc=%s stderr=%s stdout=%s",
-                        username, proc.returncode, (proc.stderr or "")[:800], (proc.stdout or "")[:400],
+                        "tiktok fallback yt-dlp failed for %s: rc=%s timed_out=%s "
+                        "stderr=%s stdout=%s",
+                        username, result.returncode, result.timed_out,
+                        result.err_summary(800), (result.stdout or "")[:400],
                     )
                     return False
 
-                files = list(Path(tmpdir).rglob("*"))
-                file_count = sum(1 for f in files if f.is_file())
-                logger.info("tiktok fallback yt-dlp: %s rc=%s, downloaded %d files (stderr_tail=%s)",
-                            username, proc.returncode, file_count, (proc.stderr or "")[-300:])
-                if file_count == 0:
+                logger.info(
+                    "tiktok fallback yt-dlp: %s rc=%s, downloaded %d files (stderr_tail=%s)",
+                    username, result.returncode, result.file_count, result.err_summary(300),
+                )
+                if result.file_count == 0:
                     return False
                 await self._ingest_tmpdir(tmpdir, username)
                 return True

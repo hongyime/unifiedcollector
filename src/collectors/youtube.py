@@ -444,24 +444,40 @@ class YoutubeCollector(BaseCollector):
                     logger.error("YouTube videos.list batch failed (chunk starting %s): %s", chunk[0] if chunk else "?", e)
 
     async def _download_videos_via_yt_dlp(self, channel_id: str, channel_name: str, video_ids: list[str]):
+        from src.core.subprocess_downloader import yt_dlp_download, managed_tempdir
         urls = [f"https://www.youtube.com/watch?v={vid}" for vid in video_ids if not self.is_known(f"video_{vid}")]
         if not urls: urls = [f"https://www.youtube.com/channel/{channel_id}/videos"]
         for url in urls:
             if self._stop.is_set(): break
             await asyncio.sleep(self._download_delay)
-            with tempfile.TemporaryDirectory() as tmpdir:
-                output_tmpl = os.path.join(tmpdir, "%(id)s.%(ext)s")
-                cmd = ["yt-dlp", "--impersonate", "chrome", "-f", self._ytdlp_format, "--merge-output-format", self._merge_format, "--write-thumbnail", "--no-overwrites", "-o", output_tmpl, "--retries", "3", "--socket-timeout", "30"]
-                if self._max_duration: cmd.extend(["--match-filter", f"duration<={self._max_duration * 60}"])
-                if self._cookie_browser: cmd.extend(["--cookies-from-browser", self._cookie_browser])
-                if self._cookie_file: cmd.extend(["--cookies", self._cookie_file])
-                if "watch?v=" not in url: cmd.extend(["--playlist-end", "50"])
-                # Use `--` so a target URL starting with `--` can't be parsed as an option.
-                cmd.append("--")
-                cmd.append(url)
-                loop = asyncio.get_event_loop()
-                proc = await loop.run_in_executor(None, lambda: subprocess.run(cmd, capture_output=True, text=True, timeout=600))
-                for f in Path(tmpdir).rglob("*"):
+            async with managed_tempdir("yt_") as tmpdir:
+                extra: list[str] = ["-f", self._ytdlp_format, "--merge-output-format", self._merge_format]
+                if self._max_duration:
+                    extra.extend(["--match-filter", f"duration<={self._max_duration * 60}"])
+                if self._cookie_browser:
+                    extra.extend(["--cookies-from-browser", self._cookie_browser])
+                if "watch?v=" not in url:
+                    extra.extend(["--playlist-end", "50"])
+                result = await yt_dlp_download(
+                    url,
+                    cookies_file=self._cookie_file,
+                    output_template=os.path.join(tmpdir, "%(id)s.%(ext)s"),
+                    max_downloads=None,  # respect playlist-end / per-video
+                    retries=3,
+                    impersonate="chrome",
+                    write_thumbnail=True,
+                    no_overwrites=True,
+                    extra_args=extra,
+                    timeout=600,
+                    tempdir=tmpdir,
+                    stop_event=self._stop if hasattr(self._stop, "wait") else None,
+                )
+                if not result.ok and not result.cancelled:
+                    logger.warning(
+                        "youtube yt-dlp video download failed for %s: rc=%s timed_out=%s stderr_tail=%s",
+                        url, result.returncode, result.timed_out, result.err_summary(400),
+                    )
+                for f in result.files:
                     if self._stop.is_set(): break
                     ext = f.suffix.lstrip(".").lower()
                     if ext not in ("jpg", "jpeg", "png", "webp", "mp4", "webm", "mkv"): continue
@@ -472,16 +488,27 @@ class YoutubeCollector(BaseCollector):
                     await self.download_media({"entity_id": channel_id, "entity_name": channel_name, "content_type": "video" if is_video else "thumbnail", "content_id": cid, "data": f.read_bytes(), "extension": ext if ext != "jpeg" else "jpg", "source_url": url if "watch?v=" in url else f"https://www.youtube.com/watch?v={f.stem}"})
 
     async def _collect_thumbnails_via_yt_dlp(self, channel_id: str, channel_name: str):
+        from src.core.subprocess_downloader import yt_dlp_download, managed_tempdir
         channel_url = f"https://www.youtube.com/channel/{channel_id}/videos"
-        with tempfile.TemporaryDirectory() as tmpdir:
-            output_tmpl = os.path.join(tmpdir, "%(id)s.%(ext)s")
-            cmd = ["yt-dlp", "--impersonate", "chrome", "--write-thumbnail", "--skip-download", "--no-overwrites", "-o", output_tmpl, "--playlist-end", "50"]
-            if self._cookie_browser: cmd.extend(["--cookies-from-browser", self._cookie_browser])
-            if self._cookie_file: cmd.extend(["--cookies", self._cookie_file])
-            cmd.append(channel_url)
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, lambda: subprocess.run(cmd, capture_output=True, text=True, timeout=600))
-            for f in Path(tmpdir).rglob("*"):
+        async with managed_tempdir("yt_thumb_") as tmpdir:
+            extra: list[str] = ["--skip-download", "--playlist-end", "50"]
+            if self._cookie_browser:
+                extra.extend(["--cookies-from-browser", self._cookie_browser])
+            result = await yt_dlp_download(
+                channel_url,
+                cookies_file=self._cookie_file,
+                output_template=os.path.join(tmpdir, "%(id)s.%(ext)s"),
+                max_downloads=None,
+                retries=3,
+                impersonate="chrome",
+                write_thumbnail=True,
+                no_overwrites=True,
+                extra_args=extra,
+                timeout=600,
+                tempdir=tmpdir,
+                stop_event=self._stop if hasattr(self._stop, "wait") else None,
+            )
+            for f in result.files:
                 if self._stop.is_set(): break
                 ext = f.suffix.lstrip(".").lower()
                 if ext not in ("jpg", "jpeg", "png", "webp"): continue
