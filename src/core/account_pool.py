@@ -4,8 +4,33 @@ import os
 import time
 import threading
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
+
+
+def _quota_date(reset_hour: int = 0) -> str:
+    """Return today's quota-window key, rolling at *reset_hour* UTC.
+
+    Default reset_hour=0 means quota windows align with UTC midnight.
+    Set reset_hour to a positive int (0-23) to roll later in the day
+    (e.g. reset_hour=4 -> windows roll at 04:00 UTC).
+    """
+    now = datetime.now(timezone.utc)
+    if now.hour < reset_hour:
+        # Belongs to yesterday's window
+        from datetime import timedelta
+        now = now - timedelta(days=1)
+    return now.strftime("%Y-%m-%d")
+
+
+@dataclass
+class _Quota:
+    """Per-account daily-usage counters."""
+    quota_date: str = ""
+    profile_views: int = 0
+    actions: int = 0
+    media_downloads: int = 0
 
 
 @dataclass
@@ -18,6 +43,7 @@ class Account:
     error_count: int = 0
     success_count: int = 0
     total_requests: int = 0
+    quota: _Quota = field(default_factory=_Quota)
 
     @property
     def health_score(self) -> float:
@@ -65,10 +91,19 @@ class AccountPool:
         default_cooldown: float = 900.0,
         error_cooldown: float = 1800.0,
         max_consecutive_errors: int = 5,
+        daily_quota_profile_views: int = 0,
+        daily_quota_actions: int = 0,
+        daily_quota_media_downloads: int = 0,
+        quota_reset_hour: int = 0,
     ):
         self.default_cooldown = default_cooldown
         self.error_cooldown = error_cooldown
         self.max_consecutive_errors = max_consecutive_errors
+        # Daily quota limits. 0 = unlimited.
+        self.daily_quota_profile_views = daily_quota_profile_views
+        self.daily_quota_actions = daily_quota_actions
+        self.daily_quota_media_downloads = daily_quota_media_downloads
+        self.quota_reset_hour = quota_reset_hour
         self._accounts: list[Account] = []
         self._lock = threading.Lock()
         self._current_index = 0
@@ -192,6 +227,152 @@ class AccountPool:
                 }
                 for a in self._accounts
             ]
+
+    # -- Daily quota tracking --------------------------------------------
+    #
+    # Each Account carries a ``_Quota`` dataclass with counters. The window
+    # rolls automatically at ``quota_reset_hour`` UTC. Setting any of the
+    # ``daily_quota_*`` ctor args to 0 means that counter has no ceiling.
+
+    def _reset_quota_if_new_day(self, acct: Account):
+        """CALLER must hold self._lock."""
+        today = _quota_date(self.quota_reset_hour)
+        if acct.quota.quota_date != today:
+            acct.quota = _Quota(quota_date=today)
+
+    def record_profile_view(self, name: str, count: int = 1):
+        """Increment per-account profile-view counter (resets daily)."""
+        with self._lock:
+            acct = self._find(name)
+            if acct is None:
+                return
+            self._reset_quota_if_new_day(acct)
+            acct.quota.profile_views += count
+
+    def record_action(self, name: str, count: int = 1):
+        """Increment per-account generic action counter (likes, follows, etc.)."""
+        with self._lock:
+            acct = self._find(name)
+            if acct is None:
+                return
+            self._reset_quota_if_new_day(acct)
+            acct.quota.actions += count
+
+    def record_media_download(self, name: str, count: int = 1):
+        """Increment per-account media-download counter."""
+        with self._lock:
+            acct = self._find(name)
+            if acct is None:
+                return
+            self._reset_quota_if_new_day(acct)
+            acct.quota.media_downloads += count
+
+    def can_view_profiles(self, name: str) -> bool:
+        """Return True if ``name`` has not hit profile-view ceiling today."""
+        if self.daily_quota_profile_views <= 0:
+            return True
+        with self._lock:
+            acct = self._find(name)
+            if acct is None:
+                return False
+            self._reset_quota_if_new_day(acct)
+            return acct.quota.profile_views < self.daily_quota_profile_views
+
+    def can_perform_action(self, name: str) -> bool:
+        """Return True if ``name`` has not hit action ceiling today."""
+        if self.daily_quota_actions <= 0:
+            return True
+        with self._lock:
+            acct = self._find(name)
+            if acct is None:
+                return False
+            self._reset_quota_if_new_day(acct)
+            return acct.quota.actions < self.daily_quota_actions
+
+    def can_download_media(self, name: str) -> bool:
+        """Return True if ``name`` has not hit media-download ceiling today."""
+        if self.daily_quota_media_downloads <= 0:
+            return True
+        with self._lock:
+            acct = self._find(name)
+            if acct is None:
+                return False
+            self._reset_quota_if_new_day(acct)
+            return acct.quota.media_downloads < self.daily_quota_media_downloads
+
+    def get_quota_usage(self, name: str) -> dict:
+        """Return raw quota counters for one account (post-reset)."""
+        with self._lock:
+            acct = self._find(name)
+            if acct is None:
+                return {}
+            self._reset_quota_if_new_day(acct)
+            q = acct.quota
+            return {
+                "quota_date": q.quota_date,
+                "profile_views": q.profile_views,
+                "actions": q.actions,
+                "media_downloads": q.media_downloads,
+            }
+
+    def get_quota_summary(self, name: str) -> dict[str, str]:
+        """Return human-readable quota summary like '13/200'."""
+        usage = self.get_quota_usage(name)
+        if not usage:
+            return {}
+        def fmt(used: int, ceil: int) -> str:
+            return f"{used}/{ceil if ceil > 0 else 'inf'}"
+        return {
+            "date": usage["quota_date"],
+            "profile_views": fmt(usage["profile_views"], self.daily_quota_profile_views),
+            "actions": fmt(usage["actions"], self.daily_quota_actions),
+            "media_downloads": fmt(usage["media_downloads"], self.daily_quota_media_downloads),
+        }
+
+    def get_next_with_quota(
+        self,
+        require: str = "any",
+        exclude: str | None = None,
+    ) -> Account | None:
+        """LRU select the next healthy account that ALSO has quota for *require*.
+
+        ``require`` is one of: 'any', 'profile_view', 'action',
+        'media_download'. 'any' = no quota check (same as ``get_next``).
+        Filters quota under the same lock as the LRU pick to avoid TOCTOU.
+        """
+        if require == "any":
+            return self.get_next(exclude=exclude)
+
+        with self._lock:
+            check_map = {
+                "profile_view": (self.daily_quota_profile_views, lambda a: a.quota.profile_views),
+                "action": (self.daily_quota_actions, lambda a: a.quota.actions),
+                "media_download": (self.daily_quota_media_downloads, lambda a: a.quota.media_downloads),
+            }
+            if require not in check_map:
+                raise ValueError(f"unknown quota requirement: {require!r}")
+            ceiling, getter = check_map[require]
+
+            candidates = []
+            for a in self._accounts:
+                if a.name == exclude or not a.is_healthy:
+                    continue
+                self._reset_quota_if_new_day(a)
+                if ceiling <= 0 or getter(a) < ceiling:
+                    candidates.append(a)
+
+            if not candidates:
+                logger.warning(
+                    "No accounts with %s quota available (excluded=%s)",
+                    require, exclude,
+                )
+                return None
+
+            candidates.sort(key=lambda a: a.last_used)
+            chosen = candidates[0]
+            chosen.last_used = time.monotonic()
+            chosen.total_requests += 1
+            return chosen
 
     def _find(self, name: str) -> Account | None:
         for a in self._accounts:
