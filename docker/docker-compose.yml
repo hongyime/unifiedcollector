@@ -10,6 +10,12 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: unifiedcollector
+    ports:
+      # Configurable host-side port. Default 5433 to avoid colliding with
+      # any pre-existing local postgres on 5432 (e.g. another project's
+      # docker postgres). Containers inside this compose network connect
+      # via host=postgres:5432 — only the host-side mapping changes.
+      - "${POSTGRES_HOST_PORT:-5433}:5432"
     volumes:
       - ./postgres/postgres.conf:/etc/postgresql/postgresql.conf
       - pgdata:/var/lib/postgresql/data
