@@ -12,7 +12,9 @@ def check_drive(path: str = DRIVE_PATH) -> bool:
     if not os.path.isdir(path):
         logger.warning("Drive not found: %s", path)
         return False
-    test_file = os.path.join(path, ".drive_check")
+    # Per-process, per-call unique probe filename so concurrent collectors
+    # don't race on the same `.drive_check` path.
+    test_file = os.path.join(path, f".drive_check.{os.getpid()}.{time.time_ns()}")
     try:
         with open(test_file, "w") as f:
             f.write("ok")
@@ -20,6 +22,10 @@ def check_drive(path: str = DRIVE_PATH) -> bool:
         return True
     except OSError as e:
         logger.warning("Drive not writable: %s — %s", path, e)
+        try:
+            os.remove(test_file)
+        except OSError:
+            pass
         return False
 
 

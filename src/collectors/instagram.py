@@ -1128,9 +1128,16 @@ class InstagramCollector(BaseCollector):
                 logger.info("Session for %s expired (age %dd), forcing re-auth",
                             username, int((time.time() - created_at) // 86400))
                 return False
-        except Exception:
-            pass
-        return True
+            return True
+        except Exception as e:
+            # Corrupt or unreadable session meta means we don't know how old
+            # the session is. Treat as expired and force re-auth — using a
+            # potentially-old session is ban-bait.
+            logger.warning(
+                "Session meta for %s unreadable (%s), forcing re-auth",
+                username, e,
+            )
+            return False
 
     def _save_session_meta(self, username: str):
         meta_file = self._session_dir / f"{username}.meta"

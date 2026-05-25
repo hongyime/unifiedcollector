@@ -127,17 +127,33 @@ class SearchCollector(BaseCollector):
         dest_dir = self.account_media_dir / item["content_type"]
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / filename
+        tmp_path = None
         try:
-            async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            # follow_redirects=True is intentional for image URLs — but the
+            # source URL is search-result-controlled, so an attacker who can
+            # influence search results could redirect to internal IPs.
+            # Acceptable here because the result is binary content we hash and
+            # store, not interpreted; SSRF impact is bounded to "we fetched a
+            # weird URL". If this surface widens, add an allow-list.
+            async with httpx.AsyncClient(timeout=30, follow_redirects=True, max_redirects=5) as client:
                 resp = await client.get(item["url"]); resp.raise_for_status(); data = resp.content
             sha = self.sha256_bytes(data)
             fd, tmp_path = tempfile.mkstemp(dir=dest_dir, suffix=".tmp")
             with os.fdopen(fd, "wb") as f: f.write(data); f.flush(); os.fsync(f.fileno())
             os.replace(tmp_path, dest)
+            tmp_path = None  # ownership transferred via os.replace
             metadata = {"entity_id": item["entity_id"], "entity_name": item["entity_name"], "content_type": item["content_type"], "content_id": cid, "collected_at": datetime.now(timezone.utc).isoformat(), "raw": item.get("raw", {})}
             self.save_json(metadata, dest_dir / f"{Path(filename).stem}_metadata.json")
             await self.insert_media_item(entity_id=item["entity_id"], entity_name=item["entity_name"], content_type=item["content_type"], content_id=cid, filename=filename, file_path=str(dest), file_size=len(data), sha256=sha, metadata=metadata)
             self._known_ids.add(cid)
-        except Exception: pass
+        except Exception:
+            # Don't swallow silently — log with stack so downloader failures
+            # are visible. Also clean up any leftover tempfile.
+            logger.exception("search download_media failed for cid=%s url=%s", cid, item.get("url", ""))
+            if tmp_path:
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
 
     async def cleanup(self): pass

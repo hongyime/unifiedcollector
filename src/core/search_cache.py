@@ -32,23 +32,47 @@ class SearchCache:
     def get(self, query: str, engine: str = "default") -> dict | None:
         key = self._key(query, engine)
         path = self._path(key)
-        if not path.exists():
+        try:
+            # Capture mtime before we read so a concurrent put() that
+            # rewrote the file doesn't get unlinked by us as if it were the
+            # stale version we just read.
+            stat_before = path.stat()
+        except FileNotFoundError:
             return None
 
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError):
             logger.warning("Corrupt cache entry %s — removing", path.name)
-            path.unlink(missing_ok=True)
+            self._unlink_if_unchanged(path, stat_before)
             return None
 
         cached_at = data.get("_cached_at", 0)
         if time.time() - cached_at > self.ttl_seconds:
             logger.debug("Cache expired for %s", path.name)
-            path.unlink(missing_ok=True)
+            self._unlink_if_unchanged(path, stat_before)
             return None
 
         return data.get("results")
+
+    @staticmethod
+    def _unlink_if_unchanged(path: Path, stat_before) -> None:
+        """Unlink only if the file hasn't been rewritten since we stat'd it.
+
+        Prevents a get()→put() race from deleting the new entry: between our
+        read and our unlink, another process may have called put() and
+        atomically replaced the file. If mtime changed, leave it alone.
+        """
+        try:
+            stat_now = path.stat()
+        except FileNotFoundError:
+            return
+        if (stat_now.st_mtime_ns == stat_before.st_mtime_ns
+                and stat_now.st_size == stat_before.st_size):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
 
     def put(self, query: str, results: dict | list, engine: str = "default"):
         key = self._key(query, engine)

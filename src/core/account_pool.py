@@ -82,6 +82,7 @@ class AccountPool:
         if fields is None:
             fields = ["NAME", "USER", "PASS"]
 
+        loaded: list[Account] = []
         i = 1
         while True:
             creds = {}
@@ -100,11 +101,16 @@ class AccountPool:
                 credentials=creds,
                 fingerprint=_build_fingerprint(name),
             )
-            self._accounts.append(acct)
+            loaded.append(acct)
             logger.info("Loaded account: %s (%s)", name, prefix)
             i += 1
 
-        logger.info("AccountPool loaded %d accounts for prefix %s", len(self._accounts), prefix)
+        # Append under the lock so concurrent get_next/record_* don't see
+        # a partially-loaded list.
+        with self._lock:
+            self._accounts.extend(loaded)
+            count = len(self._accounts)
+        logger.info("AccountPool loaded %d accounts for prefix %s", count, prefix)
 
     def add_account(self, name: str, credentials: dict[str, str]):
         acct = Account(
@@ -117,7 +123,8 @@ class AccountPool:
 
     @property
     def size(self) -> int:
-        return len(self._accounts)
+        with self._lock:
+            return len(self._accounts)
 
     @property
     def available_count(self) -> int:

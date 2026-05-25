@@ -102,11 +102,28 @@ class FaceProcessor:
         if not HAS_CV2:
             return []
 
+        # Sandbox: refuse to open paths that don't exist on disk. We
+        # intentionally don't anchor under DRIVE_PATH here because face
+        # processing is also used on tempfiles outside the drive (extracted
+        # frames, test fixtures). The path is operator-controlled, not user
+        # request-controlled.
+        if not os.path.isfile(video_path):
+            logger.warning("extract_video_frames: file not found: %s", video_path)
+            return []
+
         frames: list[tuple[bytes, int]] = []
         seen_hashes: set[str] = set()
+        # Cap dedup window to keep per-frame check linear in a bounded
+        # constant. 256 frames at 1fps is ~4 minutes of context — enough
+        # to suppress near-duplicates, small enough to stay fast.
+        _DEDUP_WINDOW = 256
 
+        cap = None
         try:
             cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                logger.warning("VideoCapture failed to open: %s", video_path)
+                return []
             video_fps = cap.get(cv2.CAP_PROP_FPS) or 30
             frame_interval = max(1, int(video_fps / fps))
             frame_idx = 0
@@ -126,14 +143,25 @@ class FaceProcessor:
                             frame_idx += 1
                             continue
                         seen_hashes.add(ph)
+                        # Bound seen-set so overall work stays O(N * window).
+                        if len(seen_hashes) > _DEDUP_WINDOW:
+                            # Drop an arbitrary oldest entry (sets aren't
+                            # ordered; this is fine for a near-duplicate
+                            # rolling window).
+                            seen_hashes.pop()
 
                     frames.append((frame_bytes, frame_idx))
 
                 frame_idx += 1
 
-            cap.release()
         except Exception as e:
             logger.debug("Video frame extraction failed: %s", e)
+        finally:
+            if cap is not None:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
 
         return frames
 

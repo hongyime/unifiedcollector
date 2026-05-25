@@ -1,12 +1,27 @@
 import asyncio
 import json
 import logging
+import os
 
 from fastapi import WebSocket, WebSocketDisconnect
+
+import jwt
 
 from src.db.connection import get_pool
 
 logger = logging.getLogger(__name__)
+
+
+_JWT_SECRET = os.getenv("DASHBOARD_JWT_SECRET", "")
+
+
+def _verify_token(token: str | None) -> dict | None:
+    if not token or not _JWT_SECRET:
+        return None
+    try:
+        return jwt.decode(token, _JWT_SECRET, algorithms=["HS256"])
+    except jwt.PyJWTError:
+        return None
 
 
 class ConnectionManager:
@@ -41,6 +56,18 @@ manager = ConnectionManager()
 
 
 async def health_ws(ws: WebSocket):
+    # Auth: accept token via ?token=... query param or Sec-WebSocket-Protocol.
+    token = ws.query_params.get("token") if hasattr(ws, "query_params") else None
+    if token is None:
+        try:
+            token = ws.headers.get("authorization", "").removeprefix("Bearer ").strip() or None
+        except Exception:
+            token = None
+    payload = _verify_token(token)
+    if payload is None:
+        await ws.close(code=4401)
+        return
+
     await manager.connect(ws)
     try:
         while True:
@@ -70,7 +97,9 @@ async def health_ws(ws: WebSocket):
                     "ws_clients": manager.count,
                 })
             except Exception as e:
-                await ws.send_json({"type": "error", "message": str(e)})
+                # Don't leak internal exception text to clients.
+                logger.exception("health_ws tick error: %s", e)
+                await ws.send_json({"type": "error", "message": "internal error"})
 
             await asyncio.sleep(5)
     except WebSocketDisconnect:

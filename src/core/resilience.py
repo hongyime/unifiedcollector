@@ -38,10 +38,13 @@ def with_retry(
         @with_retry(max_retries=3)
         def fetch_page(url): ...
     """
+    if max_retries < 1:
+        raise ValueError("max_retries must be >= 1")
+
     def decorator(fn):
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
-            last_exc = None
+            last_exc: BaseException | None = None
             for attempt in range(1, max_retries + 1):
                 try:
                     return fn(*args, **kwargs)
@@ -56,6 +59,9 @@ def with_retry(
                         fn.__name__, attempt, max_retries, exc, jitter,
                     )
                     interruptible_sleep(jitter, stop_event)
+            # last_exc is guaranteed non-None: max_retries >= 1, and we only
+            # reach here via the except branch.
+            assert last_exc is not None
             raise last_exc
         return wrapper
     return decorator
@@ -83,6 +89,12 @@ class CircuitBreaker:
         self._failure_count = 0
         self._last_failure_time: float = 0
         self._lock = threading.Lock()
+        # Eagerly create the asyncio lock placeholder — guarded by attribute
+        # presence at call-site so we never race two instances of it.
+        self._async_lock: asyncio.Lock | None = None
+        # When OPEN transitions to HALF_OPEN, this token gates concurrent probes:
+        # only the first caller to take the probe slot proceeds.
+        self._probe_in_flight = False
 
     @property
     def state(self) -> CircuitState:
@@ -90,12 +102,14 @@ class CircuitBreaker:
             if self._state == CircuitState.OPEN:
                 if time.monotonic() - self._last_failure_time >= self.recovery_timeout:
                     self._state = CircuitState.HALF_OPEN
+                    self._probe_in_flight = False
             return self._state
 
     def record_success(self):
         with self._lock:
             self._failure_count = 0
             self._state = CircuitState.CLOSED
+            self._probe_in_flight = False
 
     def record_failure(self):
         with self._lock:
@@ -103,24 +117,31 @@ class CircuitBreaker:
             self._last_failure_time = time.monotonic()
             if self._failure_count >= self.failure_threshold:
                 self._state = CircuitState.OPEN
+                self._probe_in_flight = False
                 logger.warning("Circuit breaker OPEN after %d failures", self._failure_count)
 
     def allow_request(self) -> bool:
-        s = self.state
-        if s == CircuitState.CLOSED:
-            return True
-        if s == CircuitState.HALF_OPEN:
-            return True
-        return False
+        with self._lock:
+            # OPEN → HALF_OPEN transition on read (atomic under lock).
+            if self._state == CircuitState.OPEN:
+                if time.monotonic() - self._last_failure_time >= self.recovery_timeout:
+                    self._state = CircuitState.HALF_OPEN
+                    self._probe_in_flight = False
+                else:
+                    return False
+            if self._state == CircuitState.CLOSED:
+                return True
+            # HALF_OPEN: only the first probe gets through.
+            if self._state == CircuitState.HALF_OPEN:
+                if self._probe_in_flight:
+                    return False
+                self._probe_in_flight = True
+                return True
+            return False
 
     async def async_allow_request(self) -> bool:
-        """Async-compatible version using a lazy asyncio.Lock."""
-        if self._async_lock is None:
-            self._async_lock = asyncio.Lock()
-        async with self._async_lock:
-            return self.allow_request()
-
-    _async_lock: asyncio.Lock | None = None
+        """Async-compatible version (the underlying check is already lock-protected)."""
+        return self.allow_request()
 
 
 # --- Async retry decorator ---
@@ -132,10 +153,13 @@ def async_retry(
     retryable_exceptions: tuple = (Exception,),
 ):
     """Decorator: async exponential backoff with full jitter."""
+    if max_retries < 1:
+        raise ValueError("max_retries must be >= 1")
+
     def decorator(fn):
         @functools.wraps(fn)
         async def wrapper(*args, **kwargs):
-            last_exc = None
+            last_exc: BaseException | None = None
             for attempt in range(1, max_retries + 1):
                 try:
                     return await fn(*args, **kwargs)
@@ -150,6 +174,7 @@ def async_retry(
                         fn.__name__, attempt, max_retries, exc, jitter,
                     )
                     await asyncio.sleep(jitter)
+            assert last_exc is not None
             raise last_exc
         return wrapper
     return decorator

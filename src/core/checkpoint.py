@@ -24,24 +24,24 @@ class CheckpointManager:
 
     async def load_progress(self):
         async with self._pool.acquire() as conn:
+            # Atomic upsert avoids the TOCTOU race where two workers both
+            # observe a missing row and both INSERT.
             row = await conn.fetchrow(
-                "SELECT last_processed_id, last_processed_at, status FROM service_cursors WHERE service = $1",
+                """
+                INSERT INTO service_cursors (service, status)
+                VALUES ($1, 'idle')
+                ON CONFLICT (service) DO UPDATE SET service = EXCLUDED.service
+                RETURNING last_processed_id, last_processed_at, status
+                """,
                 self._service,
             )
-            if row:
-                self.last_processed_id = row["last_processed_id"]
-                self.last_processed_at = row["last_processed_at"]
-                self.status = row["status"] or "idle"
-                logger.info(
-                    "Loaded cursor for %s — last_id=%s status=%s",
-                    self._service, self.last_processed_id, self.status,
-                )
-            else:
-                await conn.execute(
-                    "INSERT INTO service_cursors (service, status) VALUES ($1, 'idle')",
-                    self._service,
-                )
-                logger.info("Created new cursor row for %s", self._service)
+            self.last_processed_id = row["last_processed_id"]
+            self.last_processed_at = row["last_processed_at"]
+            self.status = row["status"] or "idle"
+            logger.info(
+                "Loaded cursor for %s — last_id=%s status=%s",
+                self._service, self.last_processed_id, self.status,
+            )
 
     async def save_progress(self, last_id: str | None = None, status: str | None = None):
         if last_id is not None:

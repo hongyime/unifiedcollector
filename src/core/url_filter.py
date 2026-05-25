@@ -19,12 +19,25 @@ DEFAULT_BLOCKLIST = [
 ]
 
 
+_MAX_WILDCARDS = 8
+
+
 def _wildcard_to_regex(pattern: str) -> str | None:
     if len(pattern) > MAX_PATTERN_LEN:
         logger.warning("Pattern too long (%d chars), skipping: %.50s...", len(pattern), pattern)
         return None
+    # Cap wildcards to keep regex matching linear-bounded against adversarial
+    # URLs. Multiple `.*` in the same anchored pattern can backtrack
+    # super-linearly; 8 is well above any realistic legitimate pattern.
+    if pattern.count("*") > _MAX_WILDCARDS:
+        logger.warning(
+            "Pattern has %d wildcards (max %d), skipping: %.80s...",
+            pattern.count("*"), _MAX_WILDCARDS, pattern,
+        )
+        return None
     escaped = re.escape(pattern)
-    regex = escaped.replace(r"\*", ".*").replace(r"\?", ".")
+    # Use non-greedy `.*?` to bound backtracking on adversarial inputs.
+    regex = escaped.replace(r"\*", ".*?").replace(r"\?", ".")
     return f"^{regex}$"
 
 

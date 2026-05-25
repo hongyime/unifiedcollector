@@ -2,7 +2,6 @@ import asyncio
 import json
 import logging
 import os
-import pickle
 import re
 import subprocess
 import tempfile
@@ -54,24 +53,88 @@ class YoutubeCollector(BaseCollector):
             return False
 
     def _load_oauth_credentials(self) -> str | None:
+        """Load Google OAuth credentials.
+
+        Storage format is JSON (`Credentials.to_json()`). For backward
+        compatibility we one-shot migrate any pre-existing pickle file to
+        JSON, then refuse to read pickle on subsequent runs. Pickle is an
+        RCE vector if the creds file is ever attacker-writable, so we
+        treat it as transition-only and always rewrite to JSON.
+        """
         if self._oauth_credentials:
             return self._oauth_credentials
-        if self._oauth_pickle.exists():
+
+        json_path = self._oauth_pickle.with_suffix(".json")
+        creds = None
+
+        # Preferred: JSON.
+        if json_path.exists():
             try:
+                from google.oauth2.credentials import Credentials
+                import json as _json
+                with open(json_path, "r", encoding="utf-8") as f:
+                    info = _json.load(f)
+                creds = Credentials.from_authorized_user_info(info)
+            except Exception as e:
+                logger.warning("Failed to load YouTube OAuth JSON creds: %s", e)
+                creds = None
+
+        # Migration: if JSON missing but legacy pickle present, migrate once
+        # then disable further pickle reads.
+        if creds is None and self._oauth_pickle.exists():
+            logger.warning(
+                "Migrating legacy YouTube OAuth pickle %s -> %s. "
+                "Pickle is an RCE vector and will not be loaded again.",
+                self._oauth_pickle, json_path,
+            )
+            try:
+                # Restricted unpickler — only the google credential class is
+                # whitelisted. Anything else raises and the file is quarantined.
+                import pickle as _pickle
+                import io as _io
+
+                class _SafeUnpickler(_pickle.Unpickler):
+                    def find_class(self, module, name):
+                        if module == "google.oauth2.credentials" and name == "Credentials":
+                            from google.oauth2.credentials import Credentials as _C
+                            return _C
+                        raise _pickle.UnpicklingError(
+                            f"Refusing to load {module}.{name} from legacy pickle"
+                        )
+
                 with open(self._oauth_pickle, "rb") as f:
-                    creds = pickle.load(f)
+                    creds = _SafeUnpickler(_io.BytesIO(f.read())).load()
+                # Persist as JSON.
+                with open(json_path, "w", encoding="utf-8") as f:
+                    f.write(creds.to_json())
+                # Quarantine the pickle so it can't be re-loaded later.
+                quarantine = self._oauth_pickle.with_suffix(".pickle.migrated")
                 try:
-                    from google.auth.transport.requests import Request
-                    if hasattr(creds, "expired") and creds.expired and creds.refresh_token:
-                        creds.refresh(Request())
-                        with open(self._oauth_pickle, "wb") as f:
-                            pickle.dump(creds, f)
-                        logger.info("YouTube OAuth token refreshed")
-                except Exception: pass
-                if hasattr(creds, "token"):
-                    self._oauth_credentials = creds.token
-                    return self._oauth_credentials
-            except Exception: pass
+                    self._oauth_pickle.replace(quarantine)
+                except OSError:
+                    pass
+            except Exception as e:
+                logger.error("Could not migrate legacy YouTube OAuth pickle: %s", e)
+                creds = None
+
+        if creds is None:
+            return None
+
+        # Refresh if expired.
+        try:
+            from google.auth.transport.requests import Request
+            if getattr(creds, "expired", False) and getattr(creds, "refresh_token", None):
+                creds.refresh(Request())
+                with open(json_path, "w", encoding="utf-8") as f:
+                    f.write(creds.to_json())
+                logger.info("YouTube OAuth token refreshed")
+        except Exception as e:
+            logger.warning("YouTube OAuth refresh failed: %s", e)
+
+        token = getattr(creds, "token", None)
+        if token:
+            self._oauth_credentials = token
+            return token
         return None
 
     @property
@@ -393,6 +456,8 @@ class YoutubeCollector(BaseCollector):
                 if self._cookie_browser: cmd.extend(["--cookies-from-browser", self._cookie_browser])
                 if self._cookie_file: cmd.extend(["--cookies", self._cookie_file])
                 if "watch?v=" not in url: cmd.extend(["--playlist-end", "50"])
+                # Use `--` so a target URL starting with `--` can't be parsed as an option.
+                cmd.append("--")
                 cmd.append(url)
                 loop = asyncio.get_event_loop()
                 proc = await loop.run_in_executor(None, lambda: subprocess.run(cmd, capture_output=True, text=True, timeout=600))

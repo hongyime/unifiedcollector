@@ -29,21 +29,47 @@ app.add_middleware(
 
 DIST_DIR = Path(__file__).resolve().parent.parent.parent / "dashboard" / "frontend" / "dist"
 
-JWT_SECRET = os.getenv("DASHBOARD_JWT_SECRET", "changeme-in-production")
+JWT_SECRET = os.getenv("DASHBOARD_JWT_SECRET", "")
+if not JWT_SECRET or JWT_SECRET == "changeme-in-production":
+    # Fail closed: never allow the dashboard to run with a known/empty signing key.
+    raise RuntimeError(
+        "DASHBOARD_JWT_SECRET env var is not set (or still default). "
+        "Generate one: python -c 'import secrets;print(secrets.token_urlsafe(48))'"
+    )
 JWT_EXPIRY_HOURS = int(os.getenv("DASHBOARD_JWT_EXPIRY_HOURS", "8"))
 ADMIN_USERNAME = os.getenv("DASHBOARD_ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.getenv("DASHBOARD_ADMIN_PASSWORD", "")
 
 security = HTTPBearer(auto_error=False)
 
+_ROLE_RANK = {"viewer": 0, "operator": 1, "admin": 2}
 
-async def get_current_user(creds: HTTPAuthorizationCredentials = Depends(security)) -> dict | None:
-    return {"username": "admin", "role": "admin"}
+
+async def get_current_user(creds: HTTPAuthorizationCredentials = Depends(security)) -> dict:
+    if creds is None or not creds.credentials:
+        raise HTTPException(status_code=401, detail="Missing bearer token")
+    try:
+        payload = jwt.decode(creds.credentials, JWT_SECRET, algorithms=["HS256"])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    username = payload.get("sub")
+    role = payload.get("role", "viewer")
+    if not username or role not in _ROLE_RANK:
+        raise HTTPException(status_code=401, detail="Malformed token")
+    return {"username": username, "role": role}
 
 
 def require_role(min_role: str):
-    async def check(user: dict | None = Depends(get_current_user)):
-        return {"username": "admin", "role": "admin"}
+    if min_role not in _ROLE_RANK:
+        raise ValueError(f"Unknown role: {min_role}")
+    threshold = _ROLE_RANK[min_role]
+
+    async def check(user: dict = Depends(get_current_user)):
+        if _ROLE_RANK.get(user["role"], -1) < threshold:
+            raise HTTPException(status_code=403, detail="Insufficient role")
+        return user
     return check
 
 
@@ -68,7 +94,7 @@ async def health():
 
 
 @app.get("/collectors")
-async def list_collectors():
+async def list_collectors(_user: dict = Depends(require_role("viewer"))):
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -79,7 +105,9 @@ async def list_collectors():
 
 
 @app.get("/media")
-async def list_media(source: str | None = None, limit: int = 50):
+async def list_media(source: str | None = None, limit: int = 50,
+                     _user: dict = Depends(require_role("viewer"))):
+    limit = max(1, min(limit, 500))
     pool = await get_pool()
     async with pool.acquire() as conn:
         if source:
@@ -98,7 +126,7 @@ async def list_media(source: str | None = None, limit: int = 50):
 
 
 @app.get("/media/stats")
-async def media_stats():
+async def media_stats(_user: dict = Depends(require_role("viewer"))):
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -116,7 +144,9 @@ async def media_stats():
 
 
 @app.get("/dlq")
-async def list_dlq(source: str | None = None, limit: int = 50):
+async def list_dlq(source: str | None = None, limit: int = 50,
+                   _user: dict = Depends(require_role("viewer"))):
+    limit = max(1, min(limit, 500))
     pool = await get_pool()
     async with pool.acquire() as conn:
         if source:
@@ -162,6 +192,7 @@ class MergeRequest(BaseModel):
 
 @app.post("/auth/login")
 async def login(req: LoginRequest):
+    import secrets as _secrets
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -169,15 +200,28 @@ async def login(req: LoginRequest):
             req.username,
         )
 
-    if not row:
-        if req.username == ADMIN_USERNAME and ADMIN_PASSWORD and req.password == ADMIN_PASSWORD:
-            role = "admin"
-        else:
-            raise HTTPException(status_code=401, detail="Invalid credentials")
-    else:
-        if not bcrypt.checkpw(req.password.encode(), row["password_hash"].encode()):
-            raise HTTPException(status_code=401, detail="Invalid credentials")
-        role = row["role"]
+    role = None
+    if row:
+        try:
+            stored_hash = row["password_hash"]
+            if isinstance(stored_hash, str):
+                stored_hash = stored_hash.encode()
+            if bcrypt.checkpw(req.password.encode(), stored_hash):
+                role = row["role"]
+        except (ValueError, TypeError):
+            role = None
+    elif (
+        ADMIN_PASSWORD
+        and req.username == ADMIN_USERNAME
+        and _secrets.compare_digest(req.password, ADMIN_PASSWORD)
+    ):
+        role = "admin"
+
+    if role is None:
+        # Constant-ish failure path — sleep a bit so success/fail paths are similar.
+        import asyncio as _asyncio
+        await _asyncio.sleep(0.25)
+        raise HTTPException(status_code=401, detail="Invalid credentials")
 
     token = jwt.encode(
         {
@@ -243,7 +287,7 @@ async def update_schedule(source: str, req: ScheduleRequest, _user: dict = Depen
 # ── Run detail ──
 
 @app.get("/runs/{run_id}")
-async def get_run(run_id: int):
+async def get_run(run_id: int, _user: dict = Depends(require_role("viewer"))):
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -257,7 +301,7 @@ async def get_run(run_id: int):
 # ── Per-collector deep view ──
 
 @app.get("/collectors/{source}")
-async def collector_detail(source: str):
+async def collector_detail(source: str, _user: dict = Depends(require_role("viewer"))):
     pool = await get_pool()
     async with pool.acquire() as conn:
         cursor = await conn.fetchrow(
@@ -286,7 +330,8 @@ async def collector_detail(source: str):
 # ── Social Graph ──
 
 @app.get("/graph")
-async def social_graph(source: str = "github", depth: int = 2):
+async def social_graph(source: str = "github", depth: int = 2,
+                       _user: dict = Depends(require_role("viewer"))):
     pool = await get_pool()
     async with pool.acquire() as conn:
         edges = await conn.fetch(
@@ -313,6 +358,7 @@ async def browse_media(
     content_type: str | None = None,
     page: int = Query(1, ge=1),
     page_size: int = Query(24, ge=1, le=100),
+    _user: dict = Depends(require_role("viewer")),
 ):
     pool = await get_pool()
     offset = (page - 1) * page_size
@@ -320,13 +366,17 @@ async def browse_media(
     params = []
     idx = 1
 
+    def _escape_like(s: str) -> str:
+        # Escape LIKE wildcards so user input matches literally.
+        return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
     if source:
         conditions.append(f"source = ${idx}")
         params.append(source)
         idx += 1
     if entity:
-        conditions.append(f"entity_name ILIKE ${idx}")
-        params.append(f"%{entity}%")
+        conditions.append(f"entity_name ILIKE ${idx} ESCAPE '\\'")
+        params.append(f"%{_escape_like(entity)}%")
         idx += 1
     if content_type:
         conditions.append(f"content_type = ${idx}")
@@ -355,7 +405,7 @@ async def browse_media(
 
 
 @app.get("/media/{media_id}/thumbnail")
-async def media_thumbnail(media_id: int):
+async def media_thumbnail(media_id: int, _user: dict = Depends(require_role("viewer"))):
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -364,8 +414,16 @@ async def media_thumbnail(media_id: int):
     if not row:
         raise HTTPException(status_code=404, detail="Media not found")
 
-    file_path = Path(row["file_path"])
-    if not file_path.exists():
+    file_path = Path(row["file_path"]).resolve()
+    # Constrain access to the configured drive root so a poisoned file_path
+    # column can't make us serve arbitrary host files.
+    from src.core.drive_check import DRIVE_PATH as _DRIVE_PATH
+    drive_root = Path(_DRIVE_PATH).resolve()
+    try:
+        file_path.relative_to(drive_root)
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Path outside media root")
+    if not file_path.is_file():
         raise HTTPException(status_code=404, detail="File not found on disk")
 
     if row["content_type"] in ("video", "audio", "document"):
@@ -386,7 +444,8 @@ async def media_thumbnail(media_id: int):
 # ── WhatsApp: Faces ──
 
 @app.get("/whatsapp/faces")
-async def list_faces(limit: int = 50):
+async def list_faces(limit: int = 50, _user: dict = Depends(require_role("viewer"))):
+    limit = max(1, min(limit, 500))
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -398,7 +457,7 @@ async def list_faces(limit: int = 50):
 
 
 @app.get("/whatsapp/faces/{identity_id}")
-async def get_face(identity_id: str):
+async def get_face(identity_id: str, _user: dict = Depends(require_role("viewer"))):
     pool = await get_pool()
     async with pool.acquire() as conn:
         identity = await conn.fetchrow(
@@ -438,15 +497,19 @@ async def merge_faces(req: MergeRequest, _user: dict = Depends(require_role("ope
 # ── WhatsApp: Users ──
 
 @app.get("/whatsapp/users")
-async def list_wa_users(search: str | None = None, limit: int = 50):
+async def list_wa_users(search: str | None = None, limit: int = 50,
+                         _user: dict = Depends(require_role("viewer"))):
+    limit = max(1, min(limit, 500))
     pool = await get_pool()
     async with pool.acquire() as conn:
         if search:
+            esc = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             rows = await conn.fetch(
                 "SELECT * FROM wa_user_profiles "
-                "WHERE jid ILIKE $1 OR push_name ILIKE $1 OR display_name ILIKE $1 "
+                "WHERE jid ILIKE $1 ESCAPE '\\' OR push_name ILIKE $1 ESCAPE '\\' "
+                "OR display_name ILIKE $1 ESCAPE '\\' "
                 "ORDER BY last_seen DESC NULLS LAST LIMIT $2",
-                f"%{search}%", limit,
+                f"%{esc}%", limit,
             )
         else:
             rows = await conn.fetch(
@@ -457,7 +520,9 @@ async def list_wa_users(search: str | None = None, limit: int = 50):
 
 
 @app.get("/whatsapp/users/{jid}/history")
-async def wa_user_history(jid: str, limit: int = 100):
+async def wa_user_history(jid: str, limit: int = 100,
+                           _user: dict = Depends(require_role("viewer"))):
+    limit = max(1, min(limit, 1000))
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -470,7 +535,10 @@ async def wa_user_history(jid: str, limit: int = 100):
 # ── WhatsApp: Links ──
 
 @app.get("/whatsapp/links")
-async def list_wa_links(link_type: str | None = None, status: str | None = None, limit: int = 100):
+async def list_wa_links(link_type: str | None = None, status: str | None = None,
+                        limit: int = 100,
+                        _user: dict = Depends(require_role("viewer"))):
+    limit = max(1, min(limit, 1000))
     pool = await get_pool()
     conditions = []
     params = []
@@ -494,7 +562,7 @@ async def list_wa_links(link_type: str | None = None, status: str | None = None,
 
 
 @app.get("/whatsapp/links/stats")
-async def wa_link_stats():
+async def wa_link_stats(_user: dict = Depends(require_role("viewer"))):
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -505,13 +573,13 @@ async def wa_link_stats():
 
 
 @app.get("/worker/health")
-async def worker_health():
+async def worker_health(_user: dict = Depends(require_role("viewer"))):
     from src.worker import get_worker_health
     return get_worker_health()
 
 
 @app.get("/schedules")
-async def list_schedules():
+async def list_schedules(_user: dict = Depends(require_role("viewer"))):
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -521,7 +589,7 @@ async def list_schedules():
 
 
 @app.post("/schedules")
-async def create_schedule(req: ScheduleRequest):
+async def create_schedule(req: ScheduleRequest, _user: dict = Depends(require_role("operator"))):
     from datetime import datetime, timedelta, timezone
     pool = await get_pool()
     now = datetime.now(timezone.utc)
@@ -538,7 +606,7 @@ async def create_schedule(req: ScheduleRequest):
 
 
 @app.delete("/schedules/{source}")
-async def delete_schedule(source: str):
+async def delete_schedule(source: str, _user: dict = Depends(require_role("admin"))):
     pool = await get_pool()
     async with pool.acquire() as conn:
         result = await conn.execute(
@@ -550,7 +618,8 @@ async def delete_schedule(source: str):
 
 
 @app.get("/targets")
-async def list_targets(source: str | None = None):
+async def list_targets(source: str | None = None,
+                        _user: dict = Depends(require_role("viewer"))):
     pool = await get_pool()
     async with pool.acquire() as conn:
         if source:
@@ -566,7 +635,9 @@ async def list_targets(source: str | None = None):
 
 
 @app.get("/runs")
-async def list_runs(source: str | None = None, limit: int = 20):
+async def list_runs(source: str | None = None, limit: int = 20,
+                     _user: dict = Depends(require_role("viewer"))):
+    limit = max(1, min(limit, 500))
     pool = await get_pool()
     async with pool.acquire() as conn:
         if source:
@@ -591,9 +662,17 @@ async def ws_health(ws):
 if DIST_DIR.is_dir():
     app.mount("/assets", StaticFiles(directory=str(DIST_DIR / "assets")), name="assets")
 
+    _DIST_ROOT = DIST_DIR.resolve()
+
     @app.get("/{path:path}")
     async def spa_fallback(path: str):
-        file = DIST_DIR / path
-        if file.is_file():
-            return FileResponse(str(file))
+        # Resolve the requested file under DIST_DIR and refuse anything
+        # that escapes the SPA root via traversal.
+        try:
+            candidate = (DIST_DIR / path).resolve()
+            candidate.relative_to(_DIST_ROOT)
+        except (ValueError, OSError):
+            return FileResponse(str(DIST_DIR / "index.html"))
+        if candidate.is_file():
+            return FileResponse(str(candidate))
         return FileResponse(str(DIST_DIR / "index.html"))

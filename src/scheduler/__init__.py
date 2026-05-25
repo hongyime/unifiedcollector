@@ -55,32 +55,37 @@ class Scheduler:
     async def _tick(self):
         now = datetime.now(timezone.utc)
         async with self.pool.acquire() as conn:
-            due = await conn.fetch(
-                "SELECT id, source, interval_hours FROM collection_schedules "
-                "WHERE enabled = true AND (next_run IS NULL OR next_run <= $1)",
-                now,
-            )
-            for row in due:
-                source = row["source"]
-                interval = row["interval_hours"]
-                logger.info("Schedule triggered for %s", source)
+            # Serialize multiple scheduler instances per source via advisory lock.
+            # We claim each due row in its own transaction with FOR UPDATE SKIP LOCKED
+            # so a second scheduler running in parallel just skips the row.
+            async with conn.transaction():
+                due = await conn.fetch(
+                    "SELECT id, source, interval_hours FROM collection_schedules "
+                    "WHERE enabled = true AND (next_run IS NULL OR next_run <= $1) "
+                    "FOR UPDATE SKIP LOCKED",
+                    now,
+                )
+                for row in due:
+                    source = row["source"]
+                    interval = row["interval_hours"]
+                    logger.info("Schedule triggered for %s", source)
 
-                await conn.execute(
-                    "INSERT INTO collection_runs (source, status) VALUES ($1, 'queued')",
-                    source,
-                )
-                await conn.execute(
-                    "UPDATE collection_targets SET status = 'pending' "
-                    "WHERE source = $1 AND status IN ('completed', 'error')",
-                    source,
-                )
-                next_run = now + timedelta(hours=interval)
-                await conn.execute(
-                    "UPDATE collection_schedules "
-                    "SET last_run = $1, next_run = $2 WHERE id = $3",
-                    now, next_run, row["id"],
-                )
-                logger.info("Next run for %s at %s", source, next_run.isoformat())
+                    await conn.execute(
+                        "INSERT INTO collection_runs (source, status) VALUES ($1, 'queued')",
+                        source,
+                    )
+                    await conn.execute(
+                        "UPDATE collection_targets SET status = 'pending' "
+                        "WHERE source = $1 AND status IN ('completed', 'error')",
+                        source,
+                    )
+                    next_run = now + timedelta(hours=interval)
+                    await conn.execute(
+                        "UPDATE collection_schedules "
+                        "SET last_run = $1, next_run = $2 WHERE id = $3",
+                        now, next_run, row["id"],
+                    )
+                    logger.info("Next run for %s at %s", source, next_run.isoformat())
 
     async def add_schedule(self, source: str, interval_hours: int = 24):
         if self.pool is None:

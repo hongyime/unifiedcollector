@@ -139,6 +139,10 @@ class WorkerService:
                 )
             return [r["target_id"] for r in rows]
         except Exception:
+            # Don't pretend "no targets" — that hides real DB outages.
+            # Log with stack and return empty so the run loop sleeps and
+            # retries, but operators can see the failure.
+            logger.exception("Failed to load targets for source=%s", source)
             return []
 
     async def _watchdog_loop(self):
@@ -191,8 +195,10 @@ class WorkerService:
                     "SET last_processed_at = NOW(), status = $1",
                     status,
                 )
-        except Exception as e:
-            logger.debug("Health report failed: %s", e)
+        except Exception:
+            # Operators won't see worker liveness if this fails silently.
+            # Use warning + stack so degraded health is observable.
+            logger.warning("Health report failed", exc_info=True)
 
     def get_health(self) -> dict:
         active = sum(1 for t in self._tasks.values() if not t.done())

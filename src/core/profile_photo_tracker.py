@@ -1,5 +1,6 @@
 import hashlib
 import logging
+from collections import OrderedDict
 from pathlib import Path
 
 import aiohttp
@@ -7,10 +8,36 @@ import aiohttp
 logger = logging.getLogger(__name__)
 
 HAMMING_THRESHOLD = 10
+_CACHE_MAX_ENTRIES = 4096  # bounded LRU; ~512 KB at 128 bytes/entry
 
 
 def _hamming_distance(hash1, hash2) -> int:
     return hash1 - hash2
+
+
+class _LRU(OrderedDict):
+    """Tiny size-bounded LRU. Evicts the least recently used on overflow."""
+
+    def __init__(self, maxsize: int):
+        super().__init__()
+        self._maxsize = maxsize
+
+    def __getitem__(self, key):
+        value = super().__getitem__(key)
+        self.move_to_end(key)
+        return value
+
+    def get(self, key, default=None):  # type: ignore[override]
+        if key in self:
+            return self.__getitem__(key)
+        return default
+
+    def __setitem__(self, key, value):
+        if key in self:
+            self.move_to_end(key)
+        super().__setitem__(key, value)
+        while len(self) > self._maxsize:
+            self.popitem(last=False)
 
 
 class ProfilePhotoTracker:
@@ -27,8 +54,10 @@ class ProfilePhotoTracker:
     def __init__(self, pool=None, blob_max_size_mb: int = 5000):
         self.pool = pool
         self.blob_max_size_mb = blob_max_size_mb
-        self._url_cache: dict[str, str] = {}
-        self._hash_cache: dict[str, str] = {}
+        # Bounded caches — unbounded growth was a slow leak in long-running
+        # workers tracking many entities.
+        self._url_cache: _LRU = _LRU(_CACHE_MAX_ENTRIES)
+        self._hash_cache: _LRU = _LRU(_CACHE_MAX_ENTRIES)
 
     def set_pool(self, pool):
         self.pool = pool
@@ -125,20 +154,38 @@ class ProfilePhotoTracker:
 
     def _save(self, data: bytes, entity_id: str, source: str, save_dir: Path) -> Path:
         save_dir.mkdir(parents=True, exist_ok=True)
-        md5 = hashlib.md5(data).hexdigest()[:12]
+        # SHA-256 of content prevents collisions and is non-cryptographic-use safe.
+        digest = hashlib.sha256(data).hexdigest()[:16]
         ext = "jpg"
         if data[:4] == b"\x89PNG":
             ext = "png"
         elif data[:4] == b"RIFF":
             ext = "webp"
-        path = save_dir / f"{source}_{entity_id}_profile_{md5}.{ext}"
-        path.write_bytes(data)
+        path = save_dir / f"{source}_{entity_id}_profile_{digest}.{ext}"
+        # Atomic write: tempfile + fsync + rename.
+        import os as _os
+        import tempfile as _tempfile
+        fd, tmp = _tempfile.mkstemp(dir=save_dir, suffix=".tmp")
+        try:
+            with _os.fdopen(fd, "wb") as f:
+                f.write(data)
+                f.flush()
+                _os.fsync(f.fileno())
+            _os.replace(tmp, path)
+        except BaseException:
+            try:
+                _os.remove(tmp)
+            except OSError:
+                pass
+            raise
         return path
 
     async def _store_metadata(self, source: str, entity_id: str, url: str, phash: str | None):
         if not self.pool:
             return
         try:
+            import json as _json
+            payload = _json.dumps({"url": url, "phash": phash or ""})
             async with self.pool.acquire() as conn:
                 await conn.execute(
                     """
@@ -151,7 +198,7 @@ class ProfilePhotoTracker:
                     WHERE source = $2 AND entity_id = $3
                       AND content_type = 'profile_photo'
                     """,
-                    f'{{"url":"{url}","phash":"{phash or ""}"}}',
+                    payload,
                     source,
                     entity_id,
                 )

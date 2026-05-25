@@ -86,7 +86,7 @@ class BaseCollector(ABC):
         count = 0
         for f in self.media_dir.iterdir():
             if f.is_file() and not f.name.endswith(".tmp"):
-                parsed = parse_filename(f.name)
+                parsed = parse_filename(f.name, source_name=self.SOURCE_NAME)
                 if parsed and parsed["source"] == self.SOURCE_NAME:
                     self._known_ids.add(parsed["content_id"])
                     count += 1
@@ -140,7 +140,7 @@ class BaseCollector(ABC):
                 if "raw" in metadata:
                     self.save_json(metadata["raw"], f"{stem}_raw.json")
 
-            parsed = parse_filename(filename)
+            parsed = parse_filename(filename, source_name=self.SOURCE_NAME)
             if parsed:
                 self._known_ids.add(parsed["content_id"])
             logger.debug("Saved %s", dest)
@@ -174,6 +174,10 @@ class BaseCollector(ABC):
                                 metadata: dict | None = None) -> bool:
         """Insert into media_items. Returns False on duplicate (same source+content_id)."""
         try:
+            import asyncpg
+        except ImportError:
+            asyncpg = None  # type: ignore
+        try:
             async with self.pool.acquire() as conn:
                 await conn.execute(
                     """
@@ -189,7 +193,9 @@ class BaseCollector(ABC):
                 )
             return True
         except Exception as e:
-            if "unique" in str(e).lower() or "duplicate" in str(e).lower():
+            # Use the typed exception when available so we don't accidentally
+            # swallow unrelated errors that happen to mention "unique" in their text.
+            if asyncpg is not None and isinstance(e, getattr(asyncpg, "UniqueViolationError", ())):
                 logger.debug("Duplicate skipped: %s/%s", self.SOURCE_NAME, content_id)
                 return False
             raise

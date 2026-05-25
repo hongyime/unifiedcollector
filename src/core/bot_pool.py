@@ -145,14 +145,13 @@ class BotPool:
     def _detect_clock_drift(self):
         try:
             import socket
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(2)
-            start = time.monotonic()
-            sock.connect(("8.8.8.8", 53))
-            rtt = time.monotonic() - start
-            sock.close()
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.settimeout(2)
+                start = time.monotonic()
+                sock.connect(("8.8.8.8", 53))
+                rtt = time.monotonic() - start
             if rtt > 3.0:
-                logger.warning("Possible clock drift detected (RTT=%.1fs) — common in WSL2/Docker", rtt)
+                logger.warning("High RTT detected (%.1fs) — could indicate WSL2/Docker clock drift", rtt)
         except Exception:
             pass
 

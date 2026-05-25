@@ -103,9 +103,19 @@ class HubNotifier:
         if immediate:
             last = self._last_sent.get(cat, 0)
             if now - last >= self._min_interval:
-                asyncio.create_task(self._send(f"[{cat.upper()}] {message}"))
-                self._last_sent[cat] = now
-                return
+                # Schedule on the running loop. If called from a non-loop
+                # thread (sync code path), fall through to the queued path
+                # rather than silently dropping the message.
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(self._send(f"[{cat.upper()}] {message}"))
+                    self._last_sent[cat] = now
+                    return
+                except RuntimeError:
+                    # No running loop — queue it so the flusher picks it up
+                    # next tick. ERROR notifications will still bypass rate
+                    # limit at flush time (see _flush_all).
+                    pass
 
         self._queue[cat].append(message)
         self._stats["messages_batched"] += 1
@@ -128,8 +138,12 @@ class HubNotifier:
             if not messages:
                 continue
 
+            # ERROR notifications bypass the per-category min_interval gate.
+            # They're inherently rare-but-important; rate-limit applies
+            # at the Telegram-API level, not here.
+            is_error = (cat == NotifyCategory.ERROR.value)
             last = self._last_sent.get(cat, 0)
-            if now - last < self._min_interval:
+            if not is_error and now - last < self._min_interval:
                 continue
 
             if len(messages) == 1:

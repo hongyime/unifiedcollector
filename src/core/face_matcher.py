@@ -1,4 +1,5 @@
 import logging
+import re
 import uuid
 from dataclasses import dataclass
 
@@ -48,30 +49,20 @@ class FaceMatcher:
             return MatchResult(identity_id=new_id, is_new=True, distance=0.0)
 
     async def _update_centroid(self, conn, identity_id: str, new_embedding: list[float]):
-        row = await conn.fetchrow(
-            "SELECT centroid, occurrence_count FROM wa_face_identities WHERE id = $1",
-            identity_id,
-        )
-        if not row or row["centroid"] is None:
-            return
-
-        count = row["occurrence_count"]
-        old_centroid = list(row["centroid"])
-        new_centroid = [
-            (old * count + new) / (count + 1)
-            for old, new in zip(old_centroid, new_embedding)
-        ]
-        centroid_str = "[" + ",".join(f"{v:.6f}" for v in new_centroid) + "]"
-
+        # Single-statement update so we can't lose updates between concurrent matches.
+        # We compute the new centroid in SQL using the current row's count + centroid.
+        new_str = "[" + ",".join(f"{v:.6f}" for v in new_embedding) + "]"
         await conn.execute(
             """
             UPDATE wa_face_identities
-            SET centroid = $1::vector,
+            SET centroid = (
+                (centroid * occurrence_count + $1::vector) / (occurrence_count + 1)
+            ),
                 occurrence_count = occurrence_count + 1,
                 last_seen = NOW()
-            WHERE id = $2
+            WHERE id = $2 AND centroid IS NOT NULL
             """,
-            centroid_str, identity_id,
+            new_str, identity_id,
         )
 
     async def store_embedding(self, pool, identity_id: str, embedding: list[float],
@@ -94,6 +85,10 @@ class FaceMatcher:
             )
 
     async def merge_identities(self, pool, source_id: str, target_id: str):
+        if source_id == target_id:
+            logger.warning("merge_identities: source == target (%s) — refusing self-merge",
+                           source_id)
+            return
         async with pool.acquire() as conn:
             async with conn.transaction():
                 await conn.execute(
@@ -116,7 +111,17 @@ class FaceMatcher:
 
         logger.info("Merged identity %s into %s", source_id, target_id)
 
+    _LABEL_RE = re.compile(r"^[A-Za-z0-9 _.\-]{1,80}$")
+
     async def rename_identity(self, pool, identity_id: str, label: str):
+        # Validate label to prevent stored garbage / control chars / oversize.
+        if not isinstance(label, str):
+            raise ValueError("label must be a string")
+        label = label.strip()
+        if not self._LABEL_RE.match(label):
+            raise ValueError(
+                "label must be 1-80 chars of [A-Za-z0-9 _.-] only"
+            )
         async with pool.acquire() as conn:
             await conn.execute(
                 "UPDATE wa_face_identities SET label = $1 WHERE id = $2",

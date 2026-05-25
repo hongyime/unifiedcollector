@@ -356,6 +356,8 @@ class TiktokCollector(BaseCollector):
                 cmd = ["gallery-dl", "--dest", tmpdir, "--no-mtime", "--write-metadata", "-v"]
                 if self._cookies_file:
                     cmd.extend(["--cookies", self._cookies_file])
+                # `--` ensures a profile_url that begins with `--` is treated as a positional.
+                cmd.append("--")
                 cmd.append(profile_url)
 
                 loop = asyncio.get_event_loop()
