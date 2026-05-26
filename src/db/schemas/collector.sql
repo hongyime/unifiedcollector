@@ -43,7 +43,24 @@ CREATE TABLE IF NOT EXISTS dead_letter_queue (
     created_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
+-- Wave 2.5: non-destructive columns for retry scheduling.
+-- ADD COLUMN IF NOT EXISTS is idempotent on every restart.
+ALTER TABLE dead_letter_queue
+    ADD COLUMN IF NOT EXISTS next_retry_at  TIMESTAMPTZ NOT NULL DEFAULT NOW();
+ALTER TABLE dead_letter_queue
+    ADD COLUMN IF NOT EXISTS last_attempt_at TIMESTAMPTZ;
+ALTER TABLE dead_letter_queue
+    ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'pending';
+    -- status: 'pending' | 'in_progress' | 'failed' | 'succeeded'
+    -- Rows in 'succeeded' are typically deleted; kept here as escape
+    -- hatch when a handler wants to keep the audit trail.
+
 CREATE INDEX IF NOT EXISTS idx_dlq_source ON dead_letter_queue(source, created_at);
+CREATE INDEX IF NOT EXISTS idx_dlq_due
+    ON dead_letter_queue(next_retry_at)
+    WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_dlq_status
+    ON dead_letter_queue(status, source);
 
 CREATE TABLE IF NOT EXISTS collection_targets (
     id SERIAL PRIMARY KEY,
