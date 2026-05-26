@@ -44,6 +44,10 @@ class Account:
     success_count: int = 0
     total_requests: int = 0
     quota: _Quota = field(default_factory=_Quota)
+    # Wave 2.2: classified-error tracking. Last error kind seen, plus
+    # the reason on the current cooldown (for ops/telemetry).
+    last_error_kind: str = ""
+    cooldown_reason: str = ""
 
     @property
     def health_score(self) -> float:
@@ -211,6 +215,127 @@ class AccountPool:
             if acct:
                 acct.locked_until = time.monotonic() + (seconds or self.default_cooldown)
 
+    # -- Wave 2.2: classified-error handling ------------------------------
+    #
+    # The legacy record_error() treats every error the same — increment
+    # counter, lock if threshold reached. Real upstreams (Telegram, gallery-
+    # dl, Instagram) surface DIFFERENT error categories that warrant
+    # different cooldown profiles:
+    #
+    #   rate_limit / 429:    short cooldown (~retry_after, default 1 min)
+    #   flood_wait:          long pin-cooldown for the EXACT seconds the
+    #                        upstream told us. Telethon FloodWaitError
+    #                        carries this; Instagram private API does too.
+    #   auth / 401 / 403:    long cooldown + don't auto-retry. Session
+    #                        is dead until manual intervention.
+    #   network:             short cooldown; assume transient.
+    #   server / 500-503:    medium cooldown; transient backend issue.
+    #   unknown:             default cooldown.
+    #
+    # We keep the simple ``record_error`` for callers that don't have
+    # classification context.
+
+    _ERROR_COOLDOWN_PROFILES: dict[str, float] = {  # type: ignore[var-annotated]
+        # mapping is read inside record_error_classified; sentinel for
+        # type-checkers, the actual values come from the instance.
+    }
+
+    def record_flood_wait(self, name: str, seconds: float, reason: str = "flood-wait"):
+        """Pin ``name`` out of rotation for EXACTLY ``seconds`` seconds.
+
+        Use when the upstream tells us "wait N seconds before retrying"
+        (Telegram FloodWaitError.seconds, HTTP 429 Retry-After, etc).
+        Updates ``cooldown_reason`` for telemetry.
+        """
+        if seconds <= 0:
+            return
+        with self._lock:
+            acct = self._find(name)
+            if acct is None:
+                return
+            until = time.monotonic() + seconds
+            # If we already had a longer pin, keep the longer one.
+            if until > acct.locked_until:
+                acct.locked_until = until
+                acct.cooldown_reason = reason
+                logger.warning(
+                    "AccountPool: %s flood-waited for %.0fs (reason=%s)",
+                    name, seconds, reason,
+                )
+
+    def record_error_classified(
+        self,
+        name: str,
+        kind: str,
+        retry_after: float | None = None,
+    ):
+        """Record an error WITH classification.
+
+        Args:
+            name: account name
+            kind: one of 'rate_limit', 'flood_wait', 'auth', 'network',
+                  'server', 'unknown'. Anything else is treated as 'unknown'.
+            retry_after: server-supplied retry hint in seconds. For
+                  flood_wait this is REQUIRED (we don't fabricate a
+                  duration). For others it's optional and overrides the
+                  per-kind default cooldown.
+        """
+        # Per-kind cooldown profile. Tuned to be conservative.
+        kind_profiles: dict[str, float] = {
+            "rate_limit": 60.0,
+            "flood_wait": -1.0,  # marker: must come from retry_after
+            "auth": 3600.0,      # 1h — session likely dead
+            "network": 30.0,     # transient
+            "server": 300.0,     # 5m — backend hiccup
+            "unknown": self.error_cooldown,
+        }
+        kind = kind if kind in kind_profiles else "unknown"
+
+        with self._lock:
+            acct = self._find(name)
+            if acct is None:
+                return
+            acct.error_count += 1
+            acct.last_error_kind = kind
+
+            if kind == "flood_wait":
+                if retry_after is None or retry_after <= 0:
+                    logger.warning(
+                        "AccountPool: %s record_error_classified(flood_wait) "
+                        "without retry_after — falling back to error_cooldown",
+                        name,
+                    )
+                    cd = self.error_cooldown
+                else:
+                    cd = retry_after
+            else:
+                cd = retry_after if retry_after and retry_after > 0 else kind_profiles[kind]
+
+            until = time.monotonic() + cd
+            if until > acct.locked_until:
+                acct.locked_until = until
+                acct.cooldown_reason = kind
+
+            # Auth errors are sticky: max out error_count so this account
+            # is treated as unhealthy until manually cleared.
+            if kind == "auth":
+                acct.error_count = max(acct.error_count, self.max_consecutive_errors)
+
+            logger.info(
+                "AccountPool: %s error_classified kind=%s cooldown=%.0fs "
+                "(retry_after=%s, error_count=%d)",
+                name, kind, cd, retry_after, acct.error_count,
+            )
+
+    def is_available(self, name: str) -> bool:
+        """Convenience: True if account exists, healthy, and not locked.
+
+        Equivalent to ``_find(name).is_healthy`` but null-safe.
+        """
+        with self._lock:
+            acct = self._find(name)
+            return acct is not None and acct.is_healthy
+
     def get_recommendation(self, exclude_name: str) -> Account | None:
         return self.get_next(exclude=exclude_name)
 
@@ -224,6 +349,8 @@ class AccountPool:
                     "health_score": round(a.health_score, 2),
                     "total_requests": a.total_requests,
                     "error_count": a.error_count,
+                    "last_error_kind": a.last_error_kind,
+                    "cooldown_reason": a.cooldown_reason if a.is_locked else "",
                 }
                 for a in self._accounts
             ]
