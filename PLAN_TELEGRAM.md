@@ -61,7 +61,7 @@ Connect 4+ Telegram user accounts (login via dashboard OR via 3 bots: `bryanseah
 - [x] **2.3** Forward-driven channel/user discovery: when forward source is a chat, enqueue chat as spider seed; when forward source is a user, enqueue user.
 - [x] **2.4** Auto-backfill on new account: at startup `_load_accounts()` compares known account names vs DB-tracked-accounts → for any new name, after worker connects, call `collect_dialogs()` then enqueue every chat for full `backfill_chat`.
 - [x] **2.5** Periodic monitor cron: scheduler tick every 15min runs incremental `backfill_chat(min_id=last_seen_message_id)` for every known chat. Realtime listener handles new chats not yet known. (Note: scheduler uses 1h interval by default; 15min requires changing `collection_schedules.interval_hours` column to support fractions.)
-- [ ] **2.6** Tests + smoke + commit.
+- [x] **2.6** Tests + smoke + commit.
 
 ## RUN + MONITOR (between Phase 2 and Phase 3)
 
