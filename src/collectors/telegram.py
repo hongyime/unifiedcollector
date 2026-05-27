@@ -285,8 +285,25 @@ class TelegramCollector(BaseCollector):
         self._realtime_running = False
         self._hub_group_id: int | None = None
 
+        # User change tracker — wires telegram_user_changes writes into _upsert_user_full.
+        # Lazy: created on first DB-bound call (since pool is set up by BaseCollector at startup).
+        self._user_change_tracker: UserChangeTracker | None = None
+
+        # Reaction-list per-message cap (Q2 decision: per-emoji per-message).
+        self._reaction_user_cap = int(os.getenv("TELEGRAM_REACTION_USER_CAP", "500"))
+
+        # Discussion-group dwell range — random jitter to look human (Q3 always-leave).
+        self._discussion_dwell_min = int(os.getenv("TELEGRAM_DISCUSSION_DWELL_MIN", "60"))
+        self._discussion_dwell_max = int(os.getenv("TELEGRAM_DISCUSSION_DWELL_MAX", "180"))
+
     def _load_accounts(self):
         self.account_pool.load_from_env("TELEGRAM", ["NAME", "API_ID", "API_HASH", "SESSION", "PHONE"])
+
+    def set_pool(self, pool):
+        """Override BaseCollector.set_pool to also wire UserChangeTracker."""
+        super().set_pool(pool)
+        # Tracker is generic — needs the asyncpg pool to write to telegram_user_changes.
+        self._user_change_tracker = UserChangeTracker(pool)
 
     @property
     def account_media_dir(self) -> Path:
@@ -496,6 +513,14 @@ class TelegramCollector(BaseCollector):
 
             await self._upsert_message(message, chat_id, sender_uuid)
 
+            # Forward extraction → spider queue (item 1.10).
+            # When a message is forwarded from another chat or user, that source
+            # is a discovery edge: we want to enqueue it for spidering.
+            try:
+                await self._enqueue_forward_edges(message, parent_chat_platform_id=chat_id)
+            except Exception as exc:
+                logger.debug("_enqueue_forward_edges failed: %s", exc)
+
             if message.media:
                 if isinstance(message.media, MessageMediaPhoto):
                     await self._handle_photo(worker, message, chat_id, chat_name)
@@ -517,23 +542,83 @@ class TelegramCollector(BaseCollector):
                 worker.worker_id, worker.account.name, chat_name, count,
             )
 
+        # Per-chat membership snapshot (item 1.9) — only meaningful for groups
+        # where we have visibility. Channels with broadcast=True don't expose
+        # iter_participants for non-admins; the call will return 0 silently.
+        if getattr(entity, "megagroup", False) or not getattr(entity, "broadcast", False):
+            try:
+                await self.collect_chat_members(entity.id, worker=worker)
+            except Exception as exc:
+                logger.debug(
+                    "collect_chat_members deferred-call failed for chat=%s: %s",
+                    chat_id, exc,
+                )
+
     async def _upsert_chat(self, entity):
         async with self.pool.acquire() as conn:
             await conn.execute("""
-                INSERT INTO telegram_chats (platform_chat_id, title, username, type, description, updated_at)
-                VALUES ($1, $2, $3, $4, $5, NOW())
+                INSERT INTO telegram_chats (platform_chat_id, title, username, type, description, members_count, updated_at)
+                VALUES ($1, $2, $3, $4, $5, $6, NOW())
                 ON CONFLICT (platform_chat_id) DO UPDATE SET
                     title = EXCLUDED.title,
                     username = EXCLUDED.username,
                     type = EXCLUDED.type,
                     description = EXCLUDED.description,
+                    members_count = COALESCE(EXCLUDED.members_count, telegram_chats.members_count),
                     updated_at = NOW()
             """,
             str(entity.id),
             getattr(entity, 'title', None),
             getattr(entity, 'username', None),
             'channel' if getattr(entity, 'broadcast', False) else 'group',
-            getattr(entity, 'about', None)
+            getattr(entity, 'about', None),
+            getattr(entity, 'participants_count', None)
+            )
+
+    async def _enqueue_forward_edges(self, message, parent_chat_platform_id: str) -> None:
+        """If a message is a forward, enqueue its source as a spider seed.
+
+        Telethon exposes the forward source via ``message.fwd_from`` (raw API).
+        We extract:
+          - ``from_id``: a Peer object for the original sender (User/Channel/Chat)
+          - ``channel_post``: present when forwarded from a channel post
+
+        For each source we enqueue ONE row into ``telegram_spider_queue``:
+          - source = 'forward'
+          - priority = 6 (forward signals are weak compared to direct seeds)
+          - title = best-effort label (we do not fetch the entity here — that
+            costs an API roundtrip; the spider worker resolves later)
+
+        Idempotent: ON CONFLICT DO NOTHING via the unique platform_chat_id index.
+        """
+        fwd = getattr(message, "fwd_from", None)
+        if fwd is None:
+            return
+
+        # Resolve the forward source to a platform chat/user ID string.
+        from_id = getattr(fwd, "from_id", None)
+        source_platform_id: str | None = None
+        if from_id is not None:
+            # PeerChannel / PeerChat / PeerUser carry channel_id / chat_id / user_id.
+            for attr in ("channel_id", "chat_id", "user_id"):
+                v = getattr(from_id, attr, None)
+                if v is not None:
+                    source_platform_id = str(v)
+                    break
+
+        # Don't enqueue self-forwards or empty sources.
+        if not source_platform_id or source_platform_id == parent_chat_platform_id:
+            return
+
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO telegram_spider_queue
+                    (platform_chat_id, source, priority, status, collected_at)
+                VALUES ($1, 'forward', 6, 'pending', NOW())
+                ON CONFLICT (platform_chat_id) DO NOTHING
+                """,
+                source_platform_id,
             )
 
     async def _upsert_sender(self, worker: "TelegramWorker", platform_user_id) -> str | None:
@@ -569,16 +654,161 @@ class TelegramCollector(BaseCollector):
             # Namespace message ID by chat to avoid global unique-constraint collisions
             # (different Telegram chats reuse low message IDs starting from 1).
             platform_msg_id = f"{chat_id}:{message.id}"
-            await conn.execute("""
+            row = await conn.fetchrow("""
                 INSERT INTO telegram_messages (
                     platform_message_id, chat_id, sender_id, text, caption,
                     media_type, platform_created_at, metadata
                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                 ON CONFLICT (platform_message_id) DO NOTHING
+                RETURNING id
             """,
             platform_msg_id, chat_uuid, sender_uuid, message.message, getattr(message, 'caption', None),
             media_type, message.date, json.dumps(message.to_dict(), default=_tg_json)
             )
+
+            # Capture reaction counts at backfill time (item 1.11 — historical
+            # messages already carry reactions in message.reactions).
+            if row is not None:
+                await self._capture_message_reaction_counts(conn, row["id"], message)
+                # Capture poll state if this message is a poll (item 1.12).
+                await self._capture_poll(conn, row["id"], message)
+
+    async def _capture_message_reaction_counts(self, conn, message_uuid, message) -> None:
+        """Extract message.reactions.results → write telegram_reaction_counts.
+
+        Used by both backfill (synchronous via _upsert_message) and Phase 2.2
+        reactor enumeration. Safe to call when message.reactions is None.
+        """
+        try:
+            reactions = getattr(message, "reactions", None)
+            if reactions is None:
+                return
+            from telethon.tl.types import ReactionEmoji, ReactionCustomEmoji
+
+            counts: dict[str, int] = {}
+            total = 0
+            for rc in (getattr(reactions, "results", None) or []):
+                emoji_obj = getattr(rc, "reaction", None)
+                count = int(getattr(rc, "count", 0) or 0)
+                if count <= 0:
+                    continue
+                if isinstance(emoji_obj, ReactionEmoji):
+                    key = emoji_obj.emoticon
+                elif isinstance(emoji_obj, ReactionCustomEmoji):
+                    key = f"custom:{emoji_obj.document_id}"
+                else:
+                    key = str(emoji_obj)
+                counts[key] = count
+                total += count
+
+            if not counts:
+                return
+
+            await conn.execute(
+                """
+                INSERT INTO telegram_reaction_counts
+                    (message_id, counts, total_reactions, refreshed_at)
+                VALUES ($1, $2::jsonb, $3, NOW())
+                ON CONFLICT (message_id) DO UPDATE SET
+                    counts = EXCLUDED.counts,
+                    total_reactions = EXCLUDED.total_reactions,
+                    refreshed_at = NOW()
+                """,
+                message_uuid,
+                _tg_json(counts),
+                total,
+            )
+        except Exception as exc:
+            logger.debug("_capture_message_reaction_counts failed: %s", exc)
+
+    async def _capture_poll(self, conn, message_uuid, message) -> None:
+        """Extract a Telegram poll into telegram_polls.
+
+        Telethon shape: ``message.poll`` is a ``MessageMediaPoll`` carrying
+        ``.poll`` (the question + options) and ``.results`` (vote counts).
+        Quiz polls carry ``correct_answers`` in results.
+
+        Telegram delivers poll *results* asynchronously after voting; full
+        tallies are fetched on demand via ``GetPollResultsRequest``. We do the
+        cheap read-from-message-payload here; the periodic monitor cron can
+        re-call this with a fetched fresh poll.
+        """
+        try:
+            poll_media = getattr(message, "poll", None)
+            if poll_media is None:
+                return
+            poll = getattr(poll_media, "poll", None)
+            results = getattr(poll_media, "results", None)
+            if poll is None:
+                return
+
+            poll_id = str(getattr(poll, "id", ""))
+            question_obj = getattr(poll, "question", None)
+            # Telethon may return question as a TextWithEntities-like object;
+            # extract .text or fall back to str().
+            question_text = (
+                getattr(question_obj, "text", None)
+                if question_obj is not None else None
+            ) or (str(question_obj) if question_obj is not None else None)
+
+            options = []
+            for ans in (getattr(poll, "answers", None) or []):
+                a_text_obj = getattr(ans, "text", None)
+                a_text = (
+                    getattr(a_text_obj, "text", None)
+                    if a_text_obj is not None else None
+                ) or (str(a_text_obj) if a_text_obj is not None else None)
+                a_data = getattr(ans, "option", None)
+                # bytes → hex str so JSON encoder doesn't choke
+                if isinstance(a_data, (bytes, bytearray)):
+                    a_data = a_data.hex()
+                options.append({"text": a_text, "data": a_data})
+
+            vote_counts = []
+            total_voters = 0
+            quiz_correct_idx = None
+            if results is not None:
+                total_voters = int(getattr(results, "total_voters", 0) or 0)
+                vote_results = getattr(results, "results", None) or []
+                for idx, rr in enumerate(vote_results):
+                    voters = int(getattr(rr, "voters", 0) or 0)
+                    correct = bool(getattr(rr, "correct", False))
+                    vote_counts.append({"option": idx, "voters": voters, "correct": correct})
+                    if correct:
+                        quiz_correct_idx = idx
+
+            await conn.execute(
+                """
+                INSERT INTO telegram_polls (
+                    message_id, poll_id, question, options,
+                    total_voters, vote_counts,
+                    is_closed, is_anonymous, allows_multiple, quiz_correct_idx, refreshed_at
+                ) VALUES ($1, $2, $3, $4::jsonb, $5, $6::jsonb, $7, $8, $9, $10, NOW())
+                ON CONFLICT (message_id) DO UPDATE SET
+                    poll_id = EXCLUDED.poll_id,
+                    question = EXCLUDED.question,
+                    options = EXCLUDED.options,
+                    total_voters = EXCLUDED.total_voters,
+                    vote_counts = EXCLUDED.vote_counts,
+                    is_closed = EXCLUDED.is_closed,
+                    is_anonymous = EXCLUDED.is_anonymous,
+                    allows_multiple = EXCLUDED.allows_multiple,
+                    quiz_correct_idx = EXCLUDED.quiz_correct_idx,
+                    refreshed_at = NOW()
+                """,
+                message_uuid,
+                poll_id,
+                question_text,
+                _tg_json(options),
+                total_voters,
+                _tg_json(vote_counts),
+                bool(getattr(poll, "closed", False)),
+                bool(getattr(poll, "public_voters", False)) is False,  # is_anonymous = NOT public_voters
+                bool(getattr(poll, "multiple_choice", False)),
+                quiz_correct_idx,
+            )
+        except Exception as exc:
+            logger.debug("_capture_poll failed: %s", exc)
 
     async def _collect_profile_photo(self, worker: "TelegramWorker", entity, chat_id: str, chat_name: str):
         cid = f"profile_{chat_id}"
@@ -787,6 +1017,24 @@ class TelegramCollector(BaseCollector):
                 lambda e, w=worker: self._on_user_update(w, e),
                 events.UserUpdate(),
             )
+            # Reactions — Telethon delivers these via Raw updates rather than a
+            # dedicated event class. We listen for both message-level reaction
+            # updates (humans on channels/groups) and bot-message reactions.
+            try:
+                from telethon.tl.types import (
+                    UpdateMessageReactions,
+                    UpdateBotMessageReactions,
+                )
+                client.add_event_handler(
+                    lambda e, w=worker: self._on_raw_reactions(w, e),
+                    events.Raw(types=[UpdateMessageReactions, UpdateBotMessageReactions]),
+                )
+            except Exception as exc:
+                # Older Telethon may not expose UpdateBotMessageReactions; degrade.
+                logger.warning(
+                    "Reaction event registration failed (older Telethon?): %s",
+                    exc,
+                )
             logger.info(
                 "[worker=%d account=%s] realtime handlers registered",
                 worker.worker_id, worker.account.name,
@@ -886,6 +1134,96 @@ class TelegramCollector(BaseCollector):
         except Exception as exc:
             logger.error("_on_user_update error: %s", exc, exc_info=True)
 
+    async def _on_raw_reactions(self, worker: "TelegramWorker", update):
+        """Handle UpdateMessageReactions / UpdateBotMessageReactions raw events.
+
+        Phase 1 scope: write/update the per-message reaction *counts* into
+        ``telegram_reaction_counts`` so dashboards can display engagement.
+        Per-user reactor enumeration (Phase 2.2) calls
+        ``GetMessageReactionsListRequest`` separately and writes
+        ``telegram_reactions`` rows.
+
+        Telethon raw payload shape:
+          UpdateMessageReactions(peer, msg_id, top_msg_id, reactions)
+          .reactions.results: list[ReactionCount]
+              .reaction: ReactionEmoji(emoticon=str) | ReactionCustomEmoji(...)
+              .count: int
+        """
+        try:
+            from telethon.tl.types import (
+                ReactionEmoji,
+                ReactionCustomEmoji,
+                MessageReactions,
+            )
+
+            peer = getattr(update, "peer", None)
+            msg_id = getattr(update, "msg_id", None)
+            reactions = getattr(update, "reactions", None)
+            if peer is None or msg_id is None or reactions is None:
+                return
+
+            # Resolve peer → platform_chat_id string.
+            chat_pid: str | None = None
+            for attr in ("channel_id", "chat_id", "user_id"):
+                v = getattr(peer, attr, None)
+                if v is not None:
+                    chat_pid = str(v)
+                    break
+            if chat_pid is None:
+                return
+
+            # Build emoji -> count dict from the results list.
+            counts: dict[str, int] = {}
+            total = 0
+            results = getattr(reactions, "results", None) or []
+            for rc in results:
+                emoji_obj = getattr(rc, "reaction", None)
+                count = int(getattr(rc, "count", 0) or 0)
+                if count <= 0:
+                    continue
+                if isinstance(emoji_obj, ReactionEmoji):
+                    key = emoji_obj.emoticon
+                elif isinstance(emoji_obj, ReactionCustomEmoji):
+                    key = f"custom:{emoji_obj.document_id}"
+                else:
+                    key = str(emoji_obj)
+                counts[key] = count
+                total += count
+
+            if not counts:
+                return
+
+            # Resolve message UUID via (chat_uuid, platform_message_id) lookup.
+            # platform_message_id is namespaced as "{chat_pid}:{msg_id}" by _upsert_message.
+            platform_message_id = f"{chat_pid}:{msg_id}"
+            async with self.pool.acquire() as conn:
+                msg_row = await conn.fetchrow(
+                    "SELECT id FROM telegram_messages WHERE platform_message_id = $1",
+                    platform_message_id,
+                )
+                if msg_row is None:
+                    # Reaction arrived before we ingested the message — skip;
+                    # the next backfill will refresh counts via this handler.
+                    return
+                msg_uuid = msg_row["id"]
+
+                await conn.execute(
+                    """
+                    INSERT INTO telegram_reaction_counts
+                        (message_id, counts, total_reactions, refreshed_at)
+                    VALUES ($1, $2::jsonb, $3, NOW())
+                    ON CONFLICT (message_id) DO UPDATE SET
+                        counts = EXCLUDED.counts,
+                        total_reactions = EXCLUDED.total_reactions,
+                        refreshed_at = NOW()
+                    """,
+                    msg_uuid,
+                    _tg_json(counts),
+                    total,
+                )
+        except Exception as exc:
+            logger.debug("_on_raw_reactions failed: %s", exc)
+
     async def _write_realtime_message(self, message, chat_id: int, is_edit: bool = False):
         """INSERT (or UPDATE-on-edit) the message into telegram_messages."""
         # Resolve UUIDs via the existing chat upsert chain. We don't have the
@@ -945,23 +1283,59 @@ class TelegramCollector(BaseCollector):
                 )
 
     async def _upsert_user_full(self, user):
-        """Upsert with full Telethon user attributes (bot/verified/premium/etc)."""
+        """Upsert with full Telethon user attributes (bot/verified/premium/etc).
+
+        Also detects field-level changes vs the previous DB row and writes them
+        to telegram_user_changes (UserChangeTracker). This is non-fatal — if
+        change-tracking fails, the upsert still proceeds.
+        """
         try:
+            new_row = {
+                "username": getattr(user, "username", None),
+                "first_name": getattr(user, "first_name", None),
+                "last_name": getattr(user, "last_name", None),
+                "phone": getattr(user, "phone", None),
+                "bio": getattr(user, "bio", None) or getattr(user, "about", None),
+            }
             async with self.pool.acquire() as conn:
+                # Read current row BEFORE upserting so diff is honest.
+                current = await conn.fetchrow(
+                    "SELECT username, first_name, last_name, phone, bio "
+                    "FROM telegram_users WHERE platform_user_id = $1",
+                    str(user.id),
+                )
+                # Detect-and-log changes (best effort — never break ingestion).
+                if self._user_change_tracker is not None and current is not None:
+                    try:
+                        await self._user_change_tracker.detect_and_log(
+                            table="telegram_user_changes",
+                            pk_col="user_id",
+                            pk_val=int(user.id),
+                            current_row=dict(current),
+                            new_row=new_row,
+                            fields=("username", "first_name", "last_name", "phone", "bio"),
+                        )
+                    except Exception as exc:
+                        logger.debug("user_change_tracker.detect_and_log failed: %s", exc)
+                # Upsert full row.
                 await conn.execute("""
                     INSERT INTO telegram_users (
-                        platform_user_id, username, first_name, last_name, updated_at
-                    ) VALUES ($1, $2, $3, $4, NOW())
+                        platform_user_id, username, first_name, last_name, phone, bio, updated_at
+                    ) VALUES ($1, $2, $3, $4, $5, $6, NOW())
                     ON CONFLICT (platform_user_id) DO UPDATE SET
-                        username = EXCLUDED.username,
-                        first_name = EXCLUDED.first_name,
-                        last_name = EXCLUDED.last_name,
+                        username = COALESCE(EXCLUDED.username, telegram_users.username),
+                        first_name = COALESCE(EXCLUDED.first_name, telegram_users.first_name),
+                        last_name = COALESCE(EXCLUDED.last_name, telegram_users.last_name),
+                        phone = COALESCE(EXCLUDED.phone, telegram_users.phone),
+                        bio = COALESCE(EXCLUDED.bio, telegram_users.bio),
                         updated_at = NOW()
                 """,
                 str(user.id),
-                getattr(user, "username", None),
-                getattr(user, "first_name", None),
-                getattr(user, "last_name", None),
+                new_row["username"],
+                new_row["first_name"],
+                new_row["last_name"],
+                new_row["phone"],
+                new_row["bio"],
                 )
         except Exception as exc:
             logger.debug("_upsert_user_full failed for %s: %s", getattr(user, "id", "?"), exc)
@@ -1223,6 +1597,10 @@ class TelegramCollector(BaseCollector):
         Per-memory PRD: refreshed daily at 03:00 SGT for common-chat-membership
         analytics. Sets refreshed_at = NOW() so stale rows can be pruned.
 
+        Schema (post-Phase-1): chat_id and user_id are UUIDs that FK back to
+        telegram_chats(id) and telegram_users(id). We resolve from the platform
+        bigint IDs to UUIDs by querying after _upsert_chat / _upsert_user_full.
+
         Returns the number of upserted member rows.
         """
         if worker is None:
@@ -1239,8 +1617,22 @@ class TelegramCollector(BaseCollector):
         except (ValueError, TypeError):
             entity = await client.get_entity(chat_id)
 
-        chat_id_int = int(getattr(entity, "id"))
+        chat_platform_id = str(getattr(entity, "id"))
         await self._upsert_chat(entity)
+
+        # Resolve chat UUID once.
+        async with self.pool.acquire() as conn:
+            chat_row = await conn.fetchrow(
+                "SELECT id FROM telegram_chats WHERE platform_chat_id = $1",
+                chat_platform_id,
+            )
+        if chat_row is None:
+            logger.error(
+                "collect_chat_members: chat %s not in DB after upsert — bailing",
+                chat_platform_id,
+            )
+            return 0
+        chat_uuid = chat_row["id"]
 
         seen: set[int] = set()
         upserted = 0
@@ -1258,6 +1650,16 @@ class TelegramCollector(BaseCollector):
                     await self._upsert_user_full(participant)
                 except Exception:
                     pass
+
+                # Resolve user UUID — _upsert_user_full just guaranteed the row exists.
+                async with self.pool.acquire() as conn:
+                    user_row = await conn.fetchrow(
+                        "SELECT id FROM telegram_users WHERE platform_user_id = $1",
+                        str(pid),
+                    )
+                if user_row is None:
+                    continue
+                user_uuid = user_row["id"]
 
                 # Determine role from participant.participant.* attributes.
                 role = "member"
@@ -1287,7 +1689,7 @@ class TelegramCollector(BaseCollector):
                             joined_at = COALESCE(EXCLUDED.joined_at, telegram_chat_members.joined_at),
                             last_seen_at = NOW(),
                             refreshed_at = NOW()
-                    """, chat_id_int, int(pid), role, joined_at)
+                    """, chat_uuid, user_uuid, role, joined_at)
                 upserted += 1
         except Exception as exc:
             if _is_flood_wait(exc):
@@ -1295,12 +1697,12 @@ class TelegramCollector(BaseCollector):
             else:
                 logger.error(
                     "collect_chat_members chat=%s failed: %s",
-                    chat_id_int, exc,
+                    chat_platform_id, exc,
                 )
 
         logger.info(
             "collect_chat_members: chat=%s upserted=%d",
-            chat_id_int, upserted,
+            chat_platform_id, upserted,
         )
         return upserted
 

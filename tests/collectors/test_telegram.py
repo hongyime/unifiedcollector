@@ -59,12 +59,35 @@ _FakeFloodWait.__name__ = "FloodWaitError"
 class _FakePool:
     """Minimal asyncpg-pool stand-in: pool.acquire() returns an async ctx
     manager whose __aenter__ yields a connection mock with execute/fetchrow.
+
+    Smart fetchrow: returns a fake row with an 'id' UUID for platform_chat_id /
+    platform_user_id / platform_message_id lookups (so the new UUID-resolution
+    code paths in collect_chat_members / capture_reactions / etc. work in
+    isolated tests). Tests that need fetchrow=None can overwrite ``conn.fetchrow``
+    after construction.
     """
 
     def __init__(self):
+        import uuid as _uuid
         self.conn = MagicMock()
         self.conn.execute = AsyncMock()
-        self.conn.fetchrow = AsyncMock(return_value=None)
+
+        async def _smart_fetchrow(sql, *args, **kwargs):
+            # Default behaviour: return a fake-id row for the common lookup
+            # patterns the collector uses post-Phase-1.
+            sql_lc = sql.lower() if isinstance(sql, str) else ""
+            if (
+                "from telegram_chats where platform_chat_id" in sql_lc
+                or "from telegram_users where platform_user_id" in sql_lc
+                or "from telegram_messages where platform_message_id" in sql_lc
+            ):
+                return {"id": _uuid.uuid4()}
+            # INSERT … RETURNING id (used by _upsert_message)
+            if "returning id" in sql_lc:
+                return {"id": _uuid.uuid4()}
+            return None
+
+        self.conn.fetchrow = AsyncMock(side_effect=_smart_fetchrow)
         self.conn.fetch = AsyncMock(return_value=[])
         self.conn.executemany = AsyncMock()
 
@@ -97,7 +120,9 @@ def _make_collector(monkeypatch, *, accounts=None, api_id="123", api_hash="x"):
     monkeypatch.setattr(tg_mod, "logger", tg_mod.logger)  # no-op, kept for symmetry
 
     coll = TelegramCollector()
-    coll.pool = _FakePool()
+    pool = _FakePool()
+    # Use set_pool so UserChangeTracker is wired (parity with runtime behaviour).
+    coll.set_pool(pool)
     # Plug in the stable account list — bypass env loader
     if accounts is None:
         accounts = []
