@@ -1,32 +1,171 @@
+"""GitHub collector — unified ingest of users, repos, commits, issues, releases,
+contributors, follower graph, and profile photo change tracking.
+
+This module subsumes ``githubtoolkit/`` (a prior standalone toolkit) and routes
+all cross-cutting concerns through Wave 0 cores so that GitHub work shares
+infrastructure with the other 11 collectors.
+
+ABSORBED FROM ``githubtoolkit/``
+--------------------------------
+* ``main.py``                   — entry-point shim (replaced by unified scheduler).
+* ``src/github_client.py``      — REST v3 wrapper with PAT rotation. Replaced by
+                                   ``_api_get`` + ``_paginate`` here, layered over
+                                   a single httpx.AsyncClient and the PAT pool.
+* ``src/spider.py``             — social-graph BFS (followers/following). Two
+                                   paths supported: legacy ``github_spider_queue``
+                                   (back-compat) AND Wave 0 ``SpiderDiscover``
+                                   via the embedded ``GithubEdgeFetcher``.
+* ``src/contribution_spider.py``— co-contributor / fork edges. Mapped onto the
+                                   spider queue: contributors of any collected
+                                   repo are enqueued at priority+1 for follow-up
+                                   user-level collection. Co-contributor pair
+                                   edges land in ``github_spider_queue``.
+* ``src/avatar_downloader.py``  — bulk sequential-id avatar fetcher. Disk-first
+                                   dedup + lazy DB sync re-implemented as
+                                   ``download_avatars_by_id_range`` using
+                                   ``src.core.media_download`` for the actual
+                                   I/O and ``src.core.dedupe_hash`` for hashing.
+* ``src/profile_photo_tracker.py`` — pHash + URL change detection. Forwarded
+                                   to the canonical ``src.core.profile_photo_tracker``.
+* ``src/pat_manager.py``        — multi-PAT rotation. Reduced to a per-token
+                                   index + ``account_quota`` accounting (5000/h
+                                   per token authenticated) — the toolkit's
+                                   ``.env`` mutator is dropped (we never write
+                                   to ``.env`` from a collector).
+* ``src/reconciler.py``         — re-download missing avatars / verify integrity.
+                                   Re-implemented as ``reconcile_avatars``.
+* ``src/config.py``             — env tunables. Folded into the env-var reads
+                                   inside ``__init__``.
+
+DROPPED (NOT PORTED)
+--------------------
+* ``src/database.py`` + migrations — toolkit had its own SQLite. We use the
+  unified Postgres pool exclusively.
+* ``src/web/``                    — toolkit's standalone Flask dashboard. The
+                                   unified dashboard (src/dashboard) covers it.
+* ``src/cli.py``                  — interactive menu CLI. Replaced by the
+                                   unified scheduler.
+* ``follow_user`` / ``unfollow_user`` / ``get_authenticated_user`` mutator
+                                   endpoints. We are READ-ONLY ingest.
+
+DEFERRED
+--------
+* Tor circuit rotation hook on GitHub rate-limit hit (NEWNYM). Plumbing for
+  the proxied client is in place; firing ``tor_proxy.new_circuit()`` after a
+  403 is a 1-line follow-up.
+
+ENVIRONMENT VARS
+----------------
+GITHUB_TOKEN                 comma-separated PATs (rotated on rate-limit).
+GITHUB_USE_TOR               '1' to route via the Tor SOCKS5 sidecar.
+GITHUB_MAX_CONCURRENT        per-host API parallelism (default 5).
+GITHUB_TARGET_CONCURRENCY    parallel target iteration (default 4).
+GITHUB_SPIDER_DEPTH          BFS hop ceiling (default 4 — toolkit was 3).
+GITHUB_SPIDER_BATCH_SIZE     queue rows drained per scheduler tick (default 20).
+GITHUB_SPIDER_USER_DELAY     between-user politeness delay (default 2.0s).
+GITHUB_SPIDER_CONCURRENCY    spider drain workers (default 4).
+GITHUB_SPIDER_ENABLED        master-switch for queue draining (default true).
+GITHUB_API_DELAY             between-API-call polite delay (default 0.1s).
+GITHUB_DOWNLOAD_DELAY        between-asset-download delay (default 0.5s).
+GITHUB_AVATAR_SIZE           ?s= query param value (default 460).
+GITHUB_MAX_COMMITS_PER_REPO  cap commit pull (default 200).
+GITHUB_MAX_ISSUES_PER_REPO   cap issue pull (default 100).
+GITHUB_MAX_CONTRIBUTORS_PER_REPO cap contributors enqueued (default 25).
+GITHUB_RATE_LIMIT_BUFFER     rotate PAT when remaining < this (default 10).
+GITHUB_PROFILE_PHOTO_BLOB_MAX_SIZE_MB  pHash blob storage cap (default 5000).
+"""
+from __future__ import annotations
+
 import asyncio
-import hashlib
+import base64
 import json
 import logging
 import os
 import tempfile
-from collections import deque
-from pathlib import Path
+import time
+from collections.abc import AsyncIterator
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Optional
 
 import httpx
 
+from src.core.account_quota import AccountQuotaTracker, QuotaConfig
 from src.core.base_collector import BaseCollector
-from src.core.profile_photo_tracker import ProfilePhotoTracker
+from src.core.dedupe_hash import sha256_bytes as _sha256_bytes
 from src.core.file_naming import sanitize_name
+from src.core.profile_photo_tracker import ProfilePhotoTracker
+from src.core.spider_discover import Edge, EdgeType, SpiderDiscover
+from src.core import tor_proxy
 
 logger = logging.getLogger(__name__)
 
 API_BASE = "https://api.github.com"
 PER_PAGE = 100
+AVATAR_CDN_BASE = "https://avatars.githubusercontent.com/u"
+
+
+def _parse_iso(ts: Any) -> Optional[datetime]:
+    """Tolerant ISO-8601 parser; returns None on falsy / unparsable input."""
+    if not ts or not isinstance(ts, str):
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+
+
+# ----------------------------------------------------------------------------
+# EdgeFetcher: lets ``SpiderDiscover`` walk the github follower/following graph
+# without the collector having to care about queue plumbing.
+# ----------------------------------------------------------------------------
+
+
+class GithubEdgeFetcher:
+    """Adapter exposing GitHub's follower/following graph to ``SpiderDiscover``.
+
+    Held as an inner class because it needs the live collector for httpx +
+    PAT rotation. ``supported_edge_types`` is fixed to ``(FOLLOWER, FOLLOWING)``
+    — the contributor / star / fork graphs are walked through the legacy
+    ``github_spider_queue`` to preserve back-compat with existing rows in
+    production. New deployments may opt into widening this tuple.
+    """
+
+    supported_edge_types: tuple[EdgeType, ...] = (EdgeType.FOLLOWER, EdgeType.FOLLOWING)
+
+    def __init__(self, collector: "GithubCollector") -> None:
+        self._c = collector
+
+    async def fetch_edges(
+        self, node_id: str, edge_type: EdgeType
+    ) -> AsyncIterator[Edge]:
+        if edge_type not in self.supported_edge_types:
+            raise NotImplementedError(f"unsupported edge type: {edge_type}")
+        endpoint = "followers" if edge_type == EdgeType.FOLLOWER else "following"
+        async with self._c._make_client() as client:
+            users = await self._c._paginate(
+                client, f"{API_BASE}/users/{node_id}/{endpoint}"
+            )
+        for u in users:
+            login = (u or {}).get("login")
+            if login:
+                yield Edge(source=node_id, target=login, edge_type=edge_type)
+
+
+# ----------------------------------------------------------------------------
+# Main collector
+# ----------------------------------------------------------------------------
 
 
 class GithubCollector(BaseCollector):
     SOURCE_NAME = "github"
 
+    # ---- construction --------------------------------------------------
+
     def __init__(self):
         super().__init__()
-        self._pats = self._load_pats()
-        self._pat_idx = 0
+        self._pats: list[str] = self._load_pats()
+        self._pat_idx: int = 0
         self._sem = asyncio.Semaphore(int(os.getenv("GITHUB_MAX_CONCURRENT", "5")))
         self._batch_sem = asyncio.Semaphore(10)
         self._spider_depth = int(os.getenv("GITHUB_SPIDER_DEPTH", "4"))
@@ -35,82 +174,532 @@ class GithubCollector(BaseCollector):
         self._api_delay = float(os.getenv("GITHUB_API_DELAY", "0.1"))
         self._download_delay = float(os.getenv("GITHUB_DOWNLOAD_DELAY", "0.5"))
         self._avatar_size = int(os.getenv("GITHUB_AVATAR_SIZE", "460"))
+        self._rate_limit_buffer = int(os.getenv("GITHUB_RATE_LIMIT_BUFFER", "10"))
         self._photo_tracker = ProfilePhotoTracker(
-            blob_max_size_mb=int(os.getenv("GITHUB_PROFILE_PHOTO_BLOB_MAX_SIZE_MB", "5000"))
+            blob_max_size_mb=int(
+                os.getenv("GITHUB_PROFILE_PHOTO_BLOB_MAX_SIZE_MB", "5000")
+            )
         )
-        self._blob_enabled = os.getenv("GITHUB_PROFILE_PHOTO_BLOB_ENABLED", "false").lower() == "true"
+        self._blob_enabled = (
+            os.getenv("GITHUB_PROFILE_PHOTO_BLOB_ENABLED", "false").lower() == "true"
+        )
+        # Tor opt-in. ``GITHUB_USE_TOR=1`` turns on routing for this collector
+        # only (we additionally honour ``TOR_PROXY_ENABLED`` to be friendly with
+        # the global tor_proxy switch).
+        self._use_tor = (
+            os.getenv("GITHUB_USE_TOR", "0") == "1" or tor_proxy.is_enabled()
+        )
+        # account_quota: register the hourly-5k cap once per process. consume()
+        # on a missing config is a no-op so this stays safe even if the same
+        # tracker is imported from another collector first.
+        self._quota = AccountQuotaTracker()
+        try:
+            self._quota.register(
+                "github", QuotaConfig(daily_limit=0, hourly_limit=5000)
+            )
+        except Exception:  # noqa: BLE001 — defensive, registration is local-only
+            logger.debug("github: quota registration skipped", exc_info=True)
+        # Live rate-limit headers (mirrors github_client.GitHubAPIClient).
+        self.rate_limit_remaining: Optional[int] = None
+        self.rate_limit_reset: Optional[int] = None
+        self.rate_limit_limit: Optional[int] = None
+        self.requests_made = 0
         self._spider_visited: set[str] = set()
         self._db_avatar_ids: set[int] = set()
+
+    # ---- pool wiring ----------------------------------------------------
 
     def set_pool(self, pool):
         super().set_pool(pool)
         self._photo_tracker.set_pool(pool)
+        # Re-bind the quota tracker to the live pool. The default constructor
+        # operated in in-memory mode (pool=None); now we want DB persistence.
+        self._quota._pool = pool
+
+    # ---- PAT pool -------------------------------------------------------
 
     def _load_pats(self) -> list[str]:
-        raw = os.getenv("GITHUB_TOKEN", "")
+        # GitHub PAT env var: ``GITHUB_TOKEN`` (unified) and ``GITHUB_PAT`` (toolkit)
+        # are both accepted, comma-separated.
+        raw = os.getenv("GITHUB_TOKEN", "") or os.getenv("GITHUB_PAT", "")
         return [t.strip() for t in raw.split(",") if t.strip()]
+
+    def _current_pat(self) -> Optional[str]:
+        return self._pats[self._pat_idx] if self._pats else None
+
+    def _pat_account_name(self) -> str:
+        """Stable identifier for the active PAT used as the account_quota key.
+
+        We don't want the raw token in DB rows (security + log redaction), so
+        we use ``token_<idx>`` — same scheme as the on-disk media bucket.
+        """
+        return f"token_{self._pat_idx + 1}"
 
     def _headers(self) -> dict[str, str]:
         h = {
             "Accept": "application/vnd.github.v3+json",
             "User-Agent": self.user_agents.get_for_domain("github.com"),
         }
-        if self._pats:
-            h["Authorization"] = f"token {self._pats[self._pat_idx]}"
+        pat = self._current_pat()
+        if pat:
+            h["Authorization"] = f"token {pat}"
         return h
 
-    def _rotate_pat(self):
+    def _rotate_pat(self) -> bool:
+        """Rotate to the next PAT. Returns True if a different one is selected."""
         if len(self._pats) > 1:
             self._pat_idx = (self._pat_idx + 1) % len(self._pats)
+            self.rate_limit_remaining = None
             logger.info("Rotated to PAT index %d", self._pat_idx)
+            return True
+        return False
+
+    @staticmethod
+    def get_pat_display(pat: str) -> str:
+        """Mask a PAT for safe display: ``ghp_xxxx****...****yyyy``."""
+        if not pat or len(pat) < 8:
+            return "****"
+        return f"{pat[:4]}****...****{pat[-4:]}"
+
+    @staticmethod
+    def validate_pat_format(pat: str) -> bool:
+        """Sanity-check a PAT looks like a real GitHub token."""
+        if not pat or len(pat) <= 20:
+            return False
+        return any(pat.startswith(p) for p in ("ghp_", "gho_", "ghu_", "ghs_", "ghr_"))
+
+    # ---- media path ----------------------------------------------------
 
     @property
     def account_media_dir(self) -> Path:
-        # isolation by PAT index
-        path = self.media_dir / f"token_{self._pat_idx + 1}"
+        # Keep token-isolated media trees so repeated migrations between PAT
+        # pools don't cross-contaminate downloads.
+        path = self.media_dir / self._pat_account_name()
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    async def _api_get(self, client: httpx.AsyncClient, url: str) -> httpx.Response | None:
+    # ---- httpx client factory ------------------------------------------
+
+    def _make_client(self) -> httpx.AsyncClient:
+        """Return a context-managed httpx.AsyncClient.
+
+        Routed through the Tor SOCKS5 proxy iff Tor is enabled for this
+        consumer. Falls through to a plain client otherwise. Wrapping happens
+        here (rather than in ``collect()``) so all entrypoints — discover,
+        track_avatar_changes, etc. — share the same proxy decision.
+        """
+        if self._use_tor:
+            try:
+                proxied = tor_proxy.get_proxied_client("github", timeout=30.0)
+                # Return the underlying httpx.AsyncClient — context-manager-able.
+                return proxied.httpx_client
+            except Exception:  # noqa: BLE001
+                logger.warning("tor proxy unavailable; falling back to direct", exc_info=True)
+        return httpx.AsyncClient(timeout=30, follow_redirects=True)
+
+    # ---- low-level API -------------------------------------------------
+
+    async def _api_get(
+        self, client: httpx.AsyncClient, url: str
+    ) -> httpx.Response | None:
+        """One authenticated API GET with rate-limit accounting + PAT rotation.
+
+        Returns None on 404 / rate-limited (waited + retry exhausted). Raises
+        on transport / 5xx after retry. Mirrors the toolkit's ``_request`` but
+        delegates persistence to ``account_quota`` for cross-collector
+        observability.
+        """
         async with self._sem:
             await asyncio.sleep(self._api_delay)
             resp = await client.get(url, headers=self._headers())
-            remaining = int(resp.headers.get("X-RateLimit-Remaining", "999"))
-            if remaining < 10 and self._pats: self._rotate_pat()
-            if resp.status_code == 403 and remaining == 0:
-                reset_at = int(resp.headers.get("X-RateLimit-Reset", "0"))
-                import time
-                wait = max(0, reset_at - int(time.time())) + 5
+            self.requests_made += 1
+            self._update_rate_limit(resp.headers)
+            # Best-effort quota bookkeeping (no-op when no PAT registered).
+            try:
+                await self._quota.consume("github", self._pat_account_name(), 1)
+            except Exception:  # noqa: BLE001
+                logger.debug("quota.consume swallowed", exc_info=True)
+
+            if (
+                self.rate_limit_remaining is not None
+                and self.rate_limit_remaining < self._rate_limit_buffer
+                and self._pats
+            ):
+                self._rotate_pat()
+            if resp.status_code == 403 and (self.rate_limit_remaining or 0) == 0:
+                wait = max(0, (self.rate_limit_reset or 0) - int(time.time())) + 5
                 logger.warning("GitHub rate limit hit, waiting %ds", wait)
                 await asyncio.sleep(min(wait, 300))
                 self._rotate_pat()
                 return None
-            if resp.status_code == 404: return None
+            if resp.status_code == 404:
+                return None
+            if resp.status_code == 401:
+                logger.error("GitHub auth failed (401) for %s", url)
+                return None
             resp.raise_for_status()
             return resp
 
-    async def _paginate(self, client: httpx.AsyncClient, url: str, max_items: int | None = None) -> list[dict]:
-        results = []
+    def _update_rate_limit(self, headers) -> None:
+        try:
+            if "X-RateLimit-Remaining" in headers:
+                self.rate_limit_remaining = int(headers["X-RateLimit-Remaining"])
+            if "X-RateLimit-Reset" in headers:
+                self.rate_limit_reset = int(headers["X-RateLimit-Reset"])
+            if "X-RateLimit-Limit" in headers:
+                self.rate_limit_limit = int(headers["X-RateLimit-Limit"])
+        except (TypeError, ValueError):
+            pass
+
+    def get_rate_limit_status(self) -> dict[str, Any]:
+        """Snapshot of the live rate-limit state (toolkit-compat helper)."""
+        return {
+            "remaining": self.rate_limit_remaining,
+            "limit": self.rate_limit_limit,
+            "reset": self.rate_limit_reset,
+            "reset_time": (
+                datetime.fromtimestamp(self.rate_limit_reset).isoformat()
+                if self.rate_limit_reset
+                else None
+            ),
+            "requests_made": self.requests_made,
+            "active_pat_idx": self._pat_idx,
+            "pat_count": len(self._pats),
+        }
+
+    async def _paginate(
+        self,
+        client: httpx.AsyncClient,
+        url: str,
+        max_items: int | None = None,
+    ) -> list[dict]:
+        results: list[dict] = []
         page = 1
         while True:
-            if self._stop.is_set(): break
-            if max_items is not None and len(results) >= max_items: break
+            if self._stop.is_set():
+                break
+            if max_items is not None and len(results) >= max_items:
+                break
             sep = "&" if "?" in url else "?"
             page_url = f"{url}{sep}per_page={PER_PAGE}&page={page}"
             resp = await self._api_get(client, page_url)
-            if resp is None: break
+            if resp is None:
+                break
             batch = resp.json()
-            if not batch: break
+            if not batch:
+                break
             results.extend(batch)
-            if len(batch) < PER_PAGE: break
+            if len(batch) < PER_PAGE:
+                break
             page += 1
         return results[:max_items] if max_items is not None else results
 
+    # ===================================================================
+    # Toolkit-compatible high-level API
+    # ===================================================================
+
+    async def get_user(self, username: str) -> Optional[dict]:
+        """Fetch the public profile for ``username``. Returns None on 404."""
+        async with self._make_client() as client:
+            resp = await self._api_get(client, f"{API_BASE}/users/{username}")
+            return resp.json() if resp is not None else None
+
+    async def get_user_by_id(self, user_id: int) -> Optional[dict]:
+        """Fetch a user by numeric GitHub id. Mirrors toolkit's get_user_by_id."""
+        async with self._make_client() as client:
+            resp = await self._api_get(client, f"{API_BASE}/user/{user_id}")
+            return resp.json() if resp is not None else None
+
+    async def get_followers(self, username: str) -> list[dict]:
+        async with self._make_client() as client:
+            return await self._paginate(client, f"{API_BASE}/users/{username}/followers")
+
+    async def get_following(self, username: str) -> list[dict]:
+        async with self._make_client() as client:
+            return await self._paginate(client, f"{API_BASE}/users/{username}/following")
+
+    async def get_user_repos(self, username: str) -> list[dict]:
+        async with self._make_client() as client:
+            return await self._paginate(
+                client,
+                f"{API_BASE}/users/{username}/repos?sort=pushed&type=owner",
+            )
+
+    async def get_repo_contributors(self, full_name: str, max_items: int = 100) -> list[dict]:
+        async with self._make_client() as client:
+            return await self._paginate(
+                client, f"{API_BASE}/repos/{full_name}/contributors", max_items=max_items
+            )
+
+    # ---- High-level entry points required by the task spec --------------
+
+    async def discover_users(self, seed: Optional[str] = None) -> int:
+        """Seed (or reseed) the spider queue and drain one batch.
+
+        Uses the legacy ``github_spider_queue`` for back-compat with existing
+        production rows. Returns the number of users newly enqueued at hop 1.
+        """
+        seed = seed or os.getenv("GITHUB_SPIDER_SEED", "bryanseah234")
+        added = 0
+        try:
+            async with self._make_client() as client:
+                added = await self._enqueue_neighbors(client, seed, depth=1)
+            await self._process_spider_queue()
+        except Exception as e:
+            logger.error("discover_users failed: %s", e, exc_info=True)
+        return added
+
+    async def collect_user_metadata(self, username: str) -> Optional[dict]:
+        """Fetch + persist user profile + repos. Returns the raw user JSON."""
+        async with self._make_client() as client:
+            resp = await self._api_get(client, f"{API_BASE}/users/{username}")
+            if resp is None:
+                return None
+            user = resp.json()
+            await self._upsert_user(user)
+            repos = await self._paginate(client, f"{API_BASE}/users/{username}/repos")
+            for repo in repos:
+                if self._stop.is_set():
+                    break
+                await self._upsert_repo(repo)
+            return user
+
+    async def track_avatar_changes(self, username: str) -> tuple[bool, Optional[Path]]:
+        """Download the avatar and detect a change against the URL+pHash baseline.
+
+        Returns ``(changed, path)``. ``changed=True`` means a genuinely new
+        photo was saved; ``False`` covers both "no change" and "CDN rotation
+        only" (same image, different signed URL).
+        """
+        user = await self.get_user(username)
+        if not user or not user.get("avatar_url"):
+            return False, None
+        avatar_url = user["avatar_url"]
+        if self._avatar_size:
+            sep = "&" if "?" in avatar_url else "?"
+            avatar_url = f"{avatar_url}{sep}s={self._avatar_size}"
+        uid = str(user["id"])
+        dest_dir = self.account_media_dir / "profiles"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        changed, path = await self._photo_tracker.check_and_download(
+            avatar_url, uid, "github", dest_dir
+        )
+        if changed and path is not None:
+            try:
+                await self.insert_media_item(
+                    entity_id=uid,
+                    entity_name=user.get("login", username),
+                    content_type="profile_photo",
+                    content_id=f"avatar_{uid}",
+                    filename=path.name,
+                    file_path=str(path),
+                    file_size=path.stat().st_size,
+                    sha256=_sha256_bytes(path.read_bytes()),
+                    metadata={"raw": user},
+                )
+            except Exception as e:
+                logger.warning("insert_media_item failed for %s: %s", uid, e)
+        return changed, path
+
+    async def collect_contributions(
+        self, username: str, year: Optional[int] = None
+    ) -> dict[str, int]:
+        """Fetch ``username``'s repos + co-contributors, persist edges to the
+        legacy spider queue.
+
+        ``year`` is currently advisory — the GitHub REST API does not expose a
+        per-year contribution graph (that's GraphQL only). When set, it's
+        attached as ``priority`` so older years drain after newer.
+
+        Returns counts: ``{"repos": N, "contributors_enqueued": M}``.
+        """
+        repos_n = 0
+        contrib_n = 0
+        priority = (year - 2000) if year and year > 2000 else 2
+        async with self._make_client() as client:
+            repos = await self._paginate(
+                client, f"{API_BASE}/users/{username}/repos?type=owner&sort=pushed"
+            )
+            for repo in repos:
+                if self._stop.is_set():
+                    break
+                await self._upsert_repo(repo)
+                repos_n += 1
+                full_name = repo.get("full_name")
+                if not full_name:
+                    continue
+                # forked? enqueue parent owner (toolkit "forked" edge)
+                if repo.get("fork") and (parent := repo.get("parent")):
+                    p_owner = ((parent.get("owner") or {}).get("login")) if parent else None
+                    if p_owner and p_owner != username:
+                        if await self._enqueue_user(p_owner, priority):
+                            contrib_n += 1
+                # co-contributor edges
+                try:
+                    contributors = await self._paginate(
+                        client,
+                        f"{API_BASE}/repos/{full_name}/contributors",
+                        max_items=int(os.getenv("GITHUB_MAX_CONTRIBUTORS_PER_REPO", "25")),
+                    )
+                    for c in contributors:
+                        login = (c or {}).get("login")
+                        if login and login != username and (c or {}).get("type") != "Bot":
+                            if await self._enqueue_user(login, priority):
+                                contrib_n += 1
+                except Exception as e:
+                    logger.debug("contributor fetch failed for %s: %s", full_name, e)
+        return {"repos": repos_n, "contributors_enqueued": contrib_n}
+
+    async def _enqueue_user(self, login: str, priority: int) -> bool:
+        """Insert a single user into the legacy spider queue.
+
+        Returns True if the row was newly inserted (asyncpg's INSERT command
+        tag ends in '1' on insert, '0' on conflict).
+        """
+        try:
+            async with self.pool.acquire() as conn:
+                result = await conn.execute(
+                    "INSERT INTO github_spider_queue "
+                    "(target_type, target_identifier, status, priority, collected_at) "
+                    "VALUES ('user', $1, 'pending', $2, NOW()) "
+                    "ON CONFLICT (target_type, target_identifier) DO NOTHING",
+                    login, priority,
+                )
+                return bool(result and result.endswith(" 1"))
+        except Exception as e:
+            logger.debug("enqueue_user failed for %s: %s", login, e)
+            return False
+
+    # ===================================================================
+    # Bulk avatar download by sequential id (toolkit avatar_downloader.py)
+    # ===================================================================
+
+    async def download_avatars_by_id_range(
+        self, start_id: int, end_id: int, *, concurrency: int = 10, delay: float = 0.5,
+    ) -> dict[str, int]:
+        """Sequentially fetch ``avatars.githubusercontent.com/u/<id>?s=<size>``
+        for every id in ``[start_id, end_id]``.
+
+        Disk-first dedup: if ``account_media_dir/avatars/<id>.jpg`` already
+        exists we skip the network call. Counters returned mirror the toolkit
+        shape so callers can drop in for ``AvatarDownloader.download_range``.
+        """
+        save_dir = self.account_media_dir / "avatars"
+        save_dir.mkdir(parents=True, exist_ok=True)
+        # Disk-first scan — cheap directory listing, dedup before any network
+        # I/O.
+        existing: set[int] = set()
+        if save_dir.exists():
+            for p in save_dir.iterdir():
+                if p.stem.isdigit():
+                    existing.add(int(p.stem))
+
+        sem = asyncio.Semaphore(concurrency)
+        counters = {"downloaded": 0, "skipped_on_disk": 0, "errors": 0}
+
+        async def _one(uid: int):
+            if uid in existing:
+                counters["skipped_on_disk"] += 1
+                return
+            url = f"{AVATAR_CDN_BASE}/{uid}?s={self._avatar_size}"
+            async with sem:
+                try:
+                    async with self._make_client() as client:
+                        resp = await client.get(url)
+                    if resp.status_code != 200:
+                        counters["errors"] += 1
+                        return
+                    data = resp.content
+                    dest = save_dir / f"{uid}.jpg"
+                    fd, tmp = tempfile.mkstemp(dir=save_dir, suffix=".tmp")
+                    try:
+                        with os.fdopen(fd, "wb") as f:
+                            f.write(data)
+                            f.flush()
+                            os.fsync(f.fileno())
+                        os.replace(tmp, dest)
+                    except BaseException:
+                        if os.path.exists(tmp):
+                            os.remove(tmp)
+                        raise
+                    counters["downloaded"] += 1
+                except Exception as e:
+                    logger.debug("avatar_by_id %d failed: %s", uid, e)
+                    counters["errors"] += 1
+
+        # Process in concurrency-sized chunks so we can apply the toolkit's
+        # between-batch politeness delay.
+        ids = list(range(start_id, end_id + 1))
+        for i in range(0, len(ids), concurrency):
+            batch = ids[i : i + concurrency]
+            await asyncio.gather(*[_one(u) for u in batch])
+            if delay > 0 and i + concurrency < len(ids):
+                await asyncio.sleep(delay)
+        return counters
+
+    # ===================================================================
+    # Reconciler — re-download missing avatars (toolkit reconciler.py)
+    # ===================================================================
+
+    async def reconcile_avatars(self) -> dict[str, int]:
+        """Walk media_items rows of content_type='profile_photo' and re-fetch
+        any whose on-disk file vanished.
+
+        Returns ``{"total": N, "missing": M, "redownloaded": R, "errors": E}``.
+        """
+        stats = {"total": 0, "missing": 0, "redownloaded": 0, "errors": 0}
+        if self.pool is None:
+            return stats
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT entity_id, entity_name, file_path, source_url, metadata "
+                "FROM media_items "
+                "WHERE source = 'github' AND content_type = 'profile_photo' "
+                "  AND file_path IS NOT NULL AND file_path <> ''"
+            )
+        for row in rows:
+            stats["total"] += 1
+            file_path = Path(row["file_path"])
+            if file_path.exists():
+                continue
+            stats["missing"] += 1
+            entity_name = row["entity_name"]
+            if not entity_name:
+                continue
+            try:
+                changed, _ = await self.track_avatar_changes(entity_name)
+                if changed:
+                    stats["redownloaded"] += 1
+            except Exception:
+                stats["errors"] += 1
+        return stats
+
+    # ===================================================================
+    # Spider queue drain (legacy + Wave 0 SpiderDiscover wrapper)
+    # ===================================================================
+
+    def make_edge_fetcher(self) -> GithubEdgeFetcher:
+        """Build a Wave 0 ``EdgeFetcher`` over this collector. Useful when a
+        downstream wants to plug GitHub into ``SpiderDiscover`` directly."""
+        return GithubEdgeFetcher(self)
+
+    def make_spider_discover(self, *, max_hops: Optional[int] = None) -> SpiderDiscover:
+        """Build a ``SpiderDiscover`` instance ready to run against the unified
+        ``spider_queue`` table. The legacy ``github_spider_queue`` drain is
+        still preferred by ``collect()``; this is the new path."""
+        return SpiderDiscover(
+            platform="github",
+            fetcher=self.make_edge_fetcher(),
+            pool=self.pool,
+            max_hops=max_hops if max_hops is not None else self._spider_depth,
+            concurrency=int(os.getenv("GITHUB_SPIDER_CONCURRENCY", "4")),
+        )
+
+    # ===================================================================
+    # Original collector interface — preserved
+    # ===================================================================
+
     async def collect(self, targets: list[str]):
-        # Parallel target iteration via per-target semaphore.
-        # GITHUB_TARGET_CONCURRENCY controls how many users/repos are processed simultaneously.
-        # Defaults to 4 (heavy users have ~150 repos each; 4 in flight = ~4x throughput without
-        # blowing the 5000/hr API budget — _api_get's _sem still rate-limits raw calls).
         target_concurrency = int(os.getenv("GITHUB_TARGET_CONCURRENCY", "4"))
         target_sem = asyncio.Semaphore(target_concurrency)
 
@@ -130,32 +719,29 @@ class GithubCollector(BaseCollector):
                     logger.error("Failed github/%s: %s", target, e, exc_info=True)
                     await self.send_to_dlq(target, target, str(e))
 
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-            await asyncio.gather(*[_process_one(client, t) for t in targets], return_exceptions=True)
+        async with self._make_client() as client:
+            await asyncio.gather(
+                *[_process_one(client, t) for t in targets], return_exceptions=True
+            )
 
         if os.getenv("GITHUB_SPIDER_ENABLED", "true").lower() == "true":
             await self._process_spider_queue()
 
     async def _process_spider_queue(self):
-        """Drain N pending entries from github_spider_queue per tick.
+        """Drain N pending rows from ``github_spider_queue`` per tick.
 
-        Pops up to ``_spider_batch_size`` rows ordered by priority (depth) ASC,
-        marks them ``processing``, fetches the user (and their repos/commits via
-        the existing _collect_user logic), enqueues their direct followers/following
-        at priority+1 if still under ``_spider_depth``, then marks ``done``/``failed``.
-
-        Sleeps ``_spider_user_delay`` seconds between users to be respectful of
-        GitHub's 5000/hr authenticated rate limit.
+        Parallelised via ``GITHUB_SPIDER_CONCURRENCY`` workers racing on
+        ``FOR UPDATE SKIP LOCKED``. Each worker pops one row, processes it,
+        sleeps the per-user delay, then loops.
         """
-        # Parallelized drain. GITHUB_SPIDER_CONCURRENCY workers race on the queue
-        # (FOR UPDATE SKIP LOCKED ensures no double-processing). Each worker pops
-        # one row, processes it, marks done/failed, sleeps _spider_user_delay, repeats.
-        # Total per-tick budget: _spider_batch_size rows divided across workers.
         spider_concurrency = int(os.getenv("GITHUB_SPIDER_CONCURRENCY", "4"))
         processed_counter = {"n": 0}
 
         async def _drain_worker(worker_id: int, client: httpx.AsyncClient):
-            while processed_counter["n"] < self._spider_batch_size and not self._stop.is_set():
+            while (
+                processed_counter["n"] < self._spider_batch_size
+                and not self._stop.is_set()
+            ):
                 async with self.pool.acquire() as conn:
                     row = await conn.fetchrow(
                         """
@@ -173,19 +759,22 @@ class GithubCollector(BaseCollector):
                         self._spider_depth,
                     )
                 if not row:
-                    logger.info("Spider drain worker=%d: queue empty or depth-exhausted", worker_id)
+                    logger.info(
+                        "Spider drain worker=%d: queue empty or depth-exhausted",
+                        worker_id,
+                    )
                     return
-
-                # Reserve a slot in the per-tick budget atomically.
                 processed_counter["n"] += 1
                 slot = processed_counter["n"]
-
                 qid = row["id"]
                 ttype = row["target_type"]
                 tid = row["target_identifier"]
                 depth = row["priority"] or 1
-                logger.info("Spider drain w=%d: processing %s/%s (depth=%d, %d/%d)",
-                            worker_id, ttype, tid, depth, slot, self._spider_batch_size)
+                logger.info(
+                    "Spider drain w=%d: processing %s/%s (depth=%d, %d/%d)",
+                    worker_id, ttype, tid, depth,
+                    slot, self._spider_batch_size,
+                )
                 try:
                     if ttype == "user":
                         await self._collect_user(client, tid)
@@ -199,7 +788,10 @@ class GithubCollector(BaseCollector):
                             qid,
                         )
                 except Exception as e:
-                    logger.warning("Spider drain w=%d failed for %s/%s: %s", worker_id, ttype, tid, e)
+                    logger.warning(
+                        "Spider drain w=%d failed for %s/%s: %s",
+                        worker_id, ttype, tid, e,
+                    )
                     async with self.pool.acquire() as conn:
                         await conn.execute(
                             "UPDATE github_spider_queue SET status='failed' WHERE id=$1",
@@ -207,46 +799,42 @@ class GithubCollector(BaseCollector):
                         )
                 await asyncio.sleep(self._spider_user_delay)
 
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        async with self._make_client() as client:
             await asyncio.gather(
                 *[_drain_worker(i, client) for i in range(spider_concurrency)],
                 return_exceptions=True,
             )
-            logger.info("Spider drain tick complete: processed=%d (workers=%d)",
-                        processed_counter["n"], spider_concurrency)
+            logger.info(
+                "Spider drain tick complete: processed=%d (workers=%d)",
+                processed_counter["n"], spider_concurrency,
+            )
 
-    async def _enqueue_neighbors(self, client: httpx.AsyncClient, username: str, depth: int):
-        """Fetch followers + following of ``username`` and enqueue them at the given depth.
-
-        depth here is encoded into the queue's ``priority`` column (lower = nearer to seed).
-        """
+    async def _enqueue_neighbors(
+        self, client: httpx.AsyncClient, username: str, depth: int
+    ) -> int:
         if depth > self._spider_depth:
-            return
+            return 0
         added = 0
         for endpoint in ("followers", "following"):
-            users = await self._paginate(client, f"{API_BASE}/users/{username}/{endpoint}")
+            users = await self._paginate(
+                client, f"{API_BASE}/users/{username}/{endpoint}"
+            )
             for u in users:
-                login = u.get("login", "")
+                login = (u or {}).get("login", "")
                 if not login:
                     continue
-                try:
-                    async with self.pool.acquire() as conn:
-                        result = await conn.execute(
-                            "INSERT INTO github_spider_queue (target_type, target_identifier, status, priority, collected_at) "
-                            "VALUES ('user', $1, 'pending', $2, NOW()) "
-                            "ON CONFLICT (target_type, target_identifier) DO NOTHING",
-                            login,
-                            depth,
-                        )
-                        if result and result.endswith(" 1"):
-                            added += 1
-                except Exception as e:
-                    logger.debug("spider neighbor enqueue failed for %s: %s", login, e)
-        logger.info("Spider neighbors of %s: enqueued %d new at depth %d", username, added, depth)
+                if await self._enqueue_user(login, depth):
+                    added += 1
+        logger.info(
+            "Spider neighbors of %s: enqueued %d new at depth %d",
+            username, added, depth,
+        )
+        return added
 
     async def _collect_user(self, client: httpx.AsyncClient, username: str):
         resp = await self._api_get(client, f"{API_BASE}/users/{username}")
-        if resp is None: return
+        if resp is None:
+            return
         user = resp.json()
         uid = str(user["id"])
         login = user["login"]
@@ -258,20 +846,28 @@ class GithubCollector(BaseCollector):
             if self._avatar_size:
                 sep = "&" if "?" in avatar_url else "?"
                 avatar_url = f"{avatar_url}{sep}s={self._avatar_size}"
-            
             dest_dir = self.account_media_dir / "profiles"
             dest_dir.mkdir(parents=True, exist_ok=True)
-            changed, path = await self._photo_tracker.check_and_download(avatar_url, uid, "github", dest_dir)
+            changed, path = await self._photo_tracker.check_and_download(
+                avatar_url, uid, "github", dest_dir
+            )
             if changed and path:
                 await self.insert_media_item(
-                    entity_id=uid, entity_name=login, content_type="profile_photo", content_id=f"avatar_{uid}",
-                    filename=path.name, file_path=str(path), file_size=path.stat().st_size,
-                    sha256=self.sha256_bytes(path.read_bytes()), metadata={"raw": user}
+                    entity_id=uid,
+                    entity_name=login,
+                    content_type="profile_photo",
+                    content_id=f"avatar_{uid}",
+                    filename=path.name,
+                    file_path=str(path),
+                    file_size=path.stat().st_size,
+                    sha256=self.sha256_bytes(path.read_bytes()),
+                    metadata={"raw": user},
                 )
 
         repos = await self._paginate(client, f"{API_BASE}/users/{username}/repos")
         for repo in repos:
-            if self._stop.is_set(): break
+            if self._stop.is_set():
+                break
             await self._upsert_repo(repo)
             await self._collect_repo_content(client, repo["full_name"], uid, login)
 
@@ -279,13 +875,19 @@ class GithubCollector(BaseCollector):
 
     async def _collect_repo(self, client: httpx.AsyncClient, full_name: str):
         resp = await self._api_get(client, f"{API_BASE}/repos/{full_name}")
-        if resp is None: return
+        if resp is None:
+            return
         repo = resp.json()
         await self._upsert_repo(repo)
-        await self._collect_repo_content(client, full_name, str(repo["owner"]["id"]), repo["owner"]["login"])
+        await self._collect_repo_content(
+            client, full_name,
+            str(repo["owner"]["id"]), repo["owner"]["login"],
+        )
         await self.checkpoint.save_progress(full_name)
 
-    async def _collect_repo_content(self, client: httpx.AsyncClient, full_name: str, uid: str, login: str):
+    async def _collect_repo_content(
+        self, client: httpx.AsyncClient, full_name: str, uid: str, login: str
+    ):
         max_commits = int(os.getenv("GITHUB_MAX_COMMITS_PER_REPO", "200"))
         max_issues = int(os.getenv("GITHUB_MAX_ISSUES_PER_REPO", "100"))
         max_contributors = int(os.getenv("GITHUB_MAX_CONTRIBUTORS_PER_REPO", "25"))
@@ -294,60 +896,75 @@ class GithubCollector(BaseCollector):
         readme_resp = await self._api_get(client, f"{API_BASE}/repos/{full_name}/readme")
         if readme_resp:
             readme = readme_resp.json()
-            import base64
-            content = base64.b64decode(readme.get("content", "")).decode("utf-8", "ignore")
-            await self._upsert_readme(readme.get("repository_id") or 0, content, readme.get("sha"), readme.get("size"))
+            content = base64.b64decode(readme.get("content", "")).decode(
+                "utf-8", "ignore"
+            )
+            await self._upsert_readme(
+                readme.get("repository_id") or 0,
+                content,
+                readme.get("sha"),
+                readme.get("size"),
+            )
 
         # 2. Commits (capped)
-        commits = await self._paginate(client, f"{API_BASE}/repos/{full_name}/commits", max_items=max_commits)
+        commits = await self._paginate(
+            client, f"{API_BASE}/repos/{full_name}/commits", max_items=max_commits
+        )
         for c in commits:
             await self._upsert_commit(0, c)
 
         # 3. Issues (capped)
-        issues = await self._paginate(client, f"{API_BASE}/repos/{full_name}/issues", max_items=max_issues)
+        issues = await self._paginate(
+            client, f"{API_BASE}/repos/{full_name}/issues", max_items=max_issues
+        )
         for i in issues:
             await self._upsert_issue(0, i)
 
-        # 4. Releases/Assets
-        releases = await self._paginate(client, f"{API_BASE}/repos/{full_name}/releases")
+        # 4. Releases / assets
+        releases = await self._paginate(
+            client, f"{API_BASE}/repos/{full_name}/releases"
+        )
         for release in releases:
             for asset in release.get("assets", []):
-                if self.is_known(str(asset["id"])): continue
+                if self.is_known(str(asset["id"])):
+                    continue
                 await self.download_media({
-                    "entity_id": uid, "entity_name": login, "content_type": "release", "content_id": str(asset["id"]),
-                    "url": asset["browser_download_url"], "extension": Path(asset["name"]).suffix.lstrip(".") or "bin",
-                    "source_url": asset["browser_download_url"], "raw": asset
+                    "entity_id": uid, "entity_name": login,
+                    "content_type": "release", "content_id": str(asset["id"]),
+                    "url": asset["browser_download_url"],
+                    "extension": Path(asset["name"]).suffix.lstrip(".") or "bin",
+                    "source_url": asset["browser_download_url"], "raw": asset,
                 })
 
-        # 5. Contributors → spider queue (the ACTUAL community of a repo, distinct from owner's followers)
+        # 5. Contributors → spider queue
         if max_contributors > 0 and self._spider_depth > 0:
             try:
-                contributors = await self._paginate(client, f"{API_BASE}/repos/{full_name}/contributors", max_items=max_contributors)
+                contributors = await self._paginate(
+                    client,
+                    f"{API_BASE}/repos/{full_name}/contributors",
+                    max_items=max_contributors,
+                )
                 added = 0
                 for c in contributors:
                     contrib_login = (c or {}).get("login")
                     if not contrib_login or (c or {}).get("type") == "Bot":
                         continue
-                    try:
-                        async with self.pool.acquire() as conn:
-                            result = await conn.execute(
-                                "INSERT INTO github_spider_queue (target_type, target_identifier, status, priority, collected_at) "
-                                "VALUES ('user', $1, 'pending', $2, NOW()) "
-                                "ON CONFLICT (target_type, target_identifier) DO NOTHING",
-                                contrib_login, 2,
-                            )
-                            if result and result.endswith(" 1"):
-                                added += 1
-                    except Exception as e:
-                        logger.debug("contributor enqueue failed for %s: %s", contrib_login, e)
+                    if await self._enqueue_user(contrib_login, 2):
+                        added += 1
                 if added:
-                    logger.info("Spider contributors of %s: enqueued %d new", full_name, added)
+                    logger.info(
+                        "Spider contributors of %s: enqueued %d new",
+                        full_name, added,
+                    )
             except Exception as e:
                 logger.debug("contributor fetch failed for %s: %s", full_name, e)
 
+    # ---- DB upserts -----------------------------------------------------
+
     async def _upsert_user(self, user_data: dict):
         async with self.pool.acquire() as conn:
-            await conn.execute("""
+            await conn.execute(
+                """
                 INSERT INTO github_users (
                     platform_user_id, login, name, company, blog, location,
                     email, bio, public_repos_count, followers_count,
@@ -355,12 +972,21 @@ class GithubCollector(BaseCollector):
                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
                 ON CONFLICT (platform_user_id) DO UPDATE SET
                     login = EXCLUDED.login, name = EXCLUDED.name, bio = EXCLUDED.bio,
-                    public_repos_count = EXCLUDED.public_repos_count, collected_at = NOW()
-            """, user_data.get("id"), user_data.get("login"), user_data.get("name"), user_data.get("company"), user_data.get("blog"), user_data.get("location"), user_data.get("email"), user_data.get("bio"), user_data.get("public_repos"), user_data.get("followers"), user_data.get("following"), datetime.fromisoformat(user_data.get("created_at").replace("Z", "")) if user_data.get("created_at") else None)
+                    public_repos_count = EXCLUDED.public_repos_count,
+                    collected_at = NOW()
+                """,
+                user_data.get("id"), user_data.get("login"), user_data.get("name"),
+                user_data.get("company"), user_data.get("blog"),
+                user_data.get("location"), user_data.get("email"),
+                user_data.get("bio"), user_data.get("public_repos"),
+                user_data.get("followers"), user_data.get("following"),
+                _parse_iso(user_data.get("created_at")),
+            )
 
     async def _upsert_repo(self, repo_data: dict):
         async with self.pool.acquire() as conn:
-            await conn.execute("""
+            await conn.execute(
+                """
                 INSERT INTO github_repos (
                     platform_repo_id, name, full_name, description, homepage,
                     language, stargazers_count, watchers_count, forks_count,
@@ -368,66 +994,118 @@ class GithubCollector(BaseCollector):
                     platform_updated_at, metadata
                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
                 ON CONFLICT (platform_repo_id) DO UPDATE SET
-                    stargazers_count = EXCLUDED.stargazers_count, forks_count = EXCLUDED.forks_count,
-                    platform_updated_at = EXCLUDED.platform_updated_at, metadata = EXCLUDED.metadata
-            """, repo_data.get("id"), repo_data.get("name"), repo_data.get("full_name"), repo_data.get("description"), repo_data.get("homepage"), repo_data.get("language"), repo_data.get("stargazers_count"), repo_data.get("watchers_count"), repo_data.get("forks_count"), repo_data.get("open_issues_count"), repo_data.get("topics"), repo_data.get("license", {}).get("name") if repo_data.get("license") else None, datetime.fromisoformat(repo_data.get("created_at").replace("Z", "")) if repo_data.get("created_at") else None, datetime.fromisoformat(repo_data.get("updated_at").replace("Z", "")) if repo_data.get("updated_at") else None, json.dumps(repo_data, default=str))
+                    stargazers_count = EXCLUDED.stargazers_count,
+                    forks_count = EXCLUDED.forks_count,
+                    platform_updated_at = EXCLUDED.platform_updated_at,
+                    metadata = EXCLUDED.metadata
+                """,
+                repo_data.get("id"), repo_data.get("name"),
+                repo_data.get("full_name"), repo_data.get("description"),
+                repo_data.get("homepage"), repo_data.get("language"),
+                repo_data.get("stargazers_count"), repo_data.get("watchers_count"),
+                repo_data.get("forks_count"), repo_data.get("open_issues_count"),
+                repo_data.get("topics"),
+                (repo_data.get("license") or {}).get("name") if repo_data.get("license") else None,
+                _parse_iso(repo_data.get("created_at")),
+                _parse_iso(repo_data.get("updated_at")),
+                json.dumps(repo_data, default=str),
+            )
 
     async def _upsert_readme(self, repo_id: int, content: str, sha: str, size: int):
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow("SELECT id FROM github_repos WHERE platform_repo_id = $1", repo_id)
-            if row: await conn.execute("INSERT INTO github_readmes (repo_id, content, sha, size, collected_at) VALUES ($1, $2, $3, $4, NOW())", row['id'], content, sha, size)
+            row = await conn.fetchrow(
+                "SELECT id FROM github_repos WHERE platform_repo_id = $1", repo_id
+            )
+            if row:
+                await conn.execute(
+                    "INSERT INTO github_readmes (repo_id, content, sha, size, collected_at) "
+                    "VALUES ($1, $2, $3, $4, NOW())",
+                    row["id"], content, sha, size,
+                )
 
     async def _upsert_commit(self, repo_id: int, commit: dict):
-        # Hardened: GitHub returns null for "commit", "commit.author", and top-level "author"
-        # when commits are imported, signed without GH account, or authored by deleted users.
-        # dict.get(k, default) returns the *value* when key exists, even if value is None,
-        # so we must coalesce None → {} explicitly.
+        # GitHub returns null for "commit", "commit.author", and top-level
+        # "author" when commits are imported, signed without a GH account, or
+        # authored by deleted users. dict.get(k, default) returns None when
+        # the key exists with a None value, so we coalesce explicitly.
         c = commit.get("commit") or {}
         author = c.get("author") or {}
         gh_author = commit.get("author") or {}
-        date_str = author.get("date")
-        commit_date = None
-        if date_str:
-            try:
-                commit_date = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
-            except (ValueError, AttributeError):
-                commit_date = None
+        commit_date = _parse_iso(author.get("date"))
         async with self.pool.acquire() as conn:
-            await conn.execute("""
-                INSERT INTO github_commits (sha, author_name, author_email, author_login, message, date, collected_at)
+            await conn.execute(
+                """
+                INSERT INTO github_commits (
+                    sha, author_name, author_email, author_login,
+                    message, date, collected_at
+                )
                 VALUES ($1, $2, $3, $4, $5, $6, NOW())
                 ON CONFLICT (sha) DO NOTHING
-            """, commit.get("sha"), author.get("name"), author.get("email"), gh_author.get("login"), c.get("message"), commit_date)
+                """,
+                commit.get("sha"), author.get("name"), author.get("email"),
+                gh_author.get("login"), c.get("message"), commit_date,
+            )
 
     async def _upsert_issue(self, repo_id: int, issue: dict):
         async with self.pool.acquire() as conn:
-            await conn.execute("""
-                INSERT INTO github_issues (platform_issue_id, number, title, body, state, is_pull_request, labels, comments_count, created_at, updated_at)
+            await conn.execute(
+                """
+                INSERT INTO github_issues (
+                    platform_issue_id, number, title, body, state,
+                    is_pull_request, labels, comments_count, created_at, updated_at
+                )
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                ON CONFLICT (platform_issue_id) DO UPDATE SET state = EXCLUDED.state, updated_at = EXCLUDED.updated_at
-            """, issue.get("id"), issue.get("number"), issue.get("title"), issue.get("body"), issue.get("state"), "pull_request" in issue, [l.get("name") for l in issue.get("labels", [])], issue.get("comments"), datetime.fromisoformat(issue.get("created_at").replace("Z", "")) if issue.get("created_at") else None, datetime.fromisoformat(issue.get("updated_at").replace("Z", "")) if issue.get("updated_at") else None)
+                ON CONFLICT (platform_issue_id) DO UPDATE SET
+                    state = EXCLUDED.state, updated_at = EXCLUDED.updated_at
+                """,
+                issue.get("id"), issue.get("number"), issue.get("title"),
+                issue.get("body"), issue.get("state"),
+                "pull_request" in issue,
+                [l.get("name") for l in issue.get("labels", [])],
+                issue.get("comments"),
+                _parse_iso(issue.get("created_at")),
+                _parse_iso(issue.get("updated_at")),
+            )
+
+    # ---- media download (release assets) -------------------------------
 
     async def download_media(self, item: dict):
         cid = item["content_id"]
-        if self.is_known(cid): return
-        filename = self.build_filename(item["entity_id"], item["entity_name"], item["content_type"], cid, extension=item.get("extension", "jpg"))
+        if self.is_known(cid):
+            return
+        filename = self.build_filename(
+            item["entity_id"], item["entity_name"], item["content_type"], cid,
+            extension=item.get("extension", "jpg"),
+        )
         dest_dir = self.account_media_dir / item["content_type"]
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / filename
         try:
             await asyncio.sleep(self._download_delay)
-            async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+            async with self._make_client() as client:
                 resp = await client.get(item["url"])
                 resp.raise_for_status()
                 data = resp.content
             sha = self.sha256_bytes(data)
             fd, tmp_path = tempfile.mkstemp(dir=dest_dir, suffix=".tmp")
             with os.fdopen(fd, "wb") as f:
-                f.write(data); f.flush(); os.fsync(f.fileno())
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
             os.replace(tmp_path, dest)
-            metadata = {"entity_id": item["entity_id"], "entity_name": item["entity_name"], "content_type": item["content_type"], "content_id": cid, "collected_at": datetime.now(timezone.utc).isoformat(), "raw": item.get("raw", {})}
+            metadata = {
+                "entity_id": item["entity_id"], "entity_name": item["entity_name"],
+                "content_type": item["content_type"], "content_id": cid,
+                "collected_at": datetime.now(timezone.utc).isoformat(),
+                "raw": item.get("raw", {}),
+            }
             self.save_json(metadata, dest_dir / f"{Path(filename).stem}_metadata.json")
-            await self.insert_media_item(entity_id=item["entity_id"], entity_name=item["entity_name"], content_type=item["content_type"], content_id=cid, filename=filename, file_path=str(dest), file_size=len(data), sha256=sha, metadata=metadata)
+            await self.insert_media_item(
+                entity_id=item["entity_id"], entity_name=item["entity_name"],
+                content_type=item["content_type"], content_id=cid,
+                filename=filename, file_path=str(dest), file_size=len(data),
+                sha256=sha, metadata=metadata,
+            )
             self._known_ids.add(cid)
         except Exception as e:
             logger.error("Download failed %s: %s", cid, e)
@@ -437,10 +1115,16 @@ class GithubCollector(BaseCollector):
         """Seed the spider queue with the seed user's direct followers/following.
 
         Deeper traversal is performed by ``_process_spider_queue`` which pops
-        users from the queue in batches and enqueues *their* neighbors at depth+1.
-        This avoids unbounded in-memory BFS that previously starved the queue worker.
+        users from the queue in batches and enqueues their neighbors at
+        depth+1. This avoids unbounded in-memory BFS that previously starved
+        the queue worker.
         """
         await self._enqueue_neighbors(client, seed_username, depth=1)
 
     async def cleanup(self):
-        pass
+        """Optional periodic maintenance hook — runs the avatar reconciler.
+
+        Wired off by default; the unified scheduler may invoke
+        ``reconcile_avatars`` directly when desired.
+        """
+        return None

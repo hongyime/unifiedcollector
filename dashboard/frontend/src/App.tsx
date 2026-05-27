@@ -15,9 +15,9 @@ import { SchedulesPage } from "./features/schedules/SchedulesPage";
 import { RunsPage } from "./features/runs/RunsPage";
 import { GraphPage } from "./features/graph/GraphPage";
 import { MediaBrowserPage } from "./features/media/MediaBrowserPage";
-import { FacesPage } from "./features/whatsapp/FacesPage";
 import { UsersPage } from "./features/whatsapp/UsersPage";
 import { LinksPage } from "./features/whatsapp/LinksPage";
+import { StravaFeedPage } from "./features/strava/StravaFeedPage";
 import { LoginPage } from "./features/auth/LoginPage";
 
 const queryClient = new QueryClient({
@@ -44,9 +44,9 @@ const router = createBrowserRouter([
       { path: "media", element: <MediaPage /> },
       { path: "browse", element: <MediaBrowserPage /> },
       { path: "graph", element: <GraphPage /> },
-      { path: "whatsapp/faces", element: <FacesPage /> },
       { path: "whatsapp/users", element: <UsersPage /> },
       { path: "whatsapp/links", element: <LinksPage /> },
+      { path: "strava/feed", element: <StravaFeedPage /> },
       { path: "dlq", element: <DLQPage /> },
       { path: "health", element: <HealthPage /> },
       { path: "settings", element: <SettingsPage /> },

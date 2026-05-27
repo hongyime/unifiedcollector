@@ -89,12 +89,44 @@ async def health_ws(ws: WebSocket):
                         "SELECT COUNT(*) FROM dead_letter_queue"
                     )
 
+                    # Matrix collector metrics — added Wave 1 Phase 3.
+                    # Tolerate missing tables (collector might not be
+                    # deployed) so the broadcaster never falls over.
+                    matrix_metrics: dict | None = None
+                    if os.getenv("MATRIX_COLLECTOR_ENABLED", "").lower() in (
+                        "1", "true", "yes", "on"
+                    ):
+                        try:
+                            undecrypted = await conn.fetchval(
+                                "SELECT COUNT(*) FROM matrix_events "
+                                "WHERE is_encrypted = TRUE AND is_decrypted = FALSE"
+                            )
+                            pending_media = await conn.fetchval(
+                                "SELECT COUNT(*) FROM matrix_events "
+                                "WHERE media_mxc IS NOT NULL "
+                                "AND media_local_path IS NULL "
+                                "AND (is_encrypted = FALSE OR is_decrypted = TRUE)"
+                            )
+                            backfill_pending = await conn.fetchval(
+                                "SELECT COUNT(*) FROM matrix_backfill_state "
+                                "WHERE done = FALSE"
+                            )
+                            matrix_metrics = {
+                                "undecrypted": int(undecrypted or 0),
+                                "pending_media": int(pending_media or 0),
+                                "backfill_pending": int(backfill_pending or 0),
+                            }
+                        except Exception as me:
+                            logger.debug("matrix metrics tick skipped: %s", me)
+                            matrix_metrics = None
+
                 await ws.send_json({
                     "type": "health",
                     "collectors": [dict(r) for r in cursors],
                     "media_stats": [dict(r) for r in stats],
                     "dlq_count": dlq_count,
                     "ws_clients": manager.count,
+                    "matrix": matrix_metrics,
                 })
             except Exception as e:
                 # Don't leak internal exception text to clients.

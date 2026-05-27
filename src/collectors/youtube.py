@@ -1,3 +1,55 @@
+"""YouTube collector — Wave 2 Batch A port of youtubetoolkit/.
+
+Absorbed from youtubetoolkit/:
+    - main.py loop verbs → public collect_*() methods (collect_subscriptions,
+      collect_liked_videos, collect_custom_playlist, collect_target_channel,
+      batch_download).
+    - scripts/subscription_processor.py → collect_subscriptions() w/
+      since_last_scrape (smart mode), per-channel video extraction via
+      uploads playlist (1 quota unit/page), batched videos.list enrichment.
+    - scripts/scrape_liked_videos_enhanced.py → collect_liked_videos() using
+      the Data API "LL" playlist (OAuth-only).
+    - scripts/scrape_custom_playlist.py → collect_custom_playlist() via
+      yt-dlp --flat-playlist (no API quota cost) for arbitrary playlists or
+      channel URLs.
+    - scripts/scrape_targets.py → collect_target_channels() reads operator
+      target_channels.txt and dispatches to _collect_channel().
+    - scripts/batch_downloader.py → batch_download() over a target list,
+      with photos_only and days/duration filters mapped to existing yt-dlp
+      flow.
+    - src/video_processor.py download flow → already covered by
+      _download_videos_via_yt_dlp / _collect_thumbnails_via_yt_dlp.
+    - src/auth_cache.py → JSON-credentials path inside _load_oauth_credentials()
+      (unified collector replaces pickle with JSON; legacy pickle migration
+      already in place).
+    - src/channel_photo_tracker.py (pHash logic for CDN-rotation vs genuine
+      change) → handled at the platform-agnostic level by
+      src.core.profile_photo_tracker; collector emits the URL change.
+    - src/data_manager_streamlined.parse_duration() → _parse_iso8601_duration().
+
+Dropped (per Wave 2 drop rules):
+    - main.py interactive Rich/questionary menus → operator UI, not collector
+      (toolkit's main.py runs as standalone script).
+    - SQLite database.py / migrations → unified Postgres schema is canonical.
+    - upload/comment/like-write/subscribe-write endpoints → read-only ingest.
+    - setup.bat / start_toolkit.bat / standalone CLI → no equivalent here.
+    - scripts/youtube_oauth_bootstrap.py / scripts/logout_account.py / 
+      scripts/validate_installation.py → user setup scripts. We reference
+      youtube_oauth_bootstrap (lives at scripts/) for OAuth onboarding but
+      DO NOT absorb its interactive flow.
+    - download_path_manager.prompt_for_download_path → prompts the user;
+      collectors write to a DRIVE_PATH baked into BaseCollector.
+    - download_structurer.py heuristics → file_naming.py already handles
+      our atomic + sanitised path scheme.
+
+Deferred:
+    - rate_limiter.py per-channel adaptive multipliers → would be nice on
+      top of src.core.adaptive_rate; current implementation uses
+      _api_delay/_download_delay hard sleeps. Tracked as TODO.
+    - resilience.py token-bucket → src.core.adaptive_rate covers AIMD; the
+      few `subprocess.run(..., timeout=...)` wrappers should migrate to
+      src.core.subprocess_downloader (already used for video download).
+"""
 import asyncio
 import json
 import logging
@@ -7,7 +59,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 
@@ -17,6 +69,26 @@ from src.core.file_naming import sanitize_name
 logger = logging.getLogger(__name__)
 
 YT_API_BASE = "https://www.googleapis.com/youtube/v3"
+LIKED_VIDEOS_PLAYLIST_ID = "LL"
+
+
+def parse_iso8601_duration(duration_str: str) -> int:
+    """Parse ISO 8601 duration (e.g. PT1H23M45S) to seconds. Returns 0 on parse failure.
+
+    Ported from youtubetoolkit/scripts/subscription_processor.parse_duration.
+    """
+    if not duration_str:
+        return 0
+    try:
+        m = re.search(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", duration_str)
+        if m:
+            h = int(m.group(1) or 0)
+            mn = int(m.group(2) or 0)
+            s = int(m.group(3) or 0)
+            return h * 3600 + mn * 60 + s
+    except Exception:
+        pass
+    return 0
 
 
 class YoutubeCollector(BaseCollector):
@@ -43,6 +115,16 @@ class YoutubeCollector(BaseCollector):
         self._transcript_lang = os.getenv("YOUTUBE_TRANSCRIPT_LANG", "en")
         self._max_comments = int(os.getenv("YOUTUBE_MAX_COMMENTS", "200"))
         self._enrich_batch_limit = int(os.getenv("YOUTUBE_ENRICH_BATCH_LIMIT", "10"))
+        # Wave 2 absorbed-from-toolkit settings
+        self._subscription_cache_file = Path(
+            os.getenv("YOUTUBE_SUBSCRIPTION_CACHE", "data/youtube_subscriptions.json")
+        )
+        self._target_channels_file = Path(
+            os.getenv("YOUTUBE_TARGET_CHANNELS_FILE", "data/youtube_target_channels.txt")
+        )
+        self._max_liked_videos = int(os.getenv("YOUTUBE_MAX_LIKED_VIDEOS", "1000"))
+        self._max_subscriptions = int(os.getenv("YOUTUBE_MAX_SUBSCRIPTIONS", "999"))
+        self._max_videos_per_channel = int(os.getenv("YOUTUBE_MAX_VIDEOS_PER_CHANNEL", "0"))
 
     @staticmethod
     def _check_yt_dlp() -> bool:
@@ -788,3 +870,507 @@ class YoutubeCollector(BaseCollector):
         except Exception as e:
             logger.error("Download failed %s: %s", cid, e)
             await self.send_to_dlq(item["entity_id"], cid, str(e))
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Wave 2: toolkit-parity public verbs.
+    # Each maps to a youtubetoolkit/scripts/*.py operator command and is
+    # designed to be invoked individually by the scheduler.
+    # ─────────────────────────────────────────────────────────────────────
+
+    async def _ensure_auth(self) -> bool:
+        """Lazy-load OAuth credentials and set _has_auth. Returns True if any auth is present."""
+        if not getattr(self, "_has_auth", False):
+            if not self._api_key:
+                self._load_oauth_credentials()
+            self._has_auth = bool(self._api_key or self._oauth_credentials)
+        return self._has_auth
+
+    async def _api_get(self, path: str, params: dict, *, client: "httpx.AsyncClient | None" = None) -> dict:
+        """Single GET against the YouTube Data API with the configured auth.
+
+        Returns parsed JSON dict on 200, or {} on non-200 / quota / error.
+        Wraps existing _yt_auth() to keep auth logic uniform across new verbs.
+        """
+        headers, qparams = self._yt_auth(params)
+        own_client = client is None
+        if own_client:
+            client = httpx.AsyncClient(timeout=30, headers=headers)
+        try:
+            resp = await client.get(f"{YT_API_BASE}/{path}", params=qparams, headers=headers if not own_client else None)
+            if resp.status_code != 200:
+                logger.warning("YouTube API %s status=%s body=%s", path, resp.status_code, resp.text[:200])
+                return {}
+            return resp.json()
+        finally:
+            if own_client:
+                await client.aclose()
+
+    # ── collect_subscriptions ───────────────────────────────────────────
+
+    async def collect_subscriptions(self, *, max_channels: int | None = None,
+                                    fetch_details: bool = False,
+                                    since_last_scrape: bool = False) -> list[dict]:
+        """List the authenticated user's subscribed channels via Data API.
+
+        Mirrors youtubetoolkit/scripts/subscription_processor.get_subscriptions
+        + process_subscriptions(since_last_scrape=...). Requires OAuth.
+
+        Returns a list of {channel_id, channel_name, channel_url[, bio,
+        subscriber_count]} dicts. Also caches the result to
+        _subscription_cache_file with last_scrape_time bookkeeping.
+        """
+        await self._ensure_auth()
+        if not self._oauth_credentials:
+            logger.warning("collect_subscriptions requires OAuth (got none)")
+            return []
+
+        cap = max_channels if max_channels is not None else self._max_subscriptions
+        subscriptions: list[dict] = []
+        page_token = ""
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            while len(subscriptions) < cap:
+                if self._stop.is_set():
+                    break
+                params = {"part": "snippet", "mine": "true", "maxResults": 50}
+                if page_token:
+                    params["pageToken"] = page_token
+                data = await self._api_get("subscriptions", params, client=client)
+                items = data.get("items", []) or []
+                if not items:
+                    break
+                for item in items:
+                    if len(subscriptions) >= cap:
+                        break
+                    snippet = item.get("snippet", {}) or {}
+                    rid = snippet.get("resourceId", {}) or {}
+                    cid = rid.get("channelId")
+                    if not cid:
+                        continue
+                    subscriptions.append({
+                        "channel_id": cid,
+                        "channel_name": snippet.get("title", ""),
+                        "channel_url": f"https://www.youtube.com/channel/{cid}",
+                    })
+                page_token = data.get("nextPageToken", "")
+                if not page_token:
+                    break
+                await asyncio.sleep(self._api_delay)
+
+        if fetch_details and subscriptions:
+            subscriptions = await self._fetch_channel_details(subscriptions)
+
+        # Persist cache + last_scrape_time.
+        try:
+            self._subscription_cache_file.parent.mkdir(parents=True, exist_ok=True)
+            existing = {}
+            if self._subscription_cache_file.exists():
+                try:
+                    existing = json.loads(self._subscription_cache_file.read_text(encoding="utf-8"))
+                except Exception:
+                    existing = {}
+            cache_data = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "subscriptions": subscriptions,
+                "last_scrape_time": (
+                    datetime.now(timezone.utc).isoformat() if since_last_scrape
+                    else existing.get("last_scrape_time")
+                ),
+            }
+            self._subscription_cache_file.write_text(
+                json.dumps(cache_data, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+        except Exception as e:
+            logger.warning("Could not cache subscriptions: %s", e)
+
+        logger.info("YouTube collected %d subscriptions", len(subscriptions))
+        return subscriptions
+
+    async def _fetch_channel_details(self, subscriptions: list[dict]) -> list[dict]:
+        """Batch-enrich subscriptions with bio + subscriber_count via channels.list (50 ids/call)."""
+        out: list[dict] = []
+        async with httpx.AsyncClient(timeout=30) as client:
+            for i in range(0, len(subscriptions), 50):
+                if self._stop.is_set():
+                    break
+                batch = subscriptions[i:i + 50]
+                ids = ",".join(s["channel_id"] for s in batch)
+                data = await self._api_get(
+                    "channels", {"part": "snippet,statistics", "id": ids}, client=client,
+                )
+                details = {}
+                for it in data.get("items", []) or []:
+                    sn = it.get("snippet", {}) or {}
+                    st = it.get("statistics", {}) or {}
+                    details[it.get("id")] = {
+                        "bio": sn.get("description", ""),
+                        "subscriber_count": int(st.get("subscriberCount", 0) or 0),
+                    }
+                for sub in batch:
+                    enriched = dict(sub)
+                    d = details.get(sub["channel_id"], {})
+                    enriched["bio"] = d.get("bio", "")
+                    enriched["subscriber_count"] = d.get("subscriber_count", 0)
+                    out.append(enriched)
+                if i + 50 < len(subscriptions):
+                    await asyncio.sleep(self._api_delay)
+        return out
+
+    def _get_last_scrape_time(self) -> datetime | None:
+        """Read last_scrape_time from subscription cache. None if absent."""
+        try:
+            if not self._subscription_cache_file.exists():
+                return None
+            data = json.loads(self._subscription_cache_file.read_text(encoding="utf-8"))
+            ts = data.get("last_scrape_time")
+            if ts:
+                # Tolerate naive ISO timestamps from legacy toolkit cache
+                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt
+        except Exception as e:
+            logger.warning("Could not read last scrape time: %s", e)
+        return None
+
+    # ── collect_liked_videos ────────────────────────────────────────────
+
+    async def collect_liked_videos(self, *, max_videos: int | None = None,
+                                   days: int | None = None) -> list[dict]:
+        """Fetch the OAuth user's liked videos (Data API "LL" playlist) and upsert.
+
+        Mirrors youtubetoolkit/scripts/scrape_liked_videos_enhanced.get_liked_videos.
+        Requires OAuth. Returns the list of collected video summaries.
+        """
+        await self._ensure_auth()
+        if not self._oauth_credentials:
+            logger.warning("collect_liked_videos requires OAuth (got none)")
+            return []
+
+        cap = max_videos if max_videos is not None else self._max_liked_videos
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=days)
+            if days else None
+        )
+        videos: list[dict] = []
+        page_token = ""
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            while len(videos) < cap:
+                if self._stop.is_set():
+                    break
+                params = {
+                    "part": "snippet,contentDetails",
+                    "playlistId": LIKED_VIDEOS_PLAYLIST_ID,
+                    "maxResults": min(50, cap - len(videos)),
+                }
+                if page_token:
+                    params["pageToken"] = page_token
+                data = await self._api_get("playlistItems", params, client=client)
+                items = data.get("items", []) or []
+                if not items:
+                    break
+                stop_iter = False
+                for it in items:
+                    if len(videos) >= cap:
+                        stop_iter = True
+                        break
+                    sn = it.get("snippet", {}) or {}
+                    rid = sn.get("resourceId", {}) or {}
+                    vid = rid.get("videoId")
+                    if not vid:
+                        continue
+                    if cutoff:
+                        try:
+                            added = datetime.fromisoformat(
+                                sn.get("publishedAt", "").replace("Z", "+00:00")
+                            )
+                            if added < cutoff:
+                                stop_iter = True
+                                break
+                        except Exception:
+                            pass
+                    videos.append({
+                        "video_id": vid,
+                        "url": f"https://www.youtube.com/watch?v={vid}",
+                        "title": sn.get("title", ""),
+                        "channel_id": sn.get("videoOwnerChannelId") or sn.get("channelId"),
+                        "channel": sn.get("videoOwnerChannelTitle") or sn.get("channelTitle", ""),
+                        "published_at": sn.get("publishedAt"),
+                    })
+                # Persist into youtube_videos.
+                if items:
+                    await self._upsert_liked_batch(items)
+                if stop_iter:
+                    break
+                page_token = data.get("nextPageToken", "")
+                if not page_token:
+                    break
+                await asyncio.sleep(self._api_delay)
+
+        logger.info("YouTube collected %d liked videos", len(videos))
+        return videos
+
+    async def _upsert_liked_batch(self, items: list[dict]):
+        """Upsert a page of liked-playlist items into youtube_videos.
+
+        We treat the channel referenced in each item as the canonical
+        owning channel; if not yet in youtube_channels we still upsert the
+        video with channel_id=NULL (FK is ON DELETE SET NULL).
+        """
+        for it in items:
+            if self._stop.is_set():
+                break
+            sn = it.get("snippet", {}) or {}
+            rid = sn.get("resourceId", {}) or {}
+            vid = rid.get("videoId")
+            if not vid:
+                continue
+            owner_channel = sn.get("videoOwnerChannelId") or sn.get("channelId") or ""
+            video_data = {
+                "id": vid,
+                "snippet": sn,
+                "contentDetails": it.get("contentDetails", {}),
+                "statistics": {},
+            }
+            try:
+                await self._upsert_video(owner_channel, video_data)
+            except Exception as e:
+                logger.warning("YouTube upsert (liked) failed for %s: %s", vid, e)
+
+    # ── collect_custom_playlist ────────────────────────────────────────
+
+    async def collect_custom_playlist(self, url_or_id: str, *,
+                                      days: int | None = None) -> list[dict]:
+        """Scrape arbitrary YouTube Playlist or Channel URL via yt-dlp --flat-playlist.
+
+        Mirrors youtubetoolkit/scripts/scrape_custom_playlist.scrape_custom_url.
+        Uses yt-dlp (no quota cost). Returns list of {video_id, url, title, ...}
+        and upserts each into youtube_videos.
+        """
+        if not self._use_yt_dlp:
+            logger.warning("collect_custom_playlist needs yt-dlp; skipping")
+            return []
+
+        url = url_or_id
+        if not url.startswith("http"):
+            # Bare playlist or channel id
+            if url.startswith("PL") or url.startswith("LL") or url.startswith("FL"):
+                url = f"https://www.youtube.com/playlist?list={url}"
+            else:
+                url = f"https://www.youtube.com/channel/{url}"
+
+        cmd = [
+            "yt-dlp", "--flat-playlist", "--dump-single-json",
+            "--quiet", "--no-warnings", "--ignore-errors",
+            "--socket-timeout", "30", "--retries", "2",
+        ]
+        if days:
+            cmd.extend(["--dateafter", f"now-{days}days"])
+        if self._cookie_browser:
+            cmd.extend(["--cookies-from-browser", self._cookie_browser])
+        if self._cookie_file:
+            cmd.extend(["--cookies", self._cookie_file])
+        cmd.append(url)
+
+        loop = asyncio.get_event_loop()
+        try:
+            proc = await loop.run_in_executor(
+                None, lambda: subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning("yt-dlp custom playlist timed out: %s", url)
+            return []
+        if proc.returncode != 0 or not proc.stdout.strip():
+            stderr_tail = (proc.stderr or "").strip().splitlines()[-3:]
+            logger.warning("yt-dlp custom playlist rc=%s for %s: %s",
+                           proc.returncode, url, " | ".join(stderr_tail))
+            return []
+        try:
+            info = json.loads(proc.stdout)
+        except Exception as e:
+            logger.warning("yt-dlp custom playlist returned bad JSON for %s: %s", url, e)
+            return []
+
+        videos: list[dict] = []
+        playlist_uploader = info.get("uploader") or info.get("channel") or info.get("title")
+        playlist_channel_id = info.get("channel_id") or ""
+
+        entries = info.get("entries") or [info]
+        for ent in entries:
+            if not ent:
+                continue
+            vid = ent.get("id")
+            if not vid:
+                continue
+            video = {
+                "video_id": vid,
+                "url": ent.get("url") or f"https://www.youtube.com/watch?v={vid}",
+                "title": ent.get("title", ""),
+                "channel": ent.get("uploader") or playlist_uploader or "",
+                "channel_id": ent.get("channel_id") or playlist_channel_id or "",
+                "duration": ent.get("duration") or 0,
+            }
+            videos.append(video)
+            video_data = {
+                "id": vid,
+                "snippet": {
+                    "title": video["title"],
+                    "description": ent.get("description", ""),
+                    "channelId": video["channel_id"],
+                    "publishedAt": ent.get("upload_date"),
+                },
+                "statistics": {
+                    "viewCount": ent.get("view_count", 0) or 0,
+                    "likeCount": ent.get("like_count", 0) or 0,
+                },
+            }
+            try:
+                await self._upsert_video(video["channel_id"], video_data)
+            except Exception as e:
+                logger.warning("YouTube upsert (custom) failed for %s: %s", vid, e)
+
+        logger.info("YouTube custom playlist %s yielded %d videos", url, len(videos))
+        return videos
+
+    # ── collect_target_channel(s) ───────────────────────────────────────
+
+    async def collect_target_channel(self, channel_id_or_url: str) -> list[str]:
+        """Scrape a single target channel: upserts metadata + recent videos.
+
+        Thin async-public wrapper around the existing _collect_channel(); kept
+        explicit so the scheduler can dispatch to a single channel.
+        """
+        await self._ensure_auth()
+        cid = channel_id_or_url
+        if cid.startswith("http"):
+            # Pull the trailing /channel/UC... or @handle if present
+            m = re.search(r"/channel/(UC[\w-]+)", cid)
+            if m:
+                cid = m.group(1)
+            else:
+                m = re.search(r"/(@[\w.-]+)", cid)
+                if m:
+                    cid = m.group(1)
+        await self._collect_channel(cid)
+        return [cid]
+
+    async def collect_target_channels(self, target_file: Path | str | None = None) -> list[str]:
+        """Read target_channels.txt (one channel per line, # comments OK) and process each.
+
+        Mirrors youtubetoolkit/scripts/scrape_targets.scrape_target_channels.
+        """
+        path = Path(target_file) if target_file else self._target_channels_file
+        if not path.exists():
+            logger.info("No target_channels file at %s", path)
+            return []
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except Exception as e:
+            logger.warning("Failed to read target_channels file %s: %s", path, e)
+            return []
+        channels = [l.strip() for l in lines if l.strip() and not l.strip().startswith("#")]
+        if not channels:
+            return []
+        processed: list[str] = []
+        for ch in channels:
+            if self._stop.is_set():
+                break
+            try:
+                await self.collect_target_channel(ch)
+                processed.append(ch)
+            except Exception as e:
+                logger.error("collect_target_channel failed for %s: %s", ch, e)
+                await self.send_to_dlq(ch, ch, str(e))
+            await asyncio.sleep(self._api_delay)
+        return processed
+
+    # ── batch_download ──────────────────────────────────────────────────
+
+    async def batch_download(self, target_list: list[str | dict] | None = None,
+                             *, photos_only: bool = False) -> dict:
+        """Download videos / thumbnails for a list of targets.
+
+        Mirrors youtubetoolkit/scripts/batch_downloader. Each target is either
+        a string (channel_id/url or video_id) or a dict {"video_id"/"url",
+        "channel_id", "channel_name"}. If target_list is None, pull pending
+        videos from the DB (no-channel filter, recent first).
+
+        photos_only: when True, hand off to _collect_thumbnails_via_yt_dlp
+        per channel_id and skip the video download tier.
+        """
+        if not self._use_yt_dlp:
+            logger.warning("batch_download needs yt-dlp; skipping")
+            return {"total": 0, "successful": 0, "failed": 0, "skipped": 0}
+
+        if target_list is None:
+            target_list = await self._fetch_pending_videos()
+
+        stats = {"total": len(target_list), "successful": 0, "failed": 0, "skipped": 0}
+        if not target_list:
+            return stats
+
+        # Group by channel for bulk yt-dlp invocations.
+        by_channel: dict[str, list[str]] = {}
+        for t in target_list:
+            if self._stop.is_set():
+                break
+            if isinstance(t, dict):
+                ch = t.get("channel_id") or ""
+                vid = t.get("video_id") or ""
+            else:
+                # Bare string: try to detect "watch?v=" / "UC..." / 11-char id
+                if "watch?v=" in t:
+                    ch = ""
+                    m = re.search(r"watch\?v=([\w-]{6,})", t)
+                    vid = m.group(1) if m else ""
+                elif t.startswith("UC") and len(t) >= 20:
+                    ch = t
+                    vid = ""
+                else:
+                    ch = ""
+                    vid = t
+            if vid:
+                by_channel.setdefault(ch, []).append(vid)
+            elif ch:
+                by_channel.setdefault(ch, [])
+
+        for ch, vids in by_channel.items():
+            if self._stop.is_set():
+                break
+            try:
+                if photos_only:
+                    await self._collect_thumbnails_via_yt_dlp(ch or "unknown", ch or "unknown")
+                else:
+                    await self._download_videos_via_yt_dlp(ch or "unknown", ch or "unknown", vids)
+                stats["successful"] += len(vids) or 1
+            except Exception as e:
+                logger.error("batch_download failure for channel %s: %s", ch, e)
+                stats["failed"] += len(vids) or 1
+
+        return stats
+
+    async def _fetch_pending_videos(self, limit: int = 100) -> list[dict]:
+        """Pull recently-collected video rows from DB to drive batch_download default mode."""
+        if not self.pool:
+            return []
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT v.platform_video_id, c.platform_channel_id, c.title
+                FROM youtube_videos v
+                LEFT JOIN youtube_channels c ON v.channel_id = c.id
+                ORDER BY v.collected_at DESC
+                LIMIT $1
+                """,
+                limit,
+            )
+        return [
+            {
+                "video_id": r["platform_video_id"],
+                "channel_id": r["platform_channel_id"] or "",
+                "channel_name": r["title"] or "",
+            }
+            for r in rows
+        ]
+

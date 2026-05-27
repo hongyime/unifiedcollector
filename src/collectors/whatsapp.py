@@ -1,3 +1,38 @@
+"""
+WhatsApp collector — RECEIVES events from external Baileys bridges.
+
+Bridge integration
+------------------
+Two docker containers (`wa_bridge_1`, `wa_bridge_2`) run a Baileys-based
+WhatsApp Web client (the wa-client-ts service from whatsappcollector/).
+Each bridge publishes message events; this collector consumes them in two modes:
+
+  1. RabbitMQ topic exchange `whatsapp.events` (preferred). Bound queue
+     `unifiedcollector.messages` with routing key `messages.#`. JSON event
+     bodies match the `message_event` shape produced by
+     services/wa-client-ts/src/event_handlers/messages.ts.
+
+  2. HTTP polling fallback. For each session in WHATSAPP_SESSION_BRIDGES_JSON
+     (mapping session_name -> bridge_url), GET `{bridge_url}/health` then
+     `{bridge_url}/messages/recent?limit=N`. Auth via
+     `Authorization: Bearer <WHATSAPP_MEDIA_BRIDGE_SECRET>`.
+
+Encrypted media is decrypted by the bridge's `/media/decrypt` endpoint
+(POST {messageId, mediaKey, directPath}). HMAC-SHA256 signed using
+`WHATSAPP_MEDIA_BRIDGE_SECRET` and timestamp header.
+
+Public entry points
+-------------------
+  - collect(targets)           : main loop — broker consume or HTTP poll
+  - process_bridge_event(event): handle a single bridge event payload
+  - backfill_chat(jid, ...)    : trigger on-demand backfill via bridge
+  - download_media(item)       : persist queued media bytes
+
+Send-side dropped (per task): no send/reply/react/edit/delete/typing/
+mark-read, no bot-command-handler, no bulk_sender, no web UI, no CLI/setup.
+This collector is RECEIVE-ONLY.
+"""
+
 import asyncio
 import hashlib
 import hmac
@@ -9,14 +44,13 @@ import zipfile
 import tempfile
 from pathlib import Path
 from datetime import datetime, timezone
+from uuid import uuid4
 
 import httpx
 
 from src.core.base_collector import BaseCollector
 from src.core.change_tracker import ChangeTracker
 from src.core.link_extractor import extract_whatsapp_links
-from src.core.face_processor import FaceProcessor
-from src.core.face_matcher import FaceMatcher
 from src.core.file_naming import sanitize_name
 
 logger = logging.getLogger(__name__)
@@ -72,16 +106,10 @@ class WhatsappCollector(BaseCollector):
         self._use_realtime = bool(self._session_bridges and self._bridge_secret)
         self._use_export = bool(self._export_dir and os.path.isdir(self._export_dir))
 
-        self._face_enabled = os.getenv("WHATSAPP_FACE_RECOGNITION_ENABLED", "false").lower() == "true"
-        self._face_processor = FaceProcessor() if self._face_enabled else None
-        self._face_matcher = FaceMatcher()
         self._change_tracker = ChangeTracker()
         self._link_discovery_enabled = os.getenv("WHATSAPP_LINK_DISCOVERY_ENABLED", "true").lower() == "true"
-        self._bulk_send_enabled = os.getenv("WHATSAPP_BULK_SEND_ENABLED", "false").lower() == "true"
-        self._bulk_hourly_cap = int(os.getenv("WHATSAPP_BULK_HOURLY_CAP", "30"))
-        self._bulk_daily_cap = int(os.getenv("WHATSAPP_BULK_DAILY_CAP", "200"))
-        self._bulk_min_membership_hours = int(os.getenv("WHATSAPP_BULK_MIN_MEMBERSHIP_HOURS", "48"))
-        self._bulk_send_counts: dict[str, list[float]] = {}
+        # Send-side intentionally dropped: no bulk_send_enabled / hourly cap /
+        # daily cap / membership gating. This collector is RECEIVE-ONLY.
 
     @property
     def account_media_dir(self) -> Path:
@@ -223,9 +251,6 @@ class WhatsappCollector(BaseCollector):
 
         if data:
             await self._save_media(data, cid, chat_jid, chat_name, content_type, ext, event)
-
-            if self._face_enabled and content_type in ("photo", "video"):
-                await self._process_faces(data, cid, chat_jid.split("@")[0], content_type)
 
         if self._link_discovery_enabled:
             text = event.get("body", "") or event.get("text", "") or event.get("caption", "")
@@ -400,8 +425,119 @@ class WhatsappCollector(BaseCollector):
 
             await asyncio.sleep(self._backfill_poll)
 
+    async def process_bridge_event(self, event: dict, targets: list[str] | None = None):
+        """Public entry point: process a single bridge event payload.
+
+        Use this when a host process feeds events directly (e.g. test harness,
+        or a custom subscriber). Equivalent to internal _handle_message_event.
+        """
+        await self._handle_message_event(event, targets or [])
+
+    async def backfill_chat(self, chat_jid: str, *, oldest_msg_key: str = "",
+                             oldest_msg_ts: int = 0, count: int = 100,
+                             session: str | None = None) -> str | None:
+        """Request on-demand history backfill from a bridge for ``chat_jid``.
+
+        Mirrors whatsappcollector BackfillManager.request_backfill_batch:
+        POST {bridge_url}/backfill-request with chat_jid + oldest_msg_key/ts +
+        correlation_id. Returns the correlation_id on success, None on failure.
+        """
+        session_name = session or (self._session_names[0] if self._session_names else "")
+        bridge_url = self._session_bridges.get(session_name) if session_name else None
+        if not bridge_url:
+            # fall back to first available bridge
+            if self._session_bridges:
+                session_name, bridge_url = next(iter(self._session_bridges.items()))
+            else:
+                logger.warning("backfill_chat: no bridge configured for jid=%s", chat_jid)
+                return None
+
+        correlation_id = str(uuid4())
+        payload = {
+            "chat_jid": chat_jid,
+            "oldest_msg_key": oldest_msg_key,
+            "oldest_msg_ts": int(oldest_msg_ts or 0),
+            "count": int(count),
+            "correlation_id": correlation_id,
+        }
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                resp = await client.post(
+                    f"{bridge_url}/backfill-request",
+                    json=payload,
+                    headers=self._bridge_headers(),
+                )
+                resp.raise_for_status()
+            # rate limit per BackfillManager
+            per_request_sleep = max(0.0, 60.0 / max(1, self._backfill_rpm))
+            await asyncio.sleep(per_request_sleep)
+            return correlation_id
+        except Exception as exc:
+            logger.warning("backfill_chat failed jid=%s err=%s", chat_jid, exc)
+            return None
+
+    async def _discover_links(self, text: str, chat_jid: str):
+        """Extract WhatsApp invite links and persist for downstream discovery."""
+        try:
+            links = extract_whatsapp_links(text or "")
+        except Exception as e:
+            logger.debug("link extraction failed: %s", e)
+            return
+        if not links:
+            return
+        if not self.pool:
+            return
+        try:
+            async with self.pool.acquire() as conn:
+                for kind, url in links:
+                    try:
+                        await conn.execute(
+                            """
+                            INSERT INTO discovered_links (source, kind, url, context, discovered_at)
+                            VALUES ($1, $2, $3, $4, NOW())
+                            ON CONFLICT (url) DO NOTHING
+                            """,
+                            self.SOURCE_NAME, kind, url, chat_jid,
+                        )
+                    except Exception as e:
+                        # table may not exist in some envs; soft-fail
+                        logger.debug("discovered_links insert skipped (%s): %s", url, e)
+                        break
+        except Exception as e:
+            logger.debug("discover_links db failure: %s", e)
+
     async def _media_archival_loop(self):
+        """Periodic re-download for messages where media archival has not yet
+        completed. Mirrors media_archival/worker semantics: pull pending items,
+        decrypt via bridge, persist."""
         while not self._stop.is_set():
+            try:
+                if self.pool:
+                    async with self.pool.acquire() as conn:
+                        rows = await conn.fetch(
+                            """
+                            SELECT platform_message_id, metadata
+                            FROM whatsapp_messages
+                            WHERE media_url IS NULL
+                              AND metadata ? 'mediaKey'
+                              AND metadata ? 'directPath'
+                            ORDER BY collected_at DESC
+                            LIMIT $1
+                            """,
+                            self._media_batch,
+                        )
+                    for row in rows or []:
+                        if self._stop.is_set():
+                            break
+                        meta = row["metadata"]
+                        if isinstance(meta, str):
+                            try:
+                                meta = json.loads(meta)
+                            except Exception:
+                                continue
+                        await self._handle_message_event(meta, [])
+            except Exception as e:
+                logger.debug("media archival loop iteration failed: %s", e)
             await asyncio.sleep(self._media_poll)
 
     async def _download_via_bridge(self, session: str, msg_id: str,

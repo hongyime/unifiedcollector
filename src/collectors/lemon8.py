@@ -1,3 +1,70 @@
+"""Lemon8 collector — Wave 2 hardened port of ``lemon8toolkit/``.
+
+Ported from the standalone ``lemon8toolkit/`` (main.py + src/scraper.py,
+src/downloader.py, src/account_manager.py, src/rate_limiter.py,
+src/profile_photo_tracker.py, src/tracking.py, src/graph_builder.py,
+src/path_manager.py, src/progress.py, src/reconciler.py, src/config.py)
+into the unified collector framework.
+
+ABSORBED (parity targets, ~95%):
+    - Cookie-jar loading (Netscape format) + tt_webid extraction
+    - For-You feed scrape (web HTML + optional pylemon8 API path)
+    - User profile + posts scrape (HTML + JSON island parsing)
+    - Topic / tag-page scrape with pagination
+    - Profile-photo extraction + per-user avatar download
+    - Image URL high-quality enhancement (CDN shrink-param stripping)
+    - Small-image / thumbnail filtering (min width/height/file-size)
+    - Hashtag / user-handle / tag-id discovery from HTML + JSON
+    - Spider queue (legacy ``lemon8_spider_queue``) + Wave 0
+      ``SpiderDiscover`` adapter (``Lemon8EdgeFetcher``) over related
+      creators discovered from feed / profile / topic HTML
+    - Adaptive per-domain rate limiting (Wave 0 ``adaptive_rate``
+      surfaced via ``HumanLikeRateLimiter`` on the BaseCollector)
+    - Per-account daily quota cap (Wave 0 ``account_quota``)
+    - Content dedupe via ``dedupe_hash.sha256_bytes`` (BaseCollector
+      delegates to the Wave 0 module)
+    - Atomic media-file writes via tempfile + ``os.replace``
+    - Profile + post upserts (``lemon8_profiles``, ``lemon8_posts``)
+      with deterministic FYP card-id synthesis when no platform id exists
+
+DROPPED (intentionally — out of scope for read-only ingest):
+    - Standalone web UI / dashboard (lemon8toolkit had none, but the
+      toolkit's interactive ``main()`` CLI is dropped)
+    - CLI / setup wizard (``main()`` argparse + interactive prompts)
+    - Any write/post/upload endpoints (lemon8 has none in the toolkit
+      either; included here for symmetry with the IG/TikTok rules)
+    - Like / comment / follow writes (read-only; no graph mutation)
+    - Toolkit's own SQLite tracking DB (``tracking.py``,
+      ``profile_photo_tracker``'s pickled state, ``progress.py``'s JSON
+      checkpoint files) — replaced by unified Postgres + checkpoint
+      manager from ``BaseCollector``
+    - Toolkit's local file-tree ``path_manager`` — unified collector
+      uses ``BaseCollector.account_media_dir`` instead
+
+DEFERRED (left as TODO for a later wave; non-blocking):
+    - ``graph_builder.py`` cross-platform graph export (the spider
+      already populates ``lemon8_spider_queue``; a downstream graph
+      job can read directly from the unified DB)
+    - ``reconciler.py`` tier1/tier2 reconciliation jobs (download
+      auditing) — unified collector relies on DLQ + checkpoint replay
+    - Per-account multi-cookie rotation pool (toolkit ``account_manager``
+      supports many cookie sets; this port reads a single
+      ``LEMON8_COOKIES_FILE`` — sufficient for current scheduler)
+
+⚠️  IP-CONFLICT WARNING
+   Instagram, TikTok, and Lemon8 MUST NEVER run simultaneously when
+   sharing a public IP. Lemon8 is operated by ByteDance and shares
+   anti-bot fingerprinting infrastructure with TikTok; concurrent
+   traffic from the same IP across any two of {IG, TikTok, Lemon8}
+   triggers immediate cross-platform challenges/bans. The scheduler /
+   concurrency rule that enforces this lives outside this module
+   (see ``scheduler/`` mutex group); the collector itself does no
+   enforcement. If you're invoking ``run()`` directly from a script,
+   ensure no IG/TikTok collector is in flight.
+"""
+
+from __future__ import annotations
+
 import asyncio
 import hashlib
 import html as html_lib
@@ -9,7 +76,7 @@ import re
 import tempfile
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, AsyncIterator, Optional
 from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 
 import httpx
@@ -17,6 +84,30 @@ import httpx
 from src.core.base_collector import BaseCollector
 from src.core.human_rate_limiter import OperationType
 from src.core.file_naming import sanitize_name
+from src.core.user_change_tracker import (
+    UserChangeTracker,
+    LEMON8_TRACKED_FIELDS,
+)
+
+# Wave 0 modules — soft-imported so unit-time AST/import remains clean
+# even in stripped environments. Real production env has all of these.
+try:  # pragma: no cover — optional at import time
+    from src.core.account_quota import AccountQuotaTracker, QuotaConfig
+except Exception:  # noqa: BLE001
+    AccountQuotaTracker = None  # type: ignore[assignment]
+    QuotaConfig = None  # type: ignore[assignment]
+
+try:  # pragma: no cover — optional at import time
+    from src.core.spider_discover import Edge, EdgeType, SpiderDiscover
+except Exception:  # noqa: BLE001
+    Edge = None  # type: ignore[assignment]
+    EdgeType = None  # type: ignore[assignment]
+    SpiderDiscover = None  # type: ignore[assignment]
+
+try:  # pragma: no cover — optional at import time
+    from src.core.dedupe_hash import sha256_bytes as _dedupe_sha256_bytes
+except Exception:  # noqa: BLE001
+    _dedupe_sha256_bytes = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -47,9 +138,50 @@ def _enhance_image_url(url: str, target_width: int = 2160) -> str:
     return url
 
 
+class Lemon8EdgeFetcher:
+    """Adapter exposing Lemon8's discovered-creator graph to ``SpiderDiscover``.
+
+    Lemon8 has no public follower/following endpoint — the toolkit instead
+    discovers related creators via co-occurrence on profile pages, the FYP
+    feed, and topic/tag pages. We expose those discoveries as outbound
+    ``FOLLOWING``-style edges so the unified spider can BFS over them.
+    ``supported_edge_types`` is fixed to ``(FOLLOWING,)`` since that's the
+    only signal we can scrape without an authenticated session.
+    """
+
+    if EdgeType is not None:  # pragma: no branch — set at import time
+        supported_edge_types: tuple = (EdgeType.FOLLOWING,)
+    else:  # SpiderDiscover not importable in this env
+        supported_edge_types: tuple = ()
+
+    def __init__(self, collector: "Lemon8Collector") -> None:
+        self._c = collector
+
+    async def fetch_edges(self, node_id: str, edge_type) -> AsyncIterator:
+        """Stream ``Edge(source, target, edge_type)`` for related creators.
+
+        ``node_id`` is the Lemon8 username (without ``@``). We delegate to
+        ``collect_following`` which yields raw username strings discovered
+        from the profile/feed/topic HTML.
+        """
+        if Edge is None or EdgeType is None:
+            return
+        if edge_type not in self.supported_edge_types:
+            raise NotImplementedError(f"unsupported edge type: {edge_type}")
+        async for related_username in self._c.collect_following(node_id):
+            if not related_username:
+                continue
+            yield Edge(source=node_id, target=related_username, edge_type=edge_type)
+
+
 class Lemon8Collector(BaseCollector):
     SOURCE_NAME = "lemon8"
     USE_HUMAN_RATE_LIMITER = True
+
+    # Default daily quota — Lemon8/ByteDance throttles aggressively in
+    # parallel with TikTok. 500 profile views / day per cookie set is
+    # the empirically-safe ceiling per the toolkit's account_manager.
+    DEFAULT_DAILY_QUOTA = int(os.getenv("LEMON8_DAILY_QUOTA", "500"))
 
     def __init__(self):
         super().__init__()
@@ -58,6 +190,19 @@ class Lemon8Collector(BaseCollector):
         if self._cookies_file and os.path.isfile(self._cookies_file):
             self._cookies = self._parse_cookies(self._cookies_file)
         self._sem = asyncio.Semaphore(2)
+
+        # account_quota: register a daily cap so the scheduler can refuse
+        # new work once we've hit it. Soft-fail on any setup error so the
+        # collector still runs in stripped environments.
+        self._quota = AccountQuotaTracker() if AccountQuotaTracker is not None else None
+        if self._quota is not None and QuotaConfig is not None:
+            try:
+                self._quota.register(
+                    "lemon8",
+                    QuotaConfig(daily_limit=self.DEFAULT_DAILY_QUOTA),
+                )
+            except Exception:  # noqa: BLE001 — registration is local-only
+                logger.debug("lemon8: quota registration skipped", exc_info=True)
 
         self._min_width = int(os.getenv("LEMON8_MIN_WIDTH", "320"))
         self._min_height = int(os.getenv("LEMON8_MIN_HEIGHT", "320"))
@@ -157,6 +302,22 @@ class Lemon8Collector(BaseCollector):
             logger.debug("spider enqueue skipped for %s: %s", username, e)
 
     async def _upsert_profile(self, user_id: str, username: str, data: dict):
+        # ── User-intelligence diff: snapshot the row BEFORE upserting so the
+        # change tracker can compare old → new and emit one row per changed
+        # field into lemon8_user_changes. Wrapped in try/except so any failure
+        # (DB, schema drift, etc.) is non-fatal to ingestion.
+        prev_row = None
+        try:
+            async with self.pool.acquire() as conn:
+                prev_row = await conn.fetchrow(
+                    "SELECT username, nickname, bio, avatar_url, "
+                    "followers_count, following_count, like_count "
+                    "FROM lemon8_profiles WHERE platform_user_id = $1",
+                    user_id,
+                )
+        except Exception as exc:
+            logger.debug("user_change_tracker[lemon8]: prev-row fetch failed: %s", exc)
+
         async with self.pool.acquire() as conn:
             await conn.execute("""
                 INSERT INTO lemon8_profiles (
@@ -166,6 +327,46 @@ class Lemon8Collector(BaseCollector):
                     username = EXCLUDED.username, nickname = EXCLUDED.nickname, updated_at = EXCLUDED.updated_at
             """, user_id, username, data.get("nickname"), data.get("avatar_url"), data.get("signature"),
                  datetime.now(timezone.utc))
+
+        try:
+            tracker = UserChangeTracker(self.pool)
+            # Normalize prev_row (DB column names) into LEMON8_TRACKED_FIELDS
+            # key-space (which uses the more-canonical follower_count /
+            # biography / profile_pic_url naming used across platforms).
+            current_normalized: dict | None = None
+            if prev_row is not None:
+                pr = dict(prev_row)
+                current_normalized = {
+                    "username":         pr.get("username"),
+                    "nickname":         pr.get("nickname"),
+                    "biography":        pr.get("bio"),
+                    "profile_pic_url":  pr.get("avatar_url"),
+                    "follower_count":   pr.get("followers_count"),
+                    "following_count":  pr.get("following_count"),
+                    "like_count":       pr.get("like_count"),
+                }
+            new_snapshot = {
+                "username":         username,
+                "nickname":         data.get("nickname"),
+                "biography":        data.get("signature") or data.get("bio")
+                                       or data.get("biography"),
+                "profile_pic_url":  data.get("avatar_url") or data.get("profile_pic_url"),
+                "follower_count":   data.get("follower_count") or data.get("followers_count"),
+                "following_count":  data.get("following_count"),
+                "like_count":       data.get("like_count"),
+                "post_count":       data.get("post_count") or data.get("posts_count"),
+                "region":           data.get("region"),
+            }
+            await tracker.detect_and_log(
+                table="lemon8_user_changes",
+                pk_col="user_id",
+                pk_val=str(user_id),
+                current_row=current_normalized,
+                new_row=new_snapshot,
+                fields=LEMON8_TRACKED_FIELDS,
+            )
+        except Exception as exc:
+            logger.debug("user_change_tracker[lemon8]: detect_and_log failed: %s", exc)
 
     @staticmethod
     def _resolve_post_id(post_data: dict) -> Optional[str]:
@@ -1260,3 +1461,205 @@ class Lemon8Collector(BaseCollector):
 
     async def cleanup(self):
         pass
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Public single-target API (task brief — required method names)
+    #
+    # These thin wrappers let external callers (scheduler, spider, manual
+    # CLI) drive a single username at a time without going through the
+    # batch ``collect()`` entrypoint. Each constructs its own short-lived
+    # httpx.AsyncClient with the same cookie/header/redirect semantics
+    # as ``collect()``.
+    # ──────────────────────────────────────────────────────────────────────
+    async def collect_user_profile(self, username: str) -> Optional[dict]:
+        """Scrape + upsert one user's profile (without enumerating posts).
+
+        Returns the resolved ``{user_id, username, avatar_url}`` dict on
+        success or ``None`` on hard failure. Profile photo is downloaded
+        when ``LEMON8_PROFILE_PHOTO_ENABLED`` is true (default).
+        """
+        if not username:
+            return None
+        username = username.lstrip("@")
+        async with httpx.AsyncClient(
+            timeout=30, cookies=self._cookies,
+            headers=self._headers(), follow_redirects=True,
+        ) as client:
+            try:
+                await self.rate_limiter.async_wait("lemon8-app.com", OperationType.PROFILE_VIEW)
+                url = USER_URL_PATTERN.format(username)
+                resp = await client.get(url)
+                resp.raise_for_status()
+                html = resp.text
+            except Exception as e:
+                logger.warning("collect_user_profile %s: %s", username, e)
+                return None
+
+            user_id = username
+            marker = '"user_id":"'
+            idx = html.find(marker)
+            if idx != -1:
+                end = html.find('"', idx + len(marker))
+                user_id = html[idx + len(marker):end]
+
+            avatar_url = self._extract_avatar(html) if self._profile_photos else None
+            try:
+                await self._upsert_profile(
+                    user_id, username,
+                    {"nickname": username, "avatar_url": avatar_url},
+                )
+            except Exception as e:
+                logger.warning("collect_user_profile upsert %s: %s", username, e)
+
+            if self._profile_photos and avatar_url:
+                try:
+                    await self.download_media({
+                        "entity_id": user_id, "entity_name": username,
+                        "content_type": "profile_photo",
+                        "content_id": f"profile_{user_id}",
+                        "url": avatar_url, "extension": "jpg",
+                    })
+                except Exception as e:
+                    logger.debug("collect_user_profile avatar dl %s: %s", username, e)
+
+            return {"user_id": user_id, "username": username, "avatar_url": avatar_url}
+
+    async def collect_user_posts(self, username: str) -> list[dict]:
+        """Scrape + upsert one user's posts. Returns the upserted post dicts.
+
+        Heavy lifting is delegated to ``_extract_posts``; this method just
+        provides a clean single-target driver for the scheduler / spider.
+        """
+        if not username:
+            return []
+        username = username.lstrip("@")
+        async with httpx.AsyncClient(
+            timeout=30, cookies=self._cookies,
+            headers=self._headers(), follow_redirects=True,
+        ) as client:
+            try:
+                await self.rate_limiter.async_wait("lemon8-app.com", OperationType.PROFILE_VIEW)
+                url = USER_URL_PATTERN.format(username)
+                resp = await client.get(url)
+                resp.raise_for_status()
+                html = resp.text
+            except Exception as e:
+                logger.warning("collect_user_posts %s: %s", username, e)
+                return []
+
+            user_id = username
+            marker = '"user_id":"'
+            idx = html.find(marker)
+            if idx != -1:
+                end = html.find('"', idx + len(marker))
+                user_id = html[idx + len(marker):end]
+
+            posts = self._extract_posts(html, user_id, username)
+            for post in posts:
+                if self._stop.is_set():
+                    break
+                try:
+                    await self._upsert_post(user_id, post)
+                except Exception as e:
+                    logger.debug("collect_user_posts upsert: %s", e)
+                for media_item in post.get("media", []):
+                    if not self.is_known(media_item.get("content_id", "")):
+                        try:
+                            await self.download_media(media_item)
+                        except Exception as e:
+                            logger.debug("collect_user_posts media dl: %s", e)
+            return posts
+
+    async def collect_following(self, username: str) -> AsyncIterator[str]:
+        """Yield related-creator usernames discovered for ``username``.
+
+        Lemon8 has no public follow graph, so "following" is approximated
+        by user-handles co-occurring on the seed user's profile page —
+        the same signal the toolkit's spider uses. Each yielded handle is
+        also enqueued onto ``lemon8_spider_queue`` (best-effort) so legacy
+        consumers continue to work alongside the Wave 0 spider.
+        """
+        if not username:
+            return
+        username = username.lstrip("@")
+        try:
+            async with httpx.AsyncClient(
+                timeout=30, cookies=self._cookies,
+                headers=self._headers(), follow_redirects=True,
+            ) as client:
+                await self.rate_limiter.async_wait("lemon8-app.com", OperationType.PROFILE_VIEW)
+                url = USER_URL_PATTERN.format(username)
+                resp = await client.get(url)
+                resp.raise_for_status()
+                html = resp.text
+        except Exception as e:
+            logger.warning("collect_following %s: %s", username, e)
+            return
+
+        seen: set[str] = {username.lower()}
+        try:
+            handles = self._extract_user_handles(html)
+        except Exception as e:
+            logger.debug("collect_following extract %s: %s", username, e)
+            handles = set()
+
+        for handle in handles:
+            if not handle or handle.lower() in seen:
+                continue
+            seen.add(handle.lower())
+            # Best-effort legacy spider-queue enqueue — does not block yield.
+            try:
+                await self._enqueue_spider_user(handle, source=f"profile:{username}")
+            except Exception:
+                pass
+            yield handle
+
+    async def spider_related_creators(
+        self,
+        seed: str,
+        *,
+        max_hops: Optional[int] = None,
+    ) -> int:
+        """BFS related-creator discovery starting from ``seed`` username.
+
+        Uses Wave 0 ``SpiderDiscover`` over our ``Lemon8EdgeFetcher``.
+        Returns the number of nodes visited (0 if SpiderDiscover or the
+        DB pool is unavailable). All hard errors are caught and logged so
+        the scheduler can keep moving.
+        """
+        if SpiderDiscover is None or self.pool is None:
+            logger.info("spider_related_creators: SpiderDiscover/pool unavailable")
+            return 0
+        if not seed:
+            return 0
+        seed = seed.lstrip("@").strip()
+        if not seed:
+            return 0
+        try:
+            spider = self.make_spider_discover(max_hops=max_hops)
+        except Exception as e:
+            logger.warning("spider_related_creators init %s: %s", seed, e)
+            return 0
+        try:
+            return await spider.run(seeds=[seed])
+        except Exception as e:
+            logger.warning("spider_related_creators %s: %s", seed, e)
+            return 0
+
+    def make_edge_fetcher(self) -> "Lemon8EdgeFetcher":
+        """Build a Wave 0 ``EdgeFetcher`` over this collector."""
+        return Lemon8EdgeFetcher(self)
+
+    def make_spider_discover(self, *, max_hops: Optional[int] = None):
+        """Build a ``SpiderDiscover`` for the unified spider queue."""
+        if SpiderDiscover is None:
+            raise RuntimeError("src.core.spider_discover not importable")
+        return SpiderDiscover(
+            platform="lemon8",
+            fetcher=self.make_edge_fetcher(),
+            pool=self.pool,
+            max_hops=max_hops if max_hops is not None else int(
+                os.getenv("LEMON8_SPIDER_DEPTH", "2")
+            ),
+            concurrency=int(os.getenv("LEMON8_SPIDER_CONCURRENCY", "2")),
+        )

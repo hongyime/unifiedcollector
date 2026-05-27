@@ -11,10 +11,10 @@ import {
   Calendar,
   PlayCircle,
   Network,
-  ScanFace,
   Users,
   Link2,
   ImageIcon,
+  Bike,
 } from "lucide-react";
 
 const groups = [
@@ -39,9 +39,14 @@ const groups = [
   {
     label: "WhatsApp",
     items: [
-      { to: "/whatsapp/faces", label: "Faces", icon: ScanFace },
       { to: "/whatsapp/users", label: "Users", icon: Users },
       { to: "/whatsapp/links", label: "Links", icon: Link2 },
+    ],
+  },
+  {
+    label: "Strava",
+    items: [
+      { to: "/strava/feed", label: "Feed", icon: Bike },
     ],
   },
   {

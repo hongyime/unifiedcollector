@@ -179,15 +179,6 @@ class LoginRequest(BaseModel):
     password: str
 
 
-class LabelRequest(BaseModel):
-    label: str
-
-
-class MergeRequest(BaseModel):
-    source_id: str
-    target_id: str
-
-
 # ── Auth ──
 
 @app.post("/auth/login")
@@ -242,16 +233,72 @@ async def auth_me(user: dict = Depends(require_role("viewer"))):
 
 # ── Targets CRUD ──
 
+
+async def _target_already_known(conn, source: str, target_id: str) -> dict | None:
+    """Return {discovered_via, last_seen} if target already in spider data, else None."""
+    queries = {
+        'github': "SELECT login AS hit FROM github_users WHERE login=$1 OR platform_user_id::text=$1 LIMIT 1",
+        'instagram': "SELECT username AS hit FROM instagram_profiles WHERE username=$1 OR platform_user_id=$1 LIMIT 1",
+        'telegram': "SELECT username AS hit FROM telegram_users WHERE username=$1 OR platform_user_id=$1 LIMIT 1",
+        'lemon8': "SELECT username AS hit FROM lemon8_profiles WHERE username=$1 OR platform_user_id=$1 LIMIT 1",
+        'strava': "SELECT platform_athlete_id::text AS hit FROM strava_athletes WHERE platform_athlete_id::text=$1 LIMIT 1",
+        'tiktok': "SELECT username AS hit FROM tiktok_profiles WHERE username=$1 OR platform_user_id=$1 LIMIT 1",
+        'whatsapp': "SELECT platform_user_id AS hit FROM whatsapp_users WHERE platform_user_id=$1 LIMIT 1",
+        'website': "SELECT domain AS hit FROM website_targets WHERE domain=$1 LIMIT 1",
+    }
+    q = queries.get(source)
+    if not q:
+        return None  # youtube, search - no profile table or no dedupe applicable
+    try:
+        row = await conn.fetchrow(q, target_id)
+    except Exception:
+        return None  # table missing - don't block
+    if not row:
+        return None
+    try:
+        parent = await conn.fetchval(
+            "SELECT parent_node_id FROM spider_queue WHERE platform=$1 AND node_id=$2 AND parent_node_id IS NOT NULL LIMIT 1",
+            source, target_id,
+        )
+    except Exception:
+        parent = None
+    try:
+        last_seen = await conn.fetchval(
+            "SELECT last_attempted_at FROM spider_queue WHERE platform=$1 AND node_id=$2 LIMIT 1",
+            source, target_id,
+        )
+    except Exception:
+        last_seen = None
+    return {'discovered_via': parent, 'last_seen': last_seen.isoformat() if last_seen else None}
+
+
 @app.post("/targets")
-async def create_target(req: TargetRequest, _user: dict = Depends(require_role("operator"))):
+async def create_target(
+    req: TargetRequest,
+    force: bool = False,
+    _user: dict = Depends(require_role("operator")),
+):
     pool = await get_pool()
     async with pool.acquire() as conn:
+        if not force:
+            already = await _target_already_known(conn, req.source, req.target)
+            if already is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        'code': 'already_discovered',
+                        'source': req.source,
+                        'target_id': req.target,
+                        **already,
+                    },
+                )
+        priority = req.priority + 5 if force else req.priority
         await conn.execute(
-            "INSERT INTO collection_targets (source, target, priority) "
+            "INSERT INTO collection_targets (source, target_id, priority) "
             "VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
-            req.source, req.target, req.priority,
+            req.source, req.target, priority,
         )
-    return {"status": "ok", "source": req.source, "target": req.target}
+    return {"status": "ok", "source": req.source, "target": req.target, "forced": force}
 
 
 @app.delete("/targets/{target_id}")
@@ -441,59 +488,6 @@ async def media_thumbnail(media_id: int, _user: dict = Depends(require_role("vie
         return FileResponse(str(file_path))
 
 
-# ── WhatsApp: Faces ──
-
-@app.get("/whatsapp/faces")
-async def list_faces(limit: int = 50, _user: dict = Depends(require_role("viewer"))):
-    limit = max(1, min(limit, 500))
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT id, label, occurrence_count, created_at, last_seen "
-            "FROM wa_face_identities ORDER BY occurrence_count DESC LIMIT $1",
-            limit,
-        )
-    return [dict(r) for r in rows]
-
-
-@app.get("/whatsapp/faces/{identity_id}")
-async def get_face(identity_id: str, _user: dict = Depends(require_role("viewer"))):
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        identity = await conn.fetchrow(
-            "SELECT * FROM wa_face_identities WHERE id = $1", identity_id,
-        )
-        if not identity:
-            raise HTTPException(status_code=404, detail="Identity not found")
-        embeddings = await conn.fetch(
-            "SELECT source_content_id, source_entity_id, confidence, frame_index, created_at "
-            "FROM wa_face_embeddings WHERE identity_id = $1 ORDER BY created_at DESC LIMIT 50",
-            identity_id,
-        )
-    return {
-        "identity": dict(identity),
-        "embeddings": [dict(e) for e in embeddings],
-    }
-
-
-@app.post("/whatsapp/faces/{identity_id}/label")
-async def label_face(identity_id: str, req: LabelRequest, _user: dict = Depends(require_role("operator"))):
-    from src.core.face_matcher import FaceMatcher
-    pool = await get_pool()
-    matcher = FaceMatcher()
-    await matcher.rename_identity(pool, identity_id, req.label)
-    return {"status": "ok"}
-
-
-@app.post("/whatsapp/faces/merge")
-async def merge_faces(req: MergeRequest, _user: dict = Depends(require_role("operator"))):
-    from src.core.face_matcher import FaceMatcher
-    pool = await get_pool()
-    matcher = FaceMatcher()
-    await matcher.merge_identities(pool, req.source_id, req.target_id)
-    return {"status": "ok"}
-
-
 # ── WhatsApp: Users ──
 
 @app.get("/whatsapp/users")
@@ -654,9 +648,249 @@ async def list_runs(source: str | None = None, limit: int = 20,
     return [dict(r) for r in rows]
 
 
+# ── Strava following-feed endpoints ──
+#
+# Powers the dashboard /strava/feed page. All endpoints are read-only and
+# require viewer role. Backed by the strava_activities table, which is
+# populated by both the API path (collect_athlete_profile/_collect_activities_api)
+# and the cookie path (fetch_feed_for_date / backfill_feed_history).
+
+@app.get("/strava/athletes")
+async def strava_list_athletes(
+    limit: int = 200,
+    _user: dict = Depends(require_role("viewer")),
+):
+    """List athletes with at least one activity, ordered by activity count."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT a.platform_athlete_id, a.username, a.firstname, a.lastname,
+                   a.profile, COUNT(act.id) AS activity_count
+            FROM strava_athletes a
+            LEFT JOIN strava_activities act ON act.athlete_id = a.id
+            GROUP BY a.id
+            ORDER BY activity_count DESC, a.platform_athlete_id ASC
+            LIMIT $1
+            """,
+            limit,
+        )
+    return [dict(r) for r in rows]
+
+
+@app.get("/strava/feed/dates")
+async def strava_feed_dates(
+    athlete_id: int | None = None,
+    from_: str | None = Query(None, alias="from"),
+    to: str | None = None,
+    _user: dict = Depends(require_role("viewer")),
+):
+    """List dates with activity counts for a given athlete (or all)."""
+    pool = await get_pool()
+    where = ["start_date IS NOT NULL"]
+    args: list = []
+    if athlete_id is not None:
+        args.append(int(athlete_id))
+        where.append(
+            f"athlete_id = (SELECT id FROM strava_athletes WHERE platform_athlete_id = ${len(args)})"
+        )
+    if from_:
+        try:
+            args.append(datetime.fromisoformat(from_))
+            where.append(f"start_date >= ${len(args)}")
+        except Exception:
+            raise HTTPException(status_code=400, detail="bad 'from' date")
+    if to:
+        try:
+            args.append(datetime.fromisoformat(to))
+            where.append(f"start_date <= ${len(args)}")
+        except Exception:
+            raise HTTPException(status_code=400, detail="bad 'to' date")
+    sql = (
+        "SELECT DATE(start_date) AS date, COUNT(*) AS count "
+        "FROM strava_activities "
+        f"WHERE {' AND '.join(where)} "
+        "GROUP BY DATE(start_date) ORDER BY DATE(start_date) DESC LIMIT 365"
+    )
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql, *args)
+    return [{"date": r["date"].isoformat(), "count": r["count"]} for r in rows]
+
+
+@app.get("/strava/feed/activities")
+async def strava_feed_activities(
+    date: str,
+    athlete_id: int | None = None,
+    limit: int = 200,
+    offset: int = 0,
+    _user: dict = Depends(require_role("viewer")),
+):
+    """Activities on a given UTC date for an athlete (or all)."""
+    try:
+        day = datetime.fromisoformat(date).date()
+    except Exception:
+        raise HTTPException(status_code=400, detail="bad 'date'")
+    pool = await get_pool()
+    where = ["DATE(act.start_date) = $1"]
+    args: list = [day]
+    if athlete_id is not None:
+        args.append(int(athlete_id))
+        where.append(
+            f"act.athlete_id = (SELECT id FROM strava_athletes WHERE platform_athlete_id = ${len(args)})"
+        )
+    args.append(int(limit))
+    args.append(int(offset))
+    sql = (
+        "SELECT act.platform_activity_id, act.name, act.type, act.sport_type, "
+        "       act.distance, act.moving_time, act.elapsed_time, "
+        "       act.total_elevation_gain, act.start_date, "
+        "       a.platform_athlete_id, a.username, a.firstname, a.lastname, a.profile "
+        "FROM strava_activities act "
+        "LEFT JOIN strava_athletes a ON a.id = act.athlete_id "
+        f"WHERE {' AND '.join(where)} "
+        f"ORDER BY act.start_date DESC LIMIT ${len(args) - 1} OFFSET ${len(args)}"
+    )
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql, *args)
+    out = []
+    for r in rows:
+        d = dict(r)
+        if d.get("start_date"):
+            d["start_date"] = d["start_date"].isoformat()
+        out.append(d)
+    return out
+
+
+@app.get("/strava/feed/stats")
+async def strava_feed_stats(
+    athlete_id: int | None = None,
+    _user: dict = Depends(require_role("viewer")),
+):
+    """Summary stats for an athlete's activities (or all)."""
+    pool = await get_pool()
+    where = ["1 = 1"]
+    args: list = []
+    if athlete_id is not None:
+        args.append(int(athlete_id))
+        where.append(
+            f"athlete_id = (SELECT id FROM strava_athletes WHERE platform_athlete_id = ${len(args)})"
+        )
+    sql = (
+        "SELECT COUNT(*) AS total_activities, "
+        "       COALESCE(SUM(distance), 0) AS total_distance, "
+        "       COALESCE(SUM(moving_time), 0) AS total_moving_time, "
+        "       COALESCE(SUM(total_elevation_gain), 0) AS total_elevation_gain, "
+        "       MIN(start_date) AS earliest, "
+        "       MAX(start_date) AS latest "
+        f"FROM strava_activities WHERE {' AND '.join(where)}"
+    )
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(sql, *args)
+    d = dict(row) if row else {}
+    for k in ("earliest", "latest"):
+        if d.get(k):
+            d[k] = d[k].isoformat()
+    return d
+
+
 @app.websocket("/ws/health")
 async def ws_health(ws):
     await health_ws(ws)
+
+
+# ── Matrix collector (Wave 1 Phase 3) ──
+#
+# Read-only views over matrix_sync_state, matrix_backfill_state, the
+# decryption / media backlogs, and cross-source coverage. Every endpoint
+# is gated on MATRIX_COLLECTOR_ENABLED — when disabled they short-circuit
+# with a 503 rather than running queries against tables that may not be
+# populated. No writes from this section.
+
+def _matrix_enabled() -> bool:
+    return os.getenv("MATRIX_COLLECTOR_ENABLED", "").lower() in ("1", "true", "yes", "on")
+
+
+def _matrix_disabled_response():
+    raise HTTPException(
+        status_code=503,
+        detail={"enabled": False, "reason": "matrix collector disabled"},
+    )
+
+
+@app.get("/api/matrix/sync-state")
+async def matrix_sync_state(_user: dict = Depends(require_role("viewer"))):
+    if not _matrix_enabled():
+        _matrix_disabled_response()
+    pool = await get_pool()
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT user_id, next_batch, last_sync_at "
+                "FROM matrix_sync_state ORDER BY last_sync_at DESC NULLS LAST LIMIT 1"
+            )
+    except Exception as e:
+        logger.warning("matrix_sync_state query failed: %s", e)
+        return {"user_id": None, "next_batch": None, "last_sync_at": None}
+    if not row:
+        return {"user_id": None, "next_batch": None, "last_sync_at": None}
+    return dict(row)
+
+
+@app.get("/api/matrix/backfill-state")
+async def matrix_backfill_state(_user: dict = Depends(require_role("viewer"))):
+    if not _matrix_enabled():
+        _matrix_disabled_response()
+    pool = await get_pool()
+    try:
+        async with pool.acquire() as conn:
+            summary = await conn.fetchrow(
+                """
+                SELECT COUNT(*) AS total_rooms,
+                       COUNT(*) FILTER (WHERE done = TRUE) AS done,
+                       COUNT(*) FILTER (WHERE done = FALSE) AS pending,
+                       COUNT(*) FILTER (WHERE last_error IS NOT NULL AND done = FALSE) AS errored,
+                       COALESCE(SUM(events_fetched), 0) AS events_total
+                  FROM matrix_backfill_state
+                """
+            )
+    except Exception as e:
+        logger.warning("matrix_backfill_state query failed: %s", e)
+        return {"total_rooms": 0, "done": 0, "pending": 0, "errored": 0, "events_total": 0}
+    return dict(summary) if summary else {
+        "total_rooms": 0, "done": 0, "pending": 0, "errored": 0, "events_total": 0,
+    }
+
+
+@app.get("/api/matrix/queue-depths")
+async def matrix_queue_depths(_user: dict = Depends(require_role("viewer"))):
+    if not _matrix_enabled():
+        _matrix_disabled_response()
+    pool = await get_pool()
+    try:
+        async with pool.acquire() as conn:
+            undecrypted = await conn.fetchval(
+                "SELECT COUNT(*) FROM matrix_events "
+                "WHERE is_encrypted = TRUE AND is_decrypted = FALSE"
+            )
+            pending_media = await conn.fetchval(
+                "SELECT COUNT(*) FROM matrix_events "
+                "WHERE media_mxc IS NOT NULL "
+                "AND media_local_path IS NULL "
+                "AND (is_encrypted = FALSE OR is_decrypted = TRUE)"
+            )
+    except Exception as e:
+        logger.warning("matrix_queue_depths query failed: %s", e)
+        return {"undecrypted": 0, "pending_media": 0}
+    return {"undecrypted": int(undecrypted or 0), "pending_media": int(pending_media or 0)}
+
+
+@app.get("/api/matrix/coverage")
+async def matrix_coverage(_user: dict = Depends(require_role("viewer"))):
+    if not _matrix_enabled():
+        _matrix_disabled_response()
+    from src.core.matrix_dedupe_queries import coverage_overlap_summary
+    pool = await get_pool()
+    return await coverage_overlap_summary(pool)
 
 
 if DIST_DIR.is_dir():

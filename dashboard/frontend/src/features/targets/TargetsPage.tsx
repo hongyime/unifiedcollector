@@ -10,25 +10,72 @@ import { relativeTime } from "../../utils/formatters";
 import { SOURCES } from "../../utils/constants";
 import { Trash2 } from "lucide-react";
 
+const SOURCE_LABELS: Record<string, string> = {
+  github: "GitHub",
+  website: "Website",
+  instagram: "Instagram",
+  telegram: "Telegram",
+  tiktok: "TikTok",
+  youtube: "YouTube",
+  lemon8: "Lemon8",
+  strava: "Strava",
+  whatsapp: "WhatsApp",
+  search: "Search",
+};
+
+const friendly = (s: string) => SOURCE_LABELS[s] ?? (s.charAt(0).toUpperCase() + s.slice(1));
+
 const sourceOptions = [
   { value: "", label: "All sources" },
-  ...SOURCES.map((s) => ({ value: s, label: s.charAt(0).toUpperCase() + s.slice(1) })),
+  ...SOURCES.map((s) => ({ value: s, label: friendly(s) })),
 ];
+
+type ConflictData = {
+  source: string;
+  target_id: string;
+  discovered_via: string | null;
+  last_seen: string | null;
+};
 
 export function TargetsPage() {
   const qc = useQueryClient();
   const [source, setSource] = useState("");
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({ source: SOURCES[0] as string, target: "", priority: "0" });
+  const [conflictData, setConflictData] = useState<ConflictData | null>(null);
 
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ["targets", source],
     queryFn: () => api.targets(source || undefined),
   });
 
+  const resetForm = () => {
+    setShowForm(false);
+    setForm({ source: SOURCES[0], target: "", priority: "0" });
+  };
+
   const create = useMutation({
-    mutationFn: () => api.createTarget(form.source, form.target, Number(form.priority)),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ["targets"] }); setShowForm(false); setForm({ source: SOURCES[0], target: "", priority: "0" }); },
+    mutationFn: (force: boolean = false) =>
+      api.createTarget(form.source, form.target, Number(form.priority), force),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["targets"] });
+      resetForm();
+      setConflictData(null);
+    },
+    onError: (err: unknown) => {
+      const e = err as { status?: number; detail?: unknown };
+      if (e?.status === 409 && e.detail && typeof e.detail === "object") {
+        const d = e.detail as Record<string, unknown>;
+        if (d.code === "already_discovered") {
+          setConflictData({
+            source: String(d.source ?? form.source),
+            target_id: String(d.target_id ?? form.target),
+            discovered_via: (d.discovered_via as string | null) ?? null,
+            last_seen: (d.last_seen as string | null) ?? null,
+          });
+        }
+      }
+    },
   });
 
   const remove = useMutation({
@@ -49,7 +96,7 @@ export function TargetsPage() {
           <div>
             <label className="text-xs text-text-muted block mb-1">Source</label>
             <select value={form.source} onChange={(e) => setForm({ ...form, source: e.target.value })} className="bg-background border border-border rounded-md text-sm px-2 py-1.5">
-              {SOURCES.map((s) => <option key={s} value={s}>{s}</option>)}
+              {SOURCES.map((s) => <option key={s} value={s}>{friendly(s)}</option>)}
             </select>
           </div>
           <div>
@@ -60,7 +107,7 @@ export function TargetsPage() {
             <label className="text-xs text-text-muted block mb-1">Priority</label>
             <input type="number" value={form.priority} onChange={(e) => setForm({ ...form, priority: e.target.value })} className="bg-background border border-border rounded-md text-sm px-2 py-1.5 w-20" />
           </div>
-          <Button size="sm" onClick={() => create.mutate()} loading={create.isPending} disabled={!form.target}>Save</Button>
+          <Button size="sm" onClick={() => create.mutate(false)} loading={create.isPending} disabled={!form.target}>Save</Button>
         </div>
       )}
       <div className="bg-surface rounded-lg border border-border p-4">
@@ -73,7 +120,7 @@ export function TargetsPage() {
               {data?.map((t) => (
                 <tr key={t.id} className="border-b border-border/50 hover:bg-white/5">
                   <td className="py-2">{t.id}</td>
-                  <td className="py-2 uppercase text-xs">{t.source}</td>
+                  <td className="py-2 uppercase text-xs">{friendly(t.source)}</td>
                   <td className="py-2 font-medium">{t.target}</td>
                   <td className="py-2">{t.priority}</td>
                   <td className="py-2 text-text-muted">{relativeTime(t.created_at)}</td>
@@ -84,6 +131,31 @@ export function TargetsPage() {
           </table>
         )}
       </div>
+
+      {conflictData && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" role="dialog" aria-modal="true">
+          <div className="bg-surface border border-border rounded-lg p-6 max-w-md w-full shadow-xl">
+            <h3 className="text-lg font-semibold mb-3">Already discovered</h3>
+            <p className="text-sm text-text-muted mb-2">
+              <span className="font-mono">{friendly(conflictData.source)}/{conflictData.target_id}</span>
+            </p>
+            <p className="text-sm mb-4">
+              Already discovered via spider graph from{" "}
+              <span className="font-medium">
+                {conflictData.discovered_via || "a logged-in account"}
+              </span>
+              . Adding explicitly will bump priority. Add anyway?
+            </p>
+            {conflictData.last_seen && (
+              <p className="text-xs text-text-muted mb-4">Last seen: {relativeTime(conflictData.last_seen)}</p>
+            )}
+            <div className="flex justify-end gap-2">
+              <Button size="sm" variant="ghost" onClick={() => setConflictData(null)}>Cancel</Button>
+              <Button size="sm" onClick={() => create.mutate(true)} loading={create.isPending}>Add anyway</Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -11,12 +11,15 @@ import type {
   Schedule,
   Run,
   GraphData,
-  FaceIdentity,
   WhatsAppUser,
   UserHistoryEntry,
   DiscoveredLink,
   LinkStats,
   AuthResponse,
+  StravaAthleteSummary,
+  StravaFeedDate,
+  StravaFeedActivity,
+  StravaFeedStats,
 } from "./types";
 
 function getToken(): string | null {
@@ -40,7 +43,14 @@ async function post<T>(path: string, body: unknown): Promise<T> {
     headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  if (!res.ok) {
+    let detail: unknown = undefined;
+    try { detail = (await res.json()).detail; } catch { /* not JSON */ }
+    const err = new Error(`${res.status} ${res.statusText}`) as Error & { status?: number; detail?: unknown };
+    err.status = res.status;
+    err.detail = detail;
+    throw err;
+  }
   return res.json() as Promise<T>;
 }
 
@@ -95,8 +105,8 @@ export const api = {
     const params = source ? `?source=${source}` : "";
     return get<Target[]>(`/targets${params}`);
   },
-  createTarget: (source: string, target: string, priority = 0) =>
-    post("/targets", { source, target, priority }),
+  createTarget: (source: string, target: string, priority = 0, force = false) =>
+    post(`/targets${force ? "?force=true" : ""}`, { source, target, priority }),
   deleteTarget: (id: number) => del(`/targets/${id}`),
 
   schedules: () => get<Schedule[]>("/schedules"),
@@ -111,12 +121,6 @@ export const api = {
   runDetail: (id: number) => get<Run>(`/runs/${id}`),
 
   graph: (source = "github") => get<GraphData>(`/graph?source=${source}`),
-
-  faces: (limit = 50) => get<FaceIdentity[]>(`/whatsapp/faces?limit=${limit}`),
-  faceDetail: (id: string) => get<{ identity: FaceIdentity; embeddings: unknown[] }>(`/whatsapp/faces/${id}`),
-  labelFace: (id: string, label: string) => post(`/whatsapp/faces/${id}/label`, { label }),
-  mergeFaces: (sourceId: string, targetId: string) =>
-    post("/whatsapp/faces/merge", { source_id: sourceId, target_id: targetId }),
 
   waUsers: (search?: string, limit = 50) => {
     const params = new URLSearchParams({ limit: String(limit) });
@@ -137,4 +141,25 @@ export const api = {
   login: (username: string, password: string) =>
     post<AuthResponse>("/auth/login", { username, password }),
   me: () => get<{ username: string; role: string }>("/auth/me"),
+
+  // Strava following-feed playback
+  stravaAthletes: (limit = 200) =>
+    get<StravaAthleteSummary[]>(`/strava/athletes?limit=${limit}`),
+  stravaFeedDates: (athleteId?: number, from?: string, to?: string) => {
+    const params = new URLSearchParams();
+    if (athleteId !== undefined) params.set("athlete_id", String(athleteId));
+    if (from) params.set("from", from);
+    if (to) params.set("to", to);
+    return get<StravaFeedDate[]>(`/strava/feed/dates?${params}`);
+  },
+  stravaFeedActivities: (date: string, athleteId?: number, limit = 200, offset = 0) => {
+    const params = new URLSearchParams({ date, limit: String(limit), offset: String(offset) });
+    if (athleteId !== undefined) params.set("athlete_id", String(athleteId));
+    return get<StravaFeedActivity[]>(`/strava/feed/activities?${params}`);
+  },
+  stravaFeedStats: (athleteId?: number) => {
+    const params = new URLSearchParams();
+    if (athleteId !== undefined) params.set("athlete_id", String(athleteId));
+    return get<StravaFeedStats>(`/strava/feed/stats?${params}`);
+  },
 };

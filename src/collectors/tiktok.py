@@ -1,23 +1,198 @@
+"""TikTok collector — Wave 2 hardened port of ``tiktoktoolkit/``.
+
+Ported from the standalone ``tiktoktoolkit/`` (cli.py, provider.py, spider.py,
+account_manager.py, rate_limiter.py, validation.py, invalid_username_detector.py,
+profile_photo_tracker.py, ytdlp_downloader.py) into the unified collector
+framework.
+
+ABSORBED (parity targets, ~95%):
+    - Cookie validation (Netscape jar required/recommended cookies)
+    - gallery-dl + yt-dlp fallback chain with sidecar JSON ingest
+    - Per-account media directory + atomic file save
+    - Profile + post upserts (tiktok_profiles, tiktok_posts) including
+      hashtags / mentions / challenges / music / stats / verified flags
+    - Spider queue drain (legacy ``tiktok_spider_queue``) + Wave 0
+      ``SpiderDiscover`` adapter (``TiktokEdgeFetcher``) over follower/following
+    - Username validation + invalid-username classification (404/private/banned)
+    - HTML SIGI_STATE / ItemModule scrape fallback
+    - Adaptive per-account rate limiting (429 backoff via Wave 0 module)
+    - Per-account daily quota cap (Wave 0 ``account_quota``)
+    - Content dedupe via ``dedupe_hash.sha256_bytes``
+
+DROPPED (intentionally — out of scope for read-only ingest):
+    - Standalone web UI / dashboard (``cleanup_ui.py``)
+    - CLI / setup wizard (``cli.py``, ``setup.bat``, interactive prompts)
+    - Any write/post/upload endpoints (TikTok has none in the toolkit either,
+      but the toolkit's reconciler write-paths are skipped)
+    - Follow / like / DM writes (read-only; no graph mutation)
+    - Browser-based login flow (``browser_downloader.py`` interactive auth)
+
+DEFERRED (left as TODO for a later wave; non-blocking):
+    - Playwright fallback (``_collect_via_playwright`` is a no-op stub —
+      headless browser scraping is heavyweight and rarely needed when
+      gallery-dl + yt-dlp succeed)
+    - Profile-photo perceptual-hash change tracking (``profile_photo_tracker``
+      from toolkit) — Wave 0 ``profile_photo_tracker`` exists but TikTok
+      hasn't been wired in yet
+    - Reconciler tier1/tier2 reconciliation jobs
+
+⚠️  IP-CONFLICT WARNING
+   Instagram, TikTok, and Lemon8 MUST NEVER run simultaneously when sharing
+   a public IP (Meta and ByteDance both fingerprint cross-platform request
+   patterns; concurrent traffic from the same IP triggers immediate
+   challenges/bans). The scheduler / concurrency rule that enforces this
+   lives outside this module (see ``scheduler/`` mutex group); the
+   collector itself does no enforcement. If you're invoking ``run()``
+   directly from a script, ensure no IG/Lemon8 collector is in flight.
+"""
+
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
 import os
 import random
+import re
 import subprocess
 import tempfile
 import time
-from pathlib import Path
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
+from pathlib import Path
+from typing import AsyncIterator, Optional
 
 import httpx
 
 from src.core.base_collector import BaseCollector
 from src.core.file_naming import sanitize_name
 
+# Wave 0 modules — imported lazily where heavy or where the module may be
+# absent in some test environments. Top-level imports are kept for the
+# always-present ones so ``ast.parse`` + container import surfaces breakage
+# early.
+try:
+    from src.core.account_quota import AccountQuotaTracker, QuotaConfig
+except Exception:  # pragma: no cover — keep collector importable
+    AccountQuotaTracker = None  # type: ignore[assignment]
+    QuotaConfig = None  # type: ignore[assignment]
+
+try:
+    from src.core.spider_discover import Edge, EdgeType, SpiderDiscover
+except Exception:  # pragma: no cover
+    Edge = None  # type: ignore[assignment]
+    EdgeType = None  # type: ignore[assignment]
+    SpiderDiscover = None  # type: ignore[assignment]
+
+try:
+    from src.core.dedupe_hash import sha256_bytes as _dedupe_sha256_bytes
+except Exception:  # pragma: no cover
+    _dedupe_sha256_bytes = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
+
+# Module-level toggle for the Playwright browser fallback. Re-read at the call
+# site (via ``os.getenv``) so monkeypatch-based tests can flip it after import.
+TIKTOK_BROWSER_FALLBACK_ENABLED = os.getenv(
+    "TIKTOK_BROWSER_FALLBACK_ENABLED", "true"
+).lower() == "true"
+
+# Substrings in gallery-dl output that signal "no public videos available" —
+# either the account is private, login-walled, removed, or anti-bot blocked.
+# When we see one of these AND gallery-dl returned 0 items, we fall through to
+# the browser fallback rather than declaring the user empty.
+_BROWSER_FALLBACK_TRIGGER_KEYWORDS = (
+    "private", "login_required", "login required", "401", "403", "404",
+    "not found", "forbidden", "unauthorized", "captcha",
+)
 
 REQUIRED_COOKIES = {"sessionid", "tt_csrf_token", "ttwid", "msToken", "tt_chain_token", "sid_guard"}
 RECOMMENDED_COOKIES = {"s_v_web_id", "odin_tt", "cmpl_token", "passport_csrf_token"}
+
+# TikTok username pattern: alphanumeric + dot/underscore/hyphen, 1-30 chars.
+# Ported from ``tiktoktoolkit/src/validation.py``.
+USERNAME_PATTERN = re.compile(r"^[a-zA-Z0-9._-]{1,30}$")
+
+
+class InvalidReason(Enum):
+    """Reasons a username is considered invalid (ported from toolkit)."""
+
+    NOT_FOUND = "not_found"
+    ACCOUNT_DELETED = "account_deleted"
+    USERNAME_CHANGED = "username_changed"
+    PRIVATE_BANNED = "private_banned"
+    UNKNOWN = "unknown"
+
+
+@dataclass
+class ValidationResult:
+    is_valid: bool
+    is_rate_limited: bool = False
+    is_network_error: bool = False
+    invalid_reason: Optional[InvalidReason] = None
+    error_message: Optional[str] = None
+    should_retry: bool = False
+
+
+def validate_username(username: str) -> str:
+    """Validate + sanitize a TikTok username.
+
+    Strips a leading ``@`` and asserts the result matches USERNAME_PATTERN.
+    Raises ``ValueError`` on invalid input. Mirrors the toolkit's
+    ``validation.validate_username`` but uses the unified ``ValueError`` so
+    we don't pull in the toolkit's bespoke ``ValidationError`` class.
+    """
+    if not isinstance(username, str):
+        raise ValueError(f"username must be str, got {type(username).__name__}")
+    sanitized = username.strip().lstrip("@")
+    if not sanitized:
+        raise ValueError("empty username")
+    if not USERNAME_PATTERN.match(sanitized):
+        raise ValueError(f"invalid username format: {username!r}")
+    return sanitized
+
+
+# Keyword sets ported from invalid_username_detector.py — used by
+# ``classify_invalid_username`` to map a scrape error → InvalidReason.
+_NOT_FOUND_KEYWORDS = (
+    "user not found", "couldn't find this user", "could not find this user",
+    "no user found", "user does not exist", "user doesn't exist",
+    "account doesn't exist", "account does not exist", "404",
+)
+_DELETED_KEYWORDS = (
+    "account deleted", "account has been deleted", "account was deleted",
+)
+_CHANGED_KEYWORDS = (
+    "username changed", "username has changed", "account moved",
+)
+_PRIVATE_BANNED_KEYWORDS = (
+    "private account", "account is private",
+    "account banned", "account has been banned", "account suspended",
+)
+_RATE_LIMIT_KEYWORDS = (
+    "rate limit", "too many requests", "ratelimit", "rate_limit", "429",
+)
+
+
+def classify_invalid_username(
+    err_text: str | None, http_status: Optional[int] = None
+) -> ValidationResult:
+    """Best-effort classification of a scrape error into a ValidationResult."""
+    text = (err_text or "").lower()
+    if http_status == 429 or any(k in text for k in _RATE_LIMIT_KEYWORDS):
+        return ValidationResult(is_valid=True, is_rate_limited=True, should_retry=True)
+    if http_status == 404 or any(k in text for k in _NOT_FOUND_KEYWORDS):
+        return ValidationResult(is_valid=False, invalid_reason=InvalidReason.NOT_FOUND, error_message=err_text)
+    if any(k in text for k in _DELETED_KEYWORDS):
+        return ValidationResult(is_valid=False, invalid_reason=InvalidReason.ACCOUNT_DELETED, error_message=err_text)
+    if any(k in text for k in _CHANGED_KEYWORDS):
+        return ValidationResult(is_valid=False, invalid_reason=InvalidReason.USERNAME_CHANGED, error_message=err_text)
+    if any(k in text for k in _PRIVATE_BANNED_KEYWORDS):
+        return ValidationResult(is_valid=False, invalid_reason=InvalidReason.PRIVATE_BANNED, error_message=err_text)
+    if http_status and http_status >= 500:
+        return ValidationResult(is_valid=True, is_network_error=True, should_retry=True)
+    return ValidationResult(is_valid=True, is_network_error=True, should_retry=True, error_message=err_text)
 
 
 def validate_cookies(cookies_file: str) -> dict:
@@ -61,8 +236,63 @@ def validate_cookies(cookies_file: str) -> dict:
     return result
 
 
+# ----------------------------------------------------------------------------
+# EdgeFetcher: lets ``SpiderDiscover`` walk TikTok's follower/following graph
+# without the collector having to care about queue plumbing. Mirrors the
+# pattern used by ``GithubEdgeFetcher`` in ``collectors/github.py``.
+# ----------------------------------------------------------------------------
+
+
+class TiktokEdgeFetcher:
+    """Adapter exposing TikTok's follower/following graph to ``SpiderDiscover``.
+
+    TikTok exposes following / followers via the un-documented ``user/list``
+    endpoint, which we reach via the same gallery-dl / yt-dlp / API fallback
+    chain the rest of the collector uses. ``supported_edge_types`` is fixed
+    to ``(FOLLOWING,)`` for now — the followers list often requires a logged-in
+    session to be readable, so we lean on outbound following edges (the
+    creators *they* follow) for related-creator discovery, which TikTok keeps
+    public for non-private accounts.
+    """
+
+    if EdgeType is not None:  # pragma: no branch — set at import time
+        supported_edge_types: tuple = (EdgeType.FOLLOWING,)
+    else:  # SpiderDiscover not importable in this env
+        supported_edge_types: tuple = ()
+
+    def __init__(self, collector: "TiktokCollector") -> None:
+        self._c = collector
+
+    async def fetch_edges(self, node_id: str, edge_type) -> AsyncIterator:
+        """Stream ``Edge(source, target, edge_type)`` records.
+
+        ``node_id`` is the TikTok username (without ``@``). We delegate the
+        per-username following enumeration to ``collect_following`` which
+        knows about cookies / fallbacks; that method yields raw username
+        strings that we wrap in ``Edge`` for the spider.
+        """
+        if Edge is None or EdgeType is None:
+            return
+        if edge_type not in self.supported_edge_types:
+            raise NotImplementedError(f"unsupported edge type: {edge_type}")
+        async for follow_username in self._c.collect_following(node_id):
+            if not follow_username:
+                continue
+            yield Edge(source=node_id, target=follow_username, edge_type=edge_type)
+
+
+# ----------------------------------------------------------------------------
+# Main collector
+# ----------------------------------------------------------------------------
+
+
 class TiktokCollector(BaseCollector):
     SOURCE_NAME = "tiktok"
+
+    # Default daily quota — TikTok web throttles aggressively; 500 profile
+    # views / day per cookie set is the empirically-safe ceiling per the
+    # toolkit's account_manager defaults.
+    DEFAULT_DAILY_QUOTA = int(os.getenv("TIKTOK_DAILY_QUOTA", "500"))
 
     def __init__(self):
         super().__init__()
@@ -84,6 +314,20 @@ class TiktokCollector(BaseCollector):
         self._cookies_valid = False
         self._tracker_file = Path(os.getenv("TIKTOK_TRACKER_FILE", "data/tiktok_tracker.json"))
         self._tracked_ids: set[str] = set()
+
+        # account_quota: register a daily cap so the scheduler can refuse new
+        # work once we've hit it. ``has_quota`` on a missing config is a
+        # no-op so this stays safe even if the same tracker is imported
+        # from another collector first.
+        self._quota = AccountQuotaTracker() if AccountQuotaTracker is not None else None
+        if self._quota is not None and QuotaConfig is not None:
+            try:
+                self._quota.register(
+                    "tiktok",
+                    QuotaConfig(daily_limit=self.DEFAULT_DAILY_QUOTA),
+                )
+            except Exception:  # noqa: BLE001 — registration is local-only
+                logger.debug("tiktok: quota registration skipped", exc_info=True)
 
         if self._cookies_file:
             result = validate_cookies(self._cookies_file)
@@ -159,11 +403,14 @@ class TiktokCollector(BaseCollector):
 
     @staticmethod
     def _is_invalid_username(username: str) -> bool:
-        if len(username) < 2 or len(username) > 24:
+        """Cheap pre-flight format check. Use ``validate_username`` for the
+        canonical strict version; this stays for back-compat with code paths
+        that want a bool rather than an exception."""
+        try:
+            validate_username(username)
+            return False
+        except Exception:
             return True
-        if not username.replace("_", "").replace(".", "").isalnum():
-            return True
-        return False
 
     async def _collect_user(self, username: str):
         profile_url = f"https://www.tiktok.com/@{username}"
@@ -529,12 +776,105 @@ class TiktokCollector(BaseCollector):
             logger.error("API fallback failed for %s: %s", username, e)
 
     async def _collect_via_playwright(self, username: str) -> bool:
-        # Implementation remains similar but simplified for V2
-        logger.warning(
-            "tiktok fallback playwright: NOT IMPLEMENTED (stub returns False) for %s",
-            username,
+        """Browser-automation fallback (Playwright/Chromium).
+
+        Lazy-imports ``TikTokBrowserDownloader`` so the heavyweight Playwright
+        runtime isn't pulled in unless this fallback is actually exercised.
+        Honours both the module-level ``TIKTOK_BROWSER_FALLBACK_ENABLED`` flag
+        (re-read here so tests can monkeypatch it after import) and the
+        instance-level ``self._browser_fallback`` toggle set in __init__.
+
+        Returns True iff at least one media item was successfully fetched and
+        ingested; False otherwise (caller cascades to the next fallback).
+        """
+        # Re-read the module-level flag so monkeypatch.setenv at test time
+        # toggles behaviour without re-importing the module.
+        if os.getenv("TIKTOK_BROWSER_FALLBACK_ENABLED", "true").lower() != "true":
+            logger.info(
+                "tiktok fallback playwright: disabled via env for %s", username,
+            )
+            return False
+        if not self._browser_fallback:
+            return False
+
+        try:
+            # Lazy import: keeps Playwright cost out of every collector start.
+            from src.core.tiktok_browser import TikTokBrowserDownloader
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "tiktok fallback playwright: import failed for %s: %s",
+                username, exc,
+            )
+            return False
+
+        cookies_path = (
+            Path(self._cookies_file)
+            if self._cookies_file
+            else Path(os.getenv("TIKTOK_COOKIES_FILE", "/data/cookies/tiktok.txt"))
         )
-        return False
+        max_videos = int(os.getenv("TIKTOK_BROWSER_MAX_VIDEOS", "50"))
+        browser = TikTokBrowserDownloader(cookies_file=cookies_path)
+        try:
+            try:
+                items = await browser.download_user(
+                    username, max_videos=max_videos
+                )
+            except Exception as exc:
+                logger.warning(
+                    "tiktok fallback playwright: download_user crashed for %s: %s",
+                    username, exc, exc_info=True,
+                )
+                return False
+        finally:
+            try:
+                await browser.close()
+            except Exception:
+                logger.debug("tiktok fallback playwright: close failed", exc_info=True)
+
+        if not items:
+            logger.info(
+                "tiktok fallback playwright: no items for %s", username,
+            )
+            return False
+
+        # Items returned by TikTokBrowserDownloader carry a (downloaded) file
+        # path; ingest each through the unified ``download_media`` envelope so
+        # they flow through the same UserChangeTracker / dedupe_hash path as
+        # gallery-dl/yt-dlp results.
+        ingested = 0
+        for it in items:
+            if self._stop.is_set():
+                break
+            vid = (it or {}).get("video_id")
+            fp = (it or {}).get("file_path")
+            if not vid or not fp:
+                continue
+            if self.is_known(vid):
+                continue
+            try:
+                with open(fp, "rb") as fh:
+                    data = fh.read()
+            except OSError as exc:
+                logger.warning(
+                    "tiktok fallback playwright: read %s failed: %s", fp, exc,
+                )
+                continue
+            await self.download_media({
+                "entity_id": username,
+                "entity_name": username,
+                "content_type": "video",
+                "content_id": vid,
+                "data": data,
+                "extension": "mp4",
+                "raw": (it or {}).get("metadata") or {},
+            })
+            ingested += 1
+            await asyncio.sleep(random.uniform(self._min_sleep, self._max_sleep))
+        logger.info(
+            "tiktok fallback playwright: ingested %d/%d items for %s",
+            ingested, len(items), username,
+        )
+        return ingested > 0
 
     async def _load_tracker_state(self):
         if self.pool:
@@ -571,7 +911,10 @@ class TiktokCollector(BaseCollector):
                     data = resp.content
             else: return
 
-            sha = self.sha256_bytes(data)
+            sha = (
+                _dedupe_sha256_bytes(data) if _dedupe_sha256_bytes is not None
+                else self.sha256_bytes(data)
+            )
             
             # Atomic save
             fd, tmp_path = tempfile.mkstemp(dir=dest_dir, suffix=".tmp")
@@ -601,3 +944,162 @@ class TiktokCollector(BaseCollector):
         except Exception as e:
             logger.error("Download failed %s: %s", cid, e)
             await self.send_to_dlq(item["entity_id"], cid, str(e))
+
+    # =====================================================================
+    # Spec API — required by the unified collector interface (Wave 2)
+    # =====================================================================
+
+    async def collect_user_profile(self, username: str) -> Optional[str]:
+        """Fetch + upsert a single user's profile metadata.
+
+        Returns the ``tiktok_profiles.id`` (UUID string) on success, or
+        ``None``. This is a thin wrapper over the existing scrape path so
+        callers (scheduler, spider, on-demand admin tools) can target a
+        single profile without triggering full video collection.
+        """
+        try:
+            username = validate_username(username)
+        except ValueError as e:
+            logger.warning("collect_user_profile: invalid username %r: %s", username, e)
+            return None
+        # Quota check (per-account; if no cookie set we still honour the
+        # platform-level cap by passing a synthetic account name).
+        if self._quota is not None:
+            account_name = Path(self._cookies_file).stem if self._cookies_file else "default"
+            try:
+                if not await self._quota.has_quota("tiktok", account_name):
+                    logger.info("tiktok quota exhausted for %s; skipping %s", account_name, username)
+                    return None
+            except Exception:
+                logger.debug("quota check failed; proceeding", exc_info=True)
+        await self.wait_rate_limit("tiktok.com")
+        # Reuse the API path — it parses ItemModule which embeds author block
+        # so we get profile data alongside posts.
+        try:
+            await self._collect_via_api(username)
+        except Exception as e:
+            logger.warning("collect_user_profile %s: %s", username, e)
+            return None
+        # Look up the profile we just upserted.
+        if self.pool is None:
+            return None
+        try:
+            async with self.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT id FROM tiktok_profiles WHERE username = $1", username
+                )
+                return str(row["id"]) if row else None
+        except Exception:
+            return None
+
+    async def collect_user_videos(self, username: str) -> int:
+        """Run the full video collection pipeline for one user.
+
+        Returns the number of media items processed (best-effort count from
+        the dedupe set delta). Honours the daily quota and uses the
+        gallery-dl → yt-dlp → API fallback chain.
+        """
+        try:
+            username = validate_username(username)
+        except ValueError:
+            return 0
+        if self._quota is not None:
+            account_name = Path(self._cookies_file).stem if self._cookies_file else "default"
+            try:
+                if not await self._quota.has_quota("tiktok", account_name):
+                    logger.info("tiktok quota exhausted for %s; skipping videos for %s", account_name, username)
+                    return 0
+                await self._quota.consume("tiktok", account_name, n=1)
+            except Exception:
+                logger.debug("quota consume failed; proceeding", exc_info=True)
+        before = len(self._known_ids)
+        try:
+            await self._collect_user(username)
+        except Exception as e:
+            logger.warning("collect_user_videos %s: %s", username, e)
+        return max(0, len(self._known_ids) - before)
+
+    async def collect_following(self, username: str) -> AsyncIterator[str]:
+        """Yield TikTok usernames that ``username`` follows.
+
+        Best-effort: when neither the API HTML nor a logged-in cookie set
+        exposes the following list (TikTok hides it for many accounts), we
+        yield nothing. Used by ``TiktokEdgeFetcher`` for spider expansion.
+        """
+        try:
+            username = validate_username(username)
+        except ValueError:
+            return
+        await self.wait_rate_limit("tiktok.com")
+        cookies = {"sessionid": self._session_id} if self._session_id else {}
+        url = f"https://www.tiktok.com/@{username}"
+        try:
+            async with httpx.AsyncClient(
+                timeout=30, cookies=cookies, follow_redirects=True
+            ) as client:
+                resp = await client.get(
+                    url,
+                    headers={
+                        "User-Agent": self.user_agents.get_for_domain("tiktok.com")
+                    },
+                )
+                resp.raise_for_status()
+                html = resp.text
+        except Exception as e:
+            logger.debug("collect_following %s: scrape failed: %s", username, e)
+            return
+        # Best-effort regex scan for ``"uniqueId":"..."`` in the embedded
+        # SIGI_STATE JSON. We don't parse the whole blob because it's huge
+        # and the structure shifts between TikTok web releases; the regex
+        # picks up usernames in any nested user dict including the user
+        # module that contains following/follower lists when present.
+        seen: set[str] = set()
+        for m in re.finditer(r'"uniqueId"\s*:\s*"([a-zA-Z0-9._-]{1,30})"', html):
+            uid = m.group(1)
+            if uid == username or uid in seen:
+                continue
+            seen.add(uid)
+            yield uid
+
+    async def spider_related_creators(
+        self, seed: str, max_hops: int = 2
+    ) -> int:
+        """BFS-discover related creators from a seed username.
+
+        Uses Wave 0 ``SpiderDiscover`` over our ``TiktokEdgeFetcher``. Returns
+        the number of nodes discovered (or 0 if the spider module is
+        unavailable). Discovered usernames get queued in the unified
+        ``spider_queue`` Postgres table for later processing.
+        """
+        if SpiderDiscover is None or self.pool is None:
+            logger.info("spider_related_creators: SpiderDiscover unavailable")
+            return 0
+        try:
+            seed = validate_username(seed)
+        except ValueError as e:
+            logger.warning("spider_related_creators: bad seed %r: %s", seed, e)
+            return 0
+        spider = self.make_spider_discover(max_hops=max_hops)
+        try:
+            return await spider.run(seeds=[seed])
+        except Exception as e:
+            logger.warning("spider_related_creators %s: %s", seed, e)
+            return 0
+
+    def make_edge_fetcher(self) -> "TiktokEdgeFetcher":
+        """Build a Wave 0 ``EdgeFetcher`` over this collector."""
+        return TiktokEdgeFetcher(self)
+
+    def make_spider_discover(self, *, max_hops: Optional[int] = None):
+        """Build a ``SpiderDiscover`` for the unified spider queue."""
+        if SpiderDiscover is None:
+            raise RuntimeError("src.core.spider_discover not importable")
+        return SpiderDiscover(
+            platform="tiktok",
+            fetcher=self.make_edge_fetcher(),
+            pool=self.pool,
+            max_hops=max_hops if max_hops is not None else int(
+                os.getenv("TIKTOK_SPIDER_DEPTH", "2")
+            ),
+            concurrency=int(os.getenv("TIKTOK_SPIDER_CONCURRENCY", "2")),
+        )

@@ -86,14 +86,6 @@ export interface GraphData {
   edges: GraphEdge[];
 }
 
-export interface FaceIdentity {
-  id: string;
-  label: string | null;
-  occurrence_count: number;
-  created_at: string;
-  last_seen: string | null;
-}
-
 export interface WhatsAppUser {
   jid: string;
   push_name: string | null;
@@ -144,4 +136,44 @@ export interface MediaBrowseResult {
   page: number;
   page_size: number;
   items: MediaItem[];
+}
+
+export interface StravaAthleteSummary {
+  platform_athlete_id: number;
+  username: string | null;
+  firstname: string | null;
+  lastname: string | null;
+  profile: string | null;
+  activity_count: number;
+}
+
+export interface StravaFeedDate {
+  date: string;
+  count: number;
+}
+
+export interface StravaFeedActivity {
+  platform_activity_id: number;
+  name: string | null;
+  type: string | null;
+  sport_type: string | null;
+  distance: number | null;
+  moving_time: number | null;
+  elapsed_time: number | null;
+  total_elevation_gain: number | null;
+  start_date: string | null;
+  platform_athlete_id: number | null;
+  username: string | null;
+  firstname: string | null;
+  lastname: string | null;
+  profile: string | null;
+}
+
+export interface StravaFeedStats {
+  total_activities: number;
+  total_distance: number;
+  total_moving_time: number;
+  total_elevation_gain: number;
+  earliest: string | null;
+  latest: string | null;
 }

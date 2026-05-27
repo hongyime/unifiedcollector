@@ -1,3 +1,25 @@
+"""Instagram collector (Mode α=Graph/instaloader, Mode β=Playwright fallback).
+
+⚠️ IMPORTANT — SHARED-IP COEXISTENCE RULE
+   Instagram, TikTok and Lemon8 MUST NEVER run simultaneously when they
+   share the same public IP / proxy egress.  All three platforms are owned
+   by Meta-adjacent or ByteDance-adjacent groups that fingerprint requests
+   across product lines, and overlapping traffic dramatically raises 429 /
+   CAPTCHA / shadow-ban rates.  The scheduler is responsible for serialising
+   these three collectors per-egress-IP; this module asserts nothing at
+   runtime but assumes the contract holds.
+
+This module is ported from instagramtoolkit/ (~53,746 LOC source).  It is
+intentionally a thin port — write-side actions (post/comment/like/follow/DM/
+story-reply/bulk-send) are *not* carried over, and CLI/setup/standalone-web
+scripts are dropped.  See docs/wave_2_F_*.md for the absorbed/dropped/deferred
+ledger.
+
+Port responsibility split:
+  • Agent F-A: AUTH + PROFILE side  (this file, sections so marked)
+  • Agent F-B: posts + spider + Playwright
+"""
+
 import asyncio
 import json
 import logging
@@ -17,6 +39,52 @@ from src.core.account_pool import AccountPool
 from src.core.human_rate_limiter import HumanLikeRateLimiter, OperationType
 from src.core.sliding_window_limiter import SlidingWindowRateLimiter, WindowConfig
 from src.core.profile_photo_tracker import ProfilePhotoTracker
+from src.core.user_change_tracker import (
+    UserChangeTracker,
+    INSTAGRAM_TRACKED_FIELDS,
+)
+
+# Profile analytics + per-account TLS fingerprint pinning. Both are
+# defensive imports — collector still functions without them.
+try:  # pragma: no cover
+    from src.core.profile_analyzer import ProfileAnalyzer, analyze_profile_image
+except Exception:  # pragma: no cover
+    ProfileAnalyzer = None  # type: ignore[assignment]
+    analyze_profile_image = None  # type: ignore[assignment]
+
+try:  # pragma: no cover
+    from src.core.tls_fingerprint import TLSFingerprintRotator
+except Exception:  # pragma: no cover
+    TLSFingerprintRotator = None  # type: ignore[assignment]
+
+# === AUTH + PROFILE (Agent F-A) — extra core imports =======================
+# These are imported lazily inside methods where possible to keep the
+# top-of-module surface small and to avoid pulling in optional deps when only
+# the post-side path is exercised in unit tests.
+try:  # pragma: no cover — import-time only
+    from src.core.auth_session import IgSession  # session capsule
+except Exception:  # pragma: no cover
+    IgSession = None  # type: ignore[assignment]
+
+try:  # pragma: no cover
+    from src.core.account_quota import (
+        AccountQuotaTracker,
+        QuotaExhaustedError,
+        get_default_tracker as _get_default_quota_tracker,
+    )
+except Exception:  # pragma: no cover
+    AccountQuotaTracker = None  # type: ignore[assignment]
+    QuotaExhaustedError = Exception  # type: ignore[assignment, misc]
+
+    def _get_default_quota_tracker():  # type: ignore[no-redef]
+        return None
+
+try:  # pragma: no cover
+    from src.core.dedupe_hash import sha256_bytes as _dedupe_sha256
+except Exception:  # pragma: no cover
+    _dedupe_sha256 = None  # type: ignore[assignment]
+
+# === END AUTH + PROFILE imports ============================================
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +187,22 @@ class InstagramCollector(BaseCollector):
 
         self._loader = None
         self._current_account = None
+
+        # Per-account TLS fingerprint rotators. Lazily created in
+        # ``_get_tls_rotator`` so the collector still boots when the
+        # ``curl_cffi`` extra is missing. Rotation is cooldown-gated and
+        # only fires on 403 / 429 — see src/core/tls_fingerprint.py.
+        self._tls_rotators: dict[str, "TLSFingerprintRotator"] = {}
+        self._tls_cooldown_secs = int(os.getenv("INSTA_TLS_COOLDOWN_SECS", "600"))
+        self._tls_pool: list[str] = [
+            s.strip() for s in os.getenv(
+                "INSTA_TLS_IMPERSONATE_POOL",
+                "chrome120,chrome119,safari17_2,edge101",
+            ).split(",") if s.strip()
+        ]
+        # Profile analyzer instance — cheap, stateless. Falls back to
+        # None when the import failed (don't break the collector).
+        self._profile_analyzer = ProfileAnalyzer() if ProfileAnalyzer else None
 
     def _auto_discover_cookies(self) -> dict:
         """Auto-discover cookie files for all accounts.
@@ -556,6 +640,21 @@ class InstagramCollector(BaseCollector):
             self.rate_limiter.trigger_emergency_cooldown(
                 "instagram.com", account=acct_name,
             )
+        # TLS fingerprint rotation: if 429/403 keeps recurring inside the
+        # cooldown window, advance this account's curl_cffi impersonate
+        # target. Cooldown-gated inside the rotator so a flurry of
+        # failures only rotates once.
+        try:
+            if acct_name and TLSFingerprintRotator is not None:
+                rot = self._get_tls_rotator(acct_name)
+                if rot is not None:
+                    rot.rotate_on_failure(reason=str(error)[:120])
+                    pool = getattr(self, "pool", None)
+                    if pool is not None:
+                        await rot.persist(pool)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug("TLS rotator hook failed: %s", e)
+
         if self._current_account:
             self.account_pool.cooldown(self._current_account.name, 900.0)
             next_acct = self.account_pool.get_next(exclude=self._current_account.name)
@@ -565,6 +664,46 @@ class InstagramCollector(BaseCollector):
                 await asyncio.get_event_loop().run_in_executor(
                     None, self._login_account, next_acct
                 )
+
+    # -- TLS fingerprint pinning helpers ---------------------------------
+
+    def _get_tls_rotator(self, account_name: str):
+        """Lazily build a TLSFingerprintRotator for ``account_name``.
+
+        Returns None when curl_cffi / the rotator module is unavailable.
+        Caller is responsible for awaiting ``rot.load(pool)`` on first
+        use if it cares about prior state.
+        """
+        if TLSFingerprintRotator is None or not account_name:
+            return None
+        rot = self._tls_rotators.get(account_name)
+        if rot is None:
+            try:
+                rot = TLSFingerprintRotator(
+                    account_id=account_name,
+                    available_impersonates=self._tls_pool or None,
+                    cooldown_secs=self._tls_cooldown_secs,
+                )
+            except Exception as e:  # pragma: no cover - defensive
+                logger.debug("Could not build TLS rotator for %s: %s", account_name, e)
+                return None
+            self._tls_rotators[account_name] = rot
+        return rot
+
+    def _get_curl_cffi_kwargs(self, account_name: str | None) -> dict:
+        """Return ``{"impersonate": "..."}`` (or {}) for the active account.
+
+        Pass to ``curl_cffi.requests.AsyncSession`` / Session at request
+        construction time so the same account always presents the same
+        TLS / JA3 fingerprint within a session. Empty dict when the
+        rotator is unavailable so callers can splat unconditionally.
+        """
+        if not account_name:
+            return {}
+        rot = self._get_tls_rotator(account_name)
+        if rot is None:
+            return {}
+        return rot.get_curl_cffi_kwargs()
 
     async def _collect_user(self, client: httpx.AsyncClient, username: str):
         acct_name = self._current_account.name if self._current_account else None
@@ -651,6 +790,27 @@ class InstagramCollector(BaseCollector):
         await self._collect_stories(uid, entity_name)
         await self._collect_highlights(client, uid, entity_name)
 
+        # Profile analytics on a single-profile batch — cheap, generates
+        # logging-friendly stats and a slot to feed into dashboards. Wrap
+        # in try/except so a malformed user payload never breaks a run.
+        try:
+            if self._profile_analyzer is not None:
+                pstats = self._profile_analyzer.analyze_profiles([{
+                    "username": entity_name,
+                    "followers_count": user_data.get("edge_followed_by", {}).get("count", 0),
+                    "following_count": user_data.get("edge_follow", {}).get("count", 0),
+                    "is_verified": bool(user_data.get("is_verified", False)),
+                    "is_private": bool(user_data.get("is_private", False)),
+                }])
+                tier_hits = [t for t, c in pstats.get("influencer_tiers", {}).items() if c]
+                logger.debug(
+                    "instagram/%s: profile_analyzer tiers=%s ratio=%.2f",
+                    entity_name, tier_hits or ["none"],
+                    pstats.get("avg_follower_to_following_ratio", 0.0),
+                )
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug("profile_analyzer post-step failed for %s: %s", entity_name, e)
+
     async def _upsert_profile(self, data: dict):
         async with self.pool.acquire() as conn:
             await conn.execute("""
@@ -681,9 +841,8 @@ class InstagramCollector(BaseCollector):
             data.get("profile_pic_url_hd"), data.get("external_url")
             )
 
-    async def _spider_followers(self, client: httpx.AsyncClient, uid: str, username: str):
-        # Implementation for follower spidering would go here (requires GraphQL or Instaloader)
-        logger.debug("Spidering followers for %s (not fully implemented in this step)", username)
+    # _spider_followers is now defined in the F-B section below — wired to
+    # src/core/spider_discover.SpiderDiscover with read-only follower BFS.
 
     async def _collect_posts(self, client: httpx.AsyncClient, uid: str, entity_name: str) -> bool:
         """Try to enumerate posts via the GraphQL endpoint.
@@ -1233,3 +1392,1135 @@ class InstagramCollector(BaseCollector):
             self.rate_limiter.record_failure("instagram.com")
             logger.error("Download failed %s: %s", cid, e)
             await self.send_to_dlq(item["entity_id"], cid, str(e))
+
+    # =====================================================================
+    # === AUTH + PROFILE (Agent F-A) — expanded port ======================
+    # =====================================================================
+    # Everything below this banner is owned by Agent F-A (Wave 2 F-A).
+    # Agent F-B's scope (posts / spider / Playwright / stories /
+    # highlights) lives EARLIER in the file — do not interleave new
+    # post-side methods here.
+    #
+    # Absorbed from instagramtoolkit/:
+    #   • combined_modules.LoginManager challenge-handling (TOTP +
+    #     drop-file + email-link sentinel)
+    #   • profile_photo_tracker.ProfilePhotoTracker change-detection
+    #     audit log (now via src/core/profile_photo_tracker)
+    #   • collect_relationships.RelationshipCollector get_followers /
+    #     get_followees enumeration (read-only, instaloader-driven)
+    #   • profile_scanner._fetch_and_save  →  collect_user_profile()
+    #   • account_manager per-account daily quota  →
+    #     src/core/account_quota integration hook.
+    #
+    # Dropped (write-side or out-of-scope):
+    #   • bulk_sender, send_photos, send_message, comment_*, like_*,
+    #     follow_*, DM, story-reply.
+    #   • account_manager CLI add/remove flows.
+    #   • web/server.py standalone Flask UI.
+    #   • main.py / main-Prawn-L390.py CLI entrypoints.
+    #
+    # Deferred (out-of-scope for Wave 2 F-A; revisit Wave 3+):
+    #   • Per-account TLS fingerprint pinning (curl_cffi rotation).
+    #   • Username DB reconciliation jobs (`scripts/refresh_sessions.py`).
+    #   • Profile analyzer ML / nudity heuristic from profile_analyzer.py.
+    # =====================================================================
+
+    # ---------- AUTH: challenge handling ---------------------------------
+
+    def _resolve_challenge_code(self, username: str, channel: str = "any") -> str:
+        """Resolve a challenge / SMS / email-link code.
+
+        Channels considered, in order:
+          1. ``credentials/instagram/2fa/<username>.code`` drop-file
+             (any digits / link).  Reused for every challenge type.
+          2. ``credentials/instagram/challenge/<username>.<channel>``
+             (sms / email).  Lets ops drop a code per-channel.
+          3. INSTA_ACCOUNT_<N>_TOTP_SECRET (only if channel in {totp,any}).
+
+        Empty string if nothing is available.  Always non-blocking.
+        """
+        # 1. legacy 2fa drop-file (already handled by _resolve_2fa_code; we
+        #    also accept it for sms/email so ops only need one well-known
+        #    location).
+        code = self._resolve_2fa_code(username)
+        if code:
+            return code
+
+        # 2. per-channel drop-file
+        if channel and channel != "any":
+            drop = Path("credentials/instagram/challenge") / f"{username}.{channel}"
+            if drop.exists():
+                try:
+                    raw = drop.read_text(encoding="utf-8").strip()
+                    token = raw.split()[0] if raw else ""
+                    if token:
+                        logger.info(
+                            "Using challenge drop-file (%s) for %s", channel, username,
+                        )
+                        return token
+                except Exception as e:
+                    logger.warning(
+                        "Failed to read challenge drop-file for %s/%s: %s",
+                        username, channel, e,
+                    )
+        return ""
+
+    def _consume_challenge_dropfile(self, username: str, channel: str) -> None:
+        """One-shot deletion of the per-channel drop-file after success."""
+        if channel in ("any", "totp"):
+            return
+        drop = Path("credentials/instagram/challenge") / f"{username}.{channel}"
+        try:
+            if drop.exists():
+                drop.unlink()
+                logger.info("Consumed challenge drop-file (%s) for %s", channel, username)
+        except Exception:
+            pass
+
+    def _detect_challenge_kind(self, exc: BaseException) -> str:
+        """Classify an instaloader exception as one of:
+        ``2fa`` / ``sms`` / ``email`` / ``checkpoint`` / ``unknown``.
+        """
+        cls = type(exc).__name__
+        text = str(exc).lower()
+        if (
+            cls == "TwoFactorAuthRequiredException"
+            or "two-factor" in text
+            or "two_factor" in text
+            or "2fa" in text
+        ):
+            return "2fa"
+        if "sms" in text:
+            return "sms"
+        if "email" in text or "e-mail" in text:
+            return "email"
+        if "checkpoint" in text or "challenge" in text:
+            return "checkpoint"
+        return "unknown"
+
+    # ---------- AUTH: session-capsule helpers ----------------------------
+
+    def _build_ig_session_capsule(self, account_name: str) -> "IgSession | None":
+        """Wrap the current loader session in an IgSession capsule.
+
+        Returns None if the optional :mod:`auth_session` module is missing
+        or no cookies are present.  This is purely advisory — the legacy
+        instaloader path remains the source-of-truth.
+        """
+        if IgSession is None:
+            return None
+        cookies = self._get_session_cookies()
+        if not cookies:
+            return None
+        try:
+            cap = IgSession(account_name=account_name)
+            cap.cookies = dict(cookies)
+            cap.user_id = cookies.get("ds_user_id") or cap.user_id
+            cap.login_status = "logged_in"
+            return cap
+        except Exception as e:  # pragma: no cover — defensive
+            logger.debug("IgSession build failed for %s: %s", account_name, e)
+            return None
+
+    async def _is_session_alive(self, account_name: str) -> bool:
+        """Use IgSession.is_alive (or warmup probe) to sanity-check auth.
+
+        Falls back to True (assume alive) when the capsule module is not
+        importable; the legacy ``test_login`` path will catch dead
+        sessions on the next operation anyway.
+        """
+        cap = self._build_ig_session_capsule(account_name)
+        if cap is None:
+            return True
+        try:
+            return await cap.is_alive()
+        except Exception as e:
+            logger.debug("is_alive probe raised for %s: %s — assuming alive", account_name, e)
+            return True
+
+    # ---------- AUTH: account-quota integration --------------------------
+
+    def _quota_tracker(self):
+        """Return the process-wide AccountQuotaTracker, or None."""
+        try:
+            return _get_default_quota_tracker()
+        except Exception:
+            return None
+
+    async def _quota_has_room(
+        self, account_name: str, weight: int = 1,
+    ) -> bool:
+        """Defer to AccountQuotaTracker if registered, else fall back to
+        legacy in-memory ``_check_daily_quota``.
+        """
+        tracker = self._quota_tracker()
+        if tracker is None:
+            return self._check_daily_quota(account_name)
+        try:
+            ok = await tracker.has_quota("instagram", account_name, weight=weight)
+            if not ok:
+                logger.warning(
+                    "AccountQuotaTracker says instagram/%s exhausted (weight=%d)",
+                    account_name, weight,
+                )
+            return ok
+        except Exception as e:  # pragma: no cover
+            logger.debug("quota.has_quota failed for %s: %s — legacy fallback", account_name, e)
+            return self._check_daily_quota(account_name)
+
+    async def _quota_consume(
+        self, account_name: str, *, views: int = 0, actions: int = 1,
+    ) -> None:
+        """Record consumption against AccountQuotaTracker (best-effort)
+        AND the legacy in-memory counter."""
+        # legacy counter — always update so reads via _check_daily_quota
+        # remain consistent within the process lifetime.
+        self._record_daily_action(account_name, views=views, actions=actions)
+        tracker = self._quota_tracker()
+        if tracker is None:
+            return
+        try:
+            weight = max(1, actions + views)
+            await tracker.consume("instagram", account_name, weight=weight)
+        except QuotaExhaustedError:
+            # Already exhausted — surface as a soft signal; the next
+            # has_room check will short-circuit.
+            logger.warning(
+                "AccountQuotaTracker.consume exhausted for instagram/%s",
+                account_name,
+            )
+        except Exception as e:  # pragma: no cover
+            logger.debug("quota.consume failed for %s: %s", account_name, e)
+
+    # ---------- PROFILE: standalone read API -----------------------------
+
+    async def collect_user_profile(
+        self,
+        username: str,
+        *,
+        client: "httpx.AsyncClient | None" = None,
+        download_photo: bool = True,
+    ) -> dict:
+        """Collect a single user's profile and (optionally) profile-photo.
+
+        This is the standalone entrypoint called by the scheduler /
+        ad-hoc tools.  Returns the raw user dict from the Graph
+        ``web_profile_info`` endpoint, or ``{}`` on miss.
+
+        It does NOT enumerate posts / followers / following — those are
+        explicit follow-up calls.  The legacy combined ``_collect_user``
+        path (which fans out into posts + photo + spider) remains the
+        primary worker code path.
+        """
+        own_client = False
+        if client is None:
+            cookies = self._get_session_cookies()
+            proxy = self._get_proxy(self._current_account)
+            kw: dict = dict(
+                timeout=30,
+                cookies=cookies,
+                headers=self._headers(self._current_account),
+                follow_redirects=True,
+            )
+            if proxy:
+                kw["proxy"] = proxy
+            client = httpx.AsyncClient(**kw)
+            own_client = True
+
+        try:
+            acct = self._current_account.name if self._current_account else None
+            await self.rate_limiter.async_wait(
+                "instagram.com", OperationType.PROFILE_VIEW, account=acct,
+            )
+            resp = await client.get(
+                f"{GRAPH_API}/users/web_profile_info/",
+                params={"username": username},
+            )
+            if resp.status_code == 404:
+                logger.info("collect_user_profile: %s not found", username)
+                return {}
+            if resp.status_code == 429:
+                await self._handle_rate_limit(Exception("429"))
+                return {}
+            resp.raise_for_status()
+            user = resp.json().get("data", {}).get("user", {}) or {}
+            if not user:
+                return {}
+
+            # ── User-intelligence diff: snapshot the row BEFORE upserting so the
+            # change tracker can compare old → new and emit one row per changed
+            # field into instagram_user_changes. Wrapped in try/except so any
+            # failure (DB, schema drift, etc.) is non-fatal to ingestion.
+            prev_row = None
+            try:
+                async with self.pool.acquire() as conn:
+                    prev_row = await conn.fetchrow(
+                        "SELECT username, full_name, bio, followers_count, "
+                        "following_count, posts_count, is_verified, is_private, "
+                        "profile_pic_url, external_url "
+                        "FROM instagram_profiles WHERE platform_user_id = $1",
+                        str(user.get("id") or username),
+                    )
+            except Exception as exc:
+                logger.debug("user_change_tracker[ig]: prev-row fetch failed: %s", exc)
+
+            await self._upsert_profile(user)
+
+            try:
+                tracker = UserChangeTracker(self.pool)
+                # Normalize prev_row (DB column names) into the same key-space
+                # as INSTAGRAM_TRACKED_FIELDS (Graph payload-style names).
+                current_normalized: dict | None = None
+                if prev_row is not None:
+                    pr = dict(prev_row)
+                    current_normalized = {
+                        "username":         pr.get("username"),
+                        "full_name":        pr.get("full_name"),
+                        "biography":        pr.get("bio"),
+                        "is_verified":      pr.get("is_verified"),
+                        "is_private":       pr.get("is_private"),
+                        "profile_pic_url":  pr.get("profile_pic_url"),
+                        "follower_count":   pr.get("followers_count"),
+                        "following_count":  pr.get("following_count"),
+                        "post_count":       pr.get("posts_count"),
+                        "external_url":     pr.get("external_url"),
+                        # is_business is not stored in instagram_profiles today;
+                        # left absent so the first observation is baseline-only.
+                    }
+                new_snapshot = {
+                    "username":         user.get("username"),
+                    "full_name":        user.get("full_name"),
+                    "biography":        user.get("biography"),
+                    "is_verified":      user.get("is_verified"),
+                    "is_private":       user.get("is_private"),
+                    "is_business":      user.get("is_business_account",
+                                                  user.get("is_business")),
+                    "profile_pic_url":  (user.get("profile_pic_url_hd")
+                                          or user.get("profile_pic_url")),
+                    "follower_count":   (user.get("edge_followed_by") or {}).get("count"),
+                    "following_count":  (user.get("edge_follow") or {}).get("count"),
+                    "post_count":       (user.get("edge_owner_to_timeline_media") or {}).get("count"),
+                    "external_url":     user.get("external_url"),
+                }
+                try:
+                    pk_val = int(user.get("id") or 0)
+                except (TypeError, ValueError):
+                    pk_val = 0
+                if pk_val:
+                    await tracker.detect_and_log(
+                        table="instagram_user_changes",
+                        pk_col="user_id",
+                        pk_val=pk_val,
+                        current_row=current_normalized,
+                        new_row=new_snapshot,
+                        fields=INSTAGRAM_TRACKED_FIELDS,
+                    )
+            except Exception as exc:
+                logger.debug("user_change_tracker[ig]: detect_and_log failed: %s", exc)
+
+            uid = user.get("id", username)
+            entity_name = user.get("username", username)
+
+            if download_photo:
+                pic = user.get("profile_pic_url_hd") or user.get("profile_pic_url")
+                if pic:
+                    await self._track_profile_photo_change(
+                        uid=uid, entity_name=entity_name, photo_url=pic,
+                        raw=user,
+                    )
+
+            if self._current_account:
+                await self._quota_consume(
+                    self._current_account.name, views=1, actions=1,
+                )
+            return user
+        finally:
+            if own_client:
+                await client.aclose()
+
+    async def _track_profile_photo_change(
+        self,
+        *,
+        uid: str,
+        entity_name: str,
+        photo_url: str,
+        raw: dict | None = None,
+    ) -> None:
+        """Download (if changed) and audit-log a profile-photo update.
+
+        Uses :class:`ProfilePhotoTracker` for change detection.  When a
+        change is observed, the new photo is dual-recorded as a
+        ``profile_photo`` media item AND appended to the audit log
+        (``instagram_profile_photo_history`` if the table exists, else
+        a debug log line — schema migration is out of scope here).
+        """
+        dest_dir = self.account_media_dir / "profiles"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            changed, path = await self._photo_tracker.check_and_download(
+                photo_url, uid, "instagram", dest_dir,
+            )
+        except Exception as e:
+            logger.warning("profile-photo check failed for %s: %s", entity_name, e)
+            return
+        if not (changed and path):
+            return
+
+        try:
+            data = path.read_bytes()
+        except Exception as e:
+            logger.warning("profile-photo read failed for %s: %s", entity_name, e)
+            return
+
+        # Prefer the unified dedupe_hash sha256, fall back to BaseCollector's.
+        sha = (
+            _dedupe_sha256(data) if _dedupe_sha256 is not None
+            else self.sha256_bytes(data)
+        )
+
+        await self.insert_media_item(
+            entity_id=uid,
+            entity_name=entity_name,
+            content_type="profile_photo",
+            content_id=f"profile_{uid}_{int(time.time())}",
+            filename=path.name,
+            file_path=str(path),
+            file_size=len(data),
+            sha256=sha,
+            metadata={"raw": raw or {}, "source_url": photo_url},
+        )
+
+        # Best-effort audit-log append.  Table may not exist yet — that's
+        # fine, we degrade silently to a logger.info breadcrumb.
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO instagram_profile_photo_history
+                        (platform_user_id, username, photo_url, sha256,
+                         file_path, observed_at)
+                    VALUES ($1, $2, $3, $4, $5, NOW())
+                    """,
+                    str(uid), entity_name, photo_url, sha, str(path),
+                )
+        except Exception:
+            logger.info(
+                "profile-photo CHANGE detected for %s (sha=%s, %d bytes) — "
+                "history table absent, audit only in app log",
+                entity_name, sha[:12], len(data),
+            )
+
+    # ---------- PROFILE: relationship enumeration ------------------------
+
+    async def get_user_followers(
+        self,
+        username: str,
+        *,
+        max_count: int = 1000,
+    ) -> list[dict]:
+        """Enumerate followers of `username`.
+
+        Uses the instaloader path (`Profile.get_followers`) under
+        ``run_in_executor`` because instaloader is sync.  Read-only,
+        bounded by ``max_count`` AND by the per-session ceiling
+        ``INSTA_MAX_FOLLOWERS_PER_SESSION`` (default 5000) — Instagram
+        bans aggressive enumeration.
+
+        Returns a list of ``{"username": ..., "user_id": ...,
+        "is_private": bool, "is_verified": bool}`` dicts.
+        """
+        return await self._collect_relationship(
+            username=username,
+            kind="followers",
+            max_count=max_count,
+        )
+
+    async def get_user_following(
+        self,
+        username: str,
+        *,
+        max_count: int = 1000,
+    ) -> list[dict]:
+        """Enumerate accounts followed by `username`.  See
+        :meth:`get_user_followers` for caveats."""
+        return await self._collect_relationship(
+            username=username,
+            kind="following",
+            max_count=max_count,
+        )
+
+    async def _collect_relationship(
+        self,
+        *,
+        username: str,
+        kind: str,
+        max_count: int,
+    ) -> list[dict]:
+        if kind not in ("followers", "following"):
+            raise ValueError(f"unknown relationship kind: {kind}")
+        if not self._loader:
+            self._init_loader()
+        if not self._loader:
+            logger.warning(
+                "instaloader unavailable — cannot enumerate %s for %s",
+                kind, username,
+            )
+            return []
+        if self._current_account and not await self._quota_has_room(
+            self._current_account.name, weight=2,
+        ):
+            return []
+
+        session_cap = int(
+            os.getenv("INSTA_MAX_FOLLOWERS_PER_SESSION", "5000")
+        )
+        effective = min(max_count, session_cap)
+        logger.info(
+            "Enumerating %s for %s (max=%d, session_cap=%d)",
+            kind, username, effective, session_cap,
+        )
+
+        def _enumerate_sync() -> list[dict]:
+            import instaloader  # local import to keep top-of-module light
+            try:
+                profile = instaloader.Profile.from_username(
+                    self._loader.context, username,
+                )
+            except Exception as e:
+                logger.warning("Profile.from_username(%s) failed: %s", username, e)
+                return []
+            iterator = (
+                profile.get_followers() if kind == "followers"
+                else profile.get_followees()
+            )
+            out: list[dict] = []
+            try:
+                for entry in iterator:
+                    if len(out) >= effective:
+                        break
+                    out.append({
+                        "username": getattr(entry, "username", None),
+                        "user_id": str(getattr(entry, "userid", "") or ""),
+                        "is_private": bool(getattr(entry, "is_private", False)),
+                        "is_verified": bool(getattr(entry, "is_verified", False)),
+                        "full_name": getattr(entry, "full_name", "") or "",
+                    })
+            except Exception as e:
+                # Instaloader raises on rate-limit / private — keep what we got.
+                logger.info(
+                    "%s enumeration interrupted for %s after %d entries: %s",
+                    kind, username, len(out), e,
+                )
+            return out
+
+        loop = asyncio.get_event_loop()
+        try:
+            entries = await loop.run_in_executor(None, _enumerate_sync)
+        except Exception as e:
+            logger.error("%s enumeration crashed for %s: %s", kind, username, e)
+            return []
+
+        # Best-effort persistence to instagram_relationships if it exists.
+        if entries:
+            await self._persist_relationships(username, kind, entries)
+
+        if self._current_account:
+            await self._quota_consume(
+                self._current_account.name, views=0,
+                actions=max(1, len(entries) // 100),
+            )
+        return entries
+
+    async def _persist_relationships(
+        self, source_username: str, kind: str, entries: list[dict],
+    ) -> None:
+        """Persist enumerated relationships.  Silent no-op if the
+        ``instagram_relationships`` table is absent — schema migration
+        is owned by Wave 1 / DB layer, not this collector."""
+        if not entries:
+            return
+        rows = [
+            (
+                source_username,
+                e.get("username") or "",
+                e.get("user_id") or "",
+                kind,
+            )
+            for e in entries
+            if e.get("username") or e.get("user_id")
+        ]
+        if not rows:
+            return
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.executemany(
+                    """
+                    INSERT INTO instagram_relationships
+                        (source_username, target_username, target_user_id,
+                         relationship_type, observed_at)
+                    VALUES ($1, $2, $3, $4, NOW())
+                    ON CONFLICT (source_username, target_username,
+                                 relationship_type)
+                    DO UPDATE SET observed_at = NOW(),
+                                  target_user_id = EXCLUDED.target_user_id
+                    """,
+                    rows,
+                )
+        except Exception:
+            logger.debug(
+                "instagram_relationships table absent — %d %s entries for %s "
+                "kept in-memory only",
+                len(rows), kind, source_username,
+            )
+
+    # =====================================================================
+    # === END AUTH + PROFILE (Agent F-A) ==================================
+    # =====================================================================
+
+    # =====================================================================
+    # === POSTS + SPIDER + PLAYWRIGHT (Agent F-B) =========================
+    # =====================================================================
+    # Wave 2 Batch F-B additions. Functions below extend post/reel/story/
+    # highlight collection, add tagged + saved post enumeration, and wire
+    # the Instagram follower graph into src/core/spider_discover.SpiderDiscover.
+    # Read-only: no writes/follows/likes/comments.
+    # ---------------------------------------------------------------------
+
+    # ---- Reels collection -----------------------------------------------
+    async def collect_user_reels(
+        self, username: str, *, limit: int | None = None,
+    ) -> int:
+        """Enumerate a user's reels (clips). Uses instaloader's clips iterator
+        when available, falls back to filtering posts by ``product_type``.
+
+        Returns the number of reels processed.
+        """
+        if not self._loader:
+            logger.debug("collect_user_reels(%s): loader not initialised", username)
+            return 0
+
+        max_reels = int(
+            limit or os.getenv("INSTA_MAX_REELS_PER_USER", "50")
+        )
+        processed = 0
+        try:
+            import instaloader
+            profile = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: instaloader.Profile.from_username(
+                    self._loader.context, username,
+                ),
+            )
+            uid = str(getattr(profile, "userid", "") or username)
+            entity_name = getattr(profile, "username", username)
+
+            # Prefer dedicated clips iterator if instaloader exposes it.
+            iter_fn = getattr(profile, "get_clips", None) or getattr(
+                profile, "get_reels", None,
+            )
+            if iter_fn is None:
+                # Fall back to scanning posts and filtering by product_type.
+                iter_fn = profile.get_posts
+
+            for post in iter_fn():
+                if self._stop.is_set() or processed >= max_reels:
+                    break
+                product_type = getattr(post, "product_type", None) or getattr(
+                    post, "typename", "",
+                )
+                # Accept anything advertised as a clip/reel; if we fell back to
+                # get_posts and product_type is missing we still want to skip
+                # static images here.
+                if iter_fn is profile.get_posts and product_type not in {
+                    "clips", "reel", "GraphVideo",
+                }:
+                    if not getattr(post, "is_video", False):
+                        continue
+
+                shortcode = getattr(post, "shortcode", None)
+                video_url = getattr(post, "video_url", None)
+                if not shortcode or not video_url:
+                    continue
+
+                cid = f"reel_{shortcode}"
+                if self.is_known(cid):
+                    continue
+
+                await self._content_aware_delay("reel")
+                # Persist a row in instagram_posts for graph queries.
+                node = {
+                    "shortcode": shortcode,
+                    "__typename": "GraphVideo",
+                    "edge_media_preview_like": {
+                        "count": getattr(post, "likes", 0) or 0,
+                    },
+                    "edge_media_to_comment": {
+                        "count": getattr(post, "comments", 0) or 0,
+                    },
+                    "taken_at_timestamp": int(
+                        getattr(post, "date_utc", datetime.utcnow()).timestamp()
+                    ),
+                    "edge_media_to_caption": {
+                        "edges": [
+                            {"node": {"text": getattr(post, "caption", "") or ""}}
+                        ]
+                    },
+                    "video_url": video_url,
+                    "display_url": getattr(post, "url", None),
+                    "is_video": True,
+                    "product_type": "clips",
+                }
+                try:
+                    await self._upsert_post(node, uid)
+                except Exception as e:
+                    logger.debug("reel upsert failed for %s: %s", shortcode, e)
+
+                await self.download_media({
+                    "entity_id": uid,
+                    "entity_name": entity_name,
+                    "content_type": "reel",
+                    "content_id": cid,
+                    "url": video_url,
+                    "extension": "mp4",
+                    "source_url": f"https://www.instagram.com/reel/{shortcode}/",
+                    "raw": node,
+                })
+                processed += 1
+        except Exception as e:
+            logger.debug("collect_user_reels(%s) failed: %s", username, e)
+        return processed
+
+    # ---- Tagged posts ---------------------------------------------------
+    async def collect_tagged_posts(
+        self, username: str, *, limit: int | None = None,
+    ) -> int:
+        """Enumerate posts where ``username`` is tagged.
+
+        Uses ``Profile.get_tagged_posts`` if instaloader exposes it; silently
+        no-ops otherwise.
+        """
+        if not self._loader:
+            return 0
+
+        max_n = int(limit or os.getenv("INSTA_MAX_TAGGED_PER_USER", "30"))
+        processed = 0
+        try:
+            import instaloader
+            profile = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: instaloader.Profile.from_username(
+                    self._loader.context, username,
+                ),
+            )
+            uid = str(getattr(profile, "userid", "") or username)
+            entity_name = getattr(profile, "username", username)
+
+            tagged_iter = getattr(profile, "get_tagged_posts", None)
+            if tagged_iter is None:
+                logger.debug(
+                    "collect_tagged_posts(%s): instaloader build lacks get_tagged_posts",
+                    username,
+                )
+                return 0
+
+            for post in tagged_iter():
+                if self._stop.is_set() or processed >= max_n:
+                    break
+                shortcode = getattr(post, "shortcode", None)
+                if not shortcode:
+                    continue
+                cid = f"tagged_{shortcode}"
+                if self.is_known(cid):
+                    continue
+                is_video = bool(getattr(post, "is_video", False))
+                url = getattr(post, "video_url", None) if is_video else getattr(
+                    post, "url", None,
+                )
+                if not url:
+                    continue
+                await self._content_aware_delay("video" if is_video else "post")
+                await self.download_media({
+                    "entity_id": uid,
+                    "entity_name": entity_name,
+                    "content_type": "tagged_video" if is_video else "tagged_post",
+                    "content_id": cid,
+                    "url": url,
+                    "extension": "mp4" if is_video else "jpg",
+                    "source_url": f"https://www.instagram.com/p/{shortcode}/",
+                    "raw": {
+                        "shortcode": shortcode,
+                        "owner": getattr(getattr(post, "owner_profile", None), "username", None),
+                        "is_video": is_video,
+                    },
+                })
+                processed += 1
+        except Exception as e:
+            logger.debug("collect_tagged_posts(%s) failed: %s", username, e)
+        return processed
+
+    # ---- Saved posts (own account only) ---------------------------------
+    async def collect_saved_posts(self, *, limit: int | None = None) -> int:
+        """Enumerate the *currently authenticated* account's saved posts.
+
+        Only works when logged in (instaloader requires the auth context).
+        Returns count processed.
+        """
+        if not self._loader or not self._current_account:
+            return 0
+
+        max_n = int(limit or os.getenv("INSTA_MAX_SAVED", "100"))
+        processed = 0
+        try:
+            import instaloader
+            # Instaloader exposes saved posts via the *test_login* / authenticated
+            # profile. We grab the logged-in profile, then call get_saved_posts.
+            ctx = self._loader.context
+            login_user = ctx.username
+            if not login_user:
+                return 0
+            profile = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: instaloader.Profile.from_username(ctx, login_user),
+            )
+            saved_iter = getattr(profile, "get_saved_posts", None)
+            if saved_iter is None:
+                logger.debug(
+                    "collect_saved_posts: instaloader build lacks get_saved_posts",
+                )
+                return 0
+            uid = str(getattr(profile, "userid", "") or login_user)
+            entity_name = login_user
+
+            for post in saved_iter():
+                if self._stop.is_set() or processed >= max_n:
+                    break
+                shortcode = getattr(post, "shortcode", None)
+                if not shortcode:
+                    continue
+                cid = f"saved_{shortcode}"
+                if self.is_known(cid):
+                    continue
+                is_video = bool(getattr(post, "is_video", False))
+                url = getattr(post, "video_url", None) if is_video else getattr(
+                    post, "url", None,
+                )
+                if not url:
+                    continue
+                await self._content_aware_delay("video" if is_video else "post")
+                await self.download_media({
+                    "entity_id": uid,
+                    "entity_name": entity_name,
+                    "content_type": "saved_video" if is_video else "saved_post",
+                    "content_id": cid,
+                    "url": url,
+                    "extension": "mp4" if is_video else "jpg",
+                    "source_url": f"https://www.instagram.com/p/{shortcode}/",
+                    "raw": {
+                        "shortcode": shortcode,
+                        "owner": getattr(getattr(post, "owner_profile", None), "username", None),
+                        "is_video": is_video,
+                        "saved_by": login_user,
+                    },
+                })
+                processed += 1
+        except Exception as e:
+            logger.debug("collect_saved_posts failed: %s", e)
+        return processed
+
+    # ---- Public-API aliases (match Agent-F-B contract names) -----------
+    async def collect_user_posts(self, username: str) -> bool:
+        """Public entry: resolve username → uid then call _collect_posts.
+
+        Returns True if at least one page parsed cleanly. Falls through to
+        the Playwright fallback on auth/empty signals — same policy as the
+        in-line dispatcher in _collect_user.
+        """
+        try:
+            cookies = self._get_session_cookies()
+            async with httpx.AsyncClient(
+                timeout=30, cookies=cookies, headers=self._headers(self._current_account),
+                follow_redirects=True,
+            ) as client:
+                resp = await client.get(
+                    f"{GRAPH_API}/users/web_profile_info/",
+                    params={"username": username},
+                )
+                if resp.status_code != 200:
+                    return False
+                data = resp.json().get("data", {}).get("user", {}) or {}
+                uid = str(data.get("id") or "")
+                if not uid:
+                    return False
+                ok = await self._collect_posts(client, uid, username)
+                if not ok:
+                    try:
+                        await self._collect_posts_playwright(uid, username)
+                    except Exception as e:
+                        logger.debug("playwright fallback failed for %s: %s", username, e)
+                return ok
+        except Exception as e:
+            logger.debug("collect_user_posts(%s) failed: %s", username, e)
+            return False
+
+    async def collect_stories(self, username: str) -> int:
+        """Public alias around _collect_stories that resolves username → uid."""
+        if not self._loader:
+            return 0
+        try:
+            import instaloader
+            profile = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: instaloader.Profile.from_username(
+                    self._loader.context, username,
+                ),
+            )
+            uid = str(getattr(profile, "userid", "") or username)
+            entity_name = getattr(profile, "username", username)
+            await self._collect_stories(uid, entity_name)
+            return 1
+        except Exception as e:
+            logger.debug("collect_stories(%s) failed: %s", username, e)
+            return 0
+
+    async def collect_highlights(self, username: str) -> int:
+        """Public alias around _collect_highlights."""
+        if not self._loader:
+            return 0
+        try:
+            import instaloader
+            profile = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: instaloader.Profile.from_username(
+                    self._loader.context, username,
+                ),
+            )
+            uid = str(getattr(profile, "userid", "") or username)
+            entity_name = getattr(profile, "username", username)
+            cookies = self._get_session_cookies()
+            async with httpx.AsyncClient(
+                timeout=30, cookies=cookies, headers=self._headers(self._current_account),
+                follow_redirects=True,
+            ) as client:
+                await self._collect_highlights(client, uid, entity_name)
+            return 1
+        except Exception as e:
+            logger.debug("collect_highlights(%s) failed: %s", username, e)
+            return 0
+
+    # ---- Spider/discover wiring (Wave 0 spider_discover) -----------------
+    async def _spider_followers(self, client: httpx.AsyncClient, uid: str, username: str):
+        """Discover followers/following via Wave 0 SpiderDiscover.
+
+        Replaces the pre-existing stub. Honours INSTA_SPIDER_HOPS,
+        INSTA_SPIDER_CONCURRENCY, INSTA_SPIDER_MAX_FOLLOWERS env vars and
+        is fully read-only.
+        """
+        try:
+            from src.core.spider_discover import (
+                SpiderDiscover, EdgeType, Edge,
+            )
+        except Exception as e:
+            logger.debug("spider_discover unavailable: %s", e)
+            return
+
+        if not self._loader:
+            logger.debug("spider_followers(%s): loader not initialised", username)
+            return
+
+        max_followers = int(os.getenv("INSTA_SPIDER_MAX_FOLLOWERS", "200"))
+        max_following = int(os.getenv("INSTA_SPIDER_MAX_FOLLOWING", "200"))
+        max_hops = int(os.getenv("INSTA_SPIDER_HOPS", "1"))
+        concurrency = int(os.getenv("INSTA_SPIDER_CONCURRENCY", "2"))
+
+        loader = self._loader
+        rate_limiter = self.rate_limiter
+        acct_name = self._current_account.name if self._current_account else None
+
+        class _IGFetcher:
+            supported_edge_types = (EdgeType.FOLLOWER, EdgeType.FOLLOWING)
+
+            async def fetch_edges(self, node_id, edge_type):
+                # node_id is a numeric IG userid (string). We instaloader-lookup
+                # via Profile.from_id and stream followers/followees, capped.
+                import instaloader as _il
+                cap = max_followers if edge_type == EdgeType.FOLLOWER else max_following
+                try:
+                    prof = await asyncio.get_event_loop().run_in_executor(
+                        None, lambda: _il.Profile.from_id(loader.context, int(node_id)),
+                    )
+                except Exception as e:
+                    logger.debug("spider fetch_edges from_id(%s) failed: %s", node_id, e)
+                    return
+                iter_fn = (
+                    prof.get_followers if edge_type == EdgeType.FOLLOWER
+                    else prof.get_followees
+                )
+                count = 0
+                try:
+                    for neighbour in iter_fn():
+                        if count >= cap:
+                            break
+                        target_id = str(getattr(neighbour, "userid", "") or "")
+                        target_name = getattr(neighbour, "username", "")
+                        if not target_id:
+                            continue
+                        # Honour rate-limit between edge yields.
+                        await rate_limiter.async_wait(
+                            "instagram.com",
+                            OperationType.PAGINATION,
+                            account=acct_name,
+                        )
+                        yield Edge(
+                            source=str(node_id),
+                            target=target_id,
+                            edge_type=edge_type,
+                            metadata={"username": target_name},
+                        )
+                        count += 1
+                except Exception as e:
+                    logger.debug(
+                        "spider fetch_edges(%s,%s) iter raised %s",
+                        node_id, edge_type, e,
+                    )
+
+        async def _edge_sink(edge):
+            # Persist into instagram_relationships if the table exists; soft-fail
+            # otherwise so the spider keeps moving.
+            try:
+                async with self.pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        INSERT INTO instagram_relationships (
+                            source_user_id, target_user_id, relationship_type,
+                            target_username, collected_at
+                        ) VALUES ($1, $2, $3, $4, NOW())
+                        ON CONFLICT (source_user_id, target_user_id, relationship_type)
+                        DO NOTHING
+                        """,
+                        edge.source, edge.target, edge.edge_type.value,
+                        edge.metadata.get("username"),
+                    )
+            except Exception:
+                pass
+
+        try:
+            spider = SpiderDiscover(
+                platform="instagram",
+                fetcher=_IGFetcher(),
+                pool=self.pool,
+                max_hops=max_hops,
+                concurrency=concurrency,
+                rate_waiter=lambda: self.rate_limiter.async_wait(
+                    "instagram.com", OperationType.PROFILE_VIEW, account=acct_name,
+                ),
+                edge_sink=_edge_sink,
+            )
+            await spider.seed(uid)
+            await spider.run()
+            logger.info(
+                "instagram spider for %s done: nodes=%s edges=%s",
+                username,
+                getattr(spider.stats, "nodes_processed", "?"),
+                getattr(spider.stats, "edges_emitted", "?"),
+            )
+        except Exception as e:
+            logger.warning("spider_followers(%s) failed: %s", username, e)
+
+    # ---- Playwright helpers --------------------------------------------
+    async def _playwright_fetch_url(
+        self, url: str, *, account_name: str | None = None,
+        wait_until: str = "networkidle", timeout_ms: int = 45000,
+    ) -> dict | None:
+        """Generic single-shot Playwright fetch: navigate → grab page payload.
+
+        Used for endpoints instagrapi/instaloader/Graph can't hit (login walls,
+        new layouts). Honours the strict 1-at-a-time global semaphore.
+        Returns the parsed ``window`` payload or ``None``.
+        """
+        try:
+            from playwright.async_api import async_playwright  # type: ignore
+        except ImportError:
+            logger.debug("playwright not installed — _playwright_fetch_url skipped")
+            return None
+
+        storage_state = (
+            self._build_playwright_storage_state(account_name)
+            if account_name else None
+        )
+        ua = self.user_agents.get_for_domain("instagram.com")
+        if self._current_account and self._current_account.fingerprint.get("user_agent"):
+            ua = self._current_account.fingerprint["user_agent"]
+
+        async with PLAYWRIGHT_SEMAPHORE:
+            playwright_ctx = await async_playwright().start()
+            browser = None
+            try:
+                browser = await playwright_ctx.chromium.launch(
+                    headless=True, args=PLAYWRIGHT_LAUNCH_ARGS,
+                )
+                kw = {
+                    "user_agent": ua,
+                    "viewport": {"width": 1280, "height": 800},
+                    "locale": "en-US",
+                }
+                if storage_state:
+                    kw["storage_state"] = storage_state
+                ctx = await browser.new_context(**kw)
+                page = await ctx.new_page()
+                try:
+                    await page.goto(url, wait_until=wait_until, timeout=timeout_ms)
+                except Exception as e:
+                    logger.debug("playwright_fetch_url goto(%s) failed: %s", url, e)
+                    return None
+                payload = await page.evaluate(
+                    """() => {
+                        const out = {};
+                        try { out.shared = window._sharedData || null; } catch(e){}
+                        try {
+                            const all = [];
+                            for (const k of Object.keys(window)) {
+                                if (k.startsWith('__additionalData')) all.push(window[k]);
+                            }
+                            out.additional = all;
+                        } catch(e){}
+                        return out;
+                    }"""
+                )
+                return payload if isinstance(payload, dict) else None
+            finally:
+                try:
+                    if browser is not None:
+                        await browser.close()
+                except Exception:
+                    pass
+                try:
+                    await playwright_ctx.stop()
+                except Exception:
+                    pass
+
+    async def _collect_reels_playwright(self, uid: str, entity_name: str) -> int:
+        """Mode β fallback for /<user>/reels/. Same parser as posts; we just
+        navigate to a different URL."""
+        url = f"https://www.instagram.com/{entity_name}/reels/"
+        acct_name = self._current_account.name if self._current_account else None
+        payload = await self._playwright_fetch_url(url, account_name=acct_name)
+        if not payload:
+            return 0
+        edges = self._extract_post_edges_from_payload(payload)
+        if not edges:
+            return 0
+        n = 0
+        for edge in edges:
+            if self._stop.is_set():
+                break
+            node = edge.get("node", edge) if isinstance(edge, dict) else {}
+            if not node:
+                continue
+            try:
+                await self._process_post(node, uid, entity_name)
+                n += 1
+            except Exception as e:
+                logger.debug("reels playwright process_post failed: %s", e)
+        return n
+
+    # === END POSTS + SPIDER + PLAYWRIGHT (Agent F-B) =====================
