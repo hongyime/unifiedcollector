@@ -78,7 +78,7 @@ Connect 4+ Telegram user accounts (login via dashboard OR via 3 bots: `bryanseah
 - [x] **4.6** Hot-reload: on new row insert (use postgres LISTEN/NOTIFY or 60s poll), spawn worker for new account, fire backfill.
 - [x] **4.7** Dashboard API: `GET /api/telegram/accounts`, `POST /api/telegram/accounts/add` (phone+code+password), `POST /api/telegram/accounts/{name}/refresh`, `DELETE /api/telegram/accounts/{name}`.
 - [x] **4.8** Dashboard React: account-add modal with phone/code/2FA stepper, accounts table.
-- [ ] **4.9** Tests + smoke (with user-provided API creds) + commit.
+- [x] **4.9** Tests + smoke (with user-provided API creds) + commit.
 
 ## Notes / pitfalls (filled in as ralph loop discovers them)
 
