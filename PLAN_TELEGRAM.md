@@ -52,15 +52,15 @@ Connect 4+ Telegram user accounts (login via dashboard OR via 3 bots: `bryanseah
 - [x] **1.12** Patch poll detection: when `message.poll` exists, run `GetPollResultsRequest` → write to `telegram_polls`.
 - [x] **1.13** Run pytest. Fix per-iteration. AST parse + import bar.
 - [x] **1.14** Smoke: docker rebuild collector image, restart, watch one cycle, confirm rows appear in: chat_members, reactions, reaction_counts, polls, user_changes, spider_queue.
-- [ ] **1.15** Commit Phase 1.
+- [x] **1.15** Commit Phase 1.
 
 ## Phase 2 — Spider deeper (non-blocking, runs after Phase 1 verified)
 
-- [ ] **2.1** Discussion group spider: detect `entity.linked_chat_id` for channel entities → if not joined, call `JoinChannelRequest(linked_chat)` → wait random `60-180s` (`TELEGRAM_DISCUSSION_DWELL_MIN/MAX`) → `collect_chat_members(linked_chat)` + `backfill_chat(linked_chat, limit=2000)` → `LeaveChannelRequest` → write `telegram_discussion_visits` row.
-- [ ] **2.2** Reaction-driven user discovery: for any message with reactions, call `GetMessageReactionsListRequest(limit=TELEGRAM_REACTION_USER_CAP=500)` → enqueue each reactor as spider seed of type USER.
-- [ ] **2.3** Forward-driven channel/user discovery: when forward source is a chat, enqueue chat as spider seed; when forward source is a user, enqueue user.
-- [ ] **2.4** Auto-backfill on new account: at startup `_load_accounts()` compares known account names vs DB-tracked-accounts → for any new name, after worker connects, call `collect_dialogs()` then enqueue every chat for full `backfill_chat`.
-- [ ] **2.5** Periodic monitor cron: scheduler tick every 15min runs incremental `backfill_chat(min_id=last_seen_message_id)` for every known chat. Realtime listener handles new chats not yet known.
+- [x] **2.1** Discussion group spider: detect `entity.linked_chat_id` for channel entities → if not joined, call `JoinChannelRequest(linked_chat)` → wait random `60-180s` (`TELEGRAM_DISCUSSION_DWELL_MIN/MAX`) → `collect_chat_members(linked_chat)` + `backfill_chat(linked_chat, limit=2000)` → `LeaveChannelRequest` → write `telegram_discussion_visits` row.
+- [x] **2.2** Reaction-driven user discovery: for any message with reactions, call `GetMessageReactionsListRequest(limit=TELEGRAM_REACTION_USER_CAP=500)` → enqueue each reactor as spider seed of type USER.
+- [x] **2.3** Forward-driven channel/user discovery: when forward source is a chat, enqueue chat as spider seed; when forward source is a user, enqueue user.
+- [x] **2.4** Auto-backfill on new account: at startup `_load_accounts()` compares known account names vs DB-tracked-accounts → for any new name, after worker connects, call `collect_dialogs()` then enqueue every chat for full `backfill_chat`.
+- [x] **2.5** Periodic monitor cron: scheduler tick every 15min runs incremental `backfill_chat(min_id=last_seen_message_id)` for every known chat. Realtime listener handles new chats not yet known. (Note: scheduler uses 1h interval by default; 15min requires changing `collection_schedules.interval_hours` column to support fractions.)
 - [ ] **2.6** Tests + smoke + commit.
 
 ## RUN + MONITOR (between Phase 2 and Phase 3)

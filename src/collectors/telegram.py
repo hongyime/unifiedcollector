@@ -353,6 +353,81 @@ class TelegramCollector(BaseCollector):
         )
         return live
 
+    async def _auto_backfill_new_accounts(self) -> None:
+        """Auto-discover and backfill new Telegram accounts (item 2.4).
+
+        For each connected worker, we check if their account name exists in a
+        tracking set (`telegram_known_accounts` key-value in DB metadata, or
+        just by checking if any `telegram_chats` rows were collected by them).
+
+        For simplicity, we use a lightweight approach: check if we've seen ANY
+        message from this account's phone number. If not → new account →
+        run `collect_dialogs()` which enumerates all their chats.
+
+        The discovered chats get upserted into `telegram_chats` and enqueued
+        into `telegram_spider_queue` for full backfill.
+        """
+        for worker in self._workers:
+            account_name = worker.account.name
+            phone = worker.account.credentials.get("phone", "")
+
+            # Check if we've ever seen this account.
+            # Simple heuristic: if the account's phone appears in any telegram_users.phone,
+            # we've processed them before. Otherwise, new account.
+            seen_before = False
+            if phone:
+                async with self.pool.acquire() as conn:
+                    row = await conn.fetchval(
+                        "SELECT 1 FROM telegram_users WHERE phone = $1 LIMIT 1",
+                        phone,
+                    )
+                    seen_before = row is not None
+
+            if seen_before:
+                logger.debug(
+                    "[worker=%d account=%s] Account already known — skipping auto-backfill",
+                    worker.worker_id, account_name,
+                )
+                continue
+
+            logger.info(
+                "[worker=%d account=%s] NEW account detected — running full dialog discovery",
+                worker.worker_id, account_name,
+            )
+
+            # Enumerate all dialogs this account is in.
+            dialogs = await self.collect_dialogs()
+
+            # Each dialog was upserted into telegram_chats by collect_dialogs().
+            # Now enqueue every chat into spider_queue for full backfill.
+            for d in dialogs:
+                platform_chat_id = d.get("platform_chat_id")
+                if not platform_chat_id:
+                    continue
+                async with self.pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        INSERT INTO telegram_spider_queue
+                            (platform_chat_id, title, source, priority, status, collected_at)
+                        VALUES ($1, $2, 'auto_backfill', 8, 'pending', NOW())
+                        ON CONFLICT (platform_chat_id) DO NOTHING
+                        """,
+                        platform_chat_id,
+                        d.get("title"),
+                    )
+
+            logger.info(
+                "[worker=%d account=%s] Enqueued %d chat(s) for auto-backfill",
+                worker.worker_id, account_name, len(dialogs),
+            )
+
+            # Record the account's own user profile.
+            try:
+                me = await worker.client.get_me()
+                await self._upsert_user_full(me)
+            except Exception as exc:
+                logger.debug("get_me() failed for account=%s: %s", account_name, exc)
+
     def _dispatch(self, targets: list[str], num_workers: int) -> list[list[str]]:
         """Hash-bucket targets so each chat is owned by exactly one worker.
 
@@ -380,6 +455,16 @@ class TelegramCollector(BaseCollector):
         if not self._workers:
             logger.error("No Telegram workers connected — aborting cycle")
             return
+
+        # Auto-backfill new accounts (item 2.4).
+        # For each connected worker, check if their account name has been seen
+        # before. If not, run full collect_dialogs() to discover all their chats
+        # and queue them for backfill.
+        auto_backfill_enabled = (
+            os.getenv("TELEGRAM_AUTO_BACKFILL_NEW_ACCOUNTS", "true").lower() == "true"
+        )
+        if auto_backfill_enabled and self.pool is not None:
+            await self._auto_backfill_new_accounts()
 
         # HubNotifier + BotPool keyed off the primary client (first worker).
         self._hub_notifier.set_client(self._primary_client)
@@ -521,6 +606,15 @@ class TelegramCollector(BaseCollector):
             except Exception as exc:
                 logger.debug("_enqueue_forward_edges failed: %s", exc)
 
+            # Reactor enumeration (item 2.2) — enumerate who reacted and enqueue
+            # them as spider seeds. Called during backfill for every message with
+            # reactions. Expensive (1 API call per emoji), so rate-limited.
+            if getattr(message, "reactions", None) is not None:
+                try:
+                    await self._enumerate_reactors_and_enqueue(worker, message, chat_id)
+                except Exception as exc:
+                    logger.debug("_enumerate_reactors_and_enqueue failed: %s", exc)
+
             if message.media:
                 if isinstance(message.media, MessageMediaPhoto):
                     await self._handle_photo(worker, message, chat_id, chat_name)
@@ -553,6 +647,185 @@ class TelegramCollector(BaseCollector):
                     "collect_chat_members deferred-call failed for chat=%s: %s",
                     chat_id, exc,
                 )
+
+        # Discussion group spider (item 2.1) — channels may have a linked
+        # discussion group. If so, we join, scrape members+messages, leave.
+        if getattr(entity, "broadcast", False):
+            try:
+                await self._spider_discussion_group(worker, entity, chat_id)
+            except Exception as exc:
+                logger.debug(
+                    "_spider_discussion_group failed for channel=%s: %s",
+                    chat_id, exc,
+                )
+
+    async def _spider_discussion_group(
+        self, worker: "TelegramWorker", channel_entity, channel_platform_id: str
+    ) -> None:
+        """Spider the discussion group linked to a channel (item 2.1).
+
+        Flow:
+          1. Check if channel has `linked_chat_id`; if not, return early.
+          2. Check if we've already visited this discussion group recently
+             (within 24h) — if so, skip to avoid churn.
+          3. If not already joined, call `JoinChannelRequest(linked_chat)`.
+          4. Wait a random human-like dwell time (60-180s default).
+          5. Run `collect_chat_members()` + `backfill_chat(limit=2000)`.
+          6. Call `LeaveChannelRequest` (always leave per Bryan's requirement).
+          7. Record the visit in `telegram_discussion_visits`.
+        """
+        import random
+        from telethon.tl.functions.channels import JoinChannelRequest, LeaveChannelRequest
+
+        linked_chat_id = getattr(channel_entity, "linked_chat_id", None)
+        if not linked_chat_id:
+            return
+
+        client = worker.client
+        discussion_platform_id = str(linked_chat_id)
+
+        # Resolve channel UUID for FK.
+        async with self.pool.acquire() as conn:
+            channel_row = await conn.fetchrow(
+                "SELECT id FROM telegram_chats WHERE platform_chat_id = $1",
+                channel_platform_id,
+            )
+            if channel_row is None:
+                return
+            channel_uuid = channel_row["id"]
+
+            # Check recent visits — skip if visited within 24h.
+            recent = await conn.fetchval(
+                """
+                SELECT 1 FROM telegram_discussion_visits
+                WHERE channel_chat_id = $1 AND joined_at > NOW() - INTERVAL '24 hours'
+                LIMIT 1
+                """,
+                channel_uuid,
+            )
+            if recent:
+                logger.debug(
+                    "Skipping discussion spider for channel=%s — visited <24h ago",
+                    channel_platform_id,
+                )
+                return
+
+        # Get discussion group entity.
+        try:
+            discussion_entity = await client.get_entity(int(linked_chat_id))
+        except Exception as exc:
+            logger.debug("Cannot resolve discussion group %s: %s", linked_chat_id, exc)
+            return
+
+        await self._upsert_chat(discussion_entity)
+        discussion_title = (
+            getattr(discussion_entity, "title", None)
+            or getattr(discussion_entity, "username", None)
+            or discussion_platform_id
+        )
+
+        # Resolve discussion UUID.
+        async with self.pool.acquire() as conn:
+            disc_row = await conn.fetchrow(
+                "SELECT id FROM telegram_chats WHERE platform_chat_id = $1",
+                discussion_platform_id,
+            )
+            discussion_uuid = disc_row["id"] if disc_row else None
+
+        # Check if we're already a member; if not, join.
+        already_member = False
+        try:
+            # `get_participants` returns an empty iterator if not a member (for
+            # supergroups you can't read). Alternatively, check left/banned flags.
+            me = await client.get_me()
+            me_participant = await client.get_permissions(discussion_entity, me)
+            already_member = not getattr(me_participant, "left", True)
+        except Exception:
+            pass
+
+        abort_reason: str | None = None
+        members_collected = 0
+        messages_collected = 0
+        joined_at = None
+
+        try:
+            if not already_member:
+                logger.info(
+                    "[worker=%d] Joining discussion group %s (%s) for channel %s",
+                    worker.worker_id, discussion_title, discussion_platform_id, channel_platform_id,
+                )
+                await client(JoinChannelRequest(discussion_entity))
+                joined_at = asyncio.get_event_loop().time()
+
+                # Human-like dwell before scraping.
+                dwell = random.randint(self._discussion_dwell_min, self._discussion_dwell_max)
+                logger.debug("Dwelling %ds before scraping discussion group", dwell)
+                await asyncio.sleep(dwell)
+
+            # Scrape members.
+            members_collected = await self.collect_chat_members(
+                discussion_entity.id, worker=worker
+            )
+
+            # Scrape recent messages (limit 2000).
+            msg_count = 0
+            async for message in client.iter_messages(discussion_entity, limit=2000):
+                if self._stop.is_set():
+                    abort_reason = "stop_signal"
+                    break
+                sender_uuid = None
+                if message.sender_id:
+                    sender_uuid = await self._upsert_sender(worker, message.sender_id)
+                await self._upsert_message(message, discussion_platform_id, sender_uuid)
+                try:
+                    await self._enqueue_forward_edges(message, discussion_platform_id)
+                except Exception:
+                    pass
+                msg_count += 1
+            messages_collected = msg_count
+
+        except Exception as exc:
+            if _is_flood_wait(exc):
+                await self._handle_flood_wait(worker, exc)
+                abort_reason = "flood_wait"
+            else:
+                logger.error("Discussion spider failed for %s: %s", discussion_platform_id, exc)
+                abort_reason = str(type(exc).__name__)[:64]
+
+        finally:
+            # Always leave (per Bryan's "always leave" requirement).
+            try:
+                logger.info(
+                    "[worker=%d] Leaving discussion group %s",
+                    worker.worker_id, discussion_title,
+                )
+                await client(LeaveChannelRequest(discussion_entity))
+            except Exception as leave_exc:
+                logger.debug("LeaveChannelRequest failed: %s", leave_exc)
+
+            # Record the visit.
+            if discussion_uuid is not None:
+                async with self.pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        INSERT INTO telegram_discussion_visits (
+                            channel_chat_id, discussion_chat_id,
+                            joined_at, left_at,
+                            members_collected, messages_collected, abort_reason
+                        ) VALUES ($1, $2, NOW(), NOW(), $3, $4, $5)
+                        """,
+                        channel_uuid,
+                        discussion_uuid,
+                        members_collected,
+                        messages_collected,
+                        abort_reason,
+                    )
+
+        logger.info(
+            "[worker=%d] Discussion spider done: channel=%s discussion=%s members=%d msgs=%d abort=%s",
+            worker.worker_id, channel_platform_id, discussion_platform_id,
+            members_collected, messages_collected, abort_reason,
+        )
 
     async def _upsert_chat(self, entity):
         async with self.pool.acquire() as conn:
@@ -720,6 +993,133 @@ class TelegramCollector(BaseCollector):
             )
         except Exception as exc:
             logger.debug("_capture_message_reaction_counts failed: %s", exc)
+
+    async def _enumerate_reactors_and_enqueue(
+        self, worker: "TelegramWorker", message, chat_platform_id: str
+    ) -> int:
+        """Fetch per-user reactors via GetMessageReactionsListRequest and enqueue as seeds.
+
+        Phase 2.2: for any message with reactions, we call the Telegram API to
+        get the list of users who reacted (up to `_reaction_user_cap` per emoji).
+        Each reactor is written to `telegram_reactions` and enqueued as a USER
+        spider seed.
+
+        Returns the number of reactors discovered.
+        """
+        from telethon.tl.functions.messages import GetMessageReactionsListRequest
+
+        reactions = getattr(message, "reactions", None)
+        if reactions is None:
+            return 0
+
+        results = getattr(reactions, "results", None) or []
+        if not results:
+            return 0
+
+        client = worker.client
+        total_discovered = 0
+
+        # Resolve message UUID for FK.
+        platform_message_id = f"{chat_platform_id}:{message.id}"
+        async with self.pool.acquire() as conn:
+            msg_row = await conn.fetchrow(
+                "SELECT id FROM telegram_messages WHERE platform_message_id = $1",
+                platform_message_id,
+            )
+            if msg_row is None:
+                return 0
+            message_uuid = msg_row["id"]
+
+        # Iterate each emoji type and fetch reactor list.
+        for rc in results:
+            emoji_obj = getattr(rc, "reaction", None)
+            if emoji_obj is None:
+                continue
+
+            try:
+                resp = await client(GetMessageReactionsListRequest(
+                    peer=message.peer_id,
+                    id=message.id,
+                    reaction=emoji_obj,
+                    limit=self._reaction_user_cap,
+                ))
+            except Exception as exc:
+                logger.debug(
+                    "GetMessageReactionsListRequest failed for msg=%s emoji=%s: %s",
+                    message.id, emoji_obj, exc,
+                )
+                continue
+
+            from telethon.tl.types import ReactionEmoji, ReactionCustomEmoji
+            if isinstance(emoji_obj, ReactionEmoji):
+                emoji_key = emoji_obj.emoticon
+            elif isinstance(emoji_obj, ReactionCustomEmoji):
+                emoji_key = f"custom:{emoji_obj.document_id}"
+            else:
+                emoji_key = str(emoji_obj)
+
+            # resp.reactions is a list of MessagePeerReaction objects.
+            for mpr in (getattr(resp, "reactions", None) or []):
+                peer_id_obj = getattr(mpr, "peer_id", None)
+                user_id = None
+                if peer_id_obj is not None:
+                    user_id = getattr(peer_id_obj, "user_id", None)
+                if user_id is None:
+                    continue
+
+                user_platform_id = str(user_id)
+
+                # Upsert user (best effort).
+                try:
+                    user_entity = await client.get_entity(user_id)
+                    await self._upsert_user_full(user_entity)
+                except Exception:
+                    pass
+
+                # Resolve user UUID.
+                async with self.pool.acquire() as conn:
+                    user_row = await conn.fetchrow(
+                        "SELECT id FROM telegram_users WHERE platform_user_id = $1",
+                        user_platform_id,
+                    )
+                    user_uuid = user_row["id"] if user_row else None
+
+                    # Insert into telegram_reactions.
+                    if user_uuid is not None:
+                        is_big = bool(getattr(mpr, "big", False))
+                        added_at = getattr(mpr, "date", None)
+                        await conn.execute(
+                            """
+                            INSERT INTO telegram_reactions
+                                (message_id, user_id, emoji, is_big, added_at, refreshed_at)
+                            VALUES ($1, $2, $3, $4, $5, NOW())
+                            ON CONFLICT (message_id, user_id, emoji) DO UPDATE SET
+                                is_big = EXCLUDED.is_big,
+                                added_at = COALESCE(EXCLUDED.added_at, telegram_reactions.added_at),
+                                refreshed_at = NOW()
+                            """,
+                            message_uuid,
+                            user_uuid,
+                            emoji_key,
+                            is_big,
+                            added_at,
+                        )
+
+                    # Enqueue user as spider seed.
+                    await conn.execute(
+                        """
+                        INSERT INTO telegram_spider_queue
+                            (platform_chat_id, title, source, priority, status, collected_at)
+                        VALUES ($1, $2, 'reactor', 7, 'pending', NOW())
+                        ON CONFLICT (platform_chat_id) DO NOTHING
+                        """,
+                        user_platform_id,
+                        None,  # title — we don't know it yet
+                    )
+
+                total_discovered += 1
+
+        return total_discovered
 
     async def _capture_poll(self, conn, message_uuid, message) -> None:
         """Extract a Telegram poll into telegram_polls.
