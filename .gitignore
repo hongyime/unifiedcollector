@@ -52,3 +52,6 @@ Thumbs.db
 *.dump
 client_secret.json
 *.pickle
+.env.bak.*
+scripts/_beeper_msgs.json
+scripts/beeper_openapi.json

@@ -37,6 +37,11 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
+      # Beeper Desktop Local API runs on the host at 127.0.0.1:23373.
+      # The default URL inside .env (host.docker.internal:23373) resolves
+      # via the extra_hosts entry below.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - z:/unifiedcollector/media:/media
       - ../credentials:/app/credentials

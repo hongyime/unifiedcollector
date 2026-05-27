@@ -1,0 +1,697 @@
+"""Beeper Desktop Local API collector — polymorphic shadow ingest.
+
+Replaces the old `matrix.py` (Wave 1 read-only Matrix client). The new Beeper
+Desktop architecture exposes a single REST/WS API on `127.0.0.1:23373` that
+spans every connected network — Telegram, WhatsApp, Discord, Signal,
+LinkedIn, Facebook, Google Chat, Instagram, Slack, iMessage, native Matrix.
+
+This collector ingests chats + messages + participants from ALL bridges into
+the polymorphic `beeper_shadow_*` tables, providing redundancy for our
+first-party collectors (parallel-tables model — no dedupe layer).
+
+Read-only by design. The endpoints to send / react / edit / delete are NOT
+called from this module. Outbound features are intentionally unimplemented to
+match the project's no-outbound rule.
+
+Auth: Bearer token from BEEPER_DESKTOP_API_TOKEN env (created by the user via
+Beeper Desktop Settings → Developer → Access Tokens). Token does NOT expire
+on its own; the user can revoke it from the same screen.
+
+Network: defaults to `http://host.docker.internal:23373`. The Docker collector
+service needs `extra_hosts: ["host.docker.internal:host-gateway"]` in compose.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+from datetime import datetime, timezone
+from typing import Any, AsyncIterator, Optional
+from urllib.parse import quote
+
+import httpx
+
+from src.core.base_collector import BaseCollector
+
+logger = logging.getLogger(__name__)
+
+
+# ── feature gate ──────────────────────────────────────────────────────────
+
+
+_ENABLED_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def is_enabled() -> bool:
+    """True iff BEEPER_COLLECTOR_ENABLED is truthy AND a token is set."""
+    flag = os.environ.get("BEEPER_COLLECTOR_ENABLED", "").strip().lower()
+    if flag not in _ENABLED_TRUTHY:
+        return False
+    return bool(os.environ.get("BEEPER_DESKTOP_API_TOKEN", "").strip())
+
+
+# ── HTTP client ───────────────────────────────────────────────────────────
+
+
+class BeeperAPIError(RuntimeError):
+    """Any non-2xx response or transport error from the Beeper Desktop API."""
+
+
+class BeeperClient:
+    """Thin async HTTP wrapper for /v1/* and /v0/mcp.
+
+    Holds one httpx.AsyncClient with bearer auth + sane timeouts. Built for
+    long-lived reuse — `await client.close()` at shutdown.
+    """
+
+    def __init__(
+        self,
+        base_url: Optional[str] = None,
+        token: Optional[str] = None,
+        *,
+        timeout: float = 30.0,
+    ) -> None:
+        self.base_url = (
+            base_url
+            or os.environ.get("BEEPER_DESKTOP_API_URL", "http://127.0.0.1:23373")
+        ).rstrip("/")
+        self.token = token or os.environ.get("BEEPER_DESKTOP_API_TOKEN", "").strip()
+        if not self.token:
+            raise BeeperAPIError("BEEPER_DESKTOP_API_TOKEN is not set")
+
+        self._http = httpx.AsyncClient(
+            base_url=self.base_url,
+            timeout=httpx.Timeout(timeout, connect=10.0),
+            headers={
+                "Authorization": f"Bearer {self.token}",
+                "Accept": "application/json",
+            },
+        )
+
+    async def close(self) -> None:
+        await self._http.aclose()
+
+    async def _get(self, path: str, params: Optional[dict] = None) -> Any:
+        try:
+            resp = await self._http.get(path, params=params)
+        except httpx.HTTPError as exc:
+            raise BeeperAPIError(f"GET {path} transport error: {exc}") from exc
+        if resp.status_code >= 400:
+            raise BeeperAPIError(
+                f"GET {path} -> {resp.status_code}: {resp.text[:300]}"
+            )
+        try:
+            return resp.json()
+        except json.JSONDecodeError as exc:
+            raise BeeperAPIError(f"GET {path} non-JSON body: {exc}") from exc
+
+    # ── public surface ────────────────────────────────────────────────
+
+    async def info(self) -> dict:
+        return await self._get("/v1/info")
+
+    async def accounts(self) -> list[dict]:
+        return await self._get("/v1/accounts")
+
+    async def chats(
+        self,
+        *,
+        cursor: Optional[str] = None,
+        limit: int = 50,
+        account_id: Optional[str] = None,
+    ) -> dict:
+        params = {"limit": limit}
+        if cursor:
+            params["cursor"] = cursor
+        if account_id:
+            params["accountID"] = account_id
+        return await self._get("/v1/chats", params=params)
+
+    async def messages(
+        self,
+        chat_id: str,
+        *,
+        cursor: Optional[str] = None,
+        direction: str = "before",
+        limit: int = 50,
+    ) -> dict:
+        encoded = quote(chat_id, safe="")
+        params: dict[str, Any] = {"limit": limit, "direction": direction}
+        if cursor:
+            params["cursor"] = cursor
+        return await self._get(f"/v1/chats/{encoded}/messages", params=params)
+
+    async def iter_chats(
+        self, *, account_id: Optional[str] = None, page_size: int = 50
+    ) -> AsyncIterator[dict]:
+        cursor: Optional[str] = None
+        while True:
+            page = await self.chats(
+                cursor=cursor, limit=page_size, account_id=account_id
+            )
+            items = page.get("items", []) if isinstance(page, dict) else page
+            for item in items:
+                yield item
+            cursor = page.get("nextCursor") if isinstance(page, dict) else None
+            if not cursor or not items:
+                return
+
+    async def iter_messages(
+        self,
+        chat_id: str,
+        *,
+        start_cursor: Optional[str] = None,
+        direction: str = "before",
+        page_size: int = 50,
+    ) -> AsyncIterator[tuple[dict, dict]]:
+        """Yield (message, page_meta) pairs.
+
+        page_meta carries `oldestCursor` / `newestCursor` / `hasMore` so the
+        caller can persist sync state per chat.
+        """
+        cursor = start_cursor
+        while True:
+            page = await self.messages(
+                chat_id, cursor=cursor, direction=direction, limit=page_size
+            )
+            items = page.get("items", []) if isinstance(page, dict) else page
+            meta = {
+                "oldestCursor": page.get("oldestCursor") if isinstance(page, dict) else None,
+                "newestCursor": page.get("newestCursor") if isinstance(page, dict) else None,
+                "hasMore": page.get("hasMore", False) if isinstance(page, dict) else False,
+            }
+            for msg in items:
+                yield msg, meta
+            if not meta["hasMore"]:
+                return
+            cursor = meta["oldestCursor"] if direction == "before" else meta["newestCursor"]
+            if not cursor or not items:
+                return
+
+
+# ── helpers ───────────────────────────────────────────────────────────────
+
+
+def _parse_ts(value: Any) -> Optional[datetime]:
+    """Parse Beeper ISO 8601 timestamps; return None on failure."""
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(value / 1000.0, tz=timezone.utc)
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return None
+
+
+def _opt(d: dict, *keys: str) -> Any:
+    """Walk `d[key1][key2]...`, returning None on any miss."""
+    cur: Any = d
+    for k in keys:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(k)
+        if cur is None:
+            return None
+    return cur
+
+
+# ── DB writers ────────────────────────────────────────────────────────────
+
+
+class BeeperWriter:
+    """asyncpg writers for the beeper_shadow_* tables."""
+
+    def __init__(self, pool: Any, log: Optional[logging.Logger] = None) -> None:
+        self.pool = pool
+        self.log = log or logger
+
+    async def upsert_account(self, acc: dict) -> None:
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO beeper_shadow_accounts (
+                    account_id, network, login_id, bridge_type, bridge_provider,
+                    user_id, user_full_name, user_username, user_email,
+                    user_phone, img_url, status, raw,
+                    first_seen_at, last_seen_at
+                ) VALUES (
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+                    now(), now()
+                )
+                ON CONFLICT (account_id) DO UPDATE SET
+                    network = EXCLUDED.network,
+                    login_id = EXCLUDED.login_id,
+                    bridge_type = EXCLUDED.bridge_type,
+                    bridge_provider = EXCLUDED.bridge_provider,
+                    user_id = EXCLUDED.user_id,
+                    user_full_name = EXCLUDED.user_full_name,
+                    user_username = EXCLUDED.user_username,
+                    user_email = EXCLUDED.user_email,
+                    user_phone = EXCLUDED.user_phone,
+                    img_url = EXCLUDED.img_url,
+                    status = EXCLUDED.status,
+                    raw = EXCLUDED.raw,
+                    last_seen_at = now()
+                """,
+                acc.get("accountID"),
+                acc.get("network"),
+                str(acc.get("loginID")) if acc.get("loginID") is not None else None,
+                _opt(acc, "bridge", "type"),
+                _opt(acc, "bridge", "provider"),
+                _opt(acc, "user", "id"),
+                _opt(acc, "user", "fullName"),
+                _opt(acc, "user", "username"),
+                _opt(acc, "user", "email"),
+                _opt(acc, "user", "phoneNumber"),
+                _opt(acc, "user", "imgURL"),
+                acc.get("status"),
+                json.dumps(acc, default=str),
+            )
+
+    async def upsert_chat(self, chat: dict) -> None:
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO beeper_shadow_chats (
+                    chat_id, local_chat_id, account_id, network,
+                    title, description, img_url, chat_type,
+                    is_read_only, is_unread, is_archived, is_muted,
+                    is_low_priority, last_message_ts, raw,
+                    first_seen_at, last_seen_at
+                ) VALUES (
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                    $13, $14, $15, now(), now()
+                )
+                ON CONFLICT (chat_id) DO UPDATE SET
+                    title = EXCLUDED.title,
+                    description = EXCLUDED.description,
+                    img_url = EXCLUDED.img_url,
+                    chat_type = EXCLUDED.chat_type,
+                    is_read_only = EXCLUDED.is_read_only,
+                    is_unread = EXCLUDED.is_unread,
+                    is_archived = EXCLUDED.is_archived,
+                    is_muted = EXCLUDED.is_muted,
+                    is_low_priority = EXCLUDED.is_low_priority,
+                    last_message_ts = COALESCE(
+                        EXCLUDED.last_message_ts, beeper_shadow_chats.last_message_ts
+                    ),
+                    raw = EXCLUDED.raw,
+                    last_seen_at = now()
+                """,
+                chat.get("id"),
+                str(chat.get("localChatID")) if chat.get("localChatID") is not None else None,
+                chat.get("accountID"),
+                chat.get("network"),
+                chat.get("title"),
+                chat.get("description"),
+                chat.get("imgURL"),
+                chat.get("type"),
+                bool(chat.get("isReadOnly", False)),
+                chat.get("isUnread"),
+                chat.get("isArchived"),
+                chat.get("isMuted"),
+                chat.get("isLowPriority"),
+                _parse_ts(_opt(chat, "lastMessage", "timestamp")) or _parse_ts(chat.get("lastMessageTimestamp")),
+                json.dumps(chat, default=str),
+            )
+
+        # Participants (best-effort; some networks omit the list)
+        participants = _opt(chat, "participants", "items") or []
+        if isinstance(participants, list) and participants:
+            await self._upsert_participants(chat["id"], chat.get("network", ""), participants)
+
+    async def _upsert_participants(
+        self, chat_id: str, network: str, participants: list[dict]
+    ) -> None:
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                for p in participants:
+                    pid = p.get("id")
+                    if not pid:
+                        continue
+                    await conn.execute(
+                        """
+                        INSERT INTO beeper_shadow_participants (
+                            chat_id, participant_id, network, username, full_name,
+                            img_url, is_self, is_admin, is_pending, is_network_bot,
+                            cannot_message, raw, first_seen_at, last_seen_at
+                        ) VALUES (
+                            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                            now(), now()
+                        )
+                        ON CONFLICT (chat_id, participant_id) DO UPDATE SET
+                            username = EXCLUDED.username,
+                            full_name = EXCLUDED.full_name,
+                            img_url = EXCLUDED.img_url,
+                            is_self = EXCLUDED.is_self,
+                            is_admin = EXCLUDED.is_admin,
+                            is_pending = EXCLUDED.is_pending,
+                            is_network_bot = EXCLUDED.is_network_bot,
+                            cannot_message = EXCLUDED.cannot_message,
+                            raw = EXCLUDED.raw,
+                            last_seen_at = now()
+                        """,
+                        chat_id,
+                        pid,
+                        network,
+                        p.get("username"),
+                        p.get("fullName"),
+                        p.get("imgURL"),
+                        bool(p.get("isSelf", False)),
+                        bool(p.get("isAdmin", False)),
+                        bool(p.get("isPending", False)),
+                        bool(p.get("isNetworkBot", False)),
+                        bool(p.get("cannotMessage", False)),
+                        json.dumps(p, default=str),
+                    )
+
+    async def upsert_message(self, msg: dict) -> bool:
+        """Upsert a message. Returns True if the row is new (insert), False if it
+        was an update — caller uses this for paging-stop heuristics."""
+        ts = _parse_ts(msg.get("timestamp"))
+        if not ts:
+            self.log.warning(
+                "skipping message with no timestamp: chat=%s id=%s",
+                msg.get("chatID"),
+                msg.get("id"),
+            )
+            return False
+
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO beeper_shadow_messages (
+                    message_id, chat_id, account_id, network,
+                    sender_id, sender_name, is_sender,
+                    timestamp, sort_key, msg_type, text,
+                    is_deleted, is_unread, mentions, seen,
+                    reply_to_id, edited_at, attachments, reactions, raw
+                ) VALUES (
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+                    $14, $15, $16, $17, $18, $19, $20
+                )
+                ON CONFLICT (chat_id, message_id) DO UPDATE SET
+                    sender_id = EXCLUDED.sender_id,
+                    sender_name = EXCLUDED.sender_name,
+                    is_sender = EXCLUDED.is_sender,
+                    timestamp = EXCLUDED.timestamp,
+                    sort_key = EXCLUDED.sort_key,
+                    msg_type = EXCLUDED.msg_type,
+                    text = EXCLUDED.text,
+                    is_deleted = EXCLUDED.is_deleted,
+                    is_unread = EXCLUDED.is_unread,
+                    mentions = EXCLUDED.mentions,
+                    seen = EXCLUDED.seen,
+                    reply_to_id = EXCLUDED.reply_to_id,
+                    edited_at = EXCLUDED.edited_at,
+                    attachments = EXCLUDED.attachments,
+                    reactions = EXCLUDED.reactions,
+                    raw = EXCLUDED.raw
+                RETURNING (xmax = 0) AS inserted
+                """,
+                msg.get("id"),
+                msg.get("chatID"),
+                msg.get("accountID"),
+                msg.get("network"),
+                msg.get("senderID"),
+                msg.get("senderName"),
+                bool(msg.get("isSender", False)),
+                ts,
+                str(msg.get("sortKey")) if msg.get("sortKey") is not None else None,
+                msg.get("type"),
+                msg.get("text"),
+                bool(msg.get("isDeleted", False)),
+                msg.get("isUnread"),
+                json.dumps(msg.get("mentions") or [], default=str),
+                json.dumps(msg.get("seen") or {}, default=str),
+                _opt(msg, "replyTo", "id") or msg.get("replyToID"),
+                _parse_ts(msg.get("editedTimestamp")),
+                json.dumps(msg.get("attachments") or [], default=str),
+                json.dumps(msg.get("reactions") or [], default=str),
+                json.dumps(msg, default=str),
+            )
+        return bool(row and row["inserted"])
+
+    async def update_sync_state(
+        self,
+        chat_id: str,
+        *,
+        oldest_cursor: Optional[str] = None,
+        newest_cursor: Optional[str] = None,
+        backfill_complete: Optional[bool] = None,
+        last_message_ts: Optional[datetime] = None,
+        error: Optional[str] = None,
+    ) -> None:
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO beeper_shadow_sync_state (
+                    chat_id, oldest_cursor, newest_cursor, backfill_complete,
+                    last_synced_at, last_message_ts, error_count, last_error
+                ) VALUES (
+                    $1, $2, $3, COALESCE($4, FALSE), now(), $5,
+                    CASE WHEN $6::text IS NOT NULL THEN 1 ELSE 0 END, $6
+                )
+                ON CONFLICT (chat_id) DO UPDATE SET
+                    oldest_cursor = COALESCE(EXCLUDED.oldest_cursor, beeper_shadow_sync_state.oldest_cursor),
+                    newest_cursor = COALESCE(EXCLUDED.newest_cursor, beeper_shadow_sync_state.newest_cursor),
+                    backfill_complete = COALESCE($4, beeper_shadow_sync_state.backfill_complete),
+                    last_synced_at = now(),
+                    last_message_ts = COALESCE(EXCLUDED.last_message_ts, beeper_shadow_sync_state.last_message_ts),
+                    error_count = CASE
+                        WHEN $6::text IS NOT NULL THEN beeper_shadow_sync_state.error_count + 1
+                        ELSE 0
+                    END,
+                    last_error = $6
+                """,
+                chat_id,
+                oldest_cursor,
+                newest_cursor,
+                backfill_complete,
+                last_message_ts,
+                error,
+            )
+
+    async def get_sync_state(self, chat_id: str) -> Optional[dict]:
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM beeper_shadow_sync_state WHERE chat_id = $1",
+                chat_id,
+            )
+        return dict(row) if row else None
+
+
+# ── collector ────────────────────────────────────────────────────────────
+
+
+class BeeperCollector(BaseCollector):
+    """Polymorphic shadow collector across every network bridged by Beeper.
+
+    Lifecycle:
+      1. warmup     → /v1/info + /v1/accounts to confirm token + populate accounts
+      2. enumerate  → walk /v1/chats to upsert every chat + participants
+      3. backfill   → for each chat with backfill_complete=False, walk
+                      /v1/chats/{id}/messages?direction=before until oldestCursor
+                      stops advancing
+      4. tail       → for every chat, fetch newest messages (direction=after,
+                      cursor=newest_cursor) and persist them
+
+    The full backfill of 2055 rooms is not done in one cycle — each `collect()`
+    pulls a bounded slice (BEEPER_BACKFILL_PAGES_PER_CYCLE per chat by default).
+    """
+
+    SOURCE_NAME = "beeper"
+    USE_HUMAN_RATE_LIMITER = False
+    USE_ACCOUNT_POOL = False
+
+    def __init__(
+        self,
+        client: Optional[BeeperClient] = None,
+        writer: Optional[BeeperWriter] = None,
+    ) -> None:
+        super().__init__()
+        self._client_owned = client is None
+        self.client = client or BeeperClient()
+        self._writer_override = writer
+
+    @property
+    def writer(self) -> Optional[BeeperWriter]:
+        if self._writer_override:
+            return self._writer_override
+        if self.pool is None:
+            return None
+        return BeeperWriter(self.pool, log=logger)
+
+    # ── BaseCollector hooks ───────────────────────────────────────────
+
+    async def collect(self, targets: list[str]) -> dict:
+        """One sync cycle. `targets` is unused (Beeper enumerates server-side).
+
+        Returns a stat summary so the dashboard can surface per-cycle counts.
+        """
+        if self.pool is None:
+            raise RuntimeError("BeeperCollector requires a DB pool — call set_pool() first")
+
+        stats = {"accounts": 0, "chats": 0, "messages_inserted": 0, "errors": 0}
+        try:
+            stats["accounts"] = await self._sync_accounts()
+            stats["chats"] = await self._sync_chats()
+            stats["messages_inserted"] = await self._sync_messages()
+        except BeeperAPIError as exc:
+            logger.error("Beeper sync failed: %s", exc)
+            stats["errors"] += 1
+
+        logger.info(
+            "Beeper cycle done: accounts=%d chats=%d messages=%d errors=%d",
+            stats["accounts"], stats["chats"], stats["messages_inserted"], stats["errors"],
+        )
+        return stats
+
+    async def download_media(self, item: dict) -> None:
+        """No-op for Phase 4 — Beeper attachments live as mxc:// URIs in
+        attachments JSONB. A follow-up wave will resolve mxc URIs via
+        /v1/assets/serve and persist files to drive."""
+        return None
+
+    async def aclose(self) -> None:
+        if self._client_owned:
+            await self.client.close()
+
+    # ── pipeline stages ───────────────────────────────────────────────
+
+    async def _sync_accounts(self) -> int:
+        accounts = await self.client.accounts()
+        if not isinstance(accounts, list):
+            return 0
+        w = self.writer
+        if w is None:
+            return 0
+        for acc in accounts:
+            await w.upsert_account(acc)
+        return len(accounts)
+
+    async def _sync_chats(self) -> int:
+        w = self.writer
+        if w is None:
+            return 0
+        count = 0
+        async for chat in self.client.iter_chats(page_size=50):
+            await w.upsert_chat(chat)
+            count += 1
+            if self._stop.is_set():
+                break
+        return count
+
+    async def _sync_messages(self) -> int:
+        w = self.writer
+        if w is None:
+            return 0
+
+        max_pages = int(os.environ.get("BEEPER_BACKFILL_PAGES_PER_CYCLE", "3"))
+        max_chats = int(os.environ.get("BEEPER_MAX_CHATS_PER_CYCLE", "50"))
+
+        async with self.pool.acquire() as conn:
+            chat_rows = await conn.fetch(
+                """
+                SELECT c.chat_id,
+                       s.oldest_cursor,
+                       s.newest_cursor,
+                       COALESCE(s.backfill_complete, FALSE) AS backfill_complete,
+                       c.last_message_ts
+                FROM beeper_shadow_chats c
+                LEFT JOIN beeper_shadow_sync_state s USING (chat_id)
+                ORDER BY c.last_message_ts DESC NULLS LAST
+                LIMIT $1
+                """,
+                max_chats,
+            )
+
+        inserted_total = 0
+        for row in chat_rows:
+            if self._stop.is_set():
+                break
+            inserted = await self._sync_one_chat(
+                chat_id=row["chat_id"],
+                oldest_cursor=row["oldest_cursor"],
+                newest_cursor=row["newest_cursor"],
+                backfill_complete=row["backfill_complete"],
+                max_pages=max_pages,
+                w=w,
+            )
+            inserted_total += inserted
+        return inserted_total
+
+    async def _sync_one_chat(
+        self,
+        *,
+        chat_id: str,
+        oldest_cursor: Optional[str],
+        newest_cursor: Optional[str],
+        backfill_complete: bool,
+        max_pages: int,
+        w: BeeperWriter,
+    ) -> int:
+        """Backfill (direction=before) until complete, then tail (direction=after)."""
+        inserted = 0
+        try:
+            # Phase A: backfill (only while not complete)
+            if not backfill_complete:
+                pages = 0
+                cursor = oldest_cursor
+                latest_oldest = oldest_cursor
+                final_oldest = oldest_cursor
+                latest_newest = newest_cursor
+                async for msg, meta in self.client.iter_messages(
+                    chat_id, start_cursor=cursor, direction="before", page_size=50
+                ):
+                    is_new = await w.upsert_message(msg)
+                    if is_new:
+                        inserted += 1
+                    final_oldest = meta.get("oldestCursor") or final_oldest
+                    if meta.get("newestCursor") and not latest_newest:
+                        latest_newest = meta["newestCursor"]
+                    # Page-boundary detection: stop after max_pages * 50 messages
+                    pages_seen = inserted // 50
+                    if pages_seen >= max_pages:
+                        break
+                    pages += 1
+
+                done = final_oldest == latest_oldest and latest_oldest is not None
+                await w.update_sync_state(
+                    chat_id,
+                    oldest_cursor=final_oldest,
+                    newest_cursor=latest_newest,
+                    backfill_complete=done,
+                )
+
+            # Phase B: tail (always; pulls any messages newer than newest_cursor)
+            tail_inserted = 0
+            new_newest = newest_cursor
+            async for msg, meta in self.client.iter_messages(
+                chat_id,
+                start_cursor=newest_cursor,
+                direction="after",
+                page_size=50,
+            ):
+                is_new = await w.upsert_message(msg)
+                if is_new:
+                    tail_inserted += 1
+                new_newest = meta.get("newestCursor") or new_newest
+                if tail_inserted >= max_pages * 50:
+                    break
+
+            if tail_inserted or new_newest != newest_cursor:
+                await w.update_sync_state(chat_id, newest_cursor=new_newest)
+            inserted += tail_inserted
+
+        except BeeperAPIError as exc:
+            logger.warning("chat %s sync error: %s", chat_id, exc)
+            await w.update_sync_state(chat_id, error=str(exc)[:500])
+        return inserted

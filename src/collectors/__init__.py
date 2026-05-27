@@ -8,6 +8,7 @@ from .lemon8 import Lemon8Collector
 from .strava import StravaCollector
 from .whatsapp import WhatsappCollector
 from .search import SearchCollector
+from .beeper import BeeperCollector
 
 COLLECTORS = {
     "github": GithubCollector,
@@ -20,6 +21,7 @@ COLLECTORS = {
     "strava": StravaCollector,
     "whatsapp": WhatsappCollector,
     "search": SearchCollector,
+    "beeper": BeeperCollector,
 }
 
 ALL_COLLECTORS = list(COLLECTORS.values())
