@@ -893,6 +893,255 @@ async def matrix_coverage(_user: dict = Depends(require_role("viewer"))):
     return await coverage_overlap_summary(pool)
 
 
+# -----------------------------------------------------------------------------
+# Telegram account management (item 4.7)
+# -----------------------------------------------------------------------------
+
+class TelegramAccountCreate(BaseModel):
+    phone: str
+    name: str | None = None
+
+
+class TelegramAccountAuth(BaseModel):
+    phone: str
+    code: str
+    password: str | None = None  # For 2FA
+
+
+# In-memory auth state for dashboard onboarding (similar to bot flow)
+_dashboard_auth_sessions: dict[str, dict] = {}
+
+
+@app.get("/api/telegram/accounts")
+async def list_telegram_accounts(_user: dict = Depends(require_role("viewer"))):
+    """List all onboarded Telegram accounts."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT name, phone, status, owner_bot, created_at, last_connected_at, last_error
+            FROM telegram_user_accounts
+            ORDER BY created_at DESC
+            """
+        )
+    return [
+        {
+            "name": r["name"],
+            "phone": r["phone"][:4] + "****" + r["phone"][-2:] if r["phone"] else None,
+            "phone_full": r["phone"],  # Only for admin, could filter
+            "status": r["status"],
+            "owner_bot": r["owner_bot"],
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            "last_connected_at": r["last_connected_at"].isoformat() if r["last_connected_at"] else None,
+            "last_error": r["last_error"],
+        }
+        for r in rows
+    ]
+
+
+@app.post("/api/telegram/accounts/request-code")
+async def telegram_request_code(
+    body: TelegramAccountCreate,
+    _user: dict = Depends(require_role("admin")),
+):
+    """Step 1: Request verification code for a new phone number."""
+    from telethon import TelegramClient
+    from telethon.sessions import StringSession
+    from telethon.errors import FloodWaitError
+
+    api_id = int(os.getenv("TELEGRAM_API_ID", "0"))
+    api_hash = os.getenv("TELEGRAM_API_HASH", "")
+    if not api_id or not api_hash:
+        raise HTTPException(500, "TELEGRAM_API_ID/API_HASH not configured")
+
+    phone = body.phone.strip()
+    if not phone.startswith("+"):
+        raise HTTPException(400, "Phone must include country code (e.g. +6591234567)")
+
+    # Check if already registered
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        existing = await conn.fetchval(
+            "SELECT name FROM telegram_user_accounts WHERE phone = $1",
+            phone,
+        )
+        if existing:
+            raise HTTPException(400, f"Phone already registered as '{existing}'")
+
+    try:
+        client = TelegramClient(StringSession(), api_id, api_hash)
+        await client.connect()
+        sent_code = await client.send_code_request(phone)
+
+        # Store session for next step
+        _dashboard_auth_sessions[phone] = {
+            "client": client,
+            "phone_code_hash": sent_code.phone_code_hash,
+            "api_id": api_id,
+            "api_hash": api_hash,
+            "name": body.name,
+        }
+
+        return {"status": "code_sent", "phone": phone}
+
+    except FloodWaitError as e:
+        raise HTTPException(429, f"Rate limited. Wait {e.seconds} seconds.")
+    except Exception as e:
+        logger.error("telegram_request_code failed: %s", e)
+        raise HTTPException(500, f"Failed to send code: {type(e).__name__}")
+
+
+@app.post("/api/telegram/accounts/verify-code")
+async def telegram_verify_code(
+    body: TelegramAccountAuth,
+    _user: dict = Depends(require_role("admin")),
+):
+    """Step 2: Verify code and complete sign-in (handles 2FA if needed)."""
+    from telethon.errors import (
+        SessionPasswordNeededError,
+        PhoneCodeInvalidError,
+        PhoneCodeExpiredError,
+        PasswordHashInvalidError,
+    )
+
+    session = _dashboard_auth_sessions.get(body.phone)
+    if not session:
+        raise HTTPException(400, "No pending auth for this phone. Call request-code first.")
+
+    client = session["client"]
+    phone_code_hash = session["phone_code_hash"]
+
+    try:
+        if body.password:
+            # 2FA step
+            await client.sign_in(password=body.password)
+        else:
+            # Code verification step
+            await client.sign_in(body.phone, body.code, phone_code_hash=phone_code_hash)
+
+        # Success — save to DB
+        me = await client.get_me()
+        session_string = client.session.save()
+
+        name = session.get("name") or me.username or f"user_{me.id}"
+        if me.first_name and not session.get("name"):
+            name = me.first_name.lower().replace(" ", "_")[:32]
+
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            # Handle name collision
+            base_name = name
+            suffix = 0
+            while True:
+                existing = await conn.fetchval(
+                    "SELECT 1 FROM telegram_user_accounts WHERE name = $1",
+                    name,
+                )
+                if not existing:
+                    break
+                suffix += 1
+                name = f"{base_name}_{suffix}"
+
+            await conn.execute(
+                """
+                INSERT INTO telegram_user_accounts
+                    (name, api_id, api_hash, phone, session_string, owner_bot, status, last_connected_at)
+                VALUES ($1, $2, $3, $4, $5, 'dashboard', 'active', NOW())
+                """,
+                name,
+                session["api_id"],
+                session["api_hash"],
+                body.phone,
+                session_string,
+            )
+
+            # Notify collector
+            await conn.execute("SELECT pg_notify('telegram_account_added', $1)", name)
+
+        # Cleanup
+        del _dashboard_auth_sessions[body.phone]
+
+        return {
+            "status": "success",
+            "name": name,
+            "display_name": f"{me.first_name or ''} {me.last_name or ''}".strip(),
+        }
+
+    except SessionPasswordNeededError:
+        return {"status": "2fa_required", "phone": body.phone}
+
+    except PhoneCodeInvalidError:
+        raise HTTPException(400, "Invalid code")
+
+    except PhoneCodeExpiredError:
+        del _dashboard_auth_sessions[body.phone]
+        raise HTTPException(400, "Code expired. Request a new one.")
+
+    except PasswordHashInvalidError:
+        raise HTTPException(400, "Incorrect 2FA password")
+
+    except Exception as e:
+        logger.error("telegram_verify_code failed: %s", e)
+        raise HTTPException(500, f"Verification failed: {type(e).__name__}")
+
+
+@app.delete("/api/telegram/accounts/{name}")
+async def delete_telegram_account(
+    name: str,
+    _user: dict = Depends(require_role("admin")),
+):
+    """Remove a Telegram account."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM telegram_user_accounts WHERE name = $1",
+            name,
+        )
+        if result == "DELETE 0":
+            raise HTTPException(404, "Account not found")
+
+    return {"status": "deleted", "name": name}
+
+
+@app.post("/api/telegram/accounts/{name}/disable")
+async def disable_telegram_account(
+    name: str,
+    _user: dict = Depends(require_role("admin")),
+):
+    """Disable a Telegram account (stops collection but keeps session)."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "UPDATE telegram_user_accounts SET status = 'disabled' WHERE name = $1",
+            name,
+        )
+        if result == "UPDATE 0":
+            raise HTTPException(404, "Account not found")
+
+    return {"status": "disabled", "name": name}
+
+
+@app.post("/api/telegram/accounts/{name}/enable")
+async def enable_telegram_account(
+    name: str,
+    _user: dict = Depends(require_role("admin")),
+):
+    """Re-enable a disabled Telegram account."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "UPDATE telegram_user_accounts SET status = 'active' WHERE name = $1 AND status = 'disabled'",
+            name,
+        )
+        if result == "UPDATE 0":
+            raise HTTPException(404, "Account not found or not disabled")
+
+        # Notify collector
+        await conn.execute("SELECT pg_notify('telegram_account_added', $1)", name)
+
+    return {"status": "enabled", "name": name}
+
+
 if DIST_DIR.is_dir():
     app.mount("/assets", StaticFiles(directory=str(DIST_DIR / "assets")), name="assets")
 

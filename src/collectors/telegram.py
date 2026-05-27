@@ -296,8 +296,51 @@ class TelegramCollector(BaseCollector):
         self._discussion_dwell_min = int(os.getenv("TELEGRAM_DISCUSSION_DWELL_MIN", "60"))
         self._discussion_dwell_max = int(os.getenv("TELEGRAM_DISCUSSION_DWELL_MAX", "180"))
 
+        # Hot-reload task (item 4.6) — listens for new accounts via NOTIFY.
+        self._hot_reload_task: asyncio.Task | None = None
+
     def _load_accounts(self):
         self.account_pool.load_from_env("TELEGRAM", ["NAME", "API_ID", "API_HASH", "SESSION", "PHONE"])
+
+    async def _load_accounts_from_db(self):
+        """Load accounts from telegram_user_accounts table (item 4.5).
+
+        This supplements env-based accounts with bot-onboarded accounts stored
+        in the database. Called at startup after set_pool() provides the DB pool.
+        """
+        if self.pool is None:
+            return
+
+        try:
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT name, api_id, api_hash, phone, session_string
+                    FROM telegram_user_accounts
+                    WHERE status = 'active'
+                    """
+                )
+
+            for row in rows:
+                # Check if already loaded from env (env takes precedence)
+                existing = [a for a in self.account_pool._accounts if a.name == row["name"]]
+                if existing:
+                    logger.debug("Skipping DB account %s — already loaded from env", row["name"])
+                    continue
+
+                self.account_pool.add_account(
+                    name=row["name"],
+                    credentials={
+                        "api_id": str(row["api_id"]),
+                        "api_hash": row["api_hash"],
+                        "phone": row["phone"],
+                        "session": row["session_string"],  # StringSession export
+                    },
+                )
+                logger.info("Loaded account %s from telegram_user_accounts", row["name"])
+
+        except Exception as exc:
+            logger.warning("Failed to load accounts from DB: %s", exc)
 
     def set_pool(self, pool):
         """Override BaseCollector.set_pool to also wire UserChangeTracker."""
@@ -428,6 +471,110 @@ class TelegramCollector(BaseCollector):
             except Exception as exc:
                 logger.debug("get_me() failed for account=%s: %s", account_name, exc)
 
+    async def _listen_for_new_accounts(self) -> None:
+        """Listen for pg_notify('telegram_account_added', name) and hot-reload (item 4.6).
+
+        This runs as a background task during the collection cycle. When a new
+        account is onboarded via bot or dashboard, we receive the notification,
+        load the account from DB, spawn a new worker, and trigger backfill.
+        """
+        if self.pool is None:
+            return
+
+        try:
+            conn = await self.pool.acquire()
+            await conn.add_listener("telegram_account_added", self._on_account_added_notify)
+            logger.info("Listening for telegram_account_added notifications")
+
+            # Keep connection alive while listening.
+            while not self._stop.is_set():
+                await asyncio.sleep(5)
+
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.warning("_listen_for_new_accounts failed: %s", exc)
+        finally:
+            try:
+                await conn.remove_listener("telegram_account_added", self._on_account_added_notify)
+                await self.pool.release(conn)
+            except Exception:
+                pass
+
+    def _on_account_added_notify(self, conn, pid, channel, payload: str) -> None:
+        """Handle pg_notify callback for new account."""
+        logger.info("Received telegram_account_added notification: %s", payload)
+        # Schedule the async handler — can't await directly from callback.
+        asyncio.create_task(self._handle_new_account(payload))
+
+    async def _handle_new_account(self, account_name: str) -> None:
+        """Load and connect a newly-onboarded account, then trigger backfill."""
+        if self.pool is None:
+            return
+
+        # Load account from DB.
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT name, api_id, api_hash, phone, session_string
+                FROM telegram_user_accounts
+                WHERE name = $1 AND status = 'active'
+                """,
+                account_name,
+            )
+
+        if not row:
+            logger.warning("Account %s not found or inactive — skipping hot-reload", account_name)
+            return
+
+        # Check if already loaded.
+        existing = [a for a in self.account_pool._accounts if a.name == row["name"]]
+        if existing:
+            logger.info("Account %s already loaded — skipping", account_name)
+            return
+
+        # Add to pool.
+        self.account_pool.add_account(
+            name=row["name"],
+            credentials={
+                "api_id": str(row["api_id"]),
+                "api_hash": row["api_hash"],
+                "phone": row["phone"],
+                "session": row["session_string"],
+            },
+        )
+        logger.info("Hot-loaded account %s from DB", account_name)
+
+        # Spawn a new worker for this account.
+        from src.collectors.telegram import TelegramWorker
+        new_account = self.account_pool._accounts[-1]  # Just added
+        worker = TelegramWorker(self, new_account, len(self._workers))
+        try:
+            await worker.connect()
+            self._workers.append(worker)
+            logger.info("[worker=%d account=%s] Hot-connected new worker", worker.worker_id, account_name)
+
+            # Trigger full dialog discovery + backfill for the new account.
+            dialogs = await self.collect_dialogs()
+            for d in dialogs:
+                platform_chat_id = d.get("platform_chat_id")
+                if platform_chat_id:
+                    async with self.pool.acquire() as conn:
+                        await conn.execute(
+                            """
+                            INSERT INTO telegram_spider_queue
+                                (platform_chat_id, title, source, priority, status, collected_at)
+                            VALUES ($1, $2, 'hot_reload', 9, 'pending', NOW())
+                            ON CONFLICT (platform_chat_id) DO NOTHING
+                            """,
+                            platform_chat_id,
+                            d.get("title"),
+                        )
+            logger.info("[worker=%d] Enqueued %d chats for hot-reload backfill", worker.worker_id, len(dialogs))
+
+        except Exception as exc:
+            logger.error("Failed to hot-connect account %s: %s", account_name, exc)
+
     def _dispatch(self, targets: list[str], num_workers: int) -> list[list[str]]:
         """Hash-bucket targets so each chat is owned by exactly one worker.
 
@@ -451,6 +598,9 @@ class TelegramCollector(BaseCollector):
             logger.error("TELEGRAM_API_ID and TELEGRAM_API_HASH required")
             return
 
+        # Load accounts from DB (supplements env-based accounts) — item 4.5
+        await self._load_accounts_from_db()
+
         self._workers = await self._spawn_workers()
         if not self._workers:
             logger.error("No Telegram workers connected — aborting cycle")
@@ -470,6 +620,11 @@ class TelegramCollector(BaseCollector):
         self._hub_notifier.set_client(self._primary_client)
         await self._hub_notifier.start()
         await self._bot_pool.start_health_monitor()
+
+        # Start hot-reload listener for new accounts (item 4.6).
+        # This listens for pg_notify('telegram_account_added', name) and spawns
+        # a new worker when an account is onboarded via bot or dashboard.
+        self._hot_reload_task = asyncio.create_task(self._listen_for_new_accounts())
 
         self._hub_notifier.notify(
             NotifyCategory.COLLECTION_START,

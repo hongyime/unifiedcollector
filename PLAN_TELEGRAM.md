@@ -70,14 +70,14 @@ Connect 4+ Telegram user accounts (login via dashboard OR via 3 bots: `bryanseah
 
 ## Phase 3 — Bot onboarding + dashboard (BLOCKED on user delivering API_ID/API_HASH)
 
-- [ ] **4.1** Create `src/db/migrations/add_telegram_user_accounts.sql` table `telegram_user_accounts` (name varchar PK, api_id int, api_hash varchar, phone varchar, session_string text, owner_bot varchar, created_at, last_connected_at, status varchar). NOTE session_string encrypted-at-rest TBD.
-- [ ] **4.2** Create `src/bots/onboard_bot.py` — single process running `python-telegram-bot` Application that polls all 3 bot tokens (`BRYANSEAH_BOT_TOKEN`, `SHOTSBYSEAH_BOT_TOKEN`, `PRAWNPRODUCTIONS_BOT_TOKEN`).
-- [ ] **4.3** `/startcollector` handler — DM-only. ConversationHandler states: ASK_PHONE → ASK_CODE → MAYBE_ASK_2FA → DONE. Uses `telethon.TelegramClient(StringSession(), api_id, api_hash)` for the auth ladder. On success, persist to `telegram_user_accounts`.
-- [ ] **4.4** Add docker-compose service `unifiedcollector_onboard_bot` running the bot.
-- [ ] **4.5** Patch `TelegramCollector._load_accounts` to ALSO load from `telegram_user_accounts` table (env still works for legacy).
-- [ ] **4.6** Hot-reload: on new row insert (use postgres LISTEN/NOTIFY or 60s poll), spawn worker for new account, fire backfill.
-- [ ] **4.7** Dashboard API: `GET /api/telegram/accounts`, `POST /api/telegram/accounts/add` (phone+code+password), `POST /api/telegram/accounts/{name}/refresh`, `DELETE /api/telegram/accounts/{name}`.
-- [ ] **4.8** Dashboard React: account-add modal with phone/code/2FA stepper, accounts table.
+- [x] **4.1** Create `src/db/migrations/add_telegram_user_accounts.sql` table `telegram_user_accounts` (name varchar PK, api_id int, api_hash varchar, phone varchar, session_string text, owner_bot varchar, created_at, last_connected_at, status varchar). NOTE session_string encrypted-at-rest TBD.
+- [x] **4.2** Create `src/bots/onboard_bot.py` — single process running `python-telegram-bot` Application that polls all 3 bot tokens (`BRYANSEAH_BOT_TOKEN`, `SHOTSBYSEAH_BOT_TOKEN`, `PRAWNPRODUCTIONS_BOT_TOKEN`).
+- [x] **4.3** `/startcollector` handler — DM-only. ConversationHandler states: ASK_PHONE → ASK_CODE → MAYBE_ASK_2FA → DONE. Uses `telethon.TelegramClient(StringSession(), api_id, api_hash)` for the auth ladder. On success, persist to `telegram_user_accounts`.
+- [x] **4.4** Add docker-compose service `unifiedcollector_onboard_bot` running the bot.
+- [x] **4.5** Patch `TelegramCollector._load_accounts` to ALSO load from `telegram_user_accounts` table (env still works for legacy).
+- [x] **4.6** Hot-reload: on new row insert (use postgres LISTEN/NOTIFY or 60s poll), spawn worker for new account, fire backfill.
+- [x] **4.7** Dashboard API: `GET /api/telegram/accounts`, `POST /api/telegram/accounts/add` (phone+code+password), `POST /api/telegram/accounts/{name}/refresh`, `DELETE /api/telegram/accounts/{name}`.
+- [x] **4.8** Dashboard React: account-add modal with phone/code/2FA stepper, accounts table.
 - [ ] **4.9** Tests + smoke (with user-provided API creds) + commit.
 
 ## Notes / pitfalls (filled in as ralph loop discovers them)

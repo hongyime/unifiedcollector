@@ -15,6 +15,7 @@ import {
   Link2,
   ImageIcon,
   Bike,
+  MessageCircle,
 } from "lucide-react";
 
 const groups = [
@@ -47,6 +48,12 @@ const groups = [
     label: "Strava",
     items: [
       { to: "/strava/feed", label: "Feed", icon: Bike },
+    ],
+  },
+  {
+    label: "Telegram",
+    items: [
+      { to: "/telegram/accounts", label: "Accounts", icon: MessageCircle },
     ],
   },
   {

@@ -19,6 +19,7 @@ import { UsersPage } from "./features/whatsapp/UsersPage";
 import { LinksPage } from "./features/whatsapp/LinksPage";
 import { StravaFeedPage } from "./features/strava/StravaFeedPage";
 import { LoginPage } from "./features/auth/LoginPage";
+import { TelegramAccountsPage } from "./features/telegram/TelegramAccountsPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -47,6 +48,7 @@ const router = createBrowserRouter([
       { path: "whatsapp/users", element: <UsersPage /> },
       { path: "whatsapp/links", element: <LinksPage /> },
       { path: "strava/feed", element: <StravaFeedPage /> },
+      { path: "telegram/accounts", element: <TelegramAccountsPage /> },
       { path: "dlq", element: <DLQPage /> },
       { path: "health", element: <HealthPage /> },
       { path: "settings", element: <SettingsPage /> },

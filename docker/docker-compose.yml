@@ -103,6 +103,32 @@ services:
       start_period: 30s
     restart: unless-stopped
 
+  onboard_bot:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: unifiedcollector_onboard_bot
+    command: python -m src.bots.onboard_bot
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
+      BRYANSEAH_BOT_TOKEN: ${BRYANSEAH_BOT_TOKEN:-}
+      SHOTSBYSEAH_BOT_TOKEN: ${SHOTSBYSEAH_BOT_TOKEN:-}
+      PRAWNPRODUCTIONS_BOT_TOKEN: ${PRAWNPRODUCTIONS_BOT_TOKEN:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - ../.env
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
   dashboard:
     build:
       context: ..
