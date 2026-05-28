@@ -141,7 +141,7 @@ class TelegramWorker:
         )
 
     async def connect(self):
-        from telethon.sync import TelegramClient
+        from telethon import TelegramClient  # NOT telethon.sync!
         session_dir = Path("sessions")
         session_dir.mkdir(parents=True, exist_ok=True)
 
@@ -160,7 +160,11 @@ class TelegramWorker:
         try:
             self.state = SessionState.CONNECTING
             self.client = TelegramClient(session_file, api_id, api_hash)
-            await self.client.start()
+            # start() handles connect + auth check in one call.
+            # Pass phone=lambda: None to prevent interactive prompts.
+            # If session is not authorized, this will raise an error.
+            phone = self.account.credentials.get("phone", "")
+            await self.client.start(phone=phone if phone else lambda: None)
             self.state = SessionState.CONNECTED
             try:
                 me = await self.client.get_me()
@@ -594,17 +598,21 @@ class TelegramCollector(BaseCollector):
     # ------------------------------------------------------------------
 
     async def collect(self, targets: list[str]):
+        logger.info("[telegram.collect] ENTER with %d targets", len(targets))
         if not self._api_id or not self._api_hash:
             logger.error("TELEGRAM_API_ID and TELEGRAM_API_HASH required")
             return
 
         # Load accounts from DB (supplements env-based accounts) — item 4.5
+        logger.info("[telegram.collect] calling _load_accounts_from_db")
         await self._load_accounts_from_db()
 
+        logger.info("[telegram.collect] calling _spawn_workers")
         self._workers = await self._spawn_workers()
         if not self._workers:
             logger.error("No Telegram workers connected — aborting cycle")
             return
+        logger.info("[telegram.collect] got %d workers", len(self._workers))
 
         # Auto-backfill new accounts (item 2.4).
         # For each connected worker, check if their account name has been seen
