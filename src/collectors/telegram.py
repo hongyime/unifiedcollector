@@ -609,9 +609,12 @@ class TelegramCollector(BaseCollector):
     # ------------------------------------------------------------------
 
     async def collect(self, targets: list[str]):
-        # Short delay to let other collectors settle - their sync init
-        # code can block the event loop and prevent our async connects.
-        await asyncio.sleep(5)
+        # Longer delay to let other collectors (instagram/tiktok) finish their
+        # SYNC initialization that blocks the event loop. Without this, our
+        # async connects never complete because instaloader's retry loops freeze
+        # the entire asyncio event loop.
+        logger.info("[telegram.collect] waiting 30s for other collectors to settle...")
+        await asyncio.sleep(30)
         
         logger.info("[telegram.collect] ENTER with %d targets", len(targets))
         if not self._api_id or not self._api_hash:
