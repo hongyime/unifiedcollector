@@ -841,6 +841,7 @@ class TelegramCollector(BaseCollector):
                 )
 
         # Mark this target as collected in collection_targets
+        logger.info("[_collect_chat] completed target=%s, calling mark_target_collected", target)
         await self.mark_target_collected(target)
 
     async def _spider_discussion_group(
