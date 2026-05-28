@@ -640,17 +640,21 @@ class TelegramCollector(BaseCollector):
             os.getenv("TELEGRAM_AUTO_BACKFILL_NEW_ACCOUNTS", "true").lower() == "true"
         )
         if auto_backfill_enabled and self.pool is not None:
+            logger.info("[telegram.collect] starting _auto_backfill_new_accounts")
             await self._auto_backfill_new_accounts()
+            logger.info("[telegram.collect] finished _auto_backfill_new_accounts")
 
         # HubNotifier + BotPool keyed off the primary client (first worker).
         self._hub_notifier.set_client(self._primary_client)
         await self._hub_notifier.start()
         await self._bot_pool.start_health_monitor()
+        logger.info("[telegram.collect] HubNotifier + BotPool started")
 
         # Start hot-reload listener for new accounts (item 4.6).
         # This listens for pg_notify('telegram_account_added', name) and spawns
         # a new worker when an account is onboarded via bot or dashboard.
         self._hot_reload_task = asyncio.create_task(self._listen_for_new_accounts())
+        logger.info("[telegram.collect] hot_reload_task started")
 
         self._hub_notifier.notify(
             NotifyCategory.COLLECTION_START,
