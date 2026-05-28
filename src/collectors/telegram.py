@@ -371,26 +371,37 @@ class TelegramCollector(BaseCollector):
     # ------------------------------------------------------------------
 
     async def _spawn_workers(self) -> list[TelegramWorker]:
-        """Connect one TelegramClient per loaded account, in parallel."""
+        """Connect one TelegramClient per loaded account, sequentially with delays.
+        
+        We connect sequentially (not in parallel) because Telegram rate-limits
+        multiple concurrent connections from the same IP. A small delay between
+        connections avoids triggering this limit.
+        """
         accounts = list(self.account_pool._accounts)  # snapshot
         if not accounts:
             logger.error("No Telegram accounts in pool — cannot start workers")
             return []
 
         workers = [TelegramWorker(self, acc, idx) for idx, acc in enumerate(accounts)]
-        results = await asyncio.gather(
-            *(w.connect() for w in workers),
-            return_exceptions=True,
-        )
         live: list[TelegramWorker] = []
-        for w, r in zip(workers, results):
-            if isinstance(r, Exception):
+        
+        for w in workers:
+            try:
+                await asyncio.wait_for(w.connect(), timeout=45)
+                live.append(w)
+                # Small delay between connections to avoid Telegram rate limits
+                if len(live) < len(workers):
+                    await asyncio.sleep(2)
+            except asyncio.TimeoutError:
+                logger.error(
+                    "[worker=%d account=%s] connect timed out after 45s",
+                    w.worker_id, w.account.name,
+                )
+            except Exception as e:
                 logger.error(
                     "[worker=%d account=%s] failed to connect: %s",
-                    w.worker_id, w.account.name, r,
+                    w.worker_id, w.account.name, e,
                 )
-                continue
-            live.append(w)
 
         if live:
             self._primary_client = live[0].client
@@ -598,6 +609,10 @@ class TelegramCollector(BaseCollector):
     # ------------------------------------------------------------------
 
     async def collect(self, targets: list[str]):
+        # Short delay to let other collectors settle - their sync init
+        # code can block the event loop and prevent our async connects.
+        await asyncio.sleep(5)
+        
         logger.info("[telegram.collect] ENTER with %d targets", len(targets))
         if not self._api_id or not self._api_hash:
             logger.error("TELEGRAM_API_ID and TELEGRAM_API_HASH required")
