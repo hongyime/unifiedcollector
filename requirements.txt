@@ -53,3 +53,6 @@ pgvector>=0.3.0
 # Beeper Matrix client (Wave 0). [e2e] extra pulls in olm/cryptography
 # for E2EE rooms — requires libolm system lib in the collector image.
 matrix-nio[e2e]>=0.24.0
+
+# Telegram Bot API for onboarding bot (/startcollector)
+python-telegram-bot>=21.0.0

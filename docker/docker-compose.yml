@@ -111,11 +111,6 @@ services:
     command: python -m src.bots.onboard_bot
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
-      TELEGRAM_API_ID: ${TELEGRAM_API_ID}
-      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
-      BRYANSEAH_BOT_TOKEN: ${BRYANSEAH_BOT_TOKEN:-}
-      SHOTSBYSEAH_BOT_TOKEN: ${SHOTSBYSEAH_BOT_TOKEN:-}
-      PRAWNPRODUCTIONS_BOT_TOKEN: ${PRAWNPRODUCTIONS_BOT_TOKEN:-}
     depends_on:
       postgres:
         condition: service_healthy
