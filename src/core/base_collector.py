@@ -99,6 +99,23 @@ class BaseCollector(ABC):
     def stop(self):
         self._stop.set()
 
+    async def mark_target_collected(self, target_id: str):
+        """Update collection_targets after successfully collecting a target."""
+        if self.pool is None:
+            return
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute("""
+                    UPDATE collection_targets
+                    SET collection_count = collection_count + 1,
+                        last_collection_at = NOW(),
+                        status = 'active'
+                    WHERE source = $1 AND target_id = $2
+                """, self.SOURCE_NAME, target_id)
+        except Exception as e:
+            logger.debug("Failed to update collection_targets for %s/%s: %s", 
+                        self.SOURCE_NAME, target_id, e)
+
     # --- File I/O ---
 
     def save_json(self, data: dict, filename: str) -> Path:

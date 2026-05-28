@@ -837,6 +837,9 @@ class TelegramCollector(BaseCollector):
                     chat_id, exc,
                 )
 
+        # Mark this target as collected in collection_targets
+        await self.mark_target_collected(target)
+
     async def _spider_discussion_group(
         self, worker: "TelegramWorker", channel_entity, channel_platform_id: str
     ) -> None:
