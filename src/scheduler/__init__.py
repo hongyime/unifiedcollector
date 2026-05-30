@@ -131,14 +131,37 @@ class Scheduler:
                     interval = row["interval_hours"]
                     logger.info("Schedule triggered for %s", source)
 
-                    await conn.execute(
-                        "INSERT INTO collection_runs (source, status) VALUES ($1, 'queued')",
+                    # P1-1: record the run through a real lifecycle instead of
+                    # leaving it stuck in 'queued' forever (292 dead rows found).
+                    # A schedule tick is a trigger event, not a long-lived job the
+                    # worker reports back on, so we open it 'running' and close it
+                    # 'completed' once targets are re-armed. completed_at gives the
+                    # dashboard a real run history + enables retention GC (P3-7).
+                    run_id = await conn.fetchval(
+                        "INSERT INTO collection_runs (source, status, started_at) "
+                        "VALUES ($1, 'running', NOW()) RETURNING id",
                         source,
                     )
+                    # P1-1: only re-pend targets that are NOT actively being
+                    # collected. The old query flipped ALL completed/error rows to
+                    # pending every tick, which could yank a still-running collector
+                    # back to pending mid-cycle. Excluding rows touched within the
+                    # interval window protects in-flight work.
+                    rearmed = await conn.fetchval(
+                        "WITH upd AS ("
+                        "  UPDATE collection_targets SET status = 'pending' "
+                        "  WHERE source = $1 AND status IN ('completed', 'error', 'active') "
+                        "    AND (last_collection_at IS NULL "
+                        "         OR last_collection_at < NOW() - ($2 || ' hours')::interval) "
+                        "  RETURNING 1) "
+                        "SELECT count(*) FROM upd",
+                        source, str(interval),
+                    )
                     await conn.execute(
-                        "UPDATE collection_targets SET status = 'pending' "
-                        "WHERE source = $1 AND status IN ('completed', 'error')",
-                        source,
+                        "UPDATE collection_runs "
+                        "SET status = 'completed', completed_at = NOW(), "
+                        "    items_collected = $2 WHERE id = $1",
+                        run_id, rearmed or 0,
                     )
                     next_run = now + timedelta(hours=interval)
                     await conn.execute(
@@ -146,7 +169,8 @@ class Scheduler:
                         "SET last_run = $1, next_run = $2 WHERE id = $3",
                         now, next_run, row["id"],
                     )
-                    logger.info("Next run for %s at %s", source, next_run.isoformat())
+                    logger.info("Next run for %s at %s (re-armed %d targets)",
+                                source, next_run.isoformat(), rearmed or 0)
 
     async def add_schedule(self, source: str, interval_hours: int = 24):
         if self.pool is None:
