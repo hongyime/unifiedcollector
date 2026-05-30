@@ -150,6 +150,9 @@ class WorkerService:
                              exc_info=True)
                 if count >= self.max_restarts:
                     logger.error("%s exceeded max restarts, giving up", source)
+                    # P2-4: persist permanent death so it's queryable / alertable
+                    # instead of just vanishing behind a log line.
+                    await self._mark_source_dead(source, repr(e), count)
                     break
                 backoff = min(300, 30 * (2 ** (count - 1)))
                 logger.info("Restarting %s in %ds", source, backoff)
@@ -229,6 +232,29 @@ class WorkerService:
             # Operators won't see worker liveness if this fails silently.
             # Use warning + stack so degraded health is observable.
             logger.warning("Health report failed", exc_info=True)
+
+    async def _mark_source_dead(self, source: str, error: str, crash_count: int):
+        """P2-4: persist a permanently-dead source so it's queryable + alertable.
+
+        The /metrics endpoint surfaces dead sources via uc_source_dead; an
+        operator alert can fire on status='dead' instead of relying on someone
+        noticing a single 'giving up' log line.
+        """
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO source_health "
+                    "  (source, status, last_error, crash_count, died_at, updated_at) "
+                    "VALUES ($1, 'dead', $2, $3, NOW(), NOW()) "
+                    "ON CONFLICT (source) DO UPDATE "
+                    "SET status='dead', last_error=$2, crash_count=$3, "
+                    "    died_at=NOW(), updated_at=NOW()",
+                    source, error[:2000], crash_count,
+                )
+            logger.critical("SOURCE DEAD: %s gave up after %d crashes — %s",
+                            source, crash_count, error[:200])
+        except Exception:
+            logger.warning("Failed to persist source death for %s", source, exc_info=True)
 
     def get_health(self) -> dict:
         active = sum(1 for t in self._tasks.values() if not t.done())

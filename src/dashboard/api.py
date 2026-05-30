@@ -196,6 +196,19 @@ async def metrics():
             )
             emit("uc_worker_health_age_seconds", age if age is not None else -1,
                  "Seconds since the worker last reported health (-1 = never)", "gauge")
+
+            # P2-4: permanently-dead sources (watchdog gave up). Alert on > 0.
+            try:
+                rows = await conn.fetch(
+                    "SELECT source, crash_count FROM source_health WHERE status = 'dead'"
+                )
+                emit("uc_source_dead_total", len(rows),
+                     "Number of sources the watchdog permanently gave up on", "gauge")
+                for r in rows:
+                    emit("uc_source_dead", 1, "", "gauge",
+                         labels=f'source="{r["source"]}"')
+            except Exception:
+                pass  # source_health table may not exist on older deploys
     except Exception as e:  # pragma: no cover - defensive
         emit("uc_metrics_scrape_error", 1, f"Metrics scrape failed: {e}")
 
