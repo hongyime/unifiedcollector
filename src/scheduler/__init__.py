@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from src.db.connection import get_pool, close_pool
+from src.core.env import env_int
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,34 @@ class Scheduler:
         # P0-1/P0-2: ledger-backed runner applies schemas/ + migrations/.
         from src.db.migrate import apply_all
         await apply_all(self.pool)
+
+    async def _gc_collection_runs(self):
+        """P3-7: retention GC for collection_runs.
+
+        The table has no consumer and grew unbounded (307+ aborted rows). Keep
+        recent history for the dashboard run-view but prune anything older than
+        the retention window. Runs at most hourly (gated by _last_gc).
+        """
+        import time as _time
+        now = _time.monotonic()
+        if now - getattr(self, "_last_gc", 0) < 3600:
+            return
+        self._last_gc = now
+        retention_days = env_int("COLLECTION_RUNS_RETENTION_DAYS", 7, min_value=1)
+        try:
+            async with self.pool.acquire() as conn:
+                deleted = await conn.fetchval(
+                    "WITH d AS (DELETE FROM collection_runs "
+                    "WHERE COALESCE(completed_at, started_at) "
+                    "      < NOW() - ($1 || ' days')::interval "
+                    "RETURNING 1) SELECT COUNT(*) FROM d",
+                    str(retention_days),
+                )
+            if deleted:
+                logger.info("collection_runs GC: pruned %d rows older than %dd",
+                            deleted, retention_days)
+        except Exception:
+            logger.warning("collection_runs GC failed", exc_info=True)
 
     async def _register_beeper_if_enabled(self):
         """Register the polymorphic Beeper Desktop Local API collector.
@@ -171,6 +200,9 @@ class Scheduler:
                     )
                     logger.info("Next run for %s at %s (re-armed %d targets)",
                                 source, next_run.isoformat(), rearmed or 0)
+
+        # P3-7: prune old collection_runs (self-gated to hourly).
+        await self._gc_collection_runs()
 
     async def add_schedule(self, source: str, interval_hours: int = 24):
         if self.pool is None:
