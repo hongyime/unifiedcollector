@@ -920,12 +920,18 @@ class GithubCollector(BaseCollector):
         for i in issues:
             await self._upsert_issue(0, i)
 
-        # 4. Releases / assets
+        # 4. Releases / assets — skip for repos we don't own (too large)
+        _own_logins = {login.lower()} if login else set()
+        _skip_assets = full_name.lower() not in {f"{login.lower()}/{r}" for r in []} and login.lower() not in {
+            os.getenv("GITHUB_ASSET_OWNER_LOGIN", "bryanseah234").lower()
+        }
         releases = await self._paginate(
             client, f"{API_BASE}/repos/{full_name}/releases"
         )
         for release in releases:
             for asset in release.get("assets", []):
+                if _skip_assets:
+                    continue  # only download assets from our own repos
                 if self.is_known(str(asset["id"])):
                     continue
                 await self.download_media({

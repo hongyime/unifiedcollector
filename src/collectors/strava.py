@@ -102,6 +102,11 @@ class StravaCollector(BaseCollector):
             logger.info("Strava token refreshed")
 
     async def collect(self, targets: list[str]):
+        if os.getenv("STRAVA_COLLECTOR_ENABLED", "true").lower() != "true":
+            logger.info("strava: disabled via STRAVA_COLLECTOR_ENABLED=false, skipping")
+            return
+        # Previously disabled due to httpx → Z:/C: NTFS kernel D-state.
+        # Root cause fixed: all mounts now on WSL2 ext4 named volumes.
         if self._use_api: await self._ensure_token()
         for target in targets:
             if self._stop.is_set(): break
@@ -113,7 +118,7 @@ class StravaCollector(BaseCollector):
                     # No API creds: try cookie-based scrape of authenticated user's
                     # training_activities feed. Falls through to graceful skip
                     # if cookies are missing/invalid.
-                    await self._collect_via_cookies()
+                    await asyncio.wait_for(self._collect_via_cookies(), timeout=300.0)
                 elif target.lower() == "feed" and self._use_web: await self._collect_feed()
                 elif self._use_api: await self._collect_athlete(target)
                 elif self._use_web: await self._collect_athlete_web(target)
@@ -216,13 +221,15 @@ class StravaCollector(BaseCollector):
             "Referer": "https://www.strava.com/dashboard",
         }
 
-        async with httpx.AsyncClient(timeout=30, cookies=jar, follow_redirects=True,
-                                     headers={"User-Agent": ua}) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=10.0, read=25.0, write=10.0, pool=5.0),
+                                     cookies=jar, follow_redirects=True,
+                                     headers={**base_headers, "User-Agent": ua}) as client:
             # 1) Resolve current athlete via /api/v3/athlete (web cookie works here).
             athlete_id = None
             athlete_name = "me"
             try:
-                resp = await client.get(f"{STRAVA_API}/athlete", headers=base_headers)
+                resp = await asyncio.wait_for(
+                    client.get(f"{STRAVA_API}/athlete", headers=base_headers), timeout=30.0)
                 if resp.status_code == 200 and resp.headers.get("content-type", "").startswith("application/json"):
                     a = resp.json()
                     athlete_id = str(a.get("id") or "")
@@ -238,18 +245,30 @@ class StravaCollector(BaseCollector):
             except Exception as e:
                 logger.info("strava: /api/v3/athlete probe error: %s", e)
 
-            # Fallback: pull athlete id from dashboard HTML hydration if needed.
+            # Fallback: pull athlete id AND profile data from dashboard HTML hydration.
             if not athlete_id:
                 try:
-                    dash = await client.get(f"{STRAVA_WEB}/dashboard",
-                                            headers={"User-Agent": ua,
-                                                     "Accept": "text/html,application/xhtml+xml"})
+                    dash = await asyncio.wait_for(
+                        client.get(f"{STRAVA_WEB}/dashboard",
+                                   headers={"User-Agent": ua, "Accept": "text/html,application/xhtml+xml"}),
+                        timeout=30.0)
                     if dash.status_code == 200:
                         m = re.search(r'"athlete_id"\s*:\s*(\d+)', dash.text) or \
                             re.search(r'/athletes/(\d+)', dash.text)
                         if m:
                             athlete_id = m.group(1)
                             logger.info("strava: resolved athlete_id=%s via dashboard hydration", athlete_id)
+                        # Also try to extract full profile from embedded JSON blob
+                        # Strava embeds {"currentAthlete":{...}} in the page JS
+                        profile_m = re.search(r'"currentAthlete"\s*:\s*(\{[^}]{20,500}\})', dash.text)
+                        if profile_m:
+                            try:
+                                profile_data = json.loads(profile_m.group(1))
+                                if profile_data.get("id"):
+                                    await self._upsert_athlete(profile_data)
+                                    logger.info("strava: upserted athlete profile from dashboard JSON")
+                            except Exception:
+                                pass
                 except Exception as e:
                     logger.warning("strava: dashboard hydration probe failed: %s", e)
 
@@ -276,10 +295,11 @@ class StravaCollector(BaseCollector):
             while not self._stop.is_set() and page <= 200:
                 await self._delay(self._feed_delay_min, self._feed_delay_max)
                 try:
-                    resp = await client.get(
-                        f"{STRAVA_WEB}/athlete/training_activities",
-                        headers=base_headers,
-                        params={
+                    resp = await asyncio.wait_for(
+                        client.get(
+                            f"{STRAVA_WEB}/athlete/training_activities",
+                            headers=base_headers,
+                            params={
                             "keywords": "",
                             "activity_type": "",
                             "workout_type": "",
@@ -288,7 +308,8 @@ class StravaCollector(BaseCollector):
                             "start_date": "",
                             "end_date": "",
                             "page": str(page),
-                        },
+                        }),
+                        timeout=30.0,
                     )
                 except Exception as e:
                     logger.warning("strava: training_activities page %d fetch error: %s", page, e)
@@ -340,6 +361,38 @@ class StravaCollector(BaseCollector):
 
             logger.info("strava: cookie scrape complete — %d activities upserted for athlete %s",
                         total, athlete_id)
+            # Try to enrich athlete profile by scraping their public profile page
+            if athlete_id:
+                try:
+                    profile_page = await client.get(
+                        f"{STRAVA_WEB}/athletes/{athlete_id}",
+                        headers={"User-Agent": ua, "Accept": "text/html,application/xhtml+xml"},
+                    )
+                    if profile_page.status_code == 200:
+                        html = profile_page.text
+                        # Extract name, location, profile photo from the page
+                        athlete_patch: dict = {"id": int(athlete_id)}
+                        name_m = re.search(r'<h1[^>]*class="[^"]*athlete-name[^"]*"[^>]*>([^<]+)<', html)
+                        if not name_m:
+                            name_m = re.search(r'"name"\s*:\s*"([^"]{2,60})"', html)
+                        if name_m:
+                            parts = name_m.group(1).strip().split(None, 1)
+                            athlete_patch["firstname"] = parts[0]
+                            if len(parts) > 1:
+                                athlete_patch["lastname"] = parts[1]
+                        loc_m = re.search(r'"location"\s*:\s*"([^"]{2,80})"', html)
+                        if loc_m:
+                            athlete_patch["city"] = loc_m.group(1)
+                        photo_m = re.search(r'"profile"\s*:\s*"(https?://[^"]+\.(jpg|png|jpeg)[^"]*)"', html)
+                        if not photo_m:
+                            photo_m = re.search(r'<img[^>]+class="[^"]*avatar[^"]*"[^>]+src="([^"]+)"', html)
+                        if photo_m:
+                            athlete_patch["profile"] = photo_m.group(1)
+                        if len(athlete_patch) > 1:
+                            await self._upsert_athlete(athlete_patch)
+                            logger.info("strava: enriched athlete %s profile from profile page", athlete_id)
+                except Exception as e:
+                    logger.debug("strava: profile page scrape failed: %s", e)
 
     @staticmethod
     def _normalize_training_activity(raw: dict) -> dict:
@@ -440,9 +493,21 @@ class StravaCollector(BaseCollector):
                     updated_at
                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
                 ON CONFLICT (platform_athlete_id) DO UPDATE SET
-                    username = EXCLUDED.username, profile = EXCLUDED.profile,
-                    follower_count = EXCLUDED.follower_count, updated_at = NOW()
-            """, athlete.get("id"), athlete.get("username"), athlete.get("firstname"), athlete.get("lastname"), athlete.get("profile"), athlete.get("city"), athlete.get("state"), athlete.get("country"), athlete.get("sex"), athlete.get("follower_count", 0), athlete.get("friend_count", 0))
+                    username = COALESCE(EXCLUDED.username, strava_athletes.username),
+                    firstname = COALESCE(EXCLUDED.firstname, strava_athletes.firstname),
+                    lastname = COALESCE(EXCLUDED.lastname, strava_athletes.lastname),
+                    profile = COALESCE(EXCLUDED.profile, strava_athletes.profile),
+                    city = COALESCE(EXCLUDED.city, strava_athletes.city),
+                    state = COALESCE(EXCLUDED.state, strava_athletes.state),
+                    country = COALESCE(EXCLUDED.country, strava_athletes.country),
+                    follower_count = COALESCE(EXCLUDED.follower_count, strava_athletes.follower_count),
+                    following_count = COALESCE(EXCLUDED.following_count, strava_athletes.following_count),
+                    updated_at = NOW()
+            """, athlete.get("id"), athlete.get("username"), athlete.get("firstname"),
+                athlete.get("lastname"), athlete.get("profile"), athlete.get("city"),
+                athlete.get("state"), athlete.get("country"), athlete.get("sex"),
+                athlete.get("follower_count", 0) or athlete.get("friends", 0) or 0,
+                athlete.get("friend_count", 0) or athlete.get("following_count", 0) or 0)
 
     async def _upsert_activity(self, activity: dict, athlete_id: str):
         async with self.pool.acquire() as conn:

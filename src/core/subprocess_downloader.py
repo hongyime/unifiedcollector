@@ -131,7 +131,12 @@ class DownloadResult:
 # ---------------------------------------------------------------------------
 
 async def _drain_stream(stream: asyncio.StreamReader, sink: list[str], hook: Optional[Callable[[str], None]] = None):
-    """Read lines from a subprocess stream into ``sink`` (and optional hook)."""
+    """Read lines from a subprocess stream into ``sink`` (and optional hook).
+
+    Yields the event loop every 50 lines to prevent starvation of other tasks
+    (timer callbacks, other coroutines) when subprocess produces large output.
+    """
+    line_count = 0
     while True:
         line = await stream.readline()
         if not line:
@@ -147,6 +152,9 @@ async def _drain_stream(stream: asyncio.StreamReader, sink: list[str], hook: Opt
             except Exception:
                 # never let a bad hook kill the download
                 logger.debug("subprocess_downloader: progress hook raised", exc_info=True)
+        line_count += 1
+        if line_count % 50 == 0:
+            await asyncio.sleep(0)   # yield to event loop every 50 lines
 
 
 async def _run_subprocess(
@@ -157,77 +165,73 @@ async def _run_subprocess(
     stop_event: Optional[asyncio.Event] = None,
     progress_hook: Optional[Callable[[str], None]] = None,
 ) -> tuple[int, str, str, bool, bool]:
-    """Run a subprocess with streamed capture, hard timeout, optional cancel.
+    """Run a subprocess in a thread executor with hard wall-clock timeout.
+
+    Uses subprocess.run() in a ThreadPoolExecutor thread instead of asyncio
+    subprocess machinery, which can hang waiting for SIGCHLD in WSL2/Docker.
+    Both stdout and stderr are discarded to prevent pipe-full deadlock.
 
     Returns (returncode, stdout, stderr, timed_out, cancelled).
     """
-    proc = await asyncio.create_subprocess_exec(
-        *argv,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        cwd=cwd,
-        env=env,
-    )
+    import subprocess, concurrent.futures, os, signal
 
-    out_chunks: list[str] = []
-    err_chunks: list[str] = []
     timed_out = False
     cancelled = False
 
-    out_task = asyncio.create_task(_drain_stream(proc.stdout, out_chunks, progress_hook))
-    err_task = asyncio.create_task(_drain_stream(proc.stderr, err_chunks, progress_hook))
+    def _run_sync() -> int:
+        try:
+            result = subprocess.run(
+                list(argv),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                cwd=cwd,
+                env=env,
+                start_new_session=True,
+                timeout=timeout,
+            )
+            return result.returncode
+        except subprocess.TimeoutExpired as e:
+            # Kill the process group
+            if hasattr(e, 'process') and e.process:
+                try:
+                    os.killpg(os.getpgid(e.process.pid), signal.SIGKILL)
+                except Exception:
+                    pass
+            return -9  # SIGKILL
 
-    # Race three things: process exit, hard timeout, and stop_event.
-    proc_task = asyncio.create_task(proc.wait())
-    timeout_task = asyncio.create_task(asyncio.sleep(timeout))
-    waitset = {proc_task, timeout_task}
-    stop_task: Optional[asyncio.Task] = None
-    if stop_event is not None:
-        stop_task = asyncio.create_task(stop_event.wait())
-        waitset.add(stop_task)
-
+    loop = asyncio.get_running_loop()
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="subproc")
     try:
-        done, pending = await asyncio.wait(waitset, return_when=asyncio.FIRST_COMPLETED)
-
-        if proc_task in done:
-            # Process finished naturally
-            pass
-        elif stop_task is not None and stop_task in done:
-            cancelled = True
+        future = loop.run_in_executor(executor, _run_sync)
+        # Race between the thread completing and stop_event
+        if stop_event is not None:
+            stop_task = asyncio.create_task(stop_event.wait())
+            done, _ = await asyncio.wait(
+                {asyncio.ensure_future(future), stop_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if stop_task in done:
+                cancelled = True
+                future.cancel()
+                stop_task.cancel()
+            else:
+                stop_task.cancel()
         else:
+            await future
+
+        rc = future.result() if not cancelled and future.done() else -1
+        if rc == -9:
             timed_out = True
-
-        # If proc still running, kill it.
-        if proc.returncode is None:
-            proc.kill()
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=10)
-            except asyncio.TimeoutError:
-                logger.error("subprocess_downloader: kill did not terminate within 10s")
-
-        # Cancel remaining race tasks (timeout_task / stop_task)
-        for t in pending:
-            if t is not proc_task:
-                t.cancel()
-
-        # Drain residual streams (they should close once proc exits)
-        for t in (out_task, err_task):
-            try:
-                await asyncio.wait_for(t, timeout=2)
-            except asyncio.TimeoutError:
-                t.cancel()
-            except Exception:
-                pass
-
-        rc = proc.returncode if proc.returncode is not None else -1
+    except concurrent.futures.CancelledError:
+        cancelled = True
+        rc = -1
+    except Exception as e:
+        logger.warning("subprocess_downloader: run_in_executor error: %s", e)
+        rc = -1
     finally:
-        for t in (out_task, err_task, timeout_task):
-            if not t.done():
-                t.cancel()
-        if stop_task is not None and not stop_task.done():
-            stop_task.cancel()
+        executor.shutdown(wait=False)
 
-    return rc, "".join(out_chunks), "".join(err_chunks), timed_out, cancelled
+    return rc, "", "", timed_out, cancelled
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +265,12 @@ async def gallery_dl_download(
     if own_tempdir:
         tempdir = tempfile.mkdtemp(prefix="gdl_")
 
-    argv: list[str] = ["gallery-dl", "--dest", tempdir]
+    argv: list[str] = [
+        "gallery-dl",
+        "--dest", tempdir,
+        "--option", "downloader.http.timeout=30",   # per-request socket timeout
+        "--option", "downloader.http.retries=1",    # fail fast, let caller retry
+    ]
     if no_mtime:
         argv.append("--no-mtime")
     if write_metadata:

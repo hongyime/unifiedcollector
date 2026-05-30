@@ -4,7 +4,7 @@ import time
 
 logger = logging.getLogger(__name__)
 
-DRIVE_PATH = os.environ.get("COLLECTOR_DRIVE_PATH", "Z:/media")
+DRIVE_PATH = os.environ.get("COLLECTOR_DRIVE_PATH", "Z:/unifiedcollector/media")
 
 
 def check_drive(path: str = DRIVE_PATH) -> bool:

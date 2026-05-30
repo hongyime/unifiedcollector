@@ -55,3 +55,13 @@ client_secret.json
 .env.bak.*
 scripts/_beeper_msgs.json
 scripts/beeper_openapi.json
+
+# Downloaded media (lives on docker named volume; host copy is throwaway)
+media/
+
+# Scratch / one-off fix scripts and runbooks (session artifacts)
+fix_*.py
+fix_*.cmd
+*_RUNBOOK.md
+URGENT_*.md
+migrations/_tmp*.sql

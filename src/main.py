@@ -11,6 +11,10 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
+# Suppress noisy httpx request logs — they fill the Docker log pipe buffer
+# and cause Python stdout writes to block, freezing the asyncio event loop.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger("unifiedcollector")
 
 

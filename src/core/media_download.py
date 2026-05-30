@@ -328,7 +328,7 @@ async def download(
     url : str
         The source URL or identifier (delegated backend may use a non-URL).
     dest_dir : path-like
-        Final destination directory (typically under Z:/media/<source>/).
+        Final destination directory (typically under Z:/unifiedcollector/media/<source>/).
         Subprocess tiers download into a private tempdir and the caller
         ingests ``result.files`` into their own tree.
         httpx + delegated tiers write the final file directly under

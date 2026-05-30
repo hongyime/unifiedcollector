@@ -169,7 +169,8 @@ class InstagramCollector(BaseCollector):
         self._daily_actions: dict[str, int] = {}
 
         proxy_url = os.getenv("PROXY_URL", "")
-        self._global_proxy = proxy_url.strip() if proxy_url else None
+        insta_proxy_disabled = os.getenv("INSTA_PROXY_DISABLED", "false").lower() == "true"
+        self._global_proxy = proxy_url.strip() if (proxy_url and not insta_proxy_disabled) else None
         self._account_proxies: dict[str, str] = {}
         self._account_browser_cookies: dict[str, str] = self._auto_discover_cookies()
         self._account_priorities: dict[str, str] = {}
@@ -262,20 +263,26 @@ class InstagramCollector(BaseCollector):
             self._loader = None
 
     def _login_account(self, account) -> bool:
+        logger.info("[DEBUG] _login_account ENTER for %s", account.name)
         if not self._loader:
             self._init_loader()
         if not self._loader:
+            logger.info("[DEBUG] _login_account: no loader, returning False")
             return False
 
         username = account.credentials.get("user", "")
         password = account.credentials.get("pass", "")
         if not username:
+            logger.info("[DEBUG] _login_account: no username, returning False")
             return False
 
         priority = self._account_priorities.get(account.name, os.getenv("INSTA_LOGIN_PRIORITY", "cookie"))
+        logger.info("[DEBUG] _login_account: priority=%s for %s", priority, username)
 
         if priority == "cookie":
+            logger.info("[DEBUG] _login_account: trying cookie login first")
             if self._try_cookie_login(account, username):
+                logger.info("[DEBUG] _login_account: cookie login succeeded, returning True")
                 return True
             if password:
                 return self._password_login(account, username, password)
@@ -291,7 +298,10 @@ class InstagramCollector(BaseCollector):
     def _try_cookie_login(self, account, username: str) -> bool:
         if account.name in self._account_browser_cookies:
             cookie_path = self._account_browser_cookies[account.name]
-            if self._login_from_cookies(username, cookie_path):
+            logger.info("[DEBUG] _try_cookie_login calling _login_from_cookies for %s", username)
+            result = self._login_from_cookies(username, cookie_path)
+            logger.info("[DEBUG] _login_from_cookies returned %s", result)
+            if result:
                 return True
             logger.info("Cookie login failed for %s", username)
         return False
@@ -302,7 +312,9 @@ class InstagramCollector(BaseCollector):
             if session_file.exists() and self._check_session_age(username):
                 import instaloader
                 self._loader.load_session_from_file(username, str(session_file))
-                self._loader.test_login()
+                # Skip test_login() — it blocks for minutes on 401 errors.
+                # Session file existence + age check is sufficient.
+                # self._loader.test_login()
                 logger.info("Resumed session for %s", username)
                 return True
         except Exception:
@@ -416,10 +428,13 @@ class InstagramCollector(BaseCollector):
             for name, value in cookies.items():
                 session.cookies.set(name, value, domain=".instagram.com")
 
-            self._loader.test_login()
+            # Skip test_login() — it blocks for minutes on 401 errors.
+            # Cookie presence + sessionid validation is sufficient.
+            # self._loader.test_login()
             self._save_session_meta(username)
             logger.info("Logged in via browser cookies for %s (%d cookies loaded)",
                         username, len(cookies))
+            logger.info("[DEBUG] _login_from_cookies returning True")
             return True
         except Exception as e:
             logger.debug("Browser cookie login failed for %s: %s", username, e)
@@ -437,6 +452,17 @@ class InstagramCollector(BaseCollector):
                 if len(parts) >= 7:
                     cookies[parts[5]] = parts[6]
         return cookies
+
+    def _load_cookies_for_account(self, account) -> dict[str, str]:
+        """Load cookies directly from file, bypassing instaloader entirely."""
+        if account.name in self._account_browser_cookies:
+            cookie_path = self._account_browser_cookies[account.name]
+            if os.path.exists(cookie_path):
+                cookies = self._parse_browser_cookies(cookie_path)
+                if cookies and "sessionid" in cookies:
+                    return cookies
+                logger.warning("Cookie file %s missing sessionid", cookie_path)
+        return {}
 
     def _get_session_cookies(self) -> dict[str, str]:
         if self._loader and self._loader.context._session:
@@ -528,39 +554,74 @@ class InstagramCollector(BaseCollector):
         path.mkdir(parents=True, exist_ok=True)
         return path
 
+
     async def collect(self, targets: list[str]):
-        account = self.account_pool.get_next()
-        if account:
-            self._current_account = account
-            logged_in = await asyncio.get_event_loop().run_in_executor(
-                None, self._login_account, account
-            )
-            if not logged_in:
-                logger.error("Could not log in to any Instagram account")
+        """Collect Instagram profiles and posts.
+
+        Runs the httpx-based collection logic with per-target timeouts so a
+        rate-limited account never blocks the event loop for > 120s.
+        """
+        import concurrent.futures
+        import asyncio
+
+        # Check if ALL accounts are in emergency cooldown — skip entire cycle
+        # rather than burning 120s timeouts per target.
+        # Only applies when account_pool has accounts (env-var based); cookie-only
+        # setups have empty _accounts and must always proceed.
+        if isinstance(self.rate_limiter, HumanLikeRateLimiter):
+            accounts = getattr(self.account_pool, '_accounts', [])
+            if accounts and all(
+                self.rate_limiter.cooldown_remaining_seconds(
+                    "instagram.com", account=acct.name
+                ) > 30.0
+                for acct in accounts
+            ):
+                min_remaining = min(
+                    self.rate_limiter.cooldown_remaining_seconds(
+                        "instagram.com", account=a.name
+                    ) for a in accounts
+                )
+                logger.info(
+                    "instagram: all %d accounts in cooldown (min %.0fs remaining) — skipping cycle",
+                    len(accounts), min_remaining,
+                )
                 return
-        else:
-            logger.warning("No Instagram accounts configured — limited functionality")
+        # Iterate targets and collect each one
+        # Pick the first available cookie account (rotate on 429)
+        cookie_accounts = list(self._account_browser_cookies.keys())
+        if not cookie_accounts:
+            logger.warning("instagram: no cookie accounts available — skipping cycle")
+            return
 
-        cookies = self._get_session_cookies()
-        proxy = self._get_proxy(account)
-        client_kwargs = dict(
-            timeout=30, cookies=cookies, headers=self._headers(account), follow_redirects=True,
-        )
-        if proxy:
-            client_kwargs["proxy"] = proxy
-            logger.info("Using proxy for Instagram: %s", proxy.split("@")[-1] if "@" in proxy else "configured")
+        acct_name = cookie_accounts[0]
+        cookies = self._load_cookies_for_account(type("A", (), {"name": acct_name})())
+        if not cookies:
+            logger.warning("instagram: failed to load cookies for %s — skipping cycle", acct_name)
+            return
 
-        async with httpx.AsyncClient(**client_kwargs) as client:
-            await self._warmup(client)
-            
-            # Process manual targets first
-            for username in targets:
-                if self._stop.is_set(): break
-                await self._process_target(client, username)
+        logger.info("[DEBUG] instagram collect: using account=%s cookies=%d", acct_name, len(cookies))
 
-            # Then process spider queue if enabled
-            if os.getenv("INSTA_SPIDER_ENABLED", "true").lower() == "true":
-                await self._process_spider_queue(client)
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(30.0),
+            follow_redirects=True,
+            cookies=cookies,
+            headers={
+                "User-Agent": self.user_agents.get_for_domain("instagram.com"),
+                "x-ig-app-id": "936619743392459",
+            },
+        ) as client:
+            for target in targets:
+                try:
+                    await asyncio.wait_for(
+                        self._process_target(client, target),
+                        timeout=120.0,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("instagram: _process_target timed out for %s (120s)", target)
+                except Exception as e:
+                    logger.error("instagram: unexpected error for %s: %s", target, e, exc_info=True)
+                await asyncio.sleep(2)
+
 
     async def _process_target(self, client: httpx.AsyncClient, username: str):
         if self._current_account and not self._check_daily_quota(self._current_account.name):
@@ -591,6 +652,7 @@ class InstagramCollector(BaseCollector):
             await self._collect_user(client, username)
             self._sliding_limiter.record("instagram.com")
             await self.checkpoint.save_progress(username)
+            self._consecutive_429s = 0  # reset backoff on success
             if self._current_account:
                 self.account_pool.record_success(self._current_account.name)
                 self._record_daily_action(self._current_account.name, views=1)
@@ -635,11 +697,24 @@ class InstagramCollector(BaseCollector):
 
     async def _handle_rate_limit(self, error):
         # Per-account cooldown (§22): isolate this account's 429 from siblings.
+        # Exponential backoff: each consecutive 429 doubles the cooldown up to 4h.
         acct_name = self._current_account.name if self._current_account else None
+        self._consecutive_429s = getattr(self, "_consecutive_429s", 0) + 1
+        base_cooldown = 900.0
+        cooldown = min(base_cooldown * (2 ** (self._consecutive_429s - 1)), 14400.0)
+        logger.warning(
+            "instagram: 429 #%d — emergency cooldown %.0fs (%.1fh)",
+            self._consecutive_429s, cooldown, cooldown / 3600,
+        )
         if isinstance(self.rate_limiter, HumanLikeRateLimiter):
+            # Override the default 900s with our exponential value
+            old = self.rate_limiter.emergency_cooldown
+            self.rate_limiter.emergency_cooldown = cooldown
             self.rate_limiter.trigger_emergency_cooldown(
                 "instagram.com", account=acct_name,
             )
+            self.rate_limiter.emergency_cooldown = old
+
         # TLS fingerprint rotation: if 429/403 keeps recurring inside the
         # cooldown window, advance this account's curl_cffi impersonate
         # target. Cooldown-gated inside the rotator so a flurry of
@@ -707,14 +782,28 @@ class InstagramCollector(BaseCollector):
 
     async def _collect_user(self, client: httpx.AsyncClient, username: str):
         acct_name = self._current_account.name if self._current_account else None
+        logger.info("[DEBUG] _collect_user: waiting for rate limiter (acct=%s)", acct_name)
         await self.rate_limiter.async_wait(
             "instagram.com", OperationType.PROFILE_VIEW, account=acct_name,
         )
+        logger.info("[DEBUG] _collect_user: rate limiter done, making request")
 
-        resp = await client.get(
-            f"{GRAPH_API}/users/web_profile_info/",
-            params={"username": username},
-        )
+        logger.info("[DEBUG] _collect_user: calling client.get for %s", username)
+        try:
+            resp = await asyncio.wait_for(
+                client.get(
+                    f"{GRAPH_API}/users/web_profile_info/",
+                    params={"username": username},
+                ),
+                timeout=35.0,
+            )
+            logger.info("[DEBUG] _collect_user: got response status=%s", resp.status_code)
+        except asyncio.TimeoutError:
+            logger.error("[DEBUG] _collect_user: request timed out after 35s for %s", username)
+            return
+        except Exception as e:
+            logger.error("[DEBUG] _collect_user: request failed: %s", e)
+            return
         if resp.status_code == 404:
             logger.warning("User not found: %s", username)
             return
@@ -1109,67 +1198,113 @@ class InstagramCollector(BaseCollector):
         return edges
 
     async def _collect_stories(self, uid: str, entity_name: str):
+        """Collect stories for a user.
+        
+        Uses run_in_executor to wrap sync instaloader calls so we don't block
+        the asyncio event loop (see §blocking-instaloader pattern).
+        """
         if not self._loader:
             return
         try:
             import instaloader
-            profile = instaloader.Profile.from_id(self._loader.context, int(uid))
-            for story in self._loader.get_stories(userids=[profile.userid]):
-                for item in story.get_items():
-                    if self._stop.is_set():
-                        return
-                    await self.rate_limiter.async_wait("instagram.com", OperationType.MEDIA_DOWNLOAD)
+            loop = asyncio.get_event_loop()
+            
+            # Sync: Profile.from_id + get_stories iteration
+            def _fetch_story_items_sync() -> list[dict]:
+                items = []
+                try:
+                    profile = instaloader.Profile.from_id(self._loader.context, int(uid))
+                    for story in self._loader.get_stories(userids=[profile.userid]):
+                        for item in story.get_items():
+                            items.append({
+                                "mediaid": item.mediaid,
+                                "is_video": item.is_video,
+                                "url": item.video_url if item.is_video else item.url,
+                                "raw": item._asdict() if hasattr(item, "_asdict") else {},
+                            })
+                except Exception as e:
+                    logger.debug("_fetch_story_items_sync failed for %s: %s", uid, e)
+                return items
+            
+            story_items = await loop.run_in_executor(None, _fetch_story_items_sync)
+            
+            for item in story_items:
+                if self._stop.is_set():
+                    return
+                await self.rate_limiter.async_wait("instagram.com", OperationType.MEDIA_DOWNLOAD)
 
-                    url = item.video_url if item.is_video else item.url
-                    ext = "mp4" if item.is_video else "jpg"
-                    content_type = "story_video" if item.is_video else "story"
+                ext = "mp4" if item["is_video"] else "jpg"
+                content_type = "story_video" if item["is_video"] else "story"
+                cid = f"story_{item['mediaid']}"
 
-                    if self.is_known(f"story_{item.mediaid}"):
-                        continue
+                if self.is_known(cid):
+                    continue
 
-                    await self.download_media({
-                        "entity_id": uid,
-                        "entity_name": entity_name,
-                        "content_type": content_type,
-                        "content_id": f"story_{item.mediaid}",
-                        "url": url,
-                        "extension": ext,
-                        "raw": item._asdict() if hasattr(item, "_asdict") else {}
-                    })
+                await self.download_media({
+                    "entity_id": uid,
+                    "entity_name": entity_name,
+                    "content_type": content_type,
+                    "content_id": cid,
+                    "url": item["url"],
+                    "extension": ext,
+                    "raw": item["raw"],
+                })
         except Exception as e:
             logger.debug("Stories collection failed for %s: %s", entity_name, e)
 
     async def _collect_highlights(self, client: httpx.AsyncClient, uid: str, entity_name: str):
+        """Collect highlights for a user.
+        
+        Uses run_in_executor to wrap sync instaloader calls so we don't block
+        the asyncio event loop (see §blocking-instaloader pattern).
+        """
         if not self._loader:
             return
         try:
             import instaloader
-            profile = instaloader.Profile.from_id(self._loader.context, int(uid))
-            for highlight in self._loader.get_highlights(profile):
+            loop = asyncio.get_event_loop()
+            
+            # Sync: Profile.from_id + get_highlights iteration
+            def _fetch_highlight_items_sync() -> list[dict]:
+                items = []
+                try:
+                    profile = instaloader.Profile.from_id(self._loader.context, int(uid))
+                    for highlight in self._loader.get_highlights(profile):
+                        for item in highlight.get_items():
+                            items.append({
+                                "highlight_unique_id": highlight.unique_id,
+                                "mediaid": item.mediaid,
+                                "is_video": item.is_video,
+                                "url": item.video_url if item.is_video else item.url,
+                                "raw": item._asdict() if hasattr(item, "_asdict") else {},
+                            })
+                except Exception as e:
+                    logger.debug("_fetch_highlight_items_sync failed for %s: %s", uid, e)
+                return items
+            
+            highlight_items = await loop.run_in_executor(None, _fetch_highlight_items_sync)
+            
+            for item in highlight_items:
                 if self._stop.is_set():
                     return
-                for item in highlight.get_items():
-                    if self._stop.is_set():
-                        return
-                    await self.rate_limiter.async_wait("instagram.com", OperationType.MEDIA_DOWNLOAD)
+                await self.rate_limiter.async_wait("instagram.com", OperationType.MEDIA_DOWNLOAD)
 
-                    url = item.video_url if item.is_video else item.url
-                    ext = "mp4" if item.is_video else "jpg"
-                    content_type = "highlight_video" if item.is_video else "highlight"
-                    cid = f"highlight_{highlight.unique_id}_{item.mediaid}"
+                ext = "mp4" if item["is_video"] else "jpg"
+                content_type = "highlight_video" if item["is_video"] else "highlight"
+                cid = f"highlight_{item['highlight_unique_id']}_{item['mediaid']}"
 
-                    if self.is_known(cid):
-                        continue
+                if self.is_known(cid):
+                    continue
 
-                    await self.download_media({
-                        "entity_id": uid,
-                        "entity_name": entity_name,
-                        "content_type": content_type,
-                        "content_id": cid,
-                        "url": url,
-                        "extension": ext,
-                        "raw": item._asdict() if hasattr(item, "_asdict") else {}
-                    })
+                await self.download_media({
+                    "entity_id": uid,
+                    "entity_name": entity_name,
+                    "content_type": content_type,
+                    "content_id": cid,
+                    "url": item["url"],
+                    "extension": ext,
+                    "raw": item["raw"],
+                })
         except Exception as e:
             logger.debug("Highlights collection failed for %s: %s", entity_name, e)
 

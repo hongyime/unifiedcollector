@@ -48,7 +48,8 @@ async def get_pool() -> asyncpg.Pool:
     async with _pool_lock:
         if _pool is None:
             ssl = _ssl_context()
-            kwargs = dict(min_size=2, max_size=10, command_timeout=30)
+            kwargs = dict(min_size=2, max_size=20, command_timeout=60,
+                          max_inactive_connection_lifetime=300)
             if ssl is not None:
                 kwargs["ssl"] = ssl
             _pool = await asyncpg.create_pool(_dsn(), **kwargs)

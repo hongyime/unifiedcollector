@@ -304,7 +304,10 @@ class TiktokCollector(BaseCollector):
         self._timeout = int(os.getenv("TIKTOK_TIMEOUT_SECONDS", "300"))
         self._browser_fallback = os.getenv("TIKTOK_BROWSER_FALLBACK_ENABLED", "true").lower() == "true"
         self._ytdlp_fallback = os.getenv("TIKTOK_YTDLP_FALLBACK_ENABLED", "true").lower() == "true"
-        self._use_gallery_dl = self._check_tool("gallery-dl")
+        self._use_gallery_dl = (
+            self._check_tool("gallery-dl")
+            and os.getenv("TIKTOK_GALLERY_DL_ENABLED", "true").lower() == "true"
+        )
         self._use_yt_dlp = self._check_tool("yt-dlp")
         logger.info(
             "tiktok tool availability: gallery-dl=%s yt-dlp=%s browser_fallback=%s ytdlp_fallback=%s",
@@ -417,10 +420,34 @@ class TiktokCollector(BaseCollector):
         # For V2, we try to get metadata first (placeholder for now)
         await self._scrape_profile_metadata(username)
 
+        # Hard outer timeout: if gallery-dl/yt-dlp hang (event-loop starvation),
+        # cancel the entire _collect_user coroutine after timeout+30s grace.
+        outer_timeout = self._timeout + 30
+
         if self._use_gallery_dl:
-            if await self._collect_via_gallery_dl(username, profile_url): return
+            try:
+                ok = await asyncio.wait_for(
+                    self._collect_via_gallery_dl(username, profile_url),
+                    timeout=outer_timeout,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("tiktok: _collect_via_gallery_dl hard-timeout for %s (%.0fs)", username, outer_timeout)
+                ok = False
+            if ok:
+                return
+
         if self._use_yt_dlp and self._ytdlp_fallback:
-            if await self._collect_via_yt_dlp(username, profile_url): return
+            try:
+                ok = await asyncio.wait_for(
+                    self._collect_via_yt_dlp(username, profile_url),
+                    timeout=outer_timeout,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("tiktok: _collect_via_yt_dlp hard-timeout for %s (%.0fs)", username, outer_timeout)
+                ok = False
+            if ok:
+                return
+
         if self._browser_fallback:
             if await self._collect_via_playwright(username): return
         await self._collect_via_api(username)

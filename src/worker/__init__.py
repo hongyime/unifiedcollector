@@ -41,10 +41,15 @@ class WorkerService:
         self.pool = await get_pool()
         await self._init_db()
 
+        # Warmup WSL2 network stack before launching collectors.
+        # Without this, the first httpx request from any collector hits a kernel
+        # D-state (uninterruptible sleep) that freezes the entire asyncio event loop.
+        await self._warmup_network()
+
         self._install_signal_handlers()
 
-        for source in sources:
-            self._launch(source)
+        for i, source in enumerate(sources):
+            self._launch(source, startup_delay=i * 3.0)
 
         watchdog = asyncio.create_task(self._watchdog_loop())
         reporter = asyncio.create_task(self._health_reporter())
@@ -68,6 +73,28 @@ class WorkerService:
             for sql_file in sorted(schema_dir.glob("*.sql")):
                 await conn.execute(sql_file.read_text())
 
+    async def _warmup_network(self):
+        """Prime WSL2 network via a thread — kernel-level hang cannot freeze the event loop."""
+        import urllib.request, concurrent.futures
+        def _probe():
+            try:
+                r = urllib.request.urlopen(
+                    "http://connectivitycheck.gstatic.com/generate_204", timeout=20
+                )
+                return f"ok:{r.status}"
+            except Exception as exc:
+                return f"warn:{exc}"
+        logger.info("worker: warming up network stack...")
+        loop = asyncio.get_event_loop()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            try:
+                result = await asyncio.wait_for(loop.run_in_executor(pool, _probe), timeout=22.0)
+                logger.info("worker: network warmup %s", result)
+            except asyncio.TimeoutError:
+                logger.warning("worker: network warmup timed out (non-fatal)")
+            except Exception as exc:
+                logger.warning("worker: network warmup failed (non-fatal): %s", exc)
+
     def _install_signal_handlers(self):
         loop = asyncio.get_event_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
@@ -80,15 +107,18 @@ class WorkerService:
         logger.info("Shutdown signal received")
         self._stop.set()
 
-    def _launch(self, source: str):
+    def _launch(self, source: str, startup_delay: float = 0.0):
         if source in self._tasks and not self._tasks[source].done():
             return
         self._crash_counts.setdefault(source, 0)
-        task = asyncio.create_task(self._run_source(source), name=f"worker-{source}")
+        task = asyncio.create_task(self._run_source(source, startup_delay=startup_delay), name=f"worker-{source}")
         self._tasks[source] = task
         logger.info("Launched worker for %s", source)
 
-    async def _run_source(self, source: str):
+    async def _run_source(self, source: str, startup_delay: float = 0.0):
+        if startup_delay > 0:
+            logger.info("worker/%s: staggered startup, waiting %.0fs", source, startup_delay)
+            await asyncio.sleep(startup_delay)
         collector = get_collector(source)
         collector.set_pool(self.pool)
 
@@ -117,7 +147,8 @@ class WorkerService:
             except Exception as e:
                 self._crash_counts[source] += 1
                 count = self._crash_counts[source]
-                logger.error("%s crashed (%d/%d): %s", source, count, self.max_restarts, e)
+                logger.error("%s crashed (%d/%d): %r", source, count, self.max_restarts, e,
+                             exc_info=True)
                 if count >= self.max_restarts:
                     logger.error("%s exceeded max restarts, giving up", source)
                     break
