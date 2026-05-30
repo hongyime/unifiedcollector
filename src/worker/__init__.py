@@ -24,6 +24,7 @@ class WorkerService:
         self._started_at: float = 0
         self.watchdog_interval = 30
         self.max_restarts = 5
+        self._dlq = None
 
     async def start(self, sources: list[str]):
         logger.info("Worker service starting with sources: %s", sources)
@@ -54,13 +55,34 @@ class WorkerService:
         watchdog = asyncio.create_task(self._watchdog_loop())
         reporter = asyncio.create_task(self._health_reporter())
 
+        # P3-4: start the DLQ consumer (previously dead code — dlq_consumer.py
+        # existed but was never instantiated, so dead_letter_queue grew forever
+        # with no retries). A generic handler re-enqueues the failed entity as a
+        # pending collection_target so the normal worker loop re-attempts it.
+        dlq_task = None
+        try:
+            from src.core.dlq_consumer import DLQConsumer
+            self._dlq = DLQConsumer(self.pool, max_retries=10, scan_interval_seconds=120.0)
+            for source in sources:
+                self._dlq.register(source, self._make_dlq_handler(source))
+            dlq_task = asyncio.create_task(self._dlq.run_forever())
+            logger.info("DLQ consumer started for sources: %s", sources)
+        except Exception:
+            logger.warning("DLQ consumer failed to start", exc_info=True)
+
         await self._stop.wait()
 
         watchdog.cancel()
         reporter.cancel()
+        if self._dlq is not None:
+            self._dlq.stop()
+        if dlq_task is not None:
+            dlq_task.cancel()
         for t in self._tasks.values():
             t.cancel()
         all_tasks = [watchdog, reporter, *self._tasks.values()]
+        if dlq_task is not None:
+            all_tasks.append(dlq_task)
         await asyncio.gather(*all_tasks, return_exceptions=True)
 
         await self._report_health("stopped")
@@ -101,6 +123,29 @@ class WorkerService:
                 loop.add_signal_handler(sig, self._handle_signal)
             except NotImplementedError:
                 signal.signal(sig, lambda *_: self._handle_signal())
+
+    def _make_dlq_handler(self, source: str):
+        """P3-4: build a generic DLQ retry handler for a source.
+
+        The handler re-enqueues the failed entity as a pending collection_target
+        so the normal worker loop re-attempts it on its next pass. Raising
+        propagates to the consumer's retry/backoff logic.
+        """
+        async def _handler(row: dict) -> None:
+            entity = row.get("entity_id") or row.get("content_id")
+            if not entity:
+                from src.core.dlq_consumer import PermanentError
+                raise PermanentError("DLQ row has no entity_id/content_id")
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO collection_targets (source, target_id, status, priority) "
+                    "VALUES ($1, $2, 'pending', 1) "
+                    "ON CONFLICT (source, target_id) DO UPDATE "
+                    "SET status='pending' "
+                    "WHERE collection_targets.status IN ('error', 'completed', 'active')",
+                    source, str(entity),
+                )
+        return _handler
 
     def _handle_signal(self):
         logger.info("Shutdown signal received")
