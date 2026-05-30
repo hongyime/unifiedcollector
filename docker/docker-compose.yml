@@ -67,6 +67,47 @@ services:
       start_period: 30s
     restart: unless-stopped
 
+  # P3-1: youtube runs in its OWN process/container, isolated from the main
+  # collector's shared event loop. yt-dlp invokes a blocking subprocess that can
+  # wedge on lost SIGCHLD in WSL2/Docker (py-spy confirmed); in the shared worker
+  # that froze all 11 collectors. Here a wedge only affects youtube, and
+  # restart:unless-stopped + the subprocess_downloader hard-timeout recover it.
+  # Re-enabled by NOT disabling it here (the main collector still disables it via
+  # COLLECTOR_DISABLED_SOURCES=youtube).
+  collector_youtube:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: unifiedcollector-collector:latest
+    container_name: unifiedcollector_collector_youtube
+    command: python -m src.main worker --source youtube
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      COLLECTOR_DRIVE_PATH: /media
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    cap_add:
+      - SYS_PTRACE
+    volumes:
+      - media_data:/media
+      - ../credentials:/app/credentials
+      - sessions_data:/app/sessions
+      - ../whatsapp_session:/app/whatsapp_session
+    depends_on:
+      postgres:
+        condition: service_healthy
+      tor:
+        condition: service_started
+    env_file:
+      - ../.env
+    healthcheck:
+      test: ["CMD", "python", "-m", "src.core.health"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
   tor:
     # Tor SOCKS5 proxy sidecar for the search collector (DDG via Tor).
     # Container exposes 9050/tcp on the internal docker network as `tor:9050`.
