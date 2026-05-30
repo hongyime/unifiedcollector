@@ -93,6 +93,116 @@ async def health():
     }
 
 
+@app.get("/metrics")
+async def metrics():
+    """Prometheus text-format metrics (P2-2).
+
+    Dependency-free: renders the exposition format by hand from DB queries, so
+    no prometheus_client install / extra port is needed — reuses the dashboard
+    web server. Scrape with a standard Prometheus job pointed at :8700/metrics.
+    """
+    pool = await get_pool()
+    lines: list[str] = []
+
+    def emit(name: str, value, help_text: str, mtype: str = "gauge", labels: str = ""):
+        if help_text:
+            lines.append(f"# HELP {name} {help_text}")
+            lines.append(f"# TYPE {name} {mtype}")
+        suffix = "{" + labels + "}" if labels else ""
+        lines.append(f"{name}{suffix} {value}")
+
+    try:
+        async with pool.acquire() as conn:
+            # Per-source media item counts.
+            rows = await conn.fetch(
+                "SELECT source, COUNT(*) AS n FROM media_items GROUP BY source"
+            )
+            first = True
+            for r in rows:
+                emit("uc_media_items_total", r["n"],
+                     "Total media items collected per source" if first else "",
+                     "counter", labels=f'source="{r["source"]}"')
+                first = False
+
+            # Items collected in the last hour (throughput proxy).
+            rows = await conn.fetch(
+                "SELECT source, COUNT(*) AS n FROM media_items "
+                "WHERE collected_at > NOW() - INTERVAL '1 hour' GROUP BY source"
+            )
+            first = True
+            for r in rows:
+                emit("uc_media_items_last_hour", r["n"],
+                     "Media items collected in the last hour per source" if first else "",
+                     "gauge", labels=f'source="{r["source"]}"')
+                first = False
+
+            # Seconds since last successful collection per source (staleness).
+            rows = await conn.fetch(
+                "SELECT source, EXTRACT(EPOCH FROM (NOW() - MAX(collected_at)))::int AS age "
+                "FROM media_items GROUP BY source"
+            )
+            first = True
+            for r in rows:
+                emit("uc_source_last_success_age_seconds", r["age"] or 0,
+                     "Seconds since last collected item per source" if first else "",
+                     "gauge", labels=f'source="{r["source"]}"')
+                first = False
+
+            # Spider queue depth per source (pending discovery backlog).
+            try:
+                rows = await conn.fetch(
+                    "SELECT source, COUNT(*) AS n FROM spider_queue "
+                    "WHERE status = 'pending' GROUP BY source"
+                )
+                first = True
+                for r in rows:
+                    emit("uc_spider_queue_pending", r["n"],
+                         "Pending spider-queue entries per source" if first else "",
+                         "gauge", labels=f'source="{r["source"]}"')
+                    first = False
+            except Exception:
+                pass  # spider_queue may be source-specific; non-fatal
+
+            # Telegram spider queue (separate table).
+            try:
+                n = await conn.fetchval(
+                    "SELECT COUNT(*) FROM telegram_spider_queue WHERE status = 'pending'"
+                )
+                emit("uc_spider_queue_pending", n or 0, "", "gauge",
+                     labels='source="telegram"')
+            except Exception:
+                pass
+
+            # DLQ depth (unretried failures).
+            dlq = await conn.fetchval("SELECT COUNT(*) FROM dead_letter_queue")
+            emit("uc_dlq_total", dlq or 0, "Dead-letter-queue entries", "gauge")
+
+            # Recent collection_runs by status (last 24h).
+            rows = await conn.fetch(
+                "SELECT status, COUNT(*) AS n FROM collection_runs "
+                "WHERE started_at > NOW() - INTERVAL '24 hours' GROUP BY status"
+            )
+            first = True
+            for r in rows:
+                emit("uc_collection_runs_24h", r["n"],
+                     "Collection runs in the last 24h by status" if first else "",
+                     "gauge", labels=f'status="{r["status"]}"')
+                first = False
+
+            # Worker liveness: seconds since last health report.
+            age = await conn.fetchval(
+                "SELECT EXTRACT(EPOCH FROM (NOW() - last_processed_at))::int "
+                "FROM service_cursors WHERE service = '_worker'"
+            )
+            emit("uc_worker_health_age_seconds", age if age is not None else -1,
+                 "Seconds since the worker last reported health (-1 = never)", "gauge")
+    except Exception as e:  # pragma: no cover - defensive
+        emit("uc_metrics_scrape_error", 1, f"Metrics scrape failed: {e}")
+
+    from fastapi.responses import PlainTextResponse
+    return PlainTextResponse("\n".join(lines) + "\n")
+
+
 @app.get("/collectors")
 async def list_collectors(_user: dict = Depends(require_role("viewer"))):
     pool = await get_pool()
