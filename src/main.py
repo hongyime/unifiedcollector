@@ -1,20 +1,27 @@
 import argparse
 import asyncio
 import logging
+import os
 import sys
 from pathlib import Path
 
 from src.core.drive_check import check_drive
 from src.db.connection import get_pool, close_pool
-from src.core.logging_config import configure_logging
 
-# P2-3: non-blocking queue-based logging. Previously a plain StreamHandler wrote
-# to stdout from inside the event loop; when the Docker log pipe buffer filled,
-# the synchronous write blocked and froze the whole collector. configure_logging
-# installs a QueueHandler (event loop only does a non-blocking put) + a
-# background QueueListener thread that does the actual I/O. Set LOG_JSON=true for
-# structured logs.
-configure_logging()
+# NOTE: P2-3 attempted a QueueHandler/QueueListener pipeline here but it
+# deadlocked the collector (main thread stuck in futex_wait on the logging
+# lock; 0% CPU freeze ~2 min after start). Reverted to the known-good simple
+# config. The real original freeze mitigation is silencing chatty httpx/telethon
+# INFO logging (below), which is preserved.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    stream=sys.stdout,
+)
+# Keep verbose third-party loggers from flooding the event-loop log path.
+for _noisy in ("httpx", "httpcore", "telethon", "asyncio"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+
 logger = logging.getLogger("unifiedcollector")
 
 
