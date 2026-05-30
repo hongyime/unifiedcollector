@@ -65,3 +65,4 @@ fix_*.cmd
 *_RUNBOOK.md
 URGENT_*.md
 migrations/_tmp*.sql
+backups/
