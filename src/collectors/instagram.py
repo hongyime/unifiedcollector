@@ -36,6 +36,7 @@ import httpx
 
 from src.core.base_collector import BaseCollector
 from src.core.account_pool import AccountPool
+from src.core.file_naming import sanitize_name  # F821 fix: used in account_media_dir
 from src.core.human_rate_limiter import HumanLikeRateLimiter, OperationType
 from src.core.sliding_window_limiter import SlidingWindowRateLimiter, WindowConfig
 from src.core.profile_photo_tracker import ProfilePhotoTracker

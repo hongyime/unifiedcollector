@@ -1,0 +1,29 @@
+[tool.pytest.ini_options]
+# pytest-asyncio: auto mode so `async def test_*` run without per-test decorators.
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-q"
+# Quiet the known third-party deprecation noise so real failures stand out.
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+
+[tool.ruff]
+# Match the codebase's actual line lengths; don't trigger a reformatting storm.
+line-length = 120
+target-version = "py312"
+extend-exclude = [
+    "archive",
+    "telegramcollector",
+    "whatsappcollector",
+    "tmp",
+    "src/db/migrations",
+]
+
+[tool.ruff.lint]
+# Start conservative: real-bug rules only (pyflakes F + a subset of pycodestyle E).
+# Style-only churn (line length E501, import sorting) is intentionally NOT enforced
+# yet so CI flags genuine defects (undefined names, unused imports) without a
+# 28k-LOC reformatting diff. Tighten later once the backlog is clean.
+select = ["F", "E9"]
+ignore = []
