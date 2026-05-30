@@ -479,26 +479,12 @@ class TelegramCollector(BaseCollector):
             dialogs = await self.collect_dialogs()
 
             # Each dialog was upserted into telegram_chats by collect_dialogs().
-            # Now enqueue every chat into spider_queue for full backfill.
-            for d in dialogs:
-                platform_chat_id = d.get("platform_chat_id")
-                if not platform_chat_id:
-                    continue
-                async with self.pool.acquire() as conn:
-                    await conn.execute(
-                        """
-                        INSERT INTO telegram_spider_queue
-                            (platform_chat_id, title, source, priority, status, collected_at)
-                        VALUES ($1, $2, 'auto_backfill', 8, 'pending', NOW())
-                        ON CONFLICT (platform_chat_id) DO NOTHING
-                        """,
-                        platform_chat_id,
-                        d.get("title"),
-                    )
+            # P3-2: bounded enqueue with backpressure (was an unbounded loop).
+            enqueued = await self._spider_enqueue(dialogs, "auto_backfill", priority=8)
 
             logger.info(
-                "[worker=%d account=%s] Enqueued %d chat(s) for auto-backfill",
-                worker.worker_id, account_name, len(dialogs),
+                "[worker=%d account=%s] Enqueued %d/%d chat(s) for auto-backfill",
+                worker.worker_id, account_name, enqueued, len(dialogs),
             )
 
             # Record the account's own user profile.
@@ -593,21 +579,9 @@ class TelegramCollector(BaseCollector):
 
             # Trigger full dialog discovery + backfill for the new account.
             dialogs = await self.collect_dialogs()
-            for d in dialogs:
-                platform_chat_id = d.get("platform_chat_id")
-                if platform_chat_id:
-                    async with self.pool.acquire() as conn:
-                        await conn.execute(
-                            """
-                            INSERT INTO telegram_spider_queue
-                                (platform_chat_id, title, source, priority, status, collected_at)
-                            VALUES ($1, $2, 'hot_reload', 9, 'pending', NOW())
-                            ON CONFLICT (platform_chat_id) DO NOTHING
-                            """,
-                            platform_chat_id,
-                            d.get("title"),
-                        )
-            logger.info("[worker=%d] Enqueued %d chats for hot-reload backfill", worker.worker_id, len(dialogs))
+            # P3-2: bounded enqueue with backpressure (was an unbounded loop).
+            enqueued = await self._spider_enqueue(dialogs, "hot_reload", priority=9)
+            logger.info("[worker=%d] Enqueued %d/%d chats for hot-reload backfill", worker.worker_id, enqueued, len(dialogs))
 
         except Exception as exc:
             logger.error("Failed to hot-connect account %s: %s", account_name, exc)
@@ -730,6 +704,54 @@ class TelegramCollector(BaseCollector):
                 await self._process_join_queue()
             except Exception as e:
                 logger.error("Join queue failed: %s", e)
+
+    async def _spider_enqueue(self, rows, source_tag: str, priority: int = 8) -> int:
+        """P3-2: bounded enqueue into telegram_spider_queue with backpressure.
+
+        Unbounded auto_backfill enqueue (1500+ pending) vs a single-worker drain
+        cadence produced an ever-growing backlog that starved live collection.
+        This caps the pending depth at TELEGRAM_SPIDER_QUEUE_MAX (default 2000):
+        once the queue is at/over the cap we stop enqueueing new discovery work
+        so collection of already-queued + realtime chats can catch up. ON CONFLICT
+        DO NOTHING keeps it idempotent. Returns the number actually enqueued.
+        """
+        if self.pool is None:
+            return 0
+        cap = int(os.getenv("TELEGRAM_SPIDER_QUEUE_MAX", "2000"))
+        async with self.pool.acquire() as conn:
+            pending = await conn.fetchval(
+                "SELECT COUNT(*) FROM telegram_spider_queue WHERE status = 'pending'"
+            )
+        budget = cap - int(pending or 0)
+        if budget <= 0:
+            logger.warning(
+                "spider queue at cap (%d/%d pending) - skipping %s enqueue of %d "
+                "chats (backpressure)", pending, cap, source_tag, len(rows),
+            )
+            return 0
+        enqueued = 0
+        for d in rows:
+            if enqueued >= budget:
+                logger.warning(
+                    "spider queue cap reached mid-enqueue (%s); deferred %d chats",
+                    source_tag, len(rows) - enqueued,
+                )
+                break
+            pcid = d.get("platform_chat_id")
+            if not pcid:
+                continue
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO telegram_spider_queue
+                        (platform_chat_id, title, source, priority, status, collected_at)
+                    VALUES ($1, $2, $3, $4, 'pending', NOW())
+                    ON CONFLICT (platform_chat_id) DO NOTHING
+                    """,
+                    pcid, d.get("title"), source_tag, priority,
+                )
+            enqueued += 1
+        return enqueued
 
     async def _process_spider_queue(self, worker: "TelegramWorker"):
         """Process telegram_spider_queue jobs using the given worker's client."""
