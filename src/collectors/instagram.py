@@ -170,7 +170,8 @@ class InstagramCollector(BaseCollector):
         self._daily_actions: dict[str, int] = {}
 
         proxy_url = os.getenv("PROXY_URL", "")
-        insta_proxy_disabled = os.getenv("INSTA_PROXY_DISABLED", "false").lower() == "true"
+        from src.core.env import env_bool
+        insta_proxy_disabled = env_bool("INSTA_PROXY_DISABLED", default=False)
         self._global_proxy = proxy_url.strip() if (proxy_url and not insta_proxy_disabled) else None
         self._account_proxies: dict[str, str] = {}
         self._account_browser_cookies: dict[str, str] = self._auto_discover_cookies()

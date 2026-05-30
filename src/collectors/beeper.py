@@ -41,13 +41,10 @@ logger = logging.getLogger(__name__)
 # ── feature gate ──────────────────────────────────────────────────────────
 
 
-_ENABLED_TRUTHY = {"1", "true", "yes", "on"}
-
-
 def is_enabled() -> bool:
     """True iff BEEPER_COLLECTOR_ENABLED is truthy AND a token is set."""
-    flag = os.environ.get("BEEPER_COLLECTOR_ENABLED", "").strip().lower()
-    if flag not in _ENABLED_TRUTHY:
+    from src.core.env import env_bool
+    if not env_bool("BEEPER_COLLECTOR_ENABLED", default=False):
         return False
     return bool(os.environ.get("BEEPER_DESKTOP_API_TOKEN", "").strip())
 

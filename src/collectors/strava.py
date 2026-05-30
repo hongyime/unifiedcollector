@@ -102,7 +102,8 @@ class StravaCollector(BaseCollector):
             logger.info("Strava token refreshed")
 
     async def collect(self, targets: list[str]):
-        if os.getenv("STRAVA_COLLECTOR_ENABLED", "true").lower() != "true":
+        from src.core.env import env_bool
+        if not env_bool("STRAVA_COLLECTOR_ENABLED", default=True):
             logger.info("strava: disabled via STRAVA_COLLECTOR_ENABLED=false, skipping")
             return
         # Previously disabled due to httpx → Z:/C: NTFS kernel D-state.
