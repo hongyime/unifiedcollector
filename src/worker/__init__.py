@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 import signal
 import time
 from datetime import datetime, timezone
@@ -60,15 +61,18 @@ class WorkerService:
         # with no retries). A generic handler re-enqueues the failed entity as a
         # pending collection_target so the normal worker loop re-attempts it.
         dlq_task = None
-        try:
-            from src.core.dlq_consumer import DLQConsumer
-            self._dlq = DLQConsumer(self.pool, max_retries=10, scan_interval_seconds=120.0)
-            for source in sources:
-                self._dlq.register(source, self._make_dlq_handler(source))
-            dlq_task = asyncio.create_task(self._dlq.run_forever())
-            logger.info("DLQ consumer started for sources: %s", sources)
-        except Exception:
-            logger.warning("DLQ consumer failed to start", exc_info=True)
+        if os.getenv("DLQ_CONSUMER_ENABLED", "true").lower() == "true":
+            try:
+                from src.core.dlq_consumer import DLQConsumer
+                self._dlq = DLQConsumer(self.pool, max_retries=10, scan_interval_seconds=120.0)
+                for source in sources:
+                    self._dlq.register(source, self._make_dlq_handler(source))
+                dlq_task = asyncio.create_task(self._dlq.run_forever())
+                logger.info("DLQ consumer started for sources: %s", sources)
+            except Exception:
+                logger.warning("DLQ consumer failed to start", exc_info=True)
+        else:
+            logger.info("DLQ consumer disabled via DLQ_CONSUMER_ENABLED=false")
 
         await self._stop.wait()
 

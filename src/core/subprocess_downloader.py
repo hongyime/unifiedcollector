@@ -201,23 +201,47 @@ async def _run_subprocess(
 
     loop = asyncio.get_running_loop()
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="subproc")
+    # Hard wall-clock ceiling on the AWAIT itself. subprocess.run(timeout=...) relies
+    # on SIGCHLD delivery to wake its internal wait(); in WSL2/Docker SIGCHLD can be
+    # lost, so the child exits but the worker thread's wait() never returns and the
+    # future never resolves — freezing the whole event loop (observed: youtube/yt-dlp
+    # wedged the loop with the child already gone). This outer timeout guarantees the
+    # loop is released; the orphaned thread is abandoned via shutdown(wait=False).
+    outer_timeout = timeout + 60.0
     try:
         future = loop.run_in_executor(executor, _run_sync)
         # Race between the thread completing and stop_event
         if stop_event is not None:
             stop_task = asyncio.create_task(stop_event.wait())
-            done, _ = await asyncio.wait(
-                {asyncio.ensure_future(future), stop_task},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if stop_task in done:
+            try:
+                done, _ = await asyncio.wait(
+                    {asyncio.ensure_future(future), stop_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                    timeout=outer_timeout,
+                )
+            except Exception:
+                done = set()
+            if not done:
+                # Outer timeout tripped — subprocess wedged (likely lost SIGCHLD).
+                logger.error("subprocess_downloader: hard timeout (%.0fs) — abandoning "
+                             "wedged subprocess to unblock event loop", outer_timeout)
+                timed_out = True
+                future.cancel()
+                stop_task.cancel()
+            elif stop_task in done:
                 cancelled = True
                 future.cancel()
                 stop_task.cancel()
             else:
                 stop_task.cancel()
         else:
-            await future
+            try:
+                await asyncio.wait_for(asyncio.ensure_future(future), timeout=outer_timeout)
+            except asyncio.TimeoutError:
+                logger.error("subprocess_downloader: hard timeout (%.0fs) — abandoning "
+                             "wedged subprocess to unblock event loop", outer_timeout)
+                timed_out = True
+                future.cancel()
 
         rc = future.result() if not cancelled and future.done() else -1
         if rc == -9:

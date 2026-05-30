@@ -35,11 +35,18 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
+      # freeze fix: youtube's yt-dlp subprocess wedges on lost SIGCHLD in
+      # WSL2/Docker and freezes the SHARED event loop (py-spy confirmed MainThread
+      # stuck in _run_subprocess). Disabled until youtube runs out-of-process (P3-1).
+      # The subprocess_downloader hard-timeout is the defense-in-depth backstop.
+      COLLECTOR_DISABLED_SOURCES: "youtube"
       # Beeper Desktop Local API runs on the host at 127.0.0.1:23373.
       # The default URL inside .env (host.docker.internal:23373) resolves
       # via the extra_hosts entry below.
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    cap_add:
+      - SYS_PTRACE
     volumes:
       - media_data:/media
       - ../credentials:/app/credentials

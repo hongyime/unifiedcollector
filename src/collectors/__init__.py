@@ -35,4 +35,17 @@ def get_collector(source: str):
 
 
 def list_sources() -> list[str]:
-    return list(COLLECTORS.keys())
+    """Active collector sources, minus any in COLLECTOR_DISABLED_SOURCES.
+
+    COLLECTOR_DISABLED_SOURCES is a comma-separated kill-switch (operational
+    control) for taking a misbehaving collector out of the shared worker without
+    a code change — e.g. youtube, whose yt-dlp subprocess can wedge on lost
+    SIGCHLD in WSL2/Docker and freeze the shared event loop.
+    """
+    import os
+    disabled = {
+        s.strip().lower()
+        for s in os.getenv("COLLECTOR_DISABLED_SOURCES", "").split(",")
+        if s.strip()
+    }
+    return [s for s in COLLECTORS.keys() if s.lower() not in disabled]
