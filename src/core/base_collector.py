@@ -69,20 +69,48 @@ class BaseCollector(ABC):
             raise RuntimeError(f"Drive not mounted. Pausing {self.SOURCE_NAME}.")
 
         self.media_dir.mkdir(parents=True, exist_ok=True)
-        self._scan_existing_media()
+        await self._seed_known_ids()
         await self.checkpoint.load_progress()
         await self.checkpoint.reset_if_stale()
         await self.checkpoint.mark_running()
 
-        logger.info("Starting %s collector (%d known items on disk)", self.SOURCE_NAME, len(self._known_ids))
+        logger.info("Starting %s collector (%d known items)", self.SOURCE_NAME, len(self._known_ids))
         try:
             await self.collect(targets)
         finally:
             await self.checkpoint.mark_idle()
             logger.info("Stopped %s collector", self.SOURCE_NAME)
 
+    async def _seed_known_ids(self):
+        """DB-first dedup seed (P3-3). Replaces the per-instance O(files) disk
+        scan of media_dir, which slowed over time and raced across telegram's
+        multi-workers sharing one media_dir. media_items UNIQUE(source,content_id)
+        is the dedup authority; we seed the in-memory cache from it with a single
+        indexed query. save_media_item still relies on ON CONFLICT, so a missed
+        cache entry only costs one harmless insert attempt, never a duplicate.
+        """
+        if self.pool is None:
+            return
+        try:
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    "SELECT content_id FROM media_items WHERE source = $1",
+                    self.SOURCE_NAME,
+                )
+            for r in rows:
+                cid = r["content_id"]
+                if cid:
+                    self._known_ids.add(cid)
+            if rows:
+                logger.info("Seeded %d known %s content_ids from DB",
+                            len(rows), self.SOURCE_NAME)
+        except Exception:
+            logger.warning("%s: DB known-id seed failed; relying on ON CONFLICT",
+                           self.SOURCE_NAME, exc_info=True)
+
     def _scan_existing_media(self):
-        """Disk-first dedup: scan media_dir for existing files and build _known_ids set."""
+        """DEPRECATED (P3-3): legacy disk scan, kept as a fallback only. Use
+        _seed_known_ids() which is DB-backed and multi-worker safe."""
         count = 0
         for f in self.media_dir.iterdir():
             if f.is_file() and not f.name.endswith(".tmp"):
