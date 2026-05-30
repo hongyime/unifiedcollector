@@ -50,10 +50,9 @@ class Scheduler:
         logger.info("Scheduler stopped")
 
     async def _init_db(self):
-        schema_dir = Path(__file__).resolve().parent.parent / "db" / "schemas"
-        async with self.pool.acquire() as conn:
-            for sql_file in sorted(schema_dir.glob("*.sql")):
-                await conn.execute(sql_file.read_text())
+        # P0-1/P0-2: ledger-backed runner applies schemas/ + migrations/.
+        from src.db.migrate import apply_all
+        await apply_all(self.pool)
 
     async def _register_beeper_if_enabled(self):
         """Register the polymorphic Beeper Desktop Local API collector.

@@ -19,11 +19,11 @@ logger = logging.getLogger("unifiedcollector")
 
 
 async def init_db(pool):
-    schema_dir = Path(__file__).parent / "db" / "schemas"
-    async with pool.acquire() as conn:
-        for sql_file in sorted(schema_dir.glob("*.sql")):
-            await conn.execute(sql_file.read_text())
-            logger.info("Applied schema: %s", sql_file.name)
+    # P0-1/P0-2: single DDL authority. Applies base schemas/ then pending
+    # migrations/ via the ledger-backed runner. The old code globbed schemas/
+    # ONLY, silently omitting 19 live, code-referenced tables under migrations/.
+    from src.db.migrate import apply_all
+    await apply_all(pool)
 
 
 def main():
