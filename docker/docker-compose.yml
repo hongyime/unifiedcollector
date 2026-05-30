@@ -1,5 +1,3 @@
-version: '3.8'
-
 name: unifiedcollector
 
 services:
@@ -43,9 +41,9 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      - z:/unifiedcollector/media:/media
+      - media_data:/media
       - ../credentials:/app/credentials
-      - ../sessions:/app/sessions
+      - sessions_data:/app/sessions
       - ../whatsapp_session:/app/whatsapp_session
     depends_on:
       postgres:
@@ -87,9 +85,9 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
     volumes:
-      - z:/unifiedcollector/media:/media
+      - media_data:/media
       - ../credentials:/app/credentials
-      - ../sessions:/app/sessions
+      - sessions_data:/app/sessions
     depends_on:
       postgres:
         condition: service_healthy
@@ -135,7 +133,7 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
     volumes:
-      - z:/unifiedcollector/media:/media
+      - media_data:/media
       - ../credentials:/app/credentials
     depends_on:
       postgres:
@@ -153,6 +151,7 @@ services:
   backup:
     image: postgres:16-alpine
     container_name: unifiedcollector_backup
+    profiles: ["manual"]   # never auto-starts; run with: docker compose --profile manual up backup
     environment:
       PGUSER: ${POSTGRES_USER}
       PGPASSWORD: ${POSTGRES_PASSWORD}
@@ -160,7 +159,7 @@ services:
       PGDATABASE: unifiedcollector
     volumes:
       - ./backups:/backups
-      - z:/media/db/wal_archive:/wal_archive
+      - c:/unifiedcollector/media/db/wal_archive:/wal_archive
     entrypoint: /bin/sh
     command:
       - -c
@@ -173,7 +172,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    restart: unless-stopped
+    restart: "no"
 
   rabbitmq:
     image: rabbitmq:3.13-management-alpine
@@ -229,7 +228,7 @@ services:
       - "3011:3001"
     volumes:
       - ../whatsappcollector/services/wa-client-ts/auth_info:/app/auth_info
-      - z:/unifiedcollector/media/whatsapp:/data/media
+      - media_data:/data/media
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -261,7 +260,7 @@ services:
       - "3012:3001"
     volumes:
       - ../whatsappcollector/services/wa-client-ts/auth_info:/app/auth_info
-      - z:/unifiedcollector/media/whatsapp:/data/media
+      - media_data:/data/media
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -277,3 +276,5 @@ volumes:
   pgdata:
   rabbitmq_data:
   redis_data:
+  media_data:
+  sessions_data:

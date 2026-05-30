@@ -142,14 +142,29 @@ class TelegramWorker:
 
     async def connect(self):
         from telethon import TelegramClient  # NOT telethon.sync!
+        from telethon.sessions import StringSession
         session_dir = Path("sessions")
         session_dir.mkdir(parents=True, exist_ok=True)
 
         api_id = int(self.account.credentials.get("api_id") or os.getenv("TELEGRAM_API_ID", "0"))
         api_hash = self.account.credentials.get("api_hash") or os.getenv("TELEGRAM_API_HASH", "")
-        session_path = self.account.credentials.get("session", "")
-        if session_path and Path(session_path).exists():
-            session_file = str(session_path)
+        session_val = self.account.credentials.get("session", "")
+        # StringSession strings are long base64 — detect by length (>100 chars)
+        if session_val and len(session_val) > 100:
+            session_file = StringSession(session_val)
+        elif session_val and Path(session_val).exists():
+            session_file = str(session_val)
+        elif session_val:
+            # ENV/DB gave an explicit session path but the file is missing.
+            # Do NOT silently fall back to a name-based path — that creates a
+            # fresh UNAUTHORIZED session and Telethon's start() then blocks on
+            # interactive stdin (=> "EOF when reading a line"). Fail loudly so
+            # the session-file/volume mismatch is obvious.
+            raise FileNotFoundError(
+                f"Telegram session file not found: {session_val!r} "
+                f"(account={self.account.name}). The authorized .session file "
+                f"must be present in the sessions volume."
+            )
         else:
             session_file = str(session_dir / self.account.name)
 
@@ -160,11 +175,17 @@ class TelegramWorker:
         try:
             self.state = SessionState.CONNECTING
             self.client = TelegramClient(session_file, api_id, api_hash)
-            # start() handles connect + auth check in one call.
-            # Pass phone=lambda: None to prevent interactive prompts.
-            # If session is not authorized, this will raise an error.
-            phone = self.account.credentials.get("phone", "")
-            await self.client.start(phone=phone if phone else lambda: None)
+            # Use connect() + is_user_authorized() instead of start(): start()
+            # falls back to interactive stdin prompts when a session is not
+            # authorized, which blocks forever in a container (=> "EOF when
+            # reading a line"). We never want that — fail cleanly instead.
+            await self.client.connect()
+            if not await self.client.is_user_authorized():
+                raise RuntimeError(
+                    f"Telegram session for account={self.account.name} is not "
+                    f"authorized. Re-auth via /startcollector or restore the "
+                    f"authorized .session file."
+                )
             self.state = SessionState.CONNECTED
             try:
                 me = await self.client.get_me()
@@ -389,9 +410,10 @@ class TelegramCollector(BaseCollector):
             try:
                 await asyncio.wait_for(w.connect(), timeout=45)
                 live.append(w)
-                # Small delay between connections to avoid Telegram rate limits
+                # 15s between connections — prevents Telegram treating rapid
+                # parallel logins as a security event and revoking auth keys.
                 if len(live) < len(workers):
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(15)
             except asyncio.TimeoutError:
                 logger.error(
                     "[worker=%d account=%s] connect timed out after 45s",
@@ -615,7 +637,19 @@ class TelegramCollector(BaseCollector):
         # the entire asyncio event loop.
         logger.info("[telegram.collect] waiting 30s for other collectors to settle...")
         await asyncio.sleep(30)
-        
+
+        # Rate-limit full reconnect cycles — Telegram revokes auth keys when
+        # all accounts reconnect rapidly in a short window (e.g. container restarts).
+        # Enforce minimum 5 minutes between full connection attempts.
+        now = asyncio.get_event_loop().time()
+        last = getattr(self, "_last_connect_time", 0)
+        min_interval = 300.0  # 5 minutes
+        if now - last < min_interval:
+            wait = min_interval - (now - last)
+            logger.info("[telegram.collect] rate-limiting reconnect — waiting %.0fs", wait)
+            await asyncio.sleep(wait)
+        self._last_connect_time = asyncio.get_event_loop().time()
+
         logger.info("[telegram.collect] ENTER with %d targets", len(targets))
         if not self._api_id or not self._api_hash:
             logger.error("TELEGRAM_API_ID and TELEGRAM_API_HASH required")
