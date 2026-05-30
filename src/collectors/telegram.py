@@ -427,10 +427,26 @@ class TelegramCollector(BaseCollector):
 
         if live:
             self._primary_client = live[0].client
-        logger.info(
-            "Telegram parallel mode: %d/%d worker(s) connected",
-            len(live), len(workers),
-        )
+        # P4-5: session-volume drift guard. Authoritative sessions are host files
+        # synced into the named volume by the boot script; a manual `compose up`
+        # bypasses that sync and can drift to stale/unauthorized sessions ->
+        # silent auth failure. Log LOUDLY (not INFO) when any worker failed to
+        # connect, naming the drifted accounts, so the gap is unmissable.
+        live_names = {w.account.name for w in live}
+        failed = [w.account.name for w in workers if w.account.name not in live_names]
+        if failed:
+            logger.error(
+                "TELEGRAM SESSION DRIFT: only %d/%d worker(s) connected. "
+                "UNAUTHORIZED/UNREACHABLE accounts: %s. The boot session-sync was "
+                "likely bypassed (manual `compose up`?). Re-run the boot script or "
+                "restore authorized .session files.",
+                len(live), len(workers), ", ".join(sorted(failed)),
+            )
+        else:
+            logger.info(
+                "Telegram parallel mode: %d/%d worker(s) connected",
+                len(live), len(workers),
+            )
         return live
 
     async def _auto_backfill_new_accounts(self) -> None:
