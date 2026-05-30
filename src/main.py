@@ -6,15 +6,15 @@ from pathlib import Path
 
 from src.core.drive_check import check_drive
 from src.db.connection import get_pool, close_pool
+from src.core.logging_config import configure_logging
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
-# Suppress noisy httpx request logs — they fill the Docker log pipe buffer
-# and cause Python stdout writes to block, freezing the asyncio event loop.
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("httpcore").setLevel(logging.WARNING)
+# P2-3: non-blocking queue-based logging. Previously a plain StreamHandler wrote
+# to stdout from inside the event loop; when the Docker log pipe buffer filled,
+# the synchronous write blocked and froze the whole collector. configure_logging
+# installs a QueueHandler (event loop only does a non-blocking put) + a
+# background QueueListener thread that does the actual I/O. Set LOG_JSON=true for
+# structured logs.
+configure_logging()
 logger = logging.getLogger("unifiedcollector")
 
 
