@@ -1,0 +1,43 @@
+# requirements.lock — exact pins for reproducible builds (P1-3)
+#
+# Generated from the versions actually installed in the known-good running
+# collector container (2026-05-30). These are PROVEN versions the system runs
+# on. requirements.txt remains the human-readable source with >= ranges; this
+# lock is what the Docker image and CI install for reproducibility.
+#
+# To refresh after an intentional upgrade:
+#   docker exec unifiedcollector_collector pip freeze > /tmp/freeze.txt
+#   then re-pin the lines below from that output.
+#
+# A bare `pip install -r requirements.txt` could silently pull a breaking
+# telethon / yt-dlp / instaloader / gallery-dl on any rebuild — that is the bug
+# this file closes.
+
+asyncpg==0.31.0
+fastapi==0.136.3
+uvicorn[standard]==0.48.0
+httpx[socks]==0.28.1
+aiofiles==24.1.0
+python-dotenv==1.2.2
+beautifulsoup4==4.14.3
+Pillow==12.2.0
+defusedxml==0.7.1
+telethon==1.43.2
+imagehash==4.3.2
+instaloader==4.15.1
+duckduckgo-search==8.1.1
+yt-dlp==2026.3.17
+curl_cffi==0.14.0
+gallery-dl==1.32.1
+PyMuPDF==1.27.2.3
+playwright==1.60.0
+aio-pika==9.6.2
+redis==8.0.0
+aiohttp==3.13.5
+PyJWT==2.13.0
+bcrypt==5.0.0
+google-auth==2.53.0
+google-auth-oauthlib==1.4.0
+pgvector==0.4.2
+matrix-nio[e2e]==0.25.2
+python-telegram-bot==22.7

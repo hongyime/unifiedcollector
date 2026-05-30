@@ -11,8 +11,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates wget \
  && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt requirements.lock ./
+# P1-3: install from the lockfile for reproducible builds. requirements.txt is
+# kept for human-readable ranges; requirements.lock has exact proven pins.
+RUN pip install --no-cache-dir -r requirements.lock
 
 # Install Playwright Chromium only (no firefox/webkit — saves ~400MB).
 # install-deps is still useful as a belt-and-braces top-up of any missing libs.
