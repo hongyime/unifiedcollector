@@ -35,6 +35,10 @@ from pathlib import Path
 import httpx
 
 from src.core.base_collector import BaseCollector
+from src.collectors.instagram.parse import (
+    parse_browser_cookies as _parse_browser_cookies,
+    extract_post_edges_from_payload as _parse_extract_post_edges,
+)
 from src.core.account_pool import AccountPool
 from src.core.file_naming import sanitize_name  # F821 fix: used in account_media_dir
 from src.core.human_rate_limiter import HumanLikeRateLimiter, OperationType
@@ -444,16 +448,7 @@ class InstagramCollector(BaseCollector):
 
     @staticmethod
     def _parse_browser_cookies(filepath: str) -> dict[str, str]:
-        cookies = {}
-        with open(filepath, "r") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                parts = line.split("\t")
-                if len(parts) >= 7:
-                    cookies[parts[5]] = parts[6]
-        return cookies
+        return _parse_browser_cookies(filepath)
 
     def _load_cookies_for_account(self, account) -> dict[str, str]:
         """Load cookies directly from file, bypassing instaloader entirely."""
@@ -1178,26 +1173,7 @@ class InstagramCollector(BaseCollector):
     @staticmethod
     def _extract_post_edges_from_payload(payload: dict) -> list:
         """Best-effort traversal of IG's nested JSON shapes to find post edges."""
-        edges: list = []
-        if not isinstance(payload, dict):
-            return edges
-
-        def walk(obj):
-            if isinstance(obj, dict):
-                # Common IG shape
-                etmm = obj.get("edge_owner_to_timeline_media")
-                if isinstance(etmm, dict):
-                    e = etmm.get("edges")
-                    if isinstance(e, list):
-                        edges.extend(e)
-                for v in obj.values():
-                    walk(v)
-            elif isinstance(obj, list):
-                for v in obj:
-                    walk(v)
-
-        walk(payload)
-        return edges
+        return _parse_extract_post_edges(payload)
 
     async def _collect_stories(self, uid: str, entity_name: str):
         """Collect stories for a user.
