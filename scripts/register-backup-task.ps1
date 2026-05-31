@@ -23,8 +23,11 @@ $action = New-ScheduledTaskAction -Execute "cmd.exe" `
 # Daily at 03:30.
 $trigger = New-ScheduledTaskTrigger -Daily -At 3:30AM
 
-# Run whether or not the user is logged on; highest privileges (docker access).
-$principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType S4U -RunLevel Highest
+# Run only when the user is logged on (Interactive). REQUIRED: Docker Desktop is a
+# per-user service and is NOT reachable from an S4U/no-profile session, so a batch
+# that calls docker exec fails with result 1 under S4U. Interactive inherits the
+# logged-on user's Docker session. Highest privileges for docker access.
+$principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest
 
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable `
     -DontStopOnIdleEnd -ExecutionTimeLimit (New-TimeSpan -Hours 1)
