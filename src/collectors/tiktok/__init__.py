@@ -626,10 +626,16 @@ class TiktokCollector(BaseCollector):
                 if not result.ok:
                     logger.warning(
                         "tiktok fallback gallery-dl failed for %s: rc=%s timed_out=%s "
-                        "stderr=%s stdout=%s",
-                        username, result.returncode, result.timed_out,
+                        "files=%d stderr=%s stdout=%s",
+                        username, result.returncode, result.timed_out, result.file_count,
                         result.err_summary(800), (result.stdout or "")[:400],
                     )
+                    # Even on timeout/non-zero rc, ingest any files already pulled —
+                    # gallery-dl/yt-dlp write incrementally, so a partial download is
+                    # still real data worth keeping rather than discarding.
+                    if result.file_count > 0:
+                        await self._ingest_tmpdir(tmpdir, username)
+                        return True
                     return False
 
                 logger.info(
@@ -661,10 +667,14 @@ class TiktokCollector(BaseCollector):
                 if not result.ok:
                     logger.warning(
                         "tiktok fallback yt-dlp failed for %s: rc=%s timed_out=%s "
-                        "stderr=%s stdout=%s",
-                        username, result.returncode, result.timed_out,
+                        "files=%d stderr=%s stdout=%s",
+                        username, result.returncode, result.timed_out, result.file_count,
                         result.err_summary(800), (result.stdout or "")[:400],
                     )
+                    # Ingest partial downloads even on timeout (see gallery-dl note).
+                    if result.file_count > 0:
+                        await self._ingest_tmpdir(tmpdir, username)
+                        return True
                     return False
 
                 logger.info(

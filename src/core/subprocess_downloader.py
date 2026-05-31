@@ -178,29 +178,58 @@ async def _run_subprocess(
     timed_out = False
     cancelled = False
 
-    def _run_sync() -> int:
+    def _kill_pg(pid: int) -> None:
+        """SIGKILL the whole process group, best-effort, NEVER blocking on wait().
+
+        We deliberately do NOT call proc.wait() after killing. On WSL2/Docker the
+        lost-SIGCHLD condition means wait() can hang forever even after the child is
+        gone; reaping is left to the OS / init. A zombie is harmless and cheap."""
         try:
-            result = subprocess.run(
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
+        except Exception:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except Exception:
+                pass
+
+    def _run_sync() -> int:
+        # Use Popen + communicate(timeout=) rather than subprocess.run(timeout=).
+        # subprocess.run's TimeoutExpired path internally calls proc.kill() THEN
+        # proc.wait() with no timeout — that second wait() is exactly what hangs on
+        # a lost SIGCHLD, wedging this thread forever. Here we kill the process group
+        # and return immediately WITHOUT a blocking re-wait.
+        proc = None
+        try:
+            proc = subprocess.Popen(
                 list(argv),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 cwd=cwd,
                 env=env,
                 start_new_session=True,
-                timeout=timeout,
             )
-            return result.returncode
-        except subprocess.TimeoutExpired as e:
-            # Kill the process group
-            if hasattr(e, 'process') and e.process:
+            try:
+                proc.communicate(timeout=timeout)
+                return proc.returncode if proc.returncode is not None else -1
+            except subprocess.TimeoutExpired:
+                _kill_pg(proc.pid)
+                # One short, bounded reap attempt — do NOT wait unbounded.
                 try:
-                    os.killpg(os.getpgid(e.process.pid), signal.SIGKILL)
+                    proc.communicate(timeout=5)
                 except Exception:
                     pass
-            return -9  # SIGKILL
+                return -9  # SIGKILL / timed out
+        except Exception:
+            if proc is not None:
+                _kill_pg(proc.pid)
+            return -1
 
     loop = asyncio.get_running_loop()
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="subproc")
+    # daemon threads so an irrecoverably-wedged subprocess thread can never block
+    # interpreter shutdown or pin the executor.
+    executor = concurrent.futures.ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="subproc",
+    )
     # Hard wall-clock ceiling on the AWAIT itself. subprocess.run(timeout=...) relies
     # on SIGCHLD delivery to wake its internal wait(); in WSL2/Docker SIGCHLD can be
     # lost, so the child exits but the worker thread's wait() never returns and the
@@ -210,40 +239,32 @@ async def _run_subprocess(
     outer_timeout = timeout + 60.0
     try:
         future = loop.run_in_executor(executor, _run_sync)
-        # Race between the thread completing and stop_event
-        if stop_event is not None:
-            stop_task = asyncio.create_task(stop_event.wait())
-            try:
-                done, _ = await asyncio.wait(
-                    {asyncio.ensure_future(future), stop_task},
-                    return_when=asyncio.FIRST_COMPLETED,
-                    timeout=outer_timeout,
-                )
-            except Exception:
-                done = set()
-            if not done:
-                # Outer timeout tripped — subprocess wedged (likely lost SIGCHLD).
-                logger.error("subprocess_downloader: hard timeout (%.0fs) — abandoning "
-                             "wedged subprocess to unblock event loop", outer_timeout)
-                timed_out = True
-                future.cancel()
-                stop_task.cancel()
-            elif stop_task in done:
+        # Poll the future with asyncio.sleep rather than awaiting it directly. A
+        # bare `await future` / `asyncio.wait(future, timeout=...)` relies on the
+        # executor calling loop.call_soon_threadsafe to resolve the future; if that
+        # wakeup is lost (observed under WSL2/Docker with a wedged subprocess thread)
+        # the await blocks the loop forever. asyncio.sleep ALWAYS wakes via the loop
+        # timer, so this deadline check is guaranteed to fire.
+        deadline = loop.time() + outer_timeout
+        poll = 0.25
+        while True:
+            if future.done():
+                break
+            if stop_event is not None and stop_event.is_set():
                 cancelled = True
                 future.cancel()
-                stop_task.cancel()
-            else:
-                stop_task.cancel()
-        else:
-            try:
-                await asyncio.wait_for(asyncio.ensure_future(future), timeout=outer_timeout)
-            except asyncio.TimeoutError:
+                break
+            if loop.time() >= deadline:
                 logger.error("subprocess_downloader: hard timeout (%.0fs) — abandoning "
                              "wedged subprocess to unblock event loop", outer_timeout)
                 timed_out = True
                 future.cancel()
+                break
+            await asyncio.sleep(poll)
+            if poll < 2.0:
+                poll = min(poll * 1.5, 2.0)
 
-        rc = future.result() if not cancelled and future.done() else -1
+        rc = future.result() if (not cancelled and not timed_out and future.done()) else -1
         if rc == -9:
             timed_out = True
     except concurrent.futures.CancelledError:

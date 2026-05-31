@@ -294,6 +294,14 @@ class YoutubeCollector(BaseCollector):
         # 1. Upsert Channel Info (returns uploads playlist ID, or None if channel doesn't exist)
         uploads_playlist = await self._upsert_channel(channel_id, channel_name)
 
+        # When we have API auth and the channels.list lookup returned no item,
+        # the channel is confirmed-missing — skip the expensive yt-dlp download
+        # (running yt-dlp on a dead /channel/<id>/videos URL otherwise burns the
+        # full download timeout per cycle for nothing).
+        if self._has_auth and uploads_playlist is None:
+            logger.info("youtube: skipping yt-dlp for confirmed-missing channel %s", channel_id)
+            return
+
         if self._has_auth and uploads_playlist:
             video_ids = await self._collect_video_list_via_api(channel_id, channel_name, uploads_playlist)
         else:
