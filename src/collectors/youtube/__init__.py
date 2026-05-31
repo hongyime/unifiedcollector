@@ -64,6 +64,10 @@ from datetime import datetime, timedelta, timezone
 import httpx
 
 from src.core.base_collector import BaseCollector
+from src.collectors.youtube.parse import (
+    vtt_to_text as _parse_vtt_to_text,
+    parse_relative_timestamp as _parse_rel_ts,
+)
 from src.core.file_naming import sanitize_name
 
 logger = logging.getLogger(__name__)
@@ -655,27 +659,7 @@ class YoutubeCollector(BaseCollector):
     def _vtt_to_text(vtt: str) -> str:
         """Strip WebVTT timing/header/style blocks and de-duplicate consecutive cue lines.
         YouTube auto-captions carry a rolling overlap; the simple de-dup below drops most of it."""
-        lines: list[str] = []
-        last = None
-        for raw in vtt.splitlines():
-            line = raw.strip()
-            if not line:
-                continue
-            if line.startswith("WEBVTT") or line.startswith("Kind:") or line.startswith("Language:") or line.startswith("NOTE"):
-                continue
-            if "-->" in line:
-                continue
-            if line.isdigit():
-                continue
-            # Strip in-line VTT tags like <00:00:01.000><c> and </c>
-            cleaned = re.sub(r"<[^>]+>", "", line).strip()
-            if not cleaned:
-                continue
-            if cleaned == last:
-                continue
-            lines.append(cleaned)
-            last = cleaned
-        return "\n".join(lines)
+        return _parse_vtt_to_text(vtt)
 
     async def _fetch_transcript(self, video_uuid, platform_video_id: str):
         """Run yt-dlp --write-subs/--write-auto-subs to grab a VTT subtitle file, parse to text,
@@ -744,18 +728,7 @@ class YoutubeCollector(BaseCollector):
     @staticmethod
     def _parse_relative_timestamp(text: str) -> datetime | None:
         """Best-effort parse for YouTube relative timestamps like '3 days ago' or '1 month ago (edited)'."""
-        if not text:
-            return None
-        m = re.match(r"\s*(\d+)\s+(second|minute|hour|day|week|month|year)s?\s+ago", text.strip(), re.IGNORECASE)
-        if not m:
-            return None
-        n = int(m.group(1))
-        unit = m.group(2).lower()
-        seconds = {"second": 1, "minute": 60, "hour": 3600, "day": 86400, "week": 604800, "month": 2592000, "year": 31536000}.get(unit, 0)
-        if not seconds:
-            return None
-        ts = datetime.now(timezone.utc).timestamp() - n * seconds
-        return datetime.fromtimestamp(ts, tz=timezone.utc)
+        return _parse_rel_ts(text)
 
     async def _fetch_comments(self, video_uuid, platform_video_id: str):
         """Run yt-dlp --write-comments to dump comments into the .info.json,
