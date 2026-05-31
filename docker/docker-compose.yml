@@ -57,6 +57,7 @@ services:
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../whatsapp_session:/app/whatsapp_session
+      - ../config/sources:/app/config/sources:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -98,6 +99,7 @@ services:
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../whatsapp_session:/app/whatsapp_session
+      - ../config/sources:/app/config/sources:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -143,6 +145,7 @@ services:
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../whatsapp_session:/app/whatsapp_session
+      - ../config/sources:/app/config/sources:ro
     depends_on:
       postgres:
         condition: service_healthy

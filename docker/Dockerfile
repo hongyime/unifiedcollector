@@ -23,4 +23,10 @@ RUN python -m playwright install chromium \
 
 COPY src/ src/
 
+# Bake a baseline copy of the per-source config files. At runtime the compose
+# bind-mount (../config/sources:/app/config/sources:ro) overlays these so an
+# operator can edit the host files + `docker restart` without a rebuild; the
+# baked copy is just a fallback if the mount is ever absent.
+COPY config/ config/
+
 CMD ["python", "-m", "src.main"]
