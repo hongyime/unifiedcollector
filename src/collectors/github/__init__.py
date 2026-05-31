@@ -92,6 +92,10 @@ import httpx
 
 from src.core.account_quota import AccountQuotaTracker, QuotaConfig
 from src.core.base_collector import BaseCollector
+from src.collectors.github.parse import (
+    get_pat_display as _parse_get_pat_display,
+    validate_pat_format as _parse_validate_pat_format,
+)
 from src.core.dedupe_hash import sha256_bytes as _sha256_bytes
 from src.core.file_naming import sanitize_name
 from src.core.profile_photo_tracker import ProfilePhotoTracker
@@ -257,16 +261,12 @@ class GithubCollector(BaseCollector):
     @staticmethod
     def get_pat_display(pat: str) -> str:
         """Mask a PAT for safe display: ``ghp_xxxx****...****yyyy``."""
-        if not pat or len(pat) < 8:
-            return "****"
-        return f"{pat[:4]}****...****{pat[-4:]}"
+        return _parse_get_pat_display(pat)
 
     @staticmethod
     def validate_pat_format(pat: str) -> bool:
         """Sanity-check a PAT looks like a real GitHub token."""
-        if not pat or len(pat) <= 20:
-            return False
-        return any(pat.startswith(p) for p in ("ghp_", "gho_", "ghu_", "ghs_", "ghr_"))
+        return _parse_validate_pat_format(pat)
 
     # ---- media path ----------------------------------------------------
 
