@@ -40,7 +40,11 @@ services:
       # the SHARED event loop (py-spy confirmed MainThread stuck in _run_subprocess).
       # Both are disabled here and run out-of-process in their own containers (P3-1).
       # The subprocess_downloader hard-timeout is the defense-in-depth backstop.
-      COLLECTOR_DISABLED_SOURCES: "youtube,tiktok"
+      # instagram TEMPORARILY disabled 2026-05-31: the host IP is 429-blocked by
+      # Instagram (all accounts, INSTA_PROXY_DISABLED=true). Per decision: wait the
+      # block out with ZERO requests (fastest IP recovery, no proxy cost). Re-enable
+      # by removing 'instagram' here after ~24-48h, then `docker compose up -d collector`.
+      COLLECTOR_DISABLED_SOURCES: "youtube,tiktok,instagram"
       # Beeper Desktop Local API runs on the host at 127.0.0.1:23373.
       # The default URL inside .env (host.docker.internal:23373) resolves
       # via the extra_hosts entry below.
