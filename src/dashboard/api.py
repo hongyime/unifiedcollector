@@ -1265,6 +1265,118 @@ async def enable_telegram_account(
     return {"status": "enabled", "name": name}
 
 
+@app.get("/whatsapp/qr/{bridge}")
+async def whatsapp_qr(bridge: str):
+    """Proxy the live QR / status from a wa-bridge.
+
+    bridge is '1' or '2'. Returns {status, qr, ready, error}. The bridge
+    regenerates the QR on its own cadence; the client polls this endpoint and
+    re-renders, so a QR never goes stale on screen. Unauthenticated like the
+    bridge's own /qr route (link page is behind the dashboard already).
+    """
+    import urllib.request
+
+    if bridge not in ("1", "2"):
+        raise HTTPException(400, "bridge must be 1 or 2")
+    base = os.getenv(
+        f"WA_BRIDGE_{bridge}_URL",
+        f"http://wa-bridge-{bridge}:3001",
+    )
+    out = {"bridge": bridge, "status": "unknown", "qr": "", "ready": False, "error": None}
+    try:
+        # /health tells us if already paired; /qr gives the code when waiting
+        with urllib.request.urlopen(f"{base}/health", timeout=8) as r:
+            health = __import__("json").loads(r.read().decode())
+        out["ready"] = bool(health.get("whatsapp_ready"))
+        out["status"] = health.get("status", "unknown")
+        if out["ready"]:
+            out["status"] = "connected"
+            return out
+        with urllib.request.urlopen(f"{base}/qr", timeout=8) as r:
+            qrd = __import__("json").loads(r.read().decode())
+        out["status"] = qrd.get("status", out["status"])
+        out["qr"] = qrd.get("qr", "")
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = str(exc)
+        out["status"] = "unreachable"
+    return out
+
+
+@app.get("/whatsapp/link")
+async def whatsapp_link_page():
+    """Self-contained QR linking page with auto-refresh.
+
+    Polls /whatsapp/qr/{1,2} every 3s, re-renders the QR image, and flips each
+    panel to a green 'Connected' state the moment the bridge reports
+    whatsapp_ready. No build step -- inline HTML so it ships without rebuilding
+    the SPA bundle.
+    """
+    from fastapi.responses import HTMLResponse
+
+    html = """<!doctype html>
+<html><head><meta charset="utf-8"><title>Link WhatsApp</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+ body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#0b141a;color:#e9edef;margin:0;padding:24px}
+ h1{font-size:20px;font-weight:600;margin:0 0 4px}
+ p.sub{color:#8696a0;margin:0 0 24px;font-size:14px}
+ .grid{display:flex;gap:24px;flex-wrap:wrap}
+ .card{background:#111b21;border:1px solid #222d34;border-radius:12px;padding:20px;width:320px}
+ .card h2{font-size:16px;margin:0 0 12px;display:flex;align-items:center;gap:8px}
+ .qrbox{width:280px;height:280px;display:flex;align-items:center;justify-content:center;background:#fff;border-radius:8px;margin:0 auto}
+ .qrbox img{width:264px;height:264px;image-rendering:pixelated}
+ .status{margin-top:14px;font-size:13px;text-align:center;color:#8696a0}
+ .dot{width:9px;height:9px;border-radius:50%;display:inline-block}
+ .dot.wait{background:#f0b232}.dot.ok{background:#22c55e}.dot.err{background:#ef4444}
+ .connected{color:#22c55e;font-weight:600}
+ .spinner{display:inline-block;width:12px;height:12px;border:2px solid #2a3942;border-top-color:#00a884;border-radius:50%;animation:spin .8s linear infinite;vertical-align:-1px}
+ @keyframes spin{to{transform:rotate(360deg)}}
+ .steps{color:#8696a0;font-size:13px;line-height:1.7;margin:20px 0 0;max-width:680px}
+ code{background:#202c33;padding:2px 6px;border-radius:4px}
+</style></head>
+<body>
+ <h1>Link WhatsApp accounts</h1>
+ <p class="sub">Two independent account slots. Link either one in any order. QR refreshes automatically &mdash; just leave this open.</p>
+ <div class="grid">
+  <div class="card"><h2>Bridge 1 <span id="t1"></span></h2><div class="qrbox" id="q1"><span class="spinner"></span></div><div class="status" id="s1">Loading&hellip;</div></div>
+  <div class="card"><h2>Bridge 2 <span id="t2"></span></h2><div class="qrbox" id="q2"><span class="spinner"></span></div><div class="status" id="s2">Loading&hellip;</div></div>
+ </div>
+ <div class="steps">
+  <b>On your phone:</b> WhatsApp &rarr; Settings &rarr; <b>Linked Devices</b> &rarr; <b>Link a Device</b> &rarr; point the camera at a QR above.<br>
+  The panel turns <span class="connected">green</span> automatically once linked. No need to refresh the page.
+ </div>
+<script>
+async function poll(b){
+  const sEl=document.getElementById('s'+b), qEl=document.getElementById('q'+b), tEl=document.getElementById('t'+b);
+  try{
+    const r=await fetch('/whatsapp/qr/'+b,{cache:'no-store'}); const d=await r.json();
+    if(d.ready||d.status==='connected'){
+      qEl.innerHTML='&#10003;'; qEl.style.background='#0b3d24'; qEl.style.color='#22c55e'; qEl.style.fontSize='90px';
+      sEl.innerHTML='<span class="dot ok"></span> <span class="connected">Connected</span>';
+      tEl.innerHTML='<span class="dot ok"></span>';
+      return; // stop polling this bridge
+    }
+    if(d.qr){
+      const src=d.qr.startsWith('data:')?d.qr:('data:image/png;base64,'+d.qr);
+      qEl.innerHTML='<img alt="QR" src="'+src+'">'; qEl.style.background='#fff';
+      sEl.innerHTML='<span class="dot wait"></span> Waiting for scan&hellip; (auto-refreshing)';
+      tEl.innerHTML='<span class="dot wait"></span>';
+    } else if(d.status==='unreachable'){
+      qEl.innerHTML='&#9888;'; qEl.style.background='#3d1414'; qEl.style.color='#ef4444'; qEl.style.fontSize='60px';
+      sEl.innerHTML='<span class="dot err"></span> Bridge unreachable: '+(d.error||'')+'';
+      tEl.innerHTML='<span class="dot err"></span>';
+    } else {
+      sEl.innerHTML='<span class="dot wait"></span> '+(d.status||'starting')+'&hellip;';
+    }
+  }catch(e){ sEl.textContent='poll error: '+e; }
+  setTimeout(()=>poll(b),3000);
+}
+poll('1'); poll('2');
+</script>
+</body></html>"""
+    return HTMLResponse(html)
+
+
 if DIST_DIR.is_dir():
     app.mount("/assets", StaticFiles(directory=str(DIST_DIR / "assets")), name="assets")
 
