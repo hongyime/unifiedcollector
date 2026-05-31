@@ -398,8 +398,12 @@ class WhatsappCollector(BaseCollector):
                             continue
 
                         health = resp.json()
-                        if health.get("status") != "connected":
-                            logger.debug("Session %s not connected: %s", session_name, health.get("status"))
+                        # Bridge contract is {"status":"ok","whatsapp_ready":bool},
+                        # NOT {"status":"connected"}. Accept either the ready flag or
+                        # a connected/ok status so the HTTP-poll fallback isn't skipped
+                        # forever on a correctly-running bridge.
+                        if not health.get("whatsapp_ready") and health.get("status") not in ("connected", "ok"):
+                            logger.debug("Session %s not ready: %s", session_name, health.get("status"))
                             continue
 
                         resp = await client.get(

@@ -1,0 +1,247 @@
+# tiktok.targets  -- file-authoritative target list (Option A)
+# TikTok usernames (without @).
+# Format:  target_id | Display Name | priority    (name+priority optional)
+# Blank lines and # comments ignored. Prefix a line with ! to disable it.
+# NOTE: | characters in names were replaced with / (| is the field delimiter).
+# Edit this file then `docker restart unifiedcollector_collector` to apply.
+
+shotsbyseah234 | shotsbyseah234 | 10
+libraryofsix | libraryofsix | 8
+0.pheliaaa | ophe | 5
+2164439939 | Seabass Lim | 5
+2swag.productions | 2swag | 5
+30787336993 | user699993 | 5
+3ddible | edi | 5
+4ng.elixa | angel | 5
+aakitat | Aakita | 5
+akio_bright | Akio | 5
+alberta.nyc | Alberta Tech | 5
+alexgummyclove | joei符策华 | 5
+alex.martini__ | AlexMartini | 5
+aly.ssasasa | alyssa | 5
+americanhighshorts | American High Shorts | 5
+andreifilmzz | Andrei | 5
+annabarger | Anna Barger | 5
+ant4443 | Xin Ying Lee | 5
+applepiofmyeye | joey 🛴 | 5
+ashatamasha | ashatamasha | 5
+ayay.ronnn | ron | 5
+bantalpelok_ | Bantalpeluk | 5
+beepwei | 7orz coffee | 5
+benjaminwong43 | Benjamin Wong | 5
+birdbirdgrassi | liz | 5
+blankslateworks | blankslate | 5
+bliss_ong | bliss_ong | 5
+bloopblooplalala | bloopblooplalala | 5
+bn001001s | bn001001s | 5
+bobowhosthat | bobowho | 5
+bonbonchocolateeeee | noelleee | 5
+bonzjoby | bonjobyyy | 5
+bun_on_a_run | je | 5
+_ca.ro.linee | caroline 🧸 | 5
+carolinehxr | Caroline Hu | 5
+casilbhiang | casilbhiang | 5
+ccherriieee | ccherriieee | 5
+chaelanl | chaela<3 | 5
+chimgj | gejun | 5
+chiwawaval | vallll 🍒 | 5
+chloeett | chloe | 5
+chloesarchived | chloe too! | 5
+chlomarkkk | chloe | 5
+chrdjshjd | chris | 5
+christine.ho142 | Christine Ho | 5
+citedjo | Luna T | 5
+cjh03 | cjh03 | 5
+clarah3r | clarah3r | 5
+claricektx | kee | 5
+clauu294 | CHzz | 5
+c_lby | caleb | 5
+collegelifeshorts | College Life | 5
+cornshucker575 | corn shucker | 5
+cyximic | cy_ximic | 5
+d1am0ndeye5 | d1am0ndeye5 | 5
+ddesmond11 | Ddesmond | 5
+decker757 | decker-_ | 5
+denniskoo | DennisKoo | 5
+dentogo | Den | 5
+dera.miyu | Deera【デーラ】 | 5
+dianajohar225 | dianajohar225 | 5
+dingdongsingsong5 | guava kyaw | 5
+dxing16 | Dixonn🎙️ | 5
+dx_nzel | denz | 5
+dynhhhrzl | diyanah razali | 5
+ellychuaaa | el ◡̈ | 5
+epichx | Hangryylaine | 5
+ericaa.haa | Ericaha | 5
+ezekiel.yeo | e z e k i e l  🐼 | 5
+faithkjw | faith 🪩🍸 | 5
+fielaselephants | kopipengsiewdai | 5
+fixxoxxna | fixxoxxna | 5
+gengweigwen | gengweigwen | 5
+gildennn | gilda | 5
+gregariousgirlboss | nicole | 5
+gurashiyaaaa | gracia(ㅅ´ ˘ `) | 5
+gyanhan | YH | 5
+gymjoyce | Joyce | 5
+halli.smith | Halli Smith | 5
+hat3r7 | HHA | 5
+hehuabuilds | hehua / building ‘Sup ⚖️👩‍💻 | 5
+heyyyitscait | cait | 5
+highr1se | y 🧸 | 5
+iam.chae | Chae 채원 | 5
+ilovecupcakes555555 | shin | 5
+inamarimaki | Marina Mari Maki | 5
+isabella.flores_ | Isabella Flores | 5
+isabel.leong_ | Isabel L | 5
+itricksmark | Mark | 5
+izzybizzyspider | izzybizzyspider | 5
+j3nluvss | j | 5
+j8c1yn | jelly | 5
+jae.mus1c | Jae | 5
+javierneo0 | FatNailong | 5
+jax.urban | Jax Urban | 5
+jforjaeee | jforjae | 5
+jhhhhh822 | jhhhhh | 5
+_jivisha15 | Jivisha_15 | 5
+jlcmlee | jonthegreat | 5
+jonymlee | jony | 5
+joodlyjoo | joodly | 5
+jordan.lau01 | Jordan Lau | 5
+josiahlebante14 | Josiah Lebante | 5
+joviannet | foodelicious | 5
+joyseahrz | jolly | 5
+j.r.beats | JianRong Gu | 5
+julia.huynh | Julia Huynh | 5
+june._.e24 | ᴀʟɪᴄᴇ🍐 | 5
+juniajons | Junia | 5
+kahyinnn | kahyinnn | 5
+kaijiekohh | Kaijie | 5
+kanariclub | kanariclub | 5
+kaungzinye | kaungzinye | 5
+kayatoastbread | View replies (8) | 5
+kaybchung | kay chung | 5
+keithtohwc | Keith Toh | 5
+kenengscarlet | kin | 5
+kenifxyz | kenneth ng | 5
+kimchifriedriceeater | xinyu ౨ৎ | 5
+kotori_0131 | Kotoriii | 5
+k.risty.kreme | 🥳✨kristy | 5
+kyuraios | Kyurios | 5
+laeelss | lael | 5
+lamyimfong | lamyimfong | 5
+larp1671 | larp67 | 5
+laurel._.l | laurel | 5
+lee604681 | Lee | 5
+leeenet | leeenet | 5
+lidiya.pervak | lidiya.pervak | 5
+lihopearlmilktea | 囧 | 5
+lilyrosenthall | lilymia | 5
+livswearingen | LivSwearingen | 5
+llaullauuuu | Lauren | 5
+lmaodabyoloswag | slimsteezy | 5
+loulijia | Lilly | 5
+louontherun | Lou Lou | 5
+luucass.s | lucas | 5
+lynette4984 | Lynette | 5
+lzxphyr | zx | 5
+madcookiedogz | Madcookiedogz | 5
+mangothekitten_ | Mangothekitten | 5
+marcusxng | marcus | 5
+mariaxseraphina | Maria Seraphina | 5
+marzz.yy | Mario Tay | 5
+mcmuff1n | McMuffin | 5
+mellloony | Char | 5
+mereedithgoh | meredith | 5
+mervotoks | mervo | 5
+min.err | MEOW | 5
+moeka_mocha | moeka | 5
+mozozozolu | grace | 5
+mr.kitters.the.cat | Mr. Kitters the Cat | 5
+myapril.11 | April | 5
+n0meriesyhd | n0meriesyhd | 5
+nad59949 | nad | 5
+nanxxika | nan | 5
+nathandoancomedy | Nathan Doan | 5
+nickkowrz | nick | 5
+noacopeland | Noa | 5
+noimnotlucas | noimnotlucas | 5
+nyllrie | rins | 5
+nzfszbs | christina angela | 5
+onetypicalchen | 陈典型 | 5
+oreo.boyboy | Oreo Boyboy | 5
+otpear.xin | otpear.xin | 5
+pachirach | Rachhhhhel | 5
+pangsaiman | pangsaiman | 5
+pankheks | jk | 5
+peck.geok | peck geok | 5
+phatdougie | eTHANOSerty | 5
+potatobec | potatobec | 5
+realedmundph | realedmundph | 5
+riazsulaimi | Riaz Sulaimi | 5
+ribrina.kaur | ribrina.kaur | 5
+roastedhojicha | joey | 5
+robinngt | robin | 5
+rrebbiee | that hotdog girl | 5
+rubzy.back | rubzy | 5
+ruien641 | ruien | 5
+s4rahleong | sarah | 5
+sammiiiii_lam | sammiiiii_lam | 5
+sandytummy | Sandy | 5
+sandyyy_cake | sandyyycake | 5
+sarahhfoo | sarah | 5
+sarahhwhyy | sarah | 5
+scoobydoobyd00p | butt 2 | 5
+shamio3 | Shamio | 5
+shelialia04 | shelialia04 | 5
+shermaineeboeyy | shermz | 5
+shermainhooo | shermainhooo | 5
+smruthiis | smruthiii | 5
+__sook_ja | __sook_ja | 5
+sopheroo | soph | 5
+speederrrrrr | speederrrrrr | 5
+ssharrmainee | shar | 5
+stacylsy | stacy | 5
+starry_nighttt | rach | 5
+stefn0tfunny | stef | 5
+stickmeene | keene | 5
+stringermedia | stringer media | 5
+superchillbaddi3 | Kelly | 5
+susi.vidal | Susi | 5
+svenandrobbie | Sven and Robbie | 5
+tammyalexx | tammyalexw | 5
+tf.syahz | woosansimp 🥹 | 5
+thatchriscarley | Chris Carley | 5
+thekittyandrea | Andrea Von Speed | 5
+tonghonnn | tonghonnn | 5
+tugboat_spenny | CeilingfanCEO | 5
+unnr.in | Yuna𖤐´- | 5
+urbexct | abandoned ct👤 | 5
+user3758395737 | 🦇 | 5
+user6473927462910 | 🧸 | 5
+user6978697869 | cdog | 5
+valariepepper | shi hui | 5
+van_cwx | vaness:> | 5
+vasinevaa | sineva | 5
+verniegee | Vernon Gee | 5
+victoriakwa | Victoria Kwa | 5
+violinistbynight | violinistbynight | 5
+weiweiweien | Jovia | 5
+wesleyzchanz | wsly | 5
+xenn.nnn | xenn | 5
+xh0822 | xh | 5
+xiaorose | xiaorose | 5
+_xingyii_ | xxingyii🦋 | 5
+xowiemmawithspice | Hello<3 | 5
+xxuanjie | xuanjie | 5
+xxyvnxx | Yv | 5
+yewkinn | Yew Kin (Jace) | 5
+yi.long.lew | Yi Long Lew | 5
+yskekoh | yske koh | 5
+yuhinnnnnn | yh | 5
+yujingyj | yujing | 5
+yuszysf | yuszairy | 5
+zhideyap | zhideyap | 5
+zijieeeee | zijieeeee | 5
+zuxianchong | zu | 5
+zzzenov | zenbob | 5
+shotsbyseah | | 1

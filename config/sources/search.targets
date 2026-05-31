@@ -1,0 +1,13 @@
+# search.targets  -- file-authoritative search queries (Option A)
+# Each non-comment line is ONE full search query string (DuckDuckGo via ddgs).
+# Format:  query text | label | priority     (label+priority optional)
+# Blank lines and # comments ignored. Prefix a line with ! to disable it.
+# Edit this file then `docker restart unifiedcollector_collector` to apply.
+#
+# The old single "test query" placeholder is removed. Add your real queries
+# below -- e.g. brand monitoring, topic tracking, your own name, etc.
+# Examples (disabled -- enable by removing the leading !):
+
+!Bryan Seah photographer Singapore | self-monitor | 5
+!shotsbyseah | brand | 5
+!"The Prawn Organisation" | brand | 5

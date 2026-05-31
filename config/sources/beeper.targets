@@ -1,0 +1,7 @@
+# beeper.targets  -- file-authoritative target list (Option A)
+# Beeper: 'all' = every connected bridge.
+# Format:  target_id | Display Name | priority    (name+priority optional)
+# Blank lines and # comments ignored. Prefix a line with ! to disable it.
+# Edit this file then `docker restart unifiedcollector_collector` to apply.
+
+all | Beeper Desktop (all bridges) | 10

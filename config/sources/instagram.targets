@@ -1,0 +1,15 @@
+# instagram.targets  -- file-authoritative target list (Option A)
+# Instagram usernames. NOTE: instagram currently disabled on main (IP 429 cooldown).
+# Format:  target_id | Display Name | priority    (name+priority optional)
+# Blank lines and # comments ignored. Prefix a line with ! to disable it.
+# Edit this file then `docker restart unifiedcollector_collector` to apply.
+
+bryanseah234 | Bryan Seah | 10
+cchmsmediaclub | cchmsmediaclub | 10
+oopspwned | oopspwned | 10
+prawnproductions234 | prawnproductions234 | 10
+shotsbyseah234 | shotsbyseah234 | 10
+streets.of.singapore | streets.of.singapore | 3
+humansofny | humansofny | 1
+makrosnapz | makrosnapz | 1
+natgeo | natgeo | 1

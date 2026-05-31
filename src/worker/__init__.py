@@ -55,6 +55,17 @@ class WorkerService:
         self.pool = await get_pool()
         await self._init_db()
 
+        # File-based per-source config (Option A: files authoritative). Reads
+        # config/sources/<source>.targets + <source>.env and syncs them into the DB /
+        # process env BEFORE any collector launches, so an operator edits a text file
+        # + `docker restart` and the new targets/tunables take effect. No-op for any
+        # source without a config file. Never fatal -- a bad file logs + is skipped.
+        try:
+            from src.core.source_config import sync_source_configs
+            await sync_source_configs(self.pool)
+        except Exception:
+            logger.warning("source_config sync failed (non-fatal)", exc_info=True)
+
         # Warmup WSL2 network stack before launching collectors.
         # Without this, the first httpx request from any collector hits a kernel
         # D-state (uninterruptible sleep) that freezes the entire asyncio event loop.

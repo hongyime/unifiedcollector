@@ -1,0 +1,18 @@
+# youtube.targets  -- file-authoritative target list (Option A)
+# YouTube channel IDs (UC...). Use the channel ID, not the @handle.
+# Format:  channel_id | Display Name | priority    (name+priority optional)
+# Blank lines and # comments ignored. Prefix a line with ! to disable it.
+# Edit this file then `docker restart unifiedcollector_collector` to apply.
+#
+# NOTE: these 5 were DEMO/TEST channels (big public YouTubers), not your own.
+# Replace them with channels you actually want to collect. The line marked !
+# is a DEAD/DELETED channel (a typo of PewDiePie's ID) -- left disabled as a
+# reminder; delete it whenever.
+
+UC-lHJZR3Gqxm24_Vd_AJ5Yw | PewDiePie | 5
+UCsXVk37bltHxD1rDPwtNM8Q | Kurzgesagt - In a Nutshell | 5
+UCBJycsmduvYEL83R_U4JriQ | Marques Brownlee (MKBHD) | 5
+UCsBjURrPoezykLs9EqgamOA | Fireship | 5
+
+# DEAD channel (does not exist - YouTube API returns 0 items). Kept disabled:
+!UC-lHJ7Fjz2afzjHnshG7W-w | DEAD/typo of PewDiePie | 1

@@ -1,0 +1,66 @@
+# lemon8.targets  -- file-authoritative target list (Option A)
+# Lemon8 usernames.
+# Format:  target_id | Display Name | priority    (name+priority optional)
+# Blank lines and # comments ignored. Prefix a line with ! to disable it.
+# Edit this file then `docker restart unifiedcollector_collector` to apply.
+
+bryanseah | Lemon8 Profile | 10
+shotsbyseah | | 10
+prawnproductions | | 8
+makrosnapz | | 5
+streets.of.singapore | | 5
+0.0086sgd | | 1
+altarejos12 | | 1
+angel.koh0 | | 1
+annchong579 | | 1
+ashleyzhang7 | | 1
+asiannburpgirl | | 1
+avisayang2901 | | 1
+azxcvx1 | | 1
+becktodecember | | 1
+bodrexsin1504 | | 1
+cancerian86na | | 1
+carol_loh | | 1
+ccmon6 | | 1
+cheng.lin701 | | 1
+chrysobelle | | 1
+clovyng206 | | 1
+dlwlgus97 | | 1
+doumlai_35a | | 1
+eepergirl | | 1
+ewjl319 | | 1
+fazzboika | | 1
+gaiuszs | | 1
+hazel_yang_5200806 | | 1
+huanniballecter | | 1
+huilingheofficial | | 1
+huuthuong0 | | 1
+icysohll | | 1
+idealied | | 1
+irinedesilva | | 1
+janexinyue | | 1
+jeanchen06 | | 1
+kajirrrrrreennn19 | | 1
+koi.beans | | 1
+_k_yn | | 1
+linnnn731 | | 1
+lolly_12_12 | | 1
+messy.eats | | 1
+moonandpastel | | 1
+mozozozolu | | 1
+nge2874 | | 1
+ricklee592 | | 1
+rikkyoren | | 1
+snoopydoopydooz | | 1
+ssarahbarah | | 1
+supermarket.date | | 1
+supermelvinme | | 1
+thatgooddeal | | 1
+thivya_0307 | | 1
+tinzki.merino | | 1
+vemasse_ | | 1
+wisefox06aj12 | | 1
+wok_love | | 1
+xx_jun10_xx | | 1
+yinyin59544 | | 1
+yuareadumpling | | 1
