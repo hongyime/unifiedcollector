@@ -26,6 +26,18 @@ class WorkerService:
         self.watchdog_interval = 30
         self.max_restarts = 5
         self._dlq = None
+        # AUTO-HEAL: per-source liveness heartbeat. _heartbeat[source] is the
+        # monotonic time of the last observed progress (cycle start/finish). The
+        # watchdog cancels+relaunches any task whose heartbeat is older than
+        # hang_timeout even though the task is NOT done() -- this is the ONLY thing
+        # that recovers a HUNG collector (frozen inside collector.run with no
+        # exception). Crash-restart already handled the exception case; this closes
+        # the silent-hang gap that froze tiktok/youtube/whatsapp.
+        self._heartbeat: dict[str, float] = {}
+        # A hung cycle is one that hasn't beat in this many seconds. Generous default
+        # (collectors with big subprocess downloads can legitimately run minutes);
+        # override per-deployment via COLLECTOR_HANG_TIMEOUT_SECONDS.
+        self.hang_timeout = float(os.getenv("COLLECTOR_HANG_TIMEOUT_SECONDS", "1800"))
 
     async def start(self, sources: list[str]):
         logger.info("Worker service starting with sources: %s", sources)
@@ -172,6 +184,7 @@ class WorkerService:
 
         while not self._stop.is_set():
             try:
+                self._heartbeat[source] = time.monotonic()
                 targets = await self._load_targets(source)
                 if not targets:
                     logger.debug("No targets for %s, sleeping 60s", source)
@@ -182,7 +195,9 @@ class WorkerService:
                     continue
 
                 logger.info("Running %s with %d targets", source, len(targets))
+                self._heartbeat[source] = time.monotonic()
                 await collector.run(targets)
+                self._heartbeat[source] = time.monotonic()
                 self._crash_counts[source] = 0
 
                 try:
@@ -245,6 +260,39 @@ class WorkerService:
                     crashes = self._crash_counts.get(source, 0)
                     if crashes < self.max_restarts:
                         self._launch(source)
+                    continue
+
+                # AUTO-HEAL hung tasks: a task that is NOT done but hasn't beat its
+                # heartbeat within hang_timeout is wedged (frozen inside
+                # collector.run with no exception). Cancel + relaunch it -- this is
+                # the recovery path that crash-restart can't reach. Without this a
+                # silent hang (lost SIGCHLD, stuck socket, deadlocked broker wait)
+                # leaves the source dead forever with zero auto-recovery.
+                last = self._heartbeat.get(source)
+                if last is None:
+                    continue
+                stalled = time.monotonic() - last
+                if stalled > self.hang_timeout:
+                    crashes = self._crash_counts.get(source, 0) + 1
+                    self._crash_counts[source] = crashes
+                    logger.error(
+                        "Watchdog: %s HUNG (no progress for %.0fs > %.0fs limit) "
+                        "(%d/%d) -- cancelling; relaunch on next pass",
+                        source, stalled, self.hang_timeout, crashes, self.max_restarts,
+                    )
+                    # Cancel now; the task won't be .done() until the cancellation
+                    # propagates on a later loop tick, so we do NOT relaunch inline
+                    # (_launch would no-op on the not-yet-done task). The next
+                    # watchdog pass sees it done() and relaunches via the branch
+                    # above -- unless we've hit the ceiling, in which case mark dead.
+                    task.cancel()
+                    # bump heartbeat so we don't re-trigger every pass while it drains
+                    self._heartbeat[source] = time.monotonic()
+                    if crashes >= self.max_restarts:
+                        logger.error("Watchdog: %s exceeded max restarts after hangs, giving up", source)
+                        await self._mark_source_dead(source, f"hung > {self.hang_timeout:.0f}s", crashes)
+                        # prevent the done-branch from relaunching a dead source
+                        self._crash_counts[source] = self.max_restarts
 
     async def _health_reporter(self):
         while not self._stop.is_set():
