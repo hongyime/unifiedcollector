@@ -66,6 +66,7 @@ from typing import AsyncIterator, Optional
 import httpx
 
 from src.core.base_collector import BaseCollector
+from src.collectors.tiktok.parse import safe_int as _parse_safe_int, to_dt as _parse_to_dt
 from src.core.file_naming import sanitize_name
 
 # Wave 0 modules — imported lazily where heavy or where the module may be
@@ -458,25 +459,12 @@ class TiktokCollector(BaseCollector):
 
     @staticmethod
     def _safe_int(value, default: int = 0) -> int:
-        try:
-            if value is None or value == "":
-                return default
-            return int(value)
-        except (ValueError, TypeError):
-            return default
+        return _parse_safe_int(value, default)
 
     @staticmethod
     def _to_dt(value):
         """Coerce a unix timestamp (int or str) to aware datetime; None on failure."""
-        if value is None or value == "":
-            return None
-        try:
-            ts = int(value)
-            if ts <= 0:
-                return None
-            return datetime.fromtimestamp(ts, tz=timezone.utc)
-        except (ValueError, TypeError, OSError):
-            return None
+        return _parse_to_dt(value)
 
     async def _upsert_profile(self, author: dict, author_stats: dict | None = None) -> str | None:
         """Upsert a tiktok_profiles row from a sidecar's author/authorStats blocks.
