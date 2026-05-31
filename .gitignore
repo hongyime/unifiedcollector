@@ -66,3 +66,6 @@ fix_*.cmd
 URGENT_*.md
 migrations/_tmp*.sql
 backups/
+
+# WhatsApp Baileys session credentials - never commit
+whatsappcollector/services/wa-client-ts/auth_info/
