@@ -16,9 +16,11 @@ if (-not (Test-Path $batch)) {
     throw "backup.bat not found at $batch"
 }
 
-# Action: run the batch, append stdout+stderr to a log.
-$action = New-ScheduledTaskAction -Execute "cmd.exe" `
-    -Argument "/c `"$batch`" >> `"$logFile`" 2>&1"
+# Action: run the batch directly. The batch writes its OWN log (backups\backup_task.log).
+# We deliberately do NOT use a shell redirect in the action argument -- the nested-quote
+# form ( /c "bat" >> "log" 2>&1 ) was mangled by Task Scheduler, making cmd exit 1 before
+# the batch ran. Calling the .bat by absolute path with no redirect is robust.
+$action = New-ScheduledTaskAction -Execute $batch
 
 # Daily at 03:30.
 $trigger = New-ScheduledTaskTrigger -Daily -At 3:30AM
