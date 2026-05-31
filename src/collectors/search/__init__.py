@@ -90,6 +90,11 @@ from urllib.parse import quote_plus, urljoin, urlparse
 import httpx
 
 from src.core.base_collector import BaseCollector
+from src.collectors.search.parse import (
+    is_content_url as _parse_is_content_url,
+    CONTENT_EXTENSIONS as _parse_CONTENT_EXTENSIONS,
+    ICON_KEYWORDS as _parse_ICON_KEYWORDS,
+)
 from src.core.search_cache import SearchCache
 
 logger = logging.getLogger(__name__)
@@ -99,12 +104,10 @@ logger = logging.getLogger(__name__)
 # Constants pulled from searchtoolkit/src/app.py
 # ---------------------------------------------------------------------------
 
-CONTENT_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".jfif", ".pdf"}
+CONTENT_EXTENSIONS = _parse_CONTENT_EXTENSIONS
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".jfif"}
-ICON_KEYWORDS = {
-    "icon", "logo", "favicon", "sprite", "thumb", "avatar", "badge",
-    "button", "arrow", "spacer", "pixel", "tracking", "analytics",
-}
+
+ICON_KEYWORDS = _parse_ICON_KEYWORDS
 SKIP_EXTENSIONS = {".svg", ".webp", ".ico", ".cur", ".gif"}
 
 DEFAULT_DDG_DOMAIN = "https://duckduckgo.com"
@@ -678,15 +681,7 @@ class SearchCollector(BaseCollector):
     @staticmethod
     def _is_content_url(url: str) -> bool:
         """Filter URLs to plausible image/PDF assets, skipping icons/sprites."""
-        url_lower = url.lower()
-        path = urlparse(url_lower).path
-        ext = os.path.splitext(path)[1]
-        if ext not in CONTENT_EXTENSIONS:
-            return False
-        for kw in ICON_KEYWORDS:
-            if kw in path:
-                return False
-        return True
+        return _parse_is_content_url(url)
 
     async def _spider_page(
         self,
