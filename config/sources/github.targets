@@ -1,23 +1,9 @@
 # github.targets  -- file-authoritative target list (Option A)
-# GitHub users (username) or repos (owner/repo). Numeric IDs are GitHub user IDs.
-# Format:  target_id | Display Name | priority    (name+priority optional)
-# Blank lines and # comments ignored. Prefix a line with ! to disable it.
-# Edit this file then `docker restart unifiedcollector_collector` to apply.
+# GitHub users (username) or repos (owner/repo). The FAMOUS-FILTER
+# (GITHUB_FAMOUS_STAR_CAP in github.env, 1000) OVERRIDES this seed: repos/users
+# above the star cap are skipped at collect time. Famous demo repos
+# (pytorch/pytorch, huggingface/transformers, torvalds, ...) removed.
+# Format:  target_id | Display Name | priority
+# Edit + restart to apply.
 
 bryanseah234 | bryanseah234 | 10
-huggingface/transformers | huggingface/transformers | 5
-pytorch/pytorch | pytorch/pytorch | 5
-torvalds | torvalds | 5
-gaearon | gaearon | 4
-ggerganov/llama.cpp | ggerganov/llama.cpp | 4
-NousResearch/Hermes-Function-Calling | NousResearch/Hermes-Function-Calling | 4
-sindresorhus | sindresorhus | 4
-tj | tj | 4
-elliotwutingfeng | elliotwutingfeng | 3
-20109683 | | 1
-21003710 | | 1
-25254 | | 1
-25720743 | | 1
-28691727 | | 1
-5151193 | | 1
-76832850 | | 1

@@ -1,7 +1,10 @@
 # strava.targets  -- file-authoritative target list (Option A)
-# Strava: 'me' = the authenticated athlete.
-# Format:  target_id | Display Name | priority    (name+priority optional)
-# Blank lines and # comments ignored. Prefix a line with ! to disable it.
-# Edit this file then `docker restart unifiedcollector_collector` to apply.
+# Strava: 'me' = authenticated athlete; 'feed' = the For You / following activity
+# feed. The following/followers roster + activity spider (everyone with media or
+# map data, famous or not -- NO famous filter for strava per Bryan) is driven by
+# STRAVA_FOLLOW_SPIDER in strava.env, not by target lines.
+# Format:  target_id | Display Name | priority
+# Edit + restart to apply.
 
-me | Self | 0
+me | Self | 10
+feed | For You / Following Feed | 8

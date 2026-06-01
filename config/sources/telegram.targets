@@ -1,28 +1,12 @@
 # telegram.targets  -- file-authoritative target list (Option A)
-# Telegram channel @handles or numeric chat IDs.
-# Format:  target_id | Display Name | priority    (name+priority optional)
-# Blank lines and # comments ignored. Prefix a line with ! to disable it.
-# Edit this file then `docker restart unifiedcollector_collector` to apply.
+# Telegram: connected ACCOUNTS' dialogs are auto-discovered by collect_dialogs()
+# (TELEGRAM_AUTO_BACKFILL_NEW_ACCOUNTS=true) and queued via the spider queue --
+# you do NOT list public channels here. This file is only for EXTRA explicit
+# high-priority targets (e.g. your own channel). The predefined famous channels
+# (@CoinDesk, @durov, @SpaceX, @python, ...) were demo noise and are removed:
+# none were Bryan's subscriptions. Dialog scraping of your 2+ connected accounts
+# is automatic.
+# Format:  target_id | Display Name | priority
+# Edit + restart to apply.
 
 shotsbyseah234 | Shots By Seah | 10
-durov | Pavel Durov | 5
-telegram | Telegram News | 5
-bellingcat | Bellingcat | 4
-OSINTtechniques | OSINT BY TGN | 4
-tginfo | Telegram Info | 4
-TheEconomist | TheEconomist | 4
-CoinDesk | CoinDesk | 3
-geopolitics_live | Geopolitics Live | 3
-HackerNews | tech2 | 3
-ProductHunt | Venture Capital | 3
-python | Python | 3
-PythonHub | PythonHub | 3
-SpaceX | SpaceX | 3
-wired | Wired | 3
-1003307527 | | 1
-1005640892 | | 1
-1006503122 | | 1
-1014899447 | | 1
-1110242614 | | 1
-1127820109 | | 1
-1340151382 | | 1
