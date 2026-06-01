@@ -68,4 +68,10 @@ migrations/_tmp*.sql
 backups/
 
 # WhatsApp Baileys session credentials - never commit
-whatsappcollector/services/wa-client-ts/auth_info/
+# (sessions now consolidated under sessions/whatsapp/ alongside other platforms)
+sessions/whatsapp/
+sessions/*.session
+# stray standalone-project copies that must never be re-added to the repo root
+/whatsappcollector/
+/whatsapp_session/
+/telegramcollector/
