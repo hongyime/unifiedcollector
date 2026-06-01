@@ -1,13 +1,163 @@
-# search.targets  -- file-authoritative search queries (Option A)
-# Each non-comment line is ONE full search query string (DuckDuckGo via ddgs).
-# Format:  query text | label | priority     (label+priority optional)
-# Blank lines and # comments ignored. Prefix a line with ! to disable it.
-# Edit this file then `docker restart unifiedcollector_collector` to apply.
-#
-# The old single "test query" placeholder is removed. Add your real queries
-# below -- e.g. brand monitoring, topic tracking, your own name, etc.
-# Examples (disabled -- enable by removing the leading !):
+# search.targets -- file-authoritative search query list (Option A)
+# Source: search collector (ddgs-backed). One query per line.
+# Blank lines and # comments ignored. Prefix a line with ! to disable.
+# Edit this file then restart the collector to apply.
+# Yearbook / OSINT dork set provided by Bryan 2026-06-01.
 
-!Bryan Seah photographer Singapore | self-monitor | 5
-!shotsbyseah | brand | 5
-!"The Prawn Organisation" | brand | 5
+admiralty secondary school yearbook
+ahmad ibrahim secondary school yearbook
+anderson secondary school yearbook
+ang mo kio secondary school yearbook
+anglican high school singapore yearbook
+anglo chinese school yearbook
+bartley secondary school yearbook
+beatty secondary school yearbook
+bedok green secondary school yearbook
+bedok south secondary school yearbook
+bedok view secondary school yearbook
+boon lay secondary school yearbook
+bowen secondary school yearbook
+braddell secondary school yearbook
+broadrick secondary school yearbook
+bukit batok secondary school yearbook
+bukit merah secondary school yearbook
+bukit panjang government high school yearbook
+bukit view secondary school yearbook
+canberra secondary school yearbook
+catholic high school singapore yearbook
+cedar girls secondary school yearbook
+chij saint nicholas girls school yearbook
+christ church secondary school yearbook
+chua chu kang secondary school yearbook
+chung cheng high school main yearbook
+chung cheng high school yishun yearbook
+clementi town secondary school yearbook
+commonwealth secondary school yearbook
+compassvale secondary school yearbook
+crescent girls school yearbook
+crest secondary school yearbook
+damai secondary school yearbook
+deyi secondary school yearbook
+dunearn secondary school yearbook
+dunman high school yearbook
+dunman secondary school yearbook
+east spring secondary school yearbook
+edgefield secondary school yearbook
+evergreen secondary school yearbook
+fairfield methodist schools yearbook
+fajar secondary school yearbook
+fuchun secondary school yearbook
+fuhua secondary school yearbook
+gan eng seng school yearbook
+geylang methodist school secondary yearbook
+greendale secondary school yearbook
+greenridge secondary school yearbook
+guangyang secondary school yearbook
+hai sing catholic school yearbook
+hillgrove secondary school yearbook
+holy innocents high school yearbook
+hua yi secondary school yearbook
+junyuan secondary school yearbook
+jurong secondary school yearbook
+jurongville secondary school yearbook
+juying secondary school yearbook
+kranji secondary school yearbook
+kuo chuan presbyterian secondary school yearbook
+loyang view secondary school yearbook
+manjusri secondary school yearbook
+maris stella high school yearbook
+marsiling secondary school yearbook
+mayflower secondary school yearbook
+meridian secondary school yearbook
+methodist girls school singapore yearbook
+montfort secondary school yearbook
+nan chiau high school yearbook
+nan hua high school yearbook
+nanyang girls high school yearbook
+naval base secondary school yearbook
+new town secondary school yearbook
+ngee ann secondary school yearbook
+north view secondary school yearbook
+northbrooks secondary school yearbook
+nus high school of math and science yearbook
+orchid park secondary school yearbook
+outram secondary school yearbook
+pasir ris secondary school yearbook
+paya lebar methodist girls school secondary yearbook
+pei hwa secondary school yearbook
+peirce secondary school yearbook
+pioneer secondary school yearbook
+presbyterian high school yearbook
+queenstown secondary school yearbook
+queensway secondary school yearbook
+raffles girls school secondary yearbook
+river valley high school singapore yearbook
+riverside secondary school singapore yearbook
+saint andrew s secondary school yearbook
+saint anthony s canossian secondary school yearbook
+saint patrick s school singapore yearbook
+san yu adventist school yearbook
+school of science and technology singapore yearbook
+school of the arts singapore yearbook
+sembawang secondary school yearbook
+sengkang secondary school yearbook
+serangoon garden secondary school yearbook
+serangoon secondary school yearbook
+singapore chinese girls school yearbook
+singapore sports school yearbook
+sji international school yearbook
+springfield secondary school yearbook
+st gabriel s secondary school yearbook
+st hilda s secondary school yearbook
+st margaret s secondary school yearbook
+swiss cottage secondary school yearbook
+tampines secondary school yearbook
+tanglin secondary school yearbook
+tanjong katong girls school yearbook
+tanjong katong secondary school yearbook
+teck whye secondary school yearbook
+temasek secondary school yearbook
+the chinese high school singapore yearbook
+tiong bahru secondary school yearbook
+victoria school yearbook
+west spring secondary school yearbook
+westwood secondary school yearbook
+whampoa secondary school yearbook
+whitley secondary school yearbook
+xinmin secondary school yearbook
+yio chu kang secondary school yearbook
+yishun secondary school yearbook
+yishun town secondary school yearbook
+yuan ching secondary school yearbook
+yuhua secondary school yearbook
+yusof ishak secondary school yearbook
+yuying secondary school yearbook
+zhenghua secondary school yearbook
+zhonghua secondary school class photo
+site:credsverse.com "SMU .Hack"
+site:sites.google.com "moe.edu.sg"
+site:online.fliphtml5.com "secondary school"
+secondary school yearbook
+jc yearbook
+site:.edu.sg inurl:wp-content/uploads
+site:.moe.edu.sg filetype:jpg
+site:.edu.sg filetype:png "graduation"
+intitle:"Yearbook" filetype:pdf
+site:online.fliphtml5.com "Secondary School"
+site:fliphtml5.com "Yearbook"
+site:issuu.com "Secondary School" "Yearbook"
+site:sharepoint.com "Yearbook"
+site:drive.google.com "Secondary School" "Yearbook"
+site:drive.google.com filetype:pdf "Class of"
+site:docs.google.com "Yearbook"
+site:*.moe.edu.sg filetype:pdf
+site:.moe.edu.sg filetype:pdf "yearbook"
+site:.edu.sg filetype:pdf "yearbook"
+site:.edu.sg "Secondary School" filetype:pdf
+filetype:pdf "Graduation Ceremony"
+filetype:pdf "Speech Day" "Secondary School"
+filetype:pdf "Secondary School" "Yearbook"
+filetype:pdf "Junior College" "Yearbook"
+filetype:pdf "Class of 2024" "Secondary"
+filetype:pdf site:moe.edu.sg
+filetype:pdf "SMU .Hack"
