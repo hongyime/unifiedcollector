@@ -138,6 +138,40 @@ export const api = {
   },
   waLinkStats: () => get<LinkStats[]>("/whatsapp/links/stats"),
 
+  // WhatsApp bridge QR linking (auto-refresh on the client)
+  waQr: (bridge: 1 | 2) =>
+    get<{ bridge: string; status: string; qr: string; ready: boolean; error: string | null }>(
+      `/whatsapp/qr/${bridge}`
+    ),
+
+  // Telegram collection stats
+  telegramStats: () =>
+    get<{
+      totals: Record<string, number>;
+      recent: Record<string, number>;
+      top_chats: { title: string | null; username: string | null; messages: number }[];
+    }>("/api/telegram/stats"),
+
+  // Telegram accounts
+  telegramAccounts: () =>
+    get<
+      {
+        name: string;
+        phone: string | null;
+        status: string;
+        owner_bot: string | null;
+        created_at: string | null;
+        last_connected_at: string | null;
+        last_error: string | null;
+      }[]
+    >("/api/telegram/accounts"),
+  telegramAccountEnable: (name: string) =>
+    post<{ status: string }>(`/api/telegram/accounts/${name}/enable`, {}),
+  telegramAccountDisable: (name: string) =>
+    post<{ status: string }>(`/api/telegram/accounts/${name}/disable`, {}),
+
+
+
   login: (username: string, password: string) =>
     post<AuthResponse>("/auth/login", { username, password }),
   me: () => get<{ username: string; role: string }>("/auth/me"),

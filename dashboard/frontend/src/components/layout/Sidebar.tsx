@@ -16,6 +16,8 @@ import {
   ImageIcon,
   Bike,
   MessageCircle,
+  QrCode,
+  BarChart3,
 } from "lucide-react";
 
 const groups = [
@@ -42,6 +44,7 @@ const groups = [
     items: [
       { to: "/whatsapp/users", label: "Users", icon: Users },
       { to: "/whatsapp/links", label: "Links", icon: Link2 },
+      { to: "/whatsapp/link", label: "Link Device", icon: QrCode },
     ],
   },
   {
@@ -54,6 +57,7 @@ const groups = [
     label: "Telegram",
     items: [
       { to: "/telegram/accounts", label: "Accounts", icon: MessageCircle },
+      { to: "/telegram/stats", label: "Stats", icon: BarChart3 },
     ],
   },
   {

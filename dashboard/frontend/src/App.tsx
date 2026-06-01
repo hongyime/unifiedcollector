@@ -17,9 +17,11 @@ import { GraphPage } from "./features/graph/GraphPage";
 import { MediaBrowserPage } from "./features/media/MediaBrowserPage";
 import { UsersPage } from "./features/whatsapp/UsersPage";
 import { LinksPage } from "./features/whatsapp/LinksPage";
+import { WhatsAppLinkPage } from "./features/whatsapp/WhatsAppLinkPage";
 import { StravaFeedPage } from "./features/strava/StravaFeedPage";
 import { LoginPage } from "./features/auth/LoginPage";
 import { TelegramAccountsPage } from "./features/telegram/TelegramAccountsPage";
+import { TelegramStatsPage } from "./features/telegram/TelegramStatsPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -47,8 +49,10 @@ const router = createBrowserRouter([
       { path: "graph", element: <GraphPage /> },
       { path: "whatsapp/users", element: <UsersPage /> },
       { path: "whatsapp/links", element: <LinksPage /> },
+      { path: "whatsapp/link", element: <WhatsAppLinkPage /> },
       { path: "strava/feed", element: <StravaFeedPage /> },
       { path: "telegram/accounts", element: <TelegramAccountsPage /> },
+      { path: "telegram/stats", element: <TelegramStatsPage /> },
       { path: "dlq", element: <DLQPage /> },
       { path: "health", element: <HealthPage /> },
       { path: "settings", element: <SettingsPage /> },

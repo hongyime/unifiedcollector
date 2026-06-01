@@ -44,8 +44,16 @@ security = HTTPBearer(auto_error=False)
 
 _ROLE_RANK = {"viewer": 0, "operator": 1, "admin": 2}
 
+# Localhost convenience: when DASHBOARD_AUTH_DISABLED is truthy, every request is
+# treated as an authenticated admin. Intended for single-user localhost-only
+# deployments where prompting for a bearer token is pure friction. Leave UNSET
+# (or false) for any network-exposed deployment -- the JWT flow stays fully intact.
+_AUTH_DISABLED = os.getenv("DASHBOARD_AUTH_DISABLED", "").lower() in ("1", "true", "yes", "on")
+
 
 async def get_current_user(creds: HTTPAuthorizationCredentials = Depends(security)) -> dict:
+    if _AUTH_DISABLED:
+        return {"username": "localhost", "role": "admin"}
     if creds is None or not creds.credentials:
         raise HTTPException(status_code=401, detail="Missing bearer token")
     try:
@@ -1263,6 +1271,57 @@ async def enable_telegram_account(
         await conn.execute("SELECT pg_notify('telegram_account_added', $1)", name)
 
     return {"status": "enabled", "name": name}
+
+
+@app.get("/api/telegram/stats")
+async def telegram_stats(_user: dict = Depends(require_role("viewer"))):
+    """Aggregate Telegram collection stats for the dashboard Telegram section.
+
+    Returns totals (messages, users, chats, reactions), top chats by message
+    count, and recent ingest activity, so the UI can show "users, links" and
+    overall health at a glance. Each count is guarded so a missing table never
+    500s the whole panel.
+    """
+    pool = await get_pool()
+    out: dict = {"totals": {}, "top_chats": [], "recent": {}}
+    async with pool.acquire() as conn:
+        async def _count(sql: str) -> int:
+            try:
+                v = await conn.fetchval(sql)
+                return int(v or 0)
+            except Exception:
+                return 0
+
+        out["totals"] = {
+            "messages": await _count("SELECT COUNT(*) FROM telegram_messages"),
+            "users": await _count("SELECT COUNT(*) FROM telegram_users"),
+            "chats": await _count("SELECT COUNT(*) FROM telegram_chats"),
+            "reactions": await _count("SELECT COUNT(*) FROM telegram_reactions"),
+            "accounts": await _count("SELECT COUNT(*) FROM telegram_user_accounts"),
+            "spider_queue": await _count("SELECT COUNT(*) FROM telegram_spider_queue"),
+        }
+        out["recent"] = {
+            "messages_24h": await _count(
+                "SELECT COUNT(*) FROM telegram_messages "
+                "WHERE collected_at > now() - interval '24 hours'"
+            ),
+            "messages_1h": await _count(
+                "SELECT COUNT(*) FROM telegram_messages "
+                "WHERE collected_at > now() - interval '1 hour'"
+            ),
+        }
+        try:
+            rows = await conn.fetch(
+                "SELECT c.title, c.username, COUNT(m.*) AS messages "
+                "FROM telegram_chats c "
+                "LEFT JOIN telegram_messages m ON m.chat_id = c.id "
+                "GROUP BY c.id, c.title, c.username "
+                "ORDER BY messages DESC LIMIT 10"
+            )
+            out["top_chats"] = [dict(r) for r in rows]
+        except Exception:
+            out["top_chats"] = []
+    return out
 
 
 @app.get("/whatsapp/qr/{bridge}")
