@@ -87,22 +87,22 @@ export interface GraphData {
 }
 
 export interface WhatsAppUser {
-  jid: string;
-  push_name: string | null;
-  display_name: string | null;
-  phone_number: string | null;
-  is_business: boolean;
-  message_count: number;
-  last_seen: string | null;
+  platform_user_id: string;
+  name: string | null;
+  pushname: string | null;
+  status: string | null;
+  about: string | null;
+  photo_url: string | null;
+  collected_at: string | null;
+  updated_at: string | null;
 }
 
 export interface UserHistoryEntry {
-  id: number;
-  user_jid: string;
-  field_name: string;
-  old_value: string;
-  new_value: string;
-  changed_at: string;
+  id: string;
+  content: string | null;
+  caption: string | null;
+  message_type: string | null;
+  collected_at: string;
 }
 
 export interface DiscoveredLink {

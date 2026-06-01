@@ -664,15 +664,15 @@ async def list_wa_users(search: str | None = None, limit: int = 50,
         if search:
             esc = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             rows = await conn.fetch(
-                "SELECT * FROM wa_user_profiles "
-                "WHERE jid ILIKE $1 ESCAPE '\\' OR push_name ILIKE $1 ESCAPE '\\' "
-                "OR display_name ILIKE $1 ESCAPE '\\' "
-                "ORDER BY last_seen DESC NULLS LAST LIMIT $2",
+                "SELECT * FROM whatsapp_users "
+                "WHERE platform_user_id ILIKE $1 ESCAPE '\\' OR name ILIKE $1 ESCAPE '\\' "
+                "OR pushname ILIKE $1 ESCAPE '\\' "
+                "ORDER BY updated_at DESC NULLS LAST LIMIT $2",
                 f"%{esc}%", limit,
             )
         else:
             rows = await conn.fetch(
-                "SELECT * FROM wa_user_profiles ORDER BY last_seen DESC NULLS LAST LIMIT $1",
+                "SELECT * FROM whatsapp_users ORDER BY updated_at DESC NULLS LAST LIMIT $1",
                 limit,
             )
     return [dict(r) for r in rows]
@@ -681,11 +681,19 @@ async def list_wa_users(search: str | None = None, limit: int = 50,
 @app.get("/whatsapp/users/{jid}/history")
 async def wa_user_history(jid: str, limit: int = 100,
                            _user: dict = Depends(require_role("viewer"))):
+    """Message history for one WhatsApp user (by platform_user_id / JID).
+
+    There is no separate wa_user_history table; we return the user's recent
+    messages joined through whatsapp_users.id -> whatsapp_messages.sender_id.
+    """
     limit = max(1, min(limit, 1000))
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT * FROM wa_user_history WHERE user_jid = $1 ORDER BY changed_at DESC LIMIT $2",
+            "SELECT m.* FROM whatsapp_messages m "
+            "JOIN whatsapp_users u ON u.id = m.sender_id "
+            "WHERE u.platform_user_id = $1 "
+            "ORDER BY m.collected_at DESC LIMIT $2",
             jid, limit,
         )
     return [dict(r) for r in rows]
@@ -713,6 +721,10 @@ async def list_wa_links(link_type: str | None = None, status: str | None = None,
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
 
     async with pool.acquire() as conn:
+        # wa_discovered_links is an optional feature table; return [] if absent
+        # rather than surfacing a 500 for a table that was never created.
+        if await conn.fetchval("SELECT to_regclass('wa_discovered_links')") is None:
+            return []
         rows = await conn.fetch(
             f"SELECT * FROM wa_discovered_links {where} ORDER BY discovered_at DESC LIMIT ${idx}",
             *params, limit,
@@ -724,6 +736,8 @@ async def list_wa_links(link_type: str | None = None, status: str | None = None,
 async def wa_link_stats(_user: dict = Depends(require_role("viewer"))):
     pool = await get_pool()
     async with pool.acquire() as conn:
+        if await conn.fetchval("SELECT to_regclass('wa_discovered_links')") is None:
+            return []
         rows = await conn.fetch(
             "SELECT link_type, status, COUNT(*) AS count "
             "FROM wa_discovered_links GROUP BY link_type, status ORDER BY count DESC"
