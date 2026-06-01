@@ -24,6 +24,12 @@ def _make_service():
     svc.max_restarts = 5
     svc.hang_timeout = 0.5               # tiny hang window for the test
     svc._dlq = None
+    # zero-progress auto-heal attrs (third failure mode)
+    svc._collectors = {}
+    svc._progress_baseline = {}
+    svc._zero_progress_streak = {}
+    svc.zero_progress_limit = 5
+    svc.zero_progress_hard_limit = 12
     return svc
 
 
@@ -84,5 +90,92 @@ async def _run_test():
     print("PASS: watchdog detects hung collectors and escalates to dead")
 
 
+async def _run_zero_progress_soft_test():
+    """Alive task (fresh heartbeat, never hangs) with a zero-progress streak at
+    the soft limit must be cancelled for a fresh-collector relaunch."""
+    svc = _make_service()
+    relaunched = {"count": 0}
+
+    async def alive_source():
+        # Keeps beating its heartbeat forever -> never trips hang detection.
+        while True:
+            svc._heartbeat["z"] = time.monotonic()
+            await asyncio.sleep(0.05)
+
+    def fake_launch(source, startup_delay=0.0):
+        relaunched["count"] += 1
+        svc._zero_progress_streak[source] = 0
+        svc._tasks[source] = asyncio.create_task(alive_source())
+
+    svc._launch = fake_launch
+
+    async def fake_dead(source, reason, count):
+        svc._dead_reason = reason
+    svc._mark_source_dead = fake_dead
+
+    svc._tasks["z"] = asyncio.create_task(alive_source())
+    svc._crash_counts["z"] = 0
+    # seed a streak AT the soft limit; heartbeat is fresh (not hung)
+    svc._zero_progress_streak["z"] = svc.zero_progress_limit
+    await asyncio.sleep(0.05)
+
+    wd = asyncio.create_task(svc._watchdog_loop())
+    await asyncio.sleep(2.0)
+    svc._stop.set()
+    wd.cancel()
+    try:
+        await wd
+    except asyncio.CancelledError:
+        pass
+    for t in svc._tasks.values():
+        t.cancel()
+
+    print(f"soft relaunches: {relaunched['count']}, dead: {getattr(svc,'_dead_reason',None)}")
+    # The soft tier cancels the task; the done-branch relaunches it next pass.
+    assert relaunched["count"] >= 1, "zero-progress soft tier never relaunched!"
+    print("PASS: zero-progress soft tier cancels + relaunches an alive wedged source")
+
+
+async def _run_zero_progress_hard_test():
+    """Streak at the hard limit must mark the source dead (soft relaunch failed)."""
+    svc = _make_service()
+
+    async def alive_source():
+        while True:
+            svc._heartbeat["h"] = time.monotonic()
+            await asyncio.sleep(0.05)
+
+    def fake_launch(source, startup_delay=0.0):
+        svc._tasks[source] = asyncio.create_task(alive_source())
+    svc._launch = fake_launch
+
+    async def fake_dead(source, reason, count):
+        svc._dead_reason = reason
+    svc._mark_source_dead = fake_dead
+
+    svc._tasks["h"] = asyncio.create_task(alive_source())
+    svc._crash_counts["h"] = 0
+    svc._zero_progress_streak["h"] = svc.zero_progress_hard_limit
+    await asyncio.sleep(0.05)
+
+    wd = asyncio.create_task(svc._watchdog_loop())
+    await asyncio.sleep(1.0)
+    svc._stop.set()
+    wd.cancel()
+    try:
+        await wd
+    except asyncio.CancelledError:
+        pass
+    for t in svc._tasks.values():
+        t.cancel()
+
+    print(f"hard dead reason: {getattr(svc,'_dead_reason',None)}")
+    assert getattr(svc, "_dead_reason", None) is not None, "hard tier never marked dead!"
+    assert "zero-progress" in svc._dead_reason
+    print("PASS: zero-progress hard tier marks the source dead")
+
+
 if __name__ == "__main__":
     asyncio.run(_run_test())
+    asyncio.run(_run_zero_progress_soft_test())
+    asyncio.run(_run_zero_progress_hard_test())

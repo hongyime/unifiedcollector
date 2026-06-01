@@ -42,6 +42,16 @@ class BaseCollector(ABC):
         self.user_agents = UserAgentPool()
         self.account_pool = None
         self._known_ids: set[str] = set()
+        # Progress signal for the worker's zero-progress watchdog. Counts items
+        # actually persisted (real INSERT into media_items, not dedup-skips).
+        # The worker samples this before/after each collect cycle; a cycle that
+        # had targets but did not advance this counter is a "zero-progress" cycle.
+        self._progress_count: int = 0
+
+    @property
+    def progress_count(self) -> int:
+        """Monotonic count of items actually persisted since process start."""
+        return self._progress_count
 
     def set_pool(self, pool):
         self.pool = pool
@@ -236,6 +246,7 @@ class BaseCollector(ABC):
                     filename, file_path, file_size, width, height,
                     sha256, source_url, json.dumps(metadata, default=str) if metadata is not None else None,
                 )
+            self._progress_count += 1
             return True
         except Exception as e:
             # Use the typed exception when available so we don't accidentally

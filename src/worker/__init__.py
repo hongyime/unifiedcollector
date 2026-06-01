@@ -38,6 +38,21 @@ class WorkerService:
         # (collectors with big subprocess downloads can legitimately run minutes);
         # override per-deployment via COLLECTOR_HANG_TIMEOUT_SECONDS.
         self.hang_timeout = float(os.getenv("COLLECTOR_HANG_TIMEOUT_SECONDS", "1800"))
+        # ZERO-PROGRESS AUTO-HEAL (the third failure mode). A cycle can finish
+        # cleanly and quickly yet persist NOTHING because the wedge is in the
+        # DB/session layer (write stall, SQLite lock, exhausted pool). Heartbeat
+        # stays fresh (so hang-detection never fires) and no exception is raised
+        # (so crash-restart never fires) -- the source loops finish->relaunch
+        # forever producing zero output, invisible to both other paths. We track
+        # a per-source streak of cycles that HAD targets but did not advance the
+        # collector's media_items progress counter. At the soft limit we relaunch
+        # with a FRESH collector (clears wedged pool/session handles); at the hard
+        # limit we mark the source dead (alertable).
+        self._collectors: dict[str, object] = {}
+        self._progress_baseline: dict[str, int] = {}
+        self._zero_progress_streak: dict[str, int] = {}
+        self.zero_progress_limit = int(os.getenv("COLLECTOR_ZERO_PROGRESS_LIMIT", "5"))
+        self.zero_progress_hard_limit = int(os.getenv("COLLECTOR_ZERO_PROGRESS_HARD_LIMIT", "12"))
 
     async def start(self, sources: list[str]):
         logger.info("Worker service starting with sources: %s", sources)
@@ -190,8 +205,17 @@ class WorkerService:
         if startup_delay > 0:
             logger.info("worker/%s: staggered startup, waiting %.0fs", source, startup_delay)
             await asyncio.sleep(startup_delay)
+        # Fresh collector on every (re)launch. This is what makes the zero-progress
+        # SOFT escalation effective: cancelling the task and relaunching builds a
+        # brand-new collector instance here, dropping any wedged asyncpg pool /
+        # Telethon session / broker handle the old instance was stuck on.
         collector = get_collector(source)
         collector.set_pool(self.pool)
+        self._collectors[source] = collector
+        # Reset the progress baseline to THIS collector's counter (a fresh
+        # instance starts at 0) so a relaunch doesn't inherit a stale streak.
+        self._progress_baseline[source] = collector.progress_count
+        self._zero_progress_streak[source] = 0
 
         while not self._stop.is_set():
             try:
@@ -199,6 +223,11 @@ class WorkerService:
                 targets = await self._load_targets(source)
                 if not targets:
                     logger.debug("No targets for %s, sleeping 60s", source)
+                    # No-targets is NOT a zero-progress wedge -- it's legitimate
+                    # idle (e.g. all targets marked completed / dedup-exhausted).
+                    # Reset the streak so we never escalate a healthy idle source.
+                    self._zero_progress_streak[source] = 0
+                    self._progress_baseline[source] = collector.progress_count
                     try:
                         await asyncio.wait_for(self._stop.wait(), timeout=60)
                     except asyncio.TimeoutError:
@@ -207,9 +236,26 @@ class WorkerService:
 
                 logger.info("Running %s with %d targets", source, len(targets))
                 self._heartbeat[source] = time.monotonic()
+                before = collector.progress_count
                 await collector.run(targets)
                 self._heartbeat[source] = time.monotonic()
                 self._crash_counts[source] = 0
+
+                # ZERO-PROGRESS accounting: had targets, cycle finished. Did it
+                # actually persist anything new?
+                advanced = collector.progress_count - before
+                if advanced > 0:
+                    self._zero_progress_streak[source] = 0
+                else:
+                    self._zero_progress_streak[source] = (
+                        self._zero_progress_streak.get(source, 0) + 1
+                    )
+                    streak = self._zero_progress_streak[source]
+                    logger.warning(
+                        "worker/%s: zero-progress cycle %d/%d (had %d targets, "
+                        "persisted 0)", source, streak, self.zero_progress_limit,
+                        len(targets),
+                    )
 
                 try:
                     await asyncio.wait_for(self._stop.wait(), timeout=300)
@@ -304,6 +350,43 @@ class WorkerService:
                         await self._mark_source_dead(source, f"hung > {self.hang_timeout:.0f}s", crashes)
                         # prevent the done-branch from relaunching a dead source
                         self._crash_counts[source] = self.max_restarts
+                    continue
+
+                # ZERO-PROGRESS escalation: the task is alive (not done), beating
+                # its heartbeat (not hung), but has finished N consecutive cycles
+                # that had targets yet persisted nothing. The wedge is in the
+                # DB/session layer, invisible to crash- and hang-detection.
+                streak = self._zero_progress_streak.get(source, 0)
+                if streak >= self.zero_progress_hard_limit:
+                    # HARD tier: relaunching with a fresh collector didn't help
+                    # either -- the wedge is below the process (host SQLite lock,
+                    # dead pool the loop can't rebuild). Mark dead so it's
+                    # alertable; a container restart (Docker restart policy) is
+                    # the real recovery for an OS-level lock.
+                    logger.error(
+                        "Watchdog: %s ZERO-PROGRESS HARD (%d cycles, soft relaunch "
+                        "did not help) -- marking dead", source, streak,
+                    )
+                    await self._mark_source_dead(
+                        source, f"zero-progress x{streak} (hard)", streak,
+                    )
+                    self._crash_counts[source] = self.max_restarts
+                    task.cancel()
+                    self._zero_progress_streak[source] = 0
+                    self._heartbeat[source] = time.monotonic()
+                elif streak >= self.zero_progress_limit:
+                    # SOFT tier: cancel + relaunch. The relaunch (via _run_source)
+                    # builds a FRESH collector, dropping the wedged pool/session
+                    # handle. Don't relaunch inline -- cancel now and let the
+                    # done-branch relaunch on the next pass (same pattern as hang).
+                    logger.error(
+                        "Watchdog: %s ZERO-PROGRESS SOFT (%d/%d cycles, no items "
+                        "persisted) -- cancelling for fresh-collector relaunch",
+                        source, streak, self.zero_progress_limit,
+                    )
+                    self._zero_progress_streak[source] = 0
+                    task.cancel()
+                    self._heartbeat[source] = time.monotonic()
 
     async def _health_reporter(self):
         while not self._stop.is_set():

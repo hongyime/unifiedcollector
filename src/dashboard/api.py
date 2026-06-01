@@ -1,14 +1,15 @@
 import io
 import logging
 import os
+import traceback
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import bcrypt
 import jwt
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -49,6 +50,39 @@ _ROLE_RANK = {"viewer": 0, "operator": 1, "admin": 2}
 # deployments where prompting for a bearer token is pure friction. Leave UNSET
 # (or false) for any network-exposed deployment -- the JWT flow stays fully intact.
 _AUTH_DISABLED = os.getenv("DASHBOARD_AUTH_DISABLED", "").lower() in ("1", "true", "yes", "on")
+
+
+@app.exception_handler(Exception)
+async def verbose_exception_handler(request: Request, exc: Exception):
+    """Surface RAW errors so localhost can diagnose (no localized 500 mask).
+
+    Always logs the full method/path/exception/traceback at ERROR level. When
+    DASHBOARD_AUTH_DISABLED (localhost single-user), the JSON body includes the
+    exception type, message, and traceback tail so the operator sees exactly
+    what broke. On a network-exposed deployment (auth ON) the body stays generic
+    to avoid leaking internals, but the server log still has the full trace.
+    """
+    # Let FastAPI's own HTTPException handling pass through unchanged.
+    if isinstance(exc, HTTPException):
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+    tb = traceback.format_exc()
+    logger.error(
+        "Unhandled error: %s %s -> %s: %s\n%s",
+        request.method, request.url.path, type(exc).__name__, exc, tb,
+    )
+    if _AUTH_DISABLED:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": type(exc).__name__,
+                "detail": str(exc),
+                "path": request.url.path,
+                "method": request.method,
+                "traceback": tb.splitlines()[-12:],
+            },
+        )
+    return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
 
 
 async def get_current_user(creds: HTTPAuthorizationCredentials = Depends(security)) -> dict:
