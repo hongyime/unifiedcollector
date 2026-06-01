@@ -56,7 +56,6 @@ services:
       - media_data:/media
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
-      - ../whatsapp_session:/app/whatsapp_session
       - ../config/sources:/app/config/sources:ro
     depends_on:
       postgres:
@@ -98,7 +97,6 @@ services:
       - media_data:/media
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
-      - ../whatsapp_session:/app/whatsapp_session
       - ../config/sources:/app/config/sources:ro
     depends_on:
       postgres:
@@ -144,7 +142,6 @@ services:
       - media_data:/media
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
-      - ../whatsapp_session:/app/whatsapp_session
       - ../config/sources:/app/config/sources:ro
     depends_on:
       postgres:
@@ -314,29 +311,24 @@ services:
 
   wa-bridge-1:
     build:
-      context: ../whatsappcollector/services/wa-client-ts
+      context: ../src/bridges/whatsapp
     container_name: unifiedcollector_wa_bridge_1
     init: true
     restart: unless-stopped
     environment:
       SESSION_NAME: session_1
       AUTH_STORAGE_PATH: /app/auth_info/account1
-      BROKER_TYPE: rabbitmq
+      WHATSAPP_RABBITMQ_URL: amqp://${RABBITMQ_USER:-wac_user}:${RABBITMQ_PASSWORD:-localdevrabbit123}@rabbitmq:5672/
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-wac_user}:${RABBITMQ_PASSWORD:-localdevrabbit123}@rabbitmq:5672/
-      REDIS_URL: redis://:${REDIS_PASSWORD:-localdevredis123}@redis:6379/0
-      MEDIA_BRIDGE_SECRET: ${WHATSAPP_MEDIA_BRIDGE_SECRET}
-      MEDIA_STORAGE_PATH: /data/media
-      FINDINGS_HUB_GROUP_JID: ${WHATSAPP_FINDINGS_HUB_GROUP_JID:-}
+      SYNC_FULL_HISTORY: "true"
       LOG_LEVEL: info
     ports:
       - "3011:3001"
     volumes:
-      - ../whatsappcollector/services/wa-client-ts/auth_info:/app/auth_info
+      - ../sessions/whatsapp:/app/auth_info
       - media_data:/data/media
     depends_on:
       rabbitmq:
-        condition: service_healthy
-      redis:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3001/health"]
@@ -346,29 +338,24 @@ services:
 
   wa-bridge-2:
     build:
-      context: ../whatsappcollector/services/wa-client-ts
+      context: ../src/bridges/whatsapp
     container_name: unifiedcollector_wa_bridge_2
     init: true
     restart: unless-stopped
     environment:
       SESSION_NAME: session_2
       AUTH_STORAGE_PATH: /app/auth_info/account2
-      BROKER_TYPE: rabbitmq
+      WHATSAPP_RABBITMQ_URL: amqp://${RABBITMQ_USER:-wac_user}:${RABBITMQ_PASSWORD:-localdevrabbit123}@rabbitmq:5672/
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-wac_user}:${RABBITMQ_PASSWORD:-localdevrabbit123}@rabbitmq:5672/
-      REDIS_URL: redis://:${REDIS_PASSWORD:-localdevredis123}@redis:6379/0
-      MEDIA_BRIDGE_SECRET: ${WHATSAPP_MEDIA_BRIDGE_SECRET}
-      MEDIA_STORAGE_PATH: /data/media
-      FINDINGS_HUB_GROUP_JID: ${WHATSAPP_FINDINGS_HUB_GROUP_JID:-}
+      SYNC_FULL_HISTORY: "true"
       LOG_LEVEL: info
     ports:
       - "3012:3001"
     volumes:
-      - ../whatsappcollector/services/wa-client-ts/auth_info:/app/auth_info
+      - ../sessions/whatsapp:/app/auth_info
       - media_data:/data/media
     depends_on:
       rabbitmq:
-        condition: service_healthy
-      redis:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3001/health"]

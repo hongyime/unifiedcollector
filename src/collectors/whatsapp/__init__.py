@@ -375,7 +375,7 @@ class WhatsappCollector(BaseCollector):
             await self.send_to_dlq(entity_id, cid, str(e))
 
     async def _track_user_profile(self, event: dict) -> str | None:
-        if not self._pool:
+        if not self.pool:
             return None
         sender_jid = event.get("sender_jid") or event.get("key", {}).get("participant", "")
         if not sender_jid:
