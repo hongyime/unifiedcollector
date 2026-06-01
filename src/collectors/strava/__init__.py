@@ -55,6 +55,11 @@ class StravaCollector(BaseCollector):
         self._photo_tracker = ProfilePhotoTracker()
         self._gps_enabled = os.getenv("STRAVA_GPS_ENABLED", "true").lower() == "true"
         self._follow_scrape_enabled = os.getenv("STRAVA_FOLLOW_SCRAPE_ENABLED", "true").lower() == "true"
+        # Auto-seed roster expansion from the authenticated athlete (Bryan: spider
+        # out from my own following/followers). Set after we fetch /athlete.
+        self._my_athlete_id: str | None = None
+        # Only ingest activities that carry media (photos) or a map/GPS polyline.
+        self._require_media_or_map = os.getenv("STRAVA_REQUIRE_MEDIA_OR_MAP", "false").lower() == "true"
 
     def set_pool(self, pool):
         super().set_pool(pool)
@@ -143,15 +148,22 @@ class StravaCollector(BaseCollector):
         # default to avoid surprise BFS expansion. Requires cookie auth.
         if self._follow_scrape_enabled:
             roster_seeds = os.getenv("STRAVA_ROSTER_SEED_TARGETS", "").strip()
-            if roster_seeds and self._use_web:
-                for raw in roster_seeds.split(","):
-                    sid = raw.strip()
+            seed_ids = [s.strip() for s in roster_seeds.split(",") if s.strip()] if roster_seeds else []
+            # Auto-seed from the authenticated athlete so we spider out from MY
+            # own following/followers without needing a manual ID list (Bryan).
+            if self._my_athlete_id and self._my_athlete_id not in seed_ids:
+                seed_ids.insert(0, self._my_athlete_id)
+            if seed_ids and self._use_web:
+                for sid in seed_ids:
                     if not sid or self._stop.is_set():
                         continue
                     try:
                         await self.collect_following_roster(sid)
                     except Exception as e:
                         logger.warning("strava: roster expansion for %s failed: %s", sid, e)
+            elif seed_ids and not self._use_web:
+                logger.info("strava: roster expansion skipped (no session cookie / web auth); "
+                            "set STRAVA_SESSION_COOKIE or cookies file to enable following/follower spider")
 
     async def _process_spider_queue(self):
         while not self._stop.is_set():
@@ -413,6 +425,7 @@ class StravaCollector(BaseCollector):
             athlete = resp.json()
             await self._upsert_athlete(athlete)
             aid, aname = str(athlete["id"]), athlete.get("username", str(athlete["id"]))
+            self._my_athlete_id = aid
             if athlete.get("profile"):
                 dest_dir = self.account_media_dir / "profiles"
                 dest_dir.mkdir(parents=True, exist_ok=True)
@@ -530,6 +543,16 @@ class StravaCollector(BaseCollector):
             for activity in activities:
                 if self._stop.is_set(): break
                 await self._upsert_activity(activity, aid)
+                # MEDIA/MAP FILTER (Bryan): only spider/collect media from activities
+                # that carry photos or a map/GPS polyline. The activity row is still
+                # upserted above (metadata); we just skip the media-collection work.
+                if self._require_media_or_map:
+                    has_photos = bool(activity.get("total_photo_count", 0))
+                    mp = activity.get("map") or {}
+                    has_map = bool(mp.get("summary_polyline") or mp.get("polyline")
+                                   or activity.get("summary_polyline"))
+                    if not has_photos and not has_map:
+                        continue
                 await self._collect_activity_photos(client, activity, aid, aname)
                 # Wave 0 leverage: persist route polyline for media_download
                 # consumers. No-op when activity has no map data.

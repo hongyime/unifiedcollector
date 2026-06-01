@@ -221,6 +221,26 @@ class Lemon8Collector(BaseCollector):
         self._tag_pages = int(os.getenv("LEMON8_TAG_PAGES", "10"))
         self._discovered_users: set[str] = set()
         self._discovered_tags: set[str] = set()
+        # FAMOUS-FILTER (Bryan): skip Lemon8 accounts at/above this follower count.
+        # 0 disables. Best-effort: follower_count is parsed from profile HTML.
+        self._famous_follower_cap = int(os.getenv("LEMON8_FAMOUS_FOLLOWER_CAP", "0") or "0")
+
+    @staticmethod
+    def _extract_follower_count(html: str) -> int:
+        """Best-effort parse of follower/fans count from a Lemon8 profile page.
+
+        Lemon8 embeds profile JSON in the HTML; the follower field appears as
+        "fans_count":N or "follower_count":N. Returns 0 if not found (which means
+        the famous cap can't apply -- we fail open and collect rather than guess).
+        """
+        import re
+        for marker in ('"fans_count":', '"follower_count":', '"followers_count":'):
+            idx = html.find(marker)
+            if idx != -1:
+                m = re.match(r"\s*(\d+)", html[idx + len(marker):])
+                if m:
+                    return int(m.group(1))
+        return 0
 
     @staticmethod
     def _parse_cookies(path: str) -> dict[str, str]:
@@ -484,6 +504,14 @@ class Lemon8Collector(BaseCollector):
 
         avatar_url = self._extract_avatar(html) if self._profile_photos else None
         await self._upsert_profile(user_id, username, {"nickname": username, "avatar_url": avatar_url})
+
+        # FAMOUS-FILTER: skip post/media collection for accounts at/above the cap.
+        # Profile row is still upserted (we know the account); only content is skipped.
+        followers = self._extract_follower_count(html)
+        if self._famous_follower_cap and followers >= self._famous_follower_cap:
+            logger.info("lemon8: skipping famous user %s (%d followers >= cap %d)",
+                        username, followers, self._famous_follower_cap)
+            return
 
         if self._profile_photos and avatar_url:
             await self.download_media({

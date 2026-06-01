@@ -129,6 +129,9 @@ class YoutubeCollector(BaseCollector):
         self._max_liked_videos = int(os.getenv("YOUTUBE_MAX_LIKED_VIDEOS", "1000"))
         self._max_subscriptions = int(os.getenv("YOUTUBE_MAX_SUBSCRIPTIONS", "999"))
         self._max_videos_per_channel = int(os.getenv("YOUTUBE_MAX_VIDEOS_PER_CHANNEL", "0"))
+        # FAMOUS-FILTER (Bryan): skip channels at or above this subscriber count,
+        # even if subscribed. 0 disables. Overrides the subscription seed.
+        self._famous_sub_cap = int(os.getenv("YOUTUBE_FAMOUS_SUB_CAP", "0") or "0")
 
     @staticmethod
     def _check_yt_dlp() -> bool:
@@ -291,8 +294,18 @@ class YoutubeCollector(BaseCollector):
             logger.warning("Could not resolve channel: %s", channel_input)
             return
 
-        # 1. Upsert Channel Info (returns uploads playlist ID, or None if channel doesn't exist)
-        uploads_playlist = await self._upsert_channel(channel_id, channel_name)
+        # 1. Upsert Channel Info (returns uploads playlist ID + subscriber count)
+        uploads_playlist, sub_count = await self._upsert_channel(channel_id, channel_name)
+
+        # FAMOUS-FILTER (Bryan): skip channels at/above the subscriber cap, even if
+        # subscribed. The channel row is still upserted above (so we know it + its
+        # sub count) but we collect NO videos from it. Overrides the seed.
+        if self._famous_sub_cap and sub_count >= self._famous_sub_cap:
+            logger.info(
+                "youtube: skipping famous channel %s (%s subs >= cap %d)",
+                channel_name or channel_id, sub_count, self._famous_sub_cap,
+            )
+            return
 
         # When we have API auth and the channels.list lookup returned no item,
         # the channel is confirmed-missing — skip the expensive yt-dlp download
@@ -323,8 +336,8 @@ class YoutubeCollector(BaseCollector):
             params["key"] = self._api_key
         return headers, params
 
-    async def _upsert_channel(self, channel_id: str, channel_name: str) -> str | None:
-        """Upsert channel row. Returns the uploads playlist ID (or None on failure)."""
+    async def _upsert_channel(self, channel_id: str, channel_name: str) -> tuple[str | None, int]:
+        """Upsert channel row. Returns (uploads playlist ID or None, subscriber_count)."""
         snippet = {}
         statistics = {}
         uploads_playlist = None
@@ -337,7 +350,7 @@ class YoutubeCollector(BaseCollector):
                         items = resp.json().get("items", [])
                         if not items:
                             logger.warning("YouTube channel not found: %s (channels.list returned 0 items)", channel_id)
-                            return None
+                            return None, 0
                         item = items[0]
                         snippet = item.get("snippet", {})
                         statistics = item.get("statistics", {})
@@ -367,7 +380,7 @@ class YoutubeCollector(BaseCollector):
             int(statistics.get("subscriberCount", 0) or 0),
             int(statistics.get("videoCount", 0) or 0)
             )
-        return uploads_playlist
+        return uploads_playlist, int(statistics.get("subscriberCount", 0) or 0)
 
     async def _upsert_video(self, channel_id: str, video_data: dict):
         async with self.pool.acquire() as conn:

@@ -318,6 +318,11 @@ class TiktokCollector(BaseCollector):
         self._cookies_valid = False
         self._tracker_file = Path(os.getenv("TIKTOK_TRACKER_FILE", "data/tiktok_tracker.json"))
         self._tracked_ids: set[str] = set()
+        # FAMOUS-FILTER (Bryan): skip users at/above this follower count. Checked
+        # against the DB-stored follower count from a prior cycle (TikTok's count
+        # is only known after a download), so the cap applies from the 2nd
+        # encounter onward. 0 disables.
+        self._famous_follower_cap = int(os.getenv("TIKTOK_FAMOUS_FOLLOWER_CAP", "0") or "0")
 
         # account_quota: register a daily cap so the scheduler can refuse new
         # work once we've hit it. ``has_quota`` on a missing config is a
@@ -418,6 +423,21 @@ class TiktokCollector(BaseCollector):
 
     async def _collect_user(self, username: str):
         profile_url = f"https://www.tiktok.com/@{username}"
+        # FAMOUS-FILTER: if a prior cycle recorded this user's follower count and
+        # it's at/above the cap, skip re-downloading. (TikTok's count is only known
+        # post-download, so first encounter still downloads; cap bites from cycle 2.)
+        if self._famous_follower_cap and self.pool is not None:
+            try:
+                async with self.pool.acquire() as conn:
+                    fc = await conn.fetchval(
+                        "SELECT followers_count FROM tiktok_profiles WHERE username = $1", username
+                    )
+                if fc is not None and int(fc) >= self._famous_follower_cap:
+                    logger.info("tiktok: skipping famous user %s (%d followers >= cap %d)",
+                                username, int(fc), self._famous_follower_cap)
+                    return
+            except Exception:
+                logger.debug("tiktok famous-cap check failed for %s; proceeding", username, exc_info=True)
         # For V2, we try to get metadata first (placeholder for now)
         await self._scrape_profile_metadata(username)
 

@@ -17,6 +17,15 @@ logger = logging.getLogger(__name__)
 class WorkerService:
     """Runs collectors as supervised background tasks with watchdog restart."""
 
+    # Realtime / push sources collect from a broker or live socket, NOT from a
+    # DB target list. They MUST run even with zero collection_targets -- otherwise
+    # the run loop's `if not targets: continue` skips collector.run() forever, the
+    # broker consumer never starts, and pushed events are dropped (this was the
+    # whatsapp empty-tables bug). They are also exempt from zero-progress
+    # escalation: a realtime source with no messages arriving is legitimately
+    # idle, not wedged.
+    REALTIME_SOURCES = frozenset({"whatsapp", "beeper"})
+
     def __init__(self):
         self.pool = None
         self._stop = asyncio.Event()
@@ -221,7 +230,8 @@ class WorkerService:
             try:
                 self._heartbeat[source] = time.monotonic()
                 targets = await self._load_targets(source)
-                if not targets:
+                is_realtime = source in self.REALTIME_SOURCES
+                if not targets and not is_realtime:
                     logger.debug("No targets for %s, sleeping 60s", source)
                     # No-targets is NOT a zero-progress wedge -- it's legitimate
                     # idle (e.g. all targets marked completed / dedup-exhausted).
@@ -234,7 +244,15 @@ class WorkerService:
                         pass
                     continue
 
-                logger.info("Running %s with %d targets", source, len(targets))
+                # Realtime/push sources run even with zero targets: collector.run([])
+                # starts the broker consumer / live listener which blocks until the
+                # source is stopped. They collect from ALL connected accounts'
+                # chats/groups/channels (no DB target list needed).
+                if is_realtime and not targets:
+                    logger.info("Running realtime source %s (no target list; "
+                                "collecting from all connected accounts)", source)
+                else:
+                    logger.info("Running %s with %d targets", source, len(targets))
                 self._heartbeat[source] = time.monotonic()
                 before = collector.progress_count
                 await collector.run(targets)
@@ -242,9 +260,11 @@ class WorkerService:
                 self._crash_counts[source] = 0
 
                 # ZERO-PROGRESS accounting: had targets, cycle finished. Did it
-                # actually persist anything new?
+                # actually persist anything new? Realtime sources are EXEMPT --
+                # a quiet broker (no messages arriving) is legitimate idle, and
+                # collector.run() blocks for them anyway so this rarely runs.
                 advanced = collector.progress_count - before
-                if advanced > 0:
+                if is_realtime or advanced > 0:
                     self._zero_progress_streak[source] = 0
                 else:
                     self._zero_progress_streak[source] = (

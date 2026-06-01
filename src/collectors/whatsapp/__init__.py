@@ -258,15 +258,27 @@ class WhatsappCollector(BaseCollector):
                 await self._discover_links(text, chat_jid)
 
     async def _upsert_chat(self, jid: str, name: str, event: dict):
-        is_group = "@g.us" in jid
+        # WhatsApp JID suffixes: @g.us = group, @newsletter = channel (one-to-many
+        # broadcast), @broadcast = status/broadcast list, else = 1:1 DM. Bryan wants
+        # ALL of these (all chats/groups/channels of connected accounts).
+        if "@g.us" in jid:
+            chat_type = "group"
+        elif "@newsletter" in jid:
+            chat_type = "channel"
+        elif "@broadcast" in jid:
+            chat_type = "broadcast"
+        else:
+            chat_type = "dm"
+        is_group = chat_type == "group"
         async with self.pool.acquire() as conn:
             await conn.execute("""
-                INSERT INTO whatsapp_chats (platform_chat_id, name, is_group, updated_at)
-                VALUES ($1, $2, $3, NOW())
+                INSERT INTO whatsapp_chats (platform_chat_id, name, is_group, chat_type, updated_at)
+                VALUES ($1, $2, $3, $4, NOW())
                 ON CONFLICT (platform_chat_id) DO UPDATE SET
                     name = EXCLUDED.name,
+                    chat_type = EXCLUDED.chat_type,
                     updated_at = NOW()
-            """, jid, name, is_group)
+            """, jid, name, is_group, chat_type)
 
     async def _upsert_message(self, event: dict, chat_jid: str, sender_uuid: str | None):
         msg_id = event.get("message_id") or event.get("key", {}).get("id", "")

@@ -177,6 +177,10 @@ class GithubCollector(BaseCollector):
         self._spider_user_delay = float(os.getenv("GITHUB_SPIDER_USER_DELAY", "2.0"))
         self._api_delay = float(os.getenv("GITHUB_API_DELAY", "0.1"))
         self._download_delay = float(os.getenv("GITHUB_DOWNLOAD_DELAY", "0.5"))
+        # FAMOUS-FILTER (Bryan): skip repos at/above this star count and (optionally)
+        # users at/above it (by follower count). 0 disables. Overrides the seed.
+        self._famous_star_cap = int(os.getenv("GITHUB_FAMOUS_STAR_CAP", "0") or "0")
+        self._famous_filter_users = os.getenv("GITHUB_FAMOUS_FILTER_USERS", "false").lower() == "true"
         self._avatar_size = int(os.getenv("GITHUB_AVATAR_SIZE", "460"))
         self._rate_limit_buffer = int(os.getenv("GITHUB_RATE_LIMIT_BUFFER", "10"))
         self._photo_tracker = ProfilePhotoTracker(
@@ -839,6 +843,14 @@ class GithubCollector(BaseCollector):
         uid = str(user["id"])
         login = user["login"]
 
+        # FAMOUS-FILTER: optionally skip users at/above the cap (by followers).
+        # Bryan's own account is below the cap so it always collects.
+        if (self._famous_star_cap and self._famous_filter_users
+                and int(user.get("followers", 0) or 0) >= self._famous_star_cap):
+            logger.info("github: skipping famous user %s (%s followers >= cap %d)",
+                        login, user.get("followers"), self._famous_star_cap)
+            return
+
         await self._upsert_user(user)
 
         if user.get("avatar_url"):
@@ -869,6 +881,12 @@ class GithubCollector(BaseCollector):
             if self._stop.is_set():
                 break
             await self._upsert_repo(repo)
+            # FAMOUS-FILTER: upsert the repo row (metadata) but collect NO content
+            # from repos at/above the star cap.
+            if self._famous_star_cap and int(repo.get("stargazers_count", 0) or 0) >= self._famous_star_cap:
+                logger.info("github: skipping famous repo %s (%s stars >= cap %d)",
+                            repo.get("full_name"), repo.get("stargazers_count"), self._famous_star_cap)
+                continue
             await self._collect_repo_content(client, repo["full_name"], uid, login)
 
         await self.checkpoint.save_progress(username)
@@ -879,6 +897,12 @@ class GithubCollector(BaseCollector):
             return
         repo = resp.json()
         await self._upsert_repo(repo)
+        # FAMOUS-FILTER: skip content collection for repos at/above the star cap.
+        if self._famous_star_cap and int(repo.get("stargazers_count", 0) or 0) >= self._famous_star_cap:
+            logger.info("github: skipping famous repo %s (%s stars >= cap %d)",
+                        full_name, repo.get("stargazers_count"), self._famous_star_cap)
+            await self.checkpoint.save_progress(full_name)
+            return
         await self._collect_repo_content(
             client, full_name,
             str(repo["owner"]["id"]), repo["owner"]["login"],
