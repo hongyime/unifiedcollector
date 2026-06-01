@@ -129,7 +129,11 @@ class StravaCollector(BaseCollector):
                     # training_activities feed. Falls through to graceful skip
                     # if cookies are missing/invalid.
                     await asyncio.wait_for(self._collect_via_cookies(), timeout=300.0)
-                elif target.lower() == "feed" and self._use_web: await self._collect_feed()
+                elif target.lower() == "feed" and self._use_web:
+                    # Cookie-based scrape of the authenticated dashboard/activity
+                    # feed. (_collect_feed never existed; _collect_via_cookies is
+                    # the real feed-scrape entrypoint.)
+                    await asyncio.wait_for(self._collect_via_cookies(), timeout=300.0)
                 elif self._use_api: await self._collect_athlete(target)
                 elif self._use_web: await self._collect_athlete_web(target)
                 else:
@@ -474,6 +478,10 @@ class StravaCollector(BaseCollector):
                 ON CONFLICT (platform_activity_id) DO UPDATE SET
                     name = EXCLUDED.name, metadata = EXCLUDED.metadata
             """, activity.get("id"), athlete_uuid, activity.get("name"), activity.get("type"), activity.get("sport_type"), activity.get("distance"), activity.get("moving_time"), activity.get("elapsed_time"), activity.get("total_elevation_gain"), activity.get("average_speed"), activity.get("max_speed"), activity.get("average_heartrate"), activity.get("calories"), datetime.fromisoformat(activity.get("start_date").replace("Z", "")) if activity.get("start_date") else None, metadata_json)
+        # Count the activity as progress so the worker zero-progress watchdog
+        # doesn't falsely flag strava (whose primary output is activity rows in
+        # strava_activities, not media_items) as wedged.
+        self._progress_count += 1
 
     async def _collect_athlete(self, athlete_id: str):
         async with httpx.AsyncClient(timeout=30) as client:
