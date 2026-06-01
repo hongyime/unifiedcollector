@@ -1,0 +1,4 @@
+node_modules/
+build/
+auth_info/
+*.log
