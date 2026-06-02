@@ -288,8 +288,12 @@ class StravaCollector(BaseCollector):
                                 if profile_data.get("id"):
                                     await self._upsert_athlete(profile_data)
                                     logger.info("strava: upserted athlete profile from dashboard JSON")
-                            except Exception:
-                                pass
+                                else:
+                                    logger.debug("strava: currentAthlete JSON has no 'id' field")
+                            except Exception as e:
+                                logger.warning("strava: profile JSON parse failed: %s | sample: %s", e, profile_m.group(1)[:200])
+                        else:
+                            logger.debug("strava: no currentAthlete JSON found in dashboard")
                 except Exception as e:
                     logger.warning("strava: dashboard hydration probe failed: %s", e)
 
