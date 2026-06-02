@@ -259,13 +259,16 @@ class YoutubeCollector(BaseCollector):
             await self._process_spider_queue()
 
         # Enrich a small batch of videos with transcripts and comments per tick.
+        logger.info("YouTube: enrichment gate check: _use_yt_dlp=%s _fetch_transcripts=%s _fetch_comments_enabled=%s",
+                    self._use_yt_dlp, self._fetch_transcripts, self._fetch_comments_enabled)
         if self._use_yt_dlp and (self._fetch_transcripts or self._fetch_comments_enabled):
-            logger.info("YouTube: starting transcript/comment enrichment (yt_dlp=%s transcripts=%s comments=%s limit=%d)",
-                        self._use_yt_dlp, self._fetch_transcripts, self._fetch_comments_enabled, self._enrich_batch_limit)
+            logger.info("YouTube: starting transcript/comment enrichment (limit=%d)", self._enrich_batch_limit)
             try:
                 await self._enrich_transcripts_and_comments(limit=self._enrich_batch_limit)
             except Exception as e:
                 logger.error("YouTube transcript/comment enrichment failed: %s", e, exc_info=True)
+        else:
+            logger.info("YouTube: enrichment SKIPPED (gate check failed)")
 
     async def _process_spider_queue(self):
         while not self._stop.is_set():
