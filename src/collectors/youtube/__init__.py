@@ -260,10 +260,12 @@ class YoutubeCollector(BaseCollector):
 
         # Enrich a small batch of videos with transcripts and comments per tick.
         if self._use_yt_dlp and (self._fetch_transcripts or self._fetch_comments_enabled):
+            logger.info("YouTube: starting transcript/comment enrichment (yt_dlp=%s transcripts=%s comments=%s limit=%d)",
+                        self._use_yt_dlp, self._fetch_transcripts, self._fetch_comments_enabled, self._enrich_batch_limit)
             try:
                 await self._enrich_transcripts_and_comments(limit=self._enrich_batch_limit)
             except Exception as e:
-                logger.error("YouTube transcript/comment enrichment failed: %s", e)
+                logger.error("YouTube transcript/comment enrichment failed: %s", e, exc_info=True)
 
     async def _process_spider_queue(self):
         while not self._stop.is_set():

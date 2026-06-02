@@ -580,25 +580,14 @@ class Lemon8Collector(BaseCollector):
                 "video" if item.get("media_type") == "video" else "image"
             )
 
-            # Upsert the FYP card as a post (skip for profile-photo-only items).
-            if not item.get("is_profile_photo"):
-                post_payload = {
-                    "url": url,
-                    "media": [{"url": url, "media_type": item.get("media_type") or "image"}],
-                    "title": "",
-                    "description": "",
-                    "stats": {"likeCount": 0, "commentCount": 0},
-                    "raw": item,
-                    "source": "fyp",
-                    "username": uname,
-                }
-                resolved = self._resolve_post_id(post_payload)
-                if resolved and resolved not in upserted_posts:
-                    upserted_posts.add(resolved)
-                    try:
-                        await self._upsert_post(entity_id, post_payload)
-                    except Exception as e:
-                        logger.debug("FYP post upsert skipped for %s: %s", resolved, e)
+            # NOTE: FYP feed cards lack post detail (title/desc/stats); they're just
+            # CDN media URLs. Upserting them creates 100% empty-content rows (5k+ as of
+            # 2026-06-02). Skip DB upsert; just download the media. To fix properly,
+            # enqueue post IDs for detail-fetch pass (needs post detail API endpoint).
+            # if not item.get("is_profile_photo"):
+            #     post_payload = {...}
+            #     await self._upsert_post(entity_id, post_payload)
+            # DISABLED 2026-06-02 — was creating useless empty rows.
 
             if self.is_known(content_id):
                 continue
@@ -882,14 +871,16 @@ class Lemon8Collector(BaseCollector):
                             "raw": m,
                         })
                     if media_for_db:
-                        posts.append({
-                            "id": f"profile_{user_id}",
-                            "title": "",
-                            "description": "",
-                            "stats": {"likeCount": 0, "commentCount": 0},
-                            "media": media_for_db,
-                            "raw": {},
-                        })
+                        # NOTE: Fallback feed-card pseudo-posts also lack real content.
+                        # Skip upsert; only download media (same reason as FYP above).
+                        # posts.append({
+                        #     "id": f"profile_{user_id}",
+                        #     "title": "",
+                        #     "description": "",
+                        #     "stats": {"likeCount": 0, "commentCount": 0},
+                        #     "media": media_for_db,
+                        # })
+                        pass  # DISABLED 2026-06-02
             except Exception:
                 pass
         return posts

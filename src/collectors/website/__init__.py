@@ -577,6 +577,7 @@ class WebsiteCollector(BaseCollector):
                 meta = self._extract_metadata(html)
                 images = self._extract_images(html, url)
                 links = self._extract_links(html, url)
+                content_text = self._extract_text(html)
 
                 await self._upsert_page(
                     domain=domain,
@@ -585,6 +586,7 @@ class WebsiteCollector(BaseCollector):
                     status=resp.status_code,
                     title=meta.get("title"),
                     description=meta.get("description"),
+                    content_text=content_text,
                     images=images,
                     internal_links=[l for l in links if _same_domain(l, url)],
                     external_links=[l for l in links if not _same_domain(l, url)],
@@ -693,6 +695,23 @@ class WebsiteCollector(BaseCollector):
         except Exception as e:
             logger.debug("metadata extract failed: %s", e)
         return out
+
+    def _extract_text(self, html: str) -> str:
+        """Extract plaintext body from HTML, stripping scripts/styles/nav."""
+        try:
+            soup = self._soup(html)
+            # Remove noise elements
+            for tag in soup(["script", "style", "noscript", "iframe"]):
+                tag.decompose()
+            # Get text with space separator
+            text = soup.get_text(separator=" ", strip=True)
+            # Collapse whitespace
+            import re
+            text = re.sub(r'\s+', ' ', text)
+            return text.strip()
+        except Exception as e:
+            logger.debug("text extract failed: %s", e)
+            return ""
 
     def _extract_links(self, html: str, base_url: str) -> list[str]:
         """All href / form action / iframe src / script src + free-text URLs."""
@@ -1114,6 +1133,7 @@ class WebsiteCollector(BaseCollector):
         status: int,
         title: Optional[str],
         description: Optional[str],
+        content_text: str,
         images: list[dict],
         internal_links: list[str],
         external_links: list[str],
@@ -1134,12 +1154,13 @@ class WebsiteCollector(BaseCollector):
                     """
                     INSERT INTO website_pages
                         (target_id, url, url_hash, title, meta_description,
-                         content_html, internal_links, external_links,
+                         content_text, content_html, internal_links, external_links,
                          images, status_code, fetched_at, collected_at)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,NOW(),NOW())
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,NOW(),NOW())
                     ON CONFLICT (url) DO UPDATE
                        SET title = EXCLUDED.title,
                            meta_description = EXCLUDED.meta_description,
+                           content_text = EXCLUDED.content_text,
                            content_html = EXCLUDED.content_html,
                            internal_links = EXCLUDED.internal_links,
                            external_links = EXCLUDED.external_links,
@@ -1150,6 +1171,7 @@ class WebsiteCollector(BaseCollector):
                     target_row["id"], url, url_hash,
                     (title or "")[:512] if title else None,
                     (description or "")[:1024] if description else None,
+                    (content_text or "")[:100_000] if content_text else None,  # 100KB cap
                     html[: 2 * 1024 * 1024],  # 2 MB hard cap on stored HTML
                     internal_links[:1000],
                     external_links[:1000],
