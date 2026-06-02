@@ -32,7 +32,7 @@ services:
       dockerfile: docker/Dockerfile
     container_name: unifiedcollector_collector
     command: python -m src.main worker --all
-    mem_limit: 256m
+    mem_limit: 384m
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
@@ -94,7 +94,7 @@ services:
     image: unifiedcollector-collector:latest
     container_name: unifiedcollector_collector_youtube
     command: python -m src.main worker --source youtube
-    mem_limit: 1g
+    mem_limit: 1300m
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
@@ -137,7 +137,7 @@ services:
     image: unifiedcollector-collector:latest
     container_name: unifiedcollector_collector_tiktok
     command: python -m src.main worker --source tiktok
-    mem_limit: 1g
+    mem_limit: 1300m
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
@@ -182,7 +182,7 @@ services:
     image: unifiedcollector-collector:latest
     container_name: unifiedcollector_collector_search
     command: python -m src.main worker --source search
-    mem_limit: 1g
+    mem_limit: 1300m
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
@@ -214,7 +214,7 @@ services:
     image: unifiedcollector-collector:latest
     container_name: unifiedcollector_collector_website
     command: python -m src.main worker --source website
-    mem_limit: 768m
+    mem_limit: 1g
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
@@ -246,7 +246,7 @@ services:
     image: unifiedcollector-collector:latest
     container_name: unifiedcollector_collector_lemon8
     command: python -m src.main worker --source lemon8
-    mem_limit: 768m
+    mem_limit: 1g
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
@@ -278,7 +278,7 @@ services:
     image: unifiedcollector-collector:latest
     container_name: unifiedcollector_collector_telegram
     command: python -m src.main worker --source telegram
-    mem_limit: 768m
+    mem_limit: 1g
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
@@ -310,7 +310,7 @@ services:
     image: unifiedcollector-collector:latest
     container_name: unifiedcollector_collector_github
     command: python -m src.main worker --source github
-    mem_limit: 384m
+    mem_limit: 512m
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
@@ -342,7 +342,7 @@ services:
     image: unifiedcollector-collector:latest
     container_name: unifiedcollector_collector_strava
     command: python -m src.main worker --source strava
-    mem_limit: 384m
+    mem_limit: 512m
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
@@ -374,7 +374,7 @@ services:
     image: unifiedcollector-collector:latest
     container_name: unifiedcollector_collector_beeper
     command: python -m src.main worker --source beeper
-    mem_limit: 512m
+    mem_limit: 768m
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
@@ -406,7 +406,7 @@ services:
     image: unifiedcollector-collector:latest
     container_name: unifiedcollector_collector_whatsapp
     command: python -m src.main worker --source whatsapp
-    mem_limit: 512m
+    mem_limit: 768m
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
@@ -437,8 +437,10 @@ services:
   # instagram is INTENTIONALLY not given a dedicated running container yet:
   # the host IP is 429-blocked (all accounts, INSTA_PROXY_DISABLED). Running it
   # would only reset the block timer. When the block clears, copy one of the
-  # blocks above with --source instagram + mem_limit: 768m. It stays in the
-  # main collector's COLLECTOR_DISABLED_SOURCES so nothing runs it meanwhile.
+  # blocks above as `collector_instagram` (container_name
+  # unifiedcollector_collector_instagram) with --source instagram +
+  # mem_limit: 1g, then `docker compose up -d collector_instagram`. It stays in
+  # the main collector's COLLECTOR_DISABLED_SOURCES so nothing runs it meanwhile.
 
   tor:
     # Tor SOCKS5 proxy sidecar for the search collector (DDG via Tor).
