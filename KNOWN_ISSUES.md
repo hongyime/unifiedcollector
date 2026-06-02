@@ -39,9 +39,12 @@ actionable residue). Update or strike items as they're fixed.
 8. **Observability gap.** No metrics on items/sec per source, queue depth, error
    rate, rate-limit hits, account cooldowns. Consider a prometheus exporter.
 
-## Partially addressed
+## Resolved
 
-- **Monolith split** -- whatsapp now runs as its own bridge (`src/bridges/whatsapp`)
-  and youtube/tiktok run in separate collector containers. instagram still shares
-  the main worker loop; a blocking collector there can still stall siblings
-  (mitigated by the per-worker zero-progress watchdog).
+- **Monolith split (was #7)** -- DONE. Every source now runs in its own
+  dedicated container (`collector_<source>`) via `worker --source X`, each with
+  a tuned `mem_limit`. The main `collector` disables all sources and idles as a
+  safety-net/image-builder. instagram has no running container yet (host IP
+  429-blocked); add one when the block clears. A blocking/OOMing collector can
+  no longer take down its siblings. (Resolved 2026-06-02; previously only
+  youtube + tiktok were split.)

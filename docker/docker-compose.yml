@@ -32,6 +32,7 @@ services:
       dockerfile: docker/Dockerfile
     container_name: unifiedcollector_collector
     command: python -m src.main worker --all
+    mem_limit: 256m
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
@@ -44,7 +45,14 @@ services:
       # Instagram (all accounts, INSTA_PROXY_DISABLED=true). Per decision: wait the
       # block out with ZERO requests (fastest IP recovery, no proxy cost). Re-enable
       # by removing 'instagram' here after ~24-48h, then `docker compose up -d collector`.
-      COLLECTOR_DISABLED_SOURCES: "youtube,tiktok,instagram"
+      # P3-1 FULL SPLIT: every source now runs in its OWN dedicated container
+      # (collector_search, _website, _lemon8, _telegram, _github, _strava,
+      # _beeper, _whatsapp, plus the pre-existing _youtube, _tiktok). instagram
+      # stays off (host IP 429-blocked). So the main collector disables ALL
+      # sources and effectively idles -- it remains only as the canonical image
+      # builder + a safety net. Re-enable a source HERE only if you also remove
+      # its dedicated container above.
+      COLLECTOR_DISABLED_SOURCES: "youtube,tiktok,instagram,search,website,lemon8,telegram,github,strava,beeper,whatsapp"
       # Beeper Desktop Local API runs on the host at 127.0.0.1:23373.
       # The default URL inside .env (host.docker.internal:23373) resolves
       # via the extra_hosts entry below.
@@ -86,6 +94,7 @@ services:
     image: unifiedcollector-collector:latest
     container_name: unifiedcollector_collector_youtube
     command: python -m src.main worker --source youtube
+    mem_limit: 1g
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
@@ -128,6 +137,7 @@ services:
     image: unifiedcollector-collector:latest
     container_name: unifiedcollector_collector_tiktok
     command: python -m src.main worker --source tiktok
+    mem_limit: 1g
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
@@ -157,6 +167,278 @@ services:
       retries: 3
       start_period: 30s
     restart: unless-stopped
+
+  # ───────────────────────────────────────────────────────────────
+  # P3-1 FULL SPLIT: every source runs in its OWN process/container.
+  # Same image (unifiedcollector-collector:latest), command
+  #   python -m src.main worker --source <name>
+  # Shared volumes/env; restart:unless-stopped + per-container mem_limit.
+  # The main `collector` service disables ALL of these via
+  # COLLECTOR_DISABLED_SOURCES so nothing is collected twice.
+  # mem_limit values are tuned for a ~7.7GiB host (see total budget note).
+  # ───────────────────────────────────────────────────────────────
+
+  collector_search:
+    image: unifiedcollector-collector:latest
+    container_name: unifiedcollector_collector_search
+    command: python -m src.main worker --source search
+    mem_limit: 1g
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      COLLECTOR_DRIVE_PATH: /media
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    cap_add:
+      - SYS_PTRACE
+    volumes:
+      - media_data:/media
+      - ../credentials:/app/credentials
+      - sessions_data:/app/sessions
+      - ../config/sources:/app/config/sources:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      tor:
+        condition: service_started
+    env_file:
+      - ../.env
+    healthcheck:
+      test: ["CMD", "python", "-m", "src.core.health"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  collector_website:
+    image: unifiedcollector-collector:latest
+    container_name: unifiedcollector_collector_website
+    command: python -m src.main worker --source website
+    mem_limit: 768m
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      COLLECTOR_DRIVE_PATH: /media
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    cap_add:
+      - SYS_PTRACE
+    volumes:
+      - media_data:/media
+      - ../credentials:/app/credentials
+      - sessions_data:/app/sessions
+      - ../config/sources:/app/config/sources:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      tor:
+        condition: service_started
+    env_file:
+      - ../.env
+    healthcheck:
+      test: ["CMD", "python", "-m", "src.core.health"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  collector_lemon8:
+    image: unifiedcollector-collector:latest
+    container_name: unifiedcollector_collector_lemon8
+    command: python -m src.main worker --source lemon8
+    mem_limit: 768m
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      COLLECTOR_DRIVE_PATH: /media
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    cap_add:
+      - SYS_PTRACE
+    volumes:
+      - media_data:/media
+      - ../credentials:/app/credentials
+      - sessions_data:/app/sessions
+      - ../config/sources:/app/config/sources:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      tor:
+        condition: service_started
+    env_file:
+      - ../.env
+    healthcheck:
+      test: ["CMD", "python", "-m", "src.core.health"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  collector_telegram:
+    image: unifiedcollector-collector:latest
+    container_name: unifiedcollector_collector_telegram
+    command: python -m src.main worker --source telegram
+    mem_limit: 768m
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      COLLECTOR_DRIVE_PATH: /media
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    cap_add:
+      - SYS_PTRACE
+    volumes:
+      - media_data:/media
+      - ../credentials:/app/credentials
+      - sessions_data:/app/sessions
+      - ../config/sources:/app/config/sources:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      tor:
+        condition: service_started
+    env_file:
+      - ../.env
+    healthcheck:
+      test: ["CMD", "python", "-m", "src.core.health"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  collector_github:
+    image: unifiedcollector-collector:latest
+    container_name: unifiedcollector_collector_github
+    command: python -m src.main worker --source github
+    mem_limit: 384m
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      COLLECTOR_DRIVE_PATH: /media
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    cap_add:
+      - SYS_PTRACE
+    volumes:
+      - media_data:/media
+      - ../credentials:/app/credentials
+      - sessions_data:/app/sessions
+      - ../config/sources:/app/config/sources:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      tor:
+        condition: service_started
+    env_file:
+      - ../.env
+    healthcheck:
+      test: ["CMD", "python", "-m", "src.core.health"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  collector_strava:
+    image: unifiedcollector-collector:latest
+    container_name: unifiedcollector_collector_strava
+    command: python -m src.main worker --source strava
+    mem_limit: 384m
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      COLLECTOR_DRIVE_PATH: /media
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    cap_add:
+      - SYS_PTRACE
+    volumes:
+      - media_data:/media
+      - ../credentials:/app/credentials
+      - sessions_data:/app/sessions
+      - ../config/sources:/app/config/sources:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      tor:
+        condition: service_started
+    env_file:
+      - ../.env
+    healthcheck:
+      test: ["CMD", "python", "-m", "src.core.health"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  collector_beeper:
+    image: unifiedcollector-collector:latest
+    container_name: unifiedcollector_collector_beeper
+    command: python -m src.main worker --source beeper
+    mem_limit: 512m
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      COLLECTOR_DRIVE_PATH: /media
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    cap_add:
+      - SYS_PTRACE
+    volumes:
+      - media_data:/media
+      - ../credentials:/app/credentials
+      - sessions_data:/app/sessions
+      - ../config/sources:/app/config/sources:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      tor:
+        condition: service_started
+    env_file:
+      - ../.env
+    healthcheck:
+      test: ["CMD", "python", "-m", "src.core.health"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  collector_whatsapp:
+    image: unifiedcollector-collector:latest
+    container_name: unifiedcollector_collector_whatsapp
+    command: python -m src.main worker --source whatsapp
+    mem_limit: 512m
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      COLLECTOR_DRIVE_PATH: /media
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    cap_add:
+      - SYS_PTRACE
+    volumes:
+      - media_data:/media
+      - ../credentials:/app/credentials
+      - sessions_data:/app/sessions
+      - ../config/sources:/app/config/sources:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_started
+    env_file:
+      - ../.env
+    healthcheck:
+      test: ["CMD", "python", "-m", "src.core.health"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  # instagram is INTENTIONALLY not given a dedicated running container yet:
+  # the host IP is 429-blocked (all accounts, INSTA_PROXY_DISABLED). Running it
+  # would only reset the block timer. When the block clears, copy one of the
+  # blocks above with --source instagram + mem_limit: 768m. It stays in the
+  # main collector's COLLECTOR_DISABLED_SOURCES so nothing runs it meanwhile.
 
   tor:
     # Tor SOCKS5 proxy sidecar for the search collector (DDG via Tor).
