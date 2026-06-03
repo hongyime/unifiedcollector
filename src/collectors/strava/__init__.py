@@ -312,14 +312,17 @@ class StravaCollector(BaseCollector):
                                     client.get(f"https://www.strava.com/athletes/{athlete_id}",
                                                headers={"User-Agent": ua, "Accept": "text/html"}),
                                     timeout=15.0)
+                                logger.info("strava: profile page fetch status=%s for %s", prof_resp.status_code, athlete_id)
                                 if prof_resp.status_code == 200:
                                     import re as _re
                                     nd_m = _re.search(
                                         r'<script id="__NEXT_DATA__" type="application/json">(.+?)</script>',
                                         prof_resp.text, _re.DOTALL)
+                                    logger.info("strava: __NEXT_DATA__ found=%s len=%d", bool(nd_m), len(prof_resp.text))
                                     if nd_m:
                                         nd = json.loads(nd_m.group(1))
                                         ath = nd.get("props", {}).get("pageProps", {}).get("athlete")
+                                        logger.info("strava: athlete field=%s", str(ath)[:200] if ath else "NULL")
                                         if ath and ath.get("id"):
                                             # Normalise to the same field names _upsert_athlete expects
                                             profile_data = {
