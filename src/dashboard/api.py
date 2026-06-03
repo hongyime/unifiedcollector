@@ -1423,6 +1423,7 @@ async def whatsapp_link_page():
     html = """<!doctype html>
 <html><head><meta charset="utf-8"><title>Link WhatsApp</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <style>
  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#0b141a;color:#e9edef;margin:0;padding:24px}
  h1{font-size:20px;font-weight:600;margin:0 0 4px}
@@ -1453,6 +1454,18 @@ async def whatsapp_link_page():
   The panel turns <span class="connected">green</span> automatically once linked. No need to refresh the page.
  </div>
 <script>
+var qrInstances={};
+function renderQR(b,text){
+  var el=document.getElementById('q'+b);
+  el.innerHTML='';
+  el.style.background='#fff';
+  if(qrInstances[b]){try{qrInstances[b].clear();}catch(e){}}
+  try{
+    qrInstances[b]=new QRCode(el,{text:text,width:264,height:264,correctLevel:QRCode.CorrectLevel.L});
+  }catch(e){
+    el.innerHTML='<pre style="font-size:6px;color:#000;word-break:break-all">'+text+'</pre>';
+  }
+}
 async function poll(b){
   const sEl=document.getElementById('s'+b), qEl=document.getElementById('q'+b), tEl=document.getElementById('t'+b);
   try{
@@ -1461,16 +1474,15 @@ async function poll(b){
       qEl.innerHTML='&#10003;'; qEl.style.background='#0b3d24'; qEl.style.color='#22c55e'; qEl.style.fontSize='90px';
       sEl.innerHTML='<span class="dot ok"></span> <span class="connected">Connected</span>';
       tEl.innerHTML='<span class="dot ok"></span>';
-      return; // stop polling this bridge
+      return;
     }
     if(d.qr){
-      const src=d.qr.startsWith('data:')?d.qr:('data:image/png;base64,'+d.qr);
-      qEl.innerHTML='<img alt="QR" src="'+src+'">'; qEl.style.background='#fff';
+      renderQR(b, d.qr);
       sEl.innerHTML='<span class="dot wait"></span> Waiting for scan&hellip; (auto-refreshing)';
       tEl.innerHTML='<span class="dot wait"></span>';
     } else if(d.status==='unreachable'){
       qEl.innerHTML='&#9888;'; qEl.style.background='#3d1414'; qEl.style.color='#ef4444'; qEl.style.fontSize='60px';
-      sEl.innerHTML='<span class="dot err"></span> Bridge unreachable: '+(d.error||'')+'';
+      sEl.innerHTML='<span class="dot err"></span> Bridge unreachable: '+(d.error||'');
       tEl.innerHTML='<span class="dot err"></span>';
     } else {
       sEl.innerHTML='<span class="dot wait"></span> '+(d.status||'starting')+'&hellip;';
