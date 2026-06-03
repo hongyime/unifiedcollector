@@ -333,7 +333,7 @@ class StravaCollector(BaseCollector):
                                                 "country": (ath.get("location") or {}).get("country"),
                                             }
                             except Exception as e:
-                                logger.debug("strava: profile page fetch failed: %s", e)
+                                logger.warning("strava: profile page fetch failed: %s", e)
                         if profile_data:
                             try:
                                 if profile_data.get("id"):
