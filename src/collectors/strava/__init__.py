@@ -295,22 +295,57 @@ class StravaCollector(BaseCollector):
                                         depth -= 1
                                         if depth == 0:
                                             try:
-                                                profile_data = json.loads(text[brace_start:i + 1])
-                                            except Exception as e:
-                                                logger.warning("strava: currentAthlete JSON parse failed: %s", e)
+                                                parsed = json.loads(text[brace_start:i + 1])
+                                                if parsed and parsed.get("id"):
+                                                    profile_data = parsed
+                                            except Exception:
+                                                pass
                                             break
                                     i += 1
+                        # Fallback: fetch the athlete's public profile page and
+                        # parse __NEXT_DATA__.props.pageProps.athlete (works even
+                        # when the dashboard embeds currentAthlete: null for cookie
+                        # sessions that lack full API scope).
+                        if not profile_data and athlete_id:
+                            try:
+                                prof_resp = await asyncio.wait_for(
+                                    client.get(f"https://www.strava.com/athletes/{athlete_id}",
+                                               headers={"User-Agent": ua, "Accept": "text/html"}),
+                                    timeout=15.0)
+                                if prof_resp.status_code == 200:
+                                    import re as _re
+                                    nd_m = _re.search(
+                                        r'<script id="__NEXT_DATA__" type="application/json">(.+?)</script>',
+                                        prof_resp.text, _re.DOTALL)
+                                    if nd_m:
+                                        nd = json.loads(nd_m.group(1))
+                                        ath = nd.get("props", {}).get("pageProps", {}).get("athlete")
+                                        if ath and ath.get("id"):
+                                            # Normalise to the same field names _upsert_athlete expects
+                                            profile_data = {
+                                                "id": ath.get("id"),
+                                                "username": ath.get("username") or ath.get("firstName", ""),
+                                                "firstname": ath.get("firstName"),
+                                                "lastname": ath.get("lastName"),
+                                                "profile": ath.get("profileImageUrl"),
+                                                "city": (ath.get("location") or {}).get("city"),
+                                                "state": (ath.get("location") or {}).get("state"),
+                                                "country": (ath.get("location") or {}).get("country"),
+                                            }
+                            except Exception as e:
+                                logger.debug("strava: profile page fetch failed: %s", e)
                         if profile_data:
                             try:
                                 if profile_data.get("id"):
                                     await self._upsert_athlete(profile_data)
-                                    logger.info("strava: upserted athlete profile from dashboard JSON (id=%s)", profile_data.get("id"))
+                                    logger.info("strava: upserted athlete profile (id=%s name=%s %s)",
+                                                profile_data.get("id"), profile_data.get("firstname"), profile_data.get("lastname"))
                                 else:
-                                    logger.debug("strava: currentAthlete JSON has no 'id' field: %s", str(profile_data)[:200])
+                                    logger.info("strava: currentAthlete JSON found but no 'id' field: keys=%s", list(profile_data.keys())[:10])
                             except Exception as e:
                                 logger.warning("strava: _upsert_athlete failed: %s", e)
                         else:
-                            logger.debug("strava: no currentAthlete JSON found in dashboard")
+                            logger.info("strava: no currentAthlete JSON found in dashboard (ca_idx=%s)", ca_idx)
                 except Exception as e:
                     logger.warning("strava: dashboard hydration probe failed: %s", e)
 
