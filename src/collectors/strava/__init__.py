@@ -517,16 +517,16 @@ class StravaCollector(BaseCollector):
                     updated_at
                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
                 ON CONFLICT (platform_athlete_id) DO UPDATE SET
-                    username = COALESCE(EXCLUDED.username, strava_athletes.username),
-                    firstname = COALESCE(EXCLUDED.firstname, strava_athletes.firstname),
-                    lastname = COALESCE(EXCLUDED.lastname, strava_athletes.lastname),
-                    profile = COALESCE(EXCLUDED.profile, strava_athletes.profile),
-                    city = COALESCE(EXCLUDED.city, strava_athletes.city),
-                    state = COALESCE(EXCLUDED.state, strava_athletes.state),
-                    country = COALESCE(EXCLUDED.country, strava_athletes.country),
-                    follower_count = COALESCE(EXCLUDED.follower_count, strava_athletes.follower_count),
-                    following_count = COALESCE(EXCLUDED.following_count, strava_athletes.following_count),
-                    updated_at = NOW()
+                    username       = COALESCE(EXCLUDED.username,        strava_athletes.username),
+                    firstname      = EXCLUDED.firstname,
+                    lastname       = EXCLUDED.lastname,
+                    profile        = COALESCE(EXCLUDED.profile,         strava_athletes.profile),
+                    city           = COALESCE(EXCLUDED.city,            strava_athletes.city),
+                    state          = COALESCE(EXCLUDED.state,           strava_athletes.state),
+                    country        = COALESCE(EXCLUDED.country,         strava_athletes.country),
+                    follower_count = COALESCE(EXCLUDED.follower_count,  strava_athletes.follower_count),
+                    following_count= COALESCE(EXCLUDED.following_count, strava_athletes.following_count),
+                    updated_at     = NOW()
             """, athlete.get("id"), athlete.get("username"), athlete.get("firstname"),
                 athlete.get("lastname"), athlete.get("profile"), athlete.get("city"),
                 athlete.get("state"), athlete.get("country"), athlete.get("sex"),

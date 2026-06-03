@@ -98,6 +98,8 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
+      COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
+      YOUTUBE_ENRICH_BATCH_LIMIT: "5"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     cap_add:
