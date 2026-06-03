@@ -306,25 +306,24 @@ class StravaCollector(BaseCollector):
                         # parse __NEXT_DATA__.props.pageProps.athlete (works even
                         # when the dashboard embeds currentAthlete: null for cookie
                         # sessions that lack full API scope).
+                        # Note: /athletes/{id} page may return a reduced page (no __NEXT_DATA__)
+                        # for FollowersOnly profiles or bot-detected requests. Fall back to
+                        # upserting a minimal stub from the resolved athlete_id so the FK chain works.
                         if not profile_data and athlete_id:
                             try:
                                 prof_resp = await asyncio.wait_for(
                                     client.get(f"https://www.strava.com/athletes/{athlete_id}",
                                                headers={"User-Agent": ua, "Accept": "text/html"}),
                                     timeout=15.0)
-                                logger.info("strava: profile page fetch status=%s for %s", prof_resp.status_code, athlete_id)
                                 if prof_resp.status_code == 200:
                                     import re as _re
                                     nd_m = _re.search(
                                         r'<script id="__NEXT_DATA__" type="application/json">(.+?)</script>',
                                         prof_resp.text, _re.DOTALL)
-                                    logger.info("strava: __NEXT_DATA__ found=%s len=%d", bool(nd_m), len(prof_resp.text))
                                     if nd_m:
                                         nd = json.loads(nd_m.group(1))
                                         ath = nd.get("props", {}).get("pageProps", {}).get("athlete")
-                                        logger.info("strava: athlete field=%s", str(ath)[:200] if ath else "NULL")
                                         if ath and ath.get("id"):
-                                            # Normalise to the same field names _upsert_athlete expects
                                             profile_data = {
                                                 "id": ath.get("id"),
                                                 "username": ath.get("username") or ath.get("firstName", ""),
@@ -335,8 +334,20 @@ class StravaCollector(BaseCollector):
                                                 "state": (ath.get("location") or {}).get("state"),
                                                 "country": (ath.get("location") or {}).get("country"),
                                             }
+                                    # Try extracting name from meta tags if __NEXT_DATA__ absent
+                                    if not profile_data:
+                                        name_m = _re.search(r'<title>([^<|]+)', prof_resp.text)
+                                        display_name = name_m.group(1).strip() if name_m else None
+                                        profile_data = {
+                                            "id": athlete_id,
+                                            "username": display_name or f"athlete_{athlete_id}",
+                                            "firstname": display_name,
+                                        }
+                                        logger.info("strava: using minimal profile stub from meta for %s (%s)", athlete_id, display_name)
                             except Exception as e:
                                 logger.warning("strava: profile page fetch failed: %s", e)
+                                # Last resort: upsert a bare stub so FK chain resolves
+                                profile_data = {"id": athlete_id, "username": f"athlete_{athlete_id}"}
                         if profile_data:
                             try:
                                 if profile_data.get("id"):
