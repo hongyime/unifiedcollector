@@ -474,6 +474,8 @@ class Lemon8Collector(BaseCollector):
                         comment_count = EXCLUDED.comment_count,
                         image_urls    = COALESCE(EXCLUDED.image_urls, lemon8_posts.image_urls),
                         video_url     = COALESCE(EXCLUDED.video_url,  lemon8_posts.video_url),
+                        title         = COALESCE(NULLIF(EXCLUDED.title, ''),       lemon8_posts.title),
+                        description   = COALESCE(NULLIF(EXCLUDED.description, ''), lemon8_posts.description),
                         metadata      = EXCLUDED.metadata
                 """,
                     platform_post_id, profile_uuid,

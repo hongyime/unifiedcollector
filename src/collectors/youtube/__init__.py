@@ -244,31 +244,46 @@ class YoutubeCollector(BaseCollector):
                 logger.warning("YouTube collector has neither YOUTUBE_API_KEY nor OAuth pickle — calls will fail")
         self._has_auth = bool(self._api_key or self._oauth_credentials)
 
-        for target in targets:
-            if self._stop.is_set(): break
-            logger.info("Collecting youtube/%s", target)
-            try:
-                await self._collect_channel(target)
-                await self.checkpoint.save_progress(target)
-            except Exception as e:
-                logger.error("Failed youtube/%s: %s", target, e)
-                await self.send_to_dlq(target, target, str(e))
-
-        # Spider queue processing
-        if os.getenv("YOUTUBE_SPIDER_ENABLED", "true").lower() == "true":
-            await self._process_spider_queue()
-
-        # Enrich a small batch of videos with transcripts and comments per tick.
-        logger.info("YouTube: enrichment gate check: _use_yt_dlp=%s _fetch_transcripts=%s _fetch_comments_enabled=%s",
-                    self._use_yt_dlp, self._fetch_transcripts, self._fetch_comments_enabled)
+        # Spawn transcript/comment enrichment as a background task so it runs
+        # concurrently with the 492-target channel loop instead of after it.
+        # Previously enrichment was at the END of collect() and never reached
+        # (492 channels * ~8s = 65min+ before enrichment could start).
+        enrich_task = None
         if self._use_yt_dlp and (self._fetch_transcripts or self._fetch_comments_enabled):
-            logger.info("YouTube: starting transcript/comment enrichment (limit=%d)", self._enrich_batch_limit)
-            try:
-                await self._enrich_transcripts_and_comments(limit=self._enrich_batch_limit)
-            except Exception as e:
-                logger.error("YouTube transcript/comment enrichment failed: %s", e, exc_info=True)
-        else:
-            logger.info("YouTube: enrichment SKIPPED (gate check failed)")
+            logger.info("YouTube: launching enrichment background task (limit=%d)", self._enrich_batch_limit)
+            enrich_task = asyncio.create_task(
+                self._enrich_transcripts_and_comments(limit=self._enrich_batch_limit)
+            )
+
+        try:
+            for target in targets:
+                if self._stop.is_set(): break
+                logger.info("Collecting youtube/%s", target)
+                try:
+                    await self._collect_channel(target)
+                    await self.checkpoint.save_progress(target)
+                except Exception as e:
+                    logger.error("Failed youtube/%s: %s", target, e)
+                    await self.send_to_dlq(target, target, str(e))
+
+            # Spider queue processing
+            if os.getenv("YOUTUBE_SPIDER_ENABLED", "true").lower() == "true":
+                await self._process_spider_queue()
+        finally:
+            # Wait for enrichment to complete (or cancel on stop)
+            if enrich_task is not None:
+                if self._stop.is_set():
+                    enrich_task.cancel()
+                    try:
+                        await enrich_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                else:
+                    try:
+                        await enrich_task
+                        logger.info("YouTube: enrichment background task complete")
+                    except Exception as e:
+                        logger.error("YouTube: enrichment background task failed: %s", e, exc_info=True)
 
     async def _process_spider_queue(self):
         while not self._stop.is_set():

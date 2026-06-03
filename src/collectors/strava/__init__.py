@@ -279,19 +279,36 @@ class StravaCollector(BaseCollector):
                         if m:
                             athlete_id = m.group(1)
                             logger.info("strava: resolved athlete_id=%s via dashboard hydration", athlete_id)
-                        # Also try to extract full profile from embedded JSON blob
-                        # Strava embeds {"currentAthlete":{...}} in the page JS
-                        profile_m = re.search(r'"currentAthlete"\s*:\s*(\{[^}]{20,500}\})', dash.text)
-                        if profile_m:
+                        # Also try to extract full profile from embedded JSON blob.
+                        # Use a brace-depth counter — the naive [^}] regex breaks on
+                        # any nested object (stops at first inner closing brace).
+                        profile_data = None
+                        ca_idx = dash.text.find('"currentAthlete"')
+                        if ca_idx != -1:
+                            brace_start = dash.text.find('{', ca_idx)
+                            if brace_start != -1:
+                                depth, i, text = 0, brace_start, dash.text
+                                while i < len(text) and i < brace_start + 8192:
+                                    if text[i] == '{':
+                                        depth += 1
+                                    elif text[i] == '}':
+                                        depth -= 1
+                                        if depth == 0:
+                                            try:
+                                                profile_data = json.loads(text[brace_start:i + 1])
+                                            except Exception as e:
+                                                logger.warning("strava: currentAthlete JSON parse failed: %s", e)
+                                            break
+                                    i += 1
+                        if profile_data:
                             try:
-                                profile_data = json.loads(profile_m.group(1))
                                 if profile_data.get("id"):
                                     await self._upsert_athlete(profile_data)
-                                    logger.info("strava: upserted athlete profile from dashboard JSON")
+                                    logger.info("strava: upserted athlete profile from dashboard JSON (id=%s)", profile_data.get("id"))
                                 else:
-                                    logger.debug("strava: currentAthlete JSON has no 'id' field")
+                                    logger.debug("strava: currentAthlete JSON has no 'id' field: %s", str(profile_data)[:200])
                             except Exception as e:
-                                logger.warning("strava: profile JSON parse failed: %s | sample: %s", e, profile_m.group(1)[:200])
+                                logger.warning("strava: _upsert_athlete failed: %s", e)
                         else:
                             logger.debug("strava: no currentAthlete JSON found in dashboard")
                 except Exception as e:
@@ -485,7 +502,10 @@ class StravaCollector(BaseCollector):
         # Count the activity as progress so the worker zero-progress watchdog
         # doesn't falsely flag strava (whose primary output is activity rows in
         # strava_activities, not media_items) as wedged.
-        self._progress_count += 1
+        try:
+            self._progress_count += 1
+        except AttributeError:
+            self._progress_count = 1
 
     async def _collect_athlete(self, athlete_id: str):
         async with httpx.AsyncClient(timeout=30) as client:
