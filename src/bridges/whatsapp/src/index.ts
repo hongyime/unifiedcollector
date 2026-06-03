@@ -40,6 +40,7 @@ let activeSock: any = null;
 let retryCount = 0;
 let isFirstConnect = true;
 let cachedVersion: [number, number, number] | null = null;
+let latestQr: string | null = null;
 
 let stream515: number[] = [];
 const MAX_RAPID_515 = 3;
@@ -50,6 +51,15 @@ app.get('/health', (_req, res) => {
 });
 app.get('/ready', (_req, res) => {
     res.status(serviceHealthy ? 200 : 503).json({ status: serviceHealthy ? 'ready' : 'not_ready' });
+});
+app.get('/qr', (_req, res) => {
+    if (serviceHealthy) {
+        res.status(200).json({ status: 'already_paired', qr: null, ready: true });
+    } else if (latestQr) {
+        res.status(200).json({ status: 'awaiting_scan', qr: latestQr, ready: false });
+    } else {
+        res.status(202).json({ status: 'connecting', qr: null, ready: false });
+    }
 });
 app.listen(port, () => logger.info(`Health server on :${port}`));
 
@@ -127,6 +137,7 @@ async function connectToWhatsApp(): Promise<void> {
         const { connection, lastDisconnect, qr } = update;
 
         if (qr) {
+            latestQr = qr;
             logger.info('QR code received -- scan with your phone:');
             qrcode.generate(qr, { small: true });
         }
@@ -136,6 +147,7 @@ async function connectToWhatsApp(): Promise<void> {
             await producer.publish('session.status', { session_name: sessionName, status: 'connecting' }).catch(() => {});
         } else if (connection === 'open') {
             logger.info('Connected to WhatsApp successfully!');
+            latestQr = null;
             serviceHealthy = true;
             retryCount = 0;
             if (sock.user?.id) phoneNumber = sock.user.id.split(':')[0];
