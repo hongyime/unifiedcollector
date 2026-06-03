@@ -462,13 +462,17 @@ class Lemon8Collector(BaseCollector):
                 "SELECT id FROM lemon8_profiles WHERE platform_user_id = $1", user_id
             )
             profile_uuid = profile_row['id'] if profile_row else None
+            # Build post_url from platform_post_id if it looks like a real numeric ID
+            post_url = None
+            if platform_post_id and platform_post_id.isdigit():
+                post_url = f"https://www.lemon8-app.com/@{user_id}/{platform_post_id}"
             try:
                 await conn.execute("""
                     INSERT INTO lemon8_posts (
-                        platform_post_id, profile_id, title, description,
+                        platform_post_id, profile_id, username, title, description,
                         image_urls, video_url,
-                        like_count, comment_count, metadata
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                        like_count, comment_count, post_url, metadata
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                     ON CONFLICT (platform_post_id) DO UPDATE SET
                         like_count    = EXCLUDED.like_count,
                         comment_count = EXCLUDED.comment_count,
@@ -476,9 +480,11 @@ class Lemon8Collector(BaseCollector):
                         video_url     = COALESCE(EXCLUDED.video_url,  lemon8_posts.video_url),
                         title         = COALESCE(NULLIF(EXCLUDED.title, ''),       lemon8_posts.title),
                         description   = COALESCE(NULLIF(EXCLUDED.description, ''), lemon8_posts.description),
+                        username      = COALESCE(EXCLUDED.username, lemon8_posts.username),
+                        post_url      = COALESCE(EXCLUDED.post_url,  lemon8_posts.post_url),
                         metadata      = EXCLUDED.metadata
                 """,
-                    platform_post_id, profile_uuid,
+                    platform_post_id, profile_uuid, user_id,
                     post_data.get("title"), post_data.get("description"),
                     image_urls or None, video_url,
                     int(post_data.get("stats", {}).get("likeCount", 0) or 0),

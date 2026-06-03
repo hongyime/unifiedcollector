@@ -278,6 +278,8 @@ class StravaCollector(BaseCollector):
                             re.search(r'/athletes/(\d+)', dash.text)
                         if m:
                             athlete_id = m.group(1)
+                            # Assign to instance so follow-roster expansion can use it
+                            self._my_athlete_id = athlete_id
                             logger.info("strava: resolved athlete_id=%s via dashboard hydration", athlete_id)
                         # Also try to extract full profile from embedded JSON blob.
                         # Use a brace-depth counter — the naive [^}] regex breaks on
