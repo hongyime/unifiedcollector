@@ -8,11 +8,12 @@
 // sessions/whatsapp/<account>). syncFullHistory defaults ON so historical
 // messages backfill on first connect (the old bridge left it off -> 0/0 sync).
 
-import makeWASocket, { DisconnectReason, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
+import makeWASocket, { DisconnectReason, fetchLatestBaileysVersion, downloadMediaMessage } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
 import fs from 'fs';
 import express from 'express';
+import crypto from 'crypto';
 import * as qrcode from 'qrcode-terminal';
 
 import { getAuthState, handlePairingCode } from './auth_manager';
@@ -61,6 +62,65 @@ app.get('/qr', (_req, res) => {
         res.status(202).json({ status: 'connecting', qr: null, ready: false });
     }
 });
+
+// POST /media/decrypt — decrypt and stream WhatsApp media bytes back to caller.
+// Body: { messageId, mediaKey, directPath, mimetype? }
+// Auth: HMAC-SHA256 of JSON body with BRIDGE_SECRET, passed as X-Signature header.
+app.use(express.json({ limit: '1mb' }));
+app.post('/media/decrypt', async (req, res) => {
+    const bridgeSecret = process.env.WHATSAPP_MEDIA_BRIDGE_SECRET || process.env.BRIDGE_SECRET || '';
+    if (bridgeSecret) {
+        const timestamp = req.headers['x-timestamp'] as string || '';
+        const signature = req.headers['x-signature'] as string || '';
+        const payload = JSON.stringify(req.body) + timestamp;
+        const expected = crypto.createHmac('sha256', bridgeSecret).update(payload).digest('hex');
+        if (signature !== expected) {
+            res.status(401).json({ error: 'invalid signature' });
+            return;
+        }
+    }
+    if (!activeSock) {
+        res.status(503).json({ error: 'bridge not connected' });
+        return;
+    }
+    const { messageId, mediaKey, directPath, mimetype } = req.body;
+    if (!mediaKey || !directPath) {
+        res.status(400).json({ error: 'mediaKey and directPath required' });
+        return;
+    }
+    try {
+        // Reconstruct a minimal WAMessage-like object that downloadMediaMessage accepts
+        const msgType = (mimetype || '').startsWith('image') ? 'imageMessage'
+                      : (mimetype || '').startsWith('video') ? 'videoMessage'
+                      : (mimetype || '').startsWith('audio') ? 'audioMessage'
+                      : (mimetype || '').startsWith('application') ? 'documentMessage'
+                      : 'imageMessage';
+        const fakeMsg = {
+            key: { id: messageId, remoteJid: 'status@broadcast' },
+            message: {
+                [msgType]: {
+                    mediaKey,
+                    directPath,
+                    mimetype: mimetype || 'application/octet-stream',
+                    url: `https://mmg.whatsapp.net${directPath}`,
+                }
+            }
+        };
+        const buffer = await downloadMediaMessage(
+            fakeMsg as any,
+            'buffer',
+            {},
+            { logger, reuploadRequest: activeSock.updateMediaMessage }
+        );
+        res.status(200)
+           .set('Content-Type', mimetype || 'application/octet-stream')
+           .send(buffer);
+    } catch (err: any) {
+        logger.warn({ messageId, err: err?.message }, 'media decrypt failed');
+        res.status(500).json({ error: err?.message || 'decrypt failed' });
+    }
+});
+
 app.listen(port, () => logger.info(`Health server on :${port}`));
 
 const getEnv = (key: string, dflt = ''): string => (process.env[key] || dflt).split('#')[0].trim();

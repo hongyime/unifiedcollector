@@ -144,6 +144,7 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
+      COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
       # Subprocess download tiers enabled ONLY in this isolated container.
       TIKTOK_YTDLP_FALLBACK_ENABLED: "true"
       TIKTOK_GALLERY_DL_ENABLED: "true"
@@ -189,6 +190,7 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
+      COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     cap_add:
@@ -220,6 +222,7 @@ services:
     mem_limit: 1g
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
       COLLECTOR_DRIVE_PATH: /media
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -316,6 +319,7 @@ services:
     mem_limit: 512m
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
       COLLECTOR_DRIVE_PATH: /media
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -349,6 +353,7 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
+      COLLECTOR_HANG_TIMEOUT_SECONDS: '7200'
     extra_hosts:
       - "host.docker.internal:host-gateway"
     cap_add:
