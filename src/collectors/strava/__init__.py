@@ -143,6 +143,15 @@ class StravaCollector(BaseCollector):
                 logger.error("Failed strava/%s: %s", target, e)
                 await self.send_to_dlq(target, target, str(e))
 
+        # Scrape the authenticated user's following feed (recent activities from
+        # people the logged-in athlete follows). Runs only when cookie auth
+        # resolved a valid self._my_athlete_id during _collect_via_cookies().
+        if self._my_athlete_id and self._use_web:
+            try:
+                await self._collect_following_feed()
+            except Exception as e:
+                logger.warning("strava: _collect_following_feed failed: %s", e)
+
         if os.getenv("STRAVA_SPIDER_ENABLED", "true").lower() == "true":
             await self._process_spider_queue()
 
@@ -511,6 +520,14 @@ class StravaCollector(BaseCollector):
             await self._collect_activities_api(client, aid, aname)
 
     async def _upsert_athlete(self, athlete: dict):
+        # platform_athlete_id is BIGINT -- always cast to int so asyncpg doesn't
+        # reject string IDs (common when athlete dict comes from web scraping).
+        raw_id = athlete.get("id")
+        try:
+            athlete_id_int = int(raw_id)
+        except (TypeError, ValueError):
+            logger.warning("strava: _upsert_athlete skipped — unparseable id %r", raw_id)
+            return
         async with self.pool.acquire() as conn:
             await conn.execute("""
                 INSERT INTO strava_athletes (
@@ -529,7 +546,7 @@ class StravaCollector(BaseCollector):
                     follower_count = COALESCE(EXCLUDED.follower_count,  strava_athletes.follower_count),
                     following_count= COALESCE(EXCLUDED.following_count, strava_athletes.following_count),
                     updated_at     = NOW()
-            """, athlete.get("id"), athlete.get("username"), athlete.get("firstname"),
+            """, athlete_id_int, athlete.get("username"), athlete.get("firstname"),
                 athlete.get("lastname"), athlete.get("profile"), athlete.get("city"),
                 athlete.get("state"), athlete.get("country"), athlete.get("sex"),
                 athlete.get("follower_count", 0) or athlete.get("friends", 0) or 0,
@@ -550,6 +567,155 @@ class StravaCollector(BaseCollector):
                 ON CONFLICT (platform_activity_id) DO UPDATE SET
                     name = EXCLUDED.name, metadata = EXCLUDED.metadata
             """, activity.get("id"), athlete_uuid, activity.get("name"), activity.get("type"), activity.get("sport_type"), activity.get("distance"), activity.get("moving_time"), activity.get("elapsed_time"), activity.get("total_elevation_gain"), activity.get("average_speed"), activity.get("max_speed"), activity.get("average_heartrate"), activity.get("calories"), datetime.fromisoformat(activity.get("start_date").replace("Z", "")) if activity.get("start_date") else None, metadata_json)
+
+    async def _collect_following_feed(self):
+        """Scrape the /dashboard/feed following feed for activities from all followed athletes.
+
+        Uses the same cookie auth as _collect_via_cookies. Paginates via cursor
+        until no more pages or self._stop is set. Upserts each activity row and
+        creates a stub athlete row for any new athlete_id discovered.
+        Technique ported from archive/stravatoolkit/ingestion/core/scrapers/feed.py.
+        """
+        if not self._session_cookie or not self._my_athlete_id:
+            logger.warning("strava: _collect_following_feed skipped — no cookie or athlete_id")
+            return
+
+        import time as _time
+
+        base_headers = {
+            "Cookie": self._session_cookie,
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+            "Accept": "application/json, text/javascript, */*",
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": "https://www.strava.com/dashboard",
+        }
+
+        before = int(_time.time())
+        cursor = None
+        page = 1
+        total_upserted = 0
+        max_pages = int(os.getenv("STRAVA_FEED_MAX_PAGES", "20"))
+
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            while not self._stop.is_set() and page <= max_pages:
+                await self._delay(self._feed_delay_min, self._feed_delay_max)
+                params: dict = {
+                    "feed_type": "following",
+                    "athlete_id": self._my_athlete_id,
+                    "before": str(before),
+                }
+                if cursor is not None:
+                    params["cursor"] = str(cursor)
+                try:
+                    resp = await asyncio.wait_for(
+                        client.get("https://www.strava.com/dashboard/feed",
+                                   headers=base_headers, params=params),
+                        timeout=30.0,
+                    )
+                except Exception as e:
+                    logger.warning("strava: following feed page %d fetch error: %s", page, e)
+                    break
+
+                if resp.status_code == 401 or resp.status_code == 302:
+                    logger.warning("strava: following feed page %d auth error HTTP %d (cookie stale?)", page, resp.status_code)
+                    break
+                if resp.status_code == 429:
+                    logger.warning("strava: following feed rate-limited, sleeping 60s")
+                    await asyncio.sleep(60)
+                    continue
+                if resp.status_code != 200:
+                    logger.warning("strava: following feed page %d HTTP %d; stopping", page, resp.status_code)
+                    break
+
+                try:
+                    payload = resp.json()
+                except Exception as e:
+                    logger.warning("strava: following feed page %d JSON decode failed: %s", page, e)
+                    break
+
+                # Response is either a bare list or dict with entries/cursor
+                if isinstance(payload, list):
+                    items = payload
+                    next_cursor = None
+                elif isinstance(payload, dict):
+                    items = payload.get("entries") or payload.get("models") or payload.get("activities") or []
+                    pagination = payload.get("pagination") or {}
+                    next_cursor = (payload.get("cursor") or pagination.get("cursor")
+                                   or pagination.get("next_cursor"))
+                    # cursor can also live in the last item's cursorData
+                    if not next_cursor and items:
+                        last = items[-1] if isinstance(items[-1], dict) else {}
+                        cd = last.get("cursorData") or {}
+                        next_cursor = cd.get("updated_at") or cd.get("rank")
+                else:
+                    break
+
+                if not items:
+                    logger.info("strava: following feed page %d empty, done", page)
+                    break
+
+                page_count = 0
+                for raw_item in items:
+                    if not isinstance(raw_item, dict):
+                        continue
+                    # Extract activity entity — may be nested under 'activity' or 'row'
+                    activity_payload = raw_item.get("activity")
+                    entity = (activity_payload if isinstance(activity_payload, dict)
+                              else raw_item.get("row") or raw_item)
+                    if not isinstance(entity, dict):
+                        continue
+
+                    # Extract athlete info
+                    athlete_raw = (raw_item.get("athlete") if isinstance(raw_item.get("athlete"), dict)
+                                   else entity.get("athlete") or {})
+                    athlete_id = (athlete_raw.get("id") or athlete_raw.get("athleteId")
+                                  or entity.get("athlete_id") or raw_item.get("athlete_id"))
+                    if not athlete_id:
+                        continue
+                    athlete_id = str(athlete_id)
+                    athlete_name = (athlete_raw.get("name")
+                                    or f"{athlete_raw.get('firstname','')} {athlete_raw.get('lastname','')}".strip()
+                                    or f"athlete_{athlete_id}")
+
+                    # Stub athlete row so FK resolves
+                    try:
+                        async with self.pool.acquire() as conn:
+                            await conn.execute(
+                                """INSERT INTO strava_athletes (platform_athlete_id, username, updated_at)
+                                   VALUES ($1, $2, now())
+                                   ON CONFLICT (platform_athlete_id) DO NOTHING""",
+                                int(athlete_id), athlete_name,
+                            )
+                    except Exception:
+                        pass
+
+                    # Normalize and upsert activity
+                    norm = self._normalize_training_activity(entity)
+                    if not norm.get("id"):
+                        # Try mapping feed fields to the format _normalize expects
+                        entity.setdefault("id", entity.get("activity_id") or raw_item.get("entity_id"))
+                        entity.setdefault("start_date", entity.get("startDate") or entity.get("start_date_utc"))
+                        norm = self._normalize_training_activity(entity)
+                    if not norm.get("id"):
+                        continue
+                    try:
+                        await self._upsert_activity(norm, athlete_id)
+                        page_count += 1
+                        total_upserted += 1
+                    except Exception as e:
+                        logger.debug("strava: following feed upsert failed: %s", e)
+
+                logger.info("strava: following feed page %d — %d activities upserted (total %d)",
+                            page, page_count, total_upserted)
+
+                if next_cursor is None:
+                    logger.info("strava: following feed exhausted after %d pages (%d total)", page, total_upserted)
+                    break
+                cursor = next_cursor
+                before = next_cursor
+                page += 1
+
+        logger.info("strava: _collect_following_feed complete — %d activities from followed athletes", total_upserted)
         # Count the activity as progress so the worker zero-progress watchdog
         # doesn't falsely flag strava (whose primary output is activity rows in
         # strava_activities, not media_items) as wedged.
@@ -952,6 +1118,138 @@ class StravaCollector(BaseCollector):
         logger.info("strava feed backfill: athlete=%s days=%d total_activities=%d",
                     athlete_id, days_back, total)
         return total
+
+    async def _collect_following_feed(self):
+        """Scrape the authenticated user's following feed and persist all
+        discovered activities.
+
+        Called from collect() after _collect_via_cookies() has resolved
+        self._my_athlete_id. No date-window filtering — captures up to
+        STRAVA_FEED_MAX_PAGES (default 10) pages of recent following-feed
+        activities and upserts each one.  Companion to fetch_feed_for_date
+        which is day-bounded; this method is the collect()-integrated path.
+        """
+        if not self._use_web:
+            logger.info("strava following-feed: cookie auth required; skipping")
+            return
+        if not self._my_athlete_id:
+            logger.info("strava following-feed: athlete_id not resolved; skipping")
+            return
+        jar = self._build_cookie_jar()
+        if jar is None:
+            logger.warning("strava following-feed: no cookies available; skipping")
+            return
+
+        ua = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+        headers = {
+            "User-Agent": ua,
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": "https://www.strava.com/dashboard",
+        }
+
+        import time as _time
+        before = int(_time.time())
+        cursor = None
+        page = 1
+        max_pages = min(int(os.getenv("STRAVA_FEED_MAX_PAGES", "10")), 10)
+        total_kept = 0
+        seen: set[int] = set()
+
+        async with httpx.AsyncClient(
+            timeout=30, cookies=jar, follow_redirects=True
+        ) as client:
+            while not self._stop.is_set() and page <= max_pages:
+                await self._delay(self._feed_delay_min, self._feed_delay_max)
+                params: dict = {
+                    "feed_type": "following",
+                    "athlete_id": self._my_athlete_id,
+                    "before": before,
+                }
+                if cursor is not None:
+                    params["cursor"] = cursor
+                try:
+                    resp = await client.get(
+                        f"{STRAVA_WEB}/dashboard/feed",
+                        headers=headers,
+                        params=params,
+                    )
+                except Exception as e:
+                    logger.warning("strava following-feed: page %d fetch error: %s", page, e)
+                    break
+                if resp.status_code == 429:
+                    logger.warning("strava following-feed: rate-limited on page %d; sleeping 60s", page)
+                    await asyncio.sleep(60)
+                    continue
+                if resp.status_code != 200:
+                    logger.warning(
+                        "strava following-feed: stopped at page %d HTTP %d", page, resp.status_code
+                    )
+                    break
+                try:
+                    payload = resp.json()
+                except Exception as e:
+                    logger.warning("strava following-feed: JSON decode failed page %d: %s", page, e)
+                    break
+
+                items, next_cursor = self._extract_feed_page(payload)
+                if not items:
+                    logger.info("strava following-feed: page %d empty; stopping", page)
+                    break
+
+                page_kept = 0
+                for raw in items:
+                    norm = self._normalize_feed_activity(raw)
+                    if not norm:
+                        continue
+                    aid = norm.get("id")
+                    if not aid or aid in seen:
+                        continue
+                    seen.add(aid)
+                    athlete_id_raw = norm.get("_athlete_id") or self._my_athlete_id
+                    try:
+                        athlete_id_int = int(athlete_id_raw)
+                    except (TypeError, ValueError):
+                        athlete_id_int = None
+                    if athlete_id_int is None:
+                        continue
+                    athlete_name = norm.get("_athlete_name") or str(athlete_id_int)
+                    try:
+                        # Ensure athlete row exists (stub) so FK can resolve.
+                        async with self.pool.acquire() as conn:
+                            await conn.execute(
+                                """INSERT INTO strava_athletes
+                                       (platform_athlete_id, username, updated_at)
+                                   VALUES ($1, $2, NOW())
+                                   ON CONFLICT (platform_athlete_id) DO NOTHING""",
+                                athlete_id_int,
+                                athlete_name,
+                            )
+                        await self._upsert_activity(norm, str(athlete_id_int))
+                        page_kept += 1
+                    except Exception as e:
+                        logger.warning(
+                            "strava following-feed: upsert activity %s failed: %s", aid, e
+                        )
+
+                total_kept += page_kept
+                logger.info(
+                    "strava following-feed: page %d kept=%d total=%d (next_cursor=%s)",
+                    page, page_kept, total_kept, next_cursor,
+                )
+                if next_cursor is None:
+                    break
+                cursor = next_cursor
+                before = next_cursor
+                page += 1
+
+        logger.info(
+            "strava following-feed: finished athlete=%s pages=%d total_activities=%d",
+            self._my_athlete_id, page, total_kept,
+        )
 
     async def cleanup(self):
         pass

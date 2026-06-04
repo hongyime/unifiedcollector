@@ -1402,7 +1402,20 @@ async def whatsapp_qr(bridge: str):
         with urllib.request.urlopen(f"{base}/qr", timeout=8) as r:
             qrd = __import__("json").loads(r.read().decode())
         out["status"] = qrd.get("status", out["status"])
-        out["qr"] = qrd.get("qr", "")
+        raw_qr = qrd.get("qr", "")
+        if raw_qr:
+            # Convert the raw Baileys QR string to a base64-encoded PNG so the
+            # browser can use it directly as <img src="data:image/png;base64,…">
+            import base64
+            import io
+
+            import qrcode  # noqa: PLC0415
+
+            buf = io.BytesIO()
+            qrcode.make(raw_qr).save(buf, "PNG")
+            out["qr"] = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+        else:
+            out["qr"] = ""
     except Exception as exc:  # noqa: BLE001
         out["error"] = str(exc)
         out["status"] = "unreachable"
@@ -1423,7 +1436,6 @@ async def whatsapp_link_page():
     html = """<!doctype html>
 <html><head><meta charset="utf-8"><title>Link WhatsApp</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <style>
  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#0b141a;color:#e9edef;margin:0;padding:24px}
  h1{font-size:20px;font-weight:600;margin:0 0 4px}
@@ -1454,18 +1466,6 @@ async def whatsapp_link_page():
   The panel turns <span class="connected">green</span> automatically once linked. No need to refresh the page.
  </div>
 <script>
-var qrInstances={};
-function renderQR(b,text){
-  var el=document.getElementById('q'+b);
-  el.innerHTML='';
-  el.style.background='#fff';
-  if(qrInstances[b]){try{qrInstances[b].clear();}catch(e){}}
-  try{
-    qrInstances[b]=new QRCode(el,{text:text,width:264,height:264,correctLevel:QRCode.CorrectLevel.L});
-  }catch(e){
-    el.innerHTML='<pre style="font-size:6px;color:#000;word-break:break-all">'+text+'</pre>';
-  }
-}
 async function poll(b){
   const sEl=document.getElementById('s'+b), qEl=document.getElementById('q'+b), tEl=document.getElementById('t'+b);
   try{
@@ -1477,7 +1477,8 @@ async function poll(b){
       return;
     }
     if(d.qr){
-      renderQR(b, d.qr);
+      qEl.innerHTML='<img src="'+d.qr+'" width="264" height="264" style="image-rendering:pixelated">';
+      qEl.style.background='#fff';
       sEl.innerHTML='<span class="dot wait"></span> Waiting for scan&hellip; (auto-refreshing)';
       tEl.innerHTML='<span class="dot wait"></span>';
     } else if(d.status==='unreachable'){
