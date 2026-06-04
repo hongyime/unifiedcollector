@@ -503,7 +503,7 @@ class YoutubeCollector(BaseCollector):
                     }
                     try:
                         await self._upsert_video(channel_id, video_data)
-                        self.mark_seen(video_id)   # tick watchdog even if yt-dlp download fails
+                        self._progress_count += 1   # tick watchdog even if yt-dlp download fails
                     except Exception as e:
                         logger.error("YouTube _upsert_video failed for %s: %s", video_id, e)
                     thumbs = item.get("snippet", {}).get("thumbnails", {})
@@ -605,7 +605,7 @@ class YoutubeCollector(BaseCollector):
                         "youtube yt-dlp video download failed for %s: rc=%s timed_out=%s stderr_tail=%s",
                         url, result.returncode, result.timed_out, result.err_summary(400),
                     )
-                    self.mark_seen(url)  # tick watchdog so metadata-only runs don't look hung
+                    self._progress_count += 1  # tick watchdog so metadata-only runs don't look hung
                 for f in result.files:
                     if self._stop.is_set(): break
                     ext = f.suffix.lstrip(".").lower()
