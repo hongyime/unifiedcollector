@@ -152,6 +152,13 @@ class StravaCollector(BaseCollector):
             except Exception as e:
                 logger.warning("strava: _collect_following_feed failed: %s", e)
 
+            # Backfill own activity history with polylines + photos
+            try:
+                n = await self._backfill_athlete_history(self._my_athlete_id, year_cap=5)
+                logger.info("strava: own history backfill complete, %d activities enriched", n)
+            except Exception as e:
+                logger.warning("strava: own history backfill failed: %s", e)
+
         if os.getenv("STRAVA_SPIDER_ENABLED", "true").lower() == "true":
             await self._process_spider_queue()
 
@@ -195,7 +202,10 @@ class StravaCollector(BaseCollector):
             if not row: break
             try:
                 if self._use_api: await self._collect_athlete(str(row['platform_athlete_id']))
-                elif self._use_web: await self._collect_athlete_web(str(row['platform_athlete_id']))
+                elif self._use_web:
+                    # Profile stub first, then full history backfill with photos + polylines
+                    await self._collect_athlete_web(str(row['platform_athlete_id']))
+                    await self._backfill_athlete_history(str(row['platform_athlete_id']))
                 async with self.pool.acquire() as conn:
                     await conn.execute("UPDATE strava_spider_queue SET status = 'completed' WHERE platform_athlete_id = $1", row['platform_athlete_id'])
             except Exception:
@@ -568,161 +578,7 @@ class StravaCollector(BaseCollector):
                     name = EXCLUDED.name, metadata = EXCLUDED.metadata
             """, activity.get("id"), athlete_uuid, activity.get("name"), activity.get("type"), activity.get("sport_type"), activity.get("distance"), activity.get("moving_time"), activity.get("elapsed_time"), activity.get("total_elevation_gain"), activity.get("average_speed"), activity.get("max_speed"), activity.get("average_heartrate"), activity.get("calories"), datetime.fromisoformat(activity.get("start_date").replace("Z", "")) if activity.get("start_date") else None, metadata_json)
 
-    async def _collect_following_feed(self):
-        """Scrape the /dashboard/feed following feed for activities from all followed athletes.
-
-        Uses the same cookie auth as _collect_via_cookies. Paginates via cursor
-        until no more pages or self._stop is set. Upserts each activity row and
-        creates a stub athlete row for any new athlete_id discovered.
-        Technique ported from archive/stravatoolkit/ingestion/core/scrapers/feed.py.
-        """
-        if not self._session_cookie or not self._my_athlete_id:
-            logger.warning("strava: _collect_following_feed skipped — no cookie or athlete_id")
-            return
-
-        import time as _time
-
-        base_headers = {
-            "Cookie": self._session_cookie,
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-            "Accept": "application/json, text/javascript, */*",
-            "X-Requested-With": "XMLHttpRequest",
-            "Referer": "https://www.strava.com/dashboard",
-        }
-
-        before = int(_time.time())
-        cursor = None
-        page = 1
-        total_upserted = 0
-        max_pages = int(os.getenv("STRAVA_FEED_MAX_PAGES", "20"))
-
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-            while not self._stop.is_set() and page <= max_pages:
-                await self._delay(self._feed_delay_min, self._feed_delay_max)
-                params: dict = {
-                    "feed_type": "following",
-                    "athlete_id": self._my_athlete_id,
-                    "before": str(before),
-                }
-                if cursor is not None:
-                    params["cursor"] = str(cursor)
-                try:
-                    resp = await asyncio.wait_for(
-                        client.get("https://www.strava.com/dashboard/feed",
-                                   headers=base_headers, params=params),
-                        timeout=30.0,
-                    )
-                except Exception as e:
-                    logger.warning("strava: following feed page %d fetch error: %s", page, e)
-                    break
-
-                if resp.status_code == 401 or resp.status_code == 302:
-                    logger.warning("strava: following feed page %d auth error HTTP %d (cookie stale?)", page, resp.status_code)
-                    break
-                if resp.status_code == 429:
-                    logger.warning("strava: following feed rate-limited, sleeping 60s")
-                    await asyncio.sleep(60)
-                    continue
-                if resp.status_code != 200:
-                    logger.warning("strava: following feed page %d HTTP %d; stopping", page, resp.status_code)
-                    break
-
-                try:
-                    payload = resp.json()
-                except Exception as e:
-                    logger.warning("strava: following feed page %d JSON decode failed: %s", page, e)
-                    break
-
-                # Response is either a bare list or dict with entries/cursor
-                if isinstance(payload, list):
-                    items = payload
-                    next_cursor = None
-                elif isinstance(payload, dict):
-                    items = payload.get("entries") or payload.get("models") or payload.get("activities") or []
-                    pagination = payload.get("pagination") or {}
-                    next_cursor = (payload.get("cursor") or pagination.get("cursor")
-                                   or pagination.get("next_cursor"))
-                    # cursor can also live in the last item's cursorData
-                    if not next_cursor and items:
-                        last = items[-1] if isinstance(items[-1], dict) else {}
-                        cd = last.get("cursorData") or {}
-                        next_cursor = cd.get("updated_at") or cd.get("rank")
-                else:
-                    break
-
-                if not items:
-                    logger.info("strava: following feed page %d empty, done", page)
-                    break
-
-                page_count = 0
-                for raw_item in items:
-                    if not isinstance(raw_item, dict):
-                        continue
-                    # Extract activity entity — may be nested under 'activity' or 'row'
-                    activity_payload = raw_item.get("activity")
-                    entity = (activity_payload if isinstance(activity_payload, dict)
-                              else raw_item.get("row") or raw_item)
-                    if not isinstance(entity, dict):
-                        continue
-
-                    # Extract athlete info
-                    athlete_raw = (raw_item.get("athlete") if isinstance(raw_item.get("athlete"), dict)
-                                   else entity.get("athlete") or {})
-                    athlete_id = (athlete_raw.get("id") or athlete_raw.get("athleteId")
-                                  or entity.get("athlete_id") or raw_item.get("athlete_id"))
-                    if not athlete_id:
-                        continue
-                    athlete_id = str(athlete_id)
-                    athlete_name = (athlete_raw.get("name")
-                                    or f"{athlete_raw.get('firstname','')} {athlete_raw.get('lastname','')}".strip()
-                                    or f"athlete_{athlete_id}")
-
-                    # Stub athlete row so FK resolves
-                    try:
-                        async with self.pool.acquire() as conn:
-                            await conn.execute(
-                                """INSERT INTO strava_athletes (platform_athlete_id, username, updated_at)
-                                   VALUES ($1, $2, now())
-                                   ON CONFLICT (platform_athlete_id) DO NOTHING""",
-                                int(athlete_id), athlete_name,
-                            )
-                    except Exception:
-                        pass
-
-                    # Normalize and upsert activity
-                    norm = self._normalize_training_activity(entity)
-                    if not norm.get("id"):
-                        # Try mapping feed fields to the format _normalize expects
-                        entity.setdefault("id", entity.get("activity_id") or raw_item.get("entity_id"))
-                        entity.setdefault("start_date", entity.get("startDate") or entity.get("start_date_utc"))
-                        norm = self._normalize_training_activity(entity)
-                    if not norm.get("id"):
-                        continue
-                    try:
-                        await self._upsert_activity(norm, athlete_id)
-                        page_count += 1
-                        total_upserted += 1
-                    except Exception as e:
-                        logger.debug("strava: following feed upsert failed: %s", e)
-
-                logger.info("strava: following feed page %d — %d activities upserted (total %d)",
-                            page, page_count, total_upserted)
-
-                if next_cursor is None:
-                    logger.info("strava: following feed exhausted after %d pages (%d total)", page, total_upserted)
-                    break
-                cursor = next_cursor
-                before = next_cursor
-                page += 1
-
-        logger.info("strava: _collect_following_feed complete — %d activities from followed athletes", total_upserted)
-        # Count the activity as progress so the worker zero-progress watchdog
-        # doesn't falsely flag strava (whose primary output is activity rows in
-        # strava_activities, not media_items) as wedged.
-        try:
-            self._progress_count += 1
-        except AttributeError:
-            self._progress_count = 1
+    # (following-feed implementation is at _collect_following_feed below)
 
     async def _collect_athlete(self, athlete_id: str):
         async with httpx.AsyncClient(timeout=30) as client:
@@ -1250,6 +1106,322 @@ class StravaCollector(BaseCollector):
             "strava following-feed: finished athlete=%s pages=%d total_activities=%d",
             self._my_athlete_id, page, total_kept,
         )
+
+    async def _backfill_athlete_history(self, athlete_id: str, *, year_cap: int = 3) -> int:
+        """Month-by-month per-athlete activity backfill.
+
+        Ported from archive/stravatoolkit/ingestion/core/scrapers/history.py.
+
+        Hits GET /athletes/{id}?chart_type=miles&interval_type=month&interval=YYYYMM&year_offset=0
+        and extracts activities from the SSR HTML via __NEXT_DATA__, microfrontend
+        data-react-props, or inline JS assignments (same 3-strategy parser from parsers.py).
+
+        For each activity also extracts:
+          - map.summary_polyline  -> stored in strava_activities.summary_polyline
+          - mapAndPhotos.photoList -> upserted to strava_activity_photos
+
+        Walks backwards month by month, stopping when:
+          - consecutive empty months >= 3, OR
+          - reached year_cap years back, OR
+          - HTTP 403 (private/blocked profile), OR
+          - self._stop is set
+        """
+        import re as _re
+        import json as _json
+        from html import unescape as _unescape
+        from datetime import datetime as _dt
+
+        if not self._session_cookie:
+            return 0
+
+        jar = self._build_cookie_jar()
+        if jar is None:
+            return 0
+
+        ua = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+        headers = {
+            "User-Agent": ua,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+
+        # ---- HTML parsing helpers (ported from archive parsers.py) ----
+        NEXT_DATA_RE = _re.compile(
+            r'<script[^>]+id="__NEXT_DATA__"[^>]*>(?P<data>.*?)</script>', _re.DOTALL)
+        MFE_RE = _re.compile(
+            r"data-react-props=(?P<q>['\"])(?P<data>.*?)(?P=q)", _re.DOTALL)
+        JS_RE = _re.compile(r"=\s*(\{.*?\}|\[.*?\]);", _re.DOTALL)
+        ACTIVITY_HINTS = ("id", "activity_id", "start_date", "start_date_utc",
+                          "sport_type", "type", "map", "mapAndPhotos", "activityName")
+
+        def _looks_activity(d: dict) -> bool:
+            return (d.get("entity") == "Activity"
+                    or isinstance(d.get("activity"), dict)
+                    or sum(1 for k in ACTIVITY_HINTS if k in d) >= 2)
+
+        def _coerce_list(val) -> list:
+            if isinstance(val, list):
+                return [x for x in val if isinstance(x, dict)]
+            return []
+
+        def _entries_from_dict(d: dict, assume_profile: bool = False) -> list:
+            for key in ("preFetchedEntries", "activities"):
+                v = _coerce_list(d.get(key))
+                if v:
+                    return v
+            for key in ("entries",):
+                v = _coerce_list(d.get(key))
+                if v and (assume_profile or any(_looks_activity(e) for e in v)):
+                    return v
+            for key in ("items", "models", "data"):
+                v = _coerce_list(d.get(key))
+                if v and any(_looks_activity(e) for e in v):
+                    return v
+            return []
+
+        def _extract_entries(html: str) -> list:
+            # Strategy 1: microfrontend props
+            for m in MFE_RE.finditer(html):
+                try:
+                    p = _json.loads(_unescape(m.group("data")))
+                except Exception:
+                    continue
+                if not isinstance(p, dict):
+                    continue
+                ctx = p.get("appContext") or {}
+                if isinstance(ctx, dict) and (ctx.get("page") == "profile" or ctx.get("feedType") == "profile"):
+                    entries = _entries_from_dict(ctx, assume_profile=True)
+                    if entries:
+                        return entries
+                entries = _entries_from_dict(p)
+                if entries:
+                    return entries
+
+            # Strategy 2: __NEXT_DATA__
+            m = NEXT_DATA_RE.search(html)
+            if m:
+                try:
+                    nd = _json.loads(_unescape(m.group("data")))
+                    # walk the tree
+                    def _walk(obj):
+                        if isinstance(obj, dict):
+                            e = _entries_from_dict(obj)
+                            if e:
+                                return e
+                            for v in obj.values():
+                                r = _walk(v)
+                                if r:
+                                    return r
+                        elif isinstance(obj, list):
+                            for item in obj:
+                                r = _walk(item)
+                                if r:
+                                    return r
+                        return None
+                    entries = _walk(nd)
+                    if entries:
+                        return entries
+                except Exception:
+                    pass
+
+            # Strategy 3: inline JS assignments
+            for m in JS_RE.finditer(html):
+                try:
+                    p = _json.loads(_unescape(m.group(1)))
+                except Exception:
+                    continue
+                if isinstance(p, dict):
+                    entries = _entries_from_dict(p)
+                    if entries:
+                        return entries
+            return []
+
+        def _first(*vals):
+            for v in vals:
+                if v not in (None, "", [], {}):
+                    return v
+            return None
+
+        def _parse_activity(raw: dict, athlete_id_int: int) -> dict | None:
+            # Unwrap nested structure like the archive normalizer does
+            ap = raw.get("activity")
+            entity = ap if isinstance(ap, dict) else (raw.get("row") or raw)
+            if not isinstance(entity, dict):
+                return None
+            map_info = entity.get("map") if isinstance(entity.get("map"), dict) else {}
+            map_photos = entity.get("mapAndPhotos") if isinstance(entity.get("mapAndPhotos"), dict) else {}
+            activity_id = _first(entity.get("id"), entity.get("activity_id"), raw.get("entity_id"))
+            if not activity_id:
+                return None
+            start_date = _first(
+                entity.get("start_date"), entity.get("start_date_utc"),
+                entity.get("startDate"), entity.get("start_date_local"))
+            if not start_date:
+                return None
+            polyline = _first(
+                entity.get("map_summary_polyline"),
+                map_info.get("summary_polyline"),
+                map_photos.get("activityMap", {}).get("polyline") if isinstance(map_photos.get("activityMap"), dict) else None,
+            )
+            photo_list = _first(map_photos.get("photoList"), entity.get("photoList")) or []
+            return {
+                "id": int(str(activity_id).strip()),
+                "name": _first(entity.get("name"), entity.get("activity_name"), entity.get("activityName")),
+                "type": entity.get("type"),
+                "sport_type": entity.get("sport_type") or entity.get("type"),
+                "start_date": start_date,
+                "elapsed_time": int(entity.get("elapsed_time") or entity.get("elapsedTime") or 0),
+                "distance": entity.get("distance"),
+                "_polyline": polyline,
+                "_photos": photo_list if isinstance(photo_list, list) else [],
+            }
+
+        # ---- month cursor helpers ----
+        def _month_str(year: int, month: int) -> str:
+            return f"{year}{month:02d}"
+
+        def _prev_month(ym: str) -> str:
+            y, m = int(ym[:4]), int(ym[4:])
+            return _month_str(y - 1, 12) if m == 1 else _month_str(y, m - 1)
+
+        now = _dt.utcnow()
+        cursor = _month_str(now.year, now.month)
+        cutoff = _month_str(now.year - year_cap, now.month)
+        consecutive_empty = 0
+        total_activities = 0
+        total_photos = 0
+
+        async with httpx.AsyncClient(
+            timeout=30, cookies=jar, follow_redirects=True
+        ) as client:
+            while not self._stop.is_set() and cursor >= cutoff:
+                await self._delay(2.0, 4.5)
+                url = f"{STRAVA_WEB}/athletes/{athlete_id}"
+                params = {
+                    "chart_type": "miles",
+                    "interval_type": "month",
+                    "interval": cursor,
+                    "year_offset": "0",
+                }
+                try:
+                    resp = await asyncio.wait_for(
+                        client.get(url, headers=headers, params=params),
+                        timeout=30.0,
+                    )
+                except Exception as e:
+                    logger.warning("strava history %s month %s: fetch error %s", athlete_id, cursor, e)
+                    cursor = _prev_month(cursor)
+                    continue
+
+                if resp.status_code == 403:
+                    logger.info("strava history %s: 403 forbidden, stopping backfill", athlete_id)
+                    break
+                if resp.status_code == 429:
+                    logger.warning("strava history %s: rate-limited, sleeping 90s", athlete_id)
+                    await asyncio.sleep(90)
+                    continue
+                if resp.status_code != 200:
+                    logger.warning("strava history %s month %s: HTTP %d", athlete_id, cursor, resp.status_code)
+                    cursor = _prev_month(cursor)
+                    consecutive_empty += 1
+                    if consecutive_empty >= 3:
+                        break
+                    continue
+
+                html = resp.text
+                entries = _extract_entries(html)
+                if not entries:
+                    consecutive_empty += 1
+                    logger.debug("strava history %s month %s: no entries parsed (empty=%d)",
+                                 athlete_id, cursor, consecutive_empty)
+                    if consecutive_empty >= 3:
+                        logger.info("strava history %s: 3 consecutive empty months, stopping", athlete_id)
+                        break
+                    cursor = _prev_month(cursor)
+                    continue
+
+                consecutive_empty = 0
+                month_count = 0
+
+                for raw in entries:
+                    if not isinstance(raw, dict):
+                        continue
+                    try:
+                        athlete_id_int = int(athlete_id)
+                    except ValueError:
+                        continue
+                    parsed = _parse_activity(raw, athlete_id_int)
+                    if not parsed:
+                        continue
+
+                    # Upsert activity with polyline
+                    try:
+                        await self._upsert_activity(parsed, athlete_id)
+                        # Update polyline separately if present
+                        if parsed.get("_polyline"):
+                            async with self.pool.acquire() as conn:
+                                await conn.execute(
+                                    """UPDATE strava_activities
+                                       SET summary_polyline = $1
+                                       WHERE platform_activity_id = $2
+                                         AND (summary_polyline IS NULL OR summary_polyline = '')""",
+                                    parsed["_polyline"],
+                                    parsed["id"],
+                                )
+                        month_count += 1
+                        total_activities += 1
+                    except Exception as e:
+                        logger.debug("strava history upsert activity %s failed: %s", parsed.get("id"), e)
+                        continue
+
+                    # Upsert photos
+                    for photo in parsed.get("_photos") or []:
+                        if not isinstance(photo, dict):
+                            continue
+                        photo_id = str(photo.get("photo_id") or photo.get("id") or "")
+                        large_url = photo.get("large") or photo.get("video")
+                        thumb_url = photo.get("thumbnail") or photo.get("small")
+                        if not photo_id or (not large_url and not thumb_url):
+                            continue
+                        try:
+                            async with self.pool.acquire() as conn:
+                                athlete_row = await conn.fetchrow(
+                                    "SELECT id FROM strava_athletes WHERE platform_athlete_id = $1",
+                                    athlete_id_int,
+                                )
+                                athlete_uuid = athlete_row["id"] if athlete_row else None
+                                await conn.execute(
+                                    """INSERT INTO strava_activity_photos
+                                       (platform_photo_id, platform_activity_id, athlete_id,
+                                        activity_name, athlete_name, caption, media_type,
+                                        source_url_large, source_url_thumbnail, activity_date, source)
+                                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+                                       ON CONFLICT (platform_photo_id, platform_activity_id) DO UPDATE SET
+                                         source_url_large = COALESCE(EXCLUDED.source_url_large, strava_activity_photos.source_url_large),
+                                         source_url_thumbnail = COALESCE(EXCLUDED.source_url_thumbnail, strava_activity_photos.source_url_thumbnail)
+                                    """,
+                                    photo_id, parsed["id"], athlete_uuid,
+                                    parsed.get("name"), str(athlete_id_int),
+                                    photo.get("caption_escaped"),
+                                    int(photo.get("media_type") or 1),
+                                    large_url, thumb_url,
+                                    _dt.fromisoformat(parsed["start_date"].replace("Z", "+00:00")) if parsed.get("start_date") else None,
+                                    "historical_backfill",
+                                )
+                                total_photos += 1
+                        except Exception as e:
+                            logger.debug("strava history photo upsert failed: %s", e)
+
+                logger.info("strava history %s month %s: %d activities, %d photos (total acts=%d photos=%d)",
+                            athlete_id, cursor, month_count, total_photos, total_activities, total_photos)
+                cursor = _prev_month(cursor)
+
+        logger.info("strava history backfill complete: athlete=%s total_activities=%d total_photos=%d",
+                    athlete_id, total_activities, total_photos)
+        return total_activities
 
     async def cleanup(self):
         pass
