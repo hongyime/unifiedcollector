@@ -221,7 +221,7 @@ class WhatsappCollector(BaseCollector):
         if not msg_id or not chat_jid:
             return
 
-        if targets and not any(t.lower() in chat_jid.lower() for t in targets):
+        if targets and "*" not in targets and "all" not in targets and not any(t.lower() in chat_jid.lower() for t in targets):
             return
 
         if await self._is_duplicate(msg_id, chat_jid):
