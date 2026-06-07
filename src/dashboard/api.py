@@ -251,6 +251,62 @@ async def metrics():
                          labels=f'source="{r["source"]}"')
             except Exception:
                 pass  # source_health table may not exist on older deploys
+
+            # Per-source error rate (DLQ entries vs total items).
+            try:
+                rows = await conn.fetch(
+                    "SELECT d.source, d.n AS errors, COALESCE(m.n, 0) AS total "
+                    "FROM (SELECT source, COUNT(*) AS n FROM dead_letter_queue GROUP BY source) d "
+                    "LEFT JOIN (SELECT source, COUNT(*) AS n FROM media_items GROUP BY source) m "
+                    "USING (source)"
+                )
+                first = True
+                for r in rows:
+                    total = r["total"] + r["errors"]
+                    rate = r["errors"] / total if total > 0 else 0
+                    emit("uc_error_rate", f"{rate:.4f}",
+                         "Error rate per source (DLQ / total attempts)" if first else "",
+                         "gauge", labels=f'source="{r["source"]}"')
+                    first = False
+            except Exception:
+                pass
+
+            # Per-source collection cycle duration (avg of last 24h runs).
+            try:
+                rows = await conn.fetch(
+                    "SELECT source, "
+                    "  AVG(EXTRACT(EPOCH FROM (completed_at - started_at)))::int AS avg_secs, "
+                    "  MAX(EXTRACT(EPOCH FROM (completed_at - started_at)))::int AS max_secs "
+                    "FROM collection_runs "
+                    "WHERE status = 'completed' AND completed_at > NOW() - INTERVAL '24 hours' "
+                    "GROUP BY source"
+                )
+                first = True
+                for r in rows:
+                    emit("uc_cycle_duration_avg_seconds", r["avg_secs"] or 0,
+                         "Average collection cycle duration (last 24h)" if first else "",
+                         "gauge", labels=f'source="{r["source"]}"')
+                    emit("uc_cycle_duration_max_seconds", r["max_secs"] or 0,
+                         "Max collection cycle duration (last 24h)" if first else "",
+                         "gauge", labels=f'source="{r["source"]}"')
+                    first = False
+            except Exception:
+                pass
+
+            # Pending collection targets per source.
+            try:
+                rows = await conn.fetch(
+                    "SELECT source, status, COUNT(*) AS n "
+                    "FROM collection_targets GROUP BY source, status"
+                )
+                first = True
+                for r in rows:
+                    emit("uc_targets", r["n"],
+                         "Collection targets by source and status" if first else "",
+                         "gauge", labels=f'source="{r["source"]}",status="{r["status"]}"')
+                    first = False
+            except Exception:
+                pass
     except Exception as e:  # pragma: no cover - defensive
         emit("uc_metrics_scrape_error", 1, f"Metrics scrape failed: {e}")
 

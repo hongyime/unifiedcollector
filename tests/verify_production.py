@@ -28,7 +28,6 @@ from src.collectors.search import SearchCollector
 from src.collectors.lemon8 import Lemon8Collector
 from src.collectors.whatsapp import WhatsappCollector
 from src.core.health import health_check as _hc
-from src.core.face_processor import DLIB_MODELS_PATH, get_model_path
 from src.db.connection import _ssl_context
 
 errors = []
@@ -119,8 +118,6 @@ print("\n--- Infrastructure ---")
 check("Health module importable", True)
 ssl_ctx = _ssl_context()
 check("SSL context (disabled by default)", ssl_ctx is None)
-check("DLIB_MODELS_PATH set", bool(DLIB_MODELS_PATH), DLIB_MODELS_PATH)
-check("Download script exists", os.path.exists("scripts/download_dlib_models.py"))
 check("Docker compose exists", os.path.exists("docker/docker-compose.yml"))
 check(".gitignore excludes .env", ".env" in open(".gitignore").read())
 check(".gitignore excludes credentials/", "credentials/" in open(".gitignore").read())

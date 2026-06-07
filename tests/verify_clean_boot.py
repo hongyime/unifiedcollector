@@ -52,9 +52,12 @@ EXPECTED_TABLES = {
     "strava_day_coverage", "strava_spider_queue",
     # lemon8
     "lemon8_profiles", "lemon8_posts", "lemon8_discovered", "lemon8_spider_queue",
+    # cross-platform
+    "graph_edges", "source_health",
     # website / whatsapp / beeper / matrix
     "website_targets", "website_pages",
     "whatsapp_chats", "whatsapp_messages", "whatsapp_users",
+    "wa_discovered_links",
     "beeper_shadow_accounts", "beeper_shadow_chats", "beeper_shadow_messages",
     "beeper_shadow_participants", "beeper_shadow_sync_state",
     "matrix_events", "matrix_sync_state", "matrix_backfill_state",

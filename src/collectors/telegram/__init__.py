@@ -158,12 +158,14 @@ class TelegramWorker:
         )
         try:
             self.state = SessionState.CONNECTING
-            self.client = TelegramClient(session_file, api_id, api_hash)
+            raw_client = TelegramClient(session_file, api_id, api_hash)
             # Use connect() + is_user_authorized() instead of start(): start()
             # falls back to interactive stdin prompts when a session is not
             # authorized, which blocks forever in a container (=> "EOF when
             # reading a line"). We never want that — fail cleanly instead.
-            await self.client.connect()
+            await raw_client.connect()
+            from src.core.readonly_client import ReadOnlyTelegramClient
+            self.client = ReadOnlyTelegramClient(raw_client)
             if not await self.client.is_user_authorized():
                 raise RuntimeError(
                     f"Telegram session for account={self.account.name} is not "

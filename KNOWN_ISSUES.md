@@ -6,38 +6,59 @@ actionable residue). Update or strike items as they're fixed.
 
 ## Open
 
-1. **Clean-volume boot is broken (schema reproducibility).**
-   Several telegram tables (reactions, members, polls, discussion_visits, etc.)
-   exist only via hand-applied `migrations/*.sql`, not in `schemas/`. A fresh
-   Docker volume comes up with a partial schema. Fix: fold `migrations/*.sql`
-   into `schemas/` OR build a real ordered/idempotent migration runner with a
-   `schema_migrations` ledger. (DR != ingestion; ingestion works.)
+1. ~~**Clean-volume boot is broken.**~~ → Resolved, see below.
 
-2. **Scheduler <-> worker contract is dead.**
-   The scheduler writes `collection_schedules` / `collection_runs(queued)` /
-   `targets(pending)` but the worker consumes none of it -- it's a clock writing
-   to tables nobody reads (~292 stuck queued runs). Fix: either make the worker
-   consume `collection_runs` (mark started/running/completed) or delete the dead
-   bookkeeping.
+2. ~~**Scheduler <-> worker contract is dead.**~~ → Resolved, see below.
 
-3. **No CI.** Tests exist but nothing runs them; nothing tests the integrated
-   stack or a clean-volume boot. Add GitHub Actions: lint + pytest +
-   schema-boot-on-clean-volume.
+3. ~~**No CI.**~~ → Resolved, see below.
 
-4. **No dependency lockfile.** Any rebuild can silently pull a breaking
-   telethon / yt-dlp / instaloader. Pin via uv / pip-tools.
+4. ~~**No dependency lockfile.**~~ → Resolved, see below.
 
-5. **Read-only is convention-only.** No code-level guard. Add a write-guard
-   wrapper around every platform client so an accidental send/react/edit raises.
+5. ~~**Read-only is convention-only.**~~ → Resolved, see below.
 
 6. ~~**Secrets hygiene.**~~ → Resolved, see below.
 
 7. ~~**4x duplicated schema-apply.**~~ → Resolved, see below.
 
-8. **Observability gap.** No metrics on items/sec per source, queue depth, error
-   rate, rate-limit hits, account cooldowns. Consider a prometheus exporter.
+8. **Observability gap.** Prometheus `/metrics` endpoint exists with 12 metrics
+   (totals, throughput, staleness, spider queue, DLQ, runs, worker liveness,
+   dead sources, error rate, cycle duration). Still missing: per-account
+   rate-limit hit counters, account cooldown/quota metrics. Consider exposing
+   `account_quota_usage` table via metrics.
 
 ## Resolved
+
+- **Clean-volume boot (was #1)** -- DONE. The `src.db.migrate.apply_all()`
+  runner applies base `schemas/*.sql` (idempotent) then incremental
+  `migrations/*.sql` (ledger-tracked, apply-once). Missing tables
+  `graph_edges` and `wa_discovered_links` added as migrations. CI now runs
+  `verify_clean_boot.py` against a throwaway pgvector database on every PR.
+  (2026-06-07)
+
+- **Scheduler <-> worker contract (was #2)** -- DONE. `mark_target_collected()`
+  now writes `status='completed'` (was `'active'`, which the worker's
+  `_load_targets` filter skipped — targets became invisible until the next
+  scheduler tick). Scheduler creates runs as `'running'` and closes as
+  `'completed'` (was stuck as `'queued'`). GC prunes runs older than 7 days.
+  `collection_runs` is retained as a scheduler audit log (dashboard reads it);
+  the worker intentionally does not consume it. (2026-06-07)
+
+- **CI (was #3)** -- DONE. `.github/workflows/python-ci.yml` runs on every PR
+  touching `*.py`: ruff lint (`F` + `E9` rules), pytest (unit tests), and a
+  clean-volume schema boot test against pgvector:pg16. The existing JS build
+  CI (`.github/workflows/ci.yml`) remains for dashboard frontend. (2026-06-07)
+
+- **Dependency lockfile (was #4)** -- DONE. `requirements.lock` has exact pins
+  from the proven running container (2026-05-30). `docker/Dockerfile` installs
+  from the lock, not `requirements.txt`. Hand-maintained but reproducible.
+
+- **Read-only guards (was #5)** -- DONE. Static tripwire
+  (`tests/test_readonly_guard.py`) scans for outbound method patterns at PR
+  time. Runtime guard added for Telethon: `ReadOnlyTelegramClient` wrapper
+  (`src/core/readonly_client.py`) blocks `send_message`, `edit_message`,
+  `delete_messages`, etc. at runtime. Other clients (httpx, instaloader,
+  yt-dlp) are inherently read-only (HTTP GET / subprocess download only).
+  (2026-06-07)
 
 - **Secrets hygiene (was #6)** -- DONE. `.env.bak.*` files moved out of repo
   to `~/.unifiedcollector_env_backups/`. Historical commits containing secrets

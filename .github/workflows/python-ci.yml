@@ -1,0 +1,62 @@
+name: Python CI
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "**.py"
+      - "requirements*.txt"
+      - "requirements.lock"
+      - "pyproject.toml"
+      - "src/db/schemas/**"
+      - "src/db/migrations/**"
+
+permissions: read-all
+
+jobs:
+  lint:
+    name: Ruff Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      - run: ruff check src/ tests/
+
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.lock
+      - run: pytest tests/ -q --ignore=tests/verify_clean_boot.py --ignore=tests/verify_production.py
+
+  schema-boot:
+    name: Clean Volume Boot
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: testuser
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: cleanboot_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U testuser"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install asyncpg
+      - run: python tests/verify_clean_boot.py postgresql://testuser:testpass@localhost:5432/cleanboot_test

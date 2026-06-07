@@ -147,7 +147,7 @@ class BaseCollector(ABC):
                     UPDATE collection_targets
                     SET collection_count = collection_count + 1,
                         last_collection_at = NOW(),
-                        status = 'active'
+                        status = 'completed'
                     WHERE source = $1 AND target_id = $2
                 """, self.SOURCE_NAME, target_id)
         except Exception as e:

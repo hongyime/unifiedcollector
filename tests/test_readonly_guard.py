@@ -63,3 +63,24 @@ def test_collectors_have_no_outbound_calls():
         "Outbound (write) calls found in read-only collectors — the system is "
         "read-only ingestion only:\n" + "\n".join(violations)
     )
+
+
+def test_readonly_telegram_client_blocks_writes():
+    from src.core.readonly_client import ReadOnlyTelegramClient
+
+    class FakeClient:
+        async def get_me(self):
+            return "me"
+        async def send_message(self, *a, **kw):
+            return "sent"
+
+    wrapped = ReadOnlyTelegramClient(FakeClient())
+    assert wrapped.get_me is not None
+    with pytest.raises(RuntimeError, match="Write operation blocked"):
+        wrapped.send_message
+    with pytest.raises(RuntimeError, match="Write operation blocked"):
+        wrapped.edit_message
+    with pytest.raises(RuntimeError, match="Write operation blocked"):
+        wrapped.delete_messages
+    with pytest.raises(RuntimeError, match="Write operation blocked"):
+        wrapped.forward_messages
