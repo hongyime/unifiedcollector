@@ -30,16 +30,27 @@ actionable residue). Update or strike items as they're fixed.
 5. **Read-only is convention-only.** No code-level guard. Add a write-guard
    wrapper around every platform client so an accidental send/react/edit raises.
 
-6. **Secrets hygiene.** Plaintext `.env` / `.env.bak.*` beside the repo. Move to
-   a secrets store, or at minimum gitignore + chmod.
+6. ~~**Secrets hygiene.**~~ → Resolved, see below.
 
-7. **4x duplicated schema-apply.** dashboard, scheduler, worker, bots each
-   `init_db()` independently against `schemas/` only. Consolidate.
+7. ~~**4x duplicated schema-apply.**~~ → Resolved, see below.
 
 8. **Observability gap.** No metrics on items/sec per source, queue depth, error
    rate, rate-limit hits, account cooldowns. Consider a prometheus exporter.
 
 ## Resolved
+
+- **Secrets hygiene (was #6)** -- DONE. `.env.bak.*` files moved out of repo
+  to `~/.unifiedcollector_env_backups/`. Historical commits containing secrets
+  (`.env.bak.*`, archive toolkit `.env.template`/`.env.example` files) purged
+  via `git filter-repo` (2026-06-07). `.gitignore` covers `.env`, `.env.bak.*`,
+  `credentials/`, `sessions/`, `*.pickle`, `client_secret.json`. See SECURITY.md
+  for the full secrets layout.
+
+- **4x duplicated schema-apply (was #7)** -- DONE. All four `init_db()` call
+  sites (main, worker, scheduler, dashboard) now delegate to
+  `src.db.migrate.apply_all()`, the single DDL authority. Base `schemas/*.sql`
+  applied idempotently every boot + incremental `migrations/*.sql` tracked via
+  a `schema_migrations` ledger. (Consolidated as part of the P0-1/P0-2 work.)
 
 - **Monolith split (was #7)** -- DONE. Every source now runs in its own
   dedicated container (`collector_<source>`) via `worker --source X`, each with
