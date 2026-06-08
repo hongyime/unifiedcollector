@@ -24,7 +24,7 @@ class WorkerService:
     # whatsapp empty-tables bug). They are also exempt from zero-progress
     # escalation: a realtime source with no messages arriving is legitimately
     # idle, not wedged.
-    REALTIME_SOURCES = frozenset({"whatsapp", "beeper"})
+    REALTIME_SOURCES = frozenset({"whatsapp", "beeper", "telegram"})
 
     def __init__(self):
         self.pool = None

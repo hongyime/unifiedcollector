@@ -20,11 +20,7 @@ actionable residue). Update or strike items as they're fixed.
 
 7. ~~**4x duplicated schema-apply.**~~ → Resolved, see below.
 
-8. **Observability gap.** Prometheus `/metrics` endpoint exists with 12 metrics
-   (totals, throughput, staleness, spider queue, DLQ, runs, worker liveness,
-   dead sources, error rate, cycle duration). Still missing: per-account
-   rate-limit hit counters, account cooldown/quota metrics. Consider exposing
-   `account_quota_usage` table via metrics.
+8. ~~**Observability gap.**~~ → Resolved, see below.
 
 ## Resolved
 
@@ -80,3 +76,10 @@ actionable residue). Update or strike items as they're fixed.
   429-blocked); add one when the block clears. A blocking/OOMing collector can
   no longer take down its siblings. (Resolved 2026-06-02; previously only
   youtube + tiktok were split.)
+
+- **Observability gap (was #8)** -- DONE. Per-account quota metrics now exposed
+  via Prometheus `/metrics`: `uc_account_requests_today` and
+  `uc_account_requests_hour` (labeled by platform + account) read from the
+  `account_quota_usage` table. `uc_source_health_age_seconds` and
+  `uc_source_crash_count` track per-source health and crash counts. Total
+  metrics now at 18+. (2026-06-07)

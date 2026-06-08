@@ -360,7 +360,7 @@ async def yt_dlp_download(
     if output_template is None:
         output_template = os.path.join(tempdir, "%(id)s.%(ext)s")
 
-    argv: list[str] = ["yt-dlp"]
+    argv: list[str] = ["yt-dlp", "--js-runtime", "node"]
     if impersonate:
         argv.extend(["--impersonate", impersonate])
     if write_thumbnail:

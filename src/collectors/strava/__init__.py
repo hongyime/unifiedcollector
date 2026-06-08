@@ -1521,8 +1521,9 @@ class StravaCollector(BaseCollector):
         html = resp.text
 
         # --- Extract data from data-react-props blocks ---
-        for m in re.finditer(r"data-react-props=(['\"])(.+?)\1", html, re.DOTALL):
-            raw = _unescape(m.group(2))
+        # Strava uses single-quoted props with &quot; for JSON quotes
+        for m in re.finditer(r"data-react-props='([^']+)'", html):
+            raw = _unescape(m.group(1))
             try:
                 props = json.loads(raw)
             except Exception:
@@ -1591,7 +1592,6 @@ class StravaCollector(BaseCollector):
                             WHERE platform_activity_id = $2
                               AND (summary_polyline IS NULL OR summary_polyline = '')
                         """, polyline, activity_id)
-                        # Create synthetic GPS stream from polyline
                         act_row = await conn.fetchrow(
                             "SELECT id FROM strava_activities WHERE platform_activity_id = $1",
                             activity_id)
@@ -1610,57 +1610,83 @@ class StravaCollector(BaseCollector):
                 except Exception as e:
                     logger.debug("strava scrape: polyline %s failed: %s", activity_id, e)
 
-        # --- Extract kudos from HTML ---
-        try:
-            kudos_matches = re.finditer(
-                r'data-athlete-id=["\'](\d+)["\'][^>]*>.*?'
-                r'(?:text-headline|athlete-name|kudo-name)[^>]*>([^<]+)<',
-                html, re.DOTALL)
-            for km in kudos_matches:
-                try:
-                    kudo_athlete_id = int(km.group(1))
-                    kudo_name = km.group(2).strip()
-                    async with self.pool.acquire() as conn:
-                        await conn.execute("""
-                            INSERT INTO strava_activity_kudos
-                                (platform_activity_id, platform_athlete_id, athlete_name)
-                            VALUES ($1, $2, $3)
-                            ON CONFLICT (platform_activity_id, platform_athlete_id) DO NOTHING
-                        """, activity_id, kudo_athlete_id, kudo_name)
-                    result["kudos"] += 1
-                except Exception:
-                    pass
-        except Exception as e:
-            logger.debug("strava scrape: kudos %s failed: %s", activity_id, e)
+            # Kudos + comments from the social interaction props block
+            if "kudosCount" in props or "comments" in props:
+                # Kudos: the props block has kudosCount but individual kudoers
+                # are only available via the kudos modal API endpoint
+                kudos_count = props.get("kudosCount", 0)
+                owner_id = props.get("ownerAthleteId")
+                owner_name = props.get("ownerName", "")
 
-        # --- Extract comments from HTML ---
-        try:
-            comment_matches = re.finditer(
-                r'data-athlete-id=["\'](\d+)["\'][^>]*>.*?'
-                r'(?:athlete-name|comment-name)[^>]*>([^<]+)<.*?'
-                r'(?:comment-text|comment_text)[^>]*>([^<]+)<',
-                html, re.DOTALL)
-            for cm in comment_matches:
-                try:
-                    comment_athlete_id = int(cm.group(1))
-                    comment_name = cm.group(2).strip()
-                    comment_text = cm.group(3).strip()
-                    if comment_text:
-                        async with self.pool.acquire() as conn:
-                            await conn.execute("""
-                                INSERT INTO strava_activity_comments
-                                    (platform_activity_id, platform_athlete_id,
-                                     athlete_name, comment_text)
-                                VALUES ($1, $2, $3, $4)
-                                ON CONFLICT (platform_activity_id, platform_athlete_id, platform_created_at)
-                                    DO NOTHING
-                            """, activity_id, comment_athlete_id,
-                                comment_name, comment_text)
-                        result["comments"] += 1
-                except Exception:
-                    pass
-        except Exception as e:
-            logger.debug("strava scrape: comments %s failed: %s", activity_id, e)
+                if kudos_count and kudos_count > 0:
+                    try:
+                        kudos_url = f"{STRAVA_WEB}/feed/activity/{activity_id}/kudos"
+                        kresp = await client.get(kudos_url, headers={
+                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                            "Accept": "application/json",
+                            "X-Requested-With": "XMLHttpRequest",
+                        })
+                        if kresp.status_code == 200:
+                            try:
+                                kdata = kresp.json()
+                            except Exception:
+                                kdata = {}
+                            kudoers = kdata.get("athletes", []) if isinstance(kdata, dict) else []
+                            for kudo in kudoers:
+                                if not isinstance(kudo, dict):
+                                    continue
+                                kid = kudo.get("id")
+                                kname = kudo.get("name", "")
+                                if kid:
+                                    try:
+                                        async with self.pool.acquire() as conn:
+                                            await conn.execute("""
+                                                INSERT INTO strava_activity_kudos
+                                                    (platform_activity_id, platform_athlete_id, athlete_name)
+                                                VALUES ($1, $2, $3)
+                                                ON CONFLICT (platform_activity_id, platform_athlete_id) DO NOTHING
+                                            """, activity_id, int(kid), kname)
+                                        result["kudos"] += 1
+                                    except Exception:
+                                        pass
+                    except Exception as e:
+                        logger.debug("strava scrape: kudos fetch %s failed: %s", activity_id, e)
+
+                # Comments from the props JSON
+                comments = props.get("comments", [])
+                if isinstance(comments, list):
+                    for c in comments:
+                        if not isinstance(c, dict):
+                            continue
+                        cid = c.get("athleteId") or c.get("athlete_id")
+                        cname = (c.get("athleteName") or c.get("athlete_name")
+                                 or f"{c.get('firstname', '')} {c.get('lastname', '')}".strip())
+                        ctext = c.get("comment") or c.get("text") or c.get("body") or ""
+                        if cid and ctext:
+                            try:
+                                ts = c.get("timestamp") or c.get("created_at")
+                                from datetime import datetime as _dt
+                                ts_val = None
+                                if ts:
+                                    if isinstance(ts, (int, float)):
+                                        ts_val = _dt.utcfromtimestamp(ts)
+                                    elif isinstance(ts, str):
+                                        try:
+                                            ts_val = _dt.fromisoformat(ts.replace("Z", "+00:00"))
+                                        except Exception:
+                                            pass
+                                async with self.pool.acquire() as conn:
+                                    await conn.execute("""
+                                        INSERT INTO strava_activity_comments
+                                            (platform_activity_id, platform_athlete_id,
+                                             athlete_name, comment_text, platform_created_at)
+                                        VALUES ($1, $2, $3, $4, $5)
+                                        ON CONFLICT (platform_activity_id, platform_athlete_id, platform_created_at)
+                                            DO NOTHING
+                                    """, activity_id, int(cid), cname or "", ctext, ts_val)
+                                result["comments"] += 1
+                            except Exception:
+                                pass
 
         return result
 

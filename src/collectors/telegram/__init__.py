@@ -688,10 +688,17 @@ class TelegramCollector(BaseCollector):
                     w.worker_id, w.account.name, r,
                 )
 
-        # Spider queue: process under primary worker only (avoids cross-worker contention).
+        # Spider queue: fan out across ALL connected workers for parallelism.
         if os.getenv("TELEGRAM_SPIDER_ENABLED", "true").lower() == "true":
             try:
-                await self._process_spider_queue(self._workers[0])
+                spider_tasks = [
+                    self._process_spider_queue(w)
+                    for w in self._workers
+                ]
+                results = await asyncio.gather(*spider_tasks, return_exceptions=True)
+                for w, r in zip(self._workers, results):
+                    if isinstance(r, Exception):
+                        logger.error("Spider queue worker=%d crashed: %s", w.worker_id, r)
             except Exception as e:
                 logger.error("Spider queue processing failed: %s", e)
 
@@ -757,7 +764,10 @@ class TelegramCollector(BaseCollector):
 
     async def _process_spider_queue(self, worker: "TelegramWorker"):
         """Process telegram_spider_queue jobs using the given worker's client."""
-        while not self._stop.is_set():
+        from telethon.errors import FloodWaitError
+        max_per_cycle = int(os.getenv("TELEGRAM_SPIDER_MAX_PER_CYCLE", "50"))
+        processed = 0
+        while not self._stop.is_set() and processed < max_per_cycle:
             async with self.pool.acquire() as conn:
                 row = await conn.fetchrow("""
                     UPDATE telegram_spider_queue
@@ -767,24 +777,47 @@ class TelegramCollector(BaseCollector):
                         WHERE status = 'pending'
                         ORDER BY priority ASC, collected_at ASC
                         LIMIT 1
+                        FOR UPDATE SKIP LOCKED
                     )
                     RETURNING platform_chat_id, title
                 """)
             if not row:
                 break
+            chat_id = row['platform_chat_id']
+            title = row['title'] or chat_id
             try:
-                await self._collect_chat(worker, row['platform_chat_id'])
+                logger.info(
+                    "[spider w=%d] processing chat %s (%s) [%d/%d]",
+                    worker.worker_id, chat_id, title, processed + 1, max_per_cycle,
+                )
+                await self._collect_chat(worker, chat_id)
                 async with self.pool.acquire() as conn:
                     await conn.execute(
                         "UPDATE telegram_spider_queue SET status = 'completed' WHERE platform_chat_id = $1",
-                        row['platform_chat_id'],
+                        chat_id,
                     )
-            except Exception:
+                processed += 1
+            except FloodWaitError as e:
+                logger.warning(
+                    "[spider w=%d] FloodWait %ds on chat %s — releasing back to pending",
+                    worker.worker_id, e.seconds, chat_id,
+                )
+                async with self.pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE telegram_spider_queue SET status = 'pending' WHERE platform_chat_id = $1",
+                        chat_id,
+                    )
+                await self._handle_flood_wait(worker, e)
+            except Exception as exc:
+                logger.error(
+                    "[spider w=%d] failed chat %s: %s", worker.worker_id, chat_id, exc,
+                )
                 async with self.pool.acquire() as conn:
                     await conn.execute(
                         "UPDATE telegram_spider_queue SET status = 'failed' WHERE platform_chat_id = $1",
-                        row['platform_chat_id'],
+                        chat_id,
                     )
+        logger.info("[spider w=%d] finished: processed %d chats", worker.worker_id, processed)
 
     async def _handle_flood_wait(self, worker: "TelegramWorker", error):
         wait_seconds = getattr(error, "seconds", 60)

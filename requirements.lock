@@ -27,6 +27,7 @@ imagehash==4.3.2
 instaloader==4.15.1
 ddgs==9.14.4
 yt-dlp==2026.3.17
+yt-dlp-ejs==0.8.0
 curl_cffi==0.14.0
 gallery-dl==1.32.1
 PyMuPDF==1.27.2.3

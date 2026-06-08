@@ -307,6 +307,47 @@ async def metrics():
                     first = False
             except Exception:
                 pass
+
+            # Per-account quota usage (issue #8: observability gap).
+            try:
+                rows = await conn.fetch(
+                    "SELECT platform, account, requests_today, requests_hour, "
+                    "  hour_bucket, day "
+                    "FROM account_quota_usage "
+                    "WHERE day >= (NOW() AT TIME ZONE 'Asia/Singapore')::date"
+                )
+                first = True
+                for r in rows:
+                    labels = f'platform="{r["platform"]}",account="{r["account"]}"'
+                    emit("uc_account_requests_today", r["requests_today"],
+                         "Per-account requests today (SGT day)" if first else "",
+                         "gauge", labels=labels)
+                    emit("uc_account_requests_hour", r["requests_hour"],
+                         "Per-account requests in current hour" if first else "",
+                         "gauge", labels=labels)
+                    first = False
+            except Exception:
+                pass
+
+            # Per-source account cooldown / health from source_health.
+            try:
+                rows = await conn.fetch(
+                    "SELECT source, status, crash_count, "
+                    "  EXTRACT(EPOCH FROM (NOW() - updated_at))::int AS age_seconds "
+                    "FROM source_health"
+                )
+                first = True
+                for r in rows:
+                    labels = f'source="{r["source"]}",status="{r["status"]}"'
+                    emit("uc_source_health_age_seconds", r["age_seconds"],
+                         "Seconds since source_health was last updated" if first else "",
+                         "gauge", labels=labels)
+                    emit("uc_source_crash_count", r["crash_count"],
+                         "Crash count per source" if first else "",
+                         "gauge", labels=f'source="{r["source"]}"')
+                    first = False
+            except Exception:
+                pass
     except Exception as e:  # pragma: no cover - defensive
         emit("uc_metrics_scrape_error", 1, f"Metrics scrape failed: {e}")
 

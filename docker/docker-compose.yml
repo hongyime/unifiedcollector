@@ -61,7 +61,7 @@ services:
     cap_add:
       - SYS_PTRACE
     volumes:
-      - media_data:/media
+      - z:/unifiedcollector/media:/media
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -106,7 +106,7 @@ services:
     cap_add:
       - SYS_PTRACE
     volumes:
-      - media_data:/media
+      - z:/unifiedcollector/media:/media
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -153,7 +153,7 @@ services:
     cap_add:
       - SYS_PTRACE
     volumes:
-      - media_data:/media
+      - z:/unifiedcollector/media:/media
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -191,12 +191,13 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
+      SEARCH_SPIDER_PAGES: "1"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     cap_add:
       - SYS_PTRACE
     volumes:
-      - media_data:/media
+      - z:/unifiedcollector/media:/media
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -229,7 +230,7 @@ services:
     cap_add:
       - SYS_PTRACE
     volumes:
-      - media_data:/media
+      - z:/unifiedcollector/media:/media
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -261,7 +262,7 @@ services:
     cap_add:
       - SYS_PTRACE
     volumes:
-      - media_data:/media
+      - z:/unifiedcollector/media:/media
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -293,7 +294,7 @@ services:
     cap_add:
       - SYS_PTRACE
     volumes:
-      - media_data:/media
+      - z:/unifiedcollector/media:/media
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -326,7 +327,7 @@ services:
     cap_add:
       - SYS_PTRACE
     volumes:
-      - media_data:/media
+      - z:/unifiedcollector/media:/media
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -359,7 +360,7 @@ services:
     cap_add:
       - SYS_PTRACE
     volumes:
-      - media_data:/media
+      - z:/unifiedcollector/media:/media
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -391,7 +392,7 @@ services:
     cap_add:
       - SYS_PTRACE
     volumes:
-      - media_data:/media
+      - z:/unifiedcollector/media:/media
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -423,7 +424,7 @@ services:
     cap_add:
       - SYS_PTRACE
     volumes:
-      - media_data:/media
+      - z:/unifiedcollector/media:/media
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -475,7 +476,7 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
     volumes:
-      - media_data:/media
+      - z:/unifiedcollector/media:/media
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
     depends_on:
@@ -526,7 +527,7 @@ services:
       # dashboard works without a login flow. Remove/false for network exposure.
       DASHBOARD_AUTH_DISABLED: "true"
     volumes:
-      - media_data:/media
+      - z:/unifiedcollector/media:/media
       - ../credentials:/app/credentials
     depends_on:
       postgres:
@@ -552,7 +553,7 @@ services:
       PGDATABASE: unifiedcollector
     volumes:
       - ./backups:/backups
-      - c:/unifiedcollector/media/db/wal_archive:/wal_archive
+      - z:/unifiedcollector/media/db/wal_archive:/wal_archive
     entrypoint: /bin/sh
     command:
       - -c
@@ -618,7 +619,7 @@ services:
       - "3011:3001"
     volumes:
       - ../sessions/whatsapp:/app/auth_info
-      - media_data:/data/media
+      - z:/unifiedcollector/media:/data/media
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -645,7 +646,7 @@ services:
       - "3012:3001"
     volumes:
       - ../sessions/whatsapp:/app/auth_info
-      - media_data:/data/media
+      - z:/unifiedcollector/media:/data/media
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -659,5 +660,4 @@ volumes:
   pgdata:
   rabbitmq_data:
   redis_data:
-  media_data:
   sessions_data:
