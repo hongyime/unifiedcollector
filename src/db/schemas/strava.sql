@@ -107,4 +107,24 @@ CREATE TABLE IF NOT EXISTS strava_spider_queue (
     CONSTRAINT unique_spider_athlete_strava UNIQUE (platform_athlete_id)
 );
 
+ALTER TABLE strava_activities ADD COLUMN IF NOT EXISTS summary_polyline TEXT;
+
+CREATE TABLE IF NOT EXISTS strava_activity_photos (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    platform_photo_id TEXT NOT NULL,
+    platform_activity_id BIGINT NOT NULL,
+    athlete_id UUID REFERENCES strava_athletes(id) ON DELETE SET NULL,
+    activity_name VARCHAR(500),
+    athlete_name VARCHAR(255),
+    caption TEXT,
+    media_type INTEGER DEFAULT 1,
+    source_url_large TEXT,
+    source_url_thumbnail TEXT,
+    activity_date TIMESTAMP,
+    source VARCHAR(50),
+    collected_at TIMESTAMP DEFAULT NOW(),
+    CONSTRAINT unique_photo_activity UNIQUE (platform_photo_id, platform_activity_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_strava_activities_athlete ON strava_activities(athlete_id);
+CREATE INDEX IF NOT EXISTS idx_strava_activity_photos_activity ON strava_activity_photos(platform_activity_id);
