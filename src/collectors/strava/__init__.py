@@ -198,7 +198,9 @@ class StravaCollector(BaseCollector):
                             "set STRAVA_SESSION_COOKIE or cookies file to enable following/follower spider")
 
     async def _process_spider_queue(self):
-        while not self._stop.is_set():
+        max_per_cycle = int(os.getenv("STRAVA_SPIDER_MAX_PER_CYCLE", "10"))
+        processed = 0
+        while not self._stop.is_set() and processed < max_per_cycle:
             async with self.pool.acquire() as conn:
                 row = await conn.fetchrow("""
                     UPDATE strava_spider_queue
@@ -215,14 +217,18 @@ class StravaCollector(BaseCollector):
             try:
                 if self._use_api: await self._collect_athlete(str(row['platform_athlete_id']))
                 elif self._use_web:
-                    # Profile stub first, then full history backfill with photos + polylines
                     await self._collect_athlete_web(str(row['platform_athlete_id']))
                     await self._backfill_athlete_history(str(row['platform_athlete_id']))
                 async with self.pool.acquire() as conn:
                     await conn.execute("UPDATE strava_spider_queue SET status = 'completed' WHERE platform_athlete_id = $1", row['platform_athlete_id'])
+                processed += 1
             except Exception:
                 async with self.pool.acquire() as conn:
                     await conn.execute("UPDATE strava_spider_queue SET status = 'failed' WHERE platform_athlete_id = $1", row['platform_athlete_id'])
+                processed += 1
+        if processed > 0:
+            logger.info("strava spider: processed %d athletes this cycle (%d remaining)",
+                        processed, max_per_cycle - processed)
 
     async def _collect_via_cookies(self):
         """Cookie-authenticated scrape of the logged-in user's training_activities.
