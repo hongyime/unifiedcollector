@@ -71,6 +71,58 @@ class BaseCollector(ABC):
     async def download_media(self, item: dict):
         """Download and save a single media item."""
 
+    # --- Backfill interface ---
+
+    async def get_backfill_items(self, batch_size: int) -> list[dict]:
+        """Return up to batch_size items that need media downloaded.
+
+        Each dict must have at minimum: entity_id, content_id, source_url.
+        Additional keys (entity_name, content_type, metadata) are passed
+        through to download_media().
+
+        Default: returns [] (no backfill). Override in subclasses that have
+        historical records missing media files.
+        """
+        return []
+
+    async def run_backfill(self):
+        """Fetch backfill items and download each via download_media().
+
+        Called at the END of each collect() cycle by run(), after the main
+        collection pass. Uses the existing DLQ for failures.
+        """
+        batch_size = int(os.getenv("BACKFILL_BATCH_SIZE", "100"))
+        items = await self.get_backfill_items(batch_size)
+        if not items:
+            return 0
+
+        downloaded = 0
+        for item in items:
+            if self._stop.is_set():
+                break
+            content_id = item.get("content_id", "")
+            if self.is_known(content_id):
+                continue
+            try:
+                await self.download_media(item)
+                downloaded += 1
+            except Exception as e:
+                logger.warning("%s backfill failed %s: %s",
+                               self.SOURCE_NAME, content_id, e)
+                try:
+                    await self.send_to_dlq(
+                        item.get("entity_id", ""),
+                        content_id,
+                        str(e)[:500],
+                    )
+                except Exception:
+                    logger.debug("%s: DLQ insert also failed for %s",
+                                 self.SOURCE_NAME, content_id, exc_info=True)
+        if downloaded:
+            logger.info("%s: backfilled %d/%d items",
+                        self.SOURCE_NAME, downloaded, len(items))
+        return downloaded
+
     # --- Lifecycle ---
 
     async def run(self, targets: list[str]):
@@ -87,6 +139,7 @@ class BaseCollector(ABC):
         logger.info("Starting %s collector (%d known items)", self.SOURCE_NAME, len(self._known_ids))
         try:
             await self.collect(targets)
+            await self.run_backfill()
         finally:
             await self.checkpoint.mark_idle()
             logger.info("Stopped %s collector", self.SOURCE_NAME)

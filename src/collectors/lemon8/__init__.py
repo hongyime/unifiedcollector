@@ -780,13 +780,64 @@ class Lemon8Collector(BaseCollector):
     # HTML / JSON extraction helpers (ported)
     # ──────────────────────────────────────────────────────────────────────
     def _extract_avatar(self, html: str) -> str | None:
-        for marker in ['"avatar_url":"', '"avatarUrl":"', '"profile_image":"']:
+        """Multi-fallback avatar extraction:
+        1. og:image meta tag
+        2. JSON markers in HTML (avatar_url, avatarUrl, avatarLarger, etc.)
+        3. Embedded <script> JSON payloads containing avatar keys
+        """
+        # 1. og:image — often works even when API endpoints are broken
+        og_match = re.search(r'<meta\s+property=["\']og:image["\']\s+content=["\']([^"\']+)', html)
+        if og_match:
+            url = og_match.group(1).replace("&amp;", "&")
+            if url.startswith("http") and _parse_is_profile_photo_url(url):
+                return _enhance_image_url(url) if self._enhance_urls else url
+
+        # 2. Direct JSON markers
+        for marker in ['"avatarLarger":"', '"avatar_url":"', '"avatarUrl":"',
+                       '"avatarThumb":"', '"profilePhoto":"', '"profile_image":"']:
             idx = html.find(marker)
             if idx != -1:
                 end = html.find('"', idx + len(marker))
                 url = html[idx + len(marker):end].replace("\\u002F", "/")
                 if url and url.startswith("http"):
                     return _enhance_image_url(url) if self._enhance_urls else url
+
+        # 3. Scan <script type="application/json"> blocks for avatar keys
+        avatar_keys = ("avatarLarger", "avatarThumb", "avatarUrl", "avatar_url",
+                       "avatar", "profilePhoto")
+        for block_start in re.finditer(r'<script[^>]*type=["\']application/json["\'][^>]*>', html):
+            end_tag = html.find("</script>", block_start.end())
+            if end_tag == -1:
+                continue
+            raw = html[block_start.end():end_tag].strip()
+            try:
+                blob = json.loads(raw)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            url = self._search_json_for_avatar(blob, avatar_keys)
+            if url:
+                return _enhance_image_url(url) if self._enhance_urls else url
+
+        return None
+
+    @staticmethod
+    def _search_json_for_avatar(obj: Any, keys: tuple[str, ...], depth: int = 6) -> str | None:
+        if depth <= 0 or obj is None:
+            return None
+        if isinstance(obj, dict):
+            for k in keys:
+                v = obj.get(k)
+                if isinstance(v, str) and v.startswith("http"):
+                    return v.replace("\\u002F", "/")
+            for v in obj.values():
+                result = Lemon8Collector._search_json_for_avatar(v, keys, depth - 1)
+                if result:
+                    return result
+        elif isinstance(obj, list):
+            for item in obj[:20]:
+                result = Lemon8Collector._search_json_for_avatar(item, keys, depth - 1)
+                if result:
+                    return result
         return None
 
     def _extract_posts(self, html: str, user_id: str, username: str) -> list[dict]:
@@ -1406,6 +1457,101 @@ class Lemon8Collector(BaseCollector):
             for it in data:
                 if isinstance(it, (dict, list)):
                     self._extract_tags_from_json(it, tags_set)
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Backfill — unified hook
+    # ──────────────────────────────────────────────────────────────────────
+    async def get_backfill_items(self, batch_size: int) -> list[dict]:
+        """Find profiles missing avatars and resolve URLs by scraping."""
+        if not self.pool or not self._profile_photos:
+            return []
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT p.platform_user_id, p.username
+                FROM lemon8_profiles p
+                LEFT JOIN media_items mi
+                    ON mi.source = 'lemon8'
+                    AND mi.content_id = 'profile_' || p.platform_user_id
+                WHERE mi.id IS NULL
+                  AND p.username IS NOT NULL
+                LIMIT $1
+            """, batch_size)
+        items: list[dict] = []
+        for row in rows:
+            if self._stop.is_set():
+                break
+            username = row["username"]
+            user_id = row["platform_user_id"]
+            try:
+                avatar_url = await self._resolve_avatar_url(username)
+            except Exception as e:
+                logger.debug("lemon8 backfill avatar resolve %s: %s", username, e)
+                continue
+            if not avatar_url:
+                continue
+            # Update the profile row with the found avatar
+            try:
+                async with self.pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE lemon8_profiles SET avatar_url = $1 WHERE platform_user_id = $2",
+                        avatar_url, user_id,
+                    )
+            except Exception:
+                pass
+            items.append({
+                "entity_id": user_id,
+                "entity_name": username,
+                "content_type": "profile_photo",
+                "content_id": f"profile_{user_id}",
+                "url": avatar_url,
+                "extension": "jpg",
+            })
+        return items
+
+    async def _resolve_avatar_url(self, username: str) -> str | None:
+        """Fetch profile page and extract avatar URL using multi-fallback."""
+        username = username.lstrip("@")
+        try:
+            await self.rate_limiter.async_wait("lemon8-app.com", OperationType.PROFILE_VIEW)
+        except Exception:
+            pass
+        async with httpx.AsyncClient(
+            timeout=30, cookies=self._cookies,
+            headers=self._headers(), follow_redirects=True,
+        ) as client:
+            try:
+                resp = await client.get(USER_URL_PATTERN.format(username))
+                resp.raise_for_status()
+                html = resp.text
+            except Exception as e:
+                logger.debug("lemon8 avatar fetch %s: %s", username, e)
+                return None
+            avatar = self._extract_avatar(html)
+            if avatar:
+                return avatar
+            # Last resort: try _data Remix endpoint
+            try:
+                data_url = f"{LEMON8_BASE_URL}/@{username}?_data=routes/%24user_link_name"
+                resp2 = await client.get(data_url)
+                if resp2.status_code == 200:
+                    for line in resp2.text.split("\n"):
+                        line = line.strip()
+                        if not line or not line.startswith("{"):
+                            continue
+                        try:
+                            blob = json.loads(line)
+                        except (json.JSONDecodeError, ValueError):
+                            continue
+                        url = self._search_json_for_avatar(
+                            blob,
+                            ("avatarLarger", "avatarThumb", "avatarUrl",
+                             "avatar_url", "avatar", "profilePhoto"),
+                        )
+                        if url:
+                            return _enhance_image_url(url) if self._enhance_urls else url
+            except Exception:
+                pass
+        return None
 
     # ──────────────────────────────────────────────────────────────────────
     # Media download

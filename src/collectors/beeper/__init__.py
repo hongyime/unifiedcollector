@@ -24,12 +24,16 @@ service needs `extra_hosts: ["host.docker.internal:host-gateway"]` in compose.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+import mimetypes
 import os
+import tempfile
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, AsyncIterator, Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 import httpx
 
@@ -140,6 +144,22 @@ class BeeperClient:
             params["cursor"] = cursor
         return await self._get(f"/v1/chats/{encoded}/messages", params=params)
 
+    async def serve_asset(self, src_url: str, *, timeout: float = 120.0) -> bytes:
+        """Fetch decrypted media bytes via /v1/assets/serve?url=<srcURL>."""
+        try:
+            resp = await self._http.get(
+                "/v1/assets/serve",
+                params={"url": src_url},
+                timeout=httpx.Timeout(timeout, connect=10.0),
+            )
+        except httpx.HTTPError as exc:
+            raise BeeperAPIError(f"asset serve transport error: {exc}") from exc
+        if resp.status_code >= 400:
+            raise BeeperAPIError(
+                f"asset serve -> {resp.status_code}: {resp.text[:300]}"
+            )
+        return resp.content
+
     async def iter_chats(
         self, *, account_id: Optional[str] = None, page_size: int = 50
     ) -> AsyncIterator[dict]:
@@ -205,6 +225,32 @@ def _parse_ts(value: Any) -> Optional[datetime]:
         except ValueError:
             return None
     return None
+
+
+_MIME_EXT: dict[str, str] = {
+    "image/jpeg": "jpg", "image/png": "png", "image/gif": "gif",
+    "image/webp": "webp", "image/apng": "apng",
+    "video/mp4": "mp4", "video/webm": "webm", "video/quicktime": "mov",
+    "audio/mpeg": "mp3", "audio/ogg": "ogg",
+    "application/pdf": "pdf", "application/zip": "zip",
+    "application/x-7z-compressed": "7z",
+    "text/plain": "txt", "text/html": "html", "text/css": "css",
+    "text/markdown": "md", "text/vcard": "vcf",
+    "application/octet-stream": "bin",
+}
+
+
+def _ext_from_mime(mime: str | None, filename: str | None) -> str:
+    if filename and "." in filename and not filename.startswith("http"):
+        return filename.rsplit(".", 1)[-1].lower()[:10]
+    if mime:
+        clean = mime.split(";")[0].strip().lower()
+        if clean in _MIME_EXT:
+            return _MIME_EXT[clean]
+        guess = mimetypes.guess_extension(clean, strict=False)
+        if guess:
+            return guess.lstrip(".")
+    return "bin"
 
 
 def _opt(d: dict, *keys: str) -> Any:
@@ -547,15 +593,68 @@ class BeeperCollector(BaseCollector):
 
         logger.info(
             "Beeper cycle done: accounts=%d chats=%d messages=%d errors=%d",
-            stats["accounts"], stats["chats"], stats["messages_inserted"], stats["errors"],
+            stats["accounts"], stats["chats"], stats["messages_inserted"],
+            stats["errors"],
         )
         return stats
 
     async def download_media(self, item: dict) -> None:
-        """No-op for Phase 4 — Beeper attachments live as mxc:// URIs in
-        attachments JSONB. A follow-up wave will resolve mxc URIs via
-        /v1/assets/serve and persist files to drive."""
-        return None
+        """Download a Beeper attachment via /v1/assets/serve and persist to drive."""
+        cid = item["content_id"]
+        if self.is_known(cid):
+            return
+        src_url = item["src_url"]
+        ext = item.get("extension", "bin")
+        network = item.get("network", "unknown")
+        chat_id = item.get("chat_id", "unknown")
+        content_type = item.get("content_type", "attachment")
+
+        entity_id = f"{network}_{chat_id}"
+        entity_name = network
+        filename = self.build_filename(
+            entity_id, entity_name, content_type, cid, extension=ext,
+        )
+        dest_dir = self.media_dir / network / content_type
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / filename
+
+        try:
+            data = await self.client.serve_asset(src_url)
+            sha = self.sha256_bytes(data)
+            fd, tmp_path = tempfile.mkstemp(dir=dest_dir, suffix=".tmp")
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, str(dest))
+            await self.insert_media_item(
+                entity_id=entity_id,
+                entity_name=entity_name,
+                content_type=content_type,
+                content_id=cid,
+                filename=filename,
+                file_path=str(dest),
+                file_size=len(data),
+                width=item.get("width"),
+                height=item.get("height"),
+                sha256=sha,
+                source_url=src_url.split("?")[0],
+                metadata={
+                    "network": network,
+                    "chat_id": chat_id,
+                    "message_id": item.get("message_id"),
+                    "original_filename": item.get("original_filename"),
+                    "mime_type": item.get("mime_type"),
+                },
+            )
+            self._known_ids.add(cid)
+            logger.debug("Beeper media saved: %s (%d bytes)", cid, len(data))
+        except Exception as e:
+            logger.warning("Beeper media download failed %s: %s", cid, e)
+            try:
+                await self.send_to_dlq(entity_id, cid, str(e)[:500])
+            except Exception:
+                pass
 
     async def aclose(self) -> None:
         if self._client_owned:
@@ -598,13 +697,17 @@ class BeeperCollector(BaseCollector):
             chat_rows = await conn.fetch(
                 """
                 SELECT c.chat_id,
+                       c.network,
                        s.oldest_cursor,
                        s.newest_cursor,
                        COALESCE(s.backfill_complete, FALSE) AS backfill_complete,
                        c.last_message_ts
                 FROM beeper_shadow_chats c
                 LEFT JOIN beeper_shadow_sync_state s USING (chat_id)
-                ORDER BY c.last_message_ts DESC NULLS LAST
+                ORDER BY
+                    COALESCE(s.backfill_complete, FALSE) ASC,
+                    s.last_synced_at ASC NULLS FIRST,
+                    c.last_message_ts DESC NULLS LAST
                 LIMIT $1
                 """,
                 max_chats,
@@ -616,6 +719,7 @@ class BeeperCollector(BaseCollector):
                 break
             inserted = await self._sync_one_chat(
                 chat_id=row["chat_id"],
+                network=row["network"] or "unknown",
                 oldest_cursor=row["oldest_cursor"],
                 newest_cursor=row["newest_cursor"],
                 backfill_complete=row["backfill_complete"],
@@ -625,10 +729,136 @@ class BeeperCollector(BaseCollector):
             inserted_total += inserted
         return inserted_total
 
+    async def get_backfill_items(self, batch_size: int) -> list[dict]:
+        """Return flat attachment items from messages missing media_items entries."""
+        if self.pool is None:
+            return []
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT m.message_id, m.chat_id,
+                       COALESCE(c.network, m.network, 'unknown') AS network,
+                       m.attachments
+                FROM beeper_shadow_messages m
+                LEFT JOIN beeper_shadow_chats c ON c.chat_id = m.chat_id
+                WHERE m.attachments IS NOT NULL
+                  AND m.attachments != '[]'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM media_items mi
+                      WHERE mi.source = 'beeper'
+                        AND mi.content_id LIKE m.message_id || '_%'
+                  )
+                ORDER BY m.timestamp DESC
+                LIMIT $1
+                """,
+                batch_size * 3,
+            )
+        items: list[dict] = []
+        for row in rows:
+            try:
+                atts = json.loads(row["attachments"]) if isinstance(row["attachments"], str) else row["attachments"]
+            except (json.JSONDecodeError, TypeError):
+                continue
+            network = row["network"]
+            chat_id = row["chat_id"]
+            message_id = row["message_id"]
+            for att in (atts or []):
+                if len(items) >= batch_size:
+                    break
+                src_url = att.get("srcURL")
+                if not src_url:
+                    continue
+                # file:// URLs are local cache paths; use the att id (mxc://) for serve
+                if src_url.startswith("file:"):
+                    att_id_mxc = att.get("id", "")
+                    if att_id_mxc.startswith("mxc://"):
+                        src_url = att_id_mxc
+                    else:
+                        continue
+                elif not src_url.startswith("mxc://"):
+                    continue
+                att_id = att.get("id", "")
+                content_id = f"{message_id}_{att_id.split('/')[-1][:40]}" if att_id else message_id
+                if self.is_known(content_id):
+                    continue
+                mime = att.get("mimeType")
+                att_type = att.get("type", "unknown")
+                content_type = {"img": "image", "video": "video", "audio": "audio"}.get(
+                    att_type, "file"
+                )
+                ext = _ext_from_mime(mime, att.get("fileName"))
+                size = att.get("size") or {}
+                items.append({
+                    "content_id": content_id,
+                    "entity_id": f"{network}_{chat_id}",
+                    "src_url": src_url,
+                    "extension": ext,
+                    "network": network,
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "content_type": content_type,
+                    "original_filename": att.get("fileName"),
+                    "mime_type": mime,
+                    "width": size.get("width"),
+                    "height": size.get("height"),
+                })
+            if len(items) >= batch_size:
+                break
+        return items
+
+    async def _download_attachments(self, msg: dict) -> None:
+        """Extract attachments from a message and download each one."""
+        attachments = msg.get("attachments") or []
+        if not attachments:
+            return
+        network = msg.get("network") or "unknown"
+        chat_id = msg.get("chatID") or "unknown"
+        message_id = msg.get("id") or "unknown"
+
+        for att in attachments:
+            src_url = att.get("srcURL")
+            if not src_url:
+                continue
+            if src_url.startswith("file:"):
+                att_id_mxc = att.get("id", "")
+                if att_id_mxc.startswith("mxc://"):
+                    src_url = att_id_mxc
+                else:
+                    continue
+            elif not src_url.startswith("mxc://"):
+                continue
+            att_id = att.get("id", "")
+            content_id = f"{message_id}_{att_id.split('/')[-1][:40]}" if att_id else message_id
+            if self.is_known(content_id):
+                continue
+
+            mime = att.get("mimeType")
+            att_type = att.get("type", "unknown")
+            content_type = {"img": "image", "video": "video", "audio": "audio"}.get(
+                att_type, "file"
+            )
+            ext = _ext_from_mime(mime, att.get("fileName"))
+            size = att.get("size") or {}
+
+            await self.download_media({
+                "content_id": content_id,
+                "src_url": src_url,
+                "extension": ext,
+                "network": network,
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "content_type": content_type,
+                "original_filename": att.get("fileName"),
+                "mime_type": mime,
+                "width": size.get("width"),
+                "height": size.get("height"),
+            })
+
     async def _sync_one_chat(
         self,
         *,
         chat_id: str,
+        network: str = "unknown",
         oldest_cursor: Optional[str],
         newest_cursor: Optional[str],
         backfill_complete: bool,
@@ -651,10 +881,11 @@ class BeeperCollector(BaseCollector):
                     is_new = await w.upsert_message(msg)
                     if is_new:
                         inserted += 1
+                        msg.setdefault("network", network)
+                        await self._download_attachments(msg)
                     final_oldest = meta.get("oldestCursor") or final_oldest
                     if meta.get("newestCursor") and not latest_newest:
                         latest_newest = meta["newestCursor"]
-                    # Page-boundary detection: stop after max_pages * 50 messages
                     pages_seen = inserted // 50
                     if pages_seen >= max_pages:
                         break
@@ -680,6 +911,8 @@ class BeeperCollector(BaseCollector):
                 is_new = await w.upsert_message(msg)
                 if is_new:
                     tail_inserted += 1
+                    msg.setdefault("network", network)
+                    await self._download_attachments(msg)
                 new_newest = meta.get("newestCursor") or new_newest
                 if tail_inserted >= max_pages * 50:
                     break

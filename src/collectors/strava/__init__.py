@@ -698,6 +698,30 @@ class StravaCollector(BaseCollector):
                         await conn.execute("INSERT INTO strava_gps_streams (activity_id, latlng, time, altitude) VALUES ($1, $2, $3, $4)", act_row['id'], json.dumps(streams.get("latlng", {}).get("data", [])), json.dumps(streams.get("time", {}).get("data", [])), json.dumps(streams.get("altitude", {}).get("data", [])))
         except Exception: pass
 
+    async def get_backfill_items(self, batch_size: int) -> list[dict]:
+        if not self.pool:
+            return []
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT p.platform_photo_id, p.platform_activity_id,
+                       p.source_url_large, p.athlete_name, p.activity_name
+                FROM strava_activity_photos p
+                LEFT JOIN media_items mi
+                    ON mi.source = 'strava'
+                    AND mi.content_id = p.platform_activity_id || '_' || p.platform_photo_id
+                WHERE p.source_url_large IS NOT NULL
+                  AND mi.id IS NULL
+                LIMIT $1
+            """, batch_size)
+        return [{"entity_id": r["athlete_name"] or "unknown",
+                 "entity_name": r["athlete_name"] or "unknown",
+                 "content_type": "activity_photo",
+                 "content_id": f"{r['platform_activity_id']}_{r['platform_photo_id']}",
+                 "url": r["source_url_large"],
+                 "extension": "jpg",
+                 "source_url": f"https://www.strava.com/activities/{r['platform_activity_id']}"}
+                for r in rows]
+
     async def download_media(self, item: dict):
         cid = item["content_id"]
         if self.is_known(cid): return
@@ -1412,6 +1436,16 @@ class StravaCollector(BaseCollector):
                                     "historical_backfill",
                                 )
                                 total_photos += 1
+                                if large_url and not self.is_known(f"{parsed['id']}_{photo_id}"):
+                                    await self.download_media({
+                                        "entity_id": str(athlete_id_int),
+                                        "entity_name": str(athlete_id_int),
+                                        "content_type": "activity_photo",
+                                        "content_id": f"{parsed['id']}_{photo_id}",
+                                        "url": large_url,
+                                        "extension": "jpg",
+                                        "source_url": f"https://www.strava.com/activities/{parsed['id']}",
+                                    })
                         except Exception as e:
                             logger.debug("strava history photo upsert failed: %s", e)
 

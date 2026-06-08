@@ -711,7 +711,7 @@ class YoutubeCollector(BaseCollector):
         with tempfile.TemporaryDirectory() as tmpdir:
             output_tmpl = os.path.join(tmpdir, "%(id)s.%(ext)s")
             cmd = [
-                "yt-dlp", "--impersonate", "chrome",
+                "yt-dlp", "--js-runtime", "node", "--impersonate", "chrome",
                 "--write-subs", "--write-auto-subs",
                 "--sub-lang", self._transcript_lang,
                 "--sub-format", "vtt",
@@ -723,7 +723,7 @@ class YoutubeCollector(BaseCollector):
                 cmd.extend(["--cookies-from-browser", self._cookie_browser])
             if self._cookie_file:
                 cmd.extend(["--cookies", self._cookie_file])
-            cmd.append(url)
+            cmd.extend(["--", url])
             loop = asyncio.get_event_loop()
             proc = await loop.run_in_executor(
                 None, lambda: subprocess.run(cmd, capture_output=True, text=True, timeout=180)
@@ -780,7 +780,7 @@ class YoutubeCollector(BaseCollector):
         with tempfile.TemporaryDirectory() as tmpdir:
             output_tmpl = os.path.join(tmpdir, "%(id)s.%(ext)s")
             cmd = [
-                "yt-dlp", "--impersonate", "chrome",
+                "yt-dlp", "--js-runtime", "node", "--impersonate", "chrome",
                 "--write-comments", "--write-info-json",
                 "--skip-download", "--no-warnings",
                 "--extractor-args", f"youtube:max_comments={self._max_comments},all,all,all;comment_sort=top",
@@ -791,7 +791,7 @@ class YoutubeCollector(BaseCollector):
                 cmd.extend(["--cookies-from-browser", self._cookie_browser])
             if self._cookie_file:
                 cmd.extend(["--cookies", self._cookie_file])
-            cmd.append(url)
+            cmd.extend(["--", url])
             loop = asyncio.get_event_loop()
             proc = await loop.run_in_executor(
                 None, lambda: subprocess.run(cmd, capture_output=True, text=True, timeout=300)
@@ -857,6 +857,31 @@ class YoutubeCollector(BaseCollector):
                         logger.debug("YouTube comment insert failed (%s): %s", c.get("id"), e)
             logger.info("YouTube comments saved for %s: %d / %d", platform_video_id, inserted, len(comments))
 
+    async def get_backfill_items(self, batch_size: int) -> list[dict]:
+        if not self.pool:
+            return []
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT v.platform_video_id, c.platform_channel_id, c.title AS channel_name
+                FROM youtube_videos v
+                LEFT JOIN youtube_channels c ON v.channel_id = c.id
+                LEFT JOIN media_items mi
+                    ON mi.source = 'youtube'
+                    AND mi.content_id = v.platform_video_id
+                WHERE mi.id IS NULL
+                ORDER BY v.collected_at DESC NULLS LAST
+                LIMIT $1
+            """, batch_size)
+        return [{"entity_id": r["platform_channel_id"] or "unknown",
+                 "entity_name": r["channel_name"] or "unknown",
+                 "content_type": "thumbnail",
+                 "content_id": r["platform_video_id"],
+                 "url": f"https://i.ytimg.com/vi/{r['platform_video_id']}/maxresdefault.jpg",
+                 "extension": "jpg",
+                 "source_url": f"https://www.youtube.com/watch?v={r['platform_video_id']}",
+                 "_video_id": r["platform_video_id"]}
+                for r in rows]
+
     async def download_media(self, item: dict):
         cid = item["content_id"]
         if self.is_known(cid): return
@@ -871,6 +896,9 @@ class YoutubeCollector(BaseCollector):
                 await self.wait_rate_limit("googleapis.com")
                 async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
                     resp = await client.get(item["url"])
+                    if resp.status_code == 404 and "maxresdefault" in item["url"]:
+                        fallback = item["url"].replace("maxresdefault", "hqdefault")
+                        resp = await client.get(fallback)
                     resp.raise_for_status()
                     data = resp.content
             else: return
@@ -1177,7 +1205,7 @@ class YoutubeCollector(BaseCollector):
                 url = f"https://www.youtube.com/channel/{url}"
 
         cmd = [
-            "yt-dlp", "--flat-playlist", "--dump-single-json",
+            "yt-dlp", "--js-runtime", "node", "--flat-playlist", "--dump-single-json",
             "--quiet", "--no-warnings", "--ignore-errors",
             "--socket-timeout", "30", "--retries", "2",
         ]
@@ -1187,7 +1215,7 @@ class YoutubeCollector(BaseCollector):
             cmd.extend(["--cookies-from-browser", self._cookie_browser])
         if self._cookie_file:
             cmd.extend(["--cookies", self._cookie_file])
-        cmd.append(url)
+        cmd.extend(["--", url])
 
         loop = asyncio.get_event_loop()
         try:
