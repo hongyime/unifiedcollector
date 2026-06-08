@@ -150,7 +150,7 @@ unifiedanalyzer/
 └── requirements.txt
 ```
 
-**Key architectural decision:** unifiedanalyzer reads from unifiedcollector's DB (read-only on collector tables) and writes to its own analyzer tables (same DB, different schema prefix). One postgres, two concerns.
+**Key architectural decision:** unifiedanalyzer uses its own database (`unifiedanalyzer`) on the same Postgres instance. It reads from `unifiedcollector` DB via a read-only connection and writes to its own DB. One Postgres instance, two databases, two concerns. Tables in the analyzer DB do NOT use the `ana_` prefix — they own their namespace.
 
 ---
 
@@ -322,31 +322,145 @@ These are **enrichment modules** — triggered on-demand by analyst, not part of
 
 ---
 
-## 13. Updated Build Sequence
+## 13. Roadmap (revised 2026-06-08)
 
-**Phase 1 — Foundation (no ML)**
-- `unified_entities` + `entity_platform_mappings` tables
-- JID phone parser (WhatsApp → E.164)
-- GitHub commit email harvester
-- Timeline builder (normalize all timestamp sources to local time using Strava timezone)
-- Identity card API
-- Behavioral heatmaps (timestamp aggregation)
-- Map view (PostGIS on Strava GPS + Instagram lat/lng)
+### Hardware Reality
 
-**Phase 2 — Intelligence layer**
-- Bio NLP similarity (sentence-transformers)
-- Topic modeling (YouTube transcripts → topic clusters)
-- Face recognition generalized across all platforms (lift from wa_face_* to generic)
-- Graph analytics (networkx on mentions/replies/follows)
-- Strava day_coverage gap anomaly detector
+- **CPU:** Intel i7-8565U (4C/8T, 1.8 GHz base) — 2018 ultrabook chip
+- **RAM:** 16 GB
+- **GPU:** Intel UHD 620 (integrated) — no CUDA, no GPU compute
+- **Disk:** External HDD on Z: (190k+ files, ~57k YouTube, ~48k Telegram, ~23k TikTok, ~55k Lemon8)
+- **Strava:** Cookie-only mode (API requires paid subscription). Zero GPS data.
+- **Instagram:** 429-blocked. 1 file on disk. Effectively dead.
 
-**Phase 3 — Enrichment + gap-filling**
-- Sherlock/Maigret/Holehe enrichment modules
-- HIBP email breach check
-- Wayback Machine historical content
-- Reverse geocoding (Strava GPS → address labels)
-- Profile photo change alerting (cross-platform)
-## 14. Final Locked Decisions (session 2026-05-30)
+### Media Corpus (actual, 2026-06-08)
+
+| Source | Total files | Images (jpg/png/webp) | Videos (mp4/webm) | JSON metadata |
+|---|---|---|---|---|
+| youtube | 57,941 | 28,036 | 935 | 28,970 |
+| lemon8 | 55,022 | 28,032 | 0 | 28,042 (est: ~50/50 split) |
+| telegram | 47,906 | 20,562 | 3,331 | 23,943 |
+| tiktok | 23,233 | 8,412 | 3,207 | 11,611 |
+| website | 38,884 | — | — | — |
+| search | 4,131 | — | — | — |
+| github | 3,349 | — | — | — |
+| beeper | 181 | — | — | — |
+| whatsapp | 17 | — | — | — |
+| strava | 6 | 6 | 0 | 0 |
+| instagram | 1 | — | — | — |
+| **TOTAL** | **~190k** | **~85k images** | **~7.5k videos** | **~93k** |
+
+### Phase 1 — v0.1: Identity + Timeline + Alerts (no ML, no location)
+
+**Goal:** Shippable personal OSINT terminal. Open dashboard → see alerts → click entity → see unified profile + cross-platform timeline.
+
+**Scope:**
+- Separate `unifiedanalyzer` DB on same Postgres instance
+- Read-only connection to `unifiedcollector` DB
+- `entities`, `entity_platform_links`, `identity_signals`, `timeline_events`, `alerts`, `analysis_runs` tables
+- Identity linker (deterministic signals only):
+  - Username exact match (cross-platform, normalized)
+  - WhatsApp JID → E.164 phone (runtime parse + validation)
+  - GitHub commit `author_email` (post noreply filter)
+  - Strava `firstname + lastname` (most reliable real name)
+  - `media_items.sha256` profile photo dedup
+  - Real name fuzzy match via `rapidfuzz` (token_sort_ratio ≥ 85, requires 2nd signal)
+- Timeline builder: normalize all 10 platforms' timestamps into unified events table
+- Alert engine: silence gap (dynamic + fixed fallback), new-activity-after-silence, profile change detection
+- Scheduler: 60-min incremental + nightly full resolution + on-demand trigger
+- API: `/entities`, `/entities/{id}`, `/entities/{id}/timeline`, `/alerts`, `/runs`, `/health`
+- React frontend: entity list, entity card (identity signals + platform links), timeline view, alerts home screen
+- Docker Compose: FastAPI + React frontend. NO Postgres (connects to collector's Postgres).
+
+**Explicitly NOT in Phase 1:**
+- Face recognition
+- Bio NLP / sentence-transformers
+- Map view (zero location data)
+- Behavioral heatmaps (no reliable timezone source)
+- Graph analytics
+- Enrichment tools (Sherlock, Maigret, Holehe)
+
+**Estimated effort:** 2-3 weeks to shippable v0.1.
+
+---
+
+### Phase 2 — v0.2: Face Recognition + Behavioral Profiling + Text Intelligence
+
+**Goal:** ML layer on top of Phase 1. Identify recurring faces across collected media. Extract behavioral patterns from posting timestamps. Extract text from PDFs/images.
+
+**Scope:**
+- **Face recognition pipeline (dlib, CPU-only):**
+  - Frame extraction from videos: sample 1 frame per 5 sec via OpenCV, pHash dedup (~60% reduction)
+  - Face detection (dlib HOG detector, ~0.3 sec/frame)
+  - 128-dim face embedding extraction (dlib ResNet)
+  - Face matching via pgvector cosine similarity (threshold 0.6)
+  - Initial corpus: ~85k images + ~7.5k videos (~18k unique frames after dedup) = **~8 hours CPU for initial scan**
+  - Incremental: process only new `media_items` rows since last run
+  - Tables: `face_identities`, `face_embeddings`, `face_scan_progress`
+  - Configurable: `FACE_FRAMES_PER_SECOND=0.2` (1 per 5 sec), `FACE_DETECTOR=hog|cnn`, `FACE_MATCH_THRESHOLD=0.6`
+- **Behavioral profiling:**
+  - Activity heatmap (hour × day-of-week) from posting timestamps
+  - Timezone inference: fallback "auto" mode (most common activity hour distribution) — no Strava timezone available
+  - Posting frequency computation (90-day rolling window)
+  - Sleep/wake inference (when enough data: 100+ events)
+  - Mark profiles with insufficient data as `below_threshold` in UI
+- **Text extraction:**
+  - PDF text via PyMuPDF (website + github sources)
+  - Image OCR via EasyOCR (free, CPU, no API key) for screenshots, infographics
+- **Bio NLP similarity (sentence-transformers):**
+  - `all-MiniLM-L6-v2` model (~80 MB, runs on CPU)
+  - Compare bios across platforms for identity linking
+  - Adds a new signal type to identity resolution
+- API additions: `/entities/{id}/behavior`, `/entities/{id}/faces`
+- Frontend additions: behavioral heatmap component, face gallery per entity
+
+**Estimated effort:** 3-4 weeks. Face scan initial run: 1 weekend of background processing.
+
+---
+
+### Phase 3 — v0.3: Graph Analytics + Enrichment Tools
+
+**Goal:** Social graph visualization. External tool enrichment for gap-filling.
+
+**Scope:**
+- **Graph analytics (networkx):**
+  - Build social graph from: Telegram group co-membership, reply threads (Telegram/WhatsApp), Instagram/TikTok comments + mentions, YouTube comment threads, GitHub contribution overlap
+  - Centrality scores, community detection, influence ranking
+  - Tables: `entity_relationships` (weight, cross_platform flag, last_seen_at)
+  - Secondary entity promotion logic (weight ≥ 2 AND cross-platform)
+- **Enrichment modules (on-demand, not scheduled):**
+  - Sherlock: username → 300+ platform presence check. Results → discovery view at confidence=0.30.
+  - Maigret: username → profile info extraction (name, bio, location per platform). Slower but richer than Sherlock.
+  - Holehe: email → platform registration check. Max 1x/month per email.
+  - Wayback CDX API: historical snapshots of profile pages (best for GitHub, YouTube; useless for Instagram/Telegram/Strava).
+- **Map view (conditional):**
+  - Only if a free geo source becomes available (e.g., Lemon8 location_name geocoding, or if Strava re-opens free API)
+  - Reverse geocoding via Nominatim (free, 1 req/sec) for any coordinates that exist
+  - If zero geo data: map view remains disabled
+- API additions: `/entities/{id}/graph`, `/discovery`, enrichment trigger endpoints
+- Frontend additions: graph visualization (force-directed or Maltego-style), discovery view
+
+**Estimated effort:** 4-6 weeks.
+
+---
+
+### Phase 4 — v1.0: Investigation Mode + Polish
+
+**Goal:** Multi-entity correlation. Production polish.
+
+**Scope:**
+- **Investigation mode:** Correlate 2+ entities side-by-side (shared locations, mutual contacts, timeline overlap, co-occurrence in groups)
+- **Discovery mode:** Surface significant secondary entities automatically (promoted from peripheral tier)
+- **Topic modeling:** YouTube transcripts + GitHub READMEs → topic clusters via embedding + clustering
+- **Content similarity:** Cross-platform content reuse detection (same text posted on multiple platforms)
+- **Link retraction:** `retracted_at` + `retraction_reason` on entity_platform_links; nightly run respects retractions
+- **Schema validation on startup:** Verify expected collector tables/columns exist before running
+- **Performance hardening:** Timeline partitioning (monthly), incremental behavioral updates, `ana_analysis_runs` run-lock to prevent concurrent runs
+- **WebSocket live alerts** via `/ws/alerts`
+- Frontend polish: responsive design, search, filters, entity comparison view
+
+**Estimated effort:** 4-6 weeks.
+## 14. Final Locked Decisions (revised 2026-06-08)
 
 | # | Decision | Choice |
 |---|---|---|
@@ -356,11 +470,20 @@ These are **enrichment modules** — triggered on-demand by analyst, not part of
 | 4 | Face recognition | Phase 2 only. Analyzer-owned. `wa_face_*` tables in collector are a design artifact — analyzer will own all face processing eventually. |
 | 5 | Face needed at all? | Not for Phase 1 (known targets don't need face to resolve). Phase 2 value: identifying recurring unknowns in collected media. |
 | 6 | Paid APIs | Zero. Sherlock, Maigret, Holehe (local), Wayback CDX, Nominatim, python-whois only. |
-| 7 | Repo | Separate (`unifiedanalyzer`). Reads same PostgreSQL DB (external HDD). Writes `ana_*` tables. |
+| 7 | Repo | Separate (`unifiedanalyzer`). **Separate database** (`unifiedanalyzer` DB on same Postgres instance). Reads `unifiedcollector` DB via read-only connection. Does NOT share a DB or use `ana_*` prefix in collector DB. |
 | 8 | UI | FastAPI + React. Frontend served as static from same process. |
-| 9 | Run mode | Scheduled: 30-min incremental + nightly full resolution + weekly enrichment. |
+| 9 | Run mode | Scheduled: **60-min** incremental + nightly full resolution + weekly enrichment + on-demand trigger per entity. (Changed from 30-min — 1000 targets is too heavy for 30-min cycles on i7-8565U.) |
 | 10 | Entity creation | Automatic — scheduler watches `collection_targets` for new rows. |
 | 11 | theHarvester / HIBP | Removed — HIBP is paid, theHarvester adds little beyond Maigret for this use case. |
+| 12 | Day-1 use case | **A + B combined**: Alerts ("what happened while I slept") + Entity deep-dive ("tell me everything about person X"). Timeline + Identity Card + Alerts. |
+| 13 | Target count | ~1000 primary targets. Architecture must handle batch-oriented processing, not one-at-a-time. Identity resolution in v0.1 matches primary targets only (1000×1000). Secondary/peripheral entity matching deferred to Phase 3. |
+| 14 | Strava OAuth | **NOT AVAILABLE** — Strava API requires paid subscription. Cookie-only mode. Zero GPS data. Map view deferred to Phase 3+. Timezone inference uses fallback "auto" mode (posting hour distribution). |
+| 15 | Location data | **Zero.** Strava GPS = paid API only. Instagram lat/lng = hardcoded `download_geotags=False`. Lemon8 = text `location_name` only (no coordinates). Map view deferred. |
+| 16 | Analyzer filesystem access | Read-only on `Z:/unifiedcollector/media`. Can create temp/cache files in its own directories (face index, embeddings, dashboard assets). |
+| 17 | Collector modifications | Analyzer never modifies collector tables at runtime. If a missing column blocks the analyzer, fix it in collector repo separately. |
+| 18 | Legal/ethical guardrails | None in code. No PDPA/CMA checks. |
+| 19 | Greenfield codebase | Zero code reuse from collector. Own asyncpg pool, own models, own pipeline. |
+| 20 | Data source priority | DB-first. Analyzer discovers files via `media_items` rows, reads content from Z:/ as needed. Does not walk filesystem independently. |
 
 ---
 
@@ -476,9 +599,11 @@ Rationale: if a target posts daily, every post is not interesting. The alert is 
 # ─────────────────────────────────────────────
 # DATABASE
 # ─────────────────────────────────────────────
-# Shared with unifiedcollector. Analyzer reads collector tables (read-only),
-# writes ana_* tables.
-DATABASE_URL=postgres://collector:collector@localhost:5432/unifiedcollector
+# Analyzer's own database (separate from collector).
+ANALYZER_DATABASE_URL=postgres://analyzer:analyzer@localhost:5432/unifiedanalyzer
+
+# Read-only connection to collector's database.
+COLLECTOR_DATABASE_URL=postgres://collector:collector@localhost:5432/unifiedcollector
 
 # asyncpg connection pool size
 DB_MAX_POOL_SIZE=10
@@ -488,8 +613,8 @@ DB_MAX_POOL_SIZE=10
 # SCHEDULER CADENCES
 # ─────────────────────────────────────────────
 # How often to check for new collector data and update timeline/alerts.
-# Smaller = fresher data but more DB load.
-INCREMENTAL_RUN_INTERVAL_MINUTES=30
+# 60 min chosen for 1000-target scale on i7-8565U. Smaller = fresher but heavier.
+INCREMENTAL_RUN_INTERVAL_MINUTES=60
 
 # UTC hour (0-23) for nightly full identity re-resolution.
 # Re-runs all 3 identity stages against full dataset. Slow but thorough.
@@ -1002,20 +1127,89 @@ The original Tier 1 signals have been materially revised:
 
 ---
 
-## 22. Final Next Steps
+## 22. Face Recognition Pipeline Design (Phase 2)
 
-- [ ] Spin off `unifiedanalyzer` repo
-- [ ] Apply Section G revised signal tiers to the identity pipeline design
-- [ ] Add `is_gps_available` flag to `ana_behavioral_profiles`
-- [ ] Add `retracted_at` + `retraction_reason` to `ana_entity_platform_links`
-- [ ] Add scheduler run-lock to `ana_analysis_runs`
-- [ ] Build Phase 1 (full product, ship when complete)
+> Added 2026-06-08. This is Phase 2 scope — documented here for architectural planning.
 
-- [ ] Spin off `unifiedanalyzer` repo
-- [ ] Build Phase 1 (full product, ship when complete)
+### The Problem
 
-- [ ] Define MVP scope — what is v0.1 that works end-to-end?
-- [ ] Define `.env.example` config knobs
-- [ ] Define alert rules — exact thresholds (silence gap = how long?, location anomaly = how far?)
-- [ ] Spin off `unifiedanalyzer` repo
-- [ ] Build Phase 1
+~85k images + ~7.5k videos on disk. Goal: detect and match faces across all collected media to identify recurring people across platforms.
+
+### Video Processing Pipeline
+
+Videos cannot be fed directly to face detection. They must be decomposed into frames first.
+
+| Step | What | Tool | Time per unit | Notes |
+|---|---|---|---|---|
+| 1. Frame extraction | Sample N frames per video (not every frame) | `cv2.VideoCapture` (OpenCV) | ~1 sec/video | Default: 1 frame per 5 seconds. 60-sec video = 12 frames. Configurable via `FACE_FRAMES_PER_SECOND`. |
+| 2. pHash dedup | Perceptual hash each frame. Skip near-duplicates (>95% similar) | `imagehash` | <1ms/frame | Cuts frame count by 50-80% for static-camera content (talking heads, webcams). |
+| 3. Face detection | Run dlib HOG detector on each unique frame. Returns bounding boxes. | `dlib` / `face_recognition` | ~0.3 sec/frame (HOG) | HOG is faster, misses some angled/small faces. CNN detector is 10x slower but more accurate. Default: HOG. |
+| 4. Face embedding | Extract 128-dim ResNet embedding per detected face. | `dlib` ResNet | ~0.1 sec/face | One embedding per face per frame. |
+| 5. Face matching | Compare embedding against known face index (L2 distance). | pgvector or numpy | <1ms/comparison | Threshold: 0.6 (standard dlib recommendation). |
+| 6. Persist | Store embedding + bounding box + source media reference. | asyncpg → `face_embeddings` table | trivial | Link to `media_items` row for provenance. |
+
+### Scale Estimate (current corpus)
+
+```
+Images:  ~85,000 × 0.3 sec face detection           = ~7.1 hours
+Videos:  ~7,500 × 10 frames × 40% survive dedup     = ~30,000 frames
+         ~30,000 × 0.3 sec face detection            = ~2.5 hours
+─────────────────────────────────────────────────────────────
+Total initial face scan:                              ~10 hours CPU time
+```
+
+Feasible as a weekend background job. Incremental runs process only new `media_items` since last scan.
+
+### Configurable Knobs
+
+```env
+FACE_FRAMES_PER_SECOND=0.2          # 1 frame per 5 sec (default)
+FACE_DETECTOR=hog                    # hog (fast) or cnn (accurate, 10x slower)
+FACE_MATCH_DISTANCE_THRESHOLD=0.6    # L2 distance. Lower = stricter.
+FACE_BATCH_SIZE=500                  # Images per incremental run
+FACE_SCAN_ENABLED=false              # Master switch (Phase 2)
+```
+
+### Dependencies (all free, all CPU, no API keys)
+
+- `dlib` — face detection + 128-dim embedding extraction
+- `face_recognition` — Python wrapper around dlib (simpler API)
+- `opencv-python-headless` — video frame extraction (no GUI needed)
+- `imagehash` — perceptual hashing for frame dedup
+- `pgvector` — vector similarity search in Postgres (already installed in collector's Postgres)
+
+### Tables (in `unifiedanalyzer` DB)
+
+- `face_identities` — one row per resolved face cluster (label, notes, entity_id FK nullable)
+- `face_embeddings` — one row per detected face (identity_id FK, embedding vector(128), source_media_id, face_box JSONB, frame_index)
+- `face_scan_progress` — tracks which `media_items` have been scanned (last_scanned_media_id, scan_status)
+
+---
+
+## 23. Next Steps (2026-06-08)
+
+### Phase 1 build checklist (v0.1)
+- [ ] Create `unifiedanalyzer` git repo
+- [ ] Create `unifiedanalyzer` database on same Postgres instance
+- [ ] Scaffold repo structure per Section 16
+- [ ] Implement schema (Section 15, adapted for separate DB — drop `ana_` prefix)
+- [ ] Build DB connection layer (two asyncpg pools: read-write to analyzer DB, read-only to collector DB)
+- [ ] Build identity linker with Section G revised signals
+- [ ] Build timeline builder (normalize all 10 platform timestamp sources)
+- [ ] Build alert engine (silence gap + new-activity-after-silence + profile change)
+- [ ] Build scheduler (60-min incremental + nightly full resolution + on-demand trigger)
+- [ ] Build FastAPI API layer (Section 17 endpoints)
+- [ ] Build React frontend (entity list, entity card, timeline, alerts home screen)
+- [ ] Docker Compose for analyzer (FastAPI + frontend only, connects to existing Postgres)
+- [ ] `.env.example` with all knobs
+- [ ] Ship v0.1
+
+### Collector-side checks to do (separate session, does not block analyzer):
+- [ ] Run data integrity check: `SELECT COUNT(*) FROM media_items` vs file count on Z:/ (~190k files)
+- [ ] Verify `strava_gps_streams` is empty (confirming cookie-only mode)
+- [ ] Consider enabling Instagram `download_geotags=True` if/when 429 block clears (currently hardcoded False)
+
+### Post-v0.1 roadmap summary
+- **v0.2 (Phase 2):** Face recognition + behavioral profiling + text extraction + bio NLP
+- **v0.3 (Phase 3):** Graph analytics + enrichment tools (Sherlock/Maigret/Holehe/Wayback) + map view (if geo data becomes available)
+- **v1.0 (Phase 4):** Investigation mode (multi-entity correlation) + discovery mode + topic modeling + content similarity + link retraction + performance hardening
