@@ -125,15 +125,12 @@ class StravaCollector(BaseCollector):
                 if target.lower() == "me" and self._use_api:
                     await self._collect_authenticated_athlete()
                 elif target.lower() == "me":
-                    # No API creds: try cookie-based scrape of authenticated user's
-                    # training_activities feed. Falls through to graceful skip
-                    # if cookies are missing/invalid.
-                    await asyncio.wait_for(self._collect_via_cookies(), timeout=300.0)
+                    await asyncio.wait_for(self._collect_via_cookies(), timeout=900.0)
                 elif target.lower() == "feed" and self._use_web:
-                    # Cookie-based scrape of the authenticated dashboard/activity
-                    # feed. (_collect_feed never existed; _collect_via_cookies is
-                    # the real feed-scrape entrypoint.)
-                    await asyncio.wait_for(self._collect_via_cookies(), timeout=300.0)
+                    if self._my_athlete_id:
+                        logger.info("strava/feed: already collected via 'me' target; skipping")
+                    else:
+                        await asyncio.wait_for(self._collect_via_cookies(), timeout=900.0)
                 elif self._use_api: await self._collect_athlete(target)
                 elif self._use_web: await self._collect_athlete_web(target)
                 else:
