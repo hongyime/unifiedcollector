@@ -1522,6 +1522,9 @@ class StravaCollector(BaseCollector):
             return result
 
         html = resp.text
+        props_count = len(re.findall(r"data-react-props='", html))
+        logger.info("strava scrape: activity %s status=%d size=%dKB props_blocks=%d",
+                     activity_id, resp.status_code, len(html) // 1024, props_count)
 
         # --- Extract data from data-react-props blocks ---
         # Strava uses single-quoted props with &quot; for JSON quotes
@@ -1712,12 +1715,12 @@ class StravaCollector(BaseCollector):
                        COALESCE(sa.firstname, sa.username, sa.platform_athlete_id::text) as athlete_name
                 FROM strava_activities a
                 JOIN strava_athletes sa ON sa.id = a.athlete_id
-                LEFT JOIN strava_activity_photos p
-                    ON p.platform_activity_id = a.platform_activity_id
-                WHERE p.id IS NULL
-                ORDER BY a.start_date DESC NULLS LAST
+                WHERE a.page_scraped_at IS NULL
+                ORDER BY
+                    CASE WHEN sa.platform_athlete_id = $2 THEN 0 ELSE 1 END,
+                    a.start_date DESC NULLS LAST
                 LIMIT $1
-            """, batch_size)
+            """, batch_size, int(self._my_athlete_id) if self._my_athlete_id else 0)
 
         totals = {"photos": 0, "kudos": 0, "comments": 0, "polylines": 0}
         if not rows:
@@ -1725,6 +1728,7 @@ class StravaCollector(BaseCollector):
 
         ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        logger.info("strava: scraping %d activity pages (own-first)", len(rows))
         async with httpx.AsyncClient(
             timeout=30, cookies=jar, follow_redirects=True,
             headers={"User-Agent": ua}
@@ -1733,9 +1737,9 @@ class StravaCollector(BaseCollector):
                 if self._stop.is_set():
                     break
                 await self._delay(2.0, 5.0)
+                aid = row["platform_activity_id"]
                 r = await self._scrape_activity_page(
-                    client,
-                    row["platform_activity_id"],
+                    client, aid,
                     str(row["platform_athlete_id"]),
                     row["athlete_name"],
                 )
@@ -1744,9 +1748,15 @@ class StravaCollector(BaseCollector):
                 totals["comments"] += r["comments"]
                 if r["polyline"]:
                     totals["polylines"] += 1
-        if any(v > 0 for v in totals.values()):
-            logger.info("strava: scraped %d pages -> %d photos, %d kudos, %d comments, %d polylines",
-                        len(rows), totals["photos"], totals["kudos"], totals["comments"], totals["polylines"])
+                try:
+                    async with self.pool.acquire() as conn:
+                        await conn.execute(
+                            "UPDATE strava_activities SET page_scraped_at = NOW() WHERE platform_activity_id = $1",
+                            aid)
+                except Exception:
+                    pass
+        logger.info("strava: scraped %d pages -> %d photos, %d kudos, %d comments, %d polylines",
+                    len(rows), totals["photos"], totals["kudos"], totals["comments"], totals["polylines"])
         return totals
 
     # ------------------------------------------------------------------ #
