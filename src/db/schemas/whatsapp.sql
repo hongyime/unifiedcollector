@@ -17,6 +17,8 @@ CREATE TABLE IF NOT EXISTS whatsapp_users (
     platform_user_id VARCHAR(255) UNIQUE NOT NULL, -- jid
     name VARCHAR(255),
     pushname VARCHAR(255),
+    phone_number VARCHAR(20),
+    is_business BOOLEAN DEFAULT FALSE,
     status TEXT,
     photo_url TEXT,
     about TEXT,
@@ -46,23 +48,5 @@ CREATE TABLE IF NOT EXISTS whatsapp_messages (
     CONSTRAINT unique_platform_message_whatsapp UNIQUE (platform_message_id)
 );
 
--- Face Recognition (from whatsapp_ext.sql)
-CREATE TABLE IF NOT EXISTS wa_face_identities (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    label TEXT UNIQUE,
-    notes TEXT,
-    created_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS wa_face_embeddings (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    identity_id UUID REFERENCES wa_face_identities(id) ON DELETE SET NULL,
-    embedding vector(128),
-    source_media_id UUID REFERENCES media_items(id) ON DELETE CASCADE,
-    face_box JSONB, -- [top, right, bottom, left]
-    created_at TIMESTAMP DEFAULT NOW()
-);
-
 CREATE INDEX IF NOT EXISTS idx_wa_messages_chat ON whatsapp_messages(chat_id);
 CREATE INDEX IF NOT EXISTS idx_wa_messages_sender ON whatsapp_messages(sender_id);
-CREATE INDEX IF NOT EXISTS idx_wa_face_identity ON wa_face_embeddings(identity_id);

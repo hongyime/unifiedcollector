@@ -126,5 +126,27 @@ CREATE TABLE IF NOT EXISTS strava_activity_photos (
     CONSTRAINT unique_photo_activity UNIQUE (platform_photo_id, platform_activity_id)
 );
 
+CREATE TABLE IF NOT EXISTS strava_activity_kudos (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    platform_activity_id BIGINT NOT NULL,
+    platform_athlete_id BIGINT NOT NULL,
+    athlete_name VARCHAR(255),
+    collected_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE (platform_activity_id, platform_athlete_id)
+);
+
+CREATE TABLE IF NOT EXISTS strava_activity_comments (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    platform_activity_id BIGINT NOT NULL,
+    platform_athlete_id BIGINT NOT NULL,
+    athlete_name VARCHAR(255),
+    comment_text TEXT,
+    platform_created_at TIMESTAMP,
+    collected_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE (platform_activity_id, platform_athlete_id, platform_created_at)
+);
+
 CREATE INDEX IF NOT EXISTS idx_strava_activities_athlete ON strava_activities(athlete_id);
 CREATE INDEX IF NOT EXISTS idx_strava_activity_photos_activity ON strava_activity_photos(platform_activity_id);
+CREATE INDEX IF NOT EXISTS idx_strava_activity_kudos_activity ON strava_activity_kudos(platform_activity_id);
+CREATE INDEX IF NOT EXISTS idx_strava_activity_comments_activity ON strava_activity_comments(platform_activity_id);

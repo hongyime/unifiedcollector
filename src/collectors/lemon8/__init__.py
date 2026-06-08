@@ -537,6 +537,83 @@ class Lemon8Collector(BaseCollector):
                 if not self.is_known(media_item["content_id"]):
                     await self.download_media(media_item)
 
+    async def _fetch_note_detail(self, client: httpx.AsyncClient,
+                                username: str, note_id: str) -> dict | None:
+        """Fetch individual note page and extract post detail (title, stats, media).
+
+        Tries the HTML note page at /@username/note_id and extracts structured
+        data from embedded JSON. Returns a dict suitable for _upsert_post(), or
+        None if extraction fails.
+        """
+        url = f"https://www.lemon8-app.com/@{username}/{note_id}"
+        await self.rate_limiter.async_wait("lemon8-app.com", OperationType.PROFILE_VIEW)
+        try:
+            resp = await client.get(url, headers=self._headers())
+            if resp.status_code != 200:
+                return None
+            html = resp.text
+        except Exception:
+            return None
+
+        # Try to extract post data from embedded JSON
+        detail: dict = {"id": note_id}
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html, "html.parser")
+            for script in soup.find_all("script", {"type": "application/json"}):
+                try:
+                    data = json.loads(script.string or "{}")
+                except Exception:
+                    continue
+                post = self._find_post_in_json(data, note_id)
+                if post:
+                    detail.update(post)
+                    break
+        except Exception:
+            pass
+
+        # Fallback: extract from og: meta tags
+        title_m = re.search(r'<meta\s+property="og:title"\s+content="([^"]*)"', html)
+        desc_m = re.search(r'<meta\s+property="og:description"\s+content="([^"]*)"', html)
+        if title_m and not detail.get("title"):
+            from html import unescape
+            detail["title"] = unescape(title_m.group(1))
+        if desc_m and not detail.get("description"):
+            from html import unescape
+            detail["description"] = unescape(desc_m.group(1))
+
+        if not detail.get("title") and not detail.get("description"):
+            return None
+        return detail
+
+    @staticmethod
+    def _find_post_in_json(obj, note_id: str, depth: int = 8) -> dict | None:
+        """Recursively search JSON for a post object matching note_id."""
+        if depth <= 0 or not isinstance(obj, (dict, list)):
+            return None
+        if isinstance(obj, dict):
+            obj_id = str(obj.get("id") or obj.get("itemId") or obj.get("note_id") or "")
+            if obj_id == note_id and (obj.get("title") or obj.get("desc")):
+                return {
+                    "id": note_id,
+                    "title": obj.get("title") or obj.get("desc"),
+                    "description": obj.get("desc") or obj.get("title"),
+                    "stats": {
+                        "likeCount": obj.get("digg_count") or obj.get("likeCount") or 0,
+                        "commentCount": obj.get("comment_count") or obj.get("commentCount") or 0,
+                    },
+                }
+            for v in obj.values():
+                r = Lemon8Collector._find_post_in_json(v, note_id, depth - 1)
+                if r:
+                    return r
+        elif isinstance(obj, list):
+            for item in obj:
+                r = Lemon8Collector._find_post_in_json(item, note_id, depth - 1)
+                if r:
+                    return r
+        return None
+
     async def _collect_feed(self, client: httpx.AsyncClient):
         """For-You-Page (FYP) feed scraping. Tries pylemon8 if available, falls back to web."""
         pages = max(1, self._tag_pages)
@@ -588,14 +665,22 @@ class Lemon8Collector(BaseCollector):
                 "video" if item.get("media_type") == "video" else "image"
             )
 
-            # NOTE: FYP feed cards lack post detail (title/desc/stats); they're just
-            # CDN media URLs. Upserting them creates 100% empty-content rows (5k+ as of
-            # 2026-06-02). Skip DB upsert; just download the media. To fix properly,
-            # enqueue post IDs for detail-fetch pass (needs post detail API endpoint).
-            # if not item.get("is_profile_photo"):
-            #     post_payload = {...}
-            #     await self._upsert_post(entity_id, post_payload)
-            # DISABLED 2026-06-02 — was creating useless empty rows.
+            # FYP feed cards lack post detail (title/desc/stats). Extract note_id
+            # from the item and fetch the note page for full detail before upserting.
+            if (not item.get("is_profile_photo")
+                    and os.getenv("LEMON8_FYP_DETAIL_FETCH", "false").lower() == "true"):
+                note_id = item.get("note_id") or item.get("itemId") or item.get("item_id") or ""
+                if not note_id and item.get("href"):
+                    nm = re.search(r'/(\d{10,20})(?:\?|$)', item["href"])
+                    if nm:
+                        note_id = nm.group(1)
+                if note_id:
+                    try:
+                        detail = await self._fetch_note_detail(client, uname, str(note_id))
+                        if detail:
+                            await self._upsert_post(entity_id, detail)
+                    except Exception as e:
+                        logger.debug("lemon8 FYP detail fetch %s failed: %s", note_id, e)
 
             if self.is_known(content_id):
                 continue

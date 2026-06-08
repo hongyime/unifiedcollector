@@ -168,11 +168,11 @@ class StravaCollector(BaseCollector):
         except Exception as e:
             logger.warning("strava: athlete name enrichment failed: %s", e)
 
-        # Scrape photos from individual activity pages
+        # Scrape activity pages for photos, polylines, kudos, comments
         try:
-            await self._scrape_photos_for_activities(batch_size=25)
+            await self._scrape_activity_pages(batch_size=25)
         except Exception as e:
-            logger.warning("strava: activity photo scraping failed: %s", e)
+            logger.warning("strava: activity page scraping failed: %s", e)
 
         # Optional follow-roster expansion: when STRAVA_ROSTER_SEED_TARGETS
         # is set (comma-separated athlete IDs) we scrape /follows pages and
@@ -1473,16 +1473,39 @@ class StravaCollector(BaseCollector):
     # Activity-page photo scraping (individual /activities/{id} pages)
     # ------------------------------------------------------------------ #
 
-    async def _scrape_activity_photos(self, client: httpx.AsyncClient, activity_id: int,
-                                      athlete_id: str, athlete_name: str) -> int:
-        """Scrape photos from an individual activity page via data-react-props JSON.
+    @staticmethod
+    def _decode_polyline(encoded: str) -> list[list[float]]:
+        """Decode a Google encoded polyline into [[lat, lng], ...] pairs."""
+        result = []
+        index = lat = lng = 0
+        while index < len(encoded):
+            for attr in range(2):
+                shift = 0
+                value = 0
+                while True:
+                    b = ord(encoded[index]) - 63
+                    index += 1
+                    value |= (b & 0x1F) << shift
+                    shift += 5
+                    if b < 0x20:
+                        break
+                delta = ~(value >> 1) if (value & 1) else (value >> 1)
+                if attr == 0:
+                    lat += delta
+                else:
+                    lng += delta
+            result.append([lat / 1e5, lng / 1e5])
+        return result
 
-        Returns number of photos upserted. The activity page embeds photo data in
-        a data-react-props attribute (HTML-entity-encoded JSON) with structure:
-          {"items":[{"photo_id":"...","large":"https://...","thumbnail":"...","activity_id":...,"media_type":1}], ...}
+    async def _scrape_activity_page(self, client: httpx.AsyncClient, activity_id: int,
+                                    athlete_id: str, athlete_name: str) -> dict:
+        """Scrape an individual activity page for photos, polyline, kudos, and comments.
+
+        Returns dict with counts: {"photos": N, "kudos": N, "comments": N, "polyline": bool}
         """
         from html import unescape as _unescape
 
+        result = {"photos": 0, "kudos": 0, "comments": 0, "polyline": False}
         url = f"{STRAVA_WEB}/activities/{activity_id}"
         try:
             resp = await client.get(url, headers={
@@ -1490,14 +1513,14 @@ class StravaCollector(BaseCollector):
                 "Accept": "text/html,application/xhtml+xml",
             })
         except Exception as e:
-            logger.debug("strava photos: fetch %s failed: %s", activity_id, e)
-            return 0
+            logger.debug("strava scrape: fetch %s failed: %s", activity_id, e)
+            return result
         if resp.status_code != 200:
-            return 0
+            return result
 
         html = resp.text
-        photos_found = 0
 
+        # --- Extract data from data-react-props blocks ---
         for m in re.finditer(r"data-react-props=(['\"])(.+?)\1", html, re.DOTALL):
             raw = _unescape(m.group(2))
             try:
@@ -1506,68 +1529,152 @@ class StravaCollector(BaseCollector):
                 continue
             if not isinstance(props, dict):
                 continue
+
+            # Photos
             items = props.get("items") or props.get("photos") or []
-            if not isinstance(items, list) or not items:
-                continue
-            for photo in items:
-                if not isinstance(photo, dict):
-                    continue
-                photo_id = str(photo.get("photo_id") or photo.get("id") or "")
-                large_url = photo.get("large") or photo.get("video")
-                thumb_url = photo.get("thumbnail") or photo.get("small")
-                if not photo_id or (not large_url and not thumb_url):
-                    continue
+            if isinstance(items, list) and items:
+                for photo in items:
+                    if not isinstance(photo, dict):
+                        continue
+                    photo_id = str(photo.get("photo_id") or photo.get("id") or "")
+                    large_url = photo.get("large") or photo.get("video")
+                    thumb_url = photo.get("thumbnail") or photo.get("small")
+                    if not photo_id or (not large_url and not thumb_url):
+                        continue
+                    try:
+                        athlete_id_int = int(athlete_id)
+                        async with self.pool.acquire() as conn:
+                            athlete_row = await conn.fetchrow(
+                                "SELECT id FROM strava_athletes WHERE platform_athlete_id = $1",
+                                athlete_id_int)
+                            athlete_uuid = athlete_row["id"] if athlete_row else None
+                            await conn.execute("""
+                                INSERT INTO strava_activity_photos
+                                   (platform_photo_id, platform_activity_id, athlete_id,
+                                    activity_name, athlete_name, caption, media_type,
+                                    source_url_large, source_url_thumbnail, activity_date, source)
+                                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW(),$10)
+                                ON CONFLICT (platform_photo_id, platform_activity_id) DO UPDATE SET
+                                  source_url_large = COALESCE(EXCLUDED.source_url_large, strava_activity_photos.source_url_large),
+                                  source_url_thumbnail = COALESCE(EXCLUDED.source_url_thumbnail, strava_activity_photos.source_url_thumbnail)
+                            """, photo_id, activity_id, athlete_uuid,
+                                None, athlete_name,
+                                photo.get("caption_escaped") or photo.get("caption"),
+                                int(photo.get("media_type") or 1),
+                                large_url, thumb_url, "activity_page_scrape")
+                        result["photos"] += 1
+                        if large_url and not self.is_known(f"{activity_id}_{photo_id}"):
+                            await self.download_media({
+                                "entity_id": athlete_id,
+                                "entity_name": athlete_name,
+                                "content_type": "activity_photo",
+                                "content_id": f"{activity_id}_{photo_id}",
+                                "url": large_url,
+                                "extension": "jpg",
+                                "source_url": f"https://www.strava.com/activities/{activity_id}",
+                            })
+                    except Exception as e:
+                        logger.debug("strava scrape: photo %s/%s failed: %s",
+                                     activity_id, photo_id, e)
+
+            # Polyline from activity map props
+            polyline = (props.get("polyline") or props.get("summary_polyline")
+                        or (props.get("map") or {}).get("polyline")
+                        or (props.get("map") or {}).get("summary_polyline")
+                        or (props.get("activityMap") or {}).get("polyline"))
+            if polyline and isinstance(polyline, str) and len(polyline) > 10:
                 try:
-                    athlete_id_int = int(athlete_id)
                     async with self.pool.acquire() as conn:
-                        athlete_row = await conn.fetchrow(
-                            "SELECT id FROM strava_athletes WHERE platform_athlete_id = $1",
-                            athlete_id_int)
-                        athlete_uuid = athlete_row["id"] if athlete_row else None
                         await conn.execute("""
-                            INSERT INTO strava_activity_photos
-                               (platform_photo_id, platform_activity_id, athlete_id,
-                                activity_name, athlete_name, caption, media_type,
-                                source_url_large, source_url_thumbnail, activity_date, source)
-                            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW(),$10)
-                            ON CONFLICT (platform_photo_id, platform_activity_id) DO UPDATE SET
-                              source_url_large = COALESCE(EXCLUDED.source_url_large, strava_activity_photos.source_url_large),
-                              source_url_thumbnail = COALESCE(EXCLUDED.source_url_thumbnail, strava_activity_photos.source_url_thumbnail)
-                        """, photo_id, activity_id, athlete_uuid,
-                            None, athlete_name,
-                            photo.get("caption_escaped") or photo.get("caption"),
-                            int(photo.get("media_type") or 1),
-                            large_url, thumb_url, "activity_page_scrape")
-                    photos_found += 1
-                    if large_url and not self.is_known(f"{activity_id}_{photo_id}"):
-                        await self.download_media({
-                            "entity_id": athlete_id,
-                            "entity_name": athlete_name,
-                            "content_type": "activity_photo",
-                            "content_id": f"{activity_id}_{photo_id}",
-                            "url": large_url,
-                            "extension": "jpg",
-                            "source_url": f"https://www.strava.com/activities/{activity_id}",
-                        })
+                            UPDATE strava_activities
+                            SET summary_polyline = $1
+                            WHERE platform_activity_id = $2
+                              AND (summary_polyline IS NULL OR summary_polyline = '')
+                        """, polyline, activity_id)
+                        # Create synthetic GPS stream from polyline
+                        act_row = await conn.fetchrow(
+                            "SELECT id FROM strava_activities WHERE platform_activity_id = $1",
+                            activity_id)
+                        if act_row:
+                            exists = await conn.fetchval(
+                                "SELECT 1 FROM strava_gps_streams WHERE activity_id = $1",
+                                act_row["id"])
+                            if not exists:
+                                latlng = self._decode_polyline(polyline)
+                                await conn.execute("""
+                                    INSERT INTO strava_gps_streams (activity_id, latlng, collected_at)
+                                    VALUES ($1, $2, NOW())
+                                    ON CONFLICT (activity_id) DO NOTHING
+                                """, act_row["id"], json.dumps(latlng))
+                    result["polyline"] = True
                 except Exception as e:
-                    logger.debug("strava photos: upsert photo %s/%s failed: %s",
-                                 activity_id, photo_id, e)
-            if photos_found:
-                break
-        return photos_found
+                    logger.debug("strava scrape: polyline %s failed: %s", activity_id, e)
 
-    async def _scrape_photos_for_activities(self, batch_size: int = 25) -> int:
-        """Find activities likely to have photos and scrape their pages.
+        # --- Extract kudos from HTML ---
+        try:
+            kudos_matches = re.finditer(
+                r'data-athlete-id=["\'](\d+)["\'][^>]*>.*?'
+                r'(?:text-headline|athlete-name|kudo-name)[^>]*>([^<]+)<',
+                html, re.DOTALL)
+            for km in kudos_matches:
+                try:
+                    kudo_athlete_id = int(km.group(1))
+                    kudo_name = km.group(2).strip()
+                    async with self.pool.acquire() as conn:
+                        await conn.execute("""
+                            INSERT INTO strava_activity_kudos
+                                (platform_activity_id, platform_athlete_id, athlete_name)
+                            VALUES ($1, $2, $3)
+                            ON CONFLICT (platform_activity_id, platform_athlete_id) DO NOTHING
+                        """, activity_id, kudo_athlete_id, kudo_name)
+                    result["kudos"] += 1
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.debug("strava scrape: kudos %s failed: %s", activity_id, e)
 
-        Uses metadata to find activities where Strava reported total_photo_count > 0
-        but we have no photos in strava_activity_photos. Also checks activities
-        that came via web scrape (no photo count) by sampling those not yet visited.
+        # --- Extract comments from HTML ---
+        try:
+            comment_matches = re.finditer(
+                r'data-athlete-id=["\'](\d+)["\'][^>]*>.*?'
+                r'(?:athlete-name|comment-name)[^>]*>([^<]+)<.*?'
+                r'(?:comment-text|comment_text)[^>]*>([^<]+)<',
+                html, re.DOTALL)
+            for cm in comment_matches:
+                try:
+                    comment_athlete_id = int(cm.group(1))
+                    comment_name = cm.group(2).strip()
+                    comment_text = cm.group(3).strip()
+                    if comment_text:
+                        async with self.pool.acquire() as conn:
+                            await conn.execute("""
+                                INSERT INTO strava_activity_comments
+                                    (platform_activity_id, platform_athlete_id,
+                                     athlete_name, comment_text)
+                                VALUES ($1, $2, $3, $4)
+                                ON CONFLICT (platform_activity_id, platform_athlete_id, platform_created_at)
+                                    DO NOTHING
+                            """, activity_id, comment_athlete_id,
+                                comment_name, comment_text)
+                        result["comments"] += 1
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.debug("strava scrape: comments %s failed: %s", activity_id, e)
+
+        return result
+
+    async def _scrape_activity_pages(self, batch_size: int = 25) -> dict:
+        """Scrape activity pages for photos, polylines, kudos, and comments.
+
+        Visits individual activity pages that haven't been scraped yet and
+        extracts all available data from each page in a single HTTP request.
         """
         if not self._use_web or not self.pool:
-            return 0
+            return {"photos": 0, "kudos": 0, "comments": 0, "polylines": 0}
         jar = self._build_cookie_jar()
         if jar is None:
-            return 0
+            return {"photos": 0, "kudos": 0, "comments": 0, "polylines": 0}
 
         async with self.pool.acquire() as conn:
             rows = await conn.fetch("""
@@ -1583,10 +1690,10 @@ class StravaCollector(BaseCollector):
                 LIMIT $1
             """, batch_size)
 
+        totals = {"photos": 0, "kudos": 0, "comments": 0, "polylines": 0}
         if not rows:
-            return 0
+            return totals
 
-        total = 0
         ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
         async with httpx.AsyncClient(
@@ -1597,16 +1704,21 @@ class StravaCollector(BaseCollector):
                 if self._stop.is_set():
                     break
                 await self._delay(2.0, 5.0)
-                n = await self._scrape_activity_photos(
+                r = await self._scrape_activity_page(
                     client,
                     row["platform_activity_id"],
                     str(row["platform_athlete_id"]),
                     row["athlete_name"],
                 )
-                total += n
-        if total:
-            logger.info("strava: scraped %d photos from %d activity pages", total, len(rows))
-        return total
+                totals["photos"] += r["photos"]
+                totals["kudos"] += r["kudos"]
+                totals["comments"] += r["comments"]
+                if r["polyline"]:
+                    totals["polylines"] += 1
+        if any(v > 0 for v in totals.values()):
+            logger.info("strava: scraped %d pages -> %d photos, %d kudos, %d comments, %d polylines",
+                        len(rows), totals["photos"], totals["kudos"], totals["comments"], totals["polylines"])
+        return totals
 
     # ------------------------------------------------------------------ #
     # Athlete name enrichment (scrape profile pages for stub athletes)

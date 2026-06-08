@@ -236,6 +236,7 @@ class WhatsappCollector(BaseCollector):
 
         # 2. Save Message (ALL messages)
         await self._upsert_message(event, chat_jid, sender_uuid)
+        self._progress_count += 1
 
         # 3. Handle Media if exists
         media_type = event.get("media_type") or event.get("messageType", "")
@@ -394,13 +395,17 @@ class WhatsappCollector(BaseCollector):
             # Custom upsert to return the internal ID
             async with self.pool.acquire() as conn:
                 row = await conn.fetchrow("""
-                    INSERT INTO whatsapp_users (platform_user_id, name, pushname, collected_at)
-                    VALUES ($1, $2, $3, NOW())
+                    INSERT INTO whatsapp_users (platform_user_id, name, pushname, phone_number, is_business, collected_at)
+                    VALUES ($1, $2, $3, $4, $5, NOW())
                     ON CONFLICT (platform_user_id) DO UPDATE SET
-                        pushname = EXCLUDED.pushname,
+                        pushname = COALESCE(EXCLUDED.pushname, whatsapp_users.pushname),
+                        name = COALESCE(EXCLUDED.name, whatsapp_users.name),
+                        phone_number = COALESCE(EXCLUDED.phone_number, whatsapp_users.phone_number),
+                        is_business = EXCLUDED.is_business,
                         collected_at = NOW()
                     RETURNING id
-                """, sender_jid, payload["display_name"], payload["push_name"])
+                """, sender_jid, payload["display_name"], payload["push_name"],
+                    payload["phone_number"] or None, payload["is_business"])
                 return row['id']
         except Exception as e:
             logger.debug("User profile tracking failed: %s", e)

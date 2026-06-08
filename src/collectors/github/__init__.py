@@ -1001,8 +1001,16 @@ class GithubCollector(BaseCollector):
                     following_count, platform_created_at, collected_at
                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
                 ON CONFLICT (platform_user_id) DO UPDATE SET
-                    login = EXCLUDED.login, name = EXCLUDED.name, bio = EXCLUDED.bio,
+                    login = EXCLUDED.login,
+                    name = EXCLUDED.name,
+                    company = EXCLUDED.company,
+                    blog = EXCLUDED.blog,
+                    location = EXCLUDED.location,
+                    email = EXCLUDED.email,
+                    bio = EXCLUDED.bio,
                     public_repos_count = EXCLUDED.public_repos_count,
+                    followers_count = EXCLUDED.followers_count,
+                    following_count = EXCLUDED.following_count,
                     collected_at = NOW()
                 """,
                 user_data.get("id"), user_data.get("login"), user_data.get("name"),
