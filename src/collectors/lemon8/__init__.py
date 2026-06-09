@@ -682,6 +682,7 @@ class Lemon8Collector(BaseCollector):
                     except Exception as e:
                         logger.debug("lemon8 FYP detail fetch %s failed: %s", note_id, e)
 
+            self._progress_count += 1
             if self.is_known(content_id):
                 continue
             await self.download_media({
