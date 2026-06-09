@@ -1190,8 +1190,7 @@ class StravaCollector(BaseCollector):
         # ---- HTML parsing helpers (ported from archive parsers.py) ----
         NEXT_DATA_RE = _re.compile(
             r'<script[^>]+id="__NEXT_DATA__"[^>]*>(?P<data>.*?)</script>', _re.DOTALL)
-        MFE_RE = _re.compile(
-            r"data-react-props=(?P<q>['\"])(?P<data>.*?)(?P=q)", _re.DOTALL)
+        MFE_RE = _re.compile(r"data-react-props='([^']+)'")
         JS_RE = _re.compile(r"=\s*(\{.*?\}|\[.*?\]);", _re.DOTALL)
         ACTIVITY_HINTS = ("id", "activity_id", "start_date", "start_date_utc",
                           "sport_type", "type", "map", "mapAndPhotos", "activityName")
@@ -1225,7 +1224,7 @@ class StravaCollector(BaseCollector):
             # Strategy 1: microfrontend props
             for m in MFE_RE.finditer(html):
                 try:
-                    p = _json.loads(_unescape(m.group("data")))
+                    p = _json.loads(_unescape(m.group(1)))
                 except Exception:
                     continue
                 if not isinstance(p, dict):
@@ -1401,6 +1400,8 @@ class StravaCollector(BaseCollector):
                         await self._upsert_activity(parsed, athlete_id)
                         # Update polyline separately if present
                         if parsed.get("_polyline"):
+                            logger.info("strava history: polyline found for activity %s (%d chars)",
+                                        parsed["id"], len(parsed["_polyline"]))
                             async with self.pool.acquire() as conn:
                                 await conn.execute(
                                     """UPDATE strava_activities
