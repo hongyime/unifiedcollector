@@ -257,6 +257,7 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
+      LEMON8_FYP_DETAIL_FETCH: "true"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     cap_add:
