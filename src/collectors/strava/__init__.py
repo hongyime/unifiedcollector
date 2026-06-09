@@ -416,10 +416,12 @@ class StravaCollector(BaseCollector):
                 logger.warning("strava: minimal athlete insert failed: %s", e)
 
             # 2) Paginate /athlete/training_activities (returns JSON for XHR).
+            # History backfill captures full archives; this only needs recent activities.
+            max_training_pages = int(os.getenv("STRAVA_TRAINING_MAX_PAGES", "25"))
             total = 0
             page = 1
             empty_streak = 0
-            while not self._stop.is_set() and page <= 200:
+            while not self._stop.is_set() and page <= max_training_pages:
                 await self._delay(self._feed_delay_min, self._feed_delay_max)
                 try:
                     resp = await asyncio.wait_for(
