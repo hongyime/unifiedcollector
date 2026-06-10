@@ -76,8 +76,21 @@ class WorkerService:
                 logger.error("Drive never appeared, exiting")
                 return
 
-        self.pool = await get_pool()
-        await self._init_db()
+        # Wait for DB (may not be ready on cold boot).
+        db_poll = 5.0
+        while not self._stop.is_set():
+            try:
+                self.pool = await get_pool()
+                await self._init_db()
+                break
+            except Exception as e:
+                logger.warning("worker: DB not ready — retrying in %.0fs: %s", db_poll, e)
+                try:
+                    await asyncio.wait_for(self._stop.wait(), timeout=db_poll)
+                    return
+                except asyncio.TimeoutError:
+                    pass
+                db_poll = min(db_poll * 1.5, 60.0)
 
         # File-based per-source config (Option A: files authoritative). Reads
         # config/sources/<source>.targets + <source>.env and syncs them into the DB /
@@ -90,10 +103,9 @@ class WorkerService:
         except Exception:
             logger.warning("source_config sync failed (non-fatal)", exc_info=True)
 
-        # Warmup WSL2 network stack before launching collectors.
-        # Without this, the first httpx request from any collector hits a kernel
-        # D-state (uninterruptible sleep) that freezes the entire asyncio event loop.
-        await self._warmup_network()
+        # Wait for internet before launching collectors. On cold boot or
+        # network outage this blocks patiently instead of spamming errors.
+        await self._wait_for_internet("startup")
 
         self._install_signal_handlers()
 
@@ -145,27 +157,64 @@ class WorkerService:
         from src.db.migrate import apply_all
         await apply_all(self.pool)
 
-    async def _warmup_network(self):
-        """Prime WSL2 network via a thread — kernel-level hang cannot freeze the event loop."""
+    _NETWORK_ERRORS = (
+        ConnectionError, ConnectionRefusedError, ConnectionResetError,
+        OSError, TimeoutError,
+    )
+
+    @staticmethod
+    def _is_network_error(exc: Exception) -> bool:
+        """Return True if *exc* looks like an internet-connectivity failure."""
+        if isinstance(exc, WorkerService._NETWORK_ERRORS):
+            return True
+        name = type(exc).__name__
+        if name in ("ConnectError", "ReadTimeout", "PoolTimeout",
+                     "NetworkError", "ClientConnectorError"):
+            return True
+        msg = str(exc).lower()
+        return any(kw in msg for kw in (
+            "connect", "unreachable", "name resolution",
+            "no route", "network is down", "temporary failure",
+            "getaddrinfo", "errno 11001", "dns",
+        ))
+
+    async def _check_internet(self) -> bool:
+        """Quick non-blocking internet probe via a thread."""
         import urllib.request, concurrent.futures
         def _probe():
             try:
                 r = urllib.request.urlopen(
-                    "http://connectivitycheck.gstatic.com/generate_204", timeout=20
+                    "http://connectivitycheck.gstatic.com/generate_204", timeout=15
                 )
-                return f"ok:{r.status}"
-            except Exception as exc:
-                return f"warn:{exc}"
-        logger.info("worker: warming up network stack...")
+                return r.status == 204 or r.status == 200
+            except Exception:
+                return False
         loop = asyncio.get_event_loop()
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             try:
-                result = await asyncio.wait_for(loop.run_in_executor(pool, _probe), timeout=22.0)
-                logger.info("worker: network warmup %s", result)
+                return await asyncio.wait_for(
+                    loop.run_in_executor(pool, _probe), timeout=20.0
+                )
+            except (asyncio.TimeoutError, Exception):
+                return False
+
+    async def _wait_for_internet(self, context: str = "startup"):
+        """Block until internet is reachable, polling with backoff. Logs once on loss, once on recovery."""
+        if await self._check_internet():
+            logger.info("worker: internet available (%s)", context)
+            return
+        logger.warning("worker: no internet (%s) — waiting patiently...", context)
+        poll = 10.0
+        while not self._stop.is_set():
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=poll)
+                return
             except asyncio.TimeoutError:
-                logger.warning("worker: network warmup timed out (non-fatal)")
-            except Exception as exc:
-                logger.warning("worker: network warmup failed (non-fatal): %s", exc)
+                pass
+            if await self._check_internet():
+                logger.info("worker: internet restored (%s)", context)
+                return
+            poll = min(poll * 1.5, 120.0)
 
     def _install_signal_handlers(self):
         loop = asyncio.get_event_loop()
@@ -285,14 +334,17 @@ class WorkerService:
             except asyncio.CancelledError:
                 break
             except Exception as e:
+                if self._is_network_error(e):
+                    logger.warning("%s: network error — waiting for internet: %s",
+                                   source, e)
+                    await self._wait_for_internet(f"{source}/recovery")
+                    continue
                 self._crash_counts[source] += 1
                 count = self._crash_counts[source]
                 logger.error("%s crashed (%d/%d): %r", source, count, self.max_restarts, e,
                              exc_info=True)
                 if count >= self.max_restarts:
                     logger.error("%s exceeded max restarts, giving up", source)
-                    # P2-4: persist permanent death so it's queryable / alertable
-                    # instead of just vanishing behind a log line.
                     await self._mark_source_dead(source, repr(e), count)
                     break
                 backoff = min(300, 30 * (2 ** (count - 1)))
