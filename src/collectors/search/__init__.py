@@ -186,7 +186,7 @@ class SearchCollector(BaseCollector):
         self._min_file_size = int(os.getenv("SEARCH_MIN_FILE_SIZE", "10240"))
         self._max_pdf_pages = int(os.getenv("SEARCH_MAX_PDF_PAGES", "50"))
         self._download_images = os.getenv("SEARCH_DOWNLOAD_IMAGES", "1") == "1"
-        self._spider_pages = os.getenv("SEARCH_SPIDER_PAGES", "0") == "1"
+        self._spider_pages = os.getenv("SEARCH_SPIDER_PAGES", "1") == "1"
         self._bing_pages = int(os.getenv("SEARCH_BING_PAGES", "3"))
         self._serper_threshold = int(os.getenv("SEARCH_SERPER_THRESHOLD", "5"))
         self._concurrent_downloads = int(os.getenv("SEARCH_CONCURRENT_DOWNLOADS", "5"))

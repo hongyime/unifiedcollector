@@ -217,7 +217,7 @@ class Lemon8Collector(BaseCollector):
         self._hq_width = int(os.getenv("LEMON8_HIGH_QUALITY_WIDTH", "2160"))
         self._enhance_urls = os.getenv("LEMON8_IMAGE_ENHANCEMENT", "true").lower() == "true"
         self._profile_photos = os.getenv("LEMON8_PROFILE_PHOTO_ENABLED", "true").lower() == "true"
-        self._feed_enabled = os.getenv("LEMON8_FEED_ENABLED", "false").lower() == "true"
+        self._feed_enabled = os.getenv("LEMON8_FEED_ENABLED", "true").lower() == "true"
         self._tag_pages = int(os.getenv("LEMON8_TAG_PAGES", "10"))
         self._discovered_users: set[str] = set()
         self._discovered_tags: set[str] = set()

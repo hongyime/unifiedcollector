@@ -849,7 +849,7 @@ class InstagramCollector(BaseCollector):
                 )
 
         # 3. Spidering (if enabled)
-        if os.getenv("INSTA_SPIDER_FOLLOWERS", "false").lower() == "true":
+        if os.getenv("INSTA_SPIDER_FOLLOWERS", "true").lower() == "true":
             await self._spider_followers(client, uid, entity_name)
 
         # 4. Collect Content
