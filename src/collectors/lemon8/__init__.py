@@ -679,6 +679,9 @@ class Lemon8Collector(BaseCollector):
                         detail = await self._fetch_note_detail(client, uname, str(note_id))
                         if detail:
                             await self._upsert_post(entity_id, detail)
+                            logger.info("lemon8 FYP detail: upserted post %s for %s", note_id, uname)
+                        else:
+                            logger.debug("lemon8 FYP detail: no data for note %s", note_id)
                     except Exception as e:
                         logger.debug("lemon8 FYP detail fetch %s failed: %s", note_id, e)
 
@@ -1310,6 +1313,10 @@ class Lemon8Collector(BaseCollector):
                 if not m:
                     continue
                 username = self._normalize_username(m.group(1))
+                note_id = ""
+                nm = re.search(r'/(\d{10,20})(?:\?|$)', href)
+                if nm:
+                    note_id = nm.group(1)
                 for img in card.find_all("img", src=True):
                     src = img.get("src")
                     if not src or not self._is_valid_media_url(src):
@@ -1322,6 +1329,9 @@ class Lemon8Collector(BaseCollector):
                         continue
                     mi = self._build_media_item(src, username=username)
                     if mi:
+                        if note_id:
+                            mi["note_id"] = note_id
+                        mi["href"] = href
                         out.append(mi)
         except Exception as e:
             logger.debug("extract_media_items_from_feed_cards: %s", e)
