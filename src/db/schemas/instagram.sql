@@ -13,8 +13,8 @@ CREATE TABLE IF NOT EXISTS instagram_profiles (
     is_verified BOOLEAN DEFAULT FALSE,
     is_private BOOLEAN DEFAULT FALSE,
     profile_pic_url TEXT,
-    email TEXT,
-    phone TEXT,
+    email TEXT, -- vestigial: instaloader never populates this field (always NULL)
+    phone TEXT, -- vestigial: instaloader never populates this field (always NULL)
     external_url TEXT,
     collected_at TIMESTAMP DEFAULT NOW(),
     updated_at TIMESTAMP DEFAULT NOW(),

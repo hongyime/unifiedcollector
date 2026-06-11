@@ -1015,7 +1015,8 @@ class GithubCollector(BaseCollector):
                 """,
                 user_data.get("id"), user_data.get("login"), user_data.get("name"),
                 user_data.get("company"), user_data.get("blog"),
-                user_data.get("location"), user_data.get("email"),
+                user_data.get("location"),
+                None if (user_data.get("email") or "").endswith("noreply.github.com") else user_data.get("email"),
                 user_data.get("bio"), user_data.get("public_repos"),
                 user_data.get("followers"), user_data.get("following"),
                 _parse_iso(user_data.get("created_at")),
@@ -1080,7 +1081,8 @@ class GithubCollector(BaseCollector):
                 VALUES ($1, $2, $3, $4, $5, $6, NOW())
                 ON CONFLICT (sha) DO NOTHING
                 """,
-                commit.get("sha"), author.get("name"), author.get("email"),
+                commit.get("sha"), author.get("name"),
+                None if (author.get("email") or "").endswith("noreply.github.com") else author.get("email"),
                 gh_author.get("login"), c.get("message"), commit_date,
             )
 

@@ -1191,16 +1191,18 @@ class TelegramCollector(BaseCollector):
             user = await worker.client.get_entity(platform_user_id)
             async with self.pool.acquire() as conn:
                 row = await conn.fetchrow("""
-                    INSERT INTO telegram_users (platform_user_id, username, first_name, last_name, updated_at)
-                    VALUES ($1, $2, $3, $4, NOW())
+                    INSERT INTO telegram_users (platform_user_id, username, first_name, last_name, phone, updated_at)
+                    VALUES ($1, $2, $3, $4, $5, NOW())
                     ON CONFLICT (platform_user_id) DO UPDATE SET
                         username = EXCLUDED.username,
                         first_name = EXCLUDED.first_name,
                         last_name = EXCLUDED.last_name,
+                        phone = COALESCE(EXCLUDED.phone, telegram_users.phone),
                         updated_at = NOW()
                     RETURNING id
                 """,
-                str(user.id), user.username, user.first_name, user.last_name
+                str(user.id), user.username, user.first_name, user.last_name,
+                getattr(user, "phone", None)
                 )
                 return row['id']
         except Exception:
