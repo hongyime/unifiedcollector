@@ -109,6 +109,11 @@ class WhatsappCollector(BaseCollector):
 
         self._change_tracker = ChangeTracker()
         self._link_discovery_enabled = os.getenv("WHATSAPP_LINK_DISCOVERY_ENABLED", "true").lower() == "true"
+        _spider_sessions = os.getenv("WHATSAPP_SPIDER_SESSIONS", "")
+        self._spider_sessions: set[str] = (
+            {s.strip().lower() for s in _spider_sessions.split(",") if s.strip()}
+            if _spider_sessions else set()
+        )
         # Send-side intentionally dropped: no bulk_send_enabled / hourly cap /
         # daily cap / membership gating. This collector is RECEIVE-ONLY.
 

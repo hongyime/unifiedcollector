@@ -291,6 +291,11 @@ class TelegramCollector(BaseCollector):
         self._join_min_delay = int(os.getenv("TELEGRAM_JOIN_MIN_DELAY", "30"))
         self._admin_log_enabled = os.getenv("TELEGRAM_POLL_ADMIN_LOGS", "true").lower() == "true"
         self._group_join_enabled = os.getenv("TELEGRAM_GROUP_JOIN_ENABLED", "true").lower() == "true"
+        _spider_accts = os.getenv("TELEGRAM_SPIDER_ACCOUNTS", "")
+        self._spider_accounts: set[str] = (
+            {a.strip().lower() for a in _spider_accts.split(",") if a.strip()}
+            if _spider_accts else set()
+        )
 
         # Realtime listener state — populated by collect_realtime()
         self._realtime_running = False
@@ -688,12 +693,21 @@ class TelegramCollector(BaseCollector):
                     w.worker_id, w.account.name, r,
                 )
 
-        # Spider queue: fan out across ALL connected workers for parallelism.
+        # Spider queue: fan out across allowed workers for parallelism.
+        # TELEGRAM_SPIDER_ACCOUNTS restricts which accounts can spider.
         if os.getenv("TELEGRAM_SPIDER_ENABLED", "true").lower() == "true":
             try:
+                allowed = self._spider_accounts
+                spider_workers = [
+                    w for w in self._workers
+                    if not allowed or w.account.name.lower() in allowed
+                ]
+                if allowed and len(spider_workers) < len(self._workers):
+                    logger.info("Spider restricted to accounts: %s (%d/%d workers)",
+                                ", ".join(allowed), len(spider_workers), len(self._workers))
                 spider_tasks = [
                     self._process_spider_queue(w)
-                    for w in self._workers
+                    for w in spider_workers
                 ]
                 results = await asyncio.gather(*spider_tasks, return_exceptions=True)
                 for w, r in zip(self._workers, results):
