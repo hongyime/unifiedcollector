@@ -269,26 +269,26 @@ class InstagramCollector(BaseCollector):
             self._loader = None
 
     def _login_account(self, account) -> bool:
-        logger.info("[DEBUG] _login_account ENTER for %s", account.name)
+        logger.debug("[DEBUG] _login_account ENTER for %s", account.name)
         if not self._loader:
             self._init_loader()
         if not self._loader:
-            logger.info("[DEBUG] _login_account: no loader, returning False")
+            logger.debug("[DEBUG] _login_account: no loader, returning False")
             return False
 
         username = account.credentials.get("user", "")
         password = account.credentials.get("pass", "")
         if not username:
-            logger.info("[DEBUG] _login_account: no username, returning False")
+            logger.debug("[DEBUG] _login_account: no username, returning False")
             return False
 
         priority = self._account_priorities.get(account.name, os.getenv("INSTA_LOGIN_PRIORITY", "cookie"))
-        logger.info("[DEBUG] _login_account: priority=%s for %s", priority, username)
+        logger.debug("[DEBUG] _login_account: priority=%s for %s", priority, username)
 
         if priority == "cookie":
-            logger.info("[DEBUG] _login_account: trying cookie login first")
+            logger.debug("[DEBUG] _login_account: trying cookie login first")
             if self._try_cookie_login(account, username):
-                logger.info("[DEBUG] _login_account: cookie login succeeded, returning True")
+                logger.debug("[DEBUG] _login_account: cookie login succeeded, returning True")
                 return True
             if password:
                 return self._password_login(account, username, password)
@@ -304,9 +304,9 @@ class InstagramCollector(BaseCollector):
     def _try_cookie_login(self, account, username: str) -> bool:
         if account.name in self._account_browser_cookies:
             cookie_path = self._account_browser_cookies[account.name]
-            logger.info("[DEBUG] _try_cookie_login calling _login_from_cookies for %s", username)
+            logger.debug("[DEBUG] _try_cookie_login calling _login_from_cookies for %s", username)
             result = self._login_from_cookies(username, cookie_path)
-            logger.info("[DEBUG] _login_from_cookies returned %s", result)
+            logger.debug("[DEBUG] _login_from_cookies returned %s", result)
             if result:
                 return True
             logger.info("Cookie login failed for %s", username)
@@ -440,7 +440,7 @@ class InstagramCollector(BaseCollector):
             self._save_session_meta(username)
             logger.info("Logged in via browser cookies for %s (%d cookies loaded)",
                         username, len(cookies))
-            logger.info("[DEBUG] _login_from_cookies returning True")
+            logger.debug("[DEBUG] _login_from_cookies returning True")
             return True
         except Exception as e:
             logger.debug("Browser cookie login failed for %s: %s", username, e)
@@ -596,7 +596,7 @@ class InstagramCollector(BaseCollector):
             logger.warning("instagram: failed to load cookies for %s — skipping cycle", acct_name)
             return
 
-        logger.info("[DEBUG] instagram collect: using account=%s cookies=%d", acct_name, len(cookies))
+        logger.debug("[DEBUG] instagram collect: using account=%s cookies=%d", acct_name, len(cookies))
 
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(30.0),
@@ -779,13 +779,13 @@ class InstagramCollector(BaseCollector):
 
     async def _collect_user(self, client: httpx.AsyncClient, username: str):
         acct_name = self._current_account.name if self._current_account else None
-        logger.info("[DEBUG] _collect_user: waiting for rate limiter (acct=%s)", acct_name)
+        logger.debug("[DEBUG] _collect_user: waiting for rate limiter (acct=%s)", acct_name)
         await self.rate_limiter.async_wait(
             "instagram.com", OperationType.PROFILE_VIEW, account=acct_name,
         )
-        logger.info("[DEBUG] _collect_user: rate limiter done, making request")
+        logger.debug("[DEBUG] _collect_user: rate limiter done, making request")
 
-        logger.info("[DEBUG] _collect_user: calling client.get for %s", username)
+        logger.debug("[DEBUG] _collect_user: calling client.get for %s", username)
         try:
             resp = await asyncio.wait_for(
                 client.get(
@@ -794,7 +794,7 @@ class InstagramCollector(BaseCollector):
                 ),
                 timeout=35.0,
             )
-            logger.info("[DEBUG] _collect_user: got response status=%s", resp.status_code)
+            logger.debug("[DEBUG] _collect_user: got response status=%s", resp.status_code)
         except asyncio.TimeoutError:
             logger.error("[DEBUG] _collect_user: request timed out after 35s for %s", username)
             return

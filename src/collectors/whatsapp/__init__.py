@@ -39,6 +39,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import time
 import zipfile
 import tempfile
@@ -382,12 +383,18 @@ class WhatsappCollector(BaseCollector):
         if not sender_jid:
             sender_jid = event.get("chat_jid", "")
             if not sender_jid or "@g.us" in sender_jid:
+                chat = event.get("chat_jid", "?")
+                logger.debug("whatsapp: group message missing sender in chat %s", chat)
                 return None
 
         payload = {
             "push_name": event.get("pushName", ""),
             "display_name": event.get("verifiedBizName", "") or event.get("notify", ""),
-            "phone_number": sender_jid.split("@")[0] if "@" in sender_jid else "",
+            "phone_number": (
+                sender_jid.split("@")[0]
+                if "@" in sender_jid and re.fullmatch(r"\d{7,15}", sender_jid.split("@")[0])
+                else None
+            ),
             "is_business": event.get("isBusinessMessage", False),
         }
 

@@ -1191,22 +1191,35 @@ class TelegramCollector(BaseCollector):
             user = await worker.client.get_entity(platform_user_id)
             async with self.pool.acquire() as conn:
                 row = await conn.fetchrow("""
-                    INSERT INTO telegram_users (platform_user_id, username, first_name, last_name, phone, updated_at)
-                    VALUES ($1, $2, $3, $4, $5, NOW())
+                    INSERT INTO telegram_users (platform_user_id, username, first_name, last_name, phone, is_deleted, updated_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, NOW())
                     ON CONFLICT (platform_user_id) DO UPDATE SET
                         username = EXCLUDED.username,
                         first_name = EXCLUDED.first_name,
                         last_name = EXCLUDED.last_name,
                         phone = COALESCE(EXCLUDED.phone, telegram_users.phone),
+                        is_deleted = EXCLUDED.is_deleted,
                         updated_at = NOW()
                     RETURNING id
                 """,
                 str(user.id), user.username, user.first_name, user.last_name,
-                getattr(user, "phone", None)
+                getattr(user, "phone", None),
+                getattr(user, "deleted", False),
                 )
                 return row['id']
-        except Exception:
-            return None
+        except Exception as e:
+            try:
+                async with self.pool.acquire() as conn:
+                    row = await conn.fetchrow("""
+                        INSERT INTO telegram_users (platform_user_id, is_deleted, updated_at)
+                        VALUES ($1, TRUE, NOW())
+                        ON CONFLICT (platform_user_id) DO UPDATE SET
+                            is_deleted = TRUE, updated_at = NOW()
+                        RETURNING id
+                    """, str(platform_user_id))
+                    return row['id'] if row else None
+            except Exception:
+                return None
 
     async def _upsert_message(self, message, chat_id, sender_uuid):
         async with self.pool.acquire() as conn:

@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS telegram_users (
     phone VARCHAR(50),
     bio TEXT,
     photo_url TEXT,
+    is_deleted BOOLEAN DEFAULT FALSE,
     collected_at TIMESTAMP DEFAULT NOW(),
     updated_at TIMESTAMP DEFAULT NOW(),
     CONSTRAINT unique_platform_user_telegram UNIQUE (platform_user_id)
