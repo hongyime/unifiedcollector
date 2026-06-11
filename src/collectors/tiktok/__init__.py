@@ -314,7 +314,7 @@ class TiktokCollector(BaseCollector):
             "tiktok tool availability: gallery-dl=%s yt-dlp=%s browser_fallback=%s ytdlp_fallback=%s",
             self._use_gallery_dl, self._use_yt_dlp, self._browser_fallback, self._ytdlp_fallback,
         )
-        self._sem = asyncio.Semaphore(2)
+        self._sem = asyncio.Semaphore(int(os.getenv("TIKTOK_DOWNLOAD_CONCURRENCY", "2")))
         self._cookies_valid = False
         self._tracker_file = Path(os.getenv("TIKTOK_TRACKER_FILE", "data/tiktok_tracker.json"))
         self._tracked_ids: set[str] = set()

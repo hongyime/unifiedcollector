@@ -49,6 +49,7 @@ class StravaCollector(BaseCollector):
         self._feed_delay_min = float(os.getenv("STRAVA_FEED_DELAY_MIN", "5.0"))
         self._feed_delay_max = float(os.getenv("STRAVA_FEED_DELAY_MAX", "12.0"))
         self._backfill_steps = int(os.getenv("STRAVA_BACKFILL_STEPS", "25"))
+        self._ratelimit_sleep = int(os.getenv("STRAVA_RATELIMIT_SLEEP", "60"))
 
         self._use_api = bool(self._client_id and self._client_secret and self._refresh_token)
         self._use_web = bool(self._session_cookie)
@@ -173,8 +174,9 @@ class StravaCollector(BaseCollector):
             logger.warning("strava: athlete name enrichment failed: %s", e)
 
         # Scrape activity pages for photos, polylines, kudos, comments
+        page_batch = int(os.getenv("STRAVA_PAGE_SCRAPE_BATCH", "200"))
         try:
-            await self._scrape_activity_pages(batch_size=25)
+            await self._scrape_activity_pages(batch_size=page_batch)
         except Exception as e:
             logger.warning("strava: activity page scraping failed: %s", e)
 
@@ -203,6 +205,18 @@ class StravaCollector(BaseCollector):
 
     async def _process_spider_queue(self):
         max_per_cycle = int(os.getenv("STRAVA_SPIDER_MAX_PER_CYCLE", "10"))
+        # Prune stale pending entries to prevent unbounded queue growth.
+        ttl_days = int(os.getenv("SPIDER_QUEUE_TTL_DAYS", "30"))
+        try:
+            async with self.pool.acquire() as conn:
+                deleted = await conn.execute(
+                    "DELETE FROM strava_spider_queue WHERE status = 'pending' AND collected_at < NOW() - ($1 || ' days')::INTERVAL",
+                    str(ttl_days),
+                )
+                if deleted != "DELETE 0":
+                    logger.info("strava spider: pruned %s stale queue entries (TTL %dd)", deleted, ttl_days)
+        except Exception as e:
+            logger.debug("strava spider: queue TTL prune failed: %s", e)
         processed = 0
         while not self._stop.is_set() and processed < max_per_cycle:
             async with self.pool.acquire() as conn:
@@ -451,8 +465,8 @@ class StravaCollector(BaseCollector):
                     logger.warning("strava: training_activities page %d fetch error: %s", page, e)
                     break
                 if resp.status_code == 429:
-                    logger.warning("strava: rate-limited on page %d, sleeping 60s", page)
-                    await asyncio.sleep(60)
+                    logger.warning("strava: rate-limited on page %d, sleeping %ds", page, self._ratelimit_sleep)
+                    await asyncio.sleep(self._ratelimit_sleep)
                     continue
                 if resp.status_code != 200:
                     logger.warning("strava: training_activities page %d HTTP %d (cookie likely stale); stopping",
@@ -665,7 +679,7 @@ class StravaCollector(BaseCollector):
             await self._delay()
             async with self._sem:
                 resp = await client.get(f"{STRAVA_API}/athlete/activities", headers={"Authorization": f"Bearer {self._access_token}"}, params={"page": page, "per_page": per_page})
-            if resp.status_code == 429: await asyncio.sleep(60); continue
+            if resp.status_code == 429: await asyncio.sleep(self._ratelimit_sleep); continue
             resp.raise_for_status()
             activities = resp.json()
             if not activities: break
@@ -903,8 +917,8 @@ class StravaCollector(BaseCollector):
                     logger.warning("strava feed: page %d fetch error: %s", page, e)
                     break
                 if resp.status_code == 429:
-                    logger.warning("strava feed: rate-limited on page %d, sleeping 60s", page)
-                    await asyncio.sleep(60)
+                    logger.warning("strava feed: rate-limited on page %d, sleeping %ds", page, self._ratelimit_sleep)
+                    await asyncio.sleep(self._ratelimit_sleep)
                     continue
                 if resp.status_code != 200:
                     logger.warning("strava feed: stopped at page %d HTTP %d", page, resp.status_code)
@@ -1085,8 +1099,8 @@ class StravaCollector(BaseCollector):
                     logger.warning("strava following-feed: page %d fetch error: %s", page, e)
                     break
                 if resp.status_code == 429:
-                    logger.warning("strava following-feed: rate-limited on page %d; sleeping 60s", page)
-                    await asyncio.sleep(60)
+                    logger.warning("strava following-feed: rate-limited on page %d; sleeping %ds", page, self._ratelimit_sleep)
+                    await asyncio.sleep(self._ratelimit_sleep)
                     continue
                 if resp.status_code != 200:
                     logger.warning(
@@ -1367,8 +1381,9 @@ class StravaCollector(BaseCollector):
                     logger.info("strava history %s: 403 forbidden, stopping backfill", athlete_id)
                     break
                 if resp.status_code == 429:
-                    logger.warning("strava history %s: rate-limited, sleeping 90s", athlete_id)
-                    await asyncio.sleep(90)
+                    _heavy = int(self._ratelimit_sleep * 1.5)
+                    logger.warning("strava history %s: rate-limited, sleeping %ds", athlete_id, _heavy)
+                    await asyncio.sleep(_heavy)
                     continue
                 if resp.status_code != 200:
                     logger.warning("strava history %s month %s: HTTP %d", athlete_id, cursor, resp.status_code)
@@ -1704,6 +1719,54 @@ class StravaCollector(BaseCollector):
                             except Exception:
                                 pass
 
+        # If polyline wasn't found in HTML props, try the web streams endpoint.
+        # Strava removed polylines from HTML in 2024, but the web streams path
+        # still returns JSON with cookie auth (the old stravatoolkit used this).
+        # URL: /activities/{id}/streams?stream_types[]=latlng&stream_types[]=time
+        if not result["polyline"] and self._gps_enabled:
+            try:
+                streams_url = f"{STRAVA_WEB}/activities/{activity_id}/streams"
+                sresp = await client.get(
+                    streams_url,
+                    headers={
+                        "Accept": "application/json, text/plain, */*",
+                        "X-Requested-With": "XMLHttpRequest",
+                        "Referer": f"{STRAVA_WEB}/activities/{activity_id}",
+                    },
+                    params={"stream_types[]": ["latlng", "time"]},
+                )
+                ctype = sresp.headers.get("content-type", "")
+                if sresp.status_code == 200 and "application/json" in ctype:
+                    sdata = sresp.json()
+                    latlng = []
+                    if isinstance(sdata, dict):
+                        raw_ll = sdata.get("latlng", {})
+                        latlng = raw_ll.get("data", []) if isinstance(raw_ll, dict) else raw_ll
+                    elif isinstance(sdata, list):
+                        for entry in sdata:
+                            if isinstance(entry, dict) and entry.get("type") == "latlng":
+                                latlng = entry.get("data", [])
+                                break
+                    if latlng:
+                        async with self.pool.acquire() as conn:
+                            act_row = await conn.fetchrow(
+                                "SELECT id FROM strava_activities WHERE platform_activity_id = $1",
+                                activity_id)
+                            if act_row:
+                                exists = await conn.fetchval(
+                                    "SELECT 1 FROM strava_gps_streams WHERE activity_id = $1",
+                                    act_row["id"])
+                                if not exists:
+                                    await conn.execute("""
+                                        INSERT INTO strava_gps_streams (activity_id, latlng, collected_at)
+                                        VALUES ($1, $2, NOW())
+                                        ON CONFLICT (activity_id) DO NOTHING
+                                    """, act_row["id"], json.dumps(latlng))
+                        result["polyline"] = True
+                        logger.info("strava scrape: web streams %s -> %d points", activity_id, len(latlng))
+            except Exception as e:
+                logger.debug("strava scrape: web streams %s failed: %s", activity_id, e)
+
         return result
 
     async def _scrape_activity_pages(self, batch_size: int = 25) -> dict:
@@ -2021,7 +2084,7 @@ class StravaCollector(BaseCollector):
                         params={"page": page, "per_page": per_page},
                     )
                     if resp.status_code == 429:
-                        await asyncio.sleep(60)
+                        await asyncio.sleep(self._ratelimit_sleep)
                         continue
                     if resp.status_code != 200:
                         logger.info("strava: starred segments HTTP %d page %d", resp.status_code, page)
@@ -2196,7 +2259,7 @@ class StravaCollector(BaseCollector):
                     logger.warning("strava roster: page %d fetch error: %s", page, e)
                     break
                 if resp.status_code == 429:
-                    await asyncio.sleep(60); continue
+                    await asyncio.sleep(self._ratelimit_sleep); continue
                 if resp.status_code != 200 or not resp.text.strip():
                     break
                 html = resp.text

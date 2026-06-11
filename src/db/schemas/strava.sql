@@ -46,13 +46,13 @@ CREATE TABLE IF NOT EXISTS strava_activities (
     kilojoules FLOAT,
     calories INTEGER,
     average_watts INTEGER,
-    start_date TIMESTAMP,
-    start_latlng VARCHAR(50),
-    end_latlng VARCHAR(50),
+    start_date TIMESTAMP,               -- athlete's LOCAL time (timezone-naive, apply utc_offset to get UTC)
+    start_latlng VARCHAR(50),           -- Strava privacy zone may offset or omit this for non-followers
+    end_latlng VARCHAR(50),             -- same privacy-zone caveat as start_latlng
     timezone VARCHAR(100),
-    utc_offset INTEGER,
-    platform_created_at TIMESTAMP,
-    collected_at TIMESTAMP DEFAULT NOW(),
+    utc_offset INTEGER,                 -- seconds east of UTC; start_date + INTERVAL '1s' * utc_offset = UTC
+    platform_created_at TIMESTAMP,      -- UTC timestamp when the activity was uploaded to Strava
+    collected_at TIMESTAMP DEFAULT NOW(), -- when our collector wrote this row
     metadata JSONB,
     CONSTRAINT unique_platform_activity_strava UNIQUE (platform_activity_id)
 );
@@ -103,7 +103,7 @@ CREATE TABLE IF NOT EXISTS strava_spider_queue (
     source_activity_id BIGINT,
     priority INTEGER DEFAULT 5,
     status VARCHAR(20) DEFAULT 'pending',
-    collected_at TIMESTAMP DEFAULT NOW(),
+    collected_at TIMESTAMP DEFAULT NOW(), -- when the entry was enqueued; used as queued_at for TTL pruning (SPIDER_QUEUE_TTL_DAYS)
     CONSTRAINT unique_spider_athlete_strava UNIQUE (platform_athlete_id)
 );
 

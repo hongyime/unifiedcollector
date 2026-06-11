@@ -41,17 +41,10 @@ services:
       # the SHARED event loop (py-spy confirmed MainThread stuck in _run_subprocess).
       # Both are disabled here and run out-of-process in their own containers (P3-1).
       # The subprocess_downloader hard-timeout is the defense-in-depth backstop.
-      # instagram TEMPORARILY disabled 2026-05-31: the host IP is 429-blocked by
-      # Instagram (all accounts, INSTA_PROXY_DISABLED=true). Per decision: wait the
-      # block out with ZERO requests (fastest IP recovery, no proxy cost). Re-enable
-      # by removing 'instagram' here after ~24-48h, then `docker compose up -d collector`.
-      # P3-1 FULL SPLIT: every source now runs in its OWN dedicated container
-      # (collector_search, _website, _lemon8, _telegram, _github, _strava,
-      # _beeper, _whatsapp, plus the pre-existing _youtube, _tiktok). instagram
-      # stays off (host IP 429-blocked). So the main collector disables ALL
-      # sources and effectively idles -- it remains only as the canonical image
-      # builder + a safety net. Re-enable a source HERE only if you also remove
-      # its dedicated container above.
+      # P3-1 FULL SPLIT: every source runs in its OWN dedicated container.
+      # The main collector disables ALL sources and effectively idles --
+      # it remains only as the canonical image builder + safety net.
+      # Re-enable a source HERE only if you also remove its dedicated container.
       COLLECTOR_DISABLED_SOURCES: "youtube,tiktok,instagram,search,website,lemon8,telegram,github,strava,beeper,whatsapp"
       # Beeper Desktop Local API runs on the host at 127.0.0.1:23373.
       # The default URL inside .env (host.docker.internal:23373) resolves
@@ -357,6 +350,7 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_HANG_TIMEOUT_SECONDS: '7200'
+      STRAVA_PAGE_SCRAPE_BATCH: '200'
     extra_hosts:
       - "host.docker.internal:host-gateway"
     cap_add:
@@ -446,13 +440,38 @@ services:
       start_period: 30s
     restart: unless-stopped
 
-  # instagram is INTENTIONALLY not given a dedicated running container yet:
-  # the host IP is 429-blocked (all accounts, INSTA_PROXY_DISABLED). Running it
-  # would only reset the block timer. When the block clears, copy one of the
-  # blocks above as `collector_instagram` (container_name
-  # unifiedcollector_collector_instagram) with --source instagram +
-  # mem_limit: 1g, then `docker compose up -d collector_instagram`. It stays in
-  # the main collector's COLLECTOR_DISABLED_SOURCES so nothing runs it meanwhile.
+  collector_instagram:
+    image: unifiedcollector-collector:latest
+    container_name: unifiedcollector_collector_instagram
+    command: python -m src.main worker --source instagram
+    mem_limit: 1g
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      COLLECTOR_DRIVE_PATH: /media
+      COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    cap_add:
+      - SYS_PTRACE
+    volumes:
+      - z:/unifiedcollector/media:/media
+      - ../credentials:/app/credentials
+      - sessions_data:/app/sessions
+      - ../config/sources:/app/config/sources:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      tor:
+        condition: service_started
+    env_file:
+      - ../.env
+    healthcheck:
+      test: ["CMD", "python", "-m", "src.core.health"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
 
   tor:
     # Tor SOCKS5 proxy sidecar for the search collector (DDG via Tor).
