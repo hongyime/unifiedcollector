@@ -115,6 +115,13 @@ class StravaCollector(BaseCollector):
         if not env_bool("STRAVA_COLLECTOR_ENABLED", default=True):
             logger.info("strava: disabled via STRAVA_COLLECTOR_ENABLED=false, skipping")
             return
+        if not self._use_api:
+            logger.warning(
+                "strava: running in cookie-only mode (no STRAVA_CLIENT_ID/"
+                "CLIENT_SECRET/REFRESH_TOKEN). The following data will be "
+                "unavailable: GPS streams/polylines, city/country fields, "
+                "athlete profile details (weight/FTP), clubs, starred segments."
+            )
         # Previously disabled due to httpx → Z:/C: NTFS kernel D-state.
         # Root cause fixed: all mounts now on WSL2 ext4 named volumes.
         if self._use_api: await self._ensure_token()
