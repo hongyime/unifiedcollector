@@ -252,7 +252,7 @@ class Lemon8Collector(BaseCollector):
                     if line.startswith("#") or not line: continue
                     parts = line.split("\t")
                     if len(parts) >= 7: cookies[parts[5]] = parts[6]
-        except Exception: pass
+        except Exception as e: logger.debug("_parse_cookies failed for %s: %s", path, e)
         return cookies
 
     @property

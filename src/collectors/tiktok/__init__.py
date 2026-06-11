@@ -927,7 +927,7 @@ class TiktokCollector(BaseCollector):
                 async with self.pool.acquire() as conn:
                     rows = await conn.fetch("SELECT platform_post_id FROM tiktok_posts")
                     self._tracked_ids = {r["platform_post_id"] for r in rows}
-            except Exception: pass
+            except Exception as e: logger.debug("_load_tracker_state failed: %s", e)
 
     async def _record_download(self, username: str, video_id: str, file_path: str):
         self._tracked_ids.add(video_id)
