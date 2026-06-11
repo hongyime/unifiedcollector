@@ -50,3 +50,15 @@ CREATE TABLE IF NOT EXISTS whatsapp_messages (
 
 CREATE INDEX IF NOT EXISTS idx_wa_messages_chat ON whatsapp_messages(chat_id);
 CREATE INDEX IF NOT EXISTS idx_wa_messages_sender ON whatsapp_messages(sender_id);
+
+-- LID → phone JID mapping table. Populated from contacts.update events when
+-- Baileys provides contact.lid on @s.whatsapp.net contacts. Used by
+-- _track_user_profile() to resolve group message senders from @lid to
+-- phone-based JIDs so the analyzer's entity_platform_links lookups work.
+CREATE TABLE IF NOT EXISTS whatsapp_lid_map (
+    lid VARCHAR(255) PRIMARY KEY,          -- e.g. 57703036666033@lid
+    phone_jid VARCHAR(255) NOT NULL,       -- e.g. 6512345678@s.whatsapp.net
+    display_name VARCHAR(255),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_wa_lid_map_phone ON whatsapp_lid_map(phone_jid);

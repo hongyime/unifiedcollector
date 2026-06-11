@@ -20,10 +20,14 @@ async function processContact(contact: any): Promise<void> {
     const isLid = jid.includes('@lid');
     const displayName = contact.notify || contact.name || contact.verifiedName || null;
     const phone = !isLid && jid.includes('@s.whatsapp.net') ? jid.split('@')[0] : null;
+    // contact.lid is set by Baileys on @s.whatsapp.net contacts to indicate
+    // the paired linked-device ID. Publishing it lets the collector maintain
+    // a lid → phone_jid mapping table for resolving group message senders.
+    const contactLid = contact.lid ? normalizeJid(contact.lid) : null;
 
     await producer.publish('contacts.update', {
         jid: isLid ? null : jid,
-        lid: isLid ? jid : null,
+        lid: isLid ? jid : contactLid,
         display_name: displayName,
         phone_number: phone,
     });

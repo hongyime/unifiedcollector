@@ -269,7 +269,7 @@ class WorkerService:
         """Best-effort Telegram bot notification."""
         if not self._tg_bot_token or not self._tg_chat_id:
             return
-        import urllib.request, urllib.parse, concurrent.futures
+        import urllib.request, json as _json, concurrent.futures
         def _send():
             try:
                 params = {
@@ -279,9 +279,10 @@ class WorkerService:
                 }
                 if self._tg_thread_id:
                     params["message_thread_id"] = self._tg_thread_id
-                data = urllib.parse.urlencode(params).encode()
+                data = _json.dumps(params).encode("utf-8")
                 url = f"https://api.telegram.org/bot{self._tg_bot_token}/sendMessage"
-                urllib.request.urlopen(url, data, timeout=15)
+                req = urllib.request.Request(url, data, headers={"Content-Type": "application/json"})
+                urllib.request.urlopen(req, timeout=15)
             except Exception:
                 pass
         loop = asyncio.get_event_loop()

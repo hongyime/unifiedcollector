@@ -191,12 +191,34 @@ class WhatsappCollector(BaseCollector):
             "whatsapp.events", aio_pika.ExchangeType.TOPIC, durable=True,
         )
 
-        queue = await self._broker_channel.declare_queue(
+        # Messages queue: live + history-sync events
+        msg_queue = await self._broker_channel.declare_queue(
             "unifiedcollector.messages", durable=True,
         )
-        await queue.bind(exchange, routing_key="messages.#")
+        await msg_queue.bind(exchange, routing_key="messages.#")
 
-        async with queue.iterator() as qi:
+        # Contacts queue: lid→jid mapping events from bridge contacts handler
+        contact_queue = await self._broker_channel.declare_queue(
+            "unifiedcollector.contacts", durable=True,
+        )
+        await contact_queue.bind(exchange, routing_key="contacts.#")
+
+        async def _consume_contacts():
+            async with contact_queue.iterator() as qi:
+                async for message in qi:
+                    if self._stop.is_set():
+                        break
+                    async with message.process():
+                        try:
+                            body = json.loads(message.body.decode())
+                            await self._handle_contact_event(body)
+                        except Exception as e:
+                            logger.debug("Contact event processing failed: %s", e)
+
+        import asyncio as _asyncio
+        _asyncio.create_task(_consume_contacts())
+
+        async with msg_queue.iterator() as qi:
             async for message in qi:
                 if self._stop.is_set():
                     break
@@ -219,6 +241,36 @@ class WhatsappCollector(BaseCollector):
                             await self._handle_message_event(body, targets)
                     except Exception as e:
                         logger.error("Broker message processing failed: %s", e)
+
+    async def _handle_contact_event(self, event: dict):
+        """Maintain whatsapp_lid_map from contacts.update events.
+
+        When Baileys syncs contacts it may provide both the phone-based JID
+        (event['jid']) and the linked-device ID (event['lid']). We store this
+        mapping so _track_user_profile can resolve @lid → phone JID for
+        group message senders.
+        """
+        lid = event.get("lid")
+        jid = event.get("jid")
+        if not lid or not jid:
+            return
+        if "@lid" not in lid or "@s.whatsapp.net" not in jid:
+            return
+        display_name = event.get("display_name")
+        if not self.pool:
+            return
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute("""
+                    INSERT INTO whatsapp_lid_map (lid, phone_jid, display_name, updated_at)
+                    VALUES ($1, $2, $3, NOW())
+                    ON CONFLICT (lid) DO UPDATE SET
+                        phone_jid = EXCLUDED.phone_jid,
+                        display_name = COALESCE(EXCLUDED.display_name, whatsapp_lid_map.display_name),
+                        updated_at = NOW()
+                """, lid, jid, display_name)
+        except Exception as e:
+            logger.debug("lid_map upsert failed: %s", e)
 
     async def _handle_message_event(self, event: dict, targets: list[str]):
         msg_id = event.get("message_id") or event.get("key", {}).get("id", "")
@@ -392,19 +444,37 @@ class WhatsappCollector(BaseCollector):
                 logger.debug("whatsapp: group message missing sender in chat %s", chat)
                 return None
 
+        # Resolve @lid → phone-based JID. Group messages in newer WhatsApp
+        # use @lid (linked device ID) as the participant JID. The analyzer's
+        # entity_platform_links lookup needs phone-based @s.whatsapp.net JIDs.
+        # We look up whatsapp_lid_map (populated by contacts.update events).
+        if "@lid" in sender_jid:
+            try:
+                async with self.pool.acquire() as conn:
+                    row = await conn.fetchrow(
+                        "SELECT phone_jid FROM whatsapp_lid_map WHERE lid = $1", sender_jid
+                    )
+                if row:
+                    sender_jid = row["phone_jid"]
+            except Exception:
+                pass  # fall through — store @lid JID as fallback
+
+        # Only extract phone number from @s.whatsapp.net JIDs (not @lid which
+        # has numeric LID prefix that happens to match \d{7,15} but is not a phone).
+        phone_number: str | None = None
+        if "@s.whatsapp.net" in sender_jid:
+            prefix = sender_jid.split("@")[0]
+            if re.fullmatch(r"\d{7,15}", prefix):
+                phone_number = prefix
+
         payload = {
             "push_name": event.get("pushName", ""),
             "display_name": event.get("verifiedBizName", "") or event.get("notify", ""),
-            "phone_number": (
-                sender_jid.split("@")[0]
-                if "@" in sender_jid and re.fullmatch(r"\d{7,15}", sender_jid.split("@")[0])
-                else None
-            ),
+            "phone_number": phone_number,
             "is_business": event.get("isBusinessMessage", False),
         }
 
         try:
-            # Custom upsert to return the internal ID
             async with self.pool.acquire() as conn:
                 row = await conn.fetchrow("""
                     INSERT INTO whatsapp_users (platform_user_id, name, pushname, phone_number, is_business, collected_at)
