@@ -258,7 +258,7 @@ class InstagramCollector(BaseCollector):
                 download_pictures=False,
                 download_videos=False,
                 download_video_thumbnails=False,
-                download_geotags=False,
+                download_geotags=os.getenv("INSTA_DOWNLOAD_GEOTAGS", "true").lower() == "true",
                 download_comments=False,
                 save_metadata=False,
                 compress_json=False,
@@ -1311,6 +1311,12 @@ class InstagramCollector(BaseCollector):
         if edges:
             caption = edges[0].get("node", {}).get("text", "")
 
+        # Extract location data from the node (populated when geotags are enabled)
+        loc = node.get("location") or {}
+        location_name = loc.get("name") or None
+        location_lat = loc.get("lat") or None
+        location_lng = loc.get("lng") or None
+
         async with self.pool.acquire() as conn:
             # First ensure profile exists (might be missing if we are spidering from a post)
             profile_row = await conn.fetchrow("SELECT id FROM instagram_profiles WHERE platform_user_id = $1", uid)
@@ -1319,16 +1325,21 @@ class InstagramCollector(BaseCollector):
             await conn.execute("""
                 INSERT INTO instagram_posts (
                     platform_post_id, profile_id, media_type, caption,
+                    location_name, location_lat, location_lng,
                     likes_count, comments_count, platform_created_at,
                     collected_at, metadata
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), $8)
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), $11)
                 ON CONFLICT (platform_post_id) DO UPDATE SET
                     likes_count = EXCLUDED.likes_count,
                     comments_count = EXCLUDED.comments_count,
                     caption = EXCLUDED.caption,
+                    location_name = COALESCE(EXCLUDED.location_name, instagram_posts.location_name),
+                    location_lat = COALESCE(EXCLUDED.location_lat, instagram_posts.location_lat),
+                    location_lng = COALESCE(EXCLUDED.location_lng, instagram_posts.location_lng),
                     metadata = EXCLUDED.metadata
             """,
             node.get("shortcode"), profile_uuid, node.get("__typename"), caption,
+            location_name, location_lat, location_lng,
             node.get("edge_media_preview_like", {}).get("count", 0),
             node.get("edge_media_to_comment", {}).get("count", 0),
             datetime.fromtimestamp(node.get("taken_at_timestamp", time.time())),

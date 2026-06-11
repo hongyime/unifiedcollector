@@ -916,6 +916,18 @@ class GithubCollector(BaseCollector):
         max_issues = int(os.getenv("GITHUB_MAX_ISSUES_PER_REPO", "100"))
         max_contributors = int(os.getenv("GITHUB_MAX_CONTRIBUTORS_PER_REPO", "25"))
 
+        # Resolve the internal repo UUID for foreign-key linking.
+        repo_uuid = None
+        try:
+            async with self.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT id FROM github_repos WHERE full_name = $1", full_name
+                )
+                if row:
+                    repo_uuid = row["id"]
+        except Exception:
+            logger.debug("repo UUID lookup failed for %s", full_name)
+
         # 1. README
         readme_resp = await self._api_get(client, f"{API_BASE}/repos/{full_name}/readme")
         if readme_resp:
@@ -935,7 +947,7 @@ class GithubCollector(BaseCollector):
             client, f"{API_BASE}/repos/{full_name}/commits", max_items=max_commits
         )
         for c in commits:
-            await self._upsert_commit(0, c)
+            await self._upsert_commit(repo_uuid, c)
 
         # 3. Issues (capped)
         issues = await self._paginate(
@@ -1061,7 +1073,7 @@ class GithubCollector(BaseCollector):
                     row["id"], content, sha, size,
                 )
 
-    async def _upsert_commit(self, repo_id: int, commit: dict):
+    async def _upsert_commit(self, repo_id, commit: dict):
         # GitHub returns null for "commit", "commit.author", and top-level
         # "author" when commits are imported, signed without a GH account, or
         # authored by deleted users. dict.get(k, default) returns None when
@@ -1074,13 +1086,13 @@ class GithubCollector(BaseCollector):
             await conn.execute(
                 """
                 INSERT INTO github_commits (
-                    sha, author_name, author_email, author_login,
+                    sha, repo_id, author_name, author_email, author_login,
                     message, date, collected_at
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, NOW())
-                ON CONFLICT (sha) DO NOTHING
+                VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+                ON CONFLICT (sha, repo_id) DO NOTHING
                 """,
-                commit.get("sha"), author.get("name"), author.get("email"),
+                commit.get("sha"), repo_id, author.get("name"), author.get("email"),
                 gh_author.get("login"), c.get("message"), commit_date,
             )
 

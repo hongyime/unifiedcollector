@@ -29,9 +29,9 @@ CREATE TABLE IF NOT EXISTS instagram_posts (
     caption TEXT,
     hashtags TEXT[],
     mentions TEXT[],
-    location_name TEXT,
-    location_lat FLOAT,
-    location_lng FLOAT,
+    location_name TEXT,       -- populated when INSTA_DOWNLOAD_GEOTAGS=true (default)
+    location_lat FLOAT,       -- from node.location.lat; requires geotags enabled
+    location_lng FLOAT,       -- from node.location.lng; requires geotags enabled
     likes_count INTEGER DEFAULT 0,
     comments_count INTEGER DEFAULT 0,
     shares_count INTEGER DEFAULT 0,

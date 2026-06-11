@@ -130,6 +130,15 @@ class BaseCollector(ABC):
         if not self.drive_ok:
             raise RuntimeError(f"Drive not mounted. Pausing {self.SOURCE_NAME}.")
 
+        # Circuit breaker: skip entire cycle if open (too many recent failures).
+        if not self.circuit_breaker.allow_request():
+            logger.warning(
+                "%s: circuit breaker OPEN — skipping collection cycle "
+                "(will retry after recovery timeout)",
+                self.SOURCE_NAME,
+            )
+            return
+
         self.media_dir.mkdir(parents=True, exist_ok=True)
         await self._seed_known_ids()
         await self.checkpoint.load_progress()
@@ -139,7 +148,11 @@ class BaseCollector(ABC):
         logger.info("Starting %s collector (%d known items)", self.SOURCE_NAME, len(self._known_ids))
         try:
             await self.collect(targets)
+            self.circuit_breaker.record_success()
             await self.run_backfill()
+        except Exception:
+            self.circuit_breaker.record_failure()
+            raise
         finally:
             await self.checkpoint.mark_idle()
             logger.info("Stopped %s collector", self.SOURCE_NAME)
@@ -280,7 +293,17 @@ class BaseCollector(ABC):
                                 sha256: str | None = None,
                                 source_url: str | None = None,
                                 metadata: dict | None = None) -> bool:
-        """Insert into media_items. Returns False on duplicate (same source+content_id)."""
+        """Insert into media_items. Returns False on duplicate (same source+content_id).
+
+        For profile_photo items, sha256 is auto-computed from the file on disk
+        if not provided, since the analyzer needs hashes for identity matching.
+        """
+        if sha256 is None and content_type == "profile_photo" and file_path:
+            try:
+                data = Path(file_path).read_bytes()
+                sha256 = self.sha256_bytes(data)
+            except Exception:
+                logger.debug("auto-sha256 for profile_photo %s failed", file_path, exc_info=True)
         try:
             import asyncpg
         except ImportError:

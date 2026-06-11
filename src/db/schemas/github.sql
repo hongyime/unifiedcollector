@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS github_readmes (
 CREATE TABLE IF NOT EXISTS github_commits (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     repo_id UUID REFERENCES github_repos(id) ON DELETE CASCADE,
-    sha VARCHAR(40) UNIQUE NOT NULL,
+    sha VARCHAR(40) NOT NULL,
     author_name VARCHAR(255),
     author_email VARCHAR(255),
     author_login VARCHAR(255),
@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS github_commits (
     insertions INTEGER,
     deletions INTEGER,
     collected_at TIMESTAMP DEFAULT NOW(),
-    CONSTRAINT unique_platform_commit_github UNIQUE (sha)
+    CONSTRAINT unique_commit_repo_github UNIQUE (sha, repo_id)
 );
 
 CREATE TABLE IF NOT EXISTS github_issues (
