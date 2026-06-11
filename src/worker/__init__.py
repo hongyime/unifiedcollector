@@ -62,6 +62,13 @@ class WorkerService:
         self._zero_progress_streak: dict[str, int] = {}
         self.zero_progress_limit = int(os.getenv("COLLECTOR_ZERO_PROGRESS_LIMIT", "5"))
         self.zero_progress_hard_limit = int(os.getenv("COLLECTOR_ZERO_PROGRESS_HARD_LIMIT", "12"))
+        self._auth_paused: dict[str, bool] = {}
+        self._auth_pause_since: dict[str, float] = {}
+        self.auth_retry_interval = float(os.getenv("COLLECTOR_AUTH_RETRY_INTERVAL_SECONDS", "1800"))
+        self._tg_bot_token = os.getenv("NOTIFY_TELEGRAM_BOT_TOKEN", "")
+        self._tg_chat_id = os.getenv("NOTIFY_TELEGRAM_CHAT_ID", "")
+        self._tg_thread_id = os.getenv("NOTIFY_TELEGRAM_THREAD_ID", "")
+        self._last_net_notify: float = 0  # dedup network-down alerts (5 min cooldown)
 
     async def start(self, sources: list[str]):
         logger.info("Worker service starting with sources: %s", sources)
@@ -108,6 +115,11 @@ class WorkerService:
         await self._wait_for_internet("startup")
 
         self._install_signal_handlers()
+
+        await self._notify_telegram(
+            f"🟢 <b>UnifiedCollector ONLINE</b>\n"
+            f"Sources: {', '.join(sources)}"
+        )
 
         for i, source in enumerate(sources):
             self._launch(source, startup_delay=i * 3.0)
@@ -216,6 +228,112 @@ class WorkerService:
                 return
             poll = min(poll * 1.5, 120.0)
 
+    _AUTH_ERROR_CLASS_NAMES = frozenset({
+        "AuthKeyError", "AuthKeyUnregisteredError", "SessionRevokedError",
+        "UserDeactivatedError", "UserDeactivatedBanError",
+        "TwoFactorAuthRequiredException", "LoginRequiredException",
+        "RefreshError",
+    })
+
+    @staticmethod
+    def _is_auth_error(exc: Exception) -> bool:
+        """Return True if *exc* looks like an authentication/session failure."""
+        cls_name = type(exc).__name__
+        if cls_name in WorkerService._AUTH_ERROR_CLASS_NAMES:
+            return True
+        for klass in type(exc).__mro__:
+            if klass.__name__ in WorkerService._AUTH_ERROR_CLASS_NAMES:
+                return True
+        if cls_name == "BeeperAPIError":
+            msg = str(exc).lower()
+            if any(kw in msg for kw in ("401", "403", "unauthorized", "token")):
+                return True
+        if cls_name == "HTTPStatusError":
+            response = getattr(exc, "response", None)
+            if response is not None and getattr(response, "status_code", 0) == 401:
+                return True
+        if isinstance(exc, RuntimeError):
+            msg = str(exc).lower()
+            if "not authorized" in msg and "session" in msg:
+                return True
+        msg = str(exc).lower()
+        auth_keywords = (
+            "login_required", "challenge_required", "session revoked",
+            "auth key unregistered", "user deactivated",
+            "invalid_grant", "token has been expired or revoked",
+            "session not authorized",
+        )
+        return any(kw in msg for kw in auth_keywords)
+
+    async def _notify_telegram(self, message: str):
+        """Best-effort Telegram bot notification."""
+        if not self._tg_bot_token or not self._tg_chat_id:
+            return
+        import urllib.request, urllib.parse, concurrent.futures
+        def _send():
+            try:
+                params = {
+                    "chat_id": self._tg_chat_id,
+                    "text": message,
+                    "parse_mode": "HTML",
+                }
+                if self._tg_thread_id:
+                    params["message_thread_id"] = self._tg_thread_id
+                data = urllib.parse.urlencode(params).encode()
+                url = f"https://api.telegram.org/bot{self._tg_bot_token}/sendMessage"
+                urllib.request.urlopen(url, data, timeout=15)
+            except Exception:
+                pass
+        loop = asyncio.get_event_loop()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            try:
+                await asyncio.wait_for(loop.run_in_executor(pool, _send), timeout=20.0)
+            except Exception:
+                pass
+
+    async def _mark_source_auth_paused(self, source: str, error: str):
+        self._auth_paused[source] = True
+        self._auth_pause_since.setdefault(source, time.monotonic())
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO source_health "
+                    "  (source, status, last_error, crash_count, updated_at) "
+                    "VALUES ($1, 'auth_paused', $2, $3, NOW()) "
+                    "ON CONFLICT (source) DO UPDATE "
+                    "SET status='auth_paused', last_error=$2, updated_at=NOW()",
+                    source, error[:2000], self._crash_counts.get(source, 0),
+                )
+        except Exception:
+            logger.warning("Failed to persist auth-pause for %s", source, exc_info=True)
+        await self._notify_telegram(
+            f"🔑 <b>AUTH FAILURE: {source}</b>\n"
+            f"Credentials/session broken — source paused.\n"
+            f"Retrying every {int(self.auth_retry_interval)}s.\n"
+            f"<code>{error[:300]}</code>"
+        )
+
+    async def _clear_auth_pause(self, source: str):
+        if not self._auth_paused.get(source):
+            return
+        self._auth_paused[source] = False
+        self._auth_pause_since.pop(source, None)
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE source_health SET status='running', "
+                    "  last_error=NULL, updated_at=NOW() "
+                    "WHERE source=$1 AND status='auth_paused'",
+                    source,
+                )
+            logger.info("AUTH RECOVERED: %s credentials working again", source)
+        except Exception:
+            logger.warning("Failed to clear auth-pause for %s", source, exc_info=True)
+        await self._notify_telegram(
+            f"✅ <b>AUTH RECOVERED: {source}</b>\n"
+            f"Credentials working again — collection resumed."
+        )
+
     def _install_signal_handlers(self):
         loop = asyncio.get_event_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
@@ -307,6 +425,8 @@ class WorkerService:
                 await collector.run(targets)
                 self._heartbeat[source] = time.monotonic()
                 self._crash_counts[source] = 0
+                if self._auth_paused.get(source):
+                    await self._clear_auth_pause(source)
 
                 # ZERO-PROGRESS accounting: had targets, cycle finished. Did it
                 # actually persist anything new? Realtime sources are EXEMPT --
@@ -337,7 +457,31 @@ class WorkerService:
                 if self._is_network_error(e):
                     logger.warning("%s: network error — waiting for internet: %s",
                                    source, e)
+                    now = time.monotonic()
+                    if now - self._last_net_notify > 300:
+                        self._last_net_notify = now
+                        await self._notify_telegram(
+                            f"🌐 <b>NETWORK DOWN</b>\n"
+                            f"Internet lost ({source}). Waiting to recover.\n"
+                            f"<code>{str(e)[:200]}</code>"
+                        )
                     await self._wait_for_internet(f"{source}/recovery")
+                    if now == self._last_net_notify:
+                        await self._notify_telegram("✅ <b>NETWORK RESTORED</b>\nInternet recovered — all collectors resuming.")
+                    continue
+                if self._is_auth_error(e):
+                    logger.warning(
+                        "AUTH FAILURE: %s — credentials/session broken. "
+                        "Paused (retrying every %.0fs). Error: %s",
+                        source, self.auth_retry_interval, e,
+                    )
+                    await self._mark_source_auth_paused(source, repr(e))
+                    try:
+                        await asyncio.wait_for(
+                            self._stop.wait(), timeout=self.auth_retry_interval
+                        )
+                    except asyncio.TimeoutError:
+                        pass
                     continue
                 self._crash_counts[source] += 1
                 count = self._crash_counts[source]
@@ -346,6 +490,12 @@ class WorkerService:
                 if count >= self.max_restarts:
                     logger.error("%s exceeded max restarts, giving up", source)
                     await self._mark_source_dead(source, repr(e), count)
+                    await self._notify_telegram(
+                        f"💀 <b>SOURCE DEAD: {source}</b>\n"
+                        f"Crashed {count}x, permanently stopped.\n"
+                        f"<code>{repr(e)[:300]}</code>\n"
+                        f"Fix: docker compose restart collector_{source}"
+                    )
                     break
                 backoff = min(300, 30 * (2 ** (count - 1)))
                 logger.info("Restarting %s in %ds", source, backoff)
@@ -531,6 +681,12 @@ class WorkerService:
                 s: {
                     "alive": not t.done(),
                     "crashes": self._crash_counts.get(s, 0),
+                    "auth_paused": self._auth_paused.get(s, False),
+                    "auth_paused_seconds": (
+                        int(time.monotonic() - self._auth_pause_since[s])
+                        if s in self._auth_pause_since and self._auth_paused.get(s)
+                        else None
+                    ),
                 }
                 for s, t in self._tasks.items()
             },
