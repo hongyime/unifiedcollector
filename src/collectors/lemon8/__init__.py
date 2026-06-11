@@ -489,9 +489,12 @@ class Lemon8Collector(BaseCollector):
                     image_urls or None, video_url,
                     int(post_data.get("stats", {}).get("likeCount", 0) or 0),
                     int(post_data.get("stats", {}).get("commentCount", 0) or 0),
+                    post_url,
                     json.dumps(post_data, default=str))
+                return True
             except Exception as e:
                 logger.warning("lemon8 _upsert_post failed for %s: %s", platform_post_id, e)
+                return False
 
     # ──────────────────────────────────────────────────────────────────────
     # Collection entrypoints
@@ -678,8 +681,9 @@ class Lemon8Collector(BaseCollector):
                     try:
                         detail = await self._fetch_note_detail(client, uname, str(note_id))
                         if detail:
-                            await self._upsert_post(entity_id, detail)
-                            logger.info("lemon8 FYP detail: upserted post %s for %s", note_id, uname)
+                            ok = await self._upsert_post(entity_id, detail)
+                            if ok:
+                                logger.info("lemon8 FYP detail: upserted post %s for %s", note_id, uname)
                         else:
                             logger.debug("lemon8 FYP detail: no data for note %s", note_id)
                     except Exception as e:
