@@ -563,9 +563,8 @@ class InstagramCollector(BaseCollector):
         import time as _time
 
         # DB-persisted global rate-limit check: survives collector relaunches.
-        # When a 429 is hit, we write the expiry timestamp to service_cursors.
-        # On each cycle start we check it and sleep if still in cooldown. This
-        # prevents the soft-relaunch from immediately re-hammering Instagram.
+        # last_processed_id format: "{expiry_epoch}:{consecutive_429s}"
+        # Older rows with just a float are also accepted for backward compat.
         if self.pool is not None:
             try:
                 async with self.pool.acquire() as _conn:
@@ -574,12 +573,17 @@ class InstagramCollector(BaseCollector):
                         "WHERE service = 'instagram_rate_limit'",
                     )
                 if _row and _row["last_processed_id"]:
-                    _expiry = float(_row["last_processed_id"])
+                    _raw = _row["last_processed_id"]
+                    _parts = _raw.split(":", 1)
+                    _expiry = float(_parts[0])
+                    # Restore streak so doubling survives relaunches
+                    if len(_parts) == 2:
+                        self._consecutive_429s = int(_parts[1])
                     _remaining = _expiry - _time.time()
                     if _remaining > 30:
                         logger.info(
-                            "instagram: DB-persisted rate limit active (%.0fs remaining) — sleeping",
-                            _remaining,
+                            "instagram: DB-persisted rate limit active (%.0fs remaining, streak=%d) — sleeping",
+                            _remaining, self._consecutive_429s,
                         )
                         _sleep_until = _time.time() + min(_remaining, 3600)
                         while _time.time() < _sleep_until and not self._stop.is_set():
@@ -630,6 +634,7 @@ class InstagramCollector(BaseCollector):
 
         logger.debug("[DEBUG] instagram collect: using account=%s cookies=%d", acct_name, len(cookies))
 
+        _streak_before = getattr(self, "_consecutive_429s", 0)
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(30.0),
             follow_redirects=True,
@@ -650,6 +655,17 @@ class InstagramCollector(BaseCollector):
                 except Exception as e:
                     logger.error("instagram: unexpected error for %s: %s", target, e, exc_info=True)
                 await asyncio.sleep(2)
+
+        # If the entire cycle completed without a new 429, reset the backoff streak.
+        if getattr(self, "_consecutive_429s", 0) == _streak_before and self.pool is not None:
+            self._consecutive_429s = 0
+            try:
+                async with self.pool.acquire() as _conn:
+                    await _conn.execute(
+                        "DELETE FROM service_cursors WHERE service = 'instagram_rate_limit'",
+                    )
+            except Exception as _e:
+                logger.debug("instagram: failed to clear rate-limit from DB: %s", _e)
 
 
     async def _process_target(self, client: httpx.AsyncClient, username: str):
@@ -744,10 +760,12 @@ class InstagramCollector(BaseCollector):
             )
             self.rate_limiter.emergency_cooldown = old
 
-        # Persist cooldown expiry in DB so it survives collector relaunches.
-        # service_cursors.last_processed_id stores the Unix epoch when the ban expires.
+        # Persist cooldown expiry + consecutive 429 count to DB so both survive
+        # collector relaunches. Format: "{expiry_epoch}:{streak}" — streak is used
+        # to resume exponential backoff on the next relaunch without resetting to 0.
         import time as _time
         _expiry = _time.time() + cooldown
+        _streak_val = f"{_expiry}:{self._consecutive_429s}"
         if self.pool is not None:
             try:
                 async with self.pool.acquire() as _conn:
@@ -757,7 +775,7 @@ class InstagramCollector(BaseCollector):
                         "VALUES ('instagram_rate_limit', $1, NOW(), 'blocked') "
                         "ON CONFLICT (service) DO UPDATE "
                         "SET last_processed_id = $1, last_processed_at = NOW(), status = 'blocked'",
-                        str(_expiry),
+                        _streak_val,
                     )
             except Exception as _e:
                 logger.debug("instagram: failed to persist rate-limit to DB: %s", _e)
