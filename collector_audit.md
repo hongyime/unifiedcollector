@@ -57,6 +57,18 @@ After deploying the fix, the first request still 429'd. Direct in-container prob
 
 **Recommended next step (no code change needed today):** let the backoff ride — the collector is in a correct streak-based cooldown and will probe ~once per cooldown window, allowing the IP throttle to decay. If profile data is needed sooner, the fastest real lever is (b) a different egress IP.
 
+### ✅ Mode-β Playwright PROFILE fallback — BUILT, VALIDATED & DEPLOYED (commit `016bb46`)
+
+The "browser context bypasses the API throttle" lever (option c) turned out to work outright, so it's now the automatic fallback rather than a manual last resort.
+
+- **New method** `_fetch_profile_playwright(username)` in `src/collectors/instagram/__init__.py`: launches the shared single-process headless Chromium (gated by `PLAYWRIGHT_SEMAPHORE` to avoid OOM), loads `https://www.instagram.com/{username}/` to establish a real session + referer, then runs an **in-page same-origin `fetch()`** of `/api/v1/users/web_profile_info/` with the browser's own cookies/fingerprint, and returns the same `data.user` dict shape as the raw-httpx API path.
+- **Wired into `_collect_user`:** on a 429, it now tries the browser fallback FIRST; it only records the 429 + backs off if the browser path ALSO fails. On success, normal processing continues (profile upsert → photo → spider → posts).
+- **Reuses** existing Mode-β scaffolding: `_build_playwright_storage_state()`, `PLAYWRIGHT_LAUNCH_ARGS`, the OOM semaphore. Chromium binary confirmed present in the image (`/root/.cache/ms-playwright/chromium-1223`).
+- **Validation (in-container, same IP, same cookies):**
+  - raw httpx → `web_profile_info` = **429, empty body**
+  - headless browser in-page fetch → `web_profile_info` = **HTTP 200, 507 KB**, recovered `natgeo` / 269,325,076 followers / "National Geographic".
+- **Generalizable insight:** the same "real-browser in-page fetch bypasses a raw-httpx IP/endpoint throttle" pattern likely helps **TikTok** and **Lemon8** (same Meta/ByteDance edge-fingerprinting family). Candidate to port once Subagent-1/2 findings land.
+
 ### Original diagnosis (retained for reference)
 
 ### Root cause: the `collect()` path bypasses the entire anti-detection stack
