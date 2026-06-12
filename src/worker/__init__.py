@@ -65,6 +65,12 @@ class WorkerService:
         self._auth_paused: dict[str, bool] = {}
         self._auth_pause_since: dict[str, float] = {}
         self.auth_retry_interval = float(os.getenv("COLLECTOR_AUTH_RETRY_INTERVAL_SECONDS", "1800"))
+        # Hang kills use a separate counter so repeated hang-and-recover cycles
+        # do not consume the crash budget. Reset to 0 on a successful cycle.
+        # Only permanently kills a source that hangs every single cycle with no
+        # successful completion in between.
+        self._hang_counts: dict[str, int] = {}
+        self.max_hang_cycles = int(os.getenv("COLLECTOR_MAX_HANG_CYCLES", "10"))
         self._tg_bot_token = os.getenv("NOTIFY_TELEGRAM_BOT_TOKEN", "")
         self._tg_chat_id = os.getenv("NOTIFY_TELEGRAM_CHAT_ID", "")
         self._tg_thread_id = os.getenv("NOTIFY_TELEGRAM_THREAD_ID", "")
@@ -171,7 +177,7 @@ class WorkerService:
 
     _NETWORK_ERRORS = (
         ConnectionError, ConnectionRefusedError, ConnectionResetError,
-        OSError, TimeoutError,
+        OSError, TimeoutError, asyncio.TimeoutError,
     )
 
     @staticmethod
@@ -426,6 +432,7 @@ class WorkerService:
                 await collector.run(targets)
                 self._heartbeat[source] = time.monotonic()
                 self._crash_counts[source] = 0
+                self._hang_counts[source] = 0  # successful cycle clears hang budget
                 if self._auth_paused.get(source):
                     await self._clear_auth_pause(source)
 
@@ -532,14 +539,18 @@ class WorkerService:
 
             for source, task in list(self._tasks.items()):
                 if task.done():
+                    crashes = self._crash_counts.get(source, 0)
+                    if crashes >= self.max_restarts:
+                        # Permanently dead — remove from tracking to stop log spam.
+                        logger.debug("Watchdog: %s is dead (crashes=%d), removing from watch", source, crashes)
+                        del self._tasks[source]
+                        continue
                     exc = task.exception() if not task.cancelled() else None
                     if exc:
                         logger.warning("Watchdog: %s died (%s), relaunching", source, exc)
                     else:
                         logger.info("Watchdog: %s finished, relaunching", source)
-                    crashes = self._crash_counts.get(source, 0)
-                    if crashes < self.max_restarts:
-                        self._launch(source)
+                    self._launch(source)
                     continue
 
                 # AUTO-HEAL hung tasks: a task that is NOT done but hasn't beat its
@@ -553,25 +564,22 @@ class WorkerService:
                     continue
                 stalled = time.monotonic() - last
                 if stalled > self.hang_timeout:
-                    crashes = self._crash_counts.get(source, 0) + 1
-                    self._crash_counts[source] = crashes
+                    # Hangs use a separate budget from crash exceptions so that
+                    # a source that hangs occasionally but also completes cycles
+                    # successfully is never permanently killed. _hang_counts resets
+                    # to 0 on every successful cycle.
+                    hangs = self._hang_counts.get(source, 0) + 1
+                    self._hang_counts[source] = hangs
                     logger.error(
                         "Watchdog: %s HUNG (no progress for %.0fs > %.0fs limit) "
-                        "(%d/%d) -- cancelling; relaunch on next pass",
-                        source, stalled, self.hang_timeout, crashes, self.max_restarts,
+                        "(%d/%d hangs) -- cancelling; relaunch on next pass",
+                        source, stalled, self.hang_timeout, hangs, self.max_hang_cycles,
                     )
-                    # Cancel now; the task won't be .done() until the cancellation
-                    # propagates on a later loop tick, so we do NOT relaunch inline
-                    # (_launch would no-op on the not-yet-done task). The next
-                    # watchdog pass sees it done() and relaunches via the branch
-                    # above -- unless we've hit the ceiling, in which case mark dead.
                     task.cancel()
-                    # bump heartbeat so we don't re-trigger every pass while it drains
                     self._heartbeat[source] = time.monotonic()
-                    if crashes >= self.max_restarts:
-                        logger.error("Watchdog: %s exceeded max restarts after hangs, giving up", source)
-                        await self._mark_source_dead(source, f"hung > {self.hang_timeout:.0f}s", crashes)
-                        # prevent the done-branch from relaunching a dead source
+                    if hangs >= self.max_hang_cycles:
+                        logger.error("Watchdog: %s exceeded max hang cycles (%d), giving up", source, hangs)
+                        await self._mark_source_dead(source, f"hung > {self.hang_timeout:.0f}s (x{hangs})", hangs)
                         self._crash_counts[source] = self.max_restarts
                     continue
 
