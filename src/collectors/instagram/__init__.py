@@ -39,7 +39,7 @@ from src.collectors.instagram.parse import (
     parse_browser_cookies as _parse_browser_cookies,
     extract_post_edges_from_payload as _parse_extract_post_edges,
 )
-from src.core.account_pool import AccountPool
+from src.core.account_pool import AccountPool, Account, _build_fingerprint
 from src.core.file_naming import sanitize_name  # F821 fix: used in account_media_dir
 from src.core.human_rate_limiter import HumanLikeRateLimiter, OperationType
 from src.core.sliding_window_limiter import SlidingWindowRateLimiter, WindowConfig
@@ -100,7 +100,11 @@ class _RateLimitHandled(Exception):
     _handle_rate_limit call, preserving _consecutive_429s."""
 
 
-GRAPH_API = "https://www.instagram.com/api/v1"
+# NOTE: web_profile_info is served by the mobile-API host i.instagram.com for
+# anonymous/cookie profile fetches. The www.instagram.com/api/v1 host returns
+# 403/429 for under-authenticated requests, which was a root cause of immediate
+# 429s on the very first request. See collector_audit.md (Subagent-3 findings).
+GRAPH_API = "https://i.instagram.com/api/v1"
 
 NIGHT_HOURS = {23, 0, 1, 2, 3, 4, 5, 6}
 RISKY_HOURS = {9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19}
@@ -635,21 +639,43 @@ class InstagramCollector(BaseCollector):
             return
 
         acct_name = cookie_accounts[0]
-        cookies = self._load_cookies_for_account(type("A", (), {"name": acct_name})())
+        # Wire a REAL Account (stable per-account fingerprint: UA + device_id)
+        # and set it as the current account BEFORE the first request. Previously
+        # this used a throwaway placeholder and left _current_account = None, so
+        # _headers()/_warmup()/per-account cooldown were all dead code and the
+        # first request went out as a bare 2-header cold call → immediate 429.
+        # See collector_audit.md (Subagent-3 findings).
+        self._current_account = Account(
+            name=acct_name,
+            credentials={},
+            fingerprint=_build_fingerprint(acct_name),
+        )
+        cookies = self._load_cookies_for_account(self._current_account)
         if not cookies:
             logger.warning("instagram: failed to load cookies for %s — skipping cycle", acct_name)
             return
 
         _streak_before = getattr(self, "_consecutive_429s", 0)
+        # Build the full mobile-API header set tied to this account's fingerprint.
+        # csrftoken lives in the browser cookie jar (instaloader loader is None in
+        # cookie-only mode), so populate X-CSRFToken from the loaded cookies.
+        _ig_headers = self._headers(self._current_account)
+        if cookies.get("csrftoken"):
+            _ig_headers["X-CSRFToken"] = cookies["csrftoken"]
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(30.0),
             follow_redirects=True,
             cookies=cookies,
-            headers={
-                "User-Agent": self.user_agents.get_for_domain("instagram.com"),
-                "x-ig-app-id": "936619743392459",
-            },
+            headers=_ig_headers,
         ) as client:
+            # Human-arrival warmup: load instagram.com once before hitting any
+            # /api/v1 endpoint so request #1 isn't a cold direct API call.
+            # Runs at most once per process (gated by self._warmed_up) and is
+            # skippable via INSTA_WARMUP_ENABLED=false.
+            try:
+                await self._warmup(client)
+            except Exception as _e:
+                logger.debug("instagram: warmup skipped (non-fatal): %s", _e)
             for target in targets:
                 try:
                     await asyncio.wait_for(
@@ -810,13 +836,20 @@ class InstagramCollector(BaseCollector):
 
         if self._current_account:
             self.account_pool.cooldown(self._current_account.name, 900.0)
-            next_acct = self.account_pool.get_next(exclude=self._current_account.name)
-            if next_acct:
-                logger.info("Switching to account %s after rate limit", next_acct.name)
-                self._current_account = next_acct
-                await asyncio.get_event_loop().run_in_executor(
-                    None, self._login_account, next_acct
-                )
+            # Only rotate within the env-based account pool. Cookie-only accounts
+            # (the collect() path) are NOT pool members, so get_next() would
+            # otherwise hand back an unrelated pool account and trigger a spurious
+            # instaloader login mid-cycle. Skip rotation for non-pool accounts;
+            # the next collect() cycle re-selects the cookie account anyway.
+            _pool_names = {a.name for a in getattr(self.account_pool, "_accounts", [])}
+            if self._current_account.name in _pool_names:
+                next_acct = self.account_pool.get_next(exclude=self._current_account.name)
+                if next_acct:
+                    logger.info("Switching to account %s after rate limit", next_acct.name)
+                    self._current_account = next_acct
+                    await asyncio.get_event_loop().run_in_executor(
+                        None, self._login_account, next_acct
+                    )
 
     # -- TLS fingerprint pinning helpers ---------------------------------
 
