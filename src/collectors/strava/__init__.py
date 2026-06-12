@@ -1662,12 +1662,12 @@ class StravaCollector(BaseCollector):
                                     act_row["id"], json.dumps(latlng),
                                 )
                         result["streams"] = len(latlng)
-                        logger.debug("strava scrape: activity %s streams %d points, start=%s",
-                                     activity_id, len(latlng), sl)
+                        logger.info("strava scrape: activity %s streams %d points, start=%s sl=%r el=%r",
+                                    activity_id, len(latlng), latlng[0], sl, el)
                 elif streams_resp.status_code == 429:
-                    logger.debug("strava scrape: streams 429 for %s — skipping GPS", activity_id)
+                    logger.info("strava scrape: streams 429 for %s — skipping GPS", activity_id)
             except Exception as e:
-                logger.debug("strava scrape: streams fetch %s failed: %s", activity_id, e)
+                logger.warning("strava scrape: streams fetch %s failed: %s", activity_id, e)
 
         # --- Extract data from data-react-props blocks ---
         # Strava uses single-quoted props with &quot; for JSON quotes
