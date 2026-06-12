@@ -203,6 +203,106 @@ class Scheduler:
 
         # P3-7: prune old collection_runs (self-gated to hourly).
         await self._gc_collection_runs()
+        # Build social graph edges from WhatsApp co-group/DM data (self-gated to 30 min).
+        await self._build_graph_edges()
+
+    async def _build_graph_edges(self):
+        """Compute social graph edges from WhatsApp messages into graph_edges.
+
+        Co-group: pairs of users who both sent messages in the same WhatsApp group.
+        Weight = number of shared groups.
+
+        DM: users who sent direct messages to another user.
+
+        Self-gated to run at most every 30 minutes.
+        """
+        import time as _time
+        now = _time.monotonic()
+        if now - getattr(self, "_last_graph_build", 0) < 1800:
+            return
+        self._last_graph_build = now
+        try:
+            async with self.pool.acquire() as conn:
+                # Co-group edges: distinct (chat, sender) pairs joined against themselves.
+                # Using CTEs to avoid O(n²) message self-join.
+                inserted_cg = await conn.fetchval("""
+                    WITH distinct_senders AS (
+                        SELECT DISTINCT wm.chat_id, wm.sender_id
+                        FROM whatsapp_messages wm
+                        JOIN whatsapp_chats wc ON wm.chat_id = wc.id
+                        WHERE wm.sender_id IS NOT NULL AND wc.is_group = true
+                    ),
+                    co_group AS (
+                        SELECT
+                            ds1.sender_id AS sender1,
+                            ds2.sender_id AS sender2,
+                            COUNT(DISTINCT ds1.chat_id) AS shared_groups
+                        FROM distinct_senders ds1
+                        JOIN distinct_senders ds2
+                            ON ds1.chat_id = ds2.chat_id
+                            AND ds1.sender_id < ds2.sender_id
+                        GROUP BY ds1.sender_id, ds2.sender_id
+                    ),
+                    upserted AS (
+                        INSERT INTO graph_edges
+                            (source, source_user, target_user, edge_type, weight,
+                             first_seen_at, last_seen_at)
+                        SELECT
+                            'whatsapp',
+                            u1.platform_user_id,
+                            u2.platform_user_id,
+                            'co_group',
+                            cg.shared_groups::integer,
+                            NOW(),
+                            NOW()
+                        FROM co_group cg
+                        JOIN whatsapp_users u1 ON cg.sender1 = u1.id
+                        JOIN whatsapp_users u2 ON cg.sender2 = u2.id
+                        ON CONFLICT (source, source_user, target_user, edge_type)
+                        DO UPDATE SET
+                            weight = EXCLUDED.weight,
+                            last_seen_at = NOW()
+                        RETURNING 1
+                    )
+                    SELECT COUNT(*) FROM upserted
+                """)
+
+                # DM edges: who sent messages in which 1:1 chat.
+                inserted_dm = await conn.fetchval("""
+                    WITH dm_senders AS (
+                        SELECT DISTINCT
+                            wm.sender_id,
+                            wc.platform_chat_id AS target_jid
+                        FROM whatsapp_messages wm
+                        JOIN whatsapp_chats wc ON wm.chat_id = wc.id
+                        WHERE wc.is_group = false
+                          AND wm.sender_id IS NOT NULL
+                          AND wc.platform_chat_id LIKE '%@s.whatsapp.net'
+                    ),
+                    upserted AS (
+                        INSERT INTO graph_edges
+                            (source, source_user, target_user, edge_type, weight,
+                             first_seen_at, last_seen_at)
+                        SELECT
+                            'whatsapp',
+                            u.platform_user_id,
+                            ds.target_jid,
+                            'dm',
+                            1,
+                            NOW(),
+                            NOW()
+                        FROM dm_senders ds
+                        JOIN whatsapp_users u ON ds.sender_id = u.id
+                        ON CONFLICT (source, source_user, target_user, edge_type)
+                        DO UPDATE SET last_seen_at = NOW()
+                        RETURNING 1
+                    )
+                    SELECT COUNT(*) FROM upserted
+                """)
+
+            logger.info("graph_edges build: co_group=%d dm=%d", inserted_cg or 0, inserted_dm or 0)
+        except Exception:
+            logger.warning("graph_edges build failed", exc_info=True)
 
     async def add_schedule(self, source: str, interval_hours: int = 24):
         if self.pool is None:
