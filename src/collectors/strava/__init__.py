@@ -605,16 +605,78 @@ class StravaCollector(BaseCollector):
             athlete_row = await conn.fetchrow("SELECT id FROM strava_athletes WHERE platform_athlete_id = $1", int(athlete_id))
             athlete_uuid = athlete_row['id'] if athlete_row else None
             metadata_json = json.dumps(activity, default=str)
+
+            # latlng comes from API as [lat, lng] list; schema is VARCHAR(50)
+            def _latlng(val):
+                if val and len(val) == 2:
+                    return f"{val[0]},{val[1]}"
+                return None
+
+            mp = activity.get("map") or {}
+            polyline = mp.get("summary_polyline") or activity.get("summary_polyline") or None
+            start_latlng = _latlng(activity.get("start_latlng"))
+            end_latlng = _latlng(activity.get("end_latlng"))
+            utc_offset_raw = activity.get("utc_offset")
+            utc_offset = int(utc_offset_raw) if utc_offset_raw is not None else None
+            # watts fields are floats in API but INTEGER in schema
+            def _int(v): return int(v) if v is not None else None
+
+            start_date_str = activity.get("start_date")
+            start_date = datetime.fromisoformat(start_date_str.replace("Z", "")) if start_date_str else None
+
             await conn.execute("""
                 INSERT INTO strava_activities (
                     platform_activity_id, athlete_id, name, type, sport_type,
+                    workout_type, description,
                     distance, moving_time, elapsed_time, total_elevation_gain,
-                    average_speed, max_speed, average_heartrate, calories,
-                    start_date, metadata
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb)
+                    average_speed, max_speed,
+                    average_heartrate, max_heartrate,
+                    average_cadence, average_temp,
+                    weighted_average_watts, max_watts, kilojoules, average_watts,
+                    calories,
+                    start_date, start_latlng, end_latlng,
+                    timezone, utc_offset,
+                    summary_polyline, metadata
+                ) VALUES (
+                    $1, $2, $3, $4, $5,
+                    $6, $7,
+                    $8, $9, $10, $11,
+                    $12, $13,
+                    $14, $15,
+                    $16, $17,
+                    $18, $19, $20, $21,
+                    $22,
+                    $23, $24, $25,
+                    $26, $27,
+                    $28, $29::jsonb
+                )
                 ON CONFLICT (platform_activity_id) DO UPDATE SET
-                    name = EXCLUDED.name, metadata = EXCLUDED.metadata
-            """, activity.get("id"), athlete_uuid, activity.get("name"), activity.get("type"), activity.get("sport_type"), activity.get("distance"), activity.get("moving_time"), activity.get("elapsed_time"), activity.get("total_elevation_gain"), activity.get("average_speed"), activity.get("max_speed"), activity.get("average_heartrate"), activity.get("calories"), datetime.fromisoformat(activity.get("start_date").replace("Z", "")) if activity.get("start_date") else None, metadata_json)
+                    name             = EXCLUDED.name,
+                    description      = COALESCE(EXCLUDED.description,      strava_activities.description),
+                    start_latlng     = COALESCE(EXCLUDED.start_latlng,     strava_activities.start_latlng),
+                    end_latlng       = COALESCE(EXCLUDED.end_latlng,       strava_activities.end_latlng),
+                    timezone         = COALESCE(EXCLUDED.timezone,         strava_activities.timezone),
+                    utc_offset       = COALESCE(EXCLUDED.utc_offset,       strava_activities.utc_offset),
+                    summary_polyline = COALESCE(EXCLUDED.summary_polyline, strava_activities.summary_polyline),
+                    average_heartrate= COALESCE(EXCLUDED.average_heartrate,strava_activities.average_heartrate),
+                    max_heartrate    = COALESCE(EXCLUDED.max_heartrate,    strava_activities.max_heartrate),
+                    calories         = COALESCE(EXCLUDED.calories,         strava_activities.calories),
+                    weighted_average_watts = COALESCE(EXCLUDED.weighted_average_watts, strava_activities.weighted_average_watts),
+                    kilojoules       = COALESCE(EXCLUDED.kilojoules,       strava_activities.kilojoules),
+                    metadata         = EXCLUDED.metadata
+            """,
+            activity.get("id"), athlete_uuid, activity.get("name"), activity.get("type"), activity.get("sport_type"),
+            activity.get("workout_type"), activity.get("description"),
+            activity.get("distance"), activity.get("moving_time"), activity.get("elapsed_time"), activity.get("total_elevation_gain"),
+            activity.get("average_speed"), activity.get("max_speed"),
+            activity.get("average_heartrate"), activity.get("max_heartrate"),
+            activity.get("average_cadence"), activity.get("average_temp"),
+            _int(activity.get("weighted_average_watts")), _int(activity.get("max_watts")),
+            activity.get("kilojoules"), _int(activity.get("average_watts")),
+            activity.get("calories"),
+            start_date, start_latlng, end_latlng,
+            activity.get("timezone"), utc_offset,
+            polyline, metadata_json)
 
     # (following-feed implementation is at _collect_following_feed below)
 

@@ -867,6 +867,16 @@ class InstagramCollector(BaseCollector):
 
         if not posts_ok:
             try:
+                posts_ok = await self._collect_posts_instaloader(uid, entity_name)
+            except Exception as e:
+                logger.warning(
+                    "instagram/%s: instaloader post fallback raised %s",
+                    entity_name, type(e).__name__,
+                )
+                posts_ok = False
+
+        if not posts_ok:
+            try:
                 await self._collect_posts_playwright(uid, entity_name)
             except Exception as e:
                 logger.warning(
@@ -1067,6 +1077,89 @@ class InstagramCollector(BaseCollector):
         if not cookies:
             return None
         return {"cookies": cookies, "origins": []}
+
+    async def _collect_posts_instaloader(self, uid: str, entity_name: str) -> bool:
+        """Mode γ: enumerate posts via instaloader's Profile.get_posts().
+
+        Used when the GraphQL query_hash path (Mode α) fails. Instaloader uses
+        its own authenticated session so it works independently of the httpx
+        client or browser cookies. All blocking I/O is wrapped in run_in_executor
+        so the event loop is never blocked.
+
+        Returns True if at least one post was upserted.
+        """
+        if not self._loader:
+            logger.debug("instagram/%s: instaloader not initialised, skipping Mode γ", entity_name)
+            return False
+
+        max_posts = int(os.getenv("INSTA_MAX_POSTS_PER_USER", "100"))
+
+        try:
+            import instaloader
+            loop = asyncio.get_event_loop()
+
+            # Fetch all post nodes synchronously inside the executor so we don't
+            # block the event loop on network I/O (each page fetch is blocking).
+            def _fetch_posts_sync() -> list[dict]:
+                nodes: list[dict] = []
+                try:
+                    try:
+                        profile = instaloader.Profile.from_id(self._loader.context, int(uid))
+                    except Exception:
+                        profile = instaloader.Profile.from_username(self._loader.context, entity_name)
+                    for post in profile.get_posts():
+                        if len(nodes) >= max_posts:
+                            break
+                        loc = getattr(post, "location", None)
+                        nodes.append({
+                            "shortcode": getattr(post, "shortcode", None),
+                            "__typename": getattr(post, "typename", "GraphImage"),
+                            "is_video": bool(getattr(post, "is_video", False)),
+                            "display_url": getattr(post, "url", None),
+                            "video_url": getattr(post, "video_url", None),
+                            "taken_at_timestamp": int(
+                                getattr(post, "date_utc", __import__("datetime").datetime.utcnow()).timestamp()
+                            ),
+                            "edge_media_preview_like": {"count": getattr(post, "likes", 0) or 0},
+                            "edge_media_to_comment": {"count": getattr(post, "comments", 0) or 0},
+                            "edge_media_to_caption": {
+                                "edges": [{"node": {"text": getattr(post, "caption", "") or ""}}]
+                            },
+                            "location": {
+                                "name": getattr(loc, "name", None),
+                                "lat": getattr(loc, "lat", None),
+                                "lng": getattr(loc, "lng", None),
+                            } if loc else None,
+                        })
+                except Exception as e:
+                    logger.debug("instaloader post fetch for %s failed: %s", entity_name, e)
+                return nodes
+
+            nodes = await loop.run_in_executor(None, _fetch_posts_sync)
+        except Exception as e:
+            logger.warning("instagram/%s: instaloader executor failed: %s", entity_name, e)
+            return False
+
+        if not nodes:
+            logger.info("instagram/%s: instaloader returned 0 posts", entity_name)
+            return False
+
+        upserted = 0
+        for node in nodes:
+            if self._stop.is_set():
+                break
+            if not node.get("shortcode"):
+                continue
+            try:
+                await self._upsert_post(node, uid)
+                upserted += 1
+            except Exception as e:
+                logger.debug("instagram/%s: post upsert failed for %s: %s",
+                             entity_name, node.get("shortcode"), e)
+
+        logger.info("instagram/%s: instaloader Mode γ upserted %d/%d posts",
+                    entity_name, upserted, len(nodes))
+        return upserted > 0
 
     async def _collect_posts_playwright(self, uid: str, entity_name: str):
         """Mode β: spin up a single-process headless Chromium, navigate to the
