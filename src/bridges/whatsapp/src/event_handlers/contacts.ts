@@ -36,6 +36,9 @@ async function processContact(contact: any): Promise<void> {
 export function registerContactsHandler(sock: WASocket): void {
     const handler = async (contacts: any[]) => {
         try {
+            const withLid = contacts.filter(c => c.lid).length;
+            const withPhone = contacts.filter(c => c.id && !String(c.id).includes('@lid')).length;
+            logger.info({ total: contacts.length, withLid, withPhone }, 'contacts event received');
             for (const c of contacts) await processContact(c);
         } catch (err) {
             logger.error({ err }, 'Error in contacts handler');
@@ -43,4 +46,24 @@ export function registerContactsHandler(sock: WASocket): void {
     };
     sock.ev.on('contacts.update', handler);
     sock.ev.on('contacts.upsert', handler);
+
+    // lid-mapping.update fires explicitly for LID→phone pairs during app state sync.
+    // It carries { lid: string, pn: string } where pn is the @s.whatsapp.net JID.
+    (sock.ev as any).on('lid-mapping.update', async (mapping: { lid: string; pn: string }) => {
+        try {
+            if (!mapping?.lid || !mapping?.pn) return;
+            const lid = normalizeJid(mapping.lid);
+            const jid = normalizeJid(mapping.pn);
+            const phone = jid.includes('@s.whatsapp.net') ? jid.split('@')[0] : null;
+            logger.debug({ lid, jid }, 'lid-mapping.update');
+            await producer.publish('contacts.update', {
+                jid,
+                lid,
+                display_name: null,
+                phone_number: phone,
+            });
+        } catch (err) {
+            logger.error({ err }, 'Error in lid-mapping.update handler');
+        }
+    });
 }

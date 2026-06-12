@@ -135,6 +135,42 @@ function clearAuthState(): void {
     }
 }
 
+let lidBackfillDone = false;
+
+async function emitStoredLidMappings(sessionName: string): Promise<void> {
+    if (lidBackfillDone) return;
+    lidBackfillDone = true;
+    const authPath = process.env.AUTH_STORAGE_PATH || `./auth_info/${getEnv('SESSION_NAME', 'default')}`;
+    let files: string[];
+    try {
+        files = fs.readdirSync(authPath);
+    } catch (e) {
+        logger.warn({ err: e, authPath }, 'lid backfill: could not read auth dir');
+        return;
+    }
+    // Filter lid-mapping files upfront (synchronous dir listing, not file reads).
+    const lidFiles = files.filter(f => /^lid-mapping-\d+_reverse\.json$/.test(f));
+    let count = 0;
+    let errors = 0;
+    // Process in parallel batches to avoid blocking the event loop on Docker FS reads.
+    const BATCH = 50;
+    for (let i = 0; i < lidFiles.length; i += BATCH) {
+        const batch = lidFiles.slice(i, i + BATCH);
+        const results = await Promise.allSettled(batch.map(async (file) => {
+            const lidNum = file.match(/^lid-mapping-(\d+)_reverse\.json$/)![1];
+            const raw = JSON.parse(await fs.promises.readFile(`${authPath}/${file}`, 'utf8'));
+            const phone = typeof raw === 'string' ? raw : String(raw);
+            const lid = `${lidNum}@lid`;
+            const jid = `${phone}@s.whatsapp.net`;
+            await producer.publish('contacts.update', {
+                jid, lid, display_name: null, phone_number: phone, session_name: sessionName,
+            });
+        }));
+        for (const r of results) r.status === 'fulfilled' ? count++ : errors++;
+    }
+    logger.info({ count, errors, sessionName }, 'lid backfill: emitted stored lid mappings');
+}
+
 async function connectToWhatsApp(): Promise<void> {
     const sessionName = getEnv('SESSION_NAME', 'default');
 
@@ -214,6 +250,22 @@ async function connectToWhatsApp(): Promise<void> {
             await producer.publish('session.status', {
                 session_name: sessionName, phone_number: phoneNumber, status: 'active',
             }).catch(() => {});
+
+            // On reconnection Baileys skips app state sync so contacts.upsert
+            // never fires. Force a resync so contacts with their `lid` fields
+            // are emitted and the collector can populate whatsapp_lid_map.
+            setTimeout(() => {
+                sock.resyncAppState(['regular', 'regular_high', 'regular_low', 'critical_block', 'critical_unblock_low'], false)
+                    .catch((e: Error) => logger.warn({ err: e?.message }, 'contacts resync failed'));
+            }, 3000);
+
+            // Backfill LID→phone mappings from Baileys' on-disk store.
+            // Baileys persists lid-mapping-{lid}_reverse.json files whenever
+            // it receives LID_MIGRATION_MAPPING_SYNC protocol messages, but
+            // never re-emits them as events on reconnection. We read them
+            // directly and publish as contacts.update so the collector can
+            // seed whatsapp_lid_map without waiting for new live events.
+            setTimeout(() => emitStoredLidMappings(sessionName).catch(() => {}), 5000);
 
             if (heartbeat) clearInterval(heartbeat);
             heartbeat = setInterval(() => {
