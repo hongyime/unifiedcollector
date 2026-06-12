@@ -416,6 +416,11 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
       WHATSAPP_SPIDER_SESSIONS: "session_2"
+      # WhatsApp is event-driven: collector.run() blocks in the RabbitMQ
+      # consumer loop until messages arrive. The default 1800s watchdog kills
+      # it during quiet periods (e.g. overnight). 86400s = 24h gives it room
+      # to wait; Docker restart:unless-stopped recovers genuine OOM/crash.
+      COLLECTOR_HANG_TIMEOUT_SECONDS: "86400"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     cap_add:
