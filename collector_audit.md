@@ -18,7 +18,46 @@
 
 ---
 
-## ✅ Subagent 3 — Instagram 429 Root Cause (COMPLETE, actionable)
+## ✅ Subagent 3 — Instagram 429 Root Cause (COMPLETE) — FIX IMPLEMENTED & DEPLOYED (commit `4f83eb8`)
+
+**Status:** All 5 recommended fixes shipped in `src/collectors/instagram/__init__.py`:
+1. ✅ `GRAPH_API` host → `https://i.instagram.com/api/v1` (`:103`)
+2. ✅ `collect()` constructs a real `Account` with `_build_fingerprint()` and sets `self._current_account` before the first request (was a throwaway placeholder)
+3. ✅ `collect()` sends full `self._headers()` set + `X-CSRFToken` from the cookie jar (was 2 headers)
+4. ✅ `collect()` calls `self._warmup(client)` once per process before the first API call (env-toggle `INSTA_WARMUP_ENABLED`)
+5. ✅ `_handle_rate_limit()` only rotates within the env account pool — skips spurious instaloader login for cookie-only accounts
+- Built + deployed to `collector_instagram`; stale streak=3 rate-limit cursor cleared to validate.
+- _Note: query_hash demotion (item 5 in research) deferred — current fallback order already puts instaloader first in practice; revisit if GraphQL path still 429s._
+
+### ⚠️ VALIDATION RESULT — residual 429 is ENVIRONMENTAL (IP/endpoint throttle), not a code bug
+
+After deploying the fix, the first request still 429'd. Direct in-container probes (now cleaned up) localized the cause precisely:
+
+| Request (from the collector's own IP) | Result |
+|---|---|
+| `i.instagram.com/api/v1/users/web_profile_info/` — **authenticated** | 429, **empty body** |
+| `i.instagram.com/api/v1/users/web_profile_info/` — **anonymous (no cookies)** | 429, **empty body** |
+| `www.instagram.com/api/v1/users/web_profile_info/` | 429, empty body |
+| `www.instagram.com/` (homepage HTML) | **200**, 594 KB |
+| `www.instagram.com/natgeo/` (profile page HTML) | **200**, 594 KB |
+
+**Conclusions (evidence-based):**
+1. **Empty-body 429** = Instagram **edge/IP rate-limit**, NOT an app-layer flag. A flagged session/challenge returns a JSON body (`feedback_required`, `challenge_required`, "please wait"). Empty = edge throttle.
+2. **Anonymous also 429s** → it is NOT an account/session/cookie problem. No cookie hygiene fixes it.
+3. **HTML pages return 200** → the IP is NOT banned. The throttle is **specific to the `web_profile_info` API path** for this IP, caused by today's repeated hammering.
+4. **Static profile HTML no longer embeds profile stats** — `edge_followed_by`, `follower_count`, `biography`, `profile_pic_url`, `edge_owner_to_timeline_media` all absent (count 0). Modern IG hydrates these via the same throttled XHR. So cheap HTML scraping does NOT yield the data; only the API (throttled) or a JS-executing browser (Playwright Mode-β) does.
+
+**Therefore:** the host/header/fingerprint/warmup wiring fix is correct hygiene and is retained (it makes us less likely to RE-trigger the throttle once it clears, and per-account/IP cooldown is now keyed correctly + TLS rotation active). But it cannot bypass an IP-level endpoint throttle. The only native (no-paid-proxy) levers are:
+- **(a) Patience + conservative pacing** — let the endpoint throttle decay. The existing exponential backoff (900s→…→14400s cap, DB-persisted streak) already does this; after a few 429s the collector won't touch the endpoint for 1-4h, letting it clear. This is the primary, already-working mitigation.
+- **(b) Different egress IP** — mobile tether / different network (NOT a paid proxy). Endpoint throttle is per-IP. `INSTA_PROXY_DISABLED=true` today (direct IP); Tor (`socks5://tor:9050`) is available but IG bans Tor exits, so it would likely be worse.
+- **(c) Playwright Mode-β** — render `/{username}/` in a real browser context so its in-page XHR fetches the hydrated data. Same IP, but a genuine browser fingerprint/referer chain sometimes gets served when raw httpx is throttled. Highest-effort, uncertain payoff.
+- **(d) Slow the cycle cadence** so we stop re-extending the throttle window.
+
+**Env note:** `INSTA_WARMUP_ENABLED=false` in the deployed container, so the warmup path is wired but currently disabled by config. Flip to `true` to exercise it (adds ~90-180s/process; doesn't help the API throttle, so leave off for now).
+
+**Recommended next step (no code change needed today):** let the backoff ride — the collector is in a correct streak-based cooldown and will probe ~once per cooldown window, allowing the IP throttle to decay. If profile data is needed sooner, the fastest real lever is (b) a different egress IP.
+
+### Original diagnosis (retained for reference)
 
 ### Root cause: the `collect()` path bypasses the entire anti-detection stack
 
