@@ -777,8 +777,11 @@ class InstagramCollector(BaseCollector):
                         "SET last_processed_id = $1, last_processed_at = NOW(), status = 'blocked'",
                         _streak_val,
                     )
+                logger.info("instagram: persisted rate-limit to DB (expiry=%.0f streak=%d)", _expiry, self._consecutive_429s)
             except Exception as _e:
-                logger.debug("instagram: failed to persist rate-limit to DB: %s", _e)
+                logger.warning("instagram: failed to persist rate-limit to DB: %s", _e)
+        else:
+            logger.warning("instagram: rate-limit NOT persisted — pool is None")
 
         # TLS fingerprint rotation: if 429/403 keeps recurring inside the
         # cooldown window, advance this account's curl_cffi impersonate
