@@ -853,8 +853,24 @@ class InstagramCollector(BaseCollector):
             await self._spider_followers(client, uid, entity_name)
 
         # 4. Collect Content
-        # Probe instaloader/Graph first; if post enumeration explicitly fails
-        # (401/429/empty), fall back to Playwright (Mode β, §22 hybrid).
+        # Fast path: the web_profile_info response already contains the first
+        # page of posts in edge_owner_to_timeline_media. Upsert them now so we
+        # get at least partial data even if the paginated paths below fail.
+        initial_edges = (user_data.get("edge_owner_to_timeline_media", {})
+                         .get("edges", []))
+        if initial_edges:
+            for edge in initial_edges:
+                node = edge.get("node", {})
+                if node and node.get("shortcode"):
+                    try:
+                        await self._upsert_post(node, uid)
+                    except Exception:
+                        pass
+            logger.info("instagram/%s: upserted %d posts from profile response",
+                        entity_name, len(initial_edges))
+
+        # Paginated post enumeration: GraphQL (Mode α) → instaloader (Mode γ)
+        # → Playwright (Mode β). Each returns True on success.
         posts_ok = False
         try:
             posts_ok = await self._collect_posts(client, uid, entity_name)
