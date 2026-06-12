@@ -915,10 +915,23 @@ class InstagramCollector(BaseCollector):
             logger.warning("User not found: %s", username)
             return
         if resp.status_code == 429:
-            await self._handle_rate_limit(Exception("429"))
-            raise _RateLimitHandled("429")
-        resp.raise_for_status()
-        user_data = resp.json().get("data", {}).get("user", {})
+            # Mode-β fallback: the web_profile_info API path gets IP-throttled for
+            # raw httpx (empty-body 429), but a real headless browser can still
+            # fetch the same JSON via an in-page same-origin fetch — it carries the
+            # account cookies, a consistent fingerprint, and a real referer chain
+            # that IG's edge often serves even when raw httpx is 429'd. Only when
+            # the browser path ALSO fails do we record the 429 and back off.
+            user_data = await self._fetch_profile_playwright(username)
+            if not user_data:
+                await self._handle_rate_limit(Exception("429"))
+                raise _RateLimitHandled("429")
+            logger.info(
+                "instagram/%s: profile recovered via Playwright Mode-β after API 429",
+                username,
+            )
+        else:
+            resp.raise_for_status()
+            user_data = resp.json().get("data", {}).get("user", {})
         if not user_data:
             logger.warning("Empty profile data for %s", username)
             return
@@ -1286,6 +1299,113 @@ class InstagramCollector(BaseCollector):
         logger.info("instagram/%s: instaloader Mode γ upserted %d/%d posts",
                     entity_name, upserted, len(nodes))
         return upserted > 0
+
+    async def _fetch_profile_playwright(self, username: str) -> dict | None:
+        """Mode-β PROFILE fetch: when the web_profile_info API is IP-throttled for
+        raw httpx, render the profile in a real headless Chromium and fetch the
+        same JSON via an in-page same-origin fetch. The browser carries the
+        account's cookies (storage_state), a consistent fingerprint, and a real
+        referer chain, which IG's edge frequently serves even when raw httpx 429s.
+
+        Returns the ``user`` dict (same shape as the API ``data.user`` payload) or
+        None on any failure. Concurrency: STRICT 1-at-a-time via
+        PLAYWRIGHT_SEMAPHORE — do NOT bypass it (OOM guard, see semaphore comment).
+        """
+        try:
+            from playwright.async_api import async_playwright  # type: ignore
+        except ImportError:
+            logger.warning(
+                "Playwright not installed — cannot run Mode-β profile fallback for %s",
+                username,
+            )
+            return None
+
+        acct_name = self._current_account.name if self._current_account else None
+        storage_state = self._build_playwright_storage_state(acct_name) if acct_name else None
+        ua = self.user_agents.get_for_domain("instagram.com")
+        if self._current_account and self._current_account.fingerprint.get("user_agent"):
+            ua = self._current_account.fingerprint["user_agent"]
+
+        profile_url = f"https://www.instagram.com/{username}/"
+
+        async with PLAYWRIGHT_SEMAPHORE:
+            logger.info(
+                "Playwright Mode-β: fetching profile instagram/%s (account=%s)",
+                username, acct_name or "anonymous",
+            )
+            playwright_ctx = await async_playwright().start()
+            browser = None
+            try:
+                browser = await playwright_ctx.chromium.launch(
+                    headless=True,
+                    args=PLAYWRIGHT_LAUNCH_ARGS,
+                )
+                context_kwargs: dict = {
+                    "user_agent": ua,
+                    "viewport": {"width": 1280, "height": 800},
+                    "locale": "en-US",
+                }
+                if storage_state:
+                    context_kwargs["storage_state"] = storage_state
+                context = await browser.new_context(**context_kwargs)
+                page = await context.new_page()
+
+                # Load the profile page first to establish a real session + referer
+                # chain before the API fetch (humans land on the page, not the API).
+                try:
+                    await page.goto(profile_url, wait_until="domcontentloaded", timeout=45000)
+                except Exception as e:
+                    logger.warning("Playwright Mode-β goto failed for %s: %s", username, e)
+                    return None
+
+                # Same-origin in-page fetch: executes inside the page's JS context
+                # with the browser's own cookies, TLS fingerprint and headers.
+                try:
+                    result = await page.evaluate(
+                        """async (uname) => {
+                            try {
+                                const r = await fetch(
+                                    '/api/v1/users/web_profile_info/?username=' + encodeURIComponent(uname),
+                                    { headers: { 'x-ig-app-id': '936619743392459' },
+                                      credentials: 'include' });
+                                return { status: r.status, body: await r.text() };
+                            } catch (e) { return { status: -1, body: String(e) }; }
+                        }""",
+                        username,
+                    )
+                except Exception as e:
+                    logger.warning("Playwright Mode-β evaluate failed for %s: %s", username, e)
+                    return None
+
+                status = result.get("status") if isinstance(result, dict) else None
+                if status != 200:
+                    logger.info(
+                        "Playwright Mode-β: in-page fetch for %s returned status=%s",
+                        username, status,
+                    )
+                    return None
+                try:
+                    data = json.loads(result.get("body") or "{}")
+                except Exception as e:
+                    logger.warning("Playwright Mode-β: JSON parse failed for %s: %s", username, e)
+                    return None
+                user_data = data.get("data", {}).get("user", {})
+                if user_data:
+                    logger.info("Playwright Mode-β: recovered profile JSON for %s", username)
+                    return user_data
+                logger.info("Playwright Mode-β: empty user payload for %s", username)
+                return None
+            finally:
+                # ALWAYS close the browser — leaks here will OOM the WSL host.
+                try:
+                    if browser is not None:
+                        await browser.close()
+                except Exception:
+                    pass
+                try:
+                    await playwright_ctx.stop()
+                except Exception:
+                    pass
 
     async def _collect_posts_playwright(self, uid: str, entity_name: str):
         """Mode β: spin up a single-process headless Chromium, navigate to the
