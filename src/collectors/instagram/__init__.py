@@ -560,6 +560,38 @@ class InstagramCollector(BaseCollector):
         """
         import concurrent.futures
         import asyncio
+        import time as _time
+
+        # DB-persisted global rate-limit check: survives collector relaunches.
+        # When a 429 is hit, we write the expiry timestamp to service_cursors.
+        # On each cycle start we check it and sleep if still in cooldown. This
+        # prevents the soft-relaunch from immediately re-hammering Instagram.
+        if self.pool is not None:
+            try:
+                async with self.pool.acquire() as _conn:
+                    _row = await _conn.fetchrow(
+                        "SELECT last_processed_id FROM service_cursors "
+                        "WHERE service = 'instagram_rate_limit'",
+                    )
+                if _row and _row["last_processed_id"]:
+                    _expiry = float(_row["last_processed_id"])
+                    _remaining = _expiry - _time.time()
+                    if _remaining > 30:
+                        logger.info(
+                            "instagram: DB-persisted rate limit active (%.0fs remaining) — sleeping",
+                            _remaining,
+                        )
+                        _sleep_until = _time.time() + min(_remaining, 3600)
+                        while _time.time() < _sleep_until and not self._stop.is_set():
+                            await asyncio.sleep(min(30, _sleep_until - _time.time()))
+                        # After sleeping, clear the DB entry so the next cycle runs normally
+                        if not self._stop.is_set():
+                            async with self.pool.acquire() as _conn2:
+                                await _conn2.execute(
+                                    "DELETE FROM service_cursors WHERE service = 'instagram_rate_limit'",
+                                )
+            except Exception as _e:
+                logger.debug("instagram: rate-limit DB check failed: %s", _e)
 
         # Check if ALL accounts are in emergency cooldown — skip entire cycle
         # rather than burning 120s timeouts per target.
@@ -711,6 +743,24 @@ class InstagramCollector(BaseCollector):
                 "instagram.com", account=acct_name,
             )
             self.rate_limiter.emergency_cooldown = old
+
+        # Persist cooldown expiry in DB so it survives collector relaunches.
+        # service_cursors.last_processed_id stores the Unix epoch when the ban expires.
+        import time as _time
+        _expiry = _time.time() + cooldown
+        if self.pool is not None:
+            try:
+                async with self.pool.acquire() as _conn:
+                    await _conn.execute(
+                        "INSERT INTO service_cursors "
+                        "  (service, last_processed_id, last_processed_at, status) "
+                        "VALUES ('instagram_rate_limit', $1, NOW(), 'blocked') "
+                        "ON CONFLICT (service) DO UPDATE "
+                        "SET last_processed_id = $1, last_processed_at = NOW(), status = 'blocked'",
+                        str(_expiry),
+                    )
+            except Exception as _e:
+                logger.debug("instagram: failed to persist rate-limit to DB: %s", _e)
 
         # TLS fingerprint rotation: if 429/403 keeps recurring inside the
         # cooldown window, advance this account's curl_cffi impersonate
