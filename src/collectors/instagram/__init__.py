@@ -93,6 +93,13 @@ except Exception:  # pragma: no cover
 
 logger = logging.getLogger(__name__)
 
+
+class _RateLimitHandled(Exception):
+    """Raised by _collect_user after handling a 429 internally.
+    Propagates to _process_target's except path without triggering a second
+    _handle_rate_limit call, preserving _consecutive_429s."""
+
+
 GRAPH_API = "https://www.instagram.com/api/v1"
 
 NIGHT_HOURS = {23, 0, 1, 2, 3, 4, 5, 6}
@@ -633,8 +640,6 @@ class InstagramCollector(BaseCollector):
             logger.warning("instagram: failed to load cookies for %s — skipping cycle", acct_name)
             return
 
-        logger.debug("[DEBUG] instagram collect: using account=%s cookies=%d", acct_name, len(cookies))
-
         _streak_before = getattr(self, "_consecutive_429s", 0)
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(30.0),
@@ -657,12 +662,11 @@ class InstagramCollector(BaseCollector):
                     logger.error("instagram: unexpected error for %s: %s", target, e, exc_info=True)
                 await asyncio.sleep(2)
 
-        # If the entire cycle completed without a new 429, reset the backoff streak.
-        logger.info("instagram: end-of-collect check: _consecutive_429s=%d _streak_before=%d",
-                    getattr(self, "_consecutive_429s", 0), _streak_before)
-        if getattr(self, "_consecutive_429s", 0) == _streak_before and self.pool is not None:
-            logger.info("instagram: no new 429 this cycle — clearing streak and DB entry")
-            self._consecutive_429s = 0
+        # If the entire cycle completed without triggering any 429s, clear the
+        # persisted rate-limit entry so the next cycle starts clean.
+        if self._consecutive_429s == 0 and self.pool is not None:
+            if _streak_before > 0:
+                logger.info("instagram: clean cycle after streak=%d — clearing DB rate-limit entry", _streak_before)
             try:
                 async with self.pool.acquire() as _conn:
                     await _conn.execute(
@@ -706,6 +710,8 @@ class InstagramCollector(BaseCollector):
                 self.account_pool.record_success(self._current_account.name)
                 self._record_daily_action(self._current_account.name, views=1)
             await self._micro_pause()
+        except _RateLimitHandled:
+            pass  # already handled inside _collect_user; _consecutive_429s preserved
         except Exception as e:
             if "429" in str(e) or "rate" in str(e).lower():
                 await self._handle_rate_limit(e)
@@ -858,9 +864,6 @@ class InstagramCollector(BaseCollector):
         await self.rate_limiter.async_wait(
             "instagram.com", OperationType.PROFILE_VIEW, account=acct_name,
         )
-        logger.debug("[DEBUG] _collect_user: rate limiter done, making request")
-
-        logger.debug("[DEBUG] _collect_user: calling client.get for %s", username)
         try:
             resp = await asyncio.wait_for(
                 client.get(
@@ -869,19 +872,18 @@ class InstagramCollector(BaseCollector):
                 ),
                 timeout=35.0,
             )
-            logger.debug("[DEBUG] _collect_user: got response status=%s", resp.status_code)
         except asyncio.TimeoutError:
-            logger.error("[DEBUG] _collect_user: request timed out after 35s for %s", username)
+            logger.error("instagram: request timed out for %s", username)
             return
         except Exception as e:
-            logger.error("[DEBUG] _collect_user: request failed: %s", e)
+            logger.error("instagram: request failed for %s: %s", username, e)
             return
         if resp.status_code == 404:
             logger.warning("User not found: %s", username)
             return
         if resp.status_code == 429:
             await self._handle_rate_limit(Exception("429"))
-            return
+            raise _RateLimitHandled("429")
         resp.raise_for_status()
         user_data = resp.json().get("data", {}).get("user", {})
         if not user_data:
