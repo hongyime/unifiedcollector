@@ -120,8 +120,9 @@ class StravaCollector(BaseCollector):
             logger.warning(
                 "strava: running in cookie-only mode (no STRAVA_CLIENT_ID/"
                 "CLIENT_SECRET/REFRESH_TOKEN). The following data will be "
-                "unavailable: GPS streams/polylines, city/country fields, "
-                "athlete profile details (weight/FTP), clubs, starred segments."
+                "unavailable: city/country fields, "
+                "athlete profile details (weight/FTP), clubs, starred segments. "
+                "GPS streams are still fetched via cookie-authenticated XHR."
             )
         # Previously disabled due to httpx → Z:/C: NTFS kernel D-state.
         # Root cause fixed: all mounts now on WSL2 ext4 named volumes.
