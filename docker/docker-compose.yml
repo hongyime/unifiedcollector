@@ -383,6 +383,7 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
+      BEEPER_DESKTOP_API_URL: http://host.docker.internal:34076
     extra_hosts:
       - "host.docker.internal:host-gateway"
     cap_add:
