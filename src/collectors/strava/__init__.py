@@ -1595,7 +1595,7 @@ class StravaCollector(BaseCollector):
         """
         from html import unescape as _unescape
 
-        result = {"photos": 0, "kudos": 0, "comments": 0, "polyline": False}
+        result = {"photos": 0, "kudos": 0, "comments": 0, "polyline": False, "streams": 0}
         url = f"{STRAVA_WEB}/activities/{activity_id}"
         try:
             resp = await client.get(url, headers={
@@ -1612,6 +1612,61 @@ class StravaCollector(BaseCollector):
         props_count = len(re.findall(r"data-react-props='", html))
         logger.info("strava scrape: activity %s status=%d size=%dKB props_blocks=%d",
                      activity_id, resp.status_code, len(html) // 1024, props_count)
+
+        # --- Extract GPS from inline JavaScript (pageView factory pattern) ---
+        # Strava embeds map bounding box and streams flag in the ViewFactory call:
+        #   pageView = new Strava.Labs.Activities.RunPageView(id, type, factory)
+        #     .mbr([[min_lat,min_lng],[max_lat,max_lng]])   <-- bounding box
+        #     .hasStreams(true)                              <-- GPS track available
+        # If hasStreams=true, fetch /activities/{id}/streams for the actual latlng array.
+        has_streams_match = re.search(r'\.hasStreams\((\w+)\)', html)
+        has_streams = has_streams_match and has_streams_match.group(1) == 'true'
+        if has_streams:
+            try:
+                streams_url = f"{STRAVA_WEB}/activities/{activity_id}/streams"
+                streams_resp = await client.get(
+                    streams_url,
+                    params={"stream_types[]": ["latlng"]},
+                    headers={
+                        "X-Requested-With": "XMLHttpRequest",
+                        "Accept": "application/json, text/javascript, */*; q=0.01",
+                        "Referer": url,
+                    },
+                )
+                if streams_resp.status_code == 200:
+                    streams_data = streams_resp.json()
+                    latlng = streams_data.get("latlng", [])
+                    if latlng and len(latlng) >= 2:
+                        start = latlng[0]
+                        end = latlng[-1]
+                        sl = f"{start[0]},{start[1]}" if len(start) == 2 else None
+                        el = f"{end[0]},{end[1]}" if len(end) == 2 else None
+                        async with self.pool.acquire() as conn:
+                            await conn.execute(
+                                "UPDATE strava_activities "
+                                "SET start_latlng = COALESCE(start_latlng, $1), "
+                                "    end_latlng   = COALESCE(end_latlng, $2) "
+                                "WHERE platform_activity_id = $3",
+                                sl, el, activity_id,
+                            )
+                            act_row = await conn.fetchrow(
+                                "SELECT id FROM strava_activities WHERE platform_activity_id = $1",
+                                activity_id,
+                            )
+                            if act_row:
+                                await conn.execute(
+                                    "INSERT INTO strava_gps_streams (activity_id, latlng, collected_at) "
+                                    "VALUES ($1, $2, NOW()) "
+                                    "ON CONFLICT (activity_id) DO NOTHING",
+                                    act_row["id"], json.dumps(latlng),
+                                )
+                        result["streams"] = len(latlng)
+                        logger.debug("strava scrape: activity %s streams %d points, start=%s",
+                                     activity_id, len(latlng), sl)
+                elif streams_resp.status_code == 429:
+                    logger.debug("strava scrape: streams 429 for %s — skipping GPS", activity_id)
+            except Exception as e:
+                logger.debug("strava scrape: streams fetch %s failed: %s", activity_id, e)
 
         # --- Extract data from data-react-props blocks ---
         # Strava uses single-quoted props with &quot; for JSON quotes
@@ -1884,7 +1939,7 @@ class StravaCollector(BaseCollector):
                 LIMIT $1
             """, batch_size, int(self._my_athlete_id) if self._my_athlete_id else 0)
 
-        totals = {"photos": 0, "kudos": 0, "comments": 0, "polylines": 0}
+        totals = {"photos": 0, "kudos": 0, "comments": 0, "polylines": 0, "streams": 0}
         if not rows:
             return totals
 
@@ -1910,6 +1965,7 @@ class StravaCollector(BaseCollector):
                 totals["comments"] += r["comments"]
                 if r["polyline"]:
                     totals["polylines"] += 1
+                totals["streams"] += r.get("streams", 0)
                 try:
                     async with self.pool.acquire() as conn:
                         await conn.execute(
@@ -1917,8 +1973,8 @@ class StravaCollector(BaseCollector):
                             aid)
                 except Exception:
                     pass
-        logger.info("strava: scraped %d pages -> %d photos, %d kudos, %d comments, %d polylines",
-                    len(rows), totals["photos"], totals["kudos"], totals["comments"], totals["polylines"])
+        logger.info("strava: scraped %d pages -> %d photos, %d kudos, %d comments, %d polylines, %d streams",
+                    len(rows), totals["photos"], totals["kudos"], totals["comments"], totals["polylines"], totals["streams"])
         return totals
 
     # ------------------------------------------------------------------ #
