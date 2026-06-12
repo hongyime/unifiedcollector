@@ -590,6 +590,7 @@ class InstagramCollector(BaseCollector):
                             await asyncio.sleep(min(30, _sleep_until - _time.time()))
                         # After sleeping, clear the DB entry so the next cycle runs normally
                         if not self._stop.is_set():
+                            logger.info("instagram: rate-limit sleep done — clearing DB entry")
                             async with self.pool.acquire() as _conn2:
                                 await _conn2.execute(
                                     "DELETE FROM service_cursors WHERE service = 'instagram_rate_limit'",
@@ -657,7 +658,10 @@ class InstagramCollector(BaseCollector):
                 await asyncio.sleep(2)
 
         # If the entire cycle completed without a new 429, reset the backoff streak.
+        logger.info("instagram: end-of-collect check: _consecutive_429s=%d _streak_before=%d",
+                    getattr(self, "_consecutive_429s", 0), _streak_before)
         if getattr(self, "_consecutive_429s", 0) == _streak_before and self.pool is not None:
+            logger.info("instagram: no new 429 this cycle — clearing streak and DB entry")
             self._consecutive_429s = 0
             try:
                 async with self.pool.acquire() as _conn:
@@ -665,7 +669,7 @@ class InstagramCollector(BaseCollector):
                         "DELETE FROM service_cursors WHERE service = 'instagram_rate_limit'",
                     )
             except Exception as _e:
-                logger.debug("instagram: failed to clear rate-limit from DB: %s", _e)
+                logger.warning("instagram: failed to clear rate-limit from DB: %s", _e)
 
 
     async def _process_target(self, client: httpx.AsyncClient, username: str):
