@@ -1671,6 +1671,33 @@ class StravaCollector(BaseCollector):
                         logger.debug("strava scrape: photo %s/%s failed: %s",
                                      activity_id, photo_id, e)
 
+            # GPS fields: start/end latlng + timezone/utc_offset.
+            # Strava embeds these in the activity props block. Check both top-level
+            # and nested under "activity" key (layout varies by page version).
+            act_props = props.get("activity") or props
+            _sll = act_props.get("start_latlng") or props.get("startLatLng")
+            _ell = act_props.get("end_latlng") or props.get("endLatLng")
+            _tz  = act_props.get("timezone") or props.get("timezone")
+            _utc = act_props.get("utc_offset") if act_props.get("utc_offset") is not None \
+                   else props.get("utc_offset")
+            if _sll or _tz:
+                def _ll_str(v):
+                    return f"{v[0]},{v[1]}" if v and len(v) == 2 else None
+                try:
+                    async with self.pool.acquire() as conn:
+                        await conn.execute("""
+                            UPDATE strava_activities
+                            SET start_latlng = COALESCE(start_latlng, $1),
+                                end_latlng   = COALESCE(end_latlng,   $2),
+                                timezone     = COALESCE(timezone,     $3),
+                                utc_offset   = COALESCE(utc_offset,   $4)
+                            WHERE platform_activity_id = $5
+                        """, _ll_str(_sll), _ll_str(_ell), _tz,
+                             int(_utc) if _utc is not None else None,
+                             activity_id)
+                except Exception as e:
+                    logger.debug("strava scrape: gps fields %s failed: %s", activity_id, e)
+
             # Polyline from activity map props
             polyline = (props.get("polyline") or props.get("summary_polyline")
                         or (props.get("map") or {}).get("polyline")
