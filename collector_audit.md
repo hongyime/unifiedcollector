@@ -6,6 +6,37 @@
 
 ---
 
+## HEALTH SWEEP (2026-06-13 ~03:20 UTC) + REMAINING PLAN
+
+**All 21 containers healthy** (rabbitmq recovered). Per-scraper assessment:
+
+| Scraper | State | Errors/30m | Verdict |
+|---|---|---|---|
+| tiktok | cursor fresh (<1m) | 0 | ✅ healthy |
+| youtube | fresh (~20m) | 1 | ✅ healthy |
+| strava | fresh (~22m) | 0 | ✅ healthy |
+| search | fresh (~11m) | 0 | ✅ healthy |
+| github | fresh (~7m) | 0 | ✅ healthy |
+| website | ~2.5h | 0 | ✅ healthy (slow cadence) |
+| whatsapp | event-driven (cursor N/A) | 0 | ✅ collecting (11.8k msgs) |
+| beeper | event-driven (cursor N/A) | 0 | ✅ collecting (152/cycle) |
+| **instagram** | cooldown-frozen | 0 err / 11 warn | 🔧 FIXED this session (gate bypass `f861997`) |
+| **telegram** | fresh cursor but erroring | **64** | 🔧 NEEDS FIX — SQLite session lock |
+| **lemon8** | **17h stale** | 2 | 🔧 NEEDS FIX — hangs every cycle |
+
+### 🔧 NEEDS TWEAKING — prioritized
+
+1. **telegram — SQLite "database is locked" (64 errs/30m)** — all 3 workers (bryanseah234/shotsbyseah234/oopspwned) fail `Connect failed: database is locked`; telethon keepalive crashes with `OperationalError('database is locked')`. Cause: concurrent access to Telethon `.session` SQLite files. **Fix:** give each worker/account its own session file, and/or open the session SQLite with WAL mode + a busy_timeout. File: `src/collectors/telegram/__init__.py` (session/connect path). _Note: this is also one of the `_FatalSpinLogWatcher` patterns, but at ~12/30m it's below the flood threshold (correctly not self-heal-restarting — it's intermittent, not a wedge)._
+2. **lemon8 — hangs every cycle (17h stale cursor)** — watchdog: `lemon8 HUNG (no progress 1831s > 1800s)`; it slowly re-upserts the SAME posts (~40s each) and never reaches cycle-end `save_progress`. Self-heal cancels+relaunches it, but it re-hangs. **Fix:** add a per-target/per-post timeout in the lemon8 FYP-detail loop and/or raise `COLLECTOR_HANG_TIMEOUT` for lemon8; investigate why per-post takes ~40s (media download stall?). File: `src/collectors/lemon8/__init__.py`.
+3. **instagram (FIXED `f861997`)** — playwright-primary was being frozen by the httpx-429 cooldown gate; gate now bypassed in playwright-primary mode. Minor follow-up: the collect() STARTUP DB-rate-limit sleep (lines ~575-606) could also be skipped in playwright-primary mode (only bites on relaunch).
+
+### Remaining audit items (from earlier phases)
+- ⏳ **Subagent 2 feature-gap analysis** — RUNNING now (account limit lifted).
+- ⏳ Port the Mode-β real-browser-fallback pattern to **TikTok / Lemon8** (same fingerprinting family) — candidate, pending Subagent-2.
+- ⏳ Telegram rate-underutilization review — do AFTER the session-lock fix (locks are the current bottleneck, not pacing).
+- ⏳ Confirm backfill paths actually run for telegram/whatsapp/beeper; confirm Strava spider enqueues discovery.
+- ⏳ (low) RabbitMQ memory high-watermark tuning — currently healthy, revisit if it recurs.
+
 ## Latest changes (2026-06-13, direct implementation)
 
 - ✅ **Instagram Playwright-PRIMARY** (`a66fcf8`): `INSTA_PLAYWRIGHT_PRIMARY` (default true) — browser fetch is now the primary profile path for max success rate; raw httpx is the fallback. Slower but bypasses the IP/endpoint throttle.
