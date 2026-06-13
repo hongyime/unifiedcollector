@@ -6,6 +6,15 @@
 
 ---
 
+## PRIVACY-ZONE FIELDS + HEALTH/DB AUDIT + INSTAGRAM ROOT CAUSE (2026-06-13)
+
+- ✅ **Strava privacy-zone fields** (`7ef42b1`): added `stream_status`, `privacy_zone_start/end`, `truncation_point_start/end` (idempotent schema ALTER + `_collect_gps_streams` computes via `_is_truncated`/`_haversine_m`). Historical backfill (`scripts/backfill_strava_privacy_zones.py`): 485 → `stream_status='ok'`; privacy flags left NULL where the original summary wasn't preserved in metadata (honest "unknown"). Forward path sets True/False correctly.
+- ✅ **source_health false-alarm fix** (`7ef42b1`): the "no run in 14h/42h" Telegram warnings were a bug — `source_health.last_success_at` was NEVER written (only auth-pause/dead/clear touched the table). Added `_mark_source_healthy()` on every successful cycle (writes last_success_at, clears stale `dead` status e.g. lemon8). Cursor-based sources fixed; realtime sources heartbeat less often (block in run()).
+- ✅ **DB audit**: the alarming `n_live_tup=0` readings were **stale autovacuum estimates**, not real (ran `ANALYZE`). Real counts healthy: telegram_messages 58,141 · tiktok_posts 5,037 / profiles 185 · strava_activities 10,594 · youtube_videos 9,636 · beeper_shadow_messages 9,962 · website_pages 5,120 · github_commits 30,642. Critical-column NULL checks all 0. **Only genuinely-empty content table: `instagram_posts`.**
+- ✅ **INSTAGRAM ROOT CAUSE (posts=0)** — TWO bugs fixed:
+  1. **Startup rate-limit sleep** (`e1858d8`): instagram slept up to 1h/relaunch on a stale persisted streak even though Playwright bypasses that throttle → skipped in playwright-primary mode.
+  2. **Dead-session, no rotation** (`e438110`): collector always used `cookie_accounts[0]`=bryanseah234, whose IG session is **401 (expired)**. Session probe: bryanseah234=401, shotsbyseah234=401, **cchmsmediaclub/oopspwned/prawnproductions234=200**. Now rotates to a healthy account on 401 (uses existing accounts — NO credential change). _Note for user: 2 of 5 IG sessions are dead (401); 3 are alive, so collection continues._
+
 ## STRAVA start_latlng FIX + THROUGHPUT PUSH (2026-06-13, `65b6916`/`81018f7`)
 - ✅ **Strava start_latlng** — `_collect_gps_streams` now backfills start/end from the GPS track (COALESCE) when the API summary omits them (privacy-zone activities). Historical backfill ran: **258 activities fixed, 0 remaining NULL** (485/485 with streams now have coords). Forward fix deployed.
 - ✅ **Throughput pushed** (env, monitor + tune down if throttled): telegram `BACKFILL_MSG_PER_SEC 20→80`, whatsapp `BACKFILL_REQ_PER_MIN 5→12` + media batch `50→100`, beeper `page_size 50→150` (new `BEEPER_PAGE_SIZE`), website `MAX_CONCURRENT_TASKS 5→10`. Early monitor: telegram FloodWait=0, no throttling observed.
