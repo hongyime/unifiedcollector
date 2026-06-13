@@ -893,45 +893,58 @@ class InstagramCollector(BaseCollector):
 
     async def _collect_user(self, client: httpx.AsyncClient, username: str):
         acct_name = self._current_account.name if self._current_account else None
-        logger.debug("[DEBUG] _collect_user: waiting for rate limiter (acct=%s)", acct_name)
         await self.rate_limiter.async_wait(
             "instagram.com", OperationType.PROFILE_VIEW, account=acct_name,
         )
-        try:
-            resp = await asyncio.wait_for(
-                client.get(
-                    f"{GRAPH_API}/users/web_profile_info/",
-                    params={"username": username},
-                ),
-                timeout=35.0,
-            )
-        except asyncio.TimeoutError:
-            logger.error("instagram: request timed out for %s", username)
-            return
-        except Exception as e:
-            logger.error("instagram: request failed for %s: %s", username, e)
-            return
-        if resp.status_code == 404:
-            logger.warning("User not found: %s", username)
-            return
-        if resp.status_code == 429:
-            # Mode-β fallback: the web_profile_info API path gets IP-throttled for
-            # raw httpx (empty-body 429), but a real headless browser can still
-            # fetch the same JSON via an in-page same-origin fetch — it carries the
-            # account cookies, a consistent fingerprint, and a real referer chain
-            # that IG's edge often serves even when raw httpx is 429'd. Only when
-            # the browser path ALSO fails do we record the 429 and back off.
+
+        # PLAYWRIGHT-PRIMARY: prioritise the real-browser fetch for maximum success
+        # rate. It is slower (~one headless Chromium nav per profile) but bypasses
+        # the web_profile_info IP/endpoint throttle that 429s raw httpx. The raw
+        # httpx API is used only as a fallback when the browser path returns nothing.
+        # Toggle with INSTA_PLAYWRIGHT_PRIMARY=false to restore httpx-first.
+        playwright_primary = os.getenv("INSTA_PLAYWRIGHT_PRIMARY", "true").lower() == "true"
+        user_data = None
+        if playwright_primary:
             user_data = await self._fetch_profile_playwright(username)
-            if not user_data:
-                await self._handle_rate_limit(Exception("429"))
-                raise _RateLimitHandled("429")
-            logger.info(
-                "instagram/%s: profile recovered via Playwright Mode-β after API 429",
-                username,
-            )
-        else:
-            resp.raise_for_status()
-            user_data = resp.json().get("data", {}).get("user", {})
+            if user_data:
+                logger.info("instagram/%s: profile fetched via Playwright (primary)", username)
+
+        if not user_data:
+            # httpx API path: primary when Playwright is disabled, else fallback.
+            try:
+                resp = await asyncio.wait_for(
+                    client.get(
+                        f"{GRAPH_API}/users/web_profile_info/",
+                        params={"username": username},
+                    ),
+                    timeout=35.0,
+                )
+            except asyncio.TimeoutError:
+                logger.error("instagram: request timed out for %s", username)
+                return
+            except Exception as e:
+                logger.error("instagram: request failed for %s: %s", username, e)
+                return
+            if resp.status_code == 404:
+                logger.warning("User not found: %s", username)
+                return
+            if resp.status_code == 429:
+                # If Playwright wasn't the primary path, try it now as a last
+                # resort before backing off (browser bypasses the httpx throttle).
+                if not playwright_primary:
+                    user_data = await self._fetch_profile_playwright(username)
+                    if user_data:
+                        logger.info(
+                            "instagram/%s: profile recovered via Playwright Mode-β after API 429",
+                            username,
+                        )
+                if not user_data:
+                    await self._handle_rate_limit(Exception("429"))
+                    raise _RateLimitHandled("429")
+            else:
+                resp.raise_for_status()
+                user_data = resp.json().get("data", {}).get("user", {})
+
         if not user_data:
             logger.warning("Empty profile data for %s", username)
             return

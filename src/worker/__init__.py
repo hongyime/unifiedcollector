@@ -382,6 +382,7 @@ class WorkerService:
         self._crash_counts.setdefault(source, 0)
         task = asyncio.create_task(self._run_source(source, startup_delay=startup_delay), name=f"worker-{source}")
         self._tasks[source] = task
+        self._ever_launched = True
         logger.info("Launched worker for %s", source)
 
     async def _run_source(self, source: str, startup_delay: float = 0.0):
@@ -529,6 +530,44 @@ class WorkerService:
             logger.exception("Failed to load targets for source=%s", source)
             return []
 
+    async def _self_heal_exit(self, reason: str):
+        """Last-resort self-healing: exit the process so Docker's restart policy
+        (``restart: unless-stopped``) brings the container back with a clean slate.
+
+        This is the recovery path for in-process wedges that a soft collector
+        relaunch CANNOT clear because the corruption lives below the collector
+        object: a desynced Telethon MTProto session, a dead asyncpg pool the loop
+        can't rebuild, an OS-level SQLite lock. The watchdog already detects these
+        (zero-progress HARD tier, max hang cycles, all-sources-dead) but previously
+        only marked the source dead and gave up. Exiting hands recovery to Docker.
+
+        Gated by COLLECTOR_SELF_HEAL_RESTART (default "true"). Abrupt by design
+        (os._exit): a graceful shutdown could hang on the very wedge we're escaping.
+        """
+        if os.getenv("COLLECTOR_SELF_HEAL_RESTART", "true").lower() != "true":
+            logger.error(
+                "Self-heal restart DISABLED (COLLECTOR_SELF_HEAL_RESTART=false) — "
+                "NOT restarting despite terminal wedge: %s", reason,
+            )
+            return
+        logger.error("SELF-HEAL: exiting for clean container restart — %s", reason)
+        try:
+            await self._notify_telegram(
+                f"🔄 <b>SELF-HEAL RESTART</b>\n"
+                f"<code>{reason[:300]}</code>\n"
+                f"Container exiting; Docker will restart it with a clean slate."
+            )
+        except Exception:
+            pass
+        import sys as _sys
+        try:
+            _sys.stdout.flush()
+            _sys.stderr.flush()
+        except Exception:
+            pass
+        # Hard-exit so the restart policy relaunches us. 42 = self-heal sentinel.
+        os._exit(42)
+
     async def _watchdog_loop(self):
         while not self._stop.is_set():
             try:
@@ -581,6 +620,11 @@ class WorkerService:
                         logger.error("Watchdog: %s exceeded max hang cycles (%d), giving up", source, hangs)
                         await self._mark_source_dead(source, f"hung > {self.hang_timeout:.0f}s (x{hangs})", hangs)
                         self._crash_counts[source] = self.max_restarts
+                        # Self-heal: a repeatedly-hung source means a stuck socket /
+                        # deadlocked broker wait that cancel+relaunch can't free.
+                        await self._self_heal_exit(
+                            f"{source}: hung x{hangs} (cancel+relaunch did not free it)"
+                        )
                     continue
 
                 # ZERO-PROGRESS escalation: the task is alive (not done), beating
@@ -605,6 +649,12 @@ class WorkerService:
                     task.cancel()
                     self._zero_progress_streak[source] = 0
                     self._heartbeat[source] = time.monotonic()
+                    # Self-heal: soft relaunch failed, so the wedge is in-process
+                    # (e.g. desynced Telethon session). A clean container restart
+                    # is the documented recovery — actually do it now.
+                    await self._self_heal_exit(
+                        f"{source}: zero-progress hard x{streak} (in-process wedge)"
+                    )
                 elif streak >= self.zero_progress_limit:
                     # SOFT tier: cancel + relaunch. The relaunch (via _run_source)
                     # builds a FRESH collector, dropping the wedged pool/session
@@ -618,6 +668,13 @@ class WorkerService:
                     self._zero_progress_streak[source] = 0
                     task.cancel()
                     self._heartbeat[source] = time.monotonic()
+
+            # All launched sources have died and been removed from tracking → the
+            # container is alive but doing nothing. Self-heal: restart so every
+            # source comes back fresh (the done-branch only relaunches sources
+            # still under max_restarts; permanently-dead ones are dropped here).
+            if getattr(self, "_ever_launched", False) and not self._tasks:
+                await self._self_heal_exit("all sources dead — no live collectors remain")
 
     async def _health_reporter(self):
         while not self._stop.is_set():
