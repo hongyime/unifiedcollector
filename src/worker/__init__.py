@@ -110,6 +110,10 @@ class WorkerService:
         # this the heartbeat (only beat before/after run()) goes stale mid-cycle
         # and the watchdog kills a productive collector.
         self._hang_progress_seen: dict[str, int] = {}
+        # Last progress_count for which we wrote a source_health success heartbeat.
+        # Lets the watchdog mark a source healthy on observed progress, not just on
+        # full-cycle completion (covers slow/realtime collectors).
+        self._last_success_progress: dict[str, int] = {}
         # A hung cycle is one that hasn't beat in this many seconds. Generous default
         # (collectors with big subprocess downloads can legitimately run minutes);
         # override per-deployment via COLLECTOR_HANG_TIMEOUT_SECONDS.
@@ -677,6 +681,18 @@ class WorkerService:
                 pass
 
             for source, task in list(self._tasks.items()):
+                # PROGRESS = SUCCESS heartbeat. _mark_source_healthy fires only when
+                # collector.run() returns, which is rare for long-running cycles
+                # (website ~hours) and realtime sources that block in run(). Tie
+                # last_success_at to observed progress_count instead, so source_health
+                # reflects reality for ALL sources (fixes the false "no run in Nh"
+                # alarms that lingered for slow/realtime collectors).
+                _lc = self._collectors.get(source)
+                if _lc is not None:
+                    _pc = getattr(_lc, "progress_count", None)
+                    if _pc is not None and _pc > self._last_success_progress.get(source, -1):
+                        self._last_success_progress[source] = _pc
+                        await self._mark_source_healthy(source)
                 if task.done():
                     crashes = self._crash_counts.get(source, 0)
                     if crashes >= self.max_restarts:
