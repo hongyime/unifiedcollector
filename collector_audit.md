@@ -15,6 +15,18 @@
   1. **Startup rate-limit sleep** (`e1858d8`): instagram slept up to 1h/relaunch on a stale persisted streak even though Playwright bypasses that throttle → skipped in playwright-primary mode.
   2. **Dead-session, no rotation** (`e438110`): collector always used `cookie_accounts[0]`=bryanseah234, whose IG session is **401 (expired)**. Session probe: bryanseah234=401, shotsbyseah234=401, **cchmsmediaclub/oopspwned/prawnproductions234=200**. Now rotates to a healthy account on 401 (uses existing accounts — NO credential change). _Note for user: 2 of 5 IG sessions are dead (401); 3 are alive, so collection continues._
 
+## INSTAGRAM posts=0 — THIRD & ACTUAL ROOT CAUSE (`6434f07`)
+After the startup-sleep fix and the dead-session rotation, profiles fetched fine
+via cchmsmediaclub but `instagram_posts` STILL = 0. The real culprit: `_upsert_post`
+passed the raw dict `node` to the jsonb `metadata` column. No dict->jsonb codec is
+registered (connection.py), so asyncpg raised on EVERY insert — and the callers wrap
+the upsert in `except: pass`, so it failed silently while logging "upserted 12 posts".
+Fix: `json.dumps(node, default=str)`. (Three stacked bugs total: startup-sleep,
+no-rotation-on-401, jsonb-metadata. All fixed.)
+**Lesson/follow-up:** the bare `except: pass` around `_upsert_post` hid this for a
+long time — worth replacing with a logged exception. Other jsonb inserts
+(relationships ~2442, profile_photo_history ~2283) may share the dict->jsonb risk.
+
 ## STRAVA start_latlng FIX + THROUGHPUT PUSH (2026-06-13, `65b6916`/`81018f7`)
 - ✅ **Strava start_latlng** — `_collect_gps_streams` now backfills start/end from the GPS track (COALESCE) when the API summary omits them (privacy-zone activities). Historical backfill ran: **258 activities fixed, 0 remaining NULL** (485/485 with streams now have coords). Forward fix deployed.
 - ✅ **Throughput pushed** (env, monitor + tune down if throttled): telegram `BACKFILL_MSG_PER_SEC 20→80`, whatsapp `BACKFILL_REQ_PER_MIN 5→12` + media batch `50→100`, beeper `page_size 50→150` (new `BEEPER_PAGE_SIZE`), website `MAX_CONCURRENT_TASKS 5→10`. Early monitor: telegram FloodWait=0, no throttling observed.
