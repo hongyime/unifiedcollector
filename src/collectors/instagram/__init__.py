@@ -1762,7 +1762,10 @@ class InstagramCollector(BaseCollector):
             node.get("edge_media_preview_like", {}).get("count", 0),
             node.get("edge_media_to_comment", {}).get("count", 0),
             datetime.fromtimestamp(node.get("taken_at_timestamp", time.time())),
-            node
+            # metadata is a jsonb column; asyncpg has no dict->jsonb codec here, so
+            # a raw dict threw on EVERY post (silently swallowed by callers' bare
+            # except) => instagram_posts stayed empty. Encode to a JSON string.
+            json.dumps(node, default=str),
             )
 
     async def _download_node(self, node: dict, uid: str, entity_name: str, content_id: str, parent_node: dict | None = None):
