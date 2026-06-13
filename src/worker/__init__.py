@@ -1,8 +1,11 @@
 import asyncio
+import collections
 import json
 import logging
 import os
 import signal
+import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,6 +15,63 @@ from src.core.drive_check import check_drive, wait_for_drive
 from src.db.connection import get_pool, close_pool
 
 logger = logging.getLogger(__name__)
+
+
+class _FatalSpinLogWatcher(logging.Handler):
+    """Self-healing trigger for unrecoverable in-process error FLOODS.
+
+    Some wedges never crash, hang, or register as zero-progress, so the watchdog's
+    other self-heal triggers miss them — most notably the Telethon MTProto desync
+    ("Too many messages had to be ignored consecutively"), where the broken state
+    lives in the session/process and a soft collector relaunch can't clear it.
+    Also covers SQLite "database is locked" OS-level locks.
+
+    Attached to the root logger; when a known-fatal pattern floods past a rate
+    threshold it hard-exits (os._exit 42) so Docker's restart:unless-stopped
+    restarts the container with a clean slate. Gated by COLLECTOR_SELF_HEAL_RESTART.
+    """
+
+    PATTERNS = (
+        "too many messages had to be ignored consecutively",
+        "security error while unpacking a received message",
+        "server sent a very new message",   # telethon message-id desync
+        "database is locked",               # sqlite OS-level lock
+    )
+
+    def __init__(self):
+        super().__init__(level=logging.WARNING)
+        self._window = float(os.getenv("COLLECTOR_SELFHEAL_LOG_WINDOW", "120"))
+        self._threshold = int(os.getenv("COLLECTOR_SELFHEAL_LOG_THRESHOLD", "25"))
+        self._hits: "collections.deque[float]" = collections.deque()
+        self._lock = threading.Lock()
+
+    def emit(self, record):
+        if os.getenv("COLLECTOR_SELF_HEAL_RESTART", "true").lower() != "true":
+            return
+        try:
+            msg = record.getMessage().lower()
+        except Exception:
+            return
+        if not any(p in msg for p in self.PATTERNS):
+            return
+        now = time.monotonic()
+        with self._lock:
+            self._hits.append(now)
+            while self._hits and now - self._hits[0] > self._window:
+                self._hits.popleft()
+            count = len(self._hits)
+        if count >= self._threshold:
+            # "selfheal" logger name avoids re-matching our own message here.
+            logging.getLogger("selfheal").critical(
+                "SELF-HEAL: fatal log pattern flooded (%d hits in %.0fs) — exiting "
+                "for clean container restart", count, self._window,
+            )
+            try:
+                sys.stdout.flush()
+                sys.stderr.flush()
+            except Exception:
+                pass
+            os._exit(42)
 
 
 class WorkerService:
@@ -79,6 +139,15 @@ class WorkerService:
     async def start(self, sources: list[str]):
         logger.info("Worker service starting with sources: %s", sources)
         self._started_at = time.monotonic()
+
+        # Self-heal trigger for in-process error floods (e.g. Telethon MTProto
+        # desync) that don't crash/hang/zero-progress. Attached to root so it
+        # sees telethon's own logger too.
+        try:
+            logging.getLogger().addHandler(_FatalSpinLogWatcher())
+            logger.info("worker: fatal-spin log watcher installed (self-heal on error flood)")
+        except Exception:
+            logger.warning("worker: could not install fatal-spin log watcher", exc_info=True)
 
         if not check_drive():
             logger.warning("Drive not available, waiting...")
