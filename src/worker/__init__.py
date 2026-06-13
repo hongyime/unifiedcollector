@@ -103,6 +103,13 @@ class WorkerService:
         # exception). Crash-restart already handled the exception case; this closes
         # the silent-hang gap that froze tiktok/youtube/whatsapp.
         self._heartbeat: dict[str, float] = {}
+        # Last collector.progress_count the watchdog observed per source. Used to
+        # treat IN-FLIGHT progress as liveness: a collector.run() that legitimately
+        # runs longer than hang_timeout (e.g. lemon8 fetching 50 note-details +
+        # media serially) still advances progress_count, so it is NOT hung. Without
+        # this the heartbeat (only beat before/after run()) goes stale mid-cycle
+        # and the watchdog kills a productive collector.
+        self._hang_progress_seen: dict[str, int] = {}
         # A hung cycle is one that hasn't beat in this many seconds. Generous default
         # (collectors with big subprocess downloads can legitimately run minutes);
         # override per-deployment via COLLECTOR_HANG_TIMEOUT_SECONDS.
@@ -672,6 +679,26 @@ class WorkerService:
                     continue
                 stalled = time.monotonic() - last
                 if stalled > self.hang_timeout:
+                    # IN-FLIGHT PROGRESS = liveness. Before declaring a hang, check
+                    # whether the live collector advanced its progress_count since
+                    # the last watchdog pass. A long-but-productive cycle (e.g.
+                    # lemon8 serially fetching 50 note-details + downloads) beats
+                    # the heartbeat only at cycle boundaries, so without this it
+                    # looks hung. If it advanced, it's working: refresh + skip.
+                    _live = self._collectors.get(source)
+                    if _live is not None:
+                        _now_progress = getattr(_live, "progress_count", None)
+                        if _now_progress is not None:
+                            _seen = self._hang_progress_seen.get(source)
+                            self._hang_progress_seen[source] = _now_progress
+                            if _seen is None or _now_progress > _seen:
+                                self._heartbeat[source] = time.monotonic()
+                                logger.debug(
+                                    "Watchdog: %s slow but ADVANCING (progress %s, "
+                                    "%.0fs since last beat) -- not hung",
+                                    source, _now_progress, stalled,
+                                )
+                                continue
                     # Hangs use a separate budget from crash exceptions so that
                     # a source that hangs occasionally but also completes cycles
                     # successfully is never permanently killed. _hang_counts resets
