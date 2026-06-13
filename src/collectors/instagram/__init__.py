@@ -181,6 +181,10 @@ class InstagramCollector(BaseCollector):
         self._photo_tracker = ProfilePhotoTracker()
         self._session_max_age_days = int(os.getenv("INSTA_SESSION_MAX_AGE_DAYS", "7"))
         self._warmed_up = False
+        # Cookie accounts whose IG session returned 401/403 (dead) this process.
+        # collect() skips these and rotates to a healthy account. Reset on restart.
+        self._dead_cookie_accounts: set[str] = set()
+        self._session_auth_dead = False
         self._daily_views: dict[str, int] = {}
         self._daily_actions: dict[str, int] = {}
 
@@ -652,14 +656,26 @@ class InstagramCollector(BaseCollector):
                     len(accounts), min_remaining,
                 )
                 return
-        # Iterate targets and collect each one
-        # Pick the first available cookie account (rotate on 429)
+        # Iterate targets and collect each one.
+        # Pick the first cookie account whose session is NOT known-dead. A 401 on
+        # the web_profile_info fetch means that account's IG session expired; we
+        # mark it dead (for this process) and rotate to the next configured account
+        # rather than spinning on a dead session. NOTE: this uses the EXISTING
+        # configured accounts — it does not change/rotate any credential value.
         cookie_accounts = list(self._account_browser_cookies.keys())
         if not cookie_accounts:
             logger.warning("instagram: no cookie accounts available — skipping cycle")
             return
 
-        acct_name = cookie_accounts[0]
+        _healthy = [a for a in cookie_accounts if a not in self._dead_cookie_accounts]
+        if not _healthy:
+            logger.warning(
+                "instagram: all %d cookie accounts have dead (401) sessions — "
+                "cycle will likely fail until a session is refreshed", len(cookie_accounts),
+            )
+            _healthy = cookie_accounts  # try anyway
+        acct_name = _healthy[0]
+        self._session_auth_dead = False
         # Wire a REAL Account (stable per-account fingerprint: UA + device_id)
         # and set it as the current account BEFORE the first request. Previously
         # this used a throwaway placeholder and left _current_account = None, so
@@ -707,6 +723,18 @@ class InstagramCollector(BaseCollector):
                     logger.warning("instagram: _process_target timed out for %s (120s)", target)
                 except Exception as e:
                     logger.error("instagram: unexpected error for %s: %s", target, e, exc_info=True)
+                # If this account's session is dead (401), stop wasting the cycle on
+                # it — mark it dead and end so the next cycle rotates to a healthy
+                # account. (Existing accounts only; no credential change.)
+                if self._session_auth_dead:
+                    self._dead_cookie_accounts.add(acct_name)
+                    logger.warning(
+                        "instagram: account %s session is dead (401) — marked dead, "
+                        "rotating to another account next cycle. Healthy remaining: %s",
+                        acct_name,
+                        [a for a in cookie_accounts if a not in self._dead_cookie_accounts] or "NONE",
+                    )
+                    break
                 await asyncio.sleep(2)
 
         # If the entire cycle completed without triggering any 429s, clear the
@@ -1420,6 +1448,16 @@ class InstagramCollector(BaseCollector):
                     return None
 
                 status = result.get("status") if isinstance(result, dict) else None
+                if status in (401, 403):
+                    # Dead/expired session for the active account — signal collect()
+                    # to mark it and rotate to a healthy account.
+                    self._session_auth_dead = True
+                    logger.warning(
+                        "Playwright Mode-β: %s returned %s for %s — session expired/unauthorized",
+                        self._current_account.name if self._current_account else "?",
+                        status, username,
+                    )
+                    return None
                 if status != 200:
                     logger.info(
                         "Playwright Mode-β: in-page fetch for %s returned status=%s",
