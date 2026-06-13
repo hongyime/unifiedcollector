@@ -6,6 +6,11 @@
 
 ---
 
+## STRAVA start_latlng FIX + THROUGHPUT PUSH (2026-06-13, `65b6916`/`81018f7`)
+- ✅ **Strava start_latlng** — `_collect_gps_streams` now backfills start/end from the GPS track (COALESCE) when the API summary omits them (privacy-zone activities). Historical backfill ran: **258 activities fixed, 0 remaining NULL** (485/485 with streams now have coords). Forward fix deployed.
+- ✅ **Throughput pushed** (env, monitor + tune down if throttled): telegram `BACKFILL_MSG_PER_SEC 20→80`, whatsapp `BACKFILL_REQ_PER_MIN 5→12` + media batch `50→100`, beeper `page_size 50→150` (new `BEEPER_PAGE_SIZE`), website `MAX_CONCURRENT_TASKS 5→10`. Early monitor: telegram FloodWait=0, no throttling observed.
+- **Throughput risk tiers (advisory):** SAFE to push (self-correcting/quota-bound): telegram reads, beeper, website crawl, github (already at API ceiling, no gain). PUSH CAUTIOUSLY (ban-sensitive): whatsapp history, youtube downloads. DON'T push: tiktok (instagram-family fingerprinting, high ban risk) — left at MIN/MAX_SLEEP 0.5/2.0.
+
 ## HEALTH SWEEP (2026-06-13 ~03:20 UTC) + REMAINING PLAN
 
 **All 21 containers healthy** (rabbitmq recovered). Per-scraper assessment:
