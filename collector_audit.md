@@ -6,6 +6,12 @@
 
 ---
 
+## Latest changes (2026-06-13, direct implementation)
+
+- ✅ **Instagram Playwright-PRIMARY** (`a66fcf8`): `INSTA_PLAYWRIGHT_PRIMARY` (default true) — browser fetch is now the primary profile path for max success rate; raw httpx is the fallback. Slower but bypasses the IP/endpoint throttle.
+- ✅ **Self-healing container restart** (`a66fcf8`): `_self_heal_exit()` in `src/worker/__init__.py` exits the process (Docker `restart:unless-stopped` → clean restart) on the three terminal wedge states the watchdog detects (zero-progress HARD, max hang cycles, all-sources-dead). Fixes the class of in-process wedge (e.g. Telegram MTProto desync) that soft-relaunch can't clear. Gated by `COLLECTOR_SELF_HEAL_RESTART` (default true).
+- ✅ **Per-platform "famous filters" confirmed intact** (no change needed): instagram `FILTER_MAX_FOLLOWERS=960`, tiktok follower cap (`tiktok/__init__.py:321`), youtube `YOUTUBE_MAX_SUBSCRIBERS` (`youtube/__init__.py:132`). All apply at collection time regardless of fetch path.
+
 ## Orchestration status
 
 | Phase | Item | Status | Notes |
