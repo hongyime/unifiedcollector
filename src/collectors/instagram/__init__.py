@@ -576,7 +576,28 @@ class InstagramCollector(BaseCollector):
         # DB-persisted global rate-limit check: survives collector relaunches.
         # last_processed_id format: "{expiry_epoch}:{consecutive_429s}"
         # Older rows with just a float are also accepted for backward compat.
-        if self.pool is not None:
+        #
+        # SKIP this sleep entirely in Playwright-primary mode: the persisted
+        # rate-limit reflects the raw-httpx web_profile_info throttle, which the
+        # browser path bypasses. Otherwise a stale streak made instagram sleep up
+        # to an hour on every relaunch and collect almost nothing (profiles stale,
+        # posts=0). Mirrors the _process_target cooldown-gate bypass.
+        _pw_primary = os.getenv("INSTA_PLAYWRIGHT_PRIMARY", "true").lower() == "true"
+        if _pw_primary and self.pool is not None:
+            # Restore the streak (for backoff bookkeeping) but do NOT sleep.
+            try:
+                async with self.pool.acquire() as _conn:
+                    _row = await _conn.fetchrow(
+                        "SELECT last_processed_id FROM service_cursors "
+                        "WHERE service = 'instagram_rate_limit'",
+                    )
+                if _row and _row["last_processed_id"]:
+                    _parts = _row["last_processed_id"].split(":", 1)
+                    if len(_parts) == 2:
+                        self._consecutive_429s = int(_parts[1])
+            except Exception:
+                pass
+        if not _pw_primary and self.pool is not None:
             try:
                 async with self.pool.acquire() as _conn:
                     _row = await _conn.fetchrow(
