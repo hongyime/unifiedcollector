@@ -662,6 +662,32 @@ class InstagramCollector(BaseCollector):
         # mark it dead (for this process) and rotate to the next configured account
         # rather than spinning on a dead session. NOTE: this uses the EXISTING
         # configured accounts — it does not change/rotate any credential value.
+        # Hot-reload cookie files each cycle so newly-added or REFRESHED cookie
+        # files are picked up WITHOUT a container restart. A changed cookie file
+        # (by content hash) re-enables that account — so refreshing a dead 401
+        # account's cookie clears it from the dead set automatically. Unchanged
+        # dead accounts stay dead (no wasted re-probe every cycle).
+        try:
+            import hashlib as _hl
+            self._account_browser_cookies = self._auto_discover_cookies()
+            _hashes = getattr(self, "_cookie_file_hashes", {})
+            for _name, _path in self._account_browser_cookies.items():
+                try:
+                    with open(_path, "rb") as _f:
+                        _h = _hl.md5(_f.read()).hexdigest()
+                except Exception:
+                    continue
+                if _hashes.get(_name) != _h:
+                    if _name in self._dead_cookie_accounts:
+                        self._dead_cookie_accounts.discard(_name)
+                        logger.info("instagram: cookie for %s changed — re-enabling account", _name)
+                    elif _name not in _hashes:
+                        logger.info("instagram: discovered new cookie account: %s", _name)
+                    _hashes[_name] = _h
+            self._cookie_file_hashes = _hashes
+        except Exception as _e:
+            logger.debug("instagram: cookie hot-reload failed (using cached): %s", _e)
+
         cookie_accounts = list(self._account_browser_cookies.keys())
         if not cookie_accounts:
             logger.warning("instagram: no cookie accounts available — skipping cycle")

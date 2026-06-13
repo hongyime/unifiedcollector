@@ -207,6 +207,13 @@ class StravaCollector(BaseCollector):
         except Exception as e:
             logger.warning("strava: athlete name enrichment failed: %s", e)
 
+        # Recurring privacy-zone backfill for historical activities (API mode only).
+        if self._use_api:
+            try:
+                await self._backfill_privacy_zones()
+            except Exception as e:
+                logger.warning("strava: privacy-zone backfill failed: %s", e)
+
         # Scrape activity pages for photos, polylines, kudos, comments
         page_batch = int(os.getenv("STRAVA_PAGE_SCRAPE_BATCH", "200"))
         try:
@@ -815,6 +822,72 @@ class StravaCollector(BaseCollector):
             if not url: continue
             if not self.is_known(f"{activity_id}_{i}"):
                 await self.download_media({"entity_id": aid, "entity_name": aname, "content_type": "activity", "content_id": f"{activity_id}_{i}", "url": url, "extension": "jpg", "source_url": f"https://www.strava.com/activities/{activity_id}", "raw": photo})
+
+    async def _backfill_privacy_zones(self):
+        """Recurring backfill: populate privacy-zone flags for historical activities
+        that have a stored GPS stream but no flag yet (privacy_zone_start IS NULL).
+
+        Re-fetches the activity summary from the API and compares start/end to the
+        stored stream (same logic as _collect_gps_streams). Self-drains one batch
+        per cycle (rate-limited via _delay), piggybacking the recurring per-cycle
+        backfill pattern. Owned activities resolve to real flags; others' that can't
+        be re-fetched (404/403) get stream_status='ok_unverifiable' so they are not
+        retried forever. Batch size via STRAVA_PRIVACY_BACKFILL_BATCH (default 25).
+        """
+        if not self.pool or not self._access_token:
+            return
+        batch = int(os.getenv("STRAVA_PRIVACY_BACKFILL_BATCH", "25"))
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT a.id, a.platform_activity_id, s.latlng "
+                "FROM strava_activities a JOIN strava_gps_streams s ON s.activity_id = a.id "
+                "WHERE a.privacy_zone_start IS NULL AND a.stream_status = 'ok' "
+                "LIMIT $1", batch,
+            )
+        if not rows:
+            return
+        done = 0
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            for r in rows:
+                if self._stop.is_set():
+                    break
+                try:
+                    await self._delay()
+                    resp = await client.get(
+                        f"{STRAVA_API}/activities/{r['platform_activity_id']}",
+                        headers={"Authorization": f"Bearer {self._access_token}"},
+                    )
+                    if resp.status_code != 200:
+                        # Can't re-fetch (another athlete's restricted activity etc.)
+                        # — mark unverifiable so the WHERE clause skips it next cycle.
+                        async with self.pool.acquire() as conn:
+                            await conn.execute(
+                                "UPDATE strava_activities SET stream_status='ok_unverifiable' "
+                                "WHERE id=$1 AND privacy_zone_start IS NULL",
+                                r["id"],
+                            )
+                        continue
+                    act = resp.json()
+                    path = r["latlng"] if isinstance(r["latlng"], list) else json.loads(r["latlng"])
+                    if not path:
+                        continue
+                    pzs = _is_truncated(act.get("start_latlng"), path[0])
+                    pze = _is_truncated(act.get("end_latlng"), path[-1])
+                    tps = f"{path[0][0]},{path[0][1]}" if pzs else None
+                    tpe = f"{path[-1][0]},{path[-1][1]}" if pze else None
+                    async with self.pool.acquire() as conn:
+                        await conn.execute(
+                            "UPDATE strava_activities SET privacy_zone_start=$1, "
+                            "privacy_zone_end=$2, truncation_point_start=$3, "
+                            "truncation_point_end=$4 WHERE id=$5",
+                            pzs, pze, tps, tpe, r["id"],
+                        )
+                    done += 1
+                except Exception as e:
+                    logger.debug("strava privacy backfill %s failed: %s",
+                                 r["platform_activity_id"], e)
+        if done:
+            logger.info("strava: privacy-zone backfill processed %d activities this cycle", done)
 
     async def _collect_gps_streams(self, client: httpx.AsyncClient, activity: dict, aid: str):
         activity_id = str(activity["id"])
