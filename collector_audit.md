@@ -111,11 +111,36 @@ Because `_current_account` is `None`, `rate_limiter.async_wait(..., account=None
 
 ---
 
-## ⏳ Subagent 1 — Throughput & State Auditor (PENDING — re-run after 11:20pm SGT)
+## Subagent 1 — Throughput & State Auditor (subagent BLOCKED twice by session limit; **done directly by orchestrator instead**)
 
-> **TODO(agent):** Re-spawn this Sonnet subagent after the session limit resets. Objective: diagnose why WhatsApp, Beeper, Lemon8, Telegram stay idle / never set `last_processed_id`, why Telegram's rate limits are underutilized, and whether Strava spidering + Telegram/WhatsApp/Beeper backfills actually run. Key paths: `src/worker/__init__.py`, `src/core/{checkpoint,source_config,rate_limiter,human_rate_limiter,sliding_window_limiter,adaptive_rate,spider_discover}.py`, `src/collectors/{telegram,whatsapp,beeper,lemon8,strava}/__init__.py`, `migrations/` + `docker/` for the `service_cursors` schema. DB: postgres `unifiedcollector`, user `collector`. Output: per-service root cause with file:line + concrete fix.
+The Sonnet subagent hit the account session limit on both attempts (2nd reset 4:20am SGT) and emitted no report. Diagnosed directly from live state + logs.
 
-_(findings to be filled in on re-run)_
+### Live cursor/health snapshot (2026-06-13 ~01:17 UTC)
+| service | last_processed_id | status | last_processed_at |
+|---|---|---|---|
+| beeper | (empty) | running | NULL — never persisted |
+| whatsapp | (empty) | running | NULL — never persisted |
+| telegram | shotsbyseah234 | idle | 06-12 13:43 (stale ~11h) |
+| lemon8 | ewjl319 | idle | 06-12 09:34 (stale ~16h) |
+| github | MauricioFauth | idle | 06-13 00:52 (recent) |
+| instagram/strava/tiktok/youtube/website/search | set | running | recent ✅ |
+
+### ✅ ROOT CAUSE #1 (systemic, multi-collector): Postgres connection-pool exhaustion
+- `collector_beeper`, `collector_whatsapp`, `collector_lemon8` containers all crash with **asyncpg `TimeoutError` on connect**; all four idle containers report **`unhealthy`**.
+- Postgres `max_connections = 50` (`docker/postgres/postgres.conf:2`), but each pool is `min_size=2, max_size=20` (`src/db/connection.py:51`) and there are **~14 pools** (11 collectors + dashboard + scheduler + worker). Worst-case demand 14×20 = 280 ≫ 50. Live check showed **40/50 used, 33 idle** — any burst exceeds 50 → connect timeouts → the crashing collectors never reach `save_progress`, so they never set a cursor.
+- **FIX APPLIED (commit pending — Docker engine 500s mid-deploy, retrying):**
+  - `docker/postgres/postgres.conf`: `max_connections 50 → 200`.
+  - `src/db/connection.py`: pool `min_size 2→1`, `max_size 20→10`, both env-overridable (`DB_POOL_MIN_SIZE`/`DB_POOL_MAX_SIZE`). 14×10 = 140 < 200, with headroom.
+
+### ⏳ ROOT CAUSE #2: Telegram MTProto session desync (separate from DB)
+- `collector_telegram` is spamming Telethon `Server sent a very new message ... ignoring` + `Security error while unpacking a received message: Too many messages had to be ignored consecutively`. This is a known Telethon symptom of **server message-id/clock desync or a duplicated session** — the client never makes forward progress, so the cursor is stale (~11h) and shows a stale value.
+- _Note: its cursor value `shotsbyseah234` is an Instagram handle — likely a stale/cross-written checkpoint from before; needs follow-up once the session is healthy._
+- **NEXT:** likely needs the Telegram session file regenerated / clock sync on the host, or ensuring only one process uses the session. To investigate after the DB fix lands and beeper/whatsapp/lemon8 recover.
+
+### TODO (remaining throughput items)
+- Verify Telegram/WhatsApp/Beeper backfill paths actually run once DB connectivity is stable.
+- Confirm Strava spidering enqueues discovery (strava cursor is live/running, looks OK).
+- Telethon rate underutilization review (deferred until session desync fixed).
 
 ---
 

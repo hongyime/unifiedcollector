@@ -48,7 +48,17 @@ async def get_pool() -> asyncpg.Pool:
     async with _pool_lock:
         if _pool is None:
             ssl = _ssl_context()
-            kwargs = dict(min_size=2, max_size=20, command_timeout=60,
+            # Per-container pool sizing. With ~14 pools (11 collectors +
+            # dashboard + scheduler + worker) sharing one Postgres, the product
+            # of max_size × pools must stay under the server's max_connections,
+            # or bursts exhaust the slots and asyncpg raises TimeoutError on
+            # connect (observed crashing beeper/whatsapp/lemon8). Defaults:
+            # min_size=1 (small idle footprint), max_size=10 (14×10=140 < the
+            # server's 200 ceiling). Override per-container via env if needed.
+            import os as _os
+            _min = int(_os.getenv("DB_POOL_MIN_SIZE", "1"))
+            _max = int(_os.getenv("DB_POOL_MAX_SIZE", "10"))
+            kwargs = dict(min_size=_min, max_size=_max, command_timeout=60,
                           max_inactive_connection_lifetime=300)
             if ssl is not None:
                 kwargs["ssl"] = ssl
