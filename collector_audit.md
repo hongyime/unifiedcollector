@@ -133,10 +133,19 @@ The Sonnet subagent hit the account session limit on both attempts (2nd reset 4:
   - `src/db/connection.py`: pool `min_size 2→1`, `max_size 20→10`, both env-overridable (`DB_POOL_MIN_SIZE`/`DB_POOL_MAX_SIZE`). 14×10 = 140 < 200, headroom.
   - **Post-deploy verification:** collector connections **40 → 17**; beeper/whatsapp/lemon8 `TimeoutError` count over 3 min = **0** (was crash-looping); all three log "Database pool created" and containers are `Up`. Connection-exhaustion resolved.
 
-### ⏳ ROOT CAUSE #2: Telegram MTProto session desync (separate from DB)
-- `collector_telegram` is spamming Telethon `Server sent a very new message ... ignoring` + `Security error while unpacking a received message: Too many messages had to be ignored consecutively`. This is a known Telethon symptom of **server message-id/clock desync or a duplicated session** — the client never makes forward progress, so the cursor is stale (~11h) and shows a stale value.
-- _Note: its cursor value `shotsbyseah234` is an Instagram handle — likely a stale/cross-written checkpoint from before; needs follow-up once the session is healthy._
-- **NEXT:** likely needs the Telegram session file regenerated / clock sync on the host, or ensuring only one process uses the session. To investigate after the DB fix lands and beeper/whatsapp/lemon8 recover.
+### ✅ POST-FIX OUTCOME — the "idle" collectors are now collecting
+Verified ~02:00-02:04 UTC after the DB fix + recreate:
+- **beeper** → healthy; `Beeper cycle done: accounts=11 chats=25 messages=152 errors=0` (actively syncing).
+- **lemon8** → healthy; `Feed scraped: 153 media, 50 users`, upserting posts (e.g. `7528360839162642961`).
+- **telegram** → healthy; MTProto desync gone (see #2).
+- **whatsapp** → running, connected to Redis + RabbitMQ (event/queue-driven via wa-bridges).
+
+**Cursor red-herring correction:** beeper & whatsapp load `cursor last_id=None` *by design* — they are bridge/event-driven and track dedupe state via "known content_ids from DB" (beeper 6818, whatsapp 768, lemon8 28071), NOT the `last_processed_id` column. Their empty cursor was therefore never the real problem; the DB-connection crash-loop was. lemon8 DOES use a real cursor (updates at cycle end). The single root cause behind all four sitting idle was Root Cause #1 (DB exhaustion).
+
+### ✅ ROOT CAUSE #2: Telegram MTProto session desync (separate from DB) — CLEARED by restart
+- `collector_telegram` was spamming Telethon `Server sent a very new message ... ignoring` + `Too many messages had to be ignored consecutively`. Known Telethon symptom of **MTProto message-id/clock desync** — the client made no forward progress (stale ~11h cursor).
+- **RESOLVED:** the container recreate cleared the corrupt in-memory MTProto state — desync occurrences over 2 min after restart = **0**, container now `healthy`. If it recurs, the durable fix is host clock-sync / regenerating the session file / ensuring a single process owns the session.
+- _Leftover: cursor value `shotsbyseah234` is a stale cross-written checkpoint (an IG handle); harmless, will be overwritten on the next real telegram checkpoint. Watch that it advances._
 
 ### TODO (remaining throughput items)
 - Verify Telegram/WhatsApp/Beeper backfill paths actually run once DB connectivity is stable.
