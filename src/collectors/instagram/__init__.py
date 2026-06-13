@@ -1078,15 +1078,22 @@ class InstagramCollector(BaseCollector):
         initial_edges = (user_data.get("edge_owner_to_timeline_media", {})
                          .get("edges", []))
         if initial_edges:
+            _saved = 0
             for edge in initial_edges:
                 node = edge.get("node", {})
                 if node and node.get("shortcode"):
                     try:
-                        await self._upsert_post(node, uid)
-                    except Exception:
-                        pass
-            logger.info("instagram/%s: upserted %d posts from profile response",
-                        entity_name, len(initial_edges))
+                        # _process_post upserts the row AND downloads the media
+                        # (display_url/video_url/sidecar children) — previously this
+                        # only called _upsert_post, so post media was never fetched
+                        # (instagram had 0 post media, only profile photos).
+                        await self._process_post(node, uid, entity_name)
+                        _saved += 1
+                    except Exception as e:
+                        logger.debug("instagram/%s: process_post failed for %s: %s",
+                                     entity_name, node.get("shortcode"), e)
+            logger.info("instagram/%s: processed %d/%d posts from profile response (with media)",
+                        entity_name, _saved, len(initial_edges))
 
         # Paginated post enumeration: GraphQL (Mode α) → instaloader (Mode γ)
         # → Playwright (Mode β). Each returns True on success.

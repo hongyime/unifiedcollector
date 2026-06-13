@@ -156,6 +156,33 @@ class TelegramWorker:
             "[worker=%d account=%s] Connecting Telegram (session=%s)",
             self.worker_id, self.account.name, session_file,
         )
+        # Harden the .session SQLite against "database is locked" BEFORE Telethon
+        # opens it. The files live on the WSL2 Docker volume (slow fsync), so the
+        # default journal mode + 5s busy_timeout made Telethon's concurrent session
+        # access (update loop writing while queries read) crash the keepalive loop.
+        # Setting journal_mode=WAL via a direct sqlite3 connection is PERSISTENT
+        # (stored in the DB header), so it sticks for every subsequent Telethon
+        # connection — unlike the previous post-connect attempt, which never engaged
+        # (no -wal files were ever created). Only for file-backed sessions.
+        if isinstance(session_file, str):
+            _spath = session_file if session_file.endswith(".session") else f"{session_file}.session"
+            if os.path.exists(_spath):
+                try:
+                    import sqlite3 as _sqlite
+                    _c = _sqlite.connect(_spath, timeout=30)
+                    _c.execute("PRAGMA journal_mode=WAL")
+                    _c.execute("PRAGMA busy_timeout=30000")
+                    _c.commit()
+                    _c.close()
+                    logger.info(
+                        "[worker=%d account=%s] session SQLite set to WAL (persistent)",
+                        self.worker_id, self.account.name,
+                    )
+                except Exception as _pragma_err:
+                    logger.warning(
+                        "[worker=%d account=%s] could not set WAL on session: %s",
+                        self.worker_id, self.account.name, _pragma_err,
+                    )
         try:
             self.state = SessionState.CONNECTING
             raw_client = TelegramClient(session_file, api_id, api_hash)
@@ -164,29 +191,6 @@ class TelegramWorker:
             # authorized, which blocks forever in a container (=> "EOF when
             # reading a line"). We never want that — fail cleanly instead.
             await raw_client.connect()
-            # Harden the SQLite session against "database is locked": the .session
-            # files live on the WSL2-backed Docker volume where fsync is slow, so
-            # Telethon's concurrent session access (update loop writing while
-            # queries read) hits the default 5s lock timeout and crashes the
-            # keepalive loop. busy_timeout makes SQLite WAIT for the lock instead
-            # of erroring; WAL lets readers and the writer proceed concurrently.
-            # Best-effort: file-backed sessions only (StringSession has no _conn).
-            try:
-                _sess = getattr(raw_client, "session", None)
-                _conn = getattr(_sess, "_conn", None) if _sess is not None else None
-                if _conn is not None:
-                    _conn.execute("PRAGMA busy_timeout=30000")
-                    _conn.execute("PRAGMA journal_mode=WAL")
-                    _conn.commit()
-                    logger.debug(
-                        "[worker=%d account=%s] session SQLite hardened (busy_timeout=30s, WAL)",
-                        self.worker_id, self.account.name,
-                    )
-            except Exception as _pragma_err:  # pragma: no cover - defensive
-                logger.debug(
-                    "[worker=%d account=%s] could not set session SQLite pragmas: %s",
-                    self.worker_id, self.account.name, _pragma_err,
-                )
             from src.core.readonly_client import ReadOnlyTelegramClient
             self.client = ReadOnlyTelegramClient(raw_client)
             if not await self.client.is_user_authorized():
