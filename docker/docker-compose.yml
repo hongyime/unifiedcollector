@@ -218,6 +218,9 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
       COLLECTOR_DRIVE_PATH: /media
+      # Throughput push (2026-06-13): crawl spans 421 distinct sites, so more
+      # parallelism is safe (per-site politeness unaffected). 5 -> 10.
+      WEBSITE_MAX_CONCURRENT_TASKS: "10"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     cap_add:
