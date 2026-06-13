@@ -284,6 +284,9 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
       TELEGRAM_SPIDER_ACCOUNTS: "oopspwned,johnfriend101"
+      # Throughput push (2026-06-13): reads are cheap and FloodWait auto-throttles,
+      # so 20->80 msg/s/account is safe. Tune down if FloodWait floods the logs.
+      TELEGRAM_BACKFILL_MSG_PER_SEC: "80"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     cap_add:
@@ -384,6 +387,8 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
       BEEPER_DESKTOP_API_URL: http://host.docker.internal:34076
+      # Throughput push (2026-06-13): larger pages = fewer round-trips per sync.
+      BEEPER_PAGE_SIZE: "150"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     cap_add:
@@ -417,6 +422,11 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
       WHATSAPP_SPIDER_SESSIONS: "session_2"
+      # Throughput push (2026-06-13): backfill 5->12 req/min (history requests are
+      # ban-sensitive, so moderate). Larger media batch. Monitor session-risk; tune
+      # down if WhatsApp flags the session.
+      WHATSAPP_BACKFILL_REQ_PER_MIN: "12"
+      WHATSAPP_MEDIA_ARCHIVAL_BATCH_SIZE: "100"
       # WhatsApp is event-driven: collector.run() blocks in the RabbitMQ
       # consumer loop until messages arrive. The default 1800s watchdog kills
       # it during quiet periods (e.g. overnight). 86400s = 24h gives it room

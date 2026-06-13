@@ -41,6 +41,11 @@ from src.core.base_collector import BaseCollector
 
 logger = logging.getLogger(__name__)
 
+# Page size for Beeper chat/message pagination. Was hardcoded 50; raising it
+# fetches more per round-trip, speeding up sync + backfill. The Beeper Desktop
+# local API comfortably handles 100-200. Override via BEEPER_PAGE_SIZE.
+_BEEPER_PAGE_SIZE = int(os.getenv("BEEPER_PAGE_SIZE", "100"))
+
 
 # ── feature gate ──────────────────────────────────────────────────────────
 
@@ -161,7 +166,7 @@ class BeeperClient:
         return resp.content
 
     async def iter_chats(
-        self, *, account_id: Optional[str] = None, page_size: int = 50
+        self, *, account_id: Optional[str] = None, page_size: int = _BEEPER_PAGE_SIZE
     ) -> AsyncIterator[dict]:
         cursor: Optional[str] = None
         while True:
@@ -181,7 +186,7 @@ class BeeperClient:
         *,
         start_cursor: Optional[str] = None,
         direction: str = "before",
-        page_size: int = 50,
+        page_size: int = _BEEPER_PAGE_SIZE,
     ) -> AsyncIterator[tuple[dict, dict]]:
         """Yield (message, page_meta) pairs.
 
@@ -678,7 +683,7 @@ class BeeperCollector(BaseCollector):
         if w is None:
             return 0
         count = 0
-        async for chat in self.client.iter_chats(page_size=50):
+        async for chat in self.client.iter_chats(page_size=_BEEPER_PAGE_SIZE):
             await w.upsert_chat(chat)
             count += 1
             if self._stop.is_set():
@@ -876,7 +881,7 @@ class BeeperCollector(BaseCollector):
                 final_oldest = oldest_cursor
                 latest_newest = newest_cursor
                 async for msg, meta in self.client.iter_messages(
-                    chat_id, start_cursor=cursor, direction="before", page_size=50
+                    chat_id, start_cursor=cursor, direction="before", page_size=_BEEPER_PAGE_SIZE
                 ):
                     is_new = await w.upsert_message(msg)
                     if is_new:
@@ -906,7 +911,7 @@ class BeeperCollector(BaseCollector):
                 chat_id,
                 start_cursor=newest_cursor,
                 direction="after",
-                page_size=50,
+                page_size=_BEEPER_PAGE_SIZE,
             ):
                 is_new = await w.upsert_message(msg)
                 if is_new:

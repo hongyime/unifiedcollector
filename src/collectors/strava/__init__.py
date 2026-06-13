@@ -793,10 +793,29 @@ class StravaCollector(BaseCollector):
             resp = await client.get(f"{STRAVA_API}/activities/{activity_id}/streams", headers={"Authorization": f"Bearer {self._access_token}"}, params={"keys": "latlng,time,altitude", "key_by_type": "true"})
             if resp.status_code == 200:
                 streams = resp.json()
+                latlng_data = streams.get("latlng", {}).get("data", [])
                 async with self.pool.acquire() as conn:
                     act_row = await conn.fetchrow("SELECT id FROM strava_activities WHERE platform_activity_id = $1", int(activity_id))
                     if act_row:
-                        await conn.execute("INSERT INTO strava_gps_streams (activity_id, latlng, time, altitude) VALUES ($1, $2, $3, $4)", act_row['id'], json.dumps(streams.get("latlng", {}).get("data", [])), json.dumps(streams.get("time", {}).get("data", [])), json.dumps(streams.get("altitude", {}).get("data", [])))
+                        await conn.execute("INSERT INTO strava_gps_streams (activity_id, latlng, time, altitude) VALUES ($1, $2, $3, $4)", act_row['id'], json.dumps(latlng_data), json.dumps(streams.get("time", {}).get("data", [])), json.dumps(streams.get("altitude", {}).get("data", [])))
+                        # Backfill start/end coords from the GPS track when the API
+                        # summary omitted them. Privacy-zone activities return empty
+                        # start_latlng/end_latlng in the summary, but the stream still
+                        # carries the privacy-safe (zone-truncated) path. COALESCE only
+                        # fills NULLs so an authoritative summary value is never lost.
+                        # This is the API-path equivalent of the cookie path's backfill.
+                        if latlng_data:
+                            def _fmt(pt):
+                                return f"{pt[0]},{pt[1]}" if pt and len(pt) == 2 else None
+                            sll, ell = _fmt(latlng_data[0]), _fmt(latlng_data[-1])
+                            if sll or ell:
+                                await conn.execute(
+                                    "UPDATE strava_activities SET "
+                                    "start_latlng = COALESCE(start_latlng, $1), "
+                                    "end_latlng   = COALESCE(end_latlng,   $2) "
+                                    "WHERE id = $3",
+                                    sll, ell, act_row['id'],
+                                )
         except Exception as e: logger.debug("GPS stream fetch failed for activity %s: %s", activity_id, e)
 
     async def get_backfill_items(self, batch_size: int) -> list[dict]:
