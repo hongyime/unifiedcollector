@@ -25,6 +25,39 @@ STRAVA_API = "https://www.strava.com/api/v3"
 TOKEN_URL = "https://www.strava.com/oauth/token"
 STRAVA_WEB = "https://www.strava.com"
 
+# Privacy-zone truncation: distance (m) beyond which a summary start/end is
+# considered to have been clipped by a Strava privacy zone vs the GPS track.
+_PRIVACY_ZONE_THRESHOLD_M = 50.0
+
+
+def _haversine_m(lat1, lon1, lat2, lon2) -> float:
+    """Great-circle distance in metres between two lat/lon points."""
+    import math
+    r = 6371000.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.asin(min(1.0, math.sqrt(a)))
+
+
+def _is_truncated(summary_latlng, track_point) -> bool:
+    """True if the GPS track start/end was hidden by a privacy zone.
+
+    summary_latlng: the API summary [lat, lng] (empty/None when Strava omitted it).
+    track_point:    the first/last [lat, lng] of the actual GPS stream.
+    Privacy zone => either the summary was omitted entirely (but a track exists),
+    or the summary point sits >threshold metres from the real track endpoint.
+    """
+    if not track_point or len(track_point) != 2:
+        return False
+    if not summary_latlng or len(summary_latlng) != 2:
+        # Summary omitted but a real track point exists => the endpoint was hidden.
+        return True
+    return _haversine_m(
+        summary_latlng[0], summary_latlng[1], track_point[0], track_point[1]
+    ) > _PRIVACY_ZONE_THRESHOLD_M
+
 
 class StravaCollector(BaseCollector):
     SOURCE_NAME = "strava"
@@ -799,23 +832,45 @@ class StravaCollector(BaseCollector):
                     if act_row:
                         await conn.execute("INSERT INTO strava_gps_streams (activity_id, latlng, time, altitude) VALUES ($1, $2, $3, $4)", act_row['id'], json.dumps(latlng_data), json.dumps(streams.get("time", {}).get("data", [])), json.dumps(streams.get("altitude", {}).get("data", [])))
                         # Backfill start/end coords from the GPS track when the API
-                        # summary omitted them. Privacy-zone activities return empty
-                        # start_latlng/end_latlng in the summary, but the stream still
-                        # carries the privacy-safe (zone-truncated) path. COALESCE only
-                        # fills NULLs so an authoritative summary value is never lost.
-                        # This is the API-path equivalent of the cookie path's backfill.
+                        # summary omitted them, AND record privacy-zone/truncation
+                        # metadata. Privacy-zone activities return empty summary
+                        # start/end but the stream carries the privacy-safe (zone-
+                        # truncated) path. COALESCE only fills NULL coords so an
+                        # authoritative summary value is never lost. The privacy-zone
+                        # fields are derived fresh from the stream each fetch.
+                        latlng_obj = streams.get("latlng")
+                        if latlng_obj is None:
+                            stream_status = "incomplete"
+                        elif not latlng_data:
+                            stream_status = "truncated_empty"
+                        else:
+                            stream_status = "ok"
+
+                        def _fmt(pt):
+                            return f"{pt[0]},{pt[1]}" if pt and len(pt) == 2 else None
+
+                        sll = ell = tp_start = tp_end = None
+                        pz_start = pz_end = False
                         if latlng_data:
-                            def _fmt(pt):
-                                return f"{pt[0]},{pt[1]}" if pt and len(pt) == 2 else None
                             sll, ell = _fmt(latlng_data[0]), _fmt(latlng_data[-1])
-                            if sll or ell:
-                                await conn.execute(
-                                    "UPDATE strava_activities SET "
-                                    "start_latlng = COALESCE(start_latlng, $1), "
-                                    "end_latlng   = COALESCE(end_latlng,   $2) "
-                                    "WHERE id = $3",
-                                    sll, ell, act_row['id'],
-                                )
+                            pz_start = _is_truncated(activity.get("start_latlng"), latlng_data[0])
+                            pz_end = _is_truncated(activity.get("end_latlng"), latlng_data[-1])
+                            tp_start = sll if pz_start else None
+                            tp_end = ell if pz_end else None
+
+                        await conn.execute(
+                            "UPDATE strava_activities SET "
+                            "start_latlng           = COALESCE(start_latlng, $1), "
+                            "end_latlng             = COALESCE(end_latlng,   $2), "
+                            "stream_status          = $3, "
+                            "privacy_zone_start     = $4, "
+                            "privacy_zone_end       = $5, "
+                            "truncation_point_start = $6, "
+                            "truncation_point_end   = $7 "
+                            "WHERE id = $8",
+                            sll, ell, stream_status, pz_start, pz_end,
+                            tp_start, tp_end, act_row['id'],
+                        )
         except Exception as e: logger.debug("GPS stream fetch failed for activity %s: %s", activity_id, e)
 
     async def get_backfill_items(self, batch_size: int) -> list[dict]:

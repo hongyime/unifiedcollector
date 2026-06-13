@@ -109,6 +109,16 @@ CREATE TABLE IF NOT EXISTS strava_spider_queue (
 
 ALTER TABLE strava_activities ADD COLUMN IF NOT EXISTS summary_polyline TEXT;
 
+-- GPS privacy-zone / truncation metadata (ported from stravatoolkit transform_streams).
+-- stream_status: 'ok' | 'incomplete' (no latlng stream) | 'truncated_empty' (stream
+-- present but no points). privacy_zone_* flags whether the real start/end was hidden
+-- by a Strava privacy zone; truncation_point_* is the first/last VISIBLE coord ("lat,lng").
+ALTER TABLE strava_activities ADD COLUMN IF NOT EXISTS stream_status VARCHAR(20);
+ALTER TABLE strava_activities ADD COLUMN IF NOT EXISTS privacy_zone_start BOOLEAN;
+ALTER TABLE strava_activities ADD COLUMN IF NOT EXISTS privacy_zone_end BOOLEAN;
+ALTER TABLE strava_activities ADD COLUMN IF NOT EXISTS truncation_point_start VARCHAR(50);
+ALTER TABLE strava_activities ADD COLUMN IF NOT EXISTS truncation_point_end VARCHAR(50);
+
 CREATE TABLE IF NOT EXISTS strava_activity_photos (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     platform_photo_id TEXT NOT NULL,

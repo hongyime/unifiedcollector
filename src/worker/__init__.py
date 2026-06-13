@@ -417,6 +417,29 @@ class WorkerService:
             f"Credentials working again — collection resumed."
         )
 
+    async def _mark_source_healthy(self, source: str):
+        """Heartbeat a successful cycle into source_health.
+
+        Without this, last_success_at was NEVER written (only auth-pause/dead/
+        clear-auth touched the table), so the health monitor saw every source as
+        "no run in <forever>" and fired false alarms. This also auto-clears a
+        stale 'dead' status when a previously-dead source starts working again
+        (e.g. lemon8 after the hang fix).
+        """
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO source_health "
+                    "  (source, status, last_error, last_success_at, crash_count, updated_at) "
+                    "VALUES ($1, 'running', NULL, NOW(), 0, NOW()) "
+                    "ON CONFLICT (source) DO UPDATE "
+                    "SET status='running', last_error=NULL, last_success_at=NOW(), "
+                    "    crash_count=0, updated_at=NOW()",
+                    source,
+                )
+        except Exception:
+            logger.debug("Failed to heartbeat source_health for %s", source, exc_info=True)
+
     def _install_signal_handlers(self):
         loop = asyncio.get_event_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
@@ -510,6 +533,7 @@ class WorkerService:
                 self._heartbeat[source] = time.monotonic()
                 self._crash_counts[source] = 0
                 self._hang_counts[source] = 0  # successful cycle clears hang budget
+                await self._mark_source_healthy(source)  # writes last_success_at
                 if self._auth_paused.get(source):
                     await self._clear_auth_pause(source)
 
