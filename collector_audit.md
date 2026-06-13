@@ -128,9 +128,10 @@ The Sonnet subagent hit the account session limit on both attempts (2nd reset 4:
 ### ✅ ROOT CAUSE #1 (systemic, multi-collector): Postgres connection-pool exhaustion
 - `collector_beeper`, `collector_whatsapp`, `collector_lemon8` containers all crash with **asyncpg `TimeoutError` on connect**; all four idle containers report **`unhealthy`**.
 - Postgres `max_connections = 50` (`docker/postgres/postgres.conf:2`), but each pool is `min_size=2, max_size=20` (`src/db/connection.py:51`) and there are **~14 pools** (11 collectors + dashboard + scheduler + worker). Worst-case demand 14×20 = 280 ≫ 50. Live check showed **40/50 used, 33 idle** — any burst exceeds 50 → connect timeouts → the crashing collectors never reach `save_progress`, so they never set a cursor.
-- **FIX APPLIED (commit pending — Docker engine 500s mid-deploy, retrying):**
-  - `docker/postgres/postgres.conf`: `max_connections 50 → 200`.
-  - `src/db/connection.py`: pool `min_size 2→1`, `max_size 20→10`, both env-overridable (`DB_POOL_MIN_SIZE`/`DB_POOL_MAX_SIZE`). 14×10 = 140 < 200, with headroom.
+- **FIX APPLIED & VALIDATED (commit `49425b9`):**
+  - `docker/postgres/postgres.conf`: `max_connections 50 → 200` (live-confirmed `SHOW max_connections = 200`).
+  - `src/db/connection.py`: pool `min_size 2→1`, `max_size 20→10`, both env-overridable (`DB_POOL_MIN_SIZE`/`DB_POOL_MAX_SIZE`). 14×10 = 140 < 200, headroom.
+  - **Post-deploy verification:** collector connections **40 → 17**; beeper/whatsapp/lemon8 `TimeoutError` count over 3 min = **0** (was crash-looping); all three log "Database pool created" and containers are `Up`. Connection-exhaustion resolved.
 
 ### ⏳ ROOT CAUSE #2: Telegram MTProto session desync (separate from DB)
 - `collector_telegram` is spamming Telethon `Server sent a very new message ... ignoring` + `Security error while unpacking a received message: Too many messages had to be ignored consecutively`. This is a known Telethon symptom of **server message-id/clock desync or a duplicated session** — the client never makes forward progress, so the cursor is stale (~11h) and shows a stale value.
