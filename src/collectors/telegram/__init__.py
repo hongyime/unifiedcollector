@@ -191,6 +191,24 @@ class TelegramWorker:
             # authorized, which blocks forever in a container (=> "EOF when
             # reading a line"). We never want that — fail cleanly instead.
             await raw_client.connect()
+            # WAL (set pre-connect) handles concurrent reader+writer, but Telethon's
+            # OWN connection keeps the default 5s busy_timeout, so heavy writers like
+            # collect_dialogs (caching all dialog entities) still threw "database is
+            # locked". Raise busy_timeout on Telethon's live connection so it WAITS
+            # for the lock (up to 30s) instead of failing.
+            try:
+                _conn = getattr(raw_client.session, "_conn", None)
+                if _conn is not None:
+                    _conn.execute("PRAGMA busy_timeout=30000")
+                    logger.info(
+                        "[worker=%d account=%s] telethon conn busy_timeout=30s set",
+                        self.worker_id, self.account.name,
+                    )
+            except Exception as _bt_err:
+                logger.warning(
+                    "[worker=%d account=%s] could not set busy_timeout: %s",
+                    self.worker_id, self.account.name, _bt_err,
+                )
             from src.core.readonly_client import ReadOnlyTelegramClient
             self.client = ReadOnlyTelegramClient(raw_client)
             if not await self.client.is_user_authorized():
