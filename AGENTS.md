@@ -6,6 +6,11 @@ description: Central configuration and documentation for all AI coding agents ac
 
 This file defines how AI coding agents (Cursor, Antigravity, Claude Code, GitHub Copilot, etc.) should behave across all repositories in this workspace.
 
+> **📋 COLLECTION STANDARD — READ BEFORE TOUCHING ANY COLLECTOR:** [`COLLECTION_SPEC.md`](COLLECTION_SPEC.md)
+> defines the authoritative content-capture requirements (priority tiers, per-tier rules, the
+> follow-aware Stories model, and the per-collector applicability matrix). Any change to an existing
+> collector — or any NEW source — MUST implement that spec and update its matrix.
+
 ## Agent Types and Roles
 
 ### 1. Primary Coding Agent (Cursor/Claude Code)
