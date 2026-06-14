@@ -110,7 +110,11 @@ async def _cmd_worker(args):
             await close_pool()
     elif args.source:
         from src.worker import run_worker
-        await run_worker([args.source])
+        # Accept a comma-separated list so several low-risk/low-volume sources
+        # can share ONE worker process (e.g. --source github,strava,search),
+        # saving a Python-interpreter RSS baseline per merged source.
+        sources = [s.strip() for s in args.source.split(",") if s.strip()]
+        await run_worker(sources)
     else:
         print("Specify --all or --source (optionally with --targets)")
 

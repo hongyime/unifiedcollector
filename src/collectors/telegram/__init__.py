@@ -73,6 +73,18 @@ def _tg_json(obj):
     return str(obj)
 
 
+def _tg_jsonb(obj) -> str:
+    """Serialize a value for a Postgres jsonb column.
+
+    NOTE: `_tg_json` is the json.dumps `default=` *callback*, not a serializer —
+    calling it directly returns ``str(obj)`` (single-quoted Python repr), which
+    is INVALID JSON and makes the `::jsonb` cast fail silently. This wraps it
+    correctly so dicts/lists become real JSON. (Fixes silent loss of
+    telegram_reaction_counts / telegram_polls rows.)
+    """
+    return json.dumps(obj, default=_tg_json, ensure_ascii=False)
+
+
 _MIME_EXT_MAP = _parse_MIME_EXT_MAP
 
 
@@ -1357,7 +1369,7 @@ class TelegramCollector(BaseCollector):
                     refreshed_at = NOW()
                 """,
                 message_uuid,
-                _tg_json(counts),
+                _tg_jsonb(counts),
                 total,
             )
         except Exception as exc:
@@ -1568,9 +1580,9 @@ class TelegramCollector(BaseCollector):
                 message_uuid,
                 poll_id,
                 question_text,
-                _tg_json(options),
+                _tg_jsonb(options),
                 total_voters,
-                _tg_json(vote_counts),
+                _tg_jsonb(vote_counts),
                 bool(getattr(poll, "closed", False)),
                 bool(getattr(poll, "public_voters", False)) is False,  # is_anonymous = NOT public_voters
                 bool(getattr(poll, "multiple_choice", False)),
@@ -2032,7 +2044,7 @@ class TelegramCollector(BaseCollector):
                         refreshed_at = NOW()
                     """,
                     msg_uuid,
-                    _tg_json(counts),
+                    _tg_jsonb(counts),
                     total,
                 )
         except Exception as exc:

@@ -930,6 +930,17 @@ class StravaCollector(BaseCollector):
                             pz_end = _is_truncated(activity.get("end_latlng"), latlng_data[-1])
                             tp_start = sll if pz_start else None
                             tp_end = ell if pz_end else None
+                        elif stream_status == "truncated_empty":
+                            # Fully privacy-hidden activity: the API returns an
+                            # (empty) latlng stream object with zero points. If the
+                            # summary still carries a start coord, the track WAS
+                            # truncated by a privacy zone — flag it and keep the
+                            # summary start as the truncation point. (Ports the
+                            # truncated_empty branch of archive transform.py.)
+                            summ_start = activity.get("start_latlng")
+                            if summ_start and len(summ_start) == 2:
+                                pz_start = True
+                                tp_start = f"{summ_start[0]},{summ_start[1]}"
 
                         await conn.execute(
                             "UPDATE strava_activities SET "

@@ -32,7 +32,9 @@ services:
       dockerfile: docker/Dockerfile
     container_name: unifiedcollector_collector
     command: python -m src.main worker --all
-    mem_limit: 384m
+    # Idle safety-net / image-builder: all sources disabled, so it needs almost
+    # nothing at rest. Cut 384m -> 128m (memory-pressure relief for rabbitmq).
+    mem_limit: 128m
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
@@ -61,8 +63,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      tor:
-        condition: service_started
     env_file:
       - ../.env
     healthcheck:
@@ -106,8 +106,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      tor:
-        condition: service_started
     env_file:
       - ../.env
     healthcheck:
@@ -153,8 +151,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      tor:
-        condition: service_started
     env_file:
       - ../.env
     healthcheck:
@@ -175,16 +171,27 @@ services:
   # mem_limit values are tuned for a ~7.7GiB host (see total budget note).
   # ───────────────────────────────────────────────────────────────
 
-  collector_search:
+  # Merged low-risk / low-volume sources (github + strava + search) in ONE
+  # worker process. Each separate container carried a full Python-interpreter
+  # RSS baseline (~100-150MB just to exist); merging three reclaims ~1.5GB vs
+  # the old 1300+512+512. These three are low ban-risk and rarely wedge, so they
+  # are the safe candidates to give up per-source container fault-isolation.
+  collector_lowrisk:
     image: unifiedcollector-collector:latest
-    container_name: unifiedcollector_collector_search
-    command: python -m src.main worker --source search
-    mem_limit: 1300m
+    container_name: unifiedcollector_collector_lowrisk
+    command: python -m src.main worker --source github,strava,search
+    mem_limit: 768m
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
+      STRAVA_PAGE_SCRAPE_BATCH: "200"
       SEARCH_SPIDER_PAGES: "1"
+      # CPU hygiene (A#4): low-volume / API-ceiling sources idle longer between
+      # cycles — fewer wakeups, lower steady-state CPU, zero data loss.
+      COLLECTOR_CYCLE_SLEEP_GITHUB: "900"
+      COLLECTOR_CYCLE_SLEEP_STRAVA: "900"
+      COLLECTOR_CYCLE_SLEEP_SEARCH: "600"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     cap_add:
@@ -197,8 +204,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      tor:
-        condition: service_started
     env_file:
       - ../.env
     healthcheck:
@@ -221,6 +226,8 @@ services:
       # Throughput push (2026-06-13): crawl spans 421 distinct sites, so more
       # parallelism is safe (per-site politeness unaffected). 5 -> 10.
       WEBSITE_MAX_CONCURRENT_TASKS: "10"
+      # CPU hygiene (A#4): website crawls are multi-hour; idle longer between cycles.
+      COLLECTOR_CYCLE_SLEEP_WEBSITE: "600"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     cap_add:
@@ -233,8 +240,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      tor:
-        condition: service_started
     env_file:
       - ../.env
     healthcheck:
@@ -266,8 +271,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      tor:
-        condition: service_started
     env_file:
       - ../.env
     healthcheck:
@@ -302,75 +305,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      tor:
-        condition: service_started
-    env_file:
-      - ../.env
-    healthcheck:
-      test: ["CMD", "python", "-m", "src.core.health"]
-      interval: 60s
-      timeout: 30s
-      retries: 3
-      start_period: 30s
-    restart: unless-stopped
-
-  collector_github:
-    image: unifiedcollector-collector:latest
-    container_name: unifiedcollector_collector_github
-    command: python -m src.main worker --source github
-    mem_limit: 512m
-    environment:
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
-      COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
-      COLLECTOR_DRIVE_PATH: /media
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    cap_add:
-      - SYS_PTRACE
-    volumes:
-      - z:/unifiedcollector/media:/media
-      - ../credentials:/app/credentials
-      - sessions_data:/app/sessions
-      - ../config/sources:/app/config/sources:ro
-    depends_on:
-      postgres:
-        condition: service_healthy
-      tor:
-        condition: service_started
-    env_file:
-      - ../.env
-    healthcheck:
-      test: ["CMD", "python", "-m", "src.core.health"]
-      interval: 60s
-      timeout: 30s
-      retries: 3
-      start_period: 30s
-    restart: unless-stopped
-
-  collector_strava:
-    image: unifiedcollector-collector:latest
-    container_name: unifiedcollector_collector_strava
-    command: python -m src.main worker --source strava
-    mem_limit: 512m
-    environment:
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
-      COLLECTOR_DRIVE_PATH: /media
-      COLLECTOR_HANG_TIMEOUT_SECONDS: '7200'
-      STRAVA_PAGE_SCRAPE_BATCH: '200'
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    cap_add:
-      - SYS_PTRACE
-    volumes:
-      - z:/unifiedcollector/media:/media
-      - ../credentials:/app/credentials
-      - sessions_data:/app/sessions
-      - ../config/sources:/app/config/sources:ro
-    depends_on:
-      postgres:
-        condition: service_healthy
-      tor:
-        condition: service_started
     env_file:
       - ../.env
     healthcheck:
@@ -404,8 +338,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      tor:
-        condition: service_started
     env_file:
       - ../.env
     healthcheck:
@@ -480,8 +412,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      tor:
-        condition: service_started
     env_file:
       - ../.env
     healthcheck:
@@ -491,21 +421,6 @@ services:
       retries: 3
       start_period: 30s
     restart: unless-stopped
-
-  tor:
-    # Tor SOCKS5 proxy sidecar for the search collector (DDG via Tor).
-    # Container exposes 9050/tcp on the internal docker network as `tor:9050`.
-    image: dperson/torproxy:latest
-    container_name: unifiedcollector_tor
-    restart: unless-stopped
-    # No ports published to host — only reachable within the compose network.
-    healthcheck:
-      # dperson/torproxy lacks `nc`/`curl`. Probe Tor by checking the SOCKS port via /proc.
-      test: ["CMD-SHELL", "test -e /proc/net/tcp && grep -q ':235A ' /proc/net/tcp || exit 1"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 60s
 
   scheduler:
     build:

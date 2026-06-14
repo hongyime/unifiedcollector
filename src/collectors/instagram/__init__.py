@@ -1395,9 +1395,11 @@ class InstagramCollector(BaseCollector):
             try:
                 await self._upsert_post(node, uid)
                 upserted += 1
-            except Exception as e:
-                logger.debug("instagram/%s: post upsert failed for %s: %s",
-                             entity_name, node.get("shortcode"), e)
+            except Exception:
+                # WARNING (was debug): a swallowed upsert is silent data loss —
+                # exactly how the posts=0 jsonb bug hid for so long. Make it visible.
+                logger.warning("instagram/%s: post upsert FAILED for %s",
+                               entity_name, node.get("shortcode"), exc_info=True)
 
         logger.info("instagram/%s: instaloader Mode γ upserted %d/%d posts",
                     entity_name, upserted, len(nodes))
@@ -2651,8 +2653,9 @@ class InstagramCollector(BaseCollector):
                 }
                 try:
                     await self._upsert_post(node, uid)
-                except Exception as e:
-                    logger.debug("reel upsert failed for %s: %s", shortcode, e)
+                except Exception:
+                    # WARNING (was debug): swallowed upsert = silent data loss.
+                    logger.warning("reel upsert FAILED for %s", shortcode, exc_info=True)
 
                 await self.download_media({
                     "entity_id": uid,

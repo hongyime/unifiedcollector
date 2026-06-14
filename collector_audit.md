@@ -6,6 +6,54 @@
 
 ---
 
+## MEMORY/CPU CUTS + STRAVA PORT + JSONB SWEEP (2026-06-14, batch A/B/C)
+
+### A — memory/CPU cuts (docker-compose.yml + worker + main)
+- **#5 merge (supersedes #1):** `collector_github` + `collector_strava` +
+  `collector_search` → ONE `collector_lowrisk` container, `--source github,strava,search`,
+  `mem_limit: 768m` (was 1300+512+512 = 2324m). `src/main.py` now splits
+  `--source` on commas so several low-volume sources share one worker process
+  (one interpreter RSS baseline instead of three). ~1.5 GB reclaimed.
+- **#3 idle main `collector`:** `mem_limit 384m → 128m` (all sources disabled;
+  it only idles as image-builder/safety-net).
+- **#2 tor removed:** verified unused — `TOR_PROXY_ENABLED` set nowhere
+  (`tor_proxy.is_enabled()` always False), `WEBSITE_USE_TOR=false`,
+  `INSTA_PROXY_DISABLED=true`, and `SEARCH_TOR_PROXY` has **zero code references**
+  (dead env var). Deleted the `tor` service + all `depends_on: tor` entries.
+- **#4 CPU cadence:** worker inter-cycle sleep was hardcoded `300s`. Added
+  `Worker._cycle_sleep(source)` → env `COLLECTOR_CYCLE_SLEEP_<SOURCE>` /
+  `COLLECTOR_CYCLE_SLEEP_SECONDS` (floor 30s). Set github/strava=900s, search=600s
+  (on collector_lowrisk), website=600s. Fewer wakeups, lower steady-state CPU.
+- Net: ~1.7–1.9 GB headroom → directly relieves the rabbitmq memory-watermark alarm.
+- Trade-off accepted: github/strava/search lose per-source container fault
+  isolation (low ban-risk, rarely wedge — the safe candidates).
+
+### B — Strava privacy-zone truncation forward port (#1) — COMPLETE
+The forward path in `_collect_gps_streams` was already ~95% ported (stream_status
+incomplete/truncated_empty/ok, `_is_truncated`, derive start/end from first/last
+non-null `latlng`, truncation points). Ported the remaining nuance from
+`archive/stravatoolkit/ingestion/transform.py`: the **truncated_empty** case
+(API returns an empty latlng stream object → fully privacy-hidden activity) now
+flags `privacy_zone_start=True` + keeps the summary start as the truncation point.
+feature_gap_analysis.md's "#1 unported" was stale (pre-dated 7ef42b1/65b6916).
+Deleted the 5 `debug_strava_*.py` scratch scripts from the repo root.
+
+### C — jsonb silent-failure sweep — REAL BUG FOUND + FIXED
+- **telegram_reaction_counts + telegram_polls were failing on EVERY insert.**
+  `_tg_json` is the `json.dumps(default=...)` *callback*, not a serializer —
+  but it was called directly: `_tg_json(counts)` → `str(dict)` → single-quoted
+  Python repr → **invalid JSON** → the `$N::jsonb` cast raised → swallowed at
+  `logger.debug`. Added `_tg_jsonb()` (proper `json.dumps(obj, default=_tg_json)`)
+  and fixed all 4 call sites (reactions ×2, poll options, poll vote_counts).
+- **Instagram `_upsert_post` swallows:** the two callers logged at DEBUG
+  (invisible in prod — how the posts=0 bug hid). Raised to `logger.warning(..., exc_info=True)`.
+- Swept the other `::jsonb` sites — all correctly serialized: strava `metadata_json`,
+  website `_json.dumps(images)`, youtube `json.dumps(extra_meta)`. instagram
+  `relationships` / `profile_photo_history` inserts have **no jsonb column** (all
+  scalar) so the audit's worry there doesn't apply.
+
+---
+
 ## 10-TASK SWEEP + COLLECTION_SPEC TIER AUDIT (2026-06-14)
 
 Ran the 10 open tasks (2 ops + Phase 0 + cross-cutting + 6 tier phases) against

@@ -488,6 +488,24 @@ class WorkerService:
         self._ever_launched = True
         logger.info("Launched worker for %s", source)
 
+    def _cycle_sleep(self, source: str) -> float:
+        """Inter-cycle sleep in seconds (default 300).
+
+        Per-source override via COLLECTOR_CYCLE_SLEEP_<SOURCE>, else the global
+        COLLECTOR_CYCLE_SLEEP_SECONDS, else 300. Lets slow / API-ceiling sources
+        (github, strava, website) idle longer between cycles — fewer wakeups,
+        lower steady-state CPU, zero data loss. Floored at 30s.
+        """
+        for key in (f"COLLECTOR_CYCLE_SLEEP_{source.upper()}",
+                    "COLLECTOR_CYCLE_SLEEP_SECONDS"):
+            val = os.getenv(key)
+            if val:
+                try:
+                    return max(30.0, float(val))
+                except ValueError:
+                    continue
+        return 300.0
+
     async def _run_source(self, source: str, startup_delay: float = 0.0):
         if startup_delay > 0:
             logger.info("worker/%s: staggered startup, waiting %.0fs", source, startup_delay)
@@ -560,7 +578,9 @@ class WorkerService:
                     )
 
                 try:
-                    await asyncio.wait_for(self._stop.wait(), timeout=300)
+                    await asyncio.wait_for(
+                        self._stop.wait(), timeout=self._cycle_sleep(source)
+                    )
                 except asyncio.TimeoutError:
                     pass
 
