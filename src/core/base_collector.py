@@ -304,6 +304,21 @@ class BaseCollector(ABC):
                 sha256 = self.sha256_bytes(data)
             except Exception:
                 logger.debug("auto-sha256 for profile_photo %s failed", file_path, exc_info=True)
+
+        # Tier 5: best-effort EXIF GPS from the saved photo. Merged into the
+        # metadata jsonb as `exif_gps`; None (the common case — platforms strip
+        # EXIF) leaves metadata untouched. Pure-local, never raises.
+        try:
+            from .exif_gps import extract_gps, is_exif_enabled, _IMAGE_CONTENT_TYPES
+            if (is_exif_enabled() and file_path
+                    and content_type in _IMAGE_CONTENT_TYPES):
+                gps = extract_gps(file_path)
+                if gps:
+                    metadata = dict(metadata or {})
+                    metadata.setdefault("exif_gps", gps)
+        except Exception:
+            logger.debug("EXIF GPS hook failed for %s", file_path, exc_info=True)
+
         try:
             import asyncpg
         except ImportError:

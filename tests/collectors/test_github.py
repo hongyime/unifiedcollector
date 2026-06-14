@@ -370,8 +370,10 @@ async def test_upsert_commit_tolerates_none_author_blocks():
     await coll._upsert_commit(0, commit)
     coll.pool._conn.execute.assert_awaited_once()
     args = coll.pool._conn.execute.await_args.args
+    # Param order: (sha, repo_id, author_name, author_email, ...)
     assert args[1] == "abc"  # sha
-    assert args[2] is None  # author_name
+    assert args[2] == 0      # repo_id
+    assert args[3] is None   # author_name (null commit/author coalesced)
 
 
 @pytest.mark.asyncio

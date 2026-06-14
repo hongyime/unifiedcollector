@@ -46,6 +46,12 @@ logger = logging.getLogger(__name__)
 # local API comfortably handles 100-200. Override via BEEPER_PAGE_SIZE.
 _BEEPER_PAGE_SIZE = int(os.getenv("BEEPER_PAGE_SIZE", "100"))
 
+# Transient-network retry tuning. A flaky resolver (e.g. a restarting pihole
+# container) makes `host.docker.internal` momentarily unresolvable; that is a
+# blip, not a failure. Retry a few times with short backoff before giving up.
+_BEEPER_TRANSIENT_RETRIES = int(os.getenv("BEEPER_TRANSIENT_RETRIES", "3"))
+_BEEPER_TRANSIENT_BACKOFF = float(os.getenv("BEEPER_TRANSIENT_BACKOFF", "1.5"))
+
 
 # ── feature gate ──────────────────────────────────────────────────────────
 
@@ -63,6 +69,38 @@ def is_enabled() -> bool:
 
 class BeeperAPIError(RuntimeError):
     """Any non-2xx response or transport error from the Beeper Desktop API."""
+
+
+class BeeperTransientError(BeeperAPIError):
+    """A transient transport condition — DNS/name-resolution blip or connect
+    timeout to the local Beeper Desktop API. Retryable; callers should treat
+    it as 'try again next cycle', NOT as a hard error to alarm on."""
+
+
+# Substrings that mark a transient name-resolution / DNS failure across
+# platforms (Linux glibc, musl, macOS, Windows getaddrinfo).
+_TRANSIENT_DNS_MARKERS = (
+    "getaddrinfo",
+    "name or service not known",
+    "temporary failure in name resolution",
+    "nodename nor servname",
+    "name resolution",
+    "no address associated with hostname",
+    "name does not resolve",
+    "try again",
+)
+
+
+def _is_transient_network_error(exc: BaseException | None) -> bool:
+    """True if `exc` looks like a transient DNS / connect blip worth retrying."""
+    if exc is None:
+        return False
+    # Connect-level failures and read timeouts are inherently transient: the
+    # local API is briefly unreachable, not permanently broken.
+    if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout)):
+        return True
+    msg = str(exc).lower()
+    return any(marker in msg for marker in _TRANSIENT_DNS_MARKERS)
 
 
 class BeeperClient:
@@ -99,11 +137,40 @@ class BeeperClient:
     async def close(self) -> None:
         await self._http.aclose()
 
+    async def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        """Issue an httpx request with transient-network retry.
+
+        Transient DNS/connect blips (a restarting resolver, a momentarily
+        unreachable local API) are retried with short backoff. If still failing
+        after the retry budget, raise BeeperTransientError (so the caller can
+        treat it as 'retry next cycle' rather than alarm). Genuine transport
+        errors raise BeeperAPIError.
+        """
+        attempts = max(1, _BEEPER_TRANSIENT_RETRIES) + 1
+        last_exc: httpx.HTTPError | None = None
+        for i in range(attempts):
+            try:
+                return await self._http.request(method, path, **kwargs)
+            except httpx.HTTPError as exc:
+                last_exc = exc
+                if _is_transient_network_error(exc) and i < attempts - 1:
+                    delay = _BEEPER_TRANSIENT_BACKOFF * (2 ** i)
+                    logger.debug(
+                        "Beeper transient blip on %s %s (%s); retry %d/%d in %.1fs",
+                        method, path, exc, i + 1, attempts - 1, delay,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                break
+        if _is_transient_network_error(last_exc):
+            raise BeeperTransientError(
+                f"{method} {path} transient transport error after "
+                f"{attempts} attempts: {last_exc}"
+            ) from last_exc
+        raise BeeperAPIError(f"{method} {path} transport error: {last_exc}") from last_exc
+
     async def _get(self, path: str, params: Optional[dict] = None) -> Any:
-        try:
-            resp = await self._http.get(path, params=params)
-        except httpx.HTTPError as exc:
-            raise BeeperAPIError(f"GET {path} transport error: {exc}") from exc
+        resp = await self._request("GET", path, params=params)
         if resp.status_code >= 400:
             raise BeeperAPIError(
                 f"GET {path} -> {resp.status_code}: {resp.text[:300]}"
@@ -151,14 +218,12 @@ class BeeperClient:
 
     async def serve_asset(self, src_url: str, *, timeout: float = 120.0) -> bytes:
         """Fetch decrypted media bytes via /v1/assets/serve?url=<srcURL>."""
-        try:
-            resp = await self._http.get(
-                "/v1/assets/serve",
-                params={"url": src_url},
-                timeout=httpx.Timeout(timeout, connect=10.0),
-            )
-        except httpx.HTTPError as exc:
-            raise BeeperAPIError(f"asset serve transport error: {exc}") from exc
+        resp = await self._request(
+            "GET",
+            "/v1/assets/serve",
+            params={"url": src_url},
+            timeout=httpx.Timeout(timeout, connect=10.0),
+        )
         if resp.status_code >= 400:
             raise BeeperAPIError(
                 f"asset serve -> {resp.status_code}: {resp.text[:300]}"
@@ -587,28 +652,38 @@ class BeeperCollector(BaseCollector):
         if self.pool is None:
             raise RuntimeError("BeeperCollector requires a DB pool — call set_pool() first")
 
-        stats = {"accounts": 0, "chats": 0, "messages_inserted": 0, "errors": 0}
+        stats = {"accounts": 0, "chats": 0, "messages_inserted": 0,
+                 "errors": 0, "transient": 0}
         try:
             stats["accounts"] = await self._sync_accounts()
             stats["chats"] = await self._sync_chats()
             stats["messages_inserted"] = await self._sync_messages()
+        except BeeperTransientError as exc:
+            # Transient DNS/connect blip (e.g. resolver restart). The next cycle
+            # resumes from the persisted cursors, so this is not a real failure
+            # — log quietly at INFO and do NOT inflate the hard error count.
+            logger.info("Beeper transient network blip (retry next cycle): %s", exc)
+            stats["transient"] += 1
         except BeeperAPIError as exc:
             logger.error("Beeper sync failed: %s", exc)
             stats["errors"] += 1
 
         logger.info(
-            "Beeper cycle done: accounts=%d chats=%d messages=%d errors=%d",
+            "Beeper cycle done: accounts=%d chats=%d messages=%d errors=%d transient=%d",
             stats["accounts"], stats["chats"], stats["messages_inserted"],
-            stats["errors"],
+            stats["errors"], stats["transient"],
         )
         return stats
 
     async def download_media(self, item: dict) -> None:
         """Download a Beeper attachment via /v1/assets/serve and persist to drive."""
-        cid = item["content_id"]
+        cid = item.get("content_id")
+        src_url = item.get("src_url")
+        if not cid or not src_url:
+            logger.debug("Beeper download_media skipped malformed item: %s", item)
+            return
         if self.is_known(cid):
             return
-        src_url = item["src_url"]
         ext = item.get("extension", "bin")
         network = item.get("network", "unknown")
         chat_id = item.get("chat_id", "unknown")
@@ -926,6 +1001,10 @@ class BeeperCollector(BaseCollector):
                 await w.update_sync_state(chat_id, newest_cursor=new_newest)
             inserted += tail_inserted
 
+        except BeeperTransientError as exc:
+            # Transient DNS/connect blip mid-chat — leave sync_state untouched
+            # (no error_count bump) so the chat is retried cleanly next cycle.
+            logger.debug("chat %s transient blip (retry next cycle): %s", chat_id, exc)
         except BeeperAPIError as exc:
             logger.warning("chat %s sync error: %s", chat_id, exc)
             await w.update_sync_state(chat_id, error=str(exc)[:500])

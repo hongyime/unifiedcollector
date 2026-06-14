@@ -21,11 +21,14 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 
+import src.collectors.beeper as beeper_mod
 from src.collectors.beeper import (
     BeeperAPIError,
     BeeperClient,
     BeeperCollector,
+    BeeperTransientError,
     BeeperWriter,
+    _is_transient_network_error,
     _opt,
     _parse_ts,
     is_enabled,
@@ -371,6 +374,7 @@ async def test_collector_full_cycle_smoke(monkeypatch, tmp_path):
     # _sync_messages's SELECT
     conn.fetch = AsyncMock(return_value=[{
         "chat_id": "!a:b",
+        "network": "Telegram",
         "oldest_cursor": None,
         "newest_cursor": None,
         "backfill_complete": False,
@@ -418,3 +422,95 @@ async def test_collector_download_media_is_noop(monkeypatch, tmp_path):
     coll = BeeperCollector(client=MagicMock(spec=BeeperClient))
     # Should return None without raising
     assert await coll.download_media({"id": "anything"}) is None
+
+
+# ── transient DNS / name-resolution handling ───────────────────────────────
+
+
+def test_is_transient_network_error_classifies():
+    assert _is_transient_network_error(httpx.ConnectError("getaddrinfo failed"))
+    assert _is_transient_network_error(httpx.ConnectTimeout("timed out"))
+    assert _is_transient_network_error(httpx.ReadTimeout("slow"))
+    assert _is_transient_network_error(
+        Exception("[Errno -3] Temporary failure in name resolution")
+    )
+    assert _is_transient_network_error(Exception("nodename nor servname provided"))
+    # Non-transient
+    assert not _is_transient_network_error(Exception("non-JSON body"))
+    assert not _is_transient_network_error(None)
+
+
+def test_transient_error_is_api_error_subclass():
+    # Existing handlers that catch BeeperAPIError must still catch transient ones.
+    assert issubclass(BeeperTransientError, BeeperAPIError)
+
+
+@pytest.mark.asyncio
+async def test_request_retries_then_raises_transient(monkeypatch):
+    """A persistent DNS blip is retried, then surfaces as BeeperTransientError."""
+    monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
+    monkeypatch.setattr(beeper_mod, "_BEEPER_TRANSIENT_RETRIES", 2)
+    monkeypatch.setattr(beeper_mod, "_BEEPER_TRANSIENT_BACKOFF", 0.0)
+
+    attempts = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts["n"] += 1
+        raise httpx.ConnectError("getaddrinfo failed", request=request)
+
+    client = BeeperClient()
+    client._http = httpx.AsyncClient(
+        base_url=client.base_url,
+        transport=httpx.MockTransport(handler),
+        headers={"Authorization": "Bearer x"},
+    )
+    with pytest.raises(BeeperTransientError):
+        await client.info()
+    assert attempts["n"] == 3  # 1 initial + 2 retries
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_request_retries_then_succeeds(monkeypatch):
+    """A blip that clears mid-retry resolves without error."""
+    monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
+    monkeypatch.setattr(beeper_mod, "_BEEPER_TRANSIENT_RETRIES", 3)
+    monkeypatch.setattr(beeper_mod, "_BEEPER_TRANSIENT_BACKOFF", 0.0)
+
+    attempts = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise httpx.ConnectError("Temporary failure in name resolution", request=request)
+        return httpx.Response(200, json={"app": "Beeper Desktop"})
+
+    client = BeeperClient()
+    client._http = httpx.AsyncClient(
+        base_url=client.base_url,
+        transport=httpx.MockTransport(handler),
+        headers={"Authorization": "Bearer x"},
+    )
+    info = await client.info()
+    assert info["app"] == "Beeper Desktop"
+    assert attempts["n"] == 3
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_collect_swallows_transient_without_error_count(monkeypatch, tmp_path):
+    """A transient blip during a cycle increments `transient`, not `errors`."""
+    monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
+    monkeypatch.setenv("COLLECTOR_DRIVE_PATH", str(tmp_path))
+
+    pool, _conn = _mock_pool()
+    fake_client = MagicMock(spec=BeeperClient)
+    fake_client.accounts = AsyncMock(
+        side_effect=BeeperTransientError("GET /v1/accounts transient transport error")
+    )
+
+    coll = BeeperCollector(client=fake_client)
+    coll.set_pool(pool)
+    stats = await coll.collect([])
+    assert stats["transient"] == 1
+    assert stats["errors"] == 0

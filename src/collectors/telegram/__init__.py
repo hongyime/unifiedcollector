@@ -957,9 +957,12 @@ class TelegramCollector(BaseCollector):
                 elif isinstance(message.media, MessageMediaDocument):
                     doc = message.media.document
                     if doc and (getattr(doc, "size", 0) or 0) <= self._max_media_size:
-                        mime = getattr(doc, "mime_type", "")
-                        if mime.startswith(("image/", "video/")):
-                            await self._handle_document(worker, message, chat_id, chat_name, mime)
+                        mime = getattr(doc, "mime_type", "") or ""
+                        # Tier 3: route ALL documents through the classifier
+                        # (was image/video-only, which dropped PDFs/office/audio).
+                        # The classifier whitelists safe docs + audio + static
+                        # stickers and skips executables/code/animated stickers.
+                        if await self._handle_document(worker, message, chat_id, chat_name, mime):
                             count += 1
 
             if count % self._batch_size == 0 and count > 0:
@@ -1665,18 +1668,63 @@ class TelegramCollector(BaseCollector):
             "raw": message.to_dict()
         }, worker=worker)
 
-    async def _handle_document(self, worker: "TelegramWorker", message, chat_id: str, chat_name: str, mime: str):
-        ext = mime.split("/")[-1]
-        content_type = "video" if mime.startswith("video/") else "document"
+    async def _handle_document(self, worker: "TelegramWorker", message, chat_id: str, chat_name: str, mime: str) -> bool:
+        """Classify + download a document attachment per Tier 3 spec.
+
+        Returns True if the document was downloaded, False if it was skipped
+        (executable/code/unknown type, or an animated sticker).
+        """
+        from telethon.tl.types import (
+            DocumentAttributeFilename,
+            DocumentAttributeSticker,
+            DocumentAttributeAnimated,
+            DocumentAttributeAudio,
+            DocumentAttributeVideo,
+        )
+        from src.core.document_filter import classify_document
+
+        doc = message.media.document
+        attrs = getattr(doc, "attributes", []) or []
+        filename = None
+        is_sticker = is_animated = is_audio = is_video = False
+        for a in attrs:
+            if isinstance(a, DocumentAttributeFilename):
+                filename = a.file_name
+            elif isinstance(a, DocumentAttributeSticker):
+                is_sticker = True
+            elif isinstance(a, DocumentAttributeAnimated):
+                is_animated = True
+            elif isinstance(a, DocumentAttributeAudio):
+                is_audio = True
+            elif isinstance(a, DocumentAttributeVideo):
+                is_video = True
+
+        decision = classify_document(
+            mime, filename,
+            is_sticker=is_sticker, is_animated=is_animated,
+            is_audio=is_audio, is_video=is_video,
+        )
+        if not decision.download:
+            logger.debug("Telegram doc skipped (%s): chat=%s msg=%s",
+                         decision.reason, chat_name, message.id)
+            return False
+
+        # Extension: prefer the real filename, else derive from MIME.
+        if filename and "." in filename:
+            ext = filename.rsplit(".", 1)[-1].lower()[:12]
+        else:
+            ext = _ext_from_mime(mime) or (mime.split("/")[-1] if "/" in mime else "bin")
+
         await self.download_media({
             "entity_id": chat_id,
             "entity_name": chat_name,
-            "content_type": content_type,
+            "content_type": decision.content_type,
             "content_id": str(message.id),
             "media": message.media.document,
             "extension": ext,
             "raw": message.to_dict()
         }, worker=worker)
+        return True
 
     async def _scan_stories(self, worker: "TelegramWorker", targets: list[str]):
         try:

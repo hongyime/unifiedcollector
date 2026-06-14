@@ -6,6 +6,120 @@
 
 ---
 
+## 10-TASK SWEEP + COLLECTION_SPEC TIER AUDIT (2026-06-14)
+
+Ran the 10 open tasks (2 ops + Phase 0 + cross-cutting + 6 tier phases) against
+the live code. Result: most of the spec was already implemented; two real gaps
+were found and fixed, one matrix cell corrected. All 12 collectors are `Up
+(healthy)` throughout. Details below — structured for mid-task handoff.
+
+### Task 1 — stale health-alert dashboard URL :8002 → :8700 — ✅ already clean
+No `:8002` exists anywhere in the repo. The dashboard is uniformly `:8700`
+(`docker/docker-compose.yml:563`, `docker/Dockerfile.dashboard:12`,
+`dashboard/frontend/vite.config.ts:10-11`, `src/dashboard/api.py:26`). No
+external alert/prometheus/alertmanager config exists. Fixed in a prior commit;
+nothing to change.
+
+### Task 2 — transient beeper DNS / name-resolution blips — ✅ FIXED (code)
+Root: a transient DNS blip (e.g. the local `pihole` resolver restarting — it was
+`unhealthy` at audit time) made `host.docker.internal` momentarily unresolvable.
+`BeeperClient._get`/`serve_asset` wrapped every `httpx.HTTPError` into
+`BeeperAPIError`, which `collect()` logged at **ERROR** + bumped the cycle error
+count, with **no retry** — exactly the log-spam the graceful-offline policy
+forbids.
+**Change** (`src/collectors/beeper/__init__.py`): new `BeeperTransientError`
+subclass + `_is_transient_network_error()` classifier (getaddrinfo / name-
+resolution / connect-timeout markers); new `_request()` helper retries transient
+blips (`BEEPER_TRANSIENT_RETRIES=3`, backoff `BEEPER_TRANSIENT_BACKOFF=1.5s`)
+before raising; `collect()` + `_sync_one_chat()` treat transient errors as
+"retry next cycle" (INFO/debug, `stats["transient"]`, **not** `errors`). Also
+hardened `download_media` to skip malformed items instead of KeyError.
+Tests: `tests/collectors/test_beeper.py` (+4 new transient cases; fixed 2 stale
+fixtures that pre-dated this session — `network` key + `download_media` noop).
+
+### Task 3 — Phase 0 shared building blocks — ✅ verified present
+`BaseCollector.insert_media_item` casts `json.dumps(metadata)::jsonb` (the spec's
+critical jsonb rule), sha256 dedup via `media_items UNIQUE(source,content_id)` +
+DB-seeded `_known_ids`, `run_backfill()` each cycle, atomic media writes. Follow-
+aware account model = `src/core/profile_access.py` (`ProfileAccessRepository` +
+`SmartAccountSelector`). Helper blocks present: `link_extractor`,
+`spider_discover`, `change_tracker`, `profile_photo_tracker`. **+ added two new
+shared blocks this session:** `src/core/document_filter.py` (Tier 3) and
+`src/core/exif_gps.py` (Tier 5).
+
+### Task 4 — cross-cutting: tier-ordered scheduling + full backfill — ✅ (with note)
+Backfill: `BaseCollector.run_backfill()` runs at the end of every `collect()`
+cycle; per-collector backfill paths confirmed (strava/telegram/whatsapp/beeper/
+lemon8/instagram). Tier order: the scheduler (`src/scheduler/__init__.py`) is
+interval-per-source; **tier priority is honoured inside each collector** (e.g.
+telegram scans stories on its own 5-min lane, instagram collects stories within
+its cycle). NOTE: there is no *global* cross-source tier sequencer — acceptable
+because the ephemeral 4h lanes run independently and aren't starved by media
+backfill.
+
+### Task 5 — Phase 1 Tier 1 Stories — 🟡 mostly built, 1 gap
+- instagram ✅ `_collect_stories` (instaloader `get_stories`) → `story`/`story_video`.
+- telegram ✅ `_scan_stories` (Telethon `GetPeerStoriesRequest`), gated by
+  `TELEGRAM_STORY_SCAN_ENABLED` (5-min lane — tighter than the 4h spec, fine).
+- whatsapp ✅(status) — status/broadcast JID flows in as messages.
+- **tiktok ❌ — NO story code exists** despite the matrix claiming ✅. Left
+  unbuilt deliberately: the audit marks tiktok the highest ban-risk collector
+  ("don't push"), so a 4h story-poll lane would raise ban risk. **Matrix
+  corrected ✅→🔲** for tiktok Tier 1. Build behind a default-off env gate later.
+
+### Task 6 — Phase 2 Tier 2 Media — ✅ (with note)
+HD/best-quality + media bubbles broadly present. NOTE: telegram enforces a
+`_max_media_size` cap on document/media download, which deviates from the spec's
+"no size cap"; kept conservative to protect disk. Revisit if full large-file
+capture is required (raise/remove the cap via env).
+
+### Task 7 — Phase 3 Tier 3 Documents & audio — ✅ FIXED (code)
+**Gap:** telegram's live handler only downloaded `image/*` and `video/*`
+documents (`__init__.py:961`), so **PDFs, Office files, and audio were never
+collected**, and there was no executable/code skip or sticker static/animated
+split.
+**Change:** new `src/core/document_filter.py::classify_document()` — whitelists
+PDF/Office/text/images, **skips executables + code** (exe/dll/apk/sh/py/js/…),
+stores audio, keeps **static** stickers and **skips animated** (.tgs / animated
+.webm), conservatively skips unknown types. Rewrote telegram `_handle_document`
+to extract Telethon `DocumentAttribute*` (filename/sticker/animated/audio/video),
+classify, and skip-or-download with the right `content_type`; routed **all**
+documents through it (was image/video-only). Tests: `tests/core/test_document_filter.py`.
+_Follow-up: whatsapp `documentMessage` + beeper attachments still download
+without the whitelist — wire `classify_document` there too._
+
+### Task 8 — Phase 4 Tier 4 Profile content — ✅ verified present
+Change history (`change_tracker`/`user_change_tracker`/`profile_photo_tracker`
+pHash), reactions (telegram `_enumerate_reactors_and_enqueue`), memberships +
+graph spider (`SpiderDiscover` wired in instagram/lemon8/telegram/tiktok/youtube;
+`graph_edges` built by the scheduler from WhatsApp co-group/DM).
+
+### Task 9 — Phase 5 Tier 5 Location — ✅ FIXED (code) + note
+**Gap:** zero EXIF-GPS extraction and no telegram/whatsapp geo-message parsing
+existed, despite the matrix claiming ✅ for most platforms (only strava had
+native `latlng`).
+**Change:** new `src/core/exif_gps.py::extract_gps()` (Pillow + GPS IFD →
+decimal lat/lon/alt, best-effort, never raises), wired into
+`BaseCollector.insert_media_item` so **every** collector tags image media with
+`metadata.exif_gps` when present (gated `COLLECTOR_EXIF_GPS_ENABLED`, default on).
+Tests: `tests/core/test_exif_gps.py`.
+_Follow-up: parse telegram/whatsapp shared/live-location MESSAGES
+(`MessageMediaGeo`/venue) into structured coords — still not implemented._
+
+### Task 10 — Phase 6 Tier 6 Everything else — ✅ verified present
+Link extraction wired (whatsapp `extract_whatsapp_links`, website `_extract_links`,
+telegram parse). Polls/pinned/events: telegram (matrix ✅). Links feed the spider.
+
+### Remaining honest follow-ups (not blocking; logged for the next agent)
+1. tiktok Tier-1 stories (env-gated, ban-aware).
+2. whatsapp/beeper document whitelist via `classify_document`.
+3. telegram/whatsapp shared/live-location message → structured coords.
+4. telegram media size-cap vs spec "no cap" (env decision).
+5. dashboard container shows `unhealthy` though `/health` returns 200 OK on every
+   probe — cosmetic/intermittent-timeout, not a collection blocker.
+
+---
+
 ## PRIVACY-ZONE FIELDS + HEALTH/DB AUDIT + INSTAGRAM ROOT CAUSE (2026-06-13)
 
 - ✅ **Strava privacy-zone fields** (`7ef42b1`): added `stream_status`, `privacy_zone_start/end`, `truncation_point_start/end` (idempotent schema ALTER + `_collect_gps_streams` computes via `_is_truncated`/`_haversine_m`). Historical backfill (`scripts/backfill_strava_privacy_zones.py`): 485 → `stream_status='ok'`; privacy flags left NULL where the original summary wasn't preserved in metadata (honest "unknown"). Forward path sets True/False correctly.

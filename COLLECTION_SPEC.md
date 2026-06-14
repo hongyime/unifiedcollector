@@ -66,7 +66,7 @@ Legend: ✅ supported/required · ➖ N/A for platform · 🔲 to build
 
 | Tier / feature | instagram | telegram | tiktok | youtube | strava | lemon8 | website | github | whatsapp | beeper |
 |---|---|---|---|---|---|---|---|---|---|---|
-| 1 Stories/ephemeral | ✅ | ✅ | ✅ | ➖ | ➖ | ➖ | ➖ | ➖ | ✅(status) | ➖ |
+| 1 Stories/ephemeral | ✅ | ✅ | 🔲 | ➖ | ➖ | ➖ | ➖ | ➖ | ✅(status) | ➖ |
 | 2 Media (photo/video) | ✅ | ✅ | ✅ | ✅ | ✅(activity) | ✅ | ✅ | ➖(avatars) | ✅ | ✅ |
 | 2 Message bubbles | ➖ | ✅ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ✅ | ✅ |
 | 3 Documents | ➖ | ✅ | ➖ | ➖ | ➖ | ➖ | ✅(pdf) | ➖ | ✅ | ✅ |

@@ -360,25 +360,21 @@ async def test_handle_message_event_text_message_no_media(collector):
 
 
 @pytest.mark.asyncio
-async def test_track_user_profile_has_pool_typo_bug(collector):
-    """Documents a prod bug: ``_track_user_profile`` checks ``self._pool``
-    (underscore) but BaseCollector exposes ``self.pool``. This means the
-    method always raises AttributeError before doing any DB work — and
-    because ``_handle_message_event`` does NOT wrap it in try/except, every
-    real-time message ingestion currently fails.
-
-    This test pins the broken behavior so a future fix flips it to expect
-    a successful UUID return.
+async def test_track_user_profile_uses_pool_and_returns_uuid(collector):
+    """Regression: ``_track_user_profile`` used to check ``self._pool``
+    (typo) and always raise AttributeError before any DB work, breaking
+    every real-time ingestion. It now correctly uses ``self.pool`` — so with
+    a populated pool it completes and returns the upserted user UUID rather
+    than raising.
     """
     event = {
         "sender_jid": "111@s.whatsapp.net",
         "pushName": "Bob",
         "key": {"participant": "111@s.whatsapp.net"},
     }
-    # Note: the collector has self.pool set (via fixture's set_pool) but no
-    # self._pool — the typo'd attribute lookup raises.
-    with pytest.raises(AttributeError, match="_pool"):
-        await collector._track_user_profile(event)
+    result = await collector._track_user_profile(event)
+    # Fixture's mocked fetchrow returns {"id": "user-uuid-1"}.
+    assert result == "user-uuid-1"
 
 
 @pytest.mark.asyncio

@@ -309,8 +309,9 @@ async def test_upsert_channel_no_auth_writes_minimal_row(monkeypatch):
     coll = _new_collector(monkeypatch)
     coll._has_auth = False
     out = await coll._upsert_channel("UC123", "Some Channel")
-    # Without auth we never query the API → no uploads playlist.
-    assert out is None
+    # Without auth we never query the API → no uploads playlist, 0 subs.
+    # _upsert_channel returns (uploads_playlist_id | None, subscriber_count).
+    assert out == (None, 0)
     coll.pool._conn.execute.assert_awaited_once()
     args = coll.pool._conn.execute.await_args.args
     assert args[1] == "UC123"
@@ -335,7 +336,8 @@ async def test_upsert_channel_with_auth_extracts_uploads(monkeypatch):
     })
     _patch_httpx_async_client(monkeypatch, api_resp)
     out = await coll._upsert_channel("UC123", "Some Channel")
-    assert out == "UU123"
+    # Returns (uploads_playlist_id, subscriber_count) — subs "2" from statistics.
+    assert out == ("UU123", 2)
 
 
 @pytest.mark.asyncio
@@ -346,7 +348,7 @@ async def test_upsert_channel_with_auth_returns_none_when_not_found(monkeypatch)
         monkeypatch, _make_response(status=200, json_body={"items": []}),
     )
     out = await coll._upsert_channel("UC_missing", "x")
-    assert out is None
+    assert out == (None, 0)
     # Important: no DB write when channel not found
     coll.pool._conn.execute.assert_not_awaited()
 
