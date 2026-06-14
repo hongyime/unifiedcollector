@@ -223,9 +223,10 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
       COLLECTOR_DRIVE_PATH: /media
-      # Throughput push (2026-06-13): crawl spans 421 distinct sites, so more
-      # parallelism is safe (per-site politeness unaffected). 5 -> 10.
-      WEBSITE_MAX_CONCURRENT_TASKS: "10"
+      # Concurrency drives REAL RSS (each task holds a page + parse tree). After
+      # the host OOM, dialled 10 -> 6 to lower website's memory peak — a real RSS
+      # cut (unlike a mem_limit cap), minor throughput cost across 421 sites.
+      WEBSITE_MAX_CONCURRENT_TASKS: "6"
       # CPU hygiene (A#4): website crawls are multi-hour; idle longer between cycles.
       COLLECTOR_CYCLE_SLEEP_WEBSITE: "600"
     extra_hosts:

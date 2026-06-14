@@ -750,6 +750,52 @@ async def media_thumbnail(media_id: int, _user: dict = Depends(require_role("vie
         return FileResponse(str(file_path))
 
 
+def _resolve_media_path(file_path_str: str) -> Path:
+    """Resolve a media_items.file_path, constrained to the drive root.
+
+    Raises HTTPException (403/404) on traversal or a missing file. Shared by the
+    thumbnail + file endpoints so a poisoned file_path can't serve host files.
+    """
+    file_path = Path(file_path_str).resolve()
+    from src.core.drive_check import DRIVE_PATH as _DRIVE_PATH
+    drive_root = Path(_DRIVE_PATH).resolve()
+    try:
+        file_path.relative_to(drive_root)
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Path outside media root")
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail="File not found on disk")
+    return file_path
+
+
+@app.get("/media/{media_id}/file")
+async def media_file(media_id: int, _user: dict = Depends(require_role("viewer"))):
+    """Stream the raw media file with the correct Content-Type.
+
+    Handles every content_type (video/audio/pdf/document/image), unlike the
+    thumbnail endpoint which is images-only. FileResponse adds Accept-Ranges +
+    honours Range requests automatically, so <video>/<audio> seeking works.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT file_path, filename FROM media_items WHERE id = $1", media_id,
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="Media not found")
+
+    file_path = _resolve_media_path(row["file_path"])
+    import mimetypes
+    media_type = mimetypes.guess_type(row["filename"] or file_path.name)[0] \
+        or "application/octet-stream"
+    # inline so the browser renders PDFs/video in-tab instead of force-downloading.
+    return FileResponse(
+        str(file_path),
+        media_type=media_type,
+        content_disposition_type="inline",
+    )
+
+
 # ── WhatsApp: Users ──
 
 @app.get("/whatsapp/users")

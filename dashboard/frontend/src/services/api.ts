@@ -94,6 +94,7 @@ export const api = {
     return get<MediaBrowseResult>(`/media/browse?${params}`);
   },
   thumbnailUrl: (id: number) => `${API_BASE}/media/${id}/thumbnail`,
+  fileUrl: (id: number) => `${API_BASE}/media/${id}/file`,
 
   dlq: (source?: string, limit = 50) => {
     const params = new URLSearchParams({ limit: String(limit) });
