@@ -9,6 +9,11 @@ logger = logging.getLogger(__name__)
 
 _CACHE_DB_PATH = os.getenv("HUB_NOTIFY_CACHE_DB", "data/hub_cache.db")
 _CACHE_BUSY_TIMEOUT_MS = 5000
+# Notifications are ephemeral status (collection start/complete/error). If the
+# hub send keeps failing (e.g. the client isn't connected), do NOT replay them
+# forever — that produced the "Replaying N cached notifications" spam every
+# batch tick. Drop anything older than this TTL instead of re-queueing it.
+_CACHE_TTL_HOURS = float(os.getenv("HUB_NOTIFY_CACHE_TTL_HOURS", "1"))
 
 
 class NotifyCategory(Enum):
@@ -254,6 +259,17 @@ class HubNotifier:
         conn = self._open_cache_conn()
         try:
             conn.execute("BEGIN IMMEDIATE")
+            # Drop stale notifications instead of replaying them forever. Without
+            # this, an undeliverable backlog loops every batch tick (the telegram
+            # "Replaying N cached notifications" spam) and only ever grows.
+            dropped = conn.execute(
+                "DELETE FROM pending_notifications "
+                "WHERE created_at < datetime('now', ?)",
+                ("-%g hours" % _CACHE_TTL_HOURS,),
+            ).rowcount
+            if dropped:
+                logger.info("Dropped %d stale cached notifications (>%.1fh old)",
+                            dropped, _CACHE_TTL_HOURS)
             rows = conn.execute(
                 "SELECT id, message FROM pending_notifications "
                 "ORDER BY created_at ASC LIMIT ?",

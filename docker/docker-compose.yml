@@ -290,6 +290,10 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
+      # collect() now BLOCKS in the realtime listener (like whatsapp), so the
+      # per-cycle heartbeat stops — give the watchdog a 24h budget so it doesn't
+      # kill the parked-but-healthy listener (matches whatsapp's setting).
+      COLLECTOR_HANG_TIMEOUT_SECONDS: "86400"
       TELEGRAM_SPIDER_ACCOUNTS: "oopspwned,johnfriend101"
       # Throughput push (2026-06-13): reads are cheap and FloodWait auto-throttles,
       # so 20->80 msg/s/account is safe. Tune down if FloodWait floods the logs.
@@ -381,7 +385,7 @@ services:
       postgres:
         condition: service_healthy
       rabbitmq:
-        condition: service_started
+        condition: service_healthy
     env_file:
       - ../.env
     healthcheck:

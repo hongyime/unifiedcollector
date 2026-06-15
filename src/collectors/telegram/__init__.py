@@ -785,6 +785,19 @@ class TelegramCollector(BaseCollector):
             except Exception as e:
                 logger.error("Join queue failed: %s", e)
 
+        # ── REALTIME LISTENER (the missing wire) ────────────────────────────
+        # collect_realtime() was defined but NEVER called, so telegram only ever
+        # ran the one-shot backfill/spider pass above and caught NO new messages
+        # (root cause of the multi-day message gap). Registering the @client.on
+        # NewMessage handlers + parking here makes collect() BLOCK as a true
+        # realtime source (same model as whatsapp). Backfill/spider above run
+        # once per (re)launch; from here the telethon update loop owns the
+        # session uncontended, so get_difference can catch up the gap and live
+        # messages stream in. Gated so it can be disabled if ever needed.
+        if os.getenv("TELEGRAM_REALTIME_ENABLED", "true").lower() == "true":
+            logger.info("[telegram.collect] entering realtime listener (parks until stop)")
+            await self.collect_realtime()
+
     async def _spider_enqueue(self, rows, source_tag: str, priority: int = 8) -> int:
         """P3-2: bounded enqueue into telegram_spider_queue with backpressure.
 
