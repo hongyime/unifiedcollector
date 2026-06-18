@@ -74,11 +74,25 @@ class StravaCollector(BaseCollector):
         # the `_strava4_session` cookie automatically.
         if not self._session_cookie:
             self._session_cookie = self._load_session_cookie_from_file(self._cookies_file)
+        # Multi-account: discover every credentials/strava/strava_*.txt (named by
+        # username) so we can rotate across accounts for more quota AND broader
+        # visibility — an activity (and its GPS) hidden from one account may be
+        # visible to another that follows that athlete. [(name, session_cookie)].
+        self._cookie_accounts = self._load_all_cookie_accounts()
+        if not self._session_cookie and self._cookie_accounts:
+            self._session_cookie = self._cookie_accounts[0][1]
+        if self._cookie_accounts:
+            logger.info("strava: %d cookie account(s) loaded: %s",
+                        len(self._cookie_accounts),
+                        ", ".join(n for n, _ in self._cookie_accounts))
         self._access_token = ""
         self._sem = asyncio.Semaphore(2)
 
-        self._api_delay_min = float(os.getenv("STRAVA_API_DELAY_MIN", "5.0"))
-        self._api_delay_max = float(os.getenv("STRAVA_API_DELAY_MAX", "10.0"))
+        # Trimmed 5/10 -> 3/6: the web cookie path tolerates more than the strict
+        # 100-req/15min OAuth API ceiling, and we now spread load across multiple
+        # cookie accounts. Auto-backoff still kicks in on 429. Override via env.
+        self._api_delay_min = float(os.getenv("STRAVA_API_DELAY_MIN", "3.0"))
+        self._api_delay_max = float(os.getenv("STRAVA_API_DELAY_MAX", "6.0"))
         self._feed_delay_min = float(os.getenv("STRAVA_FEED_DELAY_MIN", "5.0"))
         self._feed_delay_max = float(os.getenv("STRAVA_FEED_DELAY_MAX", "12.0"))
         self._backfill_steps = int(os.getenv("STRAVA_BACKFILL_STEPS", "25"))
@@ -120,6 +134,37 @@ class StravaCollector(BaseCollector):
         except Exception as e:
             logger.warning("Failed to read Strava cookie file %s: %s", path, e)
         return ""
+
+    def _load_all_cookie_accounts(self) -> list[tuple[str, str]]:
+        """Discover all strava_*.txt cookie files (one per account, named by
+        username) and load each account's _strava4_session. The explicit
+        STRAVA_SESSION_COOKIE / STRAVA_COOKIES_FILE is the primary first entry.
+        Deduped by cookie value. Never raises."""
+        import glob
+        cookie_dir = os.path.dirname(self._cookies_file) or "credentials/strava"
+        accounts: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        if self._session_cookie and self._session_cookie not in seen:
+            seen.add(self._session_cookie)
+            accounts.append(("primary", self._session_cookie))
+        candidates: list[str] = []
+        if self._cookies_file and os.path.exists(self._cookies_file):
+            candidates.append(self._cookies_file)
+        try:
+            for p in sorted(glob.glob(os.path.join(cookie_dir, "strava_*.txt"))):
+                if p not in candidates:
+                    candidates.append(p)
+        except Exception:
+            pass
+        for p in candidates:
+            cookie = self._load_session_cookie_from_file(p)
+            if cookie and cookie not in seen:
+                seen.add(cookie)
+                name = os.path.splitext(os.path.basename(p))[0]
+                if name.startswith("strava_"):
+                    name = name[len("strava_"):]
+                accounts.append((name or "default", cookie))
+        return accounts
 
     @property
     def account_media_dir(self) -> Path:
@@ -960,23 +1005,43 @@ class StravaCollector(BaseCollector):
         """
         await self._delay()
         # Preferred: web XHR with the session cookie (covers followed athletes).
-        if self._use_web and self._session_cookie:
-            try:
-                resp = await client.get(
-                    f"https://www.strava.com/activities/{activity_id}/streams",
-                    params=[("stream_types[]", "latlng"), ("stream_types[]", "time"),
-                            ("stream_types[]", "altitude")],
-                    headers={"X-Requested-With": "XMLHttpRequest",
-                             "Accept": "application/json",
-                             "Referer": f"https://www.strava.com/activities/{activity_id}"},
-                )
-                if resp.status_code == 200:
-                    d = resp.json()
-                    # web format: arrays keyed directly by type
-                    return (d.get("latlng") or [], d.get("time") or [], d.get("altitude") or [])
-                logger.debug("web streams %s -> HTTP %s", activity_id, resp.status_code)
-            except Exception as e:
-                logger.debug("web streams fetch failed for %s: %s", activity_id, e)
+        # Try EACH cookie account in turn — an activity hidden from one account
+        # may be visible to another that follows that athlete. First account that
+        # returns a non-empty track wins. A 200-but-empty from all accounts means
+        # genuinely no GPS (manual entry) -> we return [] so it isn't retried.
+        if self._use_web and self._cookie_accounts:
+            _ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+            saw_200_empty = False
+            for idx, (name, cookie) in enumerate(self._cookie_accounts):
+                jar = self._build_cookie_jar(cookie)
+                if jar is None:
+                    continue
+                try:
+                    if idx > 0:
+                        await self._delay()  # space out cross-account retries
+                    async with httpx.AsyncClient(
+                            timeout=30, cookies=jar, follow_redirects=True,
+                            headers={"User-Agent": _ua}) as c:
+                        resp = await c.get(
+                            f"https://www.strava.com/activities/{activity_id}/streams",
+                            params=[("stream_types[]", "latlng"), ("stream_types[]", "time"),
+                                    ("stream_types[]", "altitude")],
+                            headers={"X-Requested-With": "XMLHttpRequest",
+                                     "Accept": "application/json",
+                                     "Referer": f"https://www.strava.com/activities/{activity_id}"})
+                    if resp.status_code == 200:
+                        d = resp.json()
+                        latlng = d.get("latlng") or []
+                        if latlng:
+                            return (latlng, d.get("time") or [], d.get("altitude") or [])
+                        saw_200_empty = True
+                    else:
+                        logger.debug("web streams %s (%s) -> HTTP %s", activity_id, name, resp.status_code)
+                except Exception as e:
+                    logger.debug("web streams (%s) failed for %s: %s", name, activity_id, e)
+            if saw_200_empty:
+                return [], [], []  # confirmed-no-GPS by at least one account
         # Fallback: OAuth API (only the token owner's own activities).
         if self._access_token:
             try:
@@ -1138,9 +1203,14 @@ class StravaCollector(BaseCollector):
         end = start + 86400 - 1
         return start, end
 
-    def _build_cookie_jar(self) -> httpx.Cookies | None:
-        """Construct an httpx.Cookies jar from STRAVA_COOKIES_FILE or
-        STRAVA_SESSION_COOKIE. Returns None when neither is usable."""
+    def _build_cookie_jar(self, cookie: str | None = None) -> httpx.Cookies | None:
+        """Construct an httpx.Cookies jar. If `cookie` is given, build a jar for
+        that specific account's _strava4_session; otherwise load
+        STRAVA_COOKIES_FILE / the primary session cookie. Returns None if unusable."""
+        if cookie:
+            jar = httpx.Cookies()
+            jar.set("_strava4_session", cookie, domain=".strava.com", path="/")
+            return jar
         jar = httpx.Cookies()
         loaded = 0
         if os.path.exists(self._cookies_file):
