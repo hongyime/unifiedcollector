@@ -149,8 +149,10 @@ def test_constructor_defaults(monkeypatch):
     for var in ("TIKTOK_COOKIES_FILE", "TIKTOK_SESSION_ID",
                 "TIKTOK_BROWSER_FALLBACK_ENABLED", "TIKTOK_YTDLP_FALLBACK_ENABLED"):
         monkeypatch.delenv(var, raising=False)
-    # Force the tool-availability probe to "no tools" for deterministic boot.
-    with patch.object(TiktokCollector, "_check_tool", staticmethod(lambda *_: False)):
+    # Force the tool-availability probe to "no tools" for deterministic boot,
+    # and disable cookie auto-discovery so on-disk credentials don't leak in.
+    with patch.object(TiktokCollector, "_check_tool", staticmethod(lambda *_: False)), \
+         patch.object(TiktokCollector, "_discover_cookie_file", staticmethod(lambda: "")):
         c = TiktokCollector()
     assert c.SOURCE_NAME == "tiktok"
     assert c._cookies_file == ""
@@ -181,7 +183,8 @@ def test_check_tool_returns_false_for_missing():
 
 def test_account_media_dir_uses_default_when_no_cookies(monkeypatch):
     monkeypatch.delenv("TIKTOK_COOKIES_FILE", raising=False)
-    with patch.object(TiktokCollector, "_check_tool", staticmethod(lambda *_: False)):
+    with patch.object(TiktokCollector, "_check_tool", staticmethod(lambda *_: False)), \
+         patch.object(TiktokCollector, "_discover_cookie_file", staticmethod(lambda: "")):
         c = TiktokCollector()
     p = c.account_media_dir
     assert p.name == "default"
