@@ -293,14 +293,36 @@ class TiktokCollector(BaseCollector):
     # Default daily quota — TikTok web throttles aggressively; 500 profile
     # views / day per cookie set is the empirically-safe ceiling per the
     # toolkit's account_manager defaults.
-    DEFAULT_DAILY_QUOTA = int(os.getenv("TIKTOK_DAILY_QUOTA", "500"))
+    # Dials pushed (owner accepted higher ban risk): 500 -> 800/day.
+    DEFAULT_DAILY_QUOTA = int(os.getenv("TIKTOK_DAILY_QUOTA", "800"))
+
+    @staticmethod
+    def _discover_cookie_file() -> str:
+        """Return the first credentials/tiktok/tiktok_*.txt cookie file (named by
+        username) when TIKTOK_COOKIES_FILE isn't set, else ''. Never raises."""
+        import glob
+        try:
+            for d in ("credentials/tiktok", "credentials"):
+                hits = sorted(glob.glob(os.path.join(d, "tiktok_*.txt")))
+                if hits:
+                    logger.info("tiktok: auto-discovered cookie file %s "
+                                "(%d available)", hits[0], len(hits))
+                    return hits[0]
+        except Exception:
+            pass
+        return ""
 
     def __init__(self):
         super().__init__()
         self._cookies_file = os.getenv("TIKTOK_COOKIES_FILE", "")
+        # Auto-discover a per-username cookie file (credentials/tiktok/tiktok_*.txt)
+        # when TIKTOK_COOKIES_FILE isn't set, so dropped-in named files work.
+        if not self._cookies_file:
+            self._cookies_file = self._discover_cookie_file()
         self._session_id = os.getenv("TIKTOK_SESSION_ID", "")
-        self._min_sleep = float(os.getenv("TIKTOK_MIN_SLEEP", "0.5"))
-        self._max_sleep = float(os.getenv("TIKTOK_MAX_SLEEP", "2.0"))
+        # Dials pushed (owner accepted higher ban risk): sleep 0.5/2 -> 0.4/1.5.
+        self._min_sleep = float(os.getenv("TIKTOK_MIN_SLEEP", "0.4"))
+        self._max_sleep = float(os.getenv("TIKTOK_MAX_SLEEP", "1.5"))
         self._retries = int(os.getenv("TIKTOK_RETRIES", "2"))
         self._timeout = int(os.getenv("TIKTOK_TIMEOUT_SECONDS", "300"))
         self._browser_fallback = os.getenv("TIKTOK_BROWSER_FALLBACK_ENABLED", "true").lower() == "true"
@@ -314,7 +336,9 @@ class TiktokCollector(BaseCollector):
             "tiktok tool availability: gallery-dl=%s yt-dlp=%s browser_fallback=%s ytdlp_fallback=%s",
             self._use_gallery_dl, self._use_yt_dlp, self._browser_fallback, self._ytdlp_fallback,
         )
-        self._sem = asyncio.Semaphore(int(os.getenv("TIKTOK_DOWNLOAD_CONCURRENCY", "2")))
+        # Dial pushed 2 -> 3 (owner accepted higher ban risk). Still serialized
+        # enough to look human; back off if challenges spike.
+        self._sem = asyncio.Semaphore(int(os.getenv("TIKTOK_DOWNLOAD_CONCURRENCY", "3")))
         self._cookies_valid = False
         self._tracker_file = Path(os.getenv("TIKTOK_TRACKER_FILE", "data/tiktok_tracker.json"))
         self._tracked_ids: set[str] = set()
