@@ -1884,8 +1884,30 @@ class TelegramCollector(BaseCollector):
             len(self._workers),
         )
         # Park until stop. Telethon delivers events under each client's own task.
+        # While parked we ALSO keep historical backfill flowing: every
+        # TELEGRAM_BACKFILL_DRAIN_INTERVAL seconds drain the spider/backfill queue
+        # across ALL connected workers in parallel (SKIP LOCKED makes this safe).
+        # This is the "all accounts backfill + scrape at once" behaviour — live
+        # listening and historical catch-up run concurrently instead of backfill
+        # only happening once per (re)launch.
+        drain_interval = float(os.getenv("TELEGRAM_BACKFILL_DRAIN_INTERVAL", "60"))
+        spider_on = os.getenv("TELEGRAM_SPIDER_ENABLED", "true").lower() == "true"
+        last_drain = asyncio.get_event_loop().time()
         while self._realtime_running and not self._stop.is_set():
             await asyncio.sleep(1.0)
+            if not spider_on:
+                continue
+            now = asyncio.get_event_loop().time()
+            if now - last_drain < drain_interval:
+                continue
+            last_drain = now
+            try:
+                await asyncio.gather(
+                    *(self._process_spider_queue(w) for w in self._workers),
+                    return_exceptions=True,
+                )
+            except Exception as exc:
+                logger.debug("realtime backfill drain failed: %s", exc)
 
     async def _on_new_message(self, worker: "TelegramWorker", event):
         try:

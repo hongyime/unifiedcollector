@@ -294,10 +294,15 @@ services:
       # per-cycle heartbeat stops — give the watchdog a 24h budget so it doesn't
       # kill the parked-but-healthy listener (matches whatsapp's setting).
       COLLECTOR_HANG_TIMEOUT_SECONDS: "86400"
-      TELEGRAM_SPIDER_ACCOUNTS: "oopspwned,johnfriend101"
-      # Throughput push (2026-06-13): reads are cheap and FloodWait auto-throttles,
-      # so 20->80 msg/s/account is safe. Tune down if FloodWait floods the logs.
-      TELEGRAM_BACKFILL_MSG_PER_SEC: "80"
+      # All accounts backfill + spider at once (was restricted to 2). Empty =
+      # every connected account drains the queue in parallel. Watch FloodWait;
+      # set back to a subset if Telegram throttles.
+      TELEGRAM_SPIDER_ACCOUNTS: ""
+      # Throughput push: reads are cheap and FloodWait auto-throttles; 80->150
+      # msg/s/account. Continuous backfill drains every 60s while listening live.
+      TELEGRAM_BACKFILL_MSG_PER_SEC: "150"
+      TELEGRAM_BACKFILL_DRAIN_INTERVAL: "60"
+      TELEGRAM_SPIDER_MAX_PER_CYCLE: "75"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     cap_add:
