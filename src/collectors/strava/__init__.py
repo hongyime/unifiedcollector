@@ -221,6 +221,17 @@ class StravaCollector(BaseCollector):
         except Exception as e:
             logger.warning("strava: activity page scraping failed: %s", e)
 
+        # URGENT GPS recovery: re-fetch streams for activities that never got one
+        # (the old wrong-auth bug left ~95% of activities with no GPS even though
+        # they have a map on strava.com). Drains a bounded batch each cycle via
+        # the corrected web-XHR path. Self-terminates once all are populated.
+        if self._gps_enabled and self._use_web:
+            try:
+                gps_batch = int(os.getenv("STRAVA_GPS_BACKFILL_BATCH", "150"))
+                await self._backfill_missing_gps_streams(batch_size=gps_batch)
+            except Exception as e:
+                logger.warning("strava: GPS backfill failed: %s", e)
+
         # Optional follow-roster expansion: when STRAVA_ROSTER_SEED_TARGETS
         # is set (comma-separated athlete IDs) we scrape /follows pages and
         # enqueue every discovered athlete into strava_spider_queue. Off by
@@ -889,21 +900,122 @@ class StravaCollector(BaseCollector):
         if done:
             logger.info("strava: privacy-zone backfill processed %d activities this cycle", done)
 
+    async def _backfill_missing_gps_streams(self, batch_size: int = 150) -> int:
+        """Re-fetch GPS streams for activities that never got one (stream_status NULL).
+
+        The earlier wrong-auth bug (Bearer token vs web cookie) left ~95% of
+        activities with no GPS even though they have a map on strava.com. This
+        drains a bounded batch per cycle via the corrected web-XHR path in
+        `_collect_gps_streams`. Self-terminates once stream_status is set on all.
+        """
+        if not self._use_web or not self.pool:
+            return 0
+        jar = self._build_cookie_jar()
+        if jar is None:
+            return 0
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT a.platform_activity_id, a.start_latlng, a.end_latlng
+                FROM strava_activities a
+                LEFT JOIN strava_gps_streams s ON s.activity_id = a.id
+                WHERE a.stream_status IS NULL
+                  AND (s.latlng IS NULL OR s.latlng::text IN ('[]','null',''))
+                ORDER BY a.start_date DESC NULLS LAST
+                LIMIT $1
+                """, batch_size)
+        if not rows:
+            return 0
+        ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        logger.info("strava: GPS backfill — fetching streams for %d activities", len(rows))
+        done = 0
+        async with httpx.AsyncClient(timeout=30, cookies=jar, follow_redirects=True,
+                                     headers={"User-Agent": ua}) as client:
+            for row in rows:
+                if self._stop.is_set():
+                    break
+                activity = {"id": row["platform_activity_id"],
+                            "start_latlng": row["start_latlng"],
+                            "end_latlng": row["end_latlng"]}
+                try:
+                    await self._collect_gps_streams(client, activity, str(row["platform_activity_id"]))
+                    done += 1
+                except Exception as e:
+                    logger.debug("GPS backfill failed for %s: %s",
+                                 row["platform_activity_id"], e)
+        logger.info("strava: GPS backfill processed %d activities this cycle", done)
+        return done
+
+    async def _fetch_streams(self, client: httpx.AsyncClient, activity_id: str):
+        """Return (latlng, time, altitude) arrays for an activity, or (None,None,None) on failure.
+
+        WHY THIS EXISTS: GPS was missing for activities that clearly have a map on
+        strava.com. Root cause — streams were fetched from the OAuth /api/v3
+        endpoint with `Authorization: Bearer {access_token}`, but in cookie mode
+        the token is EMPTY (401) and the API can't read FOLLOWED athletes' streams
+        at all. The web XHR endpoint (what the website's map uses) returns streams
+        for ANY activity the logged-in cookie can view. Returning None on failure
+        (vs an empty list) lets the caller retry instead of caching "no GPS".
+        """
+        await self._delay()
+        # Preferred: web XHR with the session cookie (covers followed athletes).
+        if self._use_web and self._session_cookie:
+            try:
+                resp = await client.get(
+                    f"https://www.strava.com/activities/{activity_id}/streams",
+                    params=[("stream_types[]", "latlng"), ("stream_types[]", "time"),
+                            ("stream_types[]", "altitude")],
+                    headers={"X-Requested-With": "XMLHttpRequest",
+                             "Accept": "application/json",
+                             "Referer": f"https://www.strava.com/activities/{activity_id}"},
+                )
+                if resp.status_code == 200:
+                    d = resp.json()
+                    # web format: arrays keyed directly by type
+                    return (d.get("latlng") or [], d.get("time") or [], d.get("altitude") or [])
+                logger.debug("web streams %s -> HTTP %s", activity_id, resp.status_code)
+            except Exception as e:
+                logger.debug("web streams fetch failed for %s: %s", activity_id, e)
+        # Fallback: OAuth API (only the token owner's own activities).
+        if self._access_token:
+            try:
+                resp = await client.get(
+                    f"{STRAVA_API}/activities/{activity_id}/streams",
+                    headers={"Authorization": f"Bearer {self._access_token}"},
+                    params={"keys": "latlng,time,altitude", "key_by_type": "true"})
+                if resp.status_code == 200:
+                    s = resp.json()
+                    return (s.get("latlng", {}).get("data", []),
+                            s.get("time", {}).get("data", []),
+                            s.get("altitude", {}).get("data", []))
+            except Exception as e:
+                logger.debug("api streams fetch failed for %s: %s", activity_id, e)
+        return None, None, None
+
     async def _collect_gps_streams(self, client: httpx.AsyncClient, activity: dict, aid: str):
         activity_id = str(activity["id"])
+        # Skip only if we ALREADY have a POPULATED track. The old check skipped on
+        # ANY existing row, so an empty/failed fetch was cached forever; combined
+        # with the wrong-auth bug above, activities with real GPS stayed blank.
         async with self.pool.acquire() as conn:
-            exists = await conn.fetchval("SELECT 1 FROM strava_gps_streams WHERE activity_id = (SELECT id FROM strava_activities WHERE platform_activity_id = $1)", int(activity_id))
-            if exists: return
+            existing = await conn.fetchval(
+                "SELECT s.latlng FROM strava_activities a "
+                "LEFT JOIN strava_gps_streams s ON s.activity_id = a.id "
+                "WHERE a.platform_activity_id = $1", int(activity_id))
+        if existing is not None and str(existing) not in ("[]", "null", ""):
+            return
         try:
-            await self._delay()
-            resp = await client.get(f"{STRAVA_API}/activities/{activity_id}/streams", headers={"Authorization": f"Bearer {self._access_token}"}, params={"keys": "latlng,time,altitude", "key_by_type": "true"})
-            if resp.status_code == 200:
-                streams = resp.json()
-                latlng_data = streams.get("latlng", {}).get("data", [])
+            latlng_data, time_data, alt_data = await self._fetch_streams(client, activity_id)
+            if latlng_data is None:
+                return  # fetch failed — do NOT cache empty; retry next cycle
+            if True:
                 async with self.pool.acquire() as conn:
                     act_row = await conn.fetchrow("SELECT id FROM strava_activities WHERE platform_activity_id = $1", int(activity_id))
                     if act_row:
-                        await conn.execute("INSERT INTO strava_gps_streams (activity_id, latlng, time, altitude) VALUES ($1, $2, $3, $4)", act_row['id'], json.dumps(latlng_data), json.dumps(streams.get("time", {}).get("data", [])), json.dumps(streams.get("altitude", {}).get("data", [])))
+                        # Replace any prior (empty) row for this activity.
+                        await conn.execute("DELETE FROM strava_gps_streams WHERE activity_id = $1", act_row['id'])
+                        await conn.execute("INSERT INTO strava_gps_streams (activity_id, latlng, time, altitude) VALUES ($1, $2, $3, $4)", act_row['id'], json.dumps(latlng_data), json.dumps(time_data or []), json.dumps(alt_data or []))
                         # Backfill start/end coords from the GPS track when the API
                         # summary omitted them, AND record privacy-zone/truncation
                         # metadata. Privacy-zone activities return empty summary
@@ -911,8 +1023,8 @@ class StravaCollector(BaseCollector):
                         # truncated) path. COALESCE only fills NULL coords so an
                         # authoritative summary value is never lost. The privacy-zone
                         # fields are derived fresh from the stream each fetch.
-                        latlng_obj = streams.get("latlng")
-                        if latlng_obj is None:
+                        # latlng_data is a list here (None already returned above).
+                        if latlng_data is None:
                             stream_status = "incomplete"
                         elif not latlng_data:
                             stream_status = "truncated_empty"
