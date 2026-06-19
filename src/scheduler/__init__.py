@@ -33,6 +33,11 @@ class Scheduler:
             except NotImplementedError:
                 signal.signal(sig, lambda *_: self._stop.set())
 
+        # Telegram notifications (best-effort; never block/raise the scheduler).
+        await self._notify_startup_safe()
+        self._heartbeat_hours = env_int("STATUS_HEARTBEAT_INTERVAL_HOURS", 6, min_value=0)
+        self._last_status = 0.0  # monotonic; 0 forces a heartbeat on first tick
+
         while not self._stop.is_set():
             try:
                 await self._tick()
@@ -41,14 +46,116 @@ class Scheduler:
             except Exception as e:
                 logger.error("Scheduler tick error: %s", e)
 
+            await self._maybe_heartbeat()
+
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=self.check_interval)
                 break
             except asyncio.TimeoutError:
                 pass
 
+        await self._notify_shutdown_safe()
         await close_pool()
         logger.info("Scheduler stopped")
+
+    # --- Telegram status notifications (additive, fail-safe) ---
+
+    async def _notify_startup_safe(self):
+        try:
+            from src.notifications import alerts
+            await alerts.notify_startup()
+        except Exception as e:
+            logger.warning("notify_startup failed: %s", e)
+
+    async def _notify_shutdown_safe(self):
+        try:
+            from src.notifications import alerts
+            await alerts.notify_shutdown()
+        except Exception as e:
+            logger.warning("notify_shutdown failed: %s", e)
+
+    async def _maybe_heartbeat(self):
+        """Fire the status heartbeat on the first tick, then every N hours.
+        0 hours disables. Wrapped so a failure never disturbs scheduling."""
+        if getattr(self, "_heartbeat_hours", 0) <= 0:
+            return
+        import time as _time
+        now = _time.monotonic()
+        if now - self._last_status < self._heartbeat_hours * 3600:
+            return
+        self._last_status = now
+        try:
+            from src.notifications import alerts
+            snapshot = await self._build_status()
+            await alerts.notify_status(snapshot)
+        except Exception as e:
+            logger.warning("status heartbeat failed: %s", e)
+
+    async def _build_status(self) -> dict:
+        """Snapshot of collector health for the heartbeat. Tolerates missing
+        tables/columns — every piece is independently guarded."""
+        snap: dict = {"ok": True}
+        try:
+            async with self.pool.acquire() as conn:
+                # media_items total via planner estimate (instant, lock-free).
+                try:
+                    snap["media_items"] = int(await conn.fetchval(
+                        "SELECT reltuples::bigint FROM pg_class WHERE relname='media_items'"
+                    ) or 0)
+                except Exception:
+                    pass
+
+                # 24h throughput from collection_runs.
+                try:
+                    row = await conn.fetchrow(
+                        """
+                        SELECT COALESCE(SUM(items_collected),0) AS items_24h,
+                               COUNT(*) AS runs_24h,
+                               COUNT(*) FILTER (WHERE status='failed') AS failures_24h
+                        FROM collection_runs
+                        WHERE COALESCE(completed_at, started_at) > NOW() - interval '24 hours'
+                        """,
+                        timeout=10,
+                    )
+                    if row:
+                        snap["items_24h"] = int(row["items_24h"] or 0)
+                        snap["runs_24h"] = int(row["runs_24h"] or 0)
+                        snap["failures_24h"] = int(row["failures_24h"] or 0)
+                except Exception:
+                    pass
+
+                # Most recent completed run + per-source freshness (quiet >24h).
+                try:
+                    last = await conn.fetchrow(
+                        "SELECT source, completed_at FROM collection_runs "
+                        "WHERE completed_at IS NOT NULL ORDER BY completed_at DESC LIMIT 1"
+                    )
+                    if last:
+                        snap["last_run"] = (
+                            f"{last['source']} @ {last['completed_at']:%Y-%m-%d %H:%M UTC}"
+                        )
+                    rows = await conn.fetch(
+                        "SELECT source, MAX(completed_at) AS last FROM collection_runs "
+                        "WHERE completed_at IS NOT NULL GROUP BY source"
+                    )
+                    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+                    snap["quiet_sources"] = sorted(
+                        r["source"] for r in rows if not r["last"] or r["last"] < cutoff
+                    )
+                except Exception:
+                    pass
+
+                # Down sources from source_health, if that table exists.
+                try:
+                    rows = await conn.fetch(
+                        "SELECT source FROM source_health WHERE status='dead'"
+                    )
+                    snap["down_sources"] = sorted(r["source"] for r in rows)
+                except Exception:
+                    pass
+        except Exception as e:
+            snap = {"ok": False, "error": str(e)}
+        return snap
 
     async def _init_db(self):
         # P0-1/P0-2: ledger-backed runner applies schemas/ + migrations/.
