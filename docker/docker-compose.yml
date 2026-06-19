@@ -183,7 +183,10 @@ services:
     image: unifiedcollector-collector:latest
     container_name: unifiedcollector_collector_lowrisk
     command: python -m src.main worker --source github,strava,search
-    mem_limit: 768m
+    # 768m was too tight for the merged github+strava+search worker — github's
+    # spider + ~42k seeded known-ids pushed it to ~93% and it got TERM'd ~every
+    # 35min (graceful exit-0, not cgroup-OOM). Raised to give headroom.
+    mem_limit: 1536m
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
