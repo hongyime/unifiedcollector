@@ -309,6 +309,9 @@ class SearchCollector(BaseCollector):
         return path
 
     async def collect(self, targets: list[str]):
+        # Pace between queries to reduce search-engine 429s (the ddgs brave
+        # backend throttles aggressively). Env-tunable; 0 disables.
+        query_delay = float(os.getenv("SEARCH_QUERY_DELAY_SECONDS", "3"))
         for query in targets:
             if self._stop.is_set():
                 break
@@ -319,6 +322,8 @@ class SearchCollector(BaseCollector):
             except Exception as e:
                 logger.exception("Failed search/%s: %s", query, e)
                 await self.send_to_dlq(query, query, str(e))
+            if query_delay > 0 and not self._stop.is_set():
+                await asyncio.sleep(query_delay)
 
     # ------------------------------------------------------------------ #
     # Public entry points (search_query / expand_paste_sites)

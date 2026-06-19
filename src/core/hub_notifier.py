@@ -240,7 +240,11 @@ class HubNotifier:
             if not claimed:
                 return
 
-            logger.info("Replaying %d cached notifications", len(claimed))
+            # DEBUG, not INFO: when the hub is undeliverable (client unset) this
+            # ticks every batch_interval and was spamming the telegram log. Stale
+            # entries are dropped by TTL in _claim_cache_items; successful sends
+            # below are the meaningful signal.
+            logger.debug("Replaying %d cached notifications", len(claimed))
             to_requeue = []
             for i, (msg_id, message) in enumerate(claimed):
                 sent = await self._send(f"[cached] {message}")

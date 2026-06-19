@@ -136,6 +136,9 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
+      # Big profiles (100s of videos) didn't finish in 300s and got killed mid-
+      # download. Raise to 900s; partial-ingest still saves whatever was pulled.
+      TIKTOK_TIMEOUT_SECONDS: "900"
       # Subprocess download tiers enabled ONLY in this isolated container.
       TIKTOK_YTDLP_FALLBACK_ENABLED: "true"
       TIKTOK_GALLERY_DL_ENABLED: "true"
