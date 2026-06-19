@@ -42,6 +42,28 @@ class BaseCollector(ABC):
         self.user_agents = UserAgentPool()
         self.account_pool = None
         self._known_ids: set[str] = set()
+        # RECOVERY MODE (disaster refill, e.g. external media drive reformatted):
+        # when COLLECTOR_RECOVER_MISSING is set, is_known() also verifies the
+        # backing file still exists on disk. A surviving media_items row whose
+        # file is gone is treated as UNKNOWN so the collector re-downloads it.
+        # Non-destructive: rows are kept; ON CONFLICT refreshes them on refetch.
+        # Off by default (normal ops keep the fast O(1) set-membership path).
+        # TODO(reconciler): supersede this flag with src/core/reconciler.py
+        # (feature_gap_analysis.md #5) for incremental tier1/tier2 reconciliation.
+        self._recover_missing: bool = os.environ.get(
+            "COLLECTOR_RECOVER_MISSING", ""
+        ).lower() in ("1", "true", "yes")
+        # content_id -> file_path, populated by _seed_known_ids when recovery is
+        # on, so is_known() can stat the backing file. Empty in normal ops.
+        self._known_paths: dict[str, str] = {}
+        # Anti-starvation: cap how many missing-file re-downloads is_known()
+        # releases per collect cycle. The forward pass re-downloads inline, so an
+        # unbounded recovery would pin the cycle on old media and never advance
+        # the live cursor. New content (not in _known_ids) is NEVER budgeted, so
+        # live scraping is unaffected; only the refill of lost files is throttled.
+        # 0 = unlimited. Reset to 0 at the start of each run() cycle.
+        self._recover_budget = int(os.getenv("COLLECTOR_RECOVER_PER_CYCLE", "200"))
+        self._recover_released = 0
         # Progress signal for the worker's zero-progress watchdog. Counts items
         # actually persisted (real INSERT into media_items, not dedup-skips).
         # The worker samples this before/after each collect cycle; a cycle that
@@ -145,17 +167,48 @@ class BaseCollector(ABC):
         await self.checkpoint.reset_if_stale()
         await self.checkpoint.mark_running()
 
+        # Reset the per-cycle recover-missing budget (anti-starvation; see
+        # is_known). Each run() == one collect cycle.
+        self._recover_released = 0
+        progress_before = self._progress_count
+
         logger.info("Starting %s collector (%d known items)", self.SOURCE_NAME, len(self._known_ids))
         try:
             await self.collect(targets)
             self.circuit_breaker.record_success()
             await self.run_backfill()
-        except Exception:
+        except Exception as e:
             self.circuit_breaker.record_failure()
+            await self._notify_run_error(e)
             raise
+        else:
+            await self._notify_run_summary(self._progress_count - progress_before)
         finally:
             await self.checkpoint.mark_idle()
             logger.info("Stopped %s collector", self.SOURCE_NAME)
+
+    # --- Telegram notifications (best-effort; never disturb collection) ---
+
+    async def _notify_run_summary(self, collected: int):
+        """Optional per-cycle summary. Off by default (COLLECTOR_NOTIFY_SUMMARIES)
+        to avoid flooding the group during a large media refill — the scheduler's
+        periodic heartbeat is the primary 'where things stand' signal."""
+        if os.getenv("COLLECTOR_NOTIFY_SUMMARIES", "").lower() not in ("1", "true", "yes"):
+            return
+        try:
+            from src.notifications import alerts
+            await alerts.notify_collection_summary(
+                self.SOURCE_NAME, {"collected": collected}
+            )
+        except Exception:
+            logger.debug("notify_collection_summary failed", exc_info=True)
+
+    async def _notify_run_error(self, error: Exception):
+        try:
+            from src.notifications import alerts
+            await alerts.notify_error(self.SOURCE_NAME, error)
+        except Exception:
+            logger.debug("notify_error failed", exc_info=True)
 
     async def _seed_known_ids(self):
         """DB-first dedup seed (P3-3). Replaces the per-instance O(files) disk
@@ -169,17 +222,29 @@ class BaseCollector(ABC):
             return
         try:
             async with self.pool.acquire() as conn:
-                rows = await conn.fetch(
-                    "SELECT content_id FROM media_items WHERE source = $1",
-                    self.SOURCE_NAME,
-                )
+                # Recovery mode needs file_path to stat the backing file; normal
+                # ops only need the id set (cheaper, no extra column materialized).
+                if self._recover_missing:
+                    rows = await conn.fetch(
+                        "SELECT content_id, file_path FROM media_items "
+                        "WHERE source = $1",
+                        self.SOURCE_NAME,
+                    )
+                else:
+                    rows = await conn.fetch(
+                        "SELECT content_id FROM media_items WHERE source = $1",
+                        self.SOURCE_NAME,
+                    )
             for r in rows:
                 cid = r["content_id"]
                 if cid:
                     self._known_ids.add(cid)
+                    if self._recover_missing:
+                        self._known_paths[cid] = r["file_path"]
             if rows:
-                logger.info("Seeded %d known %s content_ids from DB",
-                            len(rows), self.SOURCE_NAME)
+                logger.info("Seeded %d known %s content_ids from DB%s",
+                            len(rows), self.SOURCE_NAME,
+                            " [recover-missing ON]" if self._recover_missing else "")
         except Exception:
             logger.warning("%s: DB known-id seed failed; relying on ON CONFLICT",
                            self.SOURCE_NAME, exc_info=True)
@@ -198,7 +263,21 @@ class BaseCollector(ABC):
             logger.info("Disk scan found %d existing %s items", count, self.SOURCE_NAME)
 
     def is_known(self, content_id: str) -> bool:
-        return content_id in self._known_ids
+        if content_id not in self._known_ids:
+            return False
+        # Recovery mode: a known id whose downloaded file no longer exists on
+        # disk is treated as unknown so the collector re-downloads it. file_path
+        # is the container path (e.g. /media/...), valid inside the worker.
+        if self._recover_missing:
+            fp = self._known_paths.get(content_id)
+            if fp and not os.path.exists(fp):
+                # File gone → eligible for re-download, but bound how many we
+                # release per cycle so refill can't starve forward scraping.
+                if self._recover_budget <= 0 or self._recover_released < self._recover_budget:
+                    self._recover_released += 1
+                    return False
+                return True  # budget spent this cycle; retry on a later cycle
+        return True
 
     def stop(self):
         self._stop.set()
