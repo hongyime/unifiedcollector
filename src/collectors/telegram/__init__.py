@@ -1938,19 +1938,21 @@ class TelegramCollector(BaseCollector):
 
     async def _on_message_deleted(self, worker: "TelegramWorker", event):
         try:
-            chat_id = event.chat_id
+            from telethon.utils import resolve_id
+            # event.chat_id is the marked id (-100… for channels); the stored
+            # platform_message_id uses the bare id, so normalize first.
+            chat_id, _ = resolve_id(event.chat_id)
             for msg_id in (event.deleted_ids or []):
                 async with self.pool.acquire() as conn:
-                    # Mark the row deleted in metadata; ON CONFLICT NOTHING is
-                    # fine because the row may not exist (deletion of a
-                    # message we never saw).
+                    # Mark the row deleted in metadata; no-op if the row doesn't
+                    # exist (deletion of a message we never saw). telegram_messages
+                    # has no updated_at column — only touch metadata.
                     await conn.execute("""
                         UPDATE telegram_messages
                         SET metadata = jsonb_set(
                                 COALESCE(metadata, '{}'::jsonb),
                                 '{deleted}', 'true'::jsonb, true
-                            ),
-                            updated_at = NOW()
+                            )
                         WHERE platform_message_id = $1
                     """, f"{chat_id}:{msg_id}")
         except Exception as exc:
@@ -1959,7 +1961,8 @@ class TelegramCollector(BaseCollector):
     async def _on_chat_action(self, worker: "TelegramWorker", event):
         """Translate Telethon chat actions into telegram_chat_members upserts."""
         try:
-            chat_id = event.chat_id
+            from telethon.utils import resolve_id
+            chat_id, _ = resolve_id(event.chat_id)  # marked (-100…) -> bare id
             role = "member"
             if getattr(event, "user_kicked", False):
                 role = "banned"
@@ -1974,7 +1977,19 @@ class TelegramCollector(BaseCollector):
             if not user_ids:
                 return
             async with self.pool.acquire() as conn:
+                # telegram_chat_members.chat_id/user_id are uuids (FK) — resolve
+                # the bare platform ids to internal uuids; skip if not collected yet.
+                chat_uuid = await conn.fetchval(
+                    "SELECT id FROM telegram_chats WHERE platform_chat_id = $1",
+                    str(chat_id))
+                if chat_uuid is None:
+                    return
                 for user_id in user_ids:
+                    user_uuid = await conn.fetchval(
+                        "SELECT id FROM telegram_users WHERE platform_user_id = $1",
+                        str(user_id))
+                    if user_uuid is None:
+                        continue
                     await conn.execute("""
                         INSERT INTO telegram_chat_members
                             (chat_id, user_id, role, joined_at, last_seen_at, refreshed_at)
@@ -1983,7 +1998,7 @@ class TelegramCollector(BaseCollector):
                             role = EXCLUDED.role,
                             last_seen_at = NOW(),
                             refreshed_at = NOW()
-                    """, int(chat_id), int(user_id), role)
+                    """, chat_uuid, user_uuid, role)
         except Exception as exc:
             logger.error("_on_chat_action error: %s", exc, exc_info=True)
 
