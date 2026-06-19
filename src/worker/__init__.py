@@ -588,10 +588,28 @@ class WorkerService:
                 break
             except Exception as e:
                 if self._is_network_error(e):
+                    # Confirm a REAL internet outage before alerting. Many
+                    # per-source/local errors (e.g. beeper's local Desktop API at
+                    # host.docker.internal:23373) raise connection errors that
+                    # match _is_network_error even though the internet is fine —
+                    # alerting on those caused DOWN/RESTORED flapping seconds
+                    # apart. Probe first; if internet is up, treat as a transient
+                    # local error: back off and retry this source, no alert.
+                    if await self._check_internet():
+                        logger.warning(
+                            "%s: connection error but internet is UP — transient/"
+                            "local, retrying (no network alert): %s", source, e)
+                        try:
+                            await asyncio.wait_for(
+                                self._stop.wait(), timeout=self._cycle_sleep(source))
+                        except asyncio.TimeoutError:
+                            pass
+                        continue
                     logger.warning("%s: network error — waiting for internet: %s",
                                    source, e)
                     now = time.monotonic()
-                    if now - self._last_net_notify > 300:
+                    notified = now - self._last_net_notify > 300
+                    if notified:
                         self._last_net_notify = now
                         await self._notify_telegram(
                             f"🌐 <b>NETWORK DOWN</b>\n"
@@ -599,7 +617,7 @@ class WorkerService:
                             f"<code>{str(e)[:200]}</code>"
                         )
                     await self._wait_for_internet(f"{source}/recovery")
-                    if now == self._last_net_notify:
+                    if notified:
                         await self._notify_telegram("✅ <b>NETWORK RESTORED</b>\nInternet recovered — all collectors resuming.")
                     continue
                 if self._is_auth_error(e):
