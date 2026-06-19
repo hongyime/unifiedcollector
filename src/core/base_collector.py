@@ -64,6 +64,13 @@ class BaseCollector(ABC):
         # 0 = unlimited. Reset to 0 at the start of each run() cycle.
         self._recover_budget = int(os.getenv("COLLECTOR_RECOVER_PER_CYCLE", "200"))
         self._recover_released = 0
+        # Auto-complete: after this many consecutive cycles finding ZERO missing
+        # files, the source's refill is done — persist that (recover_state table)
+        # and drop back to fast mode, so COLLECTOR_RECOVER_MISSING never needs a
+        # manual flip-off. 0 disables auto-complete (stays on until env removed).
+        self._recover_done_after = int(os.getenv("COLLECTOR_RECOVER_DONE_CYCLES", "3"))
+        self._recover_missing_seen = 0   # missing files detected this cycle
+        self._clean_recover_cycles = 0   # consecutive cycles with 0 missing
         # Progress signal for the worker's zero-progress watchdog. Counts items
         # actually persisted (real INSERT into media_items, not dedup-skips).
         # The worker samples this before/after each collect cycle; a cycle that
@@ -167,9 +174,10 @@ class BaseCollector(ABC):
         await self.checkpoint.reset_if_stale()
         await self.checkpoint.mark_running()
 
-        # Reset the per-cycle recover-missing budget (anti-starvation; see
-        # is_known). Each run() == one collect cycle.
+        # Reset the per-cycle recover-missing counters (anti-starvation budget +
+        # auto-complete tracking; see is_known). Each run() == one collect cycle.
         self._recover_released = 0
+        self._recover_missing_seen = 0
         progress_before = self._progress_count
 
         logger.info("Starting %s collector (%d known items)", self.SOURCE_NAME, len(self._known_ids))
@@ -183,6 +191,7 @@ class BaseCollector(ABC):
             raise
         else:
             await self._notify_run_summary(self._progress_count - progress_before)
+            await self._update_recover_completion()
         finally:
             await self.checkpoint.mark_idle()
             logger.info("Stopped %s collector", self.SOURCE_NAME)
@@ -210,6 +219,53 @@ class BaseCollector(ABC):
         except Exception:
             logger.debug("notify_error failed", exc_info=True)
 
+    # --- Recover-missing auto-complete (persisted per source) ---
+
+    _RECOVER_STATE_DDL = (
+        "CREATE TABLE IF NOT EXISTS recover_state ("
+        "source TEXT PRIMARY KEY, done_at TIMESTAMPTZ NOT NULL DEFAULT now())"
+    )
+
+    async def _recover_already_done(self) -> bool:
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(self._RECOVER_STATE_DDL)
+                return bool(await conn.fetchval(
+                    "SELECT true FROM recover_state WHERE source = $1",
+                    self.SOURCE_NAME,
+                ))
+        except Exception:
+            logger.debug("recover_state read failed", exc_info=True)
+            return False
+
+    async def _update_recover_completion(self):
+        """After a successful cycle: if recovery is on and this cycle found no
+        missing files, count it; after N consecutive clean cycles persist the
+        source as done and drop to fast mode. Any missing file resets the streak."""
+        if not self._recover_missing or self._recover_done_after <= 0:
+            return
+        if self._recover_missing_seen == 0:
+            self._clean_recover_cycles += 1
+            if self._clean_recover_cycles >= self._recover_done_after:
+                try:
+                    async with self.pool.acquire() as conn:
+                        await conn.execute(self._RECOVER_STATE_DDL)
+                        await conn.execute(
+                            "INSERT INTO recover_state (source) VALUES ($1) "
+                            "ON CONFLICT (source) DO NOTHING",
+                            self.SOURCE_NAME,
+                        )
+                except Exception:
+                    logger.debug("recover_state write failed", exc_info=True)
+                self._recover_missing = False
+                logger.info(
+                    "%s: media refill complete (%d clean cycles) — "
+                    "recover-missing auto-OFF",
+                    self.SOURCE_NAME, self._clean_recover_cycles,
+                )
+        else:
+            self._clean_recover_cycles = 0
+
     async def _seed_known_ids(self):
         """DB-first dedup seed (P3-3). Replaces the per-instance O(files) disk
         scan of media_dir, which slowed over time and raced across telegram's
@@ -220,6 +276,12 @@ class BaseCollector(ABC):
         """
         if self.pool is None:
             return
+        # Auto-complete: if this source already finished its refill in a prior
+        # run, stay in fast mode regardless of the env flag.
+        if self._recover_missing and await self._recover_already_done():
+            self._recover_missing = False
+            logger.info("%s: media refill already complete (persisted) — "
+                        "recover-missing OFF", self.SOURCE_NAME)
         try:
             async with self.pool.acquire() as conn:
                 # Recovery mode needs file_path to stat the backing file; normal
@@ -271,6 +333,7 @@ class BaseCollector(ABC):
         if self._recover_missing:
             fp = self._known_paths.get(content_id)
             if fp and not os.path.exists(fp):
+                self._recover_missing_seen += 1  # drives auto-complete
                 # File gone → eligible for re-download, but bound how many we
                 # release per cycle so refill can't starve forward scraping.
                 if self._recover_budget <= 0 or self._recover_released < self._recover_budget:
