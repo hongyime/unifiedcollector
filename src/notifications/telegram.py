@@ -1,7 +1,8 @@
 """Telegram Bot API send wrapper. Send-only, fail-safe.
 
 Config via env:
-  TELEGRAM_BOT_TOKEN  - bot token from @BotFather (required to send)
+  NOTIFY_TELEGRAM_BOT_TOKEN - dedicated notify bot token (preferred), falls back
+                              to TELEGRAM_BOT_TOKEN. (Here: @unifiedcollector234bot.)
   TELEGRAM_CHAT_ID    - destination chat id (supergroup id is -100...) (required)
   TELEGRAM_THREAD_ID  - optional group-topic thread id (int)
 
@@ -20,8 +21,12 @@ _API = "https://api.telegram.org"
 
 
 def _config() -> tuple[str, str, str]:
+    token = (
+        os.getenv("NOTIFY_TELEGRAM_BOT_TOKEN", "").strip()
+        or os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    )
     return (
-        os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
+        token,
         os.getenv("TELEGRAM_CHAT_ID", "").strip(),
         os.getenv("TELEGRAM_THREAD_ID", "").strip(),
     )
