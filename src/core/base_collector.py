@@ -42,35 +42,12 @@ class BaseCollector(ABC):
         self.user_agents = UserAgentPool()
         self.account_pool = None
         self._known_ids: set[str] = set()
-        # RECOVERY MODE (disaster refill, e.g. external media drive reformatted):
-        # when COLLECTOR_RECOVER_MISSING is set, is_known() also verifies the
-        # backing file still exists on disk. A surviving media_items row whose
-        # file is gone is treated as UNKNOWN so the collector re-downloads it.
-        # Non-destructive: rows are kept; ON CONFLICT refreshes them on refetch.
-        # Off by default (normal ops keep the fast O(1) set-membership path).
-        # TODO(reconciler): supersede this flag with src/core/reconciler.py
-        # (feature_gap_analysis.md #5) for incremental tier1/tier2 reconciliation.
-        self._recover_missing: bool = os.environ.get(
-            "COLLECTOR_RECOVER_MISSING", ""
-        ).lower() in ("1", "true", "yes")
-        # content_id -> file_path, populated by _seed_known_ids when recovery is
-        # on, so is_known() can stat the backing file. Empty in normal ops.
-        self._known_paths: dict[str, str] = {}
-        # Anti-starvation: cap how many missing-file re-downloads is_known()
-        # releases per collect cycle. The forward pass re-downloads inline, so an
-        # unbounded recovery would pin the cycle on old media and never advance
-        # the live cursor. New content (not in _known_ids) is NEVER budgeted, so
-        # live scraping is unaffected; only the refill of lost files is throttled.
-        # 0 = unlimited. Reset to 0 at the start of each run() cycle.
-        self._recover_budget = int(os.getenv("COLLECTOR_RECOVER_PER_CYCLE", "200"))
-        self._recover_released = 0
-        # Auto-complete: after this many consecutive cycles finding ZERO missing
-        # files, the source's refill is done — persist that (recover_state table)
-        # and drop back to fast mode, so COLLECTOR_RECOVER_MISSING never needs a
-        # manual flip-off. 0 disables auto-complete (stays on until env removed).
-        self._recover_done_after = int(os.getenv("COLLECTOR_RECOVER_DONE_CYCLES", "3"))
-        self._recover_missing_seen = 0   # missing files detected this cycle
-        self._clean_recover_cycles = 0   # consecutive cycles with 0 missing
+        # Media reconciler: bounded, drive-gated, tombstoning re-download of
+        # media_items whose backing file is gone (feature_gap_analysis #5). Gated
+        # by COLLECTOR_RECOVER_MISSING; no-op/fast-path when disabled or a source
+        # has already completed its refill. See src/core/reconciler.py.
+        from .reconciler import Reconciler
+        self.reconciler = Reconciler(self.SOURCE_NAME)
         # Progress signal for the worker's zero-progress watchdog. Counts items
         # actually persisted (real INSERT into media_items, not dedup-skips).
         # The worker samples this before/after each collect cycle; a cycle that
@@ -85,6 +62,7 @@ class BaseCollector(ABC):
     def set_pool(self, pool):
         self.pool = pool
         self.checkpoint.set_pool(pool)
+        self.reconciler.set_pool(pool)
 
     @property
     def media_dir(self) -> Path:
@@ -138,6 +116,9 @@ class BaseCollector(ABC):
             except Exception as e:
                 logger.warning("%s backfill failed %s: %s",
                                self.SOURCE_NAME, content_id, e)
+                # Count the failed re-download so the reconciler can tombstone an
+                # item that's permanently unavailable (expired/lost source asset).
+                self.reconciler.record_failure(content_id)
                 try:
                     await self.send_to_dlq(
                         item.get("entity_id", ""),
@@ -174,10 +155,9 @@ class BaseCollector(ABC):
         await self.checkpoint.reset_if_stale()
         await self.checkpoint.mark_running()
 
-        # Reset the per-cycle recover-missing counters (anti-starvation budget +
-        # auto-complete tracking; see is_known). Each run() == one collect cycle.
-        self._recover_released = 0
-        self._recover_missing_seen = 0
+        # Reset the reconciler's per-cycle counters (budget + auto-complete
+        # tracking; see is_known). Each run() == one collect cycle.
+        self.reconciler.reset_cycle()
         progress_before = self._progress_count
 
         logger.info("Starting %s collector (%d known items)", self.SOURCE_NAME, len(self._known_ids))
@@ -191,7 +171,11 @@ class BaseCollector(ABC):
             raise
         else:
             await self._notify_run_summary(self._progress_count - progress_before)
-            await self._update_recover_completion()
+            # Reconciler bookkeeping: alert on an abnormal missing-rate, persist
+            # tombstones, auto-complete the source's refill, rotate the shard.
+            await self.reconciler.maybe_alert(len(self._known_ids))
+            await self.reconciler.finalize_cycle()
+            self.reconciler.advance_shard()
         finally:
             await self.checkpoint.mark_idle()
             logger.info("Stopped %s collector", self.SOURCE_NAME)
@@ -219,53 +203,6 @@ class BaseCollector(ABC):
         except Exception:
             logger.debug("notify_error failed", exc_info=True)
 
-    # --- Recover-missing auto-complete (persisted per source) ---
-
-    _RECOVER_STATE_DDL = (
-        "CREATE TABLE IF NOT EXISTS recover_state ("
-        "source TEXT PRIMARY KEY, done_at TIMESTAMPTZ NOT NULL DEFAULT now())"
-    )
-
-    async def _recover_already_done(self) -> bool:
-        try:
-            async with self.pool.acquire() as conn:
-                await conn.execute(self._RECOVER_STATE_DDL)
-                return bool(await conn.fetchval(
-                    "SELECT true FROM recover_state WHERE source = $1",
-                    self.SOURCE_NAME,
-                ))
-        except Exception:
-            logger.debug("recover_state read failed", exc_info=True)
-            return False
-
-    async def _update_recover_completion(self):
-        """After a successful cycle: if recovery is on and this cycle found no
-        missing files, count it; after N consecutive clean cycles persist the
-        source as done and drop to fast mode. Any missing file resets the streak."""
-        if not self._recover_missing or self._recover_done_after <= 0:
-            return
-        if self._recover_missing_seen == 0:
-            self._clean_recover_cycles += 1
-            if self._clean_recover_cycles >= self._recover_done_after:
-                try:
-                    async with self.pool.acquire() as conn:
-                        await conn.execute(self._RECOVER_STATE_DDL)
-                        await conn.execute(
-                            "INSERT INTO recover_state (source) VALUES ($1) "
-                            "ON CONFLICT (source) DO NOTHING",
-                            self.SOURCE_NAME,
-                        )
-                except Exception:
-                    logger.debug("recover_state write failed", exc_info=True)
-                self._recover_missing = False
-                logger.info(
-                    "%s: media refill complete (%d clean cycles) — "
-                    "recover-missing auto-OFF",
-                    self.SOURCE_NAME, self._clean_recover_cycles,
-                )
-        else:
-            self._clean_recover_cycles = 0
-
     async def _seed_known_ids(self):
         """DB-first dedup seed (P3-3). Replaces the per-instance O(files) disk
         scan of media_dir, which slowed over time and raced across telegram's
@@ -276,17 +213,15 @@ class BaseCollector(ABC):
         """
         if self.pool is None:
             return
-        # Auto-complete: if this source already finished its refill in a prior
-        # run, stay in fast mode regardless of the env flag.
-        if self._recover_missing and await self._recover_already_done():
-            self._recover_missing = False
-            logger.info("%s: media refill already complete (persisted) — "
-                        "recover-missing OFF", self.SOURCE_NAME)
+        # Load persisted reconciler state (done-flag, tombstones). If the source
+        # already completed its refill, reconciler.active goes False (fast path).
+        await self.reconciler.load_state()
+        recover = self.reconciler.active
         try:
             async with self.pool.acquire() as conn:
-                # Recovery mode needs file_path to stat the backing file; normal
-                # ops only need the id set (cheaper, no extra column materialized).
-                if self._recover_missing:
+                # Recovery needs file_path to stat the backing file; normal ops
+                # only need the id set (cheaper, no extra column materialized).
+                if recover:
                     rows = await conn.fetch(
                         "SELECT content_id, file_path FROM media_items "
                         "WHERE source = $1",
@@ -301,12 +236,12 @@ class BaseCollector(ABC):
                 cid = r["content_id"]
                 if cid:
                     self._known_ids.add(cid)
-                    if self._recover_missing:
-                        self._known_paths[cid] = r["file_path"]
+                    if recover:
+                        self.reconciler.note_known(cid, r["file_path"])
             if rows:
                 logger.info("Seeded %d known %s content_ids from DB%s",
                             len(rows), self.SOURCE_NAME,
-                            " [recover-missing ON]" if self._recover_missing else "")
+                            " [reconciler ON]" if recover else "")
         except Exception:
             logger.warning("%s: DB known-id seed failed; relying on ON CONFLICT",
                            self.SOURCE_NAME, exc_info=True)
@@ -327,19 +262,10 @@ class BaseCollector(ABC):
     def is_known(self, content_id: str) -> bool:
         if content_id not in self._known_ids:
             return False
-        # Recovery mode: a known id whose downloaded file no longer exists on
-        # disk is treated as unknown so the collector re-downloads it. file_path
-        # is the container path (e.g. /media/...), valid inside the worker.
-        if self._recover_missing:
-            fp = self._known_paths.get(content_id)
-            if fp and not os.path.exists(fp):
-                self._recover_missing_seen += 1  # drives auto-complete
-                # File gone → eligible for re-download, but bound how many we
-                # release per cycle so refill can't starve forward scraping.
-                if self._recover_budget <= 0 or self._recover_released < self._recover_budget:
-                    self._recover_released += 1
-                    return False
-                return True  # budget spent this cycle; retry on a later cycle
+        # Reconciler: a known id whose backing file is gone is treated as unknown
+        # (bounded per cycle, tombstone-aware) so the collector re-downloads it.
+        if self.reconciler.should_recover(content_id):
+            return False
         return True
 
     def stop(self):
