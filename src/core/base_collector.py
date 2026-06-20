@@ -171,6 +171,10 @@ class BaseCollector(ABC):
             raise
         else:
             await self._notify_run_summary(self._progress_count - progress_before)
+            # Proactive reconciler sweep — re-download media_items whose file is
+            # missing (drives refill independent of what collect() re-encountered).
+            # Runs before finalize so _missing_seen reflects the true gap.
+            await self.reconciler.sweep()
             # Reconciler bookkeeping: alert on an abnormal missing-rate, persist
             # tombstones, auto-complete the source's refill, rotate the shard.
             await self.reconciler.maybe_alert(len(self._known_ids))

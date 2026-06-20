@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      body { font: 13px system-ui, sans-serif; width: 260px; padding: 12px; }
+      h1 { font-size: 14px; margin: 0 0 8px; }
+      label { display: block; margin: 8px 0 2px; color: #555; }
+      input { width: 100%; box-sizing: border-box; padding: 4px; }
+      button { margin-top: 10px; width: 100%; padding: 6px; cursor: pointer; }
+      #status { margin-top: 8px; color: #2a7; min-height: 16px; }
+    </style>
+  </head>
+  <body>
+    <h1>UnifiedCollector IG Bridge</h1>
+    <label>Ingest endpoint</label>
+    <input id="ingest" placeholder="http://127.0.0.1:8765" />
+    <label>Auto cycle (minutes)</label>
+    <input id="interval" type="number" min="5" placeholder="30" />
+    <button id="save">Save</button>
+    <button id="scrape">Scrape now</button>
+    <div id="status"></div>
+    <script src="popup.js"></script>
+  </body>
+</html>

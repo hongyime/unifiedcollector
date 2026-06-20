@@ -226,6 +226,7 @@ services:
   collector_website:
     image: unifiedcollector-collector:latest
     container_name: unifiedcollector_collector_website
+    init: true  # reap subprocess zombies so recreate can't wedge
     command: python -m src.main worker --source website
     mem_limit: 1g
     environment:
@@ -263,6 +264,7 @@ services:
   collector_lemon8:
     image: unifiedcollector-collector:latest
     container_name: unifiedcollector_collector_lemon8
+    init: true  # reap subprocess zombies so recreate can't wedge
     command: python -m src.main worker --source lemon8
     mem_limit: 1g
     environment:
@@ -294,6 +296,7 @@ services:
   collector_telegram:
     image: unifiedcollector-collector:latest
     container_name: unifiedcollector_collector_telegram
+    init: true  # reap subprocess zombies so recreate can't wedge
     command: python -m src.main worker --source telegram
     mem_limit: 1g
     environment:
@@ -337,6 +340,7 @@ services:
   collector_beeper:
     image: unifiedcollector-collector:latest
     container_name: unifiedcollector_collector_beeper
+    init: true  # reap subprocess zombies so recreate can't wedge
     command: python -m src.main worker --source beeper
     mem_limit: 768m
     environment:
@@ -370,6 +374,7 @@ services:
   collector_whatsapp:
     image: unifiedcollector-collector:latest
     container_name: unifiedcollector_collector_whatsapp
+    init: true  # reap subprocess zombies so recreate can't wedge
     command: python -m src.main worker --source whatsapp
     mem_limit: 768m
     environment:
@@ -413,6 +418,7 @@ services:
   collector_instagram:
     image: unifiedcollector-collector:latest
     container_name: unifiedcollector_collector_instagram
+    init: true  # reap subprocess zombies so recreate can't wedge
     command: python -m src.main worker --source instagram
     mem_limit: 1g
     environment:

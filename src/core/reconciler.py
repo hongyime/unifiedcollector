@@ -82,6 +82,18 @@ class Reconciler:
         # Tier-2 (opt-in): sampled sha256 re-verification to catch corruption
         # (file present but wrong content). 0 disables. Expensive — keep small.
         self.sha256_sample_rate: float = float(os.getenv("RECONCILE_SHA256_SAMPLE_RATE", "0"))
+        # Proactive sweep: walk media_items directly (not just what collect()
+        # re-encounters) and re-download missing files from source_url. Without
+        # this, sources that don't re-scan their full history auto-completed at a
+        # few % refilled. Generic GET works for image/file sources; video sources
+        # (yt-dlp/gallery-dl) are skipped here and refill via their own backfill.
+        self._scan_offset = 0
+        self._sweep_window = _env_int("RECONCILE_SWEEP_WINDOW", 1000)
+        self._generic_skip = {
+            s.strip() for s in
+            os.getenv("RECONCILE_GENERIC_DOWNLOAD_SKIP", "youtube,tiktok").split(",")
+            if s.strip()
+        }
 
         # Per-cycle counters (reset each cycle).
         self._released = 0
@@ -209,6 +221,86 @@ class Reconciler:
             return h.hexdigest()
         except OSError:
             return None
+
+    # --- proactive sweep (the actual refill driver) ------------------------
+
+    _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+           "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+
+    async def _redownload(self, source_url: str, file_path: str) -> bool:
+        """Generic GET of source_url -> file_path (atomic). For direct-CDN media.
+        Returns False on any failure (caller tombstones after N)."""
+        if not source_url or not file_path:
+            return False
+        import httpx
+        import tempfile
+        from pathlib import Path
+        try:
+            async with httpx.AsyncClient(timeout=60, follow_redirects=True) as c:
+                r = await c.get(source_url, headers={"User-Agent": self._UA})
+                r.raise_for_status()
+                data = r.content
+            if len(data) < 1024:  # html error page / empty -> treat as failure
+                return False
+            dest = Path(file_path)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=str(dest.parent), suffix=".tmp")
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, str(dest))
+            return True
+        except Exception:
+            return False
+
+    async def sweep(self) -> int:
+        """Walk this source's media_items in a rotating window, re-download any
+        whose file is missing (generic GET), tombstone repeated failures, and
+        keep _missing_seen honest so auto-complete only fires when truly done.
+        Video sources are counted-but-skipped here (their own backfill handles
+        the heavy yt-dlp/gallery-dl downloads)."""
+        if not self.active or self.pool is None or not self.drive_ok():
+            return 0
+        try:
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    "SELECT m.content_id, m.file_path, m.source_url "
+                    "FROM media_items m "
+                    "WHERE m.source = $1 AND NOT EXISTS ("
+                    "  SELECT 1 FROM media_recover_state t "
+                    "  WHERE t.source = m.source AND t.content_id = m.content_id "
+                    "    AND t.tombstoned_at IS NOT NULL) "
+                    "ORDER BY m.content_id LIMIT $2 OFFSET $3",
+                    self.source, self._sweep_window, self._scan_offset,
+                )
+        except Exception:
+            logger.debug("%s: reconciler sweep query failed", self.source, exc_info=True)
+            return 0
+
+        if not rows:
+            self._scan_offset = 0  # wrapped past the end; restart next cycle
+            return 0
+        self._scan_offset = 0 if len(rows) < self._sweep_window else self._scan_offset + len(rows)
+
+        is_video = self.source in self._generic_skip
+        downloaded = 0
+        for r in rows:
+            fp = r["file_path"]
+            if not fp or self._exists(fp):
+                continue
+            self._missing_seen += 1  # keeps auto-complete from firing prematurely
+            if is_video or downloaded >= self.budget:
+                continue  # count missing, but defer (video) or budget-capped
+            if await self._redownload(r["source_url"], fp):
+                downloaded += 1
+            else:
+                self.record_failure(r["content_id"])
+        if downloaded:
+            logger.info("%s: reconciler sweep re-downloaded %d missing file(s)",
+                        self.source, downloaded)
+        await self.persist()
+        return downloaded
 
     # --- DB persistence (isolated; integration-tested) ---------------------
 

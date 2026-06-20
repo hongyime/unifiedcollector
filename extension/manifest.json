@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "UnifiedCollector IG Bridge",
+  "version": "0.1.0",
+  "description": "Scrapes Instagram media from your logged-in browser session and forwards it to the local UnifiedCollector ingest endpoint.",
+  "permissions": ["storage", "alarms", "scripting"],
+  "host_permissions": [
+    "https://www.instagram.com/*",
+    "https://i.instagram.com/*",
+    "http://127.0.0.1/*",
+    "http://localhost/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.instagram.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "IG Bridge"
+  },
+  "icons": {}
+}
