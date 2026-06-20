@@ -86,6 +86,7 @@ services:
       dockerfile: docker/Dockerfile
     image: unifiedcollector-collector:latest
     container_name: unifiedcollector_collector_youtube
+    init: true  # reap yt-dlp/ffmpeg zombies so recreate can't wedge on a defunct PID
     command: python -m src.main worker --source youtube
     mem_limit: 1300m
     environment:
@@ -130,6 +131,7 @@ services:
       dockerfile: docker/Dockerfile
     image: unifiedcollector-collector:latest
     container_name: unifiedcollector_collector_tiktok
+    init: true  # reap gallery-dl/yt-dlp zombies so recreate can't wedge on a defunct PID
     command: python -m src.main worker --source tiktok
     mem_limit: 1300m
     environment:
@@ -182,6 +184,7 @@ services:
   collector_lowrisk:
     image: unifiedcollector-collector:latest
     container_name: unifiedcollector_collector_lowrisk
+    init: true  # reap search/gallery-dl subprocess zombies (this wedged a recreate before)
     command: python -m src.main worker --source github,strava,search
     # 768m was too tight for the merged github+strava+search worker — github's
     # spider + ~42k seeded known-ids pushed it to ~93% and it got TERM'd ~every
@@ -232,7 +235,7 @@ services:
       # Concurrency drives REAL RSS (each task holds a page + parse tree). After
       # the host OOM, dialled 10 -> 6 to lower website's memory peak — a real RSS
       # cut (unlike a mem_limit cap), minor throughput cost across 421 sites.
-      WEBSITE_MAX_CONCURRENT_TASKS: "6"
+      WEBSITE_MAX_CONCURRENT_TASKS: "10"
       # CPU hygiene (A#4): website crawls are multi-hour; idle longer between cycles.
       COLLECTOR_CYCLE_SLEEP_WEBSITE: "600"
     extra_hosts:
