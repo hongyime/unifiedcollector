@@ -349,6 +349,18 @@ services:
       BEEPER_DESKTOP_API_URL: http://host.docker.internal:23373
       # Throughput push (2026-06-13): larger pages = fewer round-trips per sync.
       BEEPER_PAGE_SIZE: "150"
+      # Stability (2026-06-21, Bryan reported recurring "beeper disconnected"):
+      # the Beeper Desktop Local API (host:23373) is intermittently unresponsive,
+      # so a single blip used to end the cycle -> error -> retry -> alert. Ride
+      # the blips with more transient retries + gentler backoff, and stop the
+      # watchdog false-killing productive-but-slow cycles (progress_count only
+      # ticks on a successful media insert, so failed-media cycles look "hung").
+      BEEPER_TRANSIENT_RETRIES: "6"
+      BEEPER_TRANSIENT_BACKOFF: "2.0"
+      COLLECTOR_HANG_TIMEOUT_SECONDS: "5400"
+      # Wider room coverage per cycle (user: "many rooms, must be efficient").
+      BEEPER_MAX_CHATS_PER_CYCLE: "120"
+      BEEPER_BACKFILL_PAGES_PER_CYCLE: "4"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     cap_add:

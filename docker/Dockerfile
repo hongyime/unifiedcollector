@@ -23,6 +23,12 @@ RUN pip install --no-cache-dir -r requirements.lock
 RUN python -m playwright install chromium \
  && python -m playwright install-deps chromium
 
+# sqlite3 CLI for self-healing corrupt SQLite session files (session_repair.py).
+# Placed AFTER the heavy pip/playwright layers so those stay cached on rebuild
+# (keeps the image/vhdx growth minimal).
+RUN apt-get update && apt-get install -y --no-install-recommends sqlite3 \
+ && rm -rf /var/lib/apt/lists/*
+
 COPY src/ src/
 
 # Bake a baseline copy of the per-source config files. At runtime the compose

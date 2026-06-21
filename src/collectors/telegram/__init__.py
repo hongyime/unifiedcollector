@@ -168,6 +168,23 @@ class TelegramWorker:
             "[worker=%d account=%s] Connecting Telegram (session=%s)",
             self.worker_id, self.account.name, session_file,
         )
+        # Self-heal a CORRUPT session before anything touches it (2026-06-21:
+        # OOM/hard-kill mid-write corrupted the entities btree -> "malformed" ->
+        # worker permanently disconnected). ensure_healthy_session() .recover's it
+        # in place, preserving auth_key (no re-login). No-op when already healthy.
+        if isinstance(session_file, str):
+            try:
+                from src.core.session_repair import ensure_healthy_session
+                if not ensure_healthy_session(session_file):
+                    logger.error(
+                        "[worker=%d account=%s] session could not be repaired — "
+                        "may need re-auth", self.worker_id, self.account.name,
+                    )
+            except Exception:
+                logger.warning(
+                    "[worker=%d account=%s] session_repair raised",
+                    self.worker_id, self.account.name, exc_info=True,
+                )
         # Harden the .session SQLite against "database is locked" BEFORE Telethon
         # opens it. The files live on the WSL2 Docker volume (slow fsync), so the
         # default journal mode + 5s busy_timeout made Telethon's concurrent session

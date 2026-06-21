@@ -52,6 +52,15 @@ _BEEPER_PAGE_SIZE = int(os.getenv("BEEPER_PAGE_SIZE", "100"))
 _BEEPER_TRANSIENT_RETRIES = int(os.getenv("BEEPER_TRANSIENT_RETRIES", "3"))
 _BEEPER_TRANSIENT_BACKOFF = float(os.getenv("BEEPER_TRANSIENT_BACKOFF", "1.5"))
 
+# Permanent-failure tombstoning (2026-06-21). Some assets can NEVER be served:
+# Beeper evicted them from its local cache (ENOENT) or the asset's access token is
+# invalid. Without giving up, get_backfill_items re-selects them every cycle
+# forever (no media_items row is ever written), starving new collection and
+# flat-lining progress_count (-> watchdog false-kills -> "beeper disconnected").
+# After this many failed download attempts, tombstone the content_id so it is
+# never retried. Recoverable blips fail < this and recover normally.
+_BEEPER_MEDIA_TOMBSTONE_AFTER = int(os.getenv("BEEPER_MEDIA_TOMBSTONE_AFTER", "3"))
+
 
 # ── feature gate ──────────────────────────────────────────────────────────
 
@@ -694,6 +703,10 @@ class BeeperCollector(BaseCollector):
         filename = self.build_filename(
             entity_id, entity_name, content_type, cid, extension=ext,
         )
+        # Defensive: a derived extension/name occasionally carries a path
+        # separator (seen: "...011839.gg/depress"), which made os.replace target
+        # a non-existent subdir -> ENOENT. Strip separators from the basename.
+        filename = filename.replace("/", "_").replace("\\", "_")
         dest_dir = self.media_dir / network / content_type
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / filename
@@ -731,10 +744,54 @@ class BeeperCollector(BaseCollector):
             logger.debug("Beeper media saved: %s (%d bytes)", cid, len(data))
         except Exception as e:
             logger.warning("Beeper media download failed %s: %s", cid, e)
+            # Count the failure; permanently-dead assets get tombstoned so the
+            # backfill stops re-selecting them forever (see _record_media_failure).
+            await self._record_media_failure(cid)
             try:
                 await self.send_to_dlq(entity_id, cid, str(e)[:500])
             except Exception:
                 pass
+
+    async def _load_media_tombstones(self) -> set[str]:
+        """content_ids we've permanently given up on (Beeper-evicted / bad-token
+        assets). Used to filter get_backfill_items so we don't re-attempt them."""
+        if self.pool is None:
+            return set()
+        try:
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    "SELECT content_id FROM media_recover_state "
+                    "WHERE source='beeper' AND tombstoned_at IS NOT NULL"
+                )
+            return {r["content_id"] for r in rows}
+        except Exception:
+            logger.debug("beeper: load tombstones failed", exc_info=True)
+            return set()
+
+    async def _record_media_failure(self, content_id: str) -> None:
+        """Persist a failed asset download; tombstone after N attempts so it is
+        never retried. Reuses the reconciler's media_recover_state table."""
+        if self.pool is None or not content_id:
+            return
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO media_recover_state
+                        (source, content_id, attempts, last_attempt_at)
+                    VALUES ('beeper', $1, 1, now())
+                    ON CONFLICT (source, content_id) DO UPDATE SET
+                        attempts = media_recover_state.attempts + 1,
+                        last_attempt_at = now(),
+                        tombstoned_at = CASE
+                            WHEN media_recover_state.attempts + 1 >= $2
+                            THEN now() ELSE media_recover_state.tombstoned_at END
+                    """,
+                    content_id, _BEEPER_MEDIA_TOMBSTONE_AFTER,
+                )
+        except Exception:
+            logger.debug("beeper: record_media_failure failed %s", content_id,
+                         exc_info=True)
 
     async def aclose(self) -> None:
         if self._client_owned:
@@ -833,6 +890,9 @@ class BeeperCollector(BaseCollector):
                 """,
                 batch_size * 3,
             )
+        # Skip assets we've permanently given up on (Beeper-evicted / bad-token).
+        # Without this they'd be re-selected every cycle forever (the storm).
+        tombstoned = await self._load_media_tombstones()
         items: list[dict] = []
         for row in rows:
             try:
@@ -859,6 +919,8 @@ class BeeperCollector(BaseCollector):
                     continue
                 att_id = att.get("id", "")
                 content_id = f"{message_id}_{att_id.split('/')[-1][:40]}" if att_id else message_id
+                if content_id in tombstoned:
+                    continue
                 if self.is_known(content_id):
                     continue
                 mime = att.get("mimeType")

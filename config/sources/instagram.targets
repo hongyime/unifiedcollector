@@ -10,6 +10,9 @@ oopspwned | oopspwned | 10
 prawnproductions234 | prawnproductions234 | 10
 shotsbyseah234 | shotsbyseah234 | 10
 streets.of.singapore | streets.of.singapore | 3
-humansofny | humansofny | 1
 makrosnapz | makrosnapz | 1
-natgeo | natgeo | 1
+# Bryan 06-21: dropped famous seeds — we spider out from our own accounts, not
+# from celebrity profiles. natgeo/humansofny removed (and were skipped by
+# FILTER_MAX_FOLLOWERS=1000 anyway).
+!humansofny | humansofny | 1
+!natgeo | natgeo | 1
