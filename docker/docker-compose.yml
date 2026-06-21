@@ -563,28 +563,32 @@ services:
   backup:
     image: postgres:16-alpine
     container_name: unifiedcollector_backup
-    profiles: ["manual"]   # never auto-starts; run with: docker compose --profile manual up backup
+    # Auto-runs now (was profiles:[manual]). Daily pg_dump -> Z (off the C: drive),
+    # 14-day retention. pg_dump is a complete restorable snapshot; this replaces
+    # the broken WAL-archiving approach. Restore: pg_restore -d <db> <file>.dump
     environment:
       PGUSER: ${POSTGRES_USER}
       PGPASSWORD: ${POSTGRES_PASSWORD}
       PGHOST: postgres
       PGDATABASE: unifiedcollector
     volumes:
-      - ./backups:/backups
-      - z:/unifiedcollector/media/db/wal_archive:/wal_archive
+      - z:/unifiedcollector/media/db/backups:/zbackups
     entrypoint: /bin/sh
     command:
       - -c
       - |
+        mkdir -p /zbackups
         while true; do
-          pg_dump -Fc > /backups/unifiedcollector_$$(date +%Y%m%d_%H%M%S).dump
-          find /backups -name '*.dump' -mtime +7 -delete
+          echo "[backup] dumping to Z $$(date)"
+          pg_dump -Fc > /zbackups/unifiedcollector_$$(date +%Y%m%d_%H%M%S).dump \
+            && echo "[backup] ok" || echo "[backup] FAILED"
+          find /zbackups -name '*.dump' -mtime +14 -delete
           sleep 86400
         done
     depends_on:
       postgres:
         condition: service_healthy
-    restart: "no"
+    restart: unless-stopped
 
   rabbitmq:
     image: rabbitmq:3.13-management-alpine

@@ -3,23 +3,91 @@
   <head>
     <meta charset="utf-8" />
     <style>
-      body { font: 13px system-ui, sans-serif; width: 260px; padding: 12px; }
-      h1 { font-size: 14px; margin: 0 0 8px; }
-      label { display: block; margin: 8px 0 2px; color: #555; }
-      input { width: 100%; box-sizing: border-box; padding: 4px; }
-      button { margin-top: 10px; width: 100%; padding: 6px; cursor: pointer; }
-      #status { margin-top: 8px; color: #2a7; min-height: 16px; }
+      :root {
+        --bg: #0f1117; --panel: #171a23; --panel2: #1e2230; --border: #2a2f3e;
+        --fg: #e6e8ee; --muted: #8b91a3; --accent: #6366f1; --accent2: #818cf8;
+        --ok: #34d399; --warn: #fbbf24; --err: #f87171;
+      }
+      * { box-sizing: border-box; }
+      body {
+        font: 12px/1.45 system-ui, sans-serif; width: 340px; margin: 0;
+        background: var(--bg); color: var(--fg);
+      }
+      header {
+        display: flex; align-items: center; gap: 8px; padding: 12px 14px;
+        background: linear-gradient(135deg, #6366f1, #4338ca); color: #fff;
+      }
+      header img { width: 22px; height: 22px; }
+      header h1 { font-size: 13px; margin: 0; font-weight: 700; letter-spacing: .2px; }
+      header .sub { font-size: 10px; opacity: .85; }
+      .wrap { padding: 12px 14px; }
+      .row { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; }
+      .row .k { color: var(--muted); }
+      .row .v { font-weight: 600; }
+      .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; }
+      .dot.ok { background: var(--ok); } .dot.bad { background: var(--err); } .dot.idle { background: var(--muted); }
+      .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; margin-bottom: 10px; }
+      .panel h2 { font-size: 10px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); margin: 0 0 6px; }
+      .hint { font-size: 10px; color: var(--muted); margin: 6px 0 0; }
+      label { display: block; margin: 8px 0 3px; color: var(--muted); font-size: 11px; }
+      input {
+        width: 100%; padding: 6px 8px; background: var(--panel2); color: var(--fg);
+        border: 1px solid var(--border); border-radius: 6px; font: inherit;
+      }
+      .btns { display: flex; gap: 8px; margin-top: 10px; }
+      button {
+        flex: 1; padding: 7px; cursor: pointer; border: 1px solid var(--border);
+        border-radius: 6px; background: var(--panel2); color: var(--fg); font: inherit; font-weight: 600;
+      }
+      button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+      button:hover { filter: brightness(1.12); }
+      #log {
+        height: 150px; overflow-y: auto; background: #0b0d13; border: 1px solid var(--border);
+        border-radius: 6px; padding: 6px 8px; font: 11px/1.5 ui-monospace, Menlo, monospace;
+      }
+      #log .line { white-space: pre-wrap; word-break: break-word; }
+      #log .t { color: #5b6376; }
+      .info { color: var(--fg); } .warn { color: var(--warn); } .error { color: var(--err); }
+      .logbar { display: flex; justify-content: space-between; align-items: center; }
+      .logbar a { color: var(--accent2); cursor: pointer; font-size: 10px; }
     </style>
   </head>
   <body>
-    <h1>UnifiedCollector IG Bridge</h1>
-    <label>Ingest endpoint</label>
-    <input id="ingest" placeholder="http://127.0.0.1:8765" />
-    <label>Auto cycle (minutes)</label>
-    <input id="interval" type="number" min="5" placeholder="30" />
-    <button id="save">Save</button>
-    <button id="scrape">Scrape now</button>
-    <div id="status"></div>
+    <header>
+      <img id="logo" src="icons/icon48.png" alt="" />
+      <div>
+        <h1>UnifiedCollector Bridge</h1>
+        <div class="sub">multi-platform social media collector</div>
+      </div>
+    </header>
+    <div class="wrap">
+      <div class="panel">
+        <h2>Status</h2>
+        <div class="row"><span class="k">Background worker</span><span class="v" id="sw"><span class="dot idle"></span>—</span></div>
+        <div class="row"><span class="k">Social tab</span><span class="v" id="tab">—</span></div>
+        <div class="row"><span class="k">Collector (ingest)</span><span class="v" id="ingestStatus">—</span></div>
+        <div class="row"><span class="k">Auto-cycle</span><span class="v" id="cycle">—</span></div>
+        <div class="row"><span class="k">Last cycle</span><span class="v" id="last">—</span></div>
+        <p class="hint" id="keepalive"></p>
+      </div>
+
+      <div class="panel">
+        <div class="logbar"><h2>Activity log</h2><a id="clear">clear</a></div>
+        <div id="log"></div>
+      </div>
+
+      <div class="panel">
+        <h2>Settings</h2>
+        <label>Ingest endpoint</label>
+        <input id="ingest" placeholder="http://127.0.0.1:8765" />
+        <label>Auto-cycle (minutes)</label>
+        <input id="interval" type="number" min="5" placeholder="30" />
+        <div class="btns">
+          <button id="save">Save</button>
+          <button id="scrape" class="primary">Scrape now</button>
+        </div>
+      </div>
+    </div>
     <script src="popup.js"></script>
   </body>
 </html>

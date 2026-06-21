@@ -1,10 +1,19 @@
-# UnifiedCollector IG Bridge (Chrome MV3 extension)
+# UnifiedCollector Bridge (Chrome MV3 extension)
 
-Scrapes Instagram media using **your logged-in Chrome session** and forwards it
-to the local collector. Because the content script runs *on* instagram.com, its
-API calls are **same-origin** and carry your real session cookies — so it
-bypasses the login wall / GraphQL-400 rate-limiting the headless `instagram`
-collector hits, with a much lower ban profile (it looks like genuine browsing).
+Collects social media using **your logged-in Chrome session** and forwards it to
+the local collector. Because the content script runs *on* the social site, its API
+calls are **same-origin** and carry your real session cookies + browser
+fingerprint — so it bypasses the login wall / rate-limiting that the headless
+collectors hit, with a much lower ban profile (it looks like genuine browsing).
+
+**Multi-platform:** scrapers live in a `PLATFORMS` registry in `content.js`.
+**Instagram** is implemented; others (TikTok, Twitter/X, …) can be added without
+touching the rest — see "Adding a platform" below.
+
+**Observability (popup):** dark-mode popup with a live **Status** panel (worker
+alive, social tab open, ingest connected, cycle cadence + next wake, last-cycle
+stats) and a scrolling **Activity log** of every cycle/ingest/discover/error.
+A branded icon ships in `icons/`.
 
 ## Architecture
 
@@ -65,6 +74,15 @@ skipped** — we crawl your network, not celebrities. Tune via env on the
 - **Pace it**: there are randomized delays between pages/profiles. Don't crank
   them down — behavioural detection can still action even a real session.
 - **One account = one point of failure.** Use a throwaway/secondary IG login.
+
+## Adding a platform
+1. Add an object to the `PLATFORMS` registry in `content.js` with a `host`
+   matcher, a `label`, and an `async runCycle()` returning `{targets, saved,
+   discovered}` (use `clog(level, msg, label)` to surface progress in the popup).
+2. Add the site to `content_scripts.matches` + `host_permissions` in
+   `manifest.json`, and to `SOCIAL_URLS` in `background.js`.
+3. Add the matching collector-side ingest endpoints (mirror `/ig/targets`,
+   `/ig/ingest`, `/ig/discover`).
 
 ## Files
 - `manifest.json` — MV3 manifest (host_permissions for instagram.com + localhost)
