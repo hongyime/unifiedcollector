@@ -459,6 +459,31 @@ services:
       start_period: 30s
     restart: unless-stopped
 
+  # Instagram ingest bridge for the Chrome extension. Runs as a reliable
+  # auto-restart container (vs a fragile manual host process) and publishes 8765
+  # so the extension's service worker can reach it at 127.0.0.1:8765. The live
+  # `../src:/app/src` mount means ig_ingest/spider code edits apply on a plain
+  # `docker restart` — NO image rebuild (keeps the vhdx from growing).
+  ig_ingest:
+    image: unifiedcollector-collector:latest
+    container_name: unifiedcollector_ig_ingest
+    command: python -m src.bridges.ig_ingest
+    mem_limit: 512m
+    ports:
+      - "8765:8765"
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      COLLECTOR_DRIVE_PATH: /media
+    volumes:
+      - z:/unifiedcollector/media:/media
+      - ../src:/app/src
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - ../.env
+    restart: unless-stopped
+
   scheduler:
     build:
       context: ..

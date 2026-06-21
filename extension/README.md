@@ -20,26 +20,39 @@ collector hits, with a much lower ban profile (it looks like genuine browsing).
 Same consumer pattern as the WhatsApp/Beeper bridges: an external local service
 feeds the collector over a local HTTP endpoint.
 
-## Setup
+## Setup (zero-config — install + leave a tab open)
 
-1. **Run the ingest server** (collector side):
+1. **Ingest server**: runs automatically as the `ig_ingest` docker service
+   (auto-restart, publishes `127.0.0.1:8765`). It comes up with the stack:
    ```
-   python -m src.bridges.ig_ingest        # listens on 0.0.0.0:8765
+   docker compose up -d ig_ingest
    ```
-   (or add it as a docker service; it reads the same DB + `COLLECTOR_DRIVE_PATH`.)
-   - `GET /ig/targets` → instagram `collection_targets`
-   - `POST /ig/ingest` → downloads each media item + upserts `media_items`
+   No manual host process. Code edits apply with `docker restart
+   unifiedcollector_ig_ingest` (live `../src` mount, no image rebuild).
 
-2. **Load the extension**: `chrome://extensions` → enable **Developer mode** →
+2. **Load the extension** (once): `chrome://extensions` → **Developer mode** →
    **Load unpacked** → select this `extension/` folder.
 
-3. **Configure** (extension popup): set the ingest endpoint
-   (`http://127.0.0.1:8765`) and the auto-cycle interval. Keep an
-   **instagram.com tab open/pinned** (the content script needs a live IG tab).
+3. **Keep one instagram.com tab open/pinned, logged in.** That's it — **no popup
+   configuration needed.** Defaults already point at `http://127.0.0.1:8765` and
+   auto-run a scrape cycle every 30 min via `chrome.alarms`. (The popup is only
+   there if you ever want to change the endpoint/interval or hit "Scrape now".)
 
-4. Click **Scrape now**, or let the alarm run every N minutes. Targets come from
-   your collector's `collection_targets` (source=instagram); scraped media lands
-   in `media_items` + the media drive, same as every other source.
+Targets come from `collection_targets` (your seeds) plus spider-discovered
+profiles; scraped media lands in `media_items` + the media drive like every other
+source.
+
+## 2-hop spider (friends-of-friends)
+
+The extension doesn't just scrape your fixed seed list — for any profile at
+**hop < 2** it also harvests that profile's followers + following and POSTs them
+to `POST /ig/discover`, which stores them at hop+1 in `instagram_spider_targets`
+(a channel separate from `collection_targets`, so the `.targets` file-sync never
+wipes them). Hop 0 = your seeds, hop 1 = their network, hop 2 = leaf (scrape
+only). **Famous accounts (> `INSTA_SPIDER_FAMOUS_CAP`, default 100k followers) are
+skipped** — we crawl your network, not celebrities. Tune via env on the
+`ig_ingest` service: `INSTA_SPIDER_HOPS`, `INSTA_SPIDER_FAMOUS_CAP`,
+`IG_SPIDER_TARGETS_LIMIT` (max targets served per cycle).
 
 ## MV3 notes / maintenance
 

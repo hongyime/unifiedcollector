@@ -63,6 +63,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       } catch (e) {
         sendResponse({ ok: false, error: String(e) });
       }
+    } else if (msg.type === "discover") {
+      try {
+        const r = await fetch(base + "/ig/discover", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ source: msg.source, hop: msg.hop, discovered: msg.discovered }),
+        });
+        sendResponse({ ok: r.ok });
+      } catch (e) {
+        sendResponse({ ok: false, error: String(e) });
+      }
     } else if (msg.type === "scrapeNow") {
       sendResponse({ ok: await triggerScrape() });
     }
