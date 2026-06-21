@@ -15,6 +15,13 @@ alive, social tab open, ingest connected, cycle cadence + next wake, last-cycle
 stats) and a scrolling **Activity log** of every cycle/ingest/discover/error.
 A branded icon ships in `icons/`.
 
+**Social tab launcher (`tabs.html`):** a dark page (popup → "🗂 Manage social
+tabs", or right-click the icon → Options) that lists every platform with live
+status — **tab open?** and **logged in?** (detected via each platform's auth
+cookie) — plus **Open / Open all** buttons. Open them once, log in, and the
+bridge scrapes from those pinned tabs. Platforms come from `platforms.js`
+(Instagram = scraper active; TikTok/Lemon8/X/Facebook/Threads = login-ready).
+
 ## Architecture
 
 ```

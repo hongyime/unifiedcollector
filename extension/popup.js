@@ -108,5 +108,9 @@ $("clear").addEventListener("click", async () => {
   renderLog();
 });
 
+$("tabsBtn").addEventListener("click", () => {
+  chrome.tabs.create({ url: chrome.runtime.getURL("tabs.html") });
+});
+
 load();
 setInterval(refresh, 1500);

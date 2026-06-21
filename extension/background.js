@@ -8,6 +8,8 @@
 // storage-backed LOG ring buffer so the popup can show recent activity even after
 // the worker has slept and restarted.
 
+importScripts("platforms.js"); // defines globalThis.UC_PLATFORMS
+
 const ALARM = "uc-scrape";
 const DEFAULT_INGEST = "http://127.0.0.1:8765";
 const LOG_KEY = "ucLog";
@@ -60,10 +62,45 @@ chrome.alarms.onAlarm.addListener(async (a) => {
   triggerScrape();
 });
 
-// Find any supported social tab and tell its content script to run a cycle.
-const SOCIAL_URLS = ["https://www.instagram.com/*"]; // extend as platforms are added
+// Scrape-dispatch targets = platforms that actually have a content-script scraper.
+function scraperUrlPatterns() {
+  return (globalThis.UC_PLATFORMS || []).filter((p) => p.scraper).map((p) => `https://${p.host}/*`);
+}
+
+// ---- social tab launcher -------------------------------------------------
+async function tabForHost(host) {
+  const tabs = await chrome.tabs.query({ url: `*://${host}/*` });
+  return tabs && tabs[0] ? tabs[0] : null;
+}
+async function isLoggedIn(p) {
+  try {
+    const c = await chrome.cookies.get({ url: p.cookieUrl, name: p.cookie });
+    return !!(c && c.value);
+  } catch (e) {
+    return null; // unknown (no host permission / API hiccup)
+  }
+}
+async function platformStatuses() {
+  const out = [];
+  for (const p of globalThis.UC_PLATFORMS || []) {
+    const tab = await tabForHost(p.host);
+    out.push({
+      id: p.id, label: p.label, url: p.url, host: p.host, scraper: !!p.scraper,
+      tabOpen: !!tab, tabId: tab ? tab.id : null, loggedIn: await isLoggedIn(p),
+    });
+  }
+  return out;
+}
+async function openOrFocus(p, { pinned = true, active = false } = {}) {
+  const tab = await tabForHost(p.host);
+  if (tab) { await chrome.tabs.update(tab.id, { active }); return { id: p.id, focused: true }; }
+  await chrome.tabs.create({ url: p.url, pinned, active });
+  await log("info", `opened tab: ${p.label}`);
+  return { id: p.id, opened: true };
+}
+
 async function triggerScrape() {
-  const tabs = await chrome.tabs.query({ url: SOCIAL_URLS });
+  const tabs = await chrome.tabs.query({ url: scraperUrlPatterns() });
   if (tabs && tabs[0]) {
     chrome.tabs.sendMessage(tabs[0].id, { type: "scrapeCycle" });
     await log("info", `cycle dispatched to tab: ${new URL(tabs[0].url).host}`);
@@ -133,6 +170,24 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         log("info", `✅ cycle done [${msg.platform}]: ${msg.targets} targets, ${msg.saved} media, ${msg.discovered} discovered`);
         sendResponse({ ok: true });
         break;
+      case "getPlatforms":
+        sendResponse(await platformStatuses());
+        break;
+      case "openPlatform": {
+        const p = (globalThis.UC_PLATFORMS || []).find((x) => x.id === msg.id);
+        sendResponse(p ? await openOrFocus(p, { active: true }) : { error: "unknown platform" });
+        break;
+      }
+      case "openAll": {
+        let opened = 0;
+        for (const p of globalThis.UC_PLATFORMS || []) {
+          const r = await openOrFocus(p, { active: false });
+          if (r.opened) opened++;
+        }
+        await log("info", `open-all: launched ${opened} new tab(s)`);
+        sendResponse({ opened });
+        break;
+      }
       case "scrapeNow":
         scrapeNow().then(sendResponse);
         return;

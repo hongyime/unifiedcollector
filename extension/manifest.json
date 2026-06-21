@@ -1,12 +1,18 @@
 {
   "manifest_version": 3,
   "name": "UnifiedCollector Bridge",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Collects social media from your logged-in browser session and forwards it to your local UnifiedCollector. Multi-platform (Instagram live; extensible).",
-  "permissions": ["storage", "alarms", "scripting", "tabs"],
+  "permissions": ["storage", "alarms", "scripting", "tabs", "cookies"],
   "host_permissions": [
     "https://www.instagram.com/*",
     "https://i.instagram.com/*",
+    "https://www.threads.net/*",
+    "https://www.tiktok.com/*",
+    "https://www.lemon8-app.com/*",
+    "https://x.com/*",
+    "https://twitter.com/*",
+    "https://www.facebook.com/*",
     "http://127.0.0.1/*",
     "http://localhost/*"
   ],
@@ -20,6 +26,10 @@
       "run_at": "document_idle"
     }
   ],
+  "options_ui": {
+    "page": "tabs.html",
+    "open_in_tab": true
+  },
   "action": {
     "default_popup": "popup.html",
     "default_title": "UnifiedCollector Bridge",
