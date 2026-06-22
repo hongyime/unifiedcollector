@@ -3,45 +3,161 @@
 // Runs ON a social site, so its fetches to that site's internal API are
 // SAME-ORIGIN and carry your logged-in session cookies + a real browser
 // fingerprint — which bypasses the bot throttles a headless/raw client hits.
+// For sites that sign their requests (TikTok/Lemon8), we instead read the
+// page's OWN embedded state JSON (already fetched by the page) — also ban-safe.
 //
 // MULTI-PLATFORM: scrapers live in the PLATFORMS registry keyed by hostname.
-// Instagram is implemented; add a new platform by dropping another entry with a
-// `host` matcher and an async `runCycle()` that returns {targets, saved, discovered}.
-// (Remember to also add its host to manifest content_scripts + host_permissions,
-//  and a matching ingest endpoint on the collector side.)
+// Add a platform by dropping another entry with a `host` matcher and an async
+// `runCycle()` returning {targets, saved, discovered}. Remember to also add its
+// host to manifest content_scripts + host_permissions + platforms.js, and a
+// matching ingest endpoint (the generic /social/* endpoints already cover it).
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const jitter = (base) => base + Math.random() * base;
 
-// forward a log line to the background worker so it shows in the popup's Log panel
+// ---------------------------------------------------------------------------
+// HUMAN PACING. A real person browsing is slow, irregular, and takes breaks.
+// Scraping 257 profiles back-to-back is what got the IG account flagged for
+// review. `human(base)` returns base×(0.6–1.6) and ~12% of the time adds a 4–13s
+// "distraction" pause; small chance of a long 30–90s coffee break. Use hsleep()
+// everywhere instead of fixed sleeps, and keep per-cycle VOLUME small.
+function human(base) {
+  let ms = base * (0.6 + Math.random());            // 0.6×–1.6×
+  if (Math.random() < 0.12) ms += 4000 + Math.random() * 9000;   // distraction
+  if (Math.random() < 0.03) ms += 30000 + Math.random() * 60000; // coffee break
+  return Math.round(ms);
+}
+const hsleep = (base) => sleep(human(base));
+function shuffle(a) { for (let i = a.length - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0; [a[i], a[j]] = [a[j], a[i]]; } return a; }
+
+// ---------------------------------------------------------------------------
+// messaging helper — retries once if the ephemeral SW tore down the channel
+// (the classic MV3 "message channel closed before a response" race).
+// ---------------------------------------------------------------------------
+async function send(msg, { retries = 1 } = {}) {
+  for (let i = 0; ; i++) {
+    try {
+      return await chrome.runtime.sendMessage(msg);
+    } catch (e) {
+      const transient = /message channel closed|Could not establish|Receiving end does not exist|Extension context invalidated/i.test(
+        e.message || ""
+      );
+      if (!transient || i >= retries) {
+        if (/Extension context invalidated/i.test(e.message || "")) return null; // page outlived extension
+        throw e;
+      }
+      await sleep(400); // let the worker respawn
+    }
+  }
+}
 function clog(level, msg, platform) {
-  try { chrome.runtime.sendMessage({ type: "log", level, msg, platform }); } catch (e) {}
+  send({ type: "log", level, msg, platform }).catch(() => {});
+}
+
+// A login-wall / throttle returns an HTML doc with HTTP 200. Detect it so we can
+// back off cleanly instead of crashing every target with "Unexpected token '<'".
+class WallError extends Error {}
+async function fetchJson(url, opts) {
+  const res = await fetch(url, opts);
+  const ctype = res.headers.get("content-type") || "";
+  if (!res.ok) {
+    if (res.status === 429 || res.status === 401 || res.status === 403) throw new WallError("HTTP " + res.status);
+    throw new Error("HTTP " + res.status);
+  }
+  if (!/json/i.test(ctype)) {
+    const head = (await res.text()).slice(0, 40).replace(/\s+/g, " ");
+    if (/^<|doctype|<html/i.test(head)) throw new WallError("login/throttle wall");
+    throw new Error("non-JSON response");
+  }
+  return res.json();
+}
+
+// Shared collector — dedups media items by content_id+url.
+function makeSink() {
+  const seen = new Set();
+  const items = [];
+  return {
+    items,
+    add(it) {
+      if (!it || !it.url || !it.content_id) return;
+      const k = it.content_id + "|" + it.url;
+      if (seen.has(k)) return;
+      seen.add(k);
+      items.push(it);
+    },
+  };
+}
+
+// Walk an arbitrary embedded-state object collecting {url, type, id}. Used for
+// TikTok/Lemon8 where the page ships its data as JSON in a <script> tag.
+function deepCollectMedia(obj, sink, entity, depth = 0) {
+  if (!obj || depth > 8) return;
+  if (Array.isArray(obj)) {
+    for (const v of obj) deepCollectMedia(v, sink, entity, depth + 1);
+    return;
+  }
+  if (typeof obj !== "object") return;
+  // video node (tiktok)
+  const vid = obj.video || obj.Video;
+  if (vid && (vid.playAddr || vid.downloadAddr || vid.PlayAddr)) {
+    const url = vid.downloadAddr || vid.playAddr || vid.PlayAddr;
+    if (typeof url === "string") sink.add({ content_id: String(obj.id || obj.awemeId || url), content_type: "video", url, entity_name: entity });
+  }
+  // image post (tiktok photo mode / lemon8)
+  const imgs = (obj.imagePost && obj.imagePost.images) || obj.images || obj.imageList || obj.imageInfo;
+  if (Array.isArray(imgs)) {
+    imgs.forEach((im, i) => {
+      const u =
+        (im.imageURL && (im.imageURL.urlList || [])[0]) ||
+        (im.urlList || [])[0] ||
+        im.url || im.imageUrl || (im.imageInfos && im.imageInfos[0] && im.imageInfos[0].url);
+      if (typeof u === "string") sink.add({ content_id: String(obj.id || obj.postId || u) + "_" + i, content_type: "photo", url: u, entity_name: entity });
+    });
+  }
+  for (const k in obj) {
+    const v = obj[k];
+    if (v && typeof v === "object") deepCollectMedia(v, sink, entity, depth + 1);
+  }
+}
+
+function parseEmbeddedState(ids) {
+  for (const id of ids) {
+    const el = document.getElementById(id);
+    if (el && el.textContent) {
+      try { return JSON.parse(el.textContent); } catch (e) {}
+    }
+  }
+  return null;
+}
+
+async function autoScroll(times = 8, dist = 1400, pause = 1800) {
+  for (let i = 0; i < times; i++) {
+    window.scrollBy(0, dist * (0.7 + Math.random() * 0.6));
+    await hsleep(pause); // human, irregular scroll cadence
+  }
 }
 
 // ===========================================================================
-// Instagram platform
+// Instagram (same-origin API; full media + 2-hop spider)
 // ===========================================================================
 const IG_APP_ID = "936619743392459";
-const SPIDER_FAMOUS_CAP = 100000;     // skip celebrities — we want your network
-const SPIDER_FOLLOWS_PER_SIDE = 150;
+const SPIDER_FAMOUS_CAP = 100000;
+const SPIDER_FOLLOWS_PER_SIDE = 70;     // was 150 — fewer graph calls per profile
+const IG_MAX_ITEMS = 180;               // cap media pages per profile
+// Per-cycle target budget: a human checks a HANDFUL of profiles, not 257.
+// Randomised each cycle; the rest are picked up on later cycles (round-robin).
+function igTargetBudget() { return 6 + ((Math.random() * 7) | 0); } // 6–12
 
 const instagram = {
-  host: "www.instagram.com",
-  label: "Instagram",
-
+  id: "instagram", host: "www.instagram.com", label: "Instagram",
   csrf() { const m = document.cookie.match(/csrftoken=([^;]+)/); return m ? m[1] : ""; },
-  headers() {
-    return { "x-ig-app-id": IG_APP_ID, "x-csrftoken": this.csrf(), "x-requested-with": "XMLHttpRequest" };
-  },
+  headers() { return { "x-ig-app-id": IG_APP_ID, "x-csrftoken": this.csrf(), "x-requested-with": "XMLHttpRequest" }; },
 
   async getProfile(username) {
     const url = "https://www.instagram.com/api/v1/users/web_profile_info/?username=" + encodeURIComponent(username);
-    const res = await fetch(url, { headers: this.headers(), credentials: "include" });
-    if (!res.ok) throw new Error("web_profile_info " + res.status);
-    const j = await res.json();
+    const j = await fetchJson(url, { headers: this.headers(), credentials: "include" });
     return j && j.data && j.data.user;
   },
-
   extractMedia(node, username) {
     const out = [];
     const push = (n, cid) => {
@@ -49,9 +165,7 @@ const instagram = {
       if (n.video_url) { url = n.video_url; type = "video"; }
       else if (n.video_versions && n.video_versions[0]) { url = n.video_versions[0].url; type = "video"; }
       else if (n.display_url) { url = n.display_url; }
-      else if (n.image_versions2 && n.image_versions2.candidates && n.image_versions2.candidates[0]) {
-        url = n.image_versions2.candidates[0].url;
-      }
+      else if (n.image_versions2 && n.image_versions2.candidates && n.image_versions2.candidates[0]) { url = n.image_versions2.candidates[0].url; }
       if (url) out.push({ content_id: String(cid), content_type: type, url, entity_name: username });
     };
     const cid = node.id || node.pk || node.code;
@@ -60,105 +174,198 @@ const instagram = {
     else push(node, cid);
     return out;
   },
-
-  async scrapeUserMedia(user, username, maxItems = 300) {
+  async scrapeUserMedia(user, username, maxItems = IG_MAX_ITEMS) {
     const media = [];
     const tl = user.edge_owner_to_timeline_media;
     if (tl && tl.edges) tl.edges.forEach((e) => media.push(...this.extractMedia(e.node, username)));
     let maxId = tl && tl.page_info && tl.page_info.end_cursor;
     let hasNext = tl && tl.page_info && tl.page_info.has_next_page;
     while (hasNext && media.length < maxItems) {
-      await sleep(jitter(1500));
+      await hsleep(4000);
       const url = "https://www.instagram.com/api/v1/feed/user/" + user.id + "/?count=33" + (maxId ? "&max_id=" + maxId : "");
-      let res;
-      try { res = await fetch(url, { headers: this.headers(), credentials: "include" }); } catch (e) { break; }
-      if (!res.ok) break;
-      const j = await res.json();
+      const j = await fetchJson(url, { headers: this.headers(), credentials: "include" });
       (j.items || []).forEach((it) => media.push(...this.extractMedia(it, username)));
       maxId = j.next_max_id;
       hasNext = j.more_available && !!maxId;
     }
     return media;
   },
-
   async getFollows(userId, kind, max) {
     const out = [];
     let maxId = "";
     while (out.length < max) {
       const url = "https://www.instagram.com/api/v1/friendships/" + userId + "/" + kind + "/?count=50" + (maxId ? "&max_id=" + maxId : "");
-      let res;
-      try { res = await fetch(url, { headers: this.headers(), credentials: "include" }); } catch (e) { break; }
-      if (!res.ok) break;
-      const j = await res.json();
+      const j = await fetchJson(url, { headers: this.headers(), credentials: "include" });
       (j.users || []).forEach((u) => { if (u && u.username) out.push({ username: u.username }); });
       maxId = j.next_max_id;
       if (!maxId) break;
-      await sleep(jitter(1500));
+      await hsleep(4000);
     }
     return out.slice(0, max);
   },
-
   async runCycle() {
     let resp = [];
-    try { resp = (await chrome.runtime.sendMessage({ type: "getTargets" })) || []; } catch (e) {}
-    const targets = (Array.isArray(resp) ? resp : []).map((t) => (typeof t === "string" ? { username: t, hop: 0 } : t));
+    try { resp = (await send({ type: "getTargets", platform: "instagram" })) || []; } catch (e) {}
+    let pool = (Array.isArray(resp) ? resp : []).map((t) => (typeof t === "string" ? { username: t, hop: 0 } : t));
+    // Only visit a small, RANDOM handful this cycle — like a person checking a few
+    // profiles. The rest get picked up on later cycles (server round-robins them).
+    const budget = igTargetBudget();
+    const targets = shuffle(pool).slice(0, budget);
     const MAX_HOP = 2;
-    let saved = 0, discovered = 0;
-    clog("info", `cycle start: ${targets.length} target(s)`, "instagram");
+    let saved = 0, discovered = 0, visited = 0;
+    clog("info", `cycle start: visiting ${targets.length} of ${pool.length} target(s)`, "instagram");
     for (const t of targets) {
       const username = t.username, hop = typeof t.hop === "number" ? t.hop : 0;
       if (!username) continue;
       try {
         const user = await this.getProfile(username);
+        visited++;
         if (!user) continue;
         const fc = (user.edge_followed_by && user.edge_followed_by.count) || 0;
         if (fc > SPIDER_FAMOUS_CAP) { clog("info", `skip famous ${username} (${fc})`, "instagram"); continue; }
         const media = await this.scrapeUserMedia(user, username);
-        if (media.length) {
-          await chrome.runtime.sendMessage({ type: "ingest", username, items: media });
-          saved += media.length;
-        }
-        if (hop < MAX_HOP && user.id) {
+        if (media.length) { await send({ type: "ingest", platform: "instagram", username, items: media }); saved += media.length; }
+        // Only crawl the follow-graph SOMETIMES (≈45%) — constant graph crawling is
+        // a strong bot signal. Skipping it most visits looks far more human.
+        if (hop < MAX_HOP && user.id && Math.random() < 0.45) {
+          await hsleep(5000);
           const a = await this.getFollows(user.id, "followers", SPIDER_FOLLOWS_PER_SIDE);
           const b = await this.getFollows(user.id, "following", SPIDER_FOLLOWS_PER_SIDE);
           const found = a.concat(b);
-          if (found.length) {
-            await chrome.runtime.sendMessage({ type: "discover", source: username, hop, discovered: found });
-            discovered += found.length;
-          }
+          if (found.length) { await send({ type: "discover", platform: "instagram", source: username, hop, discovered: found }); discovered += found.length; }
         }
       } catch (e) {
+        if (e instanceof WallError) {
+          clog("warn", `throttled at ${username} — backing off, ending cycle early`, "instagram");
+          await send({ type: "wall", platform: "instagram" }).catch(() => {});
+          break; // stop hammering; the cooldown lets the session recover
+        }
         clog("warn", `scrape failed ${username}: ${e.message}`, "instagram");
       }
-      await sleep(jitter(4000));
+      await hsleep(16000); // ~10–26s between profiles, with occasional longer breaks
     }
-    return { targets: targets.length, saved, discovered };
+    return { targets: visited, saved, discovered };
+  },
+};
+
+// ===========================================================================
+// TikTok — read the page's embedded state (SIGI_STATE / __UNIVERSAL_DATA__).
+// Scroll to load more posts into that state, then harvest. No request signing.
+// NOTE: video CDN URLs are short-lived/cookie-bound; covers + photo-posts are the
+// reliable wins. Open a profile or your "Following" feed and leave it.
+// ===========================================================================
+const tiktok = {
+  id: "tiktok", host: "www.tiktok.com", label: "TikTok",
+  entity() { const m = location.pathname.match(/^\/@([^/?#]+)/); return m ? m[1] : "feed"; },
+  async runCycle() {
+    const entity = this.entity();
+    clog("info", `cycle start on @${entity}`, "tiktok");
+    const sink = makeSink();
+    await autoScroll(10);
+    const state = parseEmbeddedState(["__UNIVERSAL_DATA_FOR_REHYDRATION__", "SIGI_STATE", "sigi-persisted-data"]);
+    if (state) deepCollectMedia(state, sink, entity);
+    // also harvest whatever the DOM rendered (posters/sources already loaded)
+    document.querySelectorAll("video").forEach((v, i) => {
+      const u = v.src || (v.querySelector("source") && v.querySelector("source").src);
+      if (u && /^https?:/.test(u)) sink.add({ content_id: "dom_" + i + "_" + u.slice(-24), content_type: "video", url: u, entity_name: entity });
+    });
+    if (sink.items.length) await send({ type: "ingest", platform: "tiktok", username: entity, items: sink.items });
+    return { targets: 1, saved: sink.items.length, discovered: 0 };
+  },
+};
+
+// ===========================================================================
+// Lemon8 — Next.js app: data lives in __NEXT_DATA__ + lazy-loaded into DOM.
+// Photo-first platform, so image URLs download cleanly server-side.
+// ===========================================================================
+const lemon8 = {
+  id: "lemon8", host: "www.lemon8-app.com", label: "Lemon8",
+  entity() { const m = location.pathname.match(/\/@?([^/?#]+)/); return m ? m[1] : "feed"; },
+  async runCycle() {
+    const entity = this.entity();
+    clog("info", `cycle start on ${entity}`, "lemon8");
+    const sink = makeSink();
+    await autoScroll(10);
+    const state = parseEmbeddedState(["__NEXT_DATA__"]);
+    if (state) deepCollectMedia(state, sink, entity);
+    document.querySelectorAll("img").forEach((im, i) => {
+      const u = im.currentSrc || im.src;
+      if (u && /\.(jpe?g|png|webp)/i.test(u) && /https?:/.test(u) && !/icon|avatar|emoji/i.test(u))
+        sink.add({ content_id: "img_" + i + "_" + u.slice(-24), content_type: "photo", url: u, entity_name: entity });
+    });
+    if (sink.items.length) await send({ type: "ingest", platform: "lemon8", username: entity, items: sink.items });
+    return { targets: 1, saved: sink.items.length, discovered: 0 };
+  },
+};
+
+// ===========================================================================
+// Twitter / X — SPA with no static state dump; harvest rendered media from the
+// timeline DOM (pbs.twimg.com images + video posters). Open Home / a profile's
+// Media tab and leave it; scroll loads more.
+// ===========================================================================
+const x = {
+  id: "x", host: "x.com", label: "Twitter / X",
+  entity() { const m = location.pathname.match(/^\/([^/?#]+)/); return m && !/^(home|explore|notifications|messages|i|search)$/.test(m[1]) ? m[1] : "timeline"; },
+  async runCycle() {
+    const entity = this.entity();
+    clog("info", `cycle start on ${entity}`, "x");
+    const sink = makeSink();
+    await autoScroll(12);
+    document.querySelectorAll('img[src*="pbs.twimg.com/media"]').forEach((im) => {
+      // strip size params → request the original
+      let u = im.src.replace(/&name=\w+/, "&name=orig").replace(/\?format=/, "?format=");
+      sink.add({ content_id: "img_" + u.split("/media/")[1], content_type: "photo", url: u, entity_name: entity });
+    });
+    document.querySelectorAll("video").forEach((v, i) => {
+      const poster = v.poster;
+      if (poster && /https?:/.test(poster)) sink.add({ content_id: "poster_" + i + "_" + poster.slice(-24), content_type: "photo", url: poster, entity_name: entity });
+      const u = v.src || (v.querySelector("source") && v.querySelector("source").src);
+      if (u && /^https?:/.test(u) && !u.startsWith("blob:")) sink.add({ content_id: "vid_" + i + "_" + u.slice(-24), content_type: "video", url: u, entity_name: entity });
+    });
+    if (sink.items.length) await send({ type: "ingest", platform: "x", username: entity, items: sink.items });
+    return { targets: 1, saved: sink.items.length, discovered: 0 };
   },
 };
 
 // ===========================================================================
 // Registry + dispatch
 // ===========================================================================
-const PLATFORMS = [instagram /* , tiktok, twitter, ... */];
+const PLATFORMS = [instagram, tiktok, lemon8, x];
 
 function currentPlatform() {
   return PLATFORMS.find((p) => location.hostname === p.host || location.hostname.endsWith("." + p.host)) || null;
 }
 
+// Singleton guard — never let two cycles run in the same tab at once (the old
+// 30-min alarm could fire a 2nd cycle on top of a still-running one, doubling the
+// request rate and tripping IG's throttle wall).
+let CYCLE_RUNNING = false;
+
 async function runCycle() {
   const p = currentPlatform();
   if (!p) { clog("warn", `no scraper for ${location.hostname}`); return; }
+  if (CYCLE_RUNNING) { clog("info", `cycle already running on ${p.label} — skipping overlap`, p.label); return; }
+  CYCLE_RUNNING = true;
   try {
     const stats = await p.runCycle();
-    chrome.runtime.sendMessage({ type: "cycleReport", platform: p.label, ...stats });
+    await send({ type: "cycleReport", platform: p.label, ...stats }).catch(() => {});
   } catch (e) {
     clog("error", `${p.label} cycle error: ${e.message}`, p.label);
+  } finally {
+    CYCLE_RUNNING = false;
   }
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg && msg.type === "scrapeCycle") {
-    runCycle().then(() => sendResponse({ ok: true }));
-    return true;
+    // Respond IMMEDIATELY and run detached — a cycle takes minutes, and holding
+    // the channel open that long is what produced "message channel closed".
+    sendResponse({ ok: true, started: !CYCLE_RUNNING });
+    runCycle();
+    return false;
   }
 });
+
+// Tell the worker we're a live, logged-in scraper tab the moment we load, so it
+// can kick a cycle right away (event-driven, not waiting for a timer).
+send({ type: "tabReady", platform: (currentPlatform() || {}).id }).catch(() => {});

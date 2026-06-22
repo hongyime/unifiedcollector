@@ -1,17 +1,30 @@
-"""Instagram ingest bridge — receives media scraped by the IG Bridge Chrome
-extension (which uses your logged-in browser session) and persists it like any
-other collected media: downloads the file to the media drive and upserts a
-media_items row. This sidesteps the GraphQL-400 / login-wall problem the
-headless instagram collector hits, because the extension scrapes as the real
-logged-in user.
+"""Social ingest bridge — receives media scraped by the UnifiedCollector Bridge
+Chrome extension (which uses your logged-in browser session) and persists it like
+any other collected media: downloads the file to the media drive and upserts a
+media_items row. This sidesteps the GraphQL-400 / login-wall / signing problems
+the headless collectors hit, because the extension scrapes as the real logged-in
+user (same-origin fetches / reading the page's own embedded state).
+
+Module is still named ig_ingest for compose compatibility
+(`python -m src.bridges.ig_ingest`) but it is now MULTI-PLATFORM.
 
 Run:  python -m src.bridges.ig_ingest   (listens on 0.0.0.0:8765)
 
-Endpoints (CORS-open so the extension service worker can call them):
-  GET  /ig/targets  -> {"targets": ["user1", ...]}  (instagram collection_targets)
-  POST /ig/ingest   <- {"username": "...", "items": [{content_id, content_type, url, entity_name}]}
-                    -> downloads each + upserts media_items; {"saved": N, "skipped": M}
-  GET  /health      -> {"ok": true}
+Generic endpoints (CORS-open so the extension service worker can call them):
+  GET  /social/targets?platform=<p>  -> {"targets":[{username,hop}], "usernames":[...], "max_hop"}
+  POST /social/ingest   <- {"platform","username","items":[{content_id,content_type,url,entity_name}]}
+                        -> queues downloads (returns instantly) {"accepted": N}
+  POST /social/discover <- {"platform","source","hop","discovered":[{username,follower_count}]}
+  GET  /health          -> {"ok": true}
+
+Back-compat instagram aliases (the older extension builds call these):
+  GET /ig/targets, POST /ig/ingest, POST /ig/discover  (== platform=instagram)
+
+NON-BLOCKING INGEST: downloads run in a background asyncio task bounded by a
+semaphore, so the POST returns immediately. This is important — the MV3 service
+worker that calls us gets idle-killed if a request takes too long, which produced
+the "message channel closed before a response was received" errors. We ack fast
+and download out-of-band.
 """
 import asyncio
 import logging
@@ -26,19 +39,24 @@ from aiohttp import web
 from src.db.connection import get_pool, close_pool
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-logger = logging.getLogger("ig_ingest")
+logger = logging.getLogger("social_ingest")
 
 MEDIA_ROOT = os.getenv("COLLECTOR_DRIVE_PATH", "/media")
 PORT = int(os.getenv("IG_INGEST_PORT", "8765"))
 MIN_BYTES = int(os.getenv("IG_INGEST_MIN_BYTES", "1024"))
+DL_CONCURRENCY = int(os.getenv("SOCIAL_INGEST_CONCURRENCY", "4"))
 _SAFE = re.compile(r"[^A-Za-z0-9._-]")
 
-# 2-hop spider (friends-of-friends). The extension scrapes a target's media AND,
-# when the target's hop < MAX_HOP, crawls its followers/following and POSTs them
-# to /ig/discover; we store them at hop+1 in instagram_spider_targets (a channel
-# SEPARATE from collection_targets, so the .targets file-sync never wipes them).
-# Famous accounts (follower_count > cap) are dropped — we want your network, not
-# celebrities. Defaults match the tiktok/lemon8 famous cap.
+# Platforms the bridge may push. Each may carry its own famous-cap / hop config.
+# Only instagram currently spiders (followers/following graph); the others scrape
+# whatever the open page exposes, so they have no spider table.
+KNOWN_PLATFORMS = {"instagram", "tiktok", "lemon8", "x", "threads", "facebook"}
+
+# 2-hop spider (instagram only): the extension scrapes a target's media AND, when
+# the target's hop < MAX_HOP, crawls its followers/following and POSTs them to
+# discover; we store them at hop+1 in instagram_spider_targets (a channel SEPARATE
+# from collection_targets so the .targets file-sync never wipes them). Famous
+# accounts (follower_count > cap) are dropped — we want your network, not celebs.
 IG_SPIDER_MAX_HOP = int(os.getenv("INSTA_SPIDER_HOPS", "2"))
 IG_SPIDER_FAMOUS_CAP = int(os.getenv("INSTA_SPIDER_FAMOUS_CAP", "100000"))
 IG_SPIDER_TARGETS_LIMIT = int(os.getenv("IG_SPIDER_TARGETS_LIMIT", "250"))
@@ -56,6 +74,13 @@ CREATE TABLE IF NOT EXISTS instagram_spider_targets (
 """
 
 
+def _norm_platform(p):
+    p = (p or "instagram").strip().lower()
+    if p == "twitter":
+        p = "x"
+    return p if p in KNOWN_PLATFORMS else "instagram"
+
+
 def _cors(resp: web.Response) -> web.Response:
     resp.headers["Access-Control-Allow-Origin"] = "*"
     resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
@@ -67,55 +92,70 @@ async def handle_options(request):
     return _cors(web.Response(status=204))
 
 
-async def get_targets(request):
-    """Return seed targets (collection_targets, hop 0) UNION spider-discovered
-    targets (instagram_spider_targets, hop 1..MAX_HOP) as [{username, hop}].
-    The extension scrapes each, and for hop < MAX_HOP also crawls its graph.
-    Backward-compatible: also emits a flat `usernames` list."""
-    pool = request.app["pool"]
+# ---------------------------------------------------------------------------
+# targets
+# ---------------------------------------------------------------------------
+async def _targets_for(pool, platform):
+    """seed targets (collection_targets) UNION instagram spider targets (IG only)."""
     seen = set()
     out = []
     try:
         async with pool.acquire() as conn:
             seeds = await conn.fetch(
-                "SELECT target_id FROM collection_targets WHERE source='instagram'"
+                "SELECT target_id FROM collection_targets WHERE source=$1", platform
             )
             for r in seeds:
                 u = r["target_id"]
                 if u and u not in seen:
                     seen.add(u)
                     out.append({"username": u, "hop": 0})
-            spider = await conn.fetch(
-                """
-                SELECT username, hop FROM instagram_spider_targets
-                WHERE status='active' AND hop <= $1
-                ORDER BY hop ASC, last_scraped_at ASC NULLS FIRST, discovered_at ASC
-                LIMIT $2
-                """,
-                IG_SPIDER_MAX_HOP, IG_SPIDER_TARGETS_LIMIT,
-            )
-            for r in spider:
-                u = r["username"]
-                if u and u not in seen:
-                    seen.add(u)
-                    out.append({"username": u, "hop": int(r["hop"])})
+            if platform == "instagram":
+                spider = await conn.fetch(
+                    """
+                    SELECT username, hop FROM instagram_spider_targets
+                    WHERE status='active' AND hop <= $1
+                    ORDER BY hop ASC, last_scraped_at ASC NULLS FIRST, discovered_at ASC
+                    LIMIT $2
+                    """,
+                    IG_SPIDER_MAX_HOP, IG_SPIDER_TARGETS_LIMIT,
+                )
+                for r in spider:
+                    u = r["username"]
+                    if u and u not in seen:
+                        seen.add(u)
+                        out.append({"username": u, "hop": int(r["hop"])})
     except Exception:
-        logger.exception("get_targets failed")
+        logger.exception("targets query failed (%s)", platform)
+    return out
+
+
+async def get_targets(request):
+    platform = _norm_platform(request.query.get("platform"))
+    out = await _targets_for(request.app["pool"], platform)
     return _cors(web.json_response({
+        "platform": platform,
         "targets": out,
         "usernames": [t["username"] for t in out],  # back-compat
+        "max_hop": IG_SPIDER_MAX_HOP if platform == "instagram" else 0,
+    }))
+
+
+async def get_targets_ig(request):  # /ig/targets alias
+    request.query  # noqa
+    out = await _targets_for(request.app["pool"], "instagram")
+    return _cors(web.json_response({
+        "targets": out,
+        "usernames": [t["username"] for t in out],
         "max_hop": IG_SPIDER_MAX_HOP,
     }))
 
 
-async def discover(request):
-    """Receive spider-discovered usernames from the extension and enqueue them at
-    hop+1 (skipping famous accounts and anything past MAX_HOP)."""
-    pool = request.app["pool"]
-    try:
-        body = await request.json()
-    except Exception:
-        return _cors(web.json_response({"error": "bad json"}, status=400))
+# ---------------------------------------------------------------------------
+# discover (instagram spider only)
+# ---------------------------------------------------------------------------
+async def _discover(pool, platform, body):
+    if platform != "instagram":
+        return {"added": 0, "reason": "no spider for " + platform}
     try:
         src_hop = int(body.get("hop", 0))
     except (TypeError, ValueError):
@@ -124,51 +164,68 @@ async def discover(request):
     discovered = body.get("discovered") or []
     target_hop = src_hop + 1
     if target_hop > IG_SPIDER_MAX_HOP:
-        return _cors(web.json_response({"added": 0, "reason": "max_hop"}))
+        return {"added": 0, "reason": "max_hop"}
     added = 0
+    async with pool.acquire() as conn:
+        for d in discovered:
+            uname = (d.get("username") or "").strip().lstrip("@") if isinstance(d, dict) else str(d).strip()
+            if not uname:
+                continue
+            fc = d.get("follower_count") if isinstance(d, dict) else None
+            if isinstance(fc, int) and fc > IG_SPIDER_FAMOUS_CAP:
+                continue
+            res = await conn.execute(
+                """
+                INSERT INTO instagram_spider_targets (username, hop, discovered_from, follower_count)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (username) DO NOTHING
+                """,
+                uname, target_hop, source, fc if isinstance(fc, int) else None,
+            )
+            if res.endswith("1"):
+                added += 1
+    logger.info("discover[%s] from %s (hop %d): +%d new", platform, source, src_hop, added)
+    return {"added": added}
+
+
+async def discover(request):
+    platform = _norm_platform((await _safe_json(request)).get("platform"))
+    body = await _safe_json(request)
     try:
-        async with pool.acquire() as conn:
-            for d in discovered:
-                uname = (d.get("username") or "").strip().lstrip("@") if isinstance(d, dict) else str(d).strip()
-                if not uname:
-                    continue
-                fc = d.get("follower_count") if isinstance(d, dict) else None
-                if isinstance(fc, int) and fc > IG_SPIDER_FAMOUS_CAP:
-                    continue  # skip celebrities — we want your network
-                res = await conn.execute(
-                    """
-                    INSERT INTO instagram_spider_targets
-                        (username, hop, discovered_from, follower_count)
-                    VALUES ($1, $2, $3, $4)
-                    ON CONFLICT (username) DO NOTHING
-                    """,
-                    uname, target_hop, source, fc if isinstance(fc, int) else None,
-                )
-                if res.endswith("1"):
-                    added += 1
+        return _cors(web.json_response(await _discover(request.app["pool"], platform, body)))
     except Exception:
         logger.exception("discover failed")
-        return _cors(web.json_response({"added": added, "error": "db"}, status=500))
-    logger.info("discover from %s (hop %d): +%d new target(s)", source, src_hop, added)
-    return _cors(web.json_response({"added": added}))
+        return _cors(web.json_response({"added": 0, "error": "db"}, status=500))
 
 
-async def _download_and_save(pool, session, username, item) -> bool:
+async def discover_ig(request):  # /ig/discover alias
+    body = await _safe_json(request)
+    try:
+        return _cors(web.json_response(await _discover(request.app["pool"], "instagram", body)))
+    except Exception:
+        logger.exception("discover failed")
+        return _cors(web.json_response({"added": 0, "error": "db"}, status=500))
+
+
+# ---------------------------------------------------------------------------
+# download + persist (generic over platform)
+# ---------------------------------------------------------------------------
+async def _download_and_save(pool, session, platform, username, item) -> bool:
     url = item.get("url")
     cid = str(item.get("content_id") or "")
     ctype = item.get("content_type") or "photo"
     if not url or not cid:
         return False
     ext = "mp4" if ctype == "video" else "jpg"
-    safe_user = _SAFE.sub("_", username)[:80]
+    safe_user = _SAFE.sub("_", username)[:80] or "unknown"
     safe_cid = _SAFE.sub("_", cid)[:120]
-    dest_dir = Path(MEDIA_ROOT) / "instagram" / f"account_{safe_user}" / ctype
-    dest = dest_dir / f"instagram_{safe_user}_{safe_cid}.{ext}"
+    dest_dir = Path(MEDIA_ROOT) / platform / f"account_{safe_user}" / ctype
+    dest = dest_dir / f"{platform}_{safe_user}_{safe_cid}.{ext}"
     try:
-        # Skip if we already have this content_id (dedup authority is media_items).
+        # dedup authority is media_items (source, content_id)
         async with pool.acquire() as conn:
             seen = await conn.fetchval(
-                "SELECT 1 FROM media_items WHERE source='instagram' AND content_id=$1", cid
+                "SELECT 1 FROM media_items WHERE source=$1 AND content_id=$2", platform, cid
             )
         if seen and dest.exists():
             return False
@@ -192,47 +249,77 @@ async def _download_and_save(pool, session, username, item) -> bool:
                 INSERT INTO media_items
                   (source, entity_id, entity_name, content_type, content_id,
                    filename, file_path, file_size, sha256, source_url, metadata)
-                VALUES ('instagram',$1,$2,$3,$4,$5,$6,$7,$8,$9,'{}'::jsonb)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'{}'::jsonb)
                 ON CONFLICT (source, content_id) DO UPDATE SET
                    file_path = EXCLUDED.file_path,
                    file_size = EXCLUDED.file_size,
                    sha256 = EXCLUDED.sha256,
                    source_url = EXCLUDED.source_url
                 """,
-                safe_user, item.get("entity_name") or username, ctype, cid,
+                platform, safe_user, item.get("entity_name") or username, ctype, cid,
                 dest.name, str(dest), len(data), sha, url,
             )
         return True
     except Exception:
-        logger.debug("save failed cid=%s", cid, exc_info=True)
+        logger.debug("save failed platform=%s cid=%s", platform, cid, exc_info=True)
         return False
 
 
+async def _drain(app, platform, username, items):
+    """Background download worker — bounded concurrency, never blocks the POST."""
+    pool, session, sem = app["pool"], app["session"], app["sem"]
+    saved = 0
+
+    async def one(it):
+        nonlocal saved
+        async with sem:
+            if await _download_and_save(pool, session, platform, username, it):
+                saved += 1
+
+    await asyncio.gather(*(one(it) for it in items), return_exceptions=True)
+    if platform == "instagram":
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE instagram_spider_targets SET last_scraped_at=now() WHERE username=$1",
+                    username,
+                )
+        except Exception:
+            pass
+    logger.info("ingest[%s] %s: %d/%d saved", platform, username, saved, len(items))
+
+
+async def _ingest(app, platform, body):
+    username = body.get("username") or "unknown"
+    items = body.get("items") or []
+    if items:
+        task = asyncio.create_task(_drain(app, platform, username, items))
+        app["tasks"].add(task)
+        task.add_done_callback(app["tasks"].discard)
+    return {"accepted": len(items), "platform": platform}
+
+
 async def ingest(request):
-    pool = request.app["pool"]
-    session = request.app["session"]
+    body = await _safe_json(request)
+    platform = _norm_platform(body.get("platform"))
+    return _cors(web.json_response(await _ingest(request.app, platform, body)))
+
+
+async def ingest_ig(request):  # /ig/ingest alias
+    body = await _safe_json(request)
+    return _cors(web.json_response(await _ingest(request.app, "instagram", body)))
+
+
+# ---------------------------------------------------------------------------
+async def _safe_json(request):
+    if request.get("_json_cache") is not None:
+        return request["_json_cache"]
     try:
         body = await request.json()
     except Exception:
-        return _cors(web.json_response({"error": "bad json"}, status=400))
-    username = body.get("username") or "unknown"
-    items = body.get("items") or []
-    saved = 0
-    for it in items:
-        if await _download_and_save(pool, session, username, it):
-            saved += 1
-    # Mark a spider target as scraped so the round-robin (ORDER BY last_scraped_at
-    # NULLS FIRST) moves on to others next cycle. No-op for seed accounts.
-    try:
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE instagram_spider_targets SET last_scraped_at=now() WHERE username=$1",
-                username,
-            )
-    except Exception:
-        pass
-    logger.info("ingest %s: %d/%d saved", username, saved, len(items))
-    return _cors(web.json_response({"saved": saved, "skipped": len(items) - saved}))
+        body = {}
+    request["_json_cache"] = body
+    return body
 
 
 async def health(request):
@@ -241,6 +328,8 @@ async def health(request):
 
 async def _on_startup(app):
     app["pool"] = await get_pool()
+    app["tasks"] = set()
+    app["sem"] = asyncio.Semaphore(DL_CONCURRENCY)
     try:
         async with app["pool"].acquire() as conn:
             await conn.execute(_SPIDER_DDL)
@@ -253,6 +342,8 @@ async def _on_startup(app):
 
 
 async def _on_cleanup(app):
+    for t in list(app.get("tasks", [])):
+        t.cancel()
     await app["session"].close()
     await close_pool()
 
@@ -260,9 +351,14 @@ async def _on_cleanup(app):
 def make_app():
     app = web.Application(client_max_size=64 * 1024 * 1024)
     app.router.add_route("OPTIONS", "/{tail:.*}", handle_options)
-    app.router.add_get("/ig/targets", get_targets)
-    app.router.add_post("/ig/ingest", ingest)
-    app.router.add_post("/ig/discover", discover)
+    # generic multi-platform
+    app.router.add_get("/social/targets", get_targets)
+    app.router.add_post("/social/ingest", ingest)
+    app.router.add_post("/social/discover", discover)
+    # instagram back-compat aliases
+    app.router.add_get("/ig/targets", get_targets_ig)
+    app.router.add_post("/ig/ingest", ingest_ig)
+    app.router.add_post("/ig/discover", discover_ig)
     app.router.add_get("/health", health)
     app.on_startup.append(_on_startup)
     app.on_cleanup.append(_on_cleanup)

@@ -11,7 +11,8 @@ async function render() {
   const list = $("list");
   list.innerHTML = platforms
     .map((p) => {
-      const login = p.loggedIn === true ? badge("login", "ok", "logged in")
+      const login = p.noLogin ? badge("login", "idle", "no login needed")
+        : p.loggedIn === true ? badge("login", "ok", "logged in")
         : p.loggedIn === false ? badge("login", "bad", "not logged in")
         : badge("login", "idle", "login unknown");
       const tab = p.tabOpen ? badge("tab", "ok", "tab open") : badge("tab", "idle", "no tab");
