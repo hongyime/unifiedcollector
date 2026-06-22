@@ -203,7 +203,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
       case "getConfig": {
         const { ucConfig = {} } = await chrome.storage.local.get("ucConfig");
-        sendResponse({ stories: true, highlights: true, comments: false, ...ucConfig });
+        sendResponse({ stories: true, highlights: true, comments: true, ...ucConfig });
         break;
       }
       case "wall": {  // the in-tab loop hit a throttle/login wall and is sleeping

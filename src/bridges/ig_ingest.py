@@ -32,6 +32,7 @@ import logging
 import os
 import re
 import hashlib
+from datetime import datetime, timezone
 from pathlib import Path
 
 import aiohttp
@@ -74,6 +75,21 @@ CREATE TABLE IF NOT EXISTS instagram_spider_targets (
   last_scraped_at TIMESTAMPTZ
 )
 """
+
+
+def _date_prefix(item) -> str:
+    """YYYYMMDD for the filename so files sort chronologically. Prefer the post's
+    own taken_at (epoch, from item or its meta); fall back to today (collection)."""
+    epoch = item.get("taken_at")
+    if epoch is None:
+        meta = item.get("meta") or {}
+        epoch = meta.get("taken_at") if isinstance(meta, dict) else None
+    try:
+        if epoch:
+            return datetime.fromtimestamp(float(epoch), tz=timezone.utc).strftime("%Y%m%d")
+    except (TypeError, ValueError, OSError):
+        pass
+    return datetime.now(tz=timezone.utc).strftime("%Y%m%d")
 
 
 def _norm_platform(p):
@@ -223,9 +239,13 @@ async def _download_and_save(pool, session, platform, username, item) -> bool:
     media_kind = (item.get("kind") or "post").lower()
     if media_kind not in ("post", "story", "highlight"):
         media_kind = "post"
+    # DB dedup id stays namespaced so a story/highlight can't collide with a post.
     store_cid = cid if media_kind == "post" else f"{media_kind}_{cid}"
     safe_user = _SAFE.sub("_", username)[:80] or "unknown"
-    safe_cid = _SAFE.sub("_", store_cid)[:120]
+    raw_cid = _SAFE.sub("_", cid)[:100]
+    # filename kind label (no subfolders anymore — kind is encoded in the name)
+    kindtag = {"story": "story_", "highlight": "hl_"}.get(media_kind, "")
+    datestr = _date_prefix(item)
     try:
         # dedup authority is media_items (source, content_id)
         async with pool.acquire() as conn:
@@ -248,14 +268,10 @@ async def _download_and_save(pool, session, platform, username, item) -> bool:
             logger.debug("reject %s %s: %s", platform, store_cid, reason)
             return False
         ctype = "video" if mtype == "video" else ("pdf" if mtype == "pdf" else "photo")
-        # posts: /<platform>/account_<user>/<ctype>/  (unchanged — existing files stay)
-        # stories: .../account_<user>/stories/<ctype>/ ; highlights: .../highlights/<ctype>/
-        dest_dir = Path(MEDIA_ROOT) / platform / f"account_{safe_user}"
-        sub = {"story": "stories", "highlight": "highlights"}.get(media_kind)
-        if sub:
-            dest_dir = dest_dir / sub
-        dest_dir = dest_dir / ctype
-        dest = dest_dir / f"{platform}_{safe_user}_{safe_cid}.{ext}"
+        # Flat layout: /<platform>/account_<user>/<ctype>/  — kind + date live in the
+        # filename: <YYYYMMDD>_<platform>_<user>_<kindtag><cid>.<ext> (sortable by date).
+        dest_dir = Path(MEDIA_ROOT) / platform / f"account_{safe_user}" / ctype
+        dest = dest_dir / f"{datestr}_{platform}_{safe_user}_{kindtag}{raw_cid}.{ext}"
         if dest.exists():
             return False
 

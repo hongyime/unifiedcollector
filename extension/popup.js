@@ -79,7 +79,7 @@ async function refresh() { await renderStatus(); await renderLog(); }
 async function load() {
   const { ingestBase, ucConfig = {} } = await chrome.storage.local.get(["ingestBase", "ucConfig"]);
   $("ingest").value = ingestBase || DEFAULT_INGEST;
-  const cfg = { stories: true, highlights: true, comments: false, ...ucConfig };
+  const cfg = { stories: true, highlights: true, comments: true, ...ucConfig };
   $("cfgStories").checked = cfg.stories;
   $("cfgHighlights").checked = cfg.highlights;
   $("cfgComments").checked = cfg.comments;

@@ -57,7 +57,7 @@ function clog(level, msg, platform) {
 // Opt-in capture toggles (popup settings). Stories/highlights cost ~1-2 extra
 // requests per profile; comments cost ~1 per post (heavy) so it's OFF by default
 // during the IG account-review recovery week.
-const DEFAULT_CONFIG = { stories: true, highlights: true, comments: false };
+const DEFAULT_CONFIG = { stories: true, highlights: true, comments: true };
 async function getConfig() {
   try { return Object.assign({}, DEFAULT_CONFIG, (await send({ type: "getConfig" })) || {}); }
   catch (e) { return { ...DEFAULT_CONFIG }; }
@@ -244,7 +244,8 @@ const instagram = {
     if (it.video_versions && it.video_versions[0]) { url = it.video_versions[0].url; type = "video"; }
     else if (it.image_versions2 && it.image_versions2.candidates && it.image_versions2.candidates[0]) { url = it.image_versions2.candidates[0].url; }
     const cid = it.pk || it.id;
-    return url ? [{ content_id: String(cid), content_type: type, url, entity_name: username, kind }] : [];
+    const taken_at = it.taken_at || it.device_timestamp || null;
+    return url ? [{ content_id: String(cid), content_type: type, url, entity_name: username, kind, taken_at }] : [];
   },
   _reelItems(j, key) {
     const reel = (j.reels && j.reels[key]) || (j.reels_media && j.reels_media[0]) || null;
