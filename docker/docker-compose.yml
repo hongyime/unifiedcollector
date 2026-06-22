@@ -324,6 +324,9 @@ services:
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
+      # live src mount: lets collector code fixes apply on a plain recreate (no
+      # image rebuild -> vhdx doesn't grow). Same pattern as ig_ingest.
+      - ../src:/app/src
     depends_on:
       postgres:
         condition: service_healthy
@@ -358,9 +361,10 @@ services:
       BEEPER_TRANSIENT_RETRIES: "6"
       BEEPER_TRANSIENT_BACKOFF: "2.0"
       COLLECTOR_HANG_TIMEOUT_SECONDS: "5400"
-      # Wider room coverage per cycle (user: "many rooms, must be efficient").
-      BEEPER_MAX_CHATS_PER_CYCLE: "120"
-      BEEPER_BACKFILL_PAGES_PER_CYCLE: "4"
+      # Wider room coverage + deeper history per cycle (user: "so many rooms to
+      # scrape, gold mine of media"). 120->250 rooms/cycle, 4->8 backfill pages.
+      BEEPER_MAX_CHATS_PER_CYCLE: "250"
+      BEEPER_BACKFILL_PAGES_PER_CYCLE: "8"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     cap_add:
@@ -370,6 +374,7 @@ services:
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
+      - ../src:/app/src
     depends_on:
       postgres:
         condition: service_healthy

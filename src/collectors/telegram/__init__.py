@@ -941,14 +941,35 @@ class TelegramCollector(BaseCollector):
     # Per-chat collection (now takes a worker arg)
     # ------------------------------------------------------------------
 
+    async def _resolve_entity_any_worker(self, preferred: "TelegramWorker", target: str):
+        """Resolve a chat entity using whichever account is actually IN it.
+
+        Each chat lives in exactly one of the N accounts. The spider queue hands a
+        chat to whatever worker is free, so ~ (N-1)/N of the time the processing
+        account isn't a member and Telethon raises "Cannot find any entity" — that
+        was the real cause of the ~2k 'failed' backfills, not the sessions. Try the
+        preferred worker first, then the others, and return (worker, entity) for the
+        one that owns the chat so the backfill runs on the right account.
+        """
+        order = [preferred] + [w for w in self._workers if w is not preferred]
+        last_exc = None
+        for w in order:
+            try:
+                try:
+                    return w, await w.client.get_entity(int(target))
+                except (ValueError, TypeError):
+                    return w, await w.client.get_entity(target)
+            except Exception as exc:
+                last_exc = exc
+                continue
+        raise last_exc or ValueError(f"no worker can resolve entity {target!r}")
+
     async def _collect_chat(self, worker: "TelegramWorker", target: str):
         from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
 
+        # Use whichever account is actually in this chat (cross-account routing).
+        worker, entity = await self._resolve_entity_any_worker(worker, target)
         client = worker.client
-        try:
-            entity = await client.get_entity(int(target))
-        except ValueError:
-            entity = await client.get_entity(target)
 
         chat_id = str(entity.id)
         chat_name = getattr(entity, "title", None) or getattr(entity, "username", None) or chat_id
