@@ -1,13 +1,47 @@
+"""Container healthcheck — must stay LIGHT and TOLERANT.
+
+The Docker healthcheck runs this as a fresh subprocess every 60s. The old version
+called get_pool(), which builds a full asyncpg pool each time; under heavy DB load
+(e.g. a big backfill saturating connections) that connect would time out and flip
+healthy collectors to "unhealthy" even though they were working fine.
+
+This version opens ONE short-lived connection with a tight timeout and a couple of
+retries, so transient connection pressure doesn't cause false negatives — but a
+genuinely-down DB still fails (correct). Tuned to finish well under the compose
+healthcheck timeout (30s).
+"""
 import asyncio
 import sys
 
-from src.db.connection import get_pool
+import asyncpg
+
+from src.db.connection import _dsn, _ssl_context
+
+ATTEMPTS = 3
+CONNECT_TIMEOUT = 6.0
+QUERY_TIMEOUT = 4.0
+RETRY_SLEEP = 2.0
 
 
 async def _check():
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        await conn.fetchval("SELECT 1")
+    ssl = _ssl_context()
+    kwargs = {}
+    if ssl is not None and ssl != "prefer":
+        kwargs["ssl"] = ssl
+    last = None
+    for attempt in range(ATTEMPTS):
+        try:
+            conn = await asyncio.wait_for(asyncpg.connect(_dsn(), **kwargs), timeout=CONNECT_TIMEOUT)
+            try:
+                await asyncio.wait_for(conn.fetchval("SELECT 1"), timeout=QUERY_TIMEOUT)
+                return
+            finally:
+                await conn.close()
+        except Exception as e:  # transient connection pressure / timeout -> retry
+            last = e
+            if attempt < ATTEMPTS - 1:
+                await asyncio.sleep(RETRY_SLEEP)
+    raise last if last else RuntimeError("healthcheck failed")
 
 
 def health_check():
