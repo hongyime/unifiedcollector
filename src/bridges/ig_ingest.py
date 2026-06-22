@@ -77,9 +77,28 @@ CREATE TABLE IF NOT EXISTS instagram_spider_targets (
 """
 
 
-def _date_prefix(item) -> str:
+_IG_EPOCH = 1314220021721  # Instagram media-id custom epoch (ms)
+_IG_LONG = re.compile(r"\d{8,}")
+
+
+def _ig_date_from_id(content_id: str):
+    """Instagram media ids encode creation time: (id>>23)+epoch. Return YYYYMMDD."""
+    m = _IG_LONG.search(content_id or "")
+    if not m:
+        return None
+    try:
+        d = datetime.fromtimestamp(((int(m.group(0)) >> 23) + _IG_EPOCH) / 1000, tz=timezone.utc)
+        if 2010 <= d.year <= datetime.now(tz=timezone.utc).year + 1:
+            return d.strftime("%Y%m%d")
+    except Exception:
+        return None
+    return None
+
+
+def _date_prefix(item, platform="") -> str:
     """YYYYMMDD for the filename so files sort chronologically. Prefer the post's
-    own taken_at (epoch, from item or its meta); fall back to today (collection)."""
+    own taken_at; for instagram fall back to the date encoded in the media id;
+    finally fall back to today (collection)."""
     epoch = item.get("taken_at")
     if epoch is None:
         meta = item.get("meta") or {}
@@ -89,6 +108,10 @@ def _date_prefix(item) -> str:
             return datetime.fromtimestamp(float(epoch), tz=timezone.utc).strftime("%Y%m%d")
     except (TypeError, ValueError, OSError):
         pass
+    if platform == "instagram":
+        d = _ig_date_from_id(str(item.get("content_id") or ""))
+        if d:
+            return d
     return datetime.now(tz=timezone.utc).strftime("%Y%m%d")
 
 
@@ -245,7 +268,7 @@ async def _download_and_save(pool, session, platform, username, item) -> bool:
     raw_cid = _SAFE.sub("_", cid)[:100]
     # filename kind label (no subfolders anymore — kind is encoded in the name)
     kindtag = {"story": "story_", "highlight": "hl_"}.get(media_kind, "")
-    datestr = _date_prefix(item)
+    datestr = _date_prefix(item, platform)
     try:
         # dedup authority is media_items (source, content_id)
         async with pool.acquire() as conn:
