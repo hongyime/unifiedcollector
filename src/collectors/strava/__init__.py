@@ -2358,11 +2358,12 @@ class StravaCollector(BaseCollector):
                     enriched += 1
 
             # Second: scrape profile pages for athletes with numeric-only names
+            # OR no profile photo yet (user wants every athlete's profile photo).
             stub_rows = await conn.fetch(r"""
                 SELECT platform_athlete_id
                 FROM strava_athletes
-                WHERE username ~ '^\d+$'
-                ORDER BY updated_at ASC
+                WHERE username ~ '^\d+$' OR profile IS NULL
+                ORDER BY (profile IS NOT NULL), updated_at ASC
                 LIMIT $1
             """, batch_size)
 
@@ -2402,6 +2403,8 @@ class StravaCollector(BaseCollector):
                     profile_url = None
                     city = None
                     photo_m = re.search(r'"profile"\s*:\s*"(https?://[^"]+)"', html)
+                    if not photo_m:  # og:image is the reliable avatar on Strava profile pages
+                        photo_m = re.search(r'<meta[^>]+property="og:image"[^>]+content="(https?://[^"]+)"', html)
                     if not photo_m:
                         photo_m = re.search(r'<img[^>]+class="[^"]*avatar[^"]*"[^>]+src="([^"]+)"', html)
                     if photo_m:
@@ -2410,10 +2413,14 @@ class StravaCollector(BaseCollector):
                     if loc_m:
                         city = loc_m.group(1)
 
+                    # Don't clobber good names on non-stub athletes — only fill names
+                    # that are missing/numeric; always backfill the profile photo.
                     async with self.pool.acquire() as conn:
-                        await conn.execute("""
+                        await conn.execute(r"""
                             UPDATE strava_athletes
-                            SET username = $1, firstname = $2, lastname = $3,
+                            SET username  = CASE WHEN username ~ '^\d+$' THEN $1 ELSE username END,
+                                firstname = CASE WHEN firstname IS NULL OR firstname = '' OR firstname ~ '^\d+$' THEN $2 ELSE firstname END,
+                                lastname  = CASE WHEN lastname IS NULL OR lastname ~ '^\d+$' THEN $3 ELSE lastname END,
                                 profile = COALESCE($4, profile),
                                 city = COALESCE($5, city),
                                 updated_at = NOW()

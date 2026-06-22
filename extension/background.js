@@ -201,6 +201,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         } catch (e) { await log("error", `comments failed: ${e.message}`); sendResponse({ ok: false }); }
         break;
       }
+      case "profile": {  // full profile -> instagram_profiles + social_users + photo
+        try {
+          const r = await fetch(base + "/social/profile", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ platform: msg.platform || "instagram", profile: msg.profile }),
+          });
+          sendResponse({ ok: r.ok });
+        } catch (e) { sendResponse({ ok: false }); }
+        break;
+      }
       case "users": {  // universal user registry — anyone we encountered
         try {
           const r = await fetch(base + "/social/users", {

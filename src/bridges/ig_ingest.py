@@ -262,14 +262,14 @@ async def _download_and_save(pool, session, platform, username, item) -> bool:
     # their own subtree and get a namespaced content_id so they never collide with
     # a feed post that happens to share an id.
     media_kind = (item.get("kind") or "post").lower()
-    if media_kind not in ("post", "story", "highlight", "tagged"):
+    if media_kind not in ("post", "story", "highlight", "tagged", "profile"):
         media_kind = "post"
-    # DB dedup id stays namespaced so a story/highlight/tagged can't collide with a post.
+    # DB dedup id stays namespaced so a story/highlight/tagged/profile can't collide.
     store_cid = cid if media_kind == "post" else f"{media_kind}_{cid}"
     safe_user = _SAFE.sub("_", username)[:80] or "unknown"
     raw_cid = _SAFE.sub("_", cid)[:100]
     # filename kind label (no subfolders anymore — kind is encoded in the name)
-    kindtag = {"story": "story_", "highlight": "hl_", "tagged": "tagged_"}.get(media_kind, "")
+    kindtag = {"story": "story_", "highlight": "hl_", "tagged": "tagged_", "profile": "profile_"}.get(media_kind, "")
     datestr = _date_prefix(item, platform)
     try:
         # dedup authority is media_items (source, content_id)
@@ -502,18 +502,20 @@ async def _record_users(pool, platform, users, context) -> int:
             try:
                 await conn.execute(
                     """
-                    INSERT INTO social_users (platform, uid, platform_user_id, username, display_name, contexts)
-                    VALUES ($1,$2,$3,$4,$5,$6)
+                    INSERT INTO social_users (platform, uid, platform_user_id, username, display_name, profile_photo_url, contexts)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7)
                     ON CONFLICT (platform, uid) DO UPDATE SET
                        last_seen = now(),
                        times_seen = social_users.times_seen + 1,
                        username = COALESCE(EXCLUDED.username, social_users.username),
                        platform_user_id = COALESCE(EXCLUDED.platform_user_id, social_users.platform_user_id),
                        display_name = COALESCE(EXCLUDED.display_name, social_users.display_name),
+                       profile_photo_url = COALESCE(EXCLUDED.profile_photo_url, social_users.profile_photo_url),
                        contexts = (SELECT array_agg(DISTINCT c) FROM unnest(social_users.contexts || EXCLUDED.contexts) AS c)
                     """,
                     platform, uid, str(user_id) if user_id else None, username,
-                    u.get("display_name") or u.get("full_name") or None, [context],
+                    u.get("display_name") or u.get("full_name") or None,
+                    u.get("profile_pic_url") or u.get("profile_photo_url") or u.get("avatar_url") or None, [context],
                 )
                 n += 1
             except Exception:
@@ -526,6 +528,57 @@ async def users_handler(request):
     platform = _norm_platform(body.get("platform"))
     n = await _record_users(request.app["pool"], platform, body.get("users") or [], body.get("context") or "seen")
     return _cors(web.json_response({"recorded": n}))
+
+
+async def _save_profile(pool, platform, p) -> bool:
+    """Upsert a full profile (instagram). Also records the user (with photo) into
+    social_users and returns the profile_pic to be downloaded as kind=profile."""
+    if platform != "instagram":
+        return False
+    uname = (p.get("username") or "").strip().lstrip("@")
+    if not uname:
+        return False
+    pic = p.get("profile_pic_url")
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO instagram_profiles
+                  (id, platform_user_id, username, full_name, bio, followers_count,
+                   following_count, posts_count, is_verified, is_private, profile_pic_url,
+                   external_url, collected_at, updated_at)
+                VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now(),now())
+                ON CONFLICT (platform_user_id) DO UPDATE SET
+                   username=EXCLUDED.username, full_name=EXCLUDED.full_name, bio=EXCLUDED.bio,
+                   followers_count=EXCLUDED.followers_count, following_count=EXCLUDED.following_count,
+                   posts_count=EXCLUDED.posts_count, is_verified=EXCLUDED.is_verified,
+                   is_private=EXCLUDED.is_private, profile_pic_url=COALESCE(EXCLUDED.profile_pic_url, instagram_profiles.profile_pic_url),
+                   external_url=EXCLUDED.external_url, updated_at=now()
+                """,
+                str(p.get("user_id") or uname), uname, p.get("full_name"), p.get("bio"),
+                _int(p.get("followers_count")), _int(p.get("following_count")), _int(p.get("posts_count")),
+                bool(p.get("is_verified")), bool(p.get("is_private")), pic, p.get("external_url"),
+            )
+    except Exception:
+        logger.debug("save profile failed %s", uname, exc_info=True)
+    await _record_users(pool, platform, [{"user_id": p.get("user_id"), "username": uname,
+                                          "display_name": p.get("full_name"), "profile_pic_url": pic}], "profile")
+    return True
+
+
+async def profile_handler(request):
+    body = await _safe_json(request)
+    platform = _norm_platform(body.get("platform"))
+    p = body.get("profile") or {}
+    await _save_profile(request.app["pool"], platform, p)
+    # download the profile photo as a kind=profile media item
+    pic = p.get("profile_pic_url")
+    uname = (p.get("username") or "").strip().lstrip("@")
+    if pic and uname:
+        await _ingest(request.app, platform, {"username": uname, "items": [
+            {"url": pic, "content_id": str(p.get("user_id") or uname), "content_type": "photo",
+             "kind": "profile", "entity_name": uname}]})
+    return _cors(web.json_response({"ok": True}))
 
 
 async def posts_handler(request):
@@ -608,6 +661,7 @@ def make_app():
     app.router.add_post("/social/posts", posts_handler)
     app.router.add_post("/social/comments", comments_handler)
     app.router.add_post("/social/users", users_handler)
+    app.router.add_post("/social/profile", profile_handler)
     # instagram back-compat aliases
     app.router.add_get("/ig/targets", get_targets_ig)
     app.router.add_post("/ig/ingest", ingest_ig)

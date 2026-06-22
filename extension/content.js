@@ -125,6 +125,23 @@ function deepCollectMedia(obj, sink, entity, depth = 0) {
   }
 }
 
+// Scan embedded state for user objects (TikTok uniqueId/nickname, Lemon8 handles)
+// so we record every creator/commenter we come across into social_users.
+function deepCollectUsers(obj, users, depth = 0) {
+  if (!obj || depth > 8 || users.length > 800) return;
+  if (Array.isArray(obj)) { for (const v of obj) deepCollectUsers(v, users, depth + 1); return; }
+  if (typeof obj !== "object") return;
+  const uname = obj.uniqueId || obj.unique_id || obj.handle || (obj.author && obj.author.uniqueId);
+  if (typeof uname === "string" && uname && uname.length < 40) {
+    users.push({
+      user_id: obj.id || obj.uid || obj.userId || null, username: uname,
+      display_name: obj.nickname || obj.nick_name || obj.name || null,
+      profile_pic_url: obj.avatarThumb || obj.avatar_thumb || obj.avatarMedium || obj.avatar || null,
+    });
+  }
+  for (const k in obj) { const v = obj[k]; if (v && typeof v === "object") deepCollectUsers(v, users, depth + 1); }
+}
+
 function parseEmbeddedState(ids) {
   for (const id of ids) {
     const el = document.getElementById(id);
@@ -163,6 +180,21 @@ const instagram = {
     const url = "https://www.instagram.com/api/v1/users/web_profile_info/?username=" + encodeURIComponent(username);
     const j = await fetchJson(url, { headers: this.headers(), credentials: "include" });
     return j && j.data && j.data.user;
+  },
+  // Push the full profile (bio, counts, profile photo) -> instagram_profiles +
+  // social_users; the server also downloads the profile pic as kind=profile.
+  async _sendProfile(user) {
+    if (!user || !user.username) return;
+    await send({ type: "profile", platform: "instagram", profile: {
+      user_id: user.id, username: user.username, full_name: user.full_name,
+      bio: user.biography,
+      followers_count: user.edge_followed_by && user.edge_followed_by.count,
+      following_count: user.edge_follow && user.edge_follow.count,
+      posts_count: user.edge_owner_to_timeline_media && user.edge_owner_to_timeline_media.count,
+      is_verified: user.is_verified, is_private: user.is_private,
+      profile_pic_url: user.profile_pic_url_hd || user.profile_pic_url,
+      external_url: user.external_url,
+    } }).catch(() => {});
   },
   // Pull caption + engagement off a post node — these are ALREADY in the
   // web_profile_info / feed/user response, so capturing them costs no extra
@@ -375,6 +407,7 @@ const instagram = {
       try {
         const user = await getUser(t.username);
         if (!okProfile(user)) continue;
+        await this._sendProfile(user);
         saved += await this._expiring(user, t.username);
       } catch (e) {
         if (e instanceof WallError) { clog("warn", "throttled in sweep — backing off", "instagram"); await send({ type: "wall", platform: "instagram" }).catch(() => {}); return { targets: visited, saved, discovered }; }
@@ -393,6 +426,7 @@ const instagram = {
         visited++;
         if (!user) continue;
         if (!okProfile(user)) { clog("info", `skip famous ${t.username}`, "instagram"); continue; }
+        await this._sendProfile(user);
         const r = await this._deep(user, t.username, hop);
         saved += r.saved; discovered += r.discovered;
       } catch (e) {
@@ -420,7 +454,7 @@ const tiktok = {
     const sink = makeSink();
     await autoScroll(10);
     const state = parseEmbeddedState(["__UNIVERSAL_DATA_FOR_REHYDRATION__", "SIGI_STATE", "sigi-persisted-data"]);
-    if (state) deepCollectMedia(state, sink, entity);
+    if (state) { deepCollectMedia(state, sink, entity); const us = []; deepCollectUsers(state, us); if (us.length) await send({ type: "users", platform: "tiktok", context: "seen", users: us }); }
     // also harvest whatever the DOM rendered (posters/sources already loaded)
     document.querySelectorAll("video").forEach((v, i) => {
       const u = v.src || (v.querySelector("source") && v.querySelector("source").src);
@@ -444,7 +478,7 @@ const lemon8 = {
     const sink = makeSink();
     await autoScroll(10);
     const state = parseEmbeddedState(["__NEXT_DATA__"]);
-    if (state) deepCollectMedia(state, sink, entity);
+    if (state) { deepCollectMedia(state, sink, entity); const us = []; deepCollectUsers(state, us); if (us.length) await send({ type: "users", platform: "lemon8", context: "seen", users: us }); }
     document.querySelectorAll("img").forEach((im, i) => {
       const u = im.currentSrc || im.src;
       if (u && /\.(jpe?g|png|webp)/i.test(u) && /https?:/.test(u) && !/icon|avatar|emoji/i.test(u))
@@ -473,6 +507,8 @@ const x = {
       let u = im.src.replace(/&name=\w+/, "&name=orig").replace(/\?format=/, "?format=");
       sink.add({ content_id: "img_" + u.split("/media/")[1], content_type: "photo", url: u, entity_name: entity });
     });
+    const xu = collectPermalinkAuthors(/^\/([A-Za-z0-9_]{1,20})\/status\//, /^(home|explore|search|messages|notifications|i|settings)$/);
+    if (xu.length) await send({ type: "users", platform: "x", context: "seen", users: xu });
     document.querySelectorAll("video").forEach((v, i) => {
       const poster = v.poster;
       if (poster && /https?:/.test(poster)) sink.add({ content_id: "poster_" + i + "_" + poster.slice(-24), content_type: "photo", url: poster, entity_name: entity });
@@ -530,6 +566,17 @@ function harvestPermalinkPosts(linkRe, idFrom) {
   return [...byId.values()];
 }
 
+// Collect usernames from profile/permalink anchors (X /<user>/status, FB /<user>/posts,
+// Threads /@user) -> social_users. Lightweight, DOM-only, every platform.
+function collectPermalinkAuthors(re, skip) {
+  const set = new Set();
+  document.querySelectorAll("a[href]").forEach((a) => {
+    const m = (a.getAttribute("href") || "").match(re);
+    if (m && m[1] && m[1].length < 40 && !(skip && skip.test(m[1]))) set.add(m[1]);
+  });
+  return [...set].map((u) => ({ username: u }));
+}
+
 // Threads (threads.com) — Meta SPA; media served from the Instagram/FB CDN.
 const threads = {
   id: "threads", host: "www.threads.com", label: "Threads",
@@ -563,6 +610,8 @@ const facebook = {
     if (sink.items.length) await send({ type: "ingest", platform: "facebook", username: entity, items: sink.items });
     const posts = harvestPermalinkPosts(/\/(?:posts\/|permalink\.php\?story_fbid=|[^/]+\/posts\/)?(pfbid[\w]+|\d{6,})/, (m) => m[1]);
     if (posts.length) await send({ type: "posts", platform: "facebook", username: entity, posts });
+    const fu = collectPermalinkAuthors(/^\/([A-Za-z0-9.]{3,40})\/(posts|photos|videos)/, /^(profile|pages|groups|watch|marketplace)$/);
+    if (fu.length) await send({ type: "users", platform: "facebook", context: "seen", users: fu });
     return { targets: 1, saved: sink.items.length, discovered: 0 };
   },
 };
