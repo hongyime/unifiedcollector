@@ -584,6 +584,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 });
 
+// Relay engagement posts captured by the MAIN-world network hook (inject.js).
+// inject.js reads Meta's own GraphQL/REST responses (likes/replies/reposts) and
+// postMessages them here; we forward to the posts endpoint. Robust, no extra reqs.
+window.addEventListener("message", (ev) => {
+  const m = ev.data;
+  if (!m || m.__uc !== true || m.type !== "posts" || !Array.isArray(m.posts) || !m.posts.length) return;
+  send({ type: "posts", platform: m.platform, posts: m.posts }).catch(() => {});
+});
+
 // Auto-start the loop the moment the tab loads (respawns after a reload/crash).
 send({ type: "tabReady", platform: (currentPlatform() || {}).id }).catch(() => {});
 mainLoop();
