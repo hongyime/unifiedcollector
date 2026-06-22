@@ -66,13 +66,13 @@
         <div class="row"><span class="k">Background worker</span><span class="v" id="sw"><span class="dot idle"></span>—</span></div>
         <div class="row"><span class="k">Social tab</span><span class="v" id="tab">—</span></div>
         <div class="row"><span class="k">Collector (ingest)</span><span class="v" id="ingestStatus">—</span></div>
-        <div class="row"><span class="k">Auto-cycle</span><span class="v" id="cycle">—</span></div>
-        <div class="row"><span class="k">Last cycle</span><span class="v" id="last">—</span></div>
+        <div class="row"><span class="k">Scrape loop</span><span class="v" id="loop">—</span></div>
+        <div class="row"><span class="k">Last pass</span><span class="v" id="last">—</span></div>
         <p class="hint" id="keepalive"></p>
       </div>
 
       <div class="panel">
-        <div class="logbar"><h2>Activity log</h2><a id="clear">clear</a></div>
+        <div class="logbar"><h2>Activity log</h2><span><a id="copy">copy</a> &middot; <a id="clear">clear</a></span></div>
         <div id="log"></div>
       </div>
 
@@ -80,11 +80,10 @@
         <h2>Settings</h2>
         <label>Ingest endpoint</label>
         <input id="ingest" placeholder="http://127.0.0.1:8765" />
-        <label>Auto-cycle (minutes)</label>
-        <input id="interval" type="number" min="5" placeholder="30" />
+        <p class="hint">The scrape loop runs continuously in your open social tab (rate-limited + jittered) — there's no interval to set.</p>
         <div class="btns">
           <button id="save">Save</button>
-          <button id="scrape" class="primary">Scrape now</button>
+          <button id="scrape" class="primary">Start / resume loop</button>
         </div>
         <div class="btns">
           <button id="tabsBtn">🗂 Manage social tabs</button>

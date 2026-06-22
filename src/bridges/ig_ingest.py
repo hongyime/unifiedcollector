@@ -37,6 +37,7 @@ import aiohttp
 from aiohttp import web
 
 from src.db.connection import get_pool, close_pool
+from src.core.media_filter import inspect as inspect_media
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("social_ingest")
@@ -213,28 +214,36 @@ async def discover_ig(request):  # /ig/discover alias
 async def _download_and_save(pool, session, platform, username, item) -> bool:
     url = item.get("url")
     cid = str(item.get("content_id") or "")
-    ctype = item.get("content_type") or "photo"
     if not url or not cid:
         return False
-    ext = "mp4" if ctype == "video" else "jpg"
     safe_user = _SAFE.sub("_", username)[:80] or "unknown"
     safe_cid = _SAFE.sub("_", cid)[:120]
-    dest_dir = Path(MEDIA_ROOT) / platform / f"account_{safe_user}" / ctype
-    dest = dest_dir / f"{platform}_{safe_user}_{safe_cid}.{ext}"
     try:
         # dedup authority is media_items (source, content_id)
         async with pool.acquire() as conn:
             seen = await conn.fetchval(
                 "SELECT 1 FROM media_items WHERE source=$1 AND content_id=$2", platform, cid
             )
-        if seen and dest.exists():
+        if seen:
             return False
 
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=60)) as r:
             if r.status != 200:
                 return False
+            ct_header = r.headers.get("content-type")
             data = await r.read()
-        if len(data) < MIN_BYTES:
+
+        # GATE: keep only real PDF/image/video/audio above min size — drop
+        # favicons, thumbnails, tracking pixels, sprite sheets, HTML error pages.
+        ok, kind, mtype, reason = inspect_media(data, ct_header)
+        if not ok:
+            logger.debug("reject %s %s: %s", platform, cid, reason)
+            return False
+        ext = kind                                   # true extension from magic bytes
+        ctype = "video" if mtype == "video" else ("pdf" if mtype == "pdf" else "photo")
+        dest_dir = Path(MEDIA_ROOT) / platform / f"account_{safe_user}" / ctype
+        dest = dest_dir / f"{platform}_{safe_user}_{safe_cid}.{ext}"
+        if dest.exists():
             return False
 
         dest_dir.mkdir(parents=True, exist_ok=True)

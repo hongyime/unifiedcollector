@@ -146,7 +146,7 @@ const SPIDER_FOLLOWS_PER_SIDE = 70;     // was 150 — fewer graph calls per pro
 const IG_MAX_ITEMS = 180;               // cap media pages per profile
 // Per-cycle target budget: a human checks a HANDFUL of profiles, not 257.
 // Randomised each cycle; the rest are picked up on later cycles (round-robin).
-function igTargetBudget() { return 6 + ((Math.random() * 7) | 0); } // 6–12
+function igTargetBudget() { return 4 + ((Math.random() * 5) | 0); } // 4–8 (recovery-week conservative)
 
 const instagram = {
   id: "instagram", host: "www.instagram.com", label: "Instagram",
@@ -227,7 +227,7 @@ const instagram = {
         if (media.length) { await send({ type: "ingest", platform: "instagram", username, items: media }); saved += media.length; }
         // Only crawl the follow-graph SOMETIMES (≈45%) — constant graph crawling is
         // a strong bot signal. Skipping it most visits looks far more human.
-        if (hop < MAX_HOP && user.id && Math.random() < 0.45) {
+        if (hop < MAX_HOP && user.id && Math.random() < 0.3) {
           await hsleep(5000);
           const a = await this.getFollows(user.id, "followers", SPIDER_FOLLOWS_PER_SIDE);
           const b = await this.getFollows(user.id, "following", SPIDER_FOLLOWS_PER_SIDE);
@@ -242,7 +242,7 @@ const instagram = {
         }
         clog("warn", `scrape failed ${username}: ${e.message}`, "instagram");
       }
-      await hsleep(16000); // ~10–26s between profiles, with occasional longer breaks
+      await hsleep(22000); // ~13–35s between profiles, with occasional longer breaks
     }
     return { targets: visited, saved, discovered };
   },
@@ -336,36 +336,63 @@ function currentPlatform() {
   return PLATFORMS.find((p) => location.hostname === p.host || location.hostname.endsWith("." + p.host)) || null;
 }
 
-// Singleton guard — never let two cycles run in the same tab at once (the old
-// 30-min alarm could fire a 2nd cycle on top of a still-running one, doubling the
-// request rate and tripping IG's throttle wall).
-let CYCLE_RUNNING = false;
+// ===========================================================================
+// CONTINUOUS LOOP (not "cycles"). The work lives HERE in the content script,
+// which can run as long as the tab is open — unlike the MV3 service worker,
+// which Chrome kills after ~30s idle. So there is no 30-min timer: we just loop
+// forever, human-paced (rate-limited + jittered), doing one small pass at a time
+// with long rests between. If the loop ever dies (page reload / crash) it is
+// respawned: the content script auto-starts it on load, and a lightweight
+// service-worker watchdog re-nudges any open tab that isn't looping.
+// ===========================================================================
+let LOOP_RUNNING = false;
 
-async function runCycle() {
+// Rest between passes — a person doesn't scrape non-stop. Tunable.
+const PASS_REST_MS = 90000; // ~54s–144s + occasional longer breaks via human()
+
+async function mainLoop() {
   const p = currentPlatform();
   if (!p) { clog("warn", `no scraper for ${location.hostname}`); return; }
-  if (CYCLE_RUNNING) { clog("info", `cycle already running on ${p.label} — skipping overlap`, p.label); return; }
-  CYCLE_RUNNING = true;
+  if (LOOP_RUNNING) return;            // one loop per tab
+  LOOP_RUNNING = true;
+  clog("info", `${p.label} loop started — continuous & human-paced (no fixed timer)`, p.label);
+  await send({ type: "loopStatus", platform: p.label, running: true }).catch(() => {});
   try {
-    const stats = await p.runCycle();
-    await send({ type: "cycleReport", platform: p.label, ...stats }).catch(() => {});
-  } catch (e) {
-    clog("error", `${p.label} cycle error: ${e.message}`, p.label);
+    while (LOOP_RUNNING) {
+      try {
+        const stats = await p.runCycle();  // one pass: IG = a few profiles; others = scrape current page
+        await send({ type: "cycleReport", platform: p.label, ...stats }).catch(() => {});
+      } catch (e) {
+        if (e instanceof WallError) {
+          const mins = 40 + Math.floor(Math.random() * 20); // 40–60m
+          clog("warn", `${p.label} hit a throttle/login wall — sleeping ${mins}m before resuming`, p.label);
+          await send({ type: "wall", platform: p.label, mins }).catch(() => {});
+          await sleep(mins * 60000);
+          continue;
+        }
+        clog("error", `${p.label} loop error: ${e.message}`, p.label);
+        await sleep(human(60000));
+      }
+      // heartbeat so the popup shows the loop is alive between passes
+      await send({ type: "loopStatus", platform: p.label, running: true }).catch(() => {});
+      await sleep(human(PASS_REST_MS)); // long human rest between passes
+    }
   } finally {
-    CYCLE_RUNNING = false;
+    LOOP_RUNNING = false;
+    await send({ type: "loopStatus", platform: p.label, running: false }).catch(() => {});
   }
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg && msg.type === "scrapeCycle") {
-    // Respond IMMEDIATELY and run detached — a cycle takes minutes, and holding
-    // the channel open that long is what produced "message channel closed".
-    sendResponse({ ok: true, started: !CYCLE_RUNNING });
-    runCycle();
+  if (!msg) return;
+  // "ensureLoop" (watchdog / manual Scrape-now): start the loop if it isn't running.
+  if (msg.type === "ensureLoop" || msg.type === "scrapeCycle") {
+    sendResponse({ ok: true, running: LOOP_RUNNING });
+    if (!LOOP_RUNNING) mainLoop();
     return false;
   }
 });
 
-// Tell the worker we're a live, logged-in scraper tab the moment we load, so it
-// can kick a cycle right away (event-driven, not waiting for a timer).
+// Auto-start the loop the moment the tab loads (respawns after a reload/crash).
 send({ type: "tabReady", platform: (currentPlatform() || {}).id }).catch(() => {});
+mainLoop();

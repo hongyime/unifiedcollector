@@ -16,9 +16,8 @@ const ALARM = "uc-scrape";
 const DEFAULT_INGEST = "http://127.0.0.1:8765";
 const LOG_KEY = "ucLog";
 const LOG_MAX = 200;
-const HEARTBEAT_MIN = 20;        // gentle heartbeat while a tab is open (human-paced)
-const WALL_COOLDOWN_MIN = 30;    // back off this long after a throttle/review wall
-const KICK_DEBOUNCE_MS = 60000;  // don't re-kick the same tab more often than this
+const WATCHDOG_MIN = 10;         // re-nudge any open scraper tab whose loop died
+const KICK_DEBOUNCE_MS = 30000;  // don't re-nudge the same tab more often than this
 
 // ---- persistent logging --------------------------------------------------
 async function log(level, msg) {
@@ -46,71 +45,55 @@ async function ingestBase() {
   return ingestBase || DEFAULT_INGEST;
 }
 
-// ---- scheduling (event-driven + heartbeat) -------------------------------
+// ---- watchdog (the real work is the in-tab continuous loop) ---------------
 async function scheduleAlarm() {
-  chrome.alarms.create(ALARM, { periodInMinutes: HEARTBEAT_MIN });
-  await setStatus({ alarmPeriod: HEARTBEAT_MIN, swStartedAt: Date.now() });
-  await log("info", `worker started; event-driven + ${HEARTBEAT_MIN}-min heartbeat`);
+  chrome.alarms.create(ALARM, { periodInMinutes: WATCHDOG_MIN });
+  await setStatus({ swStartedAt: Date.now() });
+  await log("info", `worker started; in-tab continuous loop + ${WATCHDOG_MIN}-min watchdog`);
 }
-chrome.runtime.onInstalled.addListener(() => { scheduleAlarm(); kickIfReady("installed"); });
-chrome.runtime.onStartup.addListener(() => { scheduleAlarm(); kickIfReady("startup"); });
+chrome.runtime.onInstalled.addListener(() => { scheduleAlarm(); ensureLoops("installed"); });
+chrome.runtime.onStartup.addListener(() => { scheduleAlarm(); ensureLoops("startup"); });
 
 chrome.alarms.onAlarm.addListener(async (a) => {
-  if (a.name !== ALARM) return;
-  await kickIfReady("heartbeat");
+  if (a.name === ALARM) await ensureLoops("watchdog");
 });
 
 // scraper hosts that have a content-script scraper
 function scraperPlatforms() { return (globalThis.UC_PLATFORMS || []).filter((p) => p.scraper); }
 function scraperUrlPatterns() { return scraperPlatforms().map((p) => `https://${p.host}/*`); }
 
-async function inCooldown() {
-  const s = await getStatus();
-  return s.cooldownUntil && Date.now() < s.cooldownUntil;
-}
-
-// Dispatch a cycle to EVERY open scraper tab (one per platform runs in parallel;
-// each tab self-guards against overlapping its own cycle).
-async function triggerScrape(reason) {
-  if (await inCooldown()) {
-    const s = await getStatus();
-    const mins = Math.round((s.cooldownUntil - Date.now()) / 60000);
-    await log("info", `in cooldown ~${mins}m (${reason}) — skipping`);
-    return false;
-  }
+// Nudge every open scraper tab to ensure its continuous loop is running. The tab
+// auto-starts the loop on load; this only RESPAWNS it if it died (page reload,
+// crash) or the service worker had been asleep. No scrape cadence here — pacing
+// lives inside the loop (rate-limited + jittered).
+async function ensureLoops(reason) {
   const tabs = await chrome.tabs.query({ url: scraperUrlPatterns() });
   if (!tabs || !tabs.length) {
     await log("warn", `no scraper tab open — paused (${reason}). Open one via 🗂 Manage social tabs.`);
+    await setStatus({ loopRunning: false });
     return false;
   }
-  await setStatus({ lastAlarmAt: Date.now() });
   for (const t of tabs) {
-    try {
-      await chrome.tabs.sendMessage(t.id, { type: "scrapeCycle" });
-      await log("info", `cycle dispatched → ${new URL(t.url).host} (${reason})`);
-    } catch (e) {
-      // content script not injected yet (tab still loading) — ignore
-    }
+    try { await chrome.tabs.sendMessage(t.id, { type: "ensureLoop" }); } catch (e) {}
   }
   return true;
 }
 
-// debounced per-tab kick used by event triggers
 const lastKick = {};
-async function kickIfReady(reason, tabId) {
+async function kick(reason, tabId) {
   if (tabId != null) {
     const now = Date.now();
     if (lastKick[tabId] && now - lastKick[tabId] < KICK_DEBOUNCE_MS) return;
     lastKick[tabId] = now;
   }
-  return triggerScrape(reason);
+  return ensureLoops(reason);
 }
 
-// a scraper tab finished loading -> opportunity to scrape
+// a scraper tab finished loading -> make sure its loop is running
 chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
   if (info.status !== "complete" || !tab.url) return;
   const host = (() => { try { return new URL(tab.url).host; } catch (e) { return ""; } })();
-  if (scraperPlatforms().some((p) => host === p.host)) kickIfReady("tab-loaded", tabId);
+  if (scraperPlatforms().some((p) => host === p.host)) kick("tab-loaded", tabId);
 });
 
 // ---- social tab launcher -------------------------------------------------
@@ -194,16 +177,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
         break;
       }
-      case "wall": {  // a content script hit a throttle/login wall -> back off
-        const until = Date.now() + WALL_COOLDOWN_MIN * 60000;
-        await setStatus({ cooldownUntil: until });
-        await log("warn", `⚠️ ${msg.platform || "?"} throttle wall — cooling down ${WALL_COOLDOWN_MIN}m`);
+      case "wall": {  // the in-tab loop hit a throttle/login wall and is sleeping
+        const mins = msg.mins || 45;
+        await setStatus({ cooldownUntil: Date.now() + mins * 60000 });
+        await log("warn", `⚠️ ${msg.platform || "?"} throttle wall — loop sleeping ${mins}m`);
         sendResponse({ ok: true });
         break;
       }
-      case "tabReady": {  // scraper tab loaded -> scrape now (event-driven)
+      case "loopStatus": {  // continuous loop liveness ping
+        await setStatus({ loopRunning: !!msg.running, loopPlatform: msg.platform, lastLoopPing: Date.now() });
         sendResponse({ ok: true });
-        if (sender.tab) kickIfReady("tab-ready", sender.tab.id);
+        break;
+      }
+      case "tabReady": {  // scraper tab loaded; the loop auto-starts in the tab
+        sendResponse({ ok: true });
         break;
       }
       case "log":
@@ -245,10 +232,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 async function scrapeNow() {
-  await log("info", "manual 'Scrape now' clicked");
-  // manual override clears any active cooldown
+  await log("info", "manual 'Start/Resume loop' clicked");
   await setStatus({ cooldownUntil: 0 });
-  return { ok: await triggerScrape("manual") };
+  return { ok: await ensureLoops("manual") };
 }
 
 // Warm start (worker waking from sleep)
