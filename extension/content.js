@@ -158,15 +158,34 @@ const instagram = {
     const j = await fetchJson(url, { headers: this.headers(), credentials: "include" });
     return j && j.data && j.data.user;
   },
+  // Pull caption + engagement off a post node — these are ALREADY in the
+  // web_profile_info / feed/user response, so capturing them costs no extra
+  // requests. Handles both the GraphQL (edge_*) and v1 (caption/like_count) shapes.
+  postMeta(n) {
+    const caption =
+      (n.edge_media_to_caption && n.edge_media_to_caption.edges && n.edge_media_to_caption.edges[0] && n.edge_media_to_caption.edges[0].node.text) ||
+      (n.caption && (n.caption.text || (typeof n.caption === "string" ? n.caption : null))) || null;
+    const likes = (n.edge_liked_by && n.edge_liked_by.count) ?? (n.edge_media_preview_like && n.edge_media_preview_like.count) ?? n.like_count ?? null;
+    const comments = (n.edge_media_to_comment && n.edge_media_to_comment.count) ?? (n.edge_media_to_parent_comment && n.edge_media_to_parent_comment.count) ?? n.comment_count ?? null;
+    const views = n.video_view_count ?? n.view_count ?? n.play_count ?? null;
+    return {
+      caption, likes_count: likes, comments_count: comments, views_count: views,
+      taken_at: n.taken_at_timestamp || n.taken_at || null,
+      shortcode: n.shortcode || n.code || null,
+      location: (n.location && (n.location.name || n.location.short_name)) || null,
+    };
+  },
+
   extractMedia(node, username) {
     const out = [];
+    const meta = this.postMeta(node);
     const push = (n, cid) => {
       let url = null, type = "photo";
       if (n.video_url) { url = n.video_url; type = "video"; }
       else if (n.video_versions && n.video_versions[0]) { url = n.video_versions[0].url; type = "video"; }
       else if (n.display_url) { url = n.display_url; }
       else if (n.image_versions2 && n.image_versions2.candidates && n.image_versions2.candidates[0]) { url = n.image_versions2.candidates[0].url; }
-      if (url) out.push({ content_id: String(cid), content_type: type, url, entity_name: username });
+      if (url) out.push({ content_id: String(cid), content_type: type, url, entity_name: username, meta });
     };
     const cid = node.id || node.pk || node.code;
     const children = (node.edge_sidecar_to_children && node.edge_sidecar_to_children.edges) || node.carousel_media;

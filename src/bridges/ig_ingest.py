@@ -27,6 +27,7 @@ the "message channel closed before a response was received" errors. We ack fast
 and download out-of-band.
 """
 import asyncio
+import json
 import logging
 import os
 import re
@@ -252,21 +253,25 @@ async def _download_and_save(pool, session, platform, username, item) -> bool:
         os.replace(tmp, dest)
 
         sha = hashlib.sha256(data).hexdigest()
+        # caption + likes/comments/views/location come along free from the scrape
+        meta = item.get("meta") or {}
+        meta_json = json.dumps(meta) if isinstance(meta, dict) else "{}"
         async with pool.acquire() as conn:
             await conn.execute(
                 """
                 INSERT INTO media_items
                   (source, entity_id, entity_name, content_type, content_id,
                    filename, file_path, file_size, sha256, source_url, metadata)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'{}'::jsonb)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb)
                 ON CONFLICT (source, content_id) DO UPDATE SET
                    file_path = EXCLUDED.file_path,
                    file_size = EXCLUDED.file_size,
                    sha256 = EXCLUDED.sha256,
-                   source_url = EXCLUDED.source_url
+                   source_url = EXCLUDED.source_url,
+                   metadata = EXCLUDED.metadata
                 """,
                 platform, safe_user, item.get("entity_name") or username, ctype, cid,
-                dest.name, str(dest), len(data), sha, url,
+                dest.name, str(dest), len(data), sha, url, meta_json,
             )
         return True
     except Exception:
