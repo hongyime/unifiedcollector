@@ -151,7 +151,8 @@ const SPIDER_FOLLOWS_PER_SIDE = 70;     // was 150 — fewer graph calls per pro
 const IG_MAX_ITEMS = 180;               // cap media pages per profile
 // Per-cycle target budget: a human checks a HANDFUL of profiles, not 257.
 // Randomised each cycle; the rest are picked up on later cycles (round-robin).
-function igTargetBudget() { return 4 + ((Math.random() * 5) | 0); } // 4–8 (recovery-week conservative)
+function igTargetBudget() { return 4 + ((Math.random() * 5) | 0); } // 4–8 deep profiles/cycle
+const IG_STORY_SWEEP = 10;   // profiles to grab EXPIRING stories/highlights from, first, each cycle
 
 const instagram = {
   id: "instagram", host: "www.instagram.com", label: "Instagram",
@@ -311,78 +312,94 @@ const instagram = {
     }
     return out.slice(0, max);
   },
+
+  // EXPIRING content (24h stories + highlights) — grab these FIRST each cycle.
+  async _expiring(user, username) {
+    let saved = 0;
+    if (!user.id) return 0;
+    await hsleep(3500);
+    try { const s = await this.getStories(user.id, username); if (s.length) { await send({ type: "ingest", platform: "instagram", username, items: s }); saved += s.length; clog("info", `${username}: +${s.length} story media (expiring)`, "instagram"); } }
+    catch (e) { if (e instanceof WallError) throw e; }
+    await hsleep(3500);
+    try { const h = await this.getHighlights(user.id, username); if (h.length) { await send({ type: "ingest", platform: "instagram", username, items: h }); saved += h.length; clog("info", `${username}: +${h.length} highlight media`, "instagram"); } }
+    catch (e) { if (e instanceof WallError) throw e; }
+    return saved;
+  },
+
+  // DEEP scrape — timeline media + post metadata + comments + tagged + follow-graph.
+  async _deep(user, username, hop) {
+    let saved = 0, discovered = 0;
+    const { media, posts } = await this.scrapeUserMedia(user, username);
+    if (media.length) { await send({ type: "ingest", platform: "instagram", username, items: media }); saved += media.length; }
+    if (posts.length) { await send({ type: "posts", platform: "instagram", username, posts }); }
+    for (const p of posts.slice(0, 3)) {  // comments: heavy, cap a few posts
+      await hsleep(6000);
+      try { const cm = await this.getComments(p.platform_post_id); if (cm.length) await send({ type: "comments", platform: "instagram", post_id: p.platform_post_id, comments: cm }); }
+      catch (e) { if (e instanceof WallError) throw e; }
+    }
+    if (user.id) {  // tagged posts -> filed under this profile + tagged users recorded
+      await hsleep(5000);
+      try {
+        const tg = await this.getTagged(user.id, username);
+        if (tg.media.length) { await send({ type: "ingest", platform: "instagram", username, items: tg.media }); saved += tg.media.length; clog("info", `${username}: +${tg.media.length} tagged media`, "instagram"); }
+        if (tg.users.length) await send({ type: "users", platform: "instagram", context: "tagged", users: tg.users });
+      } catch (e) { if (e instanceof WallError) throw e; }
+    }
+    if (hop < 2 && user.id && Math.random() < 0.3) {  // follow-graph sometimes (human)
+      await hsleep(5000);
+      const a = await this.getFollows(user.id, "followers", SPIDER_FOLLOWS_PER_SIDE);
+      const b = await this.getFollows(user.id, "following", SPIDER_FOLLOWS_PER_SIDE);
+      const found = a.concat(b);
+      if (found.length) { await send({ type: "discover", platform: "instagram", source: username, hop, discovered: found }); discovered += found.length; }
+    }
+    return { saved, discovered };
+  },
+
   async runCycle() {
     let resp = [];
     try { resp = (await send({ type: "getTargets", platform: "instagram" })) || []; } catch (e) {}
-    let pool = (Array.isArray(resp) ? resp : []).map((t) => (typeof t === "string" ? { username: t, hop: 0 } : t));
-    // Only visit a small, RANDOM handful this cycle — like a person checking a few
-    // profiles. The rest get picked up on later cycles (server round-robins them).
-    const budget = igTargetBudget();
-    const targets = shuffle(pool).slice(0, budget);
-    const CFG = CAPTURE;  // always on
-    const MAX_HOP = 2;
+    const pool = (Array.isArray(resp) ? resp : [])
+      .map((t) => (typeof t === "string" ? { username: t, hop: 0 } : t))
+      .filter((t) => t && t.username);
+    if (!pool.length) return { targets: 0, saved: 0, discovered: 0 };
+    const cache = new Map();
+    const getUser = async (u) => { if (cache.has(u)) return cache.get(u); const p = await this.getProfile(u); cache.set(u, p); return p; };
+    const okProfile = (user) => user && ((user.edge_followed_by && user.edge_followed_by.count) || 0) <= SPIDER_FAMOUS_CAP;
     let saved = 0, discovered = 0, visited = 0;
-    clog("info", `cycle start: visiting ${targets.length} of ${pool.length} target(s) [stories:${CFG.stories} highlights:${CFG.highlights} comments:${CFG.comments}]`, "instagram");
-    for (const t of targets) {
-      const username = t.username, hop = typeof t.hop === "number" ? t.hop : 0;
-      if (!username) continue;
+
+    // PASS 1 — EXPIRING FIRST. The server orders seeds (hop 0) at the front, so we
+    // sweep stories/highlights for your seed profiles + early network every cycle.
+    const sweep = pool.slice(0, IG_STORY_SWEEP);
+    clog("info", `expiring-first: stories/highlights sweep of ${sweep.length} profile(s)`, "instagram");
+    for (const t of sweep) {
       try {
-        const user = await this.getProfile(username);
+        const user = await getUser(t.username);
+        if (!okProfile(user)) continue;
+        saved += await this._expiring(user, t.username);
+      } catch (e) {
+        if (e instanceof WallError) { clog("warn", "throttled in sweep — backing off", "instagram"); await send({ type: "wall", platform: "instagram" }).catch(() => {}); return { targets: visited, saved, discovered }; }
+        clog("warn", `sweep failed ${t.username}: ${e.message}`, "instagram");
+      }
+      await hsleep(9000);
+    }
+
+    // PASS 2 — DEEP scrape a small random handful (timeline + posts + comments + tagged).
+    const deep = shuffle(pool.slice()).slice(0, igTargetBudget());
+    clog("info", `deep scrape: ${deep.length} profile(s)`, "instagram");
+    for (const t of deep) {
+      const hop = typeof t.hop === "number" ? t.hop : 0;
+      try {
+        const user = await getUser(t.username);
         visited++;
         if (!user) continue;
-        const fc = (user.edge_followed_by && user.edge_followed_by.count) || 0;
-        if (fc > SPIDER_FAMOUS_CAP) { clog("info", `skip famous ${username} (${fc})`, "instagram"); continue; }
-        const { media, posts } = await this.scrapeUserMedia(user, username);
-        if (media.length) { await send({ type: "ingest", platform: "instagram", username, items: media }); saved += media.length; }
-        if (posts.length) { await send({ type: "posts", platform: "instagram", username, posts }); }
-
-        // Stories (ephemeral — grab while they exist) + Highlights (stable).
-        if (CFG.stories && user.id) {
-          await hsleep(5000);
-          try { const s = await this.getStories(user.id, username); if (s.length) { await send({ type: "ingest", platform: "instagram", username, items: s }); saved += s.length; clog("info", `${username}: +${s.length} story media`, "instagram"); } }
-          catch (e) { if (e instanceof WallError) throw e; }
-        }
-        if (CFG.highlights && user.id) {
-          await hsleep(5000);
-          try { const h = await this.getHighlights(user.id, username); if (h.length) { await send({ type: "ingest", platform: "instagram", username, items: h }); saved += h.length; clog("info", `${username}: +${h.length} highlight media`, "instagram"); } }
-          catch (e) { if (e instanceof WallError) throw e; }
-        }
-        // Comments — heavy (1 request/post); cap to a few recent posts per profile.
-        if (CFG.comments && posts.length) {
-          for (const p of posts.slice(0, 3)) {
-            await hsleep(6000);
-            try { const cm = await this.getComments(p.platform_post_id); if (cm.length) await send({ type: "comments", platform: "instagram", post_id: p.platform_post_id, comments: cm }); }
-            catch (e) { if (e instanceof WallError) throw e; }
-          }
-        }
-        // Tagged posts (posts where this profile is tagged) -> filed under them,
-        // and every tagged user / owner recorded in the user registry.
-        if (user.id) {
-          await hsleep(5000);
-          try {
-            const tg = await this.getTagged(user.id, username);
-            if (tg.media.length) { await send({ type: "ingest", platform: "instagram", username, items: tg.media }); saved += tg.media.length; clog("info", `${username}: +${tg.media.length} tagged media`, "instagram"); }
-            if (tg.users.length) await send({ type: "users", platform: "instagram", context: "tagged", users: tg.users });
-          } catch (e) { if (e instanceof WallError) throw e; }
-        }
-        // Only crawl the follow-graph SOMETIMES (≈45%) — constant graph crawling is
-        // a strong bot signal. Skipping it most visits looks far more human.
-        if (hop < MAX_HOP && user.id && Math.random() < 0.3) {
-          await hsleep(5000);
-          const a = await this.getFollows(user.id, "followers", SPIDER_FOLLOWS_PER_SIDE);
-          const b = await this.getFollows(user.id, "following", SPIDER_FOLLOWS_PER_SIDE);
-          const found = a.concat(b);
-          if (found.length) { await send({ type: "discover", platform: "instagram", source: username, hop, discovered: found }); discovered += found.length; }
-        }
+        if (!okProfile(user)) { clog("info", `skip famous ${t.username}`, "instagram"); continue; }
+        const r = await this._deep(user, t.username, hop);
+        saved += r.saved; discovered += r.discovered;
       } catch (e) {
-        if (e instanceof WallError) {
-          clog("warn", `throttled at ${username} — backing off, ending cycle early`, "instagram");
-          await send({ type: "wall", platform: "instagram" }).catch(() => {});
-          break; // stop hammering; the cooldown lets the session recover
-        }
-        clog("warn", `scrape failed ${username}: ${e.message}`, "instagram");
+        if (e instanceof WallError) { clog("warn", `throttled at ${t.username} — backing off`, "instagram"); await send({ type: "wall", platform: "instagram" }).catch(() => {}); break; }
+        clog("warn", `scrape failed ${t.username}: ${e.message}`, "instagram");
       }
-      await hsleep(22000); // ~13–35s between profiles, with occasional longer breaks
+      await hsleep(22000); // ~13–35s between profiles
     }
     return { targets: visited, saved, discovered };
   },
