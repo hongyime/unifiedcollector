@@ -54,14 +54,10 @@ function clog(level, msg, platform) {
   send({ type: "log", level, msg, platform }).catch(() => {});
 }
 
-// Opt-in capture toggles (popup settings). Stories/highlights cost ~1-2 extra
-// requests per profile; comments cost ~1 per post (heavy) so it's OFF by default
-// during the IG account-review recovery week.
-const DEFAULT_CONFIG = { stories: true, highlights: true, comments: true };
-async function getConfig() {
-  try { return Object.assign({}, DEFAULT_CONFIG, (await send({ type: "getConfig" })) || {}); }
-  catch (e) { return { ...DEFAULT_CONFIG }; }
-}
+// Capture is ALWAYS ON (user: "i want them on at all times"). Stories, highlights
+// and comments are captured every cycle — no toggles. Pacing is handled by the
+// human-paced loop + wall cooldown, not by disabling capture.
+const CAPTURE = { stories: true, highlights: true, comments: true };
 
 // A login-wall / throttle returns an HTML doc with HTTP 200. Detect it so we can
 // back off cleanly instead of crashing every target with "Unexpected token '<'".
@@ -301,7 +297,7 @@ const instagram = {
     // profiles. The rest get picked up on later cycles (server round-robins them).
     const budget = igTargetBudget();
     const targets = shuffle(pool).slice(0, budget);
-    const CFG = await getConfig();
+    const CFG = CAPTURE;  // always on
     const MAX_HOP = 2;
     let saved = 0, discovered = 0, visited = 0;
     clog("info", `cycle start: visiting ${targets.length} of ${pool.length} target(s) [stories:${CFG.stories} highlights:${CFG.highlights} comments:${CFG.comments}]`, "instagram");

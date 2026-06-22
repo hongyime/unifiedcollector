@@ -77,23 +77,10 @@ function escapeHtml(s) { return String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp
 async function refresh() { await renderStatus(); await renderLog(); }
 
 async function load() {
-  const { ingestBase, ucConfig = {} } = await chrome.storage.local.get(["ingestBase", "ucConfig"]);
+  const { ingestBase } = await chrome.storage.local.get(["ingestBase"]);
   $("ingest").value = ingestBase || DEFAULT_INGEST;
-  const cfg = { stories: true, highlights: true, comments: true, ...ucConfig };
-  $("cfgStories").checked = cfg.stories;
-  $("cfgHighlights").checked = cfg.highlights;
-  $("cfgComments").checked = cfg.comments;
   await refresh();
 }
-
-async function saveConfig() {
-  await chrome.storage.local.set({
-    ucConfig: { stories: $("cfgStories").checked, highlights: $("cfgHighlights").checked, comments: $("cfgComments").checked },
-  });
-}
-["cfgStories", "cfgHighlights", "cfgComments"].forEach((id) => {
-  $(id).addEventListener("change", saveConfig);
-});
 
 $("save").addEventListener("click", async () => {
   const ingestBase = $("ingest").value.trim() || DEFAULT_INGEST;

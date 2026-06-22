@@ -201,11 +201,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         } catch (e) { await log("error", `comments failed: ${e.message}`); sendResponse({ ok: false }); }
         break;
       }
-      case "getConfig": {
-        const { ucConfig = {} } = await chrome.storage.local.get("ucConfig");
-        sendResponse({ stories: true, highlights: true, comments: true, ...ucConfig });
-        break;
-      }
       case "wall": {  // the in-tab loop hit a throttle/login wall and is sleeping
         const mins = msg.mins || 45;
         await setStatus({ cooldownUntil: Date.now() + mins * 60000 });
