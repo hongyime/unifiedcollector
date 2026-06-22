@@ -25,7 +25,7 @@
       .row .k { color: var(--muted); }
       .row .v { font-weight: 600; }
       .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; }
-      .dot.ok { background: var(--ok); } .dot.bad { background: var(--err); } .dot.idle { background: var(--muted); }
+      .dot.ok { background: var(--ok); } .dot.bad { background: var(--err); } .dot.idle { background: var(--muted); } .dot.warn { background: var(--warn); }
       .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; margin-bottom: 10px; }
       .panel h2 { font-size: 10px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); margin: 0 0 6px; }
       .hint { font-size: 10px; color: var(--muted); margin: 6px 0 0; }
@@ -66,11 +66,10 @@
     <div class="wrap">
       <div class="panel">
         <h2>Status</h2>
-        <div class="row"><span class="k">Background worker</span><span class="v" id="sw"><span class="dot idle"></span>—</span></div>
-        <div class="row"><span class="k">Social tab</span><span class="v" id="tab">—</span></div>
-        <div class="row"><span class="k">Collector (ingest)</span><span class="v" id="ingestStatus">—</span></div>
-        <div class="row"><span class="k">Scrape loop</span><span class="v" id="loop">—</span></div>
-        <div class="row"><span class="k">Last pass</span><span class="v" id="last">—</span></div>
+        <div class="row"><span class="k">Scraping</span><span class="v" id="scrapeState"><span class="dot idle"></span>—</span></div>
+        <div class="row"><span class="k">Social tabs</span><span class="v" id="tab">—</span></div>
+        <div class="row"><span class="k">Collector</span><span class="v" id="ingestStatus">—</span></div>
+        <div class="row"><span class="k">Last activity</span><span class="v" id="last">—</span></div>
         <p class="hint" id="keepalive"></p>
       </div>
 
@@ -90,11 +89,10 @@
         <input id="ingest" placeholder="http://127.0.0.1:8765" />
         <p class="hint">The scrape loop runs continuously in your open social tab (rate-limited + jittered) — there's no interval to set.</p>
         <div class="btns">
-          <button id="save">Save</button>
-          <button id="scrape" class="primary">Start / resume loop</button>
+          <button id="save">Save endpoint</button>
         </div>
         <div class="btns">
-          <button id="tabsBtn">🗂 Manage social tabs</button>
+          <button id="tabsBtn" class="primary">🗂 Open / manage social tabs</button>
         </div>
       </div>
     </div>

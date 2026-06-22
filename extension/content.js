@@ -276,6 +276,28 @@ const instagram = {
       created_at: c.created_at, is_reply: false,
     }));
   },
+
+  // Tagged posts: posts where THIS profile is tagged by someone else (their
+  // "Tagged" tab). We file the media under the scraped profile (kind=tagged) and
+  // record every tagged user + the post owner into the user registry.
+  async getTagged(userId, username) {
+    const media = [], users = [];
+    let maxId = "";
+    for (let page = 0; page < 3; page++) {
+      const url = "https://www.instagram.com/api/v1/usertags/" + userId + "/feed/?count=24" + (maxId ? "&max_id=" + maxId : "");
+      const j = await fetchJson(url, { headers: this.headers(), credentials: "include" });
+      (j.items || []).forEach((it) => {
+        this.extractMedia(it, username).forEach((m) => media.push({ ...m, kind: "tagged" }));
+        if (it.user) users.push({ user_id: it.user.pk, username: it.user.username, display_name: it.user.full_name });
+        const tags = (it.usertags && it.usertags.in) || [];
+        tags.forEach((t) => { if (t.user) users.push({ user_id: t.user.pk, username: t.user.username, display_name: t.user.full_name }); });
+      });
+      maxId = j.next_max_id;
+      if (!maxId || !j.more_available) break;
+      await hsleep(4000);
+    }
+    return { media, users };
+  },
   async getFollows(userId, kind, max) {
     const out = [];
     let maxId = "";
@@ -332,6 +354,16 @@ const instagram = {
             try { const cm = await this.getComments(p.platform_post_id); if (cm.length) await send({ type: "comments", platform: "instagram", post_id: p.platform_post_id, comments: cm }); }
             catch (e) { if (e instanceof WallError) throw e; }
           }
+        }
+        // Tagged posts (posts where this profile is tagged) -> filed under them,
+        // and every tagged user / owner recorded in the user registry.
+        if (user.id) {
+          await hsleep(5000);
+          try {
+            const tg = await this.getTagged(user.id, username);
+            if (tg.media.length) { await send({ type: "ingest", platform: "instagram", username, items: tg.media }); saved += tg.media.length; clog("info", `${username}: +${tg.media.length} tagged media`, "instagram"); }
+            if (tg.users.length) await send({ type: "users", platform: "instagram", context: "tagged", users: tg.users });
+          } catch (e) { if (e instanceof WallError) throw e; }
         }
         // Only crawl the follow-graph SOMETIMES (≈45%) — constant graph crawling is
         // a strong bot signal. Skipping it most visits looks far more human.
@@ -589,8 +621,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 // postMessages them here; we forward to the posts endpoint. Robust, no extra reqs.
 window.addEventListener("message", (ev) => {
   const m = ev.data;
-  if (!m || m.__uc !== true || m.type !== "posts" || !Array.isArray(m.posts) || !m.posts.length) return;
-  send({ type: "posts", platform: m.platform, posts: m.posts }).catch(() => {});
+  if (!m || m.__uc !== true) return;
+  if (m.type === "posts" && Array.isArray(m.posts) && m.posts.length) {
+    send({ type: "posts", platform: m.platform, posts: m.posts }).catch(() => {});
+  } else if (m.type === "users" && Array.isArray(m.users) && m.users.length) {
+    send({ type: "users", platform: m.platform, context: m.context || "seen", users: m.users }).catch(() => {});
+  }
 });
 
 // Auto-start the loop the moment the tab loads (respawns after a reload/crash).

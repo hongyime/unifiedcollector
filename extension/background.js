@@ -201,6 +201,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         } catch (e) { await log("error", `comments failed: ${e.message}`); sendResponse({ ok: false }); }
         break;
       }
+      case "users": {  // universal user registry — anyone we encountered
+        try {
+          const r = await fetch(base + "/social/users", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ platform: msg.platform || "instagram", context: msg.context || "seen", users: msg.users }),
+          });
+          const j = await r.json().catch(() => ({}));
+          await log("info", `users[${msg.platform || "instagram"}] +${j.recorded ?? "?"} (${msg.context || "seen"})`);
+          sendResponse({ ok: r.ok });
+        } catch (e) { await log("error", `users failed: ${e.message}`); sendResponse({ ok: false }); }
+        break;
+      }
       case "wall": {  // the in-tab loop hit a throttle/login wall and is sleeping
         const mins = msg.mins || 45;
         await setStatus({ cooldownUntil: Date.now() + mins * 60000 });

@@ -225,6 +225,8 @@ async def _discover(pool, platform, body):
             )
             if res.endswith("1"):
                 added += 1
+    # every discovered follower/following is a user we've now seen
+    await _record_users(pool, platform, discovered, "follow")
     logger.info("discover[%s] from %s (hop %d): +%d new", platform, source, src_hop, added)
     return {"added": added}
 
@@ -260,14 +262,14 @@ async def _download_and_save(pool, session, platform, username, item) -> bool:
     # their own subtree and get a namespaced content_id so they never collide with
     # a feed post that happens to share an id.
     media_kind = (item.get("kind") or "post").lower()
-    if media_kind not in ("post", "story", "highlight"):
+    if media_kind not in ("post", "story", "highlight", "tagged"):
         media_kind = "post"
-    # DB dedup id stays namespaced so a story/highlight can't collide with a post.
+    # DB dedup id stays namespaced so a story/highlight/tagged can't collide with a post.
     store_cid = cid if media_kind == "post" else f"{media_kind}_{cid}"
     safe_user = _SAFE.sub("_", username)[:80] or "unknown"
     raw_cid = _SAFE.sub("_", cid)[:100]
     # filename kind label (no subfolders anymore — kind is encoded in the name)
-    kindtag = {"story": "story_", "highlight": "hl_"}.get(media_kind, "")
+    kindtag = {"story": "story_", "highlight": "hl_", "tagged": "tagged_"}.get(media_kind, "")
     datestr = _date_prefix(item, platform)
     try:
         # dedup authority is media_items (source, content_id)
@@ -478,17 +480,72 @@ async def _save_comments(pool, platform, post_pid, comments) -> int:
     return n
 
 
+# ---------------------------------------------------------------------------
+# universal user registry — every user/id we encounter anywhere (follows graph,
+# comment authors, tagged users, post authors, reactors) lands in social_users.
+# ---------------------------------------------------------------------------
+async def _record_users(pool, platform, users, context) -> int:
+    if not users:
+        return 0
+    n = 0
+    async with pool.acquire() as conn:
+        for u in users:
+            if isinstance(u, str):
+                u = {"username": u}
+            if not isinstance(u, dict):
+                continue
+            user_id = u.get("user_id") or u.get("pk") or u.get("id")
+            username = (u.get("username") or "").strip().lstrip("@") or None
+            uid = str(user_id) if user_id else username
+            if not uid:
+                continue
+            try:
+                await conn.execute(
+                    """
+                    INSERT INTO social_users (platform, uid, platform_user_id, username, display_name, contexts)
+                    VALUES ($1,$2,$3,$4,$5,$6)
+                    ON CONFLICT (platform, uid) DO UPDATE SET
+                       last_seen = now(),
+                       times_seen = social_users.times_seen + 1,
+                       username = COALESCE(EXCLUDED.username, social_users.username),
+                       platform_user_id = COALESCE(EXCLUDED.platform_user_id, social_users.platform_user_id),
+                       display_name = COALESCE(EXCLUDED.display_name, social_users.display_name),
+                       contexts = (SELECT array_agg(DISTINCT c) FROM unnest(social_users.contexts || EXCLUDED.contexts) AS c)
+                    """,
+                    platform, uid, str(user_id) if user_id else None, username,
+                    u.get("display_name") or u.get("full_name") or None, [context],
+                )
+                n += 1
+            except Exception:
+                logger.debug("record user failed %s", uid, exc_info=True)
+    return n
+
+
+async def users_handler(request):
+    body = await _safe_json(request)
+    platform = _norm_platform(body.get("platform"))
+    n = await _record_users(request.app["pool"], platform, body.get("users") or [], body.get("context") or "seen")
+    return _cors(web.json_response({"recorded": n}))
+
+
 async def posts_handler(request):
     body = await _safe_json(request)
     platform = _norm_platform(body.get("platform"))
     n = await _save_posts(request.app["pool"], platform, body.get("posts") or [])
+    # post authors (threads/facebook carry author_username) count as seen users
+    authors = [{"username": p.get("author_username")} for p in (body.get("posts") or []) if p.get("author_username")]
+    await _record_users(request.app["pool"], platform, authors, "author")
     return _cors(web.json_response({"saved": n}))
 
 
 async def comments_handler(request):
     body = await _safe_json(request)
     platform = _norm_platform(body.get("platform"))
-    n = await _save_comments(request.app["pool"], platform, body.get("post_id"), body.get("comments") or [])
+    comments = body.get("comments") or []
+    n = await _save_comments(request.app["pool"], platform, body.get("post_id"), comments)
+    # every commenter is a user we've seen
+    authors = [{"username": c.get("author_username"), "user_id": c.get("author_platform_id")} for c in comments if c.get("author_username") or c.get("author_platform_id")]
+    await _record_users(request.app["pool"], platform, authors, "comment")
     return _cors(web.json_response({"saved": n}))
 
 
@@ -550,6 +607,7 @@ def make_app():
     app.router.add_post("/social/discover", discover)
     app.router.add_post("/social/posts", posts_handler)
     app.router.add_post("/social/comments", comments_handler)
+    app.router.add_post("/social/users", users_handler)
     # instagram back-compat aliases
     app.router.add_get("/ig/targets", get_targets_ig)
     app.router.add_post("/ig/ingest", ingest_ig)

@@ -1,5 +1,9 @@
 const $ = (id) => document.getElementById(id);
 const DEFAULT_INGEST = "http://127.0.0.1:8765";
+const SCRAPER_URLS = [
+  "https://www.instagram.com/*", "https://www.tiktok.com/*", "https://www.lemon8-app.com/*",
+  "https://x.com/*", "https://www.threads.com/*", "https://www.facebook.com/*",
+];
 
 function ago(ts) {
   if (!ts) return "—";
@@ -17,17 +21,14 @@ async function ingestBase() {
 
 async function renderStatus() {
   const { ucStatus = {} } = await chrome.storage.local.get("ucStatus");
+  const tabs = await chrome.tabs.query({ url: SCRAPER_URLS });
+  const nTabs = tabs ? tabs.length : 0;
 
-  $("sw").innerHTML = `<span class="dot ok"></span>active · ${ago(ucStatus.swStartedAt)}`;
+  $("tab").innerHTML = nTabs
+    ? `<span class="dot ok"></span>${nTabs} open`
+    : `<span class="dot bad"></span>none — open one below`;
 
-  const tabs = await chrome.tabs.query({
-    url: ["https://www.instagram.com/*", "https://www.tiktok.com/*", "https://www.lemon8-app.com/*",
-          "https://x.com/*", "https://www.threads.com/*", "https://www.facebook.com/*"],
-  });
-  $("tab").innerHTML = tabs && tabs.length
-    ? `<span class="dot ok"></span>${tabs.length} scraper tab(s)`
-    : `<span class="dot bad"></span>none open — pin one`;
-
+  // collector reachable?
   try {
     const base = await ingestBase();
     const ctrl = new AbortController();
@@ -39,27 +40,26 @@ async function renderStatus() {
     $("ingestStatus").innerHTML = `<span class="dot bad"></span>unreachable`;
   }
 
-  // continuous loop status (the loop pings loopStatus while alive)
+  // ONE clear scraping state (no "loop/worker" jargon)
   const fresh = ucStatus.lastLoopPing && Date.now() - ucStatus.lastLoopPing < 8 * 60000;
-  if (ucStatus.cooldownUntil && Date.now() < ucStatus.cooldownUntil) {
-    const m = Math.round((ucStatus.cooldownUntil - Date.now()) / 60000);
-    $("loop").innerHTML = `<span class="dot idle"></span>cooling down ~${m}m (wall)`;
+  if (!nTabs) {
+    $("scrapeState").innerHTML = `<span class="dot idle"></span>paused — open a social tab`;
+  } else if (ucStatus.cooldownUntil && Date.now() < ucStatus.cooldownUntil) {
+    const m = Math.max(1, Math.round((ucStatus.cooldownUntil - Date.now()) / 60000));
+    $("scrapeState").innerHTML = `<span class="dot warn"></span>cooling down ~${m}m (rate-limit)`;
   } else if (ucStatus.loopRunning && fresh) {
-    $("loop").innerHTML = `<span class="dot ok"></span>running · ${ucStatus.loopPlatform || ""} · ${ago(ucStatus.lastLoopPing)}`;
+    $("scrapeState").innerHTML = `<span class="dot ok"></span>running${ucStatus.loopPlatform ? " · " + ucStatus.loopPlatform : ""}`;
   } else {
-    $("loop").innerHTML = `<span class="dot bad"></span>not running — open a tab / hit Start`;
+    $("scrapeState").innerHTML = `<span class="dot warn"></span>starting… keep the tab open`;
   }
 
-  if (ucStatus.lastCycle) {
-    const c = ucStatus.lastCycle;
-    $("last").textContent = `${ago(ucStatus.lastCycleAt)} · ${c.saved} media, ${c.discovered} found`;
-  } else {
-    $("last").textContent = "no pass yet";
-  }
+  $("last").textContent = ucStatus.lastCycle
+    ? `${ago(ucStatus.lastCycleAt)} · ${ucStatus.lastCycle.saved} media, ${ucStatus.lastCycle.discovered} found`
+    : "—";
 
   $("keepalive").textContent =
-    "The work runs as one continuous loop inside your open social tab — rate-limited and jittered, no fixed timer. " +
-    "A 10-min watchdog respawns it if the tab reloads or the worker slept.";
+    "Scraping runs continuously inside your open, logged-in social tabs (rate-limited + jittered). " +
+    "It starts on its own and pauses when no tab is open — nothing to press.";
 }
 
 async function renderLog() {
@@ -88,19 +88,11 @@ $("save").addEventListener("click", async () => {
   refresh();
 });
 
-$("scrape").addEventListener("click", async () => {
-  await chrome.runtime.sendMessage({ type: "scrapeNow" });
-  setTimeout(refresh, 500);
-});
-
 $("clear").addEventListener("click", async () => {
   await chrome.storage.local.set({ ucLog: [] });
   renderLog();
 });
 
-// Copy the full log to the clipboard — the popup re-renders every 1.5s, which
-// wipes any manual text selection before Ctrl+C lands, so a button is the
-// reliable way to grab logs.
 $("copy").addEventListener("click", async () => {
   const { ucLog = [] } = await chrome.storage.local.get("ucLog");
   const text = ucLog.map((e) => `${hhmmss(e.t)} [${e.level}] ${e.msg}`).join("\n");
@@ -108,7 +100,6 @@ $("copy").addEventListener("click", async () => {
     await navigator.clipboard.writeText(text);
     $("copy").textContent = "copied!";
   } catch (e) {
-    // clipboard API can be blocked in popups — fall back to a textarea + execCommand
     const ta = document.createElement("textarea");
     ta.value = text; document.body.appendChild(ta); ta.select();
     try { document.execCommand("copy"); $("copy").textContent = "copied!"; }

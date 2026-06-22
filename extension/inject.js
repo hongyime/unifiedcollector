@@ -19,6 +19,20 @@
       window.postMessage({ __uc: true, type: "posts", platform, posts }, "*");
     }
   }
+  function emitUsers(users) {
+    if (users && users.length) {
+      window.postMessage({ __uc: true, type: "users", platform, context: "seen", users }, "*");
+    }
+  }
+  // any object that looks like a user (username + id) is someone we've "seen"
+  // — commenters, likers, reactors, taggers, followers the page loaded.
+  function userFrom(o) {
+    if (!o || typeof o !== "object") return null;
+    const username = o.username;
+    const pk = o.pk || o.id;
+    if (!username || typeof username !== "string") return null;
+    return { user_id: pk != null ? String(pk) : null, username, display_name: o.full_name || null };
+  }
 
   // Pull engagement off a Threads/IG post node (handles both shapes defensively).
   function postFrom(node) {
@@ -43,27 +57,31 @@
     };
   }
 
-  function scan(obj, out, depth) {
-    if (!obj || depth > 9 || out.length > 400) return;
-    if (Array.isArray(obj)) { for (const v of obj) scan(v, out, depth + 1); return; }
+  function scan(obj, out, users, depth) {
+    if (!obj || depth > 9 || (out.length > 400 && users.length > 1500)) return;
+    if (Array.isArray(obj)) { for (const v of obj) scan(v, out, users, depth + 1); return; }
     if (typeof obj !== "object") return;
     if (obj.like_count !== undefined || obj.text_post_app_info || (obj.caption && obj.pk)) {
       const p = postFrom(obj);
       if (p) out.push(p);
     }
-    for (const k in obj) { const v = obj[k]; if (v && typeof v === "object") scan(v, out, depth + 1); }
+    if (obj.username && (obj.pk !== undefined || obj.id !== undefined)) {
+      const u = userFrom(obj);
+      if (u) users.push(u);
+    }
+    for (const k in obj) { const v = obj[k]; if (v && typeof v === "object") scan(v, out, users, depth + 1); }
   }
 
   function harvestText(text) {
     if (!text || text.length > 6_000_000) return;
     let json;
     try { json = JSON.parse(text); } catch (e) { return; }
-    const out = [];
-    scan(json, out, 0);
-    // dedup by id
-    const seen = new Set();
-    const posts = out.filter((p) => (seen.has(p.platform_post_id) ? false : seen.add(p.platform_post_id)));
-    emit(posts);
+    const out = [], users = [];
+    scan(json, out, users, 0);
+    const seenP = new Set();
+    emit(out.filter((p) => (seenP.has(p.platform_post_id) ? false : seenP.add(p.platform_post_id))));
+    const seenU = new Set();
+    emitUsers(users.filter((u) => { const k = u.user_id || u.username; return seenU.has(k) ? false : seenU.add(k); }));
   }
 
   const apiRe = /\/api\/(graphql|v1\/)/;
