@@ -688,6 +688,48 @@ class SearchCollector(BaseCollector):
         """Filter URLs to plausible image/PDF assets, skipping icons/sprites."""
         return _parse_is_content_url(url)
 
+    async def _enumerate_bucket(
+        self,
+        client: httpx.AsyncClient,
+        any_url: str,
+        first_body: Optional[str] = None,
+    ) -> set[str]:
+        """Walk an open S3-style bucket listing and return its media object URLs.
+
+        Bounded by SEARCH_BUCKET_MAX_PAGES / SEARCH_BUCKET_MAX_KEYS. Handles both
+        S3 v2 (continuation-token) and v1/GCS (marker) pagination.
+        """
+        from . import bucket_crawler as _bc
+
+        root = _bc.bucket_root(any_url)
+        max_pages = int(os.getenv("SEARCH_BUCKET_MAX_PAGES", "25"))
+        max_keys = int(os.getenv("SEARCH_BUCKET_MAX_KEYS", "3000"))
+        found: set[str] = set()
+        url = root
+        body = first_body
+        for _page in range(max_pages):
+            if body is None:
+                try:
+                    r = await client.get(url, headers=self._headers(urlparse(url).netloc))
+                    if r.status_code != 200:
+                        break
+                    body = r.text
+                except Exception as e:
+                    logger.debug("bucket fetch error %s: %s", url, e)
+                    break
+            if not _bc.is_bucket_listing(body):
+                break
+            urls, token = _bc.parse_bucket_listing(body, root)
+            for m in _bc.media_only(urls):
+                found.add(m)
+            if not token or len(found) >= max_keys:
+                break
+            url = _bc.next_page_url(root, token)
+            body = None
+        if found:
+            logger.info("bucket %s -> %d media object(s)", root, len(found))
+        return set(list(found)[:max_keys])
+
     async def _spider_page(
         self,
         client: httpx.AsyncClient,
@@ -704,6 +746,10 @@ class SearchCollector(BaseCollector):
                 return discovered
             ctype = resp.headers.get("content-type", "").lower()
             if "html" not in ctype:
+                # Open cloud bucket? Its root returns an S3-style XML listing.
+                from . import bucket_crawler as _bc
+                if ("xml" in ctype or _bc.looks_like_bucket_host(page_url)) and _bc.is_bucket_listing(resp.text):
+                    return await self._enumerate_bucket(client, page_url, first_body=resp.text)
                 if self._is_content_url(page_url):
                     discovered.add(page_url)
                 return discovered

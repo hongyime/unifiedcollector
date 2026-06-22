@@ -161,3 +161,17 @@ filetype:pdf "Junior College" "Yearbook"
 filetype:pdf "Class of 2024" "Secondary"
 filetype:pdf site:moe.edu.sg
 filetype:pdf "SMU .Hack"
+
+# --- Open-bucket / unsecured-PDF dorks (added 2026-06-22) ---
+# Surface public S3/GCS/Azure buckets + loose PDFs; bucket roots get enumerated
+# via ListBucketResult (src/collectors/search/bucket_crawler.py).
+singapore secondary school yearbook filetype:pdf
+singapore school magazine yearbook filetype:pdf
+site:s3.amazonaws.com singapore yearbook
+site:s3.amazonaws.com school yearbook
+site:storage.googleapis.com singapore school yearbook
+site:digitaloceanspaces.com yearbook
+site:blob.core.windows.net school yearbook
+"index of" yearbook (pdf OR jpg)
+"ListBucketResult" yearbook
+"ListBucketResult" singapore school
