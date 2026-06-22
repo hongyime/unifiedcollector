@@ -389,7 +389,7 @@ async def _save_posts(pool, platform, posts) -> int:
     platform's posts table. instagram_posts has the richest schema; threads_posts
     and facebook_posts mirror the essentials. tiktok/lemon8 posts are owned by
     their headless collectors, so we don't double-write them here."""
-    if platform not in ("instagram", "threads", "facebook"):
+    if platform not in ("instagram", "threads", "facebook", "x"):
         return 0
     n = 0
     async with pool.acquire() as conn:
@@ -418,6 +418,26 @@ async def _save_posts(pool, platform, posts) -> int:
                         p.get("location"), _int(p.get("likes_count")), _int(p.get("comments_count")),
                         _int(p.get("video_duration")), _num(p.get("taken_at")),
                         json.dumps(p.get("metadata") or {}),
+                    )
+                elif platform == "x":
+                    await conn.execute(
+                        """
+                        INSERT INTO x_posts
+                          (platform_post_id, author_username, caption, hashtags, mentions,
+                           likes_count, comments_count, reposts_count, quote_count, views_count,
+                           media_type, platform_created_at, collected_at, metadata)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,to_timestamp($12),now(),$13::jsonb)
+                        ON CONFLICT (platform_post_id) DO UPDATE SET
+                           caption=EXCLUDED.caption, likes_count=EXCLUDED.likes_count,
+                           comments_count=EXCLUDED.comments_count, reposts_count=EXCLUDED.reposts_count,
+                           quote_count=EXCLUDED.quote_count, views_count=EXCLUDED.views_count,
+                           collected_at=now(), metadata=EXCLUDED.metadata
+                        """,
+                        ppid, p.get("author_username"), p.get("caption"),
+                        p.get("hashtags") or [], p.get("mentions") or [],
+                        _int(p.get("likes_count")), _int(p.get("comments_count")), _int(p.get("reposts_count")),
+                        _int(p.get("quote_count")), _int(p.get("views_count")), p.get("media_type"),
+                        _num(p.get("taken_at")), json.dumps(p.get("metadata") or {}),
                     )
                 else:  # threads / facebook
                     table = "threads_posts" if platform == "threads" else "facebook_posts"

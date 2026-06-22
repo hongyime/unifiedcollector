@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "UnifiedCollector Bridge",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "Collects social media from your logged-in browser session and forwards it to your local UnifiedCollector. Multi-platform (Instagram live; extensible).",
   "permissions": ["storage", "alarms", "scripting", "tabs", "cookies"],
   "host_permissions": [
@@ -34,7 +34,7 @@
       "run_at": "document_idle"
     },
     {
-      "matches": ["https://www.threads.com/*", "https://www.instagram.com/*"],
+      "matches": ["https://www.threads.com/*", "https://www.instagram.com/*", "https://x.com/*", "https://twitter.com/*"],
       "js": ["inject.js"],
       "run_at": "document_start",
       "world": "MAIN"

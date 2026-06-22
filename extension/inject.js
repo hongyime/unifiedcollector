@@ -11,7 +11,9 @@
   window.__UC_HOOKED__ = true;
 
   const HOST = location.hostname;
-  const platform = /threads\.com$/.test(HOST) ? "threads" : /instagram\.com$/.test(HOST) ? "instagram" : null;
+  const platform = /threads\.com$/.test(HOST) ? "threads"
+    : /instagram\.com$/.test(HOST) ? "instagram"
+    : /(^|\.)x\.com$/.test(HOST) || /twitter\.com$/.test(HOST) ? "x" : null;
   if (!platform) return;
 
   function emit(posts) {
@@ -28,10 +30,12 @@
   // — commenters, likers, reactors, taggers, followers the page loaded.
   function userFrom(o) {
     if (!o || typeof o !== "object") return null;
-    const username = o.username;
-    const pk = o.pk || o.id;
+    const username = o.username || o.screen_name;       // X uses screen_name
+    const pk = o.pk || o.id || o.rest_id;
     if (!username || typeof username !== "string") return null;
-    return { user_id: pk != null ? String(pk) : null, username, display_name: o.full_name || null };
+    return { user_id: pk != null ? String(pk) : null, username,
+             display_name: o.full_name || o.name || null,
+             profile_pic_url: o.profile_pic_url || o.profile_image_url_https || null };
   }
 
   // Pull engagement off a Threads/IG post node (handles both shapes defensively).
@@ -57,15 +61,39 @@
     };
   }
 
+  // X/Twitter tweet node (GraphQL): engagement lives in obj.legacy.*
+  function tweetFrom(obj) {
+    const lg = obj.legacy;
+    if (!lg || lg.favorite_count === undefined) return null;
+    const pid = obj.rest_id || lg.id_str;
+    if (!pid) return null;
+    let author = null;
+    try { author = obj.core.user_results.result.legacy.screen_name; } catch (e) {}
+    return {
+      platform_post_id: String(pid),
+      author_username: author,
+      caption: lg.full_text || null,
+      likes_count: lg.favorite_count ?? null,
+      comments_count: lg.reply_count ?? null,
+      reposts_count: lg.retweet_count ?? null,
+      quote_count: lg.quote_count ?? null,
+      views_count: (obj.views && (obj.views.count ? parseInt(obj.views.count, 10) : null)) ?? null,
+      taken_at: lg.created_at ? Math.floor(Date.parse(lg.created_at) / 1000) : null,
+    };
+  }
+
   function scan(obj, out, users, depth) {
     if (!obj || depth > 9 || (out.length > 400 && users.length > 1500)) return;
     if (Array.isArray(obj)) { for (const v of obj) scan(v, out, users, depth + 1); return; }
     if (typeof obj !== "object") return;
-    if (obj.like_count !== undefined || obj.text_post_app_info || (obj.caption && obj.pk)) {
+    if (platform === "x" && obj.legacy && obj.legacy.favorite_count !== undefined) {
+      const t = tweetFrom(obj);
+      if (t) out.push(t);
+    } else if (obj.like_count !== undefined || obj.text_post_app_info || (obj.caption && obj.pk)) {
       const p = postFrom(obj);
       if (p) out.push(p);
     }
-    if (obj.username && (obj.pk !== undefined || obj.id !== undefined)) {
+    if ((obj.username || obj.screen_name) && (obj.pk !== undefined || obj.id !== undefined || obj.rest_id !== undefined)) {
       const u = userFrom(obj);
       if (u) users.push(u);
     }
@@ -84,7 +112,7 @@
     emitUsers(users.filter((u) => { const k = u.user_id || u.username; return seenU.has(k) ? false : seenU.add(k); }));
   }
 
-  const apiRe = /\/api\/(graphql|v1\/)/;
+  const apiRe = /graphql|\/api\/v1\//;  // IG/Threads /api/graphql + X /i/api/graphql
 
   const origFetch = window.fetch;
   window.fetch = function (...args) {
