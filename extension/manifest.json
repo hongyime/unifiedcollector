@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "UnifiedCollector Bridge",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Collects social media from your logged-in browser session and forwards it to your local UnifiedCollector. Multi-platform (Instagram live; extensible).",
   "permissions": ["storage", "alarms", "scripting", "tabs", "cookies"],
   "host_permissions": [
@@ -26,7 +26,9 @@
         "https://www.instagram.com/*",
         "https://www.tiktok.com/*",
         "https://www.lemon8-app.com/*",
-        "https://x.com/*"
+        "https://x.com/*",
+        "https://www.threads.com/*",
+        "https://www.facebook.com/*"
       ],
       "js": ["content.js"],
       "run_at": "document_idle"

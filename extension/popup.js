@@ -21,7 +21,8 @@ async function renderStatus() {
   $("sw").innerHTML = `<span class="dot ok"></span>active · ${ago(ucStatus.swStartedAt)}`;
 
   const tabs = await chrome.tabs.query({
-    url: ["https://www.instagram.com/*", "https://www.tiktok.com/*", "https://www.lemon8-app.com/*", "https://x.com/*"],
+    url: ["https://www.instagram.com/*", "https://www.tiktok.com/*", "https://www.lemon8-app.com/*",
+          "https://x.com/*", "https://www.threads.com/*", "https://www.facebook.com/*"],
   });
   $("tab").innerHTML = tabs && tabs.length
     ? `<span class="dot ok"></span>${tabs.length} scraper tab(s)`

@@ -328,9 +328,64 @@ const x = {
 };
 
 // ===========================================================================
+// Shared DOM media harvester (Threads / Facebook) — read rendered CDN images +
+// video posters/sources. Pure DOM reads (no API calls) = very low ban profile.
+// The server-side file gate drops avatars/thumbnails/UI chrome by size.
+// ===========================================================================
+function harvestDom(entity, { imgRe, junkRe }) {
+  const sink = makeSink();
+  document.querySelectorAll("img").forEach((im, i) => {
+    const u = im.currentSrc || im.src;
+    if (u && imgRe.test(u) && !junkRe.test(u))
+      sink.add({ content_id: "img_" + i + "_" + u.slice(-28), content_type: "photo", url: u, entity_name: entity });
+  });
+  document.querySelectorAll("video").forEach((v, i) => {
+    if (v.poster && /https?:/.test(v.poster) && !junkRe.test(v.poster))
+      sink.add({ content_id: "poster_" + i + "_" + v.poster.slice(-24), content_type: "photo", url: v.poster, entity_name: entity });
+    const u = v.src || (v.querySelector("source") && v.querySelector("source").src);
+    if (u && /^https?:/.test(u) && !u.startsWith("blob:"))
+      sink.add({ content_id: "vid_" + i + "_" + u.slice(-24), content_type: "video", url: u, entity_name: entity });
+  });
+  return sink;
+}
+
+// Threads (threads.com) — Meta SPA; media served from the Instagram/FB CDN.
+const threads = {
+  id: "threads", host: "www.threads.com", label: "Threads",
+  entity() { const m = location.pathname.match(/^\/@([^/?#]+)/); return m ? m[1] : "feed"; },
+  async runCycle() {
+    const entity = this.entity();
+    clog("info", `cycle start on ${entity}`, "threads");
+    await autoScroll(10);
+    const sink = harvestDom(entity, {
+      imgRe: /(cdninstagram|fbcdn)\.net/, junkRe: /s150x150|s320x320|profile_pic|rsrc\.php/,
+    });
+    if (sink.items.length) await send({ type: "ingest", platform: "threads", username: entity, items: sink.items });
+    return { targets: 1, saved: sink.items.length, discovered: 0 };
+  },
+};
+
+// Facebook — DOM media from fbcdn; noisy (lots of UI chrome), so the size gate
+// does the heavy lifting. Open your feed / a profile's Photos tab and scroll.
+const facebook = {
+  id: "facebook", host: "www.facebook.com", label: "Facebook",
+  entity() { const m = location.pathname.match(/^\/([^/?#]+)/); return m && !/^(home|watch|marketplace|groups|friends|notifications)$/.test(m[1]) ? m[1] : "feed"; },
+  async runCycle() {
+    const entity = this.entity();
+    clog("info", `cycle start on ${entity}`, "facebook");
+    await autoScroll(12);
+    const sink = harvestDom(entity, {
+      imgRe: /fbcdn\.net/, junkRe: /rsrc\.php|emoji|static|\/s\d+x\d+\/|profile|sprite/,
+    });
+    if (sink.items.length) await send({ type: "ingest", platform: "facebook", username: entity, items: sink.items });
+    return { targets: 1, saved: sink.items.length, discovered: 0 };
+  },
+};
+
+// ===========================================================================
 // Registry + dispatch
 // ===========================================================================
-const PLATFORMS = [instagram, tiktok, lemon8, x];
+const PLATFORMS = [instagram, tiktok, lemon8, x, threads, facebook];
 
 function currentPlatform() {
   return PLATFORMS.find((p) => location.hostname === p.host || location.hostname.endsWith("." + p.host)) || null;
