@@ -54,6 +54,15 @@ function clog(level, msg, platform) {
   send({ type: "log", level, msg, platform }).catch(() => {});
 }
 
+// Opt-in capture toggles (popup settings). Stories/highlights cost ~1-2 extra
+// requests per profile; comments cost ~1 per post (heavy) so it's OFF by default
+// during the IG account-review recovery week.
+const DEFAULT_CONFIG = { stories: true, highlights: true, comments: false };
+async function getConfig() {
+  try { return Object.assign({}, DEFAULT_CONFIG, (await send({ type: "getConfig" })) || {}); }
+  catch (e) { return { ...DEFAULT_CONFIG }; }
+}
+
 // A login-wall / throttle returns an HTML doc with HTTP 200. Detect it so we can
 // back off cleanly instead of crashing every target with "Unexpected token '<'".
 class WallError extends Error {}
@@ -193,21 +202,82 @@ const instagram = {
     else push(node, cid);
     return out;
   },
+  // Build a structured post record (caption/likes/comments/hashtags/location) for
+  // the instagram_posts table. Hashtags/mentions parsed from the caption text.
+  buildPost(n) {
+    const m = this.postMeta(n);
+    const cap = m.caption || "";
+    return {
+      platform_post_id: String(n.id || n.pk || n.code),
+      media_type: (n.is_video || n.video_versions) ? "video"
+        : (n.carousel_media || n.edge_sidecar_to_children) ? "carousel" : "photo",
+      caption: m.caption,
+      hashtags: (cap.match(/#[\w.]+/g) || []).map((s) => s.slice(1)),
+      mentions: (cap.match(/@[\w.]+/g) || []).map((s) => s.slice(1)),
+      location: m.location,
+      likes_count: m.likes_count, comments_count: m.comments_count,
+      taken_at: m.taken_at, video_duration: n.video_duration || null,
+      metadata: { views_count: m.views_count, shortcode: m.shortcode },
+    };
+  },
+
   async scrapeUserMedia(user, username, maxItems = IG_MAX_ITEMS) {
-    const media = [];
+    const media = [], posts = [];
     const tl = user.edge_owner_to_timeline_media;
-    if (tl && tl.edges) tl.edges.forEach((e) => media.push(...this.extractMedia(e.node, username)));
+    if (tl && tl.edges) tl.edges.forEach((e) => { media.push(...this.extractMedia(e.node, username)); posts.push(this.buildPost(e.node)); });
     let maxId = tl && tl.page_info && tl.page_info.end_cursor;
     let hasNext = tl && tl.page_info && tl.page_info.has_next_page;
     while (hasNext && media.length < maxItems) {
       await hsleep(4000);
       const url = "https://www.instagram.com/api/v1/feed/user/" + user.id + "/?count=33" + (maxId ? "&max_id=" + maxId : "");
       const j = await fetchJson(url, { headers: this.headers(), credentials: "include" });
-      (j.items || []).forEach((it) => media.push(...this.extractMedia(it, username)));
+      (j.items || []).forEach((it) => { media.push(...this.extractMedia(it, username)); posts.push(this.buildPost(it)); });
       maxId = j.next_max_id;
       hasNext = j.more_available && !!maxId;
     }
+    return { media, posts };
+  },
+
+  // ---- stories / highlights / comments (opt-in; extra requests) ----------
+  storyItemMedia(it, username, kind) {
+    let url = null, type = "photo";
+    if (it.video_versions && it.video_versions[0]) { url = it.video_versions[0].url; type = "video"; }
+    else if (it.image_versions2 && it.image_versions2.candidates && it.image_versions2.candidates[0]) { url = it.image_versions2.candidates[0].url; }
+    const cid = it.pk || it.id;
+    return url ? [{ content_id: String(cid), content_type: type, url, entity_name: username, kind }] : [];
+  },
+  _reelItems(j, key) {
+    const reel = (j.reels && j.reels[key]) || (j.reels_media && j.reels_media[0]) || null;
+    return (reel && reel.items) || [];
+  },
+  async getStories(userId, username) {
+    const url = "https://www.instagram.com/api/v1/feed/reels_media/?reel_ids=" + encodeURIComponent(userId);
+    const j = await fetchJson(url, { headers: this.headers(), credentials: "include" });
+    const media = [];
+    this._reelItems(j, String(userId)).forEach((it) => media.push(...this.storyItemMedia(it, username, "story")));
     return media;
+  },
+  async getHighlights(userId, username, maxReels = 5) {
+    const tray = await fetchJson("https://www.instagram.com/api/v1/highlights/" + userId + "/highlights_tray/", { headers: this.headers(), credentials: "include" });
+    const reels = (tray.tray || []).slice(0, maxReels);
+    const media = [];
+    for (const r of reels) {
+      await hsleep(4000);
+      const j = await fetchJson("https://www.instagram.com/api/v1/feed/reels_media/?reel_ids=" + encodeURIComponent(r.id), { headers: this.headers(), credentials: "include" });
+      this._reelItems(j, String(r.id)).forEach((it) => media.push(...this.storyItemMedia(it, username, "highlight")));
+    }
+    return media;
+  },
+  async getComments(mediaId) {
+    const url = "https://www.instagram.com/api/v1/media/" + mediaId + "/comments/?can_support_threading=true&permalink_enabled=false";
+    const j = await fetchJson(url, { headers: this.headers(), credentials: "include" });
+    return (j.comments || []).map((c) => ({
+      platform_comment_id: String(c.pk || c.id),
+      author_username: c.user && c.user.username,
+      author_platform_id: c.user && String(c.user.pk),
+      text: c.text, like_count: c.comment_like_count,
+      created_at: c.created_at, is_reply: false,
+    }));
   },
   async getFollows(userId, kind, max) {
     const out = [];
@@ -230,9 +300,10 @@ const instagram = {
     // profiles. The rest get picked up on later cycles (server round-robins them).
     const budget = igTargetBudget();
     const targets = shuffle(pool).slice(0, budget);
+    const CFG = await getConfig();
     const MAX_HOP = 2;
     let saved = 0, discovered = 0, visited = 0;
-    clog("info", `cycle start: visiting ${targets.length} of ${pool.length} target(s)`, "instagram");
+    clog("info", `cycle start: visiting ${targets.length} of ${pool.length} target(s) [stories:${CFG.stories} highlights:${CFG.highlights} comments:${CFG.comments}]`, "instagram");
     for (const t of targets) {
       const username = t.username, hop = typeof t.hop === "number" ? t.hop : 0;
       if (!username) continue;
@@ -242,8 +313,29 @@ const instagram = {
         if (!user) continue;
         const fc = (user.edge_followed_by && user.edge_followed_by.count) || 0;
         if (fc > SPIDER_FAMOUS_CAP) { clog("info", `skip famous ${username} (${fc})`, "instagram"); continue; }
-        const media = await this.scrapeUserMedia(user, username);
+        const { media, posts } = await this.scrapeUserMedia(user, username);
         if (media.length) { await send({ type: "ingest", platform: "instagram", username, items: media }); saved += media.length; }
+        if (posts.length) { await send({ type: "posts", platform: "instagram", username, posts }); }
+
+        // Stories (ephemeral — grab while they exist) + Highlights (stable).
+        if (CFG.stories && user.id) {
+          await hsleep(5000);
+          try { const s = await this.getStories(user.id, username); if (s.length) { await send({ type: "ingest", platform: "instagram", username, items: s }); saved += s.length; clog("info", `${username}: +${s.length} story media`, "instagram"); } }
+          catch (e) { if (e instanceof WallError) throw e; }
+        }
+        if (CFG.highlights && user.id) {
+          await hsleep(5000);
+          try { const h = await this.getHighlights(user.id, username); if (h.length) { await send({ type: "ingest", platform: "instagram", username, items: h }); saved += h.length; clog("info", `${username}: +${h.length} highlight media`, "instagram"); } }
+          catch (e) { if (e instanceof WallError) throw e; }
+        }
+        // Comments — heavy (1 request/post); cap to a few recent posts per profile.
+        if (CFG.comments && posts.length) {
+          for (const p of posts.slice(0, 3)) {
+            await hsleep(6000);
+            try { const cm = await this.getComments(p.platform_post_id); if (cm.length) await send({ type: "comments", platform: "instagram", post_id: p.platform_post_id, comments: cm }); }
+            catch (e) { if (e instanceof WallError) throw e; }
+          }
+        }
         // Only crawl the follow-graph SOMETIMES (≈45%) — constant graph crawling is
         // a strong bot signal. Skipping it most visits looks far more human.
         if (hop < MAX_HOP && user.id && Math.random() < 0.3) {

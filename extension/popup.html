@@ -30,6 +30,9 @@
       .panel h2 { font-size: 10px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); margin: 0 0 6px; }
       .hint { font-size: 10px; color: var(--muted); margin: 6px 0 0; }
       label { display: block; margin: 8px 0 3px; color: var(--muted); font-size: 11px; }
+      label.chk { display: flex; align-items: center; gap: 6px; color: var(--fg); margin: 5px 0; cursor: pointer; }
+      label.chk input { width: auto; }
+      .muted { color: var(--muted); font-size: 10px; }
       input {
         width: 100%; padding: 6px 8px; background: var(--panel2); color: var(--fg);
         border: 1px solid var(--border); border-radius: 6px; font: inherit;
@@ -74,6 +77,14 @@
       <div class="panel">
         <div class="logbar"><h2>Activity log</h2><span><a id="copy">copy</a> &middot; <a id="clear">clear</a></span></div>
         <div id="log"></div>
+      </div>
+
+      <div class="panel">
+        <h2>Capture (Instagram)</h2>
+        <label class="chk"><input type="checkbox" id="cfgStories" /> Stories <span class="muted">(ephemeral — grab while live)</span></label>
+        <label class="chk"><input type="checkbox" id="cfgHighlights" /> Highlights</label>
+        <label class="chk"><input type="checkbox" id="cfgComments" /> Comments <span class="muted">(heavy — off during recovery)</span></label>
+        <p class="hint">Posts, captions &amp; like/comment counts are always captured. Stories/highlights add a couple of requests per profile; comments add one per post.</p>
       </div>
 
       <div class="panel">

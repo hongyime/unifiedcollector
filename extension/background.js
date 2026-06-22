@@ -177,6 +177,35 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
         break;
       }
+      case "posts": {  // structured post metadata (captions/likes/comments counts)
+        try {
+          const r = await fetch(base + "/social/posts", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ platform: msg.platform || "instagram", username: msg.username, posts: msg.posts }),
+          });
+          const j = await r.json().catch(() => ({}));
+          await log("info", `posts[${msg.platform || "instagram"}] ${msg.username}: saved ${j.saved ?? "?"}`);
+          sendResponse({ ok: r.ok });
+        } catch (e) { await log("error", `posts failed: ${e.message}`); sendResponse({ ok: false }); }
+        break;
+      }
+      case "comments": {  // comment threads
+        try {
+          const r = await fetch(base + "/social/comments", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ platform: msg.platform || "instagram", post_id: msg.post_id, comments: msg.comments }),
+          });
+          const j = await r.json().catch(() => ({}));
+          await log("info", `comments[${msg.platform || "instagram"}] post ${msg.post_id}: saved ${j.saved ?? "?"}`);
+          sendResponse({ ok: r.ok });
+        } catch (e) { await log("error", `comments failed: ${e.message}`); sendResponse({ ok: false }); }
+        break;
+      }
+      case "getConfig": {
+        const { ucConfig = {} } = await chrome.storage.local.get("ucConfig");
+        sendResponse({ stories: true, highlights: true, comments: false, ...ucConfig });
+        break;
+      }
       case "wall": {  // the in-tab loop hit a throttle/login wall and is sleeping
         const mins = msg.mins || 45;
         await setStatus({ cooldownUntil: Date.now() + mins * 60000 });

@@ -217,13 +217,20 @@ async def _download_and_save(pool, session, platform, username, item) -> bool:
     cid = str(item.get("content_id") or "")
     if not url or not cid:
         return False
+    # media kind: post (default) | story | highlight. Stories/highlights live in
+    # their own subtree and get a namespaced content_id so they never collide with
+    # a feed post that happens to share an id.
+    media_kind = (item.get("kind") or "post").lower()
+    if media_kind not in ("post", "story", "highlight"):
+        media_kind = "post"
+    store_cid = cid if media_kind == "post" else f"{media_kind}_{cid}"
     safe_user = _SAFE.sub("_", username)[:80] or "unknown"
-    safe_cid = _SAFE.sub("_", cid)[:120]
+    safe_cid = _SAFE.sub("_", store_cid)[:120]
     try:
         # dedup authority is media_items (source, content_id)
         async with pool.acquire() as conn:
             seen = await conn.fetchval(
-                "SELECT 1 FROM media_items WHERE source=$1 AND content_id=$2", platform, cid
+                "SELECT 1 FROM media_items WHERE source=$1 AND content_id=$2", platform, store_cid
             )
         if seen:
             return False
@@ -236,13 +243,18 @@ async def _download_and_save(pool, session, platform, username, item) -> bool:
 
         # GATE: keep only real PDF/image/video/audio above min size — drop
         # favicons, thumbnails, tracking pixels, sprite sheets, HTML error pages.
-        ok, kind, mtype, reason = inspect_media(data, ct_header)
+        ok, ext, mtype, reason = inspect_media(data, ct_header)
         if not ok:
-            logger.debug("reject %s %s: %s", platform, cid, reason)
+            logger.debug("reject %s %s: %s", platform, store_cid, reason)
             return False
-        ext = kind                                   # true extension from magic bytes
         ctype = "video" if mtype == "video" else ("pdf" if mtype == "pdf" else "photo")
-        dest_dir = Path(MEDIA_ROOT) / platform / f"account_{safe_user}" / ctype
+        # posts: /<platform>/account_<user>/<ctype>/  (unchanged — existing files stay)
+        # stories: .../account_<user>/stories/<ctype>/ ; highlights: .../highlights/<ctype>/
+        dest_dir = Path(MEDIA_ROOT) / platform / f"account_{safe_user}"
+        sub = {"story": "stories", "highlight": "highlights"}.get(media_kind)
+        if sub:
+            dest_dir = dest_dir / sub
+        dest_dir = dest_dir / ctype
         dest = dest_dir / f"{platform}_{safe_user}_{safe_cid}.{ext}"
         if dest.exists():
             return False
@@ -261,17 +273,18 @@ async def _download_and_save(pool, session, platform, username, item) -> bool:
                 """
                 INSERT INTO media_items
                   (source, entity_id, entity_name, content_type, content_id,
-                   filename, file_path, file_size, sha256, source_url, metadata)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb)
+                   filename, file_path, file_size, sha256, source_url, metadata, kind)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12)
                 ON CONFLICT (source, content_id) DO UPDATE SET
                    file_path = EXCLUDED.file_path,
                    file_size = EXCLUDED.file_size,
                    sha256 = EXCLUDED.sha256,
                    source_url = EXCLUDED.source_url,
-                   metadata = EXCLUDED.metadata
+                   metadata = EXCLUDED.metadata,
+                   kind = EXCLUDED.kind
                 """,
-                platform, safe_user, item.get("entity_name") or username, ctype, cid,
-                dest.name, str(dest), len(data), sha, url, meta_json,
+                platform, safe_user, item.get("entity_name") or username, ctype, store_cid,
+                dest.name, str(dest), len(data), sha, url, meta_json, media_kind,
             )
         return True
     except Exception:
@@ -311,6 +324,112 @@ async def _ingest(app, platform, body):
         app["tasks"].add(task)
         task.add_done_callback(app["tasks"].discard)
     return {"accepted": len(items), "platform": platform}
+
+
+def _int(v):
+    try:
+        return int(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _num(v):
+    try:
+        return float(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+# ---------------------------------------------------------------------------
+# structured post + comment metadata (captions/likes/comments threads)
+# ---------------------------------------------------------------------------
+async def _save_posts(pool, platform, posts) -> int:
+    """Upsert post metadata (caption, engagement, hashtags, location) into
+    <platform>_posts. Only instagram_posts is wired today; tiktok/lemon8 are
+    populated by their headless collectors."""
+    if platform != "instagram":
+        return 0
+    n = 0
+    async with pool.acquire() as conn:
+        for p in posts:
+            ppid = str(p.get("platform_post_id") or "")
+            if not ppid:
+                continue
+            try:
+                await conn.execute(
+                    """
+                    INSERT INTO instagram_posts
+                      (id, platform_post_id, media_type, caption, hashtags, mentions,
+                       location_name, likes_count, comments_count, video_duration,
+                       platform_created_at, collected_at, metadata)
+                    VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,$6,$7,$8,$9,
+                            to_timestamp($10), now(), $11::jsonb)
+                    ON CONFLICT (platform_post_id) DO UPDATE SET
+                       caption = EXCLUDED.caption,
+                       likes_count = EXCLUDED.likes_count,
+                       comments_count = EXCLUDED.comments_count,
+                       hashtags = EXCLUDED.hashtags,
+                       mentions = EXCLUDED.mentions,
+                       location_name = EXCLUDED.location_name,
+                       collected_at = now(),
+                       metadata = EXCLUDED.metadata
+                    """,
+                    ppid, p.get("media_type"), p.get("caption"),
+                    p.get("hashtags") or [], p.get("mentions") or [],
+                    p.get("location"), _int(p.get("likes_count")), _int(p.get("comments_count")),
+                    _int(p.get("video_duration")), _num(p.get("taken_at")),
+                    json.dumps(p.get("metadata") or {}),
+                )
+                n += 1
+            except Exception:
+                logger.debug("save post failed %s", ppid, exc_info=True)
+    return n
+
+
+async def _save_comments(pool, platform, post_pid, comments) -> int:
+    """Upsert comment threads into instagram_comments, linked to their post."""
+    if platform != "instagram":
+        return 0
+    n = 0
+    async with pool.acquire() as conn:
+        for c in comments:
+            cpid = str(c.get("platform_comment_id") or "")
+            if not cpid:
+                continue
+            try:
+                await conn.execute(
+                    """
+                    INSERT INTO instagram_comments
+                      (id, platform_comment_id, post_id, author_username, author_platform_id,
+                       text, like_count, parent_comment_id, is_reply, platform_created_at, collected_at)
+                    VALUES (gen_random_uuid(),$1,
+                       (SELECT id FROM instagram_posts WHERE platform_post_id=$2),
+                       $3,$4,$5,$6,$7,$8,to_timestamp($9),now())
+                    ON CONFLICT (platform_comment_id) DO UPDATE SET
+                       text = EXCLUDED.text, like_count = EXCLUDED.like_count, collected_at = now()
+                    """,
+                    cpid, str(post_pid or ""), c.get("author_username"), c.get("author_platform_id"),
+                    c.get("text"), _int(c.get("like_count")), c.get("parent_comment_id"),
+                    bool(c.get("is_reply")), _num(c.get("created_at")),
+                )
+                n += 1
+            except Exception:
+                logger.debug("save comment failed %s", cpid, exc_info=True)
+    return n
+
+
+async def posts_handler(request):
+    body = await _safe_json(request)
+    platform = _norm_platform(body.get("platform"))
+    n = await _save_posts(request.app["pool"], platform, body.get("posts") or [])
+    return _cors(web.json_response({"saved": n}))
+
+
+async def comments_handler(request):
+    body = await _safe_json(request)
+    platform = _norm_platform(body.get("platform"))
+    n = await _save_comments(request.app["pool"], platform, body.get("post_id"), body.get("comments") or [])
+    return _cors(web.json_response({"saved": n}))
 
 
 async def ingest(request):
@@ -369,6 +488,8 @@ def make_app():
     app.router.add_get("/social/targets", get_targets)
     app.router.add_post("/social/ingest", ingest)
     app.router.add_post("/social/discover", discover)
+    app.router.add_post("/social/posts", posts_handler)
+    app.router.add_post("/social/comments", comments_handler)
     # instagram back-compat aliases
     app.router.add_get("/ig/targets", get_targets_ig)
     app.router.add_post("/ig/ingest", ingest_ig)
