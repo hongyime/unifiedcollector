@@ -175,3 +175,32 @@ site:blob.core.windows.net school yearbook
 "index of" yearbook (pdf OR jpg)
 "ListBucketResult" yearbook
 "ListBucketResult" singapore school
+
+# --- Direct seed URLs (open dirs / cloud buckets, crawled directly) 2026-06-22 ---
+# Any http(s) line is crawled straight away: Apache "Index of" dirs via <a href>,
+# S3/GCS buckets via ListBucketResult enumeration.
+https://www.comp.nus.edu.sg/~cs1231s/termtests/
+https://storage.googleapis.com/sg-obits-prod-public/
+
+# --- Dean's list / honour roll permutations ---
+nus dean's list filetype:pdf
+ntu dean's list filetype:pdf
+smu dean's list filetype:pdf
+sutd dean's list filetype:pdf
+sit dean's list filetype:pdf
+suss dean's list filetype:pdf
+singapore university dean's list filetype:pdf
+site:storage.googleapis.com dean's list singapore
+site:s3.amazonaws.com dean's list
+
+# --- Term tests / past-year papers (open course dirs) ---
+nus termtests filetype:pdf
+"index of" termtests (pdf)
+"index of" "past year papers" singapore
+singapore secondary school past year papers filetype:pdf
+site:nus.edu.sg termtests
+
+# --- Obituaries ---
+singapore obituary filetype:pdf
+site:storage.googleapis.com obituary singapore
+"index of" obituaries singapore

@@ -312,7 +312,20 @@ class SearchCollector(BaseCollector):
         # Pace between queries to reduce search-engine 429s (the ddgs brave
         # backend throttles aggressively). Env-tunable; 0 disables.
         query_delay = float(os.getenv("SEARCH_QUERY_DELAY_SECONDS", "3"))
-        for query in targets:
+        # A target that is a URL is a DIRECT seed (open directory / cloud bucket):
+        # crawl it straight away (expand_paste_sites -> _spider_page, which also
+        # enumerates S3/GCS ListBucketResult buckets). Everything else is a query.
+        direct = [t for t in targets if t.startswith(("http://", "https://"))]
+        queries = [t for t in targets if not t.startswith(("http://", "https://"))]
+        if direct:
+            logger.info("Crawling %d direct seed URL(s) (open dir / bucket)", len(direct))
+            try:
+                await self.expand_paste_sites(direct)
+                for u in direct:
+                    await self.checkpoint.save_progress(u)
+            except Exception as e:
+                logger.exception("direct seed crawl failed: %s", e)
+        for query in queries:
             if self._stop.is_set():
                 break
             logger.info("Collecting search/%s", query)
