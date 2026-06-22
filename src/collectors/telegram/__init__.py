@@ -953,12 +953,16 @@ class TelegramCollector(BaseCollector):
         """
         order = [preferred] + [w for w in self._workers if w is not preferred]
         last_exc = None
+        # Bound EACH lookup: a half-dead connection (we see "Server closed the
+        # connection" blips) must not wedge the whole backfill drain. On timeout we
+        # just move to the next account.
+        timeout = float(os.getenv("TELEGRAM_RESOLVE_TIMEOUT", "25"))
         for w in order:
             try:
                 try:
-                    return w, await w.client.get_entity(int(target))
+                    return w, await asyncio.wait_for(w.client.get_entity(int(target)), timeout)
                 except (ValueError, TypeError):
-                    return w, await w.client.get_entity(target)
+                    return w, await asyncio.wait_for(w.client.get_entity(target), timeout)
             except Exception as exc:
                 last_exc = exc
                 continue
