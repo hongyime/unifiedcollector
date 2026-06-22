@@ -10,8 +10,12 @@ CREATE TABLE IF NOT EXISTS social_users (
   first_seen        timestamptz DEFAULT now(),
   last_seen         timestamptz DEFAULT now(),
   times_seen        int DEFAULT 1,
-  contexts          text[] DEFAULT '{}',    -- follow, comment, tagged, author, like, reaction, seen
+  contexts          text[] DEFAULT '{}',    -- follow, comment, tagged, author, like, reaction, profile, seen
+  profile_photo_url text,
   metadata          jsonb DEFAULT '{}'::jsonb,
   PRIMARY KEY (platform, uid)
 );
 CREATE INDEX IF NOT EXISTS idx_social_users_username ON social_users(platform, username);
+-- backfilled from per-platform profile + comment tables (instagram_profiles,
+-- tiktok/lemon8_profiles, youtube_channels, strava_athletes, telegram_users,
+-- youtube/tiktok_comments) so every platform's users are tracked, with photos.

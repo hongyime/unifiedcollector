@@ -125,9 +125,9 @@ def classify_document(
             return DocDecision(False, "sticker", f"animated sticker skipped ({ext or mime_l})")
         return DocDecision(True, "sticker", "static sticker")
 
-    # ── audio: always store the file (Tier 3) ──────────────────────────────
+    # ── audio: DISABLED (user: "dont need audio files no mp3 or wav") ───────
     if is_audio or mime_l.startswith("audio/"):
-        return DocDecision(True, "audio", "audio file")
+        return DocDecision(False, "audio", "audio disabled")
 
     # ── video: Tier 2 media, always full ───────────────────────────────────
     if is_video or mime_l.startswith("video/"):

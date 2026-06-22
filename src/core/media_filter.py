@@ -30,9 +30,10 @@ MIN_BYTES = {
     "audio": int(os.getenv("MEDIA_MIN_AUDIO_BYTES", "8000")),    # 8 KB
 }
 
+# Audio intentionally excluded (user: "dont need audio files no mp3 or wav").
 ALLOWED_TYPES = {
     t.strip().lower()
-    for t in os.getenv("MEDIA_ALLOWED_TYPES", "image,video,pdf,audio").split(",")
+    for t in os.getenv("MEDIA_ALLOWED_TYPES", "image,video,pdf").split(",")
     if t.strip()
 }
 
