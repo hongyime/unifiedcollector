@@ -360,10 +360,11 @@ def _num(v):
 # structured post + comment metadata (captions/likes/comments threads)
 # ---------------------------------------------------------------------------
 async def _save_posts(pool, platform, posts) -> int:
-    """Upsert post metadata (caption, engagement, hashtags, location) into
-    <platform>_posts. Only instagram_posts is wired today; tiktok/lemon8 are
-    populated by their headless collectors."""
-    if platform != "instagram":
+    """Upsert post metadata (caption, engagement, hashtags, mentions) into the
+    platform's posts table. instagram_posts has the richest schema; threads_posts
+    and facebook_posts mirror the essentials. tiktok/lemon8 posts are owned by
+    their headless collectors, so we don't double-write them here."""
+    if platform not in ("instagram", "threads", "facebook"):
         return 0
     n = 0
     async with pool.acquire() as conn:
@@ -372,33 +373,53 @@ async def _save_posts(pool, platform, posts) -> int:
             if not ppid:
                 continue
             try:
-                await conn.execute(
-                    """
-                    INSERT INTO instagram_posts
-                      (id, platform_post_id, media_type, caption, hashtags, mentions,
-                       location_name, likes_count, comments_count, video_duration,
-                       platform_created_at, collected_at, metadata)
-                    VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,$6,$7,$8,$9,
-                            to_timestamp($10), now(), $11::jsonb)
-                    ON CONFLICT (platform_post_id) DO UPDATE SET
-                       caption = EXCLUDED.caption,
-                       likes_count = EXCLUDED.likes_count,
-                       comments_count = EXCLUDED.comments_count,
-                       hashtags = EXCLUDED.hashtags,
-                       mentions = EXCLUDED.mentions,
-                       location_name = EXCLUDED.location_name,
-                       collected_at = now(),
-                       metadata = EXCLUDED.metadata
-                    """,
-                    ppid, p.get("media_type"), p.get("caption"),
-                    p.get("hashtags") or [], p.get("mentions") or [],
-                    p.get("location"), _int(p.get("likes_count")), _int(p.get("comments_count")),
-                    _int(p.get("video_duration")), _num(p.get("taken_at")),
-                    json.dumps(p.get("metadata") or {}),
-                )
+                if platform == "instagram":
+                    await conn.execute(
+                        """
+                        INSERT INTO instagram_posts
+                          (id, platform_post_id, media_type, caption, hashtags, mentions,
+                           location_name, likes_count, comments_count, video_duration,
+                           platform_created_at, collected_at, metadata)
+                        VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,$6,$7,$8,$9,
+                                to_timestamp($10), now(), $11::jsonb)
+                        ON CONFLICT (platform_post_id) DO UPDATE SET
+                           caption=EXCLUDED.caption, likes_count=EXCLUDED.likes_count,
+                           comments_count=EXCLUDED.comments_count, hashtags=EXCLUDED.hashtags,
+                           mentions=EXCLUDED.mentions, location_name=EXCLUDED.location_name,
+                           collected_at=now(), metadata=EXCLUDED.metadata
+                        """,
+                        ppid, p.get("media_type"), p.get("caption"),
+                        p.get("hashtags") or [], p.get("mentions") or [],
+                        p.get("location"), _int(p.get("likes_count")), _int(p.get("comments_count")),
+                        _int(p.get("video_duration")), _num(p.get("taken_at")),
+                        json.dumps(p.get("metadata") or {}),
+                    )
+                else:  # threads / facebook
+                    table = "threads_posts" if platform == "threads" else "facebook_posts"
+                    extra_col = "reposts_count" if platform == "threads" else "shares_count"
+                    await conn.execute(
+                        f"""
+                        INSERT INTO {table}
+                          (platform_post_id, author_username, caption, hashtags, mentions,
+                           likes_count, comments_count, {extra_col}, media_type,
+                           platform_created_at, collected_at, metadata)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,to_timestamp($10),now(),$11::jsonb)
+                        ON CONFLICT (platform_post_id) DO UPDATE SET
+                           caption=EXCLUDED.caption, likes_count=EXCLUDED.likes_count,
+                           comments_count=EXCLUDED.comments_count,
+                           {extra_col}=EXCLUDED.{extra_col}, collected_at=now(),
+                           metadata=EXCLUDED.metadata
+                        """,
+                        ppid, p.get("author_username"), p.get("caption"),
+                        p.get("hashtags") or [], p.get("mentions") or [],
+                        _int(p.get("likes_count")), _int(p.get("comments_count")),
+                        _int(p.get("reposts_count") if platform == "threads" else p.get("shares_count")),
+                        p.get("media_type"), _num(p.get("taken_at")),
+                        json.dumps(p.get("metadata") or {}),
+                    )
                 n += 1
             except Exception:
-                logger.debug("save post failed %s", ppid, exc_info=True)
+                logger.debug("save post failed %s/%s", platform, ppid, exc_info=True)
     return n
 
 

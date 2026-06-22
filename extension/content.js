@@ -461,6 +461,30 @@ function harvestDom(entity, { imgRe, junkRe }) {
   return sink;
 }
 
+// Best-effort post-text capture anchored on permalinks (the most stable DOM
+// signal). For each post link we climb to its container and take the text as the
+// caption. Engagement counts are left null here — reliable counts need the auth
+// API (documented), and we won't fabricate them from brittle DOM scraping.
+function harvestPermalinkPosts(linkRe, idFrom) {
+  const byId = new Map();
+  document.querySelectorAll("a[href]").forEach((a) => {
+    const m = (a.getAttribute("href") || "").match(linkRe);
+    if (!m) return;
+    const pid = idFrom(m);
+    if (!pid || byId.has(pid)) return;
+    const box = a.closest('[data-pressable-container],[role="article"],article') || a.parentElement;
+    let caption = "";
+    try { caption = (box && box.innerText || "").trim().slice(0, 2200); } catch (e) {}
+    if (!caption) return;                       // skip empties / UI chrome
+    byId.set(pid, {
+      platform_post_id: pid, caption, media_type: "post",
+      hashtags: (caption.match(/#[\w.]+/g) || []).map((s) => s.slice(1)),
+      mentions: (caption.match(/@[\w.]+/g) || []).map((s) => s.slice(1)),
+    });
+  });
+  return [...byId.values()];
+}
+
 // Threads (threads.com) — Meta SPA; media served from the Instagram/FB CDN.
 const threads = {
   id: "threads", host: "www.threads.com", label: "Threads",
@@ -473,6 +497,8 @@ const threads = {
       imgRe: /(cdninstagram|fbcdn)\.net/, junkRe: /s150x150|s320x320|profile_pic|rsrc\.php/,
     });
     if (sink.items.length) await send({ type: "ingest", platform: "threads", username: entity, items: sink.items });
+    const posts = harvestPermalinkPosts(/\/@([^/]+)\/post\/([^/?#]+)/, (m) => m[2]);
+    if (posts.length) await send({ type: "posts", platform: "threads", username: entity, posts });
     return { targets: 1, saved: sink.items.length, discovered: 0 };
   },
 };
@@ -490,6 +516,8 @@ const facebook = {
       imgRe: /fbcdn\.net/, junkRe: /rsrc\.php|emoji|static|\/s\d+x\d+\/|profile|sprite/,
     });
     if (sink.items.length) await send({ type: "ingest", platform: "facebook", username: entity, items: sink.items });
+    const posts = harvestPermalinkPosts(/\/(?:posts\/|permalink\.php\?story_fbid=|[^/]+\/posts\/)?(pfbid[\w]+|\d{6,})/, (m) => m[1]);
+    if (posts.length) await send({ type: "posts", platform: "facebook", username: entity, posts });
     return { targets: 1, saved: sink.items.length, discovered: 0 };
   },
 };
