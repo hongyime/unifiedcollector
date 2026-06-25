@@ -318,9 +318,11 @@ services:
       TELEGRAM_SPIDER_ACCOUNTS: ""
       # Throughput push: reads are cheap and FloodWait auto-throttles; 80->150
       # msg/s/account. Continuous backfill drains every 60s while listening live.
-      TELEGRAM_BACKFILL_MSG_PER_SEC: "150"
-      TELEGRAM_BACKFILL_DRAIN_INTERVAL: "60"
-      TELEGRAM_SPIDER_MAX_PER_CYCLE: "75"
+      # Deeper backfill (user: "increase backfill so we can focus on realtime").
+      # Drain more chats per cycle, faster, more often -> historical clears quicker.
+      TELEGRAM_BACKFILL_MSG_PER_SEC: "250"
+      TELEGRAM_BACKFILL_DRAIN_INTERVAL: "30"
+      TELEGRAM_SPIDER_MAX_PER_CYCLE: "200"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     cap_add:
@@ -369,8 +371,8 @@ services:
       COLLECTOR_HANG_TIMEOUT_SECONDS: "5400"
       # Wider room coverage + deeper history per cycle (user: "so many rooms to
       # scrape, gold mine of media"). 120->250 rooms/cycle, 4->8 backfill pages.
-      BEEPER_MAX_CHATS_PER_CYCLE: "250"
-      BEEPER_BACKFILL_PAGES_PER_CYCLE: "8"
+      BEEPER_MAX_CHATS_PER_CYCLE: "400"
+      BEEPER_BACKFILL_PAGES_PER_CYCLE: "20"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     cap_add:
@@ -487,6 +489,8 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
+      # skip accounts > 3k followers when spider-discovering (user: close network only)
+      INSTA_SPIDER_FAMOUS_CAP: "3000"
     volumes:
       - z:/unifiedcollector/media:/media
       - ../src:/app/src

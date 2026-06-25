@@ -163,13 +163,14 @@ async function autoScroll(times = 8, dist = 1400, pause = 1800) {
 // Instagram (same-origin API; full media + 2-hop spider)
 // ===========================================================================
 const IG_APP_ID = "936619743392459";
-const SPIDER_FAMOUS_CAP = 100000;
+const SPIDER_FAMOUS_CAP = 3000;   // skip accounts > 3k followers (focus on close network)
 const SPIDER_FOLLOWS_PER_SIDE = 70;     // was 150 — fewer graph calls per profile
 const IG_MAX_ITEMS = 180;               // cap media pages per profile
 // Per-cycle target budget: a human checks a HANDFUL of profiles, not 257.
 // Randomised each cycle; the rest are picked up on later cycles (round-robin).
 function igTargetBudget() { return 4 + ((Math.random() * 5) | 0); } // 4–8 deep profiles/cycle
 const IG_STORY_SWEEP = 10;   // profiles to grab EXPIRING stories/highlights from, first, each cycle
+let IG_SELF_SEEDED = false;  // seed from your own followers once per session
 
 const instagram = {
   id: "instagram", host: "www.instagram.com", label: "Instagram",
@@ -387,7 +388,27 @@ const instagram = {
     return { saved, discovered };
   },
 
+  // Seed the spider from YOUR OWN followers + following (user: "instagram should
+  // start from my own followers as seeds"). Runs once per session; the logged-in
+  // user id is the ds_user_id cookie. Capped + paced for account safety.
+  async seedFromSelf() {
+    const m = document.cookie.match(/ds_user_id=(\d+)/);
+    if (!m) return;
+    const myId = m[1];
+    let users = [];
+    try {
+      const a = await this.getFollows(myId, "followers", 200);
+      const b = await this.getFollows(myId, "following", 200);
+      users = a.concat(b);
+    } catch (e) { return; }
+    if (users.length) {
+      await send({ type: "seed", platform: "instagram", users }).catch(() => {});
+      clog("info", `self-seed: ${users.length} of your followers/following added as seeds`, "instagram");
+    }
+  },
+
   async runCycle() {
+    if (!IG_SELF_SEEDED) { IG_SELF_SEEDED = true; this.seedFromSelf(); }  // once/session, detached
     let resp = [];
     try { resp = (await send({ type: "getTargets", platform: "instagram" })) || []; } catch (e) {}
     const pool = (Array.isArray(resp) ? resp : [])

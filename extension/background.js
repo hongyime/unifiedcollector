@@ -201,6 +201,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         } catch (e) { await log("error", `comments failed: ${e.message}`); sendResponse({ ok: false }); }
         break;
       }
+      case "seed": {  // seed the spider from your own followers/following (hop 0)
+        try {
+          const r = await fetch(base + "/social/seed", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ platform: msg.platform || "instagram", users: msg.users }),
+          });
+          const j = await r.json().catch(() => ({}));
+          await log("info", `self-seed: +${j.added ?? "?"} seed target(s)`);
+          sendResponse({ ok: r.ok });
+        } catch (e) { sendResponse({ ok: false }); }
+        break;
+      }
       case "profile": {  // full profile -> instagram_profiles + social_users + photo
         try {
           const r = await fetch(base + "/social/profile", {

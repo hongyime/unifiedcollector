@@ -586,6 +586,32 @@ async def _save_profile(pool, platform, p) -> bool:
     return True
 
 
+async def seed_handler(request):
+    """Seed the spider from the user's own followers/following as hop-0 targets."""
+    body = await _safe_json(request)
+    platform = _norm_platform(body.get("platform"))
+    users = body.get("users") or []
+    added = 0
+    if platform == "instagram":
+        pool = request.app["pool"]
+        async with pool.acquire() as conn:
+            for u in users:
+                uname = (u.get("username") if isinstance(u, dict) else str(u) or "").strip().lstrip("@")
+                if not uname:
+                    continue
+                res = await conn.execute(
+                    """
+                    INSERT INTO instagram_spider_targets (username, hop, discovered_from)
+                    VALUES ($1, 0, 'self') ON CONFLICT (username) DO NOTHING
+                    """,
+                    uname,
+                )
+                if res.endswith("1"):
+                    added += 1
+        await _record_users(request.app["pool"], platform, users, "follow")
+    return _cors(web.json_response({"added": added}))
+
+
 async def profile_handler(request):
     body = await _safe_json(request)
     platform = _norm_platform(body.get("platform"))
@@ -682,6 +708,7 @@ def make_app():
     app.router.add_post("/social/comments", comments_handler)
     app.router.add_post("/social/users", users_handler)
     app.router.add_post("/social/profile", profile_handler)
+    app.router.add_post("/social/seed", seed_handler)
     # instagram back-compat aliases
     app.router.add_get("/ig/targets", get_targets_ig)
     app.router.add_post("/ig/ingest", ingest_ig)
