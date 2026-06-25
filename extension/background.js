@@ -45,17 +45,54 @@ async function ingestBase() {
   return ingestBase || DEFAULT_INGEST;
 }
 
-// ---- watchdog (the real work is the in-tab continuous loop) ---------------
+// ---- watchdog + AUTO-TABS (open + refresh) --------------------------------
+// The 83h-stall problem: a closed/orphaned tab = no scraping. So the worker now
+// auto-OPENS every scraper tab (pinned, background) and auto-REFRESHES them
+// hourly — reloading respawns the content script + loop AND pulls fresh content,
+// so it can never silently die again.
+const ALARM_REFRESH = "uc-refresh";
+const REFRESH_MIN = 75;
+
+async function autoTabsEnabled() {
+  const { ucAutoTabs } = await chrome.storage.local.get("ucAutoTabs");
+  return ucAutoTabs !== false; // default ON
+}
+async function ensureScraperTabsOpen(reason) {
+  if (!(await autoTabsEnabled())) return;
+  let opened = 0;
+  for (const p of scraperPlatforms()) {
+    const urls = [p.url, ...(p.extraUrls || [])];
+    const existing = await chrome.tabs.query({ url: `*://${p.host}/*` });
+    for (const u of urls) {
+      let path = "/";
+      try { path = new URL(u).pathname.split("?")[0]; } catch (e) {}
+      const has = (existing || []).some((t) => { try { return new URL(t.url).pathname.startsWith(path); } catch (e) { return false; } });
+      if (!has) {
+        try { await chrome.tabs.create({ url: u, pinned: true, active: false }); opened++; } catch (e) {}
+      }
+    }
+  }
+  if (opened) await log("info", `auto-opened ${opened} scraper tab(s) (${reason})`);
+}
+async function refreshScraperTabs() {
+  if (!(await autoTabsEnabled())) return;
+  const tabs = await chrome.tabs.query({ url: scraperUrlPatterns() });
+  for (const t of tabs || []) { try { await chrome.tabs.reload(t.id, { bypassCache: false }); } catch (e) {} }
+  await log("info", `auto-refreshed ${tabs ? tabs.length : 0} scraper tab(s) → loop respawns fresh`);
+}
+
 async function scheduleAlarm() {
   chrome.alarms.create(ALARM, { periodInMinutes: WATCHDOG_MIN });
+  chrome.alarms.create(ALARM_REFRESH, { periodInMinutes: REFRESH_MIN });
   await setStatus({ swStartedAt: Date.now() });
-  await log("info", `worker started; in-tab continuous loop + ${WATCHDOG_MIN}-min watchdog`);
+  await log("info", `worker started; auto-tabs + ${WATCHDOG_MIN}-min watchdog + ${REFRESH_MIN}-min refresh`);
 }
-chrome.runtime.onInstalled.addListener(() => { scheduleAlarm(); ensureLoops("installed"); });
-chrome.runtime.onStartup.addListener(() => { scheduleAlarm(); ensureLoops("startup"); });
+chrome.runtime.onInstalled.addListener(() => { scheduleAlarm(); ensureScraperTabsOpen("installed").then(() => ensureLoops("installed")); });
+chrome.runtime.onStartup.addListener(() => { scheduleAlarm(); ensureScraperTabsOpen("startup").then(() => ensureLoops("startup")); });
 
 chrome.alarms.onAlarm.addListener(async (a) => {
-  if (a.name === ALARM) await ensureLoops("watchdog");
+  if (a.name === ALARM) { await ensureScraperTabsOpen("watchdog"); await ensureLoops("watchdog"); }
+  else if (a.name === ALARM_REFRESH) { await refreshScraperTabs(); }
 });
 
 // scraper hosts that have a content-script scraper

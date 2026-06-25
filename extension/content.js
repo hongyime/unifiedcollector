@@ -621,19 +621,41 @@ const threads = {
 const facebook = {
   id: "facebook", host: "www.facebook.com", label: "Facebook",
   entity() { const m = location.pathname.match(/^\/([^/?#]+)/); return m && !/^(home|watch|marketplace|groups|friends|notifications)$/.test(m[1]) ? m[1] : "feed"; },
+  // Download MEDIA only from a REAL PERSON's profile (user: not pages, not groups).
+  // Heuristic: a profile URL showing friend UI ("Add friend"/"Friends"/"Mutual"),
+  // without page UI ("follow this Page"/"Send message" to a Page). Conservative —
+  // when unsure we DON'T download (avoids page/group media).
+  _isPerson() {
+    const path = location.pathname;
+    if (/\/(groups|watch|marketplace|reels|events|gaming|pages)\b/.test(path) || /^\/(home)?$/.test(path)) return false;
+    const isProfilePath = /\/profile\.php/.test(path) || /^\/[A-Za-z0-9.]+\/?$/.test(path);
+    if (!isProfilePath) return false;
+    const txt = (document.body.innerText || "").slice(0, 20000);
+    const personSig = /\bAdd friend\b|\bFriends\b|\bMutual friends?\b/i.test(txt);
+    const pageSig = /people follow this|Like this Page|\bThis Page\b|·\s*Follower/i.test(txt);
+    return personSig && !pageSig;
+  },
   async runCycle() {
     const entity = this.entity();
-    clog("info", `cycle start on ${entity}`, "facebook");
+    const person = this._isPerson();
+    clog("info", `cycle start on ${entity} (person profile: ${person})`, "facebook");
     await autoScroll(12);
-    const sink = harvestDom(entity, {
-      imgRe: /fbcdn\.net/, junkRe: /rsrc\.php|emoji|static|\/s\d+x\d+\/|profile|sprite/,
-    });
-    if (sink.items.length) await send({ type: "ingest", platform: "facebook", username: entity, items: sink.items });
+    let saved = 0;
+    // MEDIA — only real people's profiles.
+    if (person) {
+      const sink = harvestDom(entity, { imgRe: /fbcdn\.net/, junkRe: /rsrc\.php|emoji|static|\/s\d+x\d+\/|profile|sprite/ });
+      if (sink.items.length) { await send({ type: "ingest", platform: "facebook", username: entity, items: sink.items }); saved = sink.items.length; }
+    }
+    // POSTS (captions) + USERS — captured EVERYWHERE incl. pages/groups, for the
+    // user registry + spidering (user: "when spider we can use either").
     const posts = harvestPermalinkPosts(/\/(?:posts\/|permalink\.php\?story_fbid=|[^/]+\/posts\/)?(pfbid[\w]+|\d{6,})/, (m) => m[1]);
     if (posts.length) await send({ type: "posts", platform: "facebook", username: entity, posts });
-    const fu = collectPermalinkAuthors(/^\/([A-Za-z0-9.]{3,40})\/(posts|photos|videos)/, /^(profile|pages|groups|watch|marketplace)$/);
+    const fu = collectPermalinkAuthors(
+      /^\/([A-Za-z0-9.]{5,40})(?:\/(posts|photos|videos))?(?:[/?]|$)/,
+      /^(home|watch|marketplace|groups|friends|notifications|messages|reels|events|gaming|bookmarks|stories|pages|story\.php|permalink\.php|profile\.php|sharer|login|policies)$/
+    );
     if (fu.length) await send({ type: "users", platform: "facebook", context: "seen", users: fu });
-    return { targets: 1, saved: sink.items.length, discovered: 0 };
+    return { targets: 1, saved, discovered: 0 };
   },
 };
 
