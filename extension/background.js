@@ -57,28 +57,45 @@ async function autoTabsEnabled() {
   const { ucAutoTabs } = await chrome.storage.local.get("ucAutoTabs");
   return ucAutoTabs !== false; // default ON
 }
+const _sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+let _tabsOpInProgress = false; // guard against overlapping open/refresh runs (no spam)
+
+// Open exactly the missing scraper tabs — pinned, background, ONE at a time with a
+// gap so we never spam tabs or spike CPU. Robust dedup by host+path-prefix means a
+// tab is never duplicated.
 async function ensureScraperTabsOpen(reason) {
-  if (!(await autoTabsEnabled())) return;
+  if (!(await autoTabsEnabled()) || _tabsOpInProgress) return;
+  _tabsOpInProgress = true;
   let opened = 0;
-  for (const p of scraperPlatforms()) {
-    const urls = [p.url, ...(p.extraUrls || [])];
-    const existing = await chrome.tabs.query({ url: `*://${p.host}/*` });
-    for (const u of urls) {
-      let path = "/";
-      try { path = new URL(u).pathname.split("?")[0]; } catch (e) {}
-      const has = (existing || []).some((t) => { try { return new URL(t.url).pathname.startsWith(path); } catch (e) { return false; } });
-      if (!has) {
-        try { await chrome.tabs.create({ url: u, pinned: true, active: false }); opened++; } catch (e) {}
+  try {
+    for (const p of scraperPlatforms()) {
+      const existing = await chrome.tabs.query({ url: `*://${p.host}/*` });
+      for (const u of [p.url, ...(p.extraUrls || [])]) {
+        let path = "/";
+        try { path = new URL(u).pathname.split("?")[0].replace(/\/$/, "") || "/"; } catch (e) {}
+        const has = (existing || []).some((t) => {
+          try { const tp = new URL(t.url).pathname.replace(/\/$/, "") || "/"; return tp === path || (path !== "/" && tp.startsWith(path)); }
+          catch (e) { return false; }
+        });
+        if (!has) {
+          try { const t = await chrome.tabs.create({ url: u, pinned: true, active: false }); existing.push(t); opened++; await _sleep(1500); } catch (e) {}
+        }
       }
     }
-  }
-  if (opened) await log("info", `auto-opened ${opened} scraper tab(s) (${reason})`);
+    if (opened) await log("info", `auto-opened ${opened} scraper tab(s) (${reason})`);
+  } finally { _tabsOpInProgress = false; }
 }
+
+// Reload scraper tabs ONE at a time with a gap (staggered) so the loop respawns
+// fresh without reloading 7 tabs simultaneously (CPU spike / overload).
 async function refreshScraperTabs() {
-  if (!(await autoTabsEnabled())) return;
-  const tabs = await chrome.tabs.query({ url: scraperUrlPatterns() });
-  for (const t of tabs || []) { try { await chrome.tabs.reload(t.id, { bypassCache: false }); } catch (e) {} }
-  await log("info", `auto-refreshed ${tabs ? tabs.length : 0} scraper tab(s) → loop respawns fresh`);
+  if (!(await autoTabsEnabled()) || _tabsOpInProgress) return;
+  _tabsOpInProgress = true;
+  try {
+    const tabs = await chrome.tabs.query({ url: scraperUrlPatterns() });
+    for (const t of tabs || []) { try { await chrome.tabs.reload(t.id, { bypassCache: false }); await _sleep(3000); } catch (e) {} }
+    await log("info", `auto-refreshed ${tabs ? tabs.length : 0} scraper tab(s), staggered → loop respawns fresh`);
+  } finally { _tabsOpInProgress = false; }
 }
 
 async function scheduleAlarm() {
