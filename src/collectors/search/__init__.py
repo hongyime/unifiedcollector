@@ -416,26 +416,81 @@ class SearchCollector(BaseCollector):
             return []
 
         all_assets: list[dict] = []
+        depth = int(os.getenv("SEARCH_SPIDER_DEPTH", "2"))   # recurse into sub-dirs/links
         async with self._make_client() as client:
             for seed in seed_urls:
                 if self._stop.is_set():
                     break
                 try:
-                    domain = urlparse(seed).netloc or "seed"
-                    await self.wait_rate_limit(domain)
-                    discovered = await self._spider_page(client, seed)
-                    for i, url in enumerate(sorted(discovered)):
-                        all_assets.append({
-                            "url": url,
-                            "source_url": seed,
-                            "rank": i + 1,
-                            "engine": "spider",
-                        })
-                        if self._download_images:
-                            await self._download_asset(query=seed, hit={"url": url, "rank": i + 1}, source_url=seed)
+                    if depth > 0:
+                        # Recursive: walk sub-directories/links so open dirs get fully
+                        # crawled and discovered links feed back in (no stagnation).
+                        n = await self._crawl_seed(client, seed, max_depth=depth)
+                        all_assets.append({"url": seed, "source_url": seed, "engine": "spider", "saved": n})
+                    else:
+                        domain = urlparse(seed).netloc or "seed"
+                        await self.wait_rate_limit(domain)
+                        discovered = await self._spider_page(client, seed)
+                        for i, url in enumerate(sorted(discovered)):
+                            all_assets.append({"url": url, "source_url": seed, "rank": i + 1, "engine": "spider"})
+                            if self._download_images:
+                                await self._download_asset(query=seed, hit={"url": url, "rank": i + 1}, source_url=seed)
                 except Exception as e:
                     logger.warning("expand_paste_sites failed for %s: %s", seed, e)
         return all_assets
+
+    async def _crawl_seed(self, client, seed: str, max_depth: int = 2, max_pages: int = 150) -> int:
+        """BFS-crawl a seed URL: download content (images/PDFs), enumerate buckets,
+        and recurse into same-host sub-path links (open-directory trees, page links).
+        Bounded by max_depth + max_pages so it can't run away."""
+        from . import bucket_crawler as _bc
+        host = urlparse(seed).netloc
+        base_path = urlparse(seed).path.rsplit("/", 1)[0]
+        seen: set[str] = set()
+        frontier = [(seed, 0)]
+        saved = 0
+        while frontier and len(seen) < max_pages and not self._stop.is_set():
+            url, d = frontier.pop(0)
+            if url in seen:
+                continue
+            seen.add(url)
+            try:
+                await self.wait_rate_limit(urlparse(url).netloc or host)
+                resp = await client.get(url, headers=self._headers(urlparse(url).netloc))
+            except Exception:
+                continue
+            if resp.status_code != 200:
+                continue
+            ctype = resp.headers.get("content-type", "").lower()
+            # open bucket -> enumerate the whole thing
+            if ("xml" in ctype or _bc.looks_like_bucket_host(url)) and _bc.is_bucket_listing(resp.text):
+                for m in await self._enumerate_bucket(client, url, first_body=resp.text):
+                    if self._download_images and await self._download_asset(query=seed, hit={"url": m}, source_url=url):
+                        saved += 1
+                continue
+            if "html" not in ctype:
+                if self._is_content_url(url) and self._download_images and await self._download_asset(query=seed, hit={"url": url}, source_url=url):
+                    saved += 1
+                continue
+            try:
+                soup = self._BS(resp.text, "html.parser")
+            except Exception:
+                continue
+            for tag in soup.find_all(["a", "img", "source"]):
+                href = tag.get("href") or tag.get("src")
+                if not href:
+                    continue
+                cand = urljoin(url, href)
+                p = urlparse(cand)
+                if self._is_content_url(cand):
+                    if self._download_images and await self._download_asset(query=seed, hit={"url": cand}, source_url=url):
+                        saved += 1
+                elif d < max_depth and p.scheme in ("http", "https") and p.netloc == host \
+                        and p.path.startswith(base_path) and cand not in seen and "#" not in cand:
+                    frontier.append((cand, d + 1))
+        if saved:
+            logger.info("spider %s -> %d asset(s) across %d page(s)", seed, saved, len(seen))
+        return saved
 
     # ------------------------------------------------------------------ #
     # Engine drivers
