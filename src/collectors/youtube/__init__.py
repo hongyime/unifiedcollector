@@ -471,7 +471,8 @@ class YoutubeCollector(BaseCollector):
                 pj = json.dumps(p)
                 im = re.search(r'(https://[^"\\]+(?:ggpht|ytimg)[^"\\]+)', pj)
                 image_url = im.group(1) if im else None
-                cm = re.search(r'"replyButton".{0,600}?"simpleText":"([^"]+)"', pj)
+                # NB: pj = json.dumps adds a space after ':' -> tolerate \s*.
+                cm = re.search(r'"replyButton".{0,800}?"simpleText":\s*"([^"]+)"', pj)
                 comments = self._parse_count(cm.group(1)) if cm else None
                 try:
                     await conn.execute(

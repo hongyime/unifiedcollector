@@ -244,6 +244,13 @@ class StravaCollector(BaseCollector):
                 logger.warning("strava: own history backfill failed: %s", e)
 
         if os.getenv("STRAVA_SPIDER_ENABLED", "true").lower() == "true":
+            # Club spider runs hourly (clubs change slowly) — enqueues club members.
+            if (time.time() - getattr(self, "_last_club_spider", 0)) > 3600:
+                self._last_club_spider = time.time()
+                try:
+                    await self._spider_clubs()
+                except Exception as e:
+                    logger.warning("strava: club spider failed: %s", e)
             await self._process_spider_queue()
 
         # Enrich stub athletes (numeric-only names) from profile pages
@@ -368,6 +375,47 @@ class StravaCollector(BaseCollector):
                 )
         except Exception as e:
             logger.debug("strava enqueue athlete %s failed: %s", athlete_id, e)
+
+    async def _spider_clubs(self) -> int:
+        """Spider athletes through CLUBS (user: "spider through ... clubs"): find the
+        logged-in athlete's clubs, scrape each club's member list, enqueue every
+        member. Web/cookie mode only. Idempotent."""
+        if os.getenv("STRAVA_SPIDER_ENABLED", "true").lower() != "true" or not self._use_web:
+            return 0
+        jar = self._build_cookie_jar()
+        if jar is None:
+            return 0
+        ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+        member_pages = int(os.getenv("STRAVA_CLUB_MEMBER_PAGES", "5"))
+        enq = 0
+        try:
+            async with httpx.AsyncClient(timeout=30, cookies=jar, follow_redirects=True,
+                                         headers={"User-Agent": ua, "Accept": "text/html"}) as client:
+                resp = await client.get(f"{STRAVA_WEB}/clubs")
+                club_ids = set(re.findall(r"/clubs/(\d+)", resp.text)) if resp.status_code == 200 else set()
+                for cid in list(club_ids)[:25]:
+                    if self._stop.is_set():
+                        break
+                    for page in range(1, member_pages + 1):
+                        try:
+                            mr = await client.get(f"{STRAVA_WEB}/clubs/{cid}/members?page={page}")
+                            if mr.status_code != 200:
+                                break
+                            aids = set(re.findall(r"/athletes/(\d+)", mr.text))
+                            if not aids:
+                                break
+                            for aid in aids:
+                                await self._enqueue_athlete(aid, None, "club")
+                                enq += 1
+                            await self._delay(2.0, 4.0)
+                        except Exception:
+                            break
+        except Exception as e:
+            logger.debug("strava club spider failed: %s", e)
+        if enq:
+            logger.info("strava: club spider enqueued %d club member(s) across %d club(s)", enq, len(club_ids))
+        return enq
 
     async def _collect_via_cookies(self):
         """Cookie-authenticated scrape of the logged-in user's training_activities.

@@ -343,3 +343,9 @@ yuhua secondary school dean's list OR honour roll filetype:pdf
 yusof ishak secondary school dean's list OR honour roll filetype:pdf
 yuying secondary school dean's list OR honour roll filetype:pdf
 zhenghua secondary school dean's list OR honour roll filetype:pdf
+
+# --- Face/photo directory sites (crawled recursively, depth 2, same-host) ---
+# Tuition/school student galleries: pages of face photos. The recursive _crawl_seed
+# walks the site's internal links and downloads the images; faces flow to the
+# facetracker. Add more such sites as direct https:// lines.
+https://classicle.club/our-students
