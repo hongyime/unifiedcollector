@@ -13,7 +13,8 @@
   const HOST = location.hostname;
   const platform = /threads\.com$/.test(HOST) ? "threads"
     : /instagram\.com$/.test(HOST) ? "instagram"
-    : /(^|\.)x\.com$/.test(HOST) || /twitter\.com$/.test(HOST) ? "x" : null;
+    : /(^|\.)x\.com$/.test(HOST) || /twitter\.com$/.test(HOST) ? "x"
+    : /facebook\.com$/.test(HOST) ? "facebook" : null;
   if (!platform) return;
 
   function emit(posts) {
@@ -89,6 +90,19 @@
     if (platform === "x" && obj.legacy && obj.legacy.favorite_count !== undefined) {
       const t = tweetFrom(obj);
       if (t) out.push(t);
+    } else if (platform === "facebook" && obj.reaction_count && typeof obj.reaction_count.count === "number") {
+      // FB feedback node carries engagement; id from the story it belongs to.
+      const pid = obj.subscription_target_id || obj.associated_group_id || obj.share_fbid || obj.id;
+      if (pid) {
+        const comments = (obj.total_comment_count != null ? obj.total_comment_count
+          : (obj.comment_rendering_instance && obj.comment_rendering_instance.comments && obj.comment_rendering_instance.comments.total_count));
+        out.push({
+          platform_post_id: String(pid),
+          likes_count: obj.reaction_count.count,
+          comments_count: typeof comments === "number" ? comments : null,
+          shares_count: (obj.share_count && obj.share_count.count) ?? (obj.reshare_count && obj.reshare_count.count) ?? null,
+        });
+      }
     } else if (obj.like_count !== undefined || obj.text_post_app_info || (obj.caption && obj.pk)) {
       const p = postFrom(obj);
       if (p) out.push(p);
