@@ -1457,8 +1457,12 @@ class InstagramCollector(BaseCollector):
 
                 # Load the profile page first to establish a real session + referer
                 # chain before the API fetch (humans land on the page, not the API).
+                # wait_until="commit" (not domcontentloaded) returns as soon as the
+                # navigation commits — IG's heavy JS otherwise never settles the DOM
+                # and goto hangs to the 45s timeout. We only need origin+cookies for
+                # the same-origin fetch below, which "commit" already gives us.
                 try:
-                    await page.goto(profile_url, wait_until="domcontentloaded", timeout=45000)
+                    await page.goto(profile_url, wait_until="commit", timeout=30000)
                 except Exception as e:
                     logger.warning("Playwright Mode-β goto failed for %s: %s", username, e)
                     return None
@@ -1570,7 +1574,9 @@ class InstagramCollector(BaseCollector):
                 page = await context.new_page()
 
                 try:
-                    await page.goto(url, wait_until="networkidle", timeout=45000)
+                    # "load" not "networkidle" — IG polls continuously and never goes
+                    # network-idle, so networkidle always hangs to the timeout.
+                    await page.goto(url, wait_until="load", timeout=30000)
                 except Exception as e:
                     logger.warning("Playwright goto failed for %s: %s", url, e)
                     return
