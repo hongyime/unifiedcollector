@@ -439,6 +439,44 @@ class SearchCollector(BaseCollector):
                     logger.warning("expand_paste_sites failed for %s: %s", seed, e)
         return all_assets
 
+    async def _extract_pdf_links(self, pdf_url: str) -> list[str]:
+        """Pull http(s) links out of a just-downloaded PDF (annotations + text) so
+        they can be spidered too. Best-effort; needs PyMuPDF."""
+        try:
+            import fitz  # PyMuPDF
+        except Exception:
+            return []
+        try:
+            async with self.pool.acquire() as conn:
+                fp = await conn.fetchval(
+                    "SELECT file_path FROM media_items WHERE source='search' AND source_url=$1 ORDER BY collected_at DESC LIMIT 1",
+                    pdf_url,
+                )
+        except Exception:
+            return []
+        if not fp or not os.path.exists(fp):
+            return []
+
+        def _extract(path):
+            links = set()
+            try:
+                doc = fitz.open(path)
+                for page in doc:
+                    for l in page.get_links():
+                        u = l.get("uri", "")
+                        if u.startswith("http"):
+                            links.add(u)
+                    for m in re.findall(r"https?://[^\s)>\]\"']+", page.get_text() or ""):
+                        links.add(m.rstrip(".,);"))
+                doc.close()
+            except Exception:
+                return []
+            return list(links)[:50]
+        try:
+            return await asyncio.to_thread(_extract, fp)
+        except Exception:
+            return []
+
     async def _crawl_seed(self, client, seed: str, max_depth: int = 2, max_pages: int = 150) -> int:
         """BFS-crawl a seed URL: download content (images/PDFs), enumerate buckets,
         and recurse into same-host sub-path links (open-directory trees, page links).
@@ -485,6 +523,12 @@ class SearchCollector(BaseCollector):
                 if self._is_content_url(cand):
                     if self._download_images and await self._download_asset(query=seed, hit={"url": cand}, source_url=url):
                         saved += 1
+                        # PDFs: extract their embedded links and feed them back into
+                        # the crawl so we don't go stagnant (user request).
+                        if d < max_depth and cand.lower().split("?")[0].endswith(".pdf"):
+                            for lk in await self._extract_pdf_links(cand):
+                                if lk not in seen and len(seen) + len(frontier) < max_pages:
+                                    frontier.append((lk, d + 1))
                 elif d < max_depth and p.scheme in ("http", "https") and p.netloc == host \
                         and p.path.startswith(base_path) and cand not in seen and "#" not in cand:
                     frontier.append((cand, d + 1))
