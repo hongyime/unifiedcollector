@@ -292,6 +292,14 @@ async def _download_and_save(pool, session, platform, username, item) -> bool:
         if not ok:
             logger.debug("reject %s %s: %s", platform, store_cid, reason)
             return False
+        sha = hashlib.sha256(data).hexdigest()
+        # CONTENT DEDUP: if these exact bytes are already stored for this source
+        # (e.g. the same For-You image re-scraped under a different DOM content_id),
+        # skip — no duplicate file or row. This is what kills the lemon8/tiktok
+        # re-scrape duplication. Needs the (source, sha256) index for speed.
+        async with pool.acquire() as conn:
+            if await conn.fetchval("SELECT 1 FROM media_items WHERE source=$1 AND sha256=$2 LIMIT 1", platform, sha):
+                return False
         ctype = "video" if mtype == "video" else ("pdf" if mtype == "pdf" else "photo")
         # Flat layout: /<platform>/account_<user>/<ctype>/  — kind + date live in the
         # filename: <YYYYMMDD>_<platform>_<user>_<kindtag><cid>.<ext> (sortable by date).
@@ -305,7 +313,6 @@ async def _download_and_save(pool, session, platform, username, item) -> bool:
         tmp.write_bytes(data)
         os.replace(tmp, dest)
 
-        sha = hashlib.sha256(data).hexdigest()
         # caption + likes/comments/views/location come along free from the scrape
         meta = item.get("meta") or {}
         meta_json = json.dumps(meta) if isinstance(meta, dict) else "{}"
