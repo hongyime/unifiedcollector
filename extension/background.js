@@ -63,26 +63,42 @@ let _tabsOpInProgress = false; // guard against overlapping open/refresh runs (n
 // Open exactly the missing scraper tabs — pinned, background, ONE at a time with a
 // gap so we never spam tabs or spike CPU. Robust dedup by host+path-prefix means a
 // tab is never duplicated.
+const _tpath = (u) => { try { return new URL(u).pathname.split("?")[0].replace(/\/$/, "") || "/"; } catch (e) { return "/"; } };
+
+// Keep exactly ONE tab per single-feed platform (instagram/threads/lemon8/x/facebook)
+// and one per target path for multi-url platforms (tiktok = foryou + following).
+// Closes duplicates so the extension never piles up tabs (the old bug: when the
+// auto-opened tab navigated to a sub-path, the dedup missed it and opened another).
 async function ensureScraperTabsOpen(reason) {
   if (!(await autoTabsEnabled()) || _tabsOpInProgress) return;
   _tabsOpInProgress = true;
-  let opened = 0;
+  let opened = 0, closed = 0;
   try {
     for (const p of scraperPlatforms()) {
-      const existing = await chrome.tabs.query({ url: `*://${p.host}/*` });
-      for (const u of [p.url, ...(p.extraUrls || [])]) {
-        let path = "/";
-        try { path = new URL(u).pathname.split("?")[0].replace(/\/$/, "") || "/"; } catch (e) {}
-        const has = (existing || []).some((t) => {
-          try { const tp = new URL(t.url).pathname.replace(/\/$/, "") || "/"; return tp === path || (path !== "/" && tp.startsWith(path)); }
-          catch (e) { return false; }
-        });
-        if (!has) {
-          try { const t = await chrome.tabs.create({ url: u, pinned: true, active: false }); existing.push(t); opened++; await _sleep(1500); } catch (e) {}
+      const tabs = (await chrome.tabs.query({ url: `*://${p.host}/*` })) || [];
+      if (!(p.extraUrls && p.extraUrls.length)) {
+        // single-feed: keep one tab on the host, close the rest
+        if (tabs.length === 0) {
+          try { await chrome.tabs.create({ url: p.url, pinned: true, active: false }); opened++; await _sleep(1500); } catch (e) {}
+        } else {
+          for (let i = 1; i < tabs.length; i++) { try { await chrome.tabs.remove(tabs[i].id); closed++; } catch (e) {} }
+        }
+      } else {
+        // multi-url (tiktok): one tab per target path; close path-duplicates
+        const targets = [p.url, ...p.extraUrls];
+        const wantPaths = targets.map(_tpath);
+        const kept = new Set();
+        for (const t of tabs) {
+          const tp = _tpath(t.url);
+          const m = wantPaths.find((w) => tp === w || (w !== "/" && tp.startsWith(w)));
+          if (m) { if (kept.has(m)) { try { await chrome.tabs.remove(t.id); closed++; } catch (e) {} } else kept.add(m); }
+        }
+        for (let i = 0; i < targets.length; i++) {
+          if (!kept.has(wantPaths[i])) { try { await chrome.tabs.create({ url: targets[i], pinned: true, active: false }); opened++; await _sleep(1500); } catch (e) {} }
         }
       }
     }
-    if (opened) await log("info", `auto-opened ${opened} scraper tab(s) (${reason})`);
+    if (opened || closed) await log("info", `tabs: +${opened} opened, ${closed} dup(s) closed (${reason})`);
   } finally { _tabsOpInProgress = false; }
 }
 

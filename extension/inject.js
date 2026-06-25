@@ -114,16 +114,20 @@
     for (const k in obj) { const v = obj[k]; if (v && typeof v === "object") scan(v, out, users, depth + 1); }
   }
 
+  // Session-level dedup so the SAME post/user isn't re-emitted on every GraphQL
+  // response (the feed re-fetches constantly -> was spamming "posts[threads] saved 4").
+  const _emittedP = new Set(), _emittedU = new Set();
+  const _cap = (s) => { if (s.size > 5000) s.clear(); };
+
   function harvestText(text) {
     if (!text || text.length > 6_000_000) return;
     let json;
     try { json = JSON.parse(text); } catch (e) { return; }
     const out = [], users = [];
     scan(json, out, users, 0);
-    const seenP = new Set();
-    emit(out.filter((p) => (seenP.has(p.platform_post_id) ? false : seenP.add(p.platform_post_id))));
-    const seenU = new Set();
-    emitUsers(users.filter((u) => { const k = u.user_id || u.username; return seenU.has(k) ? false : seenU.add(k); }));
+    _cap(_emittedP); _cap(_emittedU);
+    emit(out.filter((p) => (_emittedP.has(p.platform_post_id) ? false : _emittedP.add(p.platform_post_id))));
+    emitUsers(users.filter((u) => { const k = u.user_id || u.username; return _emittedU.has(k) ? false : _emittedU.add(k); }));
   }
 
   const apiRe = /graphql|\/api\/v1\//;  // IG/Threads /api/graphql + X /i/api/graphql
