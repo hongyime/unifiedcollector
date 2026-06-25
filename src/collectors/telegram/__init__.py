@@ -1950,6 +1950,14 @@ class TelegramCollector(BaseCollector):
                 )
             except Exception as exc:
                 logger.debug("realtime backfill drain failed: %s", exc)
+            # Bounded sweep: download profile photos for users that lack one
+            # (user: "why doesn't tg collector scrape photo of users").
+            try:
+                await self._collect_user_photos_pass(
+                    self._workers[0], batch=int(os.getenv("TELEGRAM_USER_PHOTO_BATCH", "15"))
+                )
+            except Exception as exc:
+                logger.debug("user photo pass failed: %s", exc)
 
     async def _on_new_message(self, worker: "TelegramWorker", event):
         try:
@@ -2640,7 +2648,8 @@ class TelegramCollector(BaseCollector):
         uname = (getattr(user, "username", None)
                  or getattr(user, "first_name", None) or uid)
 
-        # Profile photo (first/largest).
+        # Profile photo (first/largest) — download the file AND record its path in
+        # telegram_users.photo_url so the user registry/dashboard can show it.
         try:
             cid = f"profile_user_{uid}"
             if not self.is_known(cid):
@@ -2654,6 +2663,15 @@ class TelegramCollector(BaseCollector):
                         "data": photo_bytes,
                         "extension": "jpg",
                     }, worker=worker)
+            # set photo_url to the stored file (whether just downloaded or already known)
+            async with self.pool.acquire() as conn:
+                fp = await conn.fetchval(
+                    "SELECT file_path FROM media_items WHERE source='telegram' AND content_id=$1", cid
+                )
+                await conn.execute(
+                    "UPDATE telegram_users SET photo_url=COALESCE($1, photo_url), updated_at=NOW() WHERE platform_user_id=$2",
+                    fp, uid,
+                )
         except Exception as exc:
             logger.debug("user profile photo failed for %s: %s", uid, exc)
 
@@ -2693,6 +2711,30 @@ class TelegramCollector(BaseCollector):
             "is_verified": bool(getattr(user, "verified", False)),
             "is_premium": bool(getattr(user, "premium", False)),
         }
+
+    async def _collect_user_photos_pass(self, worker: "TelegramWorker", batch: int = 15) -> int:
+        """Per-cycle bounded sweep: download profile photos for telegram_users that
+        don't have one yet + set photo_url. Best-effort (cross-account users that
+        worker[0] can't resolve are retried on later cycles)."""
+        if not self.pool:
+            return 0
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT platform_user_id FROM telegram_users "
+                "WHERE photo_url IS NULL AND (is_deleted IS NOT TRUE) "
+                "ORDER BY updated_at ASC NULLS FIRST LIMIT $1",
+                batch,
+            )
+        n = 0
+        for r in rows:
+            if self._stop.is_set():
+                break
+            try:
+                await self.collect_user_profile(r["platform_user_id"], worker=worker)
+                n += 1
+            except Exception as exc:
+                logger.debug("user photo collect failed %s: %s", r["platform_user_id"], exc)
+        return n
 
     # ==================================================================
     # Single-message media download — routed through src.core.media_download
