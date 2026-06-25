@@ -77,6 +77,17 @@ async function fetchJson(url, opts) {
   return res.json();
 }
 
+// Stable id from a media URL (origin+path, volatile query stripped) so the SAME
+// image gets the SAME content_id across re-scrapes -> server dedups before
+// downloading. Fixes the lemon8/tiktok re-download duplication.
+function urlId(u) {
+  let s = u || "";
+  try { const x = new URL(u); s = x.origin + x.pathname; } catch (e) {}
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
+  return h.toString(36);
+}
+
 // Shared collector — dedups media items by content_id+url.
 function makeSink() {
   const seen = new Set();
@@ -479,7 +490,7 @@ const tiktok = {
     // also harvest whatever the DOM rendered (posters/sources already loaded)
     document.querySelectorAll("video").forEach((v, i) => {
       const u = v.src || (v.querySelector("source") && v.querySelector("source").src);
-      if (u && /^https?:/.test(u)) sink.add({ content_id: "dom_" + i + "_" + u.slice(-24), content_type: "video", url: u, entity_name: entity });
+      if (u && /^https?:/.test(u)) sink.add({ content_id: "dom_" + urlId(u), content_type: "video", url: u, entity_name: entity });
     });
     if (sink.items.length) await send({ type: "ingest", platform: "tiktok", username: entity, items: sink.items });
     return { targets: 1, saved: sink.items.length, discovered: 0 };
@@ -503,7 +514,7 @@ const lemon8 = {
     document.querySelectorAll("img").forEach((im, i) => {
       const u = im.currentSrc || im.src;
       if (u && /\.(jpe?g|png|webp)/i.test(u) && /https?:/.test(u) && !/icon|avatar|emoji/i.test(u))
-        sink.add({ content_id: "img_" + i + "_" + u.slice(-24), content_type: "photo", url: u, entity_name: entity });
+        sink.add({ content_id: "img_" + urlId(u), content_type: "photo", url: u, entity_name: entity });
     });
     if (sink.items.length) await send({ type: "ingest", platform: "lemon8", username: entity, items: sink.items });
     return { targets: 1, saved: sink.items.length, discovered: 0 };
@@ -532,9 +543,9 @@ const x = {
     if (xu.length) await send({ type: "users", platform: "x", context: "seen", users: xu });
     document.querySelectorAll("video").forEach((v, i) => {
       const poster = v.poster;
-      if (poster && /https?:/.test(poster)) sink.add({ content_id: "poster_" + i + "_" + poster.slice(-24), content_type: "photo", url: poster, entity_name: entity });
+      if (poster && /https?:/.test(poster)) sink.add({ content_id: "poster_" + urlId(poster), content_type: "photo", url: poster, entity_name: entity });
       const u = v.src || (v.querySelector("source") && v.querySelector("source").src);
-      if (u && /^https?:/.test(u) && !u.startsWith("blob:")) sink.add({ content_id: "vid_" + i + "_" + u.slice(-24), content_type: "video", url: u, entity_name: entity });
+      if (u && /^https?:/.test(u) && !u.startsWith("blob:")) sink.add({ content_id: "vid_" + urlId(u), content_type: "video", url: u, entity_name: entity });
     });
     if (sink.items.length) await send({ type: "ingest", platform: "x", username: entity, items: sink.items });
     return { targets: 1, saved: sink.items.length, discovered: 0 };
@@ -548,17 +559,17 @@ const x = {
 // ===========================================================================
 function harvestDom(entity, { imgRe, junkRe }) {
   const sink = makeSink();
-  document.querySelectorAll("img").forEach((im, i) => {
+  document.querySelectorAll("img").forEach((im) => {
     const u = im.currentSrc || im.src;
     if (u && imgRe.test(u) && !junkRe.test(u))
-      sink.add({ content_id: "img_" + i + "_" + u.slice(-28), content_type: "photo", url: u, entity_name: entity });
+      sink.add({ content_id: "img_" + urlId(u), content_type: "photo", url: u, entity_name: entity });
   });
-  document.querySelectorAll("video").forEach((v, i) => {
+  document.querySelectorAll("video").forEach((v) => {
     if (v.poster && /https?:/.test(v.poster) && !junkRe.test(v.poster))
-      sink.add({ content_id: "poster_" + i + "_" + v.poster.slice(-24), content_type: "photo", url: v.poster, entity_name: entity });
+      sink.add({ content_id: "poster_" + urlId(v.poster), content_type: "photo", url: v.poster, entity_name: entity });
     const u = v.src || (v.querySelector("source") && v.querySelector("source").src);
     if (u && /^https?:/.test(u) && !u.startsWith("blob:"))
-      sink.add({ content_id: "vid_" + i + "_" + u.slice(-24), content_type: "video", url: u, entity_name: entity });
+      sink.add({ content_id: "vid_" + urlId(u), content_type: "video", url: u, entity_name: entity });
   });
   return sink;
 }
