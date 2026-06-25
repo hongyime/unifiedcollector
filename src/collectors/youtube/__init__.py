@@ -266,6 +266,14 @@ class YoutubeCollector(BaseCollector):
                     logger.error("Failed youtube/%s: %s", target, e)
                     await self.send_to_dlq(target, target, str(e))
 
+            # Community posts — BOUNDED sweep (15 channels/cycle, oldest first), not
+            # per-channel (that was 492 fetches/cycle -> 50% CPU). Covers all over time.
+            if os.getenv("YOUTUBE_COMMUNITY_ENABLED", "true").lower() == "true":
+                try:
+                    await self._community_pass(batch_size=int(os.getenv("YOUTUBE_COMMUNITY_BATCH", "15")))
+                except Exception as e:
+                    logger.debug("youtube community pass failed: %s", e)
+
             # Spider queue processing
             if os.getenv("YOUTUBE_SPIDER_ENABLED", "true").lower() == "true":
                 await self._process_spider_queue()
@@ -334,13 +342,6 @@ class YoutubeCollector(BaseCollector):
         if self._has_auth and uploads_playlist is None:
             logger.info("youtube: skipping yt-dlp for confirmed-missing channel %s", channel_id)
             return
-
-        # Community posts (text/poll/image posts) — scraped from the Community tab.
-        if os.getenv("YOUTUBE_COMMUNITY_ENABLED", "true").lower() == "true":
-            try:
-                await self._collect_community_posts(channel_id)
-            except Exception as e:
-                logger.debug("youtube community pass failed %s: %s", channel_id, e)
 
         if self._has_auth and uploads_playlist:
             video_ids = await self._collect_video_list_via_api(channel_id, channel_name, uploads_playlist)

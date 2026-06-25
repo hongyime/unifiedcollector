@@ -379,9 +379,10 @@ services:
       COLLECTOR_HANG_TIMEOUT_SECONDS: "5400"
       # Wider room coverage + deeper history per cycle (user: "so many rooms to
       # scrape, gold mine of media"). 120->250 rooms/cycle, 4->8 backfill pages.
-      # Cover ALL rooms each cycle (user has 424; user: "get ALL historical chats").
-      BEEPER_MAX_CHATS_PER_CYCLE: "600"
-      BEEPER_BACKFILL_PAGES_PER_CYCLE: "20"
+      # All 424 rooms covered over ~3 cycles (was 600x20 = host CPU melt at load 28).
+      # Still backfills everything, just spread out so the box stays responsive.
+      BEEPER_MAX_CHATS_PER_CYCLE: "150"
+      BEEPER_BACKFILL_PAGES_PER_CYCLE: "8"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     cap_add:
