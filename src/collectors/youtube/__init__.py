@@ -335,6 +335,13 @@ class YoutubeCollector(BaseCollector):
             logger.info("youtube: skipping yt-dlp for confirmed-missing channel %s", channel_id)
             return
 
+        # Community posts (text/poll/image posts) — scraped from the Community tab.
+        if os.getenv("YOUTUBE_COMMUNITY_ENABLED", "true").lower() == "true":
+            try:
+                await self._collect_community_posts(channel_id)
+            except Exception as e:
+                logger.debug("youtube community pass failed %s: %s", channel_id, e)
+
         if self._has_auth and uploads_playlist:
             video_ids = await self._collect_video_list_via_api(channel_id, channel_name, uploads_playlist)
         else:
@@ -401,6 +408,106 @@ class YoutubeCollector(BaseCollector):
             int(statistics.get("videoCount", 0) or 0)
             )
         return uploads_playlist, int(statistics.get("subscriberCount", 0) or 0)
+
+    @staticmethod
+    def _parse_count(s):
+        """Parse YouTube short counts: '1.2K' -> 1200, '3.4M likes' -> 3400000."""
+        if not s:
+            return None
+        m = re.search(r"([\d.,]+)\s*([KMB]?)", str(s).replace(",", ""))
+        if not m:
+            return None
+        try:
+            n = float(m.group(1))
+        except ValueError:
+            return None
+        return int(n * {"K": 1e3, "M": 1e6, "B": 1e9}.get(m.group(2).upper(), 1))
+
+    async def _collect_community_posts(self, channel_id: str, max_posts: int = 40) -> int:
+        """Collect a channel's Community tab (text/poll/image posts) via YouTube's
+        InnerTube browse API (the tab lazy-loads; not in the initial HTML). The
+        renderer is `postRenderer` (formerly backstagePostRenderer). No API quota."""
+        headers = {"User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                                  "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"),
+                   "Accept-Language": "en-US,en;q=0.9", "Cookie": "SOCS=CAI"}
+        try:
+            async with httpx.AsyncClient(timeout=30, headers=headers, follow_redirects=True) as client:
+                page = await client.get(f"https://www.youtube.com/channel/{channel_id}/community?hl=en&gl=US")
+                km = re.search(r'"INNERTUBE_API_KEY":"([^"]+)"', page.text)
+                vm = re.search(r'"INNERTUBE_CONTEXT_CLIENT_VERSION":"([^"]+)"', page.text) or re.search(r'"clientVersion":"([0-9.]+)"', page.text)
+                if not km:
+                    return 0
+                body = {"context": {"client": {"clientName": "WEB", "clientVersion": vm.group(1) if vm else "2.20240101.00.00", "hl": "en", "gl": "US"}},
+                        "browseId": channel_id, "params": "Egljb21tdW5pdHk="}  # community tab
+                resp = await client.post(f"https://www.youtube.com/youtubei/v1/browse?key={km.group(1)}&prettyPrint=false", json=body)
+            if resp.status_code != 200:
+                return 0
+            data = resp.json()
+        except Exception as e:
+            logger.debug("community fetch/parse failed %s: %s", channel_id, e)
+            return 0
+
+        posts = []
+        def walk(o):
+            if isinstance(o, dict):
+                for rk in ("postRenderer", "sharedPostRenderer", "backstagePostRenderer"):
+                    if rk in o:
+                        posts.append(o[rk])
+                for v in o.values():
+                    walk(v)
+            elif isinstance(o, list):
+                for v in o:
+                    walk(v)
+        walk(data)
+
+        saved = 0
+        async with self.pool.acquire() as conn:
+            for p in posts[:max_posts]:
+                pid = p.get("postId")
+                if not pid:
+                    continue
+                text = "".join(r.get("text", "") for r in (p.get("contentText", {}).get("runs") or []))
+                votes = self._parse_count((p.get("voteCount") or {}).get("simpleText"))
+                pj = json.dumps(p)
+                im = re.search(r'(https://[^"\\]+(?:ggpht|ytimg)[^"\\]+)', pj)
+                image_url = im.group(1) if im else None
+                cm = re.search(r'"replyButton".*?"text":\{"simpleText":"([^"]+)"', pj)
+                comments = self._parse_count(cm.group(1)) if cm else None
+                try:
+                    await conn.execute(
+                        """
+                        INSERT INTO youtube_community_posts
+                          (platform_post_id, channel_id, text, likes_count, comments_count, has_image, image_url, collected_at)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())
+                        ON CONFLICT (platform_post_id) DO UPDATE SET
+                          text=EXCLUDED.text, likes_count=EXCLUDED.likes_count,
+                          comments_count=EXCLUDED.comments_count,
+                          has_image=EXCLUDED.has_image, image_url=EXCLUDED.image_url
+                        """,
+                        pid, channel_id, text or None, votes, comments, bool(image_url), image_url,
+                    )
+                    saved += 1
+                except Exception:
+                    logger.debug("community upsert failed %s", pid, exc_info=True)
+        if saved:
+            logger.info("youtube: +%d community post(s) for channel %s", saved, channel_id)
+        return saved
+
+    async def _community_pass(self, batch_size: int = 15) -> int:
+        """Per-cycle bounded sweep: refresh community posts for channels, oldest first."""
+        if not self.pool:
+            return 0
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT platform_channel_id FROM youtube_channels ORDER BY updated_at ASC NULLS FIRST LIMIT $1",
+                batch_size,
+            )
+        total = 0
+        for r in rows:
+            if self._stop.is_set():
+                break
+            total += await self._collect_community_posts(r["platform_channel_id"])
+        return total
 
     async def _upsert_video(self, channel_id: str, video_data: dict):
         async with self.pool.acquire() as conn:
