@@ -345,6 +345,30 @@ class StravaCollector(BaseCollector):
             logger.info("strava spider: processed %d athletes this cycle (%d remaining)",
                         processed, max_per_cycle - processed)
 
+    async def _enqueue_athlete(self, athlete_id, name=None, source="spider", priority: int = 6) -> None:
+        """Add a discovered athlete (kudoer/commenter/club member/follower) to the
+        spider queue so we crawl out through them. Gated by STRAVA_SPIDER_ENABLED."""
+        if os.getenv("STRAVA_SPIDER_ENABLED", "true").lower() != "true":
+            return
+        try:
+            aid = int(athlete_id)
+        except (TypeError, ValueError):
+            return
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """INSERT INTO strava_spider_queue (platform_athlete_id, source, priority, status)
+                       VALUES ($1, $2, $3, 'pending') ON CONFLICT (platform_athlete_id) DO NOTHING""",
+                    aid, source, priority,
+                )
+                await conn.execute(
+                    """INSERT INTO strava_athletes (platform_athlete_id, username, updated_at)
+                       VALUES ($1, $2, NOW()) ON CONFLICT (platform_athlete_id) DO NOTHING""",
+                    aid, (name[:255] if name else None),
+                )
+        except Exception as e:
+            logger.debug("strava enqueue athlete %s failed: %s", athlete_id, e)
+
     async def _collect_via_cookies(self):
         """Cookie-authenticated scrape of the logged-in user's training_activities.
 
@@ -2163,6 +2187,9 @@ class StravaCollector(BaseCollector):
                                                 ON CONFLICT (platform_activity_id, platform_athlete_id) DO NOTHING
                                             """, activity_id, int(kid), kname)
                                         result["kudos"] += 1
+                                        # SPIDER: enqueue the kudoer so we crawl
+                                        # out through kudos (user request).
+                                        await self._enqueue_athlete(kid, kname, "kudos")
                                     except Exception:
                                         pass
                     except Exception as e:
@@ -2201,6 +2228,8 @@ class StravaCollector(BaseCollector):
                                             DO NOTHING
                                     """, activity_id, int(cid), cname or "", ctext, ts_val)
                                 result["comments"] += 1
+                                # SPIDER: enqueue the commenter (crawl out via comments).
+                                await self._enqueue_athlete(cid, cname, "comment")
                             except Exception:
                                 pass
 

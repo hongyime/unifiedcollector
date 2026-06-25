@@ -199,10 +199,15 @@ services:
       COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
       STRAVA_PAGE_SCRAPE_BATCH: "200"
       SEARCH_SPIDER_PAGES: "1"
+      # Aggressive Strava athlete spider (user: spider through kudos/comments/
+      # followers/clubs). 10->40 athletes/cycle, spider + follow-scrape on.
+      STRAVA_SPIDER_ENABLED: "true"
+      STRAVA_FOLLOW_SCRAPE_ENABLED: "true"
+      STRAVA_SPIDER_MAX_PER_CYCLE: "40"
       # CPU hygiene (A#4): low-volume / API-ceiling sources idle longer between
       # cycles — fewer wakeups, lower steady-state CPU, zero data loss.
       COLLECTOR_CYCLE_SLEEP_GITHUB: "900"
-      COLLECTOR_CYCLE_SLEEP_STRAVA: "900"
+      COLLECTOR_CYCLE_SLEEP_STRAVA: "300"
       COLLECTOR_CYCLE_SLEEP_SEARCH: "600"
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -410,6 +415,8 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
       WHATSAPP_SPIDER_SESSIONS: "session_2"
+      # Backfill ALL history, not just 90 days (user: "whatsapp backfill all").
+      WHATSAPP_MAX_BACKFILL_AGE_DAYS: "36500"
       # Throughput push (2026-06-13): backfill 5->12 req/min (history requests are
       # ban-sensitive, so moderate). Larger media batch. Monitor session-risk; tune
       # down if WhatsApp flags the session.
