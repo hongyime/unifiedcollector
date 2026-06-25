@@ -323,6 +323,9 @@ services:
       TELEGRAM_BACKFILL_MSG_PER_SEC: "250"
       TELEGRAM_BACKFILL_DRAIN_INTERVAL: "30"
       TELEGRAM_SPIDER_MAX_PER_CYCLE: "200"
+      # Get ALL historical chats: raise the enqueue cap so every dialog across all
+      # 4 accounts is queued (user: "ensure we get ALL historical chats").
+      TELEGRAM_SPIDER_QUEUE_MAX: "20000"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     cap_add:
@@ -371,7 +374,8 @@ services:
       COLLECTOR_HANG_TIMEOUT_SECONDS: "5400"
       # Wider room coverage + deeper history per cycle (user: "so many rooms to
       # scrape, gold mine of media"). 120->250 rooms/cycle, 4->8 backfill pages.
-      BEEPER_MAX_CHATS_PER_CYCLE: "400"
+      # Cover ALL rooms each cycle (user has 424; user: "get ALL historical chats").
+      BEEPER_MAX_CHATS_PER_CYCLE: "600"
       BEEPER_BACKFILL_PAGES_PER_CYCLE: "20"
     extra_hosts:
       - "host.docker.internal:host-gateway"
