@@ -675,11 +675,19 @@ services:
       WHATSAPP_RABBITMQ_URL: amqp://${RABBITMQ_USER:-wac_user}:${RABBITMQ_PASSWORD:-localdevrabbit123}@rabbitmq:5672/
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-wac_user}:${RABBITMQ_PASSWORD:-localdevrabbit123}@rabbitmq:5672/
       SYNC_FULL_HISTORY: "true"
+      # On-demand deep history: actively pull older messages per chat (was stuck
+      # ~9 days). Paced; 36500d = effectively all the phone still holds.
+      WHATSAPP_DEEP_BACKFILL: "true"
+      WHATSAPP_BACKFILL_REQ_PER_MIN: "12"
+      WHATSAPP_MAX_BACKFILL_AGE_DAYS: "36500"
       LOG_LEVEL: info
     ports:
       - "3011:3001"
     volumes:
       - ../sessions/whatsapp:/app/auth_info
+      # live-mount compiled build/ so code changes apply on recreate (no image
+      # rebuild — vhdx must not grow).
+      - ../src/bridges/whatsapp/build:/app/build
       - z:/unifiedcollector/media:/data/media
     depends_on:
       rabbitmq:
@@ -702,11 +710,16 @@ services:
       WHATSAPP_RABBITMQ_URL: amqp://${RABBITMQ_USER:-wac_user}:${RABBITMQ_PASSWORD:-localdevrabbit123}@rabbitmq:5672/
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-wac_user}:${RABBITMQ_PASSWORD:-localdevrabbit123}@rabbitmq:5672/
       SYNC_FULL_HISTORY: "true"
+      # On-demand deep history (see wa-bridge-1).
+      WHATSAPP_DEEP_BACKFILL: "true"
+      WHATSAPP_BACKFILL_REQ_PER_MIN: "12"
+      WHATSAPP_MAX_BACKFILL_AGE_DAYS: "36500"
       LOG_LEVEL: info
     ports:
       - "3012:3001"
     volumes:
       - ../sessions/whatsapp:/app/auth_info
+      - ../src/bridges/whatsapp/build:/app/build
       - z:/unifiedcollector/media:/data/media
     depends_on:
       rabbitmq:

@@ -2017,21 +2017,36 @@ class TelegramCollector(BaseCollector):
         try:
             from telethon.utils import resolve_id
             # event.chat_id is the marked id (-100… for channels); the stored
-            # platform_message_id uses the bare id, so normalize first.
-            chat_id, _ = resolve_id(event.chat_id)
+            # platform_message_id uses the bare id, so normalize first. BUT telegram
+            # delivers some MessageDeleted updates WITHOUT a chat (DM/secret/edge
+            # cases) -> event.chat_id is None and resolve_id(None) raises. Guard it:
+            # with no chat context we match by the message-id suffix instead.
+            raw_chat = event.chat_id
+            chat_id = None
+            if raw_chat is not None:
+                try:
+                    chat_id, _ = resolve_id(raw_chat)
+                except Exception:
+                    chat_id = raw_chat
             for msg_id in (event.deleted_ids or []):
                 async with self.pool.acquire() as conn:
                     # Mark the row deleted in metadata; no-op if the row doesn't
                     # exist (deletion of a message we never saw). telegram_messages
                     # has no updated_at column — only touch metadata.
-                    await conn.execute("""
-                        UPDATE telegram_messages
-                        SET metadata = jsonb_set(
-                                COALESCE(metadata, '{}'::jsonb),
-                                '{deleted}', 'true'::jsonb, true
-                            )
-                        WHERE platform_message_id = $1
-                    """, f"{chat_id}:{msg_id}")
+                    if chat_id is not None:
+                        await conn.execute("""
+                            UPDATE telegram_messages
+                            SET metadata = jsonb_set(COALESCE(metadata,'{}'::jsonb),
+                                '{deleted}', 'true'::jsonb, true)
+                            WHERE platform_message_id = $1
+                        """, f"{chat_id}:{msg_id}")
+                    else:
+                        await conn.execute("""
+                            UPDATE telegram_messages
+                            SET metadata = jsonb_set(COALESCE(metadata,'{}'::jsonb),
+                                '{deleted}', 'true'::jsonb, true)
+                            WHERE platform_message_id LIKE $1
+                        """, f"%:{msg_id}")
         except Exception as exc:
             logger.error("_on_message_deleted error: %s", exc, exc_info=True)
 
