@@ -558,10 +558,39 @@ async def _save_comments(pool, platform, post_pid, comments) -> int:
 # universal user registry — every user/id we encounter anywhere (follows graph,
 # comment authors, tagged users, post authors, reactors) lands in social_users.
 # ---------------------------------------------------------------------------
+# A Threads handle IS the same Meta account's Instagram handle. So real people we
+# see on Threads (your Following feed, comment authors, etc.) are scrapeable on
+# Instagram — which IS target/profile-driven. Cross-seed them into the IG spider
+# queue. Gated to non-"foryou" contexts so we don't import algorithmic brand spam.
+async def _cross_seed_instagram(conn, usernames, source) -> int:
+    added = 0
+    for uname in usernames:
+        uname = (uname or "").strip().lstrip("@")
+        if not uname or len(uname) > 30:
+            continue
+        try:
+            res = await conn.execute(
+                """
+                INSERT INTO instagram_spider_targets (username, hop, discovered_from)
+                VALUES ($1, 1, $2)
+                ON CONFLICT (username) DO NOTHING
+                """,
+                uname, source,
+            )
+            if res.endswith("1"):
+                added += 1
+        except Exception:
+            logger.debug("cross-seed ig target failed %s", uname, exc_info=True)
+    if added:
+        logger.info("cross-seed instagram <- %s: +%d real handles", source, added)
+    return added
+
+
 async def _record_users(pool, platform, users, context) -> int:
     if not users:
         return 0
     n = 0
+    _cross = []  # threads handles to push into the IG spider queue
     async with pool.acquire() as conn:
         for u in users:
             if isinstance(u, str):
@@ -592,8 +621,12 @@ async def _record_users(pool, platform, users, context) -> int:
                     u.get("profile_pic_url") or u.get("profile_photo_url") or u.get("avatar_url") or None, [context],
                 )
                 n += 1
+                if platform == "threads" and username and (context or "").lower() != "foryou":
+                    _cross.append(username)
             except Exception:
                 logger.debug("record user failed %s", uid, exc_info=True)
+        if _cross:
+            await _cross_seed_instagram(conn, _cross, "threads:" + (context or "feed"))
     return n
 
 

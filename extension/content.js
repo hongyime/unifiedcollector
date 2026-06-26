@@ -526,14 +526,69 @@ const lemon8 = {
 // timeline DOM (pbs.twimg.com images + video posters). Open Home / a profile's
 // Media tab and leave it; scroll loads more.
 // ===========================================================================
+// Read tweet records straight off the DOM. This is the reliable path for X — it
+// does NOT depend on the inject GraphQL hook firing (X throttles background-tab
+// fetches and the home feed can load before the hook installs). Each <article> has
+// a permalink (author + id), tweetText, and a [role=group] whose aria-label carries
+// the full counts ("13 replies, 4 reposts, 88 likes, 9,000 views").
+function harvestXPosts(entity) {
+  const posts = [];
+  document.querySelectorAll('article[data-testid="tweet"], article[role="article"]').forEach((art) => {
+    try {
+      const link = art.querySelector('a[href*="/status/"]');
+      const m = link && (link.getAttribute("href") || "").match(/^\/([A-Za-z0-9_]{1,20})\/status\/(\d+)/);
+      if (!m) return;
+      const author = m[1], pid = m[2];
+      const textEl = art.querySelector('[data-testid="tweetText"]');
+      const caption = textEl ? (textEl.innerText || "").trim().slice(0, 2000) : null;
+      const grp = art.querySelector('[role="group"][aria-label]');
+      const al = grp ? (grp.getAttribute("aria-label") || "") : "";
+      const num = (re) => { const x = al.match(re); return x ? parseInt(x[1].replace(/[,.\s]/g, ""), 10) : null; };
+      posts.push({
+        platform_post_id: pid, author_username: author, caption: caption || null,
+        comments_count: num(/([\d,.]+)\s+repl/i), reposts_count: num(/([\d,.]+)\s+repost/i),
+        likes_count: num(/([\d,.]+)\s+like/i), views_count: num(/([\d,.]+)\s+view/i),
+        media_type: "tweet",
+        hashtags: caption ? (caption.match(/#[\w]+/g) || []).map((s) => s.slice(1)) : [],
+        mentions: caption ? (caption.match(/@[\w]+/g) || []).map((s) => s.slice(1)) : [],
+      });
+    } catch (e) {}
+  });
+  return posts;
+}
+
+// Click the "Following" timeline tab so we read people you actually follow (real
+// accounts) before X's algorithmic "For you". Following-first across all platforms.
+async function xSelectFollowing() {
+  try {
+    const tab = [...document.querySelectorAll('[role="tab"], a[role="tab"]')]
+      .find((t) => /^following$/i.test((t.textContent || "").trim()));
+    if (tab && tab.getAttribute("aria-selected") !== "true") {
+      tab.scrollIntoView({ block: "center" }); tab.click();
+      await sleep(jitter(2500));
+      return true;
+    }
+  } catch (e) {}
+  return false;
+}
+
 const x = {
   id: "x", host: "x.com", label: "Twitter / X",
   entity() { const m = location.pathname.match(/^\/([^/?#]+)/); return m && !/^(home|explore|notifications|messages|i|search)$/.test(m[1]) ? m[1] : "timeline"; },
   async runCycle() {
     const entity = this.entity();
-    clog("info", `cycle start on ${entity}`, "x");
+    // following-first: on the home timeline, switch to the Following tab.
+    let feed = entity;
+    if (/^\/home/.test(location.pathname)) feed = (await xSelectFollowing()) ? "home/following" : "home/foryou";
+    clog("info", `X cycle on ${feed} — scrolling for tweets`, "x");
     const sink = makeSink();
     await autoScroll(12);
+    // post engagement (the x_posts gap) — DOM-harvested, hook-independent.
+    const xposts = harvestXPosts(feed);
+    if (xposts.length) {
+      await send({ type: "posts", platform: "x", username: feed, posts: xposts });
+      clog("info", `X ${feed}: ${xposts.length} tweet(s) w/ counts`, "x");
+    }
     document.querySelectorAll('img[src*="pbs.twimg.com/media"]').forEach((im) => {
       // strip size params → request the original
       let u = im.src.replace(/&name=\w+/, "&name=orig").replace(/\?format=/, "?format=");
@@ -548,7 +603,7 @@ const x = {
       if (u && /^https?:/.test(u) && !u.startsWith("blob:")) sink.add({ content_id: "vid_" + urlId(u), content_type: "video", url: u, entity_name: entity });
     });
     if (sink.items.length) await send({ type: "ingest", platform: "x", username: entity, items: sink.items });
-    return { targets: 1, saved: sink.items.length, discovered: 0 };
+    return { targets: 1, saved: sink.items.length, posts: xposts.length, discovered: xu.length };
   },
 };
 
@@ -609,21 +664,50 @@ function collectPermalinkAuthors(re, skip) {
   return [...set].map((u) => ({ username: u }));
 }
 
+// Switch the Threads home feed to "Following" (real accounts you follow) instead of
+// the algorithmic "For you" (which is full of brands/big companies the user does NOT
+// want). The feed switcher is a dropdown behind the top button, so: open it, then
+// click the "Following" item. Best-effort + idempotent (no-op if already there).
+async function threadsSelectFollowing() {
+  try {
+    const find = (txt) => [...document.querySelectorAll('div[role="button"],a[role="link"],span,div')]
+      .find((e) => (e.textContent || "").trim() === txt && e.offsetParent !== null);
+    let item = find("Following");
+    if (!item) {
+      // open the feed-picker menu (top button currently shows "For you")
+      const opener = find("For you");
+      if (opener) { opener.click(); await sleep(jitter(1200)); item = find("Following"); }
+    }
+    if (item) { item.click(); await sleep(jitter(2000)); return true; }
+  } catch (e) {}
+  return false;
+}
+
 // Threads (threads.com) — Meta SPA; media served from the Instagram/FB CDN.
 const threads = {
   id: "threads", host: "www.threads.com", label: "Threads",
   entity() { const m = location.pathname.match(/^\/@([^/?#]+)/); return m ? m[1] : "feed"; },
   async runCycle() {
-    const entity = this.entity();
-    clog("info", `cycle start on ${entity}`, "threads");
+    const onProfile = /^\/@/.test(location.pathname);
+    // following-first: on the home feed, force the Following tab (real users).
+    let feed = this.entity();
+    if (!onProfile) feed = (await threadsSelectFollowing()) ? "following" : "foryou";
+    clog("info", `Threads cycle on ${feed} — scrolling`, "threads");
     await autoScroll(10);
-    const sink = harvestDom(entity, {
+    const sink = harvestDom(feed, {
       imgRe: /(cdninstagram|fbcdn)\.net/, junkRe: /s150x150|s320x320|profile_pic|rsrc\.php/,
     });
-    if (sink.items.length) await send({ type: "ingest", platform: "threads", username: entity, items: sink.items });
+    if (sink.items.length) await send({ type: "ingest", platform: "threads", username: feed, items: sink.items });
     const posts = harvestPermalinkPosts(/\/@([^/]+)\/post\/([^/?#]+)/, (m) => m[2]);
-    if (posts.length) await send({ type: "posts", platform: "threads", username: entity, posts });
-    return { targets: 1, saved: sink.items.length, discovered: 0 };
+    if (posts.length) {
+      await send({ type: "posts", platform: "threads", username: feed, posts });
+      clog("info", `Threads ${feed}: ${posts.length} post(s)`, "threads");
+    }
+    // every threads handle IS an instagram handle — feed authors we see into the
+    // shared user graph so IG can scrape them too (cross-platform handle reuse).
+    const authors = collectPermalinkAuthors(/^\/@([A-Za-z0-9._]{1,30})(?:\/|$)/, /^(search|explore|activity|saved)$/);
+    if (authors.length) await send({ type: "users", platform: "threads", context: feed, users: authors });
+    return { targets: 1, saved: sink.items.length, posts: posts.length, discovered: authors.length };
   },
 };
 
