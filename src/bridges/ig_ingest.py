@@ -202,6 +202,27 @@ async def _targets_for(pool, platform):
                     if u and u not in seen:
                         seen.add(u)
                         out.append({"username": u, "hop": int(r["hop"])})
+            elif platform == "threads":
+                # REVERSE cross-pollination: a Threads handle IS an Instagram handle,
+                # so the real people we know on Instagram (your follow graph + spider)
+                # are scrapeable Threads profiles. Hand them to the Threads tab to visit.
+                ig = await conn.fetch(
+                    """
+                    SELECT username FROM instagram_spider_targets
+                    WHERE status='active'
+                    ORDER BY last_scraped_at ASC NULLS FIRST, discovered_at ASC
+                    LIMIT $1
+                    """,
+                    IG_SPIDER_TARGETS_LIMIT,
+                )
+                ig2 = await conn.fetch(
+                    "SELECT target_id AS username FROM collection_targets WHERE source='instagram'"
+                )
+                for r in list(ig) + list(ig2):
+                    u = (r["username"] or "").strip().lstrip("@")
+                    if u and u not in seen:
+                        seen.add(u)
+                        out.append({"username": u, "hop": 1})
     except Exception:
         logger.exception("targets query failed (%s)", platform)
     return out

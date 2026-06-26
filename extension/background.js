@@ -139,7 +139,7 @@ async function scheduleAlarm() {
   chrome.alarms.create(ALARM, { periodInMinutes: WATCHDOG_MIN });
   chrome.alarms.create(ALARM_REFRESH, { periodInMinutes: REFRESH_MIN });
   await setStatus({ swStartedAt: Date.now() });
-  await log("info", `✅ worker started v1.14.0 (X DOM tweets + following-first feeds) — auto-tabs + ${WATCHDOG_MIN}-min watchdog + ${REFRESH_MIN}-min refresh`);
+  await log("info", `✅ worker started v1.15.0 (foryou-secondary rotation + threads↔ig reverse) — auto-tabs + ${WATCHDOG_MIN}-min watchdog + ${REFRESH_MIN}-min refresh`);
 }
 chrome.runtime.onInstalled.addListener(() => { scheduleAlarm(); syncCookies(); ensureScraperTabsOpen("installed").then(() => ensureLoops("installed")); });
 chrome.runtime.onStartup.addListener(() => { scheduleAlarm(); syncCookies(); ensureScraperTabsOpen("startup").then(() => ensureLoops("startup")); });

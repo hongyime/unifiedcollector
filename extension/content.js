@@ -15,6 +15,14 @@
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const jitter = (base) => base + Math.random() * base;
 
+// Per-origin persisted state. Our following/foryou rotation + profile-visit queue
+// need to survive the page reloads that navigation causes, so we stash counters in
+// localStorage (scoped to the platform's origin, so no cross-talk between sites).
+const lsGet = (k, d) => { try { const v = localStorage.getItem(k); return v == null ? d : v; } catch (e) { return d; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} };
+const lsNum = (k) => { const n = parseInt(lsGet(k, "0"), 10); return Number.isFinite(n) ? n : 0; };
+const lsBump = (k) => { const n = lsNum(k) + 1; lsSet(k, String(n)); return n; };
+
 // ---------------------------------------------------------------------------
 // HUMAN PACING. A real person browsing is slow, irregular, and takes breaks.
 // Scraping 257 profiles back-to-back is what got the IG account flagged for
@@ -557,15 +565,14 @@ function harvestXPosts(entity) {
   return posts;
 }
 
-// Click the "Following" timeline tab so we read people you actually follow (real
-// accounts) before X's algorithmic "For you". Following-first across all platforms.
-async function xSelectFollowing() {
+// Click a named home-timeline tab ("Following" or "For you"). Following is primary;
+// For-You runs as the occasional secondary pass (see rotation in runCycle).
+async function xSelectTab(name) {
   try {
     const tab = [...document.querySelectorAll('[role="tab"], a[role="tab"]')]
-      .find((t) => /^following$/i.test((t.textContent || "").trim()));
-    if (tab && tab.getAttribute("aria-selected") !== "true") {
-      tab.scrollIntoView({ block: "center" }); tab.click();
-      await sleep(jitter(2500));
+      .find((t) => (t.textContent || "").trim().toLowerCase() === name.toLowerCase());
+    if (tab) {
+      if (tab.getAttribute("aria-selected") !== "true") { tab.scrollIntoView({ block: "center" }); tab.click(); await sleep(jitter(2500)); }
       return true;
     }
   } catch (e) {}
@@ -577,9 +584,14 @@ const x = {
   entity() { const m = location.pathname.match(/^\/([^/?#]+)/); return m && !/^(home|explore|notifications|messages|i|search)$/.test(m[1]) ? m[1] : "timeline"; },
   async runCycle() {
     const entity = this.entity();
-    // following-first: on the home timeline, switch to the Following tab.
+    // following-PRIMARY, for-you SECONDARY: most cycles read Following; every 4th
+    // cycle take a For-You pass so we still capture trending/outside-graph tweets.
     let feed = entity;
-    if (/^\/home/.test(location.pathname)) feed = (await xSelectFollowing()) ? "home/following" : "home/foryou";
+    if (/^\/home/.test(location.pathname)) {
+      const c = lsBump("uc_x_cyc");
+      if (c % 4 === 0) feed = (await xSelectTab("For you")) ? "home/foryou" : "home";
+      else feed = (await xSelectTab("Following")) ? "home/following" : "home";
+    }
     clog("info", `X cycle on ${feed} — scrolling for tweets`, "x");
     const sink = makeSink();
     await autoScroll(12);
@@ -664,49 +676,104 @@ function collectPermalinkAuthors(re, skip) {
   return [...set].map((u) => ({ username: u }));
 }
 
-// Switch the Threads home feed to "Following" (real accounts you follow) instead of
-// the algorithmic "For you" (which is full of brands/big companies the user does NOT
-// want). The feed switcher is a dropdown behind the top button, so: open it, then
-// click the "Following" item. Best-effort + idempotent (no-op if already there).
-async function threadsSelectFollowing() {
+// Switch the Threads home feed to a named tab ("Following" primary, "For you"
+// secondary). The switcher is a dropdown behind the top button, so: open it (the
+// button shows the *other* feed's name), then click the wanted item. Idempotent.
+const THREADS_IMG = { imgRe: /(cdninstagram|fbcdn)\.net/, junkRe: /s150x150|s320x320|profile_pic|rsrc\.php/ };
+async function threadsSelectFeed(want) {
   try {
+    const other = want === "Following" ? "For you" : "Following";
     const find = (txt) => [...document.querySelectorAll('div[role="button"],a[role="link"],span,div')]
       .find((e) => (e.textContent || "").trim() === txt && e.offsetParent !== null);
-    let item = find("Following");
-    if (!item) {
-      // open the feed-picker menu (top button currently shows "For you")
-      const opener = find("For you");
-      if (opener) { opener.click(); await sleep(jitter(1200)); item = find("Following"); }
-    }
+    let item = find(want);
+    if (!item) { const opener = find(other); if (opener) { opener.click(); await sleep(jitter(1200)); item = find(want); } }
     if (item) { item.click(); await sleep(jitter(2000)); return true; }
   } catch (e) {}
   return false;
+}
+
+// Reverse cross-pollination picker: rotate through IG-known real handles the bridge
+// hands us, skipping recently-visited ones (capped recent set) so we spread coverage.
+function pickThreadsNext(pool) {
+  if (!pool || !pool.length) return null;
+  let seen = lsGet("uc_th_seen", "").split(",").filter(Boolean);
+  let cand = pool.map((t) => t.username).find((u) => u && !seen.includes(u));
+  if (!cand) { seen = []; cand = pool[0].username; }   // all visited -> start over
+  if (!cand) return null;
+  seen.push(cand);
+  if (seen.length > 300) seen = seen.slice(-300);
+  lsSet("uc_th_seen", seen.join(","));
+  return cand;
 }
 
 // Threads (threads.com) — Meta SPA; media served from the Instagram/FB CDN.
 const threads = {
   id: "threads", host: "www.threads.com", label: "Threads",
   entity() { const m = location.pathname.match(/^\/@([^/?#]+)/); return m ? m[1] : "feed"; },
+
+  // Scrape one Threads profile we navigated to (the IG→Threads reverse direction).
+  async _scrapeProfile(user) {
+    clog("info", `Threads profile @${user} — scraping (IG-known real account)`, "threads");
+    await autoScroll(8);
+    const sink = harvestDom(user, THREADS_IMG);
+    if (sink.items.length) await send({ type: "ingest", platform: "threads", username: user, items: sink.items });
+    const posts = harvestPermalinkPosts(/\/@([^/]+)\/post\/([^/?#]+)/, (m) => m[2]);
+    if (posts.length) {
+      await send({ type: "posts", platform: "threads", username: user, posts });
+      clog("info", `Threads @${user}: ${posts.length} post(s)`, "threads");
+    }
+    return { saved: sink.items.length, posts: posts.length };
+  },
+
   async runCycle() {
-    const onProfile = /^\/@/.test(location.pathname);
-    // following-first: on the home feed, force the Following tab (real users).
-    let feed = this.entity();
-    if (!onProfile) feed = (await threadsSelectFollowing()) ? "following" : "foryou";
+    // REVERSE direction: if we navigated to a target profile, scrape it then return
+    // to the feed so the rotation continues.
+    if (/^\/@/.test(location.pathname)) {
+      const user = this.entity();
+      const r = await this._scrapeProfile(user);
+      // always bounce back to the feed so the rotation keeps moving (robust even if
+      // target tracking desyncs); this is a dedicated scraper tab, not manual browsing.
+      lsSet("uc_th_target", "");
+      await sleep(jitter(4000));
+      location.href = "https://www.threads.com/";
+      return { targets: 1, saved: r.saved, posts: r.posts, discovered: 0 };
+    }
+
+    // FEED: Following primary; For-You every 4th cycle (secondary).
+    const c = lsBump("uc_th_cyc");
+    const feed = (c % 4 === 0)
+      ? ((await threadsSelectFeed("For you")) ? "foryou" : "feed")
+      : ((await threadsSelectFeed("Following")) ? "following" : "feed");
     clog("info", `Threads cycle on ${feed} — scrolling`, "threads");
     await autoScroll(10);
-    const sink = harvestDom(feed, {
-      imgRe: /(cdninstagram|fbcdn)\.net/, junkRe: /s150x150|s320x320|profile_pic|rsrc\.php/,
-    });
+    const sink = harvestDom(feed, THREADS_IMG);
     if (sink.items.length) await send({ type: "ingest", platform: "threads", username: feed, items: sink.items });
     const posts = harvestPermalinkPosts(/\/@([^/]+)\/post\/([^/?#]+)/, (m) => m[2]);
     if (posts.length) {
       await send({ type: "posts", platform: "threads", username: feed, posts });
       clog("info", `Threads ${feed}: ${posts.length} post(s)`, "threads");
     }
-    // every threads handle IS an instagram handle — feed authors we see into the
-    // shared user graph so IG can scrape them too (cross-platform handle reuse).
+    // every threads handle IS an instagram handle — push feed authors into the
+    // shared user graph so IG scrapes them too (forward cross-pollination).
     const authors = collectPermalinkAuthors(/^\/@([A-Za-z0-9._]{1,30})(?:\/|$)/, /^(search|explore|activity|saved)$/);
     if (authors.length) await send({ type: "users", platform: "threads", context: feed, users: authors });
+
+    // REVERSE direction rotation: every 3rd cycle, hop to one IG-known real account
+    // and scrape their Threads. Heavily paced (one profile per rotation) to stay gentle.
+    if (c % 3 === 0) {
+      try {
+        const resp = (await send({ type: "getTargets", platform: "threads" })) || [];
+        const pool = (Array.isArray(resp) ? resp : (resp.targets || []))
+          .map((t) => (typeof t === "string" ? { username: t } : t)).filter((t) => t && t.username);
+        const next = pickThreadsNext(pool);
+        if (next) {
+          lsSet("uc_th_target", next);
+          clog("info", `Threads → visiting IG-known @${next} (reverse cross-pollination)`, "threads");
+          await sleep(jitter(3000));
+          location.href = "https://www.threads.com/@" + next;
+        }
+      } catch (e) {}
+    }
     return { targets: 1, saved: sink.items.length, posts: posts.length, discovered: authors.length };
   },
 };
