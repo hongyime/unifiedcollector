@@ -692,13 +692,36 @@ async function threadsSelectFeed(want) {
   return false;
 }
 
+// NOTE: a Threads handle == the same Meta account's Instagram handle, but NOT every
+// Instagram user has activated Threads. So some IG handles 404 on Threads. We detect
+// that on the profile page and blacklist the handle (uc_th_noacct) so we never waste
+// another navigation on it.
+const thNoAcct = () => new Set(lsGet("uc_th_noacct", "").split(",").filter(Boolean));
+function thMarkNoAcct(user) {
+  const s = thNoAcct(); s.add(user);
+  let arr = [...s]; if (arr.length > 1000) arr = arr.slice(-1000);
+  lsSet("uc_th_noacct", arr.join(","));
+}
+// Threads renders a "page isn't available / not found" view for non-existent users.
+function threadsProfileMissing() {
+  try {
+    const t = (document.body.innerText || "").toLowerCase();
+    if (/isn['’]t available|page not found|sorry, this page|couldn['’]t find this account/.test(t)) return true;
+  } catch (e) {}
+  return false;
+}
+
 // Reverse cross-pollination picker: rotate through IG-known real handles the bridge
-// hands us, skipping recently-visited ones (capped recent set) so we spread coverage.
+// hands us, skipping recently-visited AND known-no-Threads-account handles.
 function pickThreadsNext(pool) {
   if (!pool || !pool.length) return null;
+  const dead = thNoAcct();
   let seen = lsGet("uc_th_seen", "").split(",").filter(Boolean);
-  let cand = pool.map((t) => t.username).find((u) => u && !seen.includes(u));
-  if (!cand) { seen = []; cand = pool[0].username; }   // all visited -> start over
+  let cand = pool.map((t) => t.username).find((u) => u && !seen.includes(u) && !dead.has(u));
+  if (!cand) {  // everyone seen -> reset rotation but still skip dead accounts
+    seen = [];
+    cand = pool.map((t) => t.username).find((u) => u && !dead.has(u));
+  }
   if (!cand) return null;
   seen.push(cand);
   if (seen.length > 300) seen = seen.slice(-300);
@@ -730,13 +753,24 @@ const threads = {
     // to the feed so the rotation continues.
     if (/^\/@/.test(location.pathname)) {
       const user = this.entity();
-      const r = await this._scrapeProfile(user);
-      // always bounce back to the feed so the rotation keeps moving (robust even if
-      // target tracking desyncs); this is a dedicated scraper tab, not manual browsing.
+      // this IG handle may not have a Threads account — detect + blacklist so the
+      // rotation never wastes another navigation on it.
+      if (threadsProfileMissing()) {
+        thMarkNoAcct(user);
+        clog("info", `Threads @${user}: no Threads account — blacklisted from reverse rotation`, "threads");
+      } else {
+        const r = await this._scrapeProfile(user);
+        // always bounce back to the feed so the rotation keeps moving (robust even if
+        // target tracking desyncs); this is a dedicated scraper tab, not manual browsing.
+        lsSet("uc_th_target", "");
+        await sleep(jitter(4000));
+        location.href = "https://www.threads.com/";
+        return { targets: 1, saved: r.saved, posts: r.posts, discovered: 0 };
+      }
       lsSet("uc_th_target", "");
-      await sleep(jitter(4000));
+      await sleep(jitter(2500));
       location.href = "https://www.threads.com/";
-      return { targets: 1, saved: r.saved, posts: r.posts, discovered: 0 };
+      return { targets: 1, saved: 0, posts: 0, discovered: 0 };
     }
 
     // FEED: Following primary; For-You every 4th cycle (secondary).
