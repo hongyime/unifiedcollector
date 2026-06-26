@@ -34,6 +34,7 @@ type Watermark = {
     pendingSince?: number;          // ms; set when an on-demand fetch is in flight
     lastRequestedOldest?: number;   // the oldestTimestamp at the moment we last requested
     lastRequestTime?: number;       // ms; for round-robin fairness across chats
+    missCount?: number;             // consecutive no-progress fetches (3 = give up)
 };
 let watermarks: Record<string, Watermark> = {};
 let progressInterval: NodeJS.Timeout | null = null;
@@ -117,7 +118,7 @@ export function registerHistoryHandler(sock: WASocket): void {
         let revived = 0;
         for (const wm of Object.values(watermarks)) {
             if (wm.isComplete && wm.oldestKey && wm.oldestTimestamp > targetOldestSec) {
-                wm.isComplete = false; revived++;
+                wm.isComplete = false; wm.missCount = 0; wm.pendingSince = undefined; revived++;
             }
         }
         if (revived) logger.info(`[HistorySync] revived ${revived} chat(s) wrongly marked complete`);
@@ -130,17 +131,29 @@ export function registerHistoryHandler(sock: WASocket): void {
             const nowMs = Date.now();
             // Retire chats whose in-flight request made no progress (exhausted), and
             // chats that reached the configured depth.
+            let dirty = false;
             for (const wm of Object.values(watermarks)) {
                 if (wm.pendingSince && nowMs - wm.pendingSince > PENDING_GRACE_MS) {
                     if (wm.oldestTimestamp >= (wm.lastRequestedOldest ?? Number.POSITIVE_INFINITY)) {
-                        wm.isComplete = true;  // WhatsApp returned nothing older
+                        // no older data came back — but WhatsApp THROTTLES on-demand
+                        // history, so one empty response ≠ exhausted. Only give up after
+                        // 3 consecutive misses; the chat keeps its turn until then.
+                        wm.missCount = (wm.missCount ?? 0) + 1;
+                        if (wm.missCount >= 3) wm.isComplete = true;
+                    } else {
+                        wm.missCount = 0;  // progress was made
                     }
                     wm.pendingSince = undefined;
+                    dirty = true;
                 }
                 if (!wm.isComplete && wm.oldestTimestamp > 0 && wm.oldestTimestamp <= targetOldestSec) {
                     wm.isComplete = true;  // reached target depth
+                    dirty = true;
                 }
             }
+            // persist progress so completion/anchors survive restarts (the set-handler
+            // only saves when fresh history arrives; throttled chats never would).
+            if (dirty) saveWatermarks();
             // Pick the eligible chat we asked about least recently (round-robin).
             let pickJid: string | null = null;
             let pickWm: Watermark | null = null;
@@ -218,6 +231,7 @@ export function registerHistoryHandler(sock: WASocket): void {
                 if (oldestRaw?.key && (!watermarks[chatJid].oldestKey || oldestRawTs < watermarks[chatJid].oldestTimestamp)) {
                     watermarks[chatJid].oldestTimestamp = oldestRawTs;
                     watermarks[chatJid].oldestKey = oldestRaw.key as WAMessageKey;
+                    watermarks[chatJid].missCount = 0;  // older history arrived — keep going
                 }
                 watermarks[chatJid].pendingSince = undefined;
 
