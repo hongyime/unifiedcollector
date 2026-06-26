@@ -349,3 +349,15 @@ zhenghua secondary school dean's list OR honour roll filetype:pdf
 # walks the site's internal links and downloads the images; faces flow to the
 # facetracker. Add more such sites as direct https:// lines.
 https://classicle.club/our-students
+
+# --- Tuition-centre / school student galleries (face photos) — discovery dorks ---
+# These find MORE classicle-style sites; the recursive crawler then walks each +
+# downloads the face photos -> facetracker.
+tuition centre singapore "our students"
+singapore tuition "student gallery"
+tuition centre "meet our students" singapore
+singapore tuition centre testimonials students photos
+"our students" tuition singapore site:wixsite.com
+"our students" tuition singapore site:squarespace.com
+singapore enrichment centre students gallery
+site:classicle.club

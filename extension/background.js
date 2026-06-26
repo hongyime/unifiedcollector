@@ -104,6 +104,27 @@ async function ensureScraperTabsOpen(reason) {
 
 // Reload scraper tabs ONE at a time with a gap (staggered) so the loop respawns
 // fresh without reloading 7 tabs simultaneously (CPU spike / overload).
+// Push the live, logged-in Instagram cookies to the collector so the HEADLESS
+// backup always runs on a fresh session (no dead-cookie 401 retry storms, which
+// look bot-like and risk bans). Runs on the refresh cycle + startup.
+async function syncCookies() {
+  try {
+    const cookies = await chrome.cookies.getAll({ domain: "instagram.com" });
+    if (!cookies || !cookies.some((c) => c.name === "sessionid")) return; // not logged in
+    const dsu = cookies.find((c) => c.name === "ds_user_id");
+    const account = dsu ? "live_" + dsu.value : "extension_live";
+    const base = await ingestBase();
+    const r = await fetch(base + "/social/cookies", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        platform: "instagram", account,
+        cookies: cookies.map((c) => ({ name: c.name, value: c.value, domain: c.domain, path: c.path, secure: c.secure, expirationDate: c.expirationDate })),
+      }),
+    });
+    if (r.ok) await log("info", `synced live IG session → headless backup (${account})`);
+  } catch (e) { /* cookies perm / ingest down */ }
+}
+
 async function refreshScraperTabs() {
   if (!(await autoTabsEnabled()) || _tabsOpInProgress) return;
   _tabsOpInProgress = true;
@@ -120,12 +141,12 @@ async function scheduleAlarm() {
   await setStatus({ swStartedAt: Date.now() });
   await log("info", `worker started; auto-tabs + ${WATCHDOG_MIN}-min watchdog + ${REFRESH_MIN}-min refresh`);
 }
-chrome.runtime.onInstalled.addListener(() => { scheduleAlarm(); ensureScraperTabsOpen("installed").then(() => ensureLoops("installed")); });
-chrome.runtime.onStartup.addListener(() => { scheduleAlarm(); ensureScraperTabsOpen("startup").then(() => ensureLoops("startup")); });
+chrome.runtime.onInstalled.addListener(() => { scheduleAlarm(); syncCookies(); ensureScraperTabsOpen("installed").then(() => ensureLoops("installed")); });
+chrome.runtime.onStartup.addListener(() => { scheduleAlarm(); syncCookies(); ensureScraperTabsOpen("startup").then(() => ensureLoops("startup")); });
 
 chrome.alarms.onAlarm.addListener(async (a) => {
   if (a.name === ALARM) { await ensureScraperTabsOpen("watchdog"); await ensureLoops("watchdog"); }
-  else if (a.name === ALARM_REFRESH) { await refreshScraperTabs(); }
+  else if (a.name === ALARM_REFRESH) { await refreshScraperTabs(); await syncCookies(); }
 });
 
 // scraper hosts that have a content-script scraper

@@ -391,6 +391,32 @@ class BaseCollector(ABC):
         except Exception:
             logger.debug("EXIF GPS hook failed for %s", file_path, exc_info=True)
 
+        # CROSS-COLLECTOR content dedup: for platforms scraped by BOTH the headless
+        # collector and the browser extension (instagram/tiktok/lemon8) + the OSINT
+        # sources, skip storing bytes we already have under a different content_id
+        # (the two paths key content_ids differently). Messaging sources are EXCLUDED
+        # — the same media legitimately appears in multiple chats there.
+        if sha256 and self.SOURCE_NAME in (
+            "instagram", "tiktok", "lemon8", "threads", "facebook", "x",
+            "search", "website", "github", "strava",
+        ):
+            try:
+                async with self.pool.acquire() as conn:
+                    dup = await conn.fetchval(
+                        "SELECT 1 FROM media_items WHERE source=$1 AND sha256=$2 LIMIT 1",
+                        self.SOURCE_NAME, sha256,
+                    )
+                if dup:
+                    try:
+                        if file_path and Path(file_path).exists():
+                            Path(file_path).unlink()
+                    except Exception:
+                        pass
+                    logger.debug("cross-collector dup skipped: %s sha=%s", self.SOURCE_NAME, sha256[:12])
+                    return False
+            except Exception:
+                pass
+
         try:
             import asyncpg
         except ImportError:

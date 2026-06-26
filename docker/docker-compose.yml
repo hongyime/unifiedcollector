@@ -463,6 +463,14 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
+      # ANTI-BAN (user: "make sure headless cookies don't get my account banned").
+      # Headless Playwright is more detectable than a real browser, so run it as a
+      # GENTLE periodic backup: lower daily profile-view quota, fully-serial spider,
+      # and a long idle between cycles. The extension is the primary live path.
+      INSTA_DAILY_QUOTA_PROFILE_VIEWS: "100"
+      INSTA_SPIDER_CONCURRENCY: "1"
+      INSTA_SPIDER_HOPS: "1"
+      COLLECTOR_CYCLE_SLEEP_INSTAGRAM: "1200"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     cap_add:
@@ -506,6 +514,7 @@ services:
     volumes:
       - z:/unifiedcollector/media:/media
       - ../src:/app/src
+      - ../credentials:/app/credentials   # so /social/cookies can write live sessions
     depends_on:
       postgres:
         condition: service_healthy
