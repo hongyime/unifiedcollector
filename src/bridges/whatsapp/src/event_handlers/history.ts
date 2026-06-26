@@ -38,7 +38,13 @@ type Watermark = {
 let watermarks: Record<string, Watermark> = {};
 let progressInterval: NodeJS.Timeout | null = null;
 let backfillInterval: NodeJS.Timeout | null = null;
-let connected = false;
+let unstuckOnce = false;
+// The bridge recreates the socket (and re-calls registerHistoryHandler) on every
+// reconnect. The long-lived backfill interval must always use the CURRENT socket,
+// not the one captured at first registration (a stale socket's late 'close' event
+// used to leave the driver wedged). So we track the live socket module-wide and
+// the interval reads it each tick.
+let currentSock: WASocket | null = null;
 
 // messageTimestamp may be a number or a Long — coerce to seconds.
 function toSec(t: any): number {
@@ -75,6 +81,7 @@ function saveWatermarks(): void {
 
 export function registerHistoryHandler(sock: WASocket): void {
     loadWatermarks();
+    currentSock = sock;  // always track the live socket (reconnects recreate it)
 
     if (!progressInterval) {
         progressInterval = setInterval(() => {
@@ -101,42 +108,61 @@ export function registerHistoryHandler(sock: WASocket): void {
     const targetOldestSec = Math.floor(Date.now() / 1000) - maxAgeDays * 86400;
     const PENDING_GRACE_MS = 60000;  // no progress within this => chat exhausted
 
+    // One-time recovery: chats that still have a usable anchor and room above the
+    // target depth but were flagged complete were wrongly retired by the old
+    // stale-socket bug (transient fetch failures looked like "no older history").
+    // Un-stick them so they resume; genuinely-exhausted chats just re-mark later.
+    if (!unstuckOnce) {
+        unstuckOnce = true;
+        let revived = 0;
+        for (const wm of Object.values(watermarks)) {
+            if (wm.isComplete && wm.oldestKey && wm.oldestTimestamp > targetOldestSec) {
+                wm.isComplete = false; revived++;
+            }
+        }
+        if (revived) logger.info(`[HistorySync] revived ${revived} chat(s) wrongly marked complete`);
+    }
+
     if (deepEnabled && !backfillInterval) {
         backfillInterval = setInterval(async () => {
-            if (!connected) return;
-            try {
-                const nowMs = Date.now();
-                // Retire chats whose in-flight request made no progress (exhausted),
-                // and chats that reached the configured depth.
-                for (const wm of Object.values(watermarks)) {
-                    if (wm.pendingSince && nowMs - wm.pendingSince > PENDING_GRACE_MS) {
-                        if (wm.oldestTimestamp >= (wm.lastRequestedOldest ?? Number.POSITIVE_INFINITY)) {
-                            wm.isComplete = true;  // WhatsApp returned nothing older
-                        }
-                        wm.pendingSince = undefined;
+            const sk = currentSock;
+            if (!sk) return;  // no live socket yet
+            const nowMs = Date.now();
+            // Retire chats whose in-flight request made no progress (exhausted), and
+            // chats that reached the configured depth.
+            for (const wm of Object.values(watermarks)) {
+                if (wm.pendingSince && nowMs - wm.pendingSince > PENDING_GRACE_MS) {
+                    if (wm.oldestTimestamp >= (wm.lastRequestedOldest ?? Number.POSITIVE_INFINITY)) {
+                        wm.isComplete = true;  // WhatsApp returned nothing older
                     }
-                    if (!wm.isComplete && wm.oldestTimestamp > 0 && wm.oldestTimestamp <= targetOldestSec) {
-                        wm.isComplete = true;  // reached target depth
-                    }
+                    wm.pendingSince = undefined;
                 }
-                // Pick the eligible chat we asked about least recently (round-robin).
-                let pickJid: string | null = null;
-                let pickWm: Watermark | null = null;
-                for (const [jid, wm] of Object.entries(watermarks)) {
-                    if (wm.isComplete || !wm.oldestKey || wm.pendingSince) continue;
-                    if (!pickWm || (wm.lastRequestTime ?? 0) < (pickWm.lastRequestTime ?? 0)) {
-                        pickJid = jid; pickWm = wm;
-                    }
+                if (!wm.isComplete && wm.oldestTimestamp > 0 && wm.oldestTimestamp <= targetOldestSec) {
+                    wm.isComplete = true;  // reached target depth
                 }
-                if (pickJid && pickWm && pickWm.oldestKey) {
-                    pickWm.lastRequestedOldest = pickWm.oldestTimestamp;
-                    pickWm.lastRequestTime = nowMs;
-                    pickWm.pendingSince = nowMs;
-                    await sock.fetchMessageHistory(fetchCount, pickWm.oldestKey, pickWm.oldestTimestamp);
+            }
+            // Pick the eligible chat we asked about least recently (round-robin).
+            let pickJid: string | null = null;
+            let pickWm: Watermark | null = null;
+            for (const [jid, wm] of Object.entries(watermarks)) {
+                if (wm.isComplete || !wm.oldestKey || wm.pendingSince) continue;
+                if (!pickWm || (wm.lastRequestTime ?? 0) < (pickWm.lastRequestTime ?? 0)) {
+                    pickJid = jid; pickWm = wm;
+                }
+            }
+            if (pickJid && pickWm && pickWm.oldestKey) {
+                pickWm.lastRequestedOldest = pickWm.oldestTimestamp;
+                pickWm.lastRequestTime = nowMs;
+                pickWm.pendingSince = nowMs;
+                try {
+                    await sk.fetchMessageHistory(fetchCount, pickWm.oldestKey, pickWm.oldestTimestamp);
                     logger.info(`[HistorySync] on-demand fetch ${pickJid} (older than ${new Date(pickWm.oldestTimestamp * 1000).toISOString()})`);
+                } catch (err) {
+                    // transient (socket reconnecting / rate limit) — DON'T mark the
+                    // chat exhausted; just clear the in-flight flag and retry later.
+                    pickWm.pendingSince = undefined;
+                    logger.warn({ err: (err as Error)?.message, jid: pickJid }, 'on-demand fetch failed (will retry)');
                 }
-            } catch (err) {
-                logger.warn({ err }, 'deep backfill tick failed');
             }
         }, Math.max(1500, Math.floor(60000 / reqPerMin)));
     }
@@ -237,12 +263,12 @@ export function registerHistoryHandler(sock: WASocket): void {
     });
 
     sock.ev.on('connection.update', (update) => {
-        if (update.connection === 'open') {
-            connected = true;
-        } else if (update.connection === 'close') {
-            connected = false;
-            if (progressInterval) { clearInterval(progressInterval); progressInterval = null; }
-            if (backfillInterval) { clearInterval(backfillInterval); backfillInterval = null; }
+        // Persist on close, but do NOT tear down the module-level intervals here: a
+        // stale socket's late 'close' would otherwise kill the freshly-recreated
+        // driver after a reconnect (and wedge backfill — the bug this replaces). The
+        // intervals are idempotent and always read the current socket; transient
+        // disconnects are handled by the per-fetch try/catch.
+        if (update.connection === 'close') {
             saveWatermarks();
         }
     });
