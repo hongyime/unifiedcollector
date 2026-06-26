@@ -139,9 +139,20 @@ async function scheduleAlarm() {
   chrome.alarms.create(ALARM, { periodInMinutes: WATCHDOG_MIN });
   chrome.alarms.create(ALARM_REFRESH, { periodInMinutes: REFRESH_MIN });
   await setStatus({ swStartedAt: Date.now() });
-  await log("info", `✅ worker started v1.16.0 (threads no-account blacklist) — auto-tabs + ${WATCHDOG_MIN}-min watchdog + ${REFRESH_MIN}-min refresh`);
+  await log("info", `✅ worker started v1.17.0 (auto-revive tabs on reload) — auto-tabs + ${WATCHDOG_MIN}-min watchdog + ${REFRESH_MIN}-min refresh`);
 }
-chrome.runtime.onInstalled.addListener(() => { scheduleAlarm(); syncCookies(); ensureScraperTabsOpen("installed").then(() => ensureLoops("installed")); });
+// onInstalled fires on every extension reload/update — the exact moment content
+// scripts in already-open tabs get SEVERED ("Extension context invalidated") and go
+// silent. Messaging them (ensureLoops) can't revive a severed script, so we RELOAD
+// the scraper tabs to respawn fresh content scripts immediately, instead of leaving
+// them dead until the 75-min auto-refresh. This is the "I reloaded the extension and
+// scraping stopped" fix.
+chrome.runtime.onInstalled.addListener(() => {
+  scheduleAlarm(); syncCookies();
+  ensureScraperTabsOpen("installed")
+    .then(() => refreshScraperTabs())   // revive orphaned tabs from the reload
+    .then(() => ensureLoops("installed"));
+});
 chrome.runtime.onStartup.addListener(() => { scheduleAlarm(); syncCookies(); ensureScraperTabsOpen("startup").then(() => ensureLoops("startup")); });
 
 chrome.alarms.onAlarm.addListener(async (a) => {
