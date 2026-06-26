@@ -95,6 +95,43 @@ def _ig_date_from_id(content_id: str):
     return None
 
 
+# Instagram/Threads shortcode alphabet — numeric media pk → the ~11-char code in
+# the public URL (instagram.com/p/<code>, threads.com/post/<code>). The extension
+# sometimes stores a wrong/long "code"; we derive the canonical one from the pk so
+# verification URLs always open.
+_SC_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+
+
+def _shortcode_from_id(media_id: str):
+    """Reverse Instagram's base64 media-id encoding into the public shortcode."""
+    m = _IG_LONG.search(str(media_id or ""))
+    if not m:
+        return None
+    try:
+        n = int(m.group(0))
+    except Exception:
+        return None
+    if n <= 0:
+        return None
+    out = []
+    while n > 0:
+        out.append(_SC_ALPHABET[n & 63])
+        n >>= 6
+    return "".join(reversed(out))
+
+
+def _verify_url(platform, media_id):
+    """Canonical openable URL for a post, for manual spot-checking."""
+    sc = _shortcode_from_id(media_id)
+    if not sc:
+        return None
+    if platform == "instagram":
+        return f"https://instagram.com/p/{sc}/"
+    if platform == "threads":
+        return f"https://threads.com/post/{sc}/"
+    return None
+
+
 def _date_prefix(item, platform="") -> str:
     """YYYYMMDD for the filename so files sort chronologically. Prefer the post's
     own taken_at; for instagram fall back to the date encoded in the media id;
@@ -404,6 +441,16 @@ async def _save_posts(pool, platform, posts) -> int:
             ppid = str(p.get("platform_post_id") or "")
             if not ppid:
                 continue
+            # stamp a canonical, openable verification URL + correct shortcode into
+            # metadata (overrides any wrong/long "code" the extension may have sent).
+            vurl = _verify_url(platform, ppid)
+            if vurl:
+                _md = p.get("metadata")
+                if not isinstance(_md, dict):
+                    _md = {}
+                _md["verify_url"] = vurl
+                _md["shortcode"] = vurl.rstrip("/").rsplit("/", 1)[-1]
+                p["metadata"] = _md
             try:
                 if platform == "instagram":
                     await conn.execute(

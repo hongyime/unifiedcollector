@@ -742,8 +742,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 window.addEventListener("message", (ev) => {
   const m = ev.data;
   if (!m || m.__uc !== true) return;
+  // label the source so logs say WHERE it came from instead of "undefined".
+  const where = (() => { try { return (location.pathname.match(/^\/@?([^/?#]+)/) || [, "feed"])[1].slice(0, 30); } catch (e) { return "feed"; } })();
   if (m.type === "posts" && Array.isArray(m.posts) && m.posts.length) {
-    send({ type: "posts", platform: m.platform, posts: m.posts }).catch(() => {});
+    send({ type: "posts", platform: m.platform, username: where, posts: m.posts }).catch(() => {});
   } else if (m.type === "users" && Array.isArray(m.users) && m.users.length) {
     send({ type: "users", platform: m.platform, context: m.context || "seen", users: m.users }).catch(() => {});
   }

@@ -139,7 +139,7 @@ async function scheduleAlarm() {
   chrome.alarms.create(ALARM, { periodInMinutes: WATCHDOG_MIN });
   chrome.alarms.create(ALARM_REFRESH, { periodInMinutes: REFRESH_MIN });
   await setStatus({ swStartedAt: Date.now() });
-  await log("info", `worker started; auto-tabs + ${WATCHDOG_MIN}-min watchdog + ${REFRESH_MIN}-min refresh`);
+  await log("info", `✅ worker started v1.13.0 (verbose logs) — auto-tabs + ${WATCHDOG_MIN}-min watchdog + ${REFRESH_MIN}-min refresh`);
 }
 chrome.runtime.onInstalled.addListener(() => { scheduleAlarm(); syncCookies(); ensureScraperTabsOpen("installed").then(() => ensureLoops("installed")); });
 chrome.runtime.onStartup.addListener(() => { scheduleAlarm(); syncCookies(); ensureScraperTabsOpen("startup").then(() => ensureLoops("startup")); });
@@ -245,7 +245,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             body: JSON.stringify({ platform: msg.platform || "instagram", username: msg.username, items: msg.items }),
           });
           const j = await r.json().catch(() => ({}));
-          await log("info", `ingest[${msg.platform || "instagram"}] ${msg.username}: queued ${j.accepted ?? msg.items.length}`);
+          await log("info", `📥 ${msg.platform || "instagram"} · ${msg.username} · ${j.accepted ?? msg.items.length} media → download`);
           sendResponse({ ok: r.ok });
         } catch (e) {
           await log("error", `ingest ${msg.username} failed: ${e.message}`);
@@ -260,7 +260,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             body: JSON.stringify({ platform: msg.platform || "instagram", source: msg.source, hop: msg.hop, discovered: msg.discovered }),
           });
           const j = await r.json().catch(() => ({}));
-          await log("info", `discover[${msg.platform || "instagram"}] from ${msg.source} (hop ${msg.hop}): +${j.added ?? "?"} new`);
+          await log("info", `🕸 ${msg.platform || "instagram"} · spider from ${msg.source} (hop ${msg.hop}) · +${j.added ?? "?"} new accounts`);
           sendResponse({ ok: r.ok });
         } catch (e) {
           await log("error", `discover failed: ${e.message}`);
@@ -275,7 +275,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             body: JSON.stringify({ platform: msg.platform || "instagram", username: msg.username, posts: msg.posts }),
           });
           const j = await r.json().catch(() => ({}));
-          await log("info", `posts[${msg.platform || "instagram"}] ${msg.username}: saved ${j.saved ?? "?"}`);
+          await log("info", `📝 ${msg.platform || "instagram"} · ${msg.username} · ${j.saved ?? msg.posts.length} post(s) w/ captions+counts`);
           sendResponse({ ok: r.ok });
         } catch (e) { await log("error", `posts failed: ${e.message}`); sendResponse({ ok: false }); }
         break;
@@ -287,7 +287,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             body: JSON.stringify({ platform: msg.platform || "instagram", post_id: msg.post_id, comments: msg.comments }),
           });
           const j = await r.json().catch(() => ({}));
-          await log("info", `comments[${msg.platform || "instagram"}] post ${msg.post_id}: saved ${j.saved ?? "?"}`);
+          await log("info", `💬 ${msg.platform || "instagram"} · post ${msg.post_id} · ${j.saved ?? "?"} comment(s)`);
           sendResponse({ ok: r.ok });
         } catch (e) { await log("error", `comments failed: ${e.message}`); sendResponse({ ok: false }); }
         break;
@@ -321,7 +321,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             body: JSON.stringify({ platform: msg.platform || "instagram", context: msg.context || "seen", users: msg.users }),
           });
           const j = await r.json().catch(() => ({}));
-          await log("info", `users[${msg.platform || "instagram"}] +${j.recorded ?? "?"} (${msg.context || "seen"})`);
+          await log("info", `👤 ${msg.platform || "instagram"} · +${j.recorded ?? "?"} users (via ${msg.context || "seen"})`);
           sendResponse({ ok: r.ok });
         } catch (e) { await log("error", `users failed: ${e.message}`); sendResponse({ ok: false }); }
         break;
