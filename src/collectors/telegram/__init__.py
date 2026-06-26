@@ -721,6 +721,16 @@ class TelegramCollector(BaseCollector):
             return
         logger.info("[telegram.collect] got %d workers", len(self._workers))
 
+        # Register realtime handlers EARLY — telethon fires them from each client's own
+        # update loop the moment they're attached, so LIVE messages stream in while the
+        # heavy historical backfill below runs. (Previously realtime started only AFTER
+        # backfill, so live capture stalled for hours behind a multi-thousand-chat backfill.)
+        if os.getenv("TELEGRAM_REALTIME_ENABLED", "true").lower() == "true":
+            try:
+                await self._register_realtime_handlers()
+            except Exception as e:
+                logger.error("early realtime handler registration failed: %s", e)
+
         # Auto-backfill new accounts (item 2.4).
         # For each connected worker, check if their account name has been seen
         # before. If not, run full collect_dialogs() to discover all their chats
@@ -1856,26 +1866,23 @@ class TelegramCollector(BaseCollector):
     # telegramcollector/services/collector/realtime_worker.py
     # ==================================================================
 
-    async def collect_realtime(self):
-        """Register Telethon event handlers on every connected worker and run forever.
-
-        This is the @client.on(events.NewMessage) listener equivalent. New /
-        edited / deleted messages and chat-action / user-update events are
-        persisted to the unified telegram_* schema. Media is downloaded
-        inline via download_message_media() rather than enqueued to Redis
-        (the unified collector replaces the microservices' Redis queue).
-
-        Runs until self._stop is set.
-        """
+    async def _register_realtime_handlers(self):
+        """Attach @client.on(NewMessage/Edited/Deleted/ChatAction/UserUpdate/Reactions)
+        handlers to every connected worker. Idempotent (guarded) and cheap — telethon's
+        per-client update loop fires these as soon as they're registered, independent of
+        whether collect() is parked or busy backfilling. We therefore call this EARLY in
+        collect() so LIVE messages stream in during the initial historical backfill
+        (previously realtime only started AFTER backfill finished, so live capture stalled
+        for hours behind a multi-thousand-chat backfill)."""
         from telethon import events
 
+        if getattr(self, "_handlers_registered", False):
+            return
         if not self._workers:
             self._workers = await self._spawn_workers()
         if not self._workers:
-            logger.error("collect_realtime: no Telegram workers connected — bailing")
+            logger.error("_register_realtime_handlers: no Telegram workers connected")
             return
-
-        self._realtime_running = True
         for worker in self._workers:
             client = worker.client
             client.add_event_handler(
@@ -1917,10 +1924,30 @@ class TelegramCollector(BaseCollector):
                     exc,
                 )
             logger.info(
-                "[worker=%d account=%s] realtime handlers registered",
+                "[worker=%d account=%s] realtime handlers registered (early)",
                 worker.worker_id, worker.account.name,
             )
+        self._handlers_registered = True
 
+    async def collect_realtime(self):
+        """Register Telethon event handlers on every connected worker and run forever.
+
+        This is the @client.on(events.NewMessage) listener equivalent. New /
+        edited / deleted messages and chat-action / user-update events are
+        persisted to the unified telegram_* schema. Media is downloaded
+        inline via download_message_media() rather than enqueued to Redis
+        (the unified collector replaces the microservices' Redis queue).
+
+        Runs until self._stop is set.
+        """
+        # Handlers may already be registered (we register them EARLY in collect()
+        # so live messages stream during the initial backfill instead of waiting
+        # for it to finish). Idempotent.
+        await self._register_realtime_handlers()
+        if not self._workers:
+            logger.error("collect_realtime: no Telegram workers connected — bailing")
+            return
+        self._realtime_running = True
         logger.info(
             "Realtime listener running across %d worker(s); awaiting events…",
             len(self._workers),
