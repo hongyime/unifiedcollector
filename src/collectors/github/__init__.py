@@ -792,10 +792,23 @@ class GithubCollector(BaseCollector):
                             qid,
                         )
                 except Exception as e:
-                    logger.warning(
-                        "Spider drain w=%d failed for %s/%s: %s",
-                        worker_id, ttype, tid, e,
-                    )
+                    # GitHub returns 403 (rate limit), 404/410 (gone), 409 (empty
+                    # repo), 451 (DMCA/unavailable), 422 routinely while spidering —
+                    # these are EXPECTED, not faults. Logging them at WARNING flooded
+                    # the logs and tripped the worker's fatal-spin self-heal into
+                    # needless ~45-min restarts. Demote expected HTTP errors to debug;
+                    # only warn on genuinely unexpected failures.
+                    status = getattr(getattr(e, "response", None), "status_code", None)
+                    if status in (401, 403, 404, 409, 410, 422, 451, 502, 503):
+                        logger.debug(
+                            "Spider drain w=%d skip %s/%s (HTTP %s)",
+                            worker_id, ttype, tid, status,
+                        )
+                    else:
+                        logger.warning(
+                            "Spider drain w=%d failed for %s/%s: %s",
+                            worker_id, ttype, tid, e,
+                        )
                     async with self.pool.acquire() as conn:
                         await conn.execute(
                             "UPDATE github_spider_queue SET status='failed' WHERE id=$1",
