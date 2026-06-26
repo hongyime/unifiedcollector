@@ -841,6 +841,15 @@ class BeeperCollector(BaseCollector):
                        c.last_message_ts
                 FROM beeper_shadow_chats c
                 LEFT JOIN beeper_shadow_sync_state s USING (chat_id)
+                -- Tombstone definitively-dead chats: Beeper returns 404 "Chat not
+                -- found" (NOT_FOUND) for chats deleted/unbridged on its side. They
+                -- were retried every cycle forever, spamming warnings. Once a chat
+                -- has 404'd as NOT_FOUND >=3 times, stop syncing it. (Transient
+                -- errors keep retrying — they don't carry NOT_FOUND.)
+                WHERE NOT (
+                    COALESCE(s.error_count, 0) >= 3
+                    AND COALESCE(s.last_error, '') LIKE '%NOT_FOUND%'
+                )
                 ORDER BY
                     COALESCE(s.backfill_complete, FALSE) ASC,
                     s.last_synced_at ASC NULLS FIRST,
