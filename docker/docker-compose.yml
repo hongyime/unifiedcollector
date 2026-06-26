@@ -322,12 +322,15 @@ services:
       TELEGRAM_SPIDER_ACCOUNTS: ""
       # Throughput push: reads are cheap and FloodWait auto-throttles; 80->150
       # msg/s/account. Continuous backfill drains every 60s while listening live.
-      # Backfill paced for SUSTAINABLE disk I/O (aggressive 250/30s/200 saturated the
+      # Backfill paced for SUSTAINABLE load (aggressive 250/30s/200 saturated the
       # Z media drive -> load 43 -> healthcheck flapping). Still backfills ALL
-      # history + realtime, just at a rate the box/drive can keep up with.
-      TELEGRAM_BACKFILL_MSG_PER_SEC: "120"
-      TELEGRAM_BACKFILL_DRAIN_INTERVAL: "90"
-      TELEGRAM_SPIDER_MAX_PER_CYCLE: "75"
+      # history + realtime, just at a rate the box can keep up with. 2026-06-26:
+      # eased further (120/90/75 -> 80/150/40) — with the box now also running the
+      # analyzer face_worker + WA deep backfill, rabbitmq was the top CPU consumer
+      # and load hovered in the ~43 flapping zone. Live capture is unaffected.
+      TELEGRAM_BACKFILL_MSG_PER_SEC: "80"
+      TELEGRAM_BACKFILL_DRAIN_INTERVAL: "150"
+      TELEGRAM_SPIDER_MAX_PER_CYCLE: "40"
       # Get ALL historical chats: raise the enqueue cap so every dialog across all
       # 4 accounts is queued (user: "ensure we get ALL historical chats").
       TELEGRAM_SPIDER_QUEUE_MAX: "20000"
