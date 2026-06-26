@@ -1993,9 +1993,16 @@ class TelegramCollector(BaseCollector):
                 return  # discard hub-group messages
             message = event.message
             await self._write_realtime_message(message, chat_id)
-            sender = await event.get_sender()
-            if sender is not None:
-                await self._upsert_user_full(sender)
+            # Sender resolution hits the network and can raise ChannelPrivateError
+            # for private/restricted channels (or if we were removed). Isolate it so
+            # it neither aborts persistence nor skips the media download below, and
+            # downgrade the noise to debug.
+            try:
+                sender = await event.get_sender()
+                if sender is not None:
+                    await self._upsert_user_full(sender)
+            except Exception as exc:
+                logger.debug("get_sender failed (private/restricted channel?): %s", exc)
             if getattr(message, "media", None) is not None:
                 # Download inline rather than queueing.
                 try:
