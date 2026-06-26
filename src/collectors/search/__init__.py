@@ -153,6 +153,15 @@ def _try_import_pil():
 def _try_import_fitz():
     try:
         import fitz  # type: ignore  # PyMuPDF
+        # Malformed PDFs (yearbooks/dean's-list scans) make MuPDF's C layer spew
+        # "format error: No common ancestor in structure tree" etc. straight to
+        # stderr at high volume — flooding logs and tripping the error-flood
+        # self-heal into needless restarts. Silence the C-level chatter (parsing
+        # still works / degrades gracefully); this toggle is process-global.
+        try:
+            fitz.TOOLS.mupdf_display_errors(False)
+        except Exception:
+            pass
         return fitz
     except ImportError:
         return None
