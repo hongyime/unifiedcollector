@@ -241,6 +241,10 @@ const instagram = {
       location: (n.location && (n.location.name || n.location.short_name)) || null,
       location_lat: (n.location && (n.location.lat ?? n.location.latitude)) ?? null,
       location_lng: (n.location && (n.location.lng ?? n.location.longitude)) ?? null,
+      music_title: (n.clips_music_attribution_info && n.clips_music_attribution_info.song_name)
+        || (n.music_metadata && n.music_metadata.music_info && n.music_metadata.music_info.music_asset_info && n.music_metadata.music_info.music_asset_info.title) || null,
+      music_author: (n.clips_music_attribution_info && n.clips_music_attribution_info.artist_name)
+        || (n.music_metadata && n.music_metadata.music_info && n.music_metadata.music_info.music_asset_info && n.music_metadata.music_info.music_asset_info.display_artist) || null,
     };
   },
 
@@ -275,6 +279,7 @@ const instagram = {
       mentions: (cap.match(/@[\w.]+/g) || []).map((s) => s.slice(1)),
       location: m.location,
       location_lat: m.location_lat, location_lng: m.location_lng,
+      music_title: m.music_title, music_author: m.music_author,
       likes_count: m.likes_count, comments_count: m.comments_count,
       taken_at: m.taken_at, video_duration: n.video_duration || null,
       metadata: { views_count: m.views_count, shortcode: m.shortcode },

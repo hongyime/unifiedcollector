@@ -139,7 +139,7 @@ async function scheduleAlarm() {
   chrome.alarms.create(ALARM, { periodInMinutes: WATCHDOG_MIN });
   chrome.alarms.create(ALARM_REFRESH, { periodInMinutes: REFRESH_MIN });
   await setStatus({ swStartedAt: Date.now() });
-  await log("info", `✅ worker started v1.19.0 (anti-ban: persistent wall + headless-cooldown sync) — auto-tabs + ${WATCHDOG_MIN}-min watchdog + ${REFRESH_MIN}-min refresh`);
+  await log("info", `✅ worker started v1.20.0 (IG reel music + geo capture) — auto-tabs + ${WATCHDOG_MIN}-min watchdog + ${REFRESH_MIN}-min refresh`);
 }
 // onInstalled fires on every extension reload/update — the exact moment content
 // scripts in already-open tabs get SEVERED ("Extension context invalidated") and go

@@ -1360,6 +1360,27 @@ class TelegramCollector(BaseCollector):
             except Exception:
                 return None
 
+    @staticmethod
+    def _msg_refs(message):
+        """Extract (reply_to, fwd_chat, fwd_msg, via_bot) as strings for the
+        conversation-threading / forward-chain columns (were 0% populated)."""
+        def _s(v):
+            return str(v) if v not in (None, 0) else None
+        reply_to = _s(getattr(message, "reply_to_msg_id", None))
+        via_bot = _s(getattr(message, "via_bot_id", None))
+        fwd_chat = fwd_msg = None
+        fwd = getattr(message, "fwd_from", None)
+        if fwd is not None:
+            from_id = getattr(fwd, "from_id", None)
+            if from_id is not None:
+                for attr in ("channel_id", "chat_id", "user_id"):
+                    v = getattr(from_id, attr, None)
+                    if v is not None:
+                        fwd_chat = _s(v)
+                        break
+            fwd_msg = _s(getattr(fwd, "channel_post", None) or getattr(fwd, "saved_from_msg_id", None))
+        return reply_to, fwd_chat, fwd_msg, via_bot
+
     async def _upsert_message(self, message, chat_id, sender_uuid):
         async with self.pool.acquire() as conn:
             chat_row = await conn.fetchrow("SELECT id FROM telegram_chats WHERE platform_chat_id = $1", str(chat_id))
@@ -1373,16 +1394,19 @@ class TelegramCollector(BaseCollector):
             # Namespace message ID by chat to avoid global unique-constraint collisions
             # (different Telegram chats reuse low message IDs starting from 1).
             platform_msg_id = f"{chat_id}:{message.id}"
+            reply_to, fwd_chat, fwd_msg, via_bot = self._msg_refs(message)
             row = await conn.fetchrow("""
                 INSERT INTO telegram_messages (
                     platform_message_id, chat_id, sender_id, text, caption,
-                    media_type, platform_created_at, metadata
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    media_type, platform_created_at, metadata,
+                    reply_to_message_id, forward_from_chat_id, forward_from_message_id, via_bot_id
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                 ON CONFLICT (platform_message_id) DO NOTHING
                 RETURNING id
             """,
             platform_msg_id, chat_uuid, sender_uuid, message.message, getattr(message, 'caption', None),
-            media_type, message.date, json.dumps(message.to_dict(), default=_tg_json)
+            media_type, message.date, json.dumps(message.to_dict(), default=_tg_json),
+            reply_to, fwd_chat, fwd_msg, via_bot
             )
 
             # Capture reaction counts at backfill time (item 1.11 — historical
@@ -2225,14 +2249,16 @@ class TelegramCollector(BaseCollector):
                 json.dumps(message.to_dict(), default=_tg_json)
                 if hasattr(message, "to_dict") else "{}"
             )
+            reply_to, fwd_chat, fwd_msg, via_bot = self._msg_refs(message)
 
             if is_edit:
                 # Update existing if present; else insert.
                 await conn.execute("""
                     INSERT INTO telegram_messages (
                         platform_message_id, chat_id, sender_id, text, caption,
-                        media_type, platform_created_at, metadata
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                        media_type, platform_created_at, metadata,
+                        reply_to_message_id, forward_from_chat_id, forward_from_message_id, via_bot_id
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                     ON CONFLICT (platform_message_id) DO UPDATE SET
                         text = EXCLUDED.text,
                         caption = EXCLUDED.caption,
@@ -2242,19 +2268,22 @@ class TelegramCollector(BaseCollector):
                 getattr(message, "message", None),
                 getattr(message, "caption", None),
                 media_type, message.date, payload_json,
+                reply_to, fwd_chat, fwd_msg, via_bot,
                 )
             else:
                 await conn.execute("""
                     INSERT INTO telegram_messages (
                         platform_message_id, chat_id, sender_id, text, caption,
-                        media_type, platform_created_at, metadata
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                        media_type, platform_created_at, metadata,
+                        reply_to_message_id, forward_from_chat_id, forward_from_message_id, via_bot_id
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                     ON CONFLICT (platform_message_id) DO NOTHING
                 """,
                 platform_msg_id, chat_uuid, sender_uuid,
                 getattr(message, "message", None),
                 getattr(message, "caption", None),
                 media_type, message.date, payload_json,
+                reply_to, fwd_chat, fwd_msg, via_bot,
                 )
 
     async def _upsert_user_full(self, user):

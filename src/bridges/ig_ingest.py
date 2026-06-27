@@ -506,22 +506,25 @@ async def _save_posts(pool, platform, posts) -> int:
                         """
                         INSERT INTO instagram_posts
                           (id, platform_post_id, media_type, caption, hashtags, mentions,
-                           location_name, location_lat, location_lng,
+                           location_name, location_lat, location_lng, music_title, music_author,
                            likes_count, comments_count, video_duration,
                            platform_created_at, collected_at, metadata)
-                        VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
-                                to_timestamp($12), now(), $13::jsonb)
+                        VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,
+                                to_timestamp($14), now(), $15::jsonb)
                         ON CONFLICT (platform_post_id) DO UPDATE SET
                            caption=EXCLUDED.caption, likes_count=EXCLUDED.likes_count,
                            comments_count=EXCLUDED.comments_count, hashtags=EXCLUDED.hashtags,
                            mentions=EXCLUDED.mentions, location_name=EXCLUDED.location_name,
                            location_lat=COALESCE(EXCLUDED.location_lat, instagram_posts.location_lat),
                            location_lng=COALESCE(EXCLUDED.location_lng, instagram_posts.location_lng),
+                           music_title=COALESCE(EXCLUDED.music_title, instagram_posts.music_title),
+                           music_author=COALESCE(EXCLUDED.music_author, instagram_posts.music_author),
                            collected_at=now(), metadata=EXCLUDED.metadata
                         """,
                         ppid, p.get("media_type"), p.get("caption"),
                         p.get("hashtags") or [], p.get("mentions") or [],
                         p.get("location"), _num(p.get("location_lat")), _num(p.get("location_lng")),
+                        p.get("music_title"), p.get("music_author"),
                         _int(p.get("likes_count")), _int(p.get("comments_count")),
                         _int(p.get("video_duration")), _num(p.get("taken_at")),
                         json.dumps(p.get("metadata") or {}),

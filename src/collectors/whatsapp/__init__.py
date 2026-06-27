@@ -427,6 +427,20 @@ class WhatsappCollector(BaseCollector):
                 sha256=sha,
                 metadata=metadata,
             )
+            # Link the media back to its message so the row carries media_url/size
+            # (was 0% — the analyzer couldn't join a message to its image). cid is
+            # "wa_<platform_message_id>".
+            if self.pool is not None and cid.startswith("wa_"):
+                try:
+                    async with self.pool.acquire() as _c:
+                        await _c.execute(
+                            "UPDATE whatsapp_messages SET media_url=$1, "
+                            "media_size=COALESCE(media_size,$2) "
+                            "WHERE platform_message_id=$3 AND media_url IS NULL",
+                            str(dest), len(data), cid[3:],
+                        )
+                except Exception:
+                    logger.debug("wa media-link update failed for %s", cid, exc_info=True)
             self._known_ids.add(cid)
         except Exception as e:
             self.circuit_breaker.record_failure()
@@ -469,7 +483,11 @@ class WhatsappCollector(BaseCollector):
 
         payload = {
             "push_name": event.get("pushName", ""),
-            "display_name": event.get("verifiedBizName", "") or event.get("notify", ""),
+            # name was ~0% populated: verifiedBizName/notify are empty for personal
+            # contacts. Fall back to pushName (the user's WhatsApp display name —
+            # present on virtually every message) so `name` is actually filled.
+            "display_name": event.get("verifiedBizName", "") or event.get("notify", "")
+                            or event.get("pushName", "") or None,
             "phone_number": phone_number,
             "is_business": event.get("isBusinessMessage", False),
         }
