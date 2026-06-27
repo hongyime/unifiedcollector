@@ -139,7 +139,7 @@ async function scheduleAlarm() {
   chrome.alarms.create(ALARM, { periodInMinutes: WATCHDOG_MIN });
   chrome.alarms.create(ALARM_REFRESH, { periodInMinutes: REFRESH_MIN });
   await setStatus({ swStartedAt: Date.now() });
-  await log("info", `✅ worker started v1.18.0 (persistent anti-ban throttle wall) — auto-tabs + ${WATCHDOG_MIN}-min watchdog + ${REFRESH_MIN}-min refresh`);
+  await log("info", `✅ worker started v1.19.0 (anti-ban: persistent wall + headless-cooldown sync) — auto-tabs + ${WATCHDOG_MIN}-min watchdog + ${REFRESH_MIN}-min refresh`);
 }
 // onInstalled fires on every extension reload/update — the exact moment content
 // scripts in already-open tabs get SEVERED ("Extension context invalidated") and go
@@ -236,6 +236,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
     const base = await ingestBase();
     switch (msg.type) {
+      case "igCooldown": {
+        // Ask the bridge whether the HEADLESS collector is in a 429 cooldown so the
+        // extension can rest in sync (shared IG account → cooperative anti-ban).
+        try {
+          const r = await fetch(base + "/social/ig_cooldown");
+          sendResponse(await r.json());
+        } catch (e) {
+          sendResponse({ cooling: false, secs_left: 0, streak: 0 });
+        }
+        break;
+      }
       case "getTargets": {
         try {
           const r = await fetch(base + `/social/targets?platform=${encodeURIComponent(msg.platform || "instagram")}`);

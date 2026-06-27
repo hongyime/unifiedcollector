@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import re
+import time
 import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
@@ -247,6 +248,33 @@ async def get_targets_ig(request):  # /ig/targets alias
         "usernames": [t["username"] for t in out],
         "max_hop": IG_SPIDER_MAX_HOP,
     }))
+
+
+# ---------------------------------------------------------------------------
+# IG throttle coordination — the headless collector persists its 429 cooldown
+# (exponential, up to 4h) to service_cursors as "<expiry_epoch>:<streak>". Expose
+# it so the EXTENSION can rest in sync: both paths share the same IG account, so if
+# headless got rate-limited the extension must back off too (anti-ban). Cooperative
+# throttling beats two independent clients each probing a flagged account.
+# ---------------------------------------------------------------------------
+async def ig_cooldown(request):
+    pool = request.app["pool"]
+    cooling, secs_left, streak = False, 0, 0
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchval(
+                "SELECT last_processed_id FROM service_cursors WHERE service='instagram_rate_limit'"
+            )
+        if row and ":" in str(row):
+            exp_s, streak_s = str(row).split(":", 1)
+            expiry = float(exp_s)
+            streak = int(float(streak_s))
+            left = expiry - time.time()
+            if left > 0:
+                cooling, secs_left = True, int(left)
+    except Exception:
+        logger.debug("ig_cooldown read failed", exc_info=True)
+    return _cors(web.json_response({"cooling": cooling, "secs_left": secs_left, "streak": streak}))
 
 
 # ---------------------------------------------------------------------------
@@ -854,6 +882,7 @@ def make_app():
     app.router.add_route("OPTIONS", "/{tail:.*}", handle_options)
     # generic multi-platform
     app.router.add_get("/social/targets", get_targets)
+    app.router.add_get("/social/ig_cooldown", ig_cooldown)
     app.router.add_post("/social/ingest", ingest)
     app.router.add_post("/social/discover", discover)
     app.router.add_post("/social/posts", posts_handler)

@@ -438,8 +438,18 @@ const instagram = {
   },
 
   async runCycle() {
-    // ANTI-BAN: if IG threw a throttle/challenge wall recently, do NOT touch IG at
-    // all until it clears — rest in chunks (survives loop respawns via localStorage).
+    // ANTI-BAN (cooperative): the HEADLESS collector shares this IG account. If it's
+    // in a 429 cooldown, the extension must rest too — adopt its remaining time as
+    // our own wall so we don't probe a flagged account from the other side.
+    try {
+      const cd = await send({ type: "igCooldown" });
+      if (cd && cd.cooling && cd.secs_left > 0) {
+        setWall("instagram", Math.ceil(cd.secs_left / 60));
+        clog("warn", `IG: headless in 429 cooldown (streak ${cd.streak}, ${Math.ceil(cd.secs_left / 60)}m) — extension resting in sync`, "instagram");
+      }
+    } catch (e) {}
+    // if IG threw a throttle/challenge wall recently (either path), do NOT touch IG
+    // at all until it clears — rest in chunks (survives loop respawns via localStorage).
     const left = wallLeftMs("instagram");
     if (left > 0) {
       clog("warn", `IG throttled — resting, ${Math.ceil(left / 60000)}m left (not touching IG)`, "instagram");
