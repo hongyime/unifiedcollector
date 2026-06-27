@@ -1,5 +1,7 @@
 import { NavLink } from "react-router-dom";
 import { clsx } from "clsx";
+import { useQuery } from "@tanstack/react-query";
+import { api } from "../../services/api";
 import {
   LayoutDashboard,
   Database,
@@ -70,12 +72,54 @@ const groups = [
   },
 ];
 
+// Branded collector mark (matches favicon): multi-platform signals funnelled in.
+function LogoMark() {
+  return (
+    <svg viewBox="0 0 48 48" className="w-7 h-7 shrink-0" aria-hidden="true">
+      <rect width="48" height="48" rx="11" fill="#12141c" />
+      <circle cx="13" cy="12" r="2.6" fill="#47bfff" />
+      <circle cx="24" cy="9.5" r="2.6" fill="#9b5cff" />
+      <circle cx="35" cy="12" r="2.6" fill="#47bfff" />
+      <path d="M8.5 17 L39.5 17 L27 32 L27 40.5 a1.8 1.8 0 0 1-2.6 1.6 L21 40.2 L21 32 Z" fill="#863bff" />
+      <circle cx="24" cy="45.4" r="2.2" fill="#47bfff" />
+    </svg>
+  );
+}
+
+// At-a-glance collection health so you don't have to open a page to know the
+// firehose is alive. Reuses the same /collectors query as the dashboard.
+function StatusPill() {
+  const { data: collectors } = useQuery({
+    queryKey: ["collectors"],
+    queryFn: api.collectors,
+    refetchInterval: 10_000,
+  });
+  const total = collectors?.length ?? 0;
+  const running = collectors?.filter((c) => c.status === "running").length ?? 0;
+  const dot =
+    total === 0 ? "bg-text-muted" : running === total ? "bg-emerald-500" : running > 0 ? "bg-amber-500" : "bg-rose-500";
+  return (
+    <div className="flex items-center gap-1.5 mt-2" title="Collectors running / total">
+      <span className={clsx("w-2 h-2 rounded-full", dot, running > 0 && "animate-pulse")} />
+      <span className="text-[10px] text-text-secondary tabular-nums">
+        {total === 0 ? "loading…" : `${running}/${total} collectors live`}
+      </span>
+    </div>
+  );
+}
+
 export function Sidebar() {
   return (
     <aside className="fixed left-0 top-0 bottom-0 w-52 bg-surface border-r border-border flex flex-col">
       <div className="p-4 border-b border-border">
-        <h1 className="text-sm font-semibold tracking-wide text-text-primary">UnifiedCollector</h1>
-        <p className="text-[10px] text-text-muted mt-0.5">Dashboard</p>
+        <div className="flex items-center gap-2.5">
+          <LogoMark />
+          <div className="min-w-0">
+            <h1 className="text-sm font-semibold tracking-wide text-text-primary leading-tight">UnifiedCollector</h1>
+            <p className="text-[10px] text-text-muted">Collection control</p>
+          </div>
+        </div>
+        <StatusPill />
       </div>
       <nav className="flex-1 p-3 overflow-y-auto">
         {groups.map((group) => (

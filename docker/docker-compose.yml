@@ -589,6 +589,9 @@ services:
       - z:/unifiedcollector/media:/media
       - ../credentials:/app/credentials
       - ../src:/app/src
+      # live-mount the built SPA so frontend changes apply on recreate (rebuild
+      # on host with `npm run build` in dashboard/frontend) — no image rebuild.
+      - ../dashboard/frontend/dist:/app/dashboard/frontend/dist
     depends_on:
       postgres:
         condition: service_healthy
