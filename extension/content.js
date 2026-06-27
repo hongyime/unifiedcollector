@@ -23,6 +23,14 @@ const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} };
 const lsNum = (k) => { const n = parseInt(lsGet(k, "0"), 10); return Number.isFinite(n) ? n : 0; };
 const lsBump = (k) => { const n = lsNum(k) + 1; lsSet(k, String(n)); return n; };
 
+// PERSISTENT throttle wall (anti-ban). When Instagram throttles/challenges us, the
+// per-loop 45m sleep used to die on every tab refresh / SW wake / reload — so a fresh
+// loop immediately re-hit a *flagged* account every ~1-2 min (the worst thing for a
+// ban). Persist the wall expiry in localStorage so ANY respawned loop honours it and
+// leaves IG completely alone until it clears. Each new wall extends the rest.
+function wallLeftMs(platform) { return Math.max(0, lsNum("uc_wall_" + platform) - Date.now()); }
+function setWall(platform, mins) { lsSet("uc_wall_" + platform, String(Date.now() + mins * 60000)); }
+
 // ---------------------------------------------------------------------------
 // HUMAN PACING. A real person browsing is slow, irregular, and takes breaks.
 // Scraping 257 profiles back-to-back is what got the IG account flagged for
@@ -427,6 +435,14 @@ const instagram = {
   },
 
   async runCycle() {
+    // ANTI-BAN: if IG threw a throttle/challenge wall recently, do NOT touch IG at
+    // all until it clears — rest in chunks (survives loop respawns via localStorage).
+    const left = wallLeftMs("instagram");
+    if (left > 0) {
+      clog("warn", `IG throttled — resting, ${Math.ceil(left / 60000)}m left (not touching IG)`, "instagram");
+      await sleep(Math.min(left, 600000)); // re-check every ≤10m
+      return { targets: 0, saved: 0, discovered: 0, walled: true };
+    }
     if (!IG_SELF_SEEDED) { IG_SELF_SEEDED = true; this.seedFromSelf(); }  // once/session, detached
     let resp = [];
     try { resp = (await send({ type: "getTargets", platform: "instagram" })) || []; } catch (e) {}
@@ -450,7 +466,7 @@ const instagram = {
         await this._sendProfile(user);
         saved += await this._expiring(user, t.username);
       } catch (e) {
-        if (e instanceof WallError) { clog("warn", "throttled in sweep — backing off", "instagram"); await send({ type: "wall", platform: "instagram" }).catch(() => {}); return { targets: visited, saved, discovered }; }
+        if (e instanceof WallError) { setWall("instagram", 45); clog("warn", "throttled in sweep — backing off 45m (persisted, survives refresh)", "instagram"); await send({ type: "wall", platform: "instagram", mins: 45 }).catch(() => {}); return { targets: visited, saved, discovered, walled: true }; }
         clog("warn", `sweep failed ${t.username}: ${e.message}`, "instagram");
       }
       await hsleep(9000);
@@ -470,7 +486,7 @@ const instagram = {
         const r = await this._deep(user, t.username, hop);
         saved += r.saved; discovered += r.discovered;
       } catch (e) {
-        if (e instanceof WallError) { clog("warn", `throttled at ${t.username} — backing off`, "instagram"); await send({ type: "wall", platform: "instagram" }).catch(() => {}); break; }
+        if (e instanceof WallError) { setWall("instagram", 45); clog("warn", `throttled at ${t.username} — backing off 45m (persisted)`, "instagram"); await send({ type: "wall", platform: "instagram", mins: 45 }).catch(() => {}); break; }
         clog("warn", `scrape failed ${t.username}: ${e.message}`, "instagram");
       }
       await hsleep(22000); // ~13–35s between profiles
@@ -893,7 +909,8 @@ async function mainLoop() {
       } catch (e) {
         if (e instanceof WallError) {
           const mins = 40 + Math.floor(Math.random() * 20); // 40–60m
-          clog("warn", `${p.label} hit a throttle/login wall — sleeping ${mins}m before resuming`, p.label);
+          setWall(p.id, mins);  // persist so a respawned loop won't immediately re-hit it
+          clog("warn", `${p.label} hit a throttle/login wall — sleeping ${mins}m (persisted, survives refresh)`, p.label);
           await send({ type: "wall", platform: p.label, mins }).catch(() => {});
           await sleep(mins * 60000);
           continue;
