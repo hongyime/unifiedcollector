@@ -42,6 +42,45 @@ def _haversine_m(lat1, lon1, lat2, lon2) -> float:
     return 2 * r * math.asin(min(1.0, math.sqrt(a)))
 
 
+def _encode_polyline(points, precision: int = 5) -> str:
+    """Encode a list of [lat,lng] points into a Google encoded polyline string.
+
+    The Strava /api/v3 summary_polyline is unreachable in cookie mode (401), so we
+    DERIVE it from the GPS track we already scrape via the web XHR endpoint. The
+    analyzer's map can then use the compact polyline OR the full gps_streams.latlng.
+    Down-sampled to a manageable point count (it's an overview line, not the track).
+    """
+    if not points:
+        return ""
+    # down-sample evenly to <= MAX points (full detail stays in gps_streams.latlng)
+    MAX = 600
+    if len(points) > MAX:
+        step = len(points) / MAX
+        points = [points[int(i * step)] for i in range(MAX)]
+    factor = 10 ** precision
+
+    def _enc(v: int) -> str:
+        v = v << 1 if v >= 0 else ~(v << 1)
+        out = []
+        while v >= 0x20:
+            out.append(chr((0x20 | (v & 0x1F)) + 63))
+            v >>= 5
+        out.append(chr(v + 63))
+        return "".join(out)
+
+    res = []
+    prev_lat = prev_lng = 0
+    for pt in points:
+        if not pt or len(pt) != 2:
+            continue
+        lat_i = int(round(pt[0] * factor))
+        lng_i = int(round(pt[1] * factor))
+        res.append(_enc(lat_i - prev_lat))
+        res.append(_enc(lng_i - prev_lng))
+        prev_lat, prev_lng = lat_i, lng_i
+    return "".join(res)
+
+
 def _is_truncated(summary_latlng, track_point) -> bool:
     """True if the GPS track start/end was hidden by a privacy zone.
 
@@ -1192,6 +1231,9 @@ class StravaCollector(BaseCollector):
                                 pz_start = True
                                 tp_start = f"{summ_start[0]},{summ_start[1]}"
 
+                        # Derive summary_polyline from the track (API path is 401-
+                        # blocked) so the analyzer's map has a compact route line.
+                        derived_polyline = _encode_polyline(latlng_data) if latlng_data else None
                         await conn.execute(
                             "UPDATE strava_activities SET "
                             "start_latlng           = COALESCE(start_latlng, $1), "
@@ -1200,10 +1242,12 @@ class StravaCollector(BaseCollector):
                             "privacy_zone_start     = $4, "
                             "privacy_zone_end       = $5, "
                             "truncation_point_start = $6, "
-                            "truncation_point_end   = $7 "
+                            "truncation_point_end   = $7, "
+                            "summary_polyline       = COALESCE(NULLIF(summary_polyline,''), $9) "
                             "WHERE id = $8",
                             sll, ell, stream_status, pz_start, pz_end,
                             tp_start, tp_end, act_row['id'],
+                            derived_polyline or None,
                         )
         except Exception as e: logger.debug("GPS stream fetch failed for activity %s: %s", activity_id, e)
 

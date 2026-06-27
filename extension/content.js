@@ -239,6 +239,8 @@ const instagram = {
       taken_at: n.taken_at_timestamp || n.taken_at || null,
       shortcode: n.shortcode || n.code || null,
       location: (n.location && (n.location.name || n.location.short_name)) || null,
+      location_lat: (n.location && (n.location.lat ?? n.location.latitude)) ?? null,
+      location_lng: (n.location && (n.location.lng ?? n.location.longitude)) ?? null,
     };
   },
 
@@ -272,6 +274,7 @@ const instagram = {
       hashtags: (cap.match(/#[\w.]+/g) || []).map((s) => s.slice(1)),
       mentions: (cap.match(/@[\w.]+/g) || []).map((s) => s.slice(1)),
       location: m.location,
+      location_lat: m.location_lat, location_lng: m.location_lng,
       likes_count: m.likes_count, comments_count: m.comments_count,
       taken_at: m.taken_at, video_duration: n.video_duration || null,
       metadata: { views_count: m.views_count, shortcode: m.shortcode },
