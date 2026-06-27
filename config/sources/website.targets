@@ -425,3 +425,22 @@ https://www.smu.edu.sg/ | Singapore Management University | 1
 https://www.suss.edu.sg/ | Singapore University of Social Sciences | 1
 https://www.sutd.edu.sg/ | Singapore University of Technology and Design | 1
 https://www.uas.edu.sg/ | University of the Arts Singapore | 1
+
+# --- SG higher-ed FACULTY / PEOPLE directories (Bryan 2026-06-27) ---
+# Seed the faculty/staff subdomains directly (priority 5) so the BFS starts AT the
+# people pages and harvests profile headshots, instead of wandering the root domain.
+https://faculty.smu.edu.sg/ | SMU Faculty Directory | 5
+https://dr.ntu.edu.sg/ | NTU Research/Faculty Profiles | 5
+https://fass.nus.edu.sg/ | NUS Arts & Social Sciences Faculty | 5
+https://medicine.nus.edu.sg/ | NUS Medicine Faculty | 5
+https://law.nus.edu.sg/ | NUS Law Faculty | 5
+https://www.comp.nus.edu.sg/ | NUS Computing Faculty | 5
+https://www.business.nus.edu.sg/ | NUS Business Faculty | 5
+https://cde.nus.edu.sg/ | NUS Design & Engineering Faculty | 5
+https://www.science.nus.edu.sg/ | NUS Science Faculty | 5
+https://www.ntu.edu.sg/scse | NTU Computer Science & Engineering | 5
+https://www.ntu.edu.sg/business | NTU Nanyang Business School | 5
+https://www.ntu.edu.sg/medicine | NTU LKC Medicine | 5
+https://www.suss.edu.sg/about-suss/faculty-and-staff | SUSS Faculty & Staff | 5
+https://www.nafa.edu.sg/ | Nanyang Academy of Fine Arts | 5
+https://www.singaporetech.edu.sg/ | SIT Faculty | 5
