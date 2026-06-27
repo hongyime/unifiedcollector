@@ -2059,25 +2059,26 @@ class TelegramCollector(BaseCollector):
                     chat_id, _ = resolve_id(raw_chat)
                 except Exception:
                     chat_id = raw_chat
+            # capture WHEN we observed the deletion (telegram doesn't tell us the
+            # exact delete time; observation time is the best available).
+            deleted_at_iso = datetime.now(tz=timezone.utc).isoformat()
+            patch = json.dumps({"deleted": True, "deleted_at": deleted_at_iso})
             for msg_id in (event.deleted_ids or []):
                 async with self.pool.acquire() as conn:
-                    # Mark the row deleted in metadata; no-op if the row doesn't
-                    # exist (deletion of a message we never saw). telegram_messages
-                    # has no updated_at column — only touch metadata.
+                    # Merge a {deleted, deleted_at} patch into metadata; no-op if the
+                    # row doesn't exist (deletion of a message we never saw).
                     if chat_id is not None:
                         await conn.execute("""
                             UPDATE telegram_messages
-                            SET metadata = jsonb_set(COALESCE(metadata,'{}'::jsonb),
-                                '{deleted}', 'true'::jsonb, true)
+                            SET metadata = COALESCE(metadata,'{}'::jsonb) || $2::jsonb
                             WHERE platform_message_id = $1
-                        """, f"{chat_id}:{msg_id}")
+                        """, f"{chat_id}:{msg_id}", patch)
                     else:
                         await conn.execute("""
                             UPDATE telegram_messages
-                            SET metadata = jsonb_set(COALESCE(metadata,'{}'::jsonb),
-                                '{deleted}', 'true'::jsonb, true)
+                            SET metadata = COALESCE(metadata,'{}'::jsonb) || $2::jsonb
                             WHERE platform_message_id LIKE $1
-                        """, f"%:{msg_id}")
+                        """, f"%:{msg_id}", patch)
         except Exception as exc:
             logger.error("_on_message_deleted error: %s", exc, exc_info=True)
 

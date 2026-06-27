@@ -273,6 +273,29 @@ class WhatsappCollector(BaseCollector):
             logger.debug("lid_map upsert failed: %s", e)
 
     async def _handle_message_event(self, event: dict, targets: list[str]):
+        # WhatsApp "delete for everyone" (revoke) — flag the original message + when.
+        if event.get("deletion"):
+            rid = event.get("revoked_message_id")
+            if rid and self.pool is not None:
+                ts = event.get("timestamp")
+                try:
+                    dt = (datetime.fromtimestamp(float(ts), tz=timezone.utc)
+                          if ts else datetime.now(timezone.utc))
+                except (TypeError, ValueError, OSError):
+                    dt = datetime.now(timezone.utc)
+                try:
+                    async with self.pool.acquire() as c:
+                        await c.execute(
+                            "UPDATE whatsapp_messages SET is_deleted=true, "
+                            "deleted_at=COALESCE(deleted_at,$1), status='revoked' "
+                            "WHERE platform_message_id=$2",
+                            dt, rid,
+                        )
+                    logger.info("whatsapp: message %s revoked (delete-for-everyone)", rid)
+                except Exception:
+                    logger.debug("wa deletion update failed for %s", rid, exc_info=True)
+            return
+
         msg_id = event.get("message_id") or event.get("key", {}).get("id", "")
         chat_jid = event.get("chat_jid") or event.get("key", {}).get("remoteJid", "")
 

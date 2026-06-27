@@ -514,10 +514,10 @@ class BeeperWriter:
                     sender_id, sender_name, is_sender,
                     timestamp, sort_key, msg_type, text,
                     is_deleted, is_unread, mentions, seen,
-                    reply_to_id, edited_at, attachments, reactions, raw
+                    reply_to_id, edited_at, attachments, reactions, raw, deleted_at
                 ) VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-                    $14, $15, $16, $17, $18, $19, $20
+                    $14, $15, $16, $17, $18, $19, $20, $21
                 )
                 ON CONFLICT (chat_id, message_id) DO UPDATE SET
                     sender_id = EXCLUDED.sender_id,
@@ -535,7 +535,11 @@ class BeeperWriter:
                     edited_at = EXCLUDED.edited_at,
                     attachments = EXCLUDED.attachments,
                     reactions = EXCLUDED.reactions,
-                    raw = EXCLUDED.raw
+                    raw = EXCLUDED.raw,
+                    -- stamp deleted_at the first time a message flips to deleted
+                    deleted_at = CASE
+                        WHEN EXCLUDED.is_deleted AND beeper_shadow_messages.deleted_at IS NULL
+                        THEN now() ELSE beeper_shadow_messages.deleted_at END
                 RETURNING (xmax = 0) AS inserted
                 """,
                 msg.get("id"),
@@ -558,6 +562,7 @@ class BeeperWriter:
                 json.dumps(msg.get("attachments") or [], default=str),
                 json.dumps(msg.get("reactions") or [], default=str),
                 json.dumps(msg, default=str),
+                datetime.now(timezone.utc) if msg.get("isDeleted") else None,
             )
         return bool(row and row["inserted"])
 
