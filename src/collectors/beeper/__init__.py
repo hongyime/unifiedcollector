@@ -498,13 +498,21 @@ class BeeperWriter:
         """Upsert a message. Returns True if the row is new (insert), False if it
         was an update — caller uses this for paging-stop heuristics."""
         ts = _parse_ts(msg.get("timestamp"))
+        # Some networks (esp. Discord attachments/screenshots) deliver a bogus
+        # epoch-0 timestamp ("1970-01-01T00:00:00.000Z"). These are REAL messages
+        # with content, so don't store 1970 (it poisons "oldest" queries) and don't
+        # drop them — fall back to ingest time as the best available proxy.
+        if ts is not None and ts.year < 2000:
+            ts = None
         if not ts:
-            self.log.warning(
-                "skipping message with no timestamp: chat=%s id=%s",
-                msg.get("chatID"),
-                msg.get("id"),
-            )
-            return False
+            if msg.get("text") or msg.get("attachments"):
+                ts = datetime.now(timezone.utc)  # keep real content w/ observation time
+            else:
+                self.log.warning(
+                    "skipping message with no timestamp: chat=%s id=%s",
+                    msg.get("chatID"), msg.get("id"),
+                )
+                return False
 
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
