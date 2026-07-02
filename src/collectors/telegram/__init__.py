@@ -1984,13 +1984,31 @@ class TelegramCollector(BaseCollector):
         # listening and historical catch-up run concurrently instead of backfill
         # only happening once per (re)launch.
         drain_interval = float(os.getenv("TELEGRAM_BACKFILL_DRAIN_INTERVAL", "60"))
+        health_interval = float(os.getenv("TELEGRAM_HEALTH_INTERVAL", "60"))
         spider_on = os.getenv("TELEGRAM_SPIDER_ENABLED", "true").lower() == "true"
         last_drain = asyncio.get_event_loop().time()
+        last_health = asyncio.get_event_loop().time()
         while self._realtime_running and not self._stop.is_set():
             await asyncio.sleep(1.0)
+            now = asyncio.get_event_loop().time()
+            # SELF-HEAL: reconnect any worker whose Telethon (MTProto) client dropped.
+            # The container healthcheck only tests HTTP, and the worker watchdog exempts
+            # realtime sources from restart — so a dead connection used to sit silently
+            # (this happened: telegram dead ~26h "Cannot send requests while disconnected").
+            # Reconnecting the same client preserves the registered event handlers.
+            if now - last_health >= health_interval:
+                last_health = now
+                for w in self._workers:
+                    try:
+                        if not w.client.is_connected():
+                            logger.warning("telegram: worker=%d account=%s DISCONNECTED — reconnecting",
+                                           w.worker_id, w.account.name)
+                            await w.client.connect()
+                            logger.info("telegram: worker=%d reconnected", w.worker_id)
+                    except Exception as exc:
+                        logger.error("telegram: worker=%d reconnect failed: %s", w.worker_id, exc)
             if not spider_on:
                 continue
-            now = asyncio.get_event_loop().time()
             if now - last_drain < drain_interval:
                 continue
             last_drain = now

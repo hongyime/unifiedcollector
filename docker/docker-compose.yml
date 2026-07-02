@@ -231,6 +231,29 @@ services:
       start_period: 30s
     restart: unless-stopped
 
+  # Data-freshness watchdog: the container healthchecks on collector_telegram /
+  # wa_bridge_* only test HTTP and stay green when the MTProto/WhatsApp connection
+  # is dead. This checks the newest row per realtime source and restarts the owning
+  # container(s) when a source goes stale (telegram once sat dead 26h, whatsapp 4d).
+  # Reuses the collector image; needs the docker socket to issue restarts.
+  watchdog:
+    image: unifiedcollector-collector:latest
+    container_name: unifiedcollector_watchdog
+    command: python -m src.watchdog.freshness
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      WATCHDOG_INTERVAL: "300"
+      WATCHDOG_STALE_TELEGRAM: "7200"
+      WATCHDOG_STALE_WHATSAPP: "14400"
+      WATCHDOG_STALE_BEEPER: "10800"
+    volumes:
+      - ../src:/app/src
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   collector_website:
     image: unifiedcollector-collector:latest
     container_name: unifiedcollector_collector_website
