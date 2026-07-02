@@ -435,6 +435,43 @@ class Lemon8Collector(BaseCollector):
         seed = "|".join(seed_parts)
         return "fyp_" + hashlib.sha256(seed.encode("utf-8", "ignore")).hexdigest()[:32]
 
+    async def _link_lemon8_media(self, note_id: str, username: str, url: str, is_video: bool) -> None:
+        """Group a feed-card media URL under its post so lemon8_posts.image_urls /
+        video_url is populated (was 0% — media existed as loose files, unlinked to
+        posts). Idempotent: creates a minimal post row if absent, else appends the
+        URL to image_urls (deduped). A later detail fetch fills title/stats."""
+        if not note_id or not url:
+            return
+        post_url = f"https://www.lemon8-app.com/@{username}/{note_id}"
+        async with self.pool.acquire() as conn:
+            if is_video:
+                await conn.execute(
+                    """
+                    INSERT INTO lemon8_posts (platform_post_id, username, video_url, post_url)
+                    VALUES ($1, $2, $3, $4)
+                    ON CONFLICT (platform_post_id) DO UPDATE SET
+                        video_url = COALESCE(lemon8_posts.video_url, EXCLUDED.video_url),
+                        username  = COALESCE(lemon8_posts.username, EXCLUDED.username),
+                        post_url  = COALESCE(lemon8_posts.post_url, EXCLUDED.post_url)
+                    """,
+                    note_id, username, url, post_url,
+                )
+            else:
+                await conn.execute(
+                    """
+                    INSERT INTO lemon8_posts (platform_post_id, username, image_urls, post_url)
+                    VALUES ($1, $2, ARRAY[$3], $4)
+                    ON CONFLICT (platform_post_id) DO UPDATE SET
+                        image_urls = (
+                            SELECT array_agg(DISTINCT e)
+                            FROM unnest(COALESCE(lemon8_posts.image_urls, '{}') || EXCLUDED.image_urls) e
+                        ),
+                        username = COALESCE(lemon8_posts.username, EXCLUDED.username),
+                        post_url = COALESCE(lemon8_posts.post_url, EXCLUDED.post_url)
+                    """,
+                    note_id, username, url, post_url,
+                )
+
     async def _upsert_post(self, user_id: str, post_data: dict):
         platform_post_id = self._resolve_post_id(post_data)
         if not platform_post_id:
@@ -662,30 +699,41 @@ class Lemon8Collector(BaseCollector):
                 continue
             uname = item.get("username") or "feed"
             entity_id = uname
-            content_id = "feed_" + hashlib.sha256(url.encode("utf-8", "ignore")).hexdigest()
-            ext = "mp4" if item.get("media_type") == "video" else "jpg"
+            is_video = item.get("media_type") == "video"
+            ext = "mp4" if is_video else "jpg"
             ctype = "profile_photo" if item.get("is_profile_photo") else (
-                "video" if item.get("media_type") == "video" else "image"
+                "video" if is_video else "image"
             )
 
-            # FYP feed cards lack post detail (title/desc/stats). Extract note_id
-            # from the item and fetch the note page for full detail before upserting.
-            if (not item.get("is_profile_photo")
-                    and os.getenv("LEMON8_FYP_DETAIL_FETCH", "false").lower() == "true"):
-                note_id = item.get("note_id") or item.get("itemId") or item.get("item_id") or ""
+            # Resolve the note (post) id from the card so media can be GROUPED BY POST:
+            # embed it in content_id AND link it into lemon8_posts.image_urls/video_url
+            # (was 0% — the media existed only as loose files). Falls back to the old
+            # feed_<hash> key when the card exposes no id (algorithmic FYP thumbnails).
+            note_id = ""
+            if not item.get("is_profile_photo"):
+                note_id = str(item.get("note_id") or item.get("itemId") or item.get("item_id") or "")
                 if not note_id and item.get("href"):
                     nm = re.search(r'/(\d{10,20})(?:\?|$)', item["href"])
                     if nm:
                         note_id = nm.group(1)
-                if note_id:
+            uhash = hashlib.sha256(url.encode("utf-8", "ignore")).hexdigest()
+            content_id = f"{note_id}_{uhash}" if note_id else "feed_" + uhash
+            enhanced_url = _enhance_image_url(url) if self._enhance_urls else url
+
+            if note_id:
+                try:
+                    await self._link_lemon8_media(note_id, uname, enhanced_url, is_video)
+                except Exception as e:
+                    logger.debug("lemon8 media-link failed for note %s: %s", note_id, e)
+
+                # Optional deep detail fetch (title/desc/stats) — off by default.
+                if os.getenv("LEMON8_FYP_DETAIL_FETCH", "false").lower() == "true":
                     try:
-                        detail = await self._fetch_note_detail(client, uname, str(note_id))
+                        detail = await self._fetch_note_detail(client, uname, note_id)
                         if detail:
                             ok = await self._upsert_post(entity_id, detail)
                             if ok:
                                 logger.info("lemon8 FYP detail: upserted post %s for %s", note_id, uname)
-                        else:
-                            logger.debug("lemon8 FYP detail: no data for note %s", note_id)
                     except Exception as e:
                         logger.debug("lemon8 FYP detail fetch %s failed: %s", note_id, e)
 
@@ -697,7 +745,7 @@ class Lemon8Collector(BaseCollector):
                 "entity_name": uname,
                 "content_type": ctype,
                 "content_id": content_id,
-                "url": _enhance_image_url(url) if self._enhance_urls else url,
+                "url": enhanced_url,
                 "extension": ext,
                 "raw": item,
             })
