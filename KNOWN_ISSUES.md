@@ -22,6 +22,24 @@ actionable residue). Update or strike items as they're fixed.
 
 8. ~~**Observability gap.**~~ → Resolved, see below.
 
+9. ~~**Silent connection death on realtime sources.**~~ → Resolved 2026-07 (watchdog).
+
+10. **Platform-data limitations (won't-fix, documented so they don't look like
+    bugs).** Some columns sit ~empty because the *source* doesn't expose the data on
+    the accessible surface, not because we drop it:
+    - `strava_athletes.city/sex/weight/bio` + `strava_activities` HR/watts/calories —
+      only on the OAuth API (cookie mode is 401); the reduced public page omits them.
+      We *do* have the follow graph, name, photo, GPS tracks + derived polyline.
+    - `instagram_posts.reach/impressions` — owner-only insights; unobtainable for others.
+    - `lemon8_posts.image_urls` — lemon8's page doesn't reliably pair media with a
+      post id, so per-post grouping is mostly impossible. The **media itself is fully
+      collected** (~11k files); only the post↔media grouping is missing.
+    - `facebook_posts` engagement — FB obfuscates the feedback GraphQL; also very
+      low volume.
+    - `youtube_videos.tags/category` — needs an extra `videos.list` call per video
+      (quota cost) for low-value metadata; deferred.
+    - `x_posts.quote_count` — not in the DOM the harvester reads.
+
 ## Resolved
 
 - **Clean-volume boot (was #1)** -- DONE. The `src.db.migrate.apply_all()`
@@ -83,3 +101,14 @@ actionable residue). Update or strike items as they're fixed.
   `account_quota_usage` table. `uc_source_health_age_seconds` and
   `uc_source_crash_count` track per-source health and crash counts. Total
   metrics now at 18+. (2026-06-07)
+
+- **Silent connection death (was #9)** -- DONE. The container healthchecks on
+  `collector_telegram` / `wa_bridge_*` only test an HTTP endpoint, which stays green
+  while the MTProto/WhatsApp connection is dead, and the worker's own watchdog
+  *exempts* realtime sources from restart (a quiet chat looks idle). Result: telegram
+  once ran dead ~26h and whatsapp ~4d unnoticed. Two fixes: (a) the telegram realtime
+  loop now checks `client.is_connected()` every 60s and reconnects dropped workers;
+  (b) a new `watchdog` service (`src/watchdog/freshness.py`) checks the newest row per
+  realtime source every 5min and restarts the owning container(s) via the docker
+  socket when stale (telegram 2h / whatsapp 4h / beeper 3h), cooldown-guarded.
+  (2026-07-02)

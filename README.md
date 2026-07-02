@@ -1,6 +1,60 @@
 # unifiedcollector
 
-Unified ingestion plane for 11 source platforms (github, youtube, strava, search, website, tiktok, lemon8, whatsapp, telegram, instagram, matrix). Read-only by design.
+Unified ingestion plane for 11 source platforms (github, youtube, strava, search,
+website, tiktok, lemon8, whatsapp, telegram, instagram, beeper/matrix). Read-only by
+design. Feeds a downstream **unifiedanalyzer** (separate service) that does identity
+resolution, face clustering, timelines, co-presence and change-tracking.
+
+## Architecture
+
+Everything runs as Docker Compose services sharing one Postgres DB. Code lives under
+`src/` and is **bind-mounted** into the containers, so changes apply on
+`docker restart` / `up -d` **without an image rebuild** (the vhdx must not grow).
+
+### Collection paths (three ways in)
+- **Headless collectors** (`src/collectors/<source>`, `python -m src.main worker
+  --source X`) — server-side scraping with stored cookies: `instagram`, `tiktok`,
+  `lemon8`, `youtube`, `strava`, `github`, `search`, `website`. Grouped for RAM:
+  `collector_lowrisk` runs github+strava+search; the rest are per-source containers.
+- **Browser extension** — "UnifiedCollector Bridge" (Chrome MV3, `extension/`). A
+  continuous in-tab content-script loop scrapes your *logged-in* social sessions
+  (`instagram`, `threads`, `tiktok`, `lemon8`, `x`, `facebook`), following-first, and
+  POSTs to the `ig_ingest` bridge. This is the ban-safe primary path for Meta/X.
+- **Realtime messaging** — push/event sources that park forever:
+  - `telegram` — Telethon MTProto, 4 accounts, live `NewMessage`/edits/deletes/
+    reactions + full-history backfill (to 2018 = account age).
+  - `whatsapp` — Baileys bridges (`wa_bridge_1/2`, TS, `src/bridges/whatsapp`) →
+    RabbitMQ → `collector_whatsapp` consumer. On-demand deep history + live + revokes.
+  - `beeper` — Matrix/Beeper, multi-network (Facebook/Discord/etc), reaches ~2011.
+
+### Support services
+- **`ig_ingest`** (aiohttp, :8765) — receives extension data → `media_items` + posts +
+  `social_users`; live IG cookie sync (`/social/cookies`), anti-ban cooldown
+  coordination (`/social/ig_cooldown`), Threads↔Instagram handle cross-pollination.
+- **`dashboard`** (React/Vite + FastAPI, :8700) — collection *operations* (collector
+  health, media browser, per-source stats, live status). Stays in its lane; the
+  analyzer (:8002) owns investigation/identity.
+- **`watchdog`** (`src/watchdog/freshness.py`) — data-freshness safety net: restarts a
+  realtime collector's container if its newest row goes stale (the container
+  healthcheck only tests HTTP, so a dead MTProto/WhatsApp connection would otherwise
+  sit silently — telegram once ran dead 26h, whatsapp 4d).
+- **infra** — `postgres` (unified DB), `rabbitmq` (messaging broker), `redis` (dedup/
+  cache), `scheduler`, `onboard_bot`, `backup`.
+
+### Key mechanisms
+- **`media_items`** — one table for all downloaded media. Dedup by `(source,
+  content_id)` UNIQUE **and** cross-collector `sha256`. Flat dated naming
+  `<YYYYMMDD>_<platform>_<user>_<kind><id>.<ext>`.
+- **`social_users`** — universal cross-platform person registry (usernames, ids,
+  profile photos, contexts like follow/comment/tagged/author).
+- **Deletion tracking** — for the analyzer's "what changed since last viewed":
+  telegram `metadata->>'deleted'`+`deleted_at`, whatsapp/beeper `is_deleted`+
+  `deleted_at` (partial-indexed).
+- **Anti-ban** — headless: exponential 429 backoff (15m→4h, persisted); extension:
+  persistent throttle walls surviving tab refresh; both cooperate via `ig_cooldown`.
+- **Migrations** — migrate-on-boot with a `schema_migrations` ledger. **Never edit an
+  applied migration** (checksum drift bricks every migrate-on-boot collector); add a
+  new file.
 
 ## Outbound functionality — intentionally absent
 
