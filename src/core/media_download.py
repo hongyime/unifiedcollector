@@ -360,15 +360,15 @@ async def download(
 
     try:
         if backend == "httpx":
-            return await _do_httpx(url, dest_dir, opts, started)
+            result = await _do_httpx(url, dest_dir, opts, started)
         elif backend == "gallery-dl":
-            return await _do_subprocess(url, dest_dir, opts, started, tool="gallery-dl")
+            result = await _do_subprocess(url, dest_dir, opts, started, tool="gallery-dl")
         elif backend == "yt-dlp":
-            return await _do_subprocess(url, dest_dir, opts, started, tool="yt-dlp")
+            result = await _do_subprocess(url, dest_dir, opts, started, tool="yt-dlp")
         elif backend == "delegated":
-            return await _do_delegated(url, dest_dir, opts, started)
+            result = await _do_delegated(url, dest_dir, opts, started)
         else:
-            return MediaResult(
+            result = MediaResult(
                 ok=False, url=url, backend=backend,
                 error=f"unknown backend: {backend!r}",
                 elapsed=time.perf_counter() - started,
@@ -386,6 +386,18 @@ async def download(
             error=f"{type(exc).__name__}: {exc}",
             elapsed=time.perf_counter() - started,
         )
+
+    # GLOBAL I/O PACER (P2 review §5): after bytes hit Z, consume that many tokens
+    # from the shared Redis bucket so aggregate write bandwidth across ALL collectors
+    # stays under one ceiling. Fail-open + dormant unless MEDIA_IO_PACER_ENABLED=1, so
+    # this can never block collection. Covers every tier (httpx/subprocess/delegated).
+    if result.ok and result.bytes_total > 0:
+        try:
+            from .io_pacer import get_pacer
+            await get_pacer().acquire(result.bytes_total)
+        except Exception:
+            logger.debug("io_pacer acquire skipped", exc_info=True)
+    return result
 
 
 # ---------------------------------------------------------------------------
