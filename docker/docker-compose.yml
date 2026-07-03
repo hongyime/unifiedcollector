@@ -645,14 +645,27 @@ services:
   backup:
     image: postgres:16-alpine
     container_name: unifiedcollector_backup
-    # Auto-runs now (was profiles:[manual]). Daily pg_dump -> Z (off the C: drive),
-    # 14-day retention. pg_dump is a complete restorable snapshot; this replaces
-    # the broken WAL-archiving approach. Restore: pg_restore -d <db> <file>.dump
+    # Daily pg_dump -> Z, 14-day retention. Restore: pg_restore -d <db> <file>.dump
+    # NOTE (2026-07-03): backups intentionally STAY on Z (user decision). The
+    # co-location risk (a Z event kills media AND backups together) is accepted;
+    # C: is space-crisis-prone and Z has 3.3TB free. The hardening below makes the
+    # WRITES safe even though the location is shared:
+    #   * dump to a temp name, then verify it is (a) non-empty AND (b) a valid,
+    #     readable archive via `pg_restore --list` BEFORE atomically renaming to
+    #     the final name. A reader/prune never sees a half-written or corrupt dump.
+    #   * prune ONLY runs after a verified-good dump exists — so N days of failures
+    #     can never delete the last good backup (the old code pruned unconditionally).
+    #   * on failure: keep old backups, remove the temp, and fire a Telegram alert
+    #     (previously `[backup] FAILED` went only to stdout that nobody reads).
     environment:
       PGUSER: ${POSTGRES_USER}
       PGPASSWORD: ${POSTGRES_PASSWORD}
       PGHOST: postgres
       PGDATABASE: unifiedcollector
+    # Load ../.env for NOTIFY_TELEGRAM_BOT_TOKEN / TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID
+    # so the failure alert can reach Telegram (busybox wget, best-effort).
+    env_file:
+      - ../.env
     volumes:
       - z:/unifiedcollector/media/db/backups:/zbackups
     entrypoint: /bin/sh
@@ -660,11 +673,29 @@ services:
       - -c
       - |
         mkdir -p /zbackups
+        notify() {
+          TOKEN="$${NOTIFY_TELEGRAM_BOT_TOKEN:-$$TELEGRAM_BOT_TOKEN}"
+          [ -z "$$TOKEN" ] && return 0
+          [ -z "$$TELEGRAM_CHAT_ID" ] && return 0
+          wget -q -O /dev/null \
+            "https://api.telegram.org/bot$${TOKEN}/sendMessage?chat_id=$${TELEGRAM_CHAT_ID}&text=$$1" \
+            || echo "[backup] alert send failed"
+        }
         while true; do
+          ts=$$(date +%Y%m%d_%H%M%S)
+          tmp="/zbackups/.inprogress_$${ts}.dump"
+          final="/zbackups/unifiedcollector_$${ts}.dump"
           echo "[backup] dumping to Z $$(date)"
-          pg_dump -Fc > /zbackups/unifiedcollector_$$(date +%Y%m%d_%H%M%S).dump \
-            && echo "[backup] ok" || echo "[backup] FAILED"
-          find /zbackups -name '*.dump' -mtime +14 -delete
+          if pg_dump -Fc -f "$$tmp" && [ -s "$$tmp" ] && pg_restore --list "$$tmp" >/dev/null 2>&1; then
+            mv "$$tmp" "$$final"
+            echo "[backup] ok $$final ($$(du -h "$$final" | cut -f1))"
+            # Prune ONLY after a verified-good dump exists this cycle.
+            find /zbackups -name 'unifiedcollector_*.dump' -mtime +14 -delete
+          else
+            echo "[backup] FAILED $$(date)"
+            rm -f "$$tmp"
+            notify "%E2%9A%A0%EF%B8%8F%20UnifiedCollector%20DB%20backup%20FAILED%20$${ts}"
+          fi
           sleep 86400
         done
     depends_on:
