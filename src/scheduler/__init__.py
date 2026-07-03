@@ -185,6 +185,41 @@ class Scheduler:
                 snap["source_ages"] = ages
                 snap["stale_sources"] = sorted(stale)
 
+                # Backfill-vs-realtime signals (for the "Backfill:" heartbeat line).
+                # (a) messaging realtime %: of rows INGESTED in the last hour, how
+                # many carry a message timestamp also within the hour. ~100% = caught
+                # up; low = still draining history under recent collected_at.
+                rt: dict[str, float] = {}
+                for src, tbl, ins_col, ts_col in (
+                    ("telegram", "telegram_messages", "collected_at", "platform_created_at"),
+                    ("whatsapp", "whatsapp_messages", "collected_at", "timestamp"),
+                    ("beeper", "beeper_shadow_messages", "ingested_at", "timestamp"),
+                ):
+                    try:
+                        pct = await conn.fetchval(
+                            f"SELECT round(100.0*count(*) FILTER "
+                            f"(WHERE {ins_col} > now()-interval '1 hour' AND {ts_col} > now()-interval '1 hour') "
+                            f"/ NULLIF(count(*) FILTER (WHERE {ins_col} > now()-interval '1 hour'),0),1) "
+                            f"FROM {tbl}", timeout=20)
+                        if pct is not None:
+                            rt[src] = float(pct)
+                    except Exception:
+                        continue
+                snap["realtime_pct"] = rt
+
+                # (b) spider-queue pending depth per source (remaining discovery/
+                # backfill work). Some are true backfill (telegram dialogs); github/
+                # strava are perpetual crawl frontiers that never reach 0.
+                qp: dict[str, int] = {}
+                for src in ("telegram", "instagram", "lemon8", "tiktok", "youtube", "github", "strava"):
+                    try:
+                        n = await conn.fetchval(
+                            f"SELECT count(*) FROM {src}_spider_queue WHERE status='pending'", timeout=15)
+                        qp[src] = int(n or 0)
+                    except Exception:
+                        continue
+                snap["queue_pending"] = qp
+
                 # Health flags from source_health (dead + degraded/auth_paused).
                 try:
                     rows = await conn.fetch(

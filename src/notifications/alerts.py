@@ -63,6 +63,47 @@ def _humanize_age(secs: int) -> str:
 # Realtime platforms surfaced explicitly on their own line (the "live" feeds).
 _REALTIME = ("telegram", "whatsapp", "beeper")
 
+# github/strava are perpetual discovery crawls (expanding frontier — the queue
+# never reaches 0), so they get their own "crawl" phase and are NOT counted as
+# "draining" backfill that the user is waiting to finish.
+_CRAWL = ("github", "strava")
+
+
+def _fmt_count(n: int) -> str:
+    """1_317_543 -> 1.3M, 13213 -> 13k, 940 -> 940."""
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.0f}k"
+    return str(n)
+
+
+def _backfill_phase(src: str, snap: dict) -> str:
+    """Classify a source's ingestion phase for the Backfill heartbeat line.
+
+    realtime  – messaging caught up (recent inserts carry recent timestamps, no
+                meaningful backfill queue)
+    draining  – messaging still pulling history (low realtime %% or a non-trivial
+                spider-queue backlog of dialogs/profiles)
+    crawl     – github/strava perpetual discovery (queue never drains)
+    current   – headless/social source that is fresh (cyclic refresh, no backfill)
+    stale     – no recent activity (a problem, surfaced elsewhere too)
+    idle      – source has produced no data yet
+    """
+    stale = set(snap.get("stale_sources") or [])
+    if src in stale:
+        return "stale"
+    ages = snap.get("source_ages") or {}
+    if src not in ages:
+        return "idle"
+    if src in _CRAWL:
+        return "crawl"
+    if src in _REALTIME:
+        rt = (snap.get("realtime_pct") or {}).get(src, 0.0)
+        pending = (snap.get("queue_pending") or {}).get(src, 0)
+        return "realtime" if (rt >= 90.0 and pending < 100) else "draining"
+    return "current"  # headless/social cyclic refresh, fresh
+
 
 async def notify_status(snapshot: dict) -> bool:
     """Recurring heartbeat, built by the scheduler's _build_status().
@@ -113,6 +154,35 @@ async def notify_status(snapshot: dict) -> bool:
     if stale_headless:
         lines.append("⚠️ Stale: " + ", ".join(
             f"{_esc(s)} ({_humanize_age(ages[s])})" for s in stale_headless if s in ages))
+
+    # Backfill vs realtime, per collector. Classify every seen source, summarize
+    # the phase counts, and name what's still draining / crawling.
+    seen = sorted(
+        set(snapshot.get("source_ages") or {})
+        | set(snapshot.get("realtime_pct") or {})
+        | set(snapshot.get("queue_pending") or {})
+    )
+    if seen:
+        phases = {s: _backfill_phase(s, snapshot) for s in seen}
+        n = lambda p: sum(1 for v in phases.values() if v == p)  # noqa: E731
+        parts = []
+        for label, key in (("realtime", "realtime"), ("draining", "draining"),
+                            ("current", "current"), ("crawl", "crawl")):
+            if n(key):
+                parts.append(f"{n(key)} {label}")
+        if parts:
+            lines.append("📥 Backfill: " + " · ".join(parts))
+
+        qp = snapshot.get("queue_pending") or {}
+        draining = [s for s in seen if phases[s] == "draining"]
+        if draining:
+            lines.append("⏳ Draining: " + ", ".join(
+                f"{_esc(s)} ({_fmt_count(qp.get(s, 0))} queued)" if qp.get(s) else _esc(s)
+                for s in draining))
+        crawl = [s for s in seen if phases[s] == "crawl"]
+        if crawl:
+            lines.append("🐛 Crawl: " + " · ".join(
+                f"{_esc(s)} {_fmt_count(qp.get(s, 0))}" for s in crawl))
 
     dead = snapshot.get("dead_sources") or []
     degraded = snapshot.get("degraded_sources") or []
