@@ -112,70 +112,95 @@ class Scheduler:
         except Exception as e:
             logger.warning("identity reconcile failed: %s", e)
 
+    # Per-source newest-activity freshness — the ACCURATE liveness signal, read
+    # from the real data tables (mirrors src/watchdog/freshness.py). The old status
+    # derived "quiet" from collection_runs, which the realtime collectors
+    # (telegram/whatsapp/beeper) never populate — so they were ALWAYS reported quiet
+    # even while actively ingesting. (source, freshness_query, stale_threshold_secs).
+    _FRESHNESS: list[tuple[str, str, int]] = [
+        ("telegram",  "SELECT extract(epoch FROM now()-max(collected_at)) FROM telegram_messages", 7200),
+        ("whatsapp",  "SELECT extract(epoch FROM now()-max(collected_at)) FROM whatsapp_messages", 14400),
+        ("beeper",    "SELECT extract(epoch FROM now()-max(ingested_at)) FROM beeper_shadow_messages", 10800),
+        ("instagram", "SELECT extract(epoch FROM now()-max(collected_at)) FROM media_items WHERE source='instagram'", 172800),
+        ("tiktok",    "SELECT extract(epoch FROM now()-max(collected_at)) FROM media_items WHERE source='tiktok'", 172800),
+        ("lemon8",    "SELECT extract(epoch FROM now()-max(collected_at)) FROM media_items WHERE source='lemon8'", 172800),
+        ("youtube",   "SELECT extract(epoch FROM now()-max(collected_at)) FROM youtube_videos", 172800),
+        ("website",   "SELECT extract(epoch FROM now()-max(collected_at)) FROM website_pages", 259200),
+        ("github",    "SELECT extract(epoch FROM now()-max(collected_at)) FROM github_commits", 259200),
+        ("strava",    "SELECT extract(epoch FROM now()-max(collected_at)) FROM strava_activities", 259200),
+        ("search",    "SELECT extract(epoch FROM now()-max(collected_at)) FROM search_results", 259200),
+    ]
+
     async def _build_status(self) -> dict:
-        """Snapshot of collector health for the heartbeat. Tolerates missing
-        tables/columns — every piece is independently guarded."""
+        """Accurate collector-health snapshot for the heartbeat. Every piece is
+        independently guarded so a missing table/slow query degrades gracefully."""
         snap: dict = {"ok": True}
         try:
             async with self.pool.acquire() as conn:
-                # media_items total via planner estimate (instant, lock-free).
+                # Exact media_items total (accurate). Falls back to the planner
+                # estimate only if the real count is slow/locked.
                 try:
                     snap["media_items"] = int(await conn.fetchval(
-                        "SELECT reltuples::bigint FROM pg_class WHERE relname='media_items'"
-                    ) or 0)
+                        "SELECT count(*) FROM media_items", timeout=30) or 0)
+                except Exception:
+                    try:
+                        snap["media_items"] = int(await conn.fetchval(
+                            "SELECT reltuples::bigint FROM pg_class WHERE relname='media_items'") or 0)
+                        snap["media_items_estimate"] = True
+                    except Exception:
+                        pass
+
+                # Real 24h media ingestion (uses idx_media_collected — fast).
+                try:
+                    snap["media_24h"] = int(await conn.fetchval(
+                        "SELECT count(*) FROM media_items WHERE collected_at > now()-interval '24 hours'",
+                        timeout=30) or 0)
                 except Exception:
                     pass
 
-                # 24h throughput from collection_runs.
+                # Real 24h messages across all 3 realtime platforms.
                 try:
-                    row = await conn.fetchrow(
+                    snap["msgs_24h"] = int(await conn.fetchval(
                         """
-                        SELECT COALESCE(SUM(items_collected),0) AS items_24h,
-                               COUNT(*) AS runs_24h,
-                               COUNT(*) FILTER (WHERE status='failed') AS failures_24h
-                        FROM collection_runs
-                        WHERE COALESCE(completed_at, started_at) > NOW() - interval '24 hours'
-                        """,
-                        timeout=10,
-                    )
-                    if row:
-                        snap["items_24h"] = int(row["items_24h"] or 0)
-                        snap["runs_24h"] = int(row["runs_24h"] or 0)
-                        snap["failures_24h"] = int(row["failures_24h"] or 0)
+                        SELECT (SELECT count(*) FROM telegram_messages     WHERE collected_at > now()-interval '24 hours')
+                             + (SELECT count(*) FROM whatsapp_messages      WHERE collected_at > now()-interval '24 hours')
+                             + (SELECT count(*) FROM beeper_shadow_messages WHERE ingested_at  > now()-interval '24 hours')
+                        """, timeout=30) or 0)
                 except Exception:
                     pass
 
-                # Most recent completed run + per-source freshness (quiet >24h).
-                try:
-                    last = await conn.fetchrow(
-                        "SELECT source, completed_at FROM collection_runs "
-                        "WHERE completed_at IS NOT NULL ORDER BY completed_at DESC LIMIT 1"
-                    )
-                    if last:
-                        snap["last_run"] = (
-                            f"{last['source']} @ {last['completed_at']:%Y-%m-%d %H:%M UTC}"
-                        )
-                    rows = await conn.fetch(
-                        "SELECT source, MAX(completed_at) AS last FROM collection_runs "
-                        "WHERE completed_at IS NOT NULL GROUP BY source"
-                    )
-                    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
-                    snap["quiet_sources"] = sorted(
-                        r["source"] for r in rows if not r["last"] or r["last"] < cutoff
-                    )
-                except Exception:
-                    pass
+                # Per-source freshness from real data (accurate for realtime too).
+                ages: dict[str, int] = {}
+                stale: list[str] = []
+                for name, query, thresh in self._FRESHNESS:
+                    try:
+                        age = await conn.fetchval(query, timeout=15)
+                    except Exception:
+                        continue
+                    if age is None:
+                        continue  # source has no data yet — not "stale", just unseen
+                    ages[name] = int(age)
+                    if age > thresh:
+                        stale.append(name)
+                snap["source_ages"] = ages
+                snap["stale_sources"] = sorted(stale)
 
-                # Down sources from source_health, if that table exists.
+                # Health flags from source_health (dead + degraded/auth_paused).
                 try:
                     rows = await conn.fetch(
-                        "SELECT source FROM source_health WHERE status='dead'"
+                        "SELECT source, status FROM source_health "
+                        "WHERE status IN ('dead','degraded','auth_paused')"
                     )
-                    snap["down_sources"] = sorted(r["source"] for r in rows)
+                    snap["dead_sources"] = sorted(r["source"] for r in rows if r["status"] == "dead")
+                    snap["degraded_sources"] = sorted(
+                        r["source"] for r in rows if r["status"] in ("degraded", "auth_paused"))
                 except Exception:
                     pass
         except Exception as e:
-            snap = {"ok": False, "error": str(e)}
+            return {"ok": False, "error": str(e)}
+
+        # ok reflects REAL health: green only when nothing dead or stale.
+        snap["ok"] = not (snap.get("dead_sources") or snap.get("stale_sources"))
         return snap
 
     async def _init_db(self):
