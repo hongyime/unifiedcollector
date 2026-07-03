@@ -575,6 +575,10 @@ services:
       - z:/unifiedcollector/media:/media
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
+      # live src mount so scheduler code (e.g. identity reconciliation) applies on
+      # a plain recreate — no image rebuild (vhdx must not grow). Matches the
+      # collector/ig_ingest pattern; scheduler previously ran only baked-in code.
+      - ../src:/app/src
     depends_on:
       postgres:
         condition: service_healthy

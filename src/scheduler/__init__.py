@@ -37,6 +37,9 @@ class Scheduler:
         await self._notify_startup_safe()
         self._heartbeat_hours = env_int("STATUS_HEARTBEAT_INTERVAL_HOURS", 6, min_value=0)
         self._last_status = 0.0  # monotonic; 0 forces a heartbeat on first tick
+        # Identity reconciliation cadence (P2 review §3). 0 disables.
+        self._reconcile_hours = env_int("RECONCILE_INTERVAL_HOURS", 12, min_value=0)
+        self._last_reconcile = 0.0  # monotonic; 0 forces a run on first tick
 
         while not self._stop.is_set():
             try:
@@ -47,6 +50,7 @@ class Scheduler:
                 logger.error("Scheduler tick error: %s", e)
 
             await self._maybe_heartbeat()
+            await self._maybe_reconcile_identities()
 
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=self.check_interval)
@@ -90,6 +94,23 @@ class Scheduler:
             await alerts.notify_status(snapshot)
         except Exception as e:
             logger.warning("status heartbeat failed: %s", e)
+
+    async def _maybe_reconcile_identities(self):
+        """Merge fragmented social_users rows (username-keyed -> id-keyed) on the
+        first tick, then every N hours. 0 disables. Fail-soft: never disturbs
+        scheduling. See src/core/identity_reconcile.py."""
+        if getattr(self, "_reconcile_hours", 0) <= 0:
+            return
+        import time as _time
+        now = _time.monotonic()
+        if now - self._last_reconcile < self._reconcile_hours * 3600:
+            return
+        self._last_reconcile = now
+        try:
+            from src.core.identity_reconcile import reconcile_social_users
+            await reconcile_social_users(self.pool)
+        except Exception as e:
+            logger.warning("identity reconcile failed: %s", e)
 
     async def _build_status(self) -> dict:
         """Snapshot of collector health for the heartbeat. Tolerates missing
