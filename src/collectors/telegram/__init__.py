@@ -100,6 +100,39 @@ def _is_flood_wait(exc):
     return hasattr(exc, "seconds") and "flood" in name.lower()
 
 
+class EntityUnresolvable(Exception):
+    """No connected account can resolve a chat entity.
+
+    Terminal for the spider queue: every one of the N accounts was asked and none
+    is a member (left / deleted / private channel we're not in). Distinct from a
+    TRANSIENT resolve failure (a disconnected account or a network timeout), which
+    a later cycle should retry — those are re-raised as their original exception so
+    _process_spider_queue treats them as retryable, not permanently 'unresolvable'.
+    """
+
+
+def _as_int(x):
+    """int(x) or None — for trying a chat id as numeric then raw string."""
+    try:
+        return int(x)
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_transient(exc):
+    """A resolve/collect error that is worth retrying (vs the chat being dead).
+
+    Connection drops, timeouts, and 'server closed'/'disconnected' blips are
+    transient — the account may resolve the chat fine on the next cycle.
+    """
+    if isinstance(exc, (asyncio.TimeoutError, ConnectionError, OSError)):
+        return True
+    blob = f"{type(exc).__name__}: {exc}".lower()
+    return any(s in blob for s in (
+        "disconnect", "server closed", "timeout", "connection", "not connected",
+    ))
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # Worker
 # ──────────────────────────────────────────────────────────────────────────
@@ -920,16 +953,52 @@ class TelegramCollector(BaseCollector):
                         chat_id,
                     )
                 await self._handle_flood_wait(worker, e)
-            except Exception as exc:
-                logger.error(
-                    "[spider w=%d] failed chat %s: %s", worker.worker_id, chat_id, exc,
+            except EntityUnresolvable as exc:
+                # Every account was asked and none owns this chat (left / deleted /
+                # private). Terminal — mark 'unresolvable' so it stops churning the
+                # queue, distinct from a retryable 'failed'.
+                logger.info(
+                    "[spider w=%d] chat %s unresolvable by all %d accounts: %s",
+                    worker.worker_id, chat_id, len(self._workers), exc,
                 )
-                async with self.pool.acquire() as conn:
-                    await conn.execute(
-                        "UPDATE telegram_spider_queue SET status = 'failed' WHERE platform_chat_id = $1",
-                        chat_id,
-                    )
+                await self._mark_spider_status(chat_id, "unresolvable", str(exc))
+            except Exception as exc:
+                # Transient (disconnect/timeout) or unknown — retry up to a cap so a
+                # blip doesn't permanently kill a recoverable chat; then give up.
+                await self._retry_or_fail_spider(chat_id, exc, worker.worker_id)
         logger.info("[spider w=%d] finished: processed %d chats", worker.worker_id, processed)
+
+    async def _mark_spider_status(self, chat_id: str, status: str, err: str):
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE telegram_spider_queue SET status = $2, last_error = $3 "
+                "WHERE platform_chat_id = $1",
+                chat_id, status, (err or "")[:500],
+            )
+
+    async def _retry_or_fail_spider(self, chat_id: str, exc: Exception, worker_id: int):
+        """Increment attempts; re-queue as 'pending' until the cap, then 'failed'."""
+        max_attempts = int(os.getenv("TELEGRAM_SPIDER_MAX_ATTEMPTS", "5"))
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "UPDATE telegram_spider_queue "
+                "SET attempts = COALESCE(attempts, 0) + 1, last_error = $2, "
+                "    status = CASE WHEN COALESCE(attempts, 0) + 1 >= $3 THEN 'failed' "
+                "                  ELSE 'pending' END "
+                "WHERE platform_chat_id = $1 RETURNING attempts, status",
+                chat_id, f"{type(exc).__name__}: {exc}"[:500], max_attempts,
+            )
+        attempts = row["attempts"] if row else 0
+        if row and row["status"] == "failed":
+            logger.warning(
+                "[spider w=%d] chat %s failed after %d attempts: %s",
+                worker_id, chat_id, attempts, exc,
+            )
+        else:
+            logger.info(
+                "[spider w=%d] chat %s transient (attempt %d/%d) — re-queued: %s",
+                worker_id, chat_id, attempts, max_attempts, exc,
+            )
 
     async def _handle_flood_wait(self, worker: "TelegramWorker", error):
         wait_seconds = getattr(error, "seconds", 60)
@@ -964,20 +1033,38 @@ class TelegramCollector(BaseCollector):
         """
         order = [preferred] + [w for w in self._workers if w is not preferred]
         last_exc = None
+        transient = False  # True if ANY account failed for a retryable reason
         # Bound EACH lookup: a half-dead connection (we see "Server closed the
         # connection" blips) must not wedge the whole backfill drain. On timeout we
         # just move to the next account.
         timeout = float(os.getenv("TELEGRAM_RESOLVE_TIMEOUT", "25"))
         for w in order:
-            try:
-                try:
-                    return w, await asyncio.wait_for(w.client.get_entity(int(target)), timeout)
-                except (ValueError, TypeError):
-                    return w, await asyncio.wait_for(w.client.get_entity(target), timeout)
-            except Exception as exc:
-                last_exc = exc
+            # A disconnected account can't answer now but MIGHT own the chat — treat
+            # its unavailability as transient so we retry, not mark unresolvable.
+            if getattr(w, "state", None) not in (None, SessionState.CONNECTED):
+                transient = True
                 continue
-        raise last_exc or ValueError(f"no worker can resolve entity {target!r}")
+            # Try the id numerically then as a raw string; get_entity raises
+            # ValueError('Cannot find any entity...') when this account isn't in it.
+            for form in (_as_int(target), target):
+                if form is None:
+                    continue
+                try:
+                    return w, await asyncio.wait_for(w.client.get_entity(form), timeout)
+                except (ValueError, TypeError) as ve:
+                    last_exc = ve  # entity-not-found on this account — not transient
+                    continue
+                except Exception as exc:
+                    last_exc = exc
+                    if _is_transient(exc):
+                        transient = True
+                    break  # move to the next account
+        # Every account was tried. If any failure was transient, surface it so the
+        # caller retries; only when ALL accounts cleanly said "not found" is the
+        # chat genuinely unresolvable (left/deleted/private).
+        if transient:
+            raise last_exc or asyncio.TimeoutError(f"transient resolve failure for {target!r}")
+        raise EntityUnresolvable(f"no connected account owns entity {target!r}")
 
     async def _collect_chat(self, worker: "TelegramWorker", target: str):
         from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
