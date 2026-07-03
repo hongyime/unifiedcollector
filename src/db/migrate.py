@@ -29,9 +29,17 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# Postgres SQLSTATE for a statement cancelled by lock_timeout.
+_LOCK_TIMEOUT_SQLSTATE = "55P03"
+
+
+def _is_lock_timeout(exc: Exception) -> bool:
+    return getattr(exc, "sqlstate", None) == _LOCK_TIMEOUT_SQLSTATE
 
 _DB_DIR = Path(__file__).resolve().parent
 SCHEMAS_DIR = _DB_DIR / "schemas"
@@ -62,67 +70,110 @@ async def apply_all(pool) -> dict:
 
     Idempotent and safe to call on every service startup.
     """
-    summary = {"schemas": 0, "migrations_applied": [], "migrations_skipped": 0}
+    summary = {"schemas": 0, "migrations_applied": [], "migrations_skipped": 0, "deferred": False}
 
     async with pool.acquire() as conn:
-        # Phase 0: required extensions. The live DB had these enabled by hand;
-        # a clean boot must create them or DDL using vector()/gen_random_uuid()
-        # fails ("type vector does not exist"). This is the P0 drift class.
-        for ext in ("pgcrypto", "vector"):
+        # DDL vs. the daily pg_dump: pg_dump holds AccessShareLock on EVERY table
+        # for the whole dump (minutes). A migration's ACCESS EXCLUSIVE request would
+        # queue behind it AND block all other traffic on that table behind the
+        # migration — a self-inflicted multi-table stall. A short lock_timeout makes
+        # DDL fail fast instead of piling up; a deferred migration is retried on the
+        # next boot (idempotent + ledger-tracked). Reset on the way out so the
+        # setting can't leak to the pooled connection's later users.
+        lock_ms = int(os.getenv("MIGRATE_LOCK_TIMEOUT_MS", "10000"))
+        try:
+            await conn.execute(f"SET lock_timeout = {lock_ms}")
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("could not SET lock_timeout", exc_info=True)
+
+        try:
+            # Phase 0: required extensions. The live DB had these enabled by hand;
+            # a clean boot must create them or DDL using vector()/gen_random_uuid()
+            # fails ("type vector does not exist"). This is the P0 drift class.
+            for ext in ("pgcrypto", "vector"):
+                try:
+                    await conn.execute(f"CREATE EXTENSION IF NOT EXISTS {ext}")
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning("Could not create extension %s: %s", ext, exc)
+
+            # Ledger first so we can record migrations.
+            await conn.execute(_LEDGER_DDL)
+
+            # Phase 1: base schemas (idempotent, applied every run).
+            if SCHEMAS_DIR.is_dir():
+                for sql_file in sorted(SCHEMAS_DIR.glob("*.sql")):
+                    try:
+                        await conn.execute(sql_file.read_text(encoding="utf-8"))
+                        summary["schemas"] += 1
+                    except Exception as exc:
+                        if _is_lock_timeout(exc):
+                            logger.warning(
+                                "Base schema %s deferred: lock_timeout (a long reader "
+                                "like pg_dump holds table locks). Retrying next boot.",
+                                sql_file.name,
+                            )
+                            summary["deferred"] = True
+                            return summary  # defer the rest; boot continues normally
+                        raise
+                logger.info("Applied %d base schema file(s)", summary["schemas"])
+
+            # Phase 2: incremental migrations (apply-once via ledger).
+            applied = {
+                r["filename"]: r["checksum"]
+                for r in await conn.fetch("SELECT filename, checksum FROM schema_migrations")
+            }
+
+            if MIGRATIONS_DIR.is_dir():
+                for sql_file in sorted(MIGRATIONS_DIR.glob("*.sql")):
+                    name = sql_file.name
+                    if name in SKIP:
+                        summary["migrations_skipped"] += 1
+                        continue
+
+                    body = sql_file.read_text(encoding="utf-8")
+                    checksum = _sha256(body)
+
+                    if name in applied:
+                        if applied[name] != checksum:
+                            # An already-applied migration was edited on disk.
+                            # Fail loudly — silently re-running could DROP data.
+                            raise RuntimeError(
+                                f"Migration drift: {name} was already applied with a "
+                                f"different checksum (ledger={applied[name][:12]}, "
+                                f"disk={checksum[:12]}). Edited an applied migration? "
+                                f"Create a NEW migration instead of editing this one."
+                            )
+                        continue  # already applied, unchanged — skip
+
+                    # Apply the migration in its own transaction so a failure
+                    # rolls back cleanly and is not recorded as applied.
+                    try:
+                        async with conn.transaction():
+                            await conn.execute(body)
+                            await conn.execute(
+                                "INSERT INTO schema_migrations (filename, checksum) "
+                                "VALUES ($1, $2)",
+                                name, checksum,
+                            )
+                    except Exception as exc:
+                        if _is_lock_timeout(exc):
+                            logger.warning(
+                                "Migration %s deferred: lock_timeout (a long reader "
+                                "like pg_dump holds table locks). Retrying next boot.",
+                                name,
+                            )
+                            summary["deferred"] = True
+                            break  # defer remaining migrations; boot continues
+                        raise
+                    summary["migrations_applied"].append(name)
+                    logger.info("Applied migration: %s", name)
+        finally:
+            # Never let the migration lock_timeout leak to this pooled connection's
+            # subsequent users.
             try:
-                await conn.execute(f"CREATE EXTENSION IF NOT EXISTS {ext}")
-            except Exception as exc:  # pragma: no cover - defensive
-                logger.warning("Could not create extension %s: %s", ext, exc)
-
-        # Ledger first so we can record migrations.
-        await conn.execute(_LEDGER_DDL)
-
-        # Phase 1: base schemas (idempotent, applied every run).
-        if SCHEMAS_DIR.is_dir():
-            for sql_file in sorted(SCHEMAS_DIR.glob("*.sql")):
-                await conn.execute(sql_file.read_text(encoding="utf-8"))
-                summary["schemas"] += 1
-            logger.info("Applied %d base schema file(s)", summary["schemas"])
-
-        # Phase 2: incremental migrations (apply-once via ledger).
-        applied = {
-            r["filename"]: r["checksum"]
-            for r in await conn.fetch("SELECT filename, checksum FROM schema_migrations")
-        }
-
-        if MIGRATIONS_DIR.is_dir():
-            for sql_file in sorted(MIGRATIONS_DIR.glob("*.sql")):
-                name = sql_file.name
-                if name in SKIP:
-                    summary["migrations_skipped"] += 1
-                    continue
-
-                body = sql_file.read_text(encoding="utf-8")
-                checksum = _sha256(body)
-
-                if name in applied:
-                    if applied[name] != checksum:
-                        # An already-applied migration was edited on disk.
-                        # Fail loudly — silently re-running could DROP data.
-                        raise RuntimeError(
-                            f"Migration drift: {name} was already applied with a "
-                            f"different checksum (ledger={applied[name][:12]}, "
-                            f"disk={checksum[:12]}). Edited an applied migration? "
-                            f"Create a NEW migration instead of editing this one."
-                        )
-                    continue  # already applied, unchanged — skip
-
-                # Apply the migration in its own transaction so a failure
-                # rolls back cleanly and is not recorded as applied.
-                async with conn.transaction():
-                    await conn.execute(body)
-                    await conn.execute(
-                        "INSERT INTO schema_migrations (filename, checksum) "
-                        "VALUES ($1, $2)",
-                        name, checksum,
-                    )
-                summary["migrations_applied"].append(name)
-                logger.info("Applied migration: %s", name)
+                await conn.execute("SET lock_timeout = DEFAULT")
+            except Exception:  # pragma: no cover - defensive
+                logger.debug("could not reset lock_timeout", exc_info=True)
 
     if summary["migrations_applied"]:
         logger.info(
