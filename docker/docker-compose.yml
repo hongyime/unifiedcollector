@@ -48,6 +48,11 @@ services:
       # it remains only as the canonical image builder + safety net.
       # Re-enable a source HERE only if you also remove its dedicated container.
       COLLECTOR_DISABLED_SOURCES: "youtube,tiktok,instagram,search,website,lemon8,telegram,github,strava,beeper,whatsapp"
+      # Conn-budget hygiene (P2 review §5): this main worker idles (all sources
+      # disabled), so it needs almost no DB connections. Shrink its pool from the
+      # default 10 to free headroom under postgres max_connections=200 (14 pools ×
+      # 10 = 140 ignores watchdog/backup/dashboard/ad-hoc scripts).
+      DB_POOL_MAX_SIZE: "3"
       # Beeper Desktop Local API runs on the host at 127.0.0.1:23373.
       # The default URL inside .env (host.docker.internal:23373) resolves
       # via the extra_hosts entry below.
@@ -208,6 +213,9 @@ services:
       COLLECTOR_CYCLE_SLEEP_GITHUB: "900"
       COLLECTOR_CYCLE_SLEEP_STRAVA: "600"
       COLLECTOR_CYCLE_SLEEP_SEARCH: "600"
+      # Conn-budget hygiene (P2 review §5): low-volume, long-cycle sources — a
+      # small pool is plenty. Default 10 -> 4.
+      DB_POOL_MAX_SIZE: "4"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     cap_add:
@@ -284,6 +292,9 @@ services:
       WEBSITE_MAX_CONCURRENT_TASKS: "10"
       # CPU hygiene (A#4): website crawls are multi-hour; idle longer between cycles.
       COLLECTOR_CYCLE_SLEEP_WEBSITE: "600"
+      # Conn-budget hygiene (P2 review §5): default 10 -> 6. Kept above lowrisk/main
+      # because up to WEBSITE_MAX_CONCURRENT_TASKS pages may write concurrently.
+      DB_POOL_MAX_SIZE: "6"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     cap_add:
@@ -510,6 +521,13 @@ services:
       INSTA_DAILY_QUOTA_PROFILE_VIEWS: "100"
       INSTA_SPIDER_CONCURRENCY: "1"
       INSTA_SPIDER_HOPS: "1"
+      # ANTI-BAN (P2 review §4): the flagged IG account shares ONE cookie jar with
+      # ig_ingest. Behavioural flags come from NOVEL profile-view/discovery patterns,
+      # not from re-fetching known content. Disable follower-graph BFS discovery in
+      # the HEADLESS path so it only refreshes already-known entities; the browser
+      # extension remains the sole IG discovery path (it uses its own IG_SPIDER_MAX_HOP,
+      # unaffected by this flag — read only at instagram/__init__.py:1071).
+      INSTA_SPIDER_FOLLOWERS: "false"
       COLLECTOR_CYCLE_SLEEP_INSTAGRAM: "1200"
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -571,6 +589,9 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
+      # Conn-budget hygiene (P2 review §5): scheduler triggers + reconciliation are
+      # low-concurrency. Default 10 -> 4.
+      DB_POOL_MAX_SIZE: "4"
     volumes:
       - z:/unifiedcollector/media:/media
       - ../credentials:/app/credentials

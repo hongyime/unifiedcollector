@@ -256,6 +256,12 @@ async def get_targets_ig(request):  # /ig/targets alias
 # it so the EXTENSION can rest in sync: both paths share the same IG account, so if
 # headless got rate-limited the extension must back off too (anti-ban). Cooperative
 # throttling beats two independent clients each probing a flagged account.
+#
+# RESTART-SAFE (P2 review §4, verified 2026-07-03): this cooldown wall lives in the
+# DB (service_cursors), NOT in process memory, so neither an ig_ingest restart nor a
+# collector restart clears an active cooldown — the surviving row is re-read on the
+# next request/cycle. The only in-memory state here is the download-concurrency
+# Semaphore, which is a steady-state cap, not a backoff timer. No change needed.
 # ---------------------------------------------------------------------------
 async def ig_cooldown(request):
     pool = request.app["pool"]
