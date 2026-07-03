@@ -250,9 +250,23 @@ services:
     volumes:
       - ../src:/app/src
       - /var/run/docker.sock:/var/run/docker.sock
+    # Load ../.env so the Telegram notifier (NOTIFY_TELEGRAM_BOT_TOKEN /
+    # TELEGRAM_CHAT_ID) can alert on stale-source restarts. Without it the
+    # notifier silently no-ops (send-only, fail-safe).
+    env_file:
+      - ../.env
     depends_on:
       postgres:
         condition: service_healthy
+    # The safety net now has its own safety net: a wedged loop (or dead
+    # interpreter) fails this heartbeat check and restart:unless-stopped revives
+    # it. start_period covers the first interval before a heartbeat exists.
+    healthcheck:
+      test: ["CMD", "python", "-m", "src.watchdog.freshness", "--healthcheck"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 360s
 
   collector_website:
     image: unifiedcollector-collector:latest
