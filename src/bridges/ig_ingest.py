@@ -407,15 +407,17 @@ async def _download_and_save(pool, session, platform, username, item) -> bool:
                 """
                 INSERT INTO media_items
                   (source, entity_id, entity_name, content_type, content_id,
-                   filename, file_path, file_size, sha256, source_url, metadata, kind)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12)
+                   filename, file_path, file_size, sha256, source_url, metadata, kind,
+                   ingest_path)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,'extension')
                 ON CONFLICT (source, content_id) DO UPDATE SET
                    file_path = EXCLUDED.file_path,
                    file_size = EXCLUDED.file_size,
                    sha256 = EXCLUDED.sha256,
                    source_url = EXCLUDED.source_url,
                    metadata = EXCLUDED.metadata,
-                   kind = EXCLUDED.kind
+                   kind = EXCLUDED.kind,
+                   ingest_path = 'extension'
                 """,
                 platform, safe_user, item.get("entity_name") or username, ctype, store_cid,
                 dest.name, str(dest), len(data), sha, url, meta_json, media_kind,

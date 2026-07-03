@@ -643,6 +643,7 @@ class BeeperCollector(BaseCollector):
     """
 
     SOURCE_NAME = "beeper"
+    INGEST_PATH = "messaging"  # realtime messaging path (P2 review §3 provenance)
     USE_HUMAN_RATE_LIMITER = False
     USE_ACCOUNT_POOL = False
 

@@ -336,6 +336,7 @@ class TelegramWorker:
 
 class TelegramCollector(BaseCollector):
     SOURCE_NAME = "telegram"
+    INGEST_PATH = "messaging"  # realtime messaging path (P2 review §3 provenance)
 
     def __init__(self):
         super().__init__()

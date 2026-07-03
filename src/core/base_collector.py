@@ -24,6 +24,11 @@ class BaseCollector(ABC):
     SOURCE_NAME: str = ""
     USE_HUMAN_RATE_LIMITER: bool = False
     USE_ACCOUNT_POOL: bool = False
+    # Provenance tag written to media_items.ingest_path (P2 review §3). Default is
+    # the server-side cookie path; realtime messaging collectors override this to
+    # 'messaging'. The browser-extension bridge (ig_ingest) sets 'extension' in its
+    # own INSERT. See migration add_media_items_ingest_path.sql.
+    INGEST_PATH: str = "headless"
 
     def __init__(self):
         if not self.SOURCE_NAME:
@@ -417,33 +422,36 @@ class BaseCollector(ABC):
             except Exception:
                 pass
 
-        try:
-            import asyncpg
-        except ImportError:
-            asyncpg = None  # type: ignore
-        try:
-            async with self.pool.acquire() as conn:
-                await conn.execute(
-                    """
-                    INSERT INTO media_items
-                        (source, entity_id, entity_name, content_type, content_id,
-                         filename, file_path, file_size, width, height,
-                         sha256, source_url, metadata)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb)
-                    """,
-                    self.SOURCE_NAME, entity_id, entity_name, content_type, content_id,
-                    filename, file_path, file_size, width, height,
-                    sha256, source_url, json.dumps(metadata, default=str) if metadata is not None else None,
-                )
+        # ATOMIC dedup (P2 review §3): `ON CONFLICT DO NOTHING` (no target) skips on
+        # ANY unique violation — both the (source, content_id) index and the partial
+        # unique (source, sha256) index (uq_media_source_sha256, in-scope sources).
+        # This replaces the old racy SELECT-then-INSERT sha256 pre-check + the
+        # UniqueViolationError catch: two concurrent tasks can no longer both insert
+        # the same bytes under different content_ids. The advisory sha256 pre-check
+        # above still runs first to delete the redundant blob in the common case;
+        # the DB constraint is the backstop for the race it couldn't close.
+        async with self.pool.acquire() as conn:
+            status = await conn.execute(
+                """
+                INSERT INTO media_items
+                    (source, entity_id, entity_name, content_type, content_id,
+                     filename, file_path, file_size, width, height,
+                     sha256, source_url, metadata, ingest_path)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14)
+                ON CONFLICT DO NOTHING
+                """,
+                self.SOURCE_NAME, entity_id, entity_name, content_type, content_id,
+                filename, file_path, file_size, width, height,
+                sha256, source_url, json.dumps(metadata, default=str) if metadata is not None else None,
+                self.INGEST_PATH,
+            )
+        # asyncpg returns the command tag, e.g. "INSERT 0 1" (stored) / "INSERT 0 0"
+        # (a unique conflict skipped it).
+        if status.endswith(" 1"):
             self._progress_count += 1
             return True
-        except Exception as e:
-            # Use the typed exception when available so we don't accidentally
-            # swallow unrelated errors that happen to mention "unique" in their text.
-            if asyncpg is not None and isinstance(e, getattr(asyncpg, "UniqueViolationError", ())):
-                logger.debug("Duplicate skipped: %s/%s", self.SOURCE_NAME, content_id)
-                return False
-            raise
+        logger.debug("Duplicate skipped (content_id or sha256): %s/%s", self.SOURCE_NAME, content_id)
+        return False
 
     async def send_to_dlq(self, entity_id: str, content_id: str, error: str):
         async with self.pool.acquire() as conn:

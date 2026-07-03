@@ -61,6 +61,7 @@ MEDIA_EXTS = {"jpg", "jpeg", "png", "mp4", "opus", "webp", "gif", "pdf", "3gp", 
 
 class WhatsappCollector(BaseCollector):
     SOURCE_NAME = "whatsapp"
+    INGEST_PATH = "messaging"  # realtime messaging path (P2 review §3 provenance)
 
     def __init__(self):
         super().__init__()
