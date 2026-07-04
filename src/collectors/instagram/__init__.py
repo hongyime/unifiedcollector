@@ -585,8 +585,9 @@ class InstagramCollector(BaseCollector):
         # scrape itself is throttled per-owner below, so this just makes the owner a
         # processed target; owners first, deduped.
         if os.getenv("INSTA_OWN_GRAPH_ENABLED", "true").lower() == "true":
-            _owners = [getattr(a, "name", None) for a in getattr(self.account_pool, "_accounts", [])]
-            _owners = [o for o in _owners if o]
+            # Owners = the cookie accounts (this is a cookie/Playwright-auth collector;
+            # account_pool._accounts is the env-password list, usually empty).
+            _owners = [n for n in (self._account_browser_cookies or {}).keys() if n]
             if _owners:
                 targets = list(dict.fromkeys(_owners + list(targets or [])))
 
@@ -1088,9 +1089,9 @@ class InstagramCollector(BaseCollector):
         # captured when the collector processes its own profile. Bounded + paced;
         # gated separately from the disabled discovery spider because scraping your
         # own graph is a normal user action, not novel-profile probing.
+        _owner_set = {n.lower() for n in (self._account_browser_cookies or {}).keys()}
         if (os.getenv("INSTA_OWN_GRAPH_ENABLED", "true").lower() == "true"
-                and self._current_account is not None
-                and username and (self._current_account.name or "").lower() == username.lower()):
+                and username and username.lower() in _owner_set):
             import time as _t
             interval = float(os.getenv("INSTA_OWN_GRAPH_INTERVAL_HOURS", "24")) * 3600
             key = username.lower()
@@ -2960,7 +2961,17 @@ class InstagramCollector(BaseCollector):
         by INSTA_OWN_GRAPH_MAX per side. This is the headless counterpart to the
         extension's ds_user_id self-graph capture.
         """
-        if not self._loader or not owner_uid:
+        if not owner_uid:
+            return
+        if not self._loader:
+            # Cookie/Playwright-primary mode has no instaloader session — the browser
+            # EXTENSION captures the owner follow graph in that mode (ban-safe live
+            # session). Only the instaloader path (cookie-login / PLAYWRIGHT_PRIMARY
+            # =false) can run this headless. Log once so it's not silently dead.
+            logger.info(
+                "instagram own-graph: no instaloader session for %s (cookie/Playwright "
+                "mode) — extension handles the follow graph here", owner_name,
+            )
             return
         import instaloader as _il
         cap = int(os.getenv("INSTA_OWN_GRAPH_MAX", "3000"))
