@@ -694,6 +694,9 @@ class InstagramCollector(BaseCollector):
                 if _hashes.get(_name) != _h:
                     if _name in self._dead_cookie_accounts:
                         self._dead_cookie_accounts.discard(_name)
+                        # Refreshed cookie -> clear the persisted 'dead' flag so the
+                        # dashboard stops showing "refresh needed" (re-tested next cycle).
+                        await self._record_cookie_status(_name, "unknown", "cookie refreshed")
                         logger.info("instagram: cookie for %s changed — re-enabling account", _name)
                     elif _name not in _hashes:
                         logger.info("instagram: discovered new cookie account: %s", _name)
@@ -768,6 +771,7 @@ class InstagramCollector(BaseCollector):
                 # account. (Existing accounts only; no credential change.)
                 if self._session_auth_dead:
                     self._dead_cookie_accounts.add(acct_name)
+                    await self._record_cookie_status(acct_name, "dead", "401 session expired")
                     logger.warning(
                         "instagram: account %s session is dead (401) — marked dead, "
                         "rotating to another account next cycle. Healthy remaining: %s",
@@ -775,6 +779,10 @@ class InstagramCollector(BaseCollector):
                         [a for a in cookie_accounts if a not in self._dead_cookie_accounts] or "NONE",
                     )
                     break
+                # Survived a target without a 401 -> the cookie is healthy. Cheap
+                # single-row upsert; the /accounts panel reads the latest.
+                elif acct_name:
+                    await self._record_cookie_status(acct_name, "ok", None)
                 await asyncio.sleep(2)
 
         # If the entire cycle completed without triggering any 429s, clear the
@@ -2924,6 +2932,26 @@ class InstagramCollector(BaseCollector):
             return 0
 
     # ---- Spider/discover wiring (Wave 0 spider_discover) -----------------
+    async def _record_cookie_status(self, account: str, status: str, reason):
+        """Persist per-account cookie validity for the /accounts dashboard panel so
+        it can show 'refresh needed' without live-probing (ban-sensitive for IG).
+        The collector tests every cycle; this just records the outcome."""
+        if not account or self.pool is None:
+            return
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO cookie_status (platform, account, status, reason, checked_at)
+                    VALUES ('instagram', $1, $2, $3, now())
+                    ON CONFLICT (platform, account) DO UPDATE SET
+                        status = EXCLUDED.status, reason = EXCLUDED.reason, checked_at = now()
+                    """,
+                    account, status, reason,
+                )
+        except Exception:
+            logger.debug("cookie_status upsert failed for %s", account, exc_info=True)
+
     async def _upsert_social_user(self, uid, username, display_name, photo, context):
         """Record one user in social_users with a relationship context. Matches the
         extension/ig_ingest convention (uid = numeric id when known) so headless and

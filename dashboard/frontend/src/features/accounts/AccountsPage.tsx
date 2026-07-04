@@ -67,33 +67,39 @@ export function AccountsPage() {
         <h3 className="text-sm font-medium mb-3">Cookie sources</h3>
         <table className="w-full text-sm">
           <thead><tr className="text-left text-text-muted border-b border-border">
-            <th className="pb-2">Source</th><th className="pb-2">Health</th><th className="pb-2">Cookie</th><th className="pb-2">Age</th><th className="pb-2">Last success</th>
+            <th className="pb-2">Source</th><th className="pb-2">Account</th><th className="pb-2">Live</th><th className="pb-2">Age</th><th className="pb-2">Status</th>
           </tr></thead>
           <tbody>
-            {data.cookies.map((c) => {
-              const stale = c.cookie_age_days != null && c.cookie_age_days > 30;
-              return (
-                <tr key={c.source} className="border-b border-border/50">
-                  <td className="py-2 uppercase text-xs">{c.source}</td>
-                  <td className="py-2">
-                    <span className="inline-flex items-center gap-1.5">
-                      <StatusDot ok={c.health === "running"} warn={c.health === "degraded" || c.health === "auth_paused"} />
-                      <span className="text-text-muted text-xs">{c.health}</span>
+            {[...data.cookies].sort((a, b) => Number(b.needs_refresh) - Number(a.needs_refresh)).map((c) => (
+              <tr key={`${c.source}-${c.file}`} className={`border-b border-border/50 ${c.needs_refresh ? "bg-danger/5" : ""}`}>
+                <td className="py-2 uppercase text-xs">{c.source}</td>
+                <td className="py-2 text-xs">{c.account}</td>
+                <td className="py-2">
+                  <span className="inline-flex items-center gap-1.5">
+                    <StatusDot ok={c.live_status === "ok"} warn={c.live_status == null || c.live_status === "unknown"} />
+                    <span className="text-text-muted text-xs">{c.live_status ?? "untested"}</span>
+                  </span>
+                </td>
+                <td className={`py-2 text-xs ${c.age_days != null && c.age_days > 30 ? "text-warning" : "text-text-muted"}`}>
+                  {c.age_days != null ? `${c.age_days}d` : "—"}
+                </td>
+                <td className="py-2 text-xs">
+                  {c.needs_refresh ? (
+                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-danger/20 text-danger font-medium">
+                      ⚠ refresh<span className="text-danger/70 font-normal">— {c.reason}</span>
                     </span>
-                  </td>
-                  <td className="py-2 text-text-muted text-xs">{c.has_cookie ? c.cookie_file : <span className="text-danger">missing</span>}</td>
-                  <td className={`py-2 text-xs ${stale ? "text-warning font-medium" : "text-text-muted"}`}>
-                    {c.cookie_age_days != null ? `${c.cookie_age_days}d${stale ? " ⚠ refresh" : ""}` : "—"}
-                  </td>
-                  <td className="py-2 text-text-muted text-xs">{c.last_success_at ? relativeTime(c.last_success_at) : "—"}</td>
-                </tr>
-              );
-            })}
+                  ) : (
+                    <span className="text-success">ok</span>
+                  )}
+                </td>
+              </tr>
+            ))}
           </tbody>
         </table>
         <p className="mt-3 text-[11px] text-text-muted">
-          Cookies are refreshed automatically by the browser extension's live-cookie sync; a large age here means that
-          source hasn't been re-synced recently. Drop a new cookie file in <code>credentials/&lt;source&gt;/</code> to update manually.
+          "Live" = the collector's actual last auth result (tested every cycle); "Age" = cookie file age. A row is flagged
+          <span className="text-danger"> ⚠ refresh</span> when it's 401-dead, expired, missing its session cookie, or stale (&gt;30d).
+          Refresh by dropping a new cookie file in <code>credentials/&lt;source&gt;/</code> (or let the extension's live-cookie sync do it).
         </p>
       </section>
     </div>

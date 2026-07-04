@@ -385,29 +385,54 @@ async def collectors_live(_user: dict = Depends(require_role("viewer"))):
 
 
 # Cookie-authenticated sources (session cookies under /app/credentials/<source>/).
-_COOKIE_SOURCES = ("instagram", "tiktok", "lemon8", "youtube", "strava", "github")
+# Cookie-authenticated sources + their session-cookie name(s). lemon8 is dropped
+# (extension-based, no cookies); github uses a token, not cookies.
+_COOKIE_SOURCES = {
+    "instagram": ("sessionid",),
+    "tiktok": ("sessionid", "sessionid_ss"),
+    "strava": ("_strava4_session",),
+    "youtube": ("__Secure-3PSID", "SID", "LOGIN_INFO"),
+}
 
 
-def _cookie_status(source: str) -> dict:
-    """Newest cookie file + its age for a cookie-auth source."""
-    base = Path(os.getenv("COLLECTOR_CREDENTIALS_DIR", "/app/credentials")) / source
-    newest = None
+def _audit_cookie_file(path: Path, session_keys) -> dict | None:
+    """Parse a Netscape cookie file: age, session-cookie presence, expiry."""
+    import time as _t
     try:
-        for p in base.iterdir():
-            if p.suffix in (".txt", ".json") and p.is_file():
-                mt = p.stat().st_mtime
-                if newest is None or mt > newest[1]:
-                    newest = (p.name, mt)
+        size = path.stat().st_size
+        age_days = round((_t.time() - path.stat().st_mtime) / 86400, 1)
+    except Exception:
+        return None
+    if size == 0:
+        return {"file": path.name, "age_days": age_days, "has_session": False,
+                "expiry_days": None, "reason": "empty file"}
+    session_name = None
+    exp = None
+    try:
+        for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            if line.startswith("#") or "\t" not in line:
+                continue
+            parts = line.strip().split("\t")
+            if len(parts) >= 7 and parts[5] in session_keys and parts[6]:
+                session_name = parts[5]
+                try:
+                    exp = float(parts[4])
+                except Exception:
+                    exp = None
+                break
     except Exception:
         pass
-    if newest is None:
-        return {"has_cookie": False, "cookie_file": None, "cookie_age_days": None}
-    import time as _t
-    return {
-        "has_cookie": True,
-        "cookie_file": newest[0],
-        "cookie_age_days": round((_t.time() - newest[1]) / 86400, 1),
-    }
+    if not session_name:
+        return {"file": path.name, "age_days": age_days, "has_session": False,
+                "expiry_days": None, "reason": "no session cookie"}
+    expiry_days = None
+    reason = None
+    if exp and exp > 0:
+        expiry_days = round((exp - _t.time()) / 86400, 1)
+        if expiry_days < 0:
+            reason = "cookie expired"
+    return {"file": path.name, "age_days": age_days, "has_session": True,
+            "expiry_days": expiry_days, "reason": reason}
 
 
 @app.get("/accounts")
@@ -448,16 +473,49 @@ async def accounts_overview(_user: dict = Depends(require_role("viewer"))):
 
     wa = await asyncio.gather(_wa_health("1"), _wa_health("2"))
 
+    # Persisted per-account validity (collector-tested each cycle).
+    async with pool.acquire() as conn:
+        try:
+            cs_rows = {
+                (r["platform"], r["account"]): (r["status"], r["reason"])
+                for r in await conn.fetch("SELECT platform, account, status, reason FROM cookie_status")
+            }
+        except Exception:
+            cs_rows = {}
+
+    stale_days = int(os.getenv("COOKIE_STALE_DAYS", "30"))
+    cred_dir = Path(os.getenv("COLLECTOR_CREDENTIALS_DIR", "/app/credentials"))
     cookies = []
-    for src in _COOKIE_SOURCES:
-        cs = _cookie_status(src)
-        h = health.get(src, {})
-        cookies.append({
-            "source": src,
-            "health": h.get("status", "unknown"),
-            "last_success_at": h.get("last_success_at"),
-            **cs,
-        })
+    for src, keys in _COOKIE_SOURCES.items():
+        base = cred_dir / src
+        try:
+            files = sorted(p for p in base.iterdir()
+                           if p.suffix == ".txt" and p.name.lower() != "readme.txt")
+        except Exception:
+            files = []
+        for p in files:
+            a = _audit_cookie_file(p, keys)
+            if not a:
+                continue
+            acct = p.stem
+            if acct.startswith(src + "_"):
+                acct = acct[len(src) + 1:]
+            live_status, live_reason = cs_rows.get((src, acct), (None, None))
+            # needs-refresh reason: persisted 'dead' (401) wins, then file signals.
+            reason = None
+            if live_status == "dead":
+                reason = live_reason or "session dead (401)"
+            elif a.get("reason"):
+                reason = a["reason"]
+            elif a.get("age_days") is not None and a["age_days"] > stale_days:
+                reason = f"stale ({a['age_days']:.0f}d)"
+            cookies.append({
+                "source": src, "account": acct, "file": a["file"],
+                "age_days": a["age_days"], "expiry_days": a.get("expiry_days"),
+                "has_session": a["has_session"], "live_status": live_status,
+                "needs_refresh": reason is not None, "reason": reason,
+                "health": (health.get(src, {}) or {}).get("status", "unknown"),
+            })
 
     return {
         "telegram": tg,

@@ -223,11 +223,15 @@ export interface WhatsAppSession {
 }
 export interface CookieAccount {
   source: string;
+  account: string;
+  file: string;
+  age_days: number | null;
+  expiry_days: number | null;
+  has_session: boolean;
+  live_status: "ok" | "dead" | "unknown" | null;
+  needs_refresh: boolean;
+  reason: string | null;
   health: string;
-  last_success_at: string | null;
-  has_cookie: boolean;
-  cookie_file: string | null;
-  cookie_age_days: number | null;
 }
 export interface AccountsOverview {
   telegram: TelegramAccountRow[];
