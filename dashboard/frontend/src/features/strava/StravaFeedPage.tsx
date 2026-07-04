@@ -21,10 +21,21 @@ function formatDuration(s: number | null): string {
   return `${sec}s`;
 }
 
+// The signed-in strava owner ("you" — own activities carry the most media). Shown
+// as "★ Me" so you recognise yourself instead of a bare numeric id.
+const STRAVA_OWNER_ID = 82346467;
+
 function athleteLabel(a: { username: string | null; firstname: string | null; lastname: string | null; platform_athlete_id?: number | null }): string {
-  if (a.firstname || a.lastname) return `${a.firstname ?? ""} ${a.lastname ?? ""}`.trim();
-  if (a.username) return a.username;
-  return a.platform_athlete_id != null ? `Athlete ${a.platform_athlete_id}` : "Unknown";
+  const id = a.platform_athlete_id;
+  if (id != null && id === STRAVA_OWNER_ID) return "★ Me";
+  const idStr = id != null ? String(id) : "";
+  // Reject numeric-id placeholders that were backfilled into name fields for
+  // athletes whose real name strava never exposed.
+  const clean = (v: string | null) => (v && v !== idStr ? v : "");
+  const name = `${clean(a.firstname)} ${clean(a.lastname)}`.trim();
+  if (name) return name;
+  if (clean(a.username)) return a.username as string;
+  return id != null ? `Unknown #${id}` : "Unknown";
 }
 
 export function StravaFeedPage() {

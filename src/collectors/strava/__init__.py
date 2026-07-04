@@ -785,6 +785,14 @@ class StravaCollector(BaseCollector):
         except (TypeError, ValueError):
             logger.warning("strava: _upsert_athlete skipped — unparseable id %r", raw_id)
             return
+        # Never persist a placeholder (the bare numeric id or "athlete_<id>") in a
+        # name field as if it were real — store NULL so the UI shows an honest
+        # "Unknown #id" instead of a fake name.
+        _placeholders = {str(athlete_id_int), f"athlete_{athlete_id_int}"}
+        _clean = {k: (None if (athlete.get(k) is not None and str(athlete.get(k)) in _placeholders) else athlete.get(k))
+                  for k in ("username", "firstname", "lastname")}
+        if any(_clean[k] != athlete.get(k) for k in _clean):
+            athlete = {**athlete, **_clean}
         async with self.pool.acquire() as conn:
             await conn.execute("""
                 INSERT INTO strava_athletes (
