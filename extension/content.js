@@ -197,7 +197,7 @@ const IG_MAX_ITEMS = 180;               // cap media pages per profile
 // Randomised each cycle; the rest are picked up on later cycles (round-robin).
 function igTargetBudget() { return 4 + ((Math.random() * 5) | 0); } // 4–8 deep profiles/cycle
 const IG_STORY_SWEEP = 10;   // profiles to grab EXPIRING stories/highlights from, first, each cycle
-let IG_SELF_SEEDED = false;  // seed from your own followers once per session
+const IG_SEEDED_ACCOUNTS = new Set();  // ds_user_ids self-seeded this session (re-seeds on account switch)
 
 const instagram = {
   id: "instagram", host: "www.instagram.com", label: "Instagram",
@@ -430,21 +430,27 @@ const instagram = {
     const m = document.cookie.match(/ds_user_id=(\d+)/);
     if (!m) return;
     const myId = m[1];
+    // Owner tag so ig_ingest can record a PER-ACCOUNT follow graph (follow_edges).
+    // The extension only ever sees the ONE account you're logged into; you switch
+    // accounts (IG's switcher) and this re-runs per account (see runCycle gate).
+    let ownerUsername = null;
+    try { ownerUsername = (window._sharedData && window._sharedData.config && window._sharedData.config.viewer && window._sharedData.config.viewer.username) || null; } catch (e) {}
+    const owner = { id: myId, username: ownerUsername };
     let followers = [], following = [];
     try {
       followers = await this.getFollows(myId, "followers", 200);
       following = await this.getFollows(myId, "following", 200);
     } catch (e) { return; }
-    // Record MY real follow graph with the CORRECT relationship context so
-    // social_users reflects who follows me ('follower') vs who I follow ('follow')
-    // — not lumped as generic 'follow'. Uses /social/users (honours context).
-    if (followers.length) await send({ type: "users", platform: "instagram", context: "follower", users: followers }).catch(() => {});
-    if (following.length) await send({ type: "users", platform: "instagram", context: "follow", users: following }).catch(() => {});
+    // Record MY real follow graph with the CORRECT relationship context + owner so
+    // social_users reflects who follows me ('follower') vs who I follow ('follow'),
+    // and follow_edges records it per account. Uses /social/users (honours both).
+    if (followers.length) await send({ type: "users", platform: "instagram", context: "follower", owner, users: followers }).catch(() => {});
+    if (following.length) await send({ type: "users", platform: "instagram", context: "follow", owner, users: following }).catch(() => {});
     // Still seed the spider from the combined set (hop-0 expansion).
     const users = followers.concat(following);
     if (users.length) {
       await send({ type: "seed", platform: "instagram", users }).catch(() => {});
-      clog("info", `self-seed: ${followers.length} followers + ${following.length} following recorded + seeded`, "instagram");
+      clog("info", `self-seed [${ownerUsername || myId}]: ${followers.length} followers + ${following.length} following recorded + seeded`, "instagram");
     }
   },
 
@@ -467,7 +473,13 @@ const instagram = {
       await sleep(Math.min(left, 600000)); // re-check every ≤10m
       return { targets: 0, saved: 0, discovered: 0, walled: true };
     }
-    if (!IG_SELF_SEEDED) { IG_SELF_SEEDED = true; this.seedFromSelf(); }  // once/session, detached
+    // Per-account self-seed: capture EACH account's own graph as you switch to it.
+    // The extension can't auto-switch IG accounts — you switch (IG's account
+    // switcher changes the ds_user_id cookie); when a not-yet-seeded account is
+    // active this cycle, seed it once. Covers all your accounts by rotating logins.
+    const _dsm = document.cookie.match(/ds_user_id=(\d+)/);
+    const _curId = _dsm ? _dsm[1] : null;
+    if (_curId && !IG_SEEDED_ACCOUNTS.has(_curId)) { IG_SEEDED_ACCOUNTS.add(_curId); this.seedFromSelf(); }
     let resp = [];
     try { resp = (await send({ type: "getTargets", platform: "instagram" })) || []; } catch (e) {}
     const pool = (Array.isArray(resp) ? resp : [])

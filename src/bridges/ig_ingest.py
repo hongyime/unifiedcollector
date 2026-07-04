@@ -650,11 +650,19 @@ async def _cross_seed_instagram(conn, usernames, source) -> int:
     return added
 
 
-async def _record_users(pool, platform, users, context) -> int:
+async def _record_users(pool, platform, users, context, owner=None) -> int:
     if not users:
         return 0
     n = 0
     _cross = []  # threads handles to push into the IG spider queue
+    # PER-ACCOUNT follow graph: when the extension sends an owner (the logged-in
+    # account) with a follow/follower context, also record a directional edge in
+    # follow_edges so each of your accounts' graphs is distinct (multi-account).
+    owner_account = None
+    direction = None
+    if isinstance(owner, dict) and (context or "").lower() in ("follow", "follower"):
+        owner_account = (owner.get("username") or owner.get("id") or "") or None
+        direction = "follower" if context.lower() == "follower" else "following"
     async with pool.acquire() as conn:
         for u in users:
             if isinstance(u, str):
@@ -685,6 +693,18 @@ async def _record_users(pool, platform, users, context) -> int:
                     u.get("profile_pic_url") or u.get("profile_photo_url") or u.get("avatar_url") or None, [context],
                 )
                 n += 1
+                if owner_account and direction:
+                    await conn.execute(
+                        """
+                        INSERT INTO follow_edges
+                            (platform, owner_account, target_uid, direction, target_username, first_seen, last_seen)
+                        VALUES ($1, $2, $3, $4, $5, now(), now())
+                        ON CONFLICT (platform, owner_account, target_uid, direction) DO UPDATE SET
+                            last_seen = now(),
+                            target_username = COALESCE(EXCLUDED.target_username, follow_edges.target_username)
+                        """,
+                        platform, str(owner_account), uid, direction, username,
+                    )
                 if platform == "threads" and username and (context or "").lower() != "foryou":
                     _cross.append(username)
             except Exception:
@@ -697,7 +717,8 @@ async def _record_users(pool, platform, users, context) -> int:
 async def users_handler(request):
     body = await _safe_json(request)
     platform = _norm_platform(body.get("platform"))
-    n = await _record_users(request.app["pool"], platform, body.get("users") or [], body.get("context") or "seen")
+    n = await _record_users(request.app["pool"], platform, body.get("users") or [],
+                            body.get("context") or "seen", owner=body.get("owner"))
     return _cors(web.json_response({"recorded": n}))
 
 
