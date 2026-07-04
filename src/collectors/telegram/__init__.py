@@ -811,6 +811,14 @@ class TelegramCollector(BaseCollector):
                     w.worker_id, w.account.name, r,
                 )
 
+        # Launch the resolve-only sweep as an INDEPENDENT task now that workers are
+        # connected — BEFORE the blocking spider drain below (and collect_realtime),
+        # which can sit for hours deep-backfilling large channels. As its own task it
+        # runs on the event loop concurrently with those blocked gathers, so dead
+        # chats get reclassified promptly instead of waiting for a worker to free up.
+        if self._workers and not getattr(self, "_sweep_task", None):
+            self._sweep_task = asyncio.create_task(self._resolve_sweep_loop())
+
         # Spider queue: fan out across allowed workers for parallelism.
         # TELEGRAM_SPIDER_ACCOUNTS restricts which accounts can spider.
         if os.getenv("TELEGRAM_SPIDER_ENABLED", "true").lower() == "true":
