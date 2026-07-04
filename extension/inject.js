@@ -14,7 +14,8 @@
   const platform = /threads\.com$/.test(HOST) ? "threads"
     : /instagram\.com$/.test(HOST) ? "instagram"
     : /(^|\.)x\.com$/.test(HOST) || /twitter\.com$/.test(HOST) ? "x"
-    : /facebook\.com$/.test(HOST) ? "facebook" : null;
+    : /facebook\.com$/.test(HOST) ? "facebook"
+    : /tiktok\.com$/.test(HOST) ? "tiktok" : null;
   if (!platform) return;
 
   function emit(posts) {
@@ -22,10 +23,40 @@
       window.postMessage({ __uc: true, type: "posts", platform, posts }, "*");
     }
   }
-  function emitUsers(users) {
+  function emitUsers(users, context) {
     if (users && users.length) {
-      window.postMessage({ __uc: true, type: "users", platform, context: "seen", users }, "*");
+      window.postMessage({ __uc: true, type: "users", platform, context: context || "seen", users }, "*");
     }
+  }
+
+  // TikTok signs its API requests, so we OBSERVE the follower/following modal's
+  // /api/user/list/ response (no extra requests) rather than replicate the signed
+  // call. scene tells us which side: 21 = following (I follow), 67 = followers
+  // (follows me). Users get the 'follow'/'follower' relationship context so the
+  // owner's own list becomes their real graph in social_users.
+  const _emittedTk = new Set();
+  function harvestTikTokList(url, text) {
+    if (!text || text.length > 6_000_000) return;
+    let json; try { json = JSON.parse(text); } catch (e) { return; }
+    const list = json && (json.userList || json.user_list);
+    if (!Array.isArray(list) || !list.length) return;
+    let scene = null;
+    try { scene = new URL(url, location.href).searchParams.get("scene"); } catch (e) {}
+    const context = scene === "67" ? "follower" : scene === "21" ? "follow" : "seen";
+    const users = [];
+    for (const item of list) {
+      const u = (item && (item.user || item)) || {};
+      const uname = u.uniqueId || u.unique_id;
+      if (!uname) continue;
+      const id = u.id || u.uid || u.secUid;
+      const k = context + ":" + (id || uname);
+      if (_emittedTk.has(k)) continue;
+      if (_emittedTk.size > 8000) _emittedTk.clear();
+      _emittedTk.add(k);
+      users.push({ user_id: id != null ? String(id) : null, username: uname,
+                   display_name: u.nickname || null, profile_pic_url: u.avatarThumb || u.avatarMedium || null });
+    }
+    if (users.length) emitUsers(users, context);
   }
   // any object that looks like a user (username + id) is someone we've "seen"
   // — commenters, likers, reactors, taggers, followers the page loaded.
@@ -132,12 +163,16 @@
 
   const apiRe = /graphql|\/api\/v1\//;  // IG/Threads /api/graphql + X /i/api/graphql
 
+  const tkListRe = /\/api\/user\/list\//;  // TikTok follower/following modal
+
   const origFetch = window.fetch;
   window.fetch = function (...args) {
     const p = origFetch.apply(this, args);
     try {
-      const url = (args[0] && (args[0].url || args[0])) || "";
-      if (apiRe.test(String(url))) {
+      const url = String((args[0] && (args[0].url || args[0])) || "");
+      if (platform === "tiktok" && tkListRe.test(url)) {
+        p.then((r) => { try { r.clone().text().then((t) => harvestTikTokList(url, t)).catch(() => {}); } catch (e) {} }).catch(() => {});
+      } else if (apiRe.test(url)) {
         p.then((r) => { try { r.clone().text().then(harvestText).catch(() => {}); } catch (e) {} }).catch(() => {});
       }
     } catch (e) {}
@@ -152,7 +187,12 @@
   };
   XMLHttpRequest.prototype.send = function () {
     try {
-      if (apiRe.test(String(this.__uc_url || ""))) {
+      const url = String(this.__uc_url || "");
+      if (platform === "tiktok" && tkListRe.test(url)) {
+        this.addEventListener("load", function () {
+          try { if (typeof this.responseText === "string") harvestTikTokList(url, this.responseText); } catch (e) {}
+        });
+      } else if (apiRe.test(url)) {
         this.addEventListener("load", function () {
           try { if (typeof this.responseText === "string") harvestText(this.responseText); } catch (e) {}
         });
