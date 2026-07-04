@@ -5,7 +5,6 @@ import { api } from "../../services/api";
 import {
   LayoutDashboard,
   Database,
-  FolderOpen,
   Activity,
   AlertTriangle,
   Settings,
@@ -36,13 +35,15 @@ const groups = [
   {
     label: "Data",
     items: [
-      { to: "/media", label: "Media", icon: FolderOpen },
-      { to: "/browse", label: "Browser", icon: ImageIcon },
+      // Media unified: one view (visual browser). The old separate "Media" table
+      // and "Browser" grid were two UIs over the same media_items — merged.
+      { to: "/browse", label: "Media", icon: ImageIcon },
       { to: "/graph", label: "Graph", icon: Network },
     ],
   },
   {
-    label: "WhatsApp",
+    // Repurposed from a WhatsApp-only section into a cross-platform Social hub.
+    label: "Social",
     items: [
       { to: "/whatsapp/users", label: "Users", icon: Users },
       { to: "/whatsapp/links", label: "Links", icon: Link2 },
