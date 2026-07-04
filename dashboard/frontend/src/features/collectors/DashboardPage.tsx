@@ -47,10 +47,10 @@ export function DashboardPage() {
     refetchInterval: 30_000,
   });
 
-  const { data: collectors } = useQuery({
-    queryKey: ["collectors"],
-    queryFn: api.collectors,
-    refetchInterval: 10_000,
+  const { data: collectorsLive } = useQuery({
+    queryKey: ["collectors-live"],
+    queryFn: api.collectorsLive,
+    refetchInterval: 15_000,
   });
 
   if (hLoading && sLoading) return <LoadingSpinner />;
@@ -58,8 +58,10 @@ export function DashboardPage() {
 
   const totalItems = stats?.reduce((s, r) => s + r.total_items, 0) ?? 0;
   const totalBytes = stats?.reduce((s, r) => s + r.total_bytes, 0) ?? 0;
-  const activeSources = stats?.length ?? 0;
-  const runningCollectors = collectors?.filter((c) => c.status === "running").length ?? 0;
+  // Real liveness from /collectors/live (data freshness + source_health), not the
+  // service_cursors.status proxy that flickered for healthy idle/realtime collectors.
+  const liveCollectors = collectorsLive?.live ?? 0;
+  const totalCollectors = collectorsLive?.total ?? 0;
 
   return (
     <div>
@@ -84,9 +86,9 @@ export function DashboardPage() {
         />
         <MetricCard
           label="Collectors"
-          value={`${runningCollectors} / ${activeSources}`}
-          sublabel={runningCollectors > 0 ? "active" : "idle"}
-          status={runningCollectors > 0 ? "success" : "idle"}
+          value={`${liveCollectors} / ${totalCollectors}`}
+          sublabel={liveCollectors === totalCollectors ? "all live" : "live"}
+          status={liveCollectors === totalCollectors ? "success" : liveCollectors > 0 ? "warning" : "idle"}
           icon={<Activity className="w-5 h-5" />}
         />
       </div>

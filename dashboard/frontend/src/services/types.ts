@@ -177,3 +177,15 @@ export interface StravaFeedStats {
   earliest: string | null;
   latest: string | null;
 }
+
+export interface CollectorLiveSource {
+  source: string;
+  status: "live" | "stale" | "degraded" | "dead" | "unknown";
+  age_seconds: number | null;
+}
+
+export interface CollectorsLive {
+  total: number;
+  live: number;
+  sources: CollectorLiveSource[];
+}

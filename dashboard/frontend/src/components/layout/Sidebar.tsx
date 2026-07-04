@@ -89,20 +89,27 @@ function LogoMark() {
 // At-a-glance collection health so you don't have to open a page to know the
 // firehose is alive. Reuses the same /collectors query as the dashboard.
 function StatusPill() {
-  const { data: collectors } = useQuery({
-    queryKey: ["collectors"],
-    queryFn: api.collectors,
-    refetchInterval: 10_000,
+  // Real liveness from data freshness + source_health (not service_cursors.status,
+  // which flips 'idle' between cycles and is 'never' for realtime feeds — that made
+  // healthy collectors read as down, e.g. a flickering "9/12").
+  const { data } = useQuery({
+    queryKey: ["collectors-live"],
+    queryFn: api.collectorsLive,
+    refetchInterval: 15_000,
   });
-  const total = collectors?.length ?? 0;
-  const running = collectors?.filter((c) => c.status === "running").length ?? 0;
+  const total = data?.total ?? 0;
+  const live = data?.live ?? 0;
   const dot =
-    total === 0 ? "bg-text-muted" : running === total ? "bg-emerald-500" : running > 0 ? "bg-amber-500" : "bg-rose-500";
+    total === 0 ? "bg-text-muted" : live === total ? "bg-emerald-500" : live > 0 ? "bg-amber-500" : "bg-rose-500";
+  const notLive = (data?.sources ?? []).filter((s) => s.status !== "live");
+  const title = notLive.length
+    ? "Not live: " + notLive.map((s) => `${s.source} (${s.status})`).join(", ")
+    : "All collectors live";
   return (
-    <div className="flex items-center gap-1.5 mt-2" title="Collectors running / total">
-      <span className={clsx("w-2 h-2 rounded-full", dot, running > 0 && "animate-pulse")} />
+    <div className="flex items-center gap-1.5 mt-2" title={title}>
+      <span className={clsx("w-2 h-2 rounded-full", dot, live > 0 && "animate-pulse")} />
       <span className="text-[10px] text-text-secondary tabular-nums">
-        {total === 0 ? "loading…" : `${running}/${total} collectors live`}
+        {total === 0 ? "loading…" : `${live}/${total} collectors live`}
       </span>
     </div>
   );

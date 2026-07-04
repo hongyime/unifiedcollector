@@ -366,6 +366,23 @@ async def list_collectors(_user: dict = Depends(require_role("viewer"))):
     return [dict(r) for r in rows]
 
 
+@app.get("/collectors/live")
+async def collectors_live(_user: dict = Depends(require_role("viewer"))):
+    """REAL per-source liveness from data freshness + source_health.
+
+    service_cursors.status (used by /collectors) flips to 'idle' between cycles for
+    healthy long-sleep collectors and is 'never' for realtime feeds, so counting
+    status=='running' made healthy collectors look down (the "9/12" confusion). This
+    reports true live/stale/degraded/dead per source from the actual data tables.
+    """
+    from src.core.source_freshness import compute_liveness
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        sources = await compute_liveness(conn)
+    live = sum(1 for s in sources if s["status"] == "live")
+    return {"total": len(sources), "live": live, "sources": sources}
+
+
 @app.get("/media")
 async def list_media(source: str | None = None, limit: int = 50,
                      _user: dict = Depends(require_role("viewer"))):

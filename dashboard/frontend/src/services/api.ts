@@ -20,6 +20,7 @@ import type {
   StravaFeedDate,
   StravaFeedActivity,
   StravaFeedStats,
+  CollectorsLive,
 } from "./types";
 
 function getToken(): string | null {
@@ -76,6 +77,7 @@ async function del<T>(path: string): Promise<T> {
 export const api = {
   health: () => get<HealthStatus>("/health"),
   collectors: () => get<CollectorStatus[]>("/collectors"),
+  collectorsLive: () => get<CollectorsLive>("/collectors/live"),
   collectorDetail: (source: string) => get<CollectorDetail>(`/collectors/${source}`),
 
   media: (source?: string, limit = 50) => {
