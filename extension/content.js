@@ -985,7 +985,7 @@ window.addEventListener("message", (ev) => {
   if (m.type === "posts" && Array.isArray(m.posts) && m.posts.length) {
     send({ type: "posts", platform: m.platform, username: where, posts: m.posts }).catch(() => {});
   } else if (m.type === "users" && Array.isArray(m.users) && m.users.length) {
-    send({ type: "users", platform: m.platform, context: m.context || "seen", users: m.users }).catch(() => {});
+    send({ type: "users", platform: m.platform, context: m.context || "seen", owner: m.owner || null, users: m.users }).catch(() => {});
   }
 });
 

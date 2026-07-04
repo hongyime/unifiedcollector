@@ -340,7 +340,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         try {
           const r = await fetch(base + "/social/users", {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ platform: msg.platform || "instagram", context: msg.context || "seen", users: msg.users }),
+            body: JSON.stringify({ platform: msg.platform || "instagram", context: msg.context || "seen", owner: msg.owner || null, users: msg.users }),
           });
           const j = await r.json().catch(() => ({}));
           await log("info", `👤 ${msg.platform || "instagram"} · +${j.recorded ?? "?"} users (via ${msg.context || "seen"})`);

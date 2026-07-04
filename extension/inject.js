@@ -23,9 +23,9 @@
       window.postMessage({ __uc: true, type: "posts", platform, posts }, "*");
     }
   }
-  function emitUsers(users, context) {
+  function emitUsers(users, context, owner) {
     if (users && users.length) {
-      window.postMessage({ __uc: true, type: "users", platform, context: context || "seen", users }, "*");
+      window.postMessage({ __uc: true, type: "users", platform, context: context || "seen", owner: owner || null, users }, "*");
     }
   }
 
@@ -34,6 +34,29 @@
   // call. scene tells us which side: 21 = following (I follow), 67 = followers
   // (follows me). Users get the 'follow'/'follower' relationship context so the
   // owner's own list becomes their real graph in social_users.
+  // Resolve the logged-in TikTok owner, but ONLY when the profile being VIEWED is
+  // that same account (its own follower/following list) — so we never mis-attribute
+  // someone else's followers to your per-account graph (follow_edges).
+  function _tiktokOwner() {
+    try {
+      let me = null;
+      const uni = window.__UNIVERSAL_DATA_FOR_REHYDRATION__;
+      if (uni && uni["__DEFAULT_SCOPE__"]) {
+        const scope = uni["__DEFAULT_SCOPE__"];
+        me = (scope["webapp.app-context"] && scope["webapp.app-context"].user && scope["webapp.app-context"].user.uniqueId)
+          || (scope["webapp.user-detail"] && scope["webapp.user-detail"].userInfo && scope["webapp.user-detail"].userInfo.user && scope["webapp.user-detail"].userInfo.user.uniqueId)
+          || null;
+      }
+      if (!me && window.SIGI_STATE && window.SIGI_STATE.AppContext && window.SIGI_STATE.AppContext.user) {
+        me = window.SIGI_STATE.AppContext.user.uniqueId || null;
+      }
+      if (!me) return null;
+      const viewed = (location.pathname.match(/^\/@([^/?#]+)/) || [])[1];
+      if (viewed && viewed.toLowerCase() === String(me).toLowerCase()) return { username: me };
+      return null;
+    } catch (e) { return null; }
+  }
+
   const _emittedTk = new Set();
   function harvestTikTokList(url, text) {
     if (!text || text.length > 6_000_000) return;
@@ -43,6 +66,7 @@
     let scene = null;
     try { scene = new URL(url, location.href).searchParams.get("scene"); } catch (e) {}
     const context = scene === "67" ? "follower" : scene === "21" ? "follow" : "seen";
+    const owner = context !== "seen" ? _tiktokOwner() : null;
     const users = [];
     for (const item of list) {
       const u = (item && (item.user || item)) || {};
@@ -56,7 +80,7 @@
       users.push({ user_id: id != null ? String(id) : null, username: uname,
                    display_name: u.nickname || null, profile_pic_url: u.avatarThumb || u.avatarMedium || null });
     }
-    if (users.length) emitUsers(users, context);
+    if (users.length) emitUsers(users, context, owner);
   }
   // any object that looks like a user (username + id) is someone we've "seen"
   // — commenters, likers, reactors, taggers, followers the page loaded.
