@@ -7,6 +7,11 @@ import { ErrorState } from "../../components/ui/ErrorState";
 import { formatTimestamp } from "../../utils/formatters";
 import type { Schedule } from "../../services/types";
 
+// Sources whose PRIMARY collection is the continuous browser-extension in-tab loop
+// (it ignores this schedule). For these the headless run below is only a gentle
+// backup, so the "Next Run" is the backup's — not when data actually flows.
+const EXTENSION_SOURCES = new Set(["instagram", "tiktok", "lemon8", "threads", "x", "facebook"]);
+
 export function SchedulesPage() {
   const qc = useQueryClient();
   const [edits, setEdits] = useState<Record<string, number>>({});
@@ -40,7 +45,14 @@ export function SchedulesPage() {
             <tbody>
               {data?.map((s) => (
                 <tr key={s.source} className="border-b border-border/50 hover:bg-white/5">
-                  <td className="py-2 uppercase font-medium">{s.source}</td>
+                  <td className="py-2 font-medium">
+                    <span className="uppercase">{s.source}</span>
+                    {EXTENSION_SOURCES.has(s.source) && (
+                      <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded bg-info/20 text-info align-middle normal-case">
+                        ＋extension
+                      </span>
+                    )}
+                  </td>
                   <td className="py-2">
                     <input
                       type="number"
@@ -58,7 +70,16 @@ export function SchedulesPage() {
                       <span className={`block w-4 h-4 rounded-full bg-white absolute top-0.5 transition-transform ${s.enabled ? "translate-x-5" : "translate-x-0.5"}`} />
                     </button>
                   </td>
-                  <td className="py-2 text-text-muted">{formatTimestamp(s.next_run)}</td>
+                  <td className="py-2 text-text-muted">
+                    {EXTENSION_SOURCES.has(s.source) ? (
+                      <span title="Primary path is the continuous extension; this is the headless backup run">
+                        <span className="text-info">continuous</span>
+                        <span className="text-text-muted/60"> · backup {formatTimestamp(s.next_run)}</span>
+                      </span>
+                    ) : (
+                      formatTimestamp(s.next_run)
+                    )}
+                  </td>
                   <td className="py-2">
                     {edits[s.source] != null && edits[s.source] !== s.interval_hours && (
                       <button onClick={() => update.mutate(s)} className="text-xs text-info hover:underline">Save</button>

@@ -308,8 +308,20 @@ class DLQConsumer:
             sorted(self._handlers.keys()), self.scan_interval_seconds,
             self.max_retries,
         )
+        # Recover orphans at boot: rows a previous consumer flipped to
+        # 'in_progress' then died on (container restart) sit stuck forever
+        # otherwise — this is exactly how 83 rows accumulated 'in_progress' with
+        # retry_count=0, never re-attempted. recover_orphans existed but was never
+        # called; wire it in here and once per idle scan below.
+        try:
+            await self.recover_orphans()
+        except Exception:
+            logger.exception("DLQ boot orphan recovery failed")
         while not self._stop.is_set():
             try:
+                # Sweep orphans each loop (cheap UPDATE) so a mid-batch crash
+                # self-heals within ~stale_after instead of never.
+                await self.recover_orphans()
                 processed = await self.run_once()
                 if processed == 0:
                     # Idle scan -> sleep full interval.
