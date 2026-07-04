@@ -19,6 +19,11 @@ export function AccountsPage() {
     queryFn: () => api.accounts(),
     refetchInterval: 15_000,
   });
+  const edges = useQuery({
+    queryKey: ["follow-edges-stats"],
+    queryFn: () => api.followEdgesStats(),
+    refetchInterval: 30_000,
+  });
 
   if (error) return <ErrorState message={String(error)} onRetry={() => refetch()} />;
   if (isLoading || !data) return <LoadingSpinner />;
@@ -61,6 +66,30 @@ export function AccountsPage() {
           ))}
         </div>
       </section>
+
+      {/* Per-account follow graph (follow_edges) */}
+      {(edges.data ?? []).length > 0 && (
+        <section className="bg-surface border border-border rounded-lg p-4 mb-4">
+          <h3 className="text-sm font-medium mb-3">Per-account follow graph <span className="text-text-muted">· who follows me / who I follow, per account</span></h3>
+          <table className="w-full text-sm">
+            <thead><tr className="text-left text-text-muted border-b border-border">
+              <th className="pb-2">Platform</th><th className="pb-2">Account</th><th className="pb-2 text-right">Followers</th><th className="pb-2 text-right">Following</th><th className="pb-2">Last capture</th>
+            </tr></thead>
+            <tbody>
+              {(edges.data ?? []).map((e) => (
+                <tr key={`${e.platform}-${e.owner_account}`} className="border-b border-border/50">
+                  <td className="py-2 uppercase text-xs text-text-muted">{e.platform}</td>
+                  <td className="py-2 text-xs">{e.owner_account}</td>
+                  <td className="py-2 text-right tabular-nums">{e.followers.toLocaleString()}</td>
+                  <td className="py-2 text-right tabular-nums">{e.following.toLocaleString()}</td>
+                  <td className="py-2 text-text-muted text-xs">{e.last_seen ? relativeTime(e.last_seen) : "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="mt-2 text-[11px] text-text-muted">Captured per account via the extension self-seed — switch to an account in your browser to capture its graph. (The extension can't auto-switch accounts.)</p>
+        </section>
+      )}
 
       {/* Cookie-auth sources */}
       <section className="bg-surface border border-border rounded-lg p-4">

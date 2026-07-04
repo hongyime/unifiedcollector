@@ -239,3 +239,11 @@ export interface AccountsOverview {
   cookies: CookieAccount[];
   health: Record<string, string>;
 }
+
+export interface FollowEdgeStat {
+  platform: string;
+  owner_account: string;
+  followers: number;
+  following: number;
+  last_seen: string | null;
+}

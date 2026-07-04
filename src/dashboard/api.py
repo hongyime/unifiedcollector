@@ -384,6 +384,30 @@ async def collectors_live(_user: dict = Depends(require_role("viewer"))):
     return {"total": len(sources), "live": live, "sources": sources}
 
 
+@app.get("/social/follow-edges/stats")
+async def follow_edges_stats(_user: dict = Depends(require_role("viewer"))):
+    """Per-account follow graph (from follow_edges): how many followers/following
+    were captured for EACH of your owned accounts, distinctly. Populated by the
+    extension self-seed (per account, as you rotate logins) + the headless path."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        try:
+            rows = await conn.fetch(
+                """
+                SELECT platform, owner_account,
+                       count(*) FILTER (WHERE direction = 'follower')  AS followers,
+                       count(*) FILTER (WHERE direction = 'following') AS following,
+                       max(last_seen) AS last_seen
+                FROM follow_edges
+                GROUP BY platform, owner_account
+                ORDER BY platform, owner_account
+                """
+            )
+        except Exception:
+            rows = []
+    return [dict(r) for r in rows]
+
+
 # Cookie-authenticated sources (session cookies under /app/credentials/<source>/).
 # Cookie-authenticated sources + their session-cookie name(s). lemon8 is dropped
 # (extension-based, no cookies); github uses a token, not cookies.
