@@ -16,6 +16,7 @@ import { RunsPage } from "./features/runs/RunsPage";
 import { GraphPage } from "./features/graph/GraphPage";
 import { MediaBrowserPage } from "./features/media/MediaBrowserPage";
 import { UsersPage } from "./features/whatsapp/UsersPage";
+import { SocialUsersPage } from "./features/social/SocialUsersPage";
 import { LinksPage } from "./features/whatsapp/LinksPage";
 import { WhatsAppLinkPage } from "./features/whatsapp/WhatsAppLinkPage";
 import { StravaFeedPage } from "./features/strava/StravaFeedPage";
@@ -47,6 +48,7 @@ const router = createBrowserRouter([
       { path: "media", element: <MediaPage /> },
       { path: "browse", element: <MediaBrowserPage /> },
       { path: "graph", element: <GraphPage /> },
+      { path: "social/users", element: <SocialUsersPage /> },
       { path: "whatsapp/users", element: <UsersPage /> },
       { path: "whatsapp/links", element: <LinksPage /> },
       { path: "whatsapp/link", element: <WhatsAppLinkPage /> },

@@ -45,7 +45,7 @@ const groups = [
     // Repurposed from a WhatsApp-only section into a cross-platform Social hub.
     label: "Social",
     items: [
-      { to: "/whatsapp/users", label: "Users", icon: Users },
+      { to: "/social/users", label: "Users", icon: Users },
       { to: "/whatsapp/links", label: "Links", icon: Link2 },
       { to: "/whatsapp/link", label: "Link Device", icon: QrCode },
     ],

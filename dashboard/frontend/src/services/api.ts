@@ -22,6 +22,7 @@ import type {
   StravaFeedStats,
   CollectorsLive,
   NetworkStat,
+  SocialUser,
 } from "./types";
 
 function getToken(): string | null {
@@ -106,6 +107,12 @@ export const api = {
   },
 
   socialNetwork: () => get<NetworkStat[]>("/social/network"),
+  socialUsers: (opts: { platform?: string; q?: string; limit?: number } = {}) => {
+    const params = new URLSearchParams({ limit: String(opts.limit ?? 60) });
+    if (opts.platform) params.set("platform", opts.platform);
+    if (opts.q) params.set("q", opts.q);
+    return get<SocialUser[]>(`/social/users?${params}`);
+  },
   targets: (source?: string) => {
     const params = source ? `?source=${source}` : "";
     return get<Target[]>(`/targets${params}`);

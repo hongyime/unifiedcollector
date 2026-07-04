@@ -196,3 +196,14 @@ export interface NetworkStat {
   following: number;
   followers: number;
 }
+
+export interface SocialUser {
+  platform: string;
+  uid: string;
+  username: string | null;
+  display_name: string | null;
+  profile_photo_url: string | null;
+  times_seen: number;
+  contexts: string[];
+  last_seen: string | null;
+}
