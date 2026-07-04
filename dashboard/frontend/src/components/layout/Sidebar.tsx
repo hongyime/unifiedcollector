@@ -19,6 +19,7 @@ import {
   MessageCircle,
   QrCode,
   BarChart3,
+  KeyRound,
 } from "lucide-react";
 
 const groups = [
@@ -27,6 +28,7 @@ const groups = [
     items: [
       { to: "/", label: "Dashboard", icon: LayoutDashboard },
       { to: "/collectors", label: "Collectors", icon: Database },
+      { to: "/accounts", label: "Accounts", icon: KeyRound },
       { to: "/targets", label: "Targets", icon: Target },
       { to: "/schedules", label: "Schedules", icon: Calendar },
       { to: "/runs", label: "Runs", icon: PlayCircle },
@@ -59,7 +61,7 @@ const groups = [
   {
     label: "Telegram",
     items: [
-      { to: "/telegram/accounts", label: "Accounts", icon: MessageCircle },
+      { to: "/telegram/accounts", label: "Onboard", icon: MessageCircle },
       { to: "/telegram/stats", label: "Stats", icon: BarChart3 },
     ],
   },

@@ -23,6 +23,7 @@ import type {
   CollectorsLive,
   NetworkStat,
   SocialUser,
+  AccountsOverview,
 } from "./types";
 
 function getToken(): string | null {
@@ -107,6 +108,7 @@ export const api = {
   },
 
   socialNetwork: () => get<NetworkStat[]>("/social/network"),
+  accounts: () => get<AccountsOverview>("/accounts"),
   socialUsers: (opts: { platform?: string; q?: string; limit?: number } = {}) => {
     const params = new URLSearchParams({ limit: String(opts.limit ?? 60) });
     if (opts.platform) params.set("platform", opts.platform);

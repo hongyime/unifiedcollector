@@ -207,3 +207,31 @@ export interface SocialUser {
   contexts: string[];
   last_seen: string | null;
 }
+
+export interface TelegramAccountRow {
+  name: string;
+  phone: string | null;
+  status: string | null;
+  last_connected_at: string | null;
+  last_error: string | null;
+}
+export interface WhatsAppSession {
+  session: string;
+  ready: boolean;
+  status: string;
+  error?: string;
+}
+export interface CookieAccount {
+  source: string;
+  health: string;
+  last_success_at: string | null;
+  has_cookie: boolean;
+  cookie_file: string | null;
+  cookie_age_days: number | null;
+}
+export interface AccountsOverview {
+  telegram: TelegramAccountRow[];
+  whatsapp: WhatsAppSession[];
+  cookies: CookieAccount[];
+  health: Record<string, string>;
+}

@@ -384,6 +384,89 @@ async def collectors_live(_user: dict = Depends(require_role("viewer"))):
     return {"total": len(sources), "live": live, "sources": sources}
 
 
+# Cookie-authenticated sources (session cookies under /app/credentials/<source>/).
+_COOKIE_SOURCES = ("instagram", "tiktok", "lemon8", "youtube", "strava", "github")
+
+
+def _cookie_status(source: str) -> dict:
+    """Newest cookie file + its age for a cookie-auth source."""
+    base = Path(os.getenv("COLLECTOR_CREDENTIALS_DIR", "/app/credentials")) / source
+    newest = None
+    try:
+        for p in base.iterdir():
+            if p.suffix in (".txt", ".json") and p.is_file():
+                mt = p.stat().st_mtime
+                if newest is None or mt > newest[1]:
+                    newest = (p.name, mt)
+    except Exception:
+        pass
+    if newest is None:
+        return {"has_cookie": False, "cookie_file": None, "cookie_age_days": None}
+    import time as _t
+    return {
+        "has_cookie": True,
+        "cookie_file": newest[0],
+        "cookie_age_days": round((_t.time() - newest[1]) / 86400, 1),
+    }
+
+
+@app.get("/accounts")
+async def accounts_overview(_user: dict = Depends(require_role("viewer"))):
+    """Unified cross-platform account/session state — telegram accounts, whatsapp
+    bridge devices, and cookie-auth sources — with health, so one panel covers all
+    platforms instead of a telegram-only view.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        try:
+            tg = [dict(r) for r in await conn.fetch(
+                "SELECT name, phone, status, last_connected_at, last_error "
+                "FROM telegram_user_accounts ORDER BY name")]
+        except Exception:
+            tg = []
+        health = {}
+        try:
+            for r in await conn.fetch("SELECT source, status, last_success_at, last_error FROM source_health"):
+                health[r["source"]] = dict(r)
+        except Exception:
+            pass
+
+    # WhatsApp bridges (health) — concurrent, off the event loop.
+    async def _wa_health(bridge: str) -> dict:
+        base = _wa_bridge_base(bridge)
+        import urllib.request
+
+        def _do():
+            with urllib.request.urlopen(f"{base}/health", timeout=6) as r:
+                return __import__("json").loads(r.read().decode())
+        try:
+            h = await asyncio.to_thread(_do)
+            return {"session": bridge, "ready": bool(h.get("whatsapp_ready")),
+                    "status": "connected" if h.get("whatsapp_ready") else "awaiting_scan"}
+        except Exception as exc:  # noqa: BLE001
+            return {"session": bridge, "ready": False, "status": "unreachable", "error": str(exc)}
+
+    wa = await asyncio.gather(_wa_health("1"), _wa_health("2"))
+
+    cookies = []
+    for src in _COOKIE_SOURCES:
+        cs = _cookie_status(src)
+        h = health.get(src, {})
+        cookies.append({
+            "source": src,
+            "health": h.get("status", "unknown"),
+            "last_success_at": h.get("last_success_at"),
+            **cs,
+        })
+
+    return {
+        "telegram": tg,
+        "whatsapp": list(wa),
+        "cookies": cookies,
+        "health": {k: v.get("status") for k, v in health.items()},
+    }
+
+
 @app.get("/media")
 async def list_media(source: str | None = None, limit: int = 50,
                      _user: dict = Depends(require_role("viewer"))):
