@@ -1036,14 +1036,12 @@ class TelegramCollector(BaseCollector):
             )
         if not rows:
             return out
-        preferred = self._workers[0]
         for r in rows:
             if self._stop.is_set():
                 break
             chat_id = r["platform_chat_id"]
-            try:
-                await self.wait_rate_limit("telegram.org")
-                await self._resolve_entity_any_worker(preferred, chat_id)
+            verdict = await self._resolves_on_any_worker(chat_id)
+            if verdict == "ok":
                 # Resolvable — mark checked, leave 'pending' for the drain.
                 async with self.pool.acquire() as conn:
                     await conn.execute(
@@ -1052,7 +1050,7 @@ class TelegramCollector(BaseCollector):
                         chat_id,
                     )
                 out["resolvable"] += 1
-            except EntityUnresolvable:
+            elif verdict == "dead":
                 async with self.pool.acquire() as conn:
                     await conn.execute(
                         "UPDATE telegram_spider_queue SET status = 'unresolvable', "
@@ -1062,11 +1060,8 @@ class TelegramCollector(BaseCollector):
                         chat_id,
                     )
                 out["unresolvable"] += 1
-            except Exception as exc:
-                if _is_flood_wait(exc):
-                    logger.warning("[resolve-sweep] FloodWait — pausing sweep this cycle")
-                    break
-                out["transient"] += 1  # leave unchecked → retried next sweep
+            else:  # transient — leave unchecked, retried next sweep
+                out["transient"] += 1
             out["checked"] += 1
         logger.info(
             "[resolve-sweep] checked=%d resolvable=%d unresolvable=%d transient=%d",
@@ -1157,6 +1152,34 @@ class TelegramCollector(BaseCollector):
         if transient:
             raise last_exc or asyncio.TimeoutError(f"transient resolve failure for {target!r}")
         raise EntityUnresolvable(f"no connected account owns entity {target!r}")
+
+    async def _resolves_on_any_worker(self, target: str) -> str:
+        """Fast, LOCAL resolvability check for the resolve sweep.
+
+        Uses get_input_entity (session-cache lookup, populated by dialog discovery)
+        instead of get_entity (a network call that queues behind each busy worker's
+        backfill iter_messages). For a chat an account is in this hits the cache and
+        returns instantly; for one it isn't in, get_input_entity raises ValueError
+        LOCALLY (no network, no FloodWait risk). Returns 'ok' | 'dead' | 'transient'.
+        """
+        cid = _as_int(target)
+        transient = False
+        for w in self._workers:
+            if getattr(w, "state", None) not in (None, SessionState.CONNECTED):
+                transient = True  # a disconnected account might own it — retry later
+                continue
+            try:
+                await w.client.get_input_entity(cid if cid is not None else target)
+                return "ok"
+            except (ValueError, TypeError):
+                continue  # this account doesn't know the chat — try the next
+            except Exception as exc:
+                transient = True
+                if _is_flood_wait(exc):
+                    # Shouldn't happen for a cache lookup, but be safe.
+                    logger.debug("[resolve-sweep] FloodWait on get_input_entity")
+                continue
+        return "transient" if transient else "dead"
 
     async def _collect_chat(self, worker: "TelegramWorker", target: str):
         from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
