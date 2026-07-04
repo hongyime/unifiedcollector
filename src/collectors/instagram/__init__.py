@@ -725,6 +725,14 @@ class InstagramCollector(BaseCollector):
         # _headers()/_warmup()/per-account cooldown were all dead code and the
         # first request went out as a bare 2-header cold call → immediate 429.
         # See collector_audit.md (Subagent-3 findings).
+        # MULTI-ACCOUNT follow graph (default OFF): capture each owned account's own
+        # followers/following via its own cookies, into follow_edges. Self-throttled
+        # per account; runs before the single-account target loop below.
+        try:
+            await self._collect_all_account_graphs()
+        except Exception as _e:
+            logger.debug("instagram multi-graph pass failed: %s", _e)
+
         self._current_account = Account(
             name=acct_name,
             credentials={},
@@ -2932,6 +2940,126 @@ class InstagramCollector(BaseCollector):
             return 0
 
     # ---- Spider/discover wiring (Wave 0 spider_discover) -----------------
+    async def _fetch_follow_list_web(self, client, owner_uid, direction, cap, delay):
+        """Fetch an account's OWN followers/following via the cookie-authenticated
+        friendships API (i.instagram.com/api/v1/friendships/{id}/{followers|following}).
+        Paginated, capped, paced; STOPS on 429 (conservative). direction:
+        'followers'|'following'. Returns the raw user dicts."""
+        import random
+        max_pages = int(os.getenv("INSTA_MULTI_GRAPH_MAX_PAGES", "20"))
+        users, max_id, pages = [], None, 0
+        while len(users) < cap and pages < max_pages and not self._stop.is_set():
+            params = {"count": 100}
+            if max_id:
+                params["max_id"] = max_id
+            try:
+                resp = await asyncio.wait_for(
+                    client.get(f"{GRAPH_API}/friendships/{owner_uid}/{direction}/", params=params),
+                    timeout=35.0)
+            except Exception as e:
+                logger.debug("multi-graph %s fetch error: %s", direction, e)
+                break
+            if resp.status_code in (429, 401, 403):
+                # IG guards the friendships (follower-list) endpoint hard: even a valid
+                # fresh session gets 401 "Please wait a few minutes" after a handful of
+                # requests. Treat ALL of these as a soft rate-limit — STOP immediately,
+                # do NOT mark the account dead (the cookie is fine), and try again on
+                # the next throttle window. This is why the extension is the safe path.
+                logger.warning("multi-graph: HTTP %d on %s %s — rate-limited, backing off (conservative)",
+                               resp.status_code, owner_uid, direction)
+                break
+            if resp.status_code != 200:
+                logger.debug("multi-graph %s HTTP %d", direction, resp.status_code)
+                break
+            try:
+                data = resp.json()
+            except Exception:
+                break
+            batch = data.get("users") or []
+            if not batch:
+                break
+            users.extend(batch)
+            max_id = data.get("next_max_id")
+            pages += 1
+            if not max_id:
+                break
+            await asyncio.sleep(random.uniform(*delay))
+        return users[:cap]
+
+    async def _write_follow_edges(self, owner_account, users, direction):
+        """Persist each edge to follow_edges (per-account graph) + social_users union."""
+        ctx = "follower" if direction == "followers" else "follow"
+        for u in users:
+            uid = str(u.get("pk") or u.get("id") or "")
+            if not uid:
+                continue
+            uname = u.get("username")
+            try:
+                async with self.pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        INSERT INTO follow_edges
+                            (platform, owner_account, target_uid, direction, target_username, first_seen, last_seen)
+                        VALUES ('instagram', $1, $2, $3, $4, now(), now())
+                        ON CONFLICT (platform, owner_account, target_uid, direction) DO UPDATE SET
+                            last_seen = now(),
+                            target_username = COALESCE(EXCLUDED.target_username, follow_edges.target_username)
+                        """,
+                        owner_account, uid, direction, uname,
+                    )
+            except Exception:
+                logger.debug("follow_edges write failed for %s", uid, exc_info=True)
+            await self._upsert_social_user(uid, uname, u.get("full_name"), u.get("profile_pic_url"), ctx)
+
+    async def _collect_all_account_graphs(self):
+        """MULTI-ACCOUNT foundation: capture EACH owned account's own follow graph
+        via ITS OWN cookies (friendships API) — the accounts the single-session
+        extension can't reach. Writes follow_edges (per-account directional graph).
+
+        DEFAULT OFF (INSTA_MULTI_GRAPH_ENABLED) so it never touches freshly-refreshed
+        accounts until enabled deliberately. Conservative: per-account throttle to
+        once / INSTA_MULTI_GRAPH_INTERVAL_HOURS, capped, 5-12s page delays, hard stop
+        on 429, skips known-dead accounts.
+        """
+        if os.getenv("INSTA_MULTI_GRAPH_ENABLED", "false").lower() != "true":
+            return
+        import time as _t
+        import random
+        interval = float(os.getenv("INSTA_MULTI_GRAPH_INTERVAL_HOURS", "24")) * 3600
+        cap = int(os.getenv("INSTA_MULTI_GRAPH_MAX", "3000"))
+        delay = (float(os.getenv("INSTA_MULTI_GRAPH_DELAY_MIN", "5")),
+                 float(os.getenv("INSTA_MULTI_GRAPH_DELAY_MAX", "12")))
+        for acct_name, cookie_path in list((self._account_browser_cookies or {}).items()):
+            if self._stop.is_set():
+                break
+            if acct_name in self._dead_cookie_accounts:
+                continue
+            key = "multigraph:" + acct_name
+            if _t.time() - self._last_own_graph.get(key, 0) < interval:
+                continue
+            if not cookie_path or not os.path.exists(cookie_path):
+                continue
+            cookies = self._parse_browser_cookies(cookie_path)
+            owner_uid = cookies.get("ds_user_id")
+            if not owner_uid or "sessionid" not in cookies:
+                continue
+            self._last_own_graph[key] = _t.time()  # claim before work (avoid re-run on error)
+            headers = self._headers()
+            headers["X-CSRFToken"] = cookies.get("csrftoken", "")
+            try:
+                async with httpx.AsyncClient(cookies=cookies, headers=headers,
+                                             timeout=35.0, follow_redirects=True) as client:
+                    for direction in ("followers", "following"):
+                        if self._stop.is_set():
+                            break
+                        users = await self._fetch_follow_list_web(client, owner_uid, direction, cap, delay)
+                        await self._write_follow_edges(acct_name, users, direction)
+                        logger.info("instagram multi-graph: account %s %s -> %d edges",
+                                    acct_name, direction, len(users))
+                        await asyncio.sleep(random.uniform(*delay))
+            except Exception as e:
+                logger.warning("instagram multi-graph: account %s failed: %s", acct_name, e)
+
     async def _record_cookie_status(self, account: str, status: str, reason):
         """Persist per-account cookie validity for the /accounts dashboard panel so
         it can show 'refresh needed' without live-probing (ban-sensitive for IG).
