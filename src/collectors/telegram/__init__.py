@@ -1000,6 +1000,90 @@ class TelegramCollector(BaseCollector):
                 worker_id, chat_id, attempts, max_attempts, exc,
             )
 
+    # ------------------------------------------------------------------
+    # Resolve-only sweep: fast dead-chat cleanup, independent of the drain
+    # ------------------------------------------------------------------
+
+    async def _sweep_resolve_pending(self) -> dict:
+        """Cheaply resolve pending chats against ALL accounts and mark the truly
+        unresolvable ones terminal WITHOUT a full backfill.
+
+        Rationale: the drain deep-backfills one chat per worker at a time, so a few
+        huge channels monopolize all workers and dead chats (left/deleted/private)
+        sit behind them un-reclassified. This pass only calls get_entity (no message
+        pull), so it clears the dead ones in seconds each. Resolvable chats are left
+        'pending' (marked resolve_checked_at) for the drain to backfill. Transient
+        failures are left unchecked so the next sweep retries them.
+        """
+        batch = int(os.getenv("TELEGRAM_RESOLVE_SWEEP_BATCH", "400"))
+        out = {"checked": 0, "resolvable": 0, "unresolvable": 0, "transient": 0}
+        if not self._workers:
+            return out
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT platform_chat_id FROM telegram_spider_queue "
+                "WHERE status = 'pending' AND resolve_checked_at IS NULL "
+                "ORDER BY priority ASC, collected_at ASC LIMIT $1",
+                batch,
+            )
+        if not rows:
+            return out
+        preferred = self._workers[0]
+        for r in rows:
+            if self._stop.is_set():
+                break
+            chat_id = r["platform_chat_id"]
+            try:
+                await self.wait_rate_limit("telegram.org")
+                await self._resolve_entity_any_worker(preferred, chat_id)
+                # Resolvable — mark checked, leave 'pending' for the drain.
+                async with self.pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE telegram_spider_queue SET resolve_checked_at = now() "
+                        "WHERE platform_chat_id = $1 AND status = 'pending'",
+                        chat_id,
+                    )
+                out["resolvable"] += 1
+            except EntityUnresolvable:
+                async with self.pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE telegram_spider_queue SET status = 'unresolvable', "
+                        "resolve_checked_at = now(), "
+                        "last_error = 'resolve-sweep: no account owns chat' "
+                        "WHERE platform_chat_id = $1 AND status = 'pending'",
+                        chat_id,
+                    )
+                out["unresolvable"] += 1
+            except Exception as exc:
+                if _is_flood_wait(exc):
+                    logger.warning("[resolve-sweep] FloodWait — pausing sweep this cycle")
+                    break
+                out["transient"] += 1  # leave unchecked → retried next sweep
+            out["checked"] += 1
+        logger.info(
+            "[resolve-sweep] checked=%d resolvable=%d unresolvable=%d transient=%d",
+            out["checked"], out["resolvable"], out["unresolvable"], out["transient"],
+        )
+        return out
+
+    async def _resolve_sweep_loop(self):
+        """Run the resolve sweep on its own cadence, independent of the drain gather
+        (which can be blocked for hours deep-backfilling a large channel)."""
+        if os.getenv("TELEGRAM_RESOLVE_SWEEP_ENABLED", "1").lower() != "1":
+            return
+        interval = float(os.getenv("TELEGRAM_RESOLVE_SWEEP_INTERVAL", "120"))
+        logger.info("[resolve-sweep] loop started (interval=%.0fs)", interval)
+        while not self._stop.is_set():
+            try:
+                res = await self._sweep_resolve_pending()
+                if res["checked"] == 0:
+                    # Nothing unchecked left — idle longer until new chats enqueue.
+                    await asyncio.sleep(interval * 5)
+                    continue
+            except Exception as exc:
+                logger.debug("[resolve-sweep] loop error: %s", exc)
+            await asyncio.sleep(interval)
+
     async def _handle_flood_wait(self, worker: "TelegramWorker", error):
         wait_seconds = getattr(error, "seconds", 60)
         worker.state = SessionState.FLOOD_WAIT
@@ -2064,6 +2148,10 @@ class TelegramCollector(BaseCollector):
             "Realtime listener running across %d worker(s); awaiting events…",
             len(self._workers),
         )
+        # Independent resolve-only sweep so dead chats get reclassified even while
+        # the drain gather below is busy deep-backfilling a large channel for hours.
+        if not getattr(self, "_sweep_task", None):
+            self._sweep_task = asyncio.create_task(self._resolve_sweep_loop())
         # Park until stop. Telethon delivers events under each client's own task.
         # While parked we ALSO keep historical backfill flowing: every
         # TELEGRAM_BACKFILL_DRAIN_INTERVAL seconds drain the spider/backfill queue
