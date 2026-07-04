@@ -21,9 +21,10 @@ function formatDuration(s: number | null): string {
   return `${sec}s`;
 }
 
-// The signed-in strava owner ("you" — own activities carry the most media). Shown
-// as "★ Me" so you recognise yourself instead of a bare numeric id.
-const STRAVA_OWNER_ID = 82346467;
+// The signed-in strava owner ("you") — the athlete the collector authenticates as
+// (resolved athlete_id=72101656, ~2939 own activities). Shown as "★ Me" so you
+// recognise yourself instead of a bare id / the "Strava" placeholder name.
+const STRAVA_OWNER_ID = 72101656;
 
 function athleteLabel(a: { username: string | null; firstname: string | null; lastname: string | null; platform_athlete_id?: number | null }): string {
   const id = a.platform_athlete_id;
