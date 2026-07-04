@@ -49,6 +49,15 @@ export function TargetsPage() {
     queryFn: () => api.targets(source || undefined),
   });
 
+  // Your REAL captured network (social_users) — the Targets table below is just a
+  // manual seed list, so this explains why it's tiny even though we track your
+  // whole follow graph.
+  const network = useQuery({
+    queryKey: ["social-network"],
+    queryFn: () => api.socialNetwork(),
+    refetchInterval: 60_000,
+  });
+
   const resetForm = () => {
     setShowForm(false);
     setForm({ source: SOURCES[0], target: "", priority: "0" });
@@ -88,6 +97,30 @@ export function TargetsPage() {
   return (
     <div>
       <Header title="Targets" subtitle="Collection targets" onRefresh={() => refetch()} actions={<Button size="sm" onClick={() => setShowForm(!showForm)}>Add Target</Button>} />
+
+      {/* Your real captured network — the seed table below is separate/manual. */}
+      <div className="bg-surface border border-border rounded-lg p-4 mb-4">
+        <div className="flex items-baseline justify-between mb-2">
+          <h3 className="text-sm font-medium">Your captured network</h3>
+          <span className="text-[11px] text-text-muted">from social_users — the follow graph (the table below is a manual seed list)</span>
+        </div>
+        {network.isLoading ? (
+          <span className="text-xs text-text-muted">loading…</span>
+        ) : (
+          <div className="flex flex-wrap gap-2">
+            {(network.data ?? []).filter((n) => n.total > 0).map((n) => (
+              <div key={n.platform} className="bg-background border border-border rounded-md px-3 py-2 min-w-[120px]">
+                <div className="text-xs uppercase text-text-muted">{n.platform}</div>
+                <div className="text-lg font-semibold tabular-nums">{n.total.toLocaleString()}</div>
+                <div className="text-[11px] text-text-secondary tabular-nums">
+                  {n.following.toLocaleString()} following · {n.followers.toLocaleString()} followers
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
       <div className="flex items-center gap-3 mb-4">
         <FilterDropdown label="Source" value={source} onChange={setSource} options={sourceOptions} />
       </div>

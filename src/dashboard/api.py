@@ -446,6 +446,31 @@ async def social_stats():
     return {"users": [dict(r) for r in users], "content": content}
 
 
+@app.get("/social/network")
+async def social_network(_user: dict = Depends(require_role("viewer"))):
+    """Your REAL captured network per platform, from social_users contexts.
+
+    The Targets table is a tiny manual seed list; the actual follow graph lives
+    here (e.g. tens of thousands of instagram users, thousands you follow). This
+    surfaces following/followers so the Targets page can show your real reach
+    instead of implying "2 strava targets" is your whole network.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT platform,
+                   count(*)                                          AS total,
+                   count(*) FILTER (WHERE 'follow'    = ANY(contexts)) AS following,
+                   count(*) FILTER (WHERE 'follower'  = ANY(contexts)) AS followers
+            FROM social_users
+            GROUP BY platform
+            ORDER BY total DESC
+            """
+        )
+    return [dict(r) for r in rows]
+
+
 @app.get("/social/users")
 async def social_users_list(platform: str | None = None, q: str | None = None,
                             limit: int = 50, offset: int = 0):

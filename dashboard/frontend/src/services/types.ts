@@ -189,3 +189,10 @@ export interface CollectorsLive {
   live: number;
   sources: CollectorLiveSource[];
 }
+
+export interface NetworkStat {
+  platform: string;
+  total: number;
+  following: number;
+  followers: number;
+}

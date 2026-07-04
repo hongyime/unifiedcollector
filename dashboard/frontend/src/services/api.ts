@@ -21,6 +21,7 @@ import type {
   StravaFeedActivity,
   StravaFeedStats,
   CollectorsLive,
+  NetworkStat,
 } from "./types";
 
 function getToken(): string | null {
@@ -104,6 +105,7 @@ export const api = {
     return get<DLQItem[]>(`/dlq?${params}`);
   },
 
+  socialNetwork: () => get<NetworkStat[]>("/social/network"),
   targets: (source?: string) => {
     const params = source ? `?source=${source}` : "";
     return get<Target[]>(`/targets${params}`);
