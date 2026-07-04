@@ -1,3 +1,4 @@
+import asyncio
 import io
 import logging
 import os
@@ -1680,6 +1681,42 @@ async def whatsapp_qr(bridge: str):
         out["error"] = str(exc)
         out["status"] = "unreachable"
     return out
+
+
+def _wa_bridge_base(bridge: str) -> str:
+    if bridge not in ("1", "2"):
+        raise HTTPException(400, "bridge must be 1 or 2")
+    return os.getenv(f"WA_BRIDGE_{bridge}_URL", f"http://wa-bridge-{bridge}:3001")
+
+
+async def _wa_bridge_post(bridge: str, path: str) -> dict:
+    """POST to a wa-bridge control route (disconnect/reconnect), off the event loop."""
+    import urllib.request
+
+    base = _wa_bridge_base(bridge)
+
+    def _do():
+        req = urllib.request.Request(f"{base}/{path}", data=b"", method="POST")
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return __import__("json").loads(r.read().decode())
+
+    try:
+        body = await asyncio.to_thread(_do)
+        return {"bridge": bridge, "ok": True, **body}
+    except Exception as exc:  # noqa: BLE001
+        return {"bridge": bridge, "ok": False, "error": str(exc)}
+
+
+@app.post("/whatsapp/{bridge}/disconnect")
+async def whatsapp_disconnect(bridge: str, _user: dict = Depends(require_role("viewer"))):
+    """Unpair a wa-bridge device (logout) so it can be re-scanned as a new device."""
+    return await _wa_bridge_post(bridge, "disconnect")
+
+
+@app.post("/whatsapp/{bridge}/reconnect")
+async def whatsapp_reconnect(bridge: str, _user: dict = Depends(require_role("viewer"))):
+    """Soft-reconnect a wa-bridge (keeps creds — no re-scan)."""
+    return await _wa_bridge_post(bridge, "reconnect")
 
 
 @app.get("/whatsapp/link")

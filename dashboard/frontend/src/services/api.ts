@@ -155,6 +155,8 @@ export const api = {
     get<{ bridge: string; status: string; qr: string; ready: boolean; error: string | null }>(
       `/whatsapp/qr/${bridge}`
     ),
+  waDisconnect: (bridge: 1 | 2) => post<{ bridge: string; ok: boolean; status?: string; error?: string }>(`/whatsapp/${bridge}/disconnect`, {}),
+  waReconnect: (bridge: 1 | 2) => post<{ bridge: string; ok: boolean; status?: string; error?: string }>(`/whatsapp/${bridge}/reconnect`, {}),
 
   // Telegram collection stats
   telegramStats: () =>

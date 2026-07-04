@@ -1,8 +1,12 @@
-import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../services/api";
 import { Header } from "../../components/layout/Header";
 
 function BridgeCard({ bridge }: { bridge: 1 | 2 }) {
+  const qc = useQueryClient();
+  const [msg, setMsg] = useState<string | null>(null);
+
   // Poll every 3s. Once a bridge reports ready we keep polling (slower) so a
   // stale/phantom "connected" can never freeze the panel -- it always reflects
   // the bridge's live /health state.
@@ -11,6 +15,16 @@ function BridgeCard({ bridge }: { bridge: 1 | 2 }) {
     queryFn: () => api.waQr(bridge),
     refetchInterval: (q) => (q.state.data?.ready ? 10_000 : 3_000),
     refetchOnWindowFocus: true,
+  });
+
+  const refresh = () => qc.invalidateQueries({ queryKey: ["wa-qr", bridge] });
+  const disconnect = useMutation({
+    mutationFn: () => api.waDisconnect(bridge),
+    onSuccess: (r) => { setMsg(r.ok ? "Unpaired — scan the new QR to re-link." : `Failed: ${r.error}`); refresh(); },
+  });
+  const reconnect = useMutation({
+    mutationFn: () => api.waReconnect(bridge),
+    onSuccess: (r) => { setMsg(r.ok ? "Reconnecting (keeping session)…" : `Failed: ${r.error}`); refresh(); },
   });
 
   const ready = data?.ready;
@@ -53,6 +67,23 @@ function BridgeCard({ bridge }: { bridge: 1 | 2 }) {
           <span className="text-text-muted">{status}&hellip;</span>
         )}
       </p>
+
+      {/* Per-device controls — independent of the other bridge. */}
+      <div className="mt-4 flex items-center justify-center gap-2">
+        <button
+          onClick={() => reconnect.mutate()}
+          disabled={reconnect.isPending}
+          className="text-xs px-2.5 py-1 rounded-md border border-border text-text-secondary hover:bg-white/5 disabled:opacity-50"
+          title="Soft reconnect — keeps the session, no re-scan"
+        >{reconnect.isPending ? "…" : "Reconnect"}</button>
+        <button
+          onClick={() => { if (confirm(`Unpair Bridge ${bridge}? You'll need to scan a new QR to re-link.`)) disconnect.mutate(); }}
+          disabled={disconnect.isPending}
+          className="text-xs px-2.5 py-1 rounded-md border border-danger/40 text-danger hover:bg-danger/10 disabled:opacity-50"
+          title="Unpair this device (logout) — then scan the new QR"
+        >{disconnect.isPending ? "…" : "Disconnect"}</button>
+      </div>
+      {msg && <p className="mt-2 text-center text-[11px] text-text-muted">{msg}</p>}
     </div>
   );
 }

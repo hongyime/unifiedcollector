@@ -63,6 +63,32 @@ app.get('/qr', (_req, res) => {
     }
 });
 
+// POST /disconnect — unpair THIS device (logout): removes it from the phone's
+// linked-devices list and clears local auth. The connection.update handler then
+// re-inits into 'awaiting_scan', so a fresh QR is available at /qr. This is the
+// per-device "disconnect then re-scan" control the dashboard exposes.
+app.post('/disconnect', async (_req, res) => {
+    if (!activeSock) { res.status(503).json({ error: 'no active socket' }); return; }
+    try {
+        await activeSock.logout();
+        res.status(200).json({ status: 'logged_out', note: 'unpaired; scan a new QR at /qr to re-link' });
+    } catch (err: any) {
+        res.status(500).json({ error: err?.message || 'logout failed' });
+    }
+});
+
+// POST /reconnect — soft reconnect KEEPING creds (no re-scan). Closes the current
+// socket; the close handler reconnects with the existing auth. Kicks a
+// stuck-but-paired session without unpairing.
+app.post('/reconnect', (_req, res) => {
+    try {
+        activeSock?.end?.(new Error('manual reconnect'));
+        res.status(200).json({ status: 'reconnecting' });
+    } catch (err: any) {
+        res.status(500).json({ error: err?.message || 'reconnect failed' });
+    }
+});
+
 // POST /media/decrypt — decrypt and stream WhatsApp media bytes back to caller.
 // Body: { messageId, mediaKey, directPath, mimetype? }
 // Auth: HMAC-SHA256 of JSON body with BRIDGE_SECRET, passed as X-Signature header.
