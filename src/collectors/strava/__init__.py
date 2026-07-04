@@ -340,7 +340,12 @@ class StravaCollector(BaseCollector):
                     if not sid or self._stop.is_set():
                         continue
                     try:
-                        await self.collect_following_roster(sid)
+                        # For MY own athlete, capture BOTH sides of the graph (who I
+                        # follow + who follows me) into social_users; for other seeds
+                        # this is just following-based discovery.
+                        await self.collect_following_roster(sid, "following")
+                        if self._my_athlete_id and str(sid) == str(self._my_athlete_id):
+                            await self.collect_following_roster(sid, "followers")
                     except Exception as e:
                         logger.warning("strava: roster expansion for %s failed: %s", sid, e)
             elif seed_ids and not self._use_web:
@@ -2821,13 +2826,20 @@ class StravaCollector(BaseCollector):
             logger.warning("strava: route map persist failed for %s: %s",
                            activity.get("id"), e)
 
-    async def collect_following_roster(self, athlete_id: str, max_pages: int = 50):
-        """Cookie-only HTML scrape of /athletes/{id}/follows?type=following.
+    async def collect_following_roster(self, athlete_id: str, roster_type: str = "following", max_pages: int = 50):
+        """Cookie-only HTML scrape of /athletes/{id}/follows?type=following|followers.
 
-        Parses athlete cards using the same regexes as the original toolkit
-        and seeds the spider queue (BFS expansion). Stops on empty page
-        or non-200. Returns the number of seeds enqueued.
+        Parses athlete cards using the same regexes as the original toolkit and
+        seeds the spider queue (BFS expansion). When athlete_id is the AUTHENTICATED
+        owner, each discovered athlete is also recorded in social_users with the
+        relationship context ('follow' for following, 'follower' for followers) so
+        the Targets network reflects who you follow AND who follows you. Paced by the
+        same STRAVA_FEED_DELAY_* + 429 backoff as the rest of the collector (anti-ban).
+        Stops on empty page or non-200. Returns the number of seeds enqueued.
         """
+        roster_type = "followers" if roster_type == "followers" else "following"
+        is_owner = self._my_athlete_id is not None and str(athlete_id) == str(self._my_athlete_id)
+        rel_context = "follower" if roster_type == "followers" else "follow"
         if not self._use_web:
             logger.info("strava: follow roster needs cookie auth; skipping %s", athlete_id)
             return 0
@@ -2875,7 +2887,7 @@ class StravaCollector(BaseCollector):
                 try:
                     resp = await client.get(
                         f"{STRAVA_WEB}/athletes/{athlete_id}/follows",
-                        params={"type": "following", "page": page},
+                        params={"type": roster_type, "page": page},
                         headers=headers,
                     )
                 except Exception as e:
@@ -2925,10 +2937,10 @@ class StravaCollector(BaseCollector):
                                 """
                                 INSERT INTO strava_spider_queue (
                                     platform_athlete_id, source, priority, status
-                                ) VALUES ($1, 'following', 5, 'pending')
+                                ) VALUES ($1, $2, 5, 'pending')
                                 ON CONFLICT (platform_athlete_id) DO NOTHING
                                 """,
-                                entry["athlete_id"],
+                                entry["athlete_id"], roster_type,
                             )
                             # Stub athlete row so FKs resolve later.
                             await conn.execute(
@@ -2941,6 +2953,27 @@ class StravaCollector(BaseCollector):
                                 entry["athlete_id"],
                                 entry["name"][:255] if entry.get("name") else None,
                             )
+                            # Record MY follow-graph edge in social_users (only for the
+                            # authenticated owner's own roster — otherwise this is just
+                            # discovery of someone else's list).
+                            if is_owner:
+                                nm = entry["name"][:255] if entry.get("name") else None
+                                await conn.execute(
+                                    """
+                                    INSERT INTO social_users
+                                        (platform, uid, platform_user_id, username, display_name,
+                                         profile_photo_url, contexts, first_seen, last_seen, times_seen)
+                                    VALUES ('strava', $1, $1, $2, $2, $3, ARRAY[$4], now(), now(), 1)
+                                    ON CONFLICT (platform, uid) DO UPDATE SET
+                                        last_seen = now(),
+                                        times_seen = social_users.times_seen + 1,
+                                        username = COALESCE(social_users.username, EXCLUDED.username),
+                                        display_name = COALESCE(social_users.display_name, EXCLUDED.display_name),
+                                        profile_photo_url = COALESCE(social_users.profile_photo_url, EXCLUDED.profile_photo_url),
+                                        contexts = (SELECT array(SELECT DISTINCT unnest(social_users.contexts || EXCLUDED.contexts)))
+                                    """,
+                                    str(entry["athlete_id"]), nm, entry.get("avatar_url"), rel_context,
+                                )
                         seeded += 1
                     except Exception as e:
                         logger.warning("strava roster: seed %s failed: %s",
