@@ -430,15 +430,21 @@ const instagram = {
     const m = document.cookie.match(/ds_user_id=(\d+)/);
     if (!m) return;
     const myId = m[1];
-    let users = [];
+    let followers = [], following = [];
     try {
-      const a = await this.getFollows(myId, "followers", 200);
-      const b = await this.getFollows(myId, "following", 200);
-      users = a.concat(b);
+      followers = await this.getFollows(myId, "followers", 200);
+      following = await this.getFollows(myId, "following", 200);
     } catch (e) { return; }
+    // Record MY real follow graph with the CORRECT relationship context so
+    // social_users reflects who follows me ('follower') vs who I follow ('follow')
+    // — not lumped as generic 'follow'. Uses /social/users (honours context).
+    if (followers.length) await send({ type: "users", platform: "instagram", context: "follower", users: followers }).catch(() => {});
+    if (following.length) await send({ type: "users", platform: "instagram", context: "follow", users: following }).catch(() => {});
+    // Still seed the spider from the combined set (hop-0 expansion).
+    const users = followers.concat(following);
     if (users.length) {
       await send({ type: "seed", platform: "instagram", users }).catch(() => {});
-      clog("info", `self-seed: ${users.length} of your followers/following added as seeds`, "instagram");
+      clog("info", `self-seed: ${followers.length} followers + ${following.length} following recorded + seeded`, "instagram");
     }
   },
 

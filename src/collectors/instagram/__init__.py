@@ -209,6 +209,9 @@ class InstagramCollector(BaseCollector):
 
         self._loader = None
         self._current_account = None
+        # Throttle the owner own-follow-graph scrape (per owner username) so it runs
+        # at most once per INSTA_OWN_GRAPH_INTERVAL_HOURS instead of every cycle.
+        self._last_own_graph: dict[str, float] = {}
 
         # Per-account TLS fingerprint rotators. Lazily created in
         # ``_get_tls_rotator`` so the collector still boots when the
@@ -576,6 +579,16 @@ class InstagramCollector(BaseCollector):
         import concurrent.futures
         import asyncio
         import time as _time
+
+        # OWN-GRAPH: ensure each logged-in account's OWN profile is in the target set
+        # so _collect_own_follow_graph fires (who follows me / who I follow). The graph
+        # scrape itself is throttled per-owner below, so this just makes the owner a
+        # processed target; owners first, deduped.
+        if os.getenv("INSTA_OWN_GRAPH_ENABLED", "true").lower() == "true":
+            _owners = [getattr(a, "name", None) for a in getattr(self.account_pool, "_accounts", [])]
+            _owners = [o for o in _owners if o]
+            if _owners:
+                targets = list(dict.fromkeys(_owners + list(targets or [])))
 
         # DB-persisted global rate-limit check: survives collector relaunches.
         # last_processed_id format: "{expiry_epoch}:{consecutive_429s}"
@@ -1070,6 +1083,20 @@ class InstagramCollector(BaseCollector):
         # 3. Spidering (if enabled)
         if os.getenv("INSTA_SPIDER_FOLLOWERS", "true").lower() == "true":
             await self._spider_followers(client, uid, entity_name)
+
+        # 3b. Owner's OWN follow graph -> social_users (who follows me / who I follow),
+        # captured when the collector processes its own profile. Bounded + paced;
+        # gated separately from the disabled discovery spider because scraping your
+        # own graph is a normal user action, not novel-profile probing.
+        if (os.getenv("INSTA_OWN_GRAPH_ENABLED", "true").lower() == "true"
+                and self._current_account is not None
+                and username and (self._current_account.name or "").lower() == username.lower()):
+            import time as _t
+            interval = float(os.getenv("INSTA_OWN_GRAPH_INTERVAL_HOURS", "24")) * 3600
+            key = username.lower()
+            if _t.time() - self._last_own_graph.get(key, 0) >= interval:
+                self._last_own_graph[key] = _t.time()
+                await self._collect_own_follow_graph(uid, entity_name)
 
         # 4. Collect Content
         # Fast path: the web_profile_info response already contains the first
@@ -2896,6 +2923,82 @@ class InstagramCollector(BaseCollector):
             return 0
 
     # ---- Spider/discover wiring (Wave 0 spider_discover) -----------------
+    async def _upsert_social_user(self, uid, username, display_name, photo, context):
+        """Record one user in social_users with a relationship context. Matches the
+        extension/ig_ingest convention (uid = numeric id when known) so headless and
+        extension writes converge on the same row instead of duplicating."""
+        if not uid:
+            return
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO social_users
+                        (platform, uid, platform_user_id, username, display_name,
+                         profile_photo_url, contexts, first_seen, last_seen, times_seen)
+                    VALUES ('instagram', $1, $1, $2, $3, $4, ARRAY[$5], now(), now(), 1)
+                    ON CONFLICT (platform, uid) DO UPDATE SET
+                        last_seen = now(),
+                        times_seen = social_users.times_seen + 1,
+                        username = COALESCE(EXCLUDED.username, social_users.username),
+                        display_name = COALESCE(social_users.display_name, EXCLUDED.display_name),
+                        profile_photo_url = COALESCE(social_users.profile_photo_url, EXCLUDED.profile_photo_url),
+                        contexts = (SELECT array(SELECT DISTINCT unnest(social_users.contexts || EXCLUDED.contexts)))
+                    """,
+                    str(uid), username, display_name, photo, context,
+                )
+        except Exception:
+            logger.debug("own-graph: social_users upsert failed for %s", uid, exc_info=True)
+
+    async def _collect_own_follow_graph(self, owner_uid: str, owner_name: str):
+        """Capture the LOGGED-IN owner's OWN followers + following into social_users
+        with 'follower'/'follow' contexts.
+
+        Scraping your OWN graph is a normal, bounded user action — distinct from the
+        open discovery spider (which is disabled for anti-ban) — so it's gated by its
+        own INSTA_OWN_GRAPH_ENABLED and paced by the same human rate-limiter. Bounded
+        by INSTA_OWN_GRAPH_MAX per side. This is the headless counterpart to the
+        extension's ds_user_id self-graph capture.
+        """
+        if not self._loader or not owner_uid:
+            return
+        import instaloader as _il
+        cap = int(os.getenv("INSTA_OWN_GRAPH_MAX", "3000"))
+        loader = self._loader
+        try:
+            prof = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: _il.Profile.from_id(loader.context, int(owner_uid)),
+            )
+        except Exception as e:
+            logger.debug("own-graph: Profile.from_id(%s) failed: %s", owner_uid, e)
+            return
+        for iter_name, ctx, label in (
+            ("get_followers", "follower", "followers"),
+            ("get_followees", "follow", "following"),
+        ):
+            iter_fn = getattr(prof, iter_name, None)
+            if iter_fn is None:
+                continue
+            count = 0
+            try:
+                for nb in iter_fn():
+                    if count >= cap or self._stop.is_set():
+                        break
+                    tid = str(getattr(nb, "userid", "") or "")
+                    if not tid:
+                        continue
+                    # Same pacing as the rest of the collector (anti-ban).
+                    await self.rate_limiter.async_wait("instagram.com", OperationType.PAGINATION)
+                    await self._upsert_social_user(
+                        tid, getattr(nb, "username", None) or None,
+                        getattr(nb, "full_name", None) or None,
+                        getattr(nb, "profile_pic_url", None) or None, ctx,
+                    )
+                    count += 1
+            except Exception as e:
+                logger.debug("own-graph: %s iterate failed: %s", label, e)
+            logger.info("instagram own-graph: recorded %d %s for owner %s", count, label, owner_name)
+
     async def _spider_followers(self, client: httpx.AsyncClient, uid: str, username: str):
         """Discover followers/following via Wave 0 SpiderDiscover.
 
