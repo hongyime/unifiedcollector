@@ -246,4 +246,54 @@
     } catch (e) {}
     return OrigSend.apply(this, arguments);
   };
+
+  // ── TikTok DM investigation (#38): observe-only WebSocket hook ───────────
+  // TikTok web messaging does NOT use JSON HTTP like IG's direct_v2. New DMs
+  // arrive over a "frontier" WebSocket (wss://…/ws/…) as binary protobuf
+  // frames; only the conversation list / history come over HTTP. The fetch/XHR
+  // hooks above therefore never see DMs. This wraps WebSocket (passive — we do
+  // NOT send anything, so it stays ban-safe) so that when the user opens TikTok
+  // Messages we can (a) capture any JSON frames directly as `tiktok_dm`, and
+  // (b) for binary/protobuf frames, log a one-time compact probe so the exact
+  // wire format can be confirmed and a protobuf decoder added later (see #35).
+  if (platform === "tiktok") {
+    try {
+      const OrigWS = window.WebSocket;
+      let _probed = false;
+      const WrappedWS = function (url, protocols) {
+        const ws = protocols !== undefined ? new OrigWS(url, protocols) : new OrigWS(url);
+        try {
+          const u = String(url || "");
+          // TikTok IM frontier sockets carry "/ws/" or "im"/"frontier" in the URL.
+          if (/\/ws\/|frontier|im-|\/im\//i.test(u)) {
+            ws.addEventListener("message", function (ev) {
+              try {
+                const d = ev.data;
+                if (typeof d === "string") {
+                  // Rare, but if TikTok ever sends JSON frames, capture them.
+                  let j; try { j = JSON.parse(d); } catch (e) { return; }
+                  window.postMessage({ __uc: true, type: "tiktok_dm", platform: "tiktok", frame: j }, "*");
+                } else if (!_probed) {
+                  // Binary (ArrayBuffer/Blob) => almost certainly protobuf. Emit a
+                  // single lightweight probe describing the frame so we can learn
+                  // the format without spamming. Does not attempt to decode.
+                  _probed = true;
+                  const kind = (d instanceof ArrayBuffer) ? "arraybuffer"
+                    : (typeof Blob !== "undefined" && d instanceof Blob) ? "blob" : typeof d;
+                  const size = (d && d.byteLength) || (d && d.size) || null;
+                  window.postMessage({ __uc: true, type: "tiktok_dm_probe", platform: "tiktok",
+                    ws_url: u.slice(0, 200), frame_kind: kind, frame_size: size }, "*");
+                }
+              } catch (e) {}
+            });
+          }
+        } catch (e) {}
+        return ws;
+      };
+      WrappedWS.prototype = OrigWS.prototype;
+      WrappedWS.CONNECTING = OrigWS.CONNECTING; WrappedWS.OPEN = OrigWS.OPEN;
+      WrappedWS.CLOSING = OrigWS.CLOSING; WrappedWS.CLOSED = OrigWS.CLOSED;
+      window.WebSocket = WrappedWS;
+    } catch (e) {}
+  }
 })();

@@ -360,6 +360,27 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         } catch (e) { await log("error", `dms failed: ${e.message}`); sendResponse({ ok: false }); }
         break;
       }
+      case "tiktok_dm": {  // TikTok DM JSON frame from the frontier WS (rare) (#35)
+        try {
+          const r = await fetch(base + "/tiktok/dm", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ frame: msg.frame }),
+          });
+          sendResponse({ ok: r.ok });
+        } catch (e) { sendResponse({ ok: false }); }
+        break;
+      }
+      case "tiktok_dm_probe": {  // one-time WS format probe for investigation (#38)
+        try {
+          await fetch(base + "/tiktok/dm-probe", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ws_url: msg.ws_url, frame_kind: msg.frame_kind, frame_size: msg.frame_size }),
+          });
+          await log("info", `🔎 TikTok DM WS format: ${msg.frame_kind} ~${msg.frame_size || "?"}B`);
+        } catch (e) {}
+        sendResponse({ ok: true });
+        break;
+      }
       case "wall": {  // the in-tab loop hit a throttle/login wall and is sleeping
         const mins = msg.mins || 45;
         await setStatus({ cooldownUntil: Date.now() + mins * 60000 });
