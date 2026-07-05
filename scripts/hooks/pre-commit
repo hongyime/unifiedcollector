@@ -1,0 +1,16 @@
+#!/bin/sh
+# Auto-bump the extension patch version whenever extension/ files are committed, so
+# a reload visibly shows the new version. Skips if manifest version already changed
+# in this commit (manual bump wins). Tracked hook: enable with
+#   git config core.hooksPath scripts/hooks
+if git diff --cached --name-only | grep -q '^extension/'; then
+  MF=extension/manifest.json
+  cur=$(grep -oE '"version": *"[0-9]+\.[0-9]+\.[0-9]+"' "$MF" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+  if [ -n "$cur" ] && ! git diff --cached "$MF" | grep -qE '^\+.*"version"'; then
+    major=$(echo "$cur" | cut -d. -f1); minor=$(echo "$cur" | cut -d. -f2); patch=$(echo "$cur" | cut -d. -f3)
+    new="$major.$minor.$((patch + 1))"
+    sed -i "s/\"version\": *\"$cur\"/\"version\": \"$new\"/" "$MF"
+    git add "$MF"
+    echo "[pre-commit] extension version auto-bumped $cur -> $new"
+  fi
+fi
