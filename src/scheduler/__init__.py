@@ -40,6 +40,9 @@ class Scheduler:
         # Identity reconciliation cadence (P2 review §3). 0 disables.
         self._reconcile_hours = env_int("RECONCILE_INTERVAL_HOURS", 12, min_value=0)
         self._last_reconcile = 0.0  # monotonic; 0 forces a run on first tick
+        # Cookie-health check cadence (no untested cookies). 0 disables.
+        self._cookie_check_hours = env_int("COOKIE_CHECK_INTERVAL_HOURS", 6, min_value=0)
+        self._last_cookie_check = 0.0  # 0 forces a check on first tick
 
         while not self._stop.is_set():
             try:
@@ -51,6 +54,7 @@ class Scheduler:
 
             await self._maybe_heartbeat()
             await self._maybe_reconcile_identities()
+            await self._maybe_check_cookies()
 
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=self.check_interval)
@@ -130,6 +134,23 @@ class Scheduler:
         ("strava",    "SELECT extract(epoch FROM now()-max(collected_at)) FROM strava_activities", 259200),
         ("search",    "SELECT extract(epoch FROM now()-max(collected_at)) FROM search_results", 259200),
     ]
+
+    async def _maybe_check_cookies(self):
+        """Actively test every cookie's validity on the first tick, then every N
+        hours, so the dashboard never shows 'untested'. Fail-soft. IG is gated off
+        inside the checker (collector-driven). See src/core/cookie_health.py."""
+        if getattr(self, "_cookie_check_hours", 0) <= 0:
+            return
+        import time as _time
+        now = _time.monotonic()
+        if now - self._last_cookie_check < self._cookie_check_hours * 3600:
+            return
+        self._last_cookie_check = now
+        try:
+            from src.core.cookie_health import check_all_cookies
+            await check_all_cookies(self.pool)
+        except Exception as e:
+            logger.warning("cookie health check failed: %s", e)
 
     async def _build_status(self) -> dict:
         """Accurate collector-health snapshot for the heartbeat. Every piece is
