@@ -722,6 +722,71 @@ async def users_handler(request):
     return _cors(web.json_response({"recorded": n}))
 
 
+async def _record_dms(pool, threads, owner) -> int:
+    """Persist Instagram DM threads + messages observed by the extension."""
+    if not threads:
+        return 0
+    owner_id = str((owner or {}).get("id") or "")
+    owner_acct = (owner or {}).get("username") or owner_id or None
+    n = 0
+    async with pool.acquire() as conn:
+        for th in threads:
+            if not isinstance(th, dict):
+                continue
+            tid = str(th.get("thread_id") or th.get("thread_v2_id") or "")
+            if not tid:
+                continue
+            users = th.get("users") or []
+            umap = {str(u.get("pk") or u.get("id") or ""): (u.get("username") or None) for u in users if isinstance(u, dict)}
+            parts = [v or k for k, v in umap.items()]
+            try:
+                await conn.execute(
+                    "INSERT INTO instagram_dm_thread (thread_id, title, participants, owner_account, last_activity, updated_at) "
+                    "VALUES ($1,$2,$3,$4, now(), now()) "
+                    "ON CONFLICT (thread_id) DO UPDATE SET title=COALESCE(EXCLUDED.title, instagram_dm_thread.title), "
+                    "participants=EXCLUDED.participants, owner_account=COALESCE(EXCLUDED.owner_account, instagram_dm_thread.owner_account), updated_at=now()",
+                    tid, th.get("thread_title") or th.get("title"), parts, owner_acct)
+            except Exception:
+                logger.debug("dm thread upsert failed %s", tid, exc_info=True)
+            for it in (th.get("items") or []):
+                if not isinstance(it, dict):
+                    continue
+                mid = str(it.get("item_id") or it.get("id") or "")
+                if not mid:
+                    continue
+                sender = str(it.get("user_id") or "")
+                # text lives in .text (text items) or nested link/clip/etc — best-effort.
+                txt = it.get("text")
+                if not txt and isinstance(it.get("link"), dict):
+                    txt = it["link"].get("text")
+                ts = it.get("timestamp")
+                try:
+                    ts_s = float(ts) / 1_000_000 if ts and float(ts) > 1e14 else (float(ts) if ts else None)
+                except Exception:
+                    ts_s = None
+                try:
+                    await conn.execute(
+                        "INSERT INTO instagram_dm (message_id, thread_id, sender_id, sender_username, text, item_type, \"timestamp\", is_from_me, owner_account, collected_at) "
+                        "VALUES ($1,$2,$3,$4,$5,$6, CASE WHEN $7::float8 IS NULL THEN NULL ELSE to_timestamp($7) END, $8, $9, now()) "
+                        "ON CONFLICT (message_id) DO NOTHING",
+                        mid, tid, sender, umap.get(sender), txt, it.get("item_type"),
+                        ts_s, bool(owner_id and sender == owner_id), owner_acct)
+                    n += 1
+                except Exception:
+                    logger.debug("dm item upsert failed %s", mid, exc_info=True)
+    return n
+
+
+async def dms_handler(request):
+    body = await _safe_json(request)
+    try:
+        n = await _record_dms(request.app["pool"], body.get("threads") or [], body.get("owner"))
+        return _cors(web.json_response({"recorded": n}))
+    except Exception:
+        logger.exception("dms handler failed")
+        return _cors(web.json_response({"recorded": 0, "error": "db"}, status=500))
+
+
 async def _save_profile(pool, platform, p) -> bool:
     """Upsert a full profile (instagram). Also records the user (with photo) into
     social_users and returns the profile_pic to be downloaded as kind=profile."""
@@ -922,6 +987,7 @@ def make_app():
     app.router.add_post("/social/users", users_handler)
     app.router.add_post("/social/profile", profile_handler)
     app.router.add_post("/social/seed", seed_handler)
+    app.router.add_post("/social/dms", dms_handler)
     app.router.add_post("/social/cookies", cookies_handler)
     # instagram back-compat aliases
     app.router.add_get("/ig/targets", get_targets_ig)

@@ -348,6 +348,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         } catch (e) { await log("error", `users failed: ${e.message}`); sendResponse({ ok: false }); }
         break;
       }
+      case "dms": {  // Instagram DMs observed from the direct_v2 responses
+        try {
+          const r = await fetch(base + "/social/dms", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ platform: msg.platform || "instagram", owner: msg.owner || null, threads: msg.threads }),
+          });
+          const j = await r.json().catch(() => ({}));
+          await log("info", `✉️ ${msg.platform || "instagram"} · +${j.recorded ?? "?"} DM messages`);
+          sendResponse({ ok: r.ok });
+        } catch (e) { await log("error", `dms failed: ${e.message}`); sendResponse({ ok: false }); }
+        break;
+      }
       case "wall": {  // the in-tab loop hit a throttle/login wall and is sleeping
         const mins = msg.mins || 45;
         await setStatus({ cooldownUntil: Date.now() + mins * 60000 });

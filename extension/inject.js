@@ -188,6 +188,22 @@
   const apiRe = /graphql|\/api\/v1\//;  // IG/Threads /api/graphql + X /i/api/graphql
 
   const tkListRe = /\/api\/user\/list\//;  // TikTok follower/following modal
+  const dmRe = /\/direct_v2\/(inbox|threads|thread)/;  // IG DMs (observe-only)
+
+  // Parse IG DM inbox/thread responses the page already fetched -> emit messages.
+  // Ban-safe: no extra requests. owner = ds_user_id so ig_ingest can set is_from_me.
+  function harvestDMs(text) {
+    if (!text || text.length > 8_000_000) return;
+    let json; try { json = JSON.parse(text); } catch (e) { return; }
+    let threads = [];
+    if (json.inbox && Array.isArray(json.inbox.threads)) threads = json.inbox.threads;
+    else if (json.thread) threads = [json.thread];
+    else if (Array.isArray(json.threads)) threads = json.threads;
+    if (!threads.length) return;
+    let ownerId = null;
+    try { ownerId = (document.cookie.match(/ds_user_id=(\d+)/) || [])[1] || null; } catch (e) {}
+    window.postMessage({ __uc: true, type: "dms", platform: "instagram", owner: { id: ownerId }, threads }, "*");
+  }
 
   const origFetch = window.fetch;
   window.fetch = function (...args) {
@@ -196,6 +212,8 @@
       const url = String((args[0] && (args[0].url || args[0])) || "");
       if (platform === "tiktok" && tkListRe.test(url)) {
         p.then((r) => { try { r.clone().text().then((t) => harvestTikTokList(url, t)).catch(() => {}); } catch (e) {} }).catch(() => {});
+      } else if (platform === "instagram" && dmRe.test(url)) {
+        p.then((r) => { try { r.clone().text().then(harvestDMs).catch(() => {}); } catch (e) {} }).catch(() => {});
       } else if (apiRe.test(url)) {
         p.then((r) => { try { r.clone().text().then(harvestText).catch(() => {}); } catch (e) {} }).catch(() => {});
       }
@@ -215,6 +233,10 @@
       if (platform === "tiktok" && tkListRe.test(url)) {
         this.addEventListener("load", function () {
           try { if (typeof this.responseText === "string") harvestTikTokList(url, this.responseText); } catch (e) {}
+        });
+      } else if (platform === "instagram" && dmRe.test(url)) {
+        this.addEventListener("load", function () {
+          try { if (typeof this.responseText === "string") harvestDMs(this.responseText); } catch (e) {}
         });
       } else if (apiRe.test(url)) {
         this.addEventListener("load", function () {
