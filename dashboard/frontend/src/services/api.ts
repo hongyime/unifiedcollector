@@ -25,6 +25,7 @@ import type {
   SocialUser,
   AccountsOverview,
   FollowEdgeStat,
+  PlatformSummary,
 } from "./types";
 
 function getToken(): string | null {
@@ -111,6 +112,7 @@ export const api = {
   socialNetwork: () => get<NetworkStat[]>("/social/network"),
   accounts: () => get<AccountsOverview>("/accounts"),
   followEdgesStats: () => get<FollowEdgeStat[]>("/social/follow-edges/stats"),
+  platformSummary: (name: string) => get<PlatformSummary>(`/platform/${name}/summary`),
   socialUsers: (opts: { platform?: string; q?: string; limit?: number } = {}) => {
     const params = new URLSearchParams({ limit: String(opts.limit ?? 60) });
     if (opts.platform) params.set("platform", opts.platform);

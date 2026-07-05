@@ -247,3 +247,18 @@ export interface FollowEdgeStat {
   following: number;
   last_seen: string | null;
 }
+
+export interface PlatformSummary {
+  platform: string;
+  media_count: number;
+  media_last: string | null;
+  media_recent: MediaItem[];
+  users_count: number;
+  posts_count?: number;
+  posts_label?: string;
+  messages_count?: number;
+  messages_last?: string | null;
+  follow_edges: { owner_account: string; followers: number; following: number }[];
+  live?: string | null;
+  age_seconds?: number | null;
+}

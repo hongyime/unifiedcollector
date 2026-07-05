@@ -18,51 +18,66 @@ import {
   Bike,
   MessageCircle,
   QrCode,
-  BarChart3,
   KeyRound,
 } from "lucide-react";
 
+// Per-platform sections: each social/messaging/other platform gets its own entry
+// -> /platform/<name> (a generic overview: what's been collected + recent activity).
+// Specialized pages (strava feed, telegram onboard, wa link) are linked from there.
 const groups = [
   {
-    label: "Operations",
+    label: "Overview",
     items: [
       { to: "/", label: "Dashboard", icon: LayoutDashboard },
       { to: "/collectors", label: "Collectors", icon: Database },
-      { to: "/accounts", label: "Accounts", icon: KeyRound },
-      { to: "/targets", label: "Targets", icon: Target },
-      { to: "/schedules", label: "Schedules", icon: Calendar },
-      { to: "/runs", label: "Runs", icon: PlayCircle },
+      { to: "/browse", label: "All media", icon: ImageIcon },
     ],
   },
   {
-    label: "Data",
+    label: "Social",
     items: [
-      // Media unified: one view (visual browser). The old separate "Media" table
-      // and "Browser" grid were two UIs over the same media_items — merged.
-      { to: "/browse", label: "Media", icon: ImageIcon },
+      { to: "/platform/instagram", label: "Instagram", icon: ImageIcon },
+      { to: "/platform/tiktok", label: "TikTok", icon: ImageIcon },
+      { to: "/platform/lemon8", label: "Lemon8", icon: ImageIcon },
+      { to: "/platform/threads", label: "Threads", icon: ImageIcon },
+      { to: "/platform/x", label: "X", icon: ImageIcon },
+      { to: "/platform/facebook", label: "Facebook", icon: ImageIcon },
+      { to: "/platform/youtube", label: "YouTube", icon: ImageIcon },
+    ],
+  },
+  {
+    label: "Messaging",
+    items: [
+      { to: "/platform/telegram", label: "Telegram", icon: MessageCircle },
+      { to: "/platform/whatsapp", label: "WhatsApp", icon: MessageCircle },
+      { to: "/platform/beeper", label: "Beeper", icon: MessageCircle },
+    ],
+  },
+  {
+    label: "Other",
+    items: [
+      { to: "/platform/strava", label: "Strava", icon: Bike },
+      { to: "/platform/github", label: "GitHub", icon: Database },
+      { to: "/platform/search", label: "Search", icon: Activity },
+      { to: "/platform/website", label: "Website", icon: Network },
+    ],
+  },
+  {
+    label: "People & links",
+    items: [
+      { to: "/social/users", label: "Social Users", icon: Users },
+      { to: "/whatsapp/links", label: "Links", icon: Link2 },
       { to: "/graph", label: "Graph", icon: Network },
     ],
   },
   {
-    // Repurposed from a WhatsApp-only section into a cross-platform Social hub.
-    label: "Social",
+    label: "Manage",
     items: [
-      { to: "/social/users", label: "Users", icon: Users },
-      { to: "/whatsapp/links", label: "Links", icon: Link2 },
+      { to: "/accounts", label: "Accounts", icon: KeyRound },
       { to: "/whatsapp/link", label: "Link Device", icon: QrCode },
-    ],
-  },
-  {
-    label: "Strava",
-    items: [
-      { to: "/strava/feed", label: "Feed", icon: Bike },
-    ],
-  },
-  {
-    label: "Telegram",
-    items: [
-      { to: "/telegram/accounts", label: "Onboard", icon: MessageCircle },
-      { to: "/telegram/stats", label: "Stats", icon: BarChart3 },
+      { to: "/targets", label: "Targets", icon: Target },
+      { to: "/schedules", label: "Schedules", icon: Calendar },
+      { to: "/runs", label: "Runs", icon: PlayCircle },
     ],
   },
   {

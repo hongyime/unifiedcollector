@@ -384,6 +384,80 @@ async def collectors_live(_user: dict = Depends(require_role("viewer"))):
     return {"total": len(sources), "live": live, "sources": sources}
 
 
+_PLATFORM_POSTS = {
+    "instagram": "instagram_posts", "tiktok": "tiktok_posts", "lemon8": "lemon8_posts",
+    "youtube": "youtube_videos", "threads": "threads_posts", "facebook": "facebook_posts",
+    "x": "x_posts", "strava": "strava_activities", "search": "search_results",
+    "website": "website_pages", "github": "github_repos",
+}
+_PLATFORM_MESSAGES = {
+    "telegram": ("telegram_messages", "collected_at"),
+    "whatsapp": ("whatsapp_messages", "collected_at"),
+    "beeper": ("beeper_shadow_messages", "ingested_at"),
+}
+
+
+@app.get("/platform/{name}/summary")
+async def platform_summary(name: str, _user: dict = Depends(require_role("viewer"))):
+    """Everything collected for ONE platform: recent media (what was just scraped),
+    counts (media/users/posts/messages), per-account follow graph, and live status.
+    Powers the per-platform dashboard sections."""
+    name = (name or "").lower()
+    pool = await get_pool()
+    out: dict = {"platform": name}
+    async with pool.acquire() as conn:
+        try:
+            out["media_count"] = int(await conn.fetchval(
+                "SELECT count(*) FROM media_items WHERE source=$1", name, timeout=8) or 0)
+            out["media_last"] = await conn.fetchval(
+                "SELECT max(collected_at) FROM media_items WHERE source=$1", name, timeout=8)
+            out["media_recent"] = [dict(r) for r in await conn.fetch(
+                "SELECT id, entity_name, content_type, filename, collected_at "
+                "FROM media_items WHERE source=$1 ORDER BY collected_at DESC LIMIT 24", name, timeout=8)]
+        except Exception:
+            out.setdefault("media_count", 0)
+            out.setdefault("media_recent", [])
+        try:
+            out["users_count"] = int(await conn.fetchval(
+                "SELECT count(*) FROM social_users WHERE platform=$1", name) or 0)
+        except Exception:
+            out["users_count"] = 0
+        # Whole-table counts via the planner estimate (instant) — count(*) on
+        # 747k-row telegram_messages timed the endpoint out.
+        pt = _PLATFORM_POSTS.get(name)
+        if pt:
+            try:
+                out["posts_count"] = int(await conn.fetchval(
+                    "SELECT reltuples::bigint FROM pg_class WHERE relname=$1", pt) or 0)
+                out["posts_label"] = pt.replace("_", " ")
+            except Exception:
+                pass
+        mt = _PLATFORM_MESSAGES.get(name)
+        if mt:
+            tbl, col = mt
+            try:
+                out["messages_count"] = int(await conn.fetchval(
+                    "SELECT reltuples::bigint FROM pg_class WHERE relname=$1", tbl) or 0)
+                out["messages_last"] = await conn.fetchval(f"SELECT max({col}) FROM {tbl}", timeout=6)
+            except Exception:
+                pass
+        try:
+            out["follow_edges"] = [dict(r) for r in await conn.fetch(
+                "SELECT owner_account, count(*) FILTER (WHERE direction='follower') AS followers, "
+                "count(*) FILTER (WHERE direction='following') AS following "
+                "FROM follow_edges WHERE platform=$1 GROUP BY owner_account", name)]
+        except Exception:
+            out["follow_edges"] = []
+        # Live status: cheap per-platform source_health lookup (not full liveness).
+        # Normalize source_health's 'running' to the UI's 'live'.
+        try:
+            st = await conn.fetchval("SELECT status FROM source_health WHERE source=$1", name)
+            out["live"] = "live" if st == "running" else st
+        except Exception:
+            pass
+    return out
+
+
 @app.get("/social/follow-edges/stats")
 async def follow_edges_stats(_user: dict = Depends(require_role("viewer"))):
     """Per-account follow graph (from follow_edges): how many followers/following
