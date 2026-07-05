@@ -285,24 +285,58 @@
     try {
       const OrigWS = window.WebSocket;
       const _wsProbed = new Set();
+      // The two real DM sockets (edge-chat MQTT for IG, im-ws frontier for
+      // TikTok). We only raw-sample frames on THESE (not the chatty keepalive
+      // gateway sockets), above a size threshold (skip 1-4B pings), capped per
+      // socket, so I can confirm the payload format and build a decoder (#35).
+      const _dmSockRe = /edge-chat\.instagram\.com\/chat|im-ws[^/]*\.tiktok\.com\/ws/i;
+      const _sampleCount = new Map();
+      const SAMPLE_MAX = 6, SAMPLE_MIN_BYTES = 24;
+      function abToB64(buf) {
+        let s = ""; const b = new Uint8Array(buf);
+        for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]);
+        return btoa(s);
+      }
+      function shipSample(u, key, buf) {
+        try {
+          const n = _sampleCount.get(key) || 0;
+          if (n >= SAMPLE_MAX || !buf || buf.byteLength < SAMPLE_MIN_BYTES) return;
+          _sampleCount.set(key, n + 1);
+          window.postMessage({ __uc: true, type: "dm_sample", platform,
+            url: u.slice(0, 200), size: buf.byteLength, b64: abToB64(buf) }, "*");
+        } catch (e) {}
+      }
       const WrappedWS = function (url, protocols) {
         const ws = protocols !== undefined ? new OrigWS(url, protocols) : new OrigWS(url);
         try {
           const u = String(url || "");
           const key = u.split("?")[0];
+          const isDm = _dmSockRe.test(u);
           ws.addEventListener("message", function (ev) {
             try {
               const d = ev.data;
               if (typeof d === "string") {
                 let j; try { j = JSON.parse(d); } catch (e) { return; }
                 window.postMessage({ __uc: true, type: platform + "_dm", platform, frame: j }, "*");
-              } else if (!_wsProbed.has(key)) {
+                return;
+              }
+              // binary frame
+              if (!_wsProbed.has(key)) {
                 _wsProbed.add(key);
                 const kind = (d instanceof ArrayBuffer) ? "arraybuffer"
                   : (typeof Blob !== "undefined" && d instanceof Blob) ? "blob" : typeof d;
                 const size = (d && d.byteLength) || (d && d.size) || null;
                 window.postMessage({ __uc: true, type: "dm_probe", platform, transport: "ws",
                   url: u.slice(0, 200), frame_kind: kind, frame_size: size }, "*");
+              }
+              // raw sample of substantial frames on the real DM sockets
+              if (isDm) {
+                if (d instanceof ArrayBuffer) shipSample(u, key, d);
+                else if (typeof Blob !== "undefined" && d instanceof Blob) {
+                  const fr = new FileReader();
+                  fr.onload = function () { try { shipSample(u, key, fr.result); } catch (e) {} };
+                  fr.readAsArrayBuffer(d);
+                }
               }
             } catch (e) {}
           });

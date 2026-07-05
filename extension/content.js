@@ -996,6 +996,9 @@ window.addEventListener("message", (ev) => {
     send({ type: "dm_probe", platform: m.platform, transport: m.transport,
            url: m.url, frame_kind: m.frame_kind, frame_size: m.frame_size }).catch(() => {});
     clog("info", `DM ${m.transport} observed: ${m.frame_kind || "url"} ${m.frame_size ? m.frame_size + "B " : ""}${m.url}`, m.platform);
+  } else if (m.type === "dm_sample" && m.b64) {
+    // Raw sample bytes of a real DM-socket frame, for decoder work (#35).
+    send({ type: "dm_sample", platform: m.platform, url: m.url, size: m.size, b64: m.b64 }).catch(() => {});
   }
 });
 

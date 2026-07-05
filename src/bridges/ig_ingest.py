@@ -29,6 +29,7 @@ and download out-of-band.
 import asyncio
 import json
 import logging
+import base64
 import os
 import re
 import time
@@ -804,6 +805,34 @@ async def dm_probe_handler(request):
     return _cors(web.json_response({"ok": True}))
 
 
+async def dm_sample_handler(request):
+    """Save a raw DM-socket frame sample (base64) for decoder development (#35).
+    Observe-only: these are bytes the page already received; we send nothing to
+    the platform. Written to /tmp/dm_samples/<platform>_<n>.bin so the exact
+    MQTT (IG) / protobuf (TikTok) payloads can be inspected offline. Capped by
+    the extension (few per socket) so this never floods.
+    """
+    body = await _safe_json(request)
+    platform = (body.get("platform") or "unknown").replace("/", "_")[:20]
+    b64 = body.get("b64") or ""
+    try:
+        raw = base64.b64decode(b64)
+    except Exception:
+        return _cors(web.json_response({"ok": False, "error": "bad_b64"}, status=400))
+    d = "/tmp/dm_samples"
+    os.makedirs(d, exist_ok=True)
+    import glob as _glob
+    n = len(_glob.glob(f"{d}/{platform}_*.bin"))
+    path = f"{d}/{platform}_{n:03d}.bin"
+    try:
+        with open(path, "wb") as f:
+            f.write(raw)
+        logger.info("DM sample saved: %s (%d bytes) url=%s", path, len(raw), body.get("url"))
+    except Exception:
+        logger.exception("dm sample write failed")
+    return _cors(web.json_response({"ok": True, "bytes": len(raw)}))
+
+
 async def dm_frame_handler(request):
     """Capture a DM JSON frame if one is ever observed over a WS (#35). These
     channels almost always send protobuf/MQTT, so this is a best-effort path:
@@ -1021,6 +1050,7 @@ def make_app():
     app.router.add_post("/social/dms", dms_handler)
     app.router.add_post("/social/cookies", cookies_handler)
     app.router.add_post("/social/dm-frame", dm_frame_handler)
+    app.router.add_post("/social/dm-sample", dm_sample_handler)
     app.router.add_post("/social/dm-probe", dm_probe_handler)
     # instagram back-compat aliases
     app.router.add_get("/ig/targets", get_targets_ig)

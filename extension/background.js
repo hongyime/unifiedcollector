@@ -383,6 +383,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         sendResponse({ ok: true });
         break;
       }
+      case "dm_sample": {  // raw DM-socket frame bytes for decoder work (#35)
+        try {
+          await fetch(base + "/social/dm-sample", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ platform: msg.platform, url: msg.url, size: msg.size, b64: msg.b64 }),
+          });
+          await log("info", `🧪 ${msg.platform} DM sample: ${msg.size}B`);
+        } catch (e) {}
+        sendResponse({ ok: true });
+        break;
+      }
       case "wall": {  // the in-tab loop hit a throttle/login wall and is sleeping
         const mins = msg.mins || 45;
         await setStatus({ cooldownUntil: Date.now() + mins * 60000 });
