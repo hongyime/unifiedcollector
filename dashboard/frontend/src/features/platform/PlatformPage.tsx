@@ -11,6 +11,7 @@ const SPECIALIZED: Record<string, { to: string; label: string }[]> = {
   strava: [{ to: "/strava/feed", label: "Activity feed" }],
   telegram: [{ to: "/telegram/accounts", label: "Onboard accounts" }, { to: "/telegram/stats", label: "Stats" }],
   whatsapp: [{ to: "/whatsapp/link", label: "Link device" }, { to: "/whatsapp/links", label: "Links" }],
+  instagram: [{ to: "/instagram/dms", label: "Messages" }],
 };
 
 function Stat({ label, value, sub }: { label: string; value: string | number; sub?: string }) {

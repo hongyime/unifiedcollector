@@ -22,6 +22,7 @@ import { PlatformPage } from "./features/platform/PlatformPage";
 import { LinksPage } from "./features/whatsapp/LinksPage";
 import { WhatsAppLinkPage } from "./features/whatsapp/WhatsAppLinkPage";
 import { StravaFeedPage } from "./features/strava/StravaFeedPage";
+import { InstagramDmPage } from "./features/instagram/InstagramDmPage";
 import { LoginPage } from "./features/auth/LoginPage";
 import { TelegramAccountsPage } from "./features/telegram/TelegramAccountsPage";
 import { TelegramStatsPage } from "./features/telegram/TelegramStatsPage";
@@ -57,6 +58,7 @@ const router = createBrowserRouter([
       { path: "whatsapp/links", element: <LinksPage /> },
       { path: "whatsapp/link", element: <WhatsAppLinkPage /> },
       { path: "strava/feed", element: <StravaFeedPage /> },
+      { path: "instagram/dms", element: <InstagramDmPage /> },
       { path: "telegram/accounts", element: <TelegramAccountsPage /> },
       { path: "telegram/stats", element: <TelegramStatsPage /> },
       { path: "dlq", element: <DLQPage /> },

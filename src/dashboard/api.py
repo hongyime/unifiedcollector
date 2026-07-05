@@ -1199,6 +1199,71 @@ async def wa_user_history(jid: str, limit: int = 100,
     return [dict(r) for r in rows]
 
 
+# ── Instagram: DMs (captured ban-safely by the extension observing direct_v2) ──
+
+@app.get("/instagram/dms/threads")
+async def list_ig_dm_threads(owner: str | None = None, limit: int = 100,
+                             _user: dict = Depends(require_role("viewer"))):
+    """DM threads with a message count and last-activity, newest first.
+
+    instagram_dm_thread may be empty until the extension observes IG DMs in a
+    logged-in tab; return [] cleanly if the table doesn't exist yet.
+    """
+    limit = max(1, min(limit, 500))
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if await conn.fetchval("SELECT to_regclass('instagram_dm_thread')") is None:
+            return []
+        params: list = []
+        where = ""
+        if owner:
+            where = "WHERE t.owner_account = $1"
+            params.append(owner)
+        rows = await conn.fetch(
+            f"""
+            SELECT t.thread_id, t.title, t.participants, t.owner_account,
+                   t.last_activity,
+                   COALESCE(m.cnt, 0)   AS message_count,
+                   m.last_ts            AS last_message_ts
+            FROM instagram_dm_thread t
+            LEFT JOIN (
+                SELECT thread_id, count(*) AS cnt, max("timestamp") AS last_ts
+                FROM instagram_dm GROUP BY thread_id
+            ) m ON m.thread_id = t.thread_id
+            {where}
+            ORDER BY COALESCE(t.last_activity, m.last_ts) DESC NULLS LAST
+            LIMIT ${len(params) + 1}
+            """,
+            *params, limit,
+        )
+    return [dict(r) for r in rows]
+
+
+@app.get("/instagram/dms/thread/{thread_id}")
+async def ig_dm_thread_messages(thread_id: str, limit: int = 200,
+                                _user: dict = Depends(require_role("viewer"))):
+    """Messages for one IG DM thread, chronological (oldest first) for display."""
+    limit = max(1, min(limit, 2000))
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if await conn.fetchval("SELECT to_regclass('instagram_dm')") is None:
+            return {"thread": None, "messages": []}
+        thread = await conn.fetchrow(
+            "SELECT * FROM instagram_dm_thread WHERE thread_id = $1", thread_id,
+        )
+        rows = await conn.fetch(
+            'SELECT message_id, sender_id, sender_username, text, item_type, '
+            '"timestamp", is_from_me, owner_account '
+            'FROM instagram_dm WHERE thread_id = $1 '
+            'ORDER BY "timestamp" ASC NULLS LAST LIMIT $2',
+            thread_id, limit,
+        )
+    return {
+        "thread": dict(thread) if thread else None,
+        "messages": [dict(r) for r in rows],
+    }
+
+
 # ── WhatsApp: Links ──
 
 @app.get("/whatsapp/links")

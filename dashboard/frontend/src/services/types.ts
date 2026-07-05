@@ -105,6 +105,27 @@ export interface UserHistoryEntry {
   collected_at: string;
 }
 
+export interface IgDmThread {
+  thread_id: string;
+  title: string | null;
+  participants: string[] | null;
+  owner_account: string | null;
+  last_activity: string | null;
+  message_count?: number;
+  last_message_ts?: string | null;
+}
+
+export interface IgDmMessage {
+  message_id: string;
+  sender_id: string | null;
+  sender_username: string | null;
+  text: string | null;
+  item_type: string | null;
+  timestamp: string | null;
+  is_from_me: boolean;
+  owner_account: string | null;
+}
+
 export interface DiscoveredLink {
   id: number;
   link: string;

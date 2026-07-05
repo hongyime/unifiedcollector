@@ -26,6 +26,8 @@ import type {
   AccountsOverview,
   FollowEdgeStat,
   PlatformSummary,
+  IgDmThread,
+  IgDmMessage,
 } from "./types";
 
 function getToken(): string | null {
@@ -146,6 +148,16 @@ export const api = {
     return get<WhatsAppUser[]>(`/whatsapp/users?${params}`);
   },
   waUserHistory: (jid: string) => get<UserHistoryEntry[]>(`/whatsapp/users/${jid}/history`),
+
+  igDmThreads: (owner?: string, limit = 100) => {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (owner) params.set("owner", owner);
+    return get<IgDmThread[]>(`/instagram/dms/threads?${params}`);
+  },
+  igDmThread: (threadId: string) =>
+    get<{ thread: IgDmThread | null; messages: IgDmMessage[] }>(
+      `/instagram/dms/thread/${encodeURIComponent(threadId)}`,
+    ),
 
   waLinks: (opts?: { linkType?: string; status?: string; limit?: number }) => {
     const params = new URLSearchParams();
