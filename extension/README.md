@@ -97,3 +97,5 @@ skipped** — we crawl your network, not celebrities. Tune via env on the
 - `background.js` — service worker: alarms + relays to the ingest endpoint
 - `popup.html` / `popup.js` — config + "Scrape now"
 - `../src/bridges/ig_ingest.py` — collector-side ingest server
+
+<!-- extension version is auto-bumped by scripts/hooks/pre-commit on any extension change. -->
