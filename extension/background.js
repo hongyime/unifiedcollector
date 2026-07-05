@@ -360,23 +360,25 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         } catch (e) { await log("error", `dms failed: ${e.message}`); sendResponse({ ok: false }); }
         break;
       }
-      case "tiktok_dm": {  // TikTok DM JSON frame from the frontier WS (rare) (#35)
+      case "tiktok_dm":       // DM JSON frame from a WS (rare) — capture (#35)
+      case "instagram_dm": {
         try {
-          const r = await fetch(base + "/tiktok/dm", {
+          const r = await fetch(base + "/social/dm-frame", {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ frame: msg.frame }),
+            body: JSON.stringify({ platform: msg.platform, frame: msg.frame }),
           });
           sendResponse({ ok: r.ok });
         } catch (e) { sendResponse({ ok: false }); }
         break;
       }
-      case "tiktok_dm_probe": {  // one-time WS format probe for investigation (#38)
+      case "dm_probe": {  // one-time DM transport/format probe for investigation (#38)
         try {
-          await fetch(base + "/tiktok/dm-probe", {
+          await fetch(base + "/social/dm-probe", {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ ws_url: msg.ws_url, frame_kind: msg.frame_kind, frame_size: msg.frame_size }),
+            body: JSON.stringify({ platform: msg.platform, transport: msg.transport,
+              url: msg.url, frame_kind: msg.frame_kind, frame_size: msg.frame_size }),
           });
-          await log("info", `🔎 TikTok DM WS format: ${msg.frame_kind} ~${msg.frame_size || "?"}B`);
+          await log("info", `🔎 ${msg.platform} DM ${msg.transport}: ${msg.frame_kind || "url"} ${msg.frame_size ? "~" + msg.frame_size + "B " : ""}${msg.url || ""}`);
         } catch (e) {}
         sendResponse({ ok: true });
         break;

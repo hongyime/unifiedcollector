@@ -787,33 +787,34 @@ async def dms_handler(request):
         return _cors(web.json_response({"recorded": 0, "error": "db"}, status=500))
 
 
-async def tiktok_dm_probe_handler(request):
-    """One-time investigation probe (#38): the extension's observe-only WebSocket
-    hook reports the format of TikTok DM frames so we can confirm the wire format
-    before committing to a decoder/schema. We just log it — no DB write. Expected
-    finding: binary/protobuf frames over a frontier WS (not JSON), which is why
-    the fetch/XHR observation path can't capture TikTok DMs the way it does IG's.
+async def dm_probe_handler(request):
+    """One-time investigation probe (#38): the extension's observe-only hooks
+    report the transport + format of each platform's DM channel so we can confirm
+    the wire format before committing to a decoder/schema. Log-only — no DB write.
+    Confirmed so far: TikTok = binary protobuf over wss://im-ws-…/ws/v2; IG is
+    expected to be binary MQTT over wss://edge-chat.instagram.com/chat — both
+    reasons the fetch/XHR JSON observation path can't capture them.
     """
     body = await _safe_json(request)
     logger.info(
-        "TikTok DM WS probe: kind=%s size=%s url=%s",
-        body.get("frame_kind"), body.get("frame_size"), body.get("ws_url"),
+        "DM probe: platform=%s transport=%s kind=%s size=%s url=%s",
+        body.get("platform"), body.get("transport"), body.get("frame_kind"),
+        body.get("frame_size"), body.get("url"),
     )
     return _cors(web.json_response({"ok": True}))
 
 
-async def tiktok_dm_handler(request):
-    """Capture a TikTok DM JSON frame if one is ever observed (#35). TikTok almost
-    always sends protobuf, so this is a best-effort path: log the raw frame so it
-    can be inspected. No dedicated table yet — schema is added once the frame
-    shape is confirmed via the probe above.
+async def dm_frame_handler(request):
+    """Capture a DM JSON frame if one is ever observed over a WS (#35). These
+    channels almost always send protobuf/MQTT, so this is a best-effort path:
+    log the raw frame so it can be inspected. No dedicated table yet — a schema
+    is added once the frame shape is confirmed via the probe above.
     """
     body = await _safe_json(request)
-    frame = body.get("frame")
     try:
-        logger.info("TikTok DM JSON frame observed: %s", json.dumps(frame)[:1000])
+        logger.info("DM JSON frame (%s): %s", body.get("platform"), json.dumps(body.get("frame"))[:1000])
     except Exception:
-        logger.info("TikTok DM frame observed (unserializable)")
+        logger.info("DM frame observed (unserializable)")
     return _cors(web.json_response({"ok": True}))
 
 
@@ -1019,8 +1020,8 @@ def make_app():
     app.router.add_post("/social/seed", seed_handler)
     app.router.add_post("/social/dms", dms_handler)
     app.router.add_post("/social/cookies", cookies_handler)
-    app.router.add_post("/tiktok/dm", tiktok_dm_handler)
-    app.router.add_post("/tiktok/dm-probe", tiktok_dm_probe_handler)
+    app.router.add_post("/social/dm-frame", dm_frame_handler)
+    app.router.add_post("/social/dm-probe", dm_probe_handler)
     # instagram back-compat aliases
     app.router.add_get("/ig/targets", get_targets_ig)
     app.router.add_post("/ig/ingest", ingest_ig)

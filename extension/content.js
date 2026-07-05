@@ -988,14 +988,14 @@ window.addEventListener("message", (ev) => {
     send({ type: "users", platform: m.platform, context: m.context || "seen", owner: m.owner || null, users: m.users }).catch(() => {});
   } else if (m.type === "dms" && Array.isArray(m.threads) && m.threads.length) {
     send({ type: "dms", platform: m.platform, owner: m.owner || null, threads: m.threads }).catch(() => {});
-  } else if (m.type === "tiktok_dm" && m.frame) {
-    // TikTok DM JSON frame (rare — most are protobuf). Forward for capture (#35).
-    send({ type: "tiktok_dm", platform: "tiktok", frame: m.frame }).catch(() => {});
-  } else if (m.type === "tiktok_dm_probe") {
-    // One-time format probe so we can confirm TikTok's DM wire format (#38).
-    send({ type: "tiktok_dm_probe", platform: "tiktok",
-           ws_url: m.ws_url, frame_kind: m.frame_kind, frame_size: m.frame_size }).catch(() => {});
-    clog("info", `TikTok DM WS frame observed: ${m.frame_kind} ${m.frame_size || "?"}B (${m.ws_url})`, "tiktok");
+  } else if ((m.type === "tiktok_dm" || m.type === "instagram_dm") && m.frame) {
+    // DM JSON frame from a WS (rare — most are protobuf/MQTT). Forward for capture.
+    send({ type: m.type, platform: m.platform, frame: m.frame }).catch(() => {});
+  } else if (m.type === "dm_probe") {
+    // Format probe so we can confirm each platform's DM wire format (#38).
+    send({ type: "dm_probe", platform: m.platform, transport: m.transport,
+           url: m.url, frame_kind: m.frame_kind, frame_size: m.frame_size }).catch(() => {});
+    clog("info", `DM ${m.transport} observed: ${m.frame_kind || "url"} ${m.frame_size ? m.frame_size + "B " : ""}${m.url}`, m.platform);
   }
 });
 
