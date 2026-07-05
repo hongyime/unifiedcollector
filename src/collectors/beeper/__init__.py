@@ -1082,8 +1082,15 @@ class BeeperCollector(BaseCollector):
                 if tail_inserted >= max_pages * 50:
                     break
 
-            if tail_inserted or new_newest != newest_cursor:
-                await w.update_sync_state(chat_id, newest_cursor=new_newest)
+            # Always bump last_synced_at (update_sync_state sets it to now()),
+            # even when the tail found nothing new. Previously this was gated on
+            # `tail_inserted or new_newest != newest_cursor`, so a caught-up chat
+            # never advanced its last_synced_at — it stayed pinned at the front of
+            # the `ORDER BY last_synced_at ASC` selection queue and got re-picked
+            # every cycle, starving the round-robin so newer-but-quieter chats
+            # (e.g. active group chats) were only tailed every ~11 days. Bumping
+            # unconditionally makes the sweep actually rotate through all chats.
+            await w.update_sync_state(chat_id, newest_cursor=new_newest)
             inserted += tail_inserted
 
         except BeeperTransientError as exc:
