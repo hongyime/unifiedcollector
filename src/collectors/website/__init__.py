@@ -413,6 +413,13 @@ class WebsiteCollector(BaseCollector):
         return path
 
     async def collect(self, targets: list[str]) -> None:
+        # Perpetual SG discovery: queue newly-found .sg domains for future cycles.
+        try:
+            await self._promote_discovered_sg_domains(
+                cap=int(os.getenv("WEBSITE_AUTODISCOVER_CAP", "50")))
+        except Exception as e:
+            logger.debug("website autodiscover failed: %s", e)
+
         for url in targets:
             if self._stop.is_set():
                 break
@@ -1104,6 +1111,63 @@ class WebsiteCollector(BaseCollector):
     # ------------------------------------------------------------------ #
     # DB persistence
     # ------------------------------------------------------------------ #
+
+    async def _promote_discovered_sg_domains(self, cap: int = 50) -> int:
+        """PERPETUAL DISCOVERY: mine external links from recently-crawled pages for
+        NEW Singapore (.sg) domains and queue them into collection_targets so the
+        crawler picks them up next cycle. Each newly-crawled .sg site reveals more
+        .sg links -> the crawl frontier keeps expanding (was static: the collector
+        discovered sites but never added them). Gated + bounded + .sg-only so it
+        stays Singapore-focused and doesn't crawl the whole web."""
+        if os.getenv("WEBSITE_AUTODISCOVER_SG", "true").lower() != "true" or not self.pool:
+            return 0
+        scan = int(os.getenv("WEBSITE_AUTODISCOVER_SCAN", "20000"))
+        candidates: list[str] = []
+        try:
+            async with self.pool.acquire() as conn:
+                # Source 1: external links from recently-crawled SG pages.
+                for r in await conn.fetch(
+                        "SELECT DISTINCT unnest(external_links) AS link FROM website_pages "
+                        "WHERE collected_at > now() - interval '3 days' AND external_links IS NOT NULL "
+                        f"LIMIT {scan}"):
+                    candidates.append(r["link"])
+                # Source 2 (richer): .sg domains from recent search results.
+                for r in await conn.fetch(
+                        "SELECT DISTINCT domain FROM search_results "
+                        "WHERE domain LIKE '%.sg' AND collected_at > now() - interval '30 days' "
+                        f"LIMIT {scan}"):
+                    candidates.append(r["domain"])
+        except Exception as e:
+            logger.debug("autodiscover scan failed: %s", e)
+            return 0
+        added, seen = 0, set()
+        async with self.pool.acquire() as conn:
+            for cand in candidates:
+                if added >= cap:
+                    break
+                try:
+                    # cand may be a full URL (external_links) or a bare domain (search).
+                    host = (urlparse(cand).netloc or cand).lower().split(":")[0]
+                except Exception:
+                    continue
+                if host.startswith("www."):
+                    host = host[4:]
+                if not host or host in seen or not host.endswith(".sg"):
+                    continue
+                seen.add(host)
+                # Skip if already a target or already crawled.
+                if await conn.fetchval("SELECT 1 FROM collection_targets WHERE source='website' AND target_id=$1", host):
+                    continue
+                if await conn.fetchval("SELECT 1 FROM website_targets WHERE domain=$1", host):
+                    continue
+                await conn.execute(
+                    "INSERT INTO collection_targets (source, target_id, target_name, status, priority) "
+                    "VALUES ('website', $1, $1, 'pending', 0) ON CONFLICT (source, target_id) DO NOTHING",
+                    host)
+                added += 1
+        if added:
+            logger.info("website: perpetual discovery queued %d new .sg domains for crawling", added)
+        return added
 
     async def _upsert_target(self, domain: str, start_url: str) -> None:
         if not self.pool:
