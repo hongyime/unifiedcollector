@@ -292,6 +292,12 @@
       const _dmSockRe = /edge-chat\.instagram\.com\/chat|im-ws[^/]*\.tiktok\.com\/ws/i;
       const _sampleCount = new Map();
       const SAMPLE_MAX = 6, SAMPLE_MIN_BYTES = 24;
+      // P1.3: WS-hook heartbeat counters. shipSample/probe increment these;
+      // a setInterval below emits a heartbeat postMessage so background.js
+      // can POST /social/dm-heartbeat and the watchdog can detect a broken
+      // hook (IG/TikTok bundle updates silently disable the wrapper today).
+      let _hookProbes = 0;
+      let _hookSamples = 0;
       function abToB64(buf) {
         let s = ""; const b = new Uint8Array(buf);
         for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]);
@@ -302,6 +308,7 @@
           const n = _sampleCount.get(key) || 0;
           if (n >= SAMPLE_MAX || !buf || buf.byteLength < SAMPLE_MIN_BYTES) return;
           _sampleCount.set(key, n + 1);
+          _hookSamples++;
           window.postMessage({ __uc: true, type: "dm_sample", platform,
             url: u.slice(0, 200), size: buf.byteLength, b64: abToB64(buf) }, "*");
         } catch (e) {}
@@ -323,6 +330,7 @@
               // binary frame
               if (!_wsProbed.has(key)) {
                 _wsProbed.add(key);
+                _hookProbes++;
                 const kind = (d instanceof ArrayBuffer) ? "arraybuffer"
                   : (typeof Blob !== "undefined" && d instanceof Blob) ? "blob" : typeof d;
                 const size = (d && d.byteLength) || (d && d.size) || null;
@@ -347,6 +355,34 @@
       WrappedWS.CONNECTING = OrigWS.CONNECTING; WrappedWS.OPEN = OrigWS.OPEN;
       WrappedWS.CLOSING = OrigWS.CLOSING; WrappedWS.CLOSED = OrigWS.CLOSED;
       window.WebSocket = WrappedWS;
+
+      // P1.3: WS-hook heartbeat. Every 5 min the running counters are shipped
+      // to /social/dm-heartbeat via content.js -> background.js so the
+      // watchdog can tell "extension not installed" from "hook silently
+      // broken by an IG/TikTok bundle update". Sending happens even when
+      // counters are still 0 — "hook loaded and alive but no traffic" is a
+      // valid state that the dashboard should surface.
+      try {
+        const HEARTBEAT_MIN = 5;
+        setInterval(function () {
+          try {
+            window.postMessage({
+              __uc: true, type: "dm_heartbeat", platform,
+              probes_sent: _hookProbes, samples_shipped: _hookSamples,
+            }, "*");
+          } catch (e) {}
+        }, HEARTBEAT_MIN * 60 * 1000);
+        // Fire one immediately after install so a fresh page load shows up
+        // in the dashboard without waiting 5 min for the first tick.
+        setTimeout(function () {
+          try {
+            window.postMessage({
+              __uc: true, type: "dm_heartbeat", platform,
+              probes_sent: _hookProbes, samples_shipped: _hookSamples,
+            }, "*");
+          } catch (e) {}
+        }, 15 * 1000);
+      } catch (e) {}
     } catch (e) {}
   }
 })();

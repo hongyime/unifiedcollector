@@ -143,6 +143,16 @@ export interface DmTelemetryPlatform {
   platform: string;
   probe: DmTelemetryBucket;
   sample: DmTelemetryBucket;
+  // P1.3: browser-side WS-hook liveness. Null when no heartbeat has ever
+  // arrived — the watchdog treats that as "not installed" (won't alert).
+  hook: DmHookHeartbeat | null;
+}
+export interface DmHookHeartbeat {
+  last_seen: string | null;
+  probes_sent: number;
+  samples_shipped: number;
+  extension_version: string | null;
+  owner_count: number;
 }
 export interface DmTelemetry {
   platforms: DmTelemetryPlatform[];

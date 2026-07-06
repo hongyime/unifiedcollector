@@ -182,6 +182,9 @@ function DmTelemetryPanel({ platforms }: { platforms: DmTelemetryPlatform[] }) {
 
 function PlatformTelemetryCard({ p }: { p: DmTelemetryPlatform }) {
   const noSamples = p.sample.all_time === 0;
+  const hookStale = p.hook?.last_seen
+    ? Date.now() - new Date(p.hook.last_seen).getTime() > 60 * 60 * 1000  // 1h
+    : false;
   return (
     <div className="bg-background rounded border border-border/60 p-3">
       <div className="flex items-baseline justify-between">
@@ -218,6 +221,23 @@ function PlatformTelemetryCard({ p }: { p: DmTelemetryPlatform }) {
             : ""}
         </div>
       )}
+      {/* P1.3 hook status. Absent = never installed; stale = bundle change
+          likely broke the hook (watchdog will alert). */}
+      <div className="mt-2 border-t border-border/40 pt-2 text-[11px]">
+        {!p.hook ? (
+          <span className="text-text-muted">
+            hook: never heard from (extension not installed on this platform)
+          </span>
+        ) : (
+          <span className={hookStale ? "text-warning" : "text-text-muted"}>
+            hook: v{p.hook.extension_version ?? "?"} ·{" "}
+            {p.hook.last_seen
+              ? `heartbeat ${relativeTime(p.hook.last_seen)}`
+              : "no heartbeat yet"}
+            {hookStale && " · STALE"}
+          </span>
+        )}
+      </div>
     </div>
   );
 }

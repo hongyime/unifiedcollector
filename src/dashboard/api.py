@@ -1266,14 +1266,18 @@ async def ig_dm_thread_messages(thread_id: str, limit: int = 200,
 
 @app.get("/dm/telemetry")
 async def dm_telemetry(_user: dict = Depends(require_role("viewer"))):
-    """Passive DM probe/sample telemetry for the dashboard panel (P1.2).
+    """Passive DM probe/sample telemetry for the dashboard panel (P1.2 + P1.3).
 
     Returns per-platform counts of probes and samples the extension's
     observe-only WS hook has emitted, so we can tell at a glance whether real
     DM frames have arrived (particularly Instagram, which has been stuck at
     keepalive-class 1–4 byte frames while TikTok has been streaming 1KB
-    protobuf samples on every DM). Empty list if the table doesn't exist
-    yet (e.g. on a boot before migration is applied).
+    protobuf samples on every DM). P1.3 also folds in dm_hook_heartbeat so
+    the panel surfaces "last time the extension WS hook checked in" —
+    critical for knowing when an IG/TikTok bundle change has silently broken
+    the wrapper.
+
+    Empty result if the tables don't exist yet (boot before migration).
     """
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -1295,15 +1299,31 @@ async def dm_telemetry(_user: dict = Depends(require_role("viewer"))):
             ORDER BY platform, event_type
             """
         )
+        heartbeat_rows = []
+        if await conn.fetchval("SELECT to_regclass('dm_hook_heartbeat')") is not None:
+            heartbeat_rows = await conn.fetch(
+                """
+                SELECT platform,
+                       MAX(last_seen)                                                AS last_seen,
+                       SUM(probes_sent)                                              AS probes_sent,
+                       SUM(samples_shipped)                                          AS samples_shipped,
+                       (ARRAY_AGG(extension_version ORDER BY last_seen DESC))[1]     AS extension_version,
+                       COUNT(*) FILTER (WHERE owner_account <> '')                   AS owner_count
+                FROM dm_hook_heartbeat
+                GROUP BY platform
+                """
+            )
     # Pivot to per-platform record for easy frontend rendering.
     per_platform: dict[str, dict] = {}
+    def _empty_bucket():
+        return {"all_time": 0, "last_24h": 0, "last_1h": 0, "last_seen": None,
+                "max_frame_size": None, "min_frame_size": None}
     for r in rows:
         p = per_platform.setdefault(r["platform"], {
             "platform": r["platform"],
-            "probe":  {"all_time": 0, "last_24h": 0, "last_1h": 0, "last_seen": None,
-                       "max_frame_size": None, "min_frame_size": None},
-            "sample": {"all_time": 0, "last_24h": 0, "last_1h": 0, "last_seen": None,
-                       "max_frame_size": None, "min_frame_size": None},
+            "probe":  _empty_bucket(),
+            "sample": _empty_bucket(),
+            "hook":   None,
         })
         bucket = "sample" if r["event_type"] == "sample" else "probe"
         p[bucket] = {
@@ -1313,6 +1333,20 @@ async def dm_telemetry(_user: dict = Depends(require_role("viewer"))):
             "last_seen":      r["last_seen"].isoformat() if r["last_seen"] else None,
             "max_frame_size": int(r["max_frame_size"]) if r["max_frame_size"] is not None else None,
             "min_frame_size": int(r["min_frame_size"]) if r["min_frame_size"] is not None else None,
+        }
+    for h in heartbeat_rows:
+        p = per_platform.setdefault(h["platform"], {
+            "platform": h["platform"],
+            "probe":  _empty_bucket(),
+            "sample": _empty_bucket(),
+            "hook":   None,
+        })
+        p["hook"] = {
+            "last_seen":         h["last_seen"].isoformat() if h["last_seen"] else None,
+            "probes_sent":       int(h["probes_sent"] or 0),
+            "samples_shipped":   int(h["samples_shipped"] or 0),
+            "extension_version": h["extension_version"],
+            "owner_count":       int(h["owner_count"] or 0),
         }
     return {
         "platforms": list(per_platform.values()),

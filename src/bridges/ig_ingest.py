@@ -833,14 +833,73 @@ async def _dm_probe_log_write(pool, platform, event_type, body, frame_size=None)
         logger.debug("dm_probe_log write failed", exc_info=True)
 
 
+async def dm_hook_heartbeat_handler(request):
+    """Heartbeat from the browser extension's DM WebSocket hook (P1.3).
+
+    The hook lives inside inject.js and is passive/send-nothing (see #35/#38).
+    If Instagram or TikTok update their bundle and break the wrapper we have
+    no server-side signal today — samples just stop arriving and it's
+    indistinguishable from "user isn't DMing". This endpoint records a beat
+    per (platform, owner) so:
+      (a) src/watchdog/freshness.py can alert on Telegram if the newest
+          heartbeat per platform goes stale (no container restart possible —
+          the hook lives in the browser), and
+      (b) the dashboard telemetry panel can show extension_version and
+          time-since-last-beat.
+    Best-effort — failures are logged at DEBUG and don't affect return.
+    """
+    body = await _safe_json(request)
+    platform = (body.get("platform") or "").strip()
+    if not platform:
+        return _cors(web.json_response({"ok": False, "error": "no_platform"}, status=400))
+    owner = (body.get("owner") or body.get("owner_account") or "").strip()
+    try:
+        probes = int(body.get("probes_sent") or 0)
+    except (TypeError, ValueError):
+        probes = 0
+    try:
+        samples = int(body.get("samples_shipped") or 0)
+    except (TypeError, ValueError):
+        samples = 0
+    ext_version = (body.get("extension_version") or None)
+    ua = request.headers.get("User-Agent") or None
+
+    pool = request.app.get("pool")
+    if not pool:
+        return _cors(web.json_response({"ok": True, "recorded": False}))
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO dm_hook_heartbeat
+                    (platform, owner_account, last_seen, probes_sent,
+                     samples_shipped, extension_version, user_agent)
+                VALUES ($1, $2, now(), $3, $4, $5, $6)
+                ON CONFLICT (platform, owner_account) DO UPDATE SET
+                    last_seen         = now(),
+                    probes_sent       = EXCLUDED.probes_sent,
+                    samples_shipped   = EXCLUDED.samples_shipped,
+                    extension_version = COALESCE(EXCLUDED.extension_version,
+                                                 dm_hook_heartbeat.extension_version),
+                    user_agent        = COALESCE(EXCLUDED.user_agent,
+                                                 dm_hook_heartbeat.user_agent)
+                """,
+                platform[:64], owner[:128], probes, samples, ext_version, ua,
+            )
+    except Exception:
+        logger.debug("dm_hook_heartbeat upsert failed", exc_info=True)
+        return _cors(web.json_response({"ok": False, "error": "db"}, status=500))
+    return _cors(web.json_response({"ok": True}))
+
+
 async def dm_probe_handler(request):
     """One-time investigation probe (#38): the extension's observe-only hooks
     report the transport + format of each platform's DM channel so we can confirm
     the wire format before committing to a decoder/schema. Logged to stderr and
     (P1.2) to dm_probe_log for the dashboard telemetry panel.
     Confirmed so far: TikTok = binary protobuf over wss://im-ws-…/ws/v2; IG is
-    expected to be binary MQTT over wss://edge-chat.instagram.com/chat — both
-    reasons the fetch/XHR JSON observation path can't capture them.
+    binary MQTT over wss://edge-chat.instagram.com/chat — both reasons the
+    fetch/XHR JSON observation path can't capture them.
     """
     body = await _safe_json(request)
     logger.info(
@@ -1165,6 +1224,7 @@ def make_app():
     app.router.add_post("/social/dm-frame", dm_frame_handler)
     app.router.add_post("/social/dm-sample", dm_sample_handler)
     app.router.add_post("/social/dm-probe", dm_probe_handler)
+    app.router.add_post("/social/dm-heartbeat", dm_hook_heartbeat_handler)
     # instagram back-compat aliases
     app.router.add_get("/ig/targets", get_targets_ig)
     app.router.add_post("/ig/ingest", ingest_ig)

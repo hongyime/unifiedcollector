@@ -276,6 +276,64 @@ async def _mark_degraded_dlq(db: asyncpg.Connection, source: str, n: int, oldest
         log.error("source_health DLQ upsert failed for %s: %s", source, e)
 
 
+# ── DM WS-hook liveness (P1.3) ───────────────────────────────────────────────
+# The browser extension's DM WebSocket wrapper (see extension/inject.js
+# "DM investigation" block) posts a heartbeat every 5 min. If IG or TikTok
+# update their bundle and the wrapper silently breaks, samples just stop
+# arriving — indistinguishable from "user isn't DMing". This alerts when the
+# newest heartbeat per platform goes stale.
+#
+# Alert-only, NO restart: the hook lives in the browser, not a container. If
+# we've never seen a heartbeat for a platform we do NOT alert (can't tell
+# "never installed" from "just broken"); the freshness check only fires when
+# a previously-alive heartbeat has since gone quiet.
+DM_HOOK_ENABLED = os.getenv("WATCHDOG_DM_HOOK_ENABLED", "1") == "1"
+DM_HOOK_STALE_SECONDS = int(os.getenv("WATCHDOG_STALE_DM_HOOK", "3600"))       # 1h
+DM_HOOK_ALERT_COOLDOWN = int(os.getenv("WATCHDOG_DM_HOOK_ALERT_COOLDOWN", "3600"))  # ≤1 alert/h/platform
+_last_dm_hook_alert: dict[str, float] = {}
+
+
+async def _dm_hook_tick(db: asyncpg.Connection) -> None:
+    now = time.time()
+    try:
+        # to_regclass check keeps the loop happy on a boot before the P1.3
+        # migration is applied.
+        exists = await db.fetchval("SELECT to_regclass('dm_hook_heartbeat')")
+        if exists is None:
+            return
+        rows = await db.fetch(
+            """
+            SELECT platform,
+                   extract(epoch FROM now() - max(last_seen)) AS age
+            FROM dm_hook_heartbeat
+            GROUP BY platform
+            """
+        )
+    except Exception as e:
+        log.error("dm_hook_heartbeat query failed: %s", e)
+        return
+    for r in rows:
+        platform, age = r["platform"], r["age"] or 0
+        if age > DM_HOOK_STALE_SECONDS:
+            if now - _last_dm_hook_alert.get(platform, 0) >= DM_HOOK_ALERT_COOLDOWN:
+                _last_dm_hook_alert[platform] = now
+                log.warning(
+                    "DM WS hook STALE for %s (last beat %.0fs ago > %ds)",
+                    platform, age, DM_HOOK_STALE_SECONDS,
+                )
+                await _notify(
+                    f"⚠️ <b>DM WS hook stale: {platform}</b>\n"
+                    f"last heartbeat {age / 60:.0f}m ago (&gt; {DM_HOOK_STALE_SECONDS // 60}m).\n"
+                    "Extension bundle change on the platform may have broken the "
+                    "passive WebSocket wrapper — check extension/inject.js against "
+                    "current window.WebSocket behaviour on the platform tab."
+                )
+            else:
+                log.info("DM hook %s stale (%.0fs) — alert in cooldown", platform, age)
+        else:
+            log.info("DM hook %s ok (last beat %.0fs ago)", platform, age)
+
+
 async def main() -> None:
     log.info("freshness watchdog started (interval=%ds, cooldown=%ds)", INTERVAL, COOLDOWN)
     _touch_heartbeat()  # write immediately so healthcheck has a file before first tick
@@ -286,6 +344,8 @@ async def main() -> None:
                 await _tick(db)
                 if DLQ_ENABLED:
                     await _dlq_tick(db)
+                if DM_HOOK_ENABLED:
+                    await _dm_hook_tick(db)
             finally:
                 await db.close()
         except Exception as e:

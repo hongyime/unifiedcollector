@@ -999,6 +999,13 @@ window.addEventListener("message", (ev) => {
   } else if (m.type === "dm_sample" && m.b64) {
     // Raw sample bytes of a real DM-socket frame, for decoder work (#35).
     send({ type: "dm_sample", platform: m.platform, url: m.url, size: m.size, b64: m.b64 }).catch(() => {});
+  } else if (m.type === "dm_heartbeat") {
+    // Periodic liveness beat from inject.js's WS hook (P1.3). Forward with
+    // the tab's current platform so the bridge can upsert per (platform, owner).
+    send({
+      type: "dm_heartbeat", platform: m.platform,
+      probes_sent: m.probes_sent, samples_shipped: m.samples_shipped,
+    }).catch(() => {});
   }
 });
 
