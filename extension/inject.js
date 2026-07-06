@@ -291,7 +291,17 @@
       // socket, so I can confirm the payload format and build a decoder (#35).
       const _dmSockRe = /edge-chat\.instagram\.com\/chat|im-ws[^/]*\.tiktok\.com\/ws/i;
       const _sampleCount = new Map();
-      const SAMPLE_MAX = 6, SAMPLE_MIN_BYTES = 24;
+      // SAMPLE_MAX was originally 6 (~"confirm the wire format is protobuf"
+      // fits in 6 handshake frames). But TikTok's frontier socket opens with
+      // ~6 stereotyped session-status frames before any user traffic arrives,
+      // so the cap always hit on session-init and every real DM after that
+      // was dropped — verified empirically: 61 captured samples were byte-
+      // identical PayloadRelatedMethod=20032 pushes with only 27 distinct
+      // inner sha256 values across hours of capture, zero message content.
+      // Now that the bridge's P1.1 rotation keeps only the newest 200 files
+      // per platform, we can afford a much looser per-session cap; the
+      // 24-byte SAMPLE_MIN_BYTES floor still skips MQTT/heartbeat pings.
+      const SAMPLE_MAX = 200, SAMPLE_MIN_BYTES = 24;
       // P1.3: WS-hook heartbeat counters. shipSample/probe increment these;
       // a setInterval below emits a heartbeat postMessage so background.js
       // can POST /social/dm-heartbeat and the watchdog can detect a broken
