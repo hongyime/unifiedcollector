@@ -1019,6 +1019,183 @@ async def dm_frame_handler(request):
     return _cors(web.json_response({"ok": True}))
 
 
+def _parse_ts_ms(v):
+    """Convert an int/str ms-epoch or None to a timezone-aware datetime.
+    Falls back to None on garbage so a bad timestamp never fails the upsert."""
+    if v is None:
+        return None
+    try:
+        ms = int(v)
+        if ms <= 0:
+            return None
+        # Sanity: TikTok values are 13-digit ms since epoch. Reject > 4102444800000
+        # (year ~2100) so a us/ns-scaled leak from the decoder can't corrupt rows.
+        if ms > 4102444800000:
+            return None
+        return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def _conv_participants(conversation_id):
+    """`0:1:UID_A:UID_B` -> ['UID_A','UID_B']. None on anything unparseable."""
+    if not conversation_id:
+        return None
+    parts = str(conversation_id).split(":")
+    if len(parts) >= 4:
+        out = [p for p in parts[2:] if p]
+        return out or None
+    return None
+
+
+def _int_or_none(v):
+    if v is None:
+        return None
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _bool_or_none(v):
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return v
+    s = str(v).strip().lower()
+    if s in ("true", "1", "yes", "on"):
+        return True
+    if s in ("false", "0", "no", "off"):
+        return False
+    return None
+
+
+async def dm_decoded_handler(request):
+    """Client-decoded DM payload from the extension (Option B of #39).
+
+    The extension's WS hook uses a minimal in-tab protobuf parser to walk
+    TikTok frontier frames on wss://im-ws-sg.tiktok.com/ws/v2 (see
+    extension/inject.js `_ttDecode`). When it identifies a real message
+    frame (method=5, inner has field 500 → field 5 with content JSON), it
+    extracts the structured payload and POSTs here. Raw sample capture
+    continues in parallel via /social/dm-sample as a schema-drift canary.
+
+    Body shape:
+      {
+        "platform": "tiktok",
+        "owner":    "<owner_uid_or_empty>",
+        "threads":  [ {conversation_id, conversation_type, participants,
+                       last_activity_ms} ],
+        "messages": [ {message_id, conversation_id, sender_uid, sender_secuid,
+                       text, aweType, message_type, create_time_ms,
+                       client_message_id, is_stranger, raw_content} ]
+      }
+
+    Message upsert keyed on message_id (idempotent — the TikTok frontier
+    pushes each message ~6× across topic subscriptions).
+    """
+    body = await _safe_json(request)
+    platform = (body.get("platform") or "").strip().lower()
+    if platform != "tiktok":
+        return _cors(web.json_response(
+            {"ok": False, "error": "unsupported_platform"}, status=400,
+        ))
+    owner = (body.get("owner") or "").strip()
+    threads = body.get("threads") or []
+    messages = body.get("messages") or []
+    if not isinstance(threads, list) or not isinstance(messages, list):
+        return _cors(web.json_response(
+            {"ok": False, "error": "bad_shape"}, status=400,
+        ))
+
+    pool = request.app.get("pool")
+    if not pool:
+        return _cors(web.json_response({"ok": True, "recorded": 0}))
+    thread_n = 0
+    msg_n = 0
+    try:
+        async with pool.acquire() as conn:
+            for t in threads:
+                if not isinstance(t, dict):
+                    continue
+                cid = (t.get("conversation_id") or "").strip()
+                if not cid:
+                    continue
+                await conn.execute(
+                    """
+                    INSERT INTO tiktok_dm_thread
+                        (conversation_id, conversation_type, participants,
+                         owner_account, last_activity)
+                    VALUES ($1, $2, $3, $4, $5)
+                    ON CONFLICT (conversation_id) DO UPDATE SET
+                        conversation_type = COALESCE(EXCLUDED.conversation_type,
+                                                     tiktok_dm_thread.conversation_type),
+                        participants      = COALESCE(EXCLUDED.participants,
+                                                     tiktok_dm_thread.participants),
+                        owner_account     = COALESCE(EXCLUDED.owner_account,
+                                                     tiktok_dm_thread.owner_account),
+                        last_activity     = GREATEST(EXCLUDED.last_activity,
+                                                     tiktok_dm_thread.last_activity),
+                        updated_at        = now()
+                    """,
+                    cid,
+                    _int_or_none(t.get("conversation_type")),
+                    (t.get("participants") or _conv_participants(cid) or None),
+                    (t.get("owner_account") or owner or None),
+                    _parse_ts_ms(t.get("last_activity_ms")),
+                )
+                thread_n += 1
+            for m in messages:
+                if not isinstance(m, dict):
+                    continue
+                mid = str(m.get("message_id") or "").strip()
+                cid = (m.get("conversation_id") or "").strip()
+                if not mid or not cid:
+                    continue
+                sender_uid = m.get("sender_uid")
+                # Cast to string so uint64 values from proto varints don't get
+                # truncated to int32 anywhere along the path.
+                sender_uid_s = str(sender_uid) if sender_uid is not None else None
+                is_from_me = bool(owner) and sender_uid_s == owner
+                raw = m.get("raw_content")
+                if raw is not None and not isinstance(raw, (dict, list)):
+                    raw = {"raw": raw}
+                await conn.execute(
+                    """
+                    INSERT INTO tiktok_dm
+                        (message_id, conversation_id, sender_uid, sender_secuid,
+                         text, awe_type, message_type, "timestamp", is_from_me,
+                         owner_account, client_message_id, is_stranger, raw_content)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                    ON CONFLICT (message_id) DO UPDATE SET
+                        text         = COALESCE(EXCLUDED.text, tiktok_dm.text),
+                        awe_type     = COALESCE(EXCLUDED.awe_type, tiktok_dm.awe_type),
+                        message_type = COALESCE(EXCLUDED.message_type, tiktok_dm.message_type),
+                        "timestamp"  = COALESCE(EXCLUDED."timestamp", tiktok_dm."timestamp"),
+                        raw_content  = COALESCE(EXCLUDED.raw_content, tiktok_dm.raw_content)
+                    """,
+                    mid, cid, sender_uid_s, m.get("sender_secuid"),
+                    m.get("text"),
+                    _int_or_none(m.get("aweType")),
+                    _int_or_none(m.get("message_type")),
+                    _parse_ts_ms(m.get("create_time_ms")),
+                    is_from_me,
+                    owner or None,
+                    m.get("client_message_id"),
+                    _bool_or_none(m.get("is_stranger")),
+                    json.dumps(raw) if raw is not None else None,
+                )
+                msg_n += 1
+    except Exception:
+        logger.exception("dm_decoded upsert failed")
+        return _cors(web.json_response(
+            {"ok": False, "error": "db"}, status=500,
+        ))
+    if thread_n or msg_n:
+        logger.info("DM decoded[%s]: %d threads, %d messages", platform, thread_n, msg_n)
+    return _cors(web.json_response({"ok": True, "threads": thread_n, "messages": msg_n}))
+
+
 async def _save_profile(pool, platform, p) -> bool:
     """Upsert a full profile (instagram). Also records the user (with photo) into
     social_users and returns the profile_pic to be downloaded as kind=profile."""
@@ -1225,6 +1402,7 @@ def make_app():
     app.router.add_post("/social/dm-sample", dm_sample_handler)
     app.router.add_post("/social/dm-probe", dm_probe_handler)
     app.router.add_post("/social/dm-heartbeat", dm_hook_heartbeat_handler)
+    app.router.add_post("/social/dm-decoded", dm_decoded_handler)
     # instagram back-compat aliases
     app.router.add_get("/ig/targets", get_targets_ig)
     app.router.add_post("/ig/ingest", ingest_ig)

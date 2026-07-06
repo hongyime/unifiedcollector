@@ -1006,6 +1006,13 @@ window.addEventListener("message", (ev) => {
       type: "dm_heartbeat", platform: m.platform,
       probes_sent: m.probes_sent, samples_shipped: m.samples_shipped,
     }).catch(() => {});
+  } else if (m.type === "dm_decoded") {
+    // Option B: client-decoded DM payload (threads + messages). Straight
+    // pass-through to the bridge's POST /social/dm-decoded upsert handler.
+    send({
+      type: "dm_decoded", platform: m.platform, owner: m.owner || "",
+      threads: m.threads || [], messages: m.messages || [],
+    }).catch(() => {});
   }
 });
 

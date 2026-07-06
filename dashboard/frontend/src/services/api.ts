@@ -28,6 +28,8 @@ import type {
   PlatformSummary,
   IgDmThread,
   IgDmMessage,
+  TtDmThread,
+  TtDmMessage,
   DmTelemetry,
 } from "./types";
 
@@ -158,6 +160,18 @@ export const api = {
   igDmThread: (threadId: string) =>
     get<{ thread: IgDmThread | null; messages: IgDmMessage[] }>(
       `/instagram/dms/thread/${encodeURIComponent(threadId)}`,
+    ),
+
+  // TikTok DMs — same schema shape as IG but backed by tiktok_dm{,_thread}
+  // populated by the extension's client-side protobuf decoder.
+  ttDmThreads: (owner?: string, limit = 100) => {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (owner) params.set("owner", owner);
+    return get<TtDmThread[]>(`/tiktok/dms/threads?${params}`);
+  },
+  ttDmThread: (threadId: string) =>
+    get<{ thread: TtDmThread | null; messages: TtDmMessage[] }>(
+      `/tiktok/dms/thread/${encodeURIComponent(threadId)}`,
     ),
 
   // P1.2: passive telemetry surface. Populated by dm_probe_handler +

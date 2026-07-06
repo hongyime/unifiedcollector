@@ -1264,6 +1264,83 @@ async def ig_dm_thread_messages(thread_id: str, limit: int = 200,
     }
 
 
+@app.get("/tiktok/dms/threads")
+async def list_tt_dm_threads(owner: str | None = None, limit: int = 100,
+                             _user: dict = Depends(require_role("viewer"))):
+    """TikTok DM threads with per-thread message count + last-activity, newest
+    first. Mirrors /instagram/dms/threads. tiktok_dm{,_thread} are populated
+    by the extension's client-side decoder POSTing to /social/dm-decoded (see
+    src/db/migrations/add_tiktok_dm.sql for the field-number derivation).
+
+    Returns [] cleanly if the table doesn't exist yet — the migration ships
+    together with the code that writes to it, but a partial-boot / lock-
+    deferred migration is a real state the dashboard shouldn't 500 on.
+    """
+    limit = max(1, min(limit, 500))
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if await conn.fetchval("SELECT to_regclass('tiktok_dm_thread')") is None:
+            return []
+        params: list = []
+        where = ""
+        if owner:
+            where = "WHERE t.owner_account = $1"
+            params.append(owner)
+        rows = await conn.fetch(
+            f"""
+            SELECT t.conversation_id      AS thread_id,
+                   t.conversation_type,
+                   t.participants,
+                   t.owner_account,
+                   t.last_activity,
+                   COALESCE(m.cnt, 0)     AS message_count,
+                   m.last_ts              AS last_message_ts
+            FROM tiktok_dm_thread t
+            LEFT JOIN (
+                SELECT conversation_id, count(*) AS cnt, max("timestamp") AS last_ts
+                FROM tiktok_dm GROUP BY conversation_id
+            ) m ON m.conversation_id = t.conversation_id
+            {where}
+            ORDER BY COALESCE(t.last_activity, m.last_ts) DESC NULLS LAST
+            LIMIT ${len(params) + 1}
+            """,
+            *params, limit,
+        )
+    return [dict(r) for r in rows]
+
+
+@app.get("/tiktok/dms/thread/{thread_id}")
+async def tt_dm_thread_messages(thread_id: str, limit: int = 200,
+                                _user: dict = Depends(require_role("viewer"))):
+    """Messages for one TikTok DM thread, chronological (oldest first) for
+    display. Returns awe_type / message_type in the JSON so a caller can
+    tell text-message rows apart from other content kinds without querying
+    raw_content."""
+    limit = max(1, min(limit, 2000))
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if await conn.fetchval("SELECT to_regclass('tiktok_dm')") is None:
+            return {"thread": None, "messages": []}
+        thread = await conn.fetchrow(
+            "SELECT conversation_id AS thread_id, conversation_type, participants, "
+            "       owner_account, last_activity "
+            "FROM tiktok_dm_thread WHERE conversation_id = $1",
+            thread_id,
+        )
+        rows = await conn.fetch(
+            'SELECT message_id, sender_uid AS sender_id, sender_secuid, '
+            '       text, awe_type, message_type, "timestamp", is_from_me, '
+            '       owner_account, client_message_id, is_stranger '
+            'FROM tiktok_dm WHERE conversation_id = $1 '
+            'ORDER BY "timestamp" ASC NULLS LAST LIMIT $2',
+            thread_id, limit,
+        )
+    return {
+        "thread": dict(thread) if thread else None,
+        "messages": [dict(r) for r in rows],
+    }
+
+
 @app.get("/dm/telemetry")
 async def dm_telemetry(_user: dict = Depends(require_role("viewer"))):
     """Passive DM probe/sample telemetry for the dashboard panel (P1.2 + P1.3).

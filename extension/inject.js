@@ -323,6 +323,179 @@
             url: u.slice(0, 200), size: buf.byteLength, b64: abToB64(buf) }, "*");
         } catch (e) {}
       }
+
+      // ── Minimal in-tab protobuf reader (Option B of #39, TikTok decoder) ──
+      // Enough to walk the TikTok frontier envelope + inner message wrapper.
+      // Wire format primer:
+      //   tag varint = (field_number << 3) | wire_type
+      //   wire_type: 0=varint, 1=64-bit fixed, 2=length-delimited, 5=32-bit
+      // We only need varint + length-delimited for the TikTok frames we've
+      // reverse-engineered; other wires are decoded to raw bytes so they
+      // don't crash the walker on schema drift.
+      function _pbReadVarint(buf, i) {
+        let result = 0n, shift = 0n;
+        while (i < buf.length) {
+          const b = buf[i++];
+          result |= BigInt(b & 0x7f) << shift;
+          if (!(b & 0x80)) return [result, i];
+          shift += 7n;
+          if (shift > 63n) throw new Error("varint too long");
+        }
+        throw new Error("varint truncated");
+      }
+      function _pbDecode(buf) {
+        // Returns Array<[fieldNum, wire, value]>. Value is BigInt for varint,
+        // Uint8Array for length-delimited, number for 32/64-bit fixed. Non-
+        // fatal on truncation — returns what it parsed cleanly.
+        const out = [];
+        let i = 0;
+        while (i < buf.length) {
+          let tag, next;
+          try {
+            [tag, next] = _pbReadVarint(buf, i);
+          } catch (e) { break; }
+          i = next;
+          const fn = Number(tag >> 3n);
+          const wire = Number(tag & 0x7n);
+          if (fn === 0) break;
+          if (wire === 0) {
+            let v; try { [v, i] = _pbReadVarint(buf, i); } catch (e) { break; }
+            out.push([fn, 0, v]);
+          } else if (wire === 2) {
+            let len; try { [len, i] = _pbReadVarint(buf, i); } catch (e) { break; }
+            const L = Number(len);
+            if (i + L > buf.length) break;
+            out.push([fn, 2, buf.subarray(i, i + L)]);
+            i += L;
+          } else if (wire === 1) {
+            if (i + 8 > buf.length) break;
+            i += 8; out.push([fn, 1, null]);
+          } else if (wire === 5) {
+            if (i + 4 > buf.length) break;
+            i += 4; out.push([fn, 5, null]);
+          } else {
+            break;
+          }
+        }
+        return out;
+      }
+      function _pbFindFirst(fields, fnum, wire) {
+        for (const f of fields) if (f[0] === fnum && f[1] === wire) return f[2];
+        return undefined;
+      }
+      function _pbFindAll(fields, fnum, wire) {
+        const out = [];
+        for (const f of fields) if (f[0] === fnum && f[1] === wire) out.push(f[2]);
+        return out;
+      }
+      function _bufToUtf8(u8) {
+        try { return new TextDecoder("utf-8", { fatal: false }).decode(u8); }
+        catch (e) { return null; }
+      }
+      // Big-uint → string preserves TikTok's uint64 IDs (message_id, sender_uid)
+      // that can't fit in a JS Number without precision loss.
+      function _bigToStr(b) { return typeof b === "bigint" ? b.toString() : String(b); }
+
+      // TikTok frontier DM decoder. Given a raw binary WS frame, returns
+      // {threads: [...], messages: [...]} shaped for POST /social/dm-decoded,
+      // or null when the frame isn't a user-event message. Structure derived
+      // empirically — see tmp/dm_analysis/decode_raw.py + inspect_unknown.py
+      // and src/db/migrations/add_tiktok_dm.sql for the field map.
+      function _ttDecode(buf) {
+        try {
+          const u8 = new Uint8Array(buf);
+          const outer = _pbDecode(u8);
+          // Only decode method=5 (user event); method=20032 is server heartbeat.
+          const method = _pbFindFirst(outer, 3, 0);
+          if (method === undefined || Number(method) !== 5) return null;
+          const inner = _pbFindFirst(outer, 8, 2);
+          if (!inner) return null;
+          const innerFields = _pbDecode(inner);
+          // field 6 → wrapper containing field 500 → message envelope(s).
+          const wrap = _pbFindFirst(innerFields, 6, 2);
+          if (!wrap) return null;
+          const wrapFields = _pbDecode(wrap);
+          const envelopes = _pbFindAll(wrapFields, 500, 2);
+          if (!envelopes.length) return null;
+          const threads = [];
+          const messages = [];
+          const seenThreads = new Set();
+          for (const env of envelopes) {
+            const envF = _pbDecode(env);
+            const cid = _pbFindFirst(envF, 2, 2);
+            const conversationId = cid ? _bufToUtf8(cid) : null;
+            const convType = _pbFindFirst(envF, 3, 0);
+            // repeated field 5 = message entries
+            for (const entry of _pbFindAll(envF, 5, 2)) {
+              const eF = _pbDecode(entry);
+              // The inner conversation_id (field 1) matches the outer one on
+              // real messages; still prefer it as the source of truth.
+              const inCid = _pbFindFirst(eF, 1, 2);
+              const entryCid = inCid ? _bufToUtf8(inCid) : conversationId;
+              const mid = _pbFindFirst(eF, 3, 0);
+              const msgType = _pbFindFirst(eF, 6, 0);
+              const senderUid = _pbFindFirst(eF, 7, 0);
+              const contentBuf = _pbFindFirst(eF, 8, 2);
+              const createTimeMs = _pbFindFirst(eF, 10, 0);
+              const secUidBuf = _pbFindFirst(eF, 14, 2);
+              const contentStr = contentBuf ? _bufToUtf8(contentBuf) : null;
+              let contentJson = null;
+              try { contentJson = contentStr ? JSON.parse(contentStr) : null; }
+              catch (e) { contentJson = null; }
+              // Skip RPC-style events (command_type is set) — mark_read, typing
+              // indicators, etc. — those aren't user messages and would pollute
+              // the tiktok_dm table with 'text=null' rows keyed on RPC IDs.
+              if (contentJson && typeof contentJson === "object"
+                  && "command_type" in contentJson) continue;
+              // Metadata key-value pairs live under repeated field 9.
+              let clientMsgId = null, isStranger = null;
+              for (const kv of _pbFindAll(eF, 9, 2)) {
+                const kvF = _pbDecode(kv);
+                const k = _bufToUtf8(_pbFindFirst(kvF, 1, 2) || new Uint8Array());
+                const v = _bufToUtf8(_pbFindFirst(kvF, 2, 2) || new Uint8Array());
+                if (k === "s:client_message_id") clientMsgId = v || null;
+                else if (k === "s:is_stranger") isStranger = (v === "true");
+              }
+              if (mid === undefined || !entryCid) continue;
+              messages.push({
+                message_id: _bigToStr(mid),
+                conversation_id: entryCid,
+                sender_uid: senderUid !== undefined ? _bigToStr(senderUid) : null,
+                sender_secuid: secUidBuf ? _bufToUtf8(secUidBuf) : null,
+                text: contentJson && typeof contentJson === "object"
+                  ? (contentJson.text || null) : null,
+                aweType: contentJson && typeof contentJson === "object"
+                  ? (typeof contentJson.aweType === "number" ? contentJson.aweType : null) : null,
+                message_type: msgType !== undefined ? Number(msgType) : null,
+                create_time_ms: createTimeMs !== undefined ? _bigToStr(createTimeMs) : null,
+                client_message_id: clientMsgId,
+                is_stranger: isStranger,
+                raw_content: contentJson,
+              });
+              if (entryCid && !seenThreads.has(entryCid)) {
+                seenThreads.add(entryCid);
+                threads.push({
+                  conversation_id: entryCid,
+                  conversation_type: convType !== undefined ? Number(convType) : null,
+                  last_activity_ms: createTimeMs !== undefined ? _bigToStr(createTimeMs) : null,
+                });
+              }
+            }
+          }
+          if (!messages.length) return null;
+          return { threads, messages };
+        } catch (e) {
+          return null;
+        }
+      }
+
+      // Owner UID lives in the WS URL as `device_id=<uid>`. Cached per socket.
+      function _extractOwner(url) {
+        try {
+          const m = String(url || "").match(/[?&]device_id=(\d+)/);
+          return m ? m[1] : "";
+        } catch (e) { return ""; }
+      }
       const WrappedWS = function (url, protocols) {
         const ws = protocols !== undefined ? new OrigWS(url, protocols) : new OrigWS(url);
         try {
@@ -349,10 +522,41 @@
               }
               // raw sample of substantial frames on the real DM sockets
               if (isDm) {
-                if (d instanceof ArrayBuffer) shipSample(u, key, d);
+                if (d instanceof ArrayBuffer) {
+                  shipSample(u, key, d);
+                  // Option B: client-side decode → structured DM payload.
+                  // Only TikTok is decoded today; IG's edge-chat MQTT+Thrift
+                  // path stays raw-sample-only until it lands separately.
+                  if (platform === "tiktok" && d.byteLength >= SAMPLE_MIN_BYTES) {
+                    try {
+                      const decoded = _ttDecode(d);
+                      if (decoded) {
+                        window.postMessage({
+                          __uc: true, type: "dm_decoded", platform,
+                          owner: _extractOwner(u),
+                          threads: decoded.threads, messages: decoded.messages,
+                        }, "*");
+                      }
+                    } catch (e) {}
+                  }
+                }
                 else if (typeof Blob !== "undefined" && d instanceof Blob) {
                   const fr = new FileReader();
-                  fr.onload = function () { try { shipSample(u, key, fr.result); } catch (e) {} };
+                  fr.onload = function () {
+                    try {
+                      shipSample(u, key, fr.result);
+                      if (platform === "tiktok" && fr.result.byteLength >= SAMPLE_MIN_BYTES) {
+                        const decoded = _ttDecode(fr.result);
+                        if (decoded) {
+                          window.postMessage({
+                            __uc: true, type: "dm_decoded", platform,
+                            owner: _extractOwner(u),
+                            threads: decoded.threads, messages: decoded.messages,
+                          }, "*");
+                        }
+                      }
+                    } catch (e) {}
+                  };
                   fr.readAsArrayBuffer(d);
                 }
               }

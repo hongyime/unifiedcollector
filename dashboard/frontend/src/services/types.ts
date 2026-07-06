@@ -126,6 +126,34 @@ export interface IgDmMessage {
   owner_account: string | null;
 }
 
+// TikTok DMs — captured through the extension's WS-hook client-side decoder
+// (Option B of #39). Table columns match tiktok_dm{,_thread}; API endpoints
+// under /tiktok/dms/. Thread IDs are the conversation_id string
+// '0:1:UID_A:UID_B' — kept as `thread_id` in the API shape for symmetry
+// with the IG DM types.
+export interface TtDmThread {
+  thread_id: string;
+  conversation_type: number | null;
+  participants: string[] | null;
+  owner_account: string | null;
+  last_activity: string | null;
+  message_count?: number;
+  last_message_ts?: string | null;
+}
+export interface TtDmMessage {
+  message_id: string;
+  sender_id: string | null;
+  sender_secuid: string | null;
+  text: string | null;
+  awe_type: number | null;
+  message_type: number | null;
+  timestamp: string | null;
+  is_from_me: boolean;
+  owner_account: string | null;
+  client_message_id: string | null;
+  is_stranger: boolean | null;
+}
+
 // Passive DM WS-hook telemetry (P1.2). One entry per platform the extension's
 // observe-only WS wrapper has ever seen; `probe`/`sample` mirror event_type
 // in dm_probe_log. Null last_seen means "never" — most useful signal for

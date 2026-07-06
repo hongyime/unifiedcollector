@@ -420,6 +420,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         sendResponse({ ok: true });
         break;
       }
+      case "dm_decoded": {  // Option B: client-decoded DM payload → structured upsert
+        try {
+          await fetch(base + "/social/dm-decoded", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              platform: msg.platform, owner: msg.owner || "",
+              threads: msg.threads || [], messages: msg.messages || [],
+            }),
+          });
+          const n = (msg.messages && msg.messages.length) || 0;
+          if (n) await log("info", `📨 ${msg.platform} DM decoded: ${n} msg`);
+        } catch (e) {}
+        sendResponse({ ok: true });
+        break;
+      }
       case "wall": {  // the in-tab loop hit a throttle/login wall and is sleeping
         const mins = msg.mins || 45;
         await setStatus({ cooldownUntil: Date.now() + mins * 60000 });
