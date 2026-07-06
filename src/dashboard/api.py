@@ -1264,6 +1264,62 @@ async def ig_dm_thread_messages(thread_id: str, limit: int = 200,
     }
 
 
+@app.get("/dm/telemetry")
+async def dm_telemetry(_user: dict = Depends(require_role("viewer"))):
+    """Passive DM probe/sample telemetry for the dashboard panel (P1.2).
+
+    Returns per-platform counts of probes and samples the extension's
+    observe-only WS hook has emitted, so we can tell at a glance whether real
+    DM frames have arrived (particularly Instagram, which has been stuck at
+    keepalive-class 1–4 byte frames while TikTok has been streaming 1KB
+    protobuf samples on every DM). Empty list if the table doesn't exist
+    yet (e.g. on a boot before migration is applied).
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if await conn.fetchval("SELECT to_regclass('dm_probe_log')") is None:
+            return {"platforms": [], "generated_at": datetime.now(timezone.utc).isoformat()}
+        rows = await conn.fetch(
+            """
+            SELECT
+                platform,
+                event_type,
+                COUNT(*)                                                            AS all_time,
+                COUNT(*) FILTER (WHERE seen_at > now() - interval '24 hours')       AS last_24h,
+                COUNT(*) FILTER (WHERE seen_at > now() - interval '1 hour')         AS last_1h,
+                MAX(seen_at)                                                        AS last_seen,
+                MAX(frame_size)                                                     AS max_frame_size,
+                MIN(frame_size) FILTER (WHERE frame_size > 0)                       AS min_frame_size
+            FROM dm_probe_log
+            GROUP BY platform, event_type
+            ORDER BY platform, event_type
+            """
+        )
+    # Pivot to per-platform record for easy frontend rendering.
+    per_platform: dict[str, dict] = {}
+    for r in rows:
+        p = per_platform.setdefault(r["platform"], {
+            "platform": r["platform"],
+            "probe":  {"all_time": 0, "last_24h": 0, "last_1h": 0, "last_seen": None,
+                       "max_frame_size": None, "min_frame_size": None},
+            "sample": {"all_time": 0, "last_24h": 0, "last_1h": 0, "last_seen": None,
+                       "max_frame_size": None, "min_frame_size": None},
+        })
+        bucket = "sample" if r["event_type"] == "sample" else "probe"
+        p[bucket] = {
+            "all_time":       int(r["all_time"] or 0),
+            "last_24h":       int(r["last_24h"] or 0),
+            "last_1h":        int(r["last_1h"] or 0),
+            "last_seen":      r["last_seen"].isoformat() if r["last_seen"] else None,
+            "max_frame_size": int(r["max_frame_size"]) if r["max_frame_size"] is not None else None,
+            "min_frame_size": int(r["min_frame_size"]) if r["min_frame_size"] is not None else None,
+        }
+    return {
+        "platforms": list(per_platform.values()),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 # ── WhatsApp: Links ──
 
 @app.get("/whatsapp/links")

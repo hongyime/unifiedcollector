@@ -28,6 +28,7 @@ import type {
   PlatformSummary,
   IgDmThread,
   IgDmMessage,
+  DmTelemetry,
 } from "./types";
 
 function getToken(): string | null {
@@ -158,6 +159,11 @@ export const api = {
     get<{ thread: IgDmThread | null; messages: IgDmMessage[] }>(
       `/instagram/dms/thread/${encodeURIComponent(threadId)}`,
     ),
+
+  // P1.2: passive telemetry surface. Populated by dm_probe_handler +
+  // dm_sample_handler in src/bridges/ig_ingest.py. Used by the counter panel
+  // at the top of InstagramDmPage.
+  dmTelemetry: () => get<DmTelemetry>("/dm/telemetry"),
 
   waLinks: (opts?: { linkType?: string; status?: string; limit?: number }) => {
     const params = new URLSearchParams();

@@ -126,6 +126,29 @@ export interface IgDmMessage {
   owner_account: string | null;
 }
 
+// Passive DM WS-hook telemetry (P1.2). One entry per platform the extension's
+// observe-only WS wrapper has ever seen; `probe`/`sample` mirror event_type
+// in dm_probe_log. Null last_seen means "never" — most useful signal for
+// Instagram, which stays at 1 placeholder sample until real DM traffic
+// (edge-chat.instagram.com/chat frames ≥ 24B) actually shows up.
+export interface DmTelemetryBucket {
+  all_time: number;
+  last_24h: number;
+  last_1h: number;
+  last_seen: string | null;
+  max_frame_size: number | null;
+  min_frame_size: number | null;
+}
+export interface DmTelemetryPlatform {
+  platform: string;
+  probe: DmTelemetryBucket;
+  sample: DmTelemetryBucket;
+}
+export interface DmTelemetry {
+  platforms: DmTelemetryPlatform[];
+  generated_at: string;
+}
+
 export interface DiscoveredLink {
   id: number;
   link: string;

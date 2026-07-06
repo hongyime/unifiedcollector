@@ -5,6 +5,7 @@ import { Header } from "../../components/layout/Header";
 import { LoadingSpinner } from "../../components/ui/LoadingSpinner";
 import { ErrorState } from "../../components/ui/ErrorState";
 import { relativeTime } from "../../utils/formatters";
+import type { DmTelemetryPlatform } from "../../services/types";
 
 // Instagram DMs are captured ban-safely: the extension OBSERVES the direct_v2
 // responses the logged-in page already fetches (no extra requests). Tables stay
@@ -16,6 +17,14 @@ export function InstagramDmPage() {
   const threads = useQuery({
     queryKey: ["ig-dm-threads"],
     queryFn: () => api.igDmThreads(),
+  });
+
+  // P1.2: passive DM WS-hook telemetry. Refreshes every 30s so a live IG
+  // browsing session immediately shows up as fresh probe/sample counts.
+  const telemetry = useQuery({
+    queryKey: ["dm-telemetry"],
+    queryFn: () => api.dmTelemetry(),
+    refetchInterval: 30_000,
   });
 
   const thread = useQuery({
@@ -32,8 +41,16 @@ export function InstagramDmPage() {
       <Header
         title="Instagram DMs"
         subtitle="Direct messages observed from your logged-in session"
-        onRefresh={() => threads.refetch()}
+        onRefresh={() => {
+          threads.refetch();
+          telemetry.refetch();
+        }}
       />
+
+      {/* DM probe/sample telemetry — key signal is whether real IG DM
+          frames (≥ 24B on edge-chat.instagram.com/chat) have arrived. */}
+      <DmTelemetryPanel platforms={telemetry.data?.platforms ?? []} />
+
       <div className="grid grid-cols-1 md:grid-cols-[320px_1fr] gap-4">
         {/* Thread list */}
         <div className="bg-surface rounded-lg border border-border overflow-hidden">
@@ -120,6 +137,87 @@ export function InstagramDmPage() {
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+// P1.2: small counter panel above the DM view. Shows both IG and TikTok
+// because the whole point is comparing: TikTok streams real 1KB protobuf
+// frames every DM, Instagram has been stuck at 1–4B keepalive frames. The
+// moment IG samples cross the SAMPLE_MIN_BYTES threshold (24B, capped in the
+// extension) is when the decoder work becomes unblocked.
+function DmTelemetryPanel({ platforms }: { platforms: DmTelemetryPlatform[] }) {
+  const platformsSorted = [...platforms].sort((a, b) =>
+    a.platform.localeCompare(b.platform),
+  );
+  const hasAny = platformsSorted.some(
+    (p) => p.probe.all_time + p.sample.all_time > 0,
+  );
+  return (
+    <div className="mb-4 bg-surface rounded-lg border border-border p-4">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-sm font-medium text-text-primary">
+          DM WS-hook telemetry
+        </h3>
+        <span className="text-xs text-text-muted">
+          probes = distinct sockets seen · samples = binary frames saved for decoder
+        </span>
+      </div>
+      {!hasAny ? (
+        <p className="text-xs text-text-muted py-2">
+          No probes recorded yet. Extension WS wrapper reports here on every
+          DM socket it hooks; if this stays empty, the extension isn't
+          installed or the content script isn't running on the platform tabs.
+        </p>
+      ) : (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          {platformsSorted.map((p) => (
+            <PlatformTelemetryCard key={p.platform} p={p} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PlatformTelemetryCard({ p }: { p: DmTelemetryPlatform }) {
+  const noSamples = p.sample.all_time === 0;
+  return (
+    <div className="bg-background rounded border border-border/60 p-3">
+      <div className="flex items-baseline justify-between">
+        <span className="text-sm font-semibold capitalize">{p.platform}</span>
+        <span className="text-[11px] text-text-muted">
+          {p.probe.last_seen
+            ? `last probe ${relativeTime(p.probe.last_seen)}`
+            : "no probes yet"}
+        </span>
+      </div>
+      <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
+        <div>
+          <div className="text-text-muted">Probes</div>
+          <div className="text-text-primary">
+            <span className="font-mono">{p.probe.last_24h}</span>
+            <span className="text-text-muted"> / 24h</span>
+            <span className="text-text-muted"> · {p.probe.all_time} total</span>
+          </div>
+        </div>
+        <div>
+          <div className="text-text-muted">Samples</div>
+          <div className={noSamples ? "text-warning" : "text-text-primary"}>
+            <span className="font-mono">{p.sample.last_24h}</span>
+            <span className="text-text-muted"> / 24h</span>
+            <span className="text-text-muted"> · {p.sample.all_time} total</span>
+          </div>
+        </div>
+      </div>
+      {p.sample.max_frame_size !== null && (
+        <div className="mt-2 text-[11px] text-text-muted">
+          frame size: {p.sample.min_frame_size}–{p.sample.max_frame_size} B
+          {p.sample.last_seen
+            ? ` · last sample ${relativeTime(p.sample.last_seen)}`
+            : ""}
+        </div>
+      )}
     </div>
   );
 }

@@ -797,10 +797,47 @@ async def dms_handler(request):
         return _cors(web.json_response({"recorded": 0, "error": "db"}, status=500))
 
 
+async def _dm_probe_log_write(pool, platform, event_type, body, frame_size=None):
+    """Best-effort write to dm_probe_log for the dashboard telemetry panel
+    (P1.2). Swallows every error — telemetry must never break capture.
+    frame_size is a separate arg because the sample handler already knows the
+    decoded length, while probes pull it from body.get('frame_size').
+    """
+    if not pool:
+        return
+    try:
+        size = frame_size
+        if size is None:
+            raw = body.get("frame_size")
+            try:
+                size = int(raw) if raw is not None else None
+            except (TypeError, ValueError):
+                size = None
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO dm_probe_log
+                    (platform, event_type, url, transport, frame_kind,
+                     frame_size, owner_account)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                """,
+                str(platform)[:64] if platform else "unknown",
+                event_type,
+                (body.get("url") or None),
+                (body.get("transport") or None),
+                (body.get("frame_kind") or None),
+                size,
+                (body.get("owner") or body.get("owner_account") or None),
+            )
+    except Exception:
+        logger.debug("dm_probe_log write failed", exc_info=True)
+
+
 async def dm_probe_handler(request):
     """One-time investigation probe (#38): the extension's observe-only hooks
     report the transport + format of each platform's DM channel so we can confirm
-    the wire format before committing to a decoder/schema. Log-only — no DB write.
+    the wire format before committing to a decoder/schema. Logged to stderr and
+    (P1.2) to dm_probe_log for the dashboard telemetry panel.
     Confirmed so far: TikTok = binary protobuf over wss://im-ws-…/ws/v2; IG is
     expected to be binary MQTT over wss://edge-chat.instagram.com/chat — both
     reasons the fetch/XHR JSON observation path can't capture them.
@@ -810,6 +847,9 @@ async def dm_probe_handler(request):
         "DM probe: platform=%s transport=%s kind=%s size=%s url=%s",
         body.get("platform"), body.get("transport"), body.get("frame_kind"),
         body.get("frame_size"), body.get("url"),
+    )
+    await _dm_probe_log_write(
+        request.app.get("pool"), body.get("platform") or "unknown", "probe", body,
     )
     return _cors(web.json_response({"ok": True}))
 
@@ -875,6 +915,11 @@ async def dm_sample_handler(request):
     if path is None:
         return _cors(web.json_response({"ok": False, "error": "write_failed"}, status=500))
     logger.info("DM sample saved: %s (%d bytes) url=%s", path, len(raw), body.get("url"))
+    # Telemetry (P1.2): record the sample event so the dashboard panel can
+    # count IG-vs-TikTok samples per 24h and surface last-seen timestamps.
+    await _dm_probe_log_write(
+        request.app.get("pool"), platform, "sample", body, frame_size=len(raw),
+    )
     # Rotate: keep newest DM_SAMPLE_CAP_PER_PLATFORM files per platform by
     # mtime. Uses a fresh glob so we count the file we just wrote.
     try:
