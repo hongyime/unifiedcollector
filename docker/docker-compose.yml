@@ -552,6 +552,61 @@ services:
       start_period: 30s
     restart: unless-stopped
 
+  # ⚠️ BAN-RISK COLLECTOR — DO NOT ENABLE WITHOUT READING THE ACTIVATION RUNBOOK ⚠️
+  # docs/handoff/INSTAGRAM_DM_ACTIVATION.md explains the 3-step activation
+  # (implement code / set flag+creds / start container) and the isolation
+  # invariants this service preserves.
+  #
+  # This service is gated behind the Docker Compose "instagram-dm" profile so
+  # `docker compose up` without `--profile instagram-dm` NEVER starts it. That
+  # matches how the code inside `src/collectors/instagram_dm/` refuses to
+  # touch the network unless INSTAGRAM_DM_COLLECTOR_ENABLED=true.
+  #
+  # Ban isolation vs the main `collector_instagram` service:
+  #   * own container name (a ban → this container dies, main IG stays green)
+  #   * own credentials/instagram_dm/ mount (never touches credentials/instagram/)
+  #   * own INSTAGRAM_DM_PROXY_URL env (does NOT inherit PROXY_URL)
+  #   * own INGEST_PATH='mobile_api' on rows it writes (analyzer can filter)
+  collector_instagram_dm:
+    profiles: ["instagram-dm"]      # opt-in only; default `up` skips this service
+    image: unifiedcollector-collector:latest
+    container_name: unifiedcollector_collector_instagram_dm
+    init: true
+    command: python -m src.main worker --source instagram_dm
+    mem_limit: 512m
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      COLLECTOR_DRIVE_PATH: /media
+      # Feature flag — MUST be set to a truthy value ("1", "true", "yes", "on")
+      # for any mobile-API network activity. Default off; the collector's
+      # collect() no-ops with a single log line when the flag is missing.
+      INSTAGRAM_DM_COLLECTOR_ENABLED: "false"
+      # Isolated credentials dir — the code guards against this pointing at
+      # credentials/instagram/ (see src/collectors/instagram_dm/__init__.py::collect).
+      INSTAGRAM_DM_CREDENTIALS_DIR: "credentials/instagram_dm"
+      # Separate egress. Leave unset if not using a proxy; do NOT set to
+      # PROXY_URL (which would share exit IP with the main IG collector).
+      INSTAGRAM_DM_PROXY_URL: ""
+    volumes:
+      - z:/unifiedcollector/media:/media
+      # Only mount the isolated credentials subdir — the main credentials/
+      # tree is intentionally NOT bind-mounted here so a code bug cannot
+      # accidentally read credentials/instagram/*.txt.
+      - ../credentials/instagram_dm:/app/credentials/instagram_dm
+      - ../src:/app/src
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - ../.env
+    healthcheck:
+      test: ["CMD", "python", "-m", "src.core.health"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
   # Instagram ingest bridge for the Chrome extension. Runs as a reliable
   # auto-restart container (vs a fragile manual host process) and publishes 8765
   # so the extension's service worker can reach it at 127.0.0.1:8765. The live
