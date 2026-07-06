@@ -48,6 +48,15 @@ logger = logging.getLogger("social_ingest")
 
 MEDIA_ROOT = os.getenv("COLLECTOR_DRIVE_PATH", "/media")
 PORT = int(os.getenv("IG_INGEST_PORT", "8765"))
+
+# DM raw-sample capture (#35). Files land in DM_SAMPLE_DIR as
+# <platform>_<n>.bin. n is a monotonically increasing index derived from the
+# max existing index (NOT a count), so pruning can't cause an old-index reuse
+# that would overwrite a not-yet-pruned file. Rotation keeps only the newest
+# DM_SAMPLE_CAP_PER_PLATFORM files per platform by mtime, so the directory
+# can't grow unbounded on active sockets (P1.1). Cap overridable via env.
+DM_SAMPLE_DIR = "/tmp/dm_samples"
+DM_SAMPLE_CAP_PER_PLATFORM = int(os.getenv("DM_SAMPLE_CAP", "200"))
 MIN_BYTES = int(os.getenv("IG_INGEST_MIN_BYTES", "1024"))
 DL_CONCURRENCY = int(os.getenv("SOCIAL_INGEST_CONCURRENCY", "4"))
 _SAFE = re.compile(r"[^A-Za-z0-9._-]")
@@ -809,8 +818,15 @@ async def dm_sample_handler(request):
     """Save a raw DM-socket frame sample (base64) for decoder development (#35).
     Observe-only: these are bytes the page already received; we send nothing to
     the platform. Written to /tmp/dm_samples/<platform>_<n>.bin so the exact
-    MQTT (IG) / protobuf (TikTok) payloads can be inspected offline. Capped by
-    the extension (few per socket) so this never floods.
+    MQTT (IG) / protobuf (TikTok) payloads can be inspected offline.
+
+    Rotation (P1.1): after each successful write we prune to the newest
+    DM_SAMPLE_CAP_PER_PLATFORM files per platform (by mtime), so this dir
+    can't grow unbounded on high-traffic sockets (TikTok emitted +6/hour in
+    passive tests). The filename index is derived from `max existing index +
+    1`, NOT the file count, so pruning never causes a fresh write to reuse
+    an index that still exists on disk. Concurrent writes race-safe via
+    O_EXCL retry loop.
     """
     body = await _safe_json(request)
     platform = (body.get("platform") or "unknown").replace("/", "_")[:20]
@@ -819,17 +835,69 @@ async def dm_sample_handler(request):
         raw = base64.b64decode(b64)
     except Exception:
         return _cors(web.json_response({"ok": False, "error": "bad_b64"}, status=400))
-    d = "/tmp/dm_samples"
+    d = DM_SAMPLE_DIR
     os.makedirs(d, exist_ok=True)
     import glob as _glob
-    n = len(_glob.glob(f"{d}/{platform}_*.bin"))
-    path = f"{d}/{platform}_{n:03d}.bin"
+    existing = _glob.glob(f"{d}/{platform}_*.bin")
+    # Derive next index from the max existing index across BOTH old 3-digit
+    # (`_NNN.bin`) and new 6-digit (`_NNNNNN.bin`) naming — the regex matches
+    # any run of digits before `.bin`, so we don't lose track when the format
+    # widens.
+    max_idx = -1
+    _idx_re = re.compile(rf"{re.escape(platform)}_(\d+)\.bin$")
+    for p in existing:
+        m = _idx_re.search(p)
+        if m:
+            try:
+                max_idx = max(max_idx, int(m.group(1)))
+            except ValueError:
+                pass
+    n = max_idx + 1
+    path = None
+    for _ in range(5):
+        candidate = f"{d}/{platform}_{n:06d}.bin"
+        try:
+            fd = os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        except FileExistsError:
+            n += 1
+            continue
+        except Exception:
+            logger.exception("dm sample open failed")
+            break
+        try:
+            os.write(fd, raw)
+            path = candidate
+        except Exception:
+            logger.exception("dm sample write failed")
+        finally:
+            os.close(fd)
+        break
+    if path is None:
+        return _cors(web.json_response({"ok": False, "error": "write_failed"}, status=500))
+    logger.info("DM sample saved: %s (%d bytes) url=%s", path, len(raw), body.get("url"))
+    # Rotate: keep newest DM_SAMPLE_CAP_PER_PLATFORM files per platform by
+    # mtime. Uses a fresh glob so we count the file we just wrote.
     try:
-        with open(path, "wb") as f:
-            f.write(raw)
-        logger.info("DM sample saved: %s (%d bytes) url=%s", path, len(raw), body.get("url"))
+        files = sorted(
+            _glob.glob(f"{d}/{platform}_*.bin"),
+            key=lambda p: os.path.getmtime(p),
+        )
+        excess = len(files) - DM_SAMPLE_CAP_PER_PLATFORM
+        if excess > 0:
+            pruned = 0
+            for old in files[:excess]:
+                try:
+                    os.unlink(old)
+                    pruned += 1
+                except OSError:
+                    pass
+            if pruned:
+                logger.info(
+                    "DM sample rotated: pruned %d old %s samples (cap=%d)",
+                    pruned, platform, DM_SAMPLE_CAP_PER_PLATFORM,
+                )
     except Exception:
-        logger.exception("dm sample write failed")
+        logger.exception("dm sample rotation failed")
     return _cors(web.json_response({"ok": True, "bytes": len(raw)}))
 
 
