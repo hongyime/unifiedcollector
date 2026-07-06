@@ -4,26 +4,44 @@ Currently unimplemented — the whole point of the scaffold is that flipping the
 feature flag today produces a clean disabled-by-flag log line instead of a
 half-working request that could ping Meta's fingerprinting.
 
-When implementing:
+Local-only helpers already shipped:
+  - credentials.load_all(creds_dir) -> list[Credentials]
+    Parses `<creds_dir>/*.txt`, refuses if creds_dir == credentials/instagram/.
+  - device.load_or_create(creds_dir, username) -> Device
+    Stable per-account fingerprint persisted to <username>.device.json.
+  - session.load / save / clear (creds_dir, username)
+    Post-login state persisted to <username>.session.json.
 
-  1. Read credentials from `creds_dir` (typically `credentials/instagram_dm/`),
-     ONE file per account. Never fall back to `credentials/instagram/`.
-  2. Generate stable device identifiers (mid, ig_family_device_id,
-     phone_id, family_device_id, uuid) and PERSIST them alongside the
-     credential file — Meta correlates repeated device_id churn as suspicious.
-  3. Fetch the current RSA login pubkey (rotates ~daily; see the
-     `X-IG-Encryption-Key-*` response headers) and encrypt the password with it.
-  4. POST to `/api/v1/accounts/login/` with the encrypted payload + all
-     device headers. On `challenge_required`, `checkpoint_required`, or
-     `sentry_block`: STOP. Do not retry. Emit a Telegram alert (that account
-     is now being scrutinised; further requests risk a ban) and exit.
-  5. Persist the returned session token (`sessionid` cookie value +
-     `ig_did`, `mid`) so restarts don't trigger a fresh full login flow
-     (which itself is a bannable signal).
-  6. Return the auth artifacts needed by `mqtt_client.MqttClient` to
-     establish the edge-chat connection — normally the mqtt username is
-     the `ds_user_id`, password is a derived MQTT auth token, and the
-     `mqttcookie` is a JSON blob of session state.
+What THIS module still needs to implement (all network-touching, ban-risky):
+
+  1. `login(cred, device, state)`:
+     * If state.is_valid() and not state.is_stale(): skip; MQTT can reuse.
+     * Else: fetch the current RSA login pubkey (`X-IG-Encryption-Key-*`
+       response headers on any GET to /api/v1/qe/sync/ — rotates ~daily).
+     * Encrypt cred.password with that pubkey per the Instagram mobile-API
+       scheme: random AES-GCM key, encrypt password with AES, wrap AES key
+       with RSA-OAEP; concatenate as base64. Format documented in
+       mautrix-meta messagix/session/password.go.
+     * POST /api/v1/accounts/login/ with the ~30 device headers built from
+       `device` (X-IG-Device-ID, X-IG-Family-Device-ID, X-IG-Android-ID,
+       X-IG-Capabilities, X-IG-Connection-Type, X-Bloks-Version-Id, etc.).
+     * On 200: parse the sessionid + ds_user_id + mid + ig_did + rur +
+       csrftoken from response cookies + body. Update `state` + call
+       session.save(). Return the artifacts.
+     * On `challenge_required` / `checkpoint_required` / `sentry_block` /
+       429: session.clear(); log at ERROR; raise `LoginBlocked` (a new
+       exception type — DO NOT retry; those are pre-ban signals and
+       further attempts on the same fingerprint escalate the ban).
+     * On network / 5xx: retry with jittered exponential backoff (start
+       30s, max 15min, 3 attempts max). Meta correlates fast retry loops
+       as bot behaviour.
+
+  2. `refresh()`:
+     * Called when state.is_stale() but state.is_valid(). Attempts a
+       lightweight session probe (GET /api/v1/users/{ds_user_id}/info/)
+       to verify tokens still work.
+     * On 200: bump state.last_seen_at, save.
+     * On 401 / 403: session.clear() + re-run login().
 
 References worth reading before implementing:
 
@@ -43,10 +61,17 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
+class LoginBlocked(RuntimeError):
+    """Raised when Meta responds with challenge_required, checkpoint_required,
+    sentry_block, or 429. STOP. Do not retry — those responses are pre-ban
+    signals; further requests on the same fingerprint escalate the ban."""
+
+
 class AuthClient:
     def __init__(self, creds_dir: Path, proxy_url: str | None = None) -> None:
         self.creds_dir = Path(creds_dir)
         self.proxy_url = proxy_url
+        # Populated by login() once implemented. All None until then.
         self.session_token: str | None = None
         self.mqtt_auth: dict | None = None
 

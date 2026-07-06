@@ -1330,7 +1330,7 @@ async def tt_dm_thread_messages(thread_id: str, limit: int = 200,
         rows = await conn.fetch(
             'SELECT message_id, sender_uid AS sender_id, sender_secuid, '
             '       text, awe_type, message_type, "timestamp", is_from_me, '
-            '       owner_account, client_message_id, is_stranger '
+            '       owner_account, client_message_id, is_stranger, media_url '
             'FROM tiktok_dm WHERE conversation_id = $1 '
             'ORDER BY "timestamp" ASC NULLS LAST LIMIT $2',
             thread_id, limit,

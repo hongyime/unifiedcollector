@@ -152,6 +152,7 @@ export interface TtDmMessage {
   owner_account: string | null;
   client_message_id: string | null;
   is_stranger: boolean | null;
+  media_url: string | null;
 }
 
 // Passive DM WS-hook telemetry (P1.2). One entry per platform the extension's

@@ -1096,7 +1096,7 @@ async def dm_decoded_handler(request):
     """
     body = await _safe_json(request)
     platform = (body.get("platform") or "").strip().lower()
-    if platform != "tiktok":
+    if platform not in ("tiktok", "instagram"):
         return _cors(web.json_response(
             {"ok": False, "error": "unsupported_platform"}, status=400,
         ))
@@ -1111,6 +1111,16 @@ async def dm_decoded_handler(request):
     pool = request.app.get("pool")
     if not pool:
         return _cors(web.json_response({"ok": True, "recorded": 0}))
+    if platform == "tiktok":
+        thread_n, msg_n = await _upsert_tt_decoded(pool, owner, threads, messages)
+    else:
+        thread_n, msg_n = await _upsert_ig_decoded(pool, owner, threads, messages)
+    if thread_n or msg_n:
+        logger.info("DM decoded[%s]: %d threads, %d messages", platform, thread_n, msg_n)
+    return _cors(web.json_response({"ok": True, "threads": thread_n, "messages": msg_n}))
+
+
+async def _upsert_tt_decoded(pool, owner, threads, messages):
     thread_n = 0
     msg_n = 0
     try:
@@ -1153,8 +1163,6 @@ async def dm_decoded_handler(request):
                 if not mid or not cid:
                     continue
                 sender_uid = m.get("sender_uid")
-                # Cast to string so uint64 values from proto varints don't get
-                # truncated to int32 anywhere along the path.
                 sender_uid_s = str(sender_uid) if sender_uid is not None else None
                 is_from_me = bool(owner) and sender_uid_s == owner
                 raw = m.get("raw_content")
@@ -1165,13 +1173,15 @@ async def dm_decoded_handler(request):
                     INSERT INTO tiktok_dm
                         (message_id, conversation_id, sender_uid, sender_secuid,
                          text, awe_type, message_type, "timestamp", is_from_me,
-                         owner_account, client_message_id, is_stranger, raw_content)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                         owner_account, client_message_id, is_stranger, media_url,
+                         raw_content)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
                     ON CONFLICT (message_id) DO UPDATE SET
                         text         = COALESCE(EXCLUDED.text, tiktok_dm.text),
                         awe_type     = COALESCE(EXCLUDED.awe_type, tiktok_dm.awe_type),
                         message_type = COALESCE(EXCLUDED.message_type, tiktok_dm.message_type),
                         "timestamp"  = COALESCE(EXCLUDED."timestamp", tiktok_dm."timestamp"),
+                        media_url    = COALESCE(EXCLUDED.media_url, tiktok_dm.media_url),
                         raw_content  = COALESCE(EXCLUDED.raw_content, tiktok_dm.raw_content)
                     """,
                     mid, cid, sender_uid_s, m.get("sender_secuid"),
@@ -1183,17 +1193,100 @@ async def dm_decoded_handler(request):
                     owner or None,
                     m.get("client_message_id"),
                     _bool_or_none(m.get("is_stranger")),
+                    (m.get("media_url") or None),
                     json.dumps(raw) if raw is not None else None,
                 )
                 msg_n += 1
     except Exception:
-        logger.exception("dm_decoded upsert failed")
-        return _cors(web.json_response(
-            {"ok": False, "error": "db"}, status=500,
-        ))
-    if thread_n or msg_n:
-        logger.info("DM decoded[%s]: %d threads, %d messages", platform, thread_n, msg_n)
-    return _cors(web.json_response({"ok": True, "threads": thread_n, "messages": msg_n}))
+        logger.exception("tt dm_decoded upsert failed")
+        raise
+    return thread_n, msg_n
+
+
+async def _upsert_ig_decoded(pool, owner, threads, messages):
+    """Instagram DM upsert into instagram_dm{,_thread}. The wire path is
+    intentionally different from TikTok: IG uses MQTT-over-WSS + Thrift on
+    edge-chat.instagram.com/chat, AND a GraphQL/direct_v2 HTTP path the
+    extension already observes. Both paths funnel through here.
+
+    Scaffolding today — no real MQTT/Thrift decoder in inject.js, so most IG
+    decoded payloads will come from the GraphQL harvester (see extension/
+    inject.js:harvestIGGraphQL) which extracts inbox/thread structures from
+    /api/graphql/ and /graphql/query/ responses.
+    """
+    thread_n = 0
+    msg_n = 0
+    try:
+        async with pool.acquire() as conn:
+            for t in threads:
+                if not isinstance(t, dict):
+                    continue
+                tid = (t.get("thread_id") or t.get("conversation_id") or "").strip()
+                if not tid:
+                    continue
+                await conn.execute(
+                    """
+                    INSERT INTO instagram_dm_thread
+                        (thread_id, title, participants, owner_account, last_activity)
+                    VALUES ($1, $2, $3, $4, $5)
+                    ON CONFLICT (thread_id) DO UPDATE SET
+                        title         = COALESCE(EXCLUDED.title,
+                                                 instagram_dm_thread.title),
+                        participants  = COALESCE(EXCLUDED.participants,
+                                                 instagram_dm_thread.participants),
+                        owner_account = COALESCE(EXCLUDED.owner_account,
+                                                 instagram_dm_thread.owner_account),
+                        last_activity = GREATEST(EXCLUDED.last_activity,
+                                                 instagram_dm_thread.last_activity),
+                        updated_at    = now()
+                    """,
+                    tid,
+                    (t.get("title") or None),
+                    (t.get("participants") or None),
+                    (t.get("owner_account") or owner or None),
+                    _parse_ts_ms(t.get("last_activity_ms")),
+                )
+                thread_n += 1
+            for m in messages:
+                if not isinstance(m, dict):
+                    continue
+                mid = str(m.get("message_id") or "").strip()
+                tid = (m.get("thread_id") or m.get("conversation_id") or "").strip()
+                if not mid or not tid:
+                    continue
+                sender_id = m.get("sender_id")
+                sender_id_s = str(sender_id) if sender_id is not None else None
+                # is_from_me: prefer client hint (extension had cookie-derived
+                # ds_user_id), fall back to sender_id vs owner match.
+                if isinstance(m.get("is_from_me"), bool):
+                    is_from_me = m["is_from_me"]
+                else:
+                    is_from_me = bool(owner) and sender_id_s == owner
+                await conn.execute(
+                    """
+                    INSERT INTO instagram_dm
+                        (message_id, thread_id, sender_id, sender_username,
+                         text, item_type, "timestamp", is_from_me, owner_account)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+                    ON CONFLICT (message_id) DO UPDATE SET
+                        text            = COALESCE(EXCLUDED.text, instagram_dm.text),
+                        item_type       = COALESCE(EXCLUDED.item_type, instagram_dm.item_type),
+                        "timestamp"     = COALESCE(EXCLUDED."timestamp", instagram_dm."timestamp"),
+                        sender_username = COALESCE(EXCLUDED.sender_username, instagram_dm.sender_username)
+                    """,
+                    mid, tid, sender_id_s,
+                    m.get("sender_username"),
+                    m.get("text"),
+                    m.get("item_type"),
+                    _parse_ts_ms(m.get("timestamp_ms") or m.get("create_time_ms")),
+                    is_from_me,
+                    owner or None,
+                )
+                msg_n += 1
+    except Exception:
+        logger.exception("ig dm_decoded upsert failed")
+        raise
+    return thread_n, msg_n
 
 
 async def _save_profile(pool, platform, p) -> bool:

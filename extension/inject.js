@@ -221,6 +221,55 @@
     window.postMessage({ __uc: true, type: "dms", platform: "instagram", owner: { id: ownerId }, threads }, "*");
   }
 
+  // Modern IG web has been migrating DM inbox/thread fetches off /direct_v2/
+  // to /api/graphql/ (and /graphql/query/). harvestDMs above only fires on
+  // direct_v2 URLs. This function heuristically extracts DM data from ANY
+  // instagram response body that looks like it contains it — checks for a
+  // couple of guaranteed DM structural markers before shipping. Emits a
+  // dm_probe on match so we log which URLs are actually carrying the data,
+  // then a dms message for the harvester downstream.
+  //
+  // Investigation phase — will graduate to a real per-URL harvester once
+  // we see which query names IG uses. Bounded by response-body size and
+  // marker checks to avoid processing every GraphQL response on the page.
+  const igGraphQLRe = /\/(?:api\/graphql|graphql\/query|ajax\/route-definition|ajax\/bulk-route-definitions)/;
+  function harvestIGGraphQL(url, text) {
+    try {
+      if (!text || text.length > 8_000_000) return;
+      // Cheap marker check — GraphQL responses that DON'T mention any DM
+      // structure are the vast majority; skip them without JSON-parsing.
+      if (!/"thread_id"|"direct_message"|"conversation_id"|"inbox"/.test(text)) return;
+      let json; try { json = JSON.parse(text); } catch (e) { return; }
+      // Log the URL as a probe so we can inventory which GraphQL query
+      // names IG uses for DMs. Cheap — no DB write yet.
+      window.postMessage({ __uc: true, type: "dm_probe", platform: "instagram",
+        transport: "graphql", url: url.slice(0, 300), frame_kind: "json",
+        frame_size: text.length }, "*");
+      // Best-effort structural extraction — the exact GraphQL response shape
+      // varies by query and version. Handle a few known containers before
+      // giving up; leave the full text as a follow-up sample if none match.
+      let threads = null;
+      const roots = [json, json && json.data, json && json.viewer,
+                     json && json.data && json.data.viewer];
+      for (const root of roots) {
+        if (!root) continue;
+        if (root.inbox && Array.isArray(root.inbox.threads))
+          threads = root.inbox.threads;
+        else if (root.direct_inbox && Array.isArray(root.direct_inbox.threads))
+          threads = root.direct_inbox.threads;
+        else if (root.thread) threads = [root.thread];
+        else if (Array.isArray(root.threads)) threads = root.threads;
+        if (threads && threads.length) break;
+      }
+      if (!threads || !threads.length) return;
+      let ownerId = null;
+      try { ownerId = (document.cookie.match(/ds_user_id=(\d+)/) || [])[1] || null; }
+      catch (e) {}
+      window.postMessage({ __uc: true, type: "dms", platform: "instagram",
+        owner: { id: ownerId }, threads }, "*");
+    } catch (e) {}
+  }
+
   const origFetch = window.fetch;
   window.fetch = function (...args) {
     const p = origFetch.apply(this, args);
@@ -233,6 +282,10 @@
       } else if (platform === "instagram" && /direct/i.test(url)) {
         probeDmUrl(url);  // investigation: a direct URL that dmRe didn't match
         p.then((r) => { try { r.clone().text().then(harvestDMs).catch(() => {}); } catch (e) {} }).catch(() => {});
+      } else if (platform === "instagram" && igGraphQLRe.test(url)) {
+        // Modern IG web DM path — investigate whether these responses
+        // contain the inbox/thread data direct_v2 used to serve.
+        p.then((r) => { try { r.clone().text().then((t) => harvestIGGraphQL(url, t)).catch(() => {}); } catch (e) {} }).catch(() => {});
       } else if (apiRe.test(url)) {
         p.then((r) => { try { r.clone().text().then(harvestText).catch(() => {}); } catch (e) {} }).catch(() => {});
       }
@@ -261,6 +314,11 @@
         probeDmUrl(url);  // investigation: a direct URL that dmRe didn't match
         this.addEventListener("load", function () {
           try { if (typeof this.responseText === "string") harvestDMs(this.responseText); } catch (e) {}
+        });
+      } else if (platform === "instagram" && igGraphQLRe.test(url)) {
+        // XHR-path mirror of the fetch-path GraphQL harvester above.
+        this.addEventListener("load", function () {
+          try { if (typeof this.responseText === "string") harvestIGGraphQL(url, this.responseText); } catch (e) {}
         });
       } else if (apiRe.test(url)) {
         this.addEventListener("load", function () {
@@ -302,6 +360,15 @@
       // per platform, we can afford a much looser per-session cap; the
       // 24-byte SAMPLE_MIN_BYTES floor still skips MQTT/heartbeat pings.
       const SAMPLE_MAX = 200, SAMPLE_MIN_BYTES = 24;
+      // IG-specific min bytes: IG's edge-chat MQTT sends CONNACK/PING at
+      // 2-4B and legitimate small PUBLISH control frames at 5-15B. Setting
+      // the floor to 8 catches those without pulling in every PING; sample
+      // rotation still bounds disk. Zero IG samples have crossed 24B in
+      // ~10 sockets of observed traffic so far — either IG's realtime DM
+      // content flows via GraphQL (see harvestIGGraphQL below) instead of
+      // MQTT, or the real DM PUBLISH frames are on a topic we haven't
+      // observed yet. Lower threshold lets us LEARN which is true.
+      const IG_SAMPLE_MIN_BYTES = 8;
       // P1.3: WS-hook heartbeat counters. shipSample/probe increment these;
       // a setInterval below emits a heartbeat postMessage so background.js
       // can POST /social/dm-heartbeat and the watchdog can detect a broken
@@ -316,7 +383,9 @@
       function shipSample(u, key, buf) {
         try {
           const n = _sampleCount.get(key) || 0;
-          if (n >= SAMPLE_MAX || !buf || buf.byteLength < SAMPLE_MIN_BYTES) return;
+          if (n >= SAMPLE_MAX || !buf) return;
+          const minBytes = platform === "instagram" ? IG_SAMPLE_MIN_BYTES : SAMPLE_MIN_BYTES;
+          if (buf.byteLength < minBytes) return;
           _sampleCount.set(key, n + 1);
           _hookSamples++;
           window.postMessage({ __uc: true, type: "dm_sample", platform,
@@ -447,6 +516,30 @@
               // the tiktok_dm table with 'text=null' rows keyed on RPC IDs.
               if (contentJson && typeof contentJson === "object"
                   && "command_type" in contentJson) continue;
+              // Speculative media URL extraction for aweType != 0. Field names
+              // are best-effort from public reverse engineering; unknown
+              // shapes fall through to media_url=null (raw_content is
+              // preserved so post-hoc extraction can still recover the URL).
+              // Handled aweTypes: 1=sticker, 2=image, 3=video, 5=audio,
+              // 6=gif, 7=share.
+              let mediaUrl = null;
+              if (contentJson && typeof contentJson === "object") {
+                const j = contentJson;
+                const aw = typeof j.aweType === "number" ? j.aweType : -1;
+                if (aw === 1) mediaUrl = j.stickerUrl
+                  || (j.imageInfo && (j.imageInfo.url || j.imageInfo.imageUri)) || null;
+                else if (aw === 2) mediaUrl = j.imageUri || j.display_image
+                  || (j.imageInfo && (j.imageInfo.imageUri || j.imageInfo.url)) || null;
+                else if (aw === 3) mediaUrl = (j.videoInfo &&
+                  (j.videoInfo.playAddr || j.videoInfo.playUri || j.videoInfo.url))
+                  || j.videoUrl || null;
+                else if (aw === 5) mediaUrl = (j.audioInfo &&
+                  (j.audioInfo.playUrl || j.audioInfo.url)) || j.audioUrl || null;
+                else if (aw === 6) mediaUrl = j.giphyUrl || j.gifUrl
+                  || (j.gifInfo && (j.gifInfo.url || j.gifInfo.playAddr)) || null;
+                else if (aw === 7) mediaUrl = (j.item && j.item.share
+                    && j.item.share.share_url) || j.share_url || null;
+              }
               // Metadata key-value pairs live under repeated field 9.
               let clientMsgId = null, isStranger = null;
               for (const kv of _pbFindAll(eF, 9, 2)) {
@@ -470,6 +563,7 @@
                 create_time_ms: createTimeMs !== undefined ? _bigToStr(createTimeMs) : null,
                 client_message_id: clientMsgId,
                 is_stranger: isStranger,
+                media_url: mediaUrl,
                 raw_content: contentJson,
               });
               if (entryCid && !seenThreads.has(entryCid)) {
@@ -493,6 +587,37 @@
       function _extractOwner(url) {
         try {
           const m = String(url || "").match(/[?&]device_id=(\d+)/);
+          return m ? m[1] : "";
+        } catch (e) { return ""; }
+      }
+
+      // IG DM decoder — scaffold. Real implementation needs MQTT frame
+      // parsing (protocol level: CONNECT/CONNACK/PUBLISH/etc.) followed by
+      // Thrift body decode for the PUBLISH payloads that carry inbox
+      // events. Kept as a stub returning null so the WS-hook pipeline is
+      // plumbed end-to-end for IG the moment the decoder implementation
+      // lands. Reference: github.com/mautrix/meta messagix/mqtt for the
+      // canonical modern IG MQTT dialect + Thrift schemas.
+      //
+      // Empirical observations (from 10 edge-chat sessions probed so far):
+      //   * every observed frame is ≤ 4B — CONNACK (0x20 0x02 0x00 0x00) +
+      //     PINGRESP (0xD0 0x00). No PUBLISH frames >= 24B have been seen.
+      //   * strong hypothesis: IG's web client fetches actual DM content
+      //     via /api/graphql/ or /graphql/query/ rather than pushing over
+      //     the MQTT edge-chat socket. See harvestIGGraphQL below.
+      function _igDecode(_buf) {
+        // Intentional no-op. When ready to implement, expected return shape
+        // is { threads: [{thread_id, title, participants, last_activity_ms}],
+        //     messages: [{message_id, thread_id, sender_id, sender_username,
+        //     text, item_type, timestamp_ms, is_from_me}] } — matches the
+        // _upsert_ig_decoded shape in src/bridges/ig_ingest.py.
+        return null;
+      }
+      // IG owner UID lives in the ds_user_id cookie, NOT the WS URL query
+      // string. Read via document.cookie in the page context.
+      function _extractOwnerIG() {
+        try {
+          const m = (document.cookie || "").match(/(?:^|;\s*)ds_user_id=(\d+)/);
           return m ? m[1] : "";
         } catch (e) { return ""; }
       }
@@ -525,8 +650,9 @@
                 if (d instanceof ArrayBuffer) {
                   shipSample(u, key, d);
                   // Option B: client-side decode → structured DM payload.
-                  // Only TikTok is decoded today; IG's edge-chat MQTT+Thrift
-                  // path stays raw-sample-only until it lands separately.
+                  // TikTok uses protobuf on the frontier socket; IG uses
+                  // MQTT-over-WSS + Thrift on edge-chat (decoder stubbed
+                  // for now, see _igDecode).
                   if (platform === "tiktok" && d.byteLength >= SAMPLE_MIN_BYTES) {
                     try {
                       const decoded = _ttDecode(d);
@@ -534,6 +660,17 @@
                         window.postMessage({
                           __uc: true, type: "dm_decoded", platform,
                           owner: _extractOwner(u),
+                          threads: decoded.threads, messages: decoded.messages,
+                        }, "*");
+                      }
+                    } catch (e) {}
+                  } else if (platform === "instagram" && d.byteLength >= IG_SAMPLE_MIN_BYTES) {
+                    try {
+                      const decoded = _igDecode(d);
+                      if (decoded) {
+                        window.postMessage({
+                          __uc: true, type: "dm_decoded", platform,
+                          owner: _extractOwnerIG(),
                           threads: decoded.threads, messages: decoded.messages,
                         }, "*");
                       }
@@ -551,6 +688,15 @@
                           window.postMessage({
                             __uc: true, type: "dm_decoded", platform,
                             owner: _extractOwner(u),
+                            threads: decoded.threads, messages: decoded.messages,
+                          }, "*");
+                        }
+                      } else if (platform === "instagram" && fr.result.byteLength >= IG_SAMPLE_MIN_BYTES) {
+                        const decoded = _igDecode(fr.result);
+                        if (decoded) {
+                          window.postMessage({
+                            __uc: true, type: "dm_decoded", platform,
+                            owner: _extractOwnerIG(),
                             threads: decoded.threads, messages: decoded.messages,
                           }, "*");
                         }

@@ -17,6 +17,20 @@ import { relativeTime } from "../../utils/formatters";
 // shows the UID + secUid; unifiedanalyzer's identity resolver can later
 // backfill display names from social_users when the same UID appears in a
 // browsed profile.
+function awe_type_label(t: number | null): string {
+  // Speculative mapping — see src/db/migrations/add_tiktok_dm_media_url.sql
+  // for the source and add_tiktok_dm.sql for the canonical column.
+  switch (t) {
+    case 0: return "text";
+    case 1: return "sticker";
+    case 2: return "image";
+    case 3: return "video";
+    case 5: return "audio";
+    case 6: return "gif";
+    case 7: return "share";
+    default: return t === null ? "unknown" : `awe_type=${t}`;
+  }
+}
 export function TiktokDmPage() {
   const [selected, setSelected] = useState<string | null>(null);
 
@@ -110,7 +124,16 @@ export function TiktokDmPage() {
                       </div>
                     )}
                     <div className="whitespace-pre-wrap break-words">
-                      {m.text || (
+                      {m.text ? (
+                        m.text
+                      ) : m.media_url ? (
+                        // Speculative media URL (from raw_content by aweType);
+                        // may be a CDN URL requiring auth cookies to load.
+                        <a href={m.media_url} target="_blank" rel="noopener noreferrer"
+                           className="underline text-info">
+                          {awe_type_label(m.awe_type)} · open
+                        </a>
+                      ) : (
                         <span className="italic text-text-muted">
                           (awe_type={m.awe_type ?? "?"} — non-text content)
                         </span>

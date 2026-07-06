@@ -127,29 +127,56 @@ class InstagramDmCollector(BaseCollector):
                 f"See {real_creds}/README.md for what to seed here."
             )
 
-        # Lazy import so a boot without the feature flag doesn't pay the cost
-        # of loading the (eventually) heavy auth/MQTT modules.
+        # Local-only preparation: load credentials, hydrate per-account
+        # device fingerprint + session state from disk. These functions are
+        # all no-network — safe to call at any time. The FIRST network
+        # activity happens inside auth.login() below, which is still a
+        # NotImplementedError as of this commit.
+        from . import credentials as _creds
+        from . import device as _dev
+        from . import session as _sess
         from .auth import AuthClient
         from .mqtt_client import MqttClient
-        if self._auth is None:
-            self._auth = AuthClient(creds_dir=self._creds_dir,
-                                    proxy_url=os.getenv("INSTAGRAM_DM_PROXY_URL"))
-        if self._mqtt is None:
-            self._mqtt = MqttClient(auth=self._auth,
-                                    on_message=self._on_mqtt_message)
 
-        # These two calls are where the real ban-risky network activity lives
-        # — deliberately unimplemented at scaffolding time. When implemented,
-        # they should:
-        #   - auth.login() — sign in to the private mobile API, obtain a
-        #     session token + MQTT connect params. Backoff aggressively on
-        #     any 400/challenge_required response — those often precede a ban.
-        #   - mqtt.run_forever() — hold the edge-chat MQTT connection, decode
-        #     inbound message events via the Thrift decoder, write structured
-        #     rows to instagram_dm/instagram_dm_thread via the same schema
-        #     the extension-observed rows use.
-        await self._auth.login()
-        await self._mqtt.run_forever()
+        accounts = _creds.load_all(self._creds_dir)
+        if not accounts:
+            logger.warning(
+                "instagram_dm collect() called but no credentials found in %s "
+                "— see %s/README.md for the file schema. Nothing to do.",
+                self._creds_dir, self._creds_dir,
+            )
+            return
+
+        for acc in accounts:
+            dev = _dev.load_or_create(self._creds_dir, acc.username)
+            state = _sess.load(self._creds_dir, acc.username)
+            logger.info(
+                "instagram_dm account %s ready: device=%s.. session_valid=%s",
+                acc.username, dev.device_id[:8], state.is_valid(),
+            )
+            if self._auth is None:
+                self._auth = AuthClient(
+                    creds_dir=self._creds_dir,
+                    proxy_url=os.getenv("INSTAGRAM_DM_PROXY_URL"),
+                )
+            if self._mqtt is None:
+                self._mqtt = MqttClient(auth=self._auth,
+                                        on_message=self._on_mqtt_message)
+
+            # These are the two calls with real ban-risky network activity —
+            # deliberately unimplemented at scaffolding time. When implemented,
+            # `auth.login(acc, dev, state)` should:
+            #   - IF state.is_valid() and not state.is_stale(): reuse session
+            #     tokens; DO NOT trigger a fresh login.
+            #   - ELSE: RSA-encrypt the password against the daily-rotating
+            #     login pubkey and POST /api/v1/accounts/login/, persisting
+            #     new tokens via _sess.save() on 200 OK. On
+            #     challenge_required / checkpoint_required / sentry_block:
+            #     STOP. _sess.clear() the stale state. DO NOT retry — those
+            #     responses are pre-ban signals.
+            #   - Return an object holding cookies + MQTT connect params.
+            await self._auth.login()
+            await self._mqtt.run_forever()
 
     async def _on_mqtt_message(self, msg):
         """Callback wired from mqtt_client → into instagram_dm{,_thread} rows.
