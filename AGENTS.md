@@ -6,11 +6,6 @@ description: Central configuration and documentation for all AI coding agents ac
 
 This file defines how AI coding agents (Cursor, Antigravity, Claude Code, GitHub Copilot, etc.) should behave across all repositories in this workspace.
 
-> **📋 COLLECTION STANDARD — READ BEFORE TOUCHING ANY COLLECTOR:** [`COLLECTION_SPEC.md`](COLLECTION_SPEC.md)
-> defines the authoritative content-capture requirements (priority tiers, per-tier rules, the
-> follow-aware Stories model, and the per-collector applicability matrix). Any change to an existing
-> collector — or any NEW source — MUST implement that spec and update its matrix.
-
 ## Agent Types and Roles
 
 ### 1. Primary Coding Agent (Cursor/Claude Code)
@@ -58,25 +53,6 @@ This file defines how AI coding agents (Cursor, Antigravity, Claude Code, GitHub
 - Explain complex changes briefly
 - Admit uncertainty when present
 - Ask for clarification when requirements are ambiguous
-
-### 5. Database & Migrations
-- **Timestamps: use `TIMESTAMPTZ` for ALL new columns.** Never bare `TIMESTAMP`.
-  The system's downstream purpose is timelines / co-presence, where a tz-naive
-  timestamp written by an ambiguous-TZ container is a latent correctness bug
-  (a "same minute" co-presence match can be hours off). Newer tables
-  (`source_health`, `social_users`) already use `TIMESTAMPTZ`; match them.
-  - Legacy note: the core tables (`media_items`, `*_messages`, `*_posts`) use
-    bare `TIMESTAMP` and their `collected_at` is UTC-at-container. Do not assume
-    a local zone when reading them; do not bulk-rewrite applied columns.
-- **Never edit an applied `src/db/migrations/*.sql`** — the migrate-on-boot
-  runner checksums each file and halts loudly on drift (a silent multi-day
-  collector outage). Add a NEW migration file instead. Prefer idempotent DDL
-  (`ADD COLUMN IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`).
-- On the LIVE hot DB, add columns/indexes with a `lock_timeout` (a bare `ALTER`
-  queues behind long transactions and then blocks all traffic on that table),
-  and build big indexes with `CREATE INDEX CONCURRENTLY` out-of-band (illegal
-  inside the migrate.py transaction — the migration file uses the plain form for
-  clean-rebuild parity).
 
 ## Repository-Specific Overrides
 
