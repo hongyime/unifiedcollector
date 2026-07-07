@@ -397,6 +397,30 @@ class WhatsappCollector(BaseCollector):
             text, event.get("mimetype"), dt, json.dumps(event)
             )
 
+    @staticmethod
+    def _build_whatsapp_source_url(chat_jid: str | None, cid: str | None) -> str | None:
+        """Stable message-URI for media_items.source_url.
+
+        WhatsApp media has no publicly-openable URL: the CDN URL is an
+        expiring, mediaKey-encrypted reference that only the account owner
+        can decrypt. But the (chat_jid, message_id) tuple IS a stable
+        globally-unique identifier, so we encode it as a whatsapp:// URI:
+
+            whatsapp://<chat_jid>/<message_id>
+
+        The scheme isn't publicly resolvable but it (a) preserves message
+        lineage for unifiedanalyzer joins, (b) is a stable, unique key,
+        and (c) fits URI semantics — clearly better than NULL for
+        downstream analytics. content_id inside this collector is
+        ``wa_<message_id>``; we strip that prefix so the URI carries the
+        raw platform message id."""
+        if not chat_jid or not cid:
+            return None
+        msg_id = cid[len("wa_"):] if cid.startswith("wa_") else cid
+        if not msg_id:
+            return None
+        return f"whatsapp://{chat_jid}/{msg_id}"
+
     async def _save_media(self, data: bytes, cid: str, chat_jid: str,
                            chat_name: str, content_type: str, ext: str,
                            event: dict | None = None):
@@ -450,6 +474,7 @@ class WhatsappCollector(BaseCollector):
                 file_size=len(data),
                 sha256=sha,
                 metadata=metadata,
+                source_url=self._build_whatsapp_source_url(chat_jid, cid),
             )
             # Link the media back to its message so the row carries media_url/size
             # (was 0% — the analyzer couldn't join a message to its image). cid is
