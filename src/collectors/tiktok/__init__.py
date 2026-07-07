@@ -956,6 +956,46 @@ class TiktokCollector(BaseCollector):
     async def _record_download(self, username: str, video_id: str, file_path: str):
         self._tracked_ids.add(video_id)
 
+    @staticmethod
+    def _build_tiktok_source_url(item: dict) -> str | None:
+        """Canonical TikTok post URL (media_items.source_url). Content-id
+        conventions inside this collector:
+          content_type=video / post: content_id = numeric aweme_id OR
+                                       "dom_<slug>" for DOM-scraped items
+          content_type=photo:        content_id = "<aweme_id>_<slot_index>"
+                                       (multi-image posts)
+          content_type=profile_photo: content_id = "profile_<sec_uid>"
+
+        Returns https://www.tiktok.com/@<username>/video/<aweme_id> for
+        video/post (TikTok's /video/ path is the canonical share URL for
+        both single-video AND slideshow posts), /photo/ for the photo
+        content type, or the profile page for profile_photo. Returns None
+        if we can't extract enough (no username, or a dom_<slug> id that
+        can't be back-mapped to an aweme_id)."""
+        ctype = (item.get("content_type") or "").strip()
+        cid = (item.get("content_id") or "").strip()
+        username = (item.get("entity_name") or "").strip()
+        if not username:
+            return None
+        if ctype == "profile_photo":
+            return f"https://www.tiktok.com/@{username}"
+        if ctype == "photo":
+            aweme = cid.rsplit("_", 1)[0]
+            if not aweme.isdigit():
+                return None
+            return f"https://www.tiktok.com/@{username}/photo/{aweme}"
+        if ctype in ("video", "post"):
+            if cid.startswith("dom_"):
+                # DOM-scraped identifier — no aweme_id available, so we
+                # can't build a per-post URL. Fall back to the profile URL
+                # (still better than NULL — the file is at least traceable
+                # to an entity).
+                return f"https://www.tiktok.com/@{username}"
+            if not cid.isdigit():
+                return None
+            return f"https://www.tiktok.com/@{username}/video/{cid}"
+        return None
+
     async def download_media(self, item: dict):
         cid = item["content_id"]
         if self.is_known(cid): return
@@ -1007,7 +1047,8 @@ class TiktokCollector(BaseCollector):
                 entity_id=item["entity_id"], entity_name=item["entity_name"],
                 content_type=item["content_type"], content_id=cid,
                 filename=filename, file_path=str(dest),
-                file_size=len(data), sha256=sha, metadata=metadata
+                file_size=len(data), sha256=sha, metadata=metadata,
+                source_url=self._build_tiktok_source_url(item),
             )
             self._known_ids.add(cid)
         except Exception as e:
