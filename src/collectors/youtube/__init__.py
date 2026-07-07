@@ -991,6 +991,33 @@ class YoutubeCollector(BaseCollector):
                  "_video_id": r["platform_video_id"]}
                 for r in rows]
 
+    @staticmethod
+    def _build_youtube_source_url(item: dict) -> str | None:
+        """Canonical YouTube watch URL (media_items.source_url) for the
+        stored file. Content-id conventions inside this collector:
+          content_type=thumbnail: content_id = <video_id>          (11-char)
+          content_type=video:     content_id = "video_<video_id>"
+          content_type=profile_photo: content_id = "profile_<channel_id>"
+        Returns the watch URL for video/thumbnail (both point at the same
+        page), the channel URL for profile_photo, or None if we can't
+        extract an ID from the content_id shape."""
+        ctype = item.get("content_type") or ""
+        cid = item.get("content_id") or ""
+        if ctype == "profile_photo":
+            channel = cid[len("profile_"):] if cid.startswith("profile_") else None
+            if channel:
+                return f"https://www.youtube.com/channel/{channel}"
+            return None
+        if ctype == "video":
+            vid = cid[len("video_"):] if cid.startswith("video_") else cid
+        elif ctype == "thumbnail":
+            vid = cid
+        else:
+            return None
+        if not vid:
+            return None
+        return f"https://www.youtube.com/watch?v={vid}"
+
     async def download_media(self, item: dict):
         cid = item["content_id"]
         if self.is_known(cid): return
@@ -1018,7 +1045,7 @@ class YoutubeCollector(BaseCollector):
             os.replace(tmp_path, dest)
             metadata = {"entity_id": item["entity_id"], "entity_name": item["entity_name"], "content_type": item["content_type"], "content_id": cid, "collected_at": datetime.now(timezone.utc).isoformat(), "raw": item.get("raw", {})}
             self.save_json(metadata, dest_dir / f"{Path(filename).stem}_metadata.json")
-            await self.insert_media_item(entity_id=item["entity_id"], entity_name=item["entity_name"], content_type=item["content_type"], content_id=cid, filename=filename, file_path=str(dest), file_size=len(data), sha256=sha, metadata=metadata)
+            await self.insert_media_item(entity_id=item["entity_id"], entity_name=item["entity_name"], content_type=item["content_type"], content_id=cid, filename=filename, file_path=str(dest), file_size=len(data), sha256=sha, metadata=metadata, source_url=self._build_youtube_source_url(item))
             self._known_ids.add(cid)
         except Exception as e:
             logger.error("Download failed %s: %s", cid, e)
