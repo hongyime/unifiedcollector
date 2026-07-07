@@ -1918,13 +1918,21 @@ class TelegramCollector(BaseCollector):
 
         Format rules for the default derivation:
           - profile_photo, chat_username set     -> https://t.me/<username>
-          - profile_photo, no username           -> None (private chats have
-                                                     no publicly openable
-                                                     profile page)
+          - profile_photo, positive numeric user -> tg://user?id=<uid>
+                                                     (stable URI, not
+                                                     web-openable)
+          - profile_photo, otherwise             -> None
           - regular media, chat_username set     -> https://t.me/<username>/<msg_id>
-          - regular media, no username           -> https://t.me/c/<chat_id>/<msg_id>
-                                                     (the account owner can
-                                                     still open this link)
+          - regular media, supergroup / group    -> https://t.me/c/<chat_id>/<msg_id>
+                                                     (member-openable)
+          - regular media, positive user chat    -> tg://openmessage?user_id=X
+                                                                      &message_id=Y
+                                                     (stable URI mirror of
+                                                     the whatsapp:// scheme
+                                                     used for WA media —
+                                                     preserves lineage
+                                                     downstream even though
+                                                     not web-openable)
 
         Callers must set ``item['chat_username']`` (may be None) and, for
         non-profile media, ``item['message_id']``. Both are cheap to add at
@@ -1940,6 +1948,18 @@ class TelegramCollector(BaseCollector):
         if item.get("content_type") in ("profile_photo", "user_profile_photo"):
             if chat_username:
                 return f"https://t.me/{chat_username}"
+            # No public URL for a private user's profile page. Fall back to
+            # tg://user?id=<uid> — clients understand it, and it's a stable
+            # identifier for downstream unifiedanalyzer joins even though
+            # it isn't a web-openable link. Only emit when we have a
+            # positive numeric user id (chat_ids that could be groups
+            # aren't valid tg://user targets).
+            try:
+                raw = str(chat_id) if chat_id is not None else ""
+            except Exception:
+                raw = ""
+            if raw.isdigit() and int(raw) > 0:
+                return f"tg://user?id={raw}"
             return None
         message_id = item.get("message_id")
         if message_id is None:
@@ -1949,8 +1969,10 @@ class TelegramCollector(BaseCollector):
         # Private/no-username fallback. Supergroup chat_ids look like
         # "-1001234567890"; the /c/ deep-link format wants just the numeric
         # portion after the -100. Regular groups have -<pos_int> and use the
-        # positive value. Users (positive chat_ids) don't have a /c/ URL
-        # form, so return None there.
+        # positive value. Users (positive chat_ids) have no /c/ URL form —
+        # we emit tg://openmessage?user_id=<uid>&message_id=<mid> instead,
+        # mirroring the whatsapp:// URI scheme convention: not publicly
+        # openable but preserves message lineage as a stable identifier.
         try:
             raw = str(chat_id)
         except Exception:
@@ -1962,7 +1984,10 @@ class TelegramCollector(BaseCollector):
         elif raw.startswith("-"):
             raw = raw[1:]
         else:
-            # Positive chat_id = private user chat; no /c/ URL form exists.
+            # Positive chat_id = private user DM. tg:// URI keeps the
+            # (user_id, message_id) tuple identifiable downstream.
+            if raw.isdigit():
+                return f"tg://openmessage?user_id={raw}&message_id={message_id}"
             return None
         if not raw.isdigit():
             return None
