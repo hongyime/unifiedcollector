@@ -500,6 +500,7 @@ class GithubCollector(BaseCollector):
                     file_size=path.stat().st_size,
                     sha256=_sha256_bytes(path.read_bytes()),
                     metadata={"raw": user},
+                    source_url=self._build_github_source_url(user.get("login", username)),
                 )
             except Exception as e:
                 logger.warning("insert_media_item failed for %s: %s", uid, e)
@@ -887,6 +888,7 @@ class GithubCollector(BaseCollector):
                     file_size=path.stat().st_size,
                     sha256=self.sha256_bytes(path.read_bytes()),
                     metadata={"raw": user},
+                    source_url=self._build_github_source_url(login),
                 )
 
         repos = await self._paginate(client, f"{API_BASE}/users/{username}/repos")
@@ -1134,6 +1136,18 @@ class GithubCollector(BaseCollector):
 
     # ---- media download (release assets) -------------------------------
 
+    @staticmethod
+    def _build_github_source_url(login_or_entity_name: str | None) -> str | None:
+        """Canonical GitHub profile URL for media_items.source_url. Every
+        media row this collector writes is a profile avatar keyed by
+        github login, so the source page for the file is simply the user's
+        profile at https://github.com/<login>. Returns None on missing
+        login."""
+        login = (login_or_entity_name or "").strip().lstrip("@")
+        if not login:
+            return None
+        return f"https://github.com/{login}"
+
     async def download_media(self, item: dict):
         cid = item["content_id"]
         if self.is_known(cid):
@@ -1170,6 +1184,7 @@ class GithubCollector(BaseCollector):
                 content_type=item["content_type"], content_id=cid,
                 filename=filename, file_path=str(dest), file_size=len(data),
                 sha256=sha, metadata=metadata,
+                source_url=self._build_github_source_url(item.get("entity_name")),
             )
             self._known_ids.add(cid)
         except Exception as e:
