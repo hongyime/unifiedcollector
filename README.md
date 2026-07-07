@@ -45,6 +45,19 @@ Everything runs as Docker Compose services sharing one Postgres DB. Code lives u
 - **`media_items`** — one table for all downloaded media. Dedup by `(source,
   content_id)` UNIQUE **and** cross-collector `sha256`. Flat dated naming
   `<YYYYMMDD>_<platform>_<user>_<kind><id>.<ext>`.
+- **`source_url` contract** — every media_items row carries `source_url`, the
+  canonical human-openable URL for the media's source page (video / post /
+  profile). Each collector derives it via a `_build_<source>_source_url(item)`
+  @staticmethod called from its `insert_media_item(...)`. Platforms with no
+  public URL (WhatsApp media, private Telegram DMs) use a stable URI scheme
+  (`whatsapp://<chat_jid>/<msg_id>`) or NULL respectively. Contract enforced
+  by the docstring on `src/core/base_collector.py::insert_media_item` and by
+  fresh-inflow monitoring on the dashboard.
+- **`ingest_path`** — provenance tag on every row: `headless` (server-side
+  scrape), `extension` (browser-observed), `messaging` (realtime
+  telegram/whatsapp/beeper), `mobile_api` (scaffolded, off by default).
+  Default from the collector's `INGEST_PATH` class attribute; extension
+  bridge sets its own inline.
 - **`social_users`** — universal cross-platform person registry (usernames, ids,
   profile photos, contexts like follow/comment/tagged/author).
 - **Deletion tracking** — for the analyzer's "what changed since last viewed":

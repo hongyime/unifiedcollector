@@ -374,6 +374,26 @@ class BaseCollector(ABC):
 
         For profile_photo items, sha256 is auto-computed from the file on disk
         if not provided, since the analyzer needs hashes for identity matching.
+
+        ``source_url`` CONTRACT (audit 2026-07-07, commits 9b0e7d6..8c81214):
+          Every collector MUST pass a source_url representing the canonical,
+          human-openable URL for the media's source page (video / post /
+          profile / etc.) so unifiedanalyzer can trace a stored file back to
+          its origin AND the media reconciler can re-fetch on drive corruption.
+
+          For platforms with genuinely no public URL (WhatsApp media is
+          mediaKey-encrypted and expiring; private Telegram DMs have no /c/
+          form), use a stable URI scheme instead:
+              whatsapp://<chat_jid>/<msg_id>
+              tg://…  (currently we leave DMs NULL — matches
+                       _build_telegram_source_url behaviour).
+
+          Each collector implements a ``_build_<source>_source_url(item)``
+          @staticmethod that derives the URL from item-dict fields
+          (content_type + content_id + entity_name/id + any per-source
+          extras like chat_username). Test cases live alongside the
+          helper — see the 7 fix commits between 9b0e7d6 and 8c81214 for
+          the pattern.
         """
         if sha256 is None and content_type == "profile_photo" and file_path:
             try:
