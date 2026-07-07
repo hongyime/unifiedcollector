@@ -778,7 +778,7 @@ class StravaCollector(BaseCollector):
                 dest_dir.mkdir(parents=True, exist_ok=True)
                 changed, path = await self._photo_tracker.check_and_download(athlete["profile"], aid, "strava", dest_dir)
                 if changed and path:
-                    await self.insert_media_item(entity_id=aid, entity_name=aname, content_type="profile_photo", content_id=f"profile_{aid}", filename=path.name, file_path=str(path), file_size=path.stat().st_size, sha256=self.sha256_bytes(path.read_bytes()), metadata={"raw": athlete})
+                    await self.insert_media_item(entity_id=aid, entity_name=aname, content_type="profile_photo", content_id=f"profile_{aid}", filename=path.name, file_path=str(path), file_size=path.stat().st_size, sha256=self.sha256_bytes(path.read_bytes()), metadata={"raw": athlete}, source_url=self._build_strava_source_url({"content_type": "profile_photo", "content_id": f"profile_{aid}"}))
             await self._collect_activities_api(client, aid, aname)
 
     async def _upsert_athlete(self, athlete: dict):
@@ -1288,6 +1288,37 @@ class StravaCollector(BaseCollector):
                  "source_url": f"https://www.strava.com/activities/{r['platform_activity_id']}"}
                 for r in rows]
 
+    @staticmethod
+    def _build_strava_source_url(item: dict) -> str | None:
+        """Canonical Strava URL for media_items.source_url. Content-id
+        conventions inside this collector:
+          content_type=profile_photo:  content_id = "profile_<athlete_id>"
+                                       -> https://www.strava.com/athletes/<id>
+          content_type=activity_photo: content_id = "<activity_id>_<uuid>"
+                                       -> https://www.strava.com/activities/<activity_id>
+          content_type=route_map:      content_id = "<activity_id>"
+                                       -> https://www.strava.com/activities/<activity_id>
+        Returns None on any unrecognised shape."""
+        ctype = (item.get("content_type") or "").strip()
+        cid = (item.get("content_id") or "").strip()
+        if ctype == "profile_photo":
+            if not cid.startswith("profile_"):
+                return None
+            athlete = cid[len("profile_"):]
+            if not athlete.isdigit():
+                return None
+            return f"https://www.strava.com/athletes/{athlete}"
+        if ctype == "activity_photo":
+            activity_id = cid.split("_", 1)[0]
+            if not activity_id.isdigit():
+                return None
+            return f"https://www.strava.com/activities/{activity_id}"
+        if ctype == "route_map":
+            if not cid.isdigit():
+                return None
+            return f"https://www.strava.com/activities/{cid}"
+        return None
+
     async def download_media(self, item: dict):
         cid = item["content_id"]
         if self.is_known(cid): return
@@ -1308,7 +1339,7 @@ class StravaCollector(BaseCollector):
             os.replace(tmp_path, dest)
             metadata = {"entity_id": item["entity_id"], "entity_name": item["entity_name"], "content_type": item["content_type"], "content_id": cid, "collected_at": datetime.now(timezone.utc).isoformat(), "raw": item.get("raw", {})}
             self.save_json(metadata, dest_dir / f"{Path(filename).stem}_metadata.json")
-            await self.insert_media_item(entity_id=item["entity_id"], entity_name=item["entity_name"], content_type=item["content_type"], content_id=cid, filename=filename, file_path=str(dest), file_size=len(data), sha256=sha, metadata=metadata)
+            await self.insert_media_item(entity_id=item["entity_id"], entity_name=item["entity_name"], content_type=item["content_type"], content_id=cid, filename=filename, file_path=str(dest), file_size=len(data), sha256=sha, metadata=metadata, source_url=self._build_strava_source_url(item))
             self._known_ids.add(cid)
         except Exception as e:
             logger.error("Download failed %s: %s", cid, e)
@@ -2820,6 +2851,7 @@ class StravaCollector(BaseCollector):
                 file_size=len(data),
                 sha256=self.sha256_bytes(data),
                 metadata=payload,
+                source_url=self._build_strava_source_url({"content_type": "route_map", "content_id": activity_id}),
             )
             self._known_ids.add(f"route_{activity_id}")
         except Exception as e:
