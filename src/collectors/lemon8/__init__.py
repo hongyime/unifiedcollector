@@ -1704,6 +1704,32 @@ class Lemon8Collector(BaseCollector):
     # ──────────────────────────────────────────────────────────────────────
     # Media download
     # ──────────────────────────────────────────────────────────────────────
+    @staticmethod
+    def _build_lemon8_source_url(item: dict) -> str | None:
+        """Canonical Lemon8 URL for media_items.source_url.
+
+        Lemon8's content_id conventions vary by scrape path (feed / profile
+        / discover) so a clean per-content_id URL isn't always derivable. We
+        take a tiered approach:
+          - profile_photo: derive the user profile page from entity_name
+                           (matches USER_URL_PATTERN in this collector).
+          - everything else with an ``item['url']`` (the CDN URL we downloaded
+                           from): use that — expiring signatures notwithstanding,
+                           it preserves lineage back to the source.
+          - fallback: entity's profile page if we at least have the username.
+        Returns None only when there is no username AND no url — a state that
+        shouldn't reach download_media in practice."""
+        ctype = (item.get("content_type") or "").strip()
+        username = (item.get("entity_name") or "").strip().lstrip("@")
+        cdn_url = (item.get("url") or "").strip() or None
+        if ctype == "profile_photo" and username:
+            return f"https://www.lemon8-app.com/@{username}"
+        if cdn_url:
+            return cdn_url
+        if username:
+            return f"https://www.lemon8-app.com/@{username}"
+        return None
+
     async def download_media(self, item: dict):
         cid = item["content_id"]
         if self.is_known(cid): return
@@ -1725,7 +1751,7 @@ class Lemon8Collector(BaseCollector):
             os.replace(tmp_path, dest)
             metadata = {"entity_id": item["entity_id"], "entity_name": item["entity_name"], "content_type": item["content_type"], "content_id": cid, "collected_at": datetime.now(timezone.utc).isoformat(), "raw": item.get("raw", {})}
             self.save_json(metadata, dest_dir / f"{Path(filename).stem}_metadata.json")
-            await self.insert_media_item(entity_id=item["entity_id"], entity_name=item["entity_name"], content_type=item["content_type"], content_id=cid, filename=filename, file_path=str(dest), file_size=len(data), sha256=sha, metadata=metadata)
+            await self.insert_media_item(entity_id=item["entity_id"], entity_name=item["entity_name"], content_type=item["content_type"], content_id=cid, filename=filename, file_path=str(dest), file_size=len(data), sha256=sha, metadata=metadata, source_url=self._build_lemon8_source_url(item))
             self._known_ids.add(cid)
         except Exception as e:
             logger.error("Download failed %s: %s", cid, e)
