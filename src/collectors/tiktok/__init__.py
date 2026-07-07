@@ -960,9 +960,14 @@ class TiktokCollector(BaseCollector):
     def _build_tiktok_source_url(item: dict) -> str | None:
         """Canonical TikTok post URL (media_items.source_url). Content-id
         conventions inside this collector:
-          content_type=video / post: content_id = numeric aweme_id OR
+          content_type=video: content_id = numeric aweme_id OR
                                        "dom_<slug>" for DOM-scraped items
-          content_type=photo:        content_id = "<aweme_id>_<slot_index>"
+          content_type=post:  content_id = "<aweme_id>" OR
+                                       "<aweme_id>_<slot_index>" for
+                                       photo-slot rows extracted from
+                                       photo-slideshow posts (gallery-dl
+                                       filename convention)
+          content_type=photo: content_id = "<aweme_id>_<slot_index>"
                                        (multi-image posts)
           content_type=profile_photo: content_id = "profile_<sec_uid>"
 
@@ -991,9 +996,13 @@ class TiktokCollector(BaseCollector):
                 # (still better than NULL — the file is at least traceable
                 # to an entity).
                 return f"https://www.tiktok.com/@{username}"
-            if not cid.isdigit():
+            # Strip a trailing "_<slot>" suffix: gallery-dl produces
+            # "<aweme_id>_<NN>.jpg" filenames for photo-slideshow slots,
+            # and the collector maps those into content_type=post rows.
+            aweme = cid.rsplit("_", 1)[0] if "_" in cid else cid
+            if not aweme.isdigit():
                 return None
-            return f"https://www.tiktok.com/@{username}/video/{cid}"
+            return f"https://www.tiktok.com/@{username}/video/{aweme}"
         return None
 
     async def download_media(self, item: dict):
