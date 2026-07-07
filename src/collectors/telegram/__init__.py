@@ -1190,6 +1190,7 @@ class TelegramCollector(BaseCollector):
 
         chat_id = str(entity.id)
         chat_name = getattr(entity, "title", None) or getattr(entity, "username", None) or chat_id
+        chat_username = getattr(entity, "username", None)  # for source_url deep-links
 
         await self._upsert_chat(entity)
         await self._collect_profile_photo(worker, entity, chat_id, chat_name)
@@ -1232,7 +1233,7 @@ class TelegramCollector(BaseCollector):
 
             if message.media:
                 if isinstance(message.media, MessageMediaPhoto):
-                    await self._handle_photo(worker, message, chat_id, chat_name)
+                    await self._handle_photo(worker, message, chat_id, chat_name, chat_username)
                     count += 1
                 elif isinstance(message.media, MessageMediaDocument):
                     doc = message.media.document
@@ -1242,7 +1243,7 @@ class TelegramCollector(BaseCollector):
                         # (was image/video-only, which dropped PDFs/office/audio).
                         # The classifier whitelists safe docs + audio + static
                         # stickers and skips executables/code/animated stickers.
-                        if await self._handle_document(worker, message, chat_id, chat_name, mime):
+                        if await self._handle_document(worker, message, chat_id, chat_name, mime, chat_username):
                             count += 1
 
             if count % self._batch_size == 0 and count > 0:
@@ -1897,9 +1898,75 @@ class TelegramCollector(BaseCollector):
                     "content_id": cid,
                     "data": photo,
                     "extension": "jpg",
+                    # source_url for the profile page — only well-defined for
+                    # public entities (with a username). Private chats have no
+                    # web-openable profile page, so leave None there.
+                    "chat_username": getattr(entity, "username", None),
                 }, worker=worker)
         except Exception as e:
             logger.debug("Profile photo download failed for %s: %s", chat_name, e)
+
+    @staticmethod
+    def _build_telegram_source_url(item: dict) -> str | None:
+        """Deep-link URL that opens this media's originating message OR the
+        entity's profile page. Populates media_items.source_url so downstream
+        consumers can trace a stored file back to the exact source message.
+
+        Callers with a fully-formed URL (e.g. stories, which use a different
+        path than regular messages) can bypass this helper by setting
+        ``item['source_url_override']``.
+
+        Format rules for the default derivation:
+          - profile_photo, chat_username set     -> https://t.me/<username>
+          - profile_photo, no username           -> None (private chats have
+                                                     no publicly openable
+                                                     profile page)
+          - regular media, chat_username set     -> https://t.me/<username>/<msg_id>
+          - regular media, no username           -> https://t.me/c/<chat_id>/<msg_id>
+                                                     (the account owner can
+                                                     still open this link)
+
+        Callers must set ``item['chat_username']`` (may be None) and, for
+        non-profile media, ``item['message_id']``. Both are cheap to add at
+        the call sites where the message + chat entity are already in scope.
+        """
+        override = item.get("source_url_override")
+        if override:
+            return override
+        chat_username = item.get("chat_username")
+        chat_id = item.get("entity_id")
+        # profile_photo and user_profile_photo both map to the entity page,
+        # not a specific message. They share the /<username> shape.
+        if item.get("content_type") in ("profile_photo", "user_profile_photo"):
+            if chat_username:
+                return f"https://t.me/{chat_username}"
+            return None
+        message_id = item.get("message_id")
+        if message_id is None:
+            return None
+        if chat_username:
+            return f"https://t.me/{chat_username}/{message_id}"
+        # Private/no-username fallback. Supergroup chat_ids look like
+        # "-1001234567890"; the /c/ deep-link format wants just the numeric
+        # portion after the -100. Regular groups have -<pos_int> and use the
+        # positive value. Users (positive chat_ids) don't have a /c/ URL
+        # form, so return None there.
+        try:
+            raw = str(chat_id)
+        except Exception:
+            return None
+        if not raw or raw.startswith("+"):
+            return None
+        if raw.startswith("-100"):
+            raw = raw[4:]
+        elif raw.startswith("-"):
+            raw = raw[1:]
+        else:
+            # Positive chat_id = private user chat; no /c/ URL form exists.
+            return None
+        if not raw.isdigit():
+            return None
+        return f"https://t.me/c/{raw}/{message_id}"
 
     async def download_media(self, item: dict, worker: "TelegramWorker | None" = None):
         cid = item["content_id"]
@@ -1953,7 +2020,8 @@ class TelegramCollector(BaseCollector):
                 entity_id=item["entity_id"], entity_name=item["entity_name"],
                 content_type=item["content_type"], content_id=cid,
                 filename=filename, file_path=str(dest),
-                file_size=len(data), sha256=sha, metadata=metadata
+                file_size=len(data), sha256=sha, metadata=metadata,
+                source_url=self._build_telegram_source_url(item),
             )
             self._known_ids.add(cid)
         except Exception as e:
@@ -1962,17 +2030,25 @@ class TelegramCollector(BaseCollector):
             logger.error("Download failed %s: %s", cid, e)
             await self.send_to_dlq(item["entity_id"], cid, str(e))
 
-    async def _handle_photo(self, worker: "TelegramWorker", message, chat_id: str, chat_name: str):
+    async def _handle_photo(self, worker: "TelegramWorker", message, chat_id: str,
+                            chat_name: str, chat_username: str | None = None):
         await self.download_media({
             "entity_id": chat_id,
             "entity_name": chat_name,
             "content_type": "photo",
             "content_id": str(message.id),
             "media": message.media.photo,
-            "raw": message.to_dict()
+            "raw": message.to_dict(),
+            # Deep-link URL population (media_items.source_url) — see
+            # _build_telegram_source_url. chat_username is None for private
+            # chats; that falls back to https://t.me/c/<numeric>/<msg_id>.
+            "chat_username": chat_username,
+            "message_id": message.id,
         }, worker=worker)
 
-    async def _handle_document(self, worker: "TelegramWorker", message, chat_id: str, chat_name: str, mime: str) -> bool:
+    async def _handle_document(self, worker: "TelegramWorker", message, chat_id: str,
+                               chat_name: str, mime: str,
+                               chat_username: str | None = None) -> bool:
         """Classify + download a document attachment per Tier 3 spec.
 
         Returns True if the document was downloaded, False if it was skipped
@@ -2026,7 +2102,10 @@ class TelegramCollector(BaseCollector):
             "content_id": str(message.id),
             "media": message.media.document,
             "extension": ext,
-            "raw": message.to_dict()
+            "raw": message.to_dict(),
+            # Deep-link population — see _build_telegram_source_url.
+            "chat_username": chat_username,
+            "message_id": message.id,
         }, worker=worker)
         return True
 
@@ -2044,6 +2123,7 @@ class TelegramCollector(BaseCollector):
 
                 chat_id = str(entity.id)
                 chat_name = getattr(entity, "title", None) or getattr(entity, "username", None) or chat_id
+                chat_username = getattr(entity, "username", None)  # for stories deep-link
 
                 try:
                     result = await client(GetPeerStoriesRequest(peer=entity))
@@ -2064,6 +2144,13 @@ class TelegramCollector(BaseCollector):
                         media = getattr(story, "media", None)
                         if media:
                             is_video = hasattr(media, "video")
+                            # Stories have their own deep-link:
+                            # https://t.me/<username>/s/<story_id> for public.
+                            # Private stories have no publicly openable URL.
+                            story_url = (
+                                f"https://t.me/{chat_username}/s/{story_id}"
+                                if chat_username else None
+                            )
                             await self.download_media({
                                 "entity_id": chat_id,
                                 "entity_name": chat_name,
@@ -2071,7 +2158,8 @@ class TelegramCollector(BaseCollector):
                                 "content_id": cid,
                                 "media": media,
                                 "extension": "mp4" if is_video else "jpg",
-                                "raw": story.to_dict()
+                                "raw": story.to_dict(),
+                                "source_url_override": story_url,
                             }, worker=worker)
                 except Exception as e:
                     logger.debug("Story fetch failed for %s: %s", chat_name, e)
@@ -2966,6 +3054,8 @@ class TelegramCollector(BaseCollector):
                         "content_id": cid,
                         "data": photo_bytes,
                         "extension": "jpg",
+                        # Deep-link URL — public users have https://t.me/<username>
+                        "chat_username": getattr(user, "username", None),
                     }, worker=worker)
             # set photo_url to the stored file (whether just downloaded or already known)
             async with self.pool.acquire() as conn:
@@ -2999,6 +3089,7 @@ class TelegramCollector(BaseCollector):
                             "content_id": cid_p,
                             "data": photo_bytes,
                             "extension": "jpg",
+                            "chat_username": getattr(user, "username", None),
                         }, worker=worker)
                 except Exception as exc:
                     logger.debug("photo %s for %s failed: %s", pid, uid, exc)
@@ -3088,20 +3179,22 @@ class TelegramCollector(BaseCollector):
         chat_id_str = str(chat_id) if chat_id is not None else str(getattr(message, "chat_id", "unknown"))
         # Try to resolve a name; fall back to chat_id.
         chat_name = chat_id_str
+        chat_username: str | None = None
         try:
             entity = await client.get_entity(int(chat_id_str))
             chat_name = getattr(entity, "title", None) or getattr(entity, "username", None) or chat_id_str
+            chat_username = getattr(entity, "username", None)
         except Exception:
             pass
 
         from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
         if isinstance(message.media, MessageMediaPhoto):
-            await self._handle_photo(worker, message, chat_id_str, chat_name)
+            await self._handle_photo(worker, message, chat_id_str, chat_name, chat_username)
             return True
         if isinstance(message.media, MessageMediaDocument):
             doc = message.media.document
             mime = getattr(doc, "mime_type", "") or ""
-            await self._handle_document(worker, message, chat_id_str, chat_name, mime)
+            await self._handle_document(worker, message, chat_id_str, chat_name, mime, chat_username)
             return True
 
         # Unknown media type — fall through to a generic Telethon download.
@@ -3118,6 +3211,8 @@ class TelegramCollector(BaseCollector):
                 "data": data,
                 "extension": ext or "bin",
                 "raw": message.to_dict(),
+                "chat_username": chat_username,
+                "message_id": message.id,
             }, worker=worker)
             return True
         except Exception as exc:
