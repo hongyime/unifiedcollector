@@ -63,6 +63,30 @@ app.get('/qr', (_req, res) => {
     }
 });
 
+// GET /session — return the identity of the WhatsApp account this bridge is
+// paired with. Bryan asked for phone + name so the dashboard can label WHICH
+// account each bridge represents after a QR scan (previously the dashboard
+// only knew "bridge 1" vs "bridge 2"). Fields:
+//   connected     — bool, mirrors serviceHealthy (paired + socket open)
+//   session_name  — bridge slot label from env (e.g. "session_1")
+//   phone_number  — the digits before ':N' in sock.user.id
+//   wid           — the full JID (e.g. "6591234567:12@s.whatsapp.net")
+//   push_name     — Baileys' cached push name for the owner (WhatsApp
+//                    display name if the user set one, else phone number)
+// Returns 200 always; `connected=false` when not paired yet.
+app.get('/session', (_req, res) => {
+    const user = activeSock?.user || null;
+    const wid: string | null = user?.id || null;
+    const phone_number = wid ? wid.split(':')[0].split('@')[0] : null;
+    res.status(200).json({
+        connected: serviceHealthy,
+        session_name: process.env.SESSION_NAME || 'default',
+        wid,
+        phone_number,
+        push_name: user?.name || user?.notify || null,
+    });
+});
+
 // POST /disconnect — unpair THIS device (logout): removes it from the phone's
 // linked-devices list and clears local auth. The connection.update handler then
 // re-inits into 'awaiting_scan', so a fresh QR is available at /qr. This is the

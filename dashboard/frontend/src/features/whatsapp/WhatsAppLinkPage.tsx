@@ -17,6 +17,20 @@ function BridgeCard({ bridge }: { bridge: 1 | 2 }) {
     refetchOnWindowFocus: true,
   });
 
+  // Session identity (phone_number + push_name) — only meaningful when the
+  // bridge is paired. Poll every 15s while connected; every 5s while trying
+  // to connect (a fresh QR scan flips identity into place within one tick).
+  const { data: sessions } = useQuery({
+    queryKey: ["wa-sessions"],
+    queryFn: () => api.waSessions(),
+    refetchInterval: (q) => {
+      const anyConnected = (q.state.data?.sessions ?? []).some((s) => s.connected);
+      return anyConnected ? 15_000 : 5_000;
+    },
+    refetchOnWindowFocus: true,
+  });
+  const identity = sessions?.sessions.find((s) => s.bridge === String(bridge));
+
   const refresh = () => qc.invalidateQueries({ queryKey: ["wa-qr", bridge] });
   const disconnect = useMutation({
     mutationFn: () => api.waDisconnect(bridge),
@@ -67,6 +81,28 @@ function BridgeCard({ bridge }: { bridge: 1 | 2 }) {
           <span className="text-text-muted">{status}&hellip;</span>
         )}
       </p>
+
+      {/* Session identity — surfaces the paired account (phone + WhatsApp
+          display name) so we can tell WHICH account is on WHICH bridge slot.
+          Only rendered when the bridge reports connected AND identity
+          resolution succeeded (bridge itself must be reachable). */}
+      {ready && identity?.ok && identity.connected && identity.phone_number && (
+        <div className="mt-3 text-center">
+          <div className="font-mono text-sm text-text-primary font-semibold">
+            +{identity.phone_number}
+          </div>
+          {identity.push_name && (
+            <div className="text-xs text-text-muted mt-0.5">
+              {identity.push_name}
+            </div>
+          )}
+          {identity.session_name && (
+            <div className="text-[10px] text-text-muted mt-0.5">
+              slot: {identity.session_name}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Per-device controls — independent of the other bridge. */}
       <div className="mt-4 flex items-center justify-center gap-2">

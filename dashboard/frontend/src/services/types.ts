@@ -168,6 +168,24 @@ export interface DmTelemetryBucket {
   max_frame_size: number | null;
   min_frame_size: number | null;
 }
+
+// WhatsApp bridge session identity (bridge /session endpoint + dashboard
+// /whatsapp/sessions aggregator). Returned per bridge slot after the user
+// scans a QR — phone_number + push_name identifies which account got
+// linked to which slot.
+export interface WaBridgeSession {
+  bridge: string;               // "1" | "2"
+  ok: boolean;                  // false when the bridge itself is unreachable
+  error?: string;
+  connected?: boolean;          // bridge paired AND socket open
+  session_name?: string | null; // bridge slot label from env (e.g. "session_1")
+  wid?: string | null;          // full JID e.g. 6591234567:12@s.whatsapp.net
+  phone_number?: string | null; // just the digits
+  push_name?: string | null;    // WhatsApp display name, if set
+}
+export interface WaSessionsResponse {
+  sessions: WaBridgeSession[];
+}
 export interface DmTelemetryPlatform {
   platform: string;
   probe: DmTelemetryBucket;

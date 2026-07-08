@@ -31,6 +31,7 @@ import type {
   TtDmThread,
   TtDmMessage,
   DmTelemetry,
+  WaSessionsResponse,
 } from "./types";
 
 function getToken(): string | null {
@@ -195,6 +196,11 @@ export const api = {
     ),
   waDisconnect: (bridge: 1 | 2) => post<{ bridge: string; ok: boolean; status?: string; error?: string }>(`/whatsapp/${bridge}/disconnect`, {}),
   waReconnect: (bridge: 1 | 2) => post<{ bridge: string; ok: boolean; status?: string; error?: string }>(`/whatsapp/${bridge}/reconnect`, {}),
+
+  // Per-bridge session identity (phone number, push name, connected state).
+  // Populated after a QR scan so the Link page can show WHICH account is on
+  // WHICH bridge slot. Sourced from the bridge's /session endpoint.
+  waSessions: () => get<WaSessionsResponse>("/whatsapp/sessions"),
 
   // Telegram collection stats
   telegramStats: () =>

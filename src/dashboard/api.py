@@ -2178,6 +2178,43 @@ async def _wa_bridge_post(bridge: str, path: str) -> dict:
         return {"bridge": bridge, "ok": False, "error": str(exc)}
 
 
+async def _wa_bridge_get(bridge: str, path: str, timeout: int = 5) -> dict:
+    """GET a wa-bridge read-only route (session/qr), off the event loop.
+
+    Returns {ok: True, ...body} on 2xx; {ok: False, error: <str>} on transport
+    or non-2xx. Never raises — the dashboard renders 'unreachable' cleanly."""
+    import urllib.request
+    base = _wa_bridge_base(bridge)
+
+    def _do():
+        with urllib.request.urlopen(f"{base}/{path}", timeout=timeout) as r:
+            return __import__("json").loads(r.read().decode())
+
+    try:
+        body = await asyncio.to_thread(_do)
+        return {"bridge": bridge, "ok": True, **body}
+    except Exception as exc:  # noqa: BLE001
+        return {"bridge": bridge, "ok": False, "error": str(exc)}
+
+
+@app.get("/whatsapp/sessions")
+async def whatsapp_sessions(_user: dict = Depends(require_role("viewer"))):
+    """Identity of each linked WhatsApp session (phone number, push name,
+    connection state) for both bridges. Bryan uses this after a QR scan to
+    verify WHICH account got linked to WHICH bridge slot — the dashboard
+    previously only exposed 'bridge 1' vs 'bridge 2' labels with no way to
+    tell them apart.
+
+    Sourced from each bridge's GET /session (added in src/bridges/whatsapp/
+    src/index.ts). Called in parallel; unreachable bridges return
+    ``ok: false`` with an error string rather than 500ing the endpoint."""
+    results = await asyncio.gather(
+        _wa_bridge_get("1", "session"),
+        _wa_bridge_get("2", "session"),
+    )
+    return {"sessions": list(results)}
+
+
 @app.post("/whatsapp/{bridge}/disconnect")
 async def whatsapp_disconnect(bridge: str, _user: dict = Depends(require_role("viewer"))):
     """Unpair a wa-bridge device (logout) so it can be re-scanned as a new device."""
@@ -2214,6 +2251,9 @@ async def whatsapp_link_page():
  .qrbox{width:280px;height:280px;display:flex;align-items:center;justify-content:center;background:#fff;border-radius:8px;margin:0 auto}
  .qrbox img{width:264px;height:264px;image-rendering:pixelated}
  .status{margin-top:14px;font-size:13px;text-align:center;color:#8696a0}
+ .identity{margin-top:10px;text-align:center}
+ .identity .phone{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:15px;color:#e9edef;font-weight:600}
+ .identity .name{font-size:13px;color:#8696a0;margin-top:2px}
  .dot{width:9px;height:9px;border-radius:50%;display:inline-block}
  .dot.wait{background:#f0b232}.dot.ok{background:#22c55e}.dot.err{background:#ef4444}
  .connected{color:#22c55e;font-weight:600}
@@ -2226,14 +2266,38 @@ async def whatsapp_link_page():
  <h1>Link WhatsApp accounts</h1>
  <p class="sub">Two independent account slots. Link either one in any order. QR refreshes automatically &mdash; just leave this open.</p>
  <div class="grid">
-  <div class="card"><h2>Bridge 1 <span id="t1"></span></h2><div class="qrbox" id="q1"><span class="spinner"></span></div><div class="status" id="s1">Loading&hellip;</div></div>
-  <div class="card"><h2>Bridge 2 <span id="t2"></span></h2><div class="qrbox" id="q2"><span class="spinner"></span></div><div class="status" id="s2">Loading&hellip;</div></div>
+  <div class="card"><h2>Bridge 1 <span id="t1"></span></h2><div class="qrbox" id="q1"><span class="spinner"></span></div><div class="status" id="s1">Loading&hellip;</div><div class="identity" id="i1"></div></div>
+  <div class="card"><h2>Bridge 2 <span id="t2"></span></h2><div class="qrbox" id="q2"><span class="spinner"></span></div><div class="status" id="s2">Loading&hellip;</div><div class="identity" id="i2"></div></div>
  </div>
  <div class="steps">
   <b>On your phone:</b> WhatsApp &rarr; Settings &rarr; <b>Linked Devices</b> &rarr; <b>Link a Device</b> &rarr; point the camera at a QR above.<br>
   The panel turns <span class="connected">green</span> automatically once linked. No need to refresh the page.
  </div>
 <script>
+async function pollSession(b){
+  // Fetch the paired-account identity (phone, push name) for this bridge and
+  // paint it under the QR box. Called on each poll tick so a new pairing
+  // shows up within one poll cycle. Uses /whatsapp/sessions which fans out
+  // to both bridges — cheap, and matches what the bridge itself reports.
+  try{
+    const r=await fetch('/whatsapp/sessions',{cache:'no-store'});
+    if(!r.ok) return;
+    const d=await r.json();
+    const iEl=document.getElementById('i'+b);
+    if(!iEl) return;
+    const idx = b === '1' ? 0 : 1;
+    const s = (d.sessions||[])[idx];
+    if(!s || !s.ok){ iEl.innerHTML=''; return; }
+    if(s.connected && s.phone_number){
+      const parts = [];
+      parts.push('<div class="phone">+' + s.phone_number + '</div>');
+      if(s.push_name) parts.push('<div class="name">' + s.push_name + '</div>');
+      iEl.innerHTML = parts.join('');
+    } else if(!s.connected){
+      iEl.innerHTML='';
+    }
+  }catch(e){/* ignore */}
+}
 async function poll(b){
   const sEl=document.getElementById('s'+b), qEl=document.getElementById('q'+b), tEl=document.getElementById('t'+b);
   try{
@@ -2242,6 +2306,8 @@ async function poll(b){
       qEl.innerHTML='&#10003;'; qEl.style.background='#0b3d24'; qEl.style.color='#22c55e'; qEl.style.fontSize='90px';
       sEl.innerHTML='<span class="dot ok"></span> <span class="connected">Connected</span>';
       tEl.innerHTML='<span class="dot ok"></span>';
+      pollSession(b);          // populate phone + push_name
+      setTimeout(()=>poll(b),15000);   // slow poll once connected
       return;
     }
     if(d.qr){
