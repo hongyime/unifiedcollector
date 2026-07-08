@@ -43,6 +43,14 @@ pyjwt>=2.8.0
 bcrypt>=4.1.0
 PyJWT>=2.8.0
 
+# WhatsApp QR code rendering in /whatsapp/qr/{bridge}. Bridge returns the
+# raw wa.me QR payload; dashboard converts to a PNG data URI so the
+# frontend can drop it into <img src>. Pillow (already required above for
+# EXIF GPS) provides the PNG writer; qrcode[pil] pulls it in explicitly
+# so a stripped-down container image can't drop the QR-encoding path
+# silently.
+qrcode[pil]>=7.4.2
+
 # YouTube OAuth token refresh
 google-auth>=2.29.0
 google-auth-oauthlib>=1.2.0

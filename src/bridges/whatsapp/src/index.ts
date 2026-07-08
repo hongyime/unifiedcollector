@@ -57,6 +57,11 @@ app.get('/qr', (_req, res) => {
     if (serviceHealthy) {
         res.status(200).json({ status: 'already_paired', qr: null, ready: true });
     } else if (latestQr) {
+        // Return the raw wa.me QR payload. The dashboard's
+        // /whatsapp/qr/{bridge} handler encodes it to a PNG data URI (via
+        // Python's `qrcode` library) — keeping image encoding on the
+        // dashboard side means the bridge stays a small event forwarder
+        // with no extra npm deps.
         res.status(200).json({ status: 'awaiting_scan', qr: latestQr, ready: false });
     } else {
         res.status(202).json({ status: 'connecting', qr: null, ready: false });
@@ -327,6 +332,9 @@ async function connectToWhatsApp(): Promise<void> {
         } else if (connection === 'close') {
             if (heartbeat) clearInterval(heartbeat);
             serviceHealthy = false;
+            // Clear the stale QR — a new one will be emitted by the next
+            // connection.update tick if reauth is needed.
+            latestQr = null;
 
             const error = lastDisconnect?.error as Boom;
             const statusCode = error?.output?.statusCode;
