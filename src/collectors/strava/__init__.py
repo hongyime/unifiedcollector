@@ -108,11 +108,12 @@ class StravaCollector(BaseCollector):
         self._client_secret = os.getenv("STRAVA_CLIENT_SECRET", "")
         self._refresh_token = os.getenv("STRAVA_REFRESH_TOKEN", "")
         self._session_cookie = os.getenv("STRAVA_SESSION_COOKIE", "")
-        self._cookies_file = os.getenv("STRAVA_COOKIES_FILE", "credentials/strava/strava_cookies.txt")
+        self._cookies_file = os.getenv("STRAVA_COOKIES_FILE", "").strip()
         # Fallback: read session cookie from a Netscape cookie jar.
-        # User can drop credentials/strava/strava_cookies.txt and we'll extract
-        # the `_strava4_session` cookie automatically.
-        if not self._session_cookie:
+        # User can drop credentials/strava/strava_<username>.txt files (or
+        # the legacy credentials/strava/strava_cookies.txt) and we auto-
+        # discover them via _load_all_cookie_accounts below.
+        if not self._session_cookie and self._cookies_file:
             self._session_cookie = self._load_session_cookie_from_file(self._cookies_file)
         # Multi-account: discover every credentials/strava/strava_*.txt (named by
         # username) so we can rotate across accounts for more quota AND broader

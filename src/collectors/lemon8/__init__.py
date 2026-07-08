@@ -190,9 +190,57 @@ class Lemon8Collector(BaseCollector):
     # the empirically-safe ceiling per the toolkit's account_manager.
     DEFAULT_DAILY_QUOTA = int(os.getenv("LEMON8_DAILY_QUOTA", "500"))
 
+    @staticmethod
+    def _discover_cookie_file() -> str:
+        """Return the best per-username cookie file under credentials/lemon8/.
+
+        Mirrors the tiktok discovery pattern: prefer named lemon8_<username>.txt
+        files, skip empty/placeholder stubs (< 1 KB, or the exact legacy names
+        ``cookies.txt`` / ``lemon8_cookies.txt`` when a named sibling exists).
+        Returns the largest non-empty candidate (a real Netscape jar is
+        typically 2-15 KB; an empty stub is 0 B). Never raises."""
+        import glob
+        try:
+            candidates = list(glob.glob("credentials/lemon8/lemon8_*.txt"))
+            candidates.extend(glob.glob("credentials/lemon8/cookies.txt"))
+            if not candidates:
+                return ""
+            has_named = any(
+                os.path.basename(p) not in ("lemon8_cookies.txt", "cookies.txt")
+                for p in candidates
+            )
+            scored: list[tuple[int, str]] = []
+            for p in candidates:
+                try:
+                    size = os.path.getsize(p)
+                except OSError:
+                    continue
+                if size < 1024:
+                    continue
+                if has_named and os.path.basename(p) in (
+                    "lemon8_cookies.txt", "cookies.txt",
+                ):
+                    continue
+                scored.append((size, p))
+            if not scored:
+                return ""
+            scored.sort(key=lambda t: (-t[0], t[1]))
+            chosen = scored[0][1]
+            logger.info(
+                "lemon8: auto-discovered cookie file %s (%d bytes, %d candidates)",
+                chosen, scored[0][0], len(candidates),
+            )
+            return chosen
+        except Exception:
+            return ""
+
     def __init__(self):
         super().__init__()
         self._cookies_file = os.getenv("LEMON8_COOKIES_FILE", "")
+        # Auto-discover per-username cookie file when the env var is unset,
+        # so dropped-in credentials/lemon8/lemon8_<username>.txt works.
+        if not self._cookies_file:
+            self._cookies_file = self._discover_cookie_file()
         self._cookies: dict[str, str] = {}
         if self._cookies_file and os.path.isfile(self._cookies_file):
             self._cookies = self._parse_cookies(self._cookies_file)

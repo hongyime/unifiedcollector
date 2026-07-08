@@ -194,11 +194,53 @@ async def insert_targets(users: Iterable[dict]):
     return inserted, skipped
 
 
+def _discover_tiktok_cookies() -> str:
+    """Find the best per-username cookie file — mirrors
+    src/collectors/tiktok/__init__.py::TiktokCollector._discover_cookie_file:
+    skip empty/legacy stubs (< 1 KB or the literal tiktok_cookies.txt when
+    named siblings exist), pick the largest remaining candidate. Empty
+    string if nothing qualifies. Kept as a helper so this script mirrors
+    the collector's decision — otherwise the seed script and the collector
+    could disagree on which cookie file to use."""
+    import glob
+    candidates: list[str] = []
+    for d in ("/app/credentials/tiktok", "credentials/tiktok"):
+        candidates.extend(glob.glob(os.path.join(d, "tiktok_*.txt")))
+    if not candidates:
+        return ""
+    has_named = any(
+        os.path.basename(p) != "tiktok_cookies.txt" for p in candidates
+    )
+    scored: list[tuple[int, str]] = []
+    for p in candidates:
+        try:
+            size = os.path.getsize(p)
+        except OSError:
+            continue
+        if size < 1024:
+            continue
+        if has_named and os.path.basename(p) == "tiktok_cookies.txt":
+            continue
+        scored.append((size, p))
+    if not scored:
+        return ""
+    scored.sort(key=lambda t: (-t[0], t[1]))
+    return scored[0][1]
+
+
 def main():
-    cookies_file = os.getenv("TIKTOK_COOKIES_FILE", "/app/credentials/tiktok/tiktok_cookies.txt")
-    if not os.path.isfile(cookies_file):
-        log.error("Cookies file not found: %s", cookies_file)
+    # Prefer the explicit env var; fall back to auto-discovery so the
+    # script works after Bryan renames cookies from tiktok_cookies.txt to
+    # per-username tiktok_<user>.txt (matches the collector behavior).
+    cookies_file = os.getenv("TIKTOK_COOKIES_FILE", "").strip() \
+        or _discover_tiktok_cookies()
+    if not cookies_file or not os.path.isfile(cookies_file):
+        log.error(
+            "Cookies file not found. Set TIKTOK_COOKIES_FILE or drop a "
+            "credentials/tiktok/tiktok_<username>.txt file (>= 1 KB)."
+        )
         sys.exit(2)
+    log.info("using cookies from %s", cookies_file)
     cookies = load_cookies(cookies_file)
     if not cookies.get("sessionid"):
         log.error("sessionid not found in cookies file")

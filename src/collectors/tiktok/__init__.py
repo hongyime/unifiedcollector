@@ -298,19 +298,62 @@ class TiktokCollector(BaseCollector):
 
     @staticmethod
     def _discover_cookie_file() -> str:
-        """Return the first credentials/tiktok/tiktok_*.txt cookie file (named by
-        username) when TIKTOK_COOKIES_FILE isn't set, else ''. Never raises."""
+        """Return the best per-username cookie file under credentials/tiktok/.
+
+        Bryan's convention: cookies are exported per-account as
+        ``tiktok_<username>.txt`` (e.g. ``tiktok_bryanseah234.txt``). The old
+        default was a single ``tiktok_cookies.txt`` stub which is sometimes
+        left behind as an empty placeholder — the collector must skip it in
+        favor of any real named file.
+
+        Selection strategy:
+          1. Enumerate credentials/tiktok/tiktok_*.txt (plus credentials/
+             fallback for older layouts).
+          2. Reject anything with fewer than 1 KB of content — those are
+             empty placeholders or a single-header stub.
+          3. Reject the exact name ``tiktok_cookies.txt`` if any named
+             siblings exist (Bryan's migration path leaves this stub around).
+          4. Return the LARGEST non-rejected file (a full cookie jar with
+             session tokens weighs 60–80 KB; a stub with just tracking
+             cookies weighs <1 KB). Ties broken alphabetically.
+
+        Never raises — returns '' if nothing qualifies (which triggers the
+        collector's "no cookies configured" fallback path).
+        """
         import glob
         try:
+            candidates = []
             for d in ("credentials/tiktok", "credentials"):
-                hits = sorted(glob.glob(os.path.join(d, "tiktok_*.txt")))
-                if hits:
-                    logger.info("tiktok: auto-discovered cookie file %s "
-                                "(%d available)", hits[0], len(hits))
-                    return hits[0]
+                candidates.extend(glob.glob(os.path.join(d, "tiktok_*.txt")))
+            if not candidates:
+                return ""
+            has_named = any(
+                os.path.basename(p) != "tiktok_cookies.txt" for p in candidates
+            )
+            scored = []
+            for p in candidates:
+                try:
+                    size = os.path.getsize(p)
+                except OSError:
+                    continue
+                if size < 1024:
+                    continue  # empty / placeholder / single-header stub
+                if has_named and os.path.basename(p) == "tiktok_cookies.txt":
+                    continue  # skip the legacy stub when named files exist
+                scored.append((size, p))
+            if not scored:
+                return ""
+            # Largest first (most cookies = most complete session), tie-break
+            # by path so runs are deterministic.
+            scored.sort(key=lambda t: (-t[0], t[1]))
+            chosen = scored[0][1]
+            logger.info(
+                "tiktok: auto-discovered cookie file %s (%d bytes, %d candidates)",
+                chosen, scored[0][0], len(candidates),
+            )
+            return chosen
         except Exception:
-            pass
-        return ""
+            return ""
 
     def __init__(self):
         super().__init__()

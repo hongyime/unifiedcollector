@@ -1,6 +1,38 @@
-import httpx, urllib.parse
+import httpx, urllib.parse, glob, os, sys
+
+
+def _discover_cookies_path() -> str:
+    """Match src/collectors/tiktok/__init__.py::_discover_cookie_file semantics
+    so this probe uses the same cookie file the live collector picks."""
+    candidates: list[str] = []
+    for d in ("/app/credentials/tiktok", "credentials/tiktok"):
+        candidates.extend(glob.glob(os.path.join(d, "tiktok_*.txt")))
+    has_named = any(os.path.basename(p) != "tiktok_cookies.txt" for p in candidates)
+    scored: list[tuple[int, str]] = []
+    for p in candidates:
+        try:
+            size = os.path.getsize(p)
+        except OSError:
+            continue
+        if size < 1024:
+            continue
+        if has_named and os.path.basename(p) == "tiktok_cookies.txt":
+            continue
+        scored.append((size, p))
+    if not scored:
+        return ""
+    scored.sort(key=lambda t: (-t[0], t[1]))
+    return scored[0][1]
+
+
+cookies_path = os.getenv("TIKTOK_COOKIES_FILE", "").strip() or _discover_cookies_path()
+if not cookies_path or not os.path.isfile(cookies_path):
+    print("no cookie file found — drop credentials/tiktok/tiktok_<username>.txt (>= 1 KB)", file=sys.stderr)
+    sys.exit(2)
+print(f"using cookies from {cookies_path}")
+
 cookies={}
-with open('/app/credentials/tiktok/tiktok_cookies.txt') as f:
+with open(cookies_path) as f:
     for line in f:
         line=line.strip()
         if line.startswith('#') or not line: continue
