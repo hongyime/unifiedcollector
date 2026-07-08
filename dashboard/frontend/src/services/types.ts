@@ -234,6 +234,7 @@ export interface AuthResponse {
 
 export interface MediaBrowseResult {
   total: number;
+  total_estimated?: boolean;
   page: number;
   page_size: number;
   items: MediaItem[];
@@ -259,10 +260,15 @@ export interface StravaFeedActivity {
   type: string | null;
   sport_type: string | null;
   distance: number | null;
+  distance_unit: string | null;
   moving_time: number | null;
   elapsed_time: number | null;
   total_elevation_gain: number | null;
+  average_speed: number | null;
   start_date: string | null;
+  summary_polyline: string | null;
+  start_latlng: string | null;
+  stream_status: string | null;
   platform_athlete_id: number | null;
   username: string | null;
   firstname: string | null;

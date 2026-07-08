@@ -106,8 +106,8 @@ export const api = {
     params.set("page_size", String(opts.pageSize ?? 24));
     return get<MediaBrowseResult>(`/media/browse?${params}`);
   },
-  thumbnailUrl: (id: number) => `${API_BASE}/media/${id}/thumbnail`,
-  fileUrl: (id: number) => `${API_BASE}/media/${id}/file`,
+  thumbnailUrl: (id: string) => `${API_BASE}/media/${id}/thumbnail`,
+  fileUrl: (id: string) => `${API_BASE}/media/${id}/file`,
 
   dlq: (source?: string, limit = 50) => {
     const params = new URLSearchParams({ limit: String(limit) });

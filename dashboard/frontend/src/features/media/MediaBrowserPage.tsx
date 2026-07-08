@@ -44,7 +44,7 @@ function Tile({ item, onClick }: { item: MediaItem; onClick: () => void }) {
       <div className="aspect-square bg-background flex items-center justify-center relative">
         {cat === "image" ? (
           <img
-            src={api.thumbnailUrl(Number(item.id))}
+            src={api.thumbnailUrl(item.id)}
             alt={item.filename}
             className="w-full h-full object-cover"
             loading="lazy"
@@ -74,12 +74,12 @@ function Tile({ item, onClick }: { item: MediaItem; onClick: () => void }) {
 
 function PreviewModal({ item, onClose }: { item: MediaItem; onClose: () => void }) {
   const cat = categoryOf(item.content_type);
-  const fileUrl = api.fileUrl(Number(item.id));
+  const fileUrl = api.fileUrl(item.id);
   return (
     <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50" onClick={onClose}>
       <div className="max-w-3xl max-h-[80vh] flex flex-col items-center" onClick={(e) => e.stopPropagation()}>
         {cat === "image" && (
-          <img src={api.thumbnailUrl(Number(item.id))} alt={item.filename} className="max-w-full max-h-[70vh] object-contain rounded-lg" />
+          <img src={api.thumbnailUrl(item.id)} alt={item.filename} className="max-w-full max-h-[70vh] object-contain rounded-lg" />
         )}
         {cat === "video" && (
           <video src={fileUrl} controls autoPlay className="max-w-full max-h-[70vh] rounded-lg bg-black" />

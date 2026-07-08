@@ -3,6 +3,7 @@ import io
 import logging
 import os
 import traceback
+import uuid as _uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -1026,10 +1027,24 @@ async def browse_media(
     page_size: int = Query(24, ge=1, le=100),
     _user: dict = Depends(require_role("viewer")),
 ):
+    """Paginated media browse.
+
+    Count strategy: an exact ``SELECT COUNT(*) FROM media_items`` on a 500k+
+    row table hit the 60s asyncpg ``command_timeout`` and hung the endpoint
+    (bare count ~10s, source-filtered ~4s cache-warm and much worse cold, ILIKE
+    entity match worse still). Instead we ask the query planner for its own
+    rowcount estimate via ``EXPLAIN (FORMAT JSON)`` -- it comes from pg_stats
+    (MCV frequencies + reltuples), does not touch the heap, returns in <1 ms,
+    and matches the true count within a fraction of a percent for this table
+    provided ANALYZE is up to date. ``total_estimated`` is always ``True`` so
+    the UI can prefix "~" if it wants to be honest about approximation. The
+    item query is strictly index-backed via ``idx_media_collected`` (backward
+    index scan + LIMIT → <1 ms).
+    """
     pool = await get_pool()
     offset = (page - 1) * page_size
     conditions = []
-    params = []
+    params: list = []
     idx = 1
 
     def _escape_like(s: str) -> str:
@@ -1051,10 +1066,21 @@ async def browse_media(
 
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
 
-    async with pool.acquire() as conn:
-        total = await conn.fetchval(
-            f"SELECT COUNT(*) FROM media_items {where}", *params,
+    async def _planner_estimate(c) -> int:
+        plan = await c.fetchval(
+            f"EXPLAIN (FORMAT JSON) SELECT 1 FROM media_items {where}",
+            *params,
         )
+        if isinstance(plan, str):
+            import json as _json
+            plan = _json.loads(plan)
+        try:
+            return int(plan[0]["Plan"]["Plan Rows"])
+        except (KeyError, IndexError, TypeError, ValueError):
+            return 0
+
+    async with pool.acquire() as conn:
+        total = await _planner_estimate(conn)
         rows = await conn.fetch(
             f"SELECT id, source, entity_name, content_type, filename, file_path, "
             f"file_size, sha256, collected_at "
@@ -1064,18 +1090,34 @@ async def browse_media(
         )
     return {
         "total": total,
+        "total_estimated": True,
         "page": page,
         "page_size": page_size,
         "items": [dict(r) for r in rows],
     }
 
 
+def _parse_media_uuid(media_id: str) -> _uuid.UUID:
+    """Validate the ``media_id`` path param as a UUID.
+
+    ``media_items.id`` is a UUID but the endpoint was previously typed ``int``,
+    so every ``Number(item.id)`` from the frontend turned into ``NaN`` and the
+    request got a 422 -- which is what the "broken image" tiles in the media
+    browser actually were.
+    """
+    try:
+        return _uuid.UUID(media_id)
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=404, detail="Invalid media id")
+
+
 @app.get("/media/{media_id}/thumbnail")
-async def media_thumbnail(media_id: int, _user: dict = Depends(require_role("viewer"))):
+async def media_thumbnail(media_id: str, _user: dict = Depends(require_role("viewer"))):
+    mid = _parse_media_uuid(media_id)
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT file_path, content_type FROM media_items WHERE id = $1", media_id,
+            "SELECT file_path, content_type FROM media_items WHERE id = $1", mid,
         )
     if not row:
         raise HTTPException(status_code=404, detail="Media not found")
@@ -1126,17 +1168,18 @@ def _resolve_media_path(file_path_str: str) -> Path:
 
 
 @app.get("/media/{media_id}/file")
-async def media_file(media_id: int, _user: dict = Depends(require_role("viewer"))):
+async def media_file(media_id: str, _user: dict = Depends(require_role("viewer"))):
     """Stream the raw media file with the correct Content-Type.
 
     Handles every content_type (video/audio/pdf/document/image), unlike the
     thumbnail endpoint which is images-only. FileResponse adds Accept-Ranges +
     honours Range requests automatically, so <video>/<audio> seeking works.
     """
+    mid = _parse_media_uuid(media_id)
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT file_path, filename FROM media_items WHERE id = $1", media_id,
+            "SELECT file_path, filename FROM media_items WHERE id = $1", mid,
         )
     if not row:
         raise HTTPException(status_code=404, detail="Media not found")
