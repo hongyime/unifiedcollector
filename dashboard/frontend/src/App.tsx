@@ -25,6 +25,7 @@ import { WhatsAppChatsPage } from "./features/whatsapp/WhatsAppChatsPage";
 import { StravaFeedPage } from "./features/strava/StravaFeedPage";
 import { InstagramDmPage } from "./features/instagram/InstagramDmPage";
 import { TiktokDmPage } from "./features/tiktok/TiktokDmPage";
+import { TiktokFeedPage } from "./features/tiktok/TiktokFeedPage";
 import { LoginPage } from "./features/auth/LoginPage";
 import { TelegramAccountsPage } from "./features/telegram/TelegramAccountsPage";
 import { TelegramStatsPage } from "./features/telegram/TelegramStatsPage";
@@ -64,6 +65,7 @@ const router = createBrowserRouter([
       { path: "strava/feed", element: <StravaFeedPage /> },
       { path: "instagram/dms", element: <InstagramDmPage /> },
       { path: "tiktok/dms", element: <TiktokDmPage /> },
+      { path: "tiktok/feed", element: <TiktokFeedPage /> },
       { path: "telegram/accounts", element: <TelegramAccountsPage /> },
       { path: "telegram/stats", element: <TelegramStatsPage /> },
       { path: "telegram/chats", element: <TelegramChatsPage /> },

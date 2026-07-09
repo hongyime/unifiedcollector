@@ -155,6 +155,61 @@ export interface TtDmMessage {
   media_url: string | null;
 }
 
+// TikTok public feed — /tiktok/profiles + /tiktok/profile/{username}. Backs
+// the rich feed page (left pane = profile picker sorted by follower count,
+// right pane = post grid with thumbnails joined from media_items).
+export interface TtProfile {
+  platform_user_id: string;
+  username: string | null;
+  nickname: string | null;
+  avatar_url: string | null;
+  bio: string | null;
+  followers_count: number | null;
+  following_count: number | null;
+  heart_count: number | null;
+  video_count: number | null;
+  digg_count?: number | null;
+  is_verified: boolean;
+  is_private?: boolean;
+  updated_at: string | null;
+  collected_at: string | null;
+  // list-view extras (list endpoint only)
+  last_post_at?: string | null;
+  posts_collected?: number;
+}
+
+export interface TtPost {
+  platform_post_id: string;
+  title: string | null;
+  description: string | null;
+  video_url: string | null;
+  cover_image_url: string | null;
+  hashtags: string[] | null;
+  view_count: number | null;
+  like_count: number | null;
+  comment_count: number | null;
+  share_count: number | null;
+  duration: number | null;
+  music_title: string | null;
+  music_author: string | null;
+  create_time: string | null;
+  collected_at: string | null;
+  // media_items UUID (null when the video/photo file was never downloaded
+  // — e.g. metadata-only backfill). Content_type disambiguates video vs.
+  // photo carousel for the card layout.
+  media_item_id: string | null;
+  media_content_type: string | null;
+  // Server-built canonical URL — prefers media_items.source_url (the
+  // collector's authoritative build) and falls back to the standard
+  // https://www.tiktok.com/@user/video/{id} pattern.
+  post_url: string;
+}
+
+export interface TtProfileDetail {
+  profile: TtProfile | null;
+  posts: TtPost[];
+}
+
 // Passive DM WS-hook telemetry (P1.2). One entry per platform the extension's
 // observe-only WS wrapper has ever seen; `probe`/`sample` mirror event_type
 // in dm_probe_log. Null last_seen means "never" — most useful signal for

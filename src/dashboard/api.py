@@ -2690,6 +2690,150 @@ async def telegram_chat_detail(chat_id: str, limit: int = 200,
     }
 
 
+# ---------------------------------------------------------------------------
+# TikTok feed (profiles + posts)
+# ---------------------------------------------------------------------------
+# Two-endpoint pair mirroring /telegram/chats + /telegram/chat/{id}. The left
+# pane picks a tiktok_profiles row; the right pane pulls that profile's newest
+# ~200 posts with the media_items UUID joined in so the existing
+# /media/<uuid>/thumbnail + /media/<uuid>/file endpoints render the video
+# thumbnail without a new proxy. Sort keys stay on indexed columns
+# (idx_tt_posts_profile, tiktok_profiles.pkey) so both queries hold sub-100ms
+# on the current 186-profile / 10.8k-post dataset.
+
+@app.get("/tiktok/profiles")
+async def list_tiktok_profiles(limit: int = 100,
+                               _user: dict = Depends(require_role("viewer"))):
+    """TikTok profiles, biggest audience first.
+
+    Sort key is followers_count DESC with an updated_at tie-break so
+    freshly-scraped accounts float ahead of stale duplicates at the same
+    follower tier. No index on followers_count, but the profile table is
+    small (186 rows today, headroom to ~10k) and the sort is trivial.
+
+    Also folds a last_post_at + posts_collected pair into the row — cheap
+    thanks to idx_tt_posts_profile — so the picker can show "N posts,
+    last N days ago" without a second round trip per profile.
+    """
+    limit = max(1, min(limit, 500))
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if await conn.fetchval("SELECT to_regclass('tiktok_profiles')") is None:
+            return []
+        rows = await conn.fetch(
+            """
+            SELECT p.platform_user_id,
+                   p.username,
+                   p.nickname,
+                   p.avatar_url,
+                   p.bio,
+                   p.followers_count,
+                   p.following_count,
+                   p.heart_count,
+                   p.video_count,
+                   p.is_verified,
+                   p.updated_at,
+                   p.collected_at,
+                   (SELECT MAX(create_time) FROM tiktok_posts WHERE profile_id = p.id) AS last_post_at,
+                   (SELECT COUNT(*)         FROM tiktok_posts WHERE profile_id = p.id) AS posts_collected
+            FROM tiktok_profiles p
+            ORDER BY p.followers_count DESC NULLS LAST,
+                     p.updated_at      DESC NULLS LAST
+            LIMIT $1
+            """,
+            limit,
+        )
+    return [dict(r) for r in rows]
+
+
+@app.get("/tiktok/profile/{username}")
+async def tiktok_profile_detail(username: str, limit: int = 200,
+                                _user: dict = Depends(require_role("viewer"))):
+    """Profile metadata + newest N posts for one TikTok account.
+
+    Posts filter by profile_id (idx_tt_posts_profile) then sort by
+    create_time DESC with a collected_at tie-break for the pre-2019 posts
+    whose exact upload timestamp is fuzzy. media_items joined in on
+    (source='tiktok', content_id=platform_post_id) — the source unique
+    index makes the join O(N posts). Only the media UUID + content_type
+    come back; the frontend already knows how to hit
+    /media/<uuid>/thumbnail and /media/<uuid>/file.
+
+    post_url prefers media_items.source_url (the collector's authoritative
+    build) and falls back to the standard TikTok share pattern for posts
+    scraped before the source_url contract landed.
+    """
+    limit = max(1, min(limit, 500))
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if await conn.fetchval("SELECT to_regclass('tiktok_profiles')") is None:
+            return {"profile": None, "posts": []}
+        profile_row = await conn.fetchrow(
+            """
+            SELECT id,
+                   platform_user_id,
+                   username,
+                   nickname,
+                   avatar_url,
+                   bio,
+                   followers_count,
+                   following_count,
+                   heart_count,
+                   video_count,
+                   digg_count,
+                   is_verified,
+                   is_private,
+                   updated_at,
+                   collected_at
+            FROM tiktok_profiles
+            WHERE username = $1
+            """,
+            username,
+        )
+        if not profile_row:
+            return {"profile": None, "posts": []}
+        profile = dict(profile_row)
+        profile_uuid = profile.pop("id")
+        rows = await conn.fetch(
+            """
+            SELECT p.platform_post_id,
+                   p.title,
+                   p.description,
+                   p.video_url,
+                   p.cover_image_url,
+                   p.hashtags,
+                   p.view_count,
+                   p.like_count,
+                   p.comment_count,
+                   p.share_count,
+                   p.duration,
+                   p.music_title,
+                   p.music_author,
+                   p.create_time,
+                   p.collected_at,
+                   mi.id                     AS media_item_id,
+                   mi.content_type           AS media_content_type,
+                   mi.source_url             AS media_source_url
+            FROM tiktok_posts p
+            LEFT JOIN media_items mi
+                   ON mi.source = 'tiktok'
+                  AND mi.content_id = p.platform_post_id
+            WHERE p.profile_id = $1
+            ORDER BY p.create_time DESC NULLS LAST, p.collected_at DESC
+            LIMIT $2
+            """,
+            profile_uuid, limit,
+        )
+        posts = []
+        for r in rows:
+            d = dict(r)
+            d["post_url"] = d.pop("media_source_url") or (
+                f"https://www.tiktok.com/@{username}/video/{d['platform_post_id']}"
+            )
+            posts.append(d)
+    return {"profile": profile, "posts": posts}
+
+
 if DIST_DIR.is_dir():
     app.mount("/assets", StaticFiles(directory=str(DIST_DIR / "assets")), name="assets")
 

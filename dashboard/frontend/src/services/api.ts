@@ -30,6 +30,8 @@ import type {
   IgDmMessage,
   TtDmThread,
   TtDmMessage,
+  TtProfile,
+  TtProfileDetail,
   DmTelemetry,
   WaSessionsResponse,
   WaChat,
@@ -186,6 +188,16 @@ export const api = {
   ttDmThread: (threadId: string) =>
     get<{ thread: TtDmThread | null; messages: TtDmMessage[] }>(
       `/tiktok/dms/thread/${encodeURIComponent(threadId)}`,
+    ),
+
+  // TikTok public feed (profiles + posts). List sorts by follower count DESC;
+  // detail returns the profile row + newest ~200 posts with media UUIDs
+  // pre-joined for /media/<uuid>/thumbnail rendering.
+  tiktokProfiles: (limit = 100) =>
+    get<TtProfile[]>(`/tiktok/profiles?limit=${limit}`),
+  tiktokProfile: (username: string, limit = 200) =>
+    get<TtProfileDetail>(
+      `/tiktok/profile/${encodeURIComponent(username)}?limit=${limit}`,
     ),
 
   // P1.2: passive telemetry surface. Populated by dm_probe_handler +

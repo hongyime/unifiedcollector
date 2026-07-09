@@ -37,7 +37,7 @@ const groups = [
     label: "Social",
     items: [
       { to: "/platform/instagram", label: "Instagram", icon: ImageIcon },
-      { to: "/platform/tiktok", label: "TikTok", icon: ImageIcon },
+      { to: "/tiktok/feed", label: "TikTok", icon: ImageIcon },
       { to: "/platform/lemon8", label: "Lemon8", icon: ImageIcon },
       { to: "/platform/threads", label: "Threads", icon: ImageIcon },
       { to: "/platform/x", label: "X", icon: ImageIcon },
