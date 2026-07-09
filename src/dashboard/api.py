@@ -997,12 +997,16 @@ async def collector_detail(source: str, _user: dict = Depends(require_role("view
 # ── Social Graph ──
 
 @app.get("/graph")
-async def social_graph(source: str = "github", depth: int = 2,
-                       _user: dict = Depends(require_role("viewer"))):
+async def social_graph(
+    source: str = Query("instagram", description="Platform source"),
+    limit: int = Query(5000, description="Max edges to return", ge=1, le=50000),
+    _user: dict = Depends(require_role("viewer"))
+):
     pool = await get_pool()
     async with pool.acquire() as conn:
         edges = await conn.fetch(
-            "SELECT source_user, target_user, edge_type FROM graph_edges LIMIT 5000"
+            "SELECT source_user, target_user, edge_type FROM graph_edges WHERE source = $1 LIMIT $2",
+            source, limit
         )
     nodes = set()
     edge_list = []
@@ -2832,6 +2836,91 @@ async def tiktok_profile_detail(username: str, limit: int = 200,
             )
             posts.append(d)
     return {"profile": profile, "posts": posts}
+
+
+# ---------------------------------------------------------------------------
+# Threads feed (profiles + posts)
+# ---------------------------------------------------------------------------
+
+@app.get("/threads/profiles")
+async def list_threads_profiles(limit: int = 100, _user: dict = Depends(require_role("viewer"))):
+    """Threads profiles derived from collected posts."""
+    limit = max(1, min(limit, 500))
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if await conn.fetchval("SELECT to_regclass('threads_posts')") is None:
+            return []
+        rows = await conn.fetch(
+            """
+            SELECT p.author_username AS username,
+                   COUNT(p.id) AS posts_collected,
+                   MAX(p.platform_created_at) AS last_post_at,
+                   (SELECT profile_photo_url FROM social_users WHERE platform='threads' AND username=p.author_username ORDER BY times_seen DESC LIMIT 1) AS avatar_url
+            FROM threads_posts p
+            GROUP BY p.author_username
+            ORDER BY posts_collected DESC
+            LIMIT $1
+            """,
+            limit,
+        )
+    return [dict(r) for r in rows]
+
+@app.get("/threads/profile/{username}")
+async def threads_profile_detail(username: str, limit: int = 200, _user: dict = Depends(require_role("viewer"))):
+    """Posts for one Threads account."""
+    limit = max(1, min(limit, 500))
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if await conn.fetchval("SELECT to_regclass('threads_posts')") is None:
+            return {"profile": None, "posts": []}
+            
+        profile_info = await conn.fetchrow(
+            """
+            SELECT p.author_username AS username,
+                   COUNT(p.id) AS posts_collected,
+                   MAX(p.platform_created_at) AS last_post_at,
+                   (SELECT profile_photo_url FROM social_users WHERE platform='threads' AND username=p.author_username ORDER BY times_seen DESC LIMIT 1) AS avatar_url
+            FROM threads_posts p
+            WHERE p.author_username = $1
+            GROUP BY p.author_username
+            """,
+            username
+        )
+        if not profile_info:
+            return {"profile": None, "posts": []}
+            
+        posts = await conn.fetch(
+            """
+            SELECT p.platform_post_id,
+                   p.caption,
+                   p.hashtags,
+                   p.likes_count,
+                   p.comments_count,
+                   p.reposts_count,
+                   p.media_type,
+                   p.platform_created_at,
+                   p.collected_at,
+                   mi.id AS media_item_id,
+                   mi.content_type AS media_content_type
+            FROM threads_posts p
+            LEFT JOIN media_items mi
+                   ON mi.source = 'threads'
+                  AND mi.entity_id = p.author_username
+                  AND mi.content_id = p.platform_post_id
+            WHERE p.author_username = $1
+            ORDER BY p.platform_created_at DESC NULLS LAST, p.collected_at DESC
+            LIMIT $2
+            """,
+            username, limit,
+        )
+        
+    out_posts = []
+    for r in posts:
+        d = dict(r)
+        d["post_url"] = f"https://www.threads.net/@{username}/post/{d['platform_post_id']}"
+        out_posts.append(d)
+        
+    return {"profile": dict(profile_info), "posts": out_posts}
 
 
 if DIST_DIR.is_dir():

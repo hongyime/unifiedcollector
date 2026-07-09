@@ -12,10 +12,11 @@ const sourceOptions = SOURCES.map((s) => ({ value: s, label: s.charAt(0).toUpper
 
 export function GraphPage() {
   const [source, setSource] = useState("github");
+  const [limit, setLimit] = useState("5000");
 
   const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ["graph", source],
-    queryFn: () => api.graph(source),
+    queryKey: ["graph", source, limit],
+    queryFn: () => api.graph(source, parseInt(limit, 10)),
   });
 
   if (error) return <ErrorState message={String(error)} onRetry={() => refetch()} />;
@@ -25,6 +26,12 @@ export function GraphPage() {
       <Header title="Social Graph" subtitle="User relationship edges" onRefresh={() => refetch()} />
       <div className="flex items-center gap-3 mb-4">
         <FilterDropdown label="Source" value={source} onChange={setSource} options={sourceOptions} />
+        <FilterDropdown label="Edge Limit" value={limit} onChange={setLimit} options={[
+          { value: "1000", label: "1,000" },
+          { value: "5000", label: "5,000" },
+          { value: "10000", label: "10,000" },
+          { value: "50000", label: "50,000" },
+        ]} />
       </div>
       {isLoading ? <LoadingSpinner /> : data && (
         <>

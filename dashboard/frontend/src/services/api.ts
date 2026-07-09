@@ -150,7 +150,7 @@ export const api = {
   },
   runDetail: (id: number) => get<Run>(`/runs/${id}`),
 
-  graph: (source = "github") => get<GraphData>(`/graph?source=${source}`),
+  graph: (source = "github", limit = 5000) => get<GraphData>(`/graph?source=${source}&limit=${limit}`),
 
   waUsers: (search?: string, limit = 50) => {
     const params = new URLSearchParams({ limit: String(limit) });
