@@ -3022,6 +3022,100 @@ async def youtube_channel_detail(channel_id: str, limit: int = 200, _user: dict 
     return {"channel": channel, "videos": out_videos}
 
 
+# ---------------------------------------------------------------------------
+# GitHub feed (repos + commits)
+# ---------------------------------------------------------------------------
+
+@app.get("/github/repos")
+async def list_github_repos(limit: int = 100, _user: dict = Depends(require_role("viewer"))):
+    """GitHub repos and collection stats."""
+    limit = max(1, min(limit, 500))
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if await conn.fetchval("SELECT to_regclass('github_repos')") is None:
+            return []
+        rows = await conn.fetch(
+            """
+            SELECT r.id,
+                   r.platform_repo_id,
+                   r.name,
+                   r.full_name,
+                   r.description,
+                   r.language,
+                   r.stargazers_count,
+                   r.forks_count,
+                   r.open_issues_count,
+                   r.platform_updated_at,
+                   (SELECT COUNT(*) FROM github_commits WHERE repo_id = r.id) AS commits_collected,
+                   (SELECT MAX(date) FROM github_commits WHERE repo_id = r.id) AS last_commit_at
+            FROM github_repos r
+            ORDER BY r.stargazers_count DESC NULLS LAST, r.platform_updated_at DESC
+            LIMIT $1
+            """,
+            limit,
+        )
+    return [dict(r) for r in rows]
+
+@app.get("/github/repo/{full_name:path}")
+async def github_repo_detail(full_name: str, limit: int = 200, _user: dict = Depends(require_role("viewer"))):
+    """Commits for one GitHub repo."""
+    limit = max(1, min(limit, 500))
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if await conn.fetchval("SELECT to_regclass('github_repos')") is None:
+            return {"repo": None, "commits": []}
+            
+        repo_row = await conn.fetchrow(
+            """
+            SELECT r.id,
+                   r.platform_repo_id,
+                   r.name,
+                   r.full_name,
+                   r.description,
+                   r.language,
+                   r.stargazers_count,
+                   r.forks_count,
+                   r.open_issues_count,
+                   r.platform_updated_at
+            FROM github_repos r
+            WHERE r.full_name = $1
+            """,
+            full_name
+        )
+        if not repo_row:
+            return {"repo": None, "commits": []}
+            
+        repo = dict(repo_row)
+        repo_uuid = repo.pop("id")
+            
+        commits = await conn.fetch(
+            """
+            SELECT c.sha,
+                   c.author_name,
+                   c.author_login,
+                   c.message,
+                   c.date,
+                   c.files_changed,
+                   c.insertions,
+                   c.deletions,
+                   c.collected_at
+            FROM github_commits c
+            WHERE c.repo_id = $1
+            ORDER BY c.date DESC NULLS LAST, c.collected_at DESC
+            LIMIT $2
+            """,
+            repo_uuid, limit,
+        )
+        
+    out_commits = []
+    for r in commits:
+        d = dict(r)
+        d["commit_url"] = f"https://github.com/{full_name}/commit/{d['sha']}"
+        out_commits.append(d)
+        
+    return {"repo": repo, "commits": out_commits}
+
+
 if DIST_DIR.is_dir():
     app.mount("/assets", StaticFiles(directory=str(DIST_DIR / "assets")), name="assets")
 

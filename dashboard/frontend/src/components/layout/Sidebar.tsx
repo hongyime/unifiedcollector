@@ -57,7 +57,7 @@ const groups = [
     label: "Other",
     items: [
       { to: "/platform/strava", label: "Strava", icon: Bike },
-      { to: "/platform/github", label: "GitHub", icon: Database },
+      { to: "/github/feed", label: "GitHub", icon: Database },
       { to: "/platform/search", label: "Search", icon: Activity },
       { to: "/platform/website", label: "Website", icon: Network },
     ],

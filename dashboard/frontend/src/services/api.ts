@@ -36,6 +36,8 @@ import type {
   ThreadsProfileDetail,
   YoutubeChannel,
   YoutubeChannelDetail,
+  GithubRepo,
+  GithubRepoDetail,
   DmTelemetry,
   WaSessionsResponse,
   WaChat,
@@ -216,6 +218,13 @@ export const api = {
   youtubeChannel: (channelId: string, limit = 200) =>
     get<YoutubeChannelDetail>(
       `/youtube/channel/${encodeURIComponent(channelId)}?limit=${limit}`,
+    ),
+
+  githubRepos: (limit = 100) =>
+    get<GithubRepo[]>(`/github/repos?limit=${limit}`),
+  githubRepo: (fullName: string, limit = 200) =>
+    get<GithubRepoDetail>(
+      `/github/repo/${encodeURIComponent(fullName)}?limit=${limit}`,
     ),
 
   // P1.2: passive telemetry surface. Populated by dm_probe_handler +

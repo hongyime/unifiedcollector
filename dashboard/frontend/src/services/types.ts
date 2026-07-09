@@ -271,6 +271,38 @@ export interface YoutubeChannelDetail {
   videos: YoutubeVideo[];
 }
 
+export interface GithubRepo {
+  platform_repo_id: number;
+  name: string | null;
+  full_name: string;
+  description: string | null;
+  language: string | null;
+  stargazers_count: number | null;
+  forks_count: number | null;
+  open_issues_count: number | null;
+  platform_updated_at: string | null;
+  commits_collected?: number;
+  last_commit_at?: string | null;
+}
+
+export interface GithubCommit {
+  sha: string;
+  author_name: string | null;
+  author_login: string | null;
+  message: string | null;
+  date: string | null;
+  files_changed: number | null;
+  insertions: number | null;
+  deletions: number | null;
+  collected_at: string | null;
+  commit_url: string;
+}
+
+export interface GithubRepoDetail {
+  repo: GithubRepo | null;
+  commits: GithubCommit[];
+}
+
 // Passive DM WS-hook telemetry (P1.2). One entry per platform the extension's
 // observe-only WS wrapper has ever seen; `probe`/`sample` mirror event_type
 // in dm_probe_log. Null last_seen means "never" — most useful signal for

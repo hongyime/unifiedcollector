@@ -1,0 +1,233 @@
+import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { ExternalLink, Heart, MessageCircle, Play, Share2, BadgeCheck } from "lucide-react";
+import { api } from "../../services/api";
+import { Header } from "../../components/layout/Header";
+import { LoadingSpinner } from "../../components/ui/LoadingSpinner";
+import { ErrorState } from "../../components/ui/ErrorState";
+import { relativeTime, formatTimestamp, formatNumber } from "../../utils/formatters";
+import type { GithubRepo, GithubCommit } from "../../services/types";
+
+// GitHub feed page — two-pane layout mirroring the Telegram/WhatsApp chat
+// pages, but with a grid of post cards on the right instead of a message
+// stream (GitHub is not a chat platform). Backed by /github/profiles for
+// the picker and /github/profile/{username} for the selected profile's
+// posts + media UUIDs. Thumbnails come from /media/<uuid>/thumbnail, the
+// same endpoint the browser/media pages already use.
+
+// Compact 1.2K / 3.4M style — GitHub itself renders counts this way and
+// full toLocaleString() ("4,600,000") wastes horizontal room on cards
+// where four stats sit side by side.
+function compactCount(n: number | null | undefined): string {
+  if (n == null) return "-";
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}K`;
+  if (n < 1_000_000_000) return `${(n / 1_000_000).toFixed(n < 10_000_000 ? 1 : 0)}M`;
+  return `${(n / 1_000_000_000).toFixed(1)}B`;
+}
+
+// GitHub clip durations are seconds-int; 3m30s reads better than 210s.
+function formatDuration(seconds: number | null | undefined): string {
+  if (!seconds || seconds < 0) return "";
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  if (m === 0) return `${s}s`;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function profileDisplayName(p: GithubRepo): string {
+  return p.full_name || p.name || 'unknown';
+}
+
+export function GithubFeedPage() {
+  const [selected, setSelected] = useState<string | null>(null);
+
+  const profiles = useQuery({
+    queryKey: ["github-repos"],
+    queryFn: () => api.githubRepos(100),
+  });
+
+  const profile = useQuery({
+    queryKey: ["github-repo", selected],
+    queryFn: () => api.githubRepo(selected!),
+    enabled: !!selected,
+  });
+
+  if (profiles.error)
+    return <ErrorState message={String(profiles.error)} onRetry={() => profiles.refetch()} />;
+
+  return (
+    <div>
+      <Header
+        title="GitHub"
+        subtitle="Repositories and their collected commits"
+        onRefresh={() => {
+          profiles.refetch();
+          if (selected) profile.refetch();
+        }}
+      />
+
+      <div className="grid grid-cols-1 md:grid-cols-[280px_1fr] gap-4">
+        {/* Profile picker */}
+        <div className="bg-surface rounded-lg border border-border overflow-hidden">
+          {profiles.isLoading ? (
+            <LoadingSpinner />
+          ) : !profiles.data?.length ? (
+            <p className="text-sm text-text-muted py-8 px-4 text-center">
+              No GitHub profiles yet. Onboard cookies and run the github
+              collector; profiles + posts will start populating here.
+            </p>
+          ) : (
+            <ul className="divide-y divide-border/50 max-h-[80vh] overflow-y-auto">
+              {profiles.data.map((p) => {
+                const isActive = selected === p.full_name;
+                return (
+                  <li
+                    key={p.full_name}
+                    onClick={() => setSelected(p.full_name)}
+                    className={`px-3 py-2.5 cursor-pointer hover:bg-white/5 ${
+                      isActive ? "bg-white/10" : ""
+                    }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <div className="w-8 h-8 rounded-full bg-background border border-border/60 shrink-0" />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1">
+                          <span className="text-sm font-medium truncate">
+                            {profileDisplayName(p)}
+                          </span>
+                        </div>
+                        {p.description && (
+                          <div className="text-[11px] text-text-muted truncate">
+                            {p.description}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                    <div className="mt-1 flex items-center justify-between text-[11px] text-text-muted tabular-nums">
+                      <span>{compactCount(p.stargazers_count)} stars</span>
+                      <span>
+                        {p.commits_collected ?? 0} commits
+                        {p.last_commit_at ? ` · ${relativeTime(p.last_commit_at)}` : ""}
+                      </span>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+
+        {/* Post grid + profile card */}
+        <div className="space-y-4">
+          {!selected ? (
+            <div className="bg-surface rounded-lg border border-border p-8">
+              <p className="text-sm text-text-muted text-center">
+                Select a repo to view its commits.
+              </p>
+            </div>
+          ) : profile.isLoading ? (
+            <LoadingSpinner />
+          ) : !profile.data?.repo ? (
+            <div className="bg-surface rounded-lg border border-border p-8">
+              <p className="text-sm text-text-muted text-center">
+                Repo not found.
+              </p>
+            </div>
+          ) : (
+            <>
+              <ProfileCard p={profile.data.repo} postCount={profile.data.commits.length} />
+              {profile.data.commits.length === 0 ? (
+                <div className="bg-surface rounded-lg border border-border p-8">
+                  <p className="text-sm text-text-muted text-center">
+                    No commits collected for this repo yet.
+                  </p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 gap-3">
+                  {profile.data.commits.map((post) => (
+                    <PostCard key={post.sha} post={post} />
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ProfileCard({ p, postCount }: { p: GithubRepo; postCount: number }) {
+  return (
+    <div className="bg-surface rounded-lg border border-border p-4">
+      <div className="flex items-start gap-3">
+        <div className="w-16 h-16 rounded-full bg-background border border-border/60 shrink-0" />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-1.5">
+            <h3 className="text-base font-semibold text-text-primary truncate">
+              {profileDisplayName(p)}
+            </h3>
+          </div>
+          {p.full_name && (
+            <a
+              href={`https://github.com/${p.full_name}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-xs text-info hover:underline"
+            >
+              {p.full_name} <ExternalLink className="inline w-3 h-3" />
+            </a>
+          )}
+          {p.description && (
+            <p className="mt-1.5 text-xs text-text-secondary whitespace-pre-wrap break-words">
+              {p.description}
+            </p>
+          )}
+          <div className="mt-2 flex flex-wrap gap-3 text-xs text-text-muted tabular-nums">
+            <span><b className="text-text-primary">{compactCount(p.stargazers_count)}</b> stars</span>
+            <span><b className="text-text-primary">{compactCount(p.forks_count)}</b> forks</span>
+            <span><b className="text-text-primary">{compactCount(p.open_issues_count)}</b> issues</span>
+            <span className="text-text-muted">·</span>
+            <span>{postCount} commits collected</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PostCard({ post }: { post: GithubCommit }) {
+  const desc = post.message || "";
+
+  return (
+    <div className="bg-surface rounded-lg border border-border overflow-hidden flex flex-col p-3 gap-2">
+      <a
+        href={post.commit_url}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="text-sm font-semibold text-info hover:underline truncate block"
+        title="Open on GitHub"
+      >
+        {post.sha.substring(0, 7)} <ExternalLink className="inline w-3 h-3" />
+      </a>
+      {desc && (
+        <p className="text-xs text-text-primary line-clamp-3 break-words">
+          {desc}
+        </p>
+      )}
+      <div className="flex flex-col gap-1 text-[11px] text-text-muted tabular-nums mt-auto pt-1">
+        <div className="flex items-center gap-2">
+            <span>{post.author_name || post.author_login || "unknown"}</span>
+        </div>
+        <div className="flex items-center gap-3">
+          <span className="text-emerald-500">+{post.insertions || 0}</span>
+          <span className="text-rose-500">-{post.deletions || 0}</span>
+          <span className="ml-auto text-text-muted">
+            {post.date ? relativeTime(post.date) : ""}
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
