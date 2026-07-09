@@ -902,7 +902,8 @@ class GithubCollector(BaseCollector):
                 logger.info("github: skipping famous repo %s (%s stars >= cap %d)",
                             repo.get("full_name"), repo.get("stargazers_count"), self._famous_star_cap)
                 continue
-            await self._collect_repo_content(client, repo["full_name"], uid, login)
+            await self._collect_repo_content(
+                client, repo["full_name"], uid, login, repo.get("id"))
 
         await self.checkpoint.save_progress(username)
 
@@ -920,28 +921,48 @@ class GithubCollector(BaseCollector):
             return
         await self._collect_repo_content(
             client, full_name,
-            str(repo["owner"]["id"]), repo["owner"]["login"],
+            str(repo["owner"]["id"]), repo["owner"]["login"], repo.get("id"),
         )
         await self.checkpoint.save_progress(full_name)
 
     async def _collect_repo_content(
-        self, client: httpx.AsyncClient, full_name: str, uid: str, login: str
+        self, client: httpx.AsyncClient, full_name: str, uid: str, login: str,
+        repo_pid: int | None = None,
     ):
         max_commits = int(os.getenv("GITHUB_MAX_COMMITS_PER_REPO", "200"))
         max_issues = int(os.getenv("GITHUB_MAX_ISSUES_PER_REPO", "100"))
         max_contributors = int(os.getenv("GITHUB_MAX_CONTRIBUTORS_PER_REPO", "25"))
 
-        # Resolve the internal repo UUID for foreign-key linking.
+        # Resolve the internal repo UUID for foreign-key linking. Prefer the
+        # STABLE platform_repo_id — looking up by full_name orphaned commits
+        # whenever a repo had been renamed (ON CONFLICT DO UPDATE didn't refresh
+        # full_name), which is how ~862k commits landed with NULL repo_id.
         repo_uuid = None
         try:
             async with self.pool.acquire() as conn:
-                row = await conn.fetchrow(
-                    "SELECT id FROM github_repos WHERE full_name = $1", full_name
-                )
+                row = None
+                if repo_pid is not None:
+                    row = await conn.fetchrow(
+                        "SELECT id FROM github_repos WHERE platform_repo_id = $1",
+                        repo_pid,
+                    )
+                if row is None:
+                    row = await conn.fetchrow(
+                        "SELECT id FROM github_repos WHERE full_name = $1", full_name
+                    )
                 if row:
                     repo_uuid = row["id"]
         except Exception:
             logger.debug("repo UUID lookup failed for %s", full_name)
+
+        if repo_uuid is None:
+            # Never insert commits with a NULL repo_id (orphans them from the
+            # dashboard). Skip content for this repo; it'll be retried next cycle
+            # once the repo row exists.
+            logger.warning(
+                "github: no repo UUID for %s (pid=%s) — skipping commit/content "
+                "collection to avoid NULL repo_id orphans", full_name, repo_pid)
+            return
 
         # 1. README
         readme_resp = await self._api_get(client, f"{API_BASE}/repos/{full_name}/readme")
@@ -1060,6 +1081,8 @@ class GithubCollector(BaseCollector):
                     platform_updated_at, metadata
                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
                 ON CONFLICT (platform_repo_id) DO UPDATE SET
+                    name = EXCLUDED.name,
+                    full_name = EXCLUDED.full_name,
                     stargazers_count = EXCLUDED.stargazers_count,
                     forks_count = EXCLUDED.forks_count,
                     platform_updated_at = EXCLUDED.platform_updated_at,
