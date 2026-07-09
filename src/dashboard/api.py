@@ -1002,12 +1002,30 @@ async def social_graph(
     limit: int = Query(5000, description="Max edges to return", ge=1, le=50000),
     _user: dict = Depends(require_role("viewer"))
 ):
+    # Relationship edges live in TWO tables depending on the collector:
+    #   * graph_edges  (source, source_user, target_user, edge_type) — whatsapp
+    #   * follow_edges (platform, owner_account, target_uid/username, direction)
+    #     — instagram (and any future follow-graph collector)
+    # Query the right one for the requested platform and normalise follow_edges
+    # into the (source_user, target_user, edge_type) shape the frontend expects.
     pool = await get_pool()
     async with pool.acquire() as conn:
         edges = await conn.fetch(
             "SELECT source_user, target_user, edge_type FROM graph_edges WHERE source = $1 LIMIT $2",
-            source, limit
+            source, limit,
         )
+        if not edges:
+            edges = await conn.fetch(
+                """
+                SELECT owner_account AS source_user,
+                       COALESCE(target_username, target_uid) AS target_user,
+                       direction AS edge_type
+                FROM follow_edges
+                WHERE platform = $1
+                LIMIT $2
+                """,
+                source, limit,
+            )
     nodes = set()
     edge_list = []
     for e in edges:
@@ -3034,23 +3052,32 @@ async def list_github_repos(limit: int = 100, _user: dict = Depends(require_role
     async with pool.acquire() as conn:
         if await conn.fetchval("SELECT to_regclass('github_repos')") is None:
             return []
+        # Sort + LIMIT the repos FIRST (CTE), then attach commit counts via
+        # LATERAL for only the surviving rows. The naive form put the COUNT/MAX
+        # correlated subqueries in the top-level target list, which the planner
+        # evaluated across far more than $1 rows over the 7.9M-row commits table
+        # (~29s, tripping the 60s command_timeout intermittently). CTE-first ->
+        # 100 lateral lookups on idx_gh_commits_repo -> <1s.
         rows = await conn.fetch(
             """
-            SELECT r.id,
-                   r.platform_repo_id,
-                   r.name,
-                   r.full_name,
-                   r.description,
-                   r.language,
-                   r.stargazers_count,
-                   r.forks_count,
-                   r.open_issues_count,
-                   r.platform_updated_at,
-                   (SELECT COUNT(*) FROM github_commits WHERE repo_id = r.id) AS commits_collected,
-                   (SELECT MAX(date) FROM github_commits WHERE repo_id = r.id) AS last_commit_at
-            FROM github_repos r
-            ORDER BY r.stargazers_count DESC NULLS LAST, r.platform_updated_at DESC
-            LIMIT $1
+            WITH top AS (
+                SELECT id, platform_repo_id, name, full_name, description,
+                       language, stargazers_count, forks_count,
+                       open_issues_count, platform_updated_at
+                FROM github_repos
+                ORDER BY stargazers_count DESC NULLS LAST, platform_updated_at DESC
+                LIMIT $1
+            )
+            SELECT t.id, t.platform_repo_id, t.name, t.full_name, t.description,
+                   t.language, t.stargazers_count, t.forks_count,
+                   t.open_issues_count, t.platform_updated_at,
+                   cc.commits_collected, cc.last_commit_at
+            FROM top t
+            LEFT JOIN LATERAL (
+                SELECT COUNT(*) AS commits_collected, MAX(date) AS last_commit_at
+                FROM github_commits gc WHERE gc.repo_id = t.id
+            ) cc ON TRUE
+            ORDER BY t.stargazers_count DESC NULLS LAST, t.platform_updated_at DESC
             """,
             limit,
         )
@@ -3234,7 +3261,8 @@ async def list_beeper_chats(limit: int = 100, _user: dict = Depends(require_role
                    c.network,
                    c.title,
                    c.img_url,
-                   c.is_direct,
+                   c.chat_type,
+                   (c.chat_type = 'dm') AS is_direct,
                    c.account_id,
                    c.last_seen_at,
                    (SELECT COUNT(*) FROM beeper_shadow_messages WHERE chat_id = c.chat_id) AS messages_collected,
@@ -3263,7 +3291,8 @@ async def beeper_chat_detail(chat_id: str, limit: int = 200, _user: dict = Depen
                    c.network,
                    c.title,
                    c.img_url,
-                   c.is_direct,
+                   c.chat_type,
+                   (c.chat_type = 'dm') AS is_direct,
                    c.account_id,
                    c.last_seen_at
             FROM beeper_shadow_chats c
@@ -3285,9 +3314,14 @@ async def beeper_chat_detail(chat_id: str, limit: int = 200, _user: dict = Depen
                    m.text,
                    m.timestamp,
                    m.sort_key,
-                   m.is_media,
-                   m.media_url,
-                   m.media_type,
+                   -- beeper_shadow_messages has no is_media/media_url/media_type
+                   -- columns; media is inferred from msg_type + attachments and
+                   -- previewed through the media_items join below.
+                   (m.msg_type IN ('IMAGE','VIDEO','STICKER','FILE','VOICE','AUDIO')
+                    OR (m.attachments IS NOT NULL
+                        AND m.attachments::text NOT IN ('null','[]','{}'))) AS is_media,
+                   NULL::text AS media_url,
+                   m.msg_type AS media_type,
                    m.is_deleted,
                    m.deleted_at,
                    m.ingested_at,

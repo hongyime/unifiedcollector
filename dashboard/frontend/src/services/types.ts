@@ -343,6 +343,7 @@ export interface BeeperChat {
   network: string;
   title: string | null;
   img_url: string | null;
+  chat_type: string | null;
   is_direct: boolean | null;
   account_id: string | null;
   last_seen_at: string | null;
