@@ -27,6 +27,7 @@ import { InstagramDmPage } from "./features/instagram/InstagramDmPage";
 import { TiktokDmPage } from "./features/tiktok/TiktokDmPage";
 import { TiktokFeedPage } from "./features/tiktok/TiktokFeedPage";
 import { ThreadsFeedPage } from "./features/threads/ThreadsFeedPage";
+import { YoutubeFeedPage } from "./features/youtube/YoutubeFeedPage";
 import { LoginPage } from "./features/auth/LoginPage";
 import { TelegramAccountsPage } from "./features/telegram/TelegramAccountsPage";
 import { TelegramStatsPage } from "./features/telegram/TelegramStatsPage";
@@ -68,6 +69,7 @@ const router = createBrowserRouter([
       { path: "tiktok/dms", element: <TiktokDmPage /> },
       { path: "tiktok/feed", element: <TiktokFeedPage /> },
       { path: "threads/feed", element: <ThreadsFeedPage /> },
+      { path: "youtube/feed", element: <YoutubeFeedPage /> },
       { path: "telegram/accounts", element: <TelegramAccountsPage /> },
       { path: "telegram/stats", element: <TelegramStatsPage /> },
       { path: "telegram/chats", element: <TelegramChatsPage /> },

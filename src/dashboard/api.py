@@ -2923,6 +2923,105 @@ async def threads_profile_detail(username: str, limit: int = 200, _user: dict = 
     return {"profile": dict(profile_info), "posts": out_posts}
 
 
+# ---------------------------------------------------------------------------
+# YouTube feed (channels + videos)
+# ---------------------------------------------------------------------------
+
+@app.get("/youtube/channels")
+async def list_youtube_channels(limit: int = 100, _user: dict = Depends(require_role("viewer"))):
+    """YouTube channels and collection stats."""
+    limit = max(1, min(limit, 500))
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if await conn.fetchval("SELECT to_regclass('youtube_channels')") is None:
+            return []
+        rows = await conn.fetch(
+            """
+            SELECT c.id,
+                   c.platform_channel_id,
+                   c.title,
+                   c.custom_url,
+                   c.thumbnail_url,
+                   c.description,
+                   c.subscriber_count,
+                   c.video_count,
+                   c.view_count,
+                   c.updated_at,
+                   (SELECT COUNT(*) FROM youtube_videos WHERE channel_id = c.id) AS videos_collected,
+                   (SELECT MAX(platform_published_at) FROM youtube_videos WHERE channel_id = c.id) AS last_video_at
+            FROM youtube_channels c
+            ORDER BY c.subscriber_count DESC NULLS LAST, c.updated_at DESC
+            LIMIT $1
+            """,
+            limit,
+        )
+    return [dict(r) for r in rows]
+
+@app.get("/youtube/channel/{channel_id}")
+async def youtube_channel_detail(channel_id: str, limit: int = 200, _user: dict = Depends(require_role("viewer"))):
+    """Videos for one YouTube channel."""
+    limit = max(1, min(limit, 500))
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if await conn.fetchval("SELECT to_regclass('youtube_channels')") is None:
+            return {"channel": None, "videos": []}
+            
+        channel_row = await conn.fetchrow(
+            """
+            SELECT c.id,
+                   c.platform_channel_id,
+                   c.title,
+                   c.custom_url,
+                   c.thumbnail_url,
+                   c.description,
+                   c.subscriber_count,
+                   c.video_count,
+                   c.view_count,
+                   c.updated_at
+            FROM youtube_channels c
+            WHERE c.platform_channel_id = $1
+            """,
+            channel_id
+        )
+        if not channel_row:
+            return {"channel": None, "videos": []}
+            
+        channel = dict(channel_row)
+        channel_uuid = channel.pop("id")
+            
+        videos = await conn.fetch(
+            """
+            SELECT v.platform_video_id,
+                   v.title,
+                   v.description,
+                   v.view_count,
+                   v.like_count,
+                   v.comment_count,
+                   v.duration,
+                   v.platform_published_at,
+                   v.collected_at,
+                   mi.id AS media_item_id,
+                   mi.content_type AS media_content_type
+            FROM youtube_videos v
+            LEFT JOIN media_items mi
+                   ON mi.source = 'youtube'
+                  AND mi.content_id = v.platform_video_id
+            WHERE v.channel_id = $1
+            ORDER BY v.platform_published_at DESC NULLS LAST, v.collected_at DESC
+            LIMIT $2
+            """,
+            channel_uuid, limit,
+        )
+        
+    out_videos = []
+    for r in videos:
+        d = dict(r)
+        d["video_url"] = f"https://www.youtube.com/watch?v={d['platform_video_id']}"
+        out_videos.append(d)
+        
+    return {"channel": channel, "videos": out_videos}
+
+
 if DIST_DIR.is_dir():
     app.mount("/assets", StaticFiles(directory=str(DIST_DIR / "assets")), name="assets")
 

@@ -42,7 +42,7 @@ const groups = [
       { to: "/threads/feed", label: "Threads", icon: ImageIcon },
       { to: "/platform/x", label: "X", icon: ImageIcon },
       { to: "/platform/facebook", label: "Facebook", icon: ImageIcon },
-      { to: "/platform/youtube", label: "YouTube", icon: ImageIcon },
+      { to: "/youtube/feed", label: "YouTube", icon: ImageIcon },
     ],
   },
   {

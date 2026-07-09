@@ -34,6 +34,8 @@ import type {
   TtProfileDetail,
   ThreadsProfile,
   ThreadsProfileDetail,
+  YoutubeChannel,
+  YoutubeChannelDetail,
   DmTelemetry,
   WaSessionsResponse,
   WaChat,
@@ -207,6 +209,13 @@ export const api = {
   threadsProfile: (username: string, limit = 200) =>
     get<ThreadsProfileDetail>(
       `/threads/profile/${encodeURIComponent(username)}?limit=${limit}`,
+    ),
+
+  youtubeChannels: (limit = 100) =>
+    get<YoutubeChannel[]>(`/youtube/channels?limit=${limit}`),
+  youtubeChannel: (channelId: string, limit = 200) =>
+    get<YoutubeChannelDetail>(
+      `/youtube/channel/${encodeURIComponent(channelId)}?limit=${limit}`,
     ),
 
   // P1.2: passive telemetry surface. Populated by dm_probe_handler +

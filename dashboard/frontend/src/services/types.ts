@@ -237,6 +237,40 @@ export interface ThreadsProfileDetail {
   posts: ThreadsPost[];
 }
 
+export interface YoutubeChannel {
+  platform_channel_id: string;
+  title: string | null;
+  custom_url: string | null;
+  thumbnail_url: string | null;
+  description: string | null;
+  subscriber_count: number | null;
+  video_count: number | null;
+  view_count: number | null;
+  updated_at: string | null;
+  videos_collected?: number;
+  last_video_at?: string | null;
+}
+
+export interface YoutubeVideo {
+  platform_video_id: string;
+  title: string | null;
+  description: string | null;
+  view_count: number | null;
+  like_count: number | null;
+  comment_count: number | null;
+  duration: string | null;
+  platform_published_at: string | null;
+  collected_at: string | null;
+  media_item_id: string | null;
+  media_content_type: string | null;
+  video_url: string;
+}
+
+export interface YoutubeChannelDetail {
+  channel: YoutubeChannel | null;
+  videos: YoutubeVideo[];
+}
+
 // Passive DM WS-hook telemetry (P1.2). One entry per platform the extension's
 // observe-only WS wrapper has ever seen; `probe`/`sample` mirror event_type
 // in dm_probe_log. Null last_seen means "never" — most useful signal for
