@@ -26,6 +26,7 @@ import logging
 import math
 import os
 import random
+import re
 import tempfile
 import time
 import uuid
@@ -1302,16 +1303,129 @@ class InstagramCollector(BaseCollector):
     # ------------------------------------------------------------------
     # Playwright (Mode β) hybrid fallback
     # ------------------------------------------------------------------
+    @staticmethod
+    def _sanitize_playwright_cookie(raw: dict) -> dict | None:
+        """Coerce a raw cookie dict into a Chromium-CDP-safe shape.
+
+        Chromium's ``Storage.setCookies`` is *atomic* — a single malformed
+        cookie in the batch rejects the entire ``new_context(storage_state=)``
+        call with ``Protocol error (Storage.setCookies): Invalid cookie fields``.
+        Cookie files harvested from real browsers routinely include entries
+        that trip CDP validation:
+
+        * empty ``name`` or ``value`` (rejected by CDP even though Netscape
+          allows them);
+        * ``expires`` as a float / string / far-future overflow / ``0`` for
+          session cookies (CDP wants int seconds, and ``-1`` for session);
+        * Netscape octal-escaped values like ``"VLL\\054<id>\\054..."`` with
+          literal surrounding quotes and ``\\NNN`` sequences (Instagram's
+          ``rur`` cookie is the canonical offender);
+        * ``sameSite`` in a form CDP rejects — Chrome JSON exports use
+          ``"no_restriction"``/``"unspecified"``/``"lax"``, but CDP only
+          accepts the exact literals ``Lax``/``Strict``/``None``;
+        * ``sameSite=None`` without ``secure=True`` (Chromium hard-rejects).
+
+        Returns the sanitized cookie dict, or ``None`` if the entry is
+        unsalvageable and should be dropped.
+        """
+        name = (raw.get("name") or "").strip()
+        value = raw.get("value")
+        if value is None:
+            return None
+        value = str(value)
+        if not name or not value:
+            return None
+
+        # Netscape's cookies.txt uses octal escapes (\NNN) for chars that
+        # can't appear raw in the tab-separated format — most often the
+        # comma inside Instagram's ``rur``. Decode them, then strip the
+        # literal surrounding double-quotes Chrome adds when a value
+        # contains such special chars. Fall back to raw value on error.
+        if "\\" in value:
+            try:
+                value = re.sub(
+                    r"\\([0-3][0-7]{2})",
+                    lambda m: chr(int(m.group(1), 8)),
+                    value,
+                )
+            except Exception:
+                pass
+        if len(value) >= 2 and value.startswith('"') and value.endswith('"'):
+            value = value[1:-1]
+        if not value:
+            return None
+
+        domain = (raw.get("domain") or "").strip()
+        if not domain:
+            return None
+        # CDP is fine with either leading-dot ("host-only=false") or bare
+        # host, but requires *some* dot-separated TLD. Skip obviously
+        # broken domains (IP-literals, no dots at all).
+        bare = domain.lstrip(".")
+        if "." not in bare or bare.replace(".", "").isdigit():
+            return None
+
+        path = raw.get("path") or "/"
+        if not isinstance(path, str) or not path.startswith("/"):
+            path = "/"
+
+        # expires: int seconds since epoch; ``-1`` for session cookies.
+        # Netscape ``0`` and JSON ``expirationDate=0`` both mean session.
+        expires_raw = raw.get("expires", raw.get("expirationDate"))
+        try:
+            expires = int(float(expires_raw)) if expires_raw not in (None, "") else -1
+        except (TypeError, ValueError):
+            expires = -1
+        if expires <= 0:
+            expires = -1
+        # Clamp to a safe upper bound — Chromium caps at ~400 days from
+        # now anyway, and values approaching 2**53 have caused overflow
+        # rejects in older Playwright/Chromium builds. 4102444800 = 2100-01-01.
+        elif expires > 4102444800:
+            expires = 4102444800
+
+        # sameSite: normalize any casing / Chrome-export synonym to the
+        # three literals CDP accepts. Anything else → "Lax".
+        same_site_raw = str(raw.get("sameSite") or "").strip().lower()
+        same_site_map = {
+            "lax": "Lax",
+            "strict": "Strict",
+            "none": "None",
+            "no_restriction": "None",  # Chrome extension export
+            "unspecified": "Lax",       # Chrome extension export
+            "": "Lax",
+        }
+        same_site = same_site_map.get(same_site_raw, "Lax")
+
+        secure = bool(raw.get("secure", False))
+        # Chromium hard-rejects sameSite=None without secure=True.
+        if same_site == "None":
+            secure = True
+
+        return {
+            "name": name,
+            "value": value,
+            "domain": domain,
+            "path": path,
+            "expires": expires,
+            "httpOnly": bool(raw.get("httpOnly", False)),
+            "secure": secure,
+            "sameSite": same_site,
+        }
+
     def _build_playwright_storage_state(self, account_name: str) -> dict | None:
         """Convert the per-account Netscape cookie file to Playwright storage_state.
 
-        Returns None if no usable cookie file exists.
+        Returns None if no usable cookie file exists. Every cookie is passed
+        through :meth:`_sanitize_playwright_cookie` because Chromium's
+        ``Storage.setCookies`` is atomic — one malformed entry aborts the
+        whole ``new_context`` call with ``Invalid cookie fields``.
         """
         cookie_path = self._account_browser_cookies.get(account_name)
         if not cookie_path or not os.path.exists(cookie_path):
             return None
 
-        cookies: list[dict] = []
+        raw_cookies: list[dict] = []
         try:
             # Support both Netscape .txt and JSON format
             if cookie_path.endswith(".json"):
@@ -1321,37 +1435,36 @@ class InstagramCollector(BaseCollector):
                     return None
                 if isinstance(raw, list):
                     for c in raw:
-                        if isinstance(c, dict) and "name" in c and "value" in c:
-                            cookies.append({
-                                "name": c["name"],
-                                "value": c["value"],
-                                "domain": c.get("domain", ".instagram.com"),
-                                "path": c.get("path", "/"),
-                                "expires": float(c.get("expirationDate", c.get("expires", -1))),
-                                "httpOnly": bool(c.get("httpOnly", False)),
-                                "secure": bool(c.get("secure", True)),
-                                "sameSite": c.get("sameSite", "Lax"),
-                            })
+                        if not isinstance(c, dict):
+                            continue
+                        raw_cookies.append({
+                            "name": c.get("name"),
+                            "value": c.get("value"),
+                            "domain": c.get("domain", ".instagram.com"),
+                            "path": c.get("path", "/"),
+                            "expires": c.get("expirationDate", c.get("expires")),
+                            "httpOnly": c.get("httpOnly", False),
+                            "secure": c.get("secure", True),
+                            "sameSite": c.get("sameSite"),
+                        })
             else:
                 with open(cookie_path, "r", encoding="utf-8") as f:
                     for line in f:
-                        line = line.strip()
+                        # NB: don't strip trailing tabs here — an empty value
+                        # is a legitimate 7th field. Only strip line endings.
+                        line = line.rstrip("\r\n")
                         if not line or line.startswith("#"):
                             continue
                         parts = line.split("\t")
                         if len(parts) < 7:
                             continue
                         domain, _flag, path, secure, expires, name, value = parts[:7]
-                        try:
-                            expires_f = float(expires)
-                        except ValueError:
-                            expires_f = -1
-                        cookies.append({
+                        raw_cookies.append({
                             "name": name,
                             "value": value,
-                            "domain": domain if domain.startswith(".") else f".{domain}",
+                            "domain": domain if (domain.startswith(".") or "." in domain) else f".{domain}",
                             "path": path or "/",
-                            "expires": expires_f,
+                            "expires": expires,
                             "httpOnly": False,
                             "secure": secure.upper() == "TRUE",
                             "sameSite": "Lax",
@@ -1359,6 +1472,21 @@ class InstagramCollector(BaseCollector):
         except Exception as e:
             logger.warning("Failed to parse cookies for Playwright (%s): %s", account_name, e)
             return None
+
+        cookies: list[dict] = []
+        dropped = 0
+        for raw in raw_cookies:
+            clean = self._sanitize_playwright_cookie(raw)
+            if clean is None:
+                dropped += 1
+                continue
+            cookies.append(clean)
+
+        if dropped:
+            logger.debug(
+                "Playwright storage_state: dropped %d/%d malformed cookies for %s",
+                dropped, len(raw_cookies), account_name,
+            )
 
         if not cookies:
             return None
