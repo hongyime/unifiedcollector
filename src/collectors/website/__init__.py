@@ -145,9 +145,38 @@ IMAGE_EXTS = {
 }
 SUPPORTED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff"}
 PDF_EXTS = {".pdf"}
-SKIP_EXTS = {
-    ".css", ".js", ".woff", ".woff2", ".ttf", ".eot", ".ico", ".map",
+
+# Documents we DO capture (COLLECTION_SPEC tier 3 whitelist: pdf/word/ppt/
+# excel/text/office — no executables, no code). PDF has its own richer path
+# (rasterisation) so it stays out of this set.
+DOC_EXTS = {
+    ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+    ".txt", ".rtf", ".csv", ".odt", ".ods", ".odp",
 }
+# Videos we DO capture. Downloaded with NO size cap (user decision) which means
+# they MUST be streamed to disk, never buffered into memory.
+VIDEO_EXTS = {
+    ".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v",
+    ".mpeg", ".mpg", ".wmv", ".flv", ".ogv", ".3gp",
+}
+# Audio + code/asset extensions we EXCLUDE entirely — never crawl, never
+# download (folded into SKIP_EXTS below so both the enqueue guard and the
+# download dispatch drop them). Matches the user's "no audio, no code files,
+# no html assets" rule for the website/search spiders.
+AUDIO_EXTS = {
+    ".mp3", ".wav", ".m4a", ".ogg", ".oga", ".flac", ".aac",
+    ".opus", ".wma", ".aiff", ".mid", ".midi",
+}
+CODE_EXTS = {
+    ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".py", ".rb", ".php",
+    ".java", ".c", ".h", ".cpp", ".cs", ".go", ".rs", ".sh", ".bat",
+    ".ps1", ".pl", ".lua", ".swift", ".kt", ".scala", ".sql", ".yaml",
+    ".yml", ".toml", ".ini", ".exe", ".dll", ".so", ".dylib", ".bin",
+    ".msi", ".apk", ".jar", ".war",
+}
+SKIP_EXTS = {
+    ".css", ".woff", ".woff2", ".ttf", ".eot", ".ico", ".map",
+} | AUDIO_EXTS | CODE_EXTS
 
 SITEMAP_PATHS = [
     "/sitemap.xml",
@@ -251,6 +280,52 @@ def _is_pdf_url(url: str) -> bool:
         return path.endswith(".pdf")
     except Exception:
         return False
+
+
+def _is_document_url(url: str) -> bool:
+    try:
+        path = urlparse(url).path.lower()
+        return any(path.endswith(ext) for ext in DOC_EXTS)
+    except Exception:
+        return False
+
+
+def _is_video_url(url: str) -> bool:
+    try:
+        path = urlparse(url).path.lower()
+        return any(path.endswith(ext) for ext in VIDEO_EXTS)
+    except Exception:
+        return False
+
+
+_DOC_CONTENT_TYPES = (
+    "application/msword",
+    "application/vnd.openxmlformats-officedocument",
+    "application/vnd.ms-excel",
+    "application/vnd.ms-powerpoint",
+    "application/vnd.oasis.opendocument",
+    "application/rtf",
+    "text/rtf",
+    "text/csv",
+)
+
+
+def _is_document_content_type(ct: str) -> bool:
+    """True for office/document MIME types. Deliberately excludes text/plain and
+    text/html so we don't hoover up arbitrary text endpoints — .txt/.csv files
+    are caught by extension instead."""
+    return any(t in ct for t in _DOC_CONTENT_TYPES)
+
+
+def _ext_from_known(url: str, exts: set[str], default: str) -> str:
+    try:
+        path = urlparse(url).path.lower()
+        for ext in exts:
+            if path.endswith(ext):
+                return ext.lstrip(".")
+    except Exception:
+        pass
+    return default
 
 
 def _extract_text_links(text: str, base: str | None = None) -> set[str]:
@@ -380,6 +455,10 @@ class WebsiteCollector(BaseCollector):
         self._follow_external = os.getenv("WEBSITE_FOLLOW_EXTERNAL", "0") == "1"
         self._download_images = os.getenv("WEBSITE_DOWNLOAD_IMAGES", "1") == "1"
         self._download_pdfs = os.getenv("WEBSITE_DOWNLOAD_PDFS", "1") == "1"
+        # Office documents (word/ppt/excel/text) and videos. Videos are streamed
+        # to disk with NO size cap (user decision); docs keep a sane byte cap.
+        self._download_docs = os.getenv("WEBSITE_DOWNLOAD_DOCS", "1") == "1"
+        self._download_videos = os.getenv("WEBSITE_DOWNLOAD_VIDEOS", "1") == "1"
         self._use_tor = os.getenv("WEBSITE_USE_TOR", "0") == "1"
         self._use_playwright = os.getenv("WEBSITE_USE_PLAYWRIGHT", "0") == "1"
         # Quality gates
@@ -387,6 +466,12 @@ class WebsiteCollector(BaseCollector):
         self._max_image_bytes = int(os.getenv("WEBSITE_MAX_IMAGE_BYTES", str(10 * 1024 * 1024)))
         self._min_image_dim = int(os.getenv("WEBSITE_MIN_IMAGE_DIM", "32"))
         self._max_pdf_bytes = int(os.getenv("WEBSITE_MAX_PDF_BYTES", str(50 * 1024 * 1024)))
+        self._max_doc_bytes = int(os.getenv("WEBSITE_MAX_DOC_BYTES", str(50 * 1024 * 1024)))
+        # 0 = no cap (user chose uncapped web video). A positive value caps the
+        # streamed video size (bytes) as a safety valve if disk pressure appears.
+        self._max_video_bytes = int(os.getenv("WEBSITE_MAX_VIDEO_BYTES", "0"))
+        # Chunk size for streaming video to disk (default 1 MiB).
+        self._video_chunk_bytes = int(os.getenv("WEBSITE_VIDEO_CHUNK_BYTES", str(1024 * 1024)))
         # URL filter (allow/block wildcard patterns)
         self._url_filter = URLFilter.from_env("WEBSITE_URL_ALLOW", "WEBSITE_URL_BLOCK")
         # robots.txt cache
@@ -521,7 +606,8 @@ class WebsiteCollector(BaseCollector):
 
         visited: set[str] = set()
         queue: list[tuple[str, int]] = [(seed_url, 0)]
-        stats = {"pages": 0, "images": 0, "pdfs": 0, "errors": 0, "skipped": 0}
+        stats = {"pages": 0, "images": 0, "pdfs": 0, "docs": 0, "videos": 0,
+                 "errors": 0, "skipped": 0}
 
         client = self._build_client(domain)
         try:
@@ -548,6 +634,22 @@ class WebsiteCollector(BaseCollector):
                     stats["skipped"] += 1
                     continue
 
+                # Videos are streamed to disk (no cap) — detect by extension and
+                # handle BEFORE the blanket client.get() below, which would
+                # otherwise buffer a multi-GB body into memory and OOM the worker.
+                if self._download_videos and _is_video_url(url):
+                    if url not in self._seen_media:
+                        self._seen_media.add(url)
+                        await self.wait_rate_limit(domain)
+                        try:
+                            async with self._sem:
+                                if await self._stream_video(client, url, domain):
+                                    stats["videos"] += 1
+                        except Exception as e:
+                            logger.debug("video stream failed %s: %s", url, e)
+                            stats["errors"] += 1
+                    continue
+
                 await self.wait_rate_limit(domain)
                 try:
                     async with self._sem:
@@ -568,6 +670,16 @@ class WebsiteCollector(BaseCollector):
                     if self._download_pdfs:
                         await self._handle_pdf(resp.content, url, domain)
                         stats["pdfs"] += 1
+                    continue
+
+                # Office documents (word/ppt/excel/text). Detect by extension or
+                # by a non-HTML office/text content-type. resp.content is already
+                # buffered here, which is fine — docs are byte-capped.
+                if self._download_docs and (
+                    _is_document_url(url) or _is_document_content_type(ct)
+                ):
+                    await self._handle_document(resp.content, url, domain)
+                    stats["docs"] += 1
                     continue
 
                 if "text/html" not in ct and "application/xhtml" not in ct:
@@ -645,9 +757,10 @@ class WebsiteCollector(BaseCollector):
                 pass
 
         logger.info(
-            "Spider %s done: pages=%d images=%d pdfs=%d errors=%d skipped=%d",
+            "Spider %s done: pages=%d images=%d pdfs=%d docs=%d videos=%d "
+            "errors=%d skipped=%d",
             domain, stats["pages"], stats["images"], stats["pdfs"],
-            stats["errors"], stats["skipped"],
+            stats["docs"], stats["videos"], stats["errors"], stats["skipped"],
         )
         return stats
 
@@ -1037,6 +1150,106 @@ class WebsiteCollector(BaseCollector):
                 "source_url": source_url,
                 "data": png_bytes,
             })
+
+    async def _handle_document(self, doc_data: bytes, source_url: str, domain: str) -> None:
+        """Persist an office/text document (word/ppt/excel/csv/txt/rtf) into
+        media_items with content_type 'document'. Byte-capped; audio/code/html
+        never reach here (excluded via SKIP_EXTS + content-type gate)."""
+        if not doc_data:
+            return
+        if len(doc_data) > self._max_doc_bytes:
+            logger.debug("doc too large, skipping: %s (%d)", source_url, len(doc_data))
+            return
+        cid = hashlib.sha256(doc_data).hexdigest()[:16]
+        if self.is_known(cid):
+            return
+        await self.download_media({
+            "entity_id": domain,
+            "entity_name": domain,
+            "content_type": "document",
+            "content_id": cid,
+            "url": source_url,
+            "extension": _ext_from_known(source_url, DOC_EXTS, "bin"),
+            "source_url": source_url,
+            "data": doc_data,
+        })
+
+    async def _stream_video(self, client: httpx.AsyncClient, video_url: str,
+                            domain: str) -> bool:
+        """Stream a video to disk in chunks (never buffered whole) and register
+        it in media_items as content_type 'video'. No size cap by default
+        (WEBSITE_MAX_VIDEO_BYTES=0); a positive cap aborts + discards an
+        over-large file. Returns True if a video row was written.
+
+        Dedup is by content SHA computed while streaming, so a partial/aborted
+        download leaves no media_items row and can be retried next cycle.
+        """
+        cid = hashlib.sha256(video_url.encode("utf-8")).hexdigest()[:16]
+        if self.is_known(cid):
+            return False
+        ext = _ext_from_known(video_url, VIDEO_EXTS, "mp4")
+        dest_dir = self.account_media_dir / "video"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        hasher = hashlib.sha256()
+        size = 0
+        fd, tmp_path = tempfile.mkstemp(dir=dest_dir, suffix=".part")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                async with client.stream("GET", video_url) as resp:
+                    if resp.status_code != 200:
+                        raise RuntimeError(f"status {resp.status_code}")
+                    ct = resp.headers.get("content-type", "").lower()
+                    if ct and not (ct.startswith("video/")
+                                   or ct in ("application/octet-stream",)
+                                   or _is_video_url(video_url)):
+                        raise RuntimeError(f"non-video content-type {ct}")
+                    async for chunk in resp.aiter_bytes(self._video_chunk_bytes):
+                        if not chunk:
+                            continue
+                        size += len(chunk)
+                        if self._max_video_bytes and size > self._max_video_bytes:
+                            raise RuntimeError(
+                                f"video exceeds cap {self._max_video_bytes}")
+                        f.write(chunk)
+                        hasher.update(chunk)
+            if size == 0:
+                raise RuntimeError("empty video body")
+            sha = hasher.hexdigest()
+            filename = self.build_filename(domain, domain, "video", cid, extension=ext)
+            dest = dest_dir / filename
+            os.replace(tmp_path, dest)
+            tmp_path = None
+            metadata = {
+                "entity_id": domain,
+                "entity_name": domain,
+                "content_type": "video",
+                "content_id": cid,
+                "source_url": video_url,
+                "file_size": size,
+                "collected_at": datetime.now(timezone.utc).isoformat(),
+            }
+            self.save_json(metadata, dest_dir / f"{Path(filename).stem}_metadata.json")
+            await self.insert_media_item(
+                entity_id=domain,
+                entity_name=domain,
+                content_type="video",
+                content_id=cid,
+                filename=filename,
+                file_path=str(dest),
+                file_size=size,
+                sha256=sha,
+                source_url=video_url,
+                metadata=metadata,
+            )
+            self._known_ids.add(cid)
+            logger.debug("video stored: %s (%d bytes)", video_url, size)
+            return True
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
 
     # ------------------------------------------------------------------ #
     # Generic media writer (used by image + pdf paths)

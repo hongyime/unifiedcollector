@@ -208,6 +208,14 @@ services:
       STRAVA_SPIDER_ENABLED: "true"
       STRAVA_FOLLOW_SCRAPE_ENABLED: "true"
       STRAVA_SPIDER_MAX_PER_CYCLE: "15"
+      # GPS-route backfill: ~33k activities still have stream_status=NULL (routes
+      # come from per-activity web-XHR stream fetches in cookie mode, not the
+      # 401'd summary_polyline). Bumped 150 -> 500/cycle to drain the backlog
+      # faster while keeping the polite 3-6s STRAVA_API_DELAY. 500 * ~6s worst
+      # case = 3000s, safely under COLLECTOR_HANG_TIMEOUT_SECONDS (7200) and the
+      # watchdog treats each fetched activity as progress. Tune down if Strava
+      # starts returning 429s.
+      STRAVA_GPS_BACKFILL_BATCH: "500"
       # CPU hygiene (A#4): low-volume / API-ceiling sources idle longer between
       # cycles — fewer wakeups, lower steady-state CPU, zero data loss.
       COLLECTOR_CYCLE_SLEEP_GITHUB: "900"

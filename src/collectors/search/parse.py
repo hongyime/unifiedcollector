@@ -9,7 +9,18 @@ from __future__ import annotations
 import os
 from urllib.parse import urlparse
 
-CONTENT_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".jfif", ".pdf"}
+# Assets the search crawler is allowed to fetch: images, PDF, office documents,
+# and videos. Audio and code/executables are deliberately absent so they're
+# never downloaded (matches the website spider's exclusion policy).
+CONTENT_EXTENSIONS = {
+    ".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".jfif", ".pdf",
+    # office / text documents
+    ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+    ".txt", ".rtf", ".csv", ".odt", ".ods", ".odp",
+    # videos
+    ".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v",
+    ".mpeg", ".mpg", ".wmv", ".flv", ".ogv", ".3gp",
+}
 
 ICON_KEYWORDS = {
     "icon", "logo", "favicon", "sprite", "thumb", "avatar", "badge",

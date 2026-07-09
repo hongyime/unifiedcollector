@@ -107,6 +107,36 @@ logger = logging.getLogger(__name__)
 CONTENT_EXTENSIONS = _parse_CONTENT_EXTENSIONS
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".jfif"}
 
+# Office/text documents and videos the search collector also captures (parity
+# with the website spider — COLLECTION_SPEC "media, documents and videos").
+DOC_EXTENSIONS = {
+    ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+    ".txt", ".rtf", ".csv", ".odt", ".ods", ".odp",
+}
+VIDEO_EXTENSIONS = {
+    ".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v",
+    ".mpeg", ".mpg", ".wmv", ".flv", ".ogv", ".3gp",
+}
+# Explicitly excluded — audio + code/executables are never downloaded.
+AUDIO_EXTENSIONS = {
+    ".mp3", ".wav", ".m4a", ".ogg", ".oga", ".flac", ".aac",
+    ".opus", ".wma", ".aiff", ".mid", ".midi",
+}
+CODE_EXTENSIONS = {
+    ".js", ".mjs", ".ts", ".jsx", ".tsx", ".py", ".rb", ".php", ".java",
+    ".c", ".h", ".cpp", ".cs", ".go", ".rs", ".sh", ".bat", ".ps1", ".pl",
+    ".lua", ".sql", ".exe", ".dll", ".so", ".dylib", ".bin", ".msi",
+    ".apk", ".jar", ".war",
+}
+_DOC_CONTENT_TYPES = (
+    "application/msword",
+    "application/vnd.openxmlformats-officedocument",
+    "application/vnd.ms-excel",
+    "application/vnd.ms-powerpoint",
+    "application/vnd.oasis.opendocument",
+    "application/rtf", "text/rtf", "text/csv",
+)
+
 ICON_KEYWORDS = _parse_ICON_KEYWORDS
 SKIP_EXTENSIONS = {".svg", ".webp", ".ico", ".cur", ".gif"}
 
@@ -195,6 +225,13 @@ class SearchCollector(BaseCollector):
         self._min_file_size = int(os.getenv("SEARCH_MIN_FILE_SIZE", "10240"))
         self._max_pdf_pages = int(os.getenv("SEARCH_MAX_PDF_PAGES", "50"))
         self._download_images = os.getenv("SEARCH_DOWNLOAD_IMAGES", "1") == "1"
+        # Documents (word/ppt/excel/text) and videos — parity with website spider.
+        self._download_docs = os.getenv("SEARCH_DOWNLOAD_DOCS", "1") == "1"
+        self._download_videos = os.getenv("SEARCH_DOWNLOAD_VIDEOS", "1") == "1"
+        self._max_doc_bytes = int(os.getenv("SEARCH_MAX_DOC_BYTES", str(50 * 1024 * 1024)))
+        # 0 = no video size cap (user decision); videos are streamed to disk.
+        self._max_video_bytes = int(os.getenv("SEARCH_MAX_VIDEO_BYTES", "0"))
+        self._video_chunk_bytes = int(os.getenv("SEARCH_VIDEO_CHUNK_BYTES", str(1024 * 1024)))
         self._spider_pages = os.getenv("SEARCH_SPIDER_PAGES", "1") == "1"
         self._bing_pages = int(os.getenv("SEARCH_BING_PAGES", "3"))
         self._serper_threshold = int(os.getenv("SEARCH_SERPER_THRESHOLD", "5"))
@@ -946,6 +983,16 @@ class SearchCollector(BaseCollector):
         if self.is_known(cid):
             return False
 
+        _ext = os.path.splitext(urlparse(url.lower()).path)[1]
+
+        # Never download audio or code/executables (user rule).
+        if _ext in AUDIO_EXTENSIONS or _ext in CODE_EXTENSIONS:
+            return False
+
+        # Videos: stream to disk (no cap) BEFORE buffering the body into memory.
+        if self._download_videos and _ext in VIDEO_EXTENSIONS:
+            return await self._stream_video(query, cid, url, source_url or url)
+
         async with self._sem:
             try:
                 async with self._make_client(timeout=30.0) as client:
@@ -975,12 +1022,18 @@ class SearchCollector(BaseCollector):
             "image" in ctype
             or ext in IMAGE_EXTENSIONS
         )
+        is_doc = self._download_docs and (
+            ext in DOC_EXTENSIONS
+            or any(t in ctype for t in _DOC_CONTENT_TYPES)
+        )
 
         q_slug = hashlib.sha256(query.encode()).hexdigest()[:12] if query else "spider"
         q_name = (query or "spider")[:50]
 
         if is_pdf:
             return await self._save_pdf(q_slug, q_name, cid, data, source_url or url)
+        if is_doc:
+            return await self._save_document(q_slug, q_name, cid, data, source_url or url, ext)
         if is_image:
             return await self._save_image(q_slug, q_name, cid, data, source_url or url)
         # Unknown content-type: try as image (PIL will reject if it's not).
@@ -1147,6 +1200,167 @@ class SearchCollector(BaseCollector):
                 None, self._extract_pdf_pages, data, dest_dir, Path(filename).stem,
             )
 
+        self._known_ids.add(content_id)
+        return True
+
+    async def _save_document(
+        self,
+        entity_id: str,
+        entity_name: str,
+        content_id: str,
+        data: bytes,
+        source_url: str,
+        ext: str,
+    ) -> bool:
+        """Persist an office/text document (word/ppt/excel/csv/txt/rtf) with
+        content_type 'document'. Byte-capped."""
+        if not data or len(data) > self._max_doc_bytes:
+            return False
+        clean_ext = (ext or ".bin").lstrip(".") or "bin"
+        filename = self.build_filename(
+            entity_id, entity_name, "document", content_id, extension=clean_ext,
+        )
+        dest_dir = self.account_media_dir / "document"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / filename
+        loop = asyncio.get_event_loop()
+
+        def _atomic_write() -> int:
+            fd, tmp_path = tempfile.mkstemp(dir=dest_dir, suffix=".tmp")
+            try:
+                with os.fdopen(fd, "wb") as f:
+                    f.write(data)
+                    f.flush()
+                    os.fsync(f.fileno())
+                size = os.path.getsize(tmp_path)
+                os.replace(tmp_path, dest)
+                return size
+            except BaseException:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+                raise
+
+        try:
+            file_size = await loop.run_in_executor(None, _atomic_write)
+        except Exception:
+            logger.exception("save document failed cid=%s url=%s", content_id, source_url)
+            return False
+
+        sha = self.sha256_bytes(data)
+        meta = {
+            "entity_id": entity_id,
+            "entity_name": entity_name,
+            "content_type": "document",
+            "content_id": content_id,
+            "collected_at": datetime.now(timezone.utc).isoformat(),
+            "source_url": source_url,
+        }
+        try:
+            self.save_json(meta, dest_dir / f"{Path(filename).stem}_metadata.json")
+        except Exception:
+            pass
+        try:
+            await self.insert_media_item(
+                entity_id=entity_id,
+                entity_name=entity_name,
+                content_type="document",
+                content_id=content_id,
+                filename=filename,
+                file_path=str(dest),
+                file_size=file_size,
+                sha256=sha,
+                source_url=source_url,
+                metadata=meta,
+            )
+        except Exception as e:
+            logger.debug("insert_media_item failed: %s", e)
+        self._known_ids.add(content_id)
+        return True
+
+    async def _stream_video(
+        self,
+        query: str,
+        content_id: str,
+        url: str,
+        source_url: str,
+    ) -> bool:
+        """Stream a video to disk in chunks (never buffered whole), no size cap
+        by default (SEARCH_MAX_VIDEO_BYTES=0). content_type 'video'."""
+        if self.is_known(content_id):
+            return False
+        ext = (os.path.splitext(urlparse(url.lower()).path)[1] or ".mp4").lstrip(".") or "mp4"
+        q_slug = hashlib.sha256(query.encode()).hexdigest()[:12] if query else "spider"
+        q_name = (query or "spider")[:50]
+        filename = self.build_filename(q_slug, q_name, "video", content_id, extension=ext)
+        dest_dir = self.account_media_dir / "video"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / filename
+        hasher = hashlib.sha256()
+        size = 0
+        fd, tmp_path = tempfile.mkstemp(dir=dest_dir, suffix=".part")
+        try:
+            async with self._sem:
+                with os.fdopen(fd, "wb") as f:
+                    async with self._make_client(timeout=120.0) as client:
+                        async with client.stream(
+                            "GET", url, headers=self._headers(urlparse(url).netloc)
+                        ) as resp:
+                            if resp.status_code != 200:
+                                raise RuntimeError(f"status {resp.status_code}")
+                            ct = resp.headers.get("content-type", "").lower()
+                            if ct and not (ct.startswith("video/")
+                                           or ct == "application/octet-stream"):
+                                raise RuntimeError(f"non-video content-type {ct}")
+                            async for chunk in resp.aiter_bytes(self._video_chunk_bytes):
+                                if not chunk:
+                                    continue
+                                size += len(chunk)
+                                if self._max_video_bytes and size > self._max_video_bytes:
+                                    raise RuntimeError("video exceeds cap")
+                                f.write(chunk)
+                                hasher.update(chunk)
+            if size < self._min_file_size:
+                raise RuntimeError("video too small")
+            os.replace(tmp_path, dest)
+            tmp_path = None
+        except Exception as e:
+            logger.debug("video stream failed for %s: %s", url, e)
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+            return False
+
+        sha = hasher.hexdigest()
+        meta = {
+            "entity_id": q_slug,
+            "entity_name": q_name,
+            "content_type": "video",
+            "content_id": content_id,
+            "collected_at": datetime.now(timezone.utc).isoformat(),
+            "source_url": source_url,
+            "file_size": size,
+        }
+        try:
+            self.save_json(meta, dest_dir / f"{Path(filename).stem}_metadata.json")
+        except Exception:
+            pass
+        try:
+            await self.insert_media_item(
+                entity_id=q_slug,
+                entity_name=q_name,
+                content_type="video",
+                content_id=content_id,
+                filename=filename,
+                file_path=str(dest),
+                file_size=size,
+                sha256=sha,
+                source_url=source_url,
+                metadata=meta,
+            )
+        except Exception as e:
+            logger.debug("insert_media_item failed: %s", e)
         self._known_ids.add(content_id)
         return True
 
