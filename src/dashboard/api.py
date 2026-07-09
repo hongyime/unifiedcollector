@@ -1242,6 +1242,143 @@ async def wa_user_history(jid: str, limit: int = 100,
     return [dict(r) for r in rows]
 
 
+# ── WhatsApp: Chats & messages (Baileys bridge → RabbitMQ → collector) ──
+#
+# Same two-pane pattern as /instagram/dms/threads + /instagram/dms/thread/{id}
+# but backed by whatsapp_chats + whatsapp_messages + whatsapp_users. The path
+# param on the message endpoint is the platform_chat_id (JID e.g.
+# 6591234567@s.whatsapp.net or 120363xxx@g.us) — chat_id in the DB is a uuid
+# so we look up by JID and rewrite to the fk before fetching messages.
+#
+# media_id is joined from media_items on file_path = media_url so the frontend
+# can reuse /media/{id}/thumbnail + /media/{id}/file (already drive-confined)
+# instead of a new WhatsApp-specific media proxy.
+
+@app.get("/whatsapp/chats")
+async def list_wa_chats(limit: int = 100,
+                        _user: dict = Depends(require_role("viewer"))):
+    """Recent WhatsApp chats with last-message preview and unread count.
+
+    Ordered by newest activity (max(chat.updated_at, latest message timestamp))
+    so an idle group with a fresh reply floats to the top. `message_count` is
+    the total, `last_text` is the preview (truncated) of the latest message.
+    """
+    limit = max(1, min(limit, 500))
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if await conn.fetchval("SELECT to_regclass('whatsapp_chats')") is None:
+            return []
+        # whatsapp_chats is tiny (~100 rows) vs. whatsapp_messages (~46k). Driving
+        # from the chats side and doing per-chat LATERAL lookups turns each
+        # last-message fetch into a single-tuple hit on
+        # idx_wa_messages_chat_ts (chat_id, timestamp DESC). Beats DISTINCT ON
+        # over the whole messages table (which forced a full seq scan +
+        # external-merge sort, ~4s).
+        #
+        # Deliberately NO per-chat message_count here: a count(*) LATERAL adds
+        # ~500ms for 101 chats (indexed but still walks every leaf per chat) —
+        # not worth the wall-clock. participant_count comes from the chats row
+        # and is enough for the sidebar; the detail view shows the loaded
+        # message run itself.
+        rows = await conn.fetch(
+            """
+            SELECT c.platform_chat_id,
+                   c.name,
+                   c.is_group,
+                   c.chat_type,
+                   c.participant_count,
+                   c.updated_at,
+                   lm."timestamp"          AS last_message_ts,
+                   lm.text                 AS last_text,
+                   lm.from_me              AS last_from_me,
+                   lm.media_mime_type      AS last_media_mime
+            FROM whatsapp_chats c
+            LEFT JOIN LATERAL (
+                SELECT "timestamp", text, from_me, media_mime_type
+                FROM whatsapp_messages
+                WHERE chat_id = c.id
+                ORDER BY "timestamp" DESC NULLS LAST
+                LIMIT 1
+            ) lm ON true
+            ORDER BY COALESCE(lm."timestamp", c.updated_at) DESC NULLS LAST
+            LIMIT $1
+            """,
+            limit,
+        )
+    return [dict(r) for r in rows]
+
+
+@app.get("/whatsapp/chat/{jid:path}")
+async def wa_chat_messages(jid: str, limit: int = 200,
+                            _user: dict = Depends(require_role("viewer"))):
+    """Messages for one WhatsApp chat (chronological, oldest first).
+
+    `jid` is the whatsapp_chats.platform_chat_id (uses :path so JIDs containing
+    slashes — e.g. broadcast lists — are accepted). Joins whatsapp_users for
+    sender display name + phone_number, and media_items for a stable media_id
+    the frontend can pass to /media/{id}/thumbnail.
+    """
+    limit = max(1, min(limit, 2000))
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if await conn.fetchval("SELECT to_regclass('whatsapp_chats')") is None:
+            return {"chat": None, "messages": []}
+        chat = await conn.fetchrow(
+            """
+            SELECT platform_chat_id, name, is_group, chat_type,
+                   participant_count, description, updated_at
+            FROM whatsapp_chats WHERE platform_chat_id = $1
+            """,
+            jid,
+        )
+        if chat is None:
+            return {"chat": None, "messages": []}
+        # Message-slice-then-join with scalar chat_id lookup: joining
+        # whatsapp_chats inside the WHERE stops the planner from using
+        # idx_wa_messages_chat_ts for ORDER BY (it can only use it when
+        # chat_id is bound to a scalar). With the scalar the ORDER BY DESC
+        # + LIMIT is a single index-range walk, ~200ms even for a 3.5k-msg
+        # channel. Reversed to chronological for display.
+        rows = await conn.fetch(
+            """
+            WITH msgs AS (
+                SELECT m.*
+                FROM whatsapp_messages m
+                WHERE m.chat_id = (
+                    SELECT id FROM whatsapp_chats WHERE platform_chat_id = $1
+                )
+                ORDER BY m."timestamp" DESC NULLS LAST
+                LIMIT $2
+            )
+            SELECT m.platform_message_id,
+                   m.from_me,
+                   m.text,
+                   m.media_url,
+                   m.media_mime_type,
+                   m.media_size,
+                   m.thumbnail_url,
+                   m."timestamp",
+                   m.is_deleted,
+                   m.deleted_at,
+                   m.quoted_text,
+                   m.forward_from_name,
+                   u.platform_user_id  AS sender_jid,
+                   u.pushname          AS sender_pushname,
+                   u.name              AS sender_name,
+                   u.phone_number      AS sender_phone,
+                   mi.id::text         AS media_id
+            FROM msgs m
+            LEFT JOIN whatsapp_users u ON u.id = m.sender_id
+            LEFT JOIN media_items mi ON mi.source = 'whatsapp'
+                                    AND mi.file_path = m.media_url
+            ORDER BY m."timestamp" DESC NULLS LAST
+            """,
+            jid, limit,
+        )
+    # Reverse to chronological (oldest first) for the chat UI.
+    return {"chat": dict(chat), "messages": [dict(r) for r in reversed(rows)]}
+
+
 # ── Instagram: DMs (captured ban-safely by the extension observing direct_v2) ──
 
 @app.get("/instagram/dms/threads")
@@ -2378,6 +2515,162 @@ poll('1'); poll('2');
 </script>
 </body></html>"""
     return HTMLResponse(html)
+
+
+# ── Telegram: chats + messages (realtime MTProto + full-history backfill) ──
+#
+# Rich per-chat detail page (dashboard /telegram/chats). Mirrors the shape of
+# /instagram/dms/{threads,thread} and /tiktok/dms/{threads,thread}: a list
+# endpoint keyed on the human-visible platform id, and a detail endpoint that
+# returns {chat, messages}. `platform_chat_id` (varchar UNIQUE on
+# telegram_chats) is used as the URL key rather than the internal UUID so the
+# URL is stable, greppable, and matches how the collector logs identify chats
+# ("-1001234567890"). Both endpoints degrade to an empty payload when the
+# tables aren't present yet (fresh boot / partial migration) rather than
+# 500ing the whole dashboard.
+
+@app.get("/telegram/chats")
+async def list_telegram_chats(owner: str | None = None, limit: int = 100,
+                              _user: dict = Depends(require_role("viewer"))):
+    """Recent Telegram chats, newest activity first.
+
+    Sort key is telegram_chats.updated_at — the collector bumps this on every
+    fresh MTProto chat snapshot, so it tracks activity closely enough that we
+    don't have to aggregate 1.2M+ telegram_messages rows on every dashboard
+    load. LIMIT ($1) is hard-capped at 500. ~6k chats × unsorted-column sort
+    is still sub-50ms in practice; if we ever need strict "last message ts"
+    ordering we can add a materialised chat-summary view or a compound index,
+    but that's a new migration and today's cost doesn't justify one.
+
+    `owner` is accepted for signature-parity with the IG/TT endpoints but the
+    Telegram collector shares one pool of chats across all 4 accounts, so
+    filtering by owner would require joining telegram_chat_members. Keeping
+    the parameter reserved so callers don't need to switch shape later.
+    """
+    _ = owner  # reserved for future per-owner filtering via telegram_chat_members
+    limit = max(1, min(limit, 500))
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if await conn.fetchval("SELECT to_regclass('telegram_chats')") is None:
+            return []
+        rows = await conn.fetch(
+            """
+            SELECT c.platform_chat_id,
+                   c.title,
+                   c.username,
+                   c.type,
+                   c.description,
+                   c.members_count,
+                   c.updated_at,
+                   c.collected_at
+            FROM telegram_chats c
+            ORDER BY c.updated_at DESC NULLS LAST
+            LIMIT $1
+            """,
+            limit,
+        )
+    return [dict(r) for r in rows]
+
+
+@app.get("/telegram/chat/{chat_id}")
+async def telegram_chat_detail(chat_id: str, limit: int = 200,
+                               _user: dict = Depends(require_role("viewer"))):
+    """Chat metadata + newest N messages for one Telegram chat.
+
+    `chat_id` is `telegram_chats.platform_chat_id` (e.g. "-1001234567890"),
+    matching how the IG/TT DM endpoints key on their platform thread ids.
+
+    Messages come back newest-first (`platform_created_at DESC`) up to LIMIT
+    (default 200, hard-capped at 1000). Sender identity is folded in via
+    telegram_users; the deletion signal is surfaced through
+    `metadata->>'deleted'` (the collector's partial index makes the flip
+    cheap on write and the accessor is a plain jsonb lookup on read).
+
+    Media rows are joined in from `media_items` (`source='telegram'`) using
+    the (entity_id, content_id) unique index — telegram's message id lives in
+    the second colon-separated segment of `platform_message_id`. Only the
+    media UUID is returned; the frontend already has /media/<uuid>/thumbnail
+    and /media/<uuid>/file wired up, so no extra API surface is needed.
+    """
+    limit = max(1, min(limit, 1000))
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if await conn.fetchval("SELECT to_regclass('telegram_chats')") is None:
+            return {"chat": None, "messages": []}
+        chat_row = await conn.fetchrow(
+            """
+            SELECT id,
+                   platform_chat_id,
+                   title,
+                   username,
+                   type,
+                   description,
+                   members_count,
+                   updated_at,
+                   collected_at
+            FROM telegram_chats
+            WHERE platform_chat_id = $1
+            """,
+            chat_id,
+        )
+        if not chat_row:
+            return {"chat": None, "messages": []}
+        chat = dict(chat_row)
+        chat_uuid = chat.pop("id")
+        # Total messages in this chat (uses idx_tg_messages_chat). Cheap even
+        # for the busiest chats (~63k rows top-end today).
+        chat["message_count"] = int(
+            await conn.fetchval(
+                "SELECT COUNT(*) FROM telegram_messages WHERE chat_id = $1",
+                chat_uuid,
+            )
+            or 0
+        )
+        rows = await conn.fetch(
+            """
+            WITH picked AS (
+                -- Filter+sort on ids only (32B rows) so Postgres doesn't have
+                -- to materialise every 500B-wide text/caption/metadata row
+                -- just to pick the top-N. This turns a ~200s cold-cache
+                -- worst-case (busiest 63k-msg chat) into a bounded scan.
+                SELECT id
+                FROM telegram_messages
+                WHERE chat_id = $1
+                ORDER BY platform_created_at DESC NULLS LAST, collected_at DESC
+                LIMIT $3
+            )
+            SELECT m.platform_message_id,
+                   m.text,
+                   m.caption,
+                   m.media_type,
+                   m.media_file_id,
+                   m.is_edited,
+                   m.edit_date,
+                   m.reply_to_message_id,
+                   m.platform_created_at,
+                   m.collected_at,
+                   (m.metadata->>'deleted' = 'true' IS TRUE)  AS is_deleted,
+                   m.metadata->>'deleted_at'                  AS deleted_at,
+                   u.platform_user_id                 AS sender_platform_id,
+                   u.username                         AS sender_username,
+                   u.first_name                       AS sender_first_name,
+                   u.last_name                        AS sender_last_name,
+                   mi.id                              AS media_item_id
+            FROM picked p
+            JOIN telegram_messages m ON m.id = p.id
+            LEFT JOIN telegram_users u ON u.id = m.sender_id
+            LEFT JOIN media_items mi
+                   ON mi.source = 'telegram'
+                  AND mi.entity_id = $2
+                  AND mi.content_id = split_part(m.platform_message_id, ':', 2)
+            ORDER BY m.platform_created_at DESC NULLS LAST, m.collected_at DESC
+            """,
+            chat_uuid, chat_id, limit,
+        )
+    return {
+        "chat": chat,
+        "messages": [dict(r) for r in rows],
+    }
 
 
 if DIST_DIR.is_dir():

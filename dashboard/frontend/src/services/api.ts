@@ -32,6 +32,10 @@ import type {
   TtDmMessage,
   DmTelemetry,
   WaSessionsResponse,
+  WaChat,
+  WaChatDetail,
+  TelegramChat,
+  TelegramMessage,
 } from "./types";
 
 function getToken(): string | null {
@@ -153,6 +157,15 @@ export const api = {
   },
   waUserHistory: (jid: string) => get<UserHistoryEntry[]>(`/whatsapp/users/${jid}/history`),
 
+  // WhatsApp chats + messages (recent-first list, chronological messages).
+  // jid is the platform_chat_id (may contain @ and dots — encodeURIComponent
+  // handles that; slashes are OK because the endpoint uses :path).
+  waChats: (limit = 100) => get<WaChat[]>(`/whatsapp/chats?limit=${limit}`),
+  waChat: (jid: string, limit = 200) =>
+    get<WaChatDetail>(
+      `/whatsapp/chat/${encodeURIComponent(jid)}?limit=${limit}`,
+    ),
+
   igDmThreads: (owner?: string, limit = 100) => {
     const params = new URLSearchParams({ limit: String(limit) });
     if (owner) params.set("owner", owner);
@@ -227,6 +240,19 @@ export const api = {
     post<{ status: string }>(`/api/telegram/accounts/${name}/enable`, {}),
   telegramAccountDisable: (name: string) =>
     post<{ status: string }>(`/api/telegram/accounts/${name}/disable`, {}),
+
+  // Rich per-chat detail view (dashboard /telegram/chats). List → detail is
+  // keyed on telegram_chats.platform_chat_id (e.g. "-1001234567890"), the
+  // same human-visible id that shows up in collector logs.
+  telegramChats: (owner?: string, limit = 100) => {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (owner) params.set("owner", owner);
+    return get<TelegramChat[]>(`/telegram/chats?${params}`);
+  },
+  telegramChat: (chatId: string, limit = 200) =>
+    get<{ chat: TelegramChat | null; messages: TelegramMessage[] }>(
+      `/telegram/chat/${encodeURIComponent(chatId)}?limit=${limit}`,
+    ),
 
 
 

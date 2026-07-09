@@ -206,6 +206,54 @@ export interface DmTelemetry {
   generated_at: string;
 }
 
+// WhatsApp chats + messages — /whatsapp/chats and /whatsapp/chat/{jid}. The
+// platform_chat_id (JID) doubles as the API path parameter; message rows carry
+// pushname/phone_number joined from whatsapp_users and a media_id joined from
+// media_items on file_path = media_url so the frontend can reuse
+// /media/{id}/thumbnail without a new proxy.
+export interface WaChat {
+  platform_chat_id: string;
+  name: string | null;
+  is_group: boolean;
+  chat_type: "dm" | "group" | "channel" | "broadcast" | string;
+  participant_count: number | null;
+  description?: string | null;
+  updated_at: string | null;
+  // No message_count in the list view — a per-chat count(*) LATERAL on the
+  // 46k-row messages table is ~500ms of unnecessary latency for a datapoint
+  // the sidebar doesn't need. Loaded messages in the detail view convey the
+  // same "how much" signal implicitly.
+  last_message_ts?: string | null;
+  last_text?: string | null;
+  last_from_me?: boolean | null;
+  last_media_mime?: string | null;
+}
+
+export interface WaMessage {
+  platform_message_id: string;
+  from_me: boolean;
+  text: string | null;
+  media_url: string | null;
+  media_mime_type: string | null;
+  media_size: number | null;
+  thumbnail_url: string | null;
+  timestamp: string | null;
+  is_deleted: boolean;
+  deleted_at: string | null;
+  quoted_text: string | null;
+  forward_from_name: string | null;
+  sender_jid: string | null;
+  sender_pushname: string | null;
+  sender_name: string | null;
+  sender_phone: string | null;
+  media_id: string | null;
+}
+
+export interface WaChatDetail {
+  chat: WaChat | null;
+  messages: WaMessage[];
+}
+
 export interface DiscoveredLink {
   id: number;
   link: string;
@@ -321,6 +369,46 @@ export interface TelegramAccountRow {
   status: string | null;
   last_connected_at: string | null;
   last_error: string | null;
+}
+
+// Telegram: rich chats+messages detail page (dashboard /telegram/chats). Keyed
+// on `platform_chat_id` (the human-visible varchar UNIQUE), not the internal
+// UUID, so URLs stay stable across DB rebuilds and match collector log ids.
+export interface TelegramChat {
+  platform_chat_id: string;
+  title: string | null;
+  username: string | null;
+  type: string | null;
+  description: string | null;
+  members_count: number | null;
+  updated_at: string | null;
+  collected_at: string | null;
+  message_count?: number;  // only set on the detail endpoint
+}
+
+// One row from /telegram/chat/{chat_id}.messages. `is_deleted` is derived from
+// telegram_messages.metadata->>'deleted' (the collector's partial index),
+// and `media_item_id` — when present — is the UUID for the existing
+// /media/<uuid>/thumbnail + /media/<uuid>/file endpoints, so the client can
+// show inline media without an extra fetch.
+export interface TelegramMessage {
+  platform_message_id: string;
+  text: string | null;
+  caption: string | null;
+  media_type: string | null;
+  media_file_id: string | null;
+  is_edited: boolean;
+  edit_date: string | null;
+  reply_to_message_id: string | null;
+  platform_created_at: string | null;
+  collected_at: string;
+  is_deleted: boolean;
+  deleted_at: string | null;
+  sender_platform_id: string | null;
+  sender_username: string | null;
+  sender_first_name: string | null;
+  sender_last_name: string | null;
+  media_item_id: string | null;
 }
 export interface WhatsAppSession {
   session: string;

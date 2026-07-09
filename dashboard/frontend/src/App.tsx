@@ -21,12 +21,14 @@ import { AccountsPage } from "./features/accounts/AccountsPage";
 import { PlatformPage } from "./features/platform/PlatformPage";
 import { LinksPage } from "./features/whatsapp/LinksPage";
 import { WhatsAppLinkPage } from "./features/whatsapp/WhatsAppLinkPage";
+import { WhatsAppChatsPage } from "./features/whatsapp/WhatsAppChatsPage";
 import { StravaFeedPage } from "./features/strava/StravaFeedPage";
 import { InstagramDmPage } from "./features/instagram/InstagramDmPage";
 import { TiktokDmPage } from "./features/tiktok/TiktokDmPage";
 import { LoginPage } from "./features/auth/LoginPage";
 import { TelegramAccountsPage } from "./features/telegram/TelegramAccountsPage";
 import { TelegramStatsPage } from "./features/telegram/TelegramStatsPage";
+import { TelegramChatsPage } from "./features/telegram/TelegramChatsPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -58,11 +60,13 @@ const router = createBrowserRouter([
       { path: "whatsapp/users", element: <UsersPage /> },
       { path: "whatsapp/links", element: <LinksPage /> },
       { path: "whatsapp/link", element: <WhatsAppLinkPage /> },
+      { path: "whatsapp/chats", element: <WhatsAppChatsPage /> },
       { path: "strava/feed", element: <StravaFeedPage /> },
       { path: "instagram/dms", element: <InstagramDmPage /> },
       { path: "tiktok/dms", element: <TiktokDmPage /> },
       { path: "telegram/accounts", element: <TelegramAccountsPage /> },
       { path: "telegram/stats", element: <TelegramStatsPage /> },
+      { path: "telegram/chats", element: <TelegramChatsPage /> },
       { path: "dlq", element: <DLQPage /> },
       { path: "health", element: <HealthPage /> },
       { path: "settings", element: <SettingsPage /> },
