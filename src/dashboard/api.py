@@ -3116,6 +3116,105 @@ async def github_repo_detail(full_name: str, limit: int = 200, _user: dict = Dep
     return {"repo": repo, "commits": out_commits}
 
 
+# ---------------------------------------------------------------------------
+# Lemon8 feed (profiles + posts)
+# ---------------------------------------------------------------------------
+
+@app.get("/lemon8/profiles")
+async def list_lemon8_profiles(limit: int = 100, _user: dict = Depends(require_role("viewer"))):
+    """Lemon8 profiles and collection stats."""
+    limit = max(1, min(limit, 500))
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if await conn.fetchval("SELECT to_regclass('lemon8_profiles')") is None:
+            return []
+        rows = await conn.fetch(
+            """
+            SELECT p.id,
+                   p.platform_user_id,
+                   p.username,
+                   p.nickname,
+                   p.avatar_url,
+                   p.bio,
+                   p.followers_count,
+                   p.following_count,
+                   p.like_count,
+                   p.updated_at,
+                   (SELECT COUNT(*) FROM lemon8_posts WHERE profile_id = p.id) AS posts_collected,
+                   (SELECT MAX(platform_created_at) FROM lemon8_posts WHERE profile_id = p.id) AS last_post_at
+            FROM lemon8_profiles p
+            ORDER BY p.followers_count DESC NULLS LAST, p.updated_at DESC
+            LIMIT $1
+            """,
+            limit,
+        )
+    return [dict(r) for r in rows]
+
+@app.get("/lemon8/profile/{username}")
+async def lemon8_profile_detail(username: str, limit: int = 200, _user: dict = Depends(require_role("viewer"))):
+    """Posts for one Lemon8 account."""
+    limit = max(1, min(limit, 500))
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if await conn.fetchval("SELECT to_regclass('lemon8_profiles')") is None:
+            return {"profile": None, "posts": []}
+            
+        profile_row = await conn.fetchrow(
+            """
+            SELECT p.id,
+                   p.platform_user_id,
+                   p.username,
+                   p.nickname,
+                   p.avatar_url,
+                   p.bio,
+                   p.followers_count,
+                   p.following_count,
+                   p.like_count,
+                   p.updated_at
+            FROM lemon8_profiles p
+            WHERE p.username = $1
+            """,
+            username
+        )
+        if not profile_row:
+            return {"profile": None, "posts": []}
+            
+        profile = dict(profile_row)
+        profile_uuid = profile.pop("id")
+            
+        posts = await conn.fetch(
+            """
+            SELECT p.platform_post_id,
+                   p.title,
+                   p.description,
+                   p.music_title,
+                   p.like_count,
+                   p.comment_count,
+                   p.share_count,
+                   p.platform_created_at,
+                   p.collected_at,
+                   mi.id AS media_item_id,
+                   mi.content_type AS media_content_type
+            FROM lemon8_posts p
+            LEFT JOIN media_items mi
+                   ON mi.source = 'lemon8'
+                  AND mi.content_id = p.platform_post_id
+            WHERE p.profile_id = $1
+            ORDER BY p.platform_created_at DESC NULLS LAST, p.collected_at DESC
+            LIMIT $2
+            """,
+            profile_uuid, limit,
+        )
+        
+    out_posts = []
+    for r in posts:
+        d = dict(r)
+        d["post_url"] = f"https://www.lemon8-app.com/{username}/post/{d['platform_post_id']}"
+        out_posts.append(d)
+        
+    return {"profile": profile, "posts": out_posts}
+
+
 if DIST_DIR.is_dir():
     app.mount("/assets", StaticFiles(directory=str(DIST_DIR / "assets")), name="assets")
 

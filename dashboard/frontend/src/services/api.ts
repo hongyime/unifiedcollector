@@ -38,6 +38,8 @@ import type {
   YoutubeChannelDetail,
   GithubRepo,
   GithubRepoDetail,
+  Lemon8Profile,
+  Lemon8ProfileDetail,
   DmTelemetry,
   WaSessionsResponse,
   WaChat,
@@ -225,6 +227,13 @@ export const api = {
   githubRepo: (fullName: string, limit = 200) =>
     get<GithubRepoDetail>(
       `/github/repo/${encodeURIComponent(fullName)}?limit=${limit}`,
+    ),
+
+  lemon8Profiles: (limit = 100) =>
+    get<Lemon8Profile[]>(`/lemon8/profiles?limit=${limit}`),
+  lemon8Profile: (username: string, limit = 200) =>
+    get<Lemon8ProfileDetail>(
+      `/lemon8/profile/${encodeURIComponent(username)}?limit=${limit}`,
     ),
 
   // P1.2: passive telemetry surface. Populated by dm_probe_handler +

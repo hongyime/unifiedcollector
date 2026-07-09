@@ -38,7 +38,7 @@ const groups = [
     items: [
       { to: "/platform/instagram", label: "Instagram", icon: ImageIcon },
       { to: "/tiktok/feed", label: "TikTok", icon: ImageIcon },
-      { to: "/platform/lemon8", label: "Lemon8", icon: ImageIcon },
+      { to: "/lemon8/feed", label: "Lemon8", icon: ImageIcon },
       { to: "/threads/feed", label: "Threads", icon: ImageIcon },
       { to: "/platform/x", label: "X", icon: ImageIcon },
       { to: "/platform/facebook", label: "Facebook", icon: ImageIcon },

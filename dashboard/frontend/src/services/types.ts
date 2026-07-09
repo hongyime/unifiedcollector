@@ -303,6 +303,40 @@ export interface GithubRepoDetail {
   commits: GithubCommit[];
 }
 
+export interface Lemon8Profile {
+  platform_user_id: string;
+  username: string | null;
+  nickname: string | null;
+  avatar_url: string | null;
+  bio: string | null;
+  followers_count: number | null;
+  following_count: number | null;
+  like_count: number | null;
+  updated_at: string | null;
+  posts_collected?: number;
+  last_post_at?: string | null;
+}
+
+export interface Lemon8Post {
+  platform_post_id: string;
+  title: string | null;
+  description: string | null;
+  music_title: string | null;
+  like_count: number | null;
+  comment_count: number | null;
+  share_count: number | null;
+  platform_created_at: string | null;
+  collected_at: string | null;
+  media_item_id: string | null;
+  media_content_type: string | null;
+  post_url: string;
+}
+
+export interface Lemon8ProfileDetail {
+  profile: Lemon8Profile | null;
+  posts: Lemon8Post[];
+}
+
 // Passive DM WS-hook telemetry (P1.2). One entry per platform the extension's
 // observe-only WS wrapper has ever seen; `probe`/`sample` mirror event_type
 // in dm_probe_log. Null last_seen means "never" — most useful signal for

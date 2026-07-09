@@ -29,6 +29,7 @@ import { TiktokFeedPage } from "./features/tiktok/TiktokFeedPage";
 import { ThreadsFeedPage } from "./features/threads/ThreadsFeedPage";
 import { YoutubeFeedPage } from "./features/youtube/YoutubeFeedPage";
 import { GithubFeedPage } from "./features/github/GithubFeedPage";
+import { Lemon8FeedPage } from "./features/lemon8/Lemon8FeedPage";
 import { LoginPage } from "./features/auth/LoginPage";
 import { TelegramAccountsPage } from "./features/telegram/TelegramAccountsPage";
 import { TelegramStatsPage } from "./features/telegram/TelegramStatsPage";
@@ -72,6 +73,7 @@ const router = createBrowserRouter([
       { path: "threads/feed", element: <ThreadsFeedPage /> },
       { path: "youtube/feed", element: <YoutubeFeedPage /> },
       { path: "github/feed", element: <GithubFeedPage /> },
+      { path: "lemon8/feed", element: <Lemon8FeedPage /> },
       { path: "telegram/accounts", element: <TelegramAccountsPage /> },
       { path: "telegram/stats", element: <TelegramStatsPage /> },
       { path: "telegram/chats", element: <TelegramChatsPage /> },
