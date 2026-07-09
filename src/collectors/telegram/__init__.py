@@ -2571,6 +2571,36 @@ class TelegramCollector(BaseCollector):
                 "SELECT id FROM telegram_chats WHERE platform_chat_id = $1",
                 str(chat_id),
             )
+            if chat_row is None:
+                # The chat_id passed here doesn't always match telegram_chats'
+                # platform_chat_id (raw peer id) format — some backfill/discussion
+                # paths pass a different form, so the lookup missed and the message
+                # landed with a NULL chat_id, orphaning it from the dashboard
+                # (was ~8% / 101k rows). Resolve via the message's OWN peer (raw
+                # id) and create a minimal chat row if it's genuinely new, so a
+                # message is never orphaned. Existing rows are healed by
+                # tmp/backfill_telegram_chat_id.py.
+                peer = getattr(message, "peer_id", None)
+                raw_pid = None
+                if peer is not None:
+                    raw_pid = (getattr(peer, "channel_id", None)
+                               or getattr(peer, "chat_id", None)
+                               or getattr(peer, "user_id", None))
+                if raw_pid is not None:
+                    ptype = type(peer).__name__
+                    ctype = ("channel" if ptype == "PeerChannel"
+                             else "group" if ptype == "PeerChat"
+                             else "user" if ptype == "PeerUser" else None)
+                    chat_row = await conn.fetchrow(
+                        """
+                        INSERT INTO telegram_chats (platform_chat_id, type)
+                        VALUES ($1, $2)
+                        ON CONFLICT (platform_chat_id) DO UPDATE
+                            SET platform_chat_id = EXCLUDED.platform_chat_id
+                        RETURNING id
+                        """,
+                        str(raw_pid), ctype,
+                    )
             chat_uuid = chat_row["id"] if chat_row else None
 
             sender_uuid = None
