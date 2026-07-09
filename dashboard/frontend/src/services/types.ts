@@ -210,6 +210,33 @@ export interface TtProfileDetail {
   posts: TtPost[];
 }
 
+export interface ThreadsProfile {
+  username: string;
+  posts_collected: number;
+  last_post_at: string | null;
+  avatar_url: string | null;
+}
+
+export interface ThreadsPost {
+  platform_post_id: string;
+  caption: string | null;
+  hashtags: string[] | null;
+  likes_count: number | null;
+  comments_count: number | null;
+  reposts_count: number | null;
+  media_type: string | null;
+  platform_created_at: string | null;
+  collected_at: string | null;
+  media_item_id: string | null;
+  media_content_type: string | null;
+  post_url: string;
+}
+
+export interface ThreadsProfileDetail {
+  profile: ThreadsProfile | null;
+  posts: ThreadsPost[];
+}
+
 // Passive DM WS-hook telemetry (P1.2). One entry per platform the extension's
 // observe-only WS wrapper has ever seen; `probe`/`sample` mirror event_type
 // in dm_probe_log. Null last_seen means "never" — most useful signal for

@@ -32,6 +32,8 @@ import type {
   TtDmMessage,
   TtProfile,
   TtProfileDetail,
+  ThreadsProfile,
+  ThreadsProfileDetail,
   DmTelemetry,
   WaSessionsResponse,
   WaChat,
@@ -198,6 +200,13 @@ export const api = {
   tiktokProfile: (username: string, limit = 200) =>
     get<TtProfileDetail>(
       `/tiktok/profile/${encodeURIComponent(username)}?limit=${limit}`,
+    ),
+
+  threadsProfiles: (limit = 100) =>
+    get<ThreadsProfile[]>(`/threads/profiles?limit=${limit}`),
+  threadsProfile: (username: string, limit = 200) =>
+    get<ThreadsProfileDetail>(
+      `/threads/profile/${encodeURIComponent(username)}?limit=${limit}`,
     ),
 
   // P1.2: passive telemetry surface. Populated by dm_probe_handler +
