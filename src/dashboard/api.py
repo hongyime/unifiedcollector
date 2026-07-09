@@ -3316,7 +3316,7 @@ async def beeper_chat_detail(chat_id: str, limit: int = 200, _user: dict = Depen
                    m.sort_key,
                    -- beeper_shadow_messages has no is_media/media_url/media_type
                    -- columns; media is inferred from msg_type + attachments and
-                   -- previewed through the media_items join below.
+                   -- previewed through the media_items map attached below.
                    (m.msg_type IN ('IMAGE','VIDEO','STICKER','FILE','VOICE','AUDIO')
                     OR (m.attachments IS NOT NULL
                         AND m.attachments::text NOT IN ('null','[]','{}'))) AS is_media,
@@ -3324,27 +3324,48 @@ async def beeper_chat_detail(chat_id: str, limit: int = 200, _user: dict = Depen
                    m.msg_type AS media_type,
                    m.is_deleted,
                    m.deleted_at,
-                   m.ingested_at,
-                   mi.id AS media_item_id
+                   m.ingested_at
             FROM beeper_shadow_messages m
-            LEFT JOIN media_items mi
-                   ON mi.source = 'beeper'
-                  AND mi.content_id = m.message_id
             WHERE m.chat_id = $1
             ORDER BY m.timestamp DESC NULLS LAST
             LIMIT $2
             """,
             chat_id, limit,
         )
-        
+
+        # The beeper collector keys media as content_id = "{message_id}_{att}"
+        # (see BeeperMediaArchiver), so an exact content_id = message_id join
+        # never matched — that's why the page showed no thumbnails despite
+        # ~11.8k beeper media rows on disk. Recover the message_id via the
+        # leading split_part segment, but ONLY for this chat's message ids
+        # (= ANY) so it's a single ~0.9s scan instead of a 7s DISTINCT ON over
+        # all beeper media on every open.
+        mids = [m["message_id"] for m in messages]
+        media_map: dict[str, str] = {}
+        if mids:
+            media_rows = await conn.fetch(
+                """
+                SELECT DISTINCT ON (split_part(content_id, '_', 1))
+                       split_part(content_id, '_', 1) AS mid,
+                       id AS media_item_id
+                FROM media_items
+                WHERE source = 'beeper'
+                  AND split_part(content_id, '_', 1) = ANY($1::text[])
+                ORDER BY split_part(content_id, '_', 1), collected_at
+                """,
+                mids,
+            )
+            media_map = {r["mid"]: r["media_item_id"] for r in media_rows}
+
     out_messages = []
     for r in messages:
         d = dict(r)
+        d["media_item_id"] = media_map.get(d["message_id"])
         out_messages.append(d)
-        
+
     # Reverse so oldest is first for chat UI
     out_messages.reverse()
-        
+
     return {"chat": chat, "messages": out_messages}
 
 
