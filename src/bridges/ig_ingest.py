@@ -492,6 +492,22 @@ def _num(v):
         return None
 
 
+_HANDLE_RE = re.compile(r"^[A-Za-z0-9._]{2,30}$")
+
+
+def _derive_handle_from_caption(caption):
+    """Recover a threads/facebook author handle when the extension left
+    author_username empty but dumped the whole post block into the caption
+    ("<handle>\\n<relative time>\\n<caption>"). Returns the first line only when
+    it's a clean handle (no spaces) — this rejects repost headers like
+    "x reposted 1h ago". Mirrors tmp/backfill_threads_author.py so new posts
+    self-heal instead of landing with NULL author. Returns None if unsure."""
+    if not caption:
+        return None
+    first = caption.split("\n", 1)[0].strip()
+    return first if _HANDLE_RE.match(first) else None
+
+
 # ---------------------------------------------------------------------------
 # structured post + comment metadata (captions/likes/comments threads)
 # ---------------------------------------------------------------------------
@@ -570,6 +586,14 @@ async def _save_posts(pool, platform, posts) -> int:
                 else:  # threads / facebook
                     table = "threads_posts" if platform == "threads" else "facebook_posts"
                     extra_col = "reposts_count" if platform == "threads" else "shares_count"
+                    # Self-heal: the threads/facebook extension scraper sometimes
+                    # leaves author_username empty and puts "<handle>\n<time>\n..."
+                    # in the caption. Recover the handle so the row isn't orphaned
+                    # (was ~56% of threads posts). See _derive_handle_from_caption.
+                    if not p.get("author_username"):
+                        _h = _derive_handle_from_caption(p.get("caption"))
+                        if _h:
+                            p["author_username"] = _h
                     await conn.execute(
                         f"""
                         INSERT INTO {table}
