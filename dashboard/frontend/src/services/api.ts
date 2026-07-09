@@ -40,6 +40,8 @@ import type {
   GithubRepoDetail,
   Lemon8Profile,
   Lemon8ProfileDetail,
+  BeeperChat,
+  BeeperChatDetail,
   DmTelemetry,
   WaSessionsResponse,
   WaChat,
@@ -234,6 +236,13 @@ export const api = {
   lemon8Profile: (username: string, limit = 200) =>
     get<Lemon8ProfileDetail>(
       `/lemon8/profile/${encodeURIComponent(username)}?limit=${limit}`,
+    ),
+
+  beeperChats: (limit = 100) =>
+    get<BeeperChat[]>(`/beeper/chats?limit=${limit}`),
+  beeperChat: (chatId: string, limit = 200) =>
+    get<BeeperChatDetail>(
+      `/beeper/chat/${encodeURIComponent(chatId)}?limit=${limit}`,
     ),
 
   // P1.2: passive telemetry surface. Populated by dm_probe_handler +

@@ -50,7 +50,8 @@ const groups = [
     items: [
       { to: "/telegram/chats", label: "Telegram", icon: MessageCircle },
       { to: "/platform/whatsapp", label: "WhatsApp", icon: MessageCircle },
-      { to: "/platform/beeper", label: "Beeper", icon: MessageCircle },
+      { to: "/beeper/chats", label: "Beeper", icon: MessageCircle },
+      { to: "/platform/discord", label: "Discord", icon: MessageCircle },
     ],
   },
   {

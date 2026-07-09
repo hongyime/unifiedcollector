@@ -337,6 +337,41 @@ export interface Lemon8ProfileDetail {
   posts: Lemon8Post[];
 }
 
+export interface BeeperChat {
+  chat_id: string;
+  local_chat_id: string | null;
+  network: string;
+  title: string | null;
+  img_url: string | null;
+  is_direct: boolean | null;
+  account_id: string | null;
+  last_seen_at: string | null;
+  messages_collected?: number;
+  last_message_at?: string | null;
+}
+
+export interface BeeperMessage {
+  message_id: string;
+  network: string;
+  sender_id: string | null;
+  sender_name: string | null;
+  text: string | null;
+  timestamp: string | null;
+  sort_key: string | null;
+  is_media: boolean | null;
+  media_url: string | null;
+  media_type: string | null;
+  is_deleted: boolean | null;
+  deleted_at: string | null;
+  ingested_at: string | null;
+  media_item_id: string | null;
+}
+
+export interface BeeperChatDetail {
+  chat: BeeperChat | null;
+  messages: BeeperMessage[];
+}
+
 // Passive DM WS-hook telemetry (P1.2). One entry per platform the extension's
 // observe-only WS wrapper has ever seen; `probe`/`sample` mirror event_type
 // in dm_probe_log. Null last_seen means "never" — most useful signal for

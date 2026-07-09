@@ -3215,6 +3215,105 @@ async def lemon8_profile_detail(username: str, limit: int = 200, _user: dict = D
     return {"profile": profile, "posts": out_posts}
 
 
+# ---------------------------------------------------------------------------
+# Beeper feed (chats + messages)
+# ---------------------------------------------------------------------------
+
+@app.get("/beeper/chats")
+async def list_beeper_chats(limit: int = 100, _user: dict = Depends(require_role("viewer"))):
+    """Beeper chats and collection stats."""
+    limit = max(1, min(limit, 500))
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if await conn.fetchval("SELECT to_regclass('beeper_shadow_chats')") is None:
+            return []
+        rows = await conn.fetch(
+            """
+            SELECT c.chat_id,
+                   c.local_chat_id,
+                   c.network,
+                   c.title,
+                   c.img_url,
+                   c.is_direct,
+                   c.account_id,
+                   c.last_seen_at,
+                   (SELECT COUNT(*) FROM beeper_shadow_messages WHERE chat_id = c.chat_id) AS messages_collected,
+                   (SELECT MAX(timestamp) FROM beeper_shadow_messages WHERE chat_id = c.chat_id) AS last_message_at
+            FROM beeper_shadow_chats c
+            ORDER BY c.last_seen_at DESC NULLS LAST
+            LIMIT $1
+            """,
+            limit,
+        )
+    return [dict(r) for r in rows]
+
+@app.get("/beeper/chat/{chat_id:path}")
+async def beeper_chat_detail(chat_id: str, limit: int = 200, _user: dict = Depends(require_role("viewer"))):
+    """Messages for one Beeper chat."""
+    limit = max(1, min(limit, 500))
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if await conn.fetchval("SELECT to_regclass('beeper_shadow_chats')") is None:
+            return {"chat": None, "messages": []}
+            
+        chat_row = await conn.fetchrow(
+            """
+            SELECT c.chat_id,
+                   c.local_chat_id,
+                   c.network,
+                   c.title,
+                   c.img_url,
+                   c.is_direct,
+                   c.account_id,
+                   c.last_seen_at
+            FROM beeper_shadow_chats c
+            WHERE c.chat_id = $1
+            """,
+            chat_id
+        )
+        if not chat_row:
+            return {"chat": None, "messages": []}
+            
+        chat = dict(chat_row)
+            
+        messages = await conn.fetch(
+            """
+            SELECT m.message_id,
+                   m.network,
+                   m.sender_id,
+                   m.sender_name,
+                   m.text,
+                   m.timestamp,
+                   m.sort_key,
+                   m.is_media,
+                   m.media_url,
+                   m.media_type,
+                   m.is_deleted,
+                   m.deleted_at,
+                   m.ingested_at,
+                   mi.id AS media_item_id
+            FROM beeper_shadow_messages m
+            LEFT JOIN media_items mi
+                   ON mi.source = 'beeper'
+                  AND mi.content_id = m.message_id
+            WHERE m.chat_id = $1
+            ORDER BY m.timestamp DESC NULLS LAST
+            LIMIT $2
+            """,
+            chat_id, limit,
+        )
+        
+    out_messages = []
+    for r in messages:
+        d = dict(r)
+        out_messages.append(d)
+        
+    # Reverse so oldest is first for chat UI
+    out_messages.reverse()
+        
+    return {"chat": chat, "messages": out_messages}
+
+
 if DIST_DIR.is_dir():
     app.mount("/assets", StaticFiles(directory=str(DIST_DIR / "assets")), name="assets")
 
