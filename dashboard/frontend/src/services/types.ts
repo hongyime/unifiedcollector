@@ -247,6 +247,11 @@ export interface WaMessage {
   sender_name: string | null;
   sender_phone: string | null;
   media_id: string | null;
+  // Server truncates individual messages > 4 KB so the response body doesn't
+  // blow past the 3s SLA on chats with rare oversized forwards. Untouched
+  // when short.
+  text_truncated?: boolean;
+  text_full_length?: number;
 }
 
 export interface WaChatDetail {

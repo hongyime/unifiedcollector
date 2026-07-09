@@ -1375,8 +1375,25 @@ async def wa_chat_messages(jid: str, limit: int = 200,
             """,
             jid, limit,
         )
-    # Reverse to chronological (oldest first) for the chat UI.
-    return {"chat": dict(chat), "messages": [dict(r) for r in reversed(rows)]}
+    # Reverse to chronological (oldest first) for the chat UI. Cap individual
+    # message text at 1500 chars to bound the response body — the whatsapp_
+    # messages p95 text length is 638 chars, so 1500 is a comfortable ceiling
+    # for anything a person actually typed. A handful of forwards / bot
+    # dumps are 6–38KB each; multiplied by 200 rows those blow the payload
+    # past 1.4 MB and take stdlib json.dumps 5+ seconds to encode. Rows
+    # carrying truncated text set text_truncated so the frontend can offer
+    # a "show full" affordance later.
+    _TEXT_CAP = 1500
+    messages = []
+    for r in reversed(rows):
+        d = dict(r)
+        text = d.get("text")
+        if text is not None and len(text) > _TEXT_CAP:
+            d["text"] = text[:_TEXT_CAP]
+            d["text_truncated"] = True
+            d["text_full_length"] = len(text)
+        messages.append(d)
+    return {"chat": dict(chat), "messages": messages}
 
 
 # ── Instagram: DMs (captured ban-safely by the extension observing direct_v2) ──

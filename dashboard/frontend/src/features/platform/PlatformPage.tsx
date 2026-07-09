@@ -10,7 +10,7 @@ import { relativeTime } from "../../utils/formatters";
 const SPECIALIZED: Record<string, { to: string; label: string }[]> = {
   strava: [{ to: "/strava/feed", label: "Activity feed" }],
   telegram: [{ to: "/telegram/accounts", label: "Onboard accounts" }, { to: "/telegram/stats", label: "Stats" }],
-  whatsapp: [{ to: "/whatsapp/link", label: "Link device" }, { to: "/whatsapp/links", label: "Links" }],
+  whatsapp: [{ to: "/whatsapp/chats", label: "Chats" }, { to: "/whatsapp/link", label: "Link device" }, { to: "/whatsapp/links", label: "Links" }],
   instagram: [{ to: "/instagram/dms", label: "Messages" }],
   tiktok: [{ to: "/tiktok/dms", label: "Messages" }],
 };
