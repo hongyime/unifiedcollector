@@ -4,21 +4,101 @@ import { api } from "../../services/api";
 import { Header } from "../../components/layout/Header";
 import { LoadingSpinner } from "../../components/ui/LoadingSpinner";
 import { ErrorState } from "../../components/ui/ErrorState";
+import { decodePolyline, polylineToSvgPath } from "./polyline";
 
-function formatDistance(m: number | null): string {
+// `distance` is meters (Strava API convention); `distance_unit` is the athlete's
+// display preference ('mi' | 'km'). Convert on render so the value matches what
+// the athlete sees on strava.com. Default 'mi' matches the DB column default.
+function formatDistance(m: number | null, unit: string | null): string {
+  if (m == null) return "—";
+  const u = (unit || "mi").toLowerCase();
+  if (u === "km") return `${(m / 1000).toFixed(2)} km`;
+  return `${(m / 1609.344).toFixed(2)} mi`;
+}
+
+// Total-stats row can't know per-athlete unit — default to km there, keep
+// per-row formatting unit-aware.
+function formatDistanceKm(m: number | null): string {
   if (m == null) return "—";
   if (m >= 1000) return `${(m / 1000).toFixed(2)} km`;
   return `${Math.round(m)} m`;
 }
 
+// mm:ss for sub-hour, h:mm:ss for longer. Matches what Strava shows for a run.
 function formatDuration(s: number | null): string {
   if (s == null) return "—";
   const h = Math.floor(s / 3600);
   const m = Math.floor((s % 3600) / 60);
   const sec = s % 60;
-  if (h > 0) return `${h}h ${m}m`;
-  if (m > 0) return `${m}m ${sec}s`;
-  return `${sec}s`;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  if (h > 0) return `${h}:${pad(m)}:${pad(sec)}`;
+  return `${m}:${pad(sec)}`;
+}
+
+// Emoji icon per activity type. Broad synonyms — Strava has ~40 sport_type
+// values, most collapse to a handful of glyphs. Falls back to a compass so
+// unknown types are still visually distinct from the "detail pending" pill.
+function activityIcon(type: string | null, sportType: string | null): string {
+  const t = (sportType || type || "").toLowerCase();
+  if (t.includes("trailrun")) return "🥾";
+  if (t.includes("run")) return "🏃";
+  if (t.includes("walk") || t.includes("hike")) return "🚶";
+  if (t.includes("ride") || t.includes("cycle") || t.includes("bike")) return "🚴";
+  if (t.includes("swim")) return "🏊";
+  if (t.includes("yoga")) return "🧘";
+  if (t.includes("row")) return "🚣";
+  if (t.includes("ski") || t.includes("snowboard")) return "⛷️";
+  if (t.includes("workout") || t.includes("weight") || t.includes("crossfit")) return "🏋️";
+  if (t.includes("kayak") || t.includes("canoe") || t.includes("paddle")) return "🛶";
+  if (t.includes("golf")) return "⛳";
+  if (t.includes("climb")) return "🧗";
+  return "🧭";
+}
+
+// Fixed thumbnail size — small enough to sit inside a table cell, big enough
+// to convey the route shape. Padding leaves the stroke away from the edge so
+// endpoints aren't clipped. viewBox is set to the same values so 1 SVG unit
+// == 1 px and stroke widths look consistent regardless of surrounding zoom.
+const MAP_W = 120;
+const MAP_H = 80;
+
+function MapThumb({ polyline, streamStatus }: { polyline: string | null; streamStatus: string | null }) {
+  // Decode once per polyline (cached across renders inside the table via memo
+  // on the row payload — decodePolyline is pure so useMemo not required at
+  // this scale, but the SVG-path derivation IS memo-worthy for very long
+  // tracks).
+  const path = useMemo(() => {
+    if (!polyline) return null;
+    const pts = decodePolyline(polyline);
+    return polylineToSvgPath(pts, MAP_W, MAP_H);
+  }, [polyline]);
+
+  if (!path) {
+    // truncated_empty = privacy-zone activity (Strava intentionally strips the
+    // track). Distinct label so the missing map isn't confused with "not yet
+    // scraped".
+    const label = streamStatus === "truncated_empty" ? "privacy zone" : "detail pending";
+    return (
+      <div
+        className="flex items-center justify-center rounded border border-dashed border-border/60 bg-black/20 text-[9px] uppercase tracking-wider text-text-muted"
+        style={{ width: MAP_W, height: MAP_H }}
+      >
+        {label}
+      </div>
+    );
+  }
+  return (
+    <svg
+      width={MAP_W}
+      height={MAP_H}
+      viewBox={`0 0 ${MAP_W} ${MAP_H}`}
+      className="rounded border border-border/60 bg-black/30"
+      role="img"
+      aria-label="route thumbnail"
+    >
+      <path d={path} fill="none" stroke="#fc4c02" strokeWidth={1.5} strokeLinejoin="round" strokeLinecap="round" />
+    </svg>
+  );
 }
 
 // The signed-in strava owner ("you") — the athlete the collector authenticates as
@@ -94,7 +174,7 @@ export function StravaFeedPage() {
         <div className="bg-surface border border-border rounded-lg p-3">
           <div className="text-[10px] uppercase text-text-muted mb-1">Distance</div>
           <div className="text-2xl font-semibold">
-            {stats.isLoading ? "…" : formatDistance(stats.data?.total_distance ?? null)}
+            {stats.isLoading ? "…" : formatDistanceKm(stats.data?.total_distance ?? null)}
           </div>
         </div>
         <div className="bg-surface border border-border rounded-lg p-3">
@@ -166,6 +246,7 @@ export function StravaFeedPage() {
             <thead>
               <tr className="text-left text-text-muted border-b border-border">
                 <th className="pb-2">Athlete</th>
+                <th className="pb-2">Map</th>
                 <th className="pb-2">Activity</th>
                 <th className="pb-2">Type</th>
                 <th className="pb-2">Distance</th>
@@ -176,7 +257,7 @@ export function StravaFeedPage() {
             </thead>
             <tbody>
               {activities.data.map((act) => (
-                <tr key={act.platform_activity_id} className="border-b border-border/50 hover:bg-white/5">
+                <tr key={act.platform_activity_id} className="border-b border-border/50 hover:bg-white/5 align-middle">
                   <td className="py-2">
                     <div className="flex items-center gap-2">
                       {act.profile ? (
@@ -188,22 +269,29 @@ export function StravaFeedPage() {
                     </div>
                   </td>
                   <td className="py-2">
+                    <MapThumb polyline={act.summary_polyline} streamStatus={act.stream_status} />
+                  </td>
+                  <td className="py-2 max-w-[280px]">
                     <a
                       href={`https://www.strava.com/activities/${act.platform_activity_id}`}
                       target="_blank"
                       rel="noreferrer"
-                      className="hover:underline"
+                      className="hover:underline truncate block"
+                      title={act.name ?? undefined}
                     >
                       {act.name ?? "(no name)"}
                     </a>
                   </td>
-                  <td className="py-2 text-xs uppercase">{act.sport_type ?? act.type ?? "—"}</td>
-                  <td className="py-2">{formatDistance(act.distance)}</td>
-                  <td className="py-2">{formatDuration(act.moving_time ?? act.elapsed_time)}</td>
-                  <td className="py-2">
+                  <td className="py-2 text-xs uppercase whitespace-nowrap">
+                    <span className="mr-1" aria-hidden>{activityIcon(act.type, act.sport_type)}</span>
+                    {act.sport_type ?? act.type ?? "—"}
+                  </td>
+                  <td className="py-2 whitespace-nowrap">{formatDistance(act.distance, act.distance_unit)}</td>
+                  <td className="py-2 whitespace-nowrap tabular-nums">{formatDuration(act.moving_time ?? act.elapsed_time)}</td>
+                  <td className="py-2 whitespace-nowrap">
                     {act.total_elevation_gain != null ? `${Math.round(act.total_elevation_gain)} m` : "—"}
                   </td>
-                  <td className="py-2 text-text-muted text-xs">
+                  <td className="py-2 text-text-muted text-xs whitespace-nowrap">
                     {act.start_date ? new Date(act.start_date).toLocaleString() : "—"}
                   </td>
                 </tr>

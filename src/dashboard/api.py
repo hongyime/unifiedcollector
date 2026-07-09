@@ -1694,10 +1694,16 @@ async def strava_feed_activities(
         )
     args.append(int(limit))
     args.append(int(offset))
+    # NB: summary_polyline / start_latlng / distance_unit / stream_status feed the
+    # dashboard map thumbnail — see StravaFeedPage.tsx decodePolyline(). Kept in
+    # the same query so the frontend renders type-icon + distance + duration +
+    # map from one round trip. `average_speed` returned too so a future speed
+    # column can drop in without another schema change.
     sql = (
         "SELECT act.platform_activity_id, act.name, act.type, act.sport_type, "
-        "       act.distance, act.moving_time, act.elapsed_time, "
-        "       act.total_elevation_gain, act.start_date, "
+        "       act.distance, act.distance_unit, act.moving_time, act.elapsed_time, "
+        "       act.total_elevation_gain, act.average_speed, act.start_date, "
+        "       act.summary_polyline, act.start_latlng, act.stream_status, "
         "       a.platform_athlete_id, a.username, a.firstname, a.lastname, a.profile "
         "FROM strava_activities act "
         "LEFT JOIN strava_athletes a ON a.id = act.athlete_id "
