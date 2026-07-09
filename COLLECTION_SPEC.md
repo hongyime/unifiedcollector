@@ -40,6 +40,22 @@ Scheduling MUST honour this tier order (ephemeral first).
 - Audio: **store the file** (no transcription, except YouTube where transcripts are already available).
 - Stickers: **collect static, skip animated** (.tgs/.webm).
 
+#### Website & search spider file policy (implemented)
+The `website` and `search` collectors crawl the open web, so their download
+policy is an explicit allow/deny by extension + content-type:
+- **Download:** images, PDF (with page rasterisation), office/text documents
+  (`.doc/.docx/.xls/.xlsx/.ppt/.pptx/.txt/.rtf/.csv/.odt/.ods/.odp`), and
+  **videos** (`.mp4/.mov/.webm/.mkv/.avi/.m4v/.mpeg/.mpg/.wmv/.flv/.ogv/.3gp`).
+- **Never download:** audio (`.mp3/.wav/.m4a/.ogg/.flac/...`), code &
+  executables (`.js/.py/.exe/.dll/.jar/...`), and html/static assets
+  (`.css/.woff/.ico/...`). These are folded into the crawler skip-lists so
+  they're neither fetched nor queued.
+- **Videos have no size cap** (streamed to disk in chunks, never buffered into
+  memory). Documents keep a 50 MB cap. Toggles/caps:
+  `WEBSITE_DOWNLOAD_DOCS/VIDEOS`, `WEBSITE_MAX_DOC_BYTES`,
+  `WEBSITE_MAX_VIDEO_BYTES` (0 = uncapped) and the `SEARCH_*` equivalents.
+- `content_type` written: `image`, `pdf`, `document`, `video`.
+
 ### Tier 4 — Profile content
 - **Full change history** — bio history, username changes, profile-pic history (pHash-based).
 - Collect **comments AND reactions** (post comments, message/post reactions).
@@ -67,9 +83,9 @@ Legend: ✅ supported/required · ➖ N/A for platform · 🔲 to build
 | Tier / feature | instagram | telegram | tiktok | youtube | strava | lemon8 | website | github | whatsapp | beeper |
 |---|---|---|---|---|---|---|---|---|---|---|
 | 1 Stories/ephemeral | ✅ | ✅ | 🔲 | ➖ | ➖ | ➖ | ➖ | ➖ | ✅(status) | ➖ |
-| 2 Media (photo/video) | ✅ | ✅ | ✅ | ✅ | ✅(activity) | ✅ | ✅ | ➖(avatars) | ✅ | ✅ |
+| 2 Media (photo/video) | ✅ | ✅ | ✅ | ✅ | ✅(activity) | ✅ | ✅(img+video) | ➖(avatars) | ✅ | ✅ |
 | 2 Message bubbles | ➖ | ✅ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ✅ | ✅ |
-| 3 Documents | ➖ | ✅ | ➖ | ➖ | ➖ | ➖ | ✅(pdf) | ➖ | ✅ | ✅ |
+| 3 Documents | ➖ | ✅ | ➖ | ➖ | ➖ | ➖ | ✅(pdf+office) | ➖ | ✅ | ✅ |
 | 3 Audio (store) | ➖ | ✅ | ➖ | ✅(file) | ➖ | ➖ | ➖ | ➖ | ✅ | ✅ |
 | 4 Profile + change history | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ➖ | ✅ | ✅ | ✅ |
 | 4 Comments/reactions | ✅ | ✅ | ✅ | ✅ | ✅(kudos/comments) | ✅ | ➖ | ➖ | ✅ | ✅ |
