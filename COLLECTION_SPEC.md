@@ -97,6 +97,38 @@ Legend: ✅ supported/required · ➖ N/A for platform · 🔲 to build
 
 _(Adjust cells as platform capabilities are confirmed during implementation.)_
 
+> **Note:** ✅ above means "required/planned," NOT "shipped." See the audit below.
+
+## Implementation status — audited 2026-07-12
+
+A codebase + live-DB audit found the reusable **Phase 0 building blocks already
+exist as code**, but several are not yet wired, and Tier 1 is not yet flowing:
+
+- **Follow-aware account selector** — `src/core/profile_access.py`
+  (`ProfileAccessRepository` + `SmartAccountSelector`, source-agnostic; this
+  supersedes the single-purpose `instagram_account_access` table the plan named).
+  Tables `profile_access_summary` / `profile_access_attempts` exist but are
+  **EMPTY (0 rows)** — only `whatsapp` imports it; instagram/tiktok/lemon8 do not
+  record attempts yet. **Gap: wire `record_attempt()` into the private-target
+  collectors, then route via `select_for_operation()`.**
+- **EXIF GPS** — `src/core/exif_gps.py` exists; verify it's called in the
+  media-download pipeline (Tier 5).
+- **Link extractor** — `src/core/link_extractor.py` exists.
+- **Change tracking / reconciler** — `src/core/{change_tracker,user_change_tracker,
+  reconciler,identity_reconcile}.py` exist.
+- **Media-type policy** — `src/core/{media_filter,document_filter}.py` +
+  the website/search allow-deny policy shipped 2026-07-12.
+- **Tier 1 Ephemeral/Stories — NOT flowing.** No stories/status/highlight table
+  exists and `media_items` has **no `story`/`story_video`/`status` content_type**
+  (distinct types: activity_photo, audio, document, file, image, media, pdf,
+  photo, post, profile_photo, sticker, thumbnail, user_profile_photo, video).
+  Ephemeral capture is genuine per-platform feature work (Instagram stories/
+  highlights, WhatsApp status, Telegram stories, TikTok stories) — treat the
+  matrix ✅s for Tier 1 as TODO, not done.
+
+Working & verified: Tier 2 media (all sources download files), Tier 3 docs/audio
+(telegram/beeper + website/search office-docs & video as of 2026-07-12).
+
 ---
 
 ## Storage conventions
