@@ -116,6 +116,16 @@ try:  # pragma: no cover — optional at import time
 except Exception:  # noqa: BLE001
     _dedupe_sha256_bytes = None  # type: ignore[assignment]
 
+# Follow-aware access recording (Phase 0, step 1) — mirrors the instagram
+# collector's wiring. Records which cookie-account could/couldn't see a target
+# into profile_access_{summary,attempts} so SmartAccountSelector can later
+# route targets. Defensive import — collection still works without it.
+try:  # pragma: no cover — optional at import time
+    from src.core.profile_access import ProfileAccessRepository, SmartAccountSelector
+except Exception:  # noqa: BLE001
+    ProfileAccessRepository = None  # type: ignore[assignment]
+    SmartAccountSelector = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
 
 API_BASE = "https://api.lemon8-app.com"
@@ -272,6 +282,11 @@ class Lemon8Collector(BaseCollector):
         # FAMOUS-FILTER (Bryan): skip Lemon8 accounts at/above this follower count.
         # 0 disables. Best-effort: follower_count is parsed from profile HTML.
         self._famous_follower_cap = int(os.getenv("LEMON8_FAMOUS_FOLLOWER_CAP", "0") or "0")
+        # Follow-aware access tracker (lazy — needs self.pool, created on first
+        # use in _record_profile_access). Persists profile-fetch outcomes into
+        # profile_access_{summary,attempts}. Toggle via LEMON8_ACCESS_TRACKING.
+        self._access_repo = None
+        self._access_tracking = os.getenv("LEMON8_ACCESS_TRACKING", "1") == "1"
 
     @staticmethod
     def _extract_follower_count(html: str) -> int:
@@ -581,6 +596,52 @@ class Lemon8Collector(BaseCollector):
                 logger.warning("lemon8 _upsert_post failed for %s: %s", platform_post_id, e)
                 return False
 
+    def _access_account_label(self) -> str:
+        """Stable account identifier for profile-access recording.
+
+        Lemon8 has a single-cookie-file account model (no rotation pool), so we
+        use the cookie file's stem (e.g. ``lemon8_<username>``) — the same label
+        ``account_media_dir`` uses — falling back to ``lemon8_default`` when no
+        cookie file is configured. record_attempt requires a non-empty account.
+        """
+        try:
+            if self._cookies_file:
+                stem = Path(self._cookies_file).stem
+                if stem:
+                    return stem
+        except Exception:  # noqa: BLE001 — label is best-effort
+            pass
+        return "lemon8_default"
+
+    async def _record_profile_access(self, username, can_access, is_private=None,
+                                     is_followed=False, error=None):
+        """Record whether this cookie-account could see ``username`` into
+        profile_access_{summary,attempts} (follow-aware selector, Phase 0).
+
+        Best-effort and fully isolated: any failure here is swallowed so profile
+        collection is never affected. No new network calls — it only persists
+        the outcome of a fetch we already made. Mirrors the instagram
+        collector's _record_profile_access.
+        """
+        if not self._access_tracking or ProfileAccessRepository is None:
+            return
+        if self.pool is None:
+            return
+        try:
+            if self._access_repo is None:
+                self._access_repo = ProfileAccessRepository(self.pool)
+            await self._access_repo.record_attempt(
+                source="lemon8",
+                target_id=str(username),
+                account=self._access_account_label(),
+                can_access=can_access,
+                is_public=(None if is_private is None else (not is_private)),
+                is_followed=is_followed,
+                error=error,
+            )
+        except Exception as e:  # noqa: BLE001 — never let tracking break collection
+            logger.debug("lemon8: access-tracking record failed for %s: %s", username, e)
+
     # ──────────────────────────────────────────────────────────────────────
     # Collection entrypoints
     # ──────────────────────────────────────────────────────────────────────
@@ -588,6 +649,16 @@ class Lemon8Collector(BaseCollector):
         await self.rate_limiter.async_wait("lemon8-app.com", OperationType.PROFILE_VIEW)
         url = USER_URL_PATTERN.format(username.lstrip("@"))
         resp = await client.get(url)
+        # Follow-aware access recording (Phase 0):
+        #   401/403 = clear access-denial → record can_access=False.
+        #   404     = user does not exist (Lemon8 currently 404s several
+        #             handles) — NOT an access denial; record nothing.
+        # raise_for_status() below still raises for all of these, so the
+        # existing error flow (caller catch → DLQ) is unchanged.
+        if resp.status_code in (401, 403):
+            await self._record_profile_access(
+                username, False, error=f"HTTP {resp.status_code}",
+            )
         resp.raise_for_status()
         html = resp.text
 
@@ -600,6 +671,11 @@ class Lemon8Collector(BaseCollector):
 
         avatar_url = self._extract_avatar(html) if self._profile_photos else None
         await self._upsert_profile(user_id, username, {"nickname": username, "avatar_url": avatar_url})
+
+        # Success: this account CAN see the target — record it for the
+        # follow-aware selector. Lemon8 has no is_private notion in the
+        # profile HTML we parse, so is_private stays None (is_public=None).
+        await self._record_profile_access(username, True)
 
         # FAMOUS-FILTER: skip post/media collection for accounts at/above the cap.
         # Profile row is still upserted (we know the account); only content is skipped.

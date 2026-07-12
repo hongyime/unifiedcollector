@@ -91,6 +91,16 @@ try:
 except Exception:  # pragma: no cover
     _dedupe_sha256_bytes = None  # type: ignore[assignment]
 
+# Follow-aware account selector (Phase 0). Records which cookie identity can
+# see which target so a later pass can route private targets to an identity
+# that actually follows them. Defensive import — collection still works
+# without it. (Mirrors the Instagram collector's wiring.)
+try:  # pragma: no cover
+    from src.core.profile_access import ProfileAccessRepository, SmartAccountSelector
+except Exception:  # pragma: no cover
+    ProfileAccessRepository = None  # type: ignore[assignment]
+    SmartAccountSelector = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
 
 # Module-level toggle for the Playwright browser fallback. Re-read at the call
@@ -391,6 +401,14 @@ class TiktokCollector(BaseCollector):
         # encounter onward. 0 disables.
         self._famous_follower_cap = int(os.getenv("TIKTOK_FAMOUS_FOLLOWER_CAP", "0") or "0")
 
+        # Follow-aware access tracker (Phase 0, lazy — needs self.pool, created
+        # on first use in _record_profile_access). Records every profile fetch
+        # outcome into profile_access_{summary,attempts} so SmartAccountSelector
+        # can later route a private target to a cookie identity that can see it.
+        # Enable/disable via TIKTOK_ACCESS_TRACKING (default on).
+        self._access_repo = None
+        self._access_tracking = os.getenv("TIKTOK_ACCESS_TRACKING", "1") == "1"
+
         # account_quota: register a daily cap so the scheduler can refuse new
         # work once we've hit it. ``has_quota`` on a missing config is a
         # no-op so this stays safe even if the same tracker is imported
@@ -488,6 +506,49 @@ class TiktokCollector(BaseCollector):
         except Exception:
             return True
 
+    async def _record_profile_access(
+        self,
+        username: str,
+        can_access: bool,
+        is_private: bool | None = None,
+        is_followed: bool = False,
+        error: str | None = None,
+    ) -> None:
+        """Record whether the current cookie identity could see this target into
+        profile_access_{summary,attempts} (follow-aware selector, Phase 0).
+
+        Mirrors instagram's _record_profile_access. Best-effort and fully
+        isolated: any failure here is swallowed (debug-logged) so collection is
+        never affected. No new network calls — it only persists the outcome of
+        a fetch the collector already made.
+
+        Unlike Instagram there is no per-request account pool: TikTok runs a
+        single cookie identity per collector instance, so ``account`` is the
+        cookie-file stem (same convention as the quota tracker) or the stable
+        literal "tiktok_default" when no cookie jar is configured.
+        """
+        if not self._access_tracking or ProfileAccessRepository is None:
+            return
+        if self.pool is None:
+            return
+        try:
+            if self._access_repo is None:
+                self._access_repo = ProfileAccessRepository(self.pool)
+            account = (
+                Path(self._cookies_file).stem if self._cookies_file else "tiktok_default"
+            )
+            await self._access_repo.record_attempt(
+                source="tiktok",
+                target_id=str(username),
+                account=account,
+                can_access=can_access,
+                is_public=(None if is_private is None else (not is_private)),
+                is_followed=is_followed,
+                error=error,
+            )
+        except Exception as e:
+            logger.debug("tiktok: access-tracking record failed for %s: %s", username, e)
+
     async def _collect_user(self, username: str):
         profile_url = f"https://www.tiktok.com/@{username}"
         # FAMOUS-FILTER: if a prior cycle recorded this user's follower count and
@@ -522,6 +583,11 @@ class TiktokCollector(BaseCollector):
                 logger.warning("tiktok: _collect_via_gallery_dl hard-timeout for %s (%.0fs)", username, outer_timeout)
                 ok = False
             if ok:
+                # Success: this cookie identity CAN see the target — record for
+                # the follow-aware selector (Phase 0). is_private isn't known at
+                # this boundary (it lives in the per-post sidecars already
+                # upserted by _ingest_tmpdir), so is_public stays unchanged.
+                await self._record_profile_access(username, True)
                 return
 
         if self._use_yt_dlp and self._ytdlp_fallback:
@@ -534,10 +600,21 @@ class TiktokCollector(BaseCollector):
                 logger.warning("tiktok: _collect_via_yt_dlp hard-timeout for %s (%.0fs)", username, outer_timeout)
                 ok = False
             if ok:
+                # Success (see gallery-dl note above): record can_access=True.
+                await self._record_profile_access(username, True)
                 return
 
         if self._browser_fallback:
-            if await self._collect_via_playwright(username): return
+            if await self._collect_via_playwright(username):
+                # Success via browser fallback: record can_access=True.
+                await self._record_profile_access(username, True)
+                return
+        # NOTE (Phase 0): no can_access=False call site is wired here on
+        # purpose. At this boundary a failed gallery-dl/yt-dlp/playwright chain
+        # cannot be distinguished from "account has zero public posts" or a
+        # transient tool failure, and _collect_via_api reports no outcome —
+        # recording False here would poison the follow-aware routing data.
+        # Only unambiguous successes are recorded.
         await self._collect_via_api(username)
 
     async def _scrape_profile_metadata(self, username: str):
