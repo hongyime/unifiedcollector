@@ -50,6 +50,15 @@ from src.core.user_change_tracker import (
     INSTAGRAM_TRACKED_FIELDS,
 )
 
+# Follow-aware account selector (Phase 0). Records which cookie-account can see
+# which target so a later pass can route private targets to an account that
+# actually follows them. Defensive import — collection still works without it.
+try:  # pragma: no cover
+    from src.core.profile_access import ProfileAccessRepository, SmartAccountSelector
+except Exception:  # pragma: no cover
+    ProfileAccessRepository = None  # type: ignore[assignment]
+    SmartAccountSelector = None  # type: ignore[assignment]
+
 # Profile analytics + per-account TLS fingerprint pinning. Both are
 # defensive imports — collector still functions without them.
 try:  # pragma: no cover
@@ -210,6 +219,12 @@ class InstagramCollector(BaseCollector):
 
         self._loader = None
         self._current_account = None
+        # Follow-aware access tracker (lazy — needs self.pool, created on first use).
+        # Records every profile fetch outcome into profile_access_{summary,attempts}
+        # so SmartAccountSelector can later route a private target to a cookie
+        # account that can actually see it. Enable/disable via INSTA_ACCESS_TRACKING.
+        self._access_repo = None
+        self._access_tracking = os.getenv("INSTA_ACCESS_TRACKING", "1") == "1"
         # Throttle the owner own-follow-graph scrape (per owner username) so it runs
         # at most once per INSTA_OWN_GRAPH_INTERVAL_HOURS instead of every cycle.
         self._last_own_graph: dict[str, float] = {}
@@ -1005,6 +1020,43 @@ class InstagramCollector(BaseCollector):
             return {}
         return rot.get_curl_cffi_kwargs()
 
+    async def _record_profile_access(self, username, can_access, user_data=None, error=None):
+        """Record which cookie-account could/couldn't see this target into
+        profile_access_{summary,attempts} (follow-aware selector, Phase 0).
+
+        Best-effort and fully isolated: any failure here is swallowed so profile
+        collection is never affected. No new network calls — it only persists the
+        outcome of a fetch we already made.
+        """
+        if not self._access_tracking or ProfileAccessRepository is None:
+            return
+        if self.pool is None or self._current_account is None:
+            return
+        try:
+            if self._access_repo is None:
+                self._access_repo = ProfileAccessRepository(self.pool)
+            is_private = None
+            is_followed = False
+            if user_data:
+                _priv = user_data.get("is_private")
+                is_private = bool(_priv) if _priv is not None else None
+                is_followed = bool(
+                    user_data.get("followed_by_viewer")
+                    or user_data.get("follows_viewer")
+                    or False
+                )
+            await self._access_repo.record_attempt(
+                source="instagram",
+                target_id=str(username),
+                account=self._current_account.name,
+                can_access=can_access,
+                is_public=(None if is_private is None else (not is_private)),
+                is_followed=is_followed,
+                error=error,
+            )
+        except Exception as e:
+            logger.debug("instagram: access-tracking record failed for %s: %s", username, e)
+
     async def _collect_user(self, client: httpx.AsyncClient, username: str):
         acct_name = self._current_account.name if self._current_account else None
         await self.rate_limiter.async_wait(
@@ -1061,10 +1113,18 @@ class InstagramCollector(BaseCollector):
 
         if not user_data:
             logger.warning("Empty profile data for %s", username)
+            # Access-denied outcome: this account couldn't see the target (private
+            # + not following, or blocked). Record so the selector can route to a
+            # follower account later.
+            await self._record_profile_access(username, False, error="empty profile data")
             return
 
         uid = user_data.get("id", username)
         entity_name = user_data.get("username", username)
+
+        # Success: this account CAN see the target — record it (with is_private /
+        # followed-by-viewer) for the follow-aware selector.
+        await self._record_profile_access(username, True, user_data)
 
         # 1. Save Profile to Database
         await self._upsert_profile(user_data)
