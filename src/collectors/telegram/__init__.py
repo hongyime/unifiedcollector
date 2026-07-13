@@ -2138,14 +2138,22 @@ class TelegramCollector(BaseCollector):
     async def _scan_stories(self, worker: "TelegramWorker", targets: list[str]):
         try:
             from telethon.tl.functions.stories import GetPeerStoriesRequest
-            client = worker.client
             for target in targets:
                 if self._stop.is_set():
                     break
+                # A chat lives in exactly ONE of the N accounts; resolving via a
+                # single fixed worker raised "Cannot find any entity" for the
+                # ~(N-1)/N owned by other accounts (why story rows were 0). Resolve
+                # via whichever account actually owns it, and fetch stories with
+                # THAT account's client.
                 try:
-                    entity = await client.get_entity(int(target))
-                except ValueError:
-                    entity = await client.get_entity(target)
+                    owner_w, entity = await self._resolve_entity_any_worker(worker, target)
+                except EntityUnresolvable:
+                    continue
+                except Exception as e:
+                    logger.debug("story entity resolve failed for %s: %s", target, e)
+                    continue
+                client = owner_w.client
 
                 chat_id = str(entity.id)
                 chat_name = getattr(entity, "title", None) or getattr(entity, "username", None) or chat_id
@@ -2190,7 +2198,7 @@ class TelegramCollector(BaseCollector):
                                 "extension": "mp4" if is_video else "jpg",
                                 "raw": story.to_dict(),
                                 "source_url_override": story_url,
-                            }, worker=worker)
+                            }, worker=owner_w)
                 except Exception as e:
                     logger.debug("Story fetch failed for %s: %s", chat_name, e)
         except ImportError:
