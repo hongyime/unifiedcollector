@@ -279,3 +279,77 @@ LEMON8_TRACKED_FIELDS: tuple[str, ...] = (
     "profile_pic_url",
     "region",
 )
+
+
+# ---------------------------------------------------------------------------
+# Tier-4 rollout wave (tiktok / youtube / github / beeper / whatsapp).
+# Field names below deliberately match the *canonical table's* column names
+# (tiktok_profiles, youtube_channels, github_users, beeper_shadow_participants,
+# whatsapp_users) so the pre-upsert snapshot row can be passed to
+# detect_and_log() as-is, without a rename shim.
+# ---------------------------------------------------------------------------
+
+
+# TikTok diff field set — mirrors the columns _upsert_profile actually updates
+# on conflict in tiktok_profiles. Count fields drift constantly (noisy by
+# design — same rationale as Instagram: dashboards replay growth from the log).
+TIKTOK_TRACKED_FIELDS: tuple[str, ...] = (
+    "username",
+    "nickname",
+    "bio",
+    "avatar_url",
+    "followers_count",
+    "following_count",
+    "heart_count",
+    "video_count",
+    "digg_count",
+    "is_verified",
+    "is_private",
+)
+
+
+# YouTube diff field set — ONLY the youtube_channels columns that
+# _upsert_channel updates on conflict. custom_url / thumbnail_url are
+# insert-only (never updated on conflict), so tracking them would re-log the
+# same "diff" on every observation — deliberately excluded.
+YOUTUBE_TRACKED_FIELDS: tuple[str, ...] = (
+    "title",
+    "description",
+    "view_count",
+    "subscriber_count",
+    "video_count",
+)
+
+
+# GitHub diff field set — profile knobs updated on conflict in github_users.
+GITHUB_TRACKED_FIELDS: tuple[str, ...] = (
+    "login",
+    "name",
+    "company",
+    "blog",
+    "location",
+    "bio",
+    "public_repos_count",
+    "followers_count",
+    "following_count",
+)
+
+
+# Beeper diff field set — the profile-ish columns on beeper_shadow_participants
+# (the closest thing Beeper has to a user table; keyed per (chat, participant)
+# but change rows are logged under the participant_id alone).
+BEEPER_TRACKED_FIELDS: tuple[str, ...] = (
+    "username",
+    "full_name",
+    "img_url",
+)
+
+
+# WhatsApp diff field set — display-name drift on whatsapp_users. phone_number
+# is deliberately NOT tracked: it "changes" whenever an @lid JID is later
+# resolved via whatsapp_lid_map, which is enrichment, not a profile change.
+WHATSAPP_TRACKED_FIELDS: tuple[str, ...] = (
+    "name",
+    "pushname",
+    "is_business",
+)

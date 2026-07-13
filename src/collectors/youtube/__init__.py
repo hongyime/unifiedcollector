@@ -69,6 +69,10 @@ from src.collectors.youtube.parse import (
     parse_relative_timestamp as _parse_rel_ts,
 )
 from src.core.file_naming import sanitize_name
+from src.core.user_change_tracker import (
+    UserChangeTracker,
+    YOUTUBE_TRACKED_FIELDS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -386,6 +390,22 @@ class YoutubeCollector(BaseCollector):
             except Exception as e:
                 logger.warning("YouTube _upsert_channel meta fetch failed for %s: %s", channel_id, e)
 
+        # ── User-intelligence diff (Tier 4): snapshot the row BEFORE upserting
+        # so UserChangeTracker can compare old → new and emit one row per
+        # changed field into youtube_user_changes. Wrapped in try/except so any
+        # failure (DB, schema drift, etc.) is non-fatal to ingestion.
+        prev_row = None
+        try:
+            async with self.pool.acquire() as conn:
+                prev_row = await conn.fetchrow(
+                    "SELECT title, description, view_count, subscriber_count, "
+                    "video_count "
+                    "FROM youtube_channels WHERE platform_channel_id = $1",
+                    channel_id,
+                )
+        except Exception as exc:
+            logger.debug("user_change_tracker[youtube]: prev-row fetch failed: %s", exc)
+
         async with self.pool.acquire() as conn:
             await conn.execute("""
                 INSERT INTO youtube_channels (
@@ -408,6 +428,31 @@ class YoutubeCollector(BaseCollector):
             int(statistics.get("subscriberCount", 0) or 0),
             int(statistics.get("videoCount", 0) or 0)
             )
+
+        # ── Change-log write (non-fatal). Field names match youtube_channels
+        # column names, so prev_row passes through unmodified. Count fields
+        # are snapshotted as None when channels.list returned no statistics
+        # (unauthenticated path), so an auth-less run can't log "N → 0" drops.
+        try:
+            tracker = UserChangeTracker(self.pool)
+            new_snapshot = {
+                "title":            channel_name,
+                "description":      snippet.get("description"),
+                "view_count":       int(statistics.get("viewCount", 0) or 0) if statistics else None,
+                "subscriber_count": int(statistics.get("subscriberCount", 0) or 0) if statistics else None,
+                "video_count":      int(statistics.get("videoCount", 0) or 0) if statistics else None,
+            }
+            await tracker.detect_and_log(
+                table="youtube_user_changes",
+                pk_col="channel_id",
+                pk_val=str(channel_id),
+                current_row=dict(prev_row) if prev_row is not None else None,
+                new_row=new_snapshot,
+                fields=YOUTUBE_TRACKED_FIELDS,
+            )
+        except Exception as exc:
+            logger.debug("user_change_tracker[youtube]: detect_and_log failed: %s", exc)
+
         return uploads_playlist, int(statistics.get("subscriberCount", 0) or 0)
 
     @staticmethod

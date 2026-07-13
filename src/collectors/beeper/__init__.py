@@ -38,6 +38,10 @@ from urllib.parse import quote, urlencode
 import httpx
 
 from src.core.base_collector import BaseCollector
+from src.core.user_change_tracker import (
+    UserChangeTracker,
+    BEEPER_TRACKED_FIELDS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -452,6 +456,23 @@ class BeeperWriter:
     async def _upsert_participants(
         self, chat_id: str, network: str, participants: list[dict]
     ) -> None:
+        # ── User-intelligence diff (Tier 4): snapshot this chat's existing
+        # participant rows BEFORE upserting so UserChangeTracker can compare
+        # old → new and emit one row per changed field into beeper_user_changes
+        # (keyed by participant_id). Wrapped in try/except so any failure is
+        # non-fatal to ingestion.
+        prev_by_pid: dict[str, dict] = {}
+        try:
+            async with self.pool.acquire() as conn:
+                prev_rows = await conn.fetch(
+                    "SELECT participant_id, username, full_name, img_url "
+                    "FROM beeper_shadow_participants WHERE chat_id = $1",
+                    chat_id,
+                )
+            prev_by_pid = {r["participant_id"]: dict(r) for r in prev_rows}
+        except Exception as exc:
+            logger.debug("user_change_tracker[beeper]: prev-rows fetch failed: %s", exc)
+
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 for p in participants:
@@ -493,6 +514,32 @@ class BeeperWriter:
                         bool(p.get("cannotMessage", False)),
                         json.dumps(p, default=str),
                     )
+
+        # ── Change-log write (non-fatal, after the upsert transaction closes
+        # so we never hold two pool connections at once). Diffs are computed
+        # against the per-(chat, participant) snapshot but logged under the
+        # participant_id alone.
+        try:
+            tracker = UserChangeTracker(self.pool)
+            for p in participants:
+                pid = p.get("id")
+                if not pid:
+                    continue
+                new_snapshot = {
+                    "username":  p.get("username"),
+                    "full_name": p.get("fullName"),
+                    "img_url":   p.get("imgURL"),
+                }
+                await tracker.detect_and_log(
+                    table="beeper_user_changes",
+                    pk_col="user_id",
+                    pk_val=str(pid),
+                    current_row=prev_by_pid.get(pid),
+                    new_row=new_snapshot,
+                    fields=BEEPER_TRACKED_FIELDS,
+                )
+        except Exception as exc:
+            logger.debug("user_change_tracker[beeper]: detect_and_log failed: %s", exc)
 
     async def upsert_message(self, msg: dict) -> bool:
         """Upsert a message. Returns True if the row is new (insert), False if it

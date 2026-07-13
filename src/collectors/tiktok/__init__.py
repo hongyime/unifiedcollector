@@ -68,6 +68,10 @@ import httpx
 from src.core.base_collector import BaseCollector
 from src.collectors.tiktok.parse import safe_int as _parse_safe_int, to_dt as _parse_to_dt
 from src.core.file_naming import sanitize_name
+from src.core.user_change_tracker import (
+    UserChangeTracker,
+    TIKTOK_TRACKED_FIELDS,
+)
 
 # Wave 0 modules — imported lazily where heavy or where the module may be
 # absent in some test environments. Top-level imports are kept for the
@@ -646,6 +650,24 @@ class TiktokCollector(BaseCollector):
             stats = author["stats"]
 
         avatar = author.get("avatarLarger") or author.get("avatarMedium") or author.get("avatarThumb")
+
+        # ── User-intelligence diff (Tier 4): snapshot the row BEFORE upserting
+        # so UserChangeTracker can compare old → new and emit one row per
+        # changed field into tiktok_user_changes. Wrapped in try/except so any
+        # failure (DB, schema drift, etc.) is non-fatal to ingestion.
+        prev_row = None
+        try:
+            async with self.pool.acquire() as conn:
+                prev_row = await conn.fetchrow(
+                    "SELECT username, nickname, bio, avatar_url, "
+                    "following_count, followers_count, heart_count, "
+                    "video_count, digg_count, is_verified, is_private "
+                    "FROM tiktok_profiles WHERE platform_user_id = $1",
+                    str(platform_user_id),
+                )
+        except Exception as exc:
+            logger.debug("user_change_tracker[tiktok]: prev-row fetch failed: %s", exc)
+
         try:
             async with self.pool.acquire() as conn:
                 row = await conn.fetchrow("""
@@ -682,10 +704,42 @@ class TiktokCollector(BaseCollector):
                 bool(author.get("verified", False)),
                 bool(author.get("privateAccount", False)),
                 )
-                return str(row["id"]) if row else None
         except Exception as e:
             logger.warning("tiktok _upsert_profile failed for %s: %s", platform_user_id, e)
             return None
+
+        # ── Change-log write (non-fatal, after the upsert connection is
+        # released). Field names match the tiktok_profiles column names, so
+        # prev_row passes through unmodified. Count fields are snapshotted as
+        # None when the sidecar carried no stats block, so a stats-less
+        # payload can't log a bogus "N → 0" drop.
+        try:
+            tracker = UserChangeTracker(self.pool)
+            new_snapshot = {
+                "username":        author.get("uniqueId"),
+                "nickname":        author.get("nickname"),
+                "bio":             author.get("signature"),
+                "avatar_url":      avatar,
+                "followers_count": self._safe_int(stats.get("followerCount")) if stats else None,
+                "following_count": self._safe_int(stats.get("followingCount")) if stats else None,
+                "heart_count":     self._safe_int(stats.get("heartCount") or stats.get("heart")) if stats else None,
+                "video_count":     self._safe_int(stats.get("videoCount")) if stats else None,
+                "digg_count":      self._safe_int(stats.get("diggCount")) if stats else None,
+                "is_verified":     bool(author.get("verified", False)),
+                "is_private":      bool(author.get("privateAccount", False)),
+            }
+            await tracker.detect_and_log(
+                table="tiktok_user_changes",
+                pk_col="user_id",
+                pk_val=str(platform_user_id),
+                current_row=dict(prev_row) if prev_row is not None else None,
+                new_row=new_snapshot,
+                fields=TIKTOK_TRACKED_FIELDS,
+            )
+        except Exception as exc:
+            logger.debug("user_change_tracker[tiktok]: detect_and_log failed: %s", exc)
+
+        return str(row["id"]) if row else None
 
     async def _upsert_post(self, data: dict, username: str, profile_uuid: str | None = None):
         post_id = data.get("id")

@@ -1612,14 +1612,16 @@ class TelegramCollector(BaseCollector):
                 INSERT INTO telegram_messages (
                     platform_message_id, chat_id, sender_id, text, caption,
                     media_type, platform_created_at, metadata,
-                    reply_to_message_id, forward_from_chat_id, forward_from_message_id, via_bot_id
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                    reply_to_message_id, forward_from_chat_id, forward_from_message_id, via_bot_id,
+                    is_pinned
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
                 ON CONFLICT (platform_message_id) DO NOTHING
                 RETURNING id
             """,
             platform_msg_id, chat_uuid, sender_uuid, message.message, getattr(message, 'caption', None),
             media_type, message.date, json.dumps(message.to_dict(), default=_tg_json),
-            reply_to, fwd_chat, fwd_msg, via_bot
+            reply_to, fwd_chat, fwd_msg, via_bot,
+            bool(getattr(message, 'pinned', False) or False)
             )
 
             # Capture reaction counts at backfill time (item 1.11 — historical
@@ -1628,6 +1630,8 @@ class TelegramCollector(BaseCollector):
                 await self._capture_message_reaction_counts(conn, row["id"], message)
                 # Capture poll state if this message is a poll (item 1.12).
                 await self._capture_poll(conn, row["id"], message)
+            # Tier 6: venue/event extraction (best effort — never breaks flow).
+            await self._extract_message_event(message, chat_uuid, platform_msg_id, conn=conn)
 
     async def _capture_message_reaction_counts(self, conn, message_uuid, message) -> None:
         """Extract message.reactions.results → write telegram_reaction_counts.
@@ -2760,6 +2764,9 @@ class TelegramCollector(BaseCollector):
                 if hasattr(message, "to_dict") else "{}"
             )
             reply_to, fwd_chat, fwd_msg, via_bot = self._msg_refs(message)
+            # Tier 6: Telethon exposes message.pinned (bool) on Message objects;
+            # backfill re-fetches also refresh it via the edit/upsert branches.
+            is_pinned = bool(getattr(message, "pinned", False) or False)
 
             if is_edit:
                 # Update existing if present; else insert.
@@ -2767,26 +2774,30 @@ class TelegramCollector(BaseCollector):
                     INSERT INTO telegram_messages (
                         platform_message_id, chat_id, sender_id, text, caption,
                         media_type, platform_created_at, metadata,
-                        reply_to_message_id, forward_from_chat_id, forward_from_message_id, via_bot_id
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                        reply_to_message_id, forward_from_chat_id, forward_from_message_id, via_bot_id,
+                        is_pinned
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
                     ON CONFLICT (platform_message_id) DO UPDATE SET
                         text = EXCLUDED.text,
                         caption = EXCLUDED.caption,
-                        metadata = EXCLUDED.metadata
+                        metadata = EXCLUDED.metadata,
+                        is_pinned = EXCLUDED.is_pinned
                 """,
                 platform_msg_id, chat_uuid, sender_uuid,
                 getattr(message, "message", None),
                 getattr(message, "caption", None),
                 media_type, message.date, payload_json,
                 reply_to, fwd_chat, fwd_msg, via_bot,
+                is_pinned,
                 )
             else:
                 await conn.execute("""
                     INSERT INTO telegram_messages (
                         platform_message_id, chat_id, sender_id, text, caption,
                         media_type, platform_created_at, metadata,
-                        reply_to_message_id, forward_from_chat_id, forward_from_message_id, via_bot_id
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                        reply_to_message_id, forward_from_chat_id, forward_from_message_id, via_bot_id,
+                        is_pinned
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
                     ON CONFLICT (platform_message_id) DO NOTHING
                 """,
                 platform_msg_id, chat_uuid, sender_uuid,
@@ -2794,7 +2805,60 @@ class TelegramCollector(BaseCollector):
                 getattr(message, "caption", None),
                 media_type, message.date, payload_json,
                 reply_to, fwd_chat, fwd_msg, via_bot,
+                is_pinned,
                 )
+
+            # Tier 6: venue/event extraction (best effort — never breaks the
+            # hot realtime path; helper swallows all exceptions internally).
+            await self._extract_message_event(message, chat_uuid, platform_msg_id, conn=conn)
+
+    async def _extract_message_event(self, message, chat_uuid, platform_msg_id, conn=None):
+        """Tier 6 (best effort): extract venue/event info → telegram_events.
+
+        Handles:
+          - MessageMediaVenue → event_type 'venue' (title/address/venue_type).
+            Lat/lng are deliberately NOT captured here — geo extraction lives
+            in telegram_message_locations (Tier 5, separate agent/path).
+          - MessageActionPinMessage service messages → event_type 'pin'.
+
+        Isolated try/except: must NEVER break the message write path. Reuses
+        the caller's connection when given, else acquires one from the pool.
+        """
+        try:
+            event_type = title = address = venue_type = None
+            starts_at = None
+
+            media = getattr(message, "media", None)
+            if media is not None and type(media).__name__ == "MessageMediaVenue":
+                event_type = "venue"
+                title = getattr(media, "title", None)
+                address = getattr(media, "address", None)
+                venue_type = getattr(media, "venue_type", None)
+            else:
+                action = getattr(message, "action", None)
+                if action is not None and type(action).__name__ == "MessageActionPinMessage":
+                    event_type = "pin"
+                    starts_at = getattr(message, "date", None)
+
+            if event_type is None:
+                return
+
+            sql = """
+                INSERT INTO telegram_events (
+                    platform_message_id, chat_id, event_type,
+                    title, address, venue_type, starts_at
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+                ON CONFLICT (platform_message_id) DO NOTHING
+            """
+            args = (platform_msg_id, chat_uuid, event_type,
+                    title, address, venue_type, starts_at)
+            if conn is not None:
+                await conn.execute(sql, *args)
+            else:
+                async with self.pool.acquire() as _conn:
+                    await _conn.execute(sql, *args)
+        except Exception as exc:
+            logger.debug("_extract_message_event failed for %s: %s", platform_msg_id, exc)
 
     async def _upsert_user_full(self, user):
         """Upsert with full Telethon user attributes (bot/verified/premium/etc).

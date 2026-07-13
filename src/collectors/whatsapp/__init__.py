@@ -51,6 +51,10 @@ import httpx
 
 from src.core.base_collector import BaseCollector
 from src.core.change_tracker import ChangeTracker
+from src.core.user_change_tracker import (
+    UserChangeTracker,
+    WHATSAPP_TRACKED_FIELDS,
+)
 from src.core.link_extractor import extract_whatsapp_links, extract_all_links
 from src.core.file_naming import sanitize_name
 
@@ -549,6 +553,21 @@ class WhatsappCollector(BaseCollector):
             "is_business": event.get("isBusinessMessage", False),
         }
 
+        # ── User-intelligence diff (Tier 4): snapshot the row BEFORE upserting
+        # so UserChangeTracker can compare old → new and emit one row per
+        # changed field into whatsapp_user_changes. Wrapped in try/except so
+        # any failure (DB, schema drift, etc.) is non-fatal to ingestion.
+        prev_row = None
+        try:
+            async with self.pool.acquire() as conn:
+                prev_row = await conn.fetchrow(
+                    "SELECT name, pushname, is_business "
+                    "FROM whatsapp_users WHERE platform_user_id = $1",
+                    sender_jid,
+                )
+        except Exception as exc:
+            logger.debug("user_change_tracker[whatsapp]: prev-row fetch failed: %s", exc)
+
         try:
             async with self.pool.acquire() as conn:
                 row = await conn.fetchrow("""
@@ -563,10 +582,33 @@ class WhatsappCollector(BaseCollector):
                     RETURNING id
                 """, sender_jid, payload["display_name"], payload["push_name"],
                     payload["phone_number"] or None, payload["is_business"])
-                return row['id']
         except Exception as e:
             logger.debug("User profile tracking failed: %s", e)
             return None
+
+        # ── Change-log write (non-fatal). Field names match whatsapp_users
+        # column names, so prev_row passes through unmodified. Empty pushname
+        # normalizes to None inside the tracker (partial payload — skipped),
+        # mirroring the COALESCE semantics of the upsert above.
+        try:
+            tracker = UserChangeTracker(self.pool)
+            new_snapshot = {
+                "name":        payload["display_name"],
+                "pushname":    payload["push_name"] or None,
+                "is_business": payload["is_business"],
+            }
+            await tracker.detect_and_log(
+                table="whatsapp_user_changes",
+                pk_col="user_id",
+                pk_val=str(sender_jid),
+                current_row=dict(prev_row) if prev_row is not None else None,
+                new_row=new_snapshot,
+                fields=WHATSAPP_TRACKED_FIELDS,
+            )
+        except Exception as exc:
+            logger.debug("user_change_tracker[whatsapp]: detect_and_log failed: %s", exc)
+
+        return row['id'] if row else None
 
     async def _poll_sessions(self, targets: list[str]):
         while not self._stop.is_set():

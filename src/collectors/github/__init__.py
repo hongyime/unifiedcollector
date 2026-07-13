@@ -100,6 +100,10 @@ from src.core.dedupe_hash import sha256_bytes as _sha256_bytes
 from src.core.file_naming import sanitize_name
 from src.core.profile_photo_tracker import ProfilePhotoTracker
 from src.core.spider_discover import Edge, EdgeType, SpiderDiscover
+from src.core.user_change_tracker import (
+    UserChangeTracker,
+    GITHUB_TRACKED_FIELDS,
+)
 from src.core import tor_proxy
 
 logger = logging.getLogger(__name__)
@@ -1040,6 +1044,22 @@ class GithubCollector(BaseCollector):
     # ---- DB upserts -----------------------------------------------------
 
     async def _upsert_user(self, user_data: dict):
+        # ── User-intelligence diff (Tier 4): snapshot the row BEFORE upserting
+        # so UserChangeTracker can compare old → new and emit one row per
+        # changed field into github_user_changes. Wrapped in try/except so any
+        # failure (DB, schema drift, etc.) is non-fatal to ingestion.
+        prev_row = None
+        try:
+            async with self.pool.acquire() as conn:
+                prev_row = await conn.fetchrow(
+                    "SELECT login, name, company, blog, location, bio, "
+                    "public_repos_count, followers_count, following_count "
+                    "FROM github_users WHERE platform_user_id = $1",
+                    user_data.get("id"),
+                )
+        except Exception as exc:
+            logger.debug("user_change_tracker[github]: prev-row fetch failed: %s", exc)
+
         async with self.pool.acquire() as conn:
             await conn.execute(
                 """
@@ -1069,6 +1089,32 @@ class GithubCollector(BaseCollector):
                 user_data.get("followers"), user_data.get("following"),
                 _parse_iso(user_data.get("created_at")),
             )
+
+        # ── Change-log write (non-fatal). Field names match github_users
+        # column names, so prev_row passes through unmodified.
+        try:
+            tracker = UserChangeTracker(self.pool)
+            new_snapshot = {
+                "login":              user_data.get("login"),
+                "name":               user_data.get("name"),
+                "company":            user_data.get("company"),
+                "blog":               user_data.get("blog"),
+                "location":           user_data.get("location"),
+                "bio":                user_data.get("bio"),
+                "public_repos_count": user_data.get("public_repos"),
+                "followers_count":    user_data.get("followers"),
+                "following_count":    user_data.get("following"),
+            }
+            await tracker.detect_and_log(
+                table="github_user_changes",
+                pk_col="user_id",
+                pk_val=int(user_data["id"]),
+                current_row=dict(prev_row) if prev_row is not None else None,
+                new_row=new_snapshot,
+                fields=GITHUB_TRACKED_FIELDS,
+            )
+        except Exception as exc:
+            logger.debug("user_change_tracker[github]: detect_and_log failed: %s", exc)
 
     async def _upsert_repo(self, repo_data: dict):
         async with self.pool.acquire() as conn:
