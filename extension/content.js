@@ -323,6 +323,35 @@ const instagram = {
     this._reelItems(j, String(userId)).forEach((it) => media.push(...this.storyItemMedia(it, username, "story")));
     return media;
   },
+  // BULK story capture: the reels_tray returns EVERY followed account that has an
+  // active story in ONE request, then reels_media fetches the full items for many
+  // reel_ids at once. This captures your whole story feed per cycle in ~1-2
+  // requests instead of one-per-profile — MORE coverage AND fewer requests
+  // (ban-safer). A user's own story reel_id == their user pk.
+  async getStoryTray() {
+    const tray = await fetchJson("https://www.instagram.com/api/v1/feed/reels_tray/", { headers: this.headers(), credentials: "include" });
+    const entries = (tray.tray || []).filter((t) => t.user && t.user.pk);
+    if (!entries.length) return 0;
+    const ids = entries.map((t) => String(t.user.pk));
+    const nameById = {};
+    entries.forEach((t) => { nameById[String(t.user.pk)] = (t.user.username || String(t.user.pk)); });
+    let saved = 0;
+    for (let i = 0; i < ids.length; i += 20) {
+      const chunk = ids.slice(i, i + 20);
+      const qs = chunk.map((id) => "reel_ids=" + encodeURIComponent(id)).join("&");
+      let j;
+      try { j = await fetchJson("https://www.instagram.com/api/v1/feed/reels_media/?" + qs, { headers: this.headers(), credentials: "include" }); }
+      catch (e) { if (e instanceof WallError) throw e; continue; }
+      for (const id of chunk) {
+        const media = [];
+        this._reelItems(j, id).forEach((it) => media.push(...this.storyItemMedia(it, nameById[id], "story")));
+        if (media.length) { await send({ type: "ingest", platform: "instagram", username: nameById[id], items: media }); saved += media.length; }
+      }
+      await hsleep(4000);
+    }
+    if (saved) clog("info", `story tray: +${saved} story media across ${ids.length} account(s)`, "instagram");
+    return saved;
+  },
   async getHighlights(userId, username, maxReels = 5) {
     const tray = await fetchJson("https://www.instagram.com/api/v1/highlights/" + userId + "/highlights_tray/", { headers: this.headers(), credentials: "include" });
     const reels = (tray.tray || []).slice(0, maxReels);
@@ -490,6 +519,17 @@ const instagram = {
     const getUser = async (u) => { if (cache.has(u)) return cache.get(u); const p = await this.getProfile(u); cache.set(u, p); return p; };
     const okProfile = (user) => user && ((user.edge_followed_by && user.edge_followed_by.count) || 0) <= SPIDER_FAMOUS_CAP;
     let saved = 0, discovered = 0, visited = 0;
+
+    // PASS 0 — WHOLE STORY TRAY. One reels_tray call captures every followed
+    // account's active story this cycle (the bulk of your story feed), so the
+    // per-profile sweep below is just a top-up for seeds/early-network.
+    try {
+      saved += await this.getStoryTray();
+    } catch (e) {
+      if (e instanceof WallError) { setWall("instagram", 45); clog("warn", "throttled in story-tray — backing off 45m", "instagram"); await send({ type: "wall", platform: "instagram", mins: 45 }).catch(() => {}); return { targets: visited, saved, discovered, walled: true }; }
+      clog("warn", `story-tray sweep failed: ${e.message}`, "instagram");
+    }
+    await hsleep(6000);
 
     // PASS 1 — EXPIRING FIRST. The server orders seeds (hop 0) at the front, so we
     // sweep stories/highlights for your seed profiles + early network every cycle.
