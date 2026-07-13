@@ -118,13 +118,18 @@ exist as code**, but several are not yet wired, and Tier 1 is not yet flowing:
   reconciler,identity_reconcile}.py` exist.
 - **Media-type policy** — `src/core/{media_filter,document_filter}.py` +
   the website/search allow-deny policy shipped 2026-07-12.
-- **Tier 1 Ephemeral/Stories — NOT flowing.** No stories/status/highlight table
-  exists and `media_items` has **no `story`/`story_video`/`status` content_type**
-  (distinct types: activity_photo, audio, document, file, image, media, pdf,
-  photo, post, profile_photo, sticker, thumbnail, user_profile_photo, video).
-  Ephemeral capture is genuine per-platform feature work (Instagram stories/
-  highlights, WhatsApp status, Telegram stories, TikTok stories) — treat the
-  matrix ✅s for Tier 1 as TODO, not done.
+- **Tier 1 Ephemeral/Stories — PARTIALLY working (correction 2026-07-13).** An
+  earlier note here said "not flowing" — that was a MEASUREMENT ERROR (only
+  `content_type` was checked). Ephemeral media is stored under the
+  **`media_items.kind`** column, not `content_type`. Instagram IS capturing it
+  via the extension -> ig_ingest `/social/ingest` path (`kind` in
+  {post, story, highlight, tagged, profile}, namespaced dedup ids `story_`/`hl_`):
+  as of 2026-07-13, instagram has **story=100, highlight=3,658** rows (plus
+  post=80,416, tagged=33,735). Remaining Tier 1 work: (a) surface stories/
+  highlights distinctly in the dashboard (query by `kind`, not content_type);
+  (b) verify/extend other platforms' ephemeral capture (WhatsApp status,
+  Telegram stories, TikTok stories); (c) decide whether to add an active 4h
+  poll lane vs the current passive in-tab extension capture.
 
 Working & verified: Tier 2 media (all sources download files), Tier 3 docs/audio
 (telegram/beeper + website/search office-docs & video as of 2026-07-12).
