@@ -2135,74 +2135,148 @@ class TelegramCollector(BaseCollector):
         }, worker=worker)
         return True
 
+    @staticmethod
+    def _entity_from_peer(peer, umap: dict, cmap: dict):
+        """Resolve a Telethon Peer to its entity using the users/chats maps that
+        come back inside a stories response (avoids an extra get_entity call)."""
+        if peer is None:
+            return None
+        uid = getattr(peer, "user_id", None)
+        if uid is not None:
+            return umap.get(uid)
+        cid = getattr(peer, "channel_id", None)
+        if cid is not None:
+            return cmap.get(cid)
+        chid = getattr(peer, "chat_id", None)
+        if chid is not None:
+            return cmap.get(chid)
+        return None
+
+    async def _download_story_items(self, worker, ent_id, ent_name, ent_username, story_items):
+        """Download a peer's active story media into media_items (kind='story')."""
+        for story in story_items or []:
+            if self._stop.is_set():
+                break
+            story_id = getattr(story, "id", None)
+            if not story_id:
+                continue
+            cid = f"story_{ent_id}_{story_id}"
+            if self.is_known(cid):
+                continue
+            media = getattr(story, "media", None)
+            if not media:
+                continue
+            is_video = hasattr(media, "video")
+            story_url = f"https://t.me/{ent_username}/s/{story_id}" if ent_username else None
+            try:
+                await self.download_media({
+                    "entity_id": str(ent_id),
+                    "entity_name": ent_name,
+                    "content_type": "story_video" if is_video else "story",
+                    # Normalize ephemeral onto media_items.kind='story' (same
+                    # convention as Instagram) so the dashboard surfaces it.
+                    "kind": "story",
+                    "content_id": cid,
+                    "media": media,
+                    "extension": "mp4" if is_video else "jpg",
+                    "raw": story.to_dict(),
+                    "source_url_override": story_url,
+                }, worker=worker)
+            except Exception as e:
+                logger.debug("story download failed %s: %s", cid, e)
+
+    async def _known_user_ids_for_stories(self, limit: int) -> list[str]:
+        """A bounded, cheaply-sampled batch of discovered user ids to probe for
+        PUBLIC stories (users we've come across but may not follow). TABLESAMPLE
+        keeps it cheap on a large table; best-effort."""
+        if not self.pool or limit <= 0:
+            return []
+        try:
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    "SELECT platform_user_id FROM telegram_users "
+                    "TABLESAMPLE SYSTEM (2) "
+                    "WHERE platform_user_id ~ '^[0-9]+$' LIMIT $1",
+                    limit,
+                )
+            return [r["platform_user_id"] for r in rows]
+        except Exception:
+            return []
+
     async def _scan_stories(self, worker: "TelegramWorker", targets: list[str]):
         try:
             from telethon.tl.functions.stories import GetPeerStoriesRequest
-            for target in targets:
-                if self._stop.is_set():
-                    break
-                # A chat lives in exactly ONE of the N accounts; resolving via a
-                # single fixed worker raised "Cannot find any entity" for the
-                # ~(N-1)/N owned by other accounts (why story rows were 0). Resolve
-                # via whichever account actually owns it, and fetch stories with
-                # THAT account's client.
-                try:
-                    owner_w, entity = await self._resolve_entity_any_worker(worker, target)
-                except EntityUnresolvable:
-                    continue
-                except Exception as e:
-                    logger.debug("story entity resolve failed for %s: %s", target, e)
-                    continue
-                client = owner_w.client
-
-                chat_id = str(entity.id)
-                chat_name = getattr(entity, "title", None) or getattr(entity, "username", None) or chat_id
-                chat_username = getattr(entity, "username", None)  # for stories deep-link
-
-                try:
-                    result = await client(GetPeerStoriesRequest(peer=entity))
-                    stories = getattr(result, "stories", None)
-                    if not stories:
-                        continue
-                    story_items = getattr(stories, "stories", [])
-                    for story in story_items:
-                        if self._stop.is_set():
-                            break
-                        story_id = getattr(story, "id", None)
-                        if not story_id:
-                            continue
-                        cid = f"story_{chat_id}_{story_id}"
-                        if self.is_known(cid):
-                            continue
-
-                        media = getattr(story, "media", None)
-                        if media:
-                            is_video = hasattr(media, "video")
-                            # Stories have their own deep-link:
-                            # https://t.me/<username>/s/<story_id> for public.
-                            # Private stories have no publicly openable URL.
-                            story_url = (
-                                f"https://t.me/{chat_username}/s/{story_id}"
-                                if chat_username else None
-                            )
-                            await self.download_media({
-                                "entity_id": chat_id,
-                                "entity_name": chat_name,
-                                "content_type": "story_video" if is_video else "story",
-                                # Normalize ephemeral onto media_items.kind='story'
-                                # (same convention as Instagram) so the dashboard
-                                # Stories view surfaces telegram stories too.
-                                "kind": "story",
-                                "content_id": cid,
-                                "media": media,
-                                "extension": "mp4" if is_video else "jpg",
-                                "raw": story.to_dict(),
-                                "source_url_override": story_url,
-                            }, worker=owner_w)
-                except Exception as e:
-                    logger.debug("Story fetch failed for %s: %s", chat_name, e)
         except ImportError:
-            pass
+            return
+        # GetAllStoriesRequest (the whole "tray") is newer — import defensively so
+        # an older Telethon still runs the per-target path below.
+        try:
+            from telethon.tl.functions.stories import GetAllStoriesRequest
+        except ImportError:
+            GetAllStoriesRequest = None
+
+        # 1) PRIMARY: the whole story tray for EACH account = every followed
+        #    CONTACT's active stories. Telegram stories come from users you
+        #    follow (the collector's `targets` are channels), so this is where
+        #    the volume is. One call per account covers all its contacts.
+        for w in (self._workers if GetAllStoriesRequest is not None else []):
+            if self._stop.is_set():
+                break
+            if getattr(w, "state", None) not in (None, SessionState.CONNECTED):
+                continue
+            try:
+                res = await w.client(GetAllStoriesRequest())
+            except Exception as e:
+                logger.debug("GetAllStories failed on w=%s: %s",
+                             getattr(w, "worker_id", "?"), e)
+                continue
+            umap = {u.id: u for u in (getattr(res, "users", None) or [])}
+            cmap = {c.id: c for c in (getattr(res, "chats", None) or [])}
+            for ps in (getattr(res, "peer_stories", None) or []):
+                ent = self._entity_from_peer(getattr(ps, "peer", None), umap, cmap)
+                if ent is None:
+                    continue
+                ent_id = getattr(ent, "id", None)
+                ent_name = (getattr(ent, "title", None) or getattr(ent, "username", None)
+                            or getattr(ent, "first_name", None) or str(ent_id))
+                ent_username = getattr(ent, "username", None)
+                await self._download_story_items(
+                    w, ent_id, ent_name, ent_username, getattr(ps, "stories", None) or [])
+
+        # 2) SECONDARY: explicit configured targets + a sampled batch of
+        #    discovered users — catches PUBLIC stories from users we've come
+        #    across but don't follow. Cross-account resolved (owning account).
+        extra = list(targets or [])
+        extra += await self._known_user_ids_for_stories(
+            int(os.getenv("TELEGRAM_STORY_USER_BATCH", "60")))
+        seen: set[str] = set()
+        for target in extra:
+            if self._stop.is_set():
+                break
+            t = str(target)
+            if not t or t in seen:
+                continue
+            seen.add(t)
+            try:
+                owner_w, entity = await self._resolve_entity_any_worker(worker, t)
+            except EntityUnresolvable:
+                continue
+            except Exception:
+                continue
+            ent_id = getattr(entity, "id", None)
+            ent_name = (getattr(entity, "title", None) or getattr(entity, "username", None)
+                        or getattr(entity, "first_name", None) or str(ent_id))
+            ent_username = getattr(entity, "username", None)
+            try:
+                result = await owner_w.client(GetPeerStoriesRequest(peer=entity))
+                stories = getattr(result, "stories", None)
+                if not stories:
+                    continue
+                await self._download_story_items(
+                    owner_w, ent_id, ent_name, ent_username,
+                    getattr(stories, "stories", None) or [])
+            except Exception as e:
+                logger.debug("Story fetch failed for %s: %s", ent_name, e)
 
     async def _poll_admin_logs(self, entity):
         # Placeholder — telegramcollector/services/collector/admin_log_poller.py
@@ -3049,17 +3123,20 @@ class TelegramCollector(BaseCollector):
                 return None
             worker = self._workers[0]
 
-        client = worker.client
+        # Resolve via whichever account actually owns this user (cross-account).
+        # A single-worker get_entity raised "Cannot find any entity" for users
+        # owned by the other N-1 accounts (the profile-path equivalent of the
+        # stories bug) — that was the ~75/20min WARNING spam AND lost profiles.
+        # Route the rest of the collection through the owning account.
         try:
-            user = await client.get_entity(int(user_id))
-        except (ValueError, TypeError):
-            try:
-                user = await client.get_entity(user_id)
-            except Exception as exc:
-                logger.warning("collect_user_profile resolve failed: %s", exc)
-                return None
+            owner_w, user = await self._resolve_entity_any_worker(worker, str(user_id))
+            worker = owner_w
+            client = owner_w.client
+        except EntityUnresolvable:
+            logger.debug("collect_user_profile: no connected account owns user %s", user_id)
+            return None
         except Exception as exc:
-            logger.warning("collect_user_profile resolve failed: %s", exc)
+            logger.debug("collect_user_profile resolve (transient) for %s: %s", user_id, exc)
             return None
 
         # ── User-intelligence diff: snapshot the row BEFORE upserting so the
