@@ -676,21 +676,37 @@ class WhatsappCollector(BaseCollector):
         if not self.pool:
             return
         try:
+            from urllib.parse import urlparse
             async with self.pool.acquire() as conn:
+                # The real table is wa_discovered_links (chat_id UUID FK, url,
+                # domain, link_type, ...). The old code targeted a non-existent
+                # `discovered_links` with the wrong schema, so every link was
+                # silently dropped (wa_discovered_links stayed 0). Resolve the
+                # chat UUID (nullable — still store links from unknown chats).
+                chat_uuid = await conn.fetchval(
+                    "SELECT id FROM whatsapp_chats WHERE platform_chat_id = $1",
+                    chat_jid,
+                )
                 for kind, url in links:
+                    try:
+                        domain = (urlparse(url).netloc or None)
+                    except Exception:
+                        domain = None
                     try:
                         await conn.execute(
                             """
-                            INSERT INTO discovered_links (source, kind, url, context, discovered_at)
-                            VALUES ($1, $2, $3, $4, NOW())
-                            ON CONFLICT (url) DO NOTHING
+                            INSERT INTO wa_discovered_links
+                                (chat_id, url, domain, link_type, discovered_at)
+                            SELECT $1, $2, $3, $4, NOW()
+                            WHERE NOT EXISTS (
+                                SELECT 1 FROM wa_discovered_links
+                                WHERE url = $2 AND chat_id IS NOT DISTINCT FROM $1
+                            )
                             """,
-                            self.SOURCE_NAME, kind, url, chat_jid,
+                            chat_uuid, url, domain, kind,
                         )
                     except Exception as e:
-                        # table may not exist in some envs; soft-fail
-                        logger.debug("discovered_links insert skipped (%s): %s", url, e)
-                        break
+                        logger.debug("wa_discovered_links insert skipped (%s): %s", url, e)
         except Exception as e:
             logger.debug("discover_links db failure: %s", e)
 
