@@ -2047,6 +2047,7 @@ class TelegramCollector(BaseCollector):
                 filename=filename, file_path=str(dest),
                 file_size=len(data), sha256=sha, metadata=metadata,
                 source_url=self._build_telegram_source_url(item),
+                kind=item.get("kind"),
             )
             self._known_ids.add(cid)
         except Exception as e:
@@ -2180,6 +2181,10 @@ class TelegramCollector(BaseCollector):
                                 "entity_id": chat_id,
                                 "entity_name": chat_name,
                                 "content_type": "story_video" if is_video else "story",
+                                # Normalize ephemeral onto media_items.kind='story'
+                                # (same convention as Instagram) so the dashboard
+                                # Stories view surfaces telegram stories too.
+                                "kind": "story",
                                 "content_id": cid,
                                 "media": media,
                                 "extension": "mp4" if is_video else "jpg",

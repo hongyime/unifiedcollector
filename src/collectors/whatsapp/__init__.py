@@ -464,6 +464,10 @@ class WhatsappCollector(BaseCollector):
             }
             self.save_json(metadata, dest_dir / f"{Path(filename).stem}_metadata.json")
 
+            # WhatsApp status ("stories") arrive on the status@broadcast JID.
+            # Tag them kind='story' (same convention as Instagram/Telegram) so
+            # the dashboard Stories view surfaces them.
+            _kind = "story" if str(chat_jid) == "status@broadcast" else None
             await self.insert_media_item(
                 entity_id=entity_id,
                 entity_name=chat_name,
@@ -475,6 +479,7 @@ class WhatsappCollector(BaseCollector):
                 sha256=sha,
                 metadata=metadata,
                 source_url=self._build_whatsapp_source_url(chat_jid, cid),
+                kind=_kind,
             )
             # Link the media back to its message so the row carries media_url/size
             # (was 0% — the analyzer couldn't join a message to its image). cid is

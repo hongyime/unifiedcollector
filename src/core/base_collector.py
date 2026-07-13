@@ -369,7 +369,8 @@ class BaseCollector(ABC):
                                 width: int | None = None, height: int | None = None,
                                 sha256: str | None = None,
                                 source_url: str | None = None,
-                                metadata: dict | None = None) -> bool:
+                                metadata: dict | None = None,
+                                kind: str | None = None) -> bool:
         """Insert into media_items. Returns False on duplicate (same source+content_id).
 
         For profile_photo items, sha256 is auto-computed from the file on disk
@@ -456,14 +457,14 @@ class BaseCollector(ABC):
                 INSERT INTO media_items
                     (source, entity_id, entity_name, content_type, content_id,
                      filename, file_path, file_size, width, height,
-                     sha256, source_url, metadata, ingest_path)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14)
+                     sha256, source_url, metadata, ingest_path, kind)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14,$15)
                 ON CONFLICT DO NOTHING
                 """,
                 self.SOURCE_NAME, entity_id, entity_name, content_type, content_id,
                 filename, file_path, file_size, width, height,
                 sha256, source_url, json.dumps(metadata, default=str) if metadata is not None else None,
-                self.INGEST_PATH,
+                self.INGEST_PATH, kind,
             )
         # asyncpg returns the command tag, e.g. "INSERT 0 1" (stored) / "INSERT 0 0"
         # (a unique conflict skipped it).
