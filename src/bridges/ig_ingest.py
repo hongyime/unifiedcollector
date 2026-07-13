@@ -52,6 +52,15 @@ try:
 except Exception:  # pragma: no cover
     ProfileAccessRepository = None  # type: ignore[assignment]
 
+# Profile change-history (Tier 4). The change tracker was only wired into the
+# 429'd headless collector, so the LIVE extension path never recorded bio/
+# username/follower changes (instagram_user_changes = 0). Wire it here too.
+try:
+    from src.core.user_change_tracker import UserChangeTracker, INSTAGRAM_TRACKED_FIELDS
+except Exception:  # pragma: no cover
+    UserChangeTracker = None  # type: ignore[assignment]
+    INSTAGRAM_TRACKED_FIELDS = None  # type: ignore[assignment]
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("social_ingest")
 
@@ -1331,6 +1340,20 @@ async def _save_profile(pool, platform, p) -> bool:
     if not uname:
         return False
     pic = p.get("profile_pic_url")
+    # Tier 4 change-history: snapshot the row BEFORE the upsert so we can diff
+    # old -> new and log bio/username/follower/etc. changes. Best-effort.
+    prev_row = None
+    if UserChangeTracker is not None:
+        try:
+            async with pool.acquire() as conn:
+                prev_row = await conn.fetchrow(
+                    "SELECT username, full_name, bio, followers_count, following_count, "
+                    "posts_count, is_verified, is_private, profile_pic_url, external_url "
+                    "FROM instagram_profiles WHERE platform_user_id = $1",
+                    str(p.get("user_id") or uname),
+                )
+        except Exception:
+            logger.debug("ig change-tracker prev-row fetch failed for %s", uname, exc_info=True)
     try:
         async with pool.acquire() as conn:
             await conn.execute(
@@ -1353,9 +1376,52 @@ async def _save_profile(pool, platform, p) -> bool:
             )
     except Exception:
         logger.debug("save profile failed %s", uname, exc_info=True)
+    await _track_ig_profile_change(pool, p, uname, prev_row)
     await _record_users(pool, platform, [{"user_id": p.get("user_id"), "username": uname,
                                           "display_name": p.get("full_name"), "profile_pic_url": pic}], "profile")
     return True
+
+
+async def _track_ig_profile_change(pool, p, uname, prev_row) -> None:
+    """Diff the prior instagram_profiles row against the incoming extension
+    payload and log field changes into instagram_user_changes (Tier 4). Maps the
+    extension's field names onto INSTAGRAM_TRACKED_FIELDS. Best-effort — never
+    breaks ingest."""
+    if UserChangeTracker is None or INSTAGRAM_TRACKED_FIELDS is None:
+        return
+    try:
+        pk_val = int(p.get("user_id") or 0)
+    except (TypeError, ValueError):
+        pk_val = 0
+    if not pk_val:
+        return
+    try:
+        current_normalized = None
+        if prev_row is not None:
+            pr = dict(prev_row)
+            current_normalized = {
+                "username": pr.get("username"), "full_name": pr.get("full_name"),
+                "biography": pr.get("bio"), "is_verified": pr.get("is_verified"),
+                "is_private": pr.get("is_private"), "profile_pic_url": pr.get("profile_pic_url"),
+                "follower_count": pr.get("followers_count"),
+                "following_count": pr.get("following_count"),
+                "post_count": pr.get("posts_count"), "external_url": pr.get("external_url"),
+            }
+        new_snapshot = {
+            "username": p.get("username"), "full_name": p.get("full_name"),
+            "biography": p.get("bio"), "is_verified": bool(p.get("is_verified")),
+            "is_private": bool(p.get("is_private")), "profile_pic_url": p.get("profile_pic_url"),
+            "follower_count": _int(p.get("followers_count")),
+            "following_count": _int(p.get("following_count")),
+            "post_count": _int(p.get("posts_count")), "external_url": p.get("external_url"),
+        }
+        await UserChangeTracker(pool).detect_and_log(
+            table="instagram_user_changes", pk_col="user_id", pk_val=pk_val,
+            current_row=current_normalized, new_row=new_snapshot,
+            fields=INSTAGRAM_TRACKED_FIELDS,
+        )
+    except Exception:
+        logger.debug("ig change-tracker detect_and_log failed for %s", uname, exc_info=True)
 
 
 async def _record_ig_access(pool, target_username, owner, profile) -> None:
