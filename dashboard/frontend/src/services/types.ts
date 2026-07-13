@@ -16,9 +16,30 @@ export interface MediaItem {
   source: string;
   entity_name: string;
   content_type: string;
+  kind?: string | null;
   filename: string;
   file_size: number | null;
   collected_at: string;
+}
+
+export interface StoryAccount {
+  source: string;
+  entity_name: string;
+  story_count: number;
+  highlight_count: number;
+  total: number;
+  newest: string | null;
+}
+
+export interface StoriesOverview {
+  stats: {
+    stories?: number;
+    highlights?: number;
+    accounts?: number;
+    sources?: number;
+    newest?: string | null;
+  };
+  accounts: StoryAccount[];
 }
 
 export interface MediaStats {

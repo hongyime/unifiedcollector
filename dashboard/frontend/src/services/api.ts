@@ -6,6 +6,7 @@ import type {
   MediaItem,
   MediaStats,
   MediaBrowseResult,
+  StoriesOverview,
   DLQItem,
   Target,
   Schedule,
@@ -113,15 +114,18 @@ export const api = {
     return get<MediaItem[]>(`/media?${params}`);
   },
   mediaStats: () => get<MediaStats[]>("/media/stats"),
-  mediaBrowse: (opts: { source?: string; entity?: string; type?: string; page?: number; pageSize?: number }) => {
+  mediaBrowse: (opts: { source?: string; entity?: string; type?: string; kind?: string; page?: number; pageSize?: number }) => {
     const params = new URLSearchParams();
     if (opts.source) params.set("source", opts.source);
     if (opts.entity) params.set("entity", opts.entity);
     if (opts.type) params.set("content_type", opts.type);
+    if (opts.kind) params.set("kind", opts.kind);
     params.set("page", String(opts.page ?? 1));
     params.set("page_size", String(opts.pageSize ?? 24));
     return get<MediaBrowseResult>(`/media/browse?${params}`);
   },
+  storiesOverview: (limit = 300) =>
+    get<StoriesOverview>(`/stories/overview?limit=${limit}`),
   thumbnailUrl: (id: string) => `${API_BASE}/media/${id}/thumbnail`,
   fileUrl: (id: string) => `${API_BASE}/media/${id}/file`,
 

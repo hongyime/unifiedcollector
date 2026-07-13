@@ -15,6 +15,7 @@ import { SchedulesPage } from "./features/schedules/SchedulesPage";
 import { RunsPage } from "./features/runs/RunsPage";
 import { GraphPage } from "./features/graph/GraphPage";
 import { MediaBrowserPage } from "./features/media/MediaBrowserPage";
+import { StoriesPage } from "./features/stories/StoriesPage";
 import { UsersPage } from "./features/whatsapp/UsersPage";
 import { SocialUsersPage } from "./features/social/SocialUsersPage";
 import { AccountsPage } from "./features/accounts/AccountsPage";
@@ -59,6 +60,7 @@ const router = createBrowserRouter([
       { path: "runs", element: <RunsPage /> },
       { path: "media", element: <MediaPage /> },
       { path: "browse", element: <MediaBrowserPage /> },
+      { path: "stories", element: <StoriesPage /> },
       { path: "graph", element: <GraphPage /> },
       { path: "accounts", element: <AccountsPage /> },
       { path: "platform/:name", element: <PlatformPage /> },

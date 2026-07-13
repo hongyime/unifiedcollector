@@ -31,6 +31,7 @@ const groups = [
       { to: "/", label: "Dashboard", icon: LayoutDashboard },
       { to: "/collectors", label: "Collectors", icon: Database },
       { to: "/browse", label: "All media", icon: ImageIcon },
+      { to: "/stories", label: "Stories", icon: ImageIcon },
     ],
   },
   {

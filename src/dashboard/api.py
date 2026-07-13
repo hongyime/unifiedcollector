@@ -1045,6 +1045,7 @@ async def browse_media(
     source: str | None = None,
     entity: str | None = None,
     content_type: str | None = None,
+    kind: str | None = None,
     page: int = Query(1, ge=1),
     page_size: int = Query(24, ge=1, le=100),
     _user: dict = Depends(require_role("viewer")),
@@ -1085,6 +1086,13 @@ async def browse_media(
         conditions.append(f"content_type = ${idx}")
         params.append(content_type)
         idx += 1
+    if kind:
+        # Accept a single kind or a comma list (e.g. "story,highlight").
+        kinds = [k.strip() for k in kind.split(",") if k.strip()]
+        if kinds:
+            conditions.append(f"kind = ANY(${idx}::text[])")
+            params.append(kinds)
+            idx += 1
 
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
 
@@ -1104,7 +1112,7 @@ async def browse_media(
     async with pool.acquire() as conn:
         total = await _planner_estimate(conn)
         rows = await conn.fetch(
-            f"SELECT id, source, entity_name, content_type, filename, file_path, "
+            f"SELECT id, source, entity_name, content_type, kind, filename, file_path, "
             f"file_size, sha256, collected_at "
             f"FROM media_items {where} ORDER BY collected_at DESC "
             f"LIMIT ${idx} OFFSET ${idx + 1}",
@@ -1117,6 +1125,47 @@ async def browse_media(
         "page_size": page_size,
         "items": [dict(r) for r in rows],
     }
+
+
+@app.get("/stories/overview")
+async def stories_overview(
+    limit: int = Query(300, ge=1, le=2000),
+    _user: dict = Depends(require_role("viewer")),
+):
+    """Ephemeral media (media_items.kind story/highlight) grouped per account,
+    with overall stats — powers the Stories dashboard page. Stories live under
+    the `kind` column (not content_type), across any source that captures them
+    (instagram today; whatsapp status / telegram stories / tiktok as they land).
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        stats = await conn.fetchrow(
+            """
+            SELECT count(*) FILTER (WHERE kind='story')      AS stories,
+                   count(*) FILTER (WHERE kind='highlight')  AS highlights,
+                   count(DISTINCT entity_name)               AS accounts,
+                   count(DISTINCT source)                     AS sources,
+                   max(collected_at)                          AS newest
+            FROM media_items
+            WHERE kind IN ('story','highlight')
+            """
+        )
+        rows = await conn.fetch(
+            """
+            SELECT source, entity_name,
+                   count(*) FILTER (WHERE kind='story')     AS story_count,
+                   count(*) FILTER (WHERE kind='highlight') AS highlight_count,
+                   count(*)                                  AS total,
+                   max(collected_at)                         AS newest
+            FROM media_items
+            WHERE kind IN ('story','highlight')
+            GROUP BY source, entity_name
+            ORDER BY max(collected_at) DESC NULLS LAST
+            LIMIT $1
+            """,
+            limit,
+        )
+    return {"stats": dict(stats) if stats else {}, "accounts": [dict(r) for r in rows]}
 
 
 def _parse_media_uuid(media_id: str) -> _uuid.UUID:
