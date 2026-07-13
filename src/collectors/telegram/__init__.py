@@ -848,6 +848,15 @@ class TelegramCollector(BaseCollector):
             except Exception as e:
                 logger.error("Story scan failed: %s", e)
 
+        # Tier 5: drain shared/live-location coords from message metadata into
+        # telegram_message_locations (bounded per-cycle; reads existing data).
+        if os.getenv("TELEGRAM_LOCATION_BACKFILL_ENABLED", "true").lower() == "true":
+            try:
+                await self._backfill_message_locations(
+                    int(os.getenv("TELEGRAM_LOCATION_BACKFILL_BATCH", "500")))
+            except Exception as e:
+                logger.debug("location backfill failed: %s", e)
+
         if self._group_join_enabled:
             try:
                 await self._process_join_queue()
@@ -2202,6 +2211,51 @@ class TelegramCollector(BaseCollector):
             return [r["platform_user_id"] for r in rows]
         except Exception:
             return []
+
+    async def _backfill_message_locations(self, batch: int = 500) -> int:
+        """Tier 5: extract shared/live-location coordinates out of message
+        metadata into telegram_message_locations (structured + queryable).
+
+        Reads EXISTING metadata only (the raw geo was already stored) — never
+        touches the hot message INSERT path. Bounded batch per cycle; the partial
+        idx_tg_messages_geo makes "find geo messages not yet extracted" cheap.
+        Covers MessageMediaGeo / GeoLive / Venue.
+        """
+        if not self.pool:
+            return 0
+        try:
+            async with self.pool.acquire() as conn:
+                res = await conn.execute(
+                    """
+                    INSERT INTO telegram_message_locations
+                        (platform_message_id, chat_id, latitude, longitude,
+                         is_live, venue_title, venue_address)
+                    SELECT m.platform_message_id, m.chat_id,
+                           (m.metadata->'media'->'geo'->>'lat')::double precision,
+                           (m.metadata->'media'->'geo'->>'long')::double precision,
+                           (m.metadata->'media'->>'_') = 'MessageMediaGeoLive',
+                           m.metadata->'media'->>'title',
+                           m.metadata->'media'->>'address'
+                    FROM telegram_messages m
+                    WHERE (m.metadata->'media'->'geo'->>'lat') IS NOT NULL
+                      AND NOT EXISTS (
+                          SELECT 1 FROM telegram_message_locations l
+                          WHERE l.platform_message_id = m.platform_message_id)
+                    LIMIT $1
+                    ON CONFLICT (platform_message_id) DO NOTHING
+                    """,
+                    batch,
+                )
+            try:
+                n = int(res.split()[-1])
+            except (ValueError, IndexError):
+                n = 0
+            if n:
+                logger.info("telegram: backfilled %d shared-location message(s)", n)
+            return n
+        except Exception as e:
+            logger.debug("_backfill_message_locations failed: %s", e)
+            return 0
 
     async def _scan_stories(self, worker: "TelegramWorker", targets: list[str]):
         try:
