@@ -458,7 +458,8 @@ class BaseCollector(ABC):
                     (source, entity_id, entity_name, content_type, content_id,
                      filename, file_path, file_size, width, height,
                      sha256, source_url, metadata, ingest_path, kind)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14,$15)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14,
+                        COALESCE($15, 'post'))
                 ON CONFLICT DO NOTHING
                 """,
                 self.SOURCE_NAME, entity_id, entity_name, content_type, content_id,
