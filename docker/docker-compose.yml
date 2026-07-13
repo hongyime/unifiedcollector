@@ -197,7 +197,17 @@ services:
     # 768m was too tight for the merged github+strava+search worker — github's
     # spider + ~42k seeded known-ids pushed it to ~93% and it got TERM'd ~every
     # 35min (graceful exit-0, not cgroup-OOM). Raised to give headroom.
-    mem_limit: 1536m
+    # EDIT 2026-07-13 (restart diagnosis): 1536m -> 2560m. RSS sat at ~1.25GiB
+    # (83%) steady; known-id seeds are now github ~15k + strava ~11k + search
+    # ~79k (search reconciler also holds per-row file_paths), and the github
+    # collector reseeds on every watchdog relaunch. NOTE the historical ~35min
+    # graceful TERM cadence matches the freshness watchdog (WATCHDOG_INTERVAL
+    # 300s + 1800s restart cooldown) restarting a stale lowrisk via the docker
+    # socket — NOT Docker OOM and NOT an in-process self-heal (those exit 42).
+    # Docker never restarts on unhealthy by itself (no autoheal service). Sized
+    # for the 7.76GiB WSL2 VM (~2GiB MemAvailable at edit time): +1GiB worst-
+    # case growth leaves ~1GiB VM headroom. Do NOT raise to 3072m on this VM.
+    mem_limit: 2560m
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
