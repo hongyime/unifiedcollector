@@ -246,6 +246,25 @@ class StravaCollector(BaseCollector):
         # Previously disabled due to httpx → Z:/C: NTFS kernel D-state.
         # Root cause fixed: all mounts now on WSL2 ext4 named volumes.
         if self._use_api: await self._ensure_token()
+
+        # --- EDIT 2026-07-13 (GPS drain starvation fix, additive) ---
+        # The tail-end GPS backfill (bottom of collect()) almost never ran:
+        # worker restarts every ~0.5-2h + the 7200s no-progress watchdog chopped
+        # the cycle tail, so it started only 3x in 48h while history discovery
+        # (which runs EARLY every cycle) kept adding stream_status=NULL rows.
+        # Run a bounded batch FIRST so the drain is deterministic every cycle;
+        # the tail call still runs as a second batch when the cycle completes.
+        # Disable via STRAVA_GPS_BACKFILL_FIRST=false. Same pacing/requests as
+        # the tail call (3-6s STRAVA_API_DELAY per activity) — no ban-risk delta.
+        if self._gps_enabled and self._use_web and \
+                os.getenv("STRAVA_GPS_BACKFILL_FIRST", "true").lower() == "true":
+            try:
+                gps_batch = int(os.getenv("STRAVA_GPS_BACKFILL_BATCH", "150"))
+                await self._backfill_missing_gps_streams(batch_size=gps_batch)
+            except Exception as e:
+                logger.warning("strava: early GPS backfill failed: %s", e)
+        # --- END EDIT (GPS-first drain) ---
+
         for target in targets:
             if self._stop.is_set(): break
             logger.info("Collecting strava/%s", target)
@@ -1092,7 +1111,14 @@ class StravaCollector(BaseCollector):
                 LEFT JOIN strava_gps_streams s ON s.activity_id = a.id
                 WHERE a.stream_status IS NULL
                   AND (s.latlng IS NULL OR s.latlng::text IN ('[]','null',''))
-                ORDER BY a.start_date DESC NULLS LAST
+                -- EDIT 2026-07-13: was ORDER BY a.start_date DESC. Fetch-failures
+                -- (non-200 from both cookie accounts: private/deleted activities)
+                -- stay stream_status=NULL and re-sorted to the queue head forever —
+                -- 436 of the top 500 were previously-attempted repeats, wasting
+                -- ~half of every batch. Random sampling spreads the (few hundred)
+                -- permanent failures across the ~34k pool so each batch is almost
+                -- all fresh work, while transient failures still get retried later.
+                ORDER BY random()
                 LIMIT $1
                 """, batch_size)
         if not rows:
@@ -1115,6 +1141,13 @@ class StravaCollector(BaseCollector):
                 except Exception as e:
                     logger.debug("GPS backfill failed for %s: %s",
                                  row["platform_activity_id"], e)
+                # EDIT 2026-07-13: tick the watchdog on EVERY attempted activity.
+                # This loop paces ~10-16s/activity (delay + up to 2 cookie-account
+                # tries) and previously never advanced progress_count, so the
+                # worker watchdog declared strava HUNG after 7200s and cancelled
+                # the task mid-batch (observed 2026-07-13 02:56). Stream fetches
+                # ARE progress — same pattern as youtube's per-item ticks.
+                self._progress_count += 1
         logger.info("strava: GPS backfill processed %d activities this cycle", done)
         return done
 

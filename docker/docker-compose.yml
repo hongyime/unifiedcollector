@@ -202,20 +202,32 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
-      STRAVA_PAGE_SCRAPE_BATCH: "200"
+      # EDIT 2026-07-13 (GPS backlog convergence): page scrape 200 -> 100. The
+      # 200-batch phase took ~40min/cycle ahead of the GPS backfill and its
+      # stream XHRs were the source of the observed 429 bursts. Halving it
+      # shortens cycles (more GPS drain runs/day) without changing request rate.
+      STRAVA_PAGE_SCRAPE_BATCH: "100"
       SEARCH_SPIDER_PAGES: "1"
       # Strava athlete spider (kudos/comments/followers/clubs) — paced for I/O.
       STRAVA_SPIDER_ENABLED: "true"
       STRAVA_FOLLOW_SCRAPE_ENABLED: "true"
-      STRAVA_SPIDER_MAX_PER_CYCLE: "15"
-      # GPS-route backfill: ~33k activities still have stream_status=NULL (routes
-      # come from per-activity web-XHR stream fetches in cookie mode, not the
-      # 401'd summary_polyline). Bumped 150 -> 500/cycle to drain the backlog
-      # faster while keeping the polite 3-6s STRAVA_API_DELAY. 500 * ~6s worst
-      # case = 3000s, safely under COLLECTOR_HANG_TIMEOUT_SECONDS (7200) and the
-      # watchdog treats each fetched activity as progress. Tune down if Strava
-      # starts returning 429s.
-      STRAVA_GPS_BACKFILL_BATCH: "500"
+      # EDIT 2026-07-13: 15 -> 3. Each spider athlete = a full month-by-month
+      # history backfill (~4-6min, ~200 activities discovered), so 15/cycle was
+      # ~50min/cycle of NEW stream_status=NULL rows (add ~1.7k/day) starving the
+      # GPS drain (~324/day) — the backlog GREW. Queue has ~25k pending athletes
+      # (unbounded), so discovery loses nothing by going slower; raise back once
+      # strava_activities.stream_status NULL count converges.
+      STRAVA_SPIDER_MAX_PER_CYCLE: "3"
+      # GPS-route backfill: ~34k activities with stream_status=NULL. 500 -> 250
+      # (2026-07-13): the 500-batch at the REAL observed pace (~10-16s/activity:
+      # 3-6s delay x up to 2 cookie accounts) ran >2h, never finished (worker
+      # restarts + the old missing progress-tick got it watchdog-killed at 7200s).
+      # collect() now drains a batch FIRST each cycle (STRAVA_GPS_BACKFILL_FIRST)
+      # and again at the tail = up to 500 attempts/cycle, each durably persisted
+      # per-activity. Per-request pacing (STRAVA_API_DELAY 3-6s) is unchanged —
+      # ban-safe. Tune down if Strava starts returning 429s on stream XHRs.
+      STRAVA_GPS_BACKFILL_BATCH: "250"
+      STRAVA_GPS_BACKFILL_FIRST: "true"
       # CPU hygiene (A#4): low-volume / API-ceiling sources idle longer between
       # cycles — fewer wakeups, lower steady-state CPU, zero data loss.
       COLLECTOR_CYCLE_SLEEP_GITHUB: "900"
