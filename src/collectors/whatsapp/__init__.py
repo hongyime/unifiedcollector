@@ -51,7 +51,7 @@ import httpx
 
 from src.core.base_collector import BaseCollector
 from src.core.change_tracker import ChangeTracker
-from src.core.link_extractor import extract_whatsapp_links
+from src.core.link_extractor import extract_whatsapp_links, extract_all_links
 from src.core.file_naming import sanitize_name
 
 logger = logging.getLogger(__name__)
@@ -667,7 +667,7 @@ class WhatsappCollector(BaseCollector):
     async def _discover_links(self, text: str, chat_jid: str):
         """Extract WhatsApp invite links and persist for downstream discovery."""
         try:
-            links = extract_whatsapp_links(text or "")
+            links = extract_all_links(text or "")
         except Exception as e:
             logger.debug("link extraction failed: %s", e)
             return
