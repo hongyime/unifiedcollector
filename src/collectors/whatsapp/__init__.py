@@ -320,6 +320,9 @@ class WhatsappCollector(BaseCollector):
         await self._upsert_message(event, chat_jid, sender_uuid)
         self._progress_count += 1
 
+        # Tier 5: shared/live-location messages -> structured lat/lng.
+        await self._extract_wa_location(event, chat_jid, msg_id)
+
         # 3. Handle Media if exists
         media_type = event.get("media_type") or event.get("messageType", "")
         has_media = media_type in ("imageMessage", "videoMessage", "audioMessage", "documentMessage", "stickerMessage")
@@ -663,6 +666,44 @@ class WhatsappCollector(BaseCollector):
         except Exception as exc:
             logger.warning("backfill_chat failed jid=%s err=%s", chat_jid, exc)
             return None
+
+    async def _extract_wa_location(self, event: dict, chat_jid: str, msg_id: str):
+        """Tier 5: pull coords out of a WhatsApp location / live-location message
+        into whatsapp_message_locations. Defensive about the bridge's event shape
+        (flat or nested location/locationMessage/liveLocationMessage). Best-effort
+        — never breaks message handling."""
+        if not self.pool or not msg_id:
+            return
+        try:
+            mt = (event.get("media_type") or event.get("messageType") or "").lower()
+            loc = None
+            for key in ("location", "locationMessage", "liveLocationMessage"):
+                v = event.get(key)
+                if isinstance(v, dict):
+                    loc = v
+                    break
+            if loc is None and "location" in mt:
+                loc = event  # flat shape: coords live on the event itself
+            if not isinstance(loc, dict):
+                return
+            lat = loc.get("degreesLatitude", loc.get("latitude", loc.get("lat")))
+            lng = loc.get("degreesLongitude", loc.get("longitude", loc.get("lng", loc.get("long"))))
+            if lat is None or lng is None:
+                return
+            is_live = ("live" in mt) or bool(loc.get("sequenceNumber") or loc.get("isLive"))
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO whatsapp_message_locations
+                        (platform_message_id, chat_jid, latitude, longitude, is_live, name, address)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7)
+                    ON CONFLICT (platform_message_id) DO NOTHING
+                    """,
+                    str(msg_id), chat_jid, float(lat), float(lng), is_live,
+                    loc.get("name"), loc.get("address"),
+                )
+        except Exception as e:
+            logger.debug("wa location extract failed for %s: %s", msg_id, e)
 
     async def _discover_links(self, text: str, chat_jid: str):
         """Extract WhatsApp invite links and persist for downstream discovery."""
