@@ -43,6 +43,15 @@ from aiohttp import web
 from src.db.connection import get_pool, close_pool
 from src.core.media_filter import inspect as inspect_media
 
+# Follow-aware access recording (Phase 0). The extension IS the live IG path, so
+# recording access outcomes here populates profile_access_{summary,attempts} far
+# faster than the 429'd headless collector. Defensive import — ingest still works
+# without it.
+try:
+    from src.core.profile_access import ProfileAccessRepository
+except Exception:  # pragma: no cover
+    ProfileAccessRepository = None  # type: ignore[assignment]
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("social_ingest")
 
@@ -1349,6 +1358,46 @@ async def _save_profile(pool, platform, p) -> bool:
     return True
 
 
+async def _record_ig_access(pool, target_username, owner, profile) -> None:
+    """Record that ``owner`` (the extension's logged-in IG account) could see
+    ``target_username`` into profile_access_{summary,attempts} — the follow-aware
+    selector (Phase 0). Because the extension is the live IG path (the headless
+    collector is 429'd), this is where the routing data actually accumulates.
+
+    A successful profile ingest means the owner CAN access the target. A private
+    profile that still yielded data implies the owner FOLLOWS it (private data is
+    only visible to followers). Best-effort — never breaks ingest.
+    """
+    if ProfileAccessRepository is None or not pool or not target_username:
+        return
+    account = None
+    if isinstance(owner, dict):
+        account = (owner.get("username") or owner.get("id") or "") or None
+    elif isinstance(owner, str):
+        account = owner.strip() or None
+    # Fallback label when the extension didn't send which account it used: still
+    # records the public/private signal, but won't match a routable cookie
+    # account (so it can't mis-route — routing only trusts real account names).
+    if not account:
+        account = "ig_extension"
+    _priv = profile.get("is_private")
+    is_private = bool(_priv) if _priv is not None else None
+    _fbv = profile.get("followed_by_viewer")
+    is_followed = bool(_fbv) if _fbv is not None else bool(is_private)
+    try:
+        repo = ProfileAccessRepository(pool)
+        await repo.record_attempt(
+            source="instagram",
+            target_id=str(target_username).lstrip("@"),
+            account=str(account),
+            can_access=True,
+            is_public=(None if is_private is None else (not is_private)),
+            is_followed=is_followed,
+        )
+    except Exception:
+        logger.debug("ig access-record failed for %s", target_username, exc_info=True)
+
+
 CREDENTIALS_ROOT = os.getenv("CREDENTIALS_ROOT", "/app/credentials")
 
 
@@ -1420,6 +1469,14 @@ async def profile_handler(request):
     platform = _norm_platform(body.get("platform"))
     p = body.get("profile") or {}
     await _save_profile(request.app["pool"], platform, p)
+    # Follow-aware access recording (Phase 0): the extension just successfully
+    # fetched this profile with its logged-in account (body["owner"]) — so that
+    # account CAN see the target. Populates profile_access for the selector.
+    if platform == "instagram":
+        await _record_ig_access(
+            request.app["pool"], (p.get("username") or "").strip().lstrip("@"),
+            body.get("owner"), p,
+        )
     # download the profile photo as a kind=profile media item
     pic = p.get("profile_pic_url")
     uname = (p.get("username") or "").strip().lstrip("@")
