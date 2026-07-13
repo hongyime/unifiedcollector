@@ -733,7 +733,12 @@ class InstagramCollector(BaseCollector):
                 "cycle will likely fail until a session is refreshed", len(cookie_accounts),
             )
             _healthy = cookie_accounts  # try anyway
-        acct_name = _healthy[0]
+        # Follow-aware routing (Phase 0 step 2): among the healthy accounts, use
+        # the one known to access the MOST of this cycle's targets (from the
+        # profile_access data). Single-account-per-cycle model, so this picks the
+        # best CYCLE account rather than switching per target. Falls back to
+        # _healthy[0] when there's no access data yet (prior behaviour preserved).
+        acct_name = await self._select_cycle_account(_healthy, targets)
         self._session_auth_dead = False
         # Wire a REAL Account (stable per-account fingerprint: UA + device_id)
         # and set it as the current account BEFORE the first request. Previously
@@ -1056,6 +1061,38 @@ class InstagramCollector(BaseCollector):
             )
         except Exception as e:
             logger.debug("instagram: access-tracking record failed for %s: %s", username, e)
+
+    async def _select_cycle_account(self, healthy, targets):
+        """Follow-aware routing (Phase 0 step 2): pick the healthy cookie account
+        known to access the most of this cycle's targets, from profile_access.
+        Best-effort; falls back to healthy[0] with no data (prior behaviour)."""
+        if not healthy:
+            return None
+        if len(healthy) == 1 or self.pool is None or not self._access_tracking:
+            return healthy[0]
+        try:
+            tids = [str(t).lstrip("@") for t in (targets or []) if t]
+            if not tids:
+                return healthy[0]
+            best, best_n = healthy[0], -1
+            async with self.pool.acquire() as conn:
+                for acct in healthy:
+                    n = await conn.fetchval(
+                        "SELECT count(DISTINCT target_id) FROM profile_access_attempts "
+                        "WHERE source='instagram' AND accessing_account=$1 "
+                        "AND can_access AND target_id = ANY($2::text[])",
+                        acct, tids,
+                    )
+                    if (n or 0) > best_n:
+                        best, best_n = acct, (n or 0)
+            if best_n > 0:
+                logger.info(
+                    "instagram: follow-aware routing picked %s (covers %d/%d targets)",
+                    best, best_n, len(tids))
+            return best
+        except Exception as e:
+            logger.debug("instagram: follow-aware account selection failed: %s", e)
+            return healthy[0]
 
     async def _collect_user(self, client: httpx.AsyncClient, username: str):
         acct_name = self._current_account.name if self._current_account else None
