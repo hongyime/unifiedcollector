@@ -125,11 +125,26 @@ exist as code**, but several are not yet wired, and Tier 1 is not yet flowing:
   via the extension -> ig_ingest `/social/ingest` path (`kind` in
   {post, story, highlight, tagged, profile}, namespaced dedup ids `story_`/`hl_`):
   as of 2026-07-13, instagram has **story=100, highlight=3,658** rows (plus
-  post=80,416, tagged=33,735). Remaining Tier 1 work: (a) surface stories/
-  highlights distinctly in the dashboard (query by `kind`, not content_type);
-  (b) verify/extend other platforms' ephemeral capture (WhatsApp status,
-  Telegram stories, TikTok stories); (c) decide whether to add an active 4h
-  poll lane vs the current passive in-tab extension capture.
+  post=80,416, tagged=33,735).
+
+  **Stories rollout (2026-07-13):**
+  - ✅ Dashboard Stories view shipped (`/stories`, queries `media_items.kind`).
+  - ✅ Storage unified onto `media_items.kind='story'` — `insert_media_item`
+    gained a `kind` param; whatsapp `status@broadcast` media and telegram
+    `_scan_stories` output are now tagged `kind='story'` (were untagged /
+    `content_type='story'`).
+  - ✅ Telegram `_scan_stories` now resolves each chat via its OWNING account
+    (`_resolve_entity_any_worker`) — the single-account resolution was why it
+    produced 0 rows ("Cannot find any entity").
+  - ❌ **TikTok stories — NOT FEASIBLE (spiked 2026-07-13).** Neither yt-dlp
+    (2026.03.17) nor gallery-dl (1.32.1) has a TikTok *story* extractor (only
+    user/post/live/collection/avatar/following/likes), and TikTok has largely
+    deprecated standalone Stories. Would require reverse-engineering the private
+    story API — high ban-risk, low value. Skipped.
+  - Note: Instagram/WhatsApp/Telegram story capture is PASSIVE (extension
+    in-tab / status broadcasts / 300s scan) — it captures what's seen, not an
+    exhaustive active poll. That's why counts are modest + rolling (stories are
+    24h-ephemeral); highlights persist so they accumulate.
 
 Working & verified: Tier 2 media (all sources download files), Tier 3 docs/audio
 (telegram/beeper + website/search office-docs & video as of 2026-07-12).
