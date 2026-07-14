@@ -44,13 +44,16 @@ link. Network comes from `beeper_shadow_chats.network` (also backfilled onto
   (`phone_match` signal).
 - `instagram_profiles.external_url` — off-platform presence (`shared_website`).
 
+## Telegram bots
+`telegram_users.is_bot` (nullable boolean, added by migration
+`add_telegram_is_bot.sql`) marks bots — set from Telethon `User.bot` on every
+upsert, and backfilled for the 283 `%bot`-suffixed rows (Telegram enforces bot
+usernames end in `bot`). The analyzer **excludes `is_bot` from entity creation**
+(`entity_resolver.load_platform_profiles`) because a shared bot contact is false
+identity evidence. Channels appearing as users are not separately flagged yet
+(no reliable source signal in `telegram_users`). (SYNC #40)
+
 ## Known gaps (do not silently "fix" without reading the linked task)
-- **telegram bots/channels are not flagged.** `telegram_users` has no `is_bot` /
-  `is_channel` column (only `is_deleted`). Bots (≈283 `%bot` usernames) can
-  therefore become "person" entities in the analyzer. If/when captured, add a
-  nullable `is_bot boolean` via a **new** migration (never edit an applied one —
-  checksum drift bricks migrate-on-boot collectors) and set it from Telethon's
-  `User.bot`. Analyzer should then exclude `is_bot` from entity creation. (SYNC #40)
 - **lemon8 `platform_user_id` is unstable.** It stores the vanity handle for some
   profiles and the stable `userNNNN` id for others, so a rename re-keys the
   identity. Capture the stable numeric/`sec_uid` id consistently. (SYNC #39)
