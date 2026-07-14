@@ -1,0 +1,59 @@
+# Identity-Key Contract (collector → analyzer)
+
+Stable contract for how `unifiedanalyzer` resolves people from collector data.
+The analyzer's `entity_platform_links.platform_id` is keyed **per source** on the
+columns below. Changing a source's identity key is a breaking change — it
+silently orphans every existing entity link for that source. Coordinate with
+`unifiedanalyzer/src/pipeline/entity_resolver.py::load_platform_profiles` and
+`timeline_builder.py` before altering any row here.
+
+## Per-source identity key
+
+| source (link) | collector table | `platform_id` column | shape | username/handle |
+|---|---|---|---|---|
+| github | `github_users` | `platform_user_id` | numeric | `login` |
+| instagram | `instagram_profiles` | `platform_user_id` | numeric | `username` |
+| telegram | `telegram_users` | `platform_user_id` | numeric | `username` |
+| strava | `strava_athletes` | `platform_athlete_id` | numeric | `username` |
+| youtube | `youtube_channels` | `platform_channel_id` | `UC…` id | `custom_url` (@handle) |
+| tiktok | `tiktok_profiles` | `platform_user_id` | numeric | `username` |
+| lemon8 | `lemon8_profiles` | `platform_user_id` | **⚠ vanity handle OR `userNNNN`** | `username` |
+| whatsapp | `whatsapp_users` | `platform_user_id` → JID | `<phone>@s.whatsapp.net` | none (phone-keyed) |
+| threads | `threads_posts` | `author_username` | handle (= IG handle) | same |
+| x | `x_posts` | `author_username` | handle | same |
+
+### WhatsApp specifics
+- A bare phone is reconstructed as `<phone>@s.whatsapp.net`.
+- `@lid` group senders have NULL phone; resolve via `whatsapp_lid_map` (`lid` →
+  `phone_jid`, a full JID). 15,901 rows. Used by both timeline attribution and
+  the beeper bridge.
+
+### Beeper (no own identity key)
+`beeper_shadow_messages.sender_id` encodes the **native** platform id
+(`@telegram_<id>`, `@instagram(go)_<id>`, `@whatsapp_<phone>`,
+`@whatsapp_lid-<id>`). Beeper is bridged onto the **native source** links above
+by `unifiedanalyzer/src/pipeline/beeper_bridge.py`, never a `source='beeper'`
+link. Network comes from `beeper_shadow_chats.network` (also backfilled onto
+`beeper_shadow_messages.network`). `@telegram_channel-*` senders are skipped.
+
+## Cross-source bridges the analyzer relies on
+- `social_users` — broad cross-platform user index; usernames on ≥2 platforms are
+  corroboration fuel for clustering.
+- `whatsapp_lid_map` — @lid → phone JID.
+- `telegram_users.phone` ↔ `whatsapp_users` phone — same-person bridge
+  (`phone_match` signal).
+- `instagram_profiles.external_url` — off-platform presence (`shared_website`).
+
+## Known gaps (do not silently "fix" without reading the linked task)
+- **telegram bots/channels are not flagged.** `telegram_users` has no `is_bot` /
+  `is_channel` column (only `is_deleted`). Bots (≈283 `%bot` usernames) can
+  therefore become "person" entities in the analyzer. If/when captured, add a
+  nullable `is_bot boolean` via a **new** migration (never edit an applied one —
+  checksum drift bricks migrate-on-boot collectors) and set it from Telethon's
+  `User.bot`. Analyzer should then exclude `is_bot` from entity creation. (SYNC #40)
+- **lemon8 `platform_user_id` is unstable.** It stores the vanity handle for some
+  profiles and the stable `userNNNN` id for others, so a rename re-keys the
+  identity. Capture the stable numeric/`sec_uid` id consistently. (SYNC #39)
+- **gone media not tombstoned.** `media_items` rows can point at files deleted
+  from disk (e.g. lemon8 after the Z reformat); there is no `status` column, so
+  consumers must tolerate missing files. (SYNC #38 / analyzer SYNC #36)
