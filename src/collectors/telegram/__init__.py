@@ -1543,19 +1543,21 @@ class TelegramCollector(BaseCollector):
             user = await worker.client.get_entity(platform_user_id)
             async with self.pool.acquire() as conn:
                 row = await conn.fetchrow("""
-                    INSERT INTO telegram_users (platform_user_id, username, first_name, last_name, phone, is_deleted, updated_at)
-                    VALUES ($1, $2, $3, $4, $5, $6, NOW())
+                    INSERT INTO telegram_users (platform_user_id, username, first_name, last_name, phone, is_bot, is_deleted, updated_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
                     ON CONFLICT (platform_user_id) DO UPDATE SET
                         username = EXCLUDED.username,
                         first_name = EXCLUDED.first_name,
                         last_name = EXCLUDED.last_name,
                         phone = COALESCE(EXCLUDED.phone, telegram_users.phone),
+                        is_bot = COALESCE(EXCLUDED.is_bot, telegram_users.is_bot),
                         is_deleted = EXCLUDED.is_deleted,
                         updated_at = NOW()
                     RETURNING id
                 """,
                 str(user.id), user.username, user.first_name, user.last_name,
                 getattr(user, "phone", None),
+                getattr(user, "bot", None),  # SYNC #40: Telethon User.bot
                 getattr(user, "deleted", False),
                 )
                 return row['id']
@@ -2874,6 +2876,7 @@ class TelegramCollector(BaseCollector):
                 "last_name": getattr(user, "last_name", None),
                 "phone": getattr(user, "phone", None),
                 "bio": getattr(user, "bio", None) or getattr(user, "about", None),
+                "is_bot": getattr(user, "bot", None),  # SYNC #40
             }
             async with self.pool.acquire() as conn:
                 # Read current row BEFORE upserting so diff is honest.
@@ -2898,14 +2901,15 @@ class TelegramCollector(BaseCollector):
                 # Upsert full row.
                 await conn.execute("""
                     INSERT INTO telegram_users (
-                        platform_user_id, username, first_name, last_name, phone, bio, updated_at
-                    ) VALUES ($1, $2, $3, $4, $5, $6, NOW())
+                        platform_user_id, username, first_name, last_name, phone, bio, is_bot, updated_at
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
                     ON CONFLICT (platform_user_id) DO UPDATE SET
                         username = COALESCE(EXCLUDED.username, telegram_users.username),
                         first_name = COALESCE(EXCLUDED.first_name, telegram_users.first_name),
                         last_name = COALESCE(EXCLUDED.last_name, telegram_users.last_name),
                         phone = COALESCE(EXCLUDED.phone, telegram_users.phone),
                         bio = COALESCE(EXCLUDED.bio, telegram_users.bio),
+                        is_bot = COALESCE(EXCLUDED.is_bot, telegram_users.is_bot),
                         updated_at = NOW()
                 """,
                 str(user.id),
@@ -2914,6 +2918,7 @@ class TelegramCollector(BaseCollector):
                 new_row["last_name"],
                 new_row["phone"],
                 new_row["bio"],
+                new_row["is_bot"],
                 )
         except Exception as exc:
             logger.debug("_upsert_user_full failed for %s: %s", getattr(user, "id", "?"), exc)
