@@ -54,9 +54,15 @@ identity evidence. Channels appearing as users are not separately flagged yet
 (no reliable source signal in `telegram_users`). (SYNC #40)
 
 ## Known gaps (do not silently "fix" without reading the linked task)
-- **lemon8 `platform_user_id` is unstable.** It stores the vanity handle for some
-  profiles and the stable `userNNNN` id for others, so a rename re-keys the
-  identity. Capture the stable numeric/`sec_uid` id consistently. (SYNC #39)
+- **lemon8 `platform_user_id` is the vanity handle for most profiles — and that
+  is the best obtainable key.** lemon8 has **no web login (mobile-app only)**, so
+  the collector can only public-scrape logged-out pages, which do NOT expose a
+  stable numeric id. `userNNNN` appears only for accounts that never set a vanity
+  handle (~14 today). The collector prefers a stable id when the page exposes one
+  and renames a vanity row in place if it ever does (see `_upsert_profile`,
+  SYNC #39), but bulk retro-conversion is impossible without the mobile API.
+  Treat the vanity handle as the canonical lemon8 key. **Do not re-attempt a
+  cookie/login-based backfill — there is no web login.**
 - **gone media not tombstoned.** `media_items` rows can point at files deleted
   from disk (e.g. lemon8 after the Z reformat); there is no `status` column, so
   consumers must tolerate missing files. (SYNC #38 / analyzer SYNC #36)
