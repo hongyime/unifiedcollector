@@ -391,6 +391,23 @@ class Lemon8Collector(BaseCollector):
         except Exception as e:
             logger.debug("spider enqueue skipped for %s: %s", username, e)
 
+    async def _stable_id_for_handle(self, username: str) -> Optional[str]:
+        """Return a previously-captured STABLE lemon8 id (userNNNN / long numeric)
+        for this handle, if one exists, so a later fetch that fails to parse the
+        id doesn't re-key the profile to the vanity handle (SYNC #39)."""
+        try:
+            async with self.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT platform_user_id FROM lemon8_profiles "
+                    "WHERE username = $1 AND platform_user_id ~ '^(user[0-9]+|[0-9]{6,})$' "
+                    "ORDER BY updated_at DESC NULLS LAST LIMIT 1",
+                    username,
+                )
+                return row["platform_user_id"] if row else None
+        except Exception as exc:
+            logger.debug("lemon8 stable-id lookup failed for %s: %s", username, exc)
+            return None
+
     async def _upsert_profile(self, user_id: str, username: str, data: dict):
         # ── User-intelligence diff: snapshot the row BEFORE upserting so the
         # change tracker can compare old → new and emit one row per changed
@@ -662,12 +679,27 @@ class Lemon8Collector(BaseCollector):
         resp.raise_for_status()
         html = resp.text
 
+        # Stable lemon8 id is "userNNNN" and is the correct identity key — the
+        # vanity handle re-keys on rename and creates duplicate profiles for the
+        # same person (SYNC #39). Prefer a stable id from any of the known JSON
+        # markers, and only accept a value that looks stable (userNNNN / long
+        # numeric); fall back to the handle just as before if none is found (no
+        # regression). Prefer a previously-captured stable id for this handle over
+        # re-keying it to the vanity fallback.
         user_id = username
-        marker = '"user_id":"'
-        idx = html.find(marker)
-        if idx != -1:
+        for marker in ('"user_id":"', '"userId":"', '"uid":"', '"sec_uid":"'):
+            idx = html.find(marker)
+            if idx == -1:
+                continue
             end = html.find('"', idx + len(marker))
-            user_id = html[idx + len(marker):end]
+            candidate = html[idx + len(marker):end] if end != -1 else ""
+            if candidate and re.fullmatch(r"user\d+|\d{6,}", candidate):
+                user_id = candidate
+                break
+        if user_id == username:
+            prior = await self._stable_id_for_handle(username)
+            if prior:
+                user_id = prior
 
         avatar_url = self._extract_avatar(html) if self._profile_photos else None
         await self._upsert_profile(user_id, username, {"nickname": username, "avatar_url": avatar_url})
