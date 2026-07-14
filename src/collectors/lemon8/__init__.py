@@ -426,6 +426,18 @@ class Lemon8Collector(BaseCollector):
             logger.debug("user_change_tracker[lemon8]: prev-row fetch failed: %s", exc)
 
         async with self.pool.acquire() as conn:
+            # #39 retro-migration: if we now have a STABLE id (user_id != handle)
+            # but an old vanity-keyed row exists for this handle, rename its key in
+            # place (posts reference the profile UUID, not platform_user_id, so
+            # they follow automatically) rather than inserting a duplicate. Guarded
+            # so it no-ops when a stable-keyed row already exists.
+            if user_id != username:
+                await conn.execute(
+                    "UPDATE lemon8_profiles SET platform_user_id = $1 "
+                    "WHERE platform_user_id = $2 AND username = $2 "
+                    "AND NOT EXISTS (SELECT 1 FROM lemon8_profiles p2 WHERE p2.platform_user_id = $1)",
+                    user_id, username,
+                )
             await conn.execute("""
                 INSERT INTO lemon8_profiles (
                     platform_user_id, username, nickname, avatar_url, bio, updated_at
