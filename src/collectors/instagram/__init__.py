@@ -2047,9 +2047,23 @@ class InstagramCollector(BaseCollector):
         location_lng = loc.get("lng") or None
 
         async with self.pool.acquire() as conn:
-            # First ensure profile exists (might be missing if we are spidering from a post)
+            # First ensure profile exists (might be missing if we are spidering
+            # from a post). Root-cause fix for the NULL-FK bug: if the author
+            # profile hasn't been collected yet, create a minimal stub keyed on
+            # the uid so the post is never inserted with a NULL profile_id (which
+            # hid it from analyzer timelines / geo). The profile collector later
+            # enriches this same row (unique platform_user_id).
             profile_row = await conn.fetchrow("SELECT id FROM instagram_profiles WHERE platform_user_id = $1", uid)
-            profile_uuid = profile_row['id'] if profile_row else None
+            if profile_row:
+                profile_uuid = profile_row['id']
+            else:
+                profile_uuid = await conn.fetchval("""
+                    INSERT INTO instagram_profiles (platform_user_id)
+                    VALUES ($1)
+                    ON CONFLICT (platform_user_id) DO UPDATE
+                        SET platform_user_id = EXCLUDED.platform_user_id
+                    RETURNING id
+                """, uid)
 
             await conn.execute("""
                 INSERT INTO instagram_posts (

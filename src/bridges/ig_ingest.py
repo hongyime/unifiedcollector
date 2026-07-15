@@ -526,6 +526,56 @@ def _derive_handle_from_caption(caption):
     return first if _HANDLE_RE.match(first) else None
 
 
+def _ig_author_uid(ppid: str) -> str | None:
+    """Recover the Instagram author's numeric user id from a platform_post_id of
+    the shape `<media_id>_<author_uid>` (IDENTITY_KEYS.md). Returns None when the
+    id has no embedded uid (a bare media id / shortcode). This trailing id equals
+    instagram_profiles.platform_user_id."""
+    if not ppid:
+        return None
+    uid = ppid.rsplit("_", 1)[-1] if "_" in ppid else ""
+    return uid if uid.isdigit() else None
+
+
+async def _ensure_ig_profile(conn, ppid: str, p: dict) -> str | None:
+    """Resolve (or create a minimal stub for) the instagram_profiles row for a
+    post's author, keyed on the numeric uid embedded in platform_post_id, and
+    return its id (uuid). This is the root-cause fix for the recurring NULL-FK
+    bug: this ingest path historically OMITTED profile_id, so ~19k posts landed
+    with NULL profile_id and were invisible to every consumer that joins
+    instagram_posts.profile_id -> instagram_profiles.id (analyzer timelines,
+    /geo). We now attach the FK at insert time.
+
+    A stub is created (ON CONFLICT DO NOTHING) when the author profile hasn't
+    been collected yet, so spidered-from-post authors still get a stable FK; the
+    real profile collector later enriches the same row (unique platform_user_id).
+    Returns None only when the uid can't be recovered (bare media id) — those
+    posts remain genuinely unattributable, same as before."""
+    uid = _ig_author_uid(ppid)
+    if not uid:
+        return None
+    row = await conn.fetchrow(
+        "SELECT id FROM instagram_profiles WHERE platform_user_id = $1", uid
+    )
+    if row:
+        return str(row["id"])
+    # No profile row yet — create a minimal stub keyed on the uid. Use any author
+    # username the extension happened to send; the profile collector fills the
+    # rest later (matched on the unique platform_user_id).
+    username = (p.get("author_username") or p.get("username") or None)
+    new_id = await conn.fetchval(
+        """
+        INSERT INTO instagram_profiles (platform_user_id, username)
+        VALUES ($1, $2)
+        ON CONFLICT (platform_user_id) DO UPDATE SET
+            username = COALESCE(instagram_profiles.username, EXCLUDED.username)
+        RETURNING id
+        """,
+        uid, username,
+    )
+    return str(new_id) if new_id else None
+
+
 # ---------------------------------------------------------------------------
 # structured post + comment metadata (captions/likes/comments threads)
 # ---------------------------------------------------------------------------
@@ -554,16 +604,22 @@ async def _save_posts(pool, platform, posts) -> int:
                 p["metadata"] = _md
             try:
                 if platform == "instagram":
+                    # Root-cause fix (NULL-FK bug): resolve/create the author
+                    # profile and attach profile_id at insert time so the post is
+                    # never orphaned. COALESCE on UPDATE so a later collection that
+                    # already set profile_id is never clobbered back to NULL.
+                    profile_id = await _ensure_ig_profile(conn, ppid, p)
                     await conn.execute(
                         """
                         INSERT INTO instagram_posts
-                          (id, platform_post_id, media_type, caption, hashtags, mentions,
+                          (id, platform_post_id, profile_id, media_type, caption, hashtags, mentions,
                            location_name, location_lat, location_lng, music_title, music_author,
                            likes_count, comments_count, video_duration,
                            platform_created_at, collected_at, metadata)
-                        VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,
-                                to_timestamp($14), now(), $15::jsonb)
+                        VALUES (gen_random_uuid(),$1,$2::uuid,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,
+                                to_timestamp($15), now(), $16::jsonb)
                         ON CONFLICT (platform_post_id) DO UPDATE SET
+                           profile_id=COALESCE(instagram_posts.profile_id, EXCLUDED.profile_id),
                            caption=EXCLUDED.caption, likes_count=EXCLUDED.likes_count,
                            comments_count=EXCLUDED.comments_count, hashtags=EXCLUDED.hashtags,
                            mentions=EXCLUDED.mentions, location_name=EXCLUDED.location_name,
@@ -573,7 +629,7 @@ async def _save_posts(pool, platform, posts) -> int:
                            music_author=COALESCE(EXCLUDED.music_author, instagram_posts.music_author),
                            collected_at=now(), metadata=EXCLUDED.metadata
                         """,
-                        ppid, p.get("media_type"), p.get("caption"),
+                        ppid, profile_id, p.get("media_type"), p.get("caption"),
                         p.get("hashtags") or [], p.get("mentions") or [],
                         p.get("location"), _num(p.get("location_lat")), _num(p.get("location_lng")),
                         p.get("music_title"), p.get("music_author"),
