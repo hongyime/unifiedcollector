@@ -3,6 +3,10 @@
 !.env.example
 credentials/
 
+# Local scratch / one-off audit scripts (kept on disk, not tracked)
+tmp/
+scratch.py
+
 # Large model files
 models/dlib/*.dat
 models/dlib/*.bz2
