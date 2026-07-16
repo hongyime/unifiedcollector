@@ -2073,6 +2073,7 @@ class InstagramCollector(BaseCollector):
                     collected_at, metadata
                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), $11)
                 ON CONFLICT (platform_post_id) DO UPDATE SET
+                    profile_id = COALESCE(instagram_posts.profile_id, EXCLUDED.profile_id),
                     likes_count = EXCLUDED.likes_count,
                     comments_count = EXCLUDED.comments_count,
                     caption = EXCLUDED.caption,
