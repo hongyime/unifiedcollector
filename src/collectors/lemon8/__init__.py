@@ -408,6 +408,63 @@ class Lemon8Collector(BaseCollector):
             logger.debug("lemon8 stable-id lookup failed for %s: %s", username, exc)
             return None
 
+    async def _ensure_post_profile(
+        self,
+        conn,
+        user_id: Optional[str],
+        username: Optional[str] = None,
+    ) -> Optional[str]:
+        """Return or create a minimal Lemon8 profile for post attribution.
+
+        Feed-card/detail paths can expose only the handle, not the stable
+        userNNNN id. Prefer existing stable-keyed profiles by username, then
+        create a handle-keyed stub so posts do not remain permanently orphaned.
+        """
+        clean_user_id = str(user_id).strip() if user_id else None
+        clean_username = self._normalize_username(username or clean_user_id)
+
+        if clean_user_id:
+            row = await conn.fetchrow(
+                "SELECT id FROM lemon8_profiles WHERE platform_user_id = $1",
+                clean_user_id,
+            )
+            if row:
+                return str(row["id"])
+
+        if clean_username:
+            row = await conn.fetchrow(
+                """
+                SELECT id
+                FROM lemon8_profiles
+                WHERE LOWER(username) = LOWER($1)
+                   OR LOWER(platform_user_id) = LOWER($1)
+                ORDER BY (platform_user_id ~ '^(user[0-9]+|[0-9]{6,})$') DESC,
+                         updated_at DESC NULLS LAST
+                LIMIT 1
+                """,
+                clean_username,
+            )
+            if row:
+                return str(row["id"])
+
+        platform_user_id = clean_user_id or clean_username
+        if not platform_user_id:
+            return None
+
+        row = await conn.fetchrow(
+            """
+            INSERT INTO lemon8_profiles (platform_user_id, username, updated_at)
+            VALUES ($1, $2, NOW())
+            ON CONFLICT (platform_user_id) DO UPDATE SET
+                username = COALESCE(lemon8_profiles.username, EXCLUDED.username),
+                updated_at = NOW()
+            RETURNING id
+            """,
+            platform_user_id,
+            clean_username,
+        )
+        return str(row["id"]) if row else None
+
     async def _upsert_profile(self, user_id: str, username: str, data: dict):
         # ── User-intelligence diff: snapshot the row BEFORE upserting so the
         # change tracker can compare old → new and emit one row per changed
@@ -536,24 +593,27 @@ class Lemon8Collector(BaseCollector):
             return
         post_url = f"https://www.lemon8-app.com/@{username}/{note_id}"
         async with self.pool.acquire() as conn:
+            profile_uuid = await self._ensure_post_profile(conn, username, username)
             if is_video:
                 await conn.execute(
                     """
-                    INSERT INTO lemon8_posts (platform_post_id, username, video_url, post_url)
-                    VALUES ($1, $2, $3, $4)
+                    INSERT INTO lemon8_posts (platform_post_id, profile_id, username, video_url, post_url)
+                    VALUES ($1, $2, $3, $4, $5)
                     ON CONFLICT (platform_post_id) DO UPDATE SET
+                        profile_id = COALESCE(lemon8_posts.profile_id, EXCLUDED.profile_id),
                         video_url = COALESCE(lemon8_posts.video_url, EXCLUDED.video_url),
                         username  = COALESCE(lemon8_posts.username, EXCLUDED.username),
                         post_url  = COALESCE(lemon8_posts.post_url, EXCLUDED.post_url)
                     """,
-                    note_id, username, url, post_url,
+                    note_id, profile_uuid, username, url, post_url,
                 )
             else:
                 await conn.execute(
                     """
-                    INSERT INTO lemon8_posts (platform_post_id, username, image_urls, post_url)
-                    VALUES ($1, $2, ARRAY[$3], $4)
+                    INSERT INTO lemon8_posts (platform_post_id, profile_id, username, image_urls, post_url)
+                    VALUES ($1, $2, $3, ARRAY[$4], $5)
                     ON CONFLICT (platform_post_id) DO UPDATE SET
+                        profile_id = COALESCE(lemon8_posts.profile_id, EXCLUDED.profile_id),
                         image_urls = (
                             SELECT array_agg(DISTINCT e)
                             FROM unnest(COALESCE(lemon8_posts.image_urls, '{}') || EXCLUDED.image_urls) e
@@ -561,7 +621,7 @@ class Lemon8Collector(BaseCollector):
                         username = COALESCE(lemon8_posts.username, EXCLUDED.username),
                         post_url = COALESCE(lemon8_posts.post_url, EXCLUDED.post_url)
                     """,
-                    note_id, username, url, post_url,
+                    note_id, profile_uuid, username, url, post_url,
                 )
 
     async def _upsert_post(self, user_id: str, post_data: dict):
@@ -587,10 +647,7 @@ class Lemon8Collector(BaseCollector):
                 image_urls.append(u)
 
         async with self.pool.acquire() as conn:
-            profile_row = await conn.fetchrow(
-                "SELECT id FROM lemon8_profiles WHERE platform_user_id = $1", user_id
-            )
-            profile_uuid = profile_row['id'] if profile_row else None
+            profile_uuid = await self._ensure_post_profile(conn, user_id, post_data.get("username") or user_id)
             # Build post_url from platform_post_id if it looks like a real numeric ID
             post_url = None
             if platform_post_id and platform_post_id.isdigit():
@@ -603,6 +660,7 @@ class Lemon8Collector(BaseCollector):
                         like_count, comment_count, post_url, metadata
                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                     ON CONFLICT (platform_post_id) DO UPDATE SET
+                        profile_id    = COALESCE(lemon8_posts.profile_id, EXCLUDED.profile_id),
                         like_count    = EXCLUDED.like_count,
                         comment_count = EXCLUDED.comment_count,
                         image_urls    = COALESCE(EXCLUDED.image_urls, lemon8_posts.image_urls),

@@ -634,6 +634,21 @@ class TiktokCollector(BaseCollector):
         """Coerce a unix timestamp (int or str) to aware datetime; None on failure."""
         return _parse_to_dt(value)
 
+    @staticmethod
+    def _clean_username(value) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip().lstrip("@")
+        return text or None
+
+    @staticmethod
+    def _safe_bool(value) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "t", "yes", "y"}
+        return bool(value)
+
     async def _upsert_profile(self, author: dict, author_stats: dict | None = None) -> str | None:
         """Upsert a tiktok_profiles row from a sidecar's author/authorStats blocks.
 
@@ -741,6 +756,94 @@ class TiktokCollector(BaseCollector):
 
         return str(row["id"]) if row else None
 
+    async def _ensure_post_profile(self, conn, data: dict, username: str | None) -> str | None:
+        """Return or create a minimal TikTok profile for post attribution.
+
+        Gallery/API post payloads sometimes have no author block but still carry
+        enough top-level metadata (metadata.user / secUid) to identify the owner.
+        Attach those posts to a stub profile instead of leaving profile_id NULL.
+        """
+        author = data.get("author") if isinstance(data.get("author"), dict) else {}
+        handle = self._clean_username(
+            author.get("uniqueId")
+            or data.get("uniqueId")
+            or data.get("user")
+            or data.get("author")
+            or data.get("authorUniqueId")
+            or username
+        )
+        platform_user_id = (
+            author.get("id")
+            or data.get("authorId")
+            or data.get("userId")
+            or data.get("uid")
+            or data.get("secUid")
+            or data.get("authorSecId")
+        )
+        if platform_user_id:
+            platform_user_id = str(platform_user_id).strip()
+        if not platform_user_id and handle:
+            platform_user_id = f"handle:{handle}"
+
+        if platform_user_id:
+            row = await conn.fetchrow(
+                "SELECT id FROM tiktok_profiles WHERE platform_user_id = $1",
+                platform_user_id,
+            )
+            if row:
+                return str(row["id"])
+
+        if handle:
+            row = await conn.fetchrow(
+                """
+                SELECT id
+                FROM tiktok_profiles
+                WHERE LOWER(username) = LOWER($1)
+                ORDER BY updated_at DESC NULLS LAST
+                LIMIT 1
+                """,
+                handle,
+            )
+            if row:
+                return str(row["id"])
+
+        if not platform_user_id:
+            return None
+
+        avatar = (
+            author.get("avatarLarger")
+            or author.get("avatarMedium")
+            or author.get("avatarThumb")
+            or data.get("avatarLarger")
+            or data.get("avatarMedium")
+            or data.get("avatarThumb")
+        )
+        row = await conn.fetchrow(
+            """
+            INSERT INTO tiktok_profiles (
+                platform_user_id, username, nickname, avatar_url, bio,
+                is_verified, is_private, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+            ON CONFLICT (platform_user_id) DO UPDATE SET
+                username = COALESCE(tiktok_profiles.username, EXCLUDED.username),
+                nickname = COALESCE(tiktok_profiles.nickname, EXCLUDED.nickname),
+                avatar_url = COALESCE(tiktok_profiles.avatar_url, EXCLUDED.avatar_url),
+                bio = COALESCE(tiktok_profiles.bio, EXCLUDED.bio),
+                is_verified = tiktok_profiles.is_verified OR EXCLUDED.is_verified,
+                is_private = tiktok_profiles.is_private OR EXCLUDED.is_private,
+                updated_at = NOW()
+            RETURNING id
+            """,
+            platform_user_id,
+            handle,
+            author.get("nickname") or data.get("nickname"),
+            avatar,
+            author.get("signature") or data.get("signature"),
+            self._safe_bool(author.get("verified", data.get("verified", False))),
+            self._safe_bool(author.get("privateAccount", data.get("privateAccount", False))),
+        )
+        return str(row["id"]) if row else None
+
     async def _upsert_post(self, data: dict, username: str, profile_uuid: str | None = None):
         post_id = data.get("id")
         if not post_id:
@@ -769,6 +872,8 @@ class TiktokCollector(BaseCollector):
                         "SELECT id FROM tiktok_profiles WHERE username = $1", username
                     )
                     profile_uuid = str(profile_row["id"]) if profile_row else None
+                if profile_uuid is None:
+                    profile_uuid = await self._ensure_post_profile(conn, data, username)
 
                 await conn.execute("""
                     INSERT INTO tiktok_posts (
