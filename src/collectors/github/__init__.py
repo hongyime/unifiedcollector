@@ -219,6 +219,12 @@ class GithubCollector(BaseCollector):
         self._spider_visited: set[str] = set()
         self._db_avatar_ids: set[int] = set()
 
+    def _owner_accounts(self) -> set[str]:
+        raw = os.getenv("GITHUB_OWNER_ACCOUNTS", "").strip()
+        if not raw:
+            raw = os.getenv("GITHUB_SPIDER_SEED", "bryanseah234")
+        return {p.strip().lstrip("@").lower() for p in raw.split(",") if p.strip()}
+
     # ---- pool wiring ----------------------------------------------------
 
     def set_pool(self, pool):
@@ -711,6 +717,7 @@ class GithubCollector(BaseCollector):
     async def collect(self, targets: list[str]):
         target_concurrency = int(os.getenv("GITHUB_TARGET_CONCURRENCY", "4"))
         target_sem = asyncio.Semaphore(target_concurrency)
+        owner_accounts = self._owner_accounts()
 
         async def _process_one(client: httpx.AsyncClient, target: str):
             async with target_sem:
@@ -722,6 +729,8 @@ class GithubCollector(BaseCollector):
                         await self._collect_repo(client, target)
                     else:
                         await self._collect_user(client, target)
+                        if target.strip().lstrip("@").lower() in owner_accounts:
+                            await self._record_owner_follow_graph(client, target)
                         if self._spider_depth > 0:
                             await self._spider_social_graph(client, target)
                 except Exception as e:
@@ -852,6 +861,74 @@ class GithubCollector(BaseCollector):
             username, added, depth,
         )
         return added
+
+    async def _record_owner_follow_graph(
+        self, client: httpx.AsyncClient, owner_login: str
+    ) -> dict[str, int]:
+        """Persist the owner's direct GitHub graph into follow_edges."""
+        owner = (owner_login or "").strip().lstrip("@")
+        if not owner:
+            return {"follower": 0, "following": 0}
+        counts = {"follower": 0, "following": 0}
+        for endpoint, direction in (("followers", "follower"), ("following", "following")):
+            users = await self._paginate(client, f"{API_BASE}/users/{owner}/{endpoint}")
+            if not users:
+                continue
+            async with self.pool.acquire() as conn:
+                for u in users:
+                    if not isinstance(u, dict):
+                        continue
+                    uid = u.get("id")
+                    login = (u.get("login") or "").strip().lstrip("@")
+                    if uid is None or not login:
+                        continue
+                    uid_s = str(uid)
+                    await conn.execute(
+                        """
+                        INSERT INTO github_users
+                            (platform_user_id, login, collected_at)
+                        VALUES ($1, $2, NOW())
+                        ON CONFLICT (platform_user_id) DO UPDATE SET
+                            login = COALESCE(NULLIF(EXCLUDED.login, ''), github_users.login),
+                            collected_at = NOW()
+                        """,
+                        int(uid), login,
+                    )
+                    await conn.execute(
+                        """
+                        INSERT INTO social_users
+                            (platform, uid, platform_user_id, username, display_name,
+                             profile_photo_url, contexts, first_seen, last_seen, times_seen)
+                        VALUES ('github', $1, $1, $2, $2, $3, ARRAY[$4], now(), now(), 1)
+                        ON CONFLICT (platform, uid) DO UPDATE SET
+                            last_seen = now(),
+                            times_seen = social_users.times_seen + 1,
+                            username = COALESCE(EXCLUDED.username, social_users.username),
+                            display_name = COALESCE(social_users.display_name, EXCLUDED.display_name),
+                            profile_photo_url = COALESCE(EXCLUDED.profile_photo_url, social_users.profile_photo_url),
+                            contexts = (SELECT array_agg(DISTINCT c) FROM unnest(social_users.contexts || EXCLUDED.contexts) AS c)
+                        """,
+                        uid_s, login, u.get("avatar_url"), direction,
+                    )
+                    await conn.execute(
+                        """
+                        INSERT INTO follow_edges
+                            (platform, owner_account, target_uid, direction,
+                             target_username, first_seen, last_seen)
+                        VALUES ('github', $1, $2, $3, $4, now(), now())
+                        ON CONFLICT (platform, owner_account, target_uid, direction)
+                        DO UPDATE SET
+                            last_seen = now(),
+                            target_username = COALESCE(EXCLUDED.target_username, follow_edges.target_username)
+                        """,
+                        owner, uid_s, direction, login,
+                    )
+                    counts[direction] += 1
+        logger.info(
+            "github owner graph[%s]: followers=%d following=%d",
+            owner, counts["follower"], counts["following"],
+        )
+        return counts
 
     async def _collect_user(self, client: httpx.AsyncClient, username: str):
         resp = await self._api_get(client, f"{API_BASE}/users/{username}")

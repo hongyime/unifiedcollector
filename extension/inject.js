@@ -28,6 +28,22 @@
       window.postMessage({ __uc: true, type: "users", platform, context: context || "seen", owner: owner || null, users }, "*");
     }
   }
+  function followContextFromPath() {
+    try {
+      let owner = null, side = null;
+      if (platform === "x") {
+        const m = location.pathname.match(/^\/([A-Za-z0-9_]{1,20})\/(followers|following|verified_followers|following_verified)\/?$/i);
+        if (m) { owner = m[1]; side = /^follow/i.test(m[2]) && m[2] !== "followers" ? "follow" : "follower"; }
+      } else if (platform === "threads") {
+        const m = location.pathname.match(/^\/@([A-Za-z0-9._]{1,30})\/(followers|following)\/?$/i);
+        if (m) { owner = m[1]; side = m[2].toLowerCase() === "following" ? "follow" : "follower"; }
+      }
+      if (!owner || !side) return null;
+      const stored = (localStorage.getItem("uc_owner_" + platform) || "").trim().replace(/^@/, "");
+      if (stored && stored.toLowerCase() !== owner.toLowerCase()) return null;
+      return { context: side, owner: { username: owner } };
+    } catch (e) { return null; }
+  }
 
   // TikTok signs its API requests, so we OBSERVE the follower/following modal's
   // /api/user/list/ response (no extra requests) rather than replicate the signed
@@ -182,7 +198,9 @@
     scan(json, out, users, 0);
     _cap(_emittedP); _cap(_emittedU);
     emit(out.filter((p) => (_emittedP.has(p.platform_post_id) ? false : _emittedP.add(p.platform_post_id))));
-    emitUsers(users.filter((u) => { const k = u.user_id || u.username; return _emittedU.has(k) ? false : _emittedU.add(k); }));
+    const rel = followContextFromPath();
+    emitUsers(users.filter((u) => { const k = u.user_id || u.username; return _emittedU.has(k) ? false : _emittedU.add(k); }),
+      rel && rel.context, rel && rel.owner);
   }
 
   const apiRe = /graphql|\/api\/v1\//;  // IG/Threads /api/graphql + X /i/api/graphql

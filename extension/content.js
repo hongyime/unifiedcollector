@@ -215,6 +215,96 @@ async function autoScroll(times = 8, dist = 1400, pause = 1800) {
   }
 }
 
+const FOLLOW_SWEEP_TTL_MS = 12 * 60 * 60 * 1000;
+
+function ownerFromStoredOrDom(platform, domFn) {
+  const k = "uc_owner_" + platform;
+  let owner = "";
+  try { owner = (localStorage.getItem(k) || "").trim().replace(/^@/, ""); } catch (e) {}
+  if (!owner && typeof domFn === "function") {
+    try { owner = (domFn() || "").trim().replace(/^@/, ""); } catch (e) {}
+  }
+  if (owner) {
+    try { localStorage.setItem(k, owner); } catch (e) {}
+  }
+  return owner || "";
+}
+
+function collectFollowHandlesFromDom(platform, owner) {
+  const users = [];
+  const seen = new Set();
+  const ownerLc = String(owner || "").toLowerCase();
+  const reserved = /^(home|explore|search|notifications|messages|settings|i|intent|share|privacy|about|tos|login|signup)$/i;
+  const patterns = platform === "threads"
+    ? [/^\/@([A-Za-z0-9._]{1,30})\/?$/]
+    : platform === "tiktok"
+      ? [/^\/@([A-Za-z0-9._]{1,32})\/?$/]
+      : [/^\/([A-Za-z0-9_]{1,20})\/?$/];
+  for (const a of document.querySelectorAll("a[href]")) {
+    const href = (a.getAttribute("href") || "").replace(/^https?:\/\/(?:www\.)?(?:x\.com|twitter\.com|threads\.com|tiktok\.com)/i, "");
+    let handle = "";
+    for (const re of patterns) {
+      const m = href.match(re);
+      if (m) { handle = m[1]; break; }
+    }
+    if (!handle || reserved.test(handle) || handle.toLowerCase() === ownerLc) continue;
+    const key = handle.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const row = a.closest('[role="listitem"], [data-e2e], div');
+    const img = row && row.querySelector && row.querySelector("img");
+    users.push({
+      username: handle,
+      display_name: (a.innerText || "").split("\n").map((s) => s.trim()).filter(Boolean)[0] || null,
+      profile_pic_url: img && (img.currentSrc || img.src) || null,
+    });
+  }
+  return users.slice(0, 800);
+}
+
+async function maybeSweepFollowGraph({ platform, owner, urls, homeUrl }) {
+  owner = (owner || "").trim().replace(/^@/, "");
+  if (!owner || !urls) return false;
+  const stateKey = "uc_" + platform + "_follow_sweep_state";
+  const lastKey = "uc_" + platform + "_follow_sweep_last_" + owner.toLowerCase();
+  const active = (() => { try { return JSON.parse(localStorage.getItem(stateKey) || "null"); } catch (e) { return null; } })();
+  const now = Date.now();
+  const sideFromPath = (() => {
+    const p = location.pathname;
+    if (urls.followingPath && urls.followingPath.test(p)) return "following";
+    if (urls.followersPath && urls.followersPath.test(p)) return "followers";
+    return "";
+  })();
+  if (active && active.owner === owner && active.side && sideFromPath === active.side) {
+    await autoScroll(active.side === "following" ? 10 : 8, 1200, 1800);
+    const context = active.side === "followers" ? "follower" : "follow";
+    const users = collectFollowHandlesFromDom(platform, owner);
+    if (users.length) {
+      await send({ type: "users", platform, context, owner: { username: owner }, users }).catch(() => {});
+      clog("info", `${platform} owner graph @${owner}: ${active.side} +${users.length}`, platform);
+    }
+    if (active.side === "following") {
+      localStorage.setItem(stateKey, JSON.stringify({ owner, side: "followers" }));
+      await sleep(jitter(2500));
+      location.href = urls.followers;
+    } else {
+      localStorage.removeItem(stateKey);
+      localStorage.setItem(lastKey, String(now));
+      await sleep(jitter(2500));
+      location.href = homeUrl;
+    }
+    return true;
+  }
+  const last = parseInt(lsGet(lastKey, "0"), 10) || 0;
+  if (!active && now - last > FOLLOW_SWEEP_TTL_MS) {
+    localStorage.setItem(stateKey, JSON.stringify({ owner, side: "following" }));
+    await sleep(jitter(1500));
+    location.href = urls.following;
+    return true;
+  }
+  return false;
+}
+
 // ===========================================================================
 // Instagram (same-origin API; full media + 2-hop spider)
 // ===========================================================================
@@ -623,6 +713,24 @@ const tiktok = {
   entity() { const m = location.pathname.match(/^\/@([^/?#]+)/); return m ? m[1] : "feed"; },
   async runCycle() {
     const entity = this.entity();
+    const owner = ownerFromStoredOrDom("tiktok", () => {
+      const state = parseEmbeddedState(["__UNIVERSAL_DATA_FOR_REHYDRATION__", "SIGI_STATE", "sigi-persisted-data"]);
+      const scope = state && state.__DEFAULT_SCOPE__;
+      return (scope && scope["webapp.app-context"] && scope["webapp.app-context"].user && scope["webapp.app-context"].user.uniqueId)
+        || (state && state.AppContext && state.AppContext.user && state.AppContext.user.uniqueId)
+        || "";
+    });
+    if (await maybeSweepFollowGraph({
+      platform: "tiktok",
+      owner,
+      urls: {
+        following: "https://www.tiktok.com/@" + encodeURIComponent(owner) + "/following",
+        followers: "https://www.tiktok.com/@" + encodeURIComponent(owner) + "/followers",
+        followingPath: new RegExp("^/@" + owner.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "/following/?$", "i"),
+        followersPath: new RegExp("^/@" + owner.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "/followers/?$", "i"),
+      },
+      homeUrl: "https://www.tiktok.com/following",
+    })) return { targets: 1, saved: 0, discovered: 0 };
     clog("info", `cycle start on @${entity}`, "tiktok");
     const sink = makeSink();
     await autoScroll(10);
@@ -712,6 +820,23 @@ async function xSelectTab(name) {
   return false;
 }
 
+function xLoggedInOwner() {
+  const sources = [
+    document.querySelector('[data-testid="SideNav_AccountSwitcher_Button"]'),
+    document.querySelector('a[data-testid="AppTabBar_Profile_Link"]'),
+    ...document.querySelectorAll('a[href^="/"][aria-label*="Profile" i]'),
+  ].filter(Boolean);
+  for (const el of sources) {
+    const txt = el.innerText || el.getAttribute("aria-label") || "";
+    const m = txt.match(/@([A-Za-z0-9_]{1,20})/);
+    if (m) return m[1];
+    const href = el.getAttribute && (el.getAttribute("href") || "");
+    const h = href.match(/^\/([A-Za-z0-9_]{1,20})\/?$/);
+    if (h && !/^(home|explore|notifications|messages|i|search)$/i.test(h[1])) return h[1];
+  }
+  return "";
+}
+
 function compactCount(s) {
   const m = String(s || "").replace(/,/g, "").match(/([\d.]+)\s*([KMB])?/i);
   if (!m) return null;
@@ -774,6 +899,18 @@ const x = {
   entity() { const m = location.pathname.match(/^\/([^/?#]+)/); return m && !/^(home|explore|notifications|messages|i|search)$/.test(m[1]) ? m[1] : "timeline"; },
   async runCycle() {
     const entity = this.entity();
+    const owner = ownerFromStoredOrDom("x", xLoggedInOwner);
+    if (await maybeSweepFollowGraph({
+      platform: "x",
+      owner,
+      urls: {
+        following: "https://x.com/" + encodeURIComponent(owner) + "/following",
+        followers: "https://x.com/" + encodeURIComponent(owner) + "/followers",
+        followingPath: new RegExp("^/" + owner.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "/following/?$", "i"),
+        followersPath: new RegExp("^/" + owner.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "/followers/?$", "i"),
+      },
+      homeUrl: "https://x.com/home",
+    })) return { targets: 1, saved: 0, discovered: 0 };
     // following-PRIMARY, for-you SECONDARY: most cycles read Following; every 4th
     // cycle take a For-You pass so we still capture trending/outside-graph tweets.
     let feed = entity;
@@ -889,6 +1026,22 @@ async function threadsSelectFeed(want) {
   return false;
 }
 
+function threadsLoggedInOwner() {
+  const sources = [
+    ...document.querySelectorAll('a[href^="/@"][aria-label*="Profile" i]'),
+    ...document.querySelectorAll('a[href^="/@"]'),
+  ];
+  for (const el of sources) {
+    const txt = el.innerText || el.getAttribute("aria-label") || "";
+    const m = txt.match(/@([A-Za-z0-9._]{1,30})/);
+    if (m) return m[1];
+    const href = el.getAttribute && (el.getAttribute("href") || "");
+    const h = href.match(/^\/@([A-Za-z0-9._]{1,30})\/?$/);
+    if (h) return h[1];
+  }
+  return "";
+}
+
 // NOTE: a Threads handle == the same Meta account's Instagram handle, but NOT every
 // Instagram user has activated Threads. So some IG handles 404 on Threads. We detect
 // that on the profile page and blacklist the handle (uc_th_noacct) so we never waste
@@ -946,6 +1099,19 @@ const threads = {
   },
 
   async runCycle() {
+    const owner = ownerFromStoredOrDom("threads", threadsLoggedInOwner);
+    if (await maybeSweepFollowGraph({
+      platform: "threads",
+      owner,
+      urls: {
+        following: "https://www.threads.com/@" + encodeURIComponent(owner) + "/following",
+        followers: "https://www.threads.com/@" + encodeURIComponent(owner) + "/followers",
+        followingPath: new RegExp("^/@" + owner.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "/following/?$", "i"),
+        followersPath: new RegExp("^/@" + owner.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "/followers/?$", "i"),
+      },
+      homeUrl: "https://www.threads.com/",
+    })) return { targets: 1, saved: 0, posts: 0, discovered: 0 };
+
     // REVERSE direction: if we navigated to a target profile, scrape it then return
     // to the feed so the rotation continues.
     if (/^\/@/.test(location.pathname)) {

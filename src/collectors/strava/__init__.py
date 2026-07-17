@@ -673,6 +673,8 @@ class StravaCollector(BaseCollector):
             if not athlete_id:
                 logger.warning("strava: could not resolve current athlete id from cookies; skipping")
                 return
+            self._my_athlete_id = athlete_id
+            await self._backfill_owner_follow_edges_from_social_users()
 
             # Make sure athlete row exists so FK resolves.
             try:
@@ -3123,6 +3125,9 @@ class StravaCollector(BaseCollector):
                             # discovery of someone else's list).
                             if is_owner:
                                 nm = entry["name"][:255] if entry.get("name") else None
+                                target_uid = str(entry["athlete_id"])
+                                owner_account = str(self._my_athlete_id)
+                                direction = "follower" if rel_context == "follower" else "following"
                                 await conn.execute(
                                     """
                                     INSERT INTO social_users
@@ -3137,7 +3142,20 @@ class StravaCollector(BaseCollector):
                                         profile_photo_url = COALESCE(social_users.profile_photo_url, EXCLUDED.profile_photo_url),
                                         contexts = (SELECT array(SELECT DISTINCT unnest(social_users.contexts || EXCLUDED.contexts)))
                                     """,
-                                    str(entry["athlete_id"]), nm, entry.get("avatar_url"), rel_context,
+                                    target_uid, nm, entry.get("avatar_url"), rel_context,
+                                )
+                                await conn.execute(
+                                    """
+                                    INSERT INTO follow_edges
+                                        (platform, owner_account, target_uid, direction,
+                                         target_username, first_seen, last_seen)
+                                    VALUES ('strava', $1, $2, $3, $4, now(), now())
+                                    ON CONFLICT (platform, owner_account, target_uid, direction)
+                                    DO UPDATE SET
+                                        last_seen = now(),
+                                        target_username = COALESCE(EXCLUDED.target_username, follow_edges.target_username)
+                                    """,
+                                    owner_account, target_uid, direction, nm,
                                 )
                         seeded += 1
                     except Exception as e:
@@ -3148,3 +3166,64 @@ class StravaCollector(BaseCollector):
                 page += 1
         logger.info("strava roster: seeded %d new spider entries from %s", seeded, athlete_id)
         return seeded
+
+    async def _backfill_owner_follow_edges_from_social_users(self) -> dict[str, int]:
+        """Bridge historical owner roster contexts into follow_edges.
+
+        Older Strava roster passes recorded the authenticated owner's follow graph
+        in social_users.contexts only. Keep this idempotent bridge so those rows
+        become proximity input without waiting for a fresh Strava web scrape.
+        """
+        if not self.pool or not self._my_athlete_id:
+            return {"following": 0, "follower": 0}
+        owner = str(self._my_athlete_id)
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                WITH expanded AS (
+                    SELECT
+                        uid,
+                        username,
+                        first_seen,
+                        last_seen,
+                        CASE
+                            WHEN ctx = 'follow' THEN 'following'
+                            WHEN ctx = 'follower' THEN 'follower'
+                        END AS direction
+                    FROM social_users su
+                    CROSS JOIN LATERAL unnest(su.contexts) AS ctx
+                    WHERE su.platform = 'strava'
+                      AND ctx IN ('follow', 'follower')
+                      AND su.uid IS NOT NULL
+                      AND su.uid <> $1
+                ),
+                inserted AS (
+                    INSERT INTO follow_edges
+                        (platform, owner_account, target_uid, direction,
+                         target_username, first_seen, last_seen)
+                    SELECT
+                        'strava', $1, uid, direction, username,
+                        COALESCE(first_seen, now()), COALESCE(last_seen, now())
+                    FROM expanded
+                    WHERE direction IS NOT NULL
+                    ON CONFLICT (platform, owner_account, target_uid, direction)
+                    DO UPDATE SET
+                        last_seen = GREATEST(follow_edges.last_seen, EXCLUDED.last_seen),
+                        target_username = COALESCE(EXCLUDED.target_username, follow_edges.target_username)
+                    RETURNING direction
+                )
+                SELECT direction, count(*) AS n
+                FROM inserted
+                GROUP BY direction
+                """,
+                owner,
+            )
+        out = {"following": 0, "follower": 0}
+        for r in rows:
+            out[r["direction"]] = int(r["n"] or 0)
+        if out["following"] or out["follower"]:
+            logger.info(
+                "strava owner graph[%s] backfilled: followers=%d following=%d",
+                owner, out["follower"], out["following"],
+            )
+        return out
