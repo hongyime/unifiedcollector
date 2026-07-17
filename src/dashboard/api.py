@@ -357,6 +357,175 @@ async def metrics():
     return PlainTextResponse("\n".join(lines) + "\n")
 
 
+@app.get("/api/backfill-equilibrium")
+async def backfill_equilibrium(_user: dict = Depends(require_role("viewer"))):
+    """Read-only backfill drain state for the dashboard.
+
+    Queue tables tell us how far each platform is from historical equilibrium:
+    pending/processing rows are backlog; terminal rows are drained work. Beeper
+    and Matrix expose explicit backfill-state tables, so include those too.
+    """
+    pool = await get_pool()
+    generated_at = datetime.now(timezone.utc).isoformat()
+
+    queue_tables = {
+        "github": "github_spider_queue",
+        "instagram": "instagram_spider_queue",
+        "lemon8": "lemon8_spider_queue",
+        "strava": "strava_spider_queue",
+        "telegram": "telegram_spider_queue",
+        "tiktok": "tiktok_spider_queue",
+        "youtube": "youtube_spider_queue",
+    }
+    terminal_statuses = {"completed", "done", "failed", "unresolvable"}
+    completed_statuses = {"completed", "done"}
+    running_statuses = {"pending", "processing", "in_progress"}
+
+    def pct(num: int, den: int) -> float | None:
+        return None if not den else round((num / den) * 100.0, 2)
+
+    async def table_exists(conn, name: str) -> bool:
+        return bool(await conn.fetchval("SELECT to_regclass($1)", f"public.{name}"))
+
+    async def status_counts(conn, table: str, platform: str) -> dict:
+        if not await table_exists(conn, table):
+            return {"platform": platform, "queue_table": table, "missing_table": True}
+        approximate = False
+        row_estimate = int(await conn.fetchval(
+            "SELECT COALESCE(reltuples, 0)::bigint FROM pg_class WHERE oid = to_regclass($1)",
+            f"public.{table}",
+        ) or 0)
+        if row_estimate > 500_000:
+            # Large queues are usually dominated by pending rows. Exact pending
+            # counts seq-scan the table and can hang the dashboard. Count the
+            # small non-pending buckets exactly via the status index and infer an
+            # estimated pending/total from pg_class.reltuples.
+            counts = {}
+            for status in ("completed", "done", "failed", "unresolvable", "processing", "in_progress"):
+                n = await conn.fetchval(f"SELECT COUNT(*)::int FROM {table} WHERE status = $1", status)
+                if n:
+                    counts[status] = int(n)
+            counts["pending"] = max(row_estimate - sum(counts.values()), 0)
+            approximate = True
+        else:
+            rows = await conn.fetch(f"SELECT status, COUNT(*)::int AS n FROM {table} GROUP BY status")
+            counts = {str(r["status"] or "unknown"): int(r["n"] or 0) for r in rows}
+        total = sum(counts.values())
+        queue_depth = sum(counts.get(s, 0) for s in running_statuses)
+        completed = sum(counts.get(s, 0) for s in completed_statuses)
+        terminal = sum(counts.get(s, 0) for s in terminal_statuses)
+        failed = counts.get("failed", 0) + counts.get("unresolvable", 0)
+        return {
+            "platform": platform,
+            "queue_table": table,
+            "status_counts": counts,
+            "total": total,
+            "pending": counts.get("pending", 0),
+            "processing": counts.get("processing", 0) + counts.get("in_progress", 0),
+            "queue_depth": queue_depth,
+            "completed": completed,
+            "failed": failed,
+            "terminal": terminal,
+            "completed_pct": pct(completed, total),
+            "terminal_pct": pct(terminal, total),
+            "backfill_complete_pct": pct(terminal, total),
+            "approximate": approximate,
+        }
+
+    async def target_counts(conn) -> dict[str, dict]:
+        if not await table_exists(conn, "collection_targets"):
+            return {}
+        rows = await conn.fetch(
+            "SELECT source, status, COUNT(*)::int AS n "
+            "FROM collection_targets GROUP BY source, status"
+        )
+        out: dict[str, dict] = {}
+        for r in rows:
+            src = str(r["source"])
+            out.setdefault(src, {"target_total": 0, "target_status_counts": {}})
+            out[src]["target_status_counts"][str(r["status"] or "unknown")] = int(r["n"] or 0)
+            out[src]["target_total"] += int(r["n"] or 0)
+        return out
+
+    platforms: dict[str, dict] = {}
+    async with pool.acquire() as conn:
+        for platform, table in queue_tables.items():
+            platforms[platform] = await status_counts(conn, table, platform)
+
+        if await table_exists(conn, "spider_queue"):
+            rows = await conn.fetch(
+                "SELECT platform, status, COUNT(*)::int AS n "
+                "FROM spider_queue GROUP BY platform, status"
+            )
+            generic: dict[str, dict[str, int]] = {}
+            for r in rows:
+                generic.setdefault(str(r["platform"]), {})[str(r["status"])] = int(r["n"] or 0)
+            for platform, counts in generic.items():
+                total = sum(counts.values())
+                queue_depth = sum(counts.get(s, 0) for s in running_statuses)
+                completed = sum(counts.get(s, 0) for s in completed_statuses)
+                terminal = sum(counts.get(s, 0) for s in terminal_statuses)
+                platforms.setdefault(platform, {"platform": platform})["generic_spider_queue"] = {
+                    "status_counts": counts,
+                    "total": total,
+                    "queue_depth": queue_depth,
+                    "completed": completed,
+                    "terminal": terminal,
+                    "completed_pct": pct(completed, total),
+                    "terminal_pct": pct(terminal, total),
+                }
+
+        if await table_exists(conn, "beeper_shadow_sync_state"):
+            row = await conn.fetchrow(
+                "SELECT COUNT(*)::int AS total, "
+                "(COUNT(*) FILTER (WHERE backfill_complete))::int AS complete "
+                "FROM beeper_shadow_sync_state"
+            )
+            total = int(row["total"] or 0)
+            complete = int(row["complete"] or 0)
+            platforms["beeper"] = {
+                "platform": "beeper",
+                "queue_table": "beeper_shadow_sync_state",
+                "total": total,
+                "completed": complete,
+                "queue_depth": max(total - complete, 0),
+                "backfill_complete": complete,
+                "backfill_running": max(total - complete, 0),
+                "backfill_complete_pct": pct(complete, total),
+            }
+        if await table_exists(conn, "matrix_backfill_state"):
+            row = await conn.fetchrow(
+                "SELECT COUNT(*)::int AS total, "
+                "(COUNT(*) FILTER (WHERE done))::int AS complete "
+                "FROM matrix_backfill_state"
+            )
+            total = int(row["total"] or 0)
+            complete = int(row["complete"] or 0)
+            platforms["matrix"] = {
+                "platform": "matrix",
+                "queue_table": "matrix_backfill_state",
+                "total": total,
+                "completed": complete,
+                "queue_depth": max(total - complete, 0),
+                "backfill_complete": complete,
+                "backfill_running": max(total - complete, 0),
+                "backfill_complete_pct": pct(complete, total),
+            }
+
+        for platform, target in (await target_counts(conn)).items():
+            platforms.setdefault(platform, {"platform": platform}).update(target)
+
+    rows = sorted(platforms.values(), key=lambda r: r.get("platform", ""))
+    totals = {
+        "platforms": len(rows),
+        "queue_depth": sum(int(r.get("queue_depth") or 0) for r in rows),
+        "completed": sum(int(r.get("completed") or 0) for r in rows),
+        "total": sum(int(r.get("total") or 0) for r in rows),
+    }
+    totals["backfill_complete_pct"] = pct(totals["completed"], totals["total"])
+    return {"generated_at": generated_at, "totals": totals, "platforms": rows}
+
+
 @app.get("/collectors")
 async def list_collectors(_user: dict = Depends(require_role("viewer"))):
     pool = await get_pool()
