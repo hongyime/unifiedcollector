@@ -31,6 +31,35 @@ const lsBump = (k) => { const n = lsNum(k) + 1; lsSet(k, String(n)); return n; }
 function wallLeftMs(platform) { return Math.max(0, lsNum("uc_wall_" + platform) - Date.now()); }
 function setWall(platform, mins) { lsSet("uc_wall_" + platform, String(Date.now() + mins * 60000)); }
 
+// Config-driven throttle walls. Override from DevTools/options with:
+//   chrome.storage.local.set({ ucThrottleBackoffMins: { x: 12, threads: 12 } })
+// Instagram stays deliberately cautious at 45m by default; shortening it
+// aggressively re-extends the account/IP throttle window and raises ban risk.
+const DEFAULT_THROTTLE_BACKOFF_MINS = {
+  instagram: 45,
+  threads: 12,
+  x: 12,
+  tiktok: 20,
+  facebook: 20,
+  lemon8: 20,
+  default: 30,
+};
+async function throttleBackoffMins(platform, fallback = DEFAULT_THROTTLE_BACKOFF_MINS.default) {
+  try {
+    const { ucThrottleBackoffMins = {} } = await chrome.storage.local.get("ucThrottleBackoffMins");
+    const raw = ucThrottleBackoffMins[platform] ?? ucThrottleBackoffMins.default;
+    const n = Number(raw);
+    if (Number.isFinite(n) && n >= 1) return Math.round(n);
+  } catch (e) {}
+  return DEFAULT_THROTTLE_BACKOFF_MINS[platform] || fallback;
+}
+async function applyThrottleWall(platform, reason) {
+  const mins = await throttleBackoffMins(platform);
+  setWall(platform, mins);
+  await send({ type: "wall", platform, mins }).catch(() => {});
+  return mins;
+}
+
 // ---------------------------------------------------------------------------
 // HUMAN PACING. A real person browsing is slow, irregular, and takes breaks.
 // Scraping 257 profiles back-to-back is what got the IG account flagged for
@@ -526,7 +555,11 @@ const instagram = {
     try {
       saved += await this.getStoryTray();
     } catch (e) {
-      if (e instanceof WallError) { setWall("instagram", 45); clog("warn", "throttled in story-tray — backing off 45m", "instagram"); await send({ type: "wall", platform: "instagram", mins: 45 }).catch(() => {}); return { targets: visited, saved, discovered, walled: true }; }
+      if (e instanceof WallError) {
+        const mins = await applyThrottleWall("instagram", "story-tray");
+        clog("warn", `throttled in story-tray — backing off ${mins}m`, "instagram");
+        return { targets: visited, saved, discovered, walled: true };
+      }
       clog("warn", `story-tray sweep failed: ${e.message}`, "instagram");
     }
     await hsleep(6000);
@@ -542,7 +575,11 @@ const instagram = {
         await this._sendProfile(user);
         saved += await this._expiring(user, t.username);
       } catch (e) {
-        if (e instanceof WallError) { setWall("instagram", 45); clog("warn", "throttled in sweep — backing off 45m (persisted, survives refresh)", "instagram"); await send({ type: "wall", platform: "instagram", mins: 45 }).catch(() => {}); return { targets: visited, saved, discovered, walled: true }; }
+        if (e instanceof WallError) {
+          const mins = await applyThrottleWall("instagram", "sweep");
+          clog("warn", `throttled in sweep — backing off ${mins}m (persisted, survives refresh)`, "instagram");
+          return { targets: visited, saved, discovered, walled: true };
+        }
         clog("warn", `sweep failed ${t.username}: ${e.message}`, "instagram");
       }
       await hsleep(9000);
@@ -562,7 +599,11 @@ const instagram = {
         const r = await this._deep(user, t.username, hop);
         saved += r.saved; discovered += r.discovered;
       } catch (e) {
-        if (e instanceof WallError) { setWall("instagram", 45); clog("warn", `throttled at ${t.username} — backing off 45m (persisted)`, "instagram"); await send({ type: "wall", platform: "instagram", mins: 45 }).catch(() => {}); break; }
+        if (e instanceof WallError) {
+          const mins = await applyThrottleWall("instagram", "deep-profile");
+          clog("warn", `throttled at ${t.username} — backing off ${mins}m (persisted)`, "instagram");
+          break;
+        }
         clog("warn", `scrape failed ${t.username}: ${e.message}`, "instagram");
       }
       await hsleep(22000); // ~13–35s between profiles
@@ -984,10 +1025,8 @@ async function mainLoop() {
         await send({ type: "cycleReport", platform: p.label, ...stats }).catch(() => {});
       } catch (e) {
         if (e instanceof WallError) {
-          const mins = 40 + Math.floor(Math.random() * 20); // 40–60m
-          setWall(p.id, mins);  // persist so a respawned loop won't immediately re-hit it
+          const mins = await applyThrottleWall(p.id, "generic-wall");
           clog("warn", `${p.label} hit a throttle/login wall — sleeping ${mins}m (persisted, survives refresh)`, p.label);
-          await send({ type: "wall", platform: p.label, mins }).catch(() => {});
           await sleep(mins * 60000);
           continue;
         }

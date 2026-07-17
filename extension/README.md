@@ -82,6 +82,35 @@ skipped** — we crawl your network, not celebrities. Tune via env on the
   them down — behavioural detection can still action even a real session.
 - **One account = one point of failure.** Use a throwaway/secondary IG login.
 
+## Throttle/backoff knobs
+
+Throttle walls are persisted per platform in the content script so a tab refresh
+or service-worker wake does not immediately re-hit a flagged account. Defaults
+are intentionally conservative:
+
+```js
+{
+  instagram: 45, // minutes; keep cautious, this is the known IG throttle wall
+  threads: 12,
+  x: 12,
+  tiktok: 20,
+  facebook: 20,
+  lemon8: 20,
+  default: 30
+}
+```
+
+Override without editing code from the extension DevTools console:
+
+```js
+chrome.storage.local.set({
+  ucThrottleBackoffMins: { threads: 10, x: 10, tiktok: 20, instagram: 45 }
+});
+```
+
+Do not shorten Instagram aggressively. The 45-minute default is deliberate: repeated
+early probes extend the IP/account throttle window and raise ban risk.
+
 ## Adding a platform
 1. Add an object to the `PLATFORMS` registry in `content.js` with a `host`
    matcher, a `label`, and an `async runCycle()` returning `{targets, saved,
