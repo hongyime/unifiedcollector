@@ -254,7 +254,9 @@ class WorkerService:
     async def _init_db(self):
         # P0-1/P0-2: ledger-backed runner applies schemas/ + migrations/.
         from src.db.migrate import apply_all
+        from src.core.maintenance import run_collector_maintenance
         await apply_all(self.pool)
+        await run_collector_maintenance(self.pool)
 
     _NETWORK_ERRORS = (
         ConnectionError, ConnectionRefusedError, ConnectionResetError,

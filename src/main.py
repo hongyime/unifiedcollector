@@ -30,7 +30,9 @@ async def init_db(pool):
     # migrations/ via the ledger-backed runner. The old code globbed schemas/
     # ONLY, silently omitting 19 live, code-referenced tables under migrations/.
     from src.db.migrate import apply_all
+    from src.core.maintenance import run_collector_maintenance
     await apply_all(pool)
+    await run_collector_maintenance(pool)
 
 
 def main():

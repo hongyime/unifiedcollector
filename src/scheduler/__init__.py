@@ -262,7 +262,9 @@ class Scheduler:
     async def _init_db(self):
         # P0-1/P0-2: ledger-backed runner applies schemas/ + migrations/.
         from src.db.migrate import apply_all
+        from src.core.maintenance import run_collector_maintenance
         await apply_all(self.pool)
+        await run_collector_maintenance(self.pool)
 
     async def _gc_collection_runs(self):
         """P3-7: retention GC for collection_runs.
