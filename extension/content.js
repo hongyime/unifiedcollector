@@ -712,6 +712,63 @@ async function xSelectTab(name) {
   return false;
 }
 
+function compactCount(s) {
+  const m = String(s || "").replace(/,/g, "").match(/([\d.]+)\s*([KMB])?/i);
+  if (!m) return null;
+  const mult = ({ K: 1e3, M: 1e6, B: 1e9 })[(m[2] || "").toUpperCase()] || 1;
+  const n = Number(m[1]) * mult;
+  return Number.isFinite(n) ? Math.round(n) : null;
+}
+
+function textOf(sel, root = document) {
+  try {
+    const el = root.querySelector(sel);
+    return el ? (el.innerText || el.textContent || "").trim() : null;
+  } catch (e) { return null; }
+}
+
+function xProfileCount(handle, suffix) {
+  try {
+    const re = new RegExp("^/?" + handle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "/" + suffix + "/?$", "i");
+    const a = [...document.querySelectorAll("a[href]")]
+      .find((el) => re.test((el.getAttribute("href") || "").replace(/^https?:\/\/(?:www\.)?x\.com/i, "")));
+    return compactCount(a && a.innerText);
+  } catch (e) { return null; }
+}
+
+function scrapeXProfile(handle) {
+  const username = (handle || "").trim().replace(/^@/, "");
+  if (!username || username === "timeline") return null;
+  const body = document.body ? (document.body.innerText || "") : "";
+  if (/account doesn['’]t exist|profile not found|page doesn['’]t exist/i.test(body)) return null;
+  const nameBlock = document.querySelector('[data-testid="UserName"]');
+  const nameLines = ((nameBlock && nameBlock.innerText) || "")
+    .split("\n").map((s) => s.trim()).filter(Boolean);
+  const displayName = nameLines.find((s) => !s.startsWith("@") && !/^(Follow|Following|Subscribe)$/i.test(s)) || null;
+  const avatar = [...document.querySelectorAll('img[src*="profile_images"]')]
+    .map((im) => im.currentSrc || im.src).find(Boolean) || null;
+  const external = (() => {
+    const a = document.querySelector('[data-testid="UserUrl"] a[href]');
+    return a ? (a.href || a.getAttribute("href")) : null;
+  })();
+  const profile = {
+    platform_user_id: username,
+    username,
+    display_name: displayName,
+    bio: textOf('[data-testid="UserDescription"]'),
+    followers_count: xProfileCount(username, "followers"),
+    following_count: xProfileCount(username, "following"),
+    is_verified: Boolean(document.querySelector('[data-testid="icon-verified"], [aria-label="Verified account"]')),
+    is_private: /These posts are protected/i.test(body),
+    profile_pic_url: avatar,
+    external_url: external,
+    location: textOf('[data-testid="UserLocation"]'),
+    joined_text: textOf('[data-testid="UserJoinDate"]'),
+    metadata: { source: "x_dom_profile", url: location.href },
+  };
+  return Object.values(profile).some((v) => v !== null && v !== "" && v !== false) ? profile : null;
+}
+
 const x = {
   id: "x", host: "x.com", label: "Twitter / X",
   entity() { const m = location.pathname.match(/^\/([^/?#]+)/); return m && !/^(home|explore|notifications|messages|i|search)$/.test(m[1]) ? m[1] : "timeline"; },
@@ -728,6 +785,13 @@ const x = {
     clog("info", `X cycle on ${feed} — scrolling for tweets`, "x");
     const sink = makeSink();
     await autoScroll(12);
+    if (entity !== "timeline") {
+      const profile = scrapeXProfile(entity);
+      if (profile) {
+        await send({ type: "profile", platform: "x", profile });
+        clog("info", `X @${profile.username}: profile captured`, "x");
+      }
+    }
     // post engagement (the x_posts gap) — DOM-harvested, hook-independent.
     const xposts = harvestXPosts(feed);
     if (xposts.length) {

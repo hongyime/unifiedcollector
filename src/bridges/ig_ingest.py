@@ -1388,14 +1388,67 @@ async def _upsert_ig_decoded(pool, owner, threads, messages):
 
 
 async def _save_profile(pool, platform, p) -> bool:
-    """Upsert a full profile (instagram). Also records the user (with photo) into
-    social_users and returns the profile_pic to be downloaded as kind=profile."""
-    if platform != "instagram":
+    """Upsert a full profile. Instagram is API-rich; X/Facebook are browser DOM
+    best-effort profiles keyed on the visible handle."""
+    if platform not in ("instagram", "x", "facebook"):
         return False
     uname = (p.get("username") or "").strip().lstrip("@")
     if not uname:
         return False
     pic = p.get("profile_pic_url")
+    if platform == "x":
+        async with pool.acquire() as conn:
+            # Preserve the exact handle casing already present in x_posts when
+            # possible; entity_platform_links for X were historically keyed on
+            # x_posts.author_username.
+            canonical = await conn.fetchval(
+                """
+                SELECT author_username
+                FROM x_posts
+                WHERE lower(author_username) = lower($1)
+                ORDER BY collected_at DESC NULLS LAST
+                LIMIT 1
+                """,
+                uname,
+            )
+            pid = str(p.get("platform_user_id") or p.get("user_id") or canonical or uname).strip().lstrip("@")
+            username = str(canonical or uname).strip().lstrip("@")
+            await conn.execute(
+                """
+                INSERT INTO x_profiles
+                  (id, platform_user_id, username, display_name, bio, followers_count,
+                   following_count, posts_count, is_verified, is_private, profile_pic_url,
+                   external_url, location, joined_text, collected_at, updated_at, metadata)
+                VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,now(),now(),$14::jsonb)
+                ON CONFLICT (platform_user_id) DO UPDATE SET
+                   username=COALESCE(NULLIF(EXCLUDED.username, ''), x_profiles.username),
+                   display_name=COALESCE(EXCLUDED.display_name, x_profiles.display_name),
+                   bio=COALESCE(EXCLUDED.bio, x_profiles.bio),
+                   followers_count=COALESCE(EXCLUDED.followers_count, x_profiles.followers_count),
+                   following_count=COALESCE(EXCLUDED.following_count, x_profiles.following_count),
+                   posts_count=COALESCE(EXCLUDED.posts_count, x_profiles.posts_count),
+                   is_verified=COALESCE(EXCLUDED.is_verified, x_profiles.is_verified),
+                   is_private=COALESCE(EXCLUDED.is_private, x_profiles.is_private),
+                   profile_pic_url=COALESCE(EXCLUDED.profile_pic_url, x_profiles.profile_pic_url),
+                   external_url=COALESCE(EXCLUDED.external_url, x_profiles.external_url),
+                   location=COALESCE(EXCLUDED.location, x_profiles.location),
+                   joined_text=COALESCE(EXCLUDED.joined_text, x_profiles.joined_text),
+                   metadata=x_profiles.metadata || EXCLUDED.metadata,
+                   updated_at=now()
+                """,
+                pid, username, p.get("display_name") or p.get("full_name"), p.get("bio"),
+                _int(p.get("followers_count")), _int(p.get("following_count")), _int(p.get("posts_count")),
+                bool(p.get("is_verified")) if p.get("is_verified") is not None else None,
+                bool(p.get("is_private")) if p.get("is_private") is not None else None,
+                pic, p.get("external_url"), p.get("location"), p.get("joined_text"),
+                json.dumps(p.get("metadata") or {}),
+            )
+        await _record_users(pool, platform, [{"user_id": pid, "username": username,
+                                              "display_name": p.get("display_name") or p.get("full_name"),
+                                              "profile_pic_url": pic}], "profile")
+        return True
+    if platform == "facebook":
+        return False
     # Tier 4 change-history: snapshot the row BEFORE the upsert so we can diff
     # old -> new and log bio/username/follower/etc. changes. Best-effort.
     prev_row = None

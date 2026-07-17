@@ -20,7 +20,7 @@ silently orphans every existing entity link for that source. Coordinate with
 | lemon8 | `lemon8_profiles` | `platform_user_id` | **⚠ vanity handle OR `userNNNN`** | `username` |
 | whatsapp | `whatsapp_users` | `platform_user_id` → JID | `<phone>@s.whatsapp.net` | none (phone-keyed) |
 | threads | `threads_posts` | `author_username` | handle (= IG handle) | same |
-| x | `x_posts` | `author_username` | handle | same |
+| x | `x_profiles` | `platform_user_id` | handle (same value as `x_posts.author_username`) | `username` |
 
 ### WhatsApp specifics
 - A bare phone is reconstructed as `<phone>@s.whatsapp.net`.
