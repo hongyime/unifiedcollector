@@ -1009,11 +1009,48 @@ const threads = {
   },
 };
 
+function facebookHandleFromLocation() {
+  try {
+    if (/^\/profile\.php/i.test(location.pathname)) {
+      return new URLSearchParams(location.search).get("id") || "profile.php";
+    }
+    const m = location.pathname.match(/^\/([^/?#]+)/);
+    return m ? m[1] : "feed";
+  } catch (e) { return "feed"; }
+}
+
+function scrapeFacebookProfile(entity, person) {
+  if (!entity || entity === "feed") return null;
+  const path = location.pathname;
+  const isProfilePath = /\/profile\.php/i.test(path) || /^\/[A-Za-z0-9.]+\/?$/.test(path);
+  if (!isProfilePath) return null;
+  const body = document.body ? (document.body.innerText || "") : "";
+  const name = textOf("h1") || null;
+  const followers = compactCount((body.match(/([\d,.]+\s*[KMB]?)\s+followers/i) || [])[1]);
+  const friends = compactCount((body.match(/([\d,.]+\s*[KMB]?)\s+friends/i) || [])[1]);
+  const avatar = [...document.querySelectorAll("image, img")]
+    .map((im) => im.href && im.href.baseVal || im.currentSrc || im.src)
+    .find((u) => u && /fbcdn\.net/.test(u) && !/emoji|rsrc\.php|static/i.test(u)) || null;
+  return {
+    platform_user_id: entity,
+    username: entity,
+    display_name: name,
+    followers_count: followers,
+    friends_count: friends,
+    is_person: Boolean(person),
+    profile_pic_url: avatar,
+    metadata: { source: "facebook_dom_profile", url: location.href, limited: !name && !person },
+  };
+}
+
 // Facebook — DOM media from fbcdn; noisy (lots of UI chrome), so the size gate
 // does the heavy lifting. Open your feed / a profile's Photos tab and scroll.
 const facebook = {
   id: "facebook", host: "www.facebook.com", label: "Facebook",
-  entity() { const m = location.pathname.match(/^\/([^/?#]+)/); return m && !/^(home|watch|marketplace|groups|friends|notifications)$/.test(m[1]) ? m[1] : "feed"; },
+  entity() {
+    const h = facebookHandleFromLocation();
+    return h && !/^(home|watch|marketplace|groups|friends|notifications|messages|reels|events|gaming|pages|business|privacy)$/i.test(h) ? h : "feed";
+  },
   // Download MEDIA only from a REAL PERSON's profile (user: not pages, not groups).
   // Heuristic: a profile URL showing friend UI ("Add friend"/"Friends"/"Mutual"),
   // without page UI ("follow this Page"/"Send message" to a Page). Conservative —
@@ -1034,6 +1071,11 @@ const facebook = {
     clog("info", `cycle start on ${entity} (person profile: ${person})`, "facebook");
     await autoScroll(12);
     let saved = 0;
+    const profile = scrapeFacebookProfile(entity, person);
+    if (profile) {
+      await send({ type: "profile", platform: "facebook", profile });
+      clog("info", `Facebook ${entity}: profile captured (person=${person})`, "facebook");
+    }
     // MEDIA — only real people's profiles.
     if (person) {
       const sink = harvestDom(entity, { imgRe: /fbcdn\.net/, junkRe: /rsrc\.php|emoji|static|\/s\d+x\d+\/|profile|sprite/ });
@@ -1042,6 +1084,7 @@ const facebook = {
     // POSTS (captions) + USERS — captured EVERYWHERE incl. pages/groups, for the
     // user registry + spidering (user: "when spider we can use either").
     const posts = harvestPermalinkPosts(/\/(?:posts\/|permalink\.php\?story_fbid=|[^/]+\/posts\/)?(pfbid[\w]+|\d{6,})/, (m) => m[1]);
+    if (person) posts.forEach((p) => { if (!p.author_username) p.author_username = entity; });
     if (posts.length) await send({ type: "posts", platform: "facebook", username: entity, posts });
     const fu = collectPermalinkAuthors(
       /^\/([A-Za-z0-9.]{5,40})(?:\/(posts|photos|videos))?(?:[/?]|$)/,

@@ -1448,7 +1448,37 @@ async def _save_profile(pool, platform, p) -> bool:
                                               "profile_pic_url": pic}], "profile")
         return True
     if platform == "facebook":
-        return False
+        async with pool.acquire() as conn:
+            pid = str(p.get("platform_user_id") or p.get("user_id") or uname).strip().lstrip("@")
+            await conn.execute(
+                """
+                INSERT INTO facebook_profiles
+                  (id, platform_user_id, username, display_name, bio, followers_count,
+                   following_count, friends_count, is_person, profile_pic_url, external_url,
+                   collected_at, updated_at, metadata)
+                VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now(),now(),$11::jsonb)
+                ON CONFLICT (platform_user_id) DO UPDATE SET
+                   username=COALESCE(NULLIF(EXCLUDED.username, ''), facebook_profiles.username),
+                   display_name=COALESCE(EXCLUDED.display_name, facebook_profiles.display_name),
+                   bio=COALESCE(EXCLUDED.bio, facebook_profiles.bio),
+                   followers_count=COALESCE(EXCLUDED.followers_count, facebook_profiles.followers_count),
+                   following_count=COALESCE(EXCLUDED.following_count, facebook_profiles.following_count),
+                   friends_count=COALESCE(EXCLUDED.friends_count, facebook_profiles.friends_count),
+                   is_person=COALESCE(EXCLUDED.is_person, facebook_profiles.is_person),
+                   profile_pic_url=COALESCE(EXCLUDED.profile_pic_url, facebook_profiles.profile_pic_url),
+                   external_url=COALESCE(EXCLUDED.external_url, facebook_profiles.external_url),
+                   metadata=facebook_profiles.metadata || EXCLUDED.metadata,
+                   updated_at=now()
+                """,
+                pid, uname, p.get("display_name") or p.get("full_name"), p.get("bio"),
+                _int(p.get("followers_count")), _int(p.get("following_count")), _int(p.get("friends_count")),
+                bool(p.get("is_person")) if p.get("is_person") is not None else None,
+                pic, p.get("external_url"), json.dumps(p.get("metadata") or {}),
+            )
+        await _record_users(pool, platform, [{"user_id": pid, "username": uname,
+                                              "display_name": p.get("display_name") or p.get("full_name"),
+                                              "profile_pic_url": pic}], "profile")
+        return True
     # Tier 4 change-history: snapshot the row BEFORE the upsert so we can diff
     # old -> new and log bio/username/follower/etc. changes. Best-effort.
     prev_row = None
