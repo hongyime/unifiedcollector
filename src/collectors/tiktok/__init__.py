@@ -68,6 +68,7 @@ import httpx
 from src.core.base_collector import BaseCollector
 from src.collectors.tiktok.parse import safe_int as _parse_safe_int, to_dt as _parse_to_dt
 from src.core.file_naming import sanitize_name
+from src.core.proximity import refresh_account_proximity_cache
 from src.core.user_change_tracker import (
     UserChangeTracker,
     TIKTOK_TRACKED_FIELDS,
@@ -476,15 +477,33 @@ class TiktokCollector(BaseCollector):
             await self._process_spider_queue()
 
     async def _process_spider_queue(self):
+        await refresh_account_proximity_cache(self.pool)
         while not self._stop.is_set():
             async with self.pool.acquire() as conn:
                 row = await conn.fetchrow("""
                     UPDATE tiktok_spider_queue
                     SET status = 'processing'
                     WHERE id = (
-                        SELECT id FROM tiktok_spider_queue
-                        WHERE status = 'pending'
-                        ORDER BY priority ASC, collected_at ASC
+                        SELECT q.id
+                        FROM tiktok_spider_queue q
+                        LEFT JOIN LATERAL (
+                            SELECT MIN(ap.tier) AS proximity_tier
+                            FROM account_proximity_cache ap
+                            WHERE ap.platform = 'tiktok'
+                              AND (
+                                     ap.account_id = q.platform_user_id
+                                  OR ap.account_id = lower(q.username)
+                              )
+                        ) prox ON TRUE
+                        WHERE q.status = 'pending'
+                        ORDER BY
+                            CASE
+                                WHEN prox.proximity_tier IN (1, 2) THEN 2
+                                WHEN prox.proximity_tier = 3 THEN 1
+                                ELSE 0
+                            END DESC,
+                            q.priority ASC,
+                            q.collected_at ASC
                         LIMIT 1
                     )
                     RETURNING platform_user_id, username

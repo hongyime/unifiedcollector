@@ -44,6 +44,7 @@ from src.core.account_pool import AccountPool, Account, _build_fingerprint
 from src.core.file_naming import sanitize_name  # F821 fix: used in account_media_dir
 from src.core.human_rate_limiter import HumanLikeRateLimiter, OperationType
 from src.core.sliding_window_limiter import SlidingWindowRateLimiter, WindowConfig
+from src.core.proximity import refresh_account_proximity_cache
 from src.core.profile_photo_tracker import ProfilePhotoTracker
 from src.core.user_change_tracker import (
     UserChangeTracker,
@@ -881,6 +882,7 @@ class InstagramCollector(BaseCollector):
 
     async def _process_spider_queue(self, client: httpx.AsyncClient):
         """Claim and process jobs from the spider queue."""
+        await refresh_account_proximity_cache(self.pool)
         while not self._stop.is_set():
             async with self.pool.acquire() as conn:
                 row = await conn.fetchrow("""
@@ -889,9 +891,26 @@ class InstagramCollector(BaseCollector):
                         last_attempt = NOW(),
                         attempts = attempts + 1
                     WHERE id = (
-                        SELECT id FROM instagram_spider_queue
-                        WHERE status = 'pending' AND attempts < 3
-                        ORDER BY priority ASC, collected_at ASC
+                        SELECT q.id
+                        FROM instagram_spider_queue q
+                        LEFT JOIN LATERAL (
+                            SELECT MIN(ap.tier) AS proximity_tier
+                            FROM account_proximity_cache ap
+                            WHERE ap.platform = 'instagram'
+                              AND (
+                                     ap.account_id = q.platform_user_id
+                                  OR ap.account_id = lower(q.username)
+                              )
+                        ) prox ON TRUE
+                        WHERE q.status = 'pending' AND q.attempts < 3
+                        ORDER BY
+                            CASE
+                                WHEN prox.proximity_tier IN (1, 2) THEN 2
+                                WHEN prox.proximity_tier = 3 THEN 1
+                                ELSE 0
+                            END DESC,
+                            q.priority ASC,
+                            q.collected_at ASC
                         LIMIT 1
                     )
                     RETURNING platform_user_id, username

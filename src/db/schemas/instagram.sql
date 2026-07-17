@@ -84,3 +84,15 @@ CREATE INDEX IF NOT EXISTS idx_ig_profiles_username ON instagram_profiles(userna
 CREATE INDEX IF NOT EXISTS idx_ig_posts_profile ON instagram_posts(profile_id);
 CREATE INDEX IF NOT EXISTS idx_ig_comments_post ON instagram_comments(post_id);
 CREATE INDEX IF NOT EXISTS idx_ig_spider_status ON instagram_spider_queue(status, priority);
+
+CREATE TABLE IF NOT EXISTS instagram_spider_targets (
+    username TEXT PRIMARY KEY,
+    hop INT NOT NULL DEFAULT 1,
+    discovered_from TEXT,
+    follower_count INT,
+    status TEXT NOT NULL DEFAULT 'active',
+    discovered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_scraped_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_ig_spider_targets_active
+    ON instagram_spider_targets(status, hop, last_scraped_at, discovered_at);

@@ -12,6 +12,7 @@ from pathlib import Path
 
 from src.collectors import get_collector, list_sources
 from src.core.drive_check import check_drive, wait_for_drive
+from src.core.proximity import refresh_account_proximity_cache
 from src.db.connection import get_pool, close_pool
 
 logger = logging.getLogger(__name__)
@@ -657,11 +658,27 @@ class WorkerService:
 
     async def _load_targets(self, source: str) -> list[str]:
         try:
+            await refresh_account_proximity_cache(self.pool)
             async with self.pool.acquire() as conn:
                 rows = await conn.fetch(
-                    "SELECT target_id FROM collection_targets "
-                    "WHERE source = $1 AND status IN ('pending', 'error') "
-                    "ORDER BY priority DESC",
+                    """
+                    SELECT ct.target_id, MIN(ap.tier) AS proximity_tier, ct.priority
+                    FROM collection_targets ct
+                    LEFT JOIN account_proximity_cache ap
+                      ON ap.platform = ct.source
+                     AND ap.account_id = lower(ct.target_id)
+                    WHERE ct.source = $1
+                      AND ct.status IN ('pending', 'error')
+                    GROUP BY ct.target_id, ct.priority, ct.created_at
+                    ORDER BY
+                        CASE
+                            WHEN MIN(ap.tier) IN (1, 2) THEN 2
+                            WHEN MIN(ap.tier) = 3 THEN 1
+                            ELSE 0
+                        END DESC,
+                        ct.priority DESC,
+                        ct.created_at ASC
+                    """,
                     source,
                 )
             return [r["target_id"] for r in rows]

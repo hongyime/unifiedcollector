@@ -83,6 +83,21 @@ CREATE INDEX IF NOT EXISTS idx_targets_source_status
 CREATE INDEX IF NOT EXISTS idx_targets_priority
     ON collection_targets(priority DESC);
 
+CREATE TABLE IF NOT EXISTS account_proximity_cache (
+    platform VARCHAR(30) NOT NULL,
+    account_id VARCHAR(255) NOT NULL,
+    owner_account VARCHAR(255) NOT NULL,
+    tier SMALLINT NOT NULL CHECK (tier BETWEEN 1 AND 4),
+    reasons JSONB NOT NULL DEFAULT '[]',
+    updated_at TIMESTAMPTZ,
+    synced_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (platform, account_id, owner_account)
+);
+CREATE INDEX IF NOT EXISTS idx_account_proximity_cache_lookup
+    ON account_proximity_cache(platform, account_id, tier);
+CREATE INDEX IF NOT EXISTS idx_account_proximity_cache_tier
+    ON account_proximity_cache(tier);
+
 CREATE TABLE IF NOT EXISTS collection_runs (
     id SERIAL PRIMARY KEY,
     source VARCHAR(20) NOT NULL,

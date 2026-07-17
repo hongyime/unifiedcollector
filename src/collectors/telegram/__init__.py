@@ -47,6 +47,7 @@ from src.core.bot_pool import BotPool
 from src.core.hub_notifier import HubNotifier, NotifyCategory
 from src.core.file_naming import sanitize_name
 from src.core.circuit_breaker import CircuitBreaker, CircuitOpenError
+from src.core.proximity import refresh_account_proximity_cache
 from src.core.user_change_tracker import (
     UserChangeTracker,
     TELEGRAM_TRACKED_FIELDS,
@@ -928,6 +929,7 @@ class TelegramCollector(BaseCollector):
         """Process telegram_spider_queue jobs using the given worker's client."""
         from telethon.errors import FloodWaitError
         max_per_cycle = int(os.getenv("TELEGRAM_SPIDER_MAX_PER_CYCLE", "50"))
+        await refresh_account_proximity_cache(self.pool)
         processed = 0
         while not self._stop.is_set() and processed < max_per_cycle:
             async with self.pool.acquire() as conn:
@@ -935,9 +937,27 @@ class TelegramCollector(BaseCollector):
                     UPDATE telegram_spider_queue
                     SET status = 'processing'
                     WHERE id = (
-                        SELECT id FROM telegram_spider_queue
-                        WHERE status = 'pending'
-                        ORDER BY priority ASC, collected_at ASC
+                        SELECT q.id
+                        FROM telegram_spider_queue q
+                        LEFT JOIN LATERAL (
+                            SELECT MIN(ap.tier) AS proximity_tier
+                            FROM telegram_chats c
+                            JOIN telegram_chat_members m ON m.chat_id = c.id
+                            JOIN telegram_users u ON u.id = m.user_id
+                            JOIN account_proximity_cache ap
+                              ON ap.platform = 'telegram'
+                             AND ap.account_id = u.platform_user_id
+                            WHERE c.platform_chat_id = q.platform_chat_id
+                        ) prox ON TRUE
+                        WHERE q.status = 'pending'
+                        ORDER BY
+                            CASE
+                                WHEN prox.proximity_tier IN (1, 2) THEN 2
+                                WHEN prox.proximity_tier = 3 THEN 1
+                                ELSE 0
+                            END DESC,
+                            q.priority ASC,
+                            q.collected_at ASC
                         LIMIT 1
                         FOR UPDATE SKIP LOCKED
                     )

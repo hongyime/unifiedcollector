@@ -81,6 +81,7 @@ from enum import Enum
 from typing import Any, Optional, Protocol, runtime_checkable
 
 from src.core.circuit_breaker import CircuitBreaker, CircuitOpenError
+from src.core.proximity import refresh_account_proximity_cache
 
 logger = logging.getLogger(__name__)
 
@@ -384,17 +385,30 @@ class SpiderDiscover:
     async def _claim_next(self) -> Optional[dict[str, Any]]:
         """Atomically claim the next pending row using SELECT ... FOR UPDATE
         SKIP LOCKED to prevent two workers from claiming the same node."""
+        await refresh_account_proximity_cache(self.pool)
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 row = await conn.fetchrow(
                     """
-                    SELECT platform, node_id, hop_distance, priority,
-                           parent_node_id, edge_type, attempts
-                      FROM spider_queue
-                     WHERE platform = $1 AND status = 'pending'
-                     ORDER BY hop_distance ASC, priority ASC, enqueued_at ASC
+                    SELECT sq.platform, sq.node_id, sq.hop_distance, sq.priority,
+                           sq.parent_node_id, sq.edge_type, sq.attempts
+                      FROM spider_queue sq
+                      LEFT JOIN LATERAL (
+                        SELECT MIN(ap.tier) AS proximity_tier
+                        FROM account_proximity_cache ap
+                        WHERE ap.platform = sq.platform
+                          AND ap.account_id = lower(sq.node_id)
+                      ) prox ON TRUE
+                     WHERE sq.platform = $1 AND sq.status = 'pending'
+                     ORDER BY
+                        CASE
+                            WHEN prox.proximity_tier IN (1, 2) THEN 2
+                            WHEN prox.proximity_tier = 3 THEN 1
+                            ELSE 0
+                        END DESC,
+                        sq.hop_distance ASC, sq.priority ASC, sq.enqueued_at ASC
                      LIMIT 1
-                    FOR UPDATE SKIP LOCKED
+                    FOR UPDATE OF sq SKIP LOCKED
                     """,
                     self.platform,
                 )

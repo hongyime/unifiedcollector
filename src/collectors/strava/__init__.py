@@ -19,6 +19,7 @@ from src.collectors.strava.parse import (
 )
 from src.core.profile_photo_tracker import ProfilePhotoTracker
 from src.core.file_naming import sanitize_name
+from src.core.proximity import refresh_account_proximity_cache
 
 logger = logging.getLogger(__name__)
 
@@ -390,6 +391,7 @@ class StravaCollector(BaseCollector):
 
     async def _process_spider_queue(self):
         max_per_cycle = int(os.getenv("STRAVA_SPIDER_MAX_PER_CYCLE", "10"))
+        await refresh_account_proximity_cache(self.pool)
         # Prune stale pending entries to prevent unbounded queue growth.
         ttl_days = int(os.getenv("SPIDER_QUEUE_TTL_DAYS", "30"))
         try:
@@ -409,9 +411,23 @@ class StravaCollector(BaseCollector):
                     UPDATE strava_spider_queue
                     SET status = 'processing'
                     WHERE id = (
-                        SELECT id FROM strava_spider_queue
-                        WHERE status = 'pending'
-                        ORDER BY priority ASC, collected_at ASC
+                        SELECT q.id
+                        FROM strava_spider_queue q
+                        LEFT JOIN LATERAL (
+                            SELECT MIN(ap.tier) AS proximity_tier
+                            FROM account_proximity_cache ap
+                            WHERE ap.platform = 'strava'
+                              AND ap.account_id = q.platform_athlete_id::text
+                        ) prox ON TRUE
+                        WHERE q.status = 'pending'
+                        ORDER BY
+                            CASE
+                                WHEN prox.proximity_tier IN (1, 2) THEN 2
+                                WHEN prox.proximity_tier = 3 THEN 1
+                                ELSE 0
+                            END DESC,
+                            q.priority ASC,
+                            q.collected_at ASC
                         LIMIT 1
                     )
                     RETURNING platform_athlete_id

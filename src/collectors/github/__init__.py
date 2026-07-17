@@ -98,6 +98,7 @@ from src.collectors.github.parse import (
 )
 from src.core.dedupe_hash import sha256_bytes as _sha256_bytes
 from src.core.file_naming import sanitize_name
+from src.core.proximity import refresh_account_proximity_cache
 from src.core.profile_photo_tracker import ProfilePhotoTracker
 from src.core.spider_discover import Edge, EdgeType, SpiderDiscover
 from src.core.user_change_tracker import (
@@ -752,6 +753,7 @@ class GithubCollector(BaseCollector):
         ``FOR UPDATE SKIP LOCKED``. Each worker pops one row, processes it,
         sleeps the per-user delay, then loops.
         """
+        await refresh_account_proximity_cache(self.pool)
         spider_concurrency = int(os.getenv("GITHUB_SPIDER_CONCURRENCY", "4"))
         processed_counter = {"n": 0}
 
@@ -766,9 +768,24 @@ class GithubCollector(BaseCollector):
                         UPDATE github_spider_queue
                         SET status = 'processing'
                         WHERE id = (
-                            SELECT id FROM github_spider_queue
-                            WHERE status = 'pending' AND priority <= $1
-                            ORDER BY priority ASC, collected_at ASC
+                            SELECT q.id
+                            FROM github_spider_queue q
+                            LEFT JOIN LATERAL (
+                                SELECT MIN(ap.tier) AS proximity_tier
+                                FROM account_proximity_cache ap
+                                WHERE ap.platform = 'github'
+                                  AND q.target_type = 'user'
+                                  AND ap.account_id = lower(q.target_identifier)
+                            ) prox ON TRUE
+                            WHERE q.status = 'pending' AND q.priority <= $1
+                            ORDER BY
+                                CASE
+                                    WHEN prox.proximity_tier IN (1, 2) THEN 2
+                                    WHEN prox.proximity_tier = 3 THEN 1
+                                    ELSE 0
+                                END DESC,
+                                q.priority ASC,
+                                q.collected_at ASC
                             FOR UPDATE SKIP LOCKED
                             LIMIT 1
                         )

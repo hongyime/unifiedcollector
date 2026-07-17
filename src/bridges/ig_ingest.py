@@ -42,6 +42,7 @@ from aiohttp import web
 
 from src.db.connection import get_pool, close_pool
 from src.core.media_filter import inspect as inspect_media
+from src.core.proximity import refresh_account_proximity_cache
 
 # Follow-aware access recording (Phase 0). The extension IS the live IG path, so
 # recording access outcomes here populates profile_access_{summary,attempts} far
@@ -207,9 +208,27 @@ async def _targets_for(pool, platform):
     seen = set()
     out = []
     try:
+        await refresh_account_proximity_cache(pool)
         async with pool.acquire() as conn:
             seeds = await conn.fetch(
-                "SELECT target_id FROM collection_targets WHERE source=$1", platform
+                """
+                SELECT ct.target_id, MIN(ap.tier) AS proximity_tier, ct.priority
+                FROM collection_targets ct
+                LEFT JOIN account_proximity_cache ap
+                  ON ap.platform = ct.source
+                 AND ap.account_id = lower(ct.target_id)
+                WHERE ct.source = $1
+                GROUP BY ct.target_id, ct.priority, ct.created_at
+                ORDER BY
+                    CASE
+                        WHEN MIN(ap.tier) IN (1, 2) THEN 2
+                        WHEN MIN(ap.tier) = 3 THEN 1
+                        ELSE 0
+                    END DESC,
+                    ct.priority DESC,
+                    ct.created_at ASC
+                """,
+                platform,
             )
             for r in seeds:
                 u = r["target_id"]
@@ -219,9 +238,24 @@ async def _targets_for(pool, platform):
             if platform == "instagram":
                 spider = await conn.fetch(
                     """
-                    SELECT username, hop FROM instagram_spider_targets
-                    WHERE status='active' AND hop <= $1
-                    ORDER BY hop ASC, last_scraped_at ASC NULLS FIRST, discovered_at ASC
+                    SELECT s.username, s.hop, prox.proximity_tier
+                    FROM instagram_spider_targets s
+                    LEFT JOIN LATERAL (
+                        SELECT MIN(ap.tier) AS proximity_tier
+                        FROM account_proximity_cache ap
+                        WHERE ap.platform = 'instagram'
+                          AND ap.account_id = lower(s.username)
+                    ) prox ON TRUE
+                    WHERE s.status='active' AND s.hop <= $1
+                    ORDER BY
+                        CASE
+                            WHEN prox.proximity_tier IN (1, 2) THEN 2
+                            WHEN prox.proximity_tier = 3 THEN 1
+                            ELSE 0
+                        END DESC,
+                        s.hop ASC,
+                        s.last_scraped_at ASC NULLS FIRST,
+                        s.discovered_at ASC
                     LIMIT $2
                     """,
                     IG_SPIDER_MAX_HOP, IG_SPIDER_TARGETS_LIMIT,
@@ -237,15 +271,45 @@ async def _targets_for(pool, platform):
                 # are scrapeable Threads profiles. Hand them to the Threads tab to visit.
                 ig = await conn.fetch(
                     """
-                    SELECT username FROM instagram_spider_targets
-                    WHERE status='active'
-                    ORDER BY last_scraped_at ASC NULLS FIRST, discovered_at ASC
+                    SELECT s.username, prox.proximity_tier
+                    FROM instagram_spider_targets s
+                    LEFT JOIN LATERAL (
+                        SELECT MIN(ap.tier) AS proximity_tier
+                        FROM account_proximity_cache ap
+                        WHERE ap.platform = 'instagram'
+                          AND ap.account_id = lower(s.username)
+                    ) prox ON TRUE
+                    WHERE s.status='active'
+                    ORDER BY
+                        CASE
+                            WHEN prox.proximity_tier IN (1, 2) THEN 2
+                            WHEN prox.proximity_tier = 3 THEN 1
+                            ELSE 0
+                        END DESC,
+                        s.last_scraped_at ASC NULLS FIRST,
+                        s.discovered_at ASC
                     LIMIT $1
                     """,
                     IG_SPIDER_TARGETS_LIMIT,
                 )
                 ig2 = await conn.fetch(
-                    "SELECT target_id AS username FROM collection_targets WHERE source='instagram'"
+                    """
+                    SELECT ct.target_id AS username, MIN(ap.tier) AS proximity_tier
+                    FROM collection_targets ct
+                    LEFT JOIN account_proximity_cache ap
+                      ON ap.platform = 'instagram'
+                     AND ap.account_id = lower(ct.target_id)
+                    WHERE ct.source='instagram'
+                    GROUP BY ct.target_id, ct.priority, ct.created_at
+                    ORDER BY
+                        CASE
+                            WHEN MIN(ap.tier) IN (1, 2) THEN 2
+                            WHEN MIN(ap.tier) = 3 THEN 1
+                            ELSE 0
+                        END DESC,
+                        ct.priority DESC,
+                        ct.created_at ASC
+                    """
                 )
                 for r in list(ig) + list(ig2):
                     u = (r["username"] or "").strip().lstrip("@")
