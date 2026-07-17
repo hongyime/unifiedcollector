@@ -265,6 +265,17 @@ class StravaCollector(BaseCollector):
                 logger.warning("strava: early GPS backfill failed: %s", e)
         # --- END EDIT (GPS-first drain) ---
 
+        # Strava photo metadata can be discovered during long page/history crawls,
+        # while BaseCollector.run_backfill() only fires after collect() returns.
+        # Drain a small media batch at the front so activity photos converge even
+        # when the crawl tail is cut by restarts/watchdogs.
+        if os.getenv("STRAVA_PHOTO_BACKFILL_FIRST", "true").lower() == "true":
+            try:
+                photo_batch = int(os.getenv("STRAVA_PHOTO_BACKFILL_BATCH", "25"))
+                await self._backfill_missing_photo_media(batch_size=photo_batch)
+            except Exception as e:
+                logger.warning("strava: early photo media backfill failed: %s", e)
+
         for target in targets:
             if self._stop.is_set(): break
             logger.info("Collecting strava/%s", target)
@@ -332,6 +343,11 @@ class StravaCollector(BaseCollector):
             await self._scrape_activity_pages(batch_size=page_batch)
         except Exception as e:
             logger.warning("strava: activity page scraping failed: %s", e)
+        try:
+            photo_batch = int(os.getenv("STRAVA_PHOTO_BACKFILL_BATCH", "25"))
+            await self._backfill_missing_photo_media(batch_size=photo_batch)
+        except Exception as e:
+            logger.warning("strava: photo media backfill failed: %s", e)
 
         # URGENT GPS recovery: re-fetch streams for activities that never got one
         # (the old wrong-auth bug left ~95% of activities with no GPS even though
@@ -1017,12 +1033,65 @@ class StravaCollector(BaseCollector):
         await self._delay()
         photo_resp = await client.get(f"{STRAVA_API}/activities/{activity_id}/photos", headers={"Authorization": f"Bearer {self._access_token}"}, params={"size": 2048})
         if photo_resp.status_code != 200: return
+        try:
+            activity_id_int = int(activity_id)
+        except (TypeError, ValueError):
+            return
+        athlete_uuid = None
+        try:
+            async with self.pool.acquire() as conn:
+                athlete_uuid = await conn.fetchval(
+                    "SELECT id FROM strava_athletes WHERE platform_athlete_id = $1",
+                    int(aid),
+                )
+        except Exception:
+            logger.debug("strava api photos: athlete lookup failed for %s", aid, exc_info=True)
+        try:
+            activity_date = datetime.fromisoformat(str(activity.get("start_date")).replace("Z", "+00:00")) if activity.get("start_date") else None
+        except Exception:
+            activity_date = None
         for i, photo in enumerate(photo_resp.json()):
+            if not isinstance(photo, dict):
+                continue
             urls = photo.get("urls", {})
-            url = urls.get("2048") or urls.get("600") or urls.get("100")
+            url = urls.get("2048") or urls.get("600") or urls.get("100") or photo.get("url")
             if not url: continue
-            if not self.is_known(f"{activity_id}_{i}"):
-                await self.download_media({"entity_id": aid, "entity_name": aname, "content_type": "activity", "content_id": f"{activity_id}_{i}", "url": url, "extension": "jpg", "source_url": f"https://www.strava.com/activities/{activity_id}", "raw": photo})
+            photo_id = str(photo.get("unique_id") or photo.get("id") or photo.get("photo_id") or i)
+            thumb = urls.get("600") or urls.get("100") or photo.get("thumbnail")
+            try:
+                async with self.pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        INSERT INTO strava_activity_photos
+                          (platform_photo_id, platform_activity_id, athlete_id,
+                           activity_name, athlete_name, caption, media_type,
+                           source_url_large, source_url_thumbnail, activity_date, source)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+                        ON CONFLICT (platform_photo_id, platform_activity_id) DO UPDATE SET
+                           source_url_large = COALESCE(EXCLUDED.source_url_large, strava_activity_photos.source_url_large),
+                           source_url_thumbnail = COALESCE(EXCLUDED.source_url_thumbnail, strava_activity_photos.source_url_thumbnail),
+                           activity_name = COALESCE(EXCLUDED.activity_name, strava_activity_photos.activity_name),
+                           athlete_name = COALESCE(EXCLUDED.athlete_name, strava_activity_photos.athlete_name)
+                        """,
+                        photo_id, activity_id_int, athlete_uuid, activity.get("name"), aname,
+                        photo.get("caption") or photo.get("caption_escaped"),
+                        int(photo.get("media_type") or 1), url, thumb, activity_date, "api_activity_photos",
+                    )
+            except Exception:
+                logger.debug("strava api photo upsert failed %s/%s", activity_id, photo_id, exc_info=True)
+                continue
+            content_id = f"{activity_id}_{photo_id}"
+            if not self.is_known(content_id):
+                await self.download_media({
+                    "entity_id": aid,
+                    "entity_name": aname,
+                    "content_type": "activity_photo",
+                    "content_id": content_id,
+                    "url": url,
+                    "extension": "jpg",
+                    "source_url": f"https://www.strava.com/activities/{activity_id}",
+                    "raw": photo,
+                })
 
     async def _backfill_privacy_zones(self):
         """Recurring backfill: populate privacy-zone flags for historical activities
@@ -1311,6 +1380,9 @@ class StravaCollector(BaseCollector):
                     AND mi.content_id = p.platform_activity_id || '_' || p.platform_photo_id
                 WHERE p.source_url_large IS NOT NULL
                   AND mi.id IS NULL
+                ORDER BY
+                  CASE WHEN p.source_url_large LIKE '%sport-image.strava.com%' THEN 1 ELSE 0 END,
+                  p.collected_at DESC NULLS LAST
                 LIMIT $1
             """, batch_size)
         return [{"entity_id": r["athlete_name"] or "unknown",
@@ -1318,9 +1390,33 @@ class StravaCollector(BaseCollector):
                  "content_type": "activity_photo",
                  "content_id": f"{r['platform_activity_id']}_{r['platform_photo_id']}",
                  "url": r["source_url_large"],
-                 "extension": "jpg",
+                 "extension": "png" if "sport-image.strava.com" in (r["source_url_large"] or "") else "jpg",
                  "source_url": f"https://www.strava.com/activities/{r['platform_activity_id']}"}
                 for r in rows]
+
+    async def _backfill_missing_photo_media(self, batch_size: int = 25) -> int:
+        items = await self.get_backfill_items(batch_size)
+        if not items:
+            return 0
+        downloaded = 0
+        for item in items:
+            if self._stop.is_set():
+                break
+            cid = item.get("content_id", "")
+            if self.is_known(cid):
+                continue
+            try:
+                if await self.download_media(item):
+                    downloaded += 1
+            except Exception as e:
+                logger.warning("strava: photo media backfill failed %s: %s", cid, e)
+                try:
+                    self.reconciler.record_failure(cid)
+                except Exception:
+                    logger.debug("strava: photo media failure accounting failed", exc_info=True)
+        if downloaded:
+            logger.info("strava: photo media backfilled %d/%d items", downloaded, len(items))
+        return downloaded
 
     @staticmethod
     def _build_strava_source_url(item: dict) -> str | None:
@@ -1355,7 +1451,7 @@ class StravaCollector(BaseCollector):
 
     async def download_media(self, item: dict):
         cid = item["content_id"]
-        if self.is_known(cid): return
+        if self.is_known(cid): return False
         filename = self.build_filename(item["entity_id"], item["entity_name"], item["content_type"], cid, extension=item.get("extension", "jpg"))
         dest_dir = self.account_media_dir / item["content_type"]
         dest_dir.mkdir(parents=True, exist_ok=True)
@@ -1373,11 +1469,14 @@ class StravaCollector(BaseCollector):
             os.replace(tmp_path, dest)
             metadata = {"entity_id": item["entity_id"], "entity_name": item["entity_name"], "content_type": item["content_type"], "content_id": cid, "collected_at": datetime.now(timezone.utc).isoformat(), "raw": item.get("raw", {})}
             self.save_json(metadata, dest_dir / f"{Path(filename).stem}_metadata.json")
-            await self.insert_media_item(entity_id=item["entity_id"], entity_name=item["entity_name"], content_type=item["content_type"], content_id=cid, filename=filename, file_path=str(dest), file_size=len(data), sha256=sha, metadata=metadata, source_url=self._build_strava_source_url(item))
-            self._known_ids.add(cid)
+            inserted = await self.insert_media_item(entity_id=item["entity_id"], entity_name=item["entity_name"], content_type=item["content_type"], content_id=cid, filename=filename, file_path=str(dest), file_size=len(data), sha256=sha, metadata=metadata, source_url=self._build_strava_source_url(item))
+            if inserted:
+                self._known_ids.add(cid)
+            return inserted
         except Exception as e:
             logger.error("Download failed %s: %s", cid, e)
             await self.send_to_dlq(item["entity_id"], cid, str(e))
+            return False
 
     # ------------------------------------------------------------------ #
     # Following-feed playback (ported from stravatoolkit FollowingFeedScraper)
