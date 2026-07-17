@@ -190,6 +190,35 @@ class WhatsappCollector(BaseCollector):
             self._broker_channel = None
 
     async def _consume_broker(self, targets: list[str]):
+        """Resilient wrapper: auto-reconnect with backoff if the broker
+        connection/channel/iterator drops. Previously a single drop killed the
+        consume task permanently — 0 consumers on `unifiedcollector.messages`
+        while the bridge kept publishing, so messages piled up in RabbitMQ and
+        never reached Postgres (observed: 990-msg backlog, WhatsApp 3 days stale).
+        Now it re-inits the channel and re-consumes instead of needing a manual
+        container restart. (2026-07-17 hardening)"""
+        import asyncio as _aio
+        backoff = 5
+        while not self._stop.is_set():
+            try:
+                if self._broker_channel is None or getattr(self._broker_channel, "is_closed", False):
+                    await self._init_broker()
+                if self._broker_channel is None:
+                    raise RuntimeError("RabbitMQ channel unavailable")
+                await self._consume_broker_once(targets)
+                backoff = 5  # returned cleanly (stop requested)
+            except _aio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning(
+                    "WhatsApp broker consumer dropped; reconnecting in %ss: %s",
+                    backoff, e,
+                )
+                self._broker_channel = None  # force re-init on next loop
+                await _aio.sleep(backoff)
+                backoff = min(backoff * 2, 60)
+
+    async def _consume_broker_once(self, targets: list[str]):
         import aio_pika
 
         exchange = await self._broker_channel.declare_exchange(
