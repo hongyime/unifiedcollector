@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 _LAST_REFRESH = 0.0
 _REFRESH_LOCK = None
+_DDL_READY = False
 
 DDL = """
 CREATE TABLE IF NOT EXISTS account_proximity_cache (
@@ -59,8 +60,18 @@ async def _ensure_lock():
 
 
 async def ensure_account_proximity_cache(pool) -> None:
+    global _DDL_READY
+    if _DDL_READY:
+        return
     async with pool.acquire() as conn:
+        exists = await conn.fetchval(
+            "SELECT to_regclass('public.account_proximity_cache') IS NOT NULL"
+        )
+        if exists:
+            _DDL_READY = True
+            return
         await conn.execute(DDL)
+    _DDL_READY = True
 
 
 async def refresh_account_proximity_cache(pool, *, force: bool = False) -> dict:
@@ -112,20 +123,43 @@ async def refresh_account_proximity_cache(pool, *, force: bool = False) -> dict:
         try:
             async with pool.acquire() as conn:
                 async with conn.transaction():
+                    await conn.execute("""
+                        CREATE TEMP TABLE tmp_account_proximity_cache (
+                            platform VARCHAR(30) NOT NULL,
+                            account_id VARCHAR(255) NOT NULL,
+                            owner_account VARCHAR(255) NOT NULL,
+                            tier SMALLINT NOT NULL,
+                            reasons JSONB NOT NULL,
+                            updated_at TIMESTAMPTZ
+                        ) ON COMMIT DROP
+                    """)
+                    if records:
+                        await conn.copy_records_to_table(
+                            "tmp_account_proximity_cache",
+                            records=records,
+                            columns=[
+                                "platform",
+                                "account_id",
+                                "owner_account",
+                                "tier",
+                                "reasons",
+                                "updated_at",
+                            ],
+                        )
                     await conn.execute("DELETE FROM account_proximity_cache")
                     if records:
-                        await conn.executemany(
+                        await conn.execute(
                             """
                             INSERT INTO account_proximity_cache
                                 (platform, account_id, owner_account, tier, reasons, updated_at, synced_at)
-                            VALUES ($1, $2, $3, $4, $5::jsonb, $6, NOW())
+                            SELECT platform, account_id, owner_account, tier, reasons, updated_at, NOW()
+                            FROM tmp_account_proximity_cache
                             ON CONFLICT (platform, account_id, owner_account) DO UPDATE SET
                                 tier = EXCLUDED.tier,
                                 reasons = EXCLUDED.reasons,
                                 updated_at = EXCLUDED.updated_at,
                                 synced_at = NOW()
-                            """,
-                            records,
+                            """
                         )
                     await _enrich_cache_aliases(conn)
         except Exception as exc:
