@@ -621,100 +621,189 @@
           return m ? m[1] : "";
         } catch (e) { return ""; }
       }
-      const WrappedWS = function (url, protocols) {
-        const ws = protocols !== undefined ? new OrigWS(url, protocols) : new OrigWS(url);
+      function _frameKind(d) {
         try {
+          if (d instanceof ArrayBuffer) return "arraybuffer";
+          if (ArrayBuffer.isView && ArrayBuffer.isView(d)) return d.constructor && d.constructor.name || "arraybuffer_view";
+          if (typeof Blob !== "undefined" && d instanceof Blob) return "blob";
+        } catch (e) {}
+        return typeof d;
+      }
+      function _frameSize(d) {
+        try {
+          if (d instanceof ArrayBuffer) return d.byteLength;
+          if (ArrayBuffer.isView && ArrayBuffer.isView(d)) return d.byteLength;
+          if (typeof Blob !== "undefined" && d instanceof Blob) return d.size;
+        } catch (e) {}
+        return null;
+      }
+      function _decodeAndPost(u, buf) {
+        try {
+          if (platform === "tiktok" && buf.byteLength >= SAMPLE_MIN_BYTES) {
+            const decoded = _ttDecode(buf);
+            if (decoded) {
+              window.postMessage({
+                __uc: true, type: "dm_decoded", platform,
+                owner: _extractOwner(u),
+                threads: decoded.threads, messages: decoded.messages,
+              }, "*");
+            }
+          } else if (platform === "instagram" && buf.byteLength >= IG_SAMPLE_MIN_BYTES) {
+            const decoded = _igDecode(buf);
+            if (decoded) {
+              window.postMessage({
+                __uc: true, type: "dm_decoded", platform,
+                owner: _extractOwnerIG(),
+                threads: decoded.threads, messages: decoded.messages,
+              }, "*");
+            }
+          }
+        } catch (e) {}
+      }
+      function _handleWSFrame(u, key, isDm, d) {
+        try {
+          if (typeof d === "string") {
+            let j; try { j = JSON.parse(d); } catch (e) { return; }
+            window.postMessage({ __uc: true, type: platform + "_dm", platform, frame: j }, "*");
+            return;
+          }
+          if (!_wsProbed.has(key)) {
+            _wsProbed.add(key);
+            _hookProbes++;
+            window.postMessage({ __uc: true, type: "dm_probe", platform, transport: "ws",
+              url: u.slice(0, 200), frame_kind: _frameKind(d), frame_size: _frameSize(d) }, "*");
+          }
+          if (!isDm) return;
+          let buf = null;
+          if (d instanceof ArrayBuffer) {
+            buf = d;
+          } else if (ArrayBuffer.isView && ArrayBuffer.isView(d)) {
+            buf = d.buffer.slice(d.byteOffset, d.byteOffset + d.byteLength);
+          }
+          if (buf) {
+            shipSample(u, key, buf);
+            _decodeAndPost(u, buf);
+          } else if (typeof Blob !== "undefined" && d instanceof Blob) {
+            const fr = new FileReader();
+            fr.onload = function () {
+              try {
+                const out = fr.result;
+                if (out instanceof ArrayBuffer) {
+                  shipSample(u, key, out);
+                  _decodeAndPost(u, out);
+                }
+              } catch (e) {}
+            };
+            fr.readAsArrayBuffer(d);
+          }
+        } catch (e) {}
+      }
+
+      const _observedSockets = typeof WeakSet !== "undefined" ? new WeakSet() : null;
+      const _wrappedConstructors = typeof WeakMap !== "undefined" ? new WeakMap() : null;
+      const _wrappedWSFns = typeof WeakSet !== "undefined" ? new WeakSet() : null;
+      function _observeSocket(ws, url) {
+        try {
+          if (!ws || typeof ws.addEventListener !== "function") return ws;
+          if (_observedSockets) {
+            if (_observedSockets.has(ws)) return ws;
+            _observedSockets.add(ws);
+          } else if (ws.__uc_ws_observed) {
+            return ws;
+          } else {
+            try { Object.defineProperty(ws, "__uc_ws_observed", { value: true }); } catch (e) {}
+          }
           const u = String(url || "");
-          const key = u.split("?")[0];
+          const key = u.split("?")[0] || u;
           const isDm = _dmSockRe.test(u);
           ws.addEventListener("message", function (ev) {
-            try {
-              const d = ev.data;
-              if (typeof d === "string") {
-                let j; try { j = JSON.parse(d); } catch (e) { return; }
-                window.postMessage({ __uc: true, type: platform + "_dm", platform, frame: j }, "*");
-                return;
-              }
-              // binary frame
-              if (!_wsProbed.has(key)) {
-                _wsProbed.add(key);
-                _hookProbes++;
-                const kind = (d instanceof ArrayBuffer) ? "arraybuffer"
-                  : (typeof Blob !== "undefined" && d instanceof Blob) ? "blob" : typeof d;
-                const size = (d && d.byteLength) || (d && d.size) || null;
-                window.postMessage({ __uc: true, type: "dm_probe", platform, transport: "ws",
-                  url: u.slice(0, 200), frame_kind: kind, frame_size: size }, "*");
-              }
-              // raw sample of substantial frames on the real DM sockets
-              if (isDm) {
-                if (d instanceof ArrayBuffer) {
-                  shipSample(u, key, d);
-                  // Option B: client-side decode → structured DM payload.
-                  // TikTok uses protobuf on the frontier socket; IG uses
-                  // MQTT-over-WSS + Thrift on edge-chat (decoder stubbed
-                  // for now, see _igDecode).
-                  if (platform === "tiktok" && d.byteLength >= SAMPLE_MIN_BYTES) {
-                    try {
-                      const decoded = _ttDecode(d);
-                      if (decoded) {
-                        window.postMessage({
-                          __uc: true, type: "dm_decoded", platform,
-                          owner: _extractOwner(u),
-                          threads: decoded.threads, messages: decoded.messages,
-                        }, "*");
-                      }
-                    } catch (e) {}
-                  } else if (platform === "instagram" && d.byteLength >= IG_SAMPLE_MIN_BYTES) {
-                    try {
-                      const decoded = _igDecode(d);
-                      if (decoded) {
-                        window.postMessage({
-                          __uc: true, type: "dm_decoded", platform,
-                          owner: _extractOwnerIG(),
-                          threads: decoded.threads, messages: decoded.messages,
-                        }, "*");
-                      }
-                    } catch (e) {}
-                  }
-                }
-                else if (typeof Blob !== "undefined" && d instanceof Blob) {
-                  const fr = new FileReader();
-                  fr.onload = function () {
-                    try {
-                      shipSample(u, key, fr.result);
-                      if (platform === "tiktok" && fr.result.byteLength >= SAMPLE_MIN_BYTES) {
-                        const decoded = _ttDecode(fr.result);
-                        if (decoded) {
-                          window.postMessage({
-                            __uc: true, type: "dm_decoded", platform,
-                            owner: _extractOwner(u),
-                            threads: decoded.threads, messages: decoded.messages,
-                          }, "*");
-                        }
-                      } else if (platform === "instagram" && fr.result.byteLength >= IG_SAMPLE_MIN_BYTES) {
-                        const decoded = _igDecode(fr.result);
-                        if (decoded) {
-                          window.postMessage({
-                            __uc: true, type: "dm_decoded", platform,
-                            owner: _extractOwnerIG(),
-                            threads: decoded.threads, messages: decoded.messages,
-                          }, "*");
-                        }
-                      }
-                    } catch (e) {}
-                  };
-                  fr.readAsArrayBuffer(d);
-                }
-              }
-            } catch (e) {}
+            try { _handleWSFrame(u, key, isDm, ev && ev.data); } catch (e) {}
           });
         } catch (e) {}
         return ws;
-      };
-      WrappedWS.prototype = OrigWS.prototype;
-      WrappedWS.CONNECTING = OrigWS.CONNECTING; WrappedWS.OPEN = OrigWS.OPEN;
-      WrappedWS.CLOSING = OrigWS.CLOSING; WrappedWS.CLOSED = OrigWS.CLOSED;
-      window.WebSocket = WrappedWS;
+      }
+      function _copyWSConstants(target, source) {
+        for (const name of ["CONNECTING", "OPEN", "CLOSING", "CLOSED"]) {
+          try {
+            const desc = Object.getOwnPropertyDescriptor(source, name);
+            if (desc) Object.defineProperty(target, name, desc);
+            else target[name] = source[name];
+          } catch (e) {
+            try { target[name] = source[name]; } catch (_e) {}
+          }
+        }
+      }
+      function _isWrappedWS(fn) {
+        try { return _wrappedWSFns ? _wrappedWSFns.has(fn) : !!fn.__uc_ws_hook; }
+        catch (e) { return false; }
+      }
+      function _markWrapped(fn) {
+        try {
+          if (_wrappedWSFns) _wrappedWSFns.add(fn);
+          else Object.defineProperty(fn, "__uc_ws_hook", { value: true });
+        } catch (e) {}
+        return fn;
+      }
+      function _makeWrappedWS(NativeWS) {
+        if (typeof NativeWS !== "function") return NativeWS;
+        if (_isWrappedWS(NativeWS)) return NativeWS;
+        if (_wrappedConstructors && _wrappedConstructors.has(NativeWS)) {
+          return _wrappedConstructors.get(NativeWS);
+        }
+        let WrappedWS = null;
+        if (typeof Proxy === "function" && typeof Reflect === "object" && Reflect.construct) {
+          WrappedWS = new Proxy(NativeWS, {
+            construct(target, args, newTarget) {
+              let ws;
+              try { ws = Reflect.construct(target, args, newTarget || target); }
+              catch (e) { ws = Reflect.construct(target, args); }
+              return _observeSocket(ws, args && args[0]);
+            },
+            apply(target, thisArg, args) {
+              return Reflect.apply(target, thisArg, args);
+            },
+          });
+        } else {
+          WrappedWS = function WebSocket(url, protocols) {
+            const ws = protocols !== undefined ? new NativeWS(url, protocols) : new NativeWS(url);
+            return _observeSocket(ws, url);
+          };
+          try { WrappedWS.prototype = NativeWS.prototype; } catch (e) {}
+          _copyWSConstants(WrappedWS, NativeWS);
+        }
+        _markWrapped(WrappedWS);
+        try {
+          Object.defineProperty(NativeWS.prototype, "constructor", {
+            value: WrappedWS, writable: true, configurable: true,
+          });
+        } catch (e) {}
+        if (_wrappedConstructors) _wrappedConstructors.set(NativeWS, WrappedWS);
+        return WrappedWS;
+      }
+
+      // Modern IG/TikTok bundles sometimes overwrite window.WebSocket after
+      // document_start or compare constructor/prototype identity. Keep a native-
+      // shaped Proxy in the getter and wrap later assignments instead of leaving
+      // a plain function replacement that can be bypassed or detected.
+      const _wsDesc = Object.getOwnPropertyDescriptor(window, "WebSocket");
+      let _currentWrappedWS = _makeWrappedWS(OrigWS);
+      try {
+        Object.defineProperty(window, "WebSocket", {
+          configurable: true,
+          enumerable: _wsDesc ? !!_wsDesc.enumerable : true,
+          get() { return _currentWrappedWS; },
+          set(v) {
+            try {
+              if (!v || v === _currentWrappedWS) return;
+              _currentWrappedWS = _makeWrappedWS(v);
+            } catch (e) {
+              _currentWrappedWS = v;
+            }
+          },
+        });
+      } catch (e) {
+        try { window.WebSocket = _currentWrappedWS; } catch (_e) {}
+      }
 
       // P1.3: WS-hook heartbeat. Every 5 min the running counters are shipped
       // to /social/dm-heartbeat via content.js -> background.js so the
