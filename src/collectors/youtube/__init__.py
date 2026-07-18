@@ -583,6 +583,7 @@ class YoutubeCollector(BaseCollector):
                     view_count = EXCLUDED.view_count,
                     like_count = EXCLUDED.like_count,
                     comment_count = EXCLUDED.comment_count,
+                    collected_at = NOW(),
                     metadata = EXCLUDED.metadata
             """,
             video_id,
@@ -1598,4 +1599,3 @@ class YoutubeCollector(BaseCollector):
             }
             for r in rows
         ]
-

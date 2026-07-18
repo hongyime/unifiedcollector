@@ -373,6 +373,7 @@ async def test_upsert_video_dict_id_shape(monkeypatch):
     args = coll.pool._conn.execute.await_args.args
     assert args[1] == "VID123"
     assert args[2] == "uuid-1"
+    assert "collected_at = NOW()" in args[0]
 
 
 @pytest.mark.asyncio
