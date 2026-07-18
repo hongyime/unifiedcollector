@@ -358,8 +358,34 @@
   // decoder later (#35). We probe ALL sockets on these platforms so we don't
   // miss the DM socket by guessing its URL.
   if (platform === "tiktok" || platform === "instagram") {
+    // Keep the liveness pulse outside the descriptor/proxy setup below. If a
+    // site bundle changes window.WebSocket in a way we do not expect, the
+    // watchdog should still learn that the page-world hook loaded.
+    let _hookProbes = 0;
+    let _hookSamples = 0;
+    function _postDmHeartbeat() {
+      try {
+        window.postMessage({
+          __uc: true, type: "dm_heartbeat", platform,
+          probes_sent: _hookProbes, samples_shipped: _hookSamples,
+        }, "*");
+      } catch (e) {}
+    }
+    try {
+      const HEARTBEAT_MIN = 5;
+      setInterval(_postDmHeartbeat, HEARTBEAT_MIN * 60 * 1000);
+      setTimeout(_postDmHeartbeat, 15 * 1000);
+    } catch (e) {}
+
     try {
       const OrigWS = window.WebSocket;
+      const _nativeAddEventListener = (() => {
+        try {
+          const add = window.EventTarget && window.EventTarget.prototype
+            && window.EventTarget.prototype.addEventListener;
+          return typeof add === "function" ? add : null;
+        } catch (e) { return null; }
+      })();
       const _wsProbed = new Set();
       // The two real DM sockets (edge-chat MQTT for IG, im-ws frontier for
       // TikTok). We only raw-sample frames on THESE (not the chatty keepalive
@@ -388,11 +414,7 @@
       // observed yet. Lower threshold lets us LEARN which is true.
       const IG_SAMPLE_MIN_BYTES = 8;
       // P1.3: WS-hook heartbeat counters. shipSample/probe increment these;
-      // a setInterval below emits a heartbeat postMessage so background.js
-      // can POST /social/dm-heartbeat and the watchdog can detect a broken
-      // hook (IG/TikTok bundle updates silently disable the wrapper today).
-      let _hookProbes = 0;
-      let _hookSamples = 0;
+      // _postDmHeartbeat emits them to background.js for /social/dm-heartbeat.
       function abToB64(buf) {
         let s = ""; const b = new Uint8Array(buf);
         for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]);
@@ -722,7 +744,9 @@
       const _wrappedWSFns = typeof WeakSet !== "undefined" ? new WeakSet() : null;
       function _observeSocket(ws, url) {
         try {
-          if (!ws || typeof ws.addEventListener !== "function") return ws;
+          const addListener = _nativeAddEventListener
+            || (ws && typeof ws.addEventListener === "function" ? ws.addEventListener : null);
+          if (!ws || typeof addListener !== "function") return ws;
           if (_observedSockets) {
             if (_observedSockets.has(ws)) return ws;
             _observedSockets.add(ws);
@@ -734,9 +758,14 @@
           const u = String(url || "");
           const key = u.split("?")[0] || u;
           const isDm = _dmSockRe.test(u);
-          ws.addEventListener("message", function (ev) {
+          const onMessage = function (ev) {
             try { _handleWSFrame(u, key, isDm, ev && ev.data); } catch (e) {}
-          });
+          };
+          try {
+            addListener.call(ws, "message", onMessage, false);
+          } catch (e) {
+            try { ws.addEventListener("message", onMessage, false); } catch (_e) {}
+          }
         } catch (e) {}
         return ws;
       }
@@ -805,51 +834,42 @@
       // a plain function replacement that can be bypassed or detected.
       const _wsDesc = Object.getOwnPropertyDescriptor(window, "WebSocket");
       let _currentWrappedWS = _makeWrappedWS(OrigWS);
-      try {
-        Object.defineProperty(window, "WebSocket", {
-          configurable: true,
-          enumerable: _wsDesc ? !!_wsDesc.enumerable : true,
-          get() { return _currentWrappedWS; },
-          set(v) {
-            try {
-              if (!v || v === _currentWrappedWS) return;
-              _currentWrappedWS = _makeWrappedWS(v);
-            } catch (e) {
-              _currentWrappedWS = v;
-            }
-          },
-        });
-      } catch (e) {
-        try { window.WebSocket = _currentWrappedWS; } catch (_e) {}
+      function _installWSWrapper() {
+        try {
+          const desc = Object.getOwnPropertyDescriptor(window, "WebSocket");
+          if (desc && !desc.configurable) {
+            try { window.WebSocket = _currentWrappedWS; } catch (_e) {}
+            return;
+          }
+          Object.defineProperty(window, "WebSocket", {
+            configurable: true,
+            enumerable: desc ? !!desc.enumerable : (_wsDesc ? !!_wsDesc.enumerable : true),
+            get() { return _currentWrappedWS; },
+            set(v) {
+              try {
+                if (!v || v === _currentWrappedWS) return;
+                _currentWrappedWS = _makeWrappedWS(v);
+              } catch (e) {
+                _currentWrappedWS = v;
+              }
+            },
+          });
+        } catch (e) {
+          try { window.WebSocket = _currentWrappedWS; } catch (_e) {}
+        }
       }
+      function _ensureWSWrapper() {
+        try {
+          const current = window.WebSocket;
+          if (current && current !== _currentWrappedWS) {
+            _currentWrappedWS = _makeWrappedWS(current);
+            _installWSWrapper();
+          }
+        } catch (e) {}
+      }
+      _installWSWrapper();
+      try { setInterval(_ensureWSWrapper, 2000); } catch (e) {}
 
-      // P1.3: WS-hook heartbeat. Every 5 min the running counters are shipped
-      // to /social/dm-heartbeat via content.js -> background.js so the
-      // watchdog can tell "extension not installed" from "hook silently
-      // broken by an IG/TikTok bundle update". Sending happens even when
-      // counters are still 0 — "hook loaded and alive but no traffic" is a
-      // valid state that the dashboard should surface.
-      try {
-        const HEARTBEAT_MIN = 5;
-        setInterval(function () {
-          try {
-            window.postMessage({
-              __uc: true, type: "dm_heartbeat", platform,
-              probes_sent: _hookProbes, samples_shipped: _hookSamples,
-            }, "*");
-          } catch (e) {}
-        }, HEARTBEAT_MIN * 60 * 1000);
-        // Fire one immediately after install so a fresh page load shows up
-        // in the dashboard without waiting 5 min for the first tick.
-        setTimeout(function () {
-          try {
-            window.postMessage({
-              __uc: true, type: "dm_heartbeat", platform,
-              probes_sent: _hookProbes, samples_shipped: _hookSamples,
-            }, "*");
-          } catch (e) {}
-        }, 15 * 1000);
-      } catch (e) {}
     } catch (e) {}
   }
 })();
