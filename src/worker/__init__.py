@@ -600,8 +600,9 @@ class WorkerService:
                     # local error: back off and retry this source, no alert.
                     if await self._check_internet():
                         logger.warning(
-                            "%s: connection error but internet is UP — transient/"
-                            "local, retrying (no network alert): %s", source, e)
+                            "%s: %s while internet is UP — transient/local, "
+                            "retrying (no network alert): %s",
+                            source, type(e).__name__, e)
                         try:
                             await asyncio.wait_for(
                                 self._stop.wait(), timeout=self._cycle_sleep(source))

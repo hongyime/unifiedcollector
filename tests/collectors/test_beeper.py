@@ -445,6 +445,17 @@ def test_transient_error_is_api_error_subclass():
     assert issubclass(BeeperTransientError, BeeperAPIError)
 
 
+def test_beeper_suppresses_transient_run_error_notifications(monkeypatch, tmp_path):
+    monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
+    monkeypatch.setenv("COLLECTOR_DRIVE_PATH", str(tmp_path))
+    coll = BeeperCollector(client=MagicMock(spec=BeeperClient))
+
+    assert coll.should_notify_run_error(BeeperTransientError("temporary")) is False
+    assert coll.should_notify_run_error(httpx.ReadTimeout("slow")) is False
+    assert coll.should_notify_run_error(TimeoutError()) is False
+    assert coll.should_notify_run_error(RuntimeError("schema broke")) is True
+
+
 @pytest.mark.asyncio
 async def test_request_retries_then_raises_transient(monkeypatch):
     """A persistent DNS blip is retried, then surfaces as BeeperTransientError."""

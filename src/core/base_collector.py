@@ -172,7 +172,14 @@ class BaseCollector(ABC):
             await self.run_backfill()
         except Exception as e:
             self.circuit_breaker.record_failure()
-            await self._notify_run_error(e)
+            if self.should_notify_run_error(e):
+                await self._notify_run_error(e)
+            else:
+                logger.debug(
+                    "%s: suppressed run-error notification for %s",
+                    self.SOURCE_NAME,
+                    type(e).__name__,
+                )
             raise
         else:
             await self._notify_run_summary(self._progress_count - progress_before)
@@ -211,6 +218,10 @@ class BaseCollector(ABC):
             await alerts.notify_error(self.SOURCE_NAME, error)
         except Exception:
             logger.debug("notify_error failed", exc_info=True)
+
+    def should_notify_run_error(self, error: Exception) -> bool:
+        """Return False for source-specific expected transient failures."""
+        return True
 
     async def _seed_known_ids(self):
         """DB-first dedup seed (P3-3). Replaces the per-instance O(files) disk

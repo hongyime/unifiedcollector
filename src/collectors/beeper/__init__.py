@@ -712,6 +712,12 @@ class BeeperCollector(BaseCollector):
             return None
         return BeeperWriter(self.pool, log=logger)
 
+    def should_notify_run_error(self, error: Exception) -> bool:
+        """Avoid Telegram noise for Beeper Desktop local transport blips."""
+        if isinstance(error, (BeeperTransientError, httpx.TransportError, TimeoutError, OSError)):
+            return False
+        return True
+
     # ── BaseCollector hooks ───────────────────────────────────────────
 
     async def collect(self, targets: list[str]) -> dict:
