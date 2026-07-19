@@ -1,6 +1,0 @@
-node_modules/
-build/
-auth_info/
-media_storage/
-sessions/
-.env*

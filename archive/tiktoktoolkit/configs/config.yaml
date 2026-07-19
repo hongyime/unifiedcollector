@@ -1,4 +1,0 @@
-output_root: downloads
-log_level: INFO
-cookies_file: configs/tiktok_cookies.txt
-cookies_browser: null

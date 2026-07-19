@@ -1,5 +1,0 @@
-{
-  "extraPaths": ["core"],
-  "exclude": ["configs/tracker_json_*", "downloads", "logs", "__pycache__"],
-  "reportMissingImports": "warning"
-}

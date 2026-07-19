@@ -1,2 +1,0 @@
-"""Unified Search Toolkit package."""
-
