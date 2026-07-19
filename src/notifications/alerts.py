@@ -132,6 +132,52 @@ async def notify_status(snapshot: dict) -> bool:
     if snapshot.get("msgs_24h") is not None:
         lines.append(f"💬 Messages (24h): {snapshot['msgs_24h']:,}")
 
+    hourly = snapshot.get("hourly_ingestion") or {}
+    totals = hourly.get("totals") or {}
+    if totals:
+        rows = int(totals.get("records", 0) or 0)
+        msgs = int(totals.get("messages", 0) or 0)
+        files = int(totals.get("files", 0) or 0)
+        r429 = int(totals.get("rate_limits", 0) or 0)
+        lines.append(
+            f"⏱ This hour: {rows:,} rows · {msgs:,} msgs · {files:,} files · {r429} 429s"
+        )
+        top = []
+        for row in hourly.get("sources") or []:
+            total = int(row.get("records", 0) or 0) + int(row.get("files", 0) or 0)
+            rls = int(row.get("rate_limits", 0) or 0)
+            if total or rls:
+                suffix = f"+{total:,}"
+                if rls:
+                    suffix += f"/{rls}x429"
+                top.append(f"{_esc(row.get('source', '?'))} {suffix}")
+        if top:
+            lines.append("Top hour: " + " · ".join(top[:6]))
+
+    active_limits = snapshot.get("active_rate_limits") or []
+    if active_limits:
+        active_parts = []
+        for r in active_limits[:4]:
+            service = _esc(str(r.get("service", "")).replace("_rate_limit", ""))
+            remaining = _humanize_age(int(r.get("seconds_remaining", 0) or 0))
+            streak = f" s{int(r['streak'])}" if r.get("streak") else ""
+            active_parts.append(f"{service} {remaining}{streak}")
+        lines.append("⏸ Cooldowns: " + " · ".join(active_parts))
+
+    recent_limits = snapshot.get("rate_limit_events") or []
+    if recent_limits:
+        parts = []
+        for r in recent_limits[:4]:
+            account = r.get("account")
+            scope = r.get("scope")
+            bits = [_esc(r.get("source", "?"))]
+            if account:
+                bits.append(_esc(account))
+            if scope:
+                bits.append(_esc(scope))
+            parts.append("/".join(bits))
+        lines.append("429s seen: " + " · ".join(parts))
+
     ages: dict = snapshot.get("source_ages") or {}
     stale = set(snapshot.get("stale_sources") or [])
 

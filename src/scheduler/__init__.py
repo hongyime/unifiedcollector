@@ -161,18 +161,15 @@ class Scheduler:
         snap: dict = {"ok": True}
         try:
             async with self.pool.acquire() as conn:
-                # Exact media_items total (accurate). Falls back to the planner
-                # estimate only if the real count is slow/locked.
+                # Operator heartbeats must be quick. Use the planner estimate for
+                # all-time media total; exact 24h/hourly counts below stay real.
                 try:
                     snap["media_items"] = int(await conn.fetchval(
-                        "SELECT count(*) FROM media_items", timeout=30) or 0)
+                        "SELECT reltuples::bigint FROM pg_class WHERE relname='media_items'",
+                        timeout=5) or 0)
+                    snap["media_items_estimate"] = True
                 except Exception:
-                    try:
-                        snap["media_items"] = int(await conn.fetchval(
-                            "SELECT reltuples::bigint FROM pg_class WHERE relname='media_items'") or 0)
-                        snap["media_items_estimate"] = True
-                    except Exception:
-                        pass
+                    pass
 
                 # Real 24h media ingestion (uses idx_media_collected — fast).
                 try:
@@ -190,6 +187,140 @@ class Scheduler:
                              + (SELECT count(*) FROM whatsapp_messages      WHERE collected_at > now()-interval '24 hours')
                              + (SELECT count(*) FROM beeper_shadow_messages WHERE ingested_at  > now()-interval '24 hours')
                         """, timeout=30) or 0)
+                except Exception:
+                    pass
+
+                # Current clock-hour ingestion for the Telegram heartbeat. This
+                # mirrors the dashboard's early-warning view but keeps the
+                # heartbeat payload compact.
+                try:
+                    content_parts = (
+                        ("telegram", "telegram_messages", "collected_at", "messages"),
+                        ("whatsapp", "whatsapp_messages", "collected_at", "messages"),
+                        ("beeper", "beeper_shadow_messages", "ingested_at", "messages"),
+                        ("instagram", "instagram_posts", "collected_at", "posts"),
+                        ("tiktok", "tiktok_posts", "collected_at", "posts"),
+                        ("lemon8", "lemon8_posts", "collected_at", "posts"),
+                        ("threads", "threads_posts", "collected_at", "posts"),
+                        ("facebook", "facebook_posts", "collected_at", "posts"),
+                        ("x", "x_posts", "collected_at", "posts"),
+                        ("youtube", "youtube_videos", "collected_at", "videos"),
+                        ("github", "github_commits", "collected_at", "commits"),
+                        ("website", "website_pages", "collected_at", "pages"),
+                        ("strava", "strava_activities", "collected_at", "activities"),
+                        ("search", "search_results", "collected_at", "results"),
+                    )
+                    by_source: dict[str, dict[str, int]] = {}
+                    for src, tbl, col, label in content_parts:
+                        try:
+                            n = int(await conn.fetchval(
+                                f"SELECT count(*) FROM {tbl} "
+                                f"WHERE {col} >= date_trunc('hour', now())",
+                                timeout=10,
+                            ) or 0)
+                        except Exception:
+                            continue
+                        if n:
+                            by_source[src] = {
+                                "records": n,
+                                "messages": n if label == "messages" else 0,
+                                "files": 0,
+                                "rate_limits": 0,
+                            }
+                    try:
+                        for row in await conn.fetch(
+                            """
+                            SELECT source, count(*)::int AS files
+                            FROM media_items
+                            WHERE collected_at >= date_trunc('hour', now())
+                            GROUP BY source
+                            """,
+                            timeout=15,
+                        ):
+                            d = by_source.setdefault(row["source"], {
+                                "records": 0, "messages": 0, "files": 0, "rate_limits": 0,
+                            })
+                            d["files"] = int(row["files"] or 0)
+                    except Exception:
+                        pass
+                    try:
+                        for row in await conn.fetch(
+                            """
+                            SELECT source, count(*)::int AS rate_limits
+                            FROM rate_limit_events
+                            WHERE created_at >= date_trunc('hour', now())
+                            GROUP BY source
+                            """,
+                            timeout=10,
+                        ):
+                            d = by_source.setdefault(row["source"], {
+                                "records": 0, "messages": 0, "files": 0, "rate_limits": 0,
+                            })
+                            d["rate_limits"] = int(row["rate_limits"] or 0)
+                    except Exception:
+                        pass
+                    totals = {
+                        "records": sum(v["records"] for v in by_source.values()),
+                        "messages": sum(v["messages"] for v in by_source.values()),
+                        "files": sum(v["files"] for v in by_source.values()),
+                        "rate_limits": sum(v["rate_limits"] for v in by_source.values()),
+                    }
+                    top = sorted(
+                        ({"source": k, **v} for k, v in by_source.items()),
+                        key=lambda r: (r["records"] + r["files"] + r["rate_limits"], r["source"]),
+                        reverse=True,
+                    )[:6]
+                    snap["hourly_ingestion"] = {"totals": totals, "sources": top}
+                except Exception:
+                    pass
+
+                try:
+                    snap["rate_limit_events"] = [dict(r) for r in await conn.fetch(
+                        """
+                        SELECT source, account, scope, cooldown_seconds, reason, created_at
+                        FROM rate_limit_events
+                        WHERE created_at >= now() - interval '1 hour'
+                        ORDER BY created_at DESC
+                        LIMIT 5
+                        """,
+                        timeout=10,
+                    )]
+                except Exception:
+                    pass
+
+                try:
+                    active_limits = []
+                    now_ts = datetime.now(timezone.utc).timestamp()
+                    for row in await conn.fetch(
+                        """
+                        SELECT service, last_processed_id, status
+                        FROM service_cursors
+                        WHERE status = 'blocked'
+                          AND (service ILIKE '%rate_limit' OR service ILIKE '%ratelimit')
+                        ORDER BY last_processed_at DESC NULLS LAST
+                        """,
+                        timeout=10,
+                    ):
+                        raw = str(row["last_processed_id"] or "")
+                        if ":" not in raw:
+                            continue
+                        left, right = raw.split(":", 1)
+                        try:
+                            expiry_ts = float(left)
+                        except Exception:
+                            continue
+                        if expiry_ts <= now_ts:
+                            continue
+                        try:
+                            streak = int(right)
+                        except Exception:
+                            streak = None
+                        active_limits.append({
+                            "service": row["service"],
+                            "seconds_remaining": int(expiry_ts - now_ts),
+                            "streak": streak,
+                        })
+                    snap["active_rate_limits"] = active_limits[:5]
                 except Exception:
                     pass
 
@@ -222,9 +353,10 @@ class Scheduler:
                     try:
                         pct = await conn.fetchval(
                             f"SELECT round(100.0*count(*) FILTER "
-                            f"(WHERE {ins_col} > now()-interval '1 hour' AND {ts_col} > now()-interval '1 hour') "
-                            f"/ NULLIF(count(*) FILTER (WHERE {ins_col} > now()-interval '1 hour'),0),1) "
-                            f"FROM {tbl}", timeout=20)
+                            f"(WHERE {ts_col} > now()-interval '1 hour') "
+                            f"/ NULLIF(count(*),0),1) "
+                            f"FROM {tbl} "
+                            f"WHERE {ins_col} > now()-interval '1 hour'", timeout=20)
                         if pct is not None:
                             rt[src] = float(pct)
                     except Exception:
