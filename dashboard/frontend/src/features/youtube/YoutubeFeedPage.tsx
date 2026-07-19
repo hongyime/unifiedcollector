@@ -92,14 +92,11 @@ export function YoutubeFeedPage() {
                   >
                     <div className="flex items-center gap-2">
                       {p.thumbnail_url ? (
-                        <img
+                        <AuthImage
                           src={p.thumbnail_url}
                           alt=""
-                          loading="lazy"
                           className="w-8 h-8 rounded-full object-cover shrink-0 bg-background"
-                          onError={(e) => {
-                            (e.currentTarget as HTMLImageElement).style.display = "none";
-                          }}
+                          fallbackLabel="yt"
                         />
                       ) : (
                         <div className="w-8 h-8 rounded-full bg-background border border-border/60 shrink-0" />
@@ -169,14 +166,11 @@ function ProfileCard({ p, postCount }: { p: YoutubeChannel; postCount: number })
     <div className="bg-surface rounded-lg border border-border p-4">
       <div className="flex items-start gap-3">
         {p.thumbnail_url && (
-          <img
+          <AuthImage
             src={p.thumbnail_url}
             alt=""
-            loading="lazy"
             className="w-16 h-16 rounded-full object-cover shrink-0 bg-background"
-            onError={(e) => {
-              (e.currentTarget as HTMLImageElement).style.display = "none";
-            }}
+            fallbackLabel="yt"
           />
         )}
         <div className="min-w-0 flex-1">

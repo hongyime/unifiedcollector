@@ -4,6 +4,7 @@ import { api } from "../../services/api";
 import { Header } from "../../components/layout/Header";
 import { LoadingSpinner } from "../../components/ui/LoadingSpinner";
 import { ErrorState } from "../../components/ui/ErrorState";
+import { AuthImage } from "../../components/ui/AuthImage";
 import { decodePolyline, polylineToSvgPath } from "./polyline";
 
 // `distance` is meters (Strava API convention); `distance_unit` is the athlete's
@@ -277,7 +278,12 @@ export function StravaFeedPage() {
                   <td className="py-2">
                     <div className="flex items-center gap-2">
                       {act.profile ? (
-                        <img src={act.profile} alt="" className="w-6 h-6 rounded-full" />
+                        <AuthImage
+                          src={act.profile}
+                          alt=""
+                          className="w-6 h-6 rounded-full object-cover shrink-0 bg-background"
+                          fallbackLabel="st"
+                        />
                       ) : (
                         <div className="w-6 h-6 rounded-full bg-white/10" />
                       )}

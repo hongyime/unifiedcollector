@@ -100,14 +100,11 @@ export function BeeperChatsPage({
                   <div className="flex items-center justify-between gap-2">
                     <div className="flex items-center gap-2 min-w-0">
                       {c.img_url ? (
-                        <img
+                        <AuthImage
                           src={c.img_url}
                           alt=""
-                          loading="lazy"
                           className="w-6 h-6 rounded-full object-cover shrink-0 bg-background"
-                          onError={(e) => {
-                            (e.currentTarget as HTMLImageElement).style.display = "none";
-                          }}
+                          fallbackLabel="chat"
                         />
                       ) : (
                         <div className="w-6 h-6 rounded-full bg-background border border-border/60 shrink-0" />
@@ -217,14 +214,11 @@ function ChatMetadataCard({ c }: { c: BeeperChat }) {
     <div className="bg-surface rounded-lg border border-border p-4 text-sm">
       <div className="flex items-center gap-3 mb-4">
         {c.img_url ? (
-          <img
+          <AuthImage
             src={c.img_url}
             alt=""
-            loading="lazy"
             className="w-12 h-12 rounded-full object-cover shrink-0 bg-background"
-            onError={(e) => {
-              (e.currentTarget as HTMLImageElement).style.display = "none";
-            }}
+            fallbackLabel="chat"
           />
         ) : (
           <div className="w-12 h-12 rounded-full bg-background border border-border/60 shrink-0" />

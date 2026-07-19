@@ -4,6 +4,7 @@ import { api } from "../../services/api";
 import { Header } from "../../components/layout/Header";
 import { LoadingSpinner } from "../../components/ui/LoadingSpinner";
 import { ErrorState } from "../../components/ui/ErrorState";
+import { AuthImage } from "../../components/ui/AuthImage";
 import { relativeTime } from "../../utils/formatters";
 
 // Cross-platform social registry (social_users), replacing the WhatsApp-only Users
@@ -61,7 +62,12 @@ export function SocialUsersPage() {
                   <td className="py-2">
                     <div className="flex items-center gap-2">
                       {u.profile_photo_url ? (
-                        <img src={u.profile_photo_url} alt="" className="w-6 h-6 rounded-full object-cover bg-background" loading="lazy" />
+                        <AuthImage
+                          src={u.profile_photo_url}
+                          alt=""
+                          className="w-6 h-6 rounded-full object-cover bg-background shrink-0"
+                          fallbackLabel={u.platform}
+                        />
                       ) : (
                         <span className="w-6 h-6 rounded-full bg-background border border-border shrink-0" />
                       )}

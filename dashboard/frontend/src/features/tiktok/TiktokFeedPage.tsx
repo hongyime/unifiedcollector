@@ -95,14 +95,11 @@ export function TiktokFeedPage() {
                         // TikTok CDN avatars — served over HTTPS with public
                         // caching. Fall back to the initial mono-badge if
                         // the CDN blocks the referer (rare, e.g. p-16-va).
-                        <img
+                        <AuthImage
                           src={p.avatar_url}
                           alt=""
-                          loading="lazy"
                           className="w-8 h-8 rounded-full object-cover shrink-0 bg-background"
-                          onError={(e) => {
-                            (e.currentTarget as HTMLImageElement).style.display = "none";
-                          }}
+                          fallbackLabel="tt"
                         />
                       ) : (
                         <div className="w-8 h-8 rounded-full bg-background border border-border/60 shrink-0" />
@@ -182,14 +179,11 @@ function ProfileCard({ p, postCount }: { p: TtProfile; postCount: number }) {
     <div className="bg-surface rounded-lg border border-border p-4">
       <div className="flex items-start gap-3">
         {p.avatar_url && (
-          <img
+          <AuthImage
             src={p.avatar_url}
             alt=""
-            loading="lazy"
             className="w-16 h-16 rounded-full object-cover shrink-0 bg-background"
-            onError={(e) => {
-              (e.currentTarget as HTMLImageElement).style.display = "none";
-            }}
+            fallbackLabel="tt"
           />
         )}
         <div className="min-w-0 flex-1">
@@ -266,14 +260,11 @@ function PostCard({ post }: { post: TtPost }) {
             fallbackLabel={post.media_content_type || "media"}
           />
         ) : post.cover_image_url ? (
-          <img
+          <AuthImage
             src={post.cover_image_url}
             alt=""
-            loading="lazy"
             className="w-full h-full object-cover transition-transform group-hover:scale-105"
-            onError={(e) => {
-              (e.currentTarget as HTMLImageElement).style.display = "none";
-            }}
+            fallbackLabel={post.media_content_type || "media"}
           />
         ) : (
           <div className="w-full h-full flex items-center justify-center text-text-muted text-xs">
