@@ -277,10 +277,16 @@ class Scheduler:
                 try:
                     snap["rate_limit_events"] = [dict(r) for r in await conn.fetch(
                         """
-                        SELECT source, account, scope, cooldown_seconds, reason, created_at
+                        SELECT source, account, scope,
+                               max(status_code)::int AS status_code,
+                               count(*)::int AS count,
+                               max(cooldown_seconds)::int AS cooldown_seconds,
+                               max(reason) AS reason,
+                               max(created_at) AS last_seen_at
                         FROM rate_limit_events
-                        WHERE created_at >= now() - interval '1 hour'
-                        ORDER BY created_at DESC
+                        WHERE created_at >= date_trunc('hour', now())
+                        GROUP BY source, account, scope
+                        ORDER BY last_seen_at DESC
                         LIMIT 5
                         """,
                         timeout=10,

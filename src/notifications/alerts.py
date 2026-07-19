@@ -19,6 +19,10 @@ def _esc(v) -> str:
     return html.escape(str(v))
 
 
+def _plural(n: int, singular: str, plural: str | None = None) -> str:
+    return singular if n == 1 else (plural or f"{singular}s")
+
+
 async def notify_startup() -> bool:
     return await telegram.send(f"🟢 <b>UnifiedCollector started</b>\n{_now()}")
 
@@ -34,9 +38,10 @@ async def notify_collection_summary(source: str, stats: dict) -> bool:
     failed = int(stats.get("failed", 0) or 0)
     if not (collected or new or failed):
         return False
+    item_word = _plural(collected, "item")
     return await telegram.send(
-        f"📦 <b>{_esc(source)}</b> run done\n"
-        f"collected {collected} · new {new} · failed {failed}"
+        f"📦 <b>{_display_source(source)} collection finished</b>\n"
+        f"Collected {collected:,} {item_word}. New: {new:,}. Failed: {failed:,}."
     )
 
 
@@ -44,7 +49,8 @@ async def notify_error(source: str, error) -> bool:
     """Posted when a source's collection run fails."""
     msg = _esc(str(error)[:500])
     return await telegram.send(
-        f"❌ <b>{_esc(source)}</b> failed\n<code>{msg}</code>"
+        f"❌ <b>{_display_source(source)} collection failed</b>\n"
+        f"Error: <code>{msg}</code>"
     )
 
 
@@ -67,6 +73,95 @@ _REALTIME = ("telegram", "whatsapp", "beeper")
 # never reaches 0), so they get their own "crawl" phase and are NOT counted as
 # "draining" backfill that the user is waiting to finish.
 _CRAWL = ("github", "strava")
+
+_SOURCE_LABELS = {
+    "beeper": "Beeper",
+    "discord": "Discord",
+    "facebook": "Facebook",
+    "github": "GitHub",
+    "instagram": "Instagram",
+    "lemon8": "Lemon8",
+    "search": "Search",
+    "strava": "Strava",
+    "telegram": "Telegram",
+    "threads": "Threads",
+    "tiktok": "TikTok",
+    "website": "Website",
+    "whatsapp": "WhatsApp",
+    "x": "Twitter / X",
+    "youtube": "YouTube",
+}
+
+_SCOPE_LABELS = {
+    "feed": "feed fetches",
+    "gps_streams": "GPS route streams",
+    "profile_fetch": "profile fetches",
+    "profile": "profile fetches",
+    "stories": "story fetches",
+    "story": "story fetches",
+}
+
+
+def _display_source(source) -> str:
+    raw = str(source or "unknown").strip()
+    if not raw:
+        raw = "unknown"
+    key = raw.lower().replace("_rate_limit", "").replace("_ratelimit", "")
+    return _esc(_SOURCE_LABELS.get(key, raw.replace("_", " ").title()))
+
+
+def _display_scope(scope) -> str:
+    raw = str(scope or "").strip()
+    if not raw:
+        return ""
+    return _esc(_SCOPE_LABELS.get(raw.lower(), raw.replace("_", " ")))
+
+
+def _current_hour_window() -> str:
+    started = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    return started.strftime("%Y-%m-%d %H:00 UTC")
+
+
+def _format_hourly_source(row: dict) -> str:
+    source = _display_source(row.get("source", "?"))
+    records = int(row.get("records", 0) or 0)
+    files = int(row.get("files", 0) or 0)
+    rate_limits = int(row.get("rate_limits", 0) or 0)
+    details = []
+    if records:
+        details.append(f"{records:,} {_plural(records, 'source row')}")
+    if files:
+        details.append(f"{files:,} {_plural(files, 'media file')}")
+    if rate_limits:
+        details.append(f"{rate_limits:,} {_plural(rate_limits, 'rate-limit hit')}")
+    if not details:
+        details.append("no new rows")
+    return f"• {source}: " + ", ".join(details)
+
+
+def _format_cooldown(row: dict) -> str:
+    service = _display_source(row.get("service", "unknown"))
+    remaining = _humanize_age(int(row.get("seconds_remaining", 0) or 0))
+    streak = int(row.get("streak", 0) or 0)
+    if streak:
+        return f"• {service}: paused for {remaining} after {streak} consecutive rate-limit hits."
+    return f"• {service}: paused for {remaining}."
+
+
+def _format_rate_limit_event(row: dict) -> str:
+    source = _display_source(row.get("source", "?"))
+    account = str(row.get("account") or "").strip()
+    scope = _display_scope(row.get("scope"))
+    status = int(row.get("status_code", 429) or 429)
+    count = int(row.get("count", 0) or 0)
+
+    subject = source
+    if scope:
+        subject += f" {scope}"
+    if account:
+        subject += f" for {_esc(account)}"
+    hits = f"{count:,} hit" if count == 1 else f"{count:,} hits"
+    return f"• {subject}: HTTP {status}, {hits} this hour."
 
 
 def _fmt_count(n: int) -> str:
@@ -120,17 +215,10 @@ async def notify_status(snapshot: dict) -> bool:
         )
 
     head = "✅" if snapshot.get("ok", True) else "⚠️"
-    lines = [f"{head} <b>UnifiedCollector status</b>  <i>{_now()}</i>"]
-
-    mi = snapshot.get("media_items")
-    if mi is not None:
-        approx = "~" if snapshot.get("media_items_estimate") else ""
-        m24 = snapshot.get("media_24h")
-        tail = f" · +{m24:,} (24h)" if m24 is not None else ""
-        lines.append(f"📦 Media: {approx}{mi:,}{tail}")
-
-    if snapshot.get("msgs_24h") is not None:
-        lines.append(f"💬 Messages (24h): {snapshot['msgs_24h']:,}")
+    lines = [
+        f"{head} <b>UnifiedCollector hourly status</b>",
+        f"<i>{_now()} · current hour since {_current_hour_window()}</i>",
+    ]
 
     hourly = snapshot.get("hourly_ingestion") or {}
     totals = hourly.get("totals") or {}
@@ -139,44 +227,34 @@ async def notify_status(snapshot: dict) -> bool:
         msgs = int(totals.get("messages", 0) or 0)
         files = int(totals.get("files", 0) or 0)
         r429 = int(totals.get("rate_limits", 0) or 0)
+        lines.append("")
+        lines.append("<b>Current hour</b>")
         lines.append(
-            f"⏱ This hour: {rows:,} rows · {msgs:,} msgs · {files:,} files · {r429} 429s"
+            f"Stored {rows:,} {_plural(rows, 'source row')}, including "
+            f"{msgs:,} {_plural(msgs, 'chat message')} and "
+            f"{files:,} {_plural(files, 'media file')}."
         )
-        top = []
-        for row in hourly.get("sources") or []:
-            total = int(row.get("records", 0) or 0) + int(row.get("files", 0) or 0)
-            rls = int(row.get("rate_limits", 0) or 0)
-            if total or rls:
-                suffix = f"+{total:,}"
-                if rls:
-                    suffix += f"/{rls}x429"
-                top.append(f"{_esc(row.get('source', '?'))} {suffix}")
+        if r429:
+            lines.append(f"Rate limits seen this hour: {r429:,}.")
+        else:
+            lines.append("Rate limits seen this hour: 0.")
+
+        top = [_format_hourly_source(row) for row in (hourly.get("sources") or [])[:6]]
         if top:
-            lines.append("Top hour: " + " · ".join(top[:6]))
+            lines.append("")
+            lines.append("<b>Top activity this hour</b>")
+            lines.extend(top)
 
     active_limits = snapshot.get("active_rate_limits") or []
-    if active_limits:
-        active_parts = []
-        for r in active_limits[:4]:
-            service = _esc(str(r.get("service", "")).replace("_rate_limit", ""))
-            remaining = _humanize_age(int(r.get("seconds_remaining", 0) or 0))
-            streak = f" s{int(r['streak'])}" if r.get("streak") else ""
-            active_parts.append(f"{service} {remaining}{streak}")
-        lines.append("⏸ Cooldowns: " + " · ".join(active_parts))
-
     recent_limits = snapshot.get("rate_limit_events") or []
+    lines.append("")
+    lines.append("<b>Rate limits and cooldowns</b>")
+    if active_limits:
+        lines.extend(_format_cooldown(r) for r in active_limits[:4])
     if recent_limits:
-        parts = []
-        for r in recent_limits[:4]:
-            account = r.get("account")
-            scope = r.get("scope")
-            bits = [_esc(r.get("source", "?"))]
-            if account:
-                bits.append(_esc(account))
-            if scope:
-                bits.append(_esc(scope))
-            parts.append("/".join(bits))
-        lines.append("429s seen: " + " · ".join(parts))
+        lines.extend(_format_rate_limit_event(r) for r in recent_limits[:5])
+    if not active_limits and not recent_limits:
+        lines.append("No active cooldowns and no HTTP 429s recorded this hour.")
 
     ages: dict = snapshot.get("source_ages") or {}
     stale = set(snapshot.get("stale_sources") or [])
@@ -185,21 +263,26 @@ async def notify_status(snapshot: dict) -> bool:
     live = []
     for s in _REALTIME:
         if s in ages:
-            flag = "⚠️" if s in stale else ""
-            live.append(f"{s[:2]} {_humanize_age(ages[s])}{flag}")
+            stale_note = " (stale)" if s in stale else ""
+            live.append(f"{_display_source(s)} {_humanize_age(ages[s])} ago{stale_note}")
     if live:
-        lines.append("🔴 Live: " + " · ".join(live))
+        lines.append("")
+        lines.append("<b>Realtime freshness</b>")
+        lines.append("; ".join(live) + ".")
 
     # Headless coverage: how many are fresh, and name any that are stale.
     headless = [s for s in ages if s not in _REALTIME]
     if headless:
         fresh = sum(1 for s in headless if s not in stale)
-        lines.append(f"🌐 Headless: {fresh}/{len(headless)} fresh")
+        lines.append("")
+        lines.append("<b>Browser and API freshness</b>")
+        lines.append(f"{fresh}/{len(headless)} non-chat sources are fresh.")
 
     stale_headless = sorted(s for s in stale if s not in _REALTIME)
     if stale_headless:
-        lines.append("⚠️ Stale: " + ", ".join(
-            f"{_esc(s)} ({_humanize_age(ages[s])})" for s in stale_headless if s in ages))
+        lines.append("Needs attention: " + ", ".join(
+            f"{_display_source(s)} ({_humanize_age(ages[s])} ago)"
+            for s in stale_headless if s in ages))
 
     # Backfill vs realtime, per collector. Classify every seen source, summarize
     # the phase counts, and name what's still draining / crawling.
@@ -217,24 +300,33 @@ async def notify_status(snapshot: dict) -> bool:
             if n(key):
                 parts.append(f"{n(key)} {label}")
         if parts:
-            lines.append("📥 Backfill: " + " · ".join(parts))
+            lines.append("")
+            lines.append("<b>Backfill state</b>")
+            lines.append(
+                "Sources by phase: "
+                + "; ".join(parts)
+                + ". Realtime means caught up; draining means history is still being pulled; "
+                + "crawl means a long-running discovery frontier."
+            )
 
         qp = snapshot.get("queue_pending") or {}
         draining = [s for s in seen if phases[s] == "draining"]
         if draining:
-            lines.append("⏳ Draining: " + ", ".join(
-                f"{_esc(s)} ({_fmt_count(qp.get(s, 0))} queued)" if qp.get(s) else _esc(s)
+            lines.append("Still draining: " + ", ".join(
+                f"{_display_source(s)} ({_fmt_count(qp.get(s, 0))} queued)" if qp.get(s) else _display_source(s)
                 for s in draining))
         crawl = [s for s in seen if phases[s] == "crawl"]
         if crawl:
-            lines.append("🐛 Crawl: " + " · ".join(
-                f"{_esc(s)} {_fmt_count(qp.get(s, 0))}" for s in crawl))
+            lines.append("Discovery crawl backlog: " + "; ".join(
+                f"{_display_source(s)} {_fmt_count(qp.get(s, 0))}" for s in crawl))
 
     dead = snapshot.get("dead_sources") or []
     degraded = snapshot.get("degraded_sources") or []
     if dead:
-        lines.append("🔴 Dead: " + ", ".join(_esc(s) for s in dead))
+        lines.append("")
+        lines.append("Dead sources: " + ", ".join(_display_source(s) for s in dead))
     if degraded:
-        lines.append("🟠 Degraded: " + ", ".join(_esc(s) for s in degraded))
+        lines.append("")
+        lines.append("Degraded sources: " + ", ".join(_display_source(s) for s in degraded))
 
     return await telegram.send("\n".join(lines))
