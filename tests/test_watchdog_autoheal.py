@@ -12,8 +12,8 @@ import types
 def _make_service():
     # Import lazily so this file can run even if other deps are heavy.
     from src.worker import WorkerService
-    svc = WorkerService.__new__(WorkerService)
-    # minimal manual init (avoid touching DB/pool)
+    svc = WorkerService()
+    # keep the fixture isolated from DB/pool work
     svc.pool = None
     svc._stop = asyncio.Event()
     svc._tasks = {}
@@ -22,14 +22,20 @@ def _make_service():
     svc._started_at = time.monotonic()
     svc.watchdog_interval = 0.2          # fast watchdog for the test
     svc.max_restarts = 5
+    svc.max_hang_cycles = 5
     svc.hang_timeout = 0.5               # tiny hang window for the test
     svc._dlq = None
-    # zero-progress auto-heal attrs (third failure mode)
+    # clear mutable state that production __init__ creates
     svc._collectors = {}
+    svc._hang_counts = {}
+    svc._hang_progress_seen = {}
+    svc._last_success_progress = {}
     svc._progress_baseline = {}
     svc._zero_progress_streak = {}
     svc.zero_progress_limit = 5
     svc.zero_progress_hard_limit = 12
+    svc._auth_paused = {}
+    svc._auth_pause_since = {}
     return svc
 
 
@@ -55,6 +61,9 @@ async def _run_test():
     async def fake_dead(source, reason, count):
         svc._dead_reason = reason
     svc._mark_source_dead = fake_dead
+    async def fake_exit(reason):
+        svc._self_heal_reason = reason
+    svc._self_heal_exit = fake_exit
 
     # seed initial hung task
     svc._tasks["x"] = asyncio.create_task(hung_source())
@@ -76,17 +85,18 @@ async def _run_test():
     for t in svc._tasks.values():
         t.cancel()
 
-    crashes = svc._crash_counts.get("x", 0)
-    print(f"hang detections (crash_count): {crashes}")
+    hangs = svc._hang_counts.get("x", 0)
+    print(f"hang detections: {hangs}")
     print(f"relaunches triggered: {relaunched['count']}")
     print(f"marked dead: {getattr(svc, '_dead_reason', None)}")
 
     # assertions: the hang MUST have been detected (crash_count rose) and the
     # source must have hit the ceiling -> marked dead (since every relaunch is
     # also hung). This proves both detection AND the give-up path.
-    assert crashes >= 1, "watchdog never detected the hang!"
+    assert hangs >= 1, "watchdog never detected the hang!"
     assert getattr(svc, "_dead_reason", None) is not None, "never marked dead after max hangs"
     assert "hung" in svc._dead_reason
+    assert "hung" in getattr(svc, "_self_heal_reason", "")
     print("PASS: watchdog detects hung collectors and escalates to dead")
 
 
@@ -112,6 +122,9 @@ async def _run_zero_progress_soft_test():
     async def fake_dead(source, reason, count):
         svc._dead_reason = reason
     svc._mark_source_dead = fake_dead
+    async def fake_exit(reason):
+        svc._self_heal_reason = reason
+    svc._self_heal_exit = fake_exit
 
     svc._tasks["z"] = asyncio.create_task(alive_source())
     svc._crash_counts["z"] = 0
@@ -152,6 +165,9 @@ async def _run_zero_progress_hard_test():
     async def fake_dead(source, reason, count):
         svc._dead_reason = reason
     svc._mark_source_dead = fake_dead
+    async def fake_exit(reason):
+        svc._self_heal_reason = reason
+    svc._self_heal_exit = fake_exit
 
     svc._tasks["h"] = asyncio.create_task(alive_source())
     svc._crash_counts["h"] = 0
@@ -172,6 +188,7 @@ async def _run_zero_progress_hard_test():
     print(f"hard dead reason: {getattr(svc,'_dead_reason',None)}")
     assert getattr(svc, "_dead_reason", None) is not None, "hard tier never marked dead!"
     assert "zero-progress" in svc._dead_reason
+    assert "zero-progress" in getattr(svc, "_self_heal_reason", "")
     print("PASS: zero-progress hard tier marks the source dead")
 
 

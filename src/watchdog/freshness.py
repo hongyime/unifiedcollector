@@ -10,15 +10,11 @@ source and restarts the owning container(s) when a source goes stale, via the
 Docker socket. Idempotent, cooldown-guarded, no image rebuild (runs the existing
 collector image with the source bind-mounted).
 """
-import asyncio
 import logging
 import os
 import sys
 import time
 from pathlib import Path
-
-import aiohttp
-import asyncpg
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] watchdog: %(message)s")
 log = logging.getLogger("watchdog")
@@ -57,6 +53,18 @@ def _run_healthcheck() -> None:
         sys.exit(1)
     print(f"OK: heartbeat {age:.0f}s old")
     sys.exit(0)
+
+
+# Keep the Docker healthcheck path tiny. Under host load, importing the async DB
+# and HTTP stacks can exceed the 10s healthcheck timeout even when the watchdog
+# heartbeat is fresh.
+if "--healthcheck" in sys.argv:
+    _run_healthcheck()
+
+import asyncio
+
+import aiohttp
+import asyncpg
 
 # source -> (freshness_query, stale_threshold_seconds, [containers that own the connection])
 # Thresholds are generous: an account with many active chats will always have SOME
@@ -357,7 +365,4 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    # `python -m src.watchdog.freshness --healthcheck` is the container healthcheck.
-    if "--healthcheck" in sys.argv:
-        _run_healthcheck()
     asyncio.run(main())
