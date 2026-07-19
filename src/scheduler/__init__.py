@@ -560,11 +560,13 @@ class Scheduler:
 
         DM: users who sent direct messages to another user.
 
-        Self-gated to run at most every 30 minutes.
+        Self-gated; default every 6 hours because the co-group upsert touches a
+        large derived pair set and is not needed minute-by-minute.
         """
         import time as _time
         now = _time.monotonic()
-        if now - getattr(self, "_last_graph_build", 0) < 1800:
+        interval = env_int("GRAPH_EDGES_BUILD_INTERVAL_SECONDS", 21600, min_value=1800)
+        if now - getattr(self, "_last_graph_build", 0) < interval:
             return
         self._last_graph_build = now
         try:
@@ -611,7 +613,7 @@ class Scheduler:
                         RETURNING 1
                     )
                     SELECT COUNT(*) FROM upserted
-                """)
+                """, timeout=180)
 
                 # DM edges: who sent messages in which 1:1 chat.
                 inserted_dm = await conn.fetchval("""
@@ -644,7 +646,7 @@ class Scheduler:
                         RETURNING 1
                     )
                     SELECT COUNT(*) FROM upserted
-                """)
+                """, timeout=180)
 
             logger.info("graph_edges build: co_group=%d dm=%d", inserted_cg or 0, inserted_dm or 0)
         except Exception:

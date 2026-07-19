@@ -945,10 +945,11 @@ class TelegramCollector(BaseCollector):
         while not self._stop.is_set() and processed < max_per_cycle:
             async with self.pool.acquire() as conn:
                 row = await conn.fetchrow("""
-                    UPDATE telegram_spider_queue
-                    SET status = 'processing'
-                    WHERE id = (
-                        SELECT q.id
+                    WITH ranked AS (
+                        SELECT q.id,
+                               q.priority,
+                               q.collected_at,
+                               prox.proximity_tier
                         FROM telegram_spider_queue q
                         LEFT JOIN LATERAL (
                             SELECT MIN(ap.tier) AS proximity_tier
@@ -969,9 +970,28 @@ class TelegramCollector(BaseCollector):
                             END DESC,
                             q.priority ASC,
                             q.collected_at ASC
+                        LIMIT 20
+                    ),
+                    candidate AS (
+                        SELECT q.id
+                        FROM telegram_spider_queue q
+                        JOIN ranked r ON r.id = q.id
+                        WHERE q.status = 'pending'
+                        ORDER BY
+                            CASE
+                                WHEN r.proximity_tier IN (1, 2) THEN 2
+                                WHEN r.proximity_tier = 3 THEN 1
+                                ELSE 0
+                            END DESC,
+                            r.priority ASC,
+                            r.collected_at ASC
                         LIMIT 1
-                        FOR UPDATE SKIP LOCKED
+                        FOR UPDATE OF q SKIP LOCKED
                     )
+                    UPDATE telegram_spider_queue
+                    SET status = 'processing'
+                    WHERE id = (SELECT id FROM candidate)
+                      AND status = 'pending'
                     RETURNING platform_chat_id, title
                 """)
             if not row:
