@@ -5,6 +5,7 @@ import { api } from "../../services/api";
 import { Header } from "../../components/layout/Header";
 import { LoadingSpinner } from "../../components/ui/LoadingSpinner";
 import { ErrorState } from "../../components/ui/ErrorState";
+import { AuthImage } from "../../components/ui/AuthImage";
 import { relativeTime, formatTimestamp, formatNumber } from "../../utils/formatters";
 import type { YoutubeChannel, YoutubeVideo } from "../../services/types";
 
@@ -231,11 +232,11 @@ function PostCard({ post }: { post: YoutubeVideo }) {
         title="Open on YouTube"
       >
         {post.media_item_id ? (
-          <img
+          <AuthImage
             src={api.thumbnailUrl(post.media_item_id)}
             alt=""
-            loading="lazy"
             className="w-full h-full object-cover transition-transform group-hover:scale-105"
+            fallbackLabel="video"
           />
         ) : (
           <div className="w-full h-full flex items-center justify-center text-text-muted text-xs">

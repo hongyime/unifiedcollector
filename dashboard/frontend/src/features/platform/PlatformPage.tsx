@@ -4,6 +4,7 @@ import { api } from "../../services/api";
 import { Header } from "../../components/layout/Header";
 import { LoadingSpinner } from "../../components/ui/LoadingSpinner";
 import { ErrorState } from "../../components/ui/ErrorState";
+import { AuthImage } from "../../components/ui/AuthImage";
 import { relativeTime } from "../../utils/formatters";
 
 // Deep-dive links to the specialized pages that still exist for some platforms.
@@ -95,7 +96,7 @@ export function PlatformPage() {
           <div className="grid grid-cols-6 gap-2">
             {data.media_recent.map((m) => (
               <div key={m.id} className="group relative aspect-square rounded-md overflow-hidden bg-background border border-border" title={`${m.entity_name} · ${relativeTime(m.collected_at)}`}>
-                <img src={api.thumbnailUrl(m.id)} alt={m.filename} loading="lazy" className="w-full h-full object-cover" />
+                <AuthImage src={api.thumbnailUrl(m.id)} alt={m.filename} className="w-full h-full object-cover" />
                 <div className="absolute bottom-0 inset-x-0 bg-black/60 text-white text-[9px] px-1 py-0.5 truncate opacity-0 group-hover:opacity-100">{m.entity_name}</div>
               </div>
             ))}

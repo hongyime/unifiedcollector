@@ -20,6 +20,7 @@ from src.collectors.strava.parse import (
 from src.core.profile_photo_tracker import ProfilePhotoTracker
 from src.core.file_naming import sanitize_name
 from src.core.proximity import refresh_account_proximity_cache
+from src.core.rate_limit_events import record_rate_limit_event
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +167,41 @@ class StravaCollector(BaseCollector):
             context,
             self._gps_stream_cooldown_seconds,
         )
+        self._note_rate_limit(
+            scope="gps_streams",
+            account=context.split("web:", 1)[1] if context.startswith("web:") else None,
+            cooldown_seconds=self._gps_stream_cooldown_seconds,
+            reason=f"streams 429 for {activity_id} via {context}",
+            metadata={"activity_id": str(activity_id), "context": context},
+        )
+
+    def _note_rate_limit(
+        self,
+        *,
+        scope: str,
+        account: str | None = None,
+        cooldown_seconds: int | None = None,
+        reason: str | None = None,
+        metadata: dict | None = None,
+    ) -> None:
+        if self.pool is None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(
+            record_rate_limit_event(
+                self.pool,
+                source="strava",
+                account=account,
+                scope=scope,
+                status_code=429,
+                cooldown_seconds=cooldown_seconds or self._ratelimit_sleep,
+                reason=reason,
+                metadata=metadata,
+            )
+        )
 
     def set_pool(self, pool):
         super().set_pool(pool)
@@ -263,6 +299,13 @@ class StravaCollector(BaseCollector):
         # Previously disabled due to httpx → Z:/C: NTFS kernel D-state.
         # Root cause fixed: all mounts now on WSL2 ext4 named volumes.
         if self._use_api: await self._ensure_token()
+
+        owner_ids_scraped: set[str] = set()
+        if self._follow_scrape_enabled and self._use_web and self._cookie_accounts:
+            try:
+                owner_ids_scraped = await self._collect_owner_rosters_for_cookie_accounts()
+            except Exception as e:
+                logger.warning("strava: owner roster capture failed: %s", e)
 
         # --- EDIT 2026-07-13 (GPS drain starvation fix, additive) ---
         # The tail-end GPS backfill (bottom of collect()) almost never ran:
@@ -384,9 +427,18 @@ class StravaCollector(BaseCollector):
         if self._follow_scrape_enabled:
             roster_seeds = os.getenv("STRAVA_ROSTER_SEED_TARGETS", "").strip()
             seed_ids = [s.strip() for s in roster_seeds.split(",") if s.strip()] if roster_seeds else []
+            if self._use_web and self._cookie_accounts and not owner_ids_scraped:
+                try:
+                    owner_ids_scraped = await self._collect_owner_rosters_for_cookie_accounts()
+                except Exception as e:
+                    logger.warning("strava: owner roster capture failed: %s", e)
             # Auto-seed from the authenticated athlete so we spider out from MY
             # own following/followers without needing a manual ID list (Bryan).
-            if self._my_athlete_id and self._my_athlete_id not in seed_ids:
+            if (
+                self._my_athlete_id
+                and self._my_athlete_id not in seed_ids
+                and self._my_athlete_id not in owner_ids_scraped
+            ):
                 seed_ids.insert(0, self._my_athlete_id)
             if seed_ids and self._use_web:
                 for sid in seed_ids:
@@ -397,7 +449,11 @@ class StravaCollector(BaseCollector):
                         # follow + who follows me) into social_users; for other seeds
                         # this is just following-based discovery.
                         await self.collect_following_roster(sid, "following")
-                        if self._my_athlete_id and str(sid) == str(self._my_athlete_id):
+                        if (
+                            self._my_athlete_id
+                            and str(sid) == str(self._my_athlete_id)
+                            and str(sid) not in owner_ids_scraped
+                        ):
                             await self.collect_following_roster(sid, "followers")
                     except Exception as e:
                         logger.warning("strava: roster expansion for %s failed: %s", sid, e)
@@ -750,6 +806,12 @@ class StravaCollector(BaseCollector):
                     break
                 if resp.status_code == 429:
                     logger.warning("strava: rate-limited on page %d, sleeping %ds", page, self._ratelimit_sleep)
+                    self._note_rate_limit(
+                        scope="training_activities",
+                        cooldown_seconds=self._ratelimit_sleep,
+                        reason=f"training_activities page {page} returned 429",
+                        metadata={"page": page},
+                    )
                     await asyncio.sleep(self._ratelimit_sleep)
                     continue
                 if resp.status_code != 200:
@@ -1033,7 +1095,15 @@ class StravaCollector(BaseCollector):
             await self._delay()
             async with self._sem:
                 resp = await client.get(f"{STRAVA_API}/athlete/activities", headers={"Authorization": f"Bearer {self._access_token}"}, params={"page": page, "per_page": per_page})
-            if resp.status_code == 429: await asyncio.sleep(self._ratelimit_sleep); continue
+            if resp.status_code == 429:
+                self._note_rate_limit(
+                    scope="api_athlete_activities",
+                    cooldown_seconds=self._ratelimit_sleep,
+                    reason=f"athlete activities page {page} returned 429",
+                    metadata={"page": page, "athlete_id": athlete_id},
+                )
+                await asyncio.sleep(self._ratelimit_sleep)
+                continue
             resp.raise_for_status()
             activities = resp.json()
             if not activities: break
@@ -1672,6 +1742,12 @@ class StravaCollector(BaseCollector):
                     break
                 if resp.status_code == 429:
                     logger.warning("strava feed: rate-limited on page %d, sleeping %ds", page, self._ratelimit_sleep)
+                    self._note_rate_limit(
+                        scope="feed",
+                        cooldown_seconds=self._ratelimit_sleep,
+                        reason=f"feed page {page} returned 429",
+                        metadata={"page": page},
+                    )
                     await asyncio.sleep(self._ratelimit_sleep)
                     continue
                 if resp.status_code != 200:
@@ -1854,6 +1930,12 @@ class StravaCollector(BaseCollector):
                     break
                 if resp.status_code == 429:
                     logger.warning("strava following-feed: rate-limited on page %d; sleeping %ds", page, self._ratelimit_sleep)
+                    self._note_rate_limit(
+                        scope="following_feed",
+                        cooldown_seconds=self._ratelimit_sleep,
+                        reason=f"following-feed page {page} returned 429",
+                        metadata={"page": page, "athlete_id": self._my_athlete_id},
+                    )
                     await asyncio.sleep(self._ratelimit_sleep)
                     continue
                 if resp.status_code != 200:
@@ -2137,6 +2219,12 @@ class StravaCollector(BaseCollector):
                 if resp.status_code == 429:
                     _heavy = int(self._ratelimit_sleep * 1.5)
                     logger.warning("strava history %s: rate-limited, sleeping %ds", athlete_id, _heavy)
+                    self._note_rate_limit(
+                        scope="history",
+                        cooldown_seconds=_heavy,
+                        reason=f"history for {athlete_id} returned 429",
+                        metadata={"athlete_id": str(athlete_id)},
+                    )
                     await asyncio.sleep(_heavy)
                     continue
                 if resp.status_code != 200:
@@ -2954,6 +3042,12 @@ class StravaCollector(BaseCollector):
                         params={"page": page, "per_page": per_page},
                     )
                     if resp.status_code == 429:
+                        self._note_rate_limit(
+                            scope="api_activities",
+                            cooldown_seconds=self._ratelimit_sleep,
+                            reason=f"api activities page {page} returned 429",
+                            metadata={"page": page},
+                        )
                         await asyncio.sleep(self._ratelimit_sleep)
                         continue
                     if resp.status_code != 200:
@@ -3069,7 +3163,75 @@ class StravaCollector(BaseCollector):
             logger.warning("strava: route map persist failed for %s: %s",
                            activity.get("id"), e)
 
-    async def collect_following_roster(self, athlete_id: str, roster_type: str = "following", max_pages: int = 50):
+    async def _resolve_cookie_athlete_id(self, account_name: str, session_cookie: str) -> str | None:
+        jar = httpx.Cookies()
+        jar.set("_strava4_session", session_cookie, domain=".strava.com", path="/")
+        ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        headers = {"User-Agent": ua, "Accept": "text/html,application/xhtml+xml"}
+        try:
+            async with httpx.AsyncClient(timeout=30, cookies=jar, follow_redirects=True) as client:
+                resp = await client.get(f"{STRAVA_WEB}/dashboard", headers=headers)
+                if resp.status_code == 429:
+                    self._note_rate_limit(
+                        scope="resolve_owner",
+                        account=account_name,
+                        cooldown_seconds=self._ratelimit_sleep,
+                        reason=f"dashboard owner resolve returned 429 for {account_name}",
+                    )
+                    return None
+                if resp.status_code != 200:
+                    logger.info("strava owner graph[%s]: dashboard HTTP %d", account_name, resp.status_code)
+                    return None
+                m = re.search(r'"athlete_id"\s*:\s*(\d+)', resp.text) or re.search(r'/athletes/(\d+)', resp.text)
+                return m.group(1) if m else None
+        except Exception as e:
+            logger.warning("strava owner graph[%s]: resolve failed: %s", account_name, e)
+            return None
+
+    async def _collect_owner_rosters_for_cookie_accounts(self) -> set[str]:
+        owner_ids: set[str] = set()
+        max_pages = int(os.getenv("STRAVA_OWNER_ROSTER_MAX_PAGES", "50"))
+        for account_name, cookie in self._cookie_accounts:
+            if self._stop.is_set():
+                break
+            owner_id = await self._resolve_cookie_athlete_id(account_name, cookie)
+            if not owner_id:
+                logger.info("strava owner graph[%s]: could not resolve athlete id", account_name)
+                continue
+            if owner_id in owner_ids:
+                logger.info("strava owner graph[%s]: same athlete id %s already captured", account_name, owner_id)
+                continue
+            owner_ids.add(owner_id)
+            logger.info("strava owner graph[%s]: capturing rosters for athlete %s", account_name, owner_id)
+            await self.collect_following_roster(
+                owner_id,
+                "following",
+                max_pages=max_pages,
+                session_cookie=cookie,
+                owner_account=owner_id,
+                owner_label=account_name,
+            )
+            await self.collect_following_roster(
+                owner_id,
+                "followers",
+                max_pages=max_pages,
+                session_cookie=cookie,
+                owner_account=owner_id,
+                owner_label=account_name,
+            )
+        return owner_ids
+
+    async def collect_following_roster(
+        self,
+        athlete_id: str,
+        roster_type: str = "following",
+        max_pages: int = 50,
+        *,
+        session_cookie: str | None = None,
+        owner_account: str | None = None,
+        owner_label: str | None = None,
+    ):
         """Cookie-only HTML scrape of /athletes/{id}/follows?type=following|followers.
 
         Parses athlete cards using the same regexes as the original toolkit and
@@ -3081,7 +3243,8 @@ class StravaCollector(BaseCollector):
         Stops on empty page or non-200. Returns the number of seeds enqueued.
         """
         roster_type = "followers" if roster_type == "followers" else "following"
-        is_owner = self._my_athlete_id is not None and str(athlete_id) == str(self._my_athlete_id)
+        owner_id = str(owner_account) if owner_account else (str(self._my_athlete_id) if self._my_athlete_id else None)
+        is_owner = owner_id is not None and str(athlete_id) == owner_id
         rel_context = "follower" if roster_type == "followers" else "follow"
         if not self._use_web:
             logger.info("strava: follow roster needs cookie auth; skipping %s", athlete_id)
@@ -3104,7 +3267,9 @@ class StravaCollector(BaseCollector):
         )
 
         jar = httpx.Cookies()
-        if os.path.exists(self._cookies_file):
+        if session_cookie:
+            jar.set("_strava4_session", session_cookie, domain=".strava.com", path="/")
+        elif os.path.exists(self._cookies_file):
             try:
                 mj = http.cookiejar.MozillaCookieJar()
                 mj.load(self._cookies_file, ignore_discard=True, ignore_expires=True)
@@ -3125,6 +3290,7 @@ class StravaCollector(BaseCollector):
         async with httpx.AsyncClient(timeout=30, cookies=jar, follow_redirects=True) as client:
             page = 1
             seen: set[int] = set()
+            no_growth_pages = 0
             while not self._stop.is_set() and page <= max_pages:
                 await self._delay(self._feed_delay_min, self._feed_delay_max)
                 try:
@@ -3137,6 +3303,12 @@ class StravaCollector(BaseCollector):
                     logger.warning("strava roster: page %d fetch error: %s", page, e)
                     break
                 if resp.status_code == 429:
+                    self._note_rate_limit(
+                        scope="roster",
+                        cooldown_seconds=self._ratelimit_sleep,
+                        reason=f"roster {roster_type} page {page} for {athlete_id} returned 429",
+                        metadata={"page": page, "athlete_id": str(athlete_id), "roster_type": roster_type},
+                    )
                     await asyncio.sleep(self._ratelimit_sleep); continue
                 if resp.status_code != 200 or not resp.text.strip():
                     break
@@ -3170,10 +3342,12 @@ class StravaCollector(BaseCollector):
                 if not discovered:
                     break
                 # Dedup + seed spider queue.
+                new_this_page = 0
                 for entry in discovered:
                     if entry["athlete_id"] in seen:
                         continue
                     seen.add(entry["athlete_id"])
+                    new_this_page += 1
                     try:
                         async with self.pool.acquire() as conn:
                             await conn.execute(
@@ -3202,7 +3376,6 @@ class StravaCollector(BaseCollector):
                             if is_owner:
                                 nm = entry["name"][:255] if entry.get("name") else None
                                 target_uid = str(entry["athlete_id"])
-                                owner_account = str(self._my_athlete_id)
                                 direction = "follower" if rel_context == "follower" else "following"
                                 await conn.execute(
                                     """
@@ -3231,7 +3404,7 @@ class StravaCollector(BaseCollector):
                                         last_seen = now(),
                                         target_username = COALESCE(EXCLUDED.target_username, follow_edges.target_username)
                                     """,
-                                    owner_account, target_uid, direction, nm,
+                                    owner_id, target_uid, direction, nm,
                                 )
                         seeded += 1
                     except Exception as e:
@@ -3239,8 +3412,23 @@ class StravaCollector(BaseCollector):
                                        entry["athlete_id"], e)
                 logger.info("strava roster: page %d -> %d athletes (running seeded=%d)",
                             page, len(discovered), seeded)
+                if new_this_page == 0:
+                    no_growth_pages += 1
+                    if no_growth_pages >= 2:
+                        logger.info(
+                            "strava roster: stopping %s for %s after %d duplicate-only pages",
+                            roster_type, athlete_id, no_growth_pages,
+                        )
+                        break
+                else:
+                    no_growth_pages = 0
                 page += 1
-        logger.info("strava roster: seeded %d new spider entries from %s", seeded, athlete_id)
+        logger.info(
+            "strava roster: seeded %d new spider entries from %s%s",
+            seeded,
+            athlete_id,
+            f" ({owner_label})" if owner_label else "",
+        )
         return seeded
 
     async def _backfill_owner_follow_edges_from_social_users(self) -> dict[str, int]:

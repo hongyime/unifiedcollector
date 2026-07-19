@@ -35,7 +35,7 @@ export function RunsPage() {
 
   return (
     <div>
-      <Header title="Runs" subtitle="Collection run history" onRefresh={() => refetch()} />
+      <Header title="Runs" subtitle="Scheduler trigger history · use Dashboard hourly ingestion for real row/file counts" onRefresh={() => refetch()} />
       <div className="flex items-center gap-3 mb-4">
         <FilterDropdown label="Source" value={source} onChange={setSource} options={sourceOptions} />
       </div>
@@ -43,7 +43,7 @@ export function RunsPage() {
         {isLoading ? <LoadingSpinner /> : (
           <table className="w-full text-sm">
             <thead><tr className="text-left text-text-muted border-b border-border">
-              <th className="pb-2">ID</th><th className="pb-2">Source</th><th className="pb-2">Status</th><th className="pb-2">Started</th><th className="pb-2">Items</th><th className="pb-2">Errors</th>
+              <th className="pb-2">ID</th><th className="pb-2">Source</th><th className="pb-2">Status</th><th className="pb-2">Started</th><th className="pb-2">Targets rearmed</th><th className="pb-2">Errors</th>
             </tr></thead>
             <tbody>
               {data?.map((r) => (
@@ -70,7 +70,7 @@ export function RunsPage() {
                 <dt className="text-text-muted">Status</dt><dd>{detail.data.status}</dd>
                 <dt className="text-text-muted">Started</dt><dd>{relativeTime(detail.data.started_at)}</dd>
                 <dt className="text-text-muted">Finished</dt><dd>{relativeTime(detail.data.finished_at)}</dd>
-                <dt className="text-text-muted">Items</dt><dd>{detail.data.items_collected}</dd>
+                <dt className="text-text-muted">Targets rearmed</dt><dd>{detail.data.items_collected}</dd>
                 <dt className="text-text-muted">Errors</dt><dd>{detail.data.errors}</dd>
               </dl>
             ) : null}

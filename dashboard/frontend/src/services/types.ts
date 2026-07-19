@@ -54,6 +54,42 @@ export interface MediaStats {
   stale_after_seconds?: number | null;
 }
 
+export interface HourlyIngestionRow {
+  source: string;
+  hour: string;
+  records: number;
+  record_label: string;
+  media_items: number;
+  messages: number;
+  rate_limits: number;
+}
+
+export interface RateLimitEvent {
+  id: number;
+  source: string;
+  account: string | null;
+  scope: string | null;
+  status_code: number | null;
+  cooldown_seconds: number | null;
+  reason: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface ActiveRateLimit {
+  service: string;
+  last_processed_id: string | null;
+  last_processed_at: string | null;
+  status: string | null;
+  active_until: string | null;
+  streak: number | null;
+}
+
+export interface RateLimitSummary {
+  events: RateLimitEvent[];
+  active: ActiveRateLimit[];
+}
+
 export interface DLQItem {
   id: number;
   source: string;

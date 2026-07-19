@@ -5,6 +5,7 @@ import { api } from "../../services/api";
 import { Header } from "../../components/layout/Header";
 import { LoadingSpinner } from "../../components/ui/LoadingSpinner";
 import { ErrorState } from "../../components/ui/ErrorState";
+import { AuthImage } from "../../components/ui/AuthImage";
 import { relativeTime, formatTimestamp, formatNumber } from "../../utils/formatters";
 import type { TtProfile, TtPost } from "../../services/types";
 
@@ -258,11 +259,11 @@ function PostCard({ post }: { post: TtPost }) {
         title="Open on TikTok"
       >
         {post.media_item_id ? (
-          <img
+          <AuthImage
             src={api.thumbnailUrl(post.media_item_id)}
             alt=""
-            loading="lazy"
             className="w-full h-full object-cover transition-transform group-hover:scale-105"
+            fallbackLabel={post.media_content_type || "media"}
           />
         ) : post.cover_image_url ? (
           <img

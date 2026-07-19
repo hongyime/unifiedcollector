@@ -5,6 +5,7 @@ import { API_BASE } from "../../utils/constants";
 import { Header } from "../../components/layout/Header";
 import { LoadingSpinner } from "../../components/ui/LoadingSpinner";
 import { ErrorState } from "../../components/ui/ErrorState";
+import { AuthImage } from "../../components/ui/AuthImage";
 import { relativeTime, formatTimestamp, formatNumber } from "../../utils/formatters";
 import type { BeeperChat, BeeperMessage } from "../../services/types";
 
@@ -193,11 +194,11 @@ function MessageBubble({ m }: { m: BeeperMessage }) {
             rel="noopener noreferrer"
             className="block mb-2"
           >
-            <img
+            <AuthImage
               src={`${API_BASE}/media/${m.media_item_id}/thumbnail`}
               alt={m.media_type ?? "media"}
-              loading="lazy"
               className="max-h-40 rounded border border-border/60 object-cover"
+              fallbackLabel={m.media_type ?? "media"}
             />
           </a>
         )}

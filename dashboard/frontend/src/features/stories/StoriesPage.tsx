@@ -6,6 +6,7 @@ import { LoadingSpinner } from "../../components/ui/LoadingSpinner";
 import { ErrorState } from "../../components/ui/ErrorState";
 import { Button } from "../../components/ui/Button";
 import { MetricCard } from "../../components/ui/MetricCard";
+import { AuthImage } from "../../components/ui/AuthImage";
 import { formatNumber, relativeTime } from "../../utils/formatters";
 import type { MediaItem } from "../../services/types";
 
@@ -31,14 +32,11 @@ function StoryTile({ item, onClick }: { item: MediaItem; onClick: () => void }) 
       className="cursor-pointer group border border-border rounded-lg overflow-hidden hover:border-white/30 transition-colors"
     >
       <div className="aspect-[9/16] bg-background flex items-center justify-center relative">
-        <img
+        <AuthImage
           src={api.thumbnailUrl(item.id)}
           alt={item.filename}
           className="w-full h-full object-cover"
-          loading="lazy"
-          onError={(e) => {
-            (e.currentTarget as HTMLImageElement).style.visibility = "hidden";
-          }}
+          fallbackLabel={item.kind || "story"}
         />
         {isVideo(item) && (
           <span className="absolute top-1 right-1 text-[10px] bg-black/70 px-1 rounded">▶</span>
@@ -62,7 +60,7 @@ function StoryModal({ item, onClose }: { item: MediaItem; onClose: () => void })
         {isVideo(item) ? (
           <video src={api.fileUrl(item.id)} controls autoPlay className="max-w-full max-h-[75vh] rounded-lg bg-black" />
         ) : (
-          <img src={api.fileUrl(item.id)} alt={item.filename} className="max-w-full max-h-[75vh] object-contain rounded-lg" />
+          <AuthImage src={api.fileUrl(item.id)} alt={item.filename} className="max-w-full max-h-[75vh] object-contain rounded-lg" />
         )}
         <div className="mt-3 text-center">
           <p className="text-sm font-medium">{item.entity_name}</p>

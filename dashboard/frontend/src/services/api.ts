@@ -5,6 +5,8 @@ import type {
   CollectorDetail,
   MediaItem,
   MediaStats,
+  HourlyIngestionRow,
+  RateLimitSummary,
   MediaBrowseResult,
   StoriesOverview,
   DLQItem,
@@ -117,6 +119,9 @@ export const api = {
     return get<MediaItem[]>(`/media?${params}`);
   },
   mediaStats: () => get<MediaStats[]>("/media/stats"),
+  hourlyIngestion: (hours = 12) => get<HourlyIngestionRow[]>(`/ingestion/hourly?hours=${hours}`),
+  rateLimits: (hours = 24, limit = 100) =>
+    get<RateLimitSummary>(`/rate-limits/recent?hours=${hours}&limit=${limit}`),
   mediaBrowse: (opts: { source?: string; entity?: string; type?: string; kind?: string; page?: number; pageSize?: number }) => {
     const params = new URLSearchParams();
     if (opts.source) params.set("source", opts.source);

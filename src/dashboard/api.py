@@ -1042,6 +1042,177 @@ async def media_stats(_user: dict = Depends(require_role("viewer"))):
     return out
 
 
+@app.get("/ingestion/hourly")
+async def hourly_ingestion(hours: int = 12, _user: dict = Depends(require_role("viewer"))):
+    """Hour-by-hour real ingestion from source tables, not collection_runs.
+
+    collection_runs records scheduler trigger/rearm events. This endpoint reads
+    the actual rows operators care about: posts/messages/activities/etc, media
+    files, and rate-limit events.
+    """
+    hours = max(1, min(hours, 72))
+    pool = await get_pool()
+    content_parts = [
+        ("telegram", "telegram_messages", "collected_at", "messages"),
+        ("whatsapp", "whatsapp_messages", "collected_at", "messages"),
+        ("beeper", "beeper_shadow_messages", "ingested_at", "messages"),
+        ("instagram", "instagram_posts", "collected_at", "posts"),
+        ("tiktok", "tiktok_posts", "collected_at", "posts"),
+        ("lemon8", "lemon8_posts", "collected_at", "posts"),
+        ("threads", "threads_posts", "collected_at", "posts"),
+        ("facebook", "facebook_posts", "collected_at", "posts"),
+        ("x", "x_posts", "collected_at", "posts"),
+        ("youtube", "youtube_videos", "collected_at", "videos"),
+        ("github", "github_commits", "collected_at", "commits"),
+        ("website", "website_pages", "collected_at", "pages"),
+        ("strava", "strava_activities", "collected_at", "activities"),
+        ("search", "search_results", "collected_at", "results"),
+    ]
+    required_tables = [table for _source, table, _column, _label in content_parts]
+    required_tables.extend(["media_items", "rate_limit_events"])
+    async with pool.acquire() as conn:
+        existing_tables = set(await conn.fetchval(
+            """
+            SELECT COALESCE(array_agg(table_name), ARRAY[]::text[])
+            FROM information_schema.tables
+            WHERE table_schema = 'public'
+              AND table_name = ANY($1::text[])
+            """,
+            required_tables,
+            timeout=8,
+        ))
+    raw_parts = [
+        f"""
+        SELECT '{source}'::text AS source,
+               date_trunc('hour', {column}) AS hour,
+               count(*)::bigint AS records,
+               0::bigint AS media_items,
+               {("count(*)" if label == "messages" else "0")}::bigint AS messages,
+               0::bigint AS rate_limits
+        FROM {table}
+        WHERE {column} >= now() - ($1 || ' hours')::interval
+        GROUP BY date_trunc('hour', {column})
+        """
+        for source, table, column, label in content_parts
+        if table in existing_tables
+    ]
+    if "media_items" in existing_tables:
+        raw_parts.append(
+            """
+            SELECT source,
+                   date_trunc('hour', collected_at) AS hour,
+                   0::bigint AS records,
+                   count(*)::bigint AS media_items,
+                   0::bigint AS messages,
+                   0::bigint AS rate_limits
+            FROM media_items
+            WHERE collected_at >= now() - ($1 || ' hours')::interval
+            GROUP BY source, date_trunc('hour', collected_at)
+            """
+        )
+    if "rate_limit_events" in existing_tables:
+        raw_parts.append(
+            """
+            SELECT source,
+                   date_trunc('hour', created_at) AS hour,
+                   0::bigint AS records,
+                   0::bigint AS media_items,
+                   0::bigint AS messages,
+                   count(*)::bigint AS rate_limits
+            FROM rate_limit_events
+            WHERE created_at >= now() - ($1 || ' hours')::interval
+            GROUP BY source, date_trunc('hour', created_at)
+            """
+        )
+    if not raw_parts:
+        return []
+    sql = f"""
+        WITH raw AS (
+            {" UNION ALL ".join(raw_parts)}
+        )
+        SELECT source, hour,
+               sum(records)::bigint AS records,
+               sum(media_items)::bigint AS media_items,
+               sum(messages)::bigint AS messages,
+               sum(rate_limits)::bigint AS rate_limits
+        FROM raw
+        GROUP BY source, hour
+        ORDER BY hour DESC, source
+    """
+    labels = {source: label for source, _table, _column, label in content_parts}
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql, str(hours), timeout=30)
+    out = []
+    for row in rows:
+        d = dict(row)
+        d["record_label"] = labels.get(d["source"], "records")
+        out.append(d)
+    return out
+
+
+@app.get("/rate-limits/recent")
+async def recent_rate_limits(hours: int = 24, limit: int = 100,
+                             _user: dict = Depends(require_role("viewer"))):
+    hours = max(1, min(hours, 168))
+    limit = max(1, min(limit, 500))
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        table_exists = bool(await conn.fetchval("SELECT to_regclass('public.rate_limit_events') IS NOT NULL", timeout=8))
+        if table_exists:
+            events = [dict(r) for r in await conn.fetch(
+                """
+                SELECT id, source, account, scope, status_code, cooldown_seconds,
+                       reason, metadata, created_at
+                FROM rate_limit_events
+                WHERE created_at >= now() - ($1 || ' hours')::interval
+                ORDER BY created_at DESC
+                LIMIT $2
+                """,
+                str(hours), limit,
+                timeout=15,
+            )]
+            for event in events:
+                if isinstance(event.get("metadata"), str):
+                    try:
+                        event["metadata"] = json.loads(event["metadata"])
+                    except Exception:
+                        event["metadata"] = {}
+        else:
+            events = []
+        active = []
+        try:
+            for r in await conn.fetch(
+                """
+                SELECT service, last_processed_id, last_processed_at, status
+                FROM service_cursors
+                WHERE service ILIKE '%rate_limit'
+                   OR service ILIKE '%ratelimit'
+                ORDER BY last_processed_at DESC NULLS LAST
+                """,
+                timeout=8,
+            ):
+                d = dict(r)
+                expiry = None
+                streak = None
+                raw = str(d.get("last_processed_id") or "")
+                if ":" in raw:
+                    left, right = raw.split(":", 1)
+                    try:
+                        expiry = datetime.fromtimestamp(float(left), tz=timezone.utc)
+                    except Exception:
+                        expiry = None
+                    try:
+                        streak = int(right)
+                    except Exception:
+                        streak = None
+                d["active_until"] = expiry
+                d["streak"] = streak
+                active.append(d)
+        except Exception:
+            active = []
+    return {"events": events, "active": active}
+
+
 # ---------------------------------------------------------------------------
 # Social registry browser (social_users + post/comment tables)
 # ---------------------------------------------------------------------------

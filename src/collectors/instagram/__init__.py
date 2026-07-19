@@ -46,6 +46,7 @@ from src.core.human_rate_limiter import HumanLikeRateLimiter, OperationType
 from src.core.sliding_window_limiter import SlidingWindowRateLimiter, WindowConfig
 from src.core.proximity import refresh_account_proximity_cache
 from src.core.profile_photo_tracker import ProfilePhotoTracker
+from src.core.rate_limit_events import record_rate_limit_event
 from src.core.scrape_pacing import headless_dwell
 from src.core.user_change_tracker import (
     UserChangeTracker,
@@ -934,17 +935,41 @@ class InstagramCollector(BaseCollector):
         # Per-account cooldown (§22): isolate this account's 429 from siblings.
         # Exponential backoff: each consecutive 429 doubles the cooldown up to 4h.
         acct_name = self._current_account.name if self._current_account else None
-        self._consecutive_429s = getattr(self, "_consecutive_429s", 0) + 1
+        import time as _time
+        _now = _time.time()
+        _existing_expiry = 0.0
+        _existing_streak = 0
+        if self.pool is not None:
+            try:
+                async with self.pool.acquire() as _conn:
+                    _raw = await _conn.fetchval(
+                        "SELECT last_processed_id FROM service_cursors "
+                        "WHERE service = 'instagram_rate_limit'",
+                    )
+                if _raw:
+                    _parts = str(_raw).split(":", 1)
+                    _existing_expiry = float(_parts[0])
+                    if len(_parts) == 2:
+                        _existing_streak = int(_parts[1])
+                    if _existing_expiry <= _now:
+                        _existing_expiry = 0.0
+                        _existing_streak = 0
+            except Exception as _e:
+                logger.debug("instagram: failed reading existing rate-limit cursor: %s", _e)
+        self._consecutive_429s = max(getattr(self, "_consecutive_429s", 0), _existing_streak) + 1
         base_cooldown = 900.0
         cooldown = min(base_cooldown * (2 ** (self._consecutive_429s - 1)), 14400.0)
+        _proposed_expiry = _now + cooldown
+        _expiry = max(_proposed_expiry, _existing_expiry)
+        _effective_cooldown = max(cooldown, _expiry - _now)
         logger.warning(
             "instagram: 429 #%d — emergency cooldown %.0fs (%.1fh)",
-            self._consecutive_429s, cooldown, cooldown / 3600,
+            self._consecutive_429s, _effective_cooldown, _effective_cooldown / 3600,
         )
         if isinstance(self.rate_limiter, HumanLikeRateLimiter):
             # Override the default 900s with our exponential value
             old = self.rate_limiter.emergency_cooldown
-            self.rate_limiter.emergency_cooldown = cooldown
+            self.rate_limiter.emergency_cooldown = _effective_cooldown
             self.rate_limiter.trigger_emergency_cooldown(
                 "instagram.com", account=acct_name,
             )
@@ -953,8 +978,6 @@ class InstagramCollector(BaseCollector):
         # Persist cooldown expiry + consecutive 429 count to DB so both survive
         # collector relaunches. Format: "{expiry_epoch}:{streak}" — streak is used
         # to resume exponential backoff on the next relaunch without resetting to 0.
-        import time as _time
-        _expiry = _time.time() + cooldown
         _streak_val = f"{_expiry}:{self._consecutive_429s}"
         if self.pool is not None:
             try:
@@ -970,6 +993,21 @@ class InstagramCollector(BaseCollector):
                 logger.info("instagram: persisted rate-limit to DB (expiry=%.0f streak=%d)", _expiry, self._consecutive_429s)
             except Exception as _e:
                 logger.warning("instagram: failed to persist rate-limit to DB: %s", _e)
+            await record_rate_limit_event(
+                self.pool,
+                source="instagram",
+                account=acct_name,
+                scope="profile_fetch",
+                status_code=429,
+                cooldown_seconds=int(_effective_cooldown),
+                reason=f"429 streak {self._consecutive_429s}",
+                metadata={
+                    "streak": self._consecutive_429s,
+                    "expiry_epoch": _expiry,
+                    "proposed_expiry_epoch": _proposed_expiry,
+                    "previous_expiry_epoch": _existing_expiry or None,
+                },
+            )
         else:
             logger.warning("instagram: rate-limit NOT persisted — pool is None")
 
@@ -989,7 +1027,7 @@ class InstagramCollector(BaseCollector):
             logger.debug("TLS rotator hook failed: %s", e)
 
         if self._current_account:
-            self.account_pool.cooldown(self._current_account.name, 900.0)
+            self.account_pool.cooldown(self._current_account.name, float(_effective_cooldown))
             # Only rotate within the env-based account pool. Cookie-only accounts
             # (the collect() path) are NOT pool members, so get_next() would
             # otherwise hand back an unrelated pool account and trigger a spurious

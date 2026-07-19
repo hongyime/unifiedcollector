@@ -4,6 +4,7 @@ import { api } from "../../services/api";
 import { Header } from "../../components/layout/Header";
 import { LoadingSpinner } from "../../components/ui/LoadingSpinner";
 import { ErrorState } from "../../components/ui/ErrorState";
+import { AuthImage } from "../../components/ui/AuthImage";
 import { relativeTime } from "../../utils/formatters";
 import { formatBytes } from "../../utils/formatters";
 import type { WaChat, WaMessage } from "../../services/types";
@@ -70,11 +71,11 @@ function MessageMedia({ m }: { m: WaMessage }) {
   if (m.media_mime_type.startsWith("image/")) {
     return (
       <a href={api.fileUrl(m.media_id)} target="_blank" rel="noopener noreferrer" className="block mt-1">
-        <img
+        <AuthImage
           src={api.thumbnailUrl(m.media_id)}
           alt=""
-          loading="lazy"
           className="max-w-[240px] max-h-[240px] rounded border border-border/40"
+          fallbackLabel="media"
         />
       </a>
     );
