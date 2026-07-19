@@ -47,6 +47,11 @@ export interface MediaStats {
   total_items: number;
   total_bytes: number;
   last_collected: string | null;
+  last_activity?: string | null;
+  activity_basis?: string | null;
+  live?: "live" | "stale" | "degraded" | "dead" | "unknown";
+  age_seconds?: number | null;
+  stale_after_seconds?: number | null;
 }
 
 export interface DLQItem {
@@ -317,10 +322,28 @@ export interface GithubCommit {
   deletions: number | null;
   collected_at: string | null;
   commit_url: string;
+  repo_full_name?: string | null;
 }
 
 export interface GithubRepoDetail {
   repo: GithubRepo | null;
+  commits: GithubCommit[];
+}
+
+export interface GithubProfile {
+  owner: string;
+  repos_collected: number;
+  stargazers_count: number | null;
+  forks_count: number | null;
+  updated_at: string | null;
+  collected_at: string | null;
+  last_commit_at?: string | null;
+  commits_loaded?: number;
+}
+
+export interface GithubProfileDetail {
+  profile: GithubProfile | null;
+  repos: GithubRepo[];
   commits: GithubCommit[];
 }
 
@@ -581,6 +604,7 @@ export interface CollectorLiveSource {
   source: string;
   status: "live" | "stale" | "degraded" | "dead" | "unknown";
   age_seconds: number | null;
+  stale_after_seconds?: number | null;
 }
 
 export interface CollectorsLive {
@@ -689,10 +713,14 @@ export interface FollowEdgeStat {
 
 export interface PlatformSummary {
   platform: string;
+  source_mode?: string | null;
   media_count: number;
   media_last: string | null;
   media_recent: MediaItem[];
+  last_activity?: string | null;
+  activity_basis?: string | null;
   users_count: number;
+  bots_count?: number;
   posts_count?: number;
   posts_label?: string;
   messages_count?: number;
@@ -700,4 +728,5 @@ export interface PlatformSummary {
   follow_edges: { owner_account: string; followers: number; following: number }[];
   live?: string | null;
   age_seconds?: number | null;
+  stale_after_seconds?: number | null;
 }

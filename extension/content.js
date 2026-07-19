@@ -112,7 +112,9 @@ async function fetchJson(url, opts) {
   const ctype = res.headers.get("content-type") || "";
   if (!res.ok) {
     if (res.status === 429 || res.status === 401 || res.status === 403) throw new WallError("HTTP " + res.status);
-    throw new Error("HTTP " + res.status);
+    const err = new Error("HTTP " + res.status);
+    err.status = res.status;
+    throw err;
   }
   if (!/json/i.test(ctype)) {
     const head = (await res.text()).slice(0, 40).replace(/\s+/g, " ");
@@ -325,8 +327,23 @@ const instagram = {
 
   async getProfile(username) {
     const url = "https://www.instagram.com/api/v1/users/web_profile_info/?username=" + encodeURIComponent(username);
-    const j = await fetchJson(url, { headers: this.headers(), credentials: "include" });
-    return j && j.data && j.data.user;
+    try {
+      const j = await fetchJson(url, { headers: this.headers(), credentials: "include" });
+      return j && j.data && j.data.user;
+    } catch (e) {
+      if (e && (e.status === 400 || e.status === 404)) {
+        await send({
+          type: "targetStatus",
+          platform: "instagram",
+          username,
+          status: "unavailable",
+          reason: "profile_http_" + e.status,
+        }).catch(() => {});
+        clog("info", `skip unavailable profile ${username}: HTTP ${e.status}`, "instagram");
+        return null;
+      }
+      throw e;
+    }
   },
   // Push the full profile (bio, counts, profile photo) -> instagram_profiles +
   // social_users; the server also downloads the profile pic as kind=profile.

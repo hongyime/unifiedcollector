@@ -81,6 +81,16 @@ const router = createBrowserRouter([
       { path: "telegram/stats", element: <TelegramStatsPage /> },
       { path: "telegram/chats", element: <TelegramChatsPage /> },
       { path: "beeper/chats", element: <BeeperChatsPage /> },
+      {
+        path: "discord/chats",
+        element: (
+          <BeeperChatsPage
+            network="Discord"
+            title="Discord"
+            subtitle="Discord chats captured through Beeper"
+          />
+        ),
+      },
       { path: "dlq", element: <DLQPage /> },
       { path: "health", element: <HealthPage /> },
       { path: "settings", element: <SettingsPage /> },

@@ -434,6 +434,41 @@ async def discover_ig(request):  # /ig/discover alias
         return _cors(web.json_response({"added": 0, "error": "db"}, status=500))
 
 
+async def target_status_handler(request):
+    """Let the extension retire bad spider targets.
+
+    Instagram returns HTTP 400/404 for some unavailable/private/deleted profile
+    lookups. Those are not throttles and should not keep rotating through the
+    active spider queue forever.
+    """
+    body = await _safe_json(request)
+    platform = _norm_platform(body.get("platform"))
+    username = (body.get("username") or "").strip().lstrip("@")
+    status = (body.get("status") or "").strip().lower()
+    reason = str(body.get("reason") or "")[:120]
+    if platform != "instagram" or not username:
+        return _cors(web.json_response({"updated": 0}))
+    if status not in {"unavailable", "skipped"}:
+        status = "unavailable"
+    updated = 0
+    async with request.app["pool"].acquire() as conn:
+        result = await conn.execute(
+            """
+            UPDATE instagram_spider_targets
+            SET status = $2,
+                last_scraped_at = now()
+            WHERE username = $1
+              AND status = 'active'
+            """,
+            username, status,
+        )
+        if result.endswith("1"):
+            updated = 1
+    if updated:
+        logger.info("target-status[%s] %s -> %s (%s)", platform, username, status, reason)
+    return _cors(web.json_response({"updated": updated, "status": status}))
+
+
 # ---------------------------------------------------------------------------
 # download + persist (generic over platform)
 # ---------------------------------------------------------------------------
@@ -1834,6 +1869,7 @@ def make_app():
     app.router.add_get("/social/ig_cooldown", ig_cooldown)
     app.router.add_post("/social/ingest", ingest)
     app.router.add_post("/social/discover", discover)
+    app.router.add_post("/social/target-status", target_status_handler)
     app.router.add_post("/social/posts", posts_handler)
     app.router.add_post("/social/comments", comments_handler)
     app.router.add_post("/social/users", users_handler)

@@ -11,11 +11,26 @@ import { Database, HardDrive, Activity, AlertCircle } from "lucide-react";
 import type { ColumnDef } from "@tanstack/react-table";
 import type { MediaStats } from "../../services/types";
 
+function liveBadgeStatus(status: MediaStats["live"]) {
+  if (status === "live") return "online";
+  if (status === "stale" || status === "degraded") return "warning";
+  if (status === "dead") return "error";
+  return "idle";
+}
+
 const columns: ColumnDef<MediaStats, unknown>[] = [
   {
     accessorKey: "source",
     header: "Source",
-    cell: (info) => <span className="uppercase font-medium text-text-primary">{info.getValue() as string}</span>,
+    cell: (info) => {
+      const row = info.row.original;
+      return (
+        <div className="flex items-center gap-2">
+          <StatusBadge status={liveBadgeStatus(row.live)} label={row.live ?? "unknown"} />
+          <span className="uppercase font-medium text-text-primary">{info.getValue() as string}</span>
+        </div>
+      );
+    },
   },
   {
     accessorKey: "total_items",
@@ -28,8 +43,25 @@ const columns: ColumnDef<MediaStats, unknown>[] = [
     cell: (info) => formatBytes(info.getValue() as number),
   },
   {
+    accessorKey: "last_activity",
+    header: "Activity",
+    cell: (info) => {
+      const row = info.row.original;
+      return (
+        <div>
+          <div>{relativeTime((info.getValue() as string | null) ?? row.last_collected)}</div>
+          {row.activity_basis && (
+            <div className="text-[10px] uppercase tracking-wide text-text-muted">
+              {row.activity_basis}
+            </div>
+          )}
+        </div>
+      );
+    },
+  },
+  {
     accessorKey: "last_collected",
-    header: "Last Collected",
+    header: "Media",
     cell: (info) => relativeTime(info.getValue() as string | null),
   },
 ];

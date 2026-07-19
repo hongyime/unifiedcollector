@@ -62,7 +62,15 @@ function activityIcon(type: string | null, sportType: string | null): string {
 const MAP_W = 120;
 const MAP_H = 80;
 
-function MapThumb({ polyline, streamStatus }: { polyline: string | null; streamStatus: string | null }) {
+function MapThumb({
+  polyline,
+  streamStatus,
+  startLatlng,
+}: {
+  polyline: string | null;
+  streamStatus: string | null;
+  startLatlng: string | null;
+}) {
   // Decode once per polyline (cached across renders inside the table via memo
   // on the row payload — decodePolyline is pure so useMemo not required at
   // this scale, but the SVG-path derivation IS memo-worthy for very long
@@ -75,9 +83,13 @@ function MapThumb({ polyline, streamStatus }: { polyline: string | null; streamS
 
   if (!path) {
     // truncated_empty = privacy-zone activity (Strava intentionally strips the
-    // track). Distinct label so the missing map isn't confused with "not yet
-    // scraped".
-    const label = streamStatus === "truncated_empty" ? "privacy zone" : "detail pending";
+    // track). "start only" means the feed exposed a start coordinate but not
+    // enough route points to draw a map.
+    const label = streamStatus === "truncated_empty"
+      ? "privacy zone"
+      : startLatlng
+        ? "start only"
+        : "no route";
     return (
       <div
         className="flex items-center justify-center rounded border border-dashed border-border/60 bg-black/20 text-[9px] uppercase tracking-wider text-text-muted"
@@ -269,7 +281,11 @@ export function StravaFeedPage() {
                     </div>
                   </td>
                   <td className="py-2">
-                    <MapThumb polyline={act.summary_polyline} streamStatus={act.stream_status} />
+                    <MapThumb
+                      polyline={act.summary_polyline}
+                      streamStatus={act.stream_status}
+                      startLatlng={act.start_latlng}
+                    />
                   </td>
                   <td className="py-2 max-w-[280px]">
                     <a

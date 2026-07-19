@@ -50,15 +50,15 @@ const groups = [
     label: "Messaging",
     items: [
       { to: "/telegram/chats", label: "Telegram", icon: MessageCircle },
-      { to: "/platform/whatsapp", label: "WhatsApp", icon: MessageCircle },
+      { to: "/whatsapp/chats", label: "WhatsApp", icon: MessageCircle },
       { to: "/beeper/chats", label: "Beeper", icon: MessageCircle },
-      { to: "/platform/discord", label: "Discord", icon: MessageCircle },
+      { to: "/discord/chats", label: "Discord", icon: MessageCircle },
     ],
   },
   {
     label: "Other",
     items: [
-      { to: "/platform/strava", label: "Strava", icon: Bike },
+      { to: "/strava/feed", label: "Strava", icon: Bike },
       { to: "/github/feed", label: "GitHub", icon: Database },
       { to: "/platform/search", label: "Search", icon: Activity },
       { to: "/platform/website", label: "Website", icon: Network },
@@ -69,7 +69,7 @@ const groups = [
     items: [
       { to: "/social/users", label: "Social Users", icon: Users },
       { to: "/whatsapp/links", label: "Links", icon: Link2 },
-      { to: "/graph", label: "Graph", icon: Network },
+      { to: "/graph", label: "Raw Graph", icon: Network },
     ],
   },
   {

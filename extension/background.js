@@ -290,6 +290,23 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
         break;
       }
+      case "targetStatus": {
+        try {
+          const r = await fetch(base + "/social/target-status", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              platform: msg.platform || "instagram",
+              username: msg.username,
+              status: msg.status,
+              reason: msg.reason || null,
+            }),
+          });
+          sendResponse({ ok: r.ok });
+        } catch (e) {
+          sendResponse({ ok: false, error: String(e.message || e) });
+        }
+        break;
+      }
       case "posts": {  // structured post metadata (captions/likes/comments counts)
         try {
           const r = await fetch(base + "/social/posts", {

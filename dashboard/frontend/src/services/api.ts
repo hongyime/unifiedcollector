@@ -39,6 +39,8 @@ import type {
   YoutubeChannelDetail,
   GithubRepo,
   GithubRepoDetail,
+  GithubProfile,
+  GithubProfileDetail,
   Lemon8Profile,
   Lemon8ProfileDetail,
   BeeperChat,
@@ -228,6 +230,12 @@ export const api = {
       `/youtube/channel/${encodeURIComponent(channelId)}?limit=${limit}`,
     ),
 
+  githubProfiles: (limit = 100) =>
+    get<GithubProfile[]>(`/github/profiles?limit=${limit}`),
+  githubProfile: (owner: string, limit = 200) =>
+    get<GithubProfileDetail>(
+      `/github/profile/${encodeURIComponent(owner)}?limit=${limit}`,
+    ),
   githubRepos: (limit = 100) =>
     get<GithubRepo[]>(`/github/repos?limit=${limit}`),
   githubRepo: (fullName: string, limit = 200) =>
@@ -242,8 +250,11 @@ export const api = {
       `/lemon8/profile/${encodeURIComponent(username)}?limit=${limit}`,
     ),
 
-  beeperChats: (limit = 100) =>
-    get<BeeperChat[]>(`/beeper/chats?limit=${limit}`),
+  beeperChats: (limit = 100, network?: string) => {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (network) params.set("network", network);
+    return get<BeeperChat[]>(`/beeper/chats?${params}`);
+  },
   beeperChat: (chatId: string, limit = 200) =>
     get<BeeperChatDetail>(
       `/beeper/chat/${encodeURIComponent(chatId)}?limit=${limit}`,

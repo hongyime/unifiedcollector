@@ -12,6 +12,10 @@ export const SOURCES = [
   "strava",
   "whatsapp",
   "search",
+  "beeper",
+  "facebook",
+  "threads",
+  "x",
 ] as const;
 
 export type SourceName = (typeof SOURCES)[number];

@@ -558,12 +558,28 @@ _PLATFORM_POSTS = {
     "instagram": "instagram_posts", "tiktok": "tiktok_posts", "lemon8": "lemon8_posts",
     "youtube": "youtube_videos", "threads": "threads_posts", "facebook": "facebook_posts",
     "x": "x_posts", "strava": "strava_activities", "search": "search_results",
-    "website": "website_pages", "github": "github_repos",
+    "website": "website_pages", "github": "github_commits",
 }
 _PLATFORM_MESSAGES = {
     "telegram": ("telegram_messages", "collected_at"),
     "whatsapp": ("whatsapp_messages", "collected_at"),
     "beeper": ("beeper_shadow_messages", "ingested_at"),
+}
+_LATEST_ACTIVITY_QUERIES = {
+    "telegram": ("SELECT max(collected_at) FROM telegram_messages", "telegram messages"),
+    "whatsapp": ("SELECT max(collected_at) FROM whatsapp_messages", "whatsapp messages"),
+    "beeper": ("SELECT max(ingested_at) FROM beeper_shadow_messages", "beeper messages"),
+    "instagram": ("SELECT max(collected_at) FROM instagram_posts", "instagram posts"),
+    "tiktok": ("SELECT max(collected_at) FROM tiktok_posts", "tiktok posts"),
+    "lemon8": ("SELECT max(collected_at) FROM lemon8_posts", "lemon8 posts"),
+    "threads": ("SELECT max(collected_at) FROM threads_posts", "threads posts"),
+    "facebook": ("SELECT max(collected_at) FROM facebook_posts", "facebook posts"),
+    "x": ("SELECT max(collected_at) FROM x_posts", "x posts"),
+    "youtube": ("SELECT max(collected_at) FROM youtube_videos", "youtube videos"),
+    "website": ("SELECT max(collected_at) FROM website_pages", "website pages"),
+    "github": ("SELECT max(collected_at) FROM github_commits", "github commits"),
+    "strava": ("SELECT max(collected_at) FROM strava_activities", "strava activities"),
+    "search": ("SELECT max(collected_at) FROM search_results", "search results"),
 }
 
 
@@ -576,6 +592,89 @@ async def platform_summary(name: str, _user: dict = Depends(require_role("viewer
     pool = await get_pool()
     out: dict = {"platform": name}
     async with pool.acquire() as conn:
+        if name == "discord":
+            out["source_mode"] = "beeper shadow"
+            try:
+                media_row = await conn.fetchrow(
+                    """
+                    SELECT count(*) AS media_count,
+                           max(collected_at) AS media_last
+                    FROM media_items
+                    WHERE source = 'beeper'
+                      AND filename LIKE 'beeper_discord_%'
+                    """,
+                    timeout=8,
+                )
+                out["media_count"] = int((media_row and media_row["media_count"]) or 0)
+                out["media_last"] = media_row["media_last"] if media_row else None
+                out["media_recent"] = [dict(r) for r in await conn.fetch(
+                    """
+                    SELECT id, entity_name, content_type, filename, collected_at
+                    FROM media_items
+                    WHERE source = 'beeper'
+                      AND filename LIKE 'beeper_discord_%'
+                    ORDER BY collected_at DESC
+                    LIMIT 24
+                    """,
+                    timeout=8,
+                )]
+            except Exception:
+                out["media_count"] = 0
+                out["media_last"] = None
+                out["media_recent"] = []
+            try:
+                out["posts_count"] = int(await conn.fetchval(
+                    "SELECT count(*) FROM beeper_shadow_chats WHERE network = 'Discord'",
+                    timeout=6,
+                ) or 0)
+                out["posts_label"] = "chats"
+                msg_row = await conn.fetchrow(
+                    """
+                    SELECT count(*) AS messages,
+                           (
+                             SELECT "timestamp"
+                             FROM beeper_shadow_messages
+                             WHERE network = 'Discord'
+                               AND "timestamp" IS NOT NULL
+                             ORDER BY "timestamp" DESC
+                             LIMIT 1
+                           ) AS messages_last
+                    FROM beeper_shadow_messages
+                    WHERE network = 'Discord'
+                      AND message_id IS NOT NULL
+                    """,
+                    timeout=12,
+                )
+                out["messages_count"] = int((msg_row and msg_row["messages"]) or 0)
+                out["messages_last"] = msg_row["messages_last"] if msg_row else None
+                out["users_count"] = int(await conn.fetchval(
+                    """
+                    SELECT count(DISTINCT NULLIF(sender_id, ''))
+                    FROM beeper_shadow_messages
+                    WHERE network = 'Discord'
+                      AND sender_id IS NOT NULL
+                      AND sender_id <> ''
+                    """,
+                    timeout=20,
+                ) or 0)
+            except Exception:
+                out["users_count"] = 0
+                out["posts_count"] = 0
+                out["posts_label"] = "chats"
+                out["messages_count"] = 0
+            out["follow_edges"] = []
+            try:
+                from src.core.source_freshness import compute_liveness
+                live = {s["source"]: s for s in await compute_liveness(conn)}
+                b = live.get("beeper")
+                if b:
+                    out["live"] = b["status"]
+                    out["age_seconds"] = b["age_seconds"]
+                    out["stale_after_seconds"] = b.get("stale_after_seconds")
+            except Exception:
+                pass
+            return out
+
         try:
             out["media_count"] = int(await conn.fetchval(
                 "SELECT count(*) FROM media_items WHERE source=$1", name, timeout=8) or 0)
@@ -587,9 +686,38 @@ async def platform_summary(name: str, _user: dict = Depends(require_role("viewer
         except Exception:
             out.setdefault("media_count", 0)
             out.setdefault("media_recent", [])
+        query_spec = _LATEST_ACTIVITY_QUERIES.get(name)
+        if query_spec:
+            query, basis = query_spec
+            try:
+                out["last_activity"] = await conn.fetchval(query, timeout=8)
+                out["activity_basis"] = basis
+            except Exception:
+                out["last_activity"] = out.get("media_last")
+                out["activity_basis"] = "media"
         try:
-            out["users_count"] = int(await conn.fetchval(
-                "SELECT count(*) FROM social_users WHERE platform=$1", name) or 0)
+            if name == "whatsapp":
+                out["users_count"] = int(await conn.fetchval(
+                    "SELECT count(*) FROM whatsapp_users", timeout=6) or 0)
+            elif name == "telegram":
+                row = await conn.fetchrow(
+                    """
+                    SELECT count(*) FILTER (WHERE COALESCE(is_bot, false) = false) AS people,
+                           count(*) FILTER (WHERE is_bot = true) AS bots
+                    FROM telegram_users
+                    """,
+                    timeout=6,
+                )
+                out["users_count"] = int((row and row["people"]) or 0)
+                out["bots_count"] = int((row and row["bots"]) or 0)
+            elif name == "beeper":
+                out["users_count"] = int(await conn.fetchval(
+                    "SELECT count(DISTINCT NULLIF(sender_id, '')) FROM beeper_shadow_messages",
+                    timeout=6,
+                ) or 0)
+            else:
+                out["users_count"] = int(await conn.fetchval(
+                    "SELECT count(*) FROM social_users WHERE platform=$1", name, timeout=6) or 0)
         except Exception:
             out["users_count"] = 0
         # Whole-table counts via the planner estimate (instant) — count(*) on
@@ -618,11 +746,16 @@ async def platform_summary(name: str, _user: dict = Depends(require_role("viewer
                 "FROM follow_edges WHERE platform=$1 GROUP BY owner_account", name)]
         except Exception:
             out["follow_edges"] = []
-        # Live status: cheap per-platform source_health lookup (not full liveness).
-        # Normalize source_health's 'running' to the UI's 'live'.
+        # Live status: canonical per-source data freshness, not source_health's
+        # coarse running/idle flag.
         try:
-            st = await conn.fetchval("SELECT status FROM source_health WHERE source=$1", name)
-            out["live"] = "live" if st == "running" else st
+            from src.core.source_freshness import compute_liveness
+            live = {s["source"]: s for s in await compute_liveness(conn)}
+            cur = live.get(name)
+            if cur:
+                out["live"] = cur["status"]
+                out["age_seconds"] = cur["age_seconds"]
+                out["stale_after_seconds"] = cur.get("stale_after_seconds")
         except Exception:
             pass
     return out
@@ -829,7 +962,30 @@ async def media_stats(_user: dict = Depends(require_role("viewer"))):
             ORDER BY source
             """
         )
-    return [dict(r) for r in rows]
+        try:
+            from src.core.source_freshness import compute_liveness
+            live = {s["source"]: s for s in await compute_liveness(conn)}
+        except Exception:
+            live = {}
+        out = []
+        now = datetime.now(timezone.utc)
+        for r in rows:
+            d = dict(r)
+            query_spec = _LATEST_ACTIVITY_QUERIES.get(d["source"])
+            cur = live.get(d["source"])
+            if cur:
+                d["live"] = cur["status"]
+                d["age_seconds"] = cur["age_seconds"]
+                d["stale_after_seconds"] = cur.get("stale_after_seconds")
+                if cur["age_seconds"] is not None:
+                    d["last_activity"] = now - timedelta(seconds=cur["age_seconds"])
+                else:
+                    d["last_activity"] = d.get("last_collected")
+            else:
+                d["last_activity"] = d.get("last_collected")
+            d["activity_basis"] = query_spec[1] if query_spec else "media"
+            out.append(d)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -3262,6 +3418,137 @@ async def youtube_channel_detail(channel_id: str, limit: int = 200, _user: dict 
 # GitHub feed (repos + commits)
 # ---------------------------------------------------------------------------
 
+@app.get("/github/profiles")
+async def list_github_profiles(limit: int = 100, _user: dict = Depends(require_role("viewer"))):
+    """GitHub owners first, with repo totals.
+
+    The dashboard is profile-first because a repo-first picker hides the useful
+    question: whose GitHub footprint changed recently?
+    """
+    limit = max(1, min(limit, 500))
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if await conn.fetchval("SELECT to_regclass('github_repos')") is None:
+            return []
+        rows = await conn.fetch(
+            """
+            WITH recent_commits AS MATERIALIZED (
+                SELECT repo_id, collected_at
+                FROM github_commits
+                WHERE collected_at IS NOT NULL
+                ORDER BY collected_at DESC
+                LIMIT 5000
+            )
+            SELECT split_part(r.full_name, '/', 1) AS owner,
+                   COUNT(DISTINCT r.id) AS repos_collected,
+                   COALESCE(MAX(r.stargazers_count), 0)::bigint AS stargazers_count,
+                   COALESCE(MAX(r.forks_count), 0)::bigint AS forks_count,
+                   MAX(r.platform_updated_at) AS updated_at,
+                   MAX(rc.collected_at) AS collected_at,
+                   COUNT(*) AS commits_loaded
+            FROM recent_commits rc
+            JOIN github_repos r ON r.id = rc.repo_id
+            WHERE r.full_name IS NOT NULL AND r.full_name <> ''
+            GROUP BY split_part(r.full_name, '/', 1)
+            ORDER BY MAX(rc.collected_at) DESC NULLS LAST,
+                     COUNT(*) DESC
+            LIMIT $1
+            """,
+            limit,
+        )
+    return [dict(r) for r in rows]
+
+
+@app.get("/github/profile/{owner}")
+async def github_profile_detail(owner: str, limit: int = 200, _user: dict = Depends(require_role("viewer"))):
+    """Repos + recent commits for one GitHub owner."""
+    limit = max(1, min(limit, 500))
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if await conn.fetchval("SELECT to_regclass('github_repos')") is None:
+            return {"profile": None, "repos": [], "commits": []}
+
+        profile_row = await conn.fetchrow(
+            """
+            SELECT split_part(full_name, '/', 1) AS owner,
+                   COUNT(*) AS repos_collected,
+                   COALESCE(SUM(stargazers_count), 0)::bigint AS stargazers_count,
+                   COALESCE(SUM(forks_count), 0)::bigint AS forks_count,
+                   MAX(platform_updated_at) AS updated_at,
+                   MAX(collected_at) AS collected_at
+            FROM github_repos
+            WHERE split_part(full_name, '/', 1) = $1
+            GROUP BY split_part(full_name, '/', 1)
+            """,
+            owner,
+        )
+        if not profile_row:
+            return {"profile": None, "repos": [], "commits": []}
+
+        repos = await conn.fetch(
+            """
+            SELECT id,
+                   platform_repo_id,
+                   name,
+                   full_name,
+                   description,
+                   language,
+                   stargazers_count,
+                   forks_count,
+                   open_issues_count,
+                   platform_updated_at
+            FROM github_repos
+            WHERE split_part(full_name, '/', 1) = $1
+            ORDER BY stargazers_count DESC NULLS LAST,
+                     platform_updated_at DESC NULLS LAST
+            LIMIT 2000
+            """,
+            owner,
+        )
+        repo_ids = [r["id"] for r in repos]
+        commits = []
+        if repo_ids:
+            commits = await conn.fetch(
+                """
+                SELECT c.sha,
+                       c.author_name,
+                       c.author_login,
+                       c.message,
+                       c.date,
+                       c.files_changed,
+                       c.insertions,
+                       c.deletions,
+                       c.collected_at,
+                       r.full_name
+                FROM github_commits c
+                JOIN github_repos r ON r.id = c.repo_id
+                WHERE c.repo_id = ANY($1::uuid[])
+                ORDER BY c.date DESC NULLS LAST, c.collected_at DESC
+                LIMIT $2
+                """,
+                repo_ids, limit,
+            )
+
+    profile = dict(profile_row)
+    out_commits = []
+    for r in commits:
+        d = dict(r)
+        full_name = d.pop("full_name")
+        d["repo_full_name"] = full_name
+        d["commit_url"] = f"https://github.com/{full_name}/commit/{d['sha']}"
+        out_commits.append(d)
+    if out_commits:
+        profile["last_commit_at"] = out_commits[0].get("date")
+        profile["commits_loaded"] = len(out_commits)
+
+    out_repos = []
+    for r in repos:
+        d = dict(r)
+        d.pop("id", None)
+        out_repos.append(d)
+    return {"profile": profile, "repos": out_repos, "commits": out_commits}
+
+
 @app.get("/github/repos")
 async def list_github_repos(limit: int = 100, _user: dict = Depends(require_role("viewer"))):
     """GitHub repos and collection stats."""
@@ -3465,15 +3752,24 @@ async def lemon8_profile_detail(username: str, limit: int = 200, _user: dict = D
 # ---------------------------------------------------------------------------
 
 @app.get("/beeper/chats")
-async def list_beeper_chats(limit: int = 100, _user: dict = Depends(require_role("viewer"))):
+async def list_beeper_chats(
+    limit: int = 100,
+    network: str | None = None,
+    _user: dict = Depends(require_role("viewer")),
+):
     """Beeper chats and collection stats."""
     limit = max(1, min(limit, 500))
     pool = await get_pool()
     async with pool.acquire() as conn:
         if await conn.fetchval("SELECT to_regclass('beeper_shadow_chats')") is None:
             return []
+        where = ""
+        args: list = [limit]
+        if network:
+            args.append(network)
+            where = "WHERE c.network = $2"
         rows = await conn.fetch(
-            """
+            f"""
             SELECT c.chat_id,
                    c.local_chat_id,
                    c.network,
@@ -3486,10 +3782,11 @@ async def list_beeper_chats(limit: int = 100, _user: dict = Depends(require_role
                    (SELECT COUNT(*) FROM beeper_shadow_messages WHERE chat_id = c.chat_id) AS messages_collected,
                    (SELECT MAX(timestamp) FROM beeper_shadow_messages WHERE chat_id = c.chat_id) AS last_message_at
             FROM beeper_shadow_chats c
+            {where}
             ORDER BY c.last_seen_at DESC NULLS LAST
             LIMIT $1
             """,
-            limit,
+            *args,
         )
     return [dict(r) for r in rows]
 

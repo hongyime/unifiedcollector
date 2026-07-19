@@ -22,12 +22,16 @@ FRESHNESS: list[tuple[str, str, int]] = [
     ("instagram", "SELECT extract(epoch FROM now()-max(collected_at)) FROM media_items WHERE source='instagram'", 2 * _DAY),
     ("tiktok",    "SELECT extract(epoch FROM now()-max(collected_at)) FROM media_items WHERE source='tiktok'", 2 * _DAY),
     ("lemon8",    "SELECT extract(epoch FROM now()-max(collected_at)) FROM media_items WHERE source='lemon8'", 2 * _DAY),
+    ("threads",   "SELECT extract(epoch FROM now()-max(collected_at)) FROM threads_posts", 2 * _DAY),
+    ("facebook",  "SELECT extract(epoch FROM now()-max(collected_at)) FROM facebook_posts", 2 * _DAY),
+    ("x",         "SELECT extract(epoch FROM now()-max(collected_at)) FROM x_posts", 2 * _DAY),
     ("youtube",   "SELECT extract(epoch FROM now()-max(collected_at)) FROM youtube_videos", 2 * _DAY),
     ("website",   "SELECT extract(epoch FROM now()-max(collected_at)) FROM website_pages", 3 * _DAY),
     ("github",    "SELECT extract(epoch FROM now()-max(collected_at)) FROM github_commits", 3 * _DAY),
     ("strava",    "SELECT extract(epoch FROM now()-max(collected_at)) FROM strava_activities", 3 * _DAY),
     ("search",    "SELECT extract(epoch FROM now()-max(collected_at)) FROM search_results", 3 * _DAY),
 ]
+FRESHNESS_BY_SOURCE = {name: (query, threshold) for name, query, threshold in FRESHNESS}
 
 # Realtime messaging feeds (surfaced distinctly by some consumers).
 REALTIME = ("telegram", "whatsapp", "beeper")
@@ -71,5 +75,6 @@ async def compute_liveness(conn) -> list[dict]:
             "source": name,
             "status": status,
             "age_seconds": int(age) if age is not None else None,
+            "stale_after_seconds": thresh,
         })
     return out

@@ -1,12 +1,12 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ExternalLink, Heart, MessageCircle, Play, Share2, BadgeCheck } from "lucide-react";
+import { ExternalLink } from "lucide-react";
 import { api } from "../../services/api";
 import { Header } from "../../components/layout/Header";
 import { LoadingSpinner } from "../../components/ui/LoadingSpinner";
 import { ErrorState } from "../../components/ui/ErrorState";
 import { relativeTime, formatTimestamp, formatNumber } from "../../utils/formatters";
-import type { GithubRepo, GithubCommit } from "../../services/types";
+import type { GithubProfile, GithubCommit, GithubRepo } from "../../services/types";
 
 // GitHub feed page — two-pane layout mirroring the Telegram/WhatsApp chat
 // pages, but with a grid of post cards on the right instead of a message
@@ -35,21 +35,21 @@ function formatDuration(seconds: number | null | undefined): string {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
-function profileDisplayName(p: GithubRepo): string {
-  return p.full_name || p.name || 'unknown';
+function profileDisplayName(p: GithubProfile): string {
+  return p.owner || "unknown";
 }
 
 export function GithubFeedPage() {
   const [selected, setSelected] = useState<string | null>(null);
 
   const profiles = useQuery({
-    queryKey: ["github-repos"],
-    queryFn: () => api.githubRepos(100),
+    queryKey: ["github-profiles"],
+    queryFn: () => api.githubProfiles(100),
   });
 
   const profile = useQuery({
-    queryKey: ["github-repo", selected],
-    queryFn: () => api.githubRepo(selected!),
+    queryKey: ["github-profile", selected],
+    queryFn: () => api.githubProfile(selected!),
     enabled: !!selected,
   });
 
@@ -60,7 +60,7 @@ export function GithubFeedPage() {
     <div>
       <Header
         title="GitHub"
-        subtitle="Repositories and their collected commits"
+        subtitle="Profiles, repositories, and collected commits"
         onRefresh={() => {
           profiles.refetch();
           if (selected) profile.refetch();
@@ -80,11 +80,11 @@ export function GithubFeedPage() {
           ) : (
             <ul className="divide-y divide-border/50 max-h-[80vh] overflow-y-auto">
               {profiles.data.map((p) => {
-                const isActive = selected === p.full_name;
+                const isActive = selected === p.owner;
                 return (
                   <li
-                    key={p.full_name}
-                    onClick={() => setSelected(p.full_name)}
+                    key={p.owner}
+                    onClick={() => setSelected(p.owner)}
                     className={`px-3 py-2.5 cursor-pointer hover:bg-white/5 ${
                       isActive ? "bg-white/10" : ""
                     }`}
@@ -97,18 +97,17 @@ export function GithubFeedPage() {
                             {profileDisplayName(p)}
                           </span>
                         </div>
-                        {p.description && (
-                          <div className="text-[11px] text-text-muted truncate">
-                            {p.description}
-                          </div>
-                        )}
+                        <div className="text-[11px] text-text-muted truncate">
+                          {formatNumber(p.repos_collected)} repos
+                          {p.commits_loaded ? ` · ${formatNumber(p.commits_loaded)} recent commits` : ""}
+                        </div>
                       </div>
                     </div>
                     <div className="mt-1 flex items-center justify-between text-[11px] text-text-muted tabular-nums">
                       <span>{compactCount(p.stargazers_count)} stars</span>
                       <span>
-                        {p.commits_collected ?? 0} commits
-                        {p.last_commit_at ? ` · ${relativeTime(p.last_commit_at)}` : ""}
+                        {compactCount(p.forks_count)} forks
+                        {p.updated_at ? ` · ${relativeTime(p.updated_at)}` : ""}
                       </span>
                     </div>
                   </li>
@@ -123,24 +122,24 @@ export function GithubFeedPage() {
           {!selected ? (
             <div className="bg-surface rounded-lg border border-border p-8">
               <p className="text-sm text-text-muted text-center">
-                Select a repo to view its commits.
+                Select a profile to view repositories and commits.
               </p>
             </div>
           ) : profile.isLoading ? (
             <LoadingSpinner />
-          ) : !profile.data?.repo ? (
+          ) : !profile.data?.profile ? (
             <div className="bg-surface rounded-lg border border-border p-8">
               <p className="text-sm text-text-muted text-center">
-                Repo not found.
+                Profile not found.
               </p>
             </div>
           ) : (
             <>
-              <ProfileCard p={profile.data.repo} postCount={profile.data.commits.length} />
+              <ProfileCard p={profile.data.profile} repos={profile.data.repos} commitCount={profile.data.commits.length} />
               {profile.data.commits.length === 0 ? (
                 <div className="bg-surface rounded-lg border border-border p-8">
                   <p className="text-sm text-text-muted text-center">
-                    No commits collected for this repo yet.
+                    No commits collected for this profile yet.
                   </p>
                 </div>
               ) : (
@@ -158,7 +157,7 @@ export function GithubFeedPage() {
   );
 }
 
-function ProfileCard({ p, postCount }: { p: GithubRepo; postCount: number }) {
+function ProfileCard({ p, repos, commitCount }: { p: GithubProfile; repos: GithubRepo[]; commitCount: number }) {
   return (
     <div className="bg-surface rounded-lg border border-border p-4">
       <div className="flex items-start gap-3">
@@ -169,27 +168,27 @@ function ProfileCard({ p, postCount }: { p: GithubRepo; postCount: number }) {
               {profileDisplayName(p)}
             </h3>
           </div>
-          {p.full_name && (
+          {p.owner && (
             <a
-              href={`https://github.com/${p.full_name}`}
+              href={`https://github.com/${p.owner}`}
               target="_blank"
               rel="noopener noreferrer"
               className="text-xs text-info hover:underline"
             >
-              {p.full_name} <ExternalLink className="inline w-3 h-3" />
+              {p.owner} <ExternalLink className="inline w-3 h-3" />
             </a>
           )}
-          {p.description && (
-            <p className="mt-1.5 text-xs text-text-secondary whitespace-pre-wrap break-words">
-              {p.description}
+          {repos.length > 0 && (
+            <p className="mt-1.5 text-xs text-text-secondary truncate">
+              Top repos: {repos.slice(0, 4).map((r) => r.name || r.full_name).join(", ")}
             </p>
           )}
           <div className="mt-2 flex flex-wrap gap-3 text-xs text-text-muted tabular-nums">
             <span><b className="text-text-primary">{compactCount(p.stargazers_count)}</b> stars</span>
             <span><b className="text-text-primary">{compactCount(p.forks_count)}</b> forks</span>
-            <span><b className="text-text-primary">{compactCount(p.open_issues_count)}</b> issues</span>
+            <span><b className="text-text-primary">{formatNumber(p.repos_collected)}</b> repos</span>
             <span className="text-text-muted">·</span>
-            <span>{postCount} commits collected</span>
+            <span>{commitCount} recent commits loaded</span>
           </div>
         </div>
       </div>
@@ -219,6 +218,7 @@ function PostCard({ post }: { post: GithubCommit }) {
       <div className="flex flex-col gap-1 text-[11px] text-text-muted tabular-nums mt-auto pt-1">
         <div className="flex items-center gap-2">
             <span>{post.author_name || post.author_login || "unknown"}</span>
+            {post.repo_full_name && <span className="truncate">in {post.repo_full_name}</span>}
         </div>
         <div className="flex items-center gap-3">
           <span className="text-emerald-500">+{post.insertions || 0}</span>

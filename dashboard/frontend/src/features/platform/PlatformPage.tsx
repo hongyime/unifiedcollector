@@ -11,6 +11,8 @@ const SPECIALIZED: Record<string, { to: string; label: string }[]> = {
   strava: [{ to: "/strava/feed", label: "Activity feed" }],
   telegram: [{ to: "/telegram/accounts", label: "Onboard accounts" }, { to: "/telegram/stats", label: "Stats" }],
   whatsapp: [{ to: "/whatsapp/chats", label: "Chats" }, { to: "/whatsapp/link", label: "Link device" }, { to: "/whatsapp/links", label: "Links" }],
+  discord: [{ to: "/discord/chats", label: "Chats" }],
+  beeper: [{ to: "/beeper/chats", label: "Chats" }],
   instagram: [{ to: "/instagram/dms", label: "Messages" }],
   tiktok: [{ to: "/tiktok/feed", label: "Feed" }, { to: "/tiktok/dms", label: "Messages" }],
 };
@@ -39,8 +41,9 @@ export function PlatformPage() {
   if (error) return <ErrorState message={String(error)} onRetry={() => refetch()} />;
   if (isLoading || !data) return <LoadingSpinner />;
 
-  const liveColor = data.live === "live" ? "bg-success" : data.live === "stale" || data.live === "degraded" ? "bg-warning" : data.live === "dead" ? "bg-danger" : "bg-text-muted";
-  const lastActivity = data.media_last || data.messages_last;
+  const liveColor = data.live === "live" ? "bg-success" : data.live === "stale" || data.live === "degraded" ? "bg-warning" : data.live === "dead" ? "bg-error" : "bg-text-muted";
+  const lastActivity = data.last_activity || data.messages_last || data.media_last;
+  const statusText = `${data.live ?? "unknown"}${data.source_mode ? ` · ${data.source_mode}` : ""}${lastActivity ? ` · last ${relativeTime(lastActivity)}` : ""}`;
 
   return (
     <div>
@@ -54,12 +57,13 @@ export function PlatformPage() {
       <div className="flex flex-wrap items-center gap-2 mb-4">
         <span className="inline-flex items-center gap-1.5 text-xs px-2 py-1 rounded-md bg-surface border border-border">
           <span className={`w-2 h-2 rounded-full ${liveColor}`} />
-          {data.live ?? "unknown"}{lastActivity ? ` · last ${relativeTime(lastActivity)}` : ""}
+          {statusText}
         </span>
       </div>
       <div className="flex flex-wrap gap-2 mb-6">
         <Stat label="Media" value={data.media_count} />
         <Stat label="People" value={data.users_count} />
+        {data.bots_count != null && data.bots_count > 0 && <Stat label="Bots excluded" value={data.bots_count} />}
         {data.posts_count != null && <Stat label={data.posts_label || "Posts"} value={data.posts_count} />}
         {data.messages_count != null && <Stat label="Messages" value={data.messages_count} />}
       </div>

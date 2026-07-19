@@ -39,12 +39,22 @@ function senderDisplayName(m: BeeperMessage): string {
   return m.sender_name || m.sender_id || "unknown";
 }
 
-export function BeeperChatsPage() {
+type BeeperChatsPageProps = {
+  network?: string;
+  title?: string;
+  subtitle?: string;
+};
+
+export function BeeperChatsPage({
+  network,
+  title = "Beeper",
+  subtitle = "Chats and messages captured across networks",
+}: BeeperChatsPageProps) {
   const [selected, setSelected] = useState<string | null>(null);
 
   const chats = useQuery({
-    queryKey: ["beeper-chats"],
-    queryFn: () => api.beeperChats(),
+    queryKey: ["beeper-chats", network ?? "all"],
+    queryFn: () => api.beeperChats(100, network),
   });
 
   const chat = useQuery({
@@ -59,8 +69,8 @@ export function BeeperChatsPage() {
   return (
     <div>
       <Header
-        title="Beeper"
-        subtitle="Chats and messages captured across networks"
+        title={title}
+        subtitle={subtitle}
         onRefresh={() => {
           chats.refetch();
           if (selected) chat.refetch();
@@ -138,9 +148,7 @@ export function BeeperChatsPage() {
               </p>
             ) : (
               <div className="space-y-2 max-h-[60vh] overflow-y-auto">
-                {/* Messages come back newest-first from the API; reverse into
-                    chronological order for a natural top-to-bottom read. */}
-                {[...chat.data.messages].reverse().map((m) => (
+                {chat.data.messages.map((m) => (
                   <MessageBubble key={m.message_id} m={m} />
                 ))}
               </div>

@@ -2674,12 +2674,12 @@ class StravaCollector(BaseCollector):
                     """, fname, lname, r["platform_athlete_id"])
                     enriched += 1
 
-            # Second: scrape profile pages for athletes with numeric-only names
+            # Second: scrape profile pages for athletes with missing/numeric names
             # OR no profile photo yet (user wants every athlete's profile photo).
             stub_rows = await conn.fetch(r"""
                 SELECT platform_athlete_id
                 FROM strava_athletes
-                WHERE username ~ '^\d+$' OR profile IS NULL
+                WHERE username IS NULL OR username = '' OR username ~ '^\d+$' OR profile IS NULL
                 ORDER BY (profile IS NOT NULL), updated_at ASC
                 LIMIT $1
             """, batch_size)
@@ -2735,7 +2735,7 @@ class StravaCollector(BaseCollector):
                     async with self.pool.acquire() as conn:
                         await conn.execute(r"""
                             UPDATE strava_athletes
-                            SET username  = CASE WHEN username ~ '^\d+$' THEN $1 ELSE username END,
+                            SET username  = CASE WHEN username IS NULL OR username = '' OR username ~ '^\d+$' THEN $1 ELSE username END,
                                 firstname = CASE WHEN firstname IS NULL OR firstname = '' OR firstname ~ '^\d+$' THEN $2 ELSE firstname END,
                                 lastname  = CASE WHEN lastname IS NULL OR lastname ~ '^\d+$' THEN $3 ELSE lastname END,
                                 profile = COALESCE($4, profile),
