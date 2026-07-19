@@ -24,6 +24,7 @@ def _make_pool():
     conn = MagicMock()
     conn.execute = AsyncMock()
     conn.fetchrow = AsyncMock(return_value={"id": "user-uuid-1"})
+    conn.fetchval = AsyncMock(return_value="chat-uuid-1")
     conn.fetch = AsyncMock(return_value=[])
 
     acquire_cm = MagicMock()
@@ -44,6 +45,7 @@ def collector(tmp_path, monkeypatch):
         "MEDIA_BRIDGE_SECRET", "WHATSAPP_SESSION_NAMES", "SESSION_NAMES",
         "WHATSAPP_RABBITMQ_URL", "RABBITMQ_URL",
         "WHATSAPP_REDIS_URL", "REDIS_URL",
+        "WHATSAPP_SPIDER_SESSIONS",
     ):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setattr(
@@ -108,6 +110,17 @@ def test_constructor_handles_invalid_session_bridges_json(
     assert c._session_bridges == {}
     assert any("Invalid SESSION_BRIDGES_JSON" in r.getMessage()
                for r in caplog.records)
+
+
+def test_constructor_parses_spider_sessions(tmp_path, monkeypatch):
+    monkeypatch.setenv("WHATSAPP_SPIDER_SESSIONS", "session_2, session_3")
+    monkeypatch.setattr(
+        "src.core.base_collector.DRIVE_PATH", str(tmp_path),
+    )
+    c = WhatsappCollector()
+    assert c._is_spider_allowed("session_2") is True
+    assert c._is_spider_allowed("session_3") is True
+    assert c._is_spider_allowed("session_1") is False
 
 
 def test_constructor_export_mode_when_dir_exists(tmp_path, monkeypatch):
@@ -360,6 +373,29 @@ async def test_handle_message_event_text_message_no_media(collector):
 
 
 @pytest.mark.asyncio
+async def test_handle_message_event_text_message_discovers_links_before_media_return(collector):
+    event = {
+        "message_id": "m1",
+        "chat_jid": "111@g.us",
+        "body": "join https://chat.whatsapp.com/InviteCode123",
+        "session_name": "session_2",
+        "key": {"id": "m1", "remoteJid": "111@g.us", "participant": "222@s.whatsapp.net"},
+    }
+    collector._is_duplicate = AsyncMock(return_value=False)
+    collector._upsert_chat = AsyncMock()
+    collector._track_user_profile = AsyncMock(return_value="user-uuid")
+    collector._upsert_message = AsyncMock()
+    collector._extract_wa_location = AsyncMock()
+    collector._discover_links = AsyncMock()
+
+    await collector._handle_message_event(event, [])
+
+    collector._discover_links.assert_awaited_once_with(
+        event["body"], "111@g.us", session="session_2",
+    )
+
+
+@pytest.mark.asyncio
 async def test_track_user_profile_uses_pool_and_returns_uuid(collector):
     """Regression: ``_track_user_profile`` used to check ``self._pool``
     (typo) and always raise AttributeError before any DB work, breaking
@@ -425,6 +461,39 @@ async def test_upsert_message_inserts_with_chat_uuid(collector):
     await collector._upsert_message(event, "111@s.whatsapp.net", "user-uuid")
     collector._test_conn.fetchrow.assert_awaited()
     collector._test_conn.execute.assert_awaited_once()
+
+
+# ── link discovery ───────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_discover_links_stores_url_domain_and_type(collector):
+    await collector._discover_links(
+        "join https://chat.whatsapp.com/InviteCode123",
+        "111@g.us",
+        session="session_2",
+    )
+
+    args = collector._test_conn.execute.await_args.args
+    assert args[1] == "chat-uuid-1"
+    assert args[2] == "https://chat.whatsapp.com/InviteCode123"
+    assert args[3] == "chat.whatsapp.com"
+    assert args[4] == "group_invite"
+
+
+@pytest.mark.asyncio
+async def test_discover_links_restricts_group_invites_from_disallowed_session(collector):
+    collector._spider_sessions = {"session_2"}
+
+    await collector._discover_links(
+        "join https://chat.whatsapp.com/InviteCode123",
+        "111@g.us",
+        session="session_1",
+    )
+
+    args = collector._test_conn.execute.await_args.args
+    assert args[2] == "https://chat.whatsapp.com/InviteCode123"
+    assert args[4] == "group_invite_restricted"
 
 
 # ── backfill_chat ─────────────────────────────────────────────────────────

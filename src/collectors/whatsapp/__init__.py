@@ -55,7 +55,7 @@ from src.core.user_change_tracker import (
     UserChangeTracker,
     WHATSAPP_TRACKED_FIELDS,
 )
-from src.core.link_extractor import extract_whatsapp_links, extract_all_links
+from src.core.link_extractor import extract_all_links
 from src.core.file_naming import sanitize_name
 
 logger = logging.getLogger(__name__)
@@ -121,6 +121,11 @@ class WhatsappCollector(BaseCollector):
         )
         # Send-side intentionally dropped: no bulk_send_enabled / hourly cap /
         # daily cap / membership gating. This collector is RECEIVE-ONLY.
+
+    def _is_spider_allowed(self, session_name: str) -> bool:
+        if not self._spider_sessions:
+            return True
+        return session_name.lower() in self._spider_sessions
 
     @property
     def account_media_dir(self) -> Path:
@@ -356,6 +361,11 @@ class WhatsappCollector(BaseCollector):
         # Tier 5: shared/live-location messages -> structured lat/lng.
         await self._extract_wa_location(event, chat_jid, msg_id)
 
+        if self._link_discovery_enabled:
+            text = event.get("body", "") or event.get("text", "") or event.get("caption", "")
+            if text:
+                await self._discover_links(text, chat_jid, session=session)
+
         # 3. Handle Media if exists
         media_type = event.get("media_type") or event.get("messageType", "")
         has_media = media_type in ("imageMessage", "videoMessage", "audioMessage", "documentMessage", "stickerMessage")
@@ -383,11 +393,6 @@ class WhatsappCollector(BaseCollector):
 
         if data:
             await self._save_media(data, cid, chat_jid, chat_name, content_type, ext, event)
-
-        if self._link_discovery_enabled:
-            text = event.get("body", "") or event.get("text", "") or event.get("caption", "")
-            if text:
-                await self._discover_links(text, chat_jid)
 
     async def _upsert_chat(self, jid: str, name: str, event: dict):
         # WhatsApp JID suffixes: @g.us = group, @newsletter = channel (one-to-many
@@ -776,8 +781,8 @@ class WhatsappCollector(BaseCollector):
         except Exception as e:
             logger.debug("wa location extract failed for %s: %s", msg_id, e)
 
-    async def _discover_links(self, text: str, chat_jid: str):
-        """Extract WhatsApp invite links and persist for downstream discovery."""
+    async def _discover_links(self, text: str, chat_jid: str, session: str = ""):
+        """Extract WhatsApp links and persist them for downstream discovery."""
         try:
             links = extract_all_links(text or "")
         except Exception as e:
@@ -799,7 +804,11 @@ class WhatsappCollector(BaseCollector):
                     "SELECT id FROM whatsapp_chats WHERE platform_chat_id = $1",
                     chat_jid,
                 )
-                for kind, url in links:
+                spider_ok = self._is_spider_allowed(session) if session else True
+                for url, kind in links:
+                    effective_kind = kind
+                    if kind == "group_invite" and not spider_ok:
+                        effective_kind = "group_invite_restricted"
                     try:
                         domain = (urlparse(url).netloc or None)
                     except Exception:
@@ -815,7 +824,7 @@ class WhatsappCollector(BaseCollector):
                                 WHERE url = $2 AND chat_id IS NOT DISTINCT FROM $1
                             )
                             """,
-                            chat_uuid, url, domain, kind,
+                            chat_uuid, url, domain, effective_kind,
                         )
                     except Exception as e:
                         logger.debug("wa_discovered_links insert skipped (%s): %s", url, e)

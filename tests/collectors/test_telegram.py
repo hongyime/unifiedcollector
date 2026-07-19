@@ -71,6 +71,7 @@ class _FakePool:
         import uuid as _uuid
         self.conn = MagicMock()
         self.conn.execute = AsyncMock()
+        self.conn.fetchval = AsyncMock(return_value=True)
 
         async def _smart_fetchrow(sql, *args, **kwargs):
             # Default behaviour: return a fake-id row for the common lookup
@@ -116,6 +117,7 @@ def _make_collector(monkeypatch, *, accounts=None, api_id="123", api_hash="x"):
     accounts pre-installed, bypassing env-driven account loading."""
     monkeypatch.setenv("TELEGRAM_API_ID", api_id)
     monkeypatch.setenv("TELEGRAM_API_HASH", api_hash)
+    monkeypatch.setenv("PROXIMITY_CACHE_ENABLED", "false")
     # Avoid noisy disk scans
     monkeypatch.setattr(tg_mod, "logger", tg_mod.logger)  # no-op, kept for symmetry
 
@@ -204,6 +206,13 @@ def test_constructor_picks_up_env(monkeypatch):
     assert coll._workers == []
     assert coll._primary_client is None
     assert coll._realtime_running is False
+
+
+def test_spider_allowlist_matches_worker_account(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_SPIDER_ACCOUNTS", "acct2, acct3")
+    coll = _make_collector(monkeypatch)
+    assert coll._is_spider_allowed(_make_worker(coll, name="acct2")) is True
+    assert coll._is_spider_allowed(_make_worker(coll, name="acct1")) is False
 
 
 def test_account_media_dir_isolated_per_session(monkeypatch, tmp_path):
@@ -341,17 +350,18 @@ async def test_process_spider_queue_marks_failed_on_exception(monkeypatch):
     worker = _make_worker(coll)
     coll.pool.conn.fetchrow.side_effect = [
         {"platform_chat_id": "999", "title": "x"},
+        {"attempts": 5, "status": "failed"},
         None,
     ]
     coll._collect_chat = AsyncMock(side_effect=RuntimeError("boom"))
 
     await coll._process_spider_queue(worker)
 
-    failed_calls = [
-        c for c in coll.pool.conn.execute.await_args_list
+    retry_or_fail_calls = [
+        c for c in coll.pool.conn.fetchrow.await_args_list
         if "failed" in c.args[0]
     ]
-    assert len(failed_calls) == 1
+    assert len(retry_or_fail_calls) == 1
 
 
 @pytest.mark.asyncio

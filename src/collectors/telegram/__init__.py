@@ -424,6 +424,12 @@ class TelegramCollector(BaseCollector):
         # Hot-reload task (item 4.6) — listens for new accounts via NOTIFY.
         self._hot_reload_task: asyncio.Task | None = None
 
+    def _is_spider_allowed(self, worker: "TelegramWorker") -> bool:
+        """Return whether this worker may process spider/join work."""
+        if not self._spider_accounts:
+            return True
+        return getattr(worker.account, "name", "").lower() in self._spider_accounts
+
     def _load_accounts(self):
         self.account_pool.load_from_env("TELEGRAM", ["NAME", "API_ID", "API_HASH", "SESSION", "PHONE"])
 
@@ -824,22 +830,27 @@ class TelegramCollector(BaseCollector):
         # TELEGRAM_SPIDER_ACCOUNTS restricts which accounts can spider.
         if os.getenv("TELEGRAM_SPIDER_ENABLED", "true").lower() == "true":
             try:
-                allowed = self._spider_accounts
                 spider_workers = [
                     w for w in self._workers
-                    if not allowed or w.account.name.lower() in allowed
+                    if self._is_spider_allowed(w)
                 ]
-                if allowed and len(spider_workers) < len(self._workers):
+                if self._spider_accounts and not spider_workers:
+                    logger.warning(
+                        "Spider enabled but no connected workers match TELEGRAM_SPIDER_ACCOUNTS=%s; skipping spider queue",
+                        ",".join(sorted(self._spider_accounts)),
+                    )
+                elif self._spider_accounts and len(spider_workers) < len(self._workers):
                     logger.info("Spider restricted to accounts: %s (%d/%d workers)",
-                                ", ".join(allowed), len(spider_workers), len(self._workers))
-                spider_tasks = [
-                    self._process_spider_queue(w)
-                    for w in spider_workers
-                ]
-                results = await asyncio.gather(*spider_tasks, return_exceptions=True)
-                for w, r in zip(self._workers, results):
-                    if isinstance(r, Exception):
-                        logger.error("Spider queue worker=%d crashed: %s", w.worker_id, r)
+                                ", ".join(sorted(self._spider_accounts)), len(spider_workers), len(self._workers))
+                if spider_workers:
+                    spider_tasks = [
+                        self._process_spider_queue(w)
+                        for w in spider_workers
+                    ]
+                    results = await asyncio.gather(*spider_tasks, return_exceptions=True)
+                    for w, r in zip(spider_workers, results):
+                        if isinstance(r, Exception):
+                            logger.error("Spider queue worker=%d crashed: %s", w.worker_id, r)
             except Exception as e:
                 logger.error("Spider queue processing failed: %s", e)
 
@@ -1311,13 +1322,19 @@ class TelegramCollector(BaseCollector):
         # Discussion group spider (item 2.1) — channels may have a linked
         # discussion group. If so, we join, scrape members+messages, leave.
         if getattr(entity, "broadcast", False):
-            try:
-                await self._spider_discussion_group(worker, entity, chat_id)
-            except Exception as exc:
+            if not self._is_spider_allowed(worker):
                 logger.debug(
-                    "_spider_discussion_group failed for channel=%s: %s",
-                    chat_id, exc,
+                    "[worker=%d account=%s] skipping discussion spider for channel=%s; account not in TELEGRAM_SPIDER_ACCOUNTS",
+                    worker.worker_id, worker.account.name, chat_id,
                 )
+            else:
+                try:
+                    await self._spider_discussion_group(worker, entity, chat_id)
+                except Exception as exc:
+                    logger.debug(
+                        "_spider_discussion_group failed for channel=%s: %s",
+                        chat_id, exc,
+                    )
 
         # Mark this target as collected in collection_targets
         logger.info("[_collect_chat] completed target=%s, calling mark_target_collected", target)
@@ -2500,8 +2517,15 @@ class TelegramCollector(BaseCollector):
                 continue
             last_drain = now
             try:
+                spider_workers = [
+                    w for w in self._workers
+                    if self._is_spider_allowed(w)
+                ]
+                if not spider_workers:
+                    logger.debug("realtime backfill drain skipped: no worker matches TELEGRAM_SPIDER_ACCOUNTS")
+                    continue
                 await asyncio.gather(
-                    *(self._process_spider_queue(w) for w in self._workers),
+                    *(self._process_spider_queue(w) for w in spider_workers),
                     return_exceptions=True,
                 )
             except Exception as exc:
