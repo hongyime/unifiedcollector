@@ -27,6 +27,7 @@ import type {
   AccountsOverview,
   FollowEdgeStat,
   PlatformSummary,
+  MessagingCoverageRow,
   IgDmThread,
   IgDmMessage,
   TtDmThread,
@@ -141,6 +142,7 @@ export const api = {
   accounts: () => get<AccountsOverview>("/accounts"),
   followEdgesStats: () => get<FollowEdgeStat[]>("/social/follow-edges/stats"),
   platformSummary: (name: string) => get<PlatformSummary>(`/platform/${name}/summary`),
+  messagingCoverage: () => get<MessagingCoverageRow[]>("/messaging/coverage"),
   socialUsers: (opts: { platform?: string; q?: string; limit?: number } = {}) => {
     const params = new URLSearchParams({ limit: String(opts.limit ?? 60) });
     if (opts.platform) params.set("platform", opts.platform);

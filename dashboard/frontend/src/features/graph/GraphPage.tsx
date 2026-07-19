@@ -7,10 +7,13 @@ import { MetricCard } from "../../components/ui/MetricCard";
 import { LoadingSpinner } from "../../components/ui/LoadingSpinner";
 import { ErrorState } from "../../components/ui/ErrorState";
 
-const sourceOptions = ["whatsapp", "instagram", "strava", "github", "x"].map((s) => ({
-  value: s,
-  label: s.charAt(0).toUpperCase() + s.slice(1),
-}));
+const sourceOptions = [
+  { value: "whatsapp", label: "WhatsApp co-message" },
+  { value: "instagram", label: "Instagram follows" },
+  { value: "strava", label: "Strava activity edges" },
+  { value: "github", label: "GitHub repo edges" },
+  { value: "x", label: "X follow edges" },
+];
 
 export function GraphPage() {
   const [source, setSource] = useState("whatsapp");
@@ -25,9 +28,9 @@ export function GraphPage() {
 
   return (
     <div>
-      <Header title="Raw Graph" subtitle="Collector-side relationship edges" onRefresh={() => refetch()} />
+      <Header title="Raw Relationship Edges" subtitle="Collector pre-resolution edges" onRefresh={() => refetch()} />
       <div className="flex items-center gap-3 mb-4">
-        <FilterDropdown label="Source" value={source} onChange={setSource} options={sourceOptions} />
+        <FilterDropdown label="Edge Source" value={source} onChange={setSource} options={sourceOptions} />
         <FilterDropdown label="Edge Limit" value={limit} onChange={setLimit} options={[
           { value: "1000", label: "1,000" },
           { value: "5000", label: "5,000" },

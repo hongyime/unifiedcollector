@@ -730,3 +730,18 @@ export interface PlatformSummary {
   age_seconds?: number | null;
   stale_after_seconds?: number | null;
 }
+
+export interface MessagingCoverageRow {
+  network: string;
+  native_source: string | null;
+  beeper_network: string;
+  canonical_source: "native" | "beeper";
+  policy: string;
+  native_messages: number;
+  native_chats: number;
+  native_people: number;
+  native_last_message: string | null;
+  beeper_messages: number;
+  beeper_chats: number;
+  beeper_last_message: string | null;
+}

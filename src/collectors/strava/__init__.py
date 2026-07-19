@@ -139,6 +139,10 @@ class StravaCollector(BaseCollector):
         self._feed_delay_max = float(os.getenv("STRAVA_FEED_DELAY_MAX", "12.0"))
         self._backfill_steps = int(os.getenv("STRAVA_BACKFILL_STEPS", "25"))
         self._ratelimit_sleep = int(os.getenv("STRAVA_RATELIMIT_SLEEP", "60"))
+        self._gps_stream_cooldown_until = 0.0
+        self._gps_stream_cooldown_seconds = int(
+            os.getenv("STRAVA_STREAM_RATELIMIT_SLEEP", str(max(self._ratelimit_sleep, 1800)))
+        )
 
         self._use_api = bool(self._client_id and self._client_secret and self._refresh_token)
         self._use_web = bool(self._session_cookie)
@@ -150,6 +154,18 @@ class StravaCollector(BaseCollector):
         self._my_athlete_id: str | None = None
         # Only ingest activities that carry media (photos) or a map/GPS polyline.
         self._require_media_or_map = os.getenv("STRAVA_REQUIRE_MEDIA_OR_MAP", "false").lower() == "true"
+
+    def _gps_stream_cooling_down(self) -> bool:
+        return time.time() < self._gps_stream_cooldown_until
+
+    def _set_gps_stream_cooldown(self, activity_id: str | int, context: str) -> None:
+        self._gps_stream_cooldown_until = time.time() + self._gps_stream_cooldown_seconds
+        logger.warning(
+            "strava: streams 429 for %s via %s; cooling GPS backfill for %ds",
+            activity_id,
+            context,
+            self._gps_stream_cooldown_seconds,
+        )
 
     def set_pool(self, pool):
         super().set_pool(pool)
@@ -1187,6 +1203,10 @@ class StravaCollector(BaseCollector):
         """
         if not self._use_web or not self.pool:
             return 0
+        if self._gps_stream_cooling_down():
+            left = int(self._gps_stream_cooldown_until - time.time())
+            logger.info("strava: GPS backfill cooling down for %ds", max(0, left))
+            return 0
         jar = self._build_cookie_jar()
         if jar is None:
             return 0
@@ -1205,7 +1225,16 @@ class StravaCollector(BaseCollector):
                 -- ~half of every batch. Random sampling spreads the (few hundred)
                 -- permanent failures across the ~34k pool so each batch is almost
                 -- all fresh work, while transient failures still get retried later.
-                ORDER BY random()
+                ORDER BY
+                    CASE WHEN a.page_scraped_at IS NOT NULL THEN 0 ELSE 1 END,
+                    CASE
+                        WHEN COALESCE(a.sport_type, a.type, '') ILIKE '%run%'
+                          OR COALESCE(a.sport_type, a.type, '') ILIKE '%walk%'
+                          OR COALESCE(a.sport_type, a.type, '') ILIKE '%ride%'
+                          OR COALESCE(a.sport_type, a.type, '') ILIKE '%hike%'
+                        THEN 0 ELSE 1
+                    END,
+                    random()
                 LIMIT $1
                 """, batch_size)
         if not rows:
@@ -1225,6 +1254,8 @@ class StravaCollector(BaseCollector):
                 try:
                     await self._collect_gps_streams(client, activity, str(row["platform_activity_id"]))
                     done += 1
+                    if self._gps_stream_cooling_down():
+                        break
                 except Exception as e:
                     logger.debug("GPS backfill failed for %s: %s",
                                  row["platform_activity_id"], e)
@@ -1249,6 +1280,8 @@ class StravaCollector(BaseCollector):
         for ANY activity the logged-in cookie can view. Returning None on failure
         (vs an empty list) lets the caller retry instead of caching "no GPS".
         """
+        if self._gps_stream_cooling_down():
+            return None, None, None
         await self._delay()
         # Preferred: web XHR with the session cookie (covers followed athletes).
         # Try EACH cookie account in turn — an activity hidden from one account
@@ -1282,6 +1315,9 @@ class StravaCollector(BaseCollector):
                         if latlng:
                             return (latlng, d.get("time") or [], d.get("altitude") or [])
                         saw_200_empty = True
+                    elif resp.status_code == 429:
+                        self._set_gps_stream_cooldown(activity_id, f"web:{name}")
+                        return None, None, None
                     else:
                         logger.debug("web streams %s (%s) -> HTTP %s", activity_id, name, resp.status_code)
                 except Exception as e:
@@ -1300,6 +1336,9 @@ class StravaCollector(BaseCollector):
                     return (s.get("latlng", {}).get("data", []),
                             s.get("time", {}).get("data", []),
                             s.get("altitude", {}).get("data", []))
+                if resp.status_code == 429:
+                    self._set_gps_stream_cooldown(activity_id, "api")
+                    return None, None, None
             except Exception as e:
                 logger.debug("api streams fetch failed for %s: %s", activity_id, e)
         return None, None, None
@@ -2294,13 +2333,16 @@ class StravaCollector(BaseCollector):
                         end = latlng[-1]
                         sl = f"{start[0]},{start[1]}" if len(start) == 2 else None
                         el = f"{end[0]},{end[1]}" if len(end) == 2 else None
+                        polyline = _encode_polyline(latlng)
                         async with self.pool.acquire() as conn:
                             await conn.execute(
                                 "UPDATE strava_activities "
                                 "SET start_latlng = COALESCE(start_latlng, $1), "
-                                "    end_latlng   = COALESCE(end_latlng, $2) "
-                                "WHERE platform_activity_id = $3",
-                                sl, el, activity_id,
+                                "    end_latlng   = COALESCE(end_latlng, $2), "
+                                "    summary_polyline = COALESCE(NULLIF(summary_polyline, ''), $3), "
+                                "    stream_status = COALESCE(stream_status, 'ok') "
+                                "WHERE platform_activity_id = $4",
+                                sl, el, polyline, activity_id,
                             )
                             act_row = await conn.fetchrow(
                                 "SELECT id FROM strava_activities WHERE platform_activity_id = $1",
@@ -2310,13 +2352,15 @@ class StravaCollector(BaseCollector):
                                 await conn.execute(
                                     "INSERT INTO strava_gps_streams (activity_id, latlng, collected_at) "
                                     "VALUES ($1, $2, NOW()) "
-                                    "ON CONFLICT (activity_id) DO NOTHING",
+                                    "ON CONFLICT (activity_id) DO UPDATE SET "
+                                    "latlng = EXCLUDED.latlng, collected_at = NOW()",
                                     act_row["id"], json.dumps(latlng),
                                 )
                         result["streams"] = len(latlng)
                         logger.info("strava scrape: activity %s streams %d points, start=%s sl=%r el=%r",
                                     activity_id, len(latlng), latlng[0], sl, el)
                 elif streams_resp.status_code == 429:
+                    self._set_gps_stream_cooldown(activity_id, "page")
                     logger.info("strava scrape: streams 429 for %s — skipping GPS", activity_id)
             except Exception as e:
                 logger.warning("strava scrape: streams fetch %s failed: %s", activity_id, e)
@@ -2550,22 +2594,35 @@ class StravaCollector(BaseCollector):
                                 latlng = entry.get("data", [])
                                 break
                     if latlng:
+                        start = latlng[0]
+                        end = latlng[-1]
+                        sl = f"{start[0]},{start[1]}" if start and len(start) == 2 else None
+                        el = f"{end[0]},{end[1]}" if end and len(end) == 2 else None
+                        polyline = _encode_polyline(latlng)
                         async with self.pool.acquire() as conn:
                             act_row = await conn.fetchrow(
                                 "SELECT id FROM strava_activities WHERE platform_activity_id = $1",
                                 activity_id)
                             if act_row:
-                                exists = await conn.fetchval(
-                                    "SELECT 1 FROM strava_gps_streams WHERE activity_id = $1",
-                                    act_row["id"])
-                                if not exists:
-                                    await conn.execute("""
-                                        INSERT INTO strava_gps_streams (activity_id, latlng, collected_at)
-                                        VALUES ($1, $2, NOW())
-                                        ON CONFLICT (activity_id) DO NOTHING
-                                    """, act_row["id"], json.dumps(latlng))
+                                await conn.execute("""
+                                    INSERT INTO strava_gps_streams (activity_id, latlng, collected_at)
+                                    VALUES ($1, $2, NOW())
+                                    ON CONFLICT (activity_id) DO UPDATE SET
+                                      latlng = EXCLUDED.latlng,
+                                      collected_at = NOW()
+                                """, act_row["id"], json.dumps(latlng))
+                                await conn.execute("""
+                                    UPDATE strava_activities
+                                    SET start_latlng = COALESCE(start_latlng, $1),
+                                        end_latlng = COALESCE(end_latlng, $2),
+                                        summary_polyline = COALESCE(NULLIF(summary_polyline, ''), $3),
+                                        stream_status = COALESCE(stream_status, 'ok')
+                                    WHERE id = $4
+                                """, sl, el, polyline, act_row["id"])
                         result["polyline"] = True
                         logger.info("strava scrape: web streams %s -> %d points", activity_id, len(latlng))
+                elif sresp.status_code == 429:
+                    self._set_gps_stream_cooldown(activity_id, "page-fallback")
             except Exception as e:
                 logger.debug("strava scrape: web streams %s failed: %s", activity_id, e)
 
@@ -2624,6 +2681,9 @@ class StravaCollector(BaseCollector):
                 if r["polyline"]:
                     totals["polylines"] += 1
                 totals["streams"] += r.get("streams", 0)
+                if self._gps_stream_cooling_down():
+                    logger.info("strava: stopping page GPS scrape early due to stream cooldown")
+                    break
                 try:
                     async with self.pool.acquire() as conn:
                         await conn.execute(

@@ -9,7 +9,7 @@ import { api } from "../../services/api";
 import { formatBytes, formatNumber, relativeTime } from "../../utils/formatters";
 import { Database, HardDrive, Activity, AlertCircle } from "lucide-react";
 import type { ColumnDef } from "@tanstack/react-table";
-import type { MediaStats } from "../../services/types";
+import type { MediaStats, MessagingCoverageRow } from "../../services/types";
 
 function liveBadgeStatus(status: MediaStats["live"]) {
   if (status === "live") return "online";
@@ -66,6 +66,61 @@ const columns: ColumnDef<MediaStats, unknown>[] = [
   },
 ];
 
+const messagingColumns: ColumnDef<MessagingCoverageRow, unknown>[] = [
+  {
+    accessorKey: "network",
+    header: "Network",
+    cell: (info) => <span className="font-medium">{info.getValue() as string}</span>,
+  },
+  {
+    accessorKey: "canonical_source",
+    header: "Canonical",
+    cell: (info) => {
+      const value = info.getValue() as MessagingCoverageRow["canonical_source"];
+      return <StatusBadge status={value === "native" ? "online" : "processing"} label={value} />;
+    },
+  },
+  {
+    accessorKey: "native_messages",
+    header: "Native",
+    cell: (info) => {
+      const row = info.row.original;
+      if (!row.native_source) return <span className="text-text-muted">—</span>;
+      return (
+        <div>
+          <div>{formatNumber(info.getValue() as number)} msgs</div>
+          <div className="text-[10px] uppercase tracking-wide text-text-muted">
+            {formatNumber(row.native_chats)} chats
+          </div>
+        </div>
+      );
+    },
+  },
+  {
+    accessorKey: "beeper_messages",
+    header: "Beeper",
+    cell: (info) => {
+      const row = info.row.original;
+      return (
+        <div>
+          <div>{formatNumber(info.getValue() as number)} msgs</div>
+          <div className="text-[10px] uppercase tracking-wide text-text-muted">
+            {formatNumber(row.beeper_chats)} chats · {row.policy}
+          </div>
+        </div>
+      );
+    },
+  },
+  {
+    accessorKey: "beeper_last_message",
+    header: "Last Seen",
+    cell: (info) => {
+      const row = info.row.original;
+      return relativeTime((row.native_last_message ?? info.getValue()) as string | null);
+    },
+  },
+];
+
 export function DashboardPage() {
   const { data: health, isLoading: hLoading } = useQuery({
     queryKey: ["health"],
@@ -83,6 +138,12 @@ export function DashboardPage() {
     queryKey: ["collectors-live"],
     queryFn: api.collectorsLive,
     refetchInterval: 15_000,
+  });
+
+  const { data: messagingCoverage } = useQuery({
+    queryKey: ["messaging-coverage"],
+    queryFn: api.messagingCoverage,
+    refetchInterval: 60_000,
   });
 
   if (hLoading && sLoading) return <LoadingSpinner />;
@@ -141,6 +202,11 @@ export function DashboardPage() {
       <div className="bg-surface rounded-lg border border-border p-4">
         <h2 className="text-xs uppercase tracking-wider text-text-muted mb-4">Collection Stats by Source</h2>
         {sLoading ? <LoadingSpinner /> : <DataTable data={stats ?? []} columns={columns} />}
+      </div>
+
+      <div className="bg-surface rounded-lg border border-border p-4 mt-6">
+        <h2 className="text-xs uppercase tracking-wider text-text-muted mb-4">Messaging Coverage</h2>
+        <DataTable data={messagingCoverage ?? []} columns={messagingColumns} />
       </div>
     </div>
   );

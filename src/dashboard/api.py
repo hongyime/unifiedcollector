@@ -1,7 +1,9 @@
 import asyncio
 import io
+import json
 import logging
 import os
+import time
 import traceback
 import uuid as _uuid
 from datetime import datetime, timedelta, timezone
@@ -20,6 +22,58 @@ from src.db.connection import get_pool
 from src.dashboard.websocket import health_ws
 
 logger = logging.getLogger(__name__)
+_MESSAGING_COVERAGE_CACHE: dict[str, object] = {"ts": 0.0, "rows": None}
+
+
+def _encode_polyline(points, precision: int = 5) -> str:
+    """Encode GPS points into a compact map thumbnail polyline."""
+    if not points:
+        return ""
+    max_points = 600
+    if len(points) > max_points:
+        step = len(points) / max_points
+        points = [points[int(i * step)] for i in range(max_points)]
+    factor = 10 ** precision
+
+    def _enc(v: int) -> str:
+        v = v << 1 if v >= 0 else ~(v << 1)
+        out = []
+        while v >= 0x20:
+            out.append(chr((0x20 | (v & 0x1F)) + 63))
+            v >>= 5
+        out.append(chr(v + 63))
+        return "".join(out)
+
+    prev_lat = prev_lng = 0
+    result = []
+    for pt in points:
+        if not pt or len(pt) != 2:
+            continue
+        lat_i = int(round(float(pt[0]) * factor))
+        lng_i = int(round(float(pt[1]) * factor))
+        result.append(_enc(lat_i - prev_lat))
+        result.append(_enc(lng_i - prev_lng))
+        prev_lat, prev_lng = lat_i, lng_i
+    return "".join(result)
+
+
+def _jsonb_points(value) -> list:
+    if not value:
+        return []
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except Exception:
+            return []
+    return value if isinstance(value, list) else []
+
+
+async def _estimated_table_rows(conn, table: str) -> int:
+    value = await conn.fetchval(
+        "SELECT GREATEST(0, reltuples)::bigint FROM pg_class WHERE oid = $1::regclass",
+        table,
+    )
+    return int(value or 0)
 
 app = FastAPI(title="UnifiedCollector Dashboard")
 
@@ -1363,6 +1417,108 @@ async def social_graph(
     }
 
 
+@app.get("/messaging/coverage")
+async def messaging_coverage(_user: dict = Depends(require_role("viewer"))):
+    """Native-vs-Beeper messaging coverage.
+
+    Native Telegram/WhatsApp tables are canonical. Beeper is a mirror for those
+    networks and the canonical source for networks with no native collector.
+    """
+    cache_ttl = 300
+    now = time.time()
+    cached = _MESSAGING_COVERAGE_CACHE.get("rows")
+    if cached is not None and now - float(_MESSAGING_COVERAGE_CACHE.get("ts") or 0) < cache_ttl:
+        return cached
+
+    pool = await get_pool()
+    rows = [
+        {
+            "network": "Telegram",
+            "native_source": "telegram",
+            "beeper_network": "Telegram",
+            "canonical_source": "native",
+            "policy": "beeper mirror",
+        },
+        {
+            "network": "WhatsApp",
+            "native_source": "whatsapp",
+            "beeper_network": "WhatsApp",
+            "canonical_source": "native",
+            "policy": "beeper mirror",
+        },
+        {
+            "network": "Discord",
+            "native_source": None,
+            "beeper_network": "Discord",
+            "canonical_source": "beeper",
+            "policy": "beeper only",
+        },
+    ]
+    async with pool.acquire() as conn:
+        native = {
+            "telegram": {
+                "messages": await _estimated_table_rows(conn, "telegram_messages"),
+                "chats": await conn.fetchval("SELECT COUNT(*) FROM telegram_chats"),
+                "people": await conn.fetchval(
+                    "SELECT COUNT(*) FROM telegram_users WHERE NOT COALESCE(is_bot, false)"
+                ),
+                "last_message": await conn.fetchval("SELECT MAX(platform_created_at) FROM telegram_messages"),
+            },
+            "whatsapp": {
+                "messages": await conn.fetchval("SELECT COUNT(*) FROM whatsapp_messages"),
+                "chats": await conn.fetchval("SELECT COUNT(*) FROM whatsapp_chats"),
+                "people": await conn.fetchval("SELECT COUNT(*) FROM whatsapp_users"),
+                "last_message": await conn.fetchval("SELECT MAX(timestamp) FROM whatsapp_messages"),
+            },
+        }
+        beeper_message_rows = await conn.fetch(
+            """
+            SELECT network, COUNT(*) AS messages, MAX(timestamp) AS last_message
+            FROM beeper_shadow_messages
+            WHERE network = ANY($1::text[])
+            GROUP BY network
+            """,
+            ["Telegram", "WhatsApp", "Discord"],
+            timeout=30,
+        )
+        beeper_chat_rows = await conn.fetch(
+            """
+            SELECT network, COUNT(*) AS chats, MAX(last_seen_at) AS last_seen
+            FROM beeper_shadow_chats
+            WHERE network = ANY($1::text[])
+            GROUP BY network
+            """,
+            ["Telegram", "WhatsApp", "Discord"],
+            timeout=30,
+        )
+    beeper_messages = {r["network"]: dict(r) for r in beeper_message_rows}
+    beeper_chats = {r["network"]: dict(r) for r in beeper_chat_rows}
+    out = []
+    for row in rows:
+        src = row["native_source"]
+        net = row["beeper_network"]
+        native_stats = native.get(src or "", {"messages": 0, "chats": 0, "people": 0, "last_message": None})
+        mirror_messages = beeper_messages.get(net, {})
+        mirror_chats = beeper_chats.get(net, {})
+        d = {
+            **row,
+            "native_messages": native_stats.get("messages") or 0,
+            "native_chats": native_stats.get("chats") or 0,
+            "native_people": native_stats.get("people") or 0,
+            "native_last_message": native_stats.get("last_message"),
+            "beeper_messages": mirror_messages.get("messages") or 0,
+            "beeper_chats": mirror_chats.get("chats") or 0,
+            "beeper_last_message": mirror_messages.get("last_message") or mirror_chats.get("last_seen"),
+        }
+        for key in ("native_last_message", "beeper_last_message"):
+            if d[key]:
+                d[key] = d[key].isoformat()
+        out.append(d)
+    _MESSAGING_COVERAGE_CACHE["ts"] = now
+    _MESSAGING_COVERAGE_CACHE["rows"] = out
+    return out
+
+
 # ── Media browser ──
 
 @app.get("/media/browse")
@@ -2245,18 +2401,18 @@ async def strava_feed_activities(
     args.append(int(limit))
     args.append(int(offset))
     # NB: summary_polyline / start_latlng / distance_unit / stream_status feed the
-    # dashboard map thumbnail — see StravaFeedPage.tsx decodePolyline(). Kept in
-    # the same query so the frontend renders type-icon + distance + duration +
-    # map from one round trip. `average_speed` returned too so a future speed
-    # column can drop in without another schema change.
+    # dashboard map thumbnail. Older scrapes sometimes populated the full GPS
+    # stream without backfilling summary_polyline, so we also fetch latlng and
+    # derive the compact thumbnail line below when needed.
     sql = (
         "SELECT act.platform_activity_id, act.name, act.type, act.sport_type, "
         "       act.distance, act.distance_unit, act.moving_time, act.elapsed_time, "
         "       act.total_elevation_gain, act.average_speed, act.start_date, "
-        "       act.summary_polyline, act.start_latlng, act.stream_status, "
+        "       act.summary_polyline, act.start_latlng, act.stream_status, s.latlng AS gps_latlng, "
         "       a.platform_athlete_id, a.username, a.firstname, a.lastname, a.profile "
         "FROM strava_activities act "
         "LEFT JOIN strava_athletes a ON a.id = act.athlete_id "
+        "LEFT JOIN strava_gps_streams s ON s.activity_id = act.id "
         f"WHERE {' AND '.join(where)} "
         f"ORDER BY act.start_date DESC LIMIT ${len(args) - 1} OFFSET ${len(args)}"
     )
@@ -2267,6 +2423,13 @@ async def strava_feed_activities(
         d = dict(r)
         if d.get("start_date"):
             d["start_date"] = d["start_date"].isoformat()
+        if not d.get("summary_polyline"):
+            points = _jsonb_points(d.pop("gps_latlng", None))
+            if len(points) > 1:
+                d["summary_polyline"] = _encode_polyline(points)
+                d["stream_status"] = d.get("stream_status") or "ok"
+        else:
+            d.pop("gps_latlng", None)
         out.append(d)
     return out
 

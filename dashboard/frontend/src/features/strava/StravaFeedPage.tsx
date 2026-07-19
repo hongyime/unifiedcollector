@@ -82,12 +82,16 @@ function MapThumb({
   }, [polyline]);
 
   if (!path) {
-    // truncated_empty = privacy-zone activity (Strava intentionally strips the
-    // track). "start only" means the feed exposed a start coordinate but not
-    // enough route points to draw a map.
+    // NULL stream_status means the collector has not reached a definitive route
+    // result yet. Do not label that as "no route"; those rows are still queued
+    // for cookie-authenticated stream backfill.
     const label = streamStatus === "truncated_empty"
       ? "privacy zone"
-      : startLatlng
+      : streamStatus === "incomplete"
+        ? "no gps"
+        : streamStatus == null
+          ? "route queued"
+          : startLatlng
         ? "start only"
         : "no route";
     return (
