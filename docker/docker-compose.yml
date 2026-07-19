@@ -745,9 +745,9 @@ services:
     env_file:
       - ../.env
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8700/health')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8700/health', timeout=10)"]
       interval: 30s
-      timeout: 5s
+      timeout: 15s
       retries: 3
       start_period: 10s
     restart: unless-stopped
