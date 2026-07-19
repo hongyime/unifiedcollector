@@ -16,7 +16,7 @@ const ALARM = "uc-scrape";
 const DEFAULT_INGEST = "http://127.0.0.1:8765";
 const LOG_KEY = "ucLog";
 const LOG_MAX = 200;
-const WATCHDOG_MIN = 10;         // re-nudge any open scraper tab whose loop died
+const WATCHDOG_MIN = 13;         // re-nudge any open scraper tab whose loop died
 const KICK_DEBOUNCE_MS = 30000;  // don't re-nudge the same tab more often than this
 
 // ---- persistent logging --------------------------------------------------
@@ -51,13 +51,20 @@ async function ingestBase() {
 // hourly — reloading respawns the content script + loop AND pulls fresh content,
 // so it can never silently die again.
 const ALARM_REFRESH = "uc-refresh";
-const REFRESH_MIN = 75;
+const REFRESH_MIN = 105;
 
 async function autoTabsEnabled() {
   const { ucAutoTabs } = await chrome.storage.local.get("ucAutoTabs");
   return ucAutoTabs !== false; // default ON
 }
 const _sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const _jitterMs = (base, spread = 0.55) => Math.round(base * (1 - spread + Math.random() * spread * 2));
+const _humanGap = (base) => {
+  let ms = _jitterMs(base, 0.65);
+  if (Math.random() < 0.12) ms += 3000 + Math.random() * 9000;
+  return Math.max(750, Math.round(ms));
+};
+const _alarmJitter = () => _sleep(15000 + Math.random() * 120000);
 let _tabsOpInProgress = false; // guard against overlapping open/refresh runs (no spam)
 
 // Open exactly the missing scraper tabs — pinned, background, ONE at a time with a
@@ -79,7 +86,7 @@ async function ensureScraperTabsOpen(reason) {
       if (!(p.extraUrls && p.extraUrls.length)) {
         // single-feed: keep one tab on the host, close the rest
         if (tabs.length === 0) {
-          try { await chrome.tabs.create({ url: p.url, pinned: true, active: false }); opened++; await _sleep(1500); } catch (e) {}
+          try { await chrome.tabs.create({ url: p.url, pinned: true, active: false }); opened++; await _sleep(_humanGap(3000)); } catch (e) {}
         } else {
           for (let i = 1; i < tabs.length; i++) { try { await chrome.tabs.remove(tabs[i].id); closed++; } catch (e) {} }
         }
@@ -94,7 +101,7 @@ async function ensureScraperTabsOpen(reason) {
           if (m) { if (kept.has(m)) { try { await chrome.tabs.remove(t.id); closed++; } catch (e) {} } else kept.add(m); }
         }
         for (let i = 0; i < targets.length; i++) {
-          if (!kept.has(wantPaths[i])) { try { await chrome.tabs.create({ url: targets[i], pinned: true, active: false }); opened++; await _sleep(1500); } catch (e) {} }
+          if (!kept.has(wantPaths[i])) { try { await chrome.tabs.create({ url: targets[i], pinned: true, active: false }); opened++; await _sleep(_humanGap(3000)); } catch (e) {} }
         }
       }
     }
@@ -130,7 +137,7 @@ async function refreshScraperTabs() {
   _tabsOpInProgress = true;
   try {
     const tabs = await chrome.tabs.query({ url: scraperUrlPatterns() });
-    for (const t of tabs || []) { try { await chrome.tabs.reload(t.id, { bypassCache: false }); await _sleep(3000); } catch (e) {} }
+    for (const t of tabs || []) { try { await chrome.tabs.reload(t.id, { bypassCache: false }); await _sleep(_humanGap(8000)); } catch (e) {} }
     await log("info", `auto-refreshed ${tabs ? tabs.length : 0} scraper tab(s), staggered → loop respawns fresh`);
   } finally { _tabsOpInProgress = false; }
 }
@@ -139,7 +146,7 @@ async function scheduleAlarm() {
   chrome.alarms.create(ALARM, { periodInMinutes: WATCHDOG_MIN });
   chrome.alarms.create(ALARM_REFRESH, { periodInMinutes: REFRESH_MIN });
   await setStatus({ swStartedAt: Date.now() });
-  await log("info", `✅ worker started v1.20.0 (IG reel music + geo capture) — auto-tabs + ${WATCHDOG_MIN}-min watchdog + ${REFRESH_MIN}-min refresh`);
+  await log("info", `worker started v1.21.18 - jittered tabs + ${WATCHDOG_MIN}-min watchdog + ${REFRESH_MIN}-min refresh`);
 }
 // onInstalled fires on every extension reload/update — the exact moment content
 // scripts in already-open tabs get SEVERED ("Extension context invalidated") and go
@@ -156,8 +163,8 @@ chrome.runtime.onInstalled.addListener(() => {
 chrome.runtime.onStartup.addListener(() => { scheduleAlarm(); syncCookies(); ensureScraperTabsOpen("startup").then(() => ensureLoops("startup")); });
 
 chrome.alarms.onAlarm.addListener(async (a) => {
-  if (a.name === ALARM) { await ensureScraperTabsOpen("watchdog"); await ensureLoops("watchdog"); }
-  else if (a.name === ALARM_REFRESH) { await refreshScraperTabs(); await syncCookies(); }
+  if (a.name === ALARM) { await _alarmJitter(); await ensureScraperTabsOpen("watchdog"); await ensureLoops("watchdog"); }
+  else if (a.name === ALARM_REFRESH) { await _alarmJitter(); await refreshScraperTabs(); await syncCookies(); }
 });
 
 // scraper hosts that have a content-script scraper

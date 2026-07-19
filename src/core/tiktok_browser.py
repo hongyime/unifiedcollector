@@ -34,6 +34,8 @@ import re
 from pathlib import Path
 from typing import Any, Optional
 
+from src.core.scrape_pacing import headless_dwell
+
 logger = logging.getLogger(__name__)
 
 
@@ -228,9 +230,11 @@ class TikTokBrowserDownloader:
         page = await self._context.new_page()
         try:
             try:
+                await headless_dwell("tiktok profile goto")
                 await page.goto(
                     profile_url, timeout=self.timeout_ms, wait_until="domcontentloaded"
                 )
+                await headless_dwell("tiktok profile hydrate")
             except Exception as exc:
                 logger.warning("download_user @%s: goto failed: %s", username, exc)
                 return []
@@ -281,9 +285,11 @@ class TikTokBrowserDownloader:
         page = await self._context.new_page()
         try:
             try:
+                await headless_dwell("tiktok video goto")
                 resp = await page.goto(
                     url, timeout=self.timeout_ms, wait_until="domcontentloaded"
                 )
+                await headless_dwell("tiktok video hydrate")
             except Exception as exc:
                 logger.warning("download_video %s: goto failed: %s", vid, exc)
                 return None
@@ -383,9 +389,11 @@ class TikTokBrowserDownloader:
 
         try:
             try:
+                await headless_dwell("tiktok video detail goto")
                 await page.goto(
                     video_url, timeout=self.timeout_ms, wait_until="domcontentloaded"
                 )
+                await headless_dwell("tiktok video detail hydrate")
             except Exception as exc:
                 logger.warning("download_video %s: goto failed: %s", vid, exc)
                 return None

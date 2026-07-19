@@ -2,6 +2,8 @@ import logging
 import threading
 import time
 
+from .scrape_pacing import jittered_delay
+
 logger = logging.getLogger(__name__)
 
 
@@ -44,7 +46,7 @@ class AdaptiveRateLimiter:
 
     def wait(self, domain: str, stop_event: threading.Event | None = None):
         """Sleep for the current delay, then update last-request time."""
-        delay = self.get_delay(domain)
+        delay = jittered_delay(self.get_delay(domain))
         if delay > 0:
             if stop_event:
                 stop_event.wait(delay)

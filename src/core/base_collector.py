@@ -13,6 +13,7 @@ from .drive_check import check_drive, DRIVE_PATH
 from .file_naming import build_filename, parse_filename
 from .rate_limiter import AdaptiveRateLimiter
 from .resilience import CircuitBreaker, wait_for_internet
+from .scrape_pacing import sleep_rate_limit
 from .user_agent import UserAgentPool
 
 logger = logging.getLogger(__name__)
@@ -502,7 +503,7 @@ class BaseCollector(ABC):
         domain = domain or self.SOURCE_NAME
         delay = self.rate_limiter.get_delay(domain)
         if delay > 0:
-            await asyncio.sleep(delay)
+            await sleep_rate_limit(delay)
 
     async def ensure_internet(self):
         loop = asyncio.get_event_loop()

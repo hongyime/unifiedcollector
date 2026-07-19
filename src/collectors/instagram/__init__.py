@@ -46,6 +46,7 @@ from src.core.human_rate_limiter import HumanLikeRateLimiter, OperationType
 from src.core.sliding_window_limiter import SlidingWindowRateLimiter, WindowConfig
 from src.core.proximity import refresh_account_proximity_cache
 from src.core.profile_photo_tracker import ProfilePhotoTracker
+from src.core.scrape_pacing import headless_dwell
 from src.core.user_change_tracker import (
     UserChangeTracker,
     INSTAGRAM_TRACKED_FIELDS,
@@ -1750,7 +1751,9 @@ class InstagramCollector(BaseCollector):
                 # and goto hangs to the 45s timeout. We only need origin+cookies for
                 # the same-origin fetch below, which "commit" already gives us.
                 try:
+                    await headless_dwell("instagram profile goto")
                     await page.goto(profile_url, wait_until="commit", timeout=30000)
+                    await headless_dwell("instagram profile api fetch")
                 except Exception as e:
                     logger.warning("Playwright Mode-β goto failed for %s: %s", username, e)
                     return None
@@ -1864,7 +1867,9 @@ class InstagramCollector(BaseCollector):
                 try:
                     # "load" not "networkidle" — IG polls continuously and never goes
                     # network-idle, so networkidle always hangs to the timeout.
+                    await headless_dwell("instagram posts goto")
                     await page.goto(url, wait_until="load", timeout=30000)
+                    await headless_dwell("instagram posts evaluate")
                 except Exception as e:
                     logger.warning("Playwright goto failed for %s: %s", url, e)
                     return
@@ -3585,7 +3590,9 @@ class InstagramCollector(BaseCollector):
                 ctx = await browser.new_context(**kw)
                 page = await ctx.new_page()
                 try:
+                    await headless_dwell("instagram generic goto")
                     await page.goto(url, wait_until=wait_until, timeout=timeout_ms)
+                    await headless_dwell("instagram generic evaluate")
                 except Exception as e:
                     logger.debug("playwright_fetch_url goto(%s) failed: %s", url, e)
                     return None

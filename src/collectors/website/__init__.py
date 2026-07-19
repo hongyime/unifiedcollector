@@ -130,6 +130,7 @@ from urllib.parse import urljoin, urlparse, urlunparse
 import httpx
 
 from src.core.base_collector import BaseCollector
+from src.core.scrape_pacing import headless_dwell
 from src.core.url_filter import URLFilter
 
 logger = logging.getLogger(__name__)
@@ -1025,7 +1026,9 @@ class WebsiteCollector(BaseCollector):
                 try:
                     context = await browser.new_context(user_agent=DEFAULT_USER_AGENT)
                     page = await context.new_page()
+                    await headless_dwell("website render goto")
                     await page.goto(url, wait_until="networkidle", timeout=30_000)
+                    await headless_dwell("website render content")
                     html = await page.content()
                     return html
                 finally:

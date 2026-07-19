@@ -36,13 +36,13 @@ function setWall(platform, mins) { lsSet("uc_wall_" + platform, String(Date.now(
 // Instagram stays deliberately cautious at 45m by default; shortening it
 // aggressively re-extends the account/IP throttle window and raises ban risk.
 const DEFAULT_THROTTLE_BACKOFF_MINS = {
-  instagram: 45,
-  threads: 12,
-  x: 12,
-  tiktok: 20,
-  facebook: 20,
-  lemon8: 20,
-  default: 30,
+  instagram: 75,
+  threads: 20,
+  x: 20,
+  tiktok: 30,
+  facebook: 30,
+  lemon8: 30,
+  default: 35,
 };
 async function throttleBackoffMins(platform, fallback = DEFAULT_THROTTLE_BACKOFF_MINS.default) {
   try {
@@ -55,21 +55,22 @@ async function throttleBackoffMins(platform, fallback = DEFAULT_THROTTLE_BACKOFF
 }
 async function applyThrottleWall(platform, reason) {
   const mins = await throttleBackoffMins(platform);
-  setWall(platform, mins);
-  await send({ type: "wall", platform, mins }).catch(() => {});
-  return mins;
+  const wallMins = Math.max(1, Math.round(mins * (0.85 + Math.random() * 0.45)));
+  setWall(platform, wallMins);
+  await send({ type: "wall", platform, mins: wallMins }).catch(() => {});
+  return wallMins;
 }
 
 // ---------------------------------------------------------------------------
 // HUMAN PACING. A real person browsing is slow, irregular, and takes breaks.
 // Scraping 257 profiles back-to-back is what got the IG account flagged for
-// review. `human(base)` returns base×(0.6–1.6) and ~12% of the time adds a 4–13s
-// "distraction" pause; small chance of a long 30–90s coffee break. Use hsleep()
+// review. `human(base)` returns base x (0.8-2.2) and sometimes adds an extra
+// pause or a longer rest. Use hsleep()
 // everywhere instead of fixed sleeps, and keep per-cycle VOLUME small.
 function human(base) {
-  let ms = base * (0.6 + Math.random());            // 0.6×–1.6×
-  if (Math.random() < 0.12) ms += 4000 + Math.random() * 9000;   // distraction
-  if (Math.random() < 0.03) ms += 30000 + Math.random() * 60000; // coffee break
+  let ms = base * (0.8 + Math.random() * 1.4);
+  if (Math.random() < 0.18) ms += 5000 + Math.random() * 15000;
+  if (Math.random() < 0.05) ms += 45000 + Math.random() * 105000;
   return Math.round(ms);
 }
 const hsleep = (base) => sleep(human(base));
@@ -312,12 +313,12 @@ async function maybeSweepFollowGraph({ platform, owner, urls, homeUrl }) {
 // ===========================================================================
 const IG_APP_ID = "936619743392459";
 const SPIDER_FAMOUS_CAP = 3000;   // skip accounts > 3k followers (focus on close network)
-const SPIDER_FOLLOWS_PER_SIDE = 70;     // was 150 — fewer graph calls per profile
+const SPIDER_FOLLOWS_PER_SIDE = 35;     // fewer graph calls per profile
 const IG_MAX_ITEMS = 180;               // cap media pages per profile
 // Per-cycle target budget: a human checks a HANDFUL of profiles, not 257.
 // Randomised each cycle; the rest are picked up on later cycles (round-robin).
-function igTargetBudget() { return 4 + ((Math.random() * 5) | 0); } // 4–8 deep profiles/cycle
-const IG_STORY_SWEEP = 10;   // profiles to grab EXPIRING stories/highlights from, first, each cycle
+function igTargetBudget() { return 2 + ((Math.random() * 3) | 0); } // 2-4 deep profiles/cycle
+const IG_STORY_SWEEP = 5;   // profiles to grab EXPIRING stories/highlights from, first, each cycle
 const IG_SEEDED_ACCOUNTS = new Set();  // ds_user_ids self-seeded this session (re-seeds on account switch)
 
 const instagram = {
@@ -635,7 +636,7 @@ const instagram = {
     const left = wallLeftMs("instagram");
     if (left > 0) {
       clog("warn", `IG throttled — resting, ${Math.ceil(left / 60000)}m left (not touching IG)`, "instagram");
-      await sleep(Math.min(left, 600000)); // re-check every ≤10m
+      await sleep(Math.min(left, human(600000))); // re-check roughly every 8-22m
       return { targets: 0, saved: 0, discovered: 0, walled: true };
     }
     // Per-account self-seed: capture EACH account's own graph as you switch to it.
@@ -1299,7 +1300,7 @@ function currentPlatform() {
 let LOOP_RUNNING = false;
 
 // Rest between passes — a person doesn't scrape non-stop. Tunable.
-const PASS_REST_MS = 90000; // ~54s–144s + occasional longer breaks via human()
+const PASS_REST_MS = 180000; // ~2.4m-6.6m + occasional longer breaks via human()
 
 async function mainLoop() {
   const p = currentPlatform();

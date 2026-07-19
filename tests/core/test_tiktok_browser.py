@@ -14,6 +14,11 @@ from src.core import tiktok_browser as tb_mod
 from src.core.tiktok_browser import TikTokBrowserDownloader
 
 
+@pytest.fixture(autouse=True)
+def _disable_headless_dwell(monkeypatch):
+    monkeypatch.setenv("HEADLESS_NAV_DWELL_ENABLED", "0")
+
+
 # ── Fakes for the Playwright async API ──────────────────────────────────────
 
 
