@@ -5,15 +5,26 @@ WORKDIR /app
 # Install OS dependencies first (cached separately)
 RUN apk add --no-cache git python3 make g++
 
-# Then handle npm install with high timeout for slow networks
-COPY package.json ./
+# Then handle npm install with high timeout for slow networks.
+COPY package.json package-lock.json ./
 RUN npm config set fetch-retry-mintimeout 20000 && \
     npm config set fetch-retry-maxtimeout 120000 && \
-    npm install --network-timeout=1000000
+    npm ci --no-audit --network-timeout=1000000
 
 COPY tsconfig.json ./
 COPY src/ ./src/
 RUN npm run build
+
+# Production dependencies stage. Native build tools stay out of the final image.
+FROM node:20-alpine AS production-deps
+WORKDIR /app
+
+RUN apk add --no-cache git python3 make g++
+COPY package.json package-lock.json ./
+RUN npm config set fetch-retry-mintimeout 20000 && \
+    npm config set fetch-retry-maxtimeout 120000 && \
+    npm ci --omit=dev --no-audit --network-timeout=1000000 && \
+    npm cache clean --force
 
 # Production stage
 FROM node:20-alpine
@@ -22,13 +33,8 @@ WORKDIR /app
 # Add non-root user
 RUN addgroup -S wac && adduser -S wac -G wac
 
-# Reuse same setup for production (without devDeps)
-RUN apk add --no-cache git python3 make g++
 COPY package.json ./
-RUN npm config set fetch-retry-mintimeout 20000 && \
-    npm config set fetch-retry-maxtimeout 120000 && \
-    npm install --omit=dev --network-timeout=1000000
-
+COPY --from=production-deps /app/node_modules ./node_modules
 COPY --from=builder /app/build ./build
 
 # Storage directories
