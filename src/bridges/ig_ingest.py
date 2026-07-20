@@ -44,7 +44,7 @@ from src.db.connection import get_pool, close_pool
 from src.core.media_filter import inspect as inspect_media
 from src.core.priority_hints import refresh_collector_priority_hints
 from src.core.proximity import refresh_account_proximity_cache
-from src.core.vault import assert_media_write_allowed, write_media_sidecar
+from src.core.vault import assert_media_write_allowed, write_media_sidecar, write_raw_payload
 
 # Follow-aware access recording (Phase 0). The extension IS the live IG path, so
 # recording access outcomes here populates profile_access_{summary,attempts} far
@@ -86,6 +86,23 @@ _SAFE = re.compile(r"[^A-Za-z0-9._-]")
 # Only instagram currently spiders (followers/following graph); the others scrape
 # whatever the open page exposes, so they have no spider table.
 KNOWN_PLATFORMS = {"instagram", "tiktok", "lemon8", "x", "threads", "facebook"}
+
+_BROWSER_CAPTURE_TARGET_TABLES = {
+    "profile": {
+        "instagram": ["instagram_profiles"],
+        "x": ["x_profiles"],
+        "facebook": ["facebook_profiles"],
+    },
+    "posts": {
+        "instagram": ["instagram_posts"],
+        "threads": ["threads_posts"],
+        "facebook": ["facebook_posts"],
+        "x": ["x_posts"],
+    },
+    "comments": {
+        "instagram": ["instagram_comments"],
+    },
+}
 
 # 2-hop spider (instagram only): the extension scrapes a target's media AND, when
 # the target's hop < MAX_HOP, crawls its followers/following and POSTs them to
@@ -1803,6 +1820,92 @@ async def _record_ig_access(pool, target_username, owner, profile) -> None:
         logger.debug("ig access-record failed for %s", target_username, exc_info=True)
 
 
+def _browser_capture_subject(endpoint: str, body: dict) -> str:
+    if endpoint == "profile":
+        profile = body.get("profile") if isinstance(body.get("profile"), dict) else {}
+        return str(
+            profile.get("username")
+            or profile.get("user_id")
+            or profile.get("platform_user_id")
+            or "profile"
+        ).lstrip("@")
+    if endpoint == "posts":
+        posts = body.get("posts") if isinstance(body.get("posts"), list) else []
+        first = posts[0] if posts and isinstance(posts[0], dict) else {}
+        return str(first.get("platform_post_id") or first.get("content_id") or f"{len(posts)}_posts")
+    if endpoint == "comments":
+        return str(body.get("post_id") or "comments")
+    return endpoint
+
+
+async def _archive_browser_capture(pool, platform: str, endpoint: str, body: dict) -> None:
+    """Best-effort vault raw archive for extension/browser evidence.
+
+    Do not call this for credential endpoints. Cookies stay in credential files,
+    never in raw payloads or sidecars.
+    """
+    if endpoint == "cookies":
+        return
+    if not isinstance(body, dict):
+        return
+    source = _norm_platform(platform)
+    if source not in KNOWN_PLATFORMS:
+        return
+    subject = _SAFE.sub("_", _browser_capture_subject(endpoint, body))[:96] or endpoint
+    artifact_id = f"extension/{endpoint}/{subject}/{time.time_ns()}"
+    owner = body.get("owner")
+    if isinstance(owner, dict):
+        collection_account = owner.get("username") or owner.get("id")
+    else:
+        collection_account = owner if isinstance(owner, str) else None
+    metadata = {
+        "ingest_path": "extension",
+        "endpoint": endpoint,
+        "platform": source,
+        "collection_account": collection_account,
+        "extension_version": body.get("extension_version"),
+        "request_url": body.get("request_url") or body.get("url"),
+        "http_status": body.get("http_status"),
+        "body_keys": sorted(str(k) for k in body.keys()),
+    }
+    target_tables = _BROWSER_CAPTURE_TARGET_TABLES.get(endpoint, {}).get(source, [])
+    result = write_raw_payload(
+        source=source,
+        artifact_id=artifact_id,
+        payload=body,
+        metadata=metadata,
+        target_tables=target_tables,
+    )
+    if result.ok:
+        return
+    logger.warning(
+        "browser raw archive failed platform=%s endpoint=%s artifact=%s: %s",
+        source,
+        endpoint,
+        artifact_id,
+        result.error,
+    )
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO dead_letter_queue (source, entity_id, content_id, error_message)
+                VALUES ($1, $2, $3, $4)
+                """,
+                source,
+                subject,
+                artifact_id,
+                f"browser raw archive failed: {result.error}"[:500],
+            )
+    except Exception:
+        logger.debug(
+            "browser raw archive DLQ insert failed platform=%s endpoint=%s",
+            source,
+            endpoint,
+            exc_info=True,
+        )
+
+
 CREDENTIALS_ROOT = os.getenv("CREDENTIALS_ROOT", "/app/credentials")
 
 
@@ -1872,6 +1975,7 @@ async def seed_handler(request):
 async def profile_handler(request):
     body = await _safe_json(request)
     platform = _norm_platform(body.get("platform"))
+    await _archive_browser_capture(request.app["pool"], platform, "profile", body)
     p = body.get("profile") or {}
     await _save_profile(request.app["pool"], platform, p)
     # Follow-aware access recording (Phase 0): the extension just successfully
@@ -1895,6 +1999,7 @@ async def profile_handler(request):
 async def posts_handler(request):
     body = await _safe_json(request)
     platform = _norm_platform(body.get("platform"))
+    await _archive_browser_capture(request.app["pool"], platform, "posts", body)
     n = await _save_posts(request.app["pool"], platform, body.get("posts") or [])
     # post authors (threads/facebook carry author_username) count as seen users
     authors = [{"username": p.get("author_username")} for p in (body.get("posts") or []) if p.get("author_username")]
@@ -1905,6 +2010,7 @@ async def posts_handler(request):
 async def comments_handler(request):
     body = await _safe_json(request)
     platform = _norm_platform(body.get("platform"))
+    await _archive_browser_capture(request.app["pool"], platform, "comments", body)
     comments = body.get("comments") or []
     n = await _save_comments(request.app["pool"], platform, body.get("post_id"), comments)
     # every commenter is a user we've seen
