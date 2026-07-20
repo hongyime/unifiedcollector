@@ -256,9 +256,9 @@ async def metrics():
                 emit("uc_vault_sidecar_failures", vault["sidecar_failures"],
                      "Total vault sidecar write failures in the dead-letter queue", "gauge")
                 emit("uc_vault_artifacts_queued", vault["artifacts_queued"],
-                     "Pending vault artifact repair/failure rows", "gauge")
+                     "Vault sidecar dead-letter queue rows", "gauge")
                 emit("uc_vault_artifacts_partial", vault["artifacts_partial"],
-                     "Media rows whose recorded vault sidecar write failed", "gauge")
+                     "Media rows with failed vault sidecar metadata", "gauge")
             except Exception:
                 pass
 

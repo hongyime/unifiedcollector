@@ -133,7 +133,7 @@ def _format_hourly_source(row: dict) -> str:
     if files:
         details.append(f"{files:,} {_plural(files, 'media file')}")
     if rate_limits:
-        details.append(f"{rate_limits:,} {_plural(rate_limits, 'rate-limit hit')}")
+        details.append(f"{rate_limits:,} recorded rate-limit events")
     if not details:
         details.append("no new rows")
     return f"• {source}: " + ", ".join(details)
@@ -144,8 +144,8 @@ def _format_cooldown(row: dict) -> str:
     remaining = _humanize_age(int(row.get("seconds_remaining", 0) or 0))
     streak = int(row.get("streak", 0) or 0)
     if streak:
-        return f"• {service}: paused for {remaining} after {streak} consecutive rate-limit hits."
-    return f"• {service}: paused for {remaining}."
+        return f"• {service}: recorded cooldown for {remaining} after {streak} consecutive rate-limit events."
+    return f"• {service}: recorded cooldown for {remaining}."
 
 
 def _format_rate_limit_event(row: dict) -> str:
@@ -160,8 +160,8 @@ def _format_rate_limit_event(row: dict) -> str:
         subject += f" {scope}"
     if account:
         subject += f" for {_esc(account)}"
-    hits = f"{count:,} hit" if count == 1 else f"{count:,} hits"
-    return f"• {subject}: HTTP {status}, {hits} this hour."
+    events = f"{count:,} recorded event" if count == 1 else f"{count:,} recorded events"
+    return f"• {subject}: HTTP {status}, {events} this hour."
 
 
 def _fmt_count(n: int) -> str:
@@ -246,9 +246,9 @@ async def notify_status(snapshot: dict) -> bool:
             f"{files:,} {_plural(files, 'media file')}."
         )
         if r429:
-            lines.append(f"Rate limits seen this hour: {r429:,}.")
+            lines.append(f"Recorded rate-limit events this hour: {r429:,}.")
         else:
-            lines.append("Rate limits seen this hour: 0.")
+            lines.append("Recorded rate-limit events this hour: 0.")
 
         top = [_format_hourly_source(row) for row in (hourly.get("sources") or [])[:6]]
         if top:
@@ -265,7 +265,7 @@ async def notify_status(snapshot: dict) -> bool:
     if recent_limits:
         lines.extend(_format_rate_limit_event(r) for r in recent_limits[:5])
     if not active_limits and not recent_limits:
-        lines.append("No active cooldowns and no HTTP 429s recorded this hour.")
+        lines.append("No recorded cooldowns from instrumented collectors this hour.")
 
     vault = snapshot.get("vault") or {}
     if vault:
@@ -288,11 +288,12 @@ async def notify_status(snapshot: dict) -> bool:
             )
         if queued or partial or failures:
             lines.append(
-                f"Artifact health: {queued:,} queued for repair, "
-                f"{partial:,} partial rows, {failures:,} sidecar failures recorded."
+                f"Artifact health: {queued:,} sidecar DLQ rows, "
+                f"{partial:,} media rows with failed sidecar metadata, "
+                f"{failures:,} total sidecar failures recorded."
             )
         else:
-            lines.append("Artifact health: no queued sidecar repairs or partial rows.")
+            lines.append("Artifact health: no sidecar DLQ rows or media rows with failed sidecar metadata.")
 
     ages: dict = snapshot.get("source_ages") or {}
     stale = set(snapshot.get("stale_sources") or [])

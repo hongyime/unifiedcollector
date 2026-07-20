@@ -169,7 +169,7 @@ const hourlyColumns: ColumnDef<HourlyIngestionRow, unknown>[] = [
   },
   {
     accessorKey: "rate_limits",
-    header: "429s",
+    header: "Recorded Limits",
     cell: (info) => {
       const value = info.getValue() as number;
       return value > 0 ? <span className="text-warning font-semibold">{value}</span> : <span className="text-text-muted">0</span>;
@@ -310,7 +310,9 @@ export function DashboardPage() {
   const activeRateLimits = activeCursorLimits.length + activeEventLimits.length;
   const vault = health?.vault;
   const vaultOk = vault?.available && vault?.writable;
-  const vaultIssues = (vault?.artifacts_queued ?? 0) + (vault?.artifacts_partial ?? 0);
+  const vaultSidecarDlqRows = vault?.artifacts_queued ?? 0;
+  const vaultFailedMetadataRows = vault?.artifacts_partial ?? 0;
+  const vaultIssues = vaultSidecarDlqRows + vaultFailedMetadataRows;
 
   return (
     <div>
@@ -353,7 +355,7 @@ export function DashboardPage() {
           value={vaultOk ? "Writable" : "Blocked"}
           sublabel={
             vault?.free_bytes != null
-              ? `${formatBytes(vault.free_bytes)} free · ${formatNumber(vaultIssues)} issues`
+              ? `${formatBytes(vault.free_bytes)} free · ${formatNumber(vaultSidecarDlqRows)} DLQ · ${formatNumber(vaultFailedMetadataRows)} metadata rows`
               : health?.drive ?? "unknown"
           }
           status={vaultOk && vaultIssues === 0 ? "success" : vaultOk ? "warning" : "error"}
@@ -370,8 +372,8 @@ export function DashboardPage() {
           value={activeRateLimits ? `${activeRateLimits} active` : `${recentRateLimitScopes}`}
           sublabel={
             activeRateLimits
-              ? `${formatNumber(recentRateLimitEvents)} 429s last 24h`
-              : "source/account scopes last 24h"
+              ? `${formatNumber(recentRateLimitEvents)} recorded events last 24h`
+              : "recorded source/account scopes last 24h"
           }
           status={activeRateLimits || recentRateLimitEvents ? "warning" : "success"}
           icon={<ShieldAlert className="w-5 h-5" />}
@@ -389,7 +391,7 @@ export function DashboardPage() {
       </div>
 
       <div className="bg-surface rounded-lg border border-border p-4 mb-6">
-        <h2 className="text-xs uppercase tracking-wider text-text-muted mb-4">Rate Limits</h2>
+        <h2 className="text-xs uppercase tracking-wider text-text-muted mb-4">Recorded Rate-Limit Events</h2>
         {(activeCursorLimits.length > 0 || activeEventLimits.length > 0) && (
           <div className="mb-3 grid grid-cols-1 md:grid-cols-2 gap-2">
             {activeCursorLimits.map((r) => (
@@ -408,8 +410,8 @@ export function DashboardPage() {
               >
                 <div className="font-medium text-warning capitalize">{formatRateLimitSummaryLabel(r)}</div>
                 <div className="text-text-muted">
-                  {r.active_until ? `cooldown until ${formatClock(r.active_until)}` : "cooldown observed"}
-                  {` · ${formatNumber(r.count)} 429s`}
+                  {r.active_until ? `recorded cooldown until ${formatClock(r.active_until)}` : "recorded cooldown"}
+                  {` · ${formatNumber(r.count)} events`}
                 </div>
               </div>
             ))}
@@ -417,7 +419,7 @@ export function DashboardPage() {
         )}
         {recentLimitSummaries.length > 0 && (
           <div className="mb-4">
-            <div className="text-[10px] uppercase tracking-wide text-text-muted mb-2">Recent 429 scopes</div>
+            <div className="text-[10px] uppercase tracking-wide text-text-muted mb-2">Recorded Rate-Limit Scopes</div>
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
               {recentLimitSummaries.slice(0, 8).map((r) => (
                 <div key={`${r.source}-${r.account ?? ""}-${r.scope ?? ""}-recent`} className="bg-background border border-border rounded-md px-3 py-2 text-xs">
@@ -425,7 +427,7 @@ export function DashboardPage() {
                     <div>
                       <div className="font-medium text-text-primary capitalize">{formatRateLimitSummaryLabel(r)}</div>
                       <div className="text-text-muted mt-0.5">
-                        {formatNumber(r.count)} hits · last {relativeTime(r.last_seen_at)} · cooldown {formatCooldown(r.cooldown_seconds)}
+                        {formatNumber(r.count)} events · last {relativeTime(r.last_seen_at)} · recorded cooldown {formatCooldown(r.cooldown_seconds)}
                       </div>
                     </div>
                     <StatusBadge status={r.active_now ? "warning" : "idle"} label={r.active_now ? "cooling" : "seen"} />
