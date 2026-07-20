@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from src.core import vault
 
 
@@ -184,3 +186,8 @@ def test_write_media_sidecar_reports_missing_vault(tmp_path, monkeypatch):
     assert result.enabled is True
     assert result.ok is False
     assert "vault" in result.error.lower()
+
+
+def test_ensure_vault_available_raises_for_missing_vault(tmp_path):
+    with pytest.raises(RuntimeError, match="collector vault unavailable"):
+        vault.ensure_vault_available(tmp_path / "missing")

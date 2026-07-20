@@ -15,7 +15,7 @@ from .rate_limiter import AdaptiveRateLimiter
 from .resilience import CircuitBreaker, wait_for_internet
 from .scrape_pacing import sleep_rate_limit
 from .user_agent import UserAgentPool
-from .vault import write_media_sidecar
+from .vault import ensure_vault_available, write_media_sidecar
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +147,10 @@ class BaseCollector(ABC):
         self.drive_ok = check_drive()
         if not self.drive_ok:
             raise RuntimeError(f"Drive not mounted. Pausing {self.SOURCE_NAME}.")
+        try:
+            ensure_vault_available()
+        except RuntimeError as exc:
+            raise RuntimeError(f"Vault not mounted or writable. Pausing {self.SOURCE_NAME}: {exc}") from exc
 
         # Circuit breaker: skip entire cycle if open (too many recent failures).
         if not self.circuit_breaker.allow_request():
