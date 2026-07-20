@@ -243,7 +243,9 @@ def _default_docker_exe() -> str:
 def _run_pg_dump(tmp: Path, *, pg_dump_exe: str, database: str) -> None:
     cmd = [pg_dump_exe, "-Fc", "-f", str(tmp)]
     dsn = os.getenv("DATABASE_URL")
-    cmd.append(dsn or database)
+    # In Docker, ../.env may still contain a host-facing DATABASE_URL such as
+    # localhost:5500. If PGHOST is explicitly set, trust libpq env instead.
+    cmd.append(dsn if dsn and not os.getenv("PGHOST") else database)
     _run(cmd, "pg_dump failed")
     _ensure_nonempty(tmp)
 

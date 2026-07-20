@@ -804,6 +804,7 @@ services:
       PGPASSWORD: ${POSTGRES_PASSWORD}
       PGHOST: postgres
       PGDATABASE: unifiedcollector
+      DATABASE_URL: ""
       COLLECTOR_DB_BACKUP_DIR: /zbackups
       COLLECTOR_DB_BACKUP_DAILY: "7"
       COLLECTOR_DB_BACKUP_WEEKLY: "4"

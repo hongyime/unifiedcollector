@@ -100,3 +100,22 @@ def test_apply_retention_plan_dry_run_does_not_delete(tmp_path):
     assert deleted == [prune_path]
     assert keep_path.exists()
     assert prune_path.exists()
+
+
+def test_pg_dump_prefers_pg_env_over_host_database_url(monkeypatch, tmp_path):
+    from src.backup import db_backup
+
+    commands = []
+    monkeypatch.setenv("DATABASE_URL", "postgres://collector:collector@localhost:5500/unifiedcollector")
+    monkeypatch.setenv("PGHOST", "postgres")
+    monkeypatch.setattr(db_backup, "_run", lambda cmd, *_args, **_kwargs: commands.append(cmd))
+    monkeypatch.setattr(db_backup, "_ensure_nonempty", lambda _path: None)
+
+    db_backup._run_pg_dump(
+        tmp_path / "unifiedcollector_20260720_090000.dump",
+        pg_dump_exe="pg_dump",
+        database="unifiedcollector",
+    )
+
+    assert commands
+    assert commands[0][-1] == "unifiedcollector"
