@@ -1,9 +1,7 @@
 import argparse
 import asyncio
 import logging
-import os
 import sys
-from pathlib import Path
 
 from src.core.drive_check import check_drive
 from src.db.connection import get_pool, close_pool
@@ -58,6 +56,11 @@ def main():
     sp = sub.add_parser("status", help="Show collection status")
     sp.add_argument("--source", help="Filter by source")
 
+    # rebuild-report
+    rp = sub.add_parser("rebuild-report", help="Dry-run rebuild coverage from vault sidecars")
+    rp.add_argument("--vault-root", default=None, help="Vault root (default: COLLECTOR_VAULT_ROOT)")
+    rp.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+
     # schedule
     scp = sub.add_parser("schedule", help="Add/update a collection schedule")
     scp.add_argument("--source", required=True)
@@ -82,6 +85,8 @@ def main():
         _cmd_list()
     elif args.command == "status":
         asyncio.run(_cmd_status(getattr(args, "source", None)))
+    elif args.command == "rebuild-report":
+        _cmd_rebuild_report(args.vault_root, args.json)
     elif args.command == "schedule":
         asyncio.run(_cmd_schedule(args.source, args.interval))
     elif args.command == "target":
@@ -190,6 +195,18 @@ async def _cmd_status(source: str | None):
                     en = "enabled" if s["enabled"] else "disabled"
                     print(f"  {s['source']}: every {s['interval_hours']}h ({en}), next: {s['next_run']}")
     await close_pool()
+
+
+def _cmd_rebuild_report(vault_root: str | None, as_json: bool):
+    import json
+
+    from src.core.rebuild_report import scan_sidecars
+
+    report = scan_sidecars(vault_root)
+    if as_json:
+        print(json.dumps(report.to_dict(), indent=2, sort_keys=True, default=str))
+    else:
+        print(report.to_text())
 
 
 # ── schedule ──────────────────────────────────────────────────

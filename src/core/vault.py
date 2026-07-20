@@ -11,6 +11,7 @@ import os
 import re
 import tempfile
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -61,6 +62,123 @@ class SidecarResult:
     path: Path | None = None
     relative_path: str | None = None
     error: str | None = None
+
+
+_SIDECAR_REQUIRED_TOP_LEVEL_FIELDS = (
+    "schema_version",
+    "artifact_kind",
+    "artifact_id",
+    "source",
+    "ingest_path",
+    "collection_priority",
+    "entity",
+    "content",
+    "file",
+    "timestamps",
+    "raw_payload",
+    "provenance",
+    "metadata",
+)
+
+_SIDECAR_REQUIRED_NESTED_FIELDS = {
+    "entity": ("id", "name"),
+    "content": ("type", "kind", "id", "filename", "source_url", "caption", "text"),
+    "file": ("path", "absolute_path", "size", "width", "height", "sha256"),
+    "timestamps": ("collected_at", "posted_at", "discovered_at"),
+    "raw_payload": ("inline", "path"),
+    "provenance": (
+        "platform_ids",
+        "collection_account",
+        "scrape_run_id",
+        "extension_version",
+        "request_url",
+        "http_status",
+        "rate_limit_scope",
+        "partial",
+    ),
+}
+
+_SIDECAR_REQUIRED_OBJECT_FIELDS = (*_SIDECAR_REQUIRED_NESTED_FIELDS.keys(), "metadata")
+
+_SIDECAR_REQUIRED_VALUE_FIELDS = (
+    "schema_version",
+    "artifact_kind",
+    "artifact_id",
+    "source",
+    "ingest_path",
+    "entity.id",
+    "content.type",
+    "content.kind",
+    "content.id",
+    "content.filename",
+    "file.path",
+    "timestamps.collected_at",
+)
+
+_MISSING = object()
+
+
+def _is_missing_value(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _sidecar_value(payload: Mapping[str, Any], field_path: str) -> Any:
+    current: Any = payload
+    for part in field_path.split("."):
+        if not isinstance(current, Mapping) or part not in current:
+            return _MISSING
+        current = current[part]
+    return current
+
+
+def validate_sidecar_payload(payload: Any) -> list[str]:
+    """Return schema errors for required collector vault sidecar fields."""
+    if not isinstance(payload, Mapping):
+        return ["sidecar payload must be a JSON object"]
+
+    errors: list[str] = []
+    missing = [field for field in _SIDECAR_REQUIRED_TOP_LEVEL_FIELDS if field not in payload]
+    errors.extend(missing)
+
+    for field in _SIDECAR_REQUIRED_OBJECT_FIELDS:
+        if field in payload and not isinstance(payload[field], Mapping):
+            errors.append(f"{field} must be an object")
+
+    for section, fields in _SIDECAR_REQUIRED_NESTED_FIELDS.items():
+        value = payload.get(section)
+        if not isinstance(value, Mapping):
+            continue
+        errors.extend(f"{section}.{field}" for field in fields if field not in value)
+
+    for field_path in _SIDECAR_REQUIRED_VALUE_FIELDS:
+        if field_path in errors:
+            continue
+        value = _sidecar_value(payload, field_path)
+        if value is _MISSING:
+            continue
+        if _is_missing_value(value):
+            errors.append(f"{field_path} is required")
+
+    schema_version = payload.get("schema_version")
+    if "schema_version" not in missing and not _is_missing_value(schema_version) and schema_version != 1:
+        errors.append("schema_version must be 1")
+
+    artifact_kind = payload.get("artifact_kind")
+    if "artifact_kind" not in missing and not _is_missing_value(artifact_kind) and artifact_kind != "media":
+        errors.append("artifact_kind must be media")
+
+    return errors
+
+
+def validate_sidecar_file(path: str | os.PathLike[str]) -> list[str]:
+    """Load a JSON sidecar file and return required-field schema errors."""
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except OSError as exc:
+        return [f"sidecar file unreadable: {exc}"]
+    except json.JSONDecodeError as exc:
+        return [f"sidecar file invalid JSON: {exc.msg}"]
+    return validate_sidecar_payload(payload)
 
 
 def vault_health(root: Path = VAULT_ROOT) -> VaultHealth:
@@ -222,6 +340,9 @@ def write_media_sidecar(
             },
             "metadata": metadata or {},
         }
+        validation_errors = validate_sidecar_payload(payload)
+        if validation_errors:
+            raise ValueError(f"invalid sidecar payload: {', '.join(validation_errors)}")
         _atomic_write_json(sidecar_path, payload)
         return SidecarResult(
             enabled=True,
