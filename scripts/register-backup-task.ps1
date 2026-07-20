@@ -2,7 +2,8 @@
 # Run ONCE in an elevated PowerShell:  powershell -ExecutionPolicy Bypass -File scripts\register-backup-task.ps1
 # Idempotent: re-running replaces the existing task.
 #
-# Schedule: daily at 03:30 local. Runs scripts\backup.bat (pg_dump -Fc + 7-day prune + validate).
+# Schedule: daily at 03:30 local. Runs scripts\backup.bat (pg_dump -Fc + validation
+# + 7 daily / 4 weekly / 3 monthly retention to Z:\unifiedcollector\backups\db).
 # Note: PowerShell 5 constraints (no em-dash, no backtick continuation, ASCII only).
 
 $ErrorActionPreference = "Stop"
@@ -45,8 +46,8 @@ if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
 
 Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger `
     -Principal $principal -Settings $settings `
-    -Description "Daily pg_dump backup of the unifiedcollector Postgres DB (P3-5). Validates dump and prunes >7 days."
+    -Description "Daily pg_dump backup of the unifiedcollector Postgres DB. Writes to Z:\unifiedcollector\backups\db and keeps 7 daily, 4 weekly, 3 monthly."
 
 Write-Host "Registered scheduled task '$taskName' (daily 03:30)."
 Write-Host "Test it now with:  Start-ScheduledTask -TaskName $taskName"
-Write-Host "Then check:        backups\backup_task.log  and  backups\*.dump"
+Write-Host "Then check:        backups\backup_task.log  and  Z:\unifiedcollector\backups\db\*.dump"

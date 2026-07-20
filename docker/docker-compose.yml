@@ -38,6 +38,7 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
+      COLLECTOR_VAULT_ROOT: /vault
       # freeze fix: youtube AND tiktok run blocking subprocess downloaders
       # (yt-dlp / gallery-dl) that wedge on lost SIGCHLD in WSL2/Docker and freeze
       # the SHARED event loop (py-spy confirmed MainThread stuck in _run_subprocess).
@@ -62,6 +63,7 @@ services:
       - SYS_PTRACE
     volumes:
       - z:/unifiedcollector/media:/media
+      - z:/unifiedcollector:/vault
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -98,6 +100,7 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
+      COLLECTOR_VAULT_ROOT: /vault
       COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
       YOUTUBE_ENRICH_BATCH_LIMIT: "5"
       YOUTUBE_COOKIE_FILE: /app/credentials/youtube/cookies.txt
@@ -107,6 +110,7 @@ services:
       - SYS_PTRACE
     volumes:
       - z:/unifiedcollector/media:/media
+      - z:/unifiedcollector:/vault
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -144,6 +148,7 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
+      COLLECTOR_VAULT_ROOT: /vault
       COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
       # Big profiles (100s of videos) didn't finish in 300s and got killed mid-
       # download. Raise to 900s; partial-ingest still saves whatever was pulled.
@@ -157,6 +162,7 @@ services:
       - SYS_PTRACE
     volumes:
       - z:/unifiedcollector/media:/media
+      - z:/unifiedcollector:/vault
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -211,6 +217,7 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
+      COLLECTOR_VAULT_ROOT: /vault
       COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
       # EDIT 2026-07-13 (GPS backlog convergence): page scrape 200 -> 100. The
       # 200-batch phase took ~40min/cycle ahead of the GPS backfill and its
@@ -252,6 +259,7 @@ services:
       - SYS_PTRACE
     volumes:
       - z:/unifiedcollector/media:/media
+      - z:/unifiedcollector:/vault
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -316,6 +324,7 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
       COLLECTOR_DRIVE_PATH: /media
+      COLLECTOR_VAULT_ROOT: /vault
       # Concurrency drives REAL RSS (each task holds a page + parse tree). After
       # the host OOM, dialled 10 -> 6 to lower website's memory peak — a real RSS
       # cut (unlike a mem_limit cap), minor throughput cost across 421 sites.
@@ -331,6 +340,7 @@ services:
       - SYS_PTRACE
     volumes:
       - z:/unifiedcollector/media:/media
+      - z:/unifiedcollector:/vault
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -357,6 +367,7 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
+      COLLECTOR_VAULT_ROOT: /vault
       LEMON8_FYP_DETAIL_FETCH: "true"
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -364,6 +375,7 @@ services:
       - SYS_PTRACE
     volumes:
       - z:/unifiedcollector/media:/media
+      - z:/unifiedcollector:/vault
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -390,6 +402,7 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
+      COLLECTOR_VAULT_ROOT: /vault
       # collect() now BLOCKS in the realtime listener (like whatsapp), so the
       # per-cycle heartbeat stops — give the watchdog a 24h budget so it doesn't
       # kill the parked-but-healthy listener (matches whatsapp's setting).
@@ -418,6 +431,7 @@ services:
       - SYS_PTRACE
     volumes:
       - z:/unifiedcollector/media:/media
+      - z:/unifiedcollector:/vault
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -446,6 +460,7 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
+      COLLECTOR_VAULT_ROOT: /vault
       BEEPER_DESKTOP_API_URL: http://host.docker.internal:23373
       # Throughput push (2026-06-13): larger pages = fewer round-trips per sync.
       BEEPER_PAGE_SIZE: "150"
@@ -470,6 +485,7 @@ services:
       - SYS_PTRACE
     volumes:
       - z:/unifiedcollector/media:/media
+      - z:/unifiedcollector:/vault
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -496,6 +512,7 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
+      COLLECTOR_VAULT_ROOT: /vault
       WHATSAPP_SPIDER_SESSIONS: "session_2"
       # Backfill ALL history, not just 90 days (user: "whatsapp backfill all").
       WHATSAPP_MAX_BACKFILL_AGE_DAYS: "36500"
@@ -515,6 +532,7 @@ services:
       - SYS_PTRACE
     volumes:
       - z:/unifiedcollector/media:/media
+      - z:/unifiedcollector:/vault
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -543,6 +561,7 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
+      COLLECTOR_VAULT_ROOT: /vault
       COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
       # ANTI-BAN (user: "make sure headless cookies don't get my account banned").
       # Headless Playwright is more detectable than a real browser, so run it as a
@@ -565,6 +584,7 @@ services:
       - SYS_PTRACE
     volumes:
       - z:/unifiedcollector/media:/media
+      - z:/unifiedcollector:/vault
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       - ../config/sources:/app/config/sources:ro
@@ -607,6 +627,7 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
+      COLLECTOR_VAULT_ROOT: /vault
       # Feature flag — MUST be set to a truthy value ("1", "true", "yes", "on")
       # for any mobile-API network activity. Default off; the collector's
       # collect() no-ops with a single log line when the flag is missing.
@@ -619,6 +640,7 @@ services:
       INSTAGRAM_DM_PROXY_URL: ""
     volumes:
       - z:/unifiedcollector/media:/media
+      - z:/unifiedcollector:/vault
       # Only mount the isolated credentials subdir — the main credentials/
       # tree is intentionally NOT bind-mounted here so a code bug cannot
       # accidentally read credentials/instagram/*.txt.
@@ -652,10 +674,12 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
+      COLLECTOR_VAULT_ROOT: /vault
       # skip accounts > 3k followers when spider-discovering (user: close network only)
       INSTA_SPIDER_FAMOUS_CAP: "3000"
     volumes:
       - z:/unifiedcollector/media:/media
+      - z:/unifiedcollector:/vault
       - ../src:/app/src
       - ../credentials:/app/credentials   # so /social/cookies can write live sessions
     depends_on:
@@ -674,11 +698,13 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
+      COLLECTOR_VAULT_ROOT: /vault
       # Conn-budget hygiene (P2 review §5): scheduler triggers + reconciliation are
       # low-concurrency. Default 10 -> 4.
       DB_POOL_MAX_SIZE: "4"
     volumes:
       - z:/unifiedcollector/media:/media
+      - z:/unifiedcollector:/vault
       - ../credentials:/app/credentials
       - sessions_data:/app/sessions
       # live src mount so scheduler code (e.g. identity reconciliation) applies on
@@ -729,11 +755,13 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
+      COLLECTOR_VAULT_ROOT: /vault
       # Localhost-only single-user deployment: skip bearer-token auth so the
       # dashboard works without a login flow. Remove/false for network exposure.
       DASHBOARD_AUTH_DISABLED: "true"
     volumes:
       - z:/unifiedcollector/media:/media
+      - z:/unifiedcollector:/vault
       - ../credentials:/app/credentials
       - ../src:/app/src
       # live-mount the built SPA so frontend changes apply on recreate (rebuild
@@ -753,9 +781,13 @@ services:
     restart: unless-stopped
 
   backup:
-    image: postgres:16-alpine
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.backup
+    image: unifiedcollector-backup:latest
     container_name: unifiedcollector_backup
-    # Daily pg_dump -> Z, 14-day retention. Restore: pg_restore -d <db> <file>.dump
+    # Daily pg_dump -> Z:\unifiedcollector\backups\db with bounded retention:
+    # 7 daily, 4 weekly, 3 monthly. Restore: pg_restore -d <db> <file>.dump
     # NOTE (2026-07-03): backups intentionally STAY on Z (user decision). The
     # co-location risk (a Z event kills media AND backups together) is accepted;
     # C: is space-crisis-prone and Z has 3.3TB free. The hardening below makes the
@@ -772,41 +804,27 @@ services:
       PGPASSWORD: ${POSTGRES_PASSWORD}
       PGHOST: postgres
       PGDATABASE: unifiedcollector
+      COLLECTOR_DB_BACKUP_DIR: /zbackups
+      COLLECTOR_DB_BACKUP_DAILY: "7"
+      COLLECTOR_DB_BACKUP_WEEKLY: "4"
+      COLLECTOR_DB_BACKUP_MONTHLY: "3"
+      COLLECTOR_DB_BACKUP_INTERVAL_SECONDS: ${COLLECTOR_DB_BACKUP_INTERVAL_SECONDS:-86400}
+      COLLECTOR_DB_BACKUP_DATABASE: unifiedcollector
     # Load ../.env for NOTIFY_TELEGRAM_BOT_TOKEN / TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID
-    # so the failure alert can reach Telegram (busybox wget, best-effort).
+    # so the Python backup runner can send a best-effort failure alert.
     env_file:
       - ../.env
     volumes:
-      - z:/unifiedcollector/media/db/backups:/zbackups
+      - z:/unifiedcollector/backups/db:/zbackups
+      - ../src/backup:/app/src/backup:ro
     entrypoint: /bin/sh
     command:
       - -c
       - |
         mkdir -p /zbackups
-        notify() {
-          TOKEN="$${NOTIFY_TELEGRAM_BOT_TOKEN:-$$TELEGRAM_BOT_TOKEN}"
-          [ -z "$$TOKEN" ] && return 0
-          [ -z "$$TELEGRAM_CHAT_ID" ] && return 0
-          wget -q -O /dev/null \
-            "https://api.telegram.org/bot$${TOKEN}/sendMessage?chat_id=$${TELEGRAM_CHAT_ID}&text=$$1" \
-            || echo "[backup] alert send failed"
-        }
         while true; do
-          ts=$$(date +%Y%m%d_%H%M%S)
-          tmp="/zbackups/.inprogress_$${ts}.dump"
-          final="/zbackups/unifiedcollector_$${ts}.dump"
-          echo "[backup] dumping to Z $$(date)"
-          if pg_dump -Fc -f "$$tmp" && [ -s "$$tmp" ] && pg_restore --list "$$tmp" >/dev/null 2>&1; then
-            mv "$$tmp" "$$final"
-            echo "[backup] ok $$final ($$(du -h "$$final" | cut -f1))"
-            # Prune ONLY after a verified-good dump exists this cycle.
-            find /zbackups -name 'unifiedcollector_*.dump' -mtime +14 -delete
-          else
-            echo "[backup] FAILED $$(date)"
-            rm -f "$$tmp"
-            notify "%E2%9A%A0%EF%B8%8F%20UnifiedCollector%20DB%20backup%20FAILED%20$${ts}"
-          fi
-          sleep 86400
+          python3 -m src.backup.db_backup run
+          sleep "$${COLLECTOR_DB_BACKUP_INTERVAL_SECONDS:-86400}"
         done
     depends_on:
       postgres:

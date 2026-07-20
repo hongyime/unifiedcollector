@@ -69,7 +69,11 @@ fix_*.cmd
 *_RUNBOOK.md
 URGENT_*.md
 migrations/_tmp*.sql
-backups/
+/backups/
+/sidecars/
+/raw/
+/manifests/
+/queues/
 
 # WhatsApp Baileys session credentials - never commit
 # (sessions now consolidated under sessions/whatsapp/ alongside other platforms)

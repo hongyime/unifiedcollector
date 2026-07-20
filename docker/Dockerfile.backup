@@ -1,0 +1,11 @@
+FROM postgres:16-alpine
+
+WORKDIR /app
+
+RUN apk add --no-cache python3
+
+COPY src/backup/ src/backup/
+
+ENV COLLECTOR_DB_BACKUP_DIR=/zbackups
+
+CMD ["python3", "-m", "src.backup.db_backup", "run"]

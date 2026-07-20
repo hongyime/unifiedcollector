@@ -15,6 +15,7 @@ from .rate_limiter import AdaptiveRateLimiter
 from .resilience import CircuitBreaker, wait_for_internet
 from .scrape_pacing import sleep_rate_limit
 from .user_agent import UserAgentPool
+from .vault import write_media_sidecar
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +144,7 @@ class BaseCollector(ABC):
 
     async def run(self, targets: list[str]):
         """Entry point with all safety checks."""
+        self.drive_ok = check_drive()
         if not self.drive_ok:
             raise RuntimeError(f"Drive not mounted. Pausing {self.SOURCE_NAME}.")
 
@@ -482,6 +484,61 @@ class BaseCollector(ABC):
         # asyncpg returns the command tag, e.g. "INSERT 0 1" (stored) / "INSERT 0 0"
         # (a unique conflict skipped it).
         if status.endswith(" 1"):
+            sidecar = write_media_sidecar(
+                source=self.SOURCE_NAME,
+                entity_id=entity_id,
+                entity_name=entity_name,
+                content_type=content_type,
+                content_id=content_id,
+                filename=filename,
+                file_path=file_path,
+                file_size=file_size,
+                width=width,
+                height=height,
+                sha256=sha256,
+                source_url=source_url,
+                metadata=metadata,
+                ingest_path=self.INGEST_PATH,
+                kind=kind,
+            )
+            sidecar_meta = {
+                "vault_sidecar": {
+                    "enabled": sidecar.enabled,
+                    "ok": sidecar.ok,
+                    "path": sidecar.relative_path,
+                    "error": sidecar.error,
+                }
+            }
+            try:
+                async with self.pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        UPDATE media_items
+                        SET metadata = COALESCE(metadata, '{}'::jsonb) || $3::jsonb
+                        WHERE source = $1 AND content_id = $2
+                        """,
+                        self.SOURCE_NAME,
+                        content_id,
+                        json.dumps(sidecar_meta, default=str),
+                    )
+                    if sidecar.enabled and not sidecar.ok:
+                        await conn.execute(
+                            """
+                            INSERT INTO dead_letter_queue (source, entity_id, content_id, error_message)
+                            VALUES ($1, $2, $3, $4)
+                            """,
+                            self.SOURCE_NAME,
+                            entity_id,
+                            content_id,
+                            f"vault sidecar write failed: {sidecar.error}",
+                        )
+            except Exception:
+                logger.warning(
+                    "vault sidecar status update failed for %s/%s",
+                    self.SOURCE_NAME,
+                    content_id,
+                    exc_info=True,
+                )
             self._progress_count += 1
             return True
         logger.debug("Duplicate skipped (content_id or sha256): %s/%s", self.SOURCE_NAME, content_id)

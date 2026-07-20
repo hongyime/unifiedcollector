@@ -43,6 +43,7 @@ from aiohttp import web
 from src.db.connection import get_pool, close_pool
 from src.core.media_filter import inspect as inspect_media
 from src.core.proximity import refresh_account_proximity_cache
+from src.core.vault import write_media_sidecar
 
 # Follow-aware access recording (Phase 0). The extension IS the live IG path, so
 # recording access outcomes here populates profile_access_{summary,attempts} far
@@ -534,7 +535,8 @@ async def _download_and_save(pool, session, platform, username, item) -> bool:
 
         # caption + likes/comments/views/location come along free from the scrape
         meta = item.get("meta") or {}
-        meta_json = json.dumps(meta) if isinstance(meta, dict) else "{}"
+        meta_obj = meta if isinstance(meta, dict) else {}
+        meta_json = json.dumps(meta_obj)
         async with pool.acquire() as conn:
             await conn.execute(
                 """
@@ -554,6 +556,61 @@ async def _download_and_save(pool, session, platform, username, item) -> bool:
                 """,
                 platform, safe_user, item.get("entity_name") or username, ctype, store_cid,
                 dest.name, str(dest), len(data), sha, url, meta_json, media_kind,
+            )
+        sidecar = write_media_sidecar(
+            source=platform,
+            entity_id=safe_user,
+            entity_name=item.get("entity_name") or username,
+            content_type=ctype,
+            content_id=store_cid,
+            filename=dest.name,
+            file_path=str(dest),
+            file_size=len(data),
+            width=None,
+            height=None,
+            sha256=sha,
+            source_url=url,
+            metadata=meta_obj,
+            ingest_path="extension",
+            kind=media_kind,
+        )
+        sidecar_meta = {
+            "vault_sidecar": {
+                "enabled": sidecar.enabled,
+                "ok": sidecar.ok,
+                "path": sidecar.relative_path,
+                "error": sidecar.error,
+            }
+        }
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE media_items
+                    SET metadata = COALESCE(metadata, '{}'::jsonb) || $3::jsonb
+                    WHERE source = $1 AND content_id = $2
+                    """,
+                    platform,
+                    store_cid,
+                    json.dumps(sidecar_meta, default=str),
+                )
+                if sidecar.enabled and not sidecar.ok:
+                    await conn.execute(
+                        """
+                        INSERT INTO dead_letter_queue (source, entity_id, content_id, error_message)
+                        VALUES ($1, $2, $3, $4)
+                        """,
+                        platform,
+                        safe_user,
+                        store_cid,
+                        f"vault sidecar write failed: {sidecar.error}",
+                    )
+        except Exception:
+            logger.warning(
+                "vault sidecar status update failed for %s/%s",
+                platform,
+                store_cid,
+                exc_info=True,
             )
         return True
     except Exception:
