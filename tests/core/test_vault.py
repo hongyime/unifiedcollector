@@ -127,6 +127,8 @@ def test_write_media_sidecar_records_rebuild_metadata(tmp_path, monkeypatch):
     assert payload["content"]["caption"] == "hello"
     assert payload["raw_payload"]["inline"] == {"id": "123"}
     assert payload["provenance"]["collection_account"] == "bryan"
+    assert payload["rebuild"]["target_tables"] == ["media_items"]
+    assert "file.sha256" in payload["rebuild"]["required_fields"]
 
 
 def test_write_media_sidecar_rejects_invalid_payload_before_write(tmp_path, monkeypatch):
@@ -212,6 +214,8 @@ def test_write_artifact_sidecar_records_json_artifact(tmp_path, monkeypatch):
     assert payload["file"]["size"] == artifact.stat().st_size
     assert len(payload["file"]["sha256"]) == 64
     assert payload["metadata"] == {"purpose": "clubs"}
+    assert payload["rebuild"]["target_tables"] == []
+    assert "file.sha256" in payload["rebuild"]["required_fields"]
 
 
 def test_ensure_vault_available_raises_for_missing_vault(tmp_path):

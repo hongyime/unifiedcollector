@@ -119,6 +119,18 @@ _SIDECAR_REQUIRED_VALUE_FIELDS = (
     "timestamps.collected_at",
 )
 
+_MEDIA_REBUILD_REQUIRED_FIELDS = (
+    "source",
+    "entity.id",
+    "entity.name",
+    "content.type",
+    "content.id",
+    "content.filename",
+    "file.path",
+    "file.size",
+    "file.sha256",
+)
+
 _MISSING = object()
 
 
@@ -396,6 +408,38 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
             pass
 
 
+def _rebuild_contract(
+    metadata: dict[str, Any],
+    *,
+    default_target_tables: list[str] | None = None,
+    default_required_fields: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    configured = metadata.get("rebuild")
+    if isinstance(configured, Mapping):
+        target_tables = configured.get("target_tables") or configured.get("tables")
+        required_fields = configured.get("required_fields")
+    else:
+        target_tables = metadata.get("rebuild_target_tables") or metadata.get("rebuild_tables")
+        required_fields = metadata.get("rebuild_required_fields")
+
+    if isinstance(target_tables, str):
+        target_tables = [target_tables]
+    if not isinstance(target_tables, list):
+        target_tables = default_target_tables or []
+    target_tables = [str(table) for table in target_tables if table]
+
+    if isinstance(required_fields, str):
+        required_fields = [required_fields]
+    if not isinstance(required_fields, list):
+        required_fields = list(default_required_fields)
+    required_fields = [str(field) for field in required_fields if field]
+
+    return {
+        "target_tables": target_tables,
+        "required_fields": required_fields,
+    }
+
+
 def write_artifact_sidecar(
     *,
     source: str,
@@ -408,6 +452,7 @@ def write_artifact_sidecar(
     if not SIDECARS_ENABLED:
         return SidecarResult(enabled=False, ok=True)
     try:
+        metadata = metadata or {}
         ensure_vault_available(root)
         path = Path(file_path)
         stat = path.stat()
@@ -437,7 +482,11 @@ def write_artifact_sidecar(
             "timestamps": {
                 "collected_at": now.isoformat(),
             },
-            "metadata": metadata or {},
+            "metadata": metadata,
+            "rebuild": _rebuild_contract(
+                metadata,
+                default_required_fields=("source", "artifact_kind", "file.path", "file.size", "file.sha256"),
+            ),
         }
         _atomic_write_json(sidecar_path, payload)
         return SidecarResult(
@@ -478,6 +527,7 @@ def write_media_sidecar(
     if not SIDECARS_ENABLED:
         return SidecarResult(enabled=False, ok=True)
     try:
+        metadata = metadata or {}
         ensure_vault_available(root)
         now = datetime.now(timezone.utc)
         sidecar_path = sidecar_path_for_media(source=source, content_id=content_id, collected_at=now, root=root)
@@ -487,7 +537,7 @@ def write_media_sidecar(
             "artifact_id": f"{source}:{content_id}",
             "source": source,
             "ingest_path": ingest_path,
-            "collection_priority": (metadata or {}).get("collection_priority"),
+            "collection_priority": metadata.get("collection_priority"),
             "entity": {
                 "id": entity_id,
                 "name": entity_name,
@@ -498,8 +548,8 @@ def write_media_sidecar(
                 "id": content_id,
                 "filename": filename,
                 "source_url": source_url,
-                "caption": (metadata or {}).get("caption"),
-                "text": (metadata or {}).get("text"),
+                "caption": metadata.get("caption"),
+                "text": metadata.get("text"),
             },
             "file": {
                 "path": relative_to_vault(file_path, root),
@@ -511,24 +561,29 @@ def write_media_sidecar(
             },
             "timestamps": {
                 "collected_at": now.isoformat(),
-                "posted_at": (metadata or {}).get("posted_at") or (metadata or {}).get("timestamp"),
-                "discovered_at": (metadata or {}).get("discovered_at"),
+                "posted_at": metadata.get("posted_at") or metadata.get("timestamp"),
+                "discovered_at": metadata.get("discovered_at"),
             },
             "raw_payload": {
-                "inline": (metadata or {}).get("raw"),
-                "path": (metadata or {}).get("raw_payload_path"),
+                "inline": metadata.get("raw"),
+                "path": metadata.get("raw_payload_path"),
             },
             "provenance": {
-                "platform_ids": (metadata or {}).get("platform_ids"),
-                "collection_account": (metadata or {}).get("collection_account"),
-                "scrape_run_id": (metadata or {}).get("scrape_run_id"),
-                "extension_version": (metadata or {}).get("extension_version"),
-                "request_url": (metadata or {}).get("request_url"),
-                "http_status": (metadata or {}).get("http_status"),
-                "rate_limit_scope": (metadata or {}).get("rate_limit_scope"),
+                "platform_ids": metadata.get("platform_ids"),
+                "collection_account": metadata.get("collection_account"),
+                "scrape_run_id": metadata.get("scrape_run_id"),
+                "extension_version": metadata.get("extension_version"),
+                "request_url": metadata.get("request_url"),
+                "http_status": metadata.get("http_status"),
+                "rate_limit_scope": metadata.get("rate_limit_scope"),
                 "partial": False,
             },
-            "metadata": metadata or {},
+            "metadata": metadata,
+            "rebuild": _rebuild_contract(
+                metadata,
+                default_target_tables=["media_items"],
+                default_required_fields=_MEDIA_REBUILD_REQUIRED_FIELDS,
+            ),
         }
         validation_errors = validate_sidecar_payload(payload)
         if validation_errors:

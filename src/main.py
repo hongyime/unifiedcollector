@@ -60,6 +60,7 @@ def main():
     rp = sub.add_parser("rebuild-report", help="Dry-run rebuild coverage from vault sidecars")
     rp.add_argument("--vault-root", default=None, help="Vault root (default: COLLECTOR_VAULT_ROOT)")
     rp.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    rp.add_argument("--verify-checksums", action="store_true", help="Hash referenced files while scanning")
 
     # schedule
     scp = sub.add_parser("schedule", help="Add/update a collection schedule")
@@ -86,7 +87,7 @@ def main():
     elif args.command == "status":
         asyncio.run(_cmd_status(getattr(args, "source", None)))
     elif args.command == "rebuild-report":
-        _cmd_rebuild_report(args.vault_root, args.json)
+        _cmd_rebuild_report(args.vault_root, args.json, args.verify_checksums)
     elif args.command == "schedule":
         asyncio.run(_cmd_schedule(args.source, args.interval))
     elif args.command == "target":
@@ -197,12 +198,12 @@ async def _cmd_status(source: str | None):
     await close_pool()
 
 
-def _cmd_rebuild_report(vault_root: str | None, as_json: bool):
+def _cmd_rebuild_report(vault_root: str | None, as_json: bool, verify_checksums: bool = False):
     import json
 
     from src.core.rebuild_report import scan_sidecars
 
-    report = scan_sidecars(vault_root)
+    report = scan_sidecars(vault_root, verify_checksums=verify_checksums)
     if as_json:
         print(json.dumps(report.to_dict(), indent=2, sort_keys=True, default=str))
     else:
