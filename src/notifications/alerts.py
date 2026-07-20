@@ -173,6 +173,17 @@ def _fmt_count(n: int) -> str:
     return str(n)
 
 
+def _fmt_bytes(n) -> str:
+    if n is None:
+        return "unknown"
+    value = float(n)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if value < 1024 or unit == "TB":
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024
+    return f"{value:.1f} TB"
+
+
 def _backfill_phase(src: str, snap: dict) -> str:
     """Classify a source's ingestion phase for the Backfill heartbeat line.
 
@@ -255,6 +266,33 @@ async def notify_status(snapshot: dict) -> bool:
         lines.extend(_format_rate_limit_event(r) for r in recent_limits[:5])
     if not active_limits and not recent_limits:
         lines.append("No active cooldowns and no HTTP 429s recorded this hour.")
+
+    vault = snapshot.get("vault") or {}
+    if vault:
+        available = bool(vault.get("available"))
+        writable = bool(vault.get("writable"))
+        queued = int(vault.get("artifacts_queued") or 0)
+        partial = int(vault.get("artifacts_partial") or 0)
+        failures = int(vault.get("sidecar_failures") or 0)
+        lines.append("")
+        lines.append("<b>Vault</b>")
+        if available and writable:
+            lines.append(
+                f"Writable at <code>{_esc(vault.get('root') or '')}</code>; "
+                f"{_fmt_bytes(vault.get('free_bytes'))} free."
+            )
+        else:
+            lines.append(
+                f"Not safe for file-backed artifacts at <code>{_esc(vault.get('root') or '')}</code>"
+                + (f": {_esc(vault.get('error'))}" if vault.get("error") else ".")
+            )
+        if queued or partial or failures:
+            lines.append(
+                f"Artifact health: {queued:,} queued for repair, "
+                f"{partial:,} partial rows, {failures:,} sidecar failures recorded."
+            )
+        else:
+            lines.append("Artifact health: no queued sidecar repairs or partial rows.")
 
     ages: dict = snapshot.get("source_ages") or {}
     stale = set(snapshot.get("stale_sources") or [])

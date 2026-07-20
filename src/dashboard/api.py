@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 from src.db.connection import get_pool
 from src.dashboard.websocket import health_ws
+from src.core.vault import vault_artifact_counts, vault_health
 
 logger = logging.getLogger(__name__)
 _MESSAGING_COVERAGE_CACHE: dict[str, object] = {"ts": 0.0, "rows": None}
@@ -74,6 +75,21 @@ async def _estimated_table_rows(conn, table: str) -> int:
         table,
     )
     return int(value or 0)
+
+
+def _vault_payload() -> dict:
+    health = vault_health()
+    return {
+        "root": str(health.root),
+        "available": health.available,
+        "writable": health.writable,
+        "free_bytes": health.free_bytes,
+        "total_bytes": health.total_bytes,
+        "error": health.error,
+        "sidecar_failures": 0,
+        "artifacts_queued": 0,
+        "artifacts_partial": 0,
+    }
 
 app = FastAPI(title="UnifiedCollector Dashboard")
 
@@ -174,20 +190,32 @@ def require_role(min_role: str):
 @app.get("/health")
 async def health():
     pool = await get_pool()
+    vault = _vault_payload()
     try:
         async with pool.acquire() as conn:
             await conn.fetchval("SELECT 1")
+            try:
+                vault.update(await vault_artifact_counts(conn))
+            except Exception as exc:
+                vault["counts_error"] = exc.__class__.__name__
         db_status = "healthy"
     except Exception as e:
         db_status = f"error: {e}"
 
     from src.core.drive_check import check_drive
     drive_ok = check_drive()
+    vault_ok = (
+        vault.get("available") is True
+        and vault.get("writable") is True
+        and int(vault.get("artifacts_queued") or 0) == 0
+        and int(vault.get("artifacts_partial") or 0) == 0
+    )
 
     return {
-        "status": "ok" if db_status == "healthy" and drive_ok else "degraded",
+        "status": "ok" if db_status == "healthy" and drive_ok and vault_ok else "degraded",
         "database": db_status,
         "drive": "mounted" if drive_ok else "missing",
+        "vault": vault,
     }
 
 
@@ -210,7 +238,30 @@ async def metrics():
         lines.append(f"{name}{suffix} {value}")
 
     try:
+        vault = _vault_payload()
+        emit("uc_vault_available", 1 if vault["available"] else 0,
+             "Whether the collector vault root exists", "gauge")
+        emit("uc_vault_writable", 1 if vault["writable"] else 0,
+             "Whether the collector vault root is writable", "gauge")
+        if vault["free_bytes"] is not None:
+            emit("uc_vault_free_bytes", vault["free_bytes"],
+                 "Free bytes on the collector vault filesystem", "gauge")
+        if vault["total_bytes"] is not None:
+            emit("uc_vault_total_bytes", vault["total_bytes"],
+                 "Total bytes on the collector vault filesystem", "gauge")
+
         async with pool.acquire() as conn:
+            try:
+                vault.update(await vault_artifact_counts(conn))
+                emit("uc_vault_sidecar_failures", vault["sidecar_failures"],
+                     "Total vault sidecar write failures in the dead-letter queue", "gauge")
+                emit("uc_vault_artifacts_queued", vault["artifacts_queued"],
+                     "Pending vault artifact repair/failure rows", "gauge")
+                emit("uc_vault_artifacts_partial", vault["artifacts_partial"],
+                     "Media rows whose recorded vault sidecar write failed", "gauge")
+            except Exception:
+                pass
+
             # Per-source media item counts.
             rows = await conn.fetch(
                 "SELECT source, COUNT(*) AS n FROM media_items GROUP BY source"

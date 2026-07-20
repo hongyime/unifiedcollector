@@ -2,6 +2,18 @@ export interface HealthStatus {
   status: "ok" | "degraded";
   database: string;
   drive: string;
+  vault?: {
+    root: string;
+    available: boolean;
+    writable: boolean;
+    free_bytes: number | null;
+    total_bytes: number | null;
+    error?: string | null;
+    sidecar_failures: number;
+    artifacts_queued: number;
+    artifacts_partial: number;
+    counts_error?: string | null;
+  };
 }
 
 export interface CollectorStatus {

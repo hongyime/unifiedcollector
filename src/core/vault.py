@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import tempfile
 import time
 from collections.abc import Mapping
@@ -52,6 +53,8 @@ class VaultHealth:
     root: Path
     available: bool
     writable: bool
+    free_bytes: int | None = None
+    total_bytes: int | None = None
     error: str | None = None
 
 
@@ -185,17 +188,56 @@ def vault_health(root: Path = VAULT_ROOT) -> VaultHealth:
     """Return mount/writability health for the canonical vault root."""
     if not root.exists() or not root.is_dir():
         return VaultHealth(root=root, available=False, writable=False, error="vault root missing")
+    free_bytes = None
+    total_bytes = None
+    try:
+        usage = shutil.disk_usage(root)
+        free_bytes = int(usage.free)
+        total_bytes = int(usage.total)
+    except OSError:
+        pass
     probe = root / f".vault_check.{os.getpid()}.{time.time_ns()}"
     try:
         probe.write_text("ok", encoding="utf-8")
         probe.unlink(missing_ok=True)
-        return VaultHealth(root=root, available=True, writable=True)
+        return VaultHealth(root=root, available=True, writable=True, free_bytes=free_bytes, total_bytes=total_bytes)
     except OSError as exc:
         try:
             probe.unlink(missing_ok=True)
         except OSError:
             pass
-        return VaultHealth(root=root, available=True, writable=False, error=str(exc))
+        return VaultHealth(
+            root=root,
+            available=True,
+            writable=False,
+            free_bytes=free_bytes,
+            total_bytes=total_bytes,
+            error=str(exc),
+        )
+
+
+async def vault_artifact_counts(conn) -> dict[str, int]:
+    """DB-backed artifact health counts used by dashboards and Telegram."""
+    row = await conn.fetchrow(
+        """
+        SELECT
+          (SELECT COUNT(*)::int
+           FROM dead_letter_queue
+           WHERE error_message LIKE 'vault sidecar write failed:%') AS sidecar_failures,
+          (SELECT COUNT(*)::int
+           FROM dead_letter_queue
+           WHERE status IN ('pending', 'in_progress')
+             AND error_message LIKE 'vault sidecar write failed:%') AS artifacts_queued,
+          (SELECT COUNT(*)::int
+           FROM media_items
+           WHERE metadata->'vault_sidecar'->>'ok' = 'false') AS artifacts_partial
+        """
+    )
+    return {
+        "sidecar_failures": int(row["sidecar_failures"] or 0),
+        "artifacts_queued": int(row["artifacts_queued"] or 0),
+        "artifacts_partial": int(row["artifacts_partial"] or 0),
+    }
 
 
 def ensure_vault_available(root: Path = VAULT_ROOT) -> None:

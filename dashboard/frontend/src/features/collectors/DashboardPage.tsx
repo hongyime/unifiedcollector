@@ -308,6 +308,9 @@ export function DashboardPage() {
   const recentRateLimitEvents = rateLimits?.events.length ?? 0;
   const recentRateLimitScopes = recentLimitSummaries.length;
   const activeRateLimits = activeCursorLimits.length + activeEventLimits.length;
+  const vault = health?.vault;
+  const vaultOk = vault?.available && vault?.writable;
+  const vaultIssues = (vault?.artifacts_queued ?? 0) + (vault?.artifacts_partial ?? 0);
 
   return (
     <div>
@@ -346,9 +349,14 @@ export function DashboardPage() {
           status={health?.database === "healthy" ? "success" : "error"}
         />
         <MetricCard
-          label="Drive"
-          value={health?.drive === "mounted" ? "Mounted" : "Missing"}
-          status={health?.drive === "mounted" ? "success" : "error"}
+          label="Vault"
+          value={vaultOk ? "Writable" : "Blocked"}
+          sublabel={
+            vault?.free_bytes != null
+              ? `${formatBytes(vault.free_bytes)} free · ${formatNumber(vaultIssues)} issues`
+              : health?.drive ?? "unknown"
+          }
+          status={vaultOk && vaultIssues === 0 ? "success" : vaultOk ? "warning" : "error"}
         />
         <MetricCard
           label="This Hour"

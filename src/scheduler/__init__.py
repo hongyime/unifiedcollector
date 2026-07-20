@@ -3,10 +3,10 @@ import logging
 import os
 import signal
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 from src.db.connection import get_pool, close_pool
 from src.core.env import env_int
+from src.core.vault import vault_artifact_counts, vault_health
 
 logger = logging.getLogger(__name__)
 
@@ -382,6 +382,21 @@ class Scheduler:
                         continue
                 snap["queue_pending"] = qp
 
+                try:
+                    vh = vault_health()
+                    vault = {
+                        "root": str(vh.root),
+                        "available": vh.available,
+                        "writable": vh.writable,
+                        "free_bytes": vh.free_bytes,
+                        "total_bytes": vh.total_bytes,
+                        "error": vh.error,
+                    }
+                    vault.update(await vault_artifact_counts(conn))
+                    snap["vault"] = vault
+                except Exception as exc:
+                    snap["vault"] = {"available": False, "writable": False, "error": str(exc)}
+
                 # Health flags from source_health (dead + degraded/auth_paused).
                 try:
                     rows = await conn.fetch(
@@ -396,8 +411,16 @@ class Scheduler:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
-        # ok reflects REAL health: green only when nothing dead or stale.
-        snap["ok"] = not (snap.get("dead_sources") or snap.get("stale_sources"))
+        # ok reflects REAL health: green only when nothing dead/stale and the
+        # vault can safely accept file-backed artifacts.
+        vault = snap.get("vault") or {}
+        vault_bad = bool(vault) and (
+            not vault.get("available")
+            or not vault.get("writable")
+            or int(vault.get("artifacts_queued") or 0) > 0
+            or int(vault.get("artifacts_partial") or 0) > 0
+        )
+        snap["ok"] = not (snap.get("dead_sources") or snap.get("stale_sources") or vault_bad)
         return snap
 
     async def _init_db(self):
