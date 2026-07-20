@@ -1,8 +1,6 @@
 import asyncio
-from pathlib import Path
 
 from src.bridges import ig_ingest
-from src.core.vault import VaultHealth
 
 
 class _FakeConn:
@@ -45,13 +43,8 @@ def test_extension_ingest_pauses_media_download_when_vault_unavailable(monkeypat
     pool = _FakePool()
     monkeypatch.setattr(
         ig_ingest,
-        "vault_health",
-        lambda: VaultHealth(
-            root=Path(tmp_path / "vault"),
-            available=False,
-            writable=False,
-            error="vault root missing",
-        ),
+        "assert_media_write_allowed",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("vault root missing")),
     )
 
     saved = asyncio.run(
@@ -69,4 +62,4 @@ def test_extension_ingest_pauses_media_download_when_vault_unavailable(monkeypat
     query, args = pool.conn.executes[0]
     assert "dead_letter_queue" in query
     assert args[:3] == ("instagram", "bryan", "abc123")
-    assert "vault unavailable before extension media write" in args[3]
+    assert "vault/media unavailable before extension media write" in args[3]

@@ -15,7 +15,7 @@ from .rate_limiter import AdaptiveRateLimiter
 from .resilience import CircuitBreaker, wait_for_internet
 from .scrape_pacing import sleep_rate_limit
 from .user_agent import UserAgentPool
-from .vault import ensure_vault_available, write_media_sidecar
+from .vault import assert_media_write_allowed, write_media_sidecar
 
 logger = logging.getLogger(__name__)
 
@@ -148,9 +148,9 @@ class BaseCollector(ABC):
         if not self.drive_ok:
             raise RuntimeError(f"Drive not mounted. Pausing {self.SOURCE_NAME}.")
         try:
-            ensure_vault_available()
+            assert_media_write_allowed(self.media_dir / ".collector_write_check")
         except RuntimeError as exc:
-            raise RuntimeError(f"Vault not mounted or writable. Pausing {self.SOURCE_NAME}: {exc}") from exc
+            raise RuntimeError(f"Vault/media path not writable. Pausing {self.SOURCE_NAME}: {exc}") from exc
 
         # Circuit breaker: skip entire cycle if open (too many recent failures).
         if not self.circuit_breaker.allow_request():
@@ -320,6 +320,8 @@ class BaseCollector(ABC):
     def save_json(self, data: dict, filename: str) -> Path:
         """Save a dictionary as a JSON file atomically."""
         dest = self.media_dir / filename
+        assert_media_write_allowed(dest)
+        self.media_dir.mkdir(parents=True, exist_ok=True)
         content = json.dumps(data, indent=2, ensure_ascii=False, default=str)
         fd, tmp_path = tempfile.mkstemp(dir=self.media_dir, suffix=".tmp")
         try:
@@ -340,6 +342,8 @@ class BaseCollector(ABC):
         Also saves a _metadata.json and _raw.json if metadata is provided.
         """
         dest = self.media_dir / filename
+        assert_media_write_allowed(dest)
+        self.media_dir.mkdir(parents=True, exist_ok=True)
         fd, tmp_path = tempfile.mkstemp(dir=self.media_dir, suffix=".tmp")
         try:
             with os.fdopen(fd, "wb") as f:

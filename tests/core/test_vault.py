@@ -191,3 +191,38 @@ def test_write_media_sidecar_reports_missing_vault(tmp_path, monkeypatch):
 def test_ensure_vault_available_raises_for_missing_vault(tmp_path):
     with pytest.raises(RuntimeError, match="collector vault unavailable"):
         vault.ensure_vault_available(tmp_path / "missing")
+
+
+def test_assert_media_write_allowed_accepts_media_inside_vault(tmp_path):
+    root = tmp_path / "vault"
+    media = root / "media"
+    media.mkdir(parents=True)
+
+    vault.assert_media_write_allowed(media / "instagram" / "a.jpg", root=root, media_root=media)
+
+
+def test_assert_media_write_allowed_rejects_missing_media_root(tmp_path):
+    root = tmp_path / "vault"
+    root.mkdir()
+
+    with pytest.raises(RuntimeError, match="media root missing"):
+        vault.assert_media_write_allowed(root / "media" / "a.jpg", root=root, media_root=root / "media")
+
+
+def test_assert_media_write_allowed_rejects_dest_outside_media_root(tmp_path):
+    root = tmp_path / "vault"
+    media = root / "media"
+    media.mkdir(parents=True)
+
+    with pytest.raises(RuntimeError, match="escapes media root"):
+        vault.assert_media_write_allowed(tmp_path / "other" / "a.jpg", root=root, media_root=media)
+
+
+def test_assert_media_write_allowed_rejects_unlinked_media_mount(tmp_path):
+    root = tmp_path / "vault"
+    (root / "media").mkdir(parents=True)
+    media = tmp_path / "detached_media"
+    media.mkdir()
+
+    with pytest.raises(RuntimeError, match="not linked to vault media"):
+        vault.assert_media_write_allowed(media / "instagram" / "a.jpg", root=root, media_root=media)

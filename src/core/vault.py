@@ -247,6 +247,74 @@ def ensure_vault_available(root: Path = VAULT_ROOT) -> None:
         raise RuntimeError(f"collector vault unavailable: {health.error or root}")
 
 
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def _media_root_from_env(root: Path = VAULT_ROOT) -> Path:
+    return Path(os.getenv("COLLECTOR_DRIVE_PATH", str(root / "media"))).resolve(strict=False)
+
+
+def _assert_media_root_mirrors_vault(media_root: Path, vault_media: Path) -> None:
+    token = f"{os.getpid()}:{time.time_ns()}"
+    name = f".vault_media_check.{os.getpid()}.{time.time_ns()}"
+    media_probe = media_root / name
+    vault_probe = vault_media / name
+    try:
+        media_probe.write_text(token, encoding="utf-8")
+        if not vault_probe.exists() or vault_probe.read_text(encoding="utf-8") != token:
+            raise RuntimeError(
+                f"collector media root {media_root} is not linked to vault media {vault_media}"
+            )
+    finally:
+        for probe in {media_probe, vault_probe}:
+            try:
+                probe.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def assert_media_write_allowed(
+    dest_path: str | os.PathLike[str],
+    *,
+    root: Path = VAULT_ROOT,
+    media_root: str | os.PathLike[str] | None = None,
+) -> None:
+    """Fail closed before media/artifact writes.
+
+    The container normally has both /vault (Z:/unifiedcollector) and /media
+    (Z:/unifiedcollector/media) mounted. A healthy /vault alone is not enough:
+    if /media is missing Docker/Python can create a local directory and the
+    collector would falsely appear to be collecting. This guard verifies the
+    destination, media root, and vault mirror relationship before file writes.
+    """
+    ensure_vault_available(root)
+
+    root_path = root.resolve(strict=False)
+    media_path = Path(media_root).resolve(strict=False) if media_root is not None else _media_root_from_env(root_path)
+    if not media_path.exists() or not media_path.is_dir():
+        raise RuntimeError(f"collector media root missing or not a directory: {media_path}")
+
+    dest = Path(dest_path)
+    if not dest.is_absolute():
+        dest = media_path / dest
+    dest = dest.resolve(strict=False)
+    if not _is_relative_to(dest, media_path):
+        raise RuntimeError(f"collector write destination escapes media root: {dest} not under {media_path}")
+
+    if _is_relative_to(media_path, root_path):
+        return
+
+    vault_media = (root_path / "media").resolve(strict=False)
+    if not vault_media.exists() or not vault_media.is_dir():
+        raise RuntimeError(f"vault media mirror missing or not a directory: {vault_media}")
+    _assert_media_root_mirrors_vault(media_path, vault_media)
+
+
 def relative_to_vault(path: str | os.PathLike[str] | None, root: Path = VAULT_ROOT) -> str | None:
     """Best-effort vault-relative path for stable DB/sidecar references."""
     if not path:

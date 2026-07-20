@@ -43,7 +43,7 @@ from aiohttp import web
 from src.db.connection import get_pool, close_pool
 from src.core.media_filter import inspect as inspect_media
 from src.core.proximity import refresh_account_proximity_cache
-from src.core.vault import vault_health, write_media_sidecar
+from src.core.vault import assert_media_write_allowed, write_media_sidecar
 
 # Follow-aware access recording (Phase 0). The extension IS the live IG path, so
 # recording access outcomes here populates profile_access_{summary,attempts} far
@@ -491,6 +491,34 @@ async def _download_and_save(pool, session, platform, username, item) -> bool:
     # filename kind label (no subfolders anymore — kind is encoded in the name)
     kindtag = {"story": "story_", "highlight": "hl_", "tagged": "tagged_", "profile": "profile_"}.get(media_kind, "")
     datestr = _date_prefix(item, platform)
+
+    async def _record_vault_pause(reason: str) -> None:
+        logger.warning(
+            "vault/media unavailable before extension media write platform=%s cid=%s: %s",
+            platform,
+            store_cid,
+            reason,
+        )
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO dead_letter_queue (source, entity_id, content_id, error_message)
+                    VALUES ($1, $2, $3, $4)
+                    """,
+                    platform,
+                    safe_user,
+                    store_cid,
+                    f"vault/media unavailable before extension media write: {reason}"[:500],
+                )
+        except Exception:
+            logger.debug(
+                "vault/media unavailable DLQ insert failed for %s/%s",
+                platform,
+                store_cid,
+                exc_info=True,
+            )
+
     try:
         # dedup authority is media_items (source, content_id)
         async with pool.acquire() as conn:
@@ -500,34 +528,13 @@ async def _download_and_save(pool, session, platform, username, item) -> bool:
         if seen:
             return False
 
-        health = vault_health()
-        if not health.available or not health.writable:
-            reason = health.error or str(health.root)
-            logger.warning(
-                "vault unavailable before extension media write platform=%s cid=%s: %s",
-                platform,
-                store_cid,
-                reason,
+        try:
+            assert_media_write_allowed(
+                Path(MEDIA_ROOT) / platform / f"account_{safe_user}" / ".extension_write_check",
+                media_root=MEDIA_ROOT,
             )
-            try:
-                async with pool.acquire() as conn:
-                    await conn.execute(
-                        """
-                        INSERT INTO dead_letter_queue (source, entity_id, content_id, error_message)
-                        VALUES ($1, $2, $3, $4)
-                        """,
-                        platform,
-                        safe_user,
-                        store_cid,
-                        f"vault unavailable before extension media write: {reason}"[:500],
-                    )
-            except Exception:
-                logger.debug(
-                    "vault unavailable DLQ insert failed for %s/%s",
-                    platform,
-                    store_cid,
-                    exc_info=True,
-                )
+        except RuntimeError as exc:
+            await _record_vault_pause(str(exc))
             return False
 
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=60)) as r:
@@ -555,6 +562,11 @@ async def _download_and_save(pool, session, platform, username, item) -> bool:
         # filename: <YYYYMMDD>_<platform>_<user>_<kindtag><cid>.<ext> (sortable by date).
         dest_dir = Path(MEDIA_ROOT) / platform / f"account_{safe_user}" / ctype
         dest = dest_dir / f"{datestr}_{platform}_{safe_user}_{kindtag}{raw_cid}.{ext}"
+        try:
+            assert_media_write_allowed(dest, media_root=MEDIA_ROOT)
+        except RuntimeError as exc:
+            await _record_vault_pause(str(exc))
+            return False
         if dest.exists():
             return False
 
