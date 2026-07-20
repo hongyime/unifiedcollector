@@ -1177,8 +1177,32 @@ async def recent_rate_limits(hours: int = 24, limit: int = 100,
                         event["metadata"] = json.loads(event["metadata"])
                     except Exception:
                         event["metadata"] = {}
+            recent_summary = [dict(r) for r in await conn.fetch(
+                """
+                SELECT source, account, scope,
+                       (array_agg(status_code ORDER BY created_at DESC))[1]::int AS status_code,
+                       count(*)::int AS count,
+                       (array_agg(cooldown_seconds ORDER BY created_at DESC))[1]::int AS cooldown_seconds,
+                       (array_agg(reason ORDER BY created_at DESC))[1] AS reason,
+                       min(created_at) AS first_seen_at,
+                       max(created_at) AS last_seen_at,
+                       max(created_at + COALESCE(cooldown_seconds, 0) * interval '1 second') AS active_until
+                FROM rate_limit_events
+                WHERE created_at >= now() - ($1 || ' hours')::interval
+                GROUP BY source, account, scope
+                ORDER BY last_seen_at DESC
+                LIMIT 24
+                """,
+                str(hours),
+                timeout=15,
+            )]
+            now_utc = datetime.now(timezone.utc)
+            for row in recent_summary:
+                active_until = row.get("active_until")
+                row["active_now"] = bool(active_until and active_until > now_utc)
         else:
             events = []
+            recent_summary = []
         active = []
         try:
             for r in await conn.fetch(
@@ -1207,10 +1231,11 @@ async def recent_rate_limits(hours: int = 24, limit: int = 100,
                         streak = None
                 d["active_until"] = expiry
                 d["streak"] = streak
+                d["active_now"] = bool(expiry and expiry > datetime.now(timezone.utc))
                 active.append(d)
         except Exception:
             active = []
-    return {"events": events, "active": active}
+    return {"events": events, "active": active, "recent_summary": recent_summary}
 
 
 # ---------------------------------------------------------------------------
@@ -1602,29 +1627,18 @@ async def messaging_coverage(_user: dict = Depends(require_role("viewer"))):
         return cached
 
     pool = await get_pool()
-    rows = [
-        {
-            "network": "Telegram",
+    native_networks = {
+        "Telegram": {
             "native_source": "telegram",
-            "beeper_network": "Telegram",
             "canonical_source": "native",
-            "policy": "beeper mirror",
+            "policy": "native primary, Beeper mirror",
         },
-        {
-            "network": "WhatsApp",
+        "WhatsApp": {
             "native_source": "whatsapp",
-            "beeper_network": "WhatsApp",
             "canonical_source": "native",
-            "policy": "beeper mirror",
+            "policy": "native primary, Beeper mirror",
         },
-        {
-            "network": "Discord",
-            "native_source": None,
-            "beeper_network": "Discord",
-            "canonical_source": "beeper",
-            "policy": "beeper only",
-        },
-    ]
+    }
     async with pool.acquire() as conn:
         native = {
             "telegram": {
@@ -1633,52 +1647,89 @@ async def messaging_coverage(_user: dict = Depends(require_role("viewer"))):
                 "people": await conn.fetchval(
                     "SELECT COUNT(*) FROM telegram_users WHERE NOT COALESCE(is_bot, false)"
                 ),
-                "last_message": await conn.fetchval("SELECT MAX(platform_created_at) FROM telegram_messages"),
+                "last_message": await conn.fetchval(
+                    "SELECT platform_created_at FROM telegram_messages "
+                    "ORDER BY platform_created_at DESC NULLS LAST LIMIT 1"
+                ),
             },
             "whatsapp": {
                 "messages": await conn.fetchval("SELECT COUNT(*) FROM whatsapp_messages"),
                 "chats": await conn.fetchval("SELECT COUNT(*) FROM whatsapp_chats"),
                 "people": await conn.fetchval("SELECT COUNT(*) FROM whatsapp_users"),
-                "last_message": await conn.fetchval("SELECT MAX(timestamp) FROM whatsapp_messages"),
+                "last_message": await conn.fetchval(
+                    'SELECT "timestamp" FROM whatsapp_messages ORDER BY "timestamp" DESC NULLS LAST LIMIT 1'
+                ),
             },
         }
         beeper_message_rows = await conn.fetch(
             """
-            SELECT network, COUNT(*) AS messages, MAX(timestamp) AS last_message
-            FROM beeper_shadow_messages
-            WHERE network = ANY($1::text[])
-            GROUP BY network
+            WITH networks AS (
+                SELECT DISTINCT network FROM beeper_shadow_chats
+                UNION
+                SELECT DISTINCT network FROM beeper_shadow_messages
+            )
+            SELECT n.network,
+                   (
+                       SELECT COUNT(*)::bigint
+                       FROM beeper_shadow_messages m
+                       WHERE m.network = n.network
+                   ) AS messages,
+                   (
+                       SELECT MAX(timestamp)
+                       FROM beeper_shadow_messages m
+                       WHERE m.network = n.network
+                   ) AS last_message
+            FROM networks n
+            ORDER BY n.network
             """,
-            ["Telegram", "WhatsApp", "Discord"],
             timeout=30,
         )
         beeper_chat_rows = await conn.fetch(
             """
             SELECT network, COUNT(*) AS chats, MAX(last_seen_at) AS last_seen
             FROM beeper_shadow_chats
-            WHERE network = ANY($1::text[])
             GROUP BY network
             """,
-            ["Telegram", "WhatsApp", "Discord"],
+            timeout=30,
+        )
+        beeper_people_rows = await conn.fetch(
+            """
+            SELECT network, COUNT(DISTINCT participant_id)::int AS people
+            FROM beeper_shadow_participants
+            GROUP BY network
+            """,
             timeout=30,
         )
     beeper_messages = {r["network"]: dict(r) for r in beeper_message_rows}
     beeper_chats = {r["network"]: dict(r) for r in beeper_chat_rows}
+    beeper_people = {r["network"]: dict(r) for r in beeper_people_rows}
+    networks = sorted(
+        set(native_networks) | set(beeper_messages) | set(beeper_chats),
+        key=lambda n: (0 if n in native_networks else 1, n.lower()),
+    )
     out = []
-    for row in rows:
+    for net in networks:
+        row = native_networks.get(net, {
+            "native_source": None,
+            "canonical_source": "beeper",
+            "policy": "Beeper only",
+        })
         src = row["native_source"]
-        net = row["beeper_network"]
         native_stats = native.get(src or "", {"messages": 0, "chats": 0, "people": 0, "last_message": None})
         mirror_messages = beeper_messages.get(net, {})
         mirror_chats = beeper_chats.get(net, {})
+        mirror_people = beeper_people.get(net, {})
         d = {
             **row,
+            "network": net,
+            "beeper_network": net,
             "native_messages": native_stats.get("messages") or 0,
             "native_chats": native_stats.get("chats") or 0,
             "native_people": native_stats.get("people") or 0,
             "native_last_message": native_stats.get("last_message"),
             "beeper_messages": mirror_messages.get("messages") or 0,
             "beeper_chats": mirror_chats.get("chats") or 0,
+            "beeper_people": mirror_people.get("people") or 0,
             "beeper_last_message": mirror_messages.get("last_message") or mirror_chats.get("last_seen"),
         }
         for key in ("native_last_message", "beeper_last_message"):

@@ -9,7 +9,13 @@ import { api } from "../../services/api";
 import { formatBytes, formatNumber, relativeTime } from "../../utils/formatters";
 import { Database, HardDrive, Activity, AlertCircle, Clock3, ShieldAlert } from "lucide-react";
 import type { ColumnDef } from "@tanstack/react-table";
-import type { HourlyIngestionRow, MediaStats, MessagingCoverageRow, RateLimitEvent } from "../../services/types";
+import type {
+  HourlyIngestionRow,
+  MediaStats,
+  MessagingCoverageRow,
+  RateLimitEvent,
+  RateLimitRecentSummary,
+} from "../../services/types";
 
 function liveBadgeStatus(status: MediaStats["live"]) {
   if (status === "live") return "online";
@@ -76,8 +82,14 @@ const messagingColumns: ColumnDef<MessagingCoverageRow, unknown>[] = [
     accessorKey: "canonical_source",
     header: "Canonical",
     cell: (info) => {
+      const row = info.row.original;
       const value = info.getValue() as MessagingCoverageRow["canonical_source"];
-      return <StatusBadge status={value === "native" ? "online" : "processing"} label={value} />;
+      return (
+        <div>
+          <StatusBadge status={value === "native" ? "online" : "processing"} label={value} />
+          <div className="text-[10px] uppercase tracking-wide text-text-muted mt-1">{row.policy}</div>
+        </div>
+      );
     },
   },
   {
@@ -90,7 +102,7 @@ const messagingColumns: ColumnDef<MessagingCoverageRow, unknown>[] = [
         <div>
           <div>{formatNumber(info.getValue() as number)} msgs</div>
           <div className="text-[10px] uppercase tracking-wide text-text-muted">
-            {formatNumber(row.native_chats)} chats
+            {formatNumber(row.native_chats)} chats · {formatNumber(row.native_people)} people
           </div>
         </div>
       );
@@ -105,7 +117,7 @@ const messagingColumns: ColumnDef<MessagingCoverageRow, unknown>[] = [
         <div>
           <div>{formatNumber(info.getValue() as number)} msgs</div>
           <div className="text-[10px] uppercase tracking-wide text-text-muted">
-            {formatNumber(row.beeper_chats)} chats · {row.policy}
+            {formatNumber(row.beeper_chats)} chats · {formatNumber(row.beeper_people)} people
           </div>
         </div>
       );
@@ -165,6 +177,40 @@ const hourlyColumns: ColumnDef<HourlyIngestionRow, unknown>[] = [
   },
 ];
 
+function formatCooldown(seconds: number | null | undefined) {
+  if (!seconds) return "-";
+  const mins = Math.round(seconds / 60);
+  if (mins >= 60) return `${(mins / 60).toFixed(1)}h`;
+  return `${mins}m`;
+}
+
+function formatClock(iso: string | null | undefined) {
+  if (!iso) return "-";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "-";
+  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function normalizeRateLimitSource(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/_?rate_?limit/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function formatRateLimitService(service: string) {
+  const label = normalizeRateLimitSource(service);
+  return label || service.replace(/_/g, " ");
+}
+
+function formatRateLimitSummaryLabel(row: RateLimitRecentSummary) {
+  const parts = [row.source, row.account, row.scope]
+    .filter((part): part is string => Boolean(part))
+    .map((part) => part.replace(/_/g, " "));
+  return parts.join(" · ");
+}
+
 const rateLimitColumns: ColumnDef<RateLimitEvent, unknown>[] = [
   {
     accessorKey: "created_at",
@@ -189,12 +235,7 @@ const rateLimitColumns: ColumnDef<RateLimitEvent, unknown>[] = [
   {
     accessorKey: "cooldown_seconds",
     header: "Cooldown",
-    cell: (info) => {
-      const seconds = info.getValue() as number | null;
-      if (!seconds) return "—";
-      const mins = Math.round(seconds / 60);
-      return mins >= 60 ? `${(mins / 60).toFixed(1)}h` : `${mins}m`;
-    },
+    cell: (info) => formatCooldown(info.getValue() as number | null),
   },
   {
     accessorKey: "reason",
@@ -254,8 +295,19 @@ export function DashboardPage() {
   const currentRows = currentHourRows.reduce((s, r) => s + r.records, 0);
   const currentMessages = currentHourRows.reduce((s, r) => s + r.messages, 0);
   const currentFiles = currentHourRows.reduce((s, r) => s + r.media_items, 0);
-  const recentRateLimits = rateLimits?.events.length ?? 0;
-  const activeRateLimits = rateLimits?.active.filter((r) => r.status === "blocked").length ?? 0;
+  const nowMs = Date.now();
+  const activeCursorLimits = (rateLimits?.active ?? []).filter((r) => {
+    const expiryMs = r.active_until ? new Date(r.active_until).getTime() : Number.NaN;
+    return r.status === "blocked" && (!r.active_until || Number.isNaN(expiryMs) || expiryMs > nowMs);
+  });
+  const activeCursorSources = new Set(activeCursorLimits.map((r) => formatRateLimitService(r.service)));
+  const recentLimitSummaries = rateLimits?.recent_summary ?? [];
+  const activeEventLimits = recentLimitSummaries.filter(
+    (r) => r.active_now && !activeCursorSources.has(normalizeRateLimitSource(r.source)),
+  );
+  const recentRateLimitEvents = rateLimits?.events.length ?? 0;
+  const recentRateLimitScopes = recentLimitSummaries.length;
+  const activeRateLimits = activeCursorLimits.length + activeEventLimits.length;
 
   return (
     <div>
@@ -307,9 +359,13 @@ export function DashboardPage() {
         />
         <MetricCard
           label="Rate Limits"
-          value={activeRateLimits ? `${activeRateLimits} active` : `${recentRateLimits}`}
-          sublabel={activeRateLimits ? `${recentRateLimits} events last 24h` : "last 24h"}
-          status={activeRateLimits || recentRateLimits ? "warning" : "success"}
+          value={activeRateLimits ? `${activeRateLimits} active` : `${recentRateLimitScopes}`}
+          sublabel={
+            activeRateLimits
+              ? `${formatNumber(recentRateLimitEvents)} 429s last 24h`
+              : "source/account scopes last 24h"
+          }
+          status={activeRateLimits || recentRateLimitEvents ? "warning" : "success"}
           icon={<ShieldAlert className="w-5 h-5" />}
         />
       </div>
@@ -326,17 +382,50 @@ export function DashboardPage() {
 
       <div className="bg-surface rounded-lg border border-border p-4 mb-6">
         <h2 className="text-xs uppercase tracking-wider text-text-muted mb-4">Rate Limits</h2>
-        {(rateLimits?.active ?? []).length > 0 && (
+        {(activeCursorLimits.length > 0 || activeEventLimits.length > 0) && (
           <div className="mb-3 grid grid-cols-1 md:grid-cols-2 gap-2">
-            {rateLimits?.active.map((r) => (
+            {activeCursorLimits.map((r) => (
               <div key={r.service} className="bg-warning/10 border border-warning/30 rounded-md px-3 py-2 text-xs">
-                <div className="font-medium text-warning">{r.service}</div>
+                <div className="font-medium text-warning capitalize">{formatRateLimitService(r.service)}</div>
                 <div className="text-text-muted">
-                  {r.active_until ? `cooldown until ${new Date(r.active_until).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : r.status}
+                  {r.active_until ? `cooldown until ${formatClock(r.active_until)}` : r.status}
                   {r.streak ? ` · streak ${r.streak}` : ""}
                 </div>
               </div>
             ))}
+            {activeEventLimits.map((r) => (
+              <div
+                key={`${r.source}-${r.account ?? ""}-${r.scope ?? ""}`}
+                className="bg-warning/10 border border-warning/30 rounded-md px-3 py-2 text-xs"
+              >
+                <div className="font-medium text-warning capitalize">{formatRateLimitSummaryLabel(r)}</div>
+                <div className="text-text-muted">
+                  {r.active_until ? `cooldown until ${formatClock(r.active_until)}` : "cooldown observed"}
+                  {` · ${formatNumber(r.count)} 429s`}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        {recentLimitSummaries.length > 0 && (
+          <div className="mb-4">
+            <div className="text-[10px] uppercase tracking-wide text-text-muted mb-2">Recent 429 scopes</div>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
+              {recentLimitSummaries.slice(0, 8).map((r) => (
+                <div key={`${r.source}-${r.account ?? ""}-${r.scope ?? ""}-recent`} className="bg-background border border-border rounded-md px-3 py-2 text-xs">
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <div className="font-medium text-text-primary capitalize">{formatRateLimitSummaryLabel(r)}</div>
+                      <div className="text-text-muted mt-0.5">
+                        {formatNumber(r.count)} hits · last {relativeTime(r.last_seen_at)} · cooldown {formatCooldown(r.cooldown_seconds)}
+                      </div>
+                    </div>
+                    <StatusBadge status={r.active_now ? "warning" : "idle"} label={r.active_now ? "cooling" : "seen"} />
+                  </div>
+                  {r.reason && <div className="mt-1 text-text-muted truncate">{r.reason}</div>}
+                </div>
+              ))}
+            </div>
           </div>
         )}
         <DataTable data={(rateLimits?.events ?? []).slice(0, 40)} columns={rateLimitColumns} />

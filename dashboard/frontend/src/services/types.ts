@@ -83,11 +83,27 @@ export interface ActiveRateLimit {
   status: string | null;
   active_until: string | null;
   streak: number | null;
+  active_now: boolean;
+}
+
+export interface RateLimitRecentSummary {
+  source: string;
+  account: string | null;
+  scope: string | null;
+  status_code: number | null;
+  count: number;
+  cooldown_seconds: number | null;
+  reason: string | null;
+  first_seen_at: string;
+  last_seen_at: string;
+  active_until: string | null;
+  active_now: boolean;
 }
 
 export interface RateLimitSummary {
   events: RateLimitEvent[];
   active: ActiveRateLimit[];
+  recent_summary: RateLimitRecentSummary[];
 }
 
 export interface DLQItem {
@@ -779,5 +795,6 @@ export interface MessagingCoverageRow {
   native_last_message: string | null;
   beeper_messages: number;
   beeper_chats: number;
+  beeper_people: number;
   beeper_last_message: string | null;
 }
