@@ -48,6 +48,7 @@ from src.core.proximity import refresh_account_proximity_cache
 from src.core.profile_photo_tracker import ProfilePhotoTracker
 from src.core.rate_limit_events import record_rate_limit_event
 from src.core.scrape_pacing import headless_dwell
+from src.core.vault import assert_media_write_allowed
 from src.core.user_change_tracker import (
     UserChangeTracker,
     INSTAGRAM_TRACKED_FIELDS,
@@ -2253,8 +2254,9 @@ class InstagramCollector(BaseCollector):
 
         # Per-account subdirectory isolation
         dest_dir = self.account_media_dir / item["content_type"]
-        dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / filename
+        assert_media_write_allowed(dest)
+        dest_dir.mkdir(parents=True, exist_ok=True)
 
         if dest.exists():
             return

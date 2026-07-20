@@ -101,6 +101,7 @@ from src.core.file_naming import sanitize_name
 from src.core.proximity import refresh_account_proximity_cache
 from src.core.profile_photo_tracker import ProfilePhotoTracker
 from src.core.spider_discover import Edge, EdgeType, SpiderDiscover
+from src.core.vault import assert_media_write_allowed
 from src.core.user_change_tracker import (
     UserChangeTracker,
     GITHUB_TRACKED_FIELDS,
@@ -1320,8 +1321,9 @@ class GithubCollector(BaseCollector):
             extension=item.get("extension", "jpg"),
         )
         dest_dir = self.account_media_dir / item["content_type"]
-        dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / filename
+        assert_media_write_allowed(dest)
+        dest_dir.mkdir(parents=True, exist_ok=True)
         try:
             await asyncio.sleep(self._download_delay)
             async with self._make_client() as client:

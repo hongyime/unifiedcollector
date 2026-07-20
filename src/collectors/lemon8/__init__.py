@@ -91,6 +91,7 @@ from src.collectors.lemon8.parse import (
 )
 from src.core.human_rate_limiter import OperationType
 from src.core.file_naming import sanitize_name
+from src.core.vault import assert_media_write_allowed
 from src.core.user_change_tracker import (
     UserChangeTracker,
     LEMON8_TRACKED_FIELDS,
@@ -1961,8 +1962,9 @@ class Lemon8Collector(BaseCollector):
         if self.is_known(cid): return
         filename = self.build_filename(item["entity_id"], item["entity_name"], item["content_type"], cid, extension=item.get("extension", "jpg"))
         dest_dir = self.account_media_dir / item["content_type"]
-        dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / filename
+        assert_media_write_allowed(dest)
+        dest_dir.mkdir(parents=True, exist_ok=True)
         try:
             await self.rate_limiter.async_wait("lemon8-app.com", OperationType.MEDIA_DOWNLOAD)
             async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:

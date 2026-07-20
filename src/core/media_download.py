@@ -48,8 +48,6 @@ import asyncio
 import hashlib
 import logging
 import os
-import shutil
-import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -58,6 +56,7 @@ from urllib.parse import urlparse
 
 from . import subprocess_downloader as _sub
 from .resilience import async_retry
+from .vault import assert_media_write_allowed
 
 logger = logging.getLogger(__name__)
 
@@ -219,6 +218,7 @@ def _atomic_replace(tmp_path: Path, final_path: Path) -> None:
         # Windows / odd FS — proceed; replace is still atomic
         if os.name != "nt":
             logger.debug("fsync failed for %s", tmp_path, exc_info=True)
+    assert_media_write_allowed(final_path)
     final_path.parent.mkdir(parents=True, exist_ok=True)
     os.replace(str(tmp_path), str(final_path))
 
@@ -238,6 +238,7 @@ async def _httpx_download_one(
     """
     import httpx  # local import — keeps module import-clean if httpx missing
 
+    assert_media_write_allowed(final_path)
     final_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = final_path.with_suffix(final_path.suffix + ".tmp")
 
@@ -341,6 +342,7 @@ async def download(
     """
     opts = options or MediaOptions()
     dest_dir = Path(dest_dir)
+    assert_media_write_allowed(dest_dir / ".media_download_check")
     dest_dir.mkdir(parents=True, exist_ok=True)
 
     # Pre-flight: rate-limiter hook (Agent C will populate)
@@ -558,6 +560,7 @@ async def _do_delegated(
         )
 
     tmp_path = final_path.with_suffix(final_path.suffix + ".tmp")
+    assert_media_write_allowed(final_path)
     final_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Race the writer against stop_event.

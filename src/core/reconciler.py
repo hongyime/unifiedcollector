@@ -28,6 +28,7 @@ import os
 from collections.abc import Callable
 
 from .drive_check import check_drive
+from .vault import assert_media_write_allowed
 
 logger = logging.getLogger(__name__)
 
@@ -243,6 +244,7 @@ class Reconciler:
             if len(data) < 1024:  # html error page / empty -> treat as failure
                 return False
             dest = Path(file_path)
+            assert_media_write_allowed(dest)
             dest.parent.mkdir(parents=True, exist_ok=True)
             fd, tmp = tempfile.mkstemp(dir=str(dest.parent), suffix=".tmp")
             with os.fdopen(fd, "wb") as f:

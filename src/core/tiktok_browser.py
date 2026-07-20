@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from src.core.scrape_pacing import headless_dwell
+from src.core.vault import assert_media_write_allowed
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +115,7 @@ def _parse_netscape_cookies(cookies_file: Path) -> list[dict[str, Any]]:
 
 def _atomic_write_bytes(dest: Path, data: bytes) -> None:
     """Write ``data`` to ``dest`` via .tmp + os.replace (best-effort fsync)."""
+    assert_media_write_allowed(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".tmp")
     with open(tmp, "wb") as fh:

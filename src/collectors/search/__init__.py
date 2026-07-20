@@ -96,6 +96,7 @@ from src.collectors.search.parse import (
     ICON_KEYWORDS as _parse_ICON_KEYWORDS,
 )
 from src.core.search_cache import SearchCache
+from src.core.vault import assert_media_write_allowed
 
 logger = logging.getLogger(__name__)
 
@@ -1063,8 +1064,9 @@ class SearchCollector(BaseCollector):
             entity_id, entity_name, "image", content_id, extension="jpg",
         )
         dest_dir = self.account_media_dir / "image"
-        dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / filename
+        assert_media_write_allowed(dest)
+        dest_dir.mkdir(parents=True, exist_ok=True)
 
         loop = asyncio.get_event_loop()
 
@@ -1139,8 +1141,9 @@ class SearchCollector(BaseCollector):
             entity_id, entity_name, "pdf", content_id, extension="pdf",
         )
         dest_dir = self.account_media_dir / "pdf"
-        dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / filename
+        assert_media_write_allowed(dest)
+        dest_dir.mkdir(parents=True, exist_ok=True)
 
         loop = asyncio.get_event_loop()
 
@@ -1221,8 +1224,9 @@ class SearchCollector(BaseCollector):
             entity_id, entity_name, "document", content_id, extension=clean_ext,
         )
         dest_dir = self.account_media_dir / "document"
-        dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / filename
+        assert_media_write_allowed(dest)
+        dest_dir.mkdir(parents=True, exist_ok=True)
         loop = asyncio.get_event_loop()
 
         def _atomic_write() -> int:
@@ -1293,8 +1297,9 @@ class SearchCollector(BaseCollector):
         q_name = (query or "spider")[:50]
         filename = self.build_filename(q_slug, q_name, "video", content_id, extension=ext)
         dest_dir = self.account_media_dir / "video"
-        dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / filename
+        assert_media_write_allowed(dest)
+        dest_dir.mkdir(parents=True, exist_ok=True)
         hasher = hashlib.sha256()
         size = 0
         fd, tmp_path = tempfile.mkstemp(dir=dest_dir, suffix=".part")
@@ -1376,6 +1381,7 @@ class SearchCollector(BaseCollector):
             zoom = 4 if page_count <= 10 else (2 if page_count <= 30 else 1)
             mat = self._fitz.Matrix(zoom, zoom)
             pages_dir = out_dir / f"{base_filename}_pages"
+            assert_media_write_allowed(pages_dir / f"{base_filename}_page_1.jpg")
             pages_dir.mkdir(parents=True, exist_ok=True)
             saved = 0
             for page_num in range(min(page_count, self._max_pdf_pages)):

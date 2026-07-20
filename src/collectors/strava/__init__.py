@@ -21,6 +21,7 @@ from src.core.profile_photo_tracker import ProfilePhotoTracker
 from src.core.file_naming import sanitize_name
 from src.core.proximity import refresh_account_proximity_cache
 from src.core.rate_limit_events import record_rate_limit_event
+from src.core.vault import assert_media_write_allowed
 
 logger = logging.getLogger(__name__)
 
@@ -1581,8 +1582,9 @@ class StravaCollector(BaseCollector):
         if self.is_known(cid): return False
         filename = self.build_filename(item["entity_id"], item["entity_name"], item["content_type"], cid, extension=item.get("extension", "jpg"))
         dest_dir = self.account_media_dir / item["content_type"]
-        dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / filename
+        assert_media_write_allowed(dest)
+        dest_dir.mkdir(parents=True, exist_ok=True)
         try:
             await self._delay()
             async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
@@ -3011,6 +3013,7 @@ class StravaCollector(BaseCollector):
             # data when the schema lacks a clubs table. This mirrors
             # the approach the toolkit took for ad-hoc payloads.
             dest_dir = self.account_media_dir / "clubs"
+            assert_media_write_allowed(dest_dir / f"clubs_{athlete_id}.json")
             dest_dir.mkdir(parents=True, exist_ok=True)
             self.save_json(
                 {"athlete_id": athlete_id, "clubs": clubs,
@@ -3132,7 +3135,6 @@ class StravaCollector(BaseCollector):
                 "collected_at": datetime.now(timezone.utc).isoformat(),
             }
             dest_dir = self.account_media_dir / "routes"
-            dest_dir.mkdir(parents=True, exist_ok=True)
             filename = self.build_filename(
                 str(athlete_id or "unknown"),
                 str(athlete_id or "unknown"),
@@ -3141,6 +3143,8 @@ class StravaCollector(BaseCollector):
                 extension="json",
             )
             dest = dest_dir / filename
+            assert_media_write_allowed(dest)
+            dest_dir.mkdir(parents=True, exist_ok=True)
             data = json.dumps(payload, indent=2).encode("utf-8")
             fd, tmp_path = tempfile.mkstemp(dir=dest_dir, suffix=".tmp")
             with os.fdopen(fd, "wb") as f:

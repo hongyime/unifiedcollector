@@ -130,6 +130,7 @@ from urllib.parse import urljoin, urlparse, urlunparse
 import httpx
 
 from src.core.base_collector import BaseCollector
+from src.core.vault import assert_media_write_allowed
 from src.core.scrape_pacing import headless_dwell
 from src.core.url_filter import URLFilter
 
@@ -1192,6 +1193,7 @@ class WebsiteCollector(BaseCollector):
             return False
         ext = _ext_from_known(video_url, VIDEO_EXTS, "mp4")
         dest_dir = self.account_media_dir / "video"
+        assert_media_write_allowed(dest_dir / f"video_{cid}.{ext}")
         dest_dir.mkdir(parents=True, exist_ok=True)
         hasher = hashlib.sha256()
         size = 0
@@ -1268,8 +1270,9 @@ class WebsiteCollector(BaseCollector):
             item["content_type"], cid, extension=ext,
         )
         dest_dir = self.account_media_dir / item["content_type"]
-        dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / filename
+        assert_media_write_allowed(dest)
+        dest_dir.mkdir(parents=True, exist_ok=True)
         try:
             data = item.get("data")
             if data is None:

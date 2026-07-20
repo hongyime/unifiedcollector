@@ -69,6 +69,7 @@ from src.core.base_collector import BaseCollector
 from src.collectors.tiktok.parse import safe_int as _parse_safe_int, to_dt as _parse_to_dt
 from src.core.file_naming import sanitize_name
 from src.core.proximity import refresh_account_proximity_cache
+from src.core.vault import assert_media_write_allowed
 from src.core.user_change_tracker import (
     UserChangeTracker,
     TIKTOK_TRACKED_FIELDS,
@@ -1313,8 +1314,9 @@ class TiktokCollector(BaseCollector):
         )
 
         dest_dir = self.account_media_dir / item["content_type"]
-        dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / filename
+        assert_media_write_allowed(dest)
+        dest_dir.mkdir(parents=True, exist_ok=True)
 
         try:
             if "data" in item:

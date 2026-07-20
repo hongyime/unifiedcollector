@@ -57,6 +57,7 @@ from src.core.user_change_tracker import (
 )
 from src.core.link_extractor import extract_all_links
 from src.core.file_naming import sanitize_name
+from src.core.vault import assert_media_write_allowed
 
 logger = logging.getLogger(__name__)
 
@@ -476,8 +477,9 @@ class WhatsappCollector(BaseCollector):
         )
 
         dest_dir = self.account_media_dir / content_type
-        dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / filename
+        assert_media_write_allowed(dest)
+        dest_dir.mkdir(parents=True, exist_ok=True)
 
         if dest.exists():
             return

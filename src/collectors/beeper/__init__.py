@@ -42,6 +42,7 @@ from src.core.user_change_tracker import (
     UserChangeTracker,
     BEEPER_TRACKED_FIELDS,
 )
+from src.core.vault import assert_media_write_allowed
 
 logger = logging.getLogger(__name__)
 
@@ -775,8 +776,9 @@ class BeeperCollector(BaseCollector):
         # a non-existent subdir -> ENOENT. Strip separators from the basename.
         filename = filename.replace("/", "_").replace("\\", "_")
         dest_dir = self.media_dir / network / content_type
-        dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / filename
+        assert_media_write_allowed(dest)
+        dest_dir.mkdir(parents=True, exist_ok=True)
 
         try:
             data = await self.client.serve_asset(src_url)

@@ -52,6 +52,7 @@ from src.core.user_change_tracker import (
     UserChangeTracker,
     TELEGRAM_TRACKED_FIELDS,
 )
+from src.core.vault import assert_media_write_allowed
 
 logger = logging.getLogger(__name__)
 
@@ -2081,8 +2082,9 @@ class TelegramCollector(BaseCollector):
         else:
             base_dir = self.account_media_dir
         dest_dir = base_dir / item["content_type"]
-        dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / filename
+        assert_media_write_allowed(dest)
+        dest_dir.mkdir(parents=True, exist_ok=True)
 
         try:
             if "data" in item:

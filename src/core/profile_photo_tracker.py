@@ -5,6 +5,8 @@ from pathlib import Path
 
 import aiohttp
 
+from src.core.vault import assert_media_write_allowed
+
 logger = logging.getLogger(__name__)
 
 HAMMING_THRESHOLD = 10
@@ -153,7 +155,6 @@ class ProfilePhotoTracker:
             return None
 
     def _save(self, data: bytes, entity_id: str, source: str, save_dir: Path) -> Path:
-        save_dir.mkdir(parents=True, exist_ok=True)
         # SHA-256 of content prevents collisions and is non-cryptographic-use safe.
         digest = hashlib.sha256(data).hexdigest()[:16]
         ext = "jpg"
@@ -162,6 +163,8 @@ class ProfilePhotoTracker:
         elif data[:4] == b"RIFF":
             ext = "webp"
         path = save_dir / f"{source}_{entity_id}_profile_{digest}.{ext}"
+        assert_media_write_allowed(path)
+        save_dir.mkdir(parents=True, exist_ok=True)
         # Atomic write: tempfile + fsync + rename.
         import os as _os
         import tempfile as _tempfile
