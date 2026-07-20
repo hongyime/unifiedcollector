@@ -76,13 +76,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import io
-import json
 import logging
 import os
 import random
 import re
 import tempfile
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Iterable, Optional
 from urllib.parse import quote_plus, urljoin, urlparse
@@ -90,6 +90,7 @@ from urllib.parse import quote_plus, urljoin, urlparse
 import httpx
 
 from src.core.base_collector import BaseCollector
+from src.core.rate_limit_events import record_rate_limit_event
 from src.collectors.search.parse import (
     is_content_url as _parse_is_content_url,
     CONTENT_EXTENSIONS as _parse_CONTENT_EXTENSIONS,
@@ -303,6 +304,68 @@ class SearchCollector(BaseCollector):
             "Accept-Encoding": "gzip, deflate, br",
         }
 
+    @staticmethod
+    def _retry_after_seconds(resp: httpx.Response) -> int | None:
+        raw = resp.headers.get("retry-after")
+        if not raw:
+            return None
+        try:
+            return max(0, int(float(raw)))
+        except ValueError:
+            pass
+        try:
+            retry_at = parsedate_to_datetime(raw)
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            return max(0, int((retry_at - datetime.now(timezone.utc)).total_seconds()))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _looks_like_rate_limit_error(error: Exception) -> bool:
+        msg = str(error).lower()
+        return any(
+            marker in msg
+            for marker in (
+                "429",
+                "too many requests",
+                "rate limit",
+                "rate-limit",
+                "ratelimit",
+                "please wait",
+                "please-wait",
+                "quota exhausted",
+            )
+        )
+
+    async def _record_search_rate_limit(
+        self,
+        *,
+        engine: str,
+        scope: str,
+        account: str | None = None,
+        status_code: int | None = 429,
+        cooldown_seconds: int | None = None,
+        reason: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        response: httpx.Response | None = None,
+    ) -> None:
+        if response is not None and cooldown_seconds is None:
+            cooldown_seconds = self._retry_after_seconds(response)
+        event_metadata = {"engine": engine}
+        if metadata:
+            event_metadata.update(metadata)
+        await record_rate_limit_event(
+            self.pool,
+            source="search",
+            account=account,
+            scope=scope,
+            status_code=status_code,
+            cooldown_seconds=cooldown_seconds,
+            reason=reason,
+            metadata=event_metadata,
+        )
+
     # ------------------------------------------------------------------ #
     # Quota wiring
     # ------------------------------------------------------------------ #
@@ -447,6 +510,17 @@ class SearchCollector(BaseCollector):
                     hit["rank"] = rank_counter
                     all_results[url] = hit
             else:
+                await self._record_search_rate_limit(
+                    engine="serper",
+                    account=self._serper_api_key[:8] or None,
+                    scope="serper_quota",
+                    status_code=None,
+                    reason="serper account quota exhausted",
+                    metadata={
+                        "query": query,
+                        "daily_quota": self._serper_quota,
+                    },
+                )
                 logger.warning("Serper quota exhausted; skipping for query=%r", query)
 
         return await self._finalise_query(query, list(all_results.values()))
@@ -545,6 +619,15 @@ class SearchCollector(BaseCollector):
             except Exception:
                 continue
             if resp.status_code != 200:
+                if resp.status_code == 429:
+                    await self._record_search_rate_limit(
+                        engine="spider",
+                        scope=urlparse(url).netloc or host or "crawl_seed",
+                        status_code=429,
+                        reason="seed crawl returned 429",
+                        metadata={"url": url, "seed": seed},
+                        response=resp,
+                    )
                 continue
             ctype = resp.headers.get("content-type", "").lower()
             # open bucket -> enumerate the whole thing
@@ -599,8 +682,11 @@ class SearchCollector(BaseCollector):
             return []
 
         loop = asyncio.get_event_loop()
+        text_rate_limit: dict[str, str] | None = None
+        image_rate_limit: dict[str, str] | None = None
 
         def _do_text() -> list[dict]:
+            nonlocal text_rate_limit
             out: list[dict] = []
             try:
                 with DDGS() as ddgs:
@@ -617,10 +703,13 @@ class SearchCollector(BaseCollector):
                             "domain": urlparse(url).netloc,
                         })
             except Exception as e:
+                if self._looks_like_rate_limit_error(e):
+                    text_rate_limit = {"message": str(e)}
                 logger.warning("[DDG] text search failed: %s", e)
             return out
 
         def _do_images() -> list[dict]:
+            nonlocal image_rate_limit
             out: list[dict] = []
             try:
                 with DDGS() as ddgs:
@@ -636,6 +725,8 @@ class SearchCollector(BaseCollector):
                             "domain": urlparse(url).netloc,
                         })
             except Exception as e:
+                if self._looks_like_rate_limit_error(e):
+                    image_rate_limit = {"message": str(e)}
                 logger.debug("[DDG] image search failed: %s", e)
             return out
 
@@ -644,6 +735,22 @@ class SearchCollector(BaseCollector):
 
         text_hits = await loop.run_in_executor(None, _do_text)
         image_hits = await loop.run_in_executor(None, _do_images)
+        if text_rate_limit is not None:
+            await self._record_search_rate_limit(
+                engine="ddg",
+                scope="duckduckgo.com",
+                status_code=429 if "429" in text_rate_limit["message"] else None,
+                reason="ddg text search rate-limit response",
+                metadata={"query": query, "kind": "text", **text_rate_limit},
+            )
+        if image_rate_limit is not None:
+            await self._record_search_rate_limit(
+                engine="ddg-img",
+                scope="duckduckgo.com",
+                status_code=429 if "429" in image_rate_limit["message"] else None,
+                reason="ddg image search rate-limit response",
+                metadata={"query": query, "kind": "image", **image_rate_limit},
+            )
         all_hits = text_hits + image_hits
         logger.info("[DDG] %r → %d text, %d images", query, len(text_hits), len(image_hits))
 
@@ -674,6 +781,15 @@ class SearchCollector(BaseCollector):
                 try:
                     resp = await client.get(url, headers=self._headers("bing.com"))
                     if resp.status_code != 200:
+                        if resp.status_code == 429:
+                            await self._record_search_rate_limit(
+                                engine="bing",
+                                scope="bing.com",
+                                status_code=429,
+                                reason="bing search returned 429",
+                                metadata={"query": query, "page": page, "url": url},
+                                response=resp,
+                            )
                         logger.debug("[Bing] status=%d page=%d", resp.status_code, page)
                         continue
                     soup = self._BS(resp.text, "html.parser")
@@ -741,6 +857,19 @@ class SearchCollector(BaseCollector):
                         logger.error("[Serper] API key unauthorized")
                         break
                     if resp.status_code == 429:
+                        await self._record_search_rate_limit(
+                            engine="serper",
+                            account=self._serper_api_key[:8] or None,
+                            scope="google.serper.dev",
+                            status_code=429,
+                            reason="serper search returned 429",
+                            metadata={
+                                "query": query,
+                                "page": page + 1,
+                                "url": url,
+                            },
+                            response=resp,
+                        )
                         logger.warning("[Serper] quota hit, breaking")
                         break
                     if resp.status_code != 200:
@@ -871,6 +1000,15 @@ class SearchCollector(BaseCollector):
                 try:
                     r = await client.get(url, headers=self._headers(urlparse(url).netloc))
                     if r.status_code != 200:
+                        if r.status_code == 429:
+                            await self._record_search_rate_limit(
+                                engine="bucket",
+                                scope=urlparse(url).netloc or "bucket",
+                                status_code=429,
+                                reason="bucket listing returned 429",
+                                metadata={"url": url, "root": root},
+                                response=r,
+                            )
                         break
                     body = r.text
                 except Exception as e:
@@ -902,6 +1040,15 @@ class SearchCollector(BaseCollector):
         try:
             resp = await client.get(page_url, headers=self._headers(urlparse(page_url).netloc))
             if resp.status_code != 200:
+                if resp.status_code == 429:
+                    await self._record_search_rate_limit(
+                        engine="spider",
+                        scope=urlparse(page_url).netloc or "spider_page",
+                        status_code=429,
+                        reason="spider page returned 429",
+                        metadata={"url": page_url},
+                        response=resp,
+                    )
                 return discovered
             ctype = resp.headers.get("content-type", "").lower()
             if "html" not in ctype:
@@ -999,6 +1146,20 @@ class SearchCollector(BaseCollector):
                 async with self._make_client(timeout=30.0) as client:
                     resp = await client.get(url, headers=self._headers(urlparse(url).netloc))
                     if resp.status_code != 200:
+                        if resp.status_code == 429:
+                            await self._record_search_rate_limit(
+                                engine=hit.get("engine") or "download",
+                                scope=urlparse(url).netloc or "download",
+                                status_code=429,
+                                reason="asset download returned 429",
+                                metadata={
+                                    "query": query,
+                                    "url": url,
+                                    "source_url": source_url,
+                                    "rank": hit.get("rank"),
+                                },
+                                response=resp,
+                            )
                         return False
                     data = resp.content
                     ctype = resp.headers.get("content-type", "").lower()
@@ -1311,6 +1472,19 @@ class SearchCollector(BaseCollector):
                             "GET", url, headers=self._headers(urlparse(url).netloc)
                         ) as resp:
                             if resp.status_code != 200:
+                                if resp.status_code == 429:
+                                    await self._record_search_rate_limit(
+                                        engine="video",
+                                        scope=urlparse(url).netloc or "video",
+                                        status_code=429,
+                                        reason="video stream returned 429",
+                                        metadata={
+                                            "query": query,
+                                            "url": url,
+                                            "source_url": source_url,
+                                        },
+                                        response=resp,
+                                    )
                                 raise RuntimeError(f"status {resp.status_code}")
                             ct = resp.headers.get("content-type", "").lower()
                             if ct and not (ct.startswith("video/")
