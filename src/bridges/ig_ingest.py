@@ -86,6 +86,7 @@ _SAFE = re.compile(r"[^A-Za-z0-9._-]")
 # Only instagram currently spiders (followers/following graph); the others scrape
 # whatever the open page exposes, so they have no spider table.
 KNOWN_PLATFORMS = {"instagram", "tiktok", "lemon8", "x", "threads", "facebook"}
+_DM_PROBE_TARGET_TABLES = {platform: ["dm_probe_log"] for platform in KNOWN_PLATFORMS}
 
 _BROWSER_CAPTURE_TARGET_TABLES = {
     "profile": {
@@ -101,6 +102,16 @@ _BROWSER_CAPTURE_TARGET_TABLES = {
     },
     "comments": {
         "instagram": ["instagram_comments"],
+    },
+    "dms": {
+        "instagram": ["instagram_dm_thread", "instagram_dm"],
+    },
+    "dm_probe": _DM_PROBE_TARGET_TABLES,
+    "dm_sample": _DM_PROBE_TARGET_TABLES,
+    "dm_frame": {},
+    "dm_decoded": {
+        "instagram": ["instagram_dm_thread", "instagram_dm"],
+        "tiktok": ["tiktok_dm_thread", "tiktok_dm"],
     },
 }
 
@@ -1104,8 +1115,11 @@ async def _record_dms(pool, threads, owner) -> int:
 
 async def dms_handler(request):
     body = await _safe_json(request)
+    pool = request.app["pool"]
+    platform = _norm_platform(body.get("platform") or "instagram")
+    await _archive_browser_capture(pool, platform, "dms", body)
     try:
-        n = await _record_dms(request.app["pool"], body.get("threads") or [], body.get("owner"))
+        n = await _record_dms(pool, body.get("threads") or [], body.get("owner"))
         return _cors(web.json_response({"recorded": n}))
     except Exception:
         logger.exception("dms handler failed")
@@ -1225,6 +1239,9 @@ async def dm_probe_handler(request):
     await _dm_probe_log_write(
         request.app.get("pool"), body.get("platform") or "unknown", "probe", body,
     )
+    await _archive_browser_capture(
+        request.app.get("pool"), body.get("platform") or "unknown", "dm_probe", body,
+    )
     return _cors(web.json_response({"ok": True}))
 
 
@@ -1289,6 +1306,12 @@ async def dm_sample_handler(request):
     if path is None:
         return _cors(web.json_response({"ok": False, "error": "write_failed"}, status=500))
     logger.info("DM sample saved: %s (%d bytes) url=%s", path, len(raw), body.get("url"))
+    archive_body = dict(body)
+    archive_body["decoded_bytes"] = len(raw)
+    archive_body["debug_sample_path"] = path
+    await _archive_browser_capture(
+        request.app.get("pool"), platform, "dm_sample", archive_body,
+    )
     # Telemetry (P1.2): record the sample event so the dashboard panel can
     # count IG-vs-TikTok samples per 24h and surface last-seen timestamps.
     await _dm_probe_log_write(
@@ -1331,6 +1354,9 @@ async def dm_frame_handler(request):
         logger.info("DM JSON frame (%s): %s", body.get("platform"), json.dumps(body.get("frame"))[:1000])
     except Exception:
         logger.info("DM frame observed (unserializable)")
+    await _archive_browser_capture(
+        request.app.get("pool"), body.get("platform") or "unknown", "dm_frame", body,
+    )
     return _cors(web.json_response({"ok": True}))
 
 
@@ -1426,6 +1452,7 @@ async def dm_decoded_handler(request):
     pool = request.app.get("pool")
     if not pool:
         return _cors(web.json_response({"ok": True, "recorded": 0}))
+    await _archive_browser_capture(pool, platform, "dm_decoded", body)
     if platform == "tiktok":
         thread_n, msg_n = await _upsert_tt_decoded(pool, owner, threads, messages)
     else:
@@ -1835,6 +1862,38 @@ def _browser_capture_subject(endpoint: str, body: dict) -> str:
         return str(first.get("platform_post_id") or first.get("content_id") or f"{len(posts)}_posts")
     if endpoint == "comments":
         return str(body.get("post_id") or "comments")
+    if endpoint == "dms":
+        owner = body.get("owner") if isinstance(body.get("owner"), dict) else {}
+        threads = body.get("threads") if isinstance(body.get("threads"), list) else []
+        first = threads[0] if threads and isinstance(threads[0], dict) else {}
+        return str(
+            owner.get("username")
+            or owner.get("id")
+            or first.get("thread_id")
+            or first.get("thread_v2_id")
+            or f"{len(threads)}_threads"
+        )
+    if endpoint in ("dm_probe", "dm_sample", "dm_frame"):
+        parts = [
+            body.get("owner") or body.get("owner_account"),
+            body.get("transport"),
+            body.get("frame_kind"),
+            body.get("frame_size"),
+        ]
+        subject = "_".join(str(p) for p in parts if p not in (None, ""))
+        return subject or endpoint
+    if endpoint == "dm_decoded":
+        messages = body.get("messages") if isinstance(body.get("messages"), list) else []
+        threads = body.get("threads") if isinstance(body.get("threads"), list) else []
+        first_msg = messages[0] if messages and isinstance(messages[0], dict) else {}
+        first_thread = threads[0] if threads and isinstance(threads[0], dict) else {}
+        return str(
+            first_msg.get("message_id")
+            or first_msg.get("client_message_id")
+            or first_thread.get("conversation_id")
+            or first_thread.get("thread_id")
+            or f"{len(messages)}_messages"
+        )
     return endpoint
 
 

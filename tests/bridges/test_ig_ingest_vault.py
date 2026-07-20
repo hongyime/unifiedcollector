@@ -102,6 +102,84 @@ def test_archive_browser_capture_writes_profile_raw_payload(monkeypatch):
     assert pool.conn.executes == []
 
 
+def test_archive_browser_capture_writes_dm_sample_raw_payload(monkeypatch):
+    pool = _FakePool()
+    calls = []
+
+    def fake_write_raw_payload(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(ok=True, error=None)
+
+    monkeypatch.setattr(ig_ingest, "write_raw_payload", fake_write_raw_payload)
+
+    asyncio.run(
+        ig_ingest._archive_browser_capture(
+            pool,
+            "tiktok",
+            "dm_sample",
+            {
+                "platform": "tiktok",
+                "owner": "bryan",
+                "transport": "websocket",
+                "frame_kind": "binary",
+                "frame_size": 2048,
+                "b64": "AAAA",
+                "decoded_bytes": 3,
+            },
+        )
+    )
+
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["source"] == "tiktok"
+    assert call["artifact_id"].startswith("extension/dm_sample/bryan_websocket_binary_2048/")
+    assert call["target_tables"] == ["dm_probe_log"]
+    assert call["payload"]["b64"] == "AAAA"
+    assert call["metadata"]["endpoint"] == "dm_sample"
+    assert call["metadata"]["body_keys"] == [
+        "b64",
+        "decoded_bytes",
+        "frame_kind",
+        "frame_size",
+        "owner",
+        "platform",
+        "transport",
+    ]
+    assert pool.conn.executes == []
+
+
+def test_archive_browser_capture_writes_decoded_dm_target_hints(monkeypatch):
+    pool = _FakePool()
+    calls = []
+
+    def fake_write_raw_payload(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(ok=True, error=None)
+
+    monkeypatch.setattr(ig_ingest, "write_raw_payload", fake_write_raw_payload)
+
+    asyncio.run(
+        ig_ingest._archive_browser_capture(
+            pool,
+            "tiktok",
+            "dm_decoded",
+            {
+                "platform": "tiktok",
+                "owner": "72101656",
+                "threads": [{"conversation_id": "0:1:1:2"}],
+                "messages": [{"message_id": "9988", "text": "hello"}],
+            },
+        )
+    )
+
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["artifact_id"].startswith("extension/dm_decoded/9988/")
+    assert call["target_tables"] == ["tiktok_dm_thread", "tiktok_dm"]
+    assert call["payload"]["messages"][0]["message_id"] == "9988"
+    assert call["metadata"]["collection_account"] == "72101656"
+
+
 def test_archive_browser_capture_failure_records_dlq(monkeypatch):
     pool = _FakePool()
 
