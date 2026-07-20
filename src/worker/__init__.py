@@ -1,17 +1,15 @@
 import asyncio
 import collections
-import json
 import logging
 import os
 import signal
 import sys
 import threading
 import time
-from datetime import datetime, timezone
-from pathlib import Path
 
-from src.collectors import get_collector, list_sources
+from src.collectors import get_collector
 from src.core.drive_check import check_drive, wait_for_drive
+from src.core.priority_hints import refresh_collector_priority_hints
 from src.core.proximity import refresh_account_proximity_cache
 from src.db.connection import get_pool, close_pool
 
@@ -662,6 +660,7 @@ class WorkerService:
     async def _load_targets(self, source: str) -> list[str]:
         try:
             await refresh_account_proximity_cache(self.pool)
+            await refresh_collector_priority_hints(self.pool)
             async with self.pool.acquire() as conn:
                 rows = await conn.fetch(
                     """
@@ -881,18 +880,6 @@ class WorkerService:
 
     async def _report_health(self, status: str):
         try:
-            active = sum(1 for t in self._tasks.values() if not t.done())
-            total_crashes = sum(self._crash_counts.values())
-            uptime = int(time.monotonic() - self._started_at)
-            payload = json.dumps({
-                "status": status,
-                "active_workers": active,
-                "total_workers": len(self._tasks),
-                "crash_count": total_crashes,
-                "uptime_seconds": uptime,
-                "drive_ok": check_drive(),
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            })
             async with self.pool.acquire() as conn:
                 await conn.execute(
                     "INSERT INTO service_cursors (service, last_processed_at, status) "

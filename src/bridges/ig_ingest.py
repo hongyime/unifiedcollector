@@ -42,6 +42,7 @@ from aiohttp import web
 
 from src.db.connection import get_pool, close_pool
 from src.core.media_filter import inspect as inspect_media
+from src.core.priority_hints import refresh_collector_priority_hints
 from src.core.proximity import refresh_account_proximity_cache
 from src.core.vault import assert_media_write_allowed, write_media_sidecar
 
@@ -210,6 +211,7 @@ async def _targets_for(pool, platform):
     out = []
     try:
         await refresh_account_proximity_cache(pool)
+        await refresh_collector_priority_hints(pool)
         async with pool.acquire() as conn:
             seeds = await conn.fetch(
                 """
