@@ -31,6 +31,10 @@ TIMESTAMP_FORMAT = "%Y%m%d_%H%M%S"
 _BACKUP_RE = re.compile(r"^(?P<prefix>.+)_(?P<stamp>\d{8}_\d{6})\.dump$")
 
 
+class BackupError(RuntimeError):
+    """Raised when a backup cannot be created or validated safely."""
+
+
 @dataclass(frozen=True)
 class BackupFile:
     path: Path
@@ -173,6 +177,47 @@ def apply_retention_plan(plan: RetentionPlan, *, dry_run: bool = False) -> list[
     return deleted
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def assert_backup_mount_ready(backup_dir: Path) -> None:
+    """Prepare backup_dir, failing closed when Docker should be on the vault."""
+    vault_root_raw = os.getenv("COLLECTOR_DB_BACKUP_VAULT_ROOT")
+    require_mirror = _env_bool("COLLECTOR_DB_BACKUP_REQUIRE_VAULT_MIRROR", bool(vault_root_raw))
+    if not require_mirror:
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        return
+
+    if not vault_root_raw:
+        raise BackupError("COLLECTOR_DB_BACKUP_VAULT_ROOT is required when vault mirror checks are enabled")
+
+    vault_root = Path(vault_root_raw)
+    expected = vault_root / "backups" / "db"
+    if not backup_dir.exists() or not backup_dir.is_dir():
+        raise BackupError(f"backup dir missing or not a directory: {backup_dir}")
+    if not expected.exists() or not expected.is_dir():
+        raise BackupError(f"vault backup mirror missing or not a directory: {expected}")
+
+    token = f"{os.getpid()}:{time.time_ns()}"
+    name = f".backup_mount_check.{os.getpid()}.{time.time_ns()}"
+    probe = backup_dir / name
+    expected_probe = expected / name
+    try:
+        probe.write_text(token, encoding="utf-8")
+        if not expected_probe.exists() or expected_probe.read_text(encoding="utf-8") != token:
+            raise BackupError(f"backup dir {backup_dir} is not linked to vault mirror {expected}")
+    finally:
+        for path in {probe, expected_probe}:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
 def create_dump(
     backup_dir: Path,
     *,
@@ -193,7 +238,7 @@ def create_dump(
     if dry_run:
         return final
 
-    backup_dir.mkdir(parents=True, exist_ok=True)
+    assert_backup_mount_ready(backup_dir)
     if tmp.exists():
         tmp.unlink()
 

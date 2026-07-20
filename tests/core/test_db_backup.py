@@ -2,10 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from src.backup.db_backup import (
     BackupFile,
+    BackupError,
     RetentionPolicy,
     apply_retention_plan,
+    assert_backup_mount_ready,
     build_retention_plan,
     list_backup_files,
     parse_backup_file,
@@ -119,3 +123,27 @@ def test_pg_dump_prefers_pg_env_over_host_database_url(monkeypatch, tmp_path):
 
     assert commands
     assert commands[0][-1] == "unifiedcollector"
+
+
+def test_backup_mount_ready_accepts_vault_mirrored_dir(monkeypatch, tmp_path):
+    vault = tmp_path / "vault"
+    backup_dir = vault / "backups" / "db"
+    backup_dir.mkdir(parents=True)
+    monkeypatch.setenv("COLLECTOR_DB_BACKUP_VAULT_ROOT", str(vault))
+    monkeypatch.setenv("COLLECTOR_DB_BACKUP_REQUIRE_VAULT_MIRROR", "1")
+
+    assert_backup_mount_ready(backup_dir)
+
+    assert not list(backup_dir.glob(".backup_mount_check.*"))
+
+
+def test_backup_mount_ready_rejects_detached_dir(monkeypatch, tmp_path):
+    vault = tmp_path / "vault"
+    (vault / "backups" / "db").mkdir(parents=True)
+    detached = tmp_path / "detached"
+    detached.mkdir()
+    monkeypatch.setenv("COLLECTOR_DB_BACKUP_VAULT_ROOT", str(vault))
+    monkeypatch.setenv("COLLECTOR_DB_BACKUP_REQUIRE_VAULT_MIRROR", "1")
+
+    with pytest.raises(BackupError, match="not linked to vault mirror"):
+        assert_backup_mount_ready(detached)

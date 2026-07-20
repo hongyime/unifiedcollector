@@ -811,18 +811,20 @@ services:
       COLLECTOR_DB_BACKUP_MONTHLY: "3"
       COLLECTOR_DB_BACKUP_INTERVAL_SECONDS: ${COLLECTOR_DB_BACKUP_INTERVAL_SECONDS:-86400}
       COLLECTOR_DB_BACKUP_DATABASE: unifiedcollector
+      COLLECTOR_DB_BACKUP_VAULT_ROOT: /vault
+      COLLECTOR_DB_BACKUP_REQUIRE_VAULT_MIRROR: "1"
     # Load ../.env for NOTIFY_TELEGRAM_BOT_TOKEN / TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID
     # so the Python backup runner can send a best-effort failure alert.
     env_file:
       - ../.env
     volumes:
       - z:/unifiedcollector/backups/db:/zbackups
+      - z:/unifiedcollector:/vault
       - ../src/backup:/app/src/backup:ro
     entrypoint: /bin/sh
     command:
       - -c
       - |
-        mkdir -p /zbackups
         while true; do
           python3 -m src.backup.db_backup run
           sleep "$${COLLECTOR_DB_BACKUP_INTERVAL_SECONDS:-86400}"
