@@ -680,10 +680,9 @@ class TiktokCollector(BaseCollector):
         # NOTE (Phase 0): no can_access=False call site is wired here on
         # purpose. At this boundary a failed gallery-dl/yt-dlp/playwright chain
         # cannot be distinguished from "account has zero public posts" or a
-        # transient tool failure, and _collect_via_api reports no outcome —
-        # recording False here would poison the follow-aware routing data.
-        # Only unambiguous successes are recorded.
-        await self._collect_via_api(username)
+        # transient tool failure. Only unambiguous successes are recorded.
+        if await self._collect_via_api(username):
+            await self._record_profile_access(username, True)
 
     async def _scrape_profile_metadata(self, username: str):
         """Try to fetch and save profile metadata to DB."""
@@ -1170,7 +1169,7 @@ class TiktokCollector(BaseCollector):
             })
             await asyncio.sleep(random.uniform(self._min_sleep, self._max_sleep))
 
-    async def _collect_via_api(self, username: str):
+    async def _collect_via_api(self, username: str) -> bool:
         await self.wait_rate_limit("tiktok.com")
         cookies = {"sessionid": self._session_id} if self._session_id else {}
 
@@ -1182,9 +1181,12 @@ class TiktokCollector(BaseCollector):
                 html = resp.text
                 marker = '"ItemModule":'
                 start = html.find(marker)
-                if start == -1: return
+                if start == -1:
+                    return False
 
                 bracket_start = html.find("{", start + len(marker))
+                if bracket_start == -1:
+                    return False
                 depth, end = 0, bracket_start
                 for i, ch in enumerate(html[bracket_start:], bracket_start):
                     if ch == "{": depth += 1
@@ -1194,9 +1196,11 @@ class TiktokCollector(BaseCollector):
                         break
 
                 items = json.loads(html[bracket_start:end])
+                processed = 0
                 for video_id, video_data in items.items():
                     if self._stop.is_set(): break
                     await self._upsert_post(video_data, username)
+                    processed += 1
                     cover = video_data.get("video", {}).get("cover")
                     if cover:
                         await self.download_media({
@@ -1204,8 +1208,10 @@ class TiktokCollector(BaseCollector):
                             "content_type": "thumbnail", "content_id": video_id,
                             "url": cover, "extension": "jpg", "raw": video_data
                         })
+                return processed > 0
         except Exception as e:
             logger.error("API fallback failed for %s: %s", username, e)
+            return False
 
     async def _collect_via_playwright(self, username: str) -> bool:
         """Browser-automation fallback (Playwright/Chromium).
@@ -1471,7 +1477,10 @@ class TiktokCollector(BaseCollector):
                 row = await conn.fetchrow(
                     "SELECT id FROM tiktok_profiles WHERE username = $1", username
                 )
-                return str(row["id"]) if row else None
+                if row:
+                    await self._record_profile_access(username, True)
+                    return str(row["id"])
+                return None
         except Exception:
             return None
 

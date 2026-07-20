@@ -348,15 +348,34 @@ async def test_collect_user_profile_returns_none_on_http_failure(
 
 
 @pytest.mark.asyncio
+async def test_collect_user_profile_records_access_denial(
+    collector, monkeypatch,
+):
+    resp = _make_httpx_response(status_code=403)
+    resp.raise_for_status.side_effect = RuntimeError("HTTP 403")
+    _patch_async_client(monkeypatch, get_response=resp)
+    monkeypatch.setattr(collector, "_record_profile_access", AsyncMock())
+
+    out = await collector.collect_user_profile("alice")
+
+    assert out is None
+    collector._record_profile_access.assert_awaited_once_with(
+        "alice", False, error="HTTP 403",
+    )
+
+
+@pytest.mark.asyncio
 async def test_collect_user_profile_happy_path(collector, monkeypatch):
     html = '{"user_id":"uid-42","avatar_url":"https://cdn/x.jpg"}'
     _patch_async_client(
         monkeypatch, get_response=_make_httpx_response(text=html),
     )
+    monkeypatch.setattr(collector, "_record_profile_access", AsyncMock())
     out = await collector.collect_user_profile("@alice")
     assert out is not None
     assert out["user_id"] == "uid-42"
     assert out["username"] == "alice"
+    collector._record_profile_access.assert_awaited_once_with("alice", True)
     # _upsert_profile invoked → conn.execute awaited at least once.
     collector._test_conn.execute.assert_awaited()
 
@@ -381,8 +400,10 @@ async def test_collect_user_posts_returns_list(collector, monkeypatch):
     _patch_async_client(
         monkeypatch, get_response=_make_httpx_response(text="<html></html>"),
     )
+    monkeypatch.setattr(collector, "_record_profile_access", AsyncMock())
     out = await collector.collect_user_posts("alice")
     assert out == []
+    collector._record_profile_access.assert_awaited_once_with("alice", True)
 
 
 @pytest.mark.asyncio

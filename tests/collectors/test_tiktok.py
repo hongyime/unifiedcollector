@@ -330,6 +330,7 @@ async def test_collect_user_profile_happy_path(monkeypatch):
         c = TiktokCollector()
     c.pool = _make_pool(fetchrow_returns={"id": "profile-uuid"})
     monkeypatch.setattr(c, "_collect_via_api", AsyncMock())
+    monkeypatch.setattr(c, "_record_profile_access", AsyncMock())
     monkeypatch.setattr(c, "wait_rate_limit", AsyncMock())
     # Skip quota gating.
     c._quota = None
@@ -337,6 +338,22 @@ async def test_collect_user_profile_happy_path(monkeypatch):
     out = await c.collect_user_profile("bryan")
     assert out == "profile-uuid"
     c._collect_via_api.assert_awaited_once_with("bryan")
+    c._record_profile_access.assert_awaited_once_with("bryan", True)
+
+
+@pytest.mark.asyncio
+async def test_collect_user_records_api_fallback_success(monkeypatch):
+    with patch.object(TiktokCollector, "_check_tool", staticmethod(lambda *_: False)):
+        c = TiktokCollector()
+    c._quota = None
+    c._browser_fallback = False
+    monkeypatch.setattr(c, "_scrape_profile_metadata", AsyncMock())
+    monkeypatch.setattr(c, "_collect_via_api", AsyncMock(return_value=True))
+    monkeypatch.setattr(c, "_record_profile_access", AsyncMock())
+
+    await c._collect_user("bryan")
+
+    c._record_profile_access.assert_awaited_once_with("bryan", True)
 
 
 @pytest.mark.asyncio

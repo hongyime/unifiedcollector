@@ -1147,21 +1147,21 @@ class InstagramCollector(BaseCollector):
             return None
         if len(healthy) == 1 or self.pool is None or not self._access_tracking:
             return healthy[0]
+        if ProfileAccessRepository is None or SmartAccountSelector is None:
+            return healthy[0]
         try:
             tids = [str(t).lstrip("@") for t in (targets or []) if t]
             if not tids:
                 return healthy[0]
-            best, best_n = healthy[0], -1
-            async with self.pool.acquire() as conn:
-                for acct in healthy:
-                    n = await conn.fetchval(
-                        "SELECT count(DISTINCT target_id) FROM profile_access_attempts "
-                        "WHERE source='instagram' AND accessing_account=$1 "
-                        "AND can_access AND target_id = ANY($2::text[])",
-                        acct, tids,
-                    )
-                    if (n or 0) > best_n:
-                        best, best_n = acct, (n or 0)
+            if self._access_repo is None:
+                self._access_repo = ProfileAccessRepository(self.pool)
+            selector = SmartAccountSelector(self._access_repo)
+            counts = {acct: 0 for acct in healthy}
+            for tid in tids:
+                acct = await selector.select_for_operation("instagram", tid, healthy)
+                if acct:
+                    counts[acct] = counts.get(acct, 0) + 1
+            best, best_n = max(counts.items(), key=lambda item: item[1])
             if best_n > 0:
                 logger.info(
                     "instagram: follow-aware routing picked %s (covers %d/%d targets)",
@@ -2628,6 +2628,7 @@ class InstagramCollector(BaseCollector):
             resp.raise_for_status()
             user = resp.json().get("data", {}).get("user", {}) or {}
             if not user:
+                await self._record_profile_access(username, False, error="empty profile data")
                 return {}
 
             # ── User-intelligence diff: snapshot the row BEFORE upserting so the
@@ -2648,6 +2649,7 @@ class InstagramCollector(BaseCollector):
                 logger.debug("user_change_tracker[ig]: prev-row fetch failed: %s", exc)
 
             await self._upsert_profile(user)
+            await self._record_profile_access(username, True, user)
 
             try:
                 tracker = UserChangeTracker(self.pool)
@@ -3241,7 +3243,9 @@ class InstagramCollector(BaseCollector):
                 data = resp.json().get("data", {}).get("user", {}) or {}
                 uid = str(data.get("id") or "")
                 if not uid:
+                    await self._record_profile_access(username, False, error="empty profile data")
                     return False
+                await self._record_profile_access(username, True, data)
                 ok = await self._collect_posts(client, uid, username)
                 if not ok:
                     try:

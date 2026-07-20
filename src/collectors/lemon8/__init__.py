@@ -2015,6 +2015,10 @@ class Lemon8Collector(BaseCollector):
                 await self.rate_limiter.async_wait("lemon8-app.com", OperationType.PROFILE_VIEW)
                 url = USER_URL_PATTERN.format(username)
                 resp = await client.get(url)
+                if resp.status_code in (401, 403):
+                    await self._record_profile_access(
+                        username, False, error=f"HTTP {resp.status_code}",
+                    )
                 resp.raise_for_status()
                 html = resp.text
             except Exception as e:
@@ -2036,6 +2040,8 @@ class Lemon8Collector(BaseCollector):
                 )
             except Exception as e:
                 logger.warning("collect_user_profile upsert %s: %s", username, e)
+
+            await self._record_profile_access(username, True)
 
             if self._profile_photos and avatar_url:
                 try:
@@ -2067,6 +2073,10 @@ class Lemon8Collector(BaseCollector):
                 await self.rate_limiter.async_wait("lemon8-app.com", OperationType.PROFILE_VIEW)
                 url = USER_URL_PATTERN.format(username)
                 resp = await client.get(url)
+                if resp.status_code in (401, 403):
+                    await self._record_profile_access(
+                        username, False, error=f"HTTP {resp.status_code}",
+                    )
                 resp.raise_for_status()
                 html = resp.text
             except Exception as e:
@@ -2079,6 +2089,8 @@ class Lemon8Collector(BaseCollector):
             if idx != -1:
                 end = html.find('"', idx + len(marker))
                 user_id = html[idx + len(marker):end]
+
+            await self._record_profile_access(username, True)
 
             posts = self._extract_posts(html, user_id, username)
             for post in posts:
