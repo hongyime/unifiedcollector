@@ -1,4 +1,5 @@
 import asyncio
+import html
 import io
 import json
 import logging
@@ -13,7 +14,7 @@ import bcrypt
 import jwt
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -1936,6 +1937,24 @@ def _parse_media_uuid(media_id: str) -> _uuid.UUID:
         raise HTTPException(status_code=404, detail="Invalid media id")
 
 
+def _thumbnail_placeholder(label: str, detail: str = "") -> Response:
+    safe_label = html.escape((label or "media").upper()[:24])
+    safe_detail = html.escape((detail or "preview unavailable")[:64])
+    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="300" height="300" viewBox="0 0 300 300" role="img" aria-label="{safe_label}">
+<rect width="300" height="300" fill="#111827"/>
+<rect x="18" y="18" width="264" height="264" rx="10" fill="#1f2937" stroke="#374151" stroke-width="2"/>
+<circle cx="150" cy="122" r="34" fill="#4b5563"/>
+<path d="M142 104 L172 122 L142 140 Z" fill="#e5e7eb"/>
+<text x="150" y="190" text-anchor="middle" fill="#f9fafb" font-family="Arial, sans-serif" font-size="24" font-weight="700">{safe_label}</text>
+<text x="150" y="218" text-anchor="middle" fill="#9ca3af" font-family="Arial, sans-serif" font-size="13">{safe_detail}</text>
+</svg>"""
+    return Response(
+        content=svg,
+        media_type="image/svg+xml",
+        headers={"Cache-Control": "private, max-age=300"},
+    )
+
+
 @app.get("/media/{media_id}/thumbnail")
 async def media_thumbnail(media_id: str, _user: dict = Depends(require_role("viewer"))):
     mid = _parse_media_uuid(media_id)
@@ -1957,10 +1976,10 @@ async def media_thumbnail(media_id: str, _user: dict = Depends(require_role("vie
     except ValueError:
         raise HTTPException(status_code=403, detail="Path outside media root")
     if not file_path.is_file():
-        raise HTTPException(status_code=404, detail="File not found on disk")
+        return _thumbnail_placeholder("missing", "file not on disk")
 
     if row["content_type"] in ("video", "audio", "document"):
-        raise HTTPException(status_code=400, detail="Thumbnails only for images")
+        return _thumbnail_placeholder(row["content_type"], file_path.suffix.lstrip(".") or "stored file")
 
     try:
         from PIL import Image
