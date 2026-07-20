@@ -195,7 +195,7 @@ async def health():
         async with pool.acquire() as conn:
             await conn.fetchval("SELECT 1")
             try:
-                vault.update(await vault_artifact_counts(conn))
+                vault.update(await vault_artifact_counts(conn, timeout=3))
             except Exception as exc:
                 vault["counts_error"] = exc.__class__.__name__
         db_status = "healthy"
@@ -252,7 +252,7 @@ async def metrics():
 
         async with pool.acquire() as conn:
             try:
-                vault.update(await vault_artifact_counts(conn))
+                vault.update(await vault_artifact_counts(conn, timeout=5))
                 emit("uc_vault_sidecar_failures", vault["sidecar_failures"],
                      "Total vault sidecar write failures in the dead-letter queue", "gauge")
                 emit("uc_vault_artifacts_queued", vault["artifacts_queued"],

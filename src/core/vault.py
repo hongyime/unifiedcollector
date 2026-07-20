@@ -216,7 +216,7 @@ def vault_health(root: Path = VAULT_ROOT) -> VaultHealth:
         )
 
 
-async def vault_artifact_counts(conn) -> dict[str, int]:
+async def vault_artifact_counts(conn, *, timeout: float | None = 10.0) -> dict[str, int]:
     """DB-backed artifact health counts used by dashboards and Telegram."""
     row = await conn.fetchrow(
         """
@@ -231,7 +231,8 @@ async def vault_artifact_counts(conn) -> dict[str, int]:
           (SELECT COUNT(*)::int
            FROM media_items
            WHERE metadata->'vault_sidecar'->>'ok' = 'false') AS artifacts_partial
-        """
+        """,
+        timeout=timeout,
     )
     return {
         "sidecar_failures": int(row["sidecar_failures"] or 0),
