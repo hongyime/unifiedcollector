@@ -12,6 +12,7 @@ import re
 import shutil
 import tempfile
 import time
+import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -355,6 +356,30 @@ def sidecar_path_for_media(
     )
 
 
+def sidecar_path_for_artifact(
+    *,
+    source: str,
+    artifact_id: str,
+    artifact_kind: str,
+    collected_at: datetime | None = None,
+    root: Path = VAULT_ROOT,
+) -> Path:
+    ts = collected_at or datetime.now(timezone.utc)
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    digest = hashlib.sha256(artifact_id.encode("utf-8")).hexdigest()[:16]
+    leaf = f"{digest}_{_safe_part(Path(artifact_id).name, fallback=artifact_kind, limit=96)}.json"
+    return (
+        root
+        / "sidecars"
+        / "artifacts"
+        / _safe_part(source)
+        / f"{ts:%Y}"
+        / f"{ts:%m}"
+        / leaf
+    )
+
+
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
@@ -369,6 +394,60 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
             tmp.unlink(missing_ok=True)
         except OSError:
             pass
+
+
+def write_artifact_sidecar(
+    *,
+    source: str,
+    artifact_kind: str,
+    file_path: str,
+    metadata: dict | None = None,
+    root: Path = VAULT_ROOT,
+) -> SidecarResult:
+    """Write a sidecar for non-media artifacts such as raw/metadata JSON."""
+    if not SIDECARS_ENABLED:
+        return SidecarResult(enabled=False, ok=True)
+    try:
+        ensure_vault_available(root)
+        path = Path(file_path)
+        stat = path.stat()
+        data = path.read_bytes()
+        sha = hashlib.sha256(data).hexdigest()
+        rel = relative_to_vault(path, root)
+        artifact_id = f"{source}:{rel or path.name}"
+        now = datetime.now(timezone.utc)
+        sidecar_path = sidecar_path_for_artifact(
+            source=source,
+            artifact_kind=artifact_kind,
+            artifact_id=artifact_id,
+            collected_at=now,
+            root=root,
+        )
+        payload = {
+            "schema_version": 1,
+            "artifact_kind": artifact_kind,
+            "artifact_id": artifact_id,
+            "source": source,
+            "file": {
+                "path": rel,
+                "absolute_path": str(path),
+                "size": int(stat.st_size),
+                "sha256": sha,
+            },
+            "timestamps": {
+                "collected_at": now.isoformat(),
+            },
+            "metadata": metadata or {},
+        }
+        _atomic_write_json(sidecar_path, payload)
+        return SidecarResult(
+            enabled=True,
+            ok=True,
+            path=sidecar_path,
+            relative_path=relative_to_vault(sidecar_path, root),
+        )
+    except Exception as exc:
+        return SidecarResult(enabled=True, ok=False, error=str(exc))
 
 
 def write_media_sidecar(

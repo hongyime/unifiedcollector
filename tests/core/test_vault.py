@@ -188,6 +188,32 @@ def test_write_media_sidecar_reports_missing_vault(tmp_path, monkeypatch):
     assert "vault" in result.error.lower()
 
 
+def test_write_artifact_sidecar_records_json_artifact(tmp_path, monkeypatch):
+    monkeypatch.setattr(vault, "SIDECARS_ENABLED", True)
+    root = tmp_path / "vault"
+    artifact = root / "media" / "strava" / "clubs" / "clubs_1.json"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text('{"clubs":[]}', encoding="utf-8")
+
+    result = vault.write_artifact_sidecar(
+        source="strava",
+        artifact_kind="json",
+        file_path=str(artifact),
+        metadata={"purpose": "clubs"},
+        root=root,
+    )
+
+    assert result.ok is True
+    assert result.relative_path is not None
+    payload = json.loads(result.path.read_text(encoding="utf-8"))
+    assert payload["artifact_kind"] == "json"
+    assert payload["source"] == "strava"
+    assert payload["file"]["path"] == "media/strava/clubs/clubs_1.json"
+    assert payload["file"]["size"] == artifact.stat().st_size
+    assert len(payload["file"]["sha256"]) == 64
+    assert payload["metadata"] == {"purpose": "clubs"}
+
+
 def test_ensure_vault_available_raises_for_missing_vault(tmp_path):
     with pytest.raises(RuntimeError, match="collector vault unavailable"):
         vault.ensure_vault_available(tmp_path / "missing")

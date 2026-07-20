@@ -15,7 +15,7 @@ from .rate_limiter import AdaptiveRateLimiter
 from .resilience import CircuitBreaker, wait_for_internet
 from .scrape_pacing import sleep_rate_limit
 from .user_agent import UserAgentPool
-from .vault import assert_media_write_allowed, write_media_sidecar
+from .vault import assert_media_write_allowed, write_artifact_sidecar, write_media_sidecar
 
 logger = logging.getLogger(__name__)
 
@@ -330,6 +330,19 @@ class BaseCollector(ABC):
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp_path, dest)
+            sidecar = write_artifact_sidecar(
+                source=self.SOURCE_NAME,
+                artifact_kind="json",
+                file_path=str(dest),
+                metadata={"filename": str(filename)},
+            )
+            if sidecar.enabled and not sidecar.ok:
+                logger.warning(
+                    "%s: JSON artifact sidecar write failed for %s: %s",
+                    self.SOURCE_NAME,
+                    dest,
+                    sidecar.error,
+                )
             logger.debug("Saved JSON %s", dest)
             return dest
         except BaseException:
