@@ -143,6 +143,20 @@ def test_set_pool_propagates_to_photo_tracker(monkeypatch):
     coll._photo_tracker.set_pool.assert_called_once_with(pool)
 
 
+def test_gps_stream_429_event_dedupes_same_activity(monkeypatch):
+    _set_web_env(monkeypatch)
+    monkeypatch.setattr(strava_mod, "_GPS_429_EVENT_DEDUPE_SECONDS", 9999.0)
+    coll = StravaCollector()
+    coll._note_rate_limit = MagicMock()
+
+    coll._set_gps_stream_cooldown("123", "page")
+    coll._set_gps_stream_cooldown("123", "page-fallback")
+    coll._recent_gps_429s["123"] -= 10000.0
+    coll._set_gps_stream_cooldown("123", "page")
+
+    assert coll._note_rate_limit.call_count == 2
+
+
 # ── account_media_dir ──────────────────────────────────────────────────────
 
 
@@ -371,23 +385,30 @@ async def test_collect_handles_per_target_exception_and_dlq(monkeypatch):
 async def test_download_media_happy_path(monkeypatch, tmp_path):
     _set_api_env(monkeypatch)
     monkeypatch.setenv("COLLECTOR_DRIVE_PATH", str(tmp_path))
+    monkeypatch.setenv("COLLECTOR_VAULT_ROOT", str(tmp_path))
     import importlib
     import src.core.drive_check as dc
     importlib.reload(dc)
     import src.core.base_collector as bc
     importlib.reload(bc)
+    import src.core.vault as vault_mod
+    importlib.reload(vault_mod)
     importlib.reload(strava_mod)
 
     coll = strava_mod.StravaCollector()
     pool = _make_pool()
     coll.set_pool(pool)
     coll.insert_media_item = AsyncMock(return_value=True)
+    coll.save_json = MagicMock(return_value=tmp_path / "metadata.json")
 
     img_resp = MagicMock(status_code=200, content=b"\xff\xd8\xff\xe0fakejpg")
     img_resp.raise_for_status = MagicMock()
     client = _stub_async_client(get_responses=img_resp)
 
-    with patch.object(strava_mod.httpx, "AsyncClient", return_value=client):
+    with patch.object(strava_mod.httpx, "AsyncClient", return_value=client), patch.dict(
+        coll.download_media.__func__.__globals__,
+        {"assert_media_write_allowed": lambda *args, **kwargs: None},
+    ):
         await coll.download_media({
             "entity_id": "42", "entity_name": "alice",
             "content_type": "activity", "content_id": "ACT_1",
@@ -423,11 +444,14 @@ async def test_download_media_skips_known(monkeypatch):
 async def test_download_media_error_routes_to_dlq(monkeypatch, tmp_path):
     _set_api_env(monkeypatch)
     monkeypatch.setenv("COLLECTOR_DRIVE_PATH", str(tmp_path))
+    monkeypatch.setenv("COLLECTOR_VAULT_ROOT", str(tmp_path))
     import importlib
     import src.core.drive_check as dc
     importlib.reload(dc)
     import src.core.base_collector as bc
     importlib.reload(bc)
+    import src.core.vault as vault_mod
+    importlib.reload(vault_mod)
     importlib.reload(strava_mod)
 
     coll = strava_mod.StravaCollector()
@@ -439,7 +463,10 @@ async def test_download_media_error_routes_to_dlq(monkeypatch, tmp_path):
     bad.raise_for_status = MagicMock(side_effect=httpx.HTTPStatusError("boom", request=None, response=bad))
     client = _stub_async_client(get_responses=bad)
 
-    with patch.object(strava_mod.httpx, "AsyncClient", return_value=client):
+    with patch.object(strava_mod.httpx, "AsyncClient", return_value=client), patch.dict(
+        coll.download_media.__func__.__globals__,
+        {"assert_media_write_allowed": lambda *args, **kwargs: None},
+    ):
         await coll.download_media({
             "entity_id": "42", "entity_name": "alice",
             "content_type": "activity", "content_id": "ACT_FAIL",
@@ -456,11 +483,14 @@ async def test_download_media_error_routes_to_dlq(monkeypatch, tmp_path):
 async def test_download_route_maps_writes_sidecar(monkeypatch, tmp_path):
     _set_api_env(monkeypatch)
     monkeypatch.setenv("COLLECTOR_DRIVE_PATH", str(tmp_path))
+    monkeypatch.setenv("COLLECTOR_VAULT_ROOT", str(tmp_path))
     import importlib
     import src.core.drive_check as dc
     importlib.reload(dc)
     import src.core.base_collector as bc
     importlib.reload(bc)
+    import src.core.vault as vault_mod
+    importlib.reload(vault_mod)
     importlib.reload(strava_mod)
 
     coll = strava_mod.StravaCollector()
@@ -475,7 +505,11 @@ async def test_download_route_maps_writes_sidecar(monkeypatch, tmp_path):
         "map": {"summary_polyline": "abc_FAKE_POLY", "bounds": [[1, 2], [3, 4]]},
         "start_latlng": [1.0, 2.0], "end_latlng": [3.0, 4.0],
     }
-    await coll.download_route_maps(activity, athlete_id="42")
+    with patch.dict(
+        coll.download_route_maps.__func__.__globals__,
+        {"assert_media_write_allowed": lambda *args, **kwargs: None},
+    ):
+        await coll.download_route_maps(activity, athlete_id="42")
 
     coll.insert_media_item.assert_awaited_once()
     kwargs = coll.insert_media_item.await_args.kwargs

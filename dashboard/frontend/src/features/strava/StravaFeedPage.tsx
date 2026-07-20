@@ -37,8 +37,7 @@ function formatDuration(s: number | null): string {
 }
 
 // Emoji icon per activity type. Broad synonyms — Strava has ~40 sport_type
-// values, most collapse to a handful of glyphs. Falls back to a compass so
-// unknown types are still visually distinct from the "detail pending" pill.
+// values, most collapse to a handful of glyphs. Falls back to a compass.
 function activityIcon(type: string | null, sportType: string | null): string {
   const t = (sportType || type || "").toLowerCase();
   if (t.includes("trailrun")) return "🥾";
@@ -66,10 +65,14 @@ const MAP_H = 80;
 function MapThumb({
   polyline,
   streamStatus,
+  routeStatus,
+  routeDetail,
   startLatlng,
 }: {
   polyline: string | null;
   streamStatus: string | null;
+  routeStatus: string | null;
+  routeDetail: string | null;
   startLatlng: string | null;
 }) {
   // Decode once per polyline (cached across renders inside the table via memo
@@ -86,19 +89,23 @@ function MapThumb({
     // NULL stream_status means the collector has not reached a definitive route
     // result yet. Do not label that as "no route"; those rows are still queued
     // for cookie-authenticated stream backfill.
-    const label = streamStatus === "truncated_empty"
-      ? "privacy zone"
-      : streamStatus === "incomplete"
-        ? "no gps"
-        : streamStatus == null
-          ? "route queued"
-          : startLatlng
-        ? "start only"
-        : "no route";
+    const label =
+      routeStatus === "rate_limited" ? "429 cooldown" :
+      routeStatus === "recent_429" ? "429 seen" :
+      routeStatus === "privacy_zone" ? "privacy zone" :
+      routeStatus === "no_gps" ? "no gps" :
+      routeStatus === "unverifiable" ? "unverified" :
+      routeStatus === "start_only" ? "start only" :
+      routeStatus === "queued" ? "route queued" :
+      streamStatus === "truncated_empty" ? "privacy zone" :
+      streamStatus === "incomplete" ? "no gps" :
+      streamStatus == null ? "route queued" :
+      startLatlng ? "start only" : "no route";
     return (
       <div
         className="flex items-center justify-center rounded border border-dashed border-border/60 bg-black/20 text-[9px] uppercase tracking-wider text-text-muted"
         style={{ width: MAP_W, height: MAP_H }}
+        title={routeDetail ?? undefined}
       >
         {label}
       </div>
@@ -294,6 +301,8 @@ export function StravaFeedPage() {
                     <MapThumb
                       polyline={act.summary_polyline}
                       streamStatus={act.stream_status}
+                      routeStatus={act.route_status}
+                      routeDetail={act.route_status_detail}
                       startLatlng={act.start_latlng}
                     />
                   </td>

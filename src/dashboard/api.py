@@ -70,6 +70,55 @@ def _jsonb_points(value) -> list:
     return value if isinstance(value, list) else []
 
 
+def _strava_route_status(row: dict) -> dict[str, str | None]:
+    """Explain why a Strava activity does or does not have a renderable route."""
+    if row.get("summary_polyline"):
+        return {"route_status": "mapped", "route_status_detail": "GPS route available"}
+
+    stream_status = row.get("stream_status")
+    if stream_status == "truncated_empty":
+        return {
+            "route_status": "privacy_zone",
+            "route_status_detail": "Strava returned an empty GPS stream, usually because the activity route is hidden.",
+        }
+    if stream_status == "incomplete":
+        return {
+            "route_status": "no_gps",
+            "route_status_detail": "Strava returned the activity without GPS stream points.",
+        }
+    if stream_status == "ok_unverifiable":
+        return {
+            "route_status": "unverifiable",
+            "route_status_detail": "Older activity could not be rechecked, so the collector will not keep retrying it.",
+        }
+
+    cooldown_until = row.get("gps_rate_limit_until")
+    if isinstance(cooldown_until, datetime):
+        if cooldown_until.tzinfo is None:
+            cooldown_until = cooldown_until.replace(tzinfo=timezone.utc)
+        if cooldown_until > datetime.now(timezone.utc):
+            reason = row.get("gps_rate_limit_reason") or "GPS stream fetch hit HTTP 429"
+            return {
+                "route_status": "rate_limited",
+                "route_status_detail": f"{reason}; retry after {cooldown_until.isoformat()}",
+            }
+
+    if row.get("start_latlng"):
+        return {
+            "route_status": "start_only",
+            "route_status_detail": "Collector has a start coordinate, but no route line yet.",
+        }
+    if row.get("gps_rate_limit_at"):
+        return {
+            "route_status": "recent_429",
+            "route_status_detail": row.get("gps_rate_limit_reason") or "Recent GPS stream request hit HTTP 429.",
+        }
+    return {
+        "route_status": "queued",
+        "route_status_detail": "GPS stream has not reached a definitive result yet and remains eligible for backfill.",
+    }
+
+
 async def _estimated_table_rows(conn, table: str) -> int:
     value = await conn.fetchval(
         "SELECT GREATEST(0, reltuples)::bigint FROM pg_class WHERE oid = $1::regclass",
@@ -2701,10 +2750,23 @@ async def strava_feed_activities(
         "       act.distance, act.distance_unit, act.moving_time, act.elapsed_time, "
         "       act.total_elevation_gain, act.average_speed, act.start_date, "
         "       act.summary_polyline, act.start_latlng, act.stream_status, s.latlng AS gps_latlng, "
+        "       rl.created_at AS gps_rate_limit_at, rl.cooldown_until AS gps_rate_limit_until, "
+        "       rl.reason AS gps_rate_limit_reason, rl.context AS gps_rate_limit_context, "
         "       a.platform_athlete_id, a.username, a.firstname, a.lastname, a.profile "
         "FROM strava_activities act "
         "LEFT JOIN strava_athletes a ON a.id = act.athlete_id "
         "LEFT JOIN strava_gps_streams s ON s.activity_id = act.id "
+        "LEFT JOIN LATERAL ( "
+        "    SELECT created_at, "
+        "           created_at + (COALESCE(cooldown_seconds, 0) * INTERVAL '1 second') AS cooldown_until, "
+        "           reason, metadata->>'context' AS context "
+        "    FROM rate_limit_events "
+        "    WHERE source = 'strava' "
+        "      AND scope = 'gps_streams' "
+        "      AND metadata->>'activity_id' = act.platform_activity_id::text "
+        "    ORDER BY created_at DESC "
+        "    LIMIT 1 "
+        ") rl ON TRUE "
         f"WHERE {' AND '.join(where)} "
         f"ORDER BY act.start_date DESC LIMIT ${len(args) - 1} OFFSET ${len(args)}"
     )
@@ -2722,6 +2784,10 @@ async def strava_feed_activities(
                 d["stream_status"] = d.get("stream_status") or "ok"
         else:
             d.pop("gps_latlng", None)
+        d.update(_strava_route_status(d))
+        for key in ("gps_rate_limit_at", "gps_rate_limit_until"):
+            if d.get(key):
+                d[key] = d[key].isoformat()
         out.append(d)
     return out
 

@@ -8,7 +8,7 @@ import re
 import tempfile
 import time
 from pathlib import Path
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 
@@ -32,6 +32,7 @@ STRAVA_WEB = "https://www.strava.com"
 # Privacy-zone truncation: distance (m) beyond which a summary start/end is
 # considered to have been clipped by a Strava privacy zone vs the GPS track.
 _PRIVACY_ZONE_THRESHOLD_M = 50.0
+_GPS_429_EVENT_DEDUPE_SECONDS = 120.0
 
 
 def _haversine_m(lat1, lon1, lat2, lon2) -> float:
@@ -145,6 +146,7 @@ class StravaCollector(BaseCollector):
         self._gps_stream_cooldown_seconds = int(
             os.getenv("STRAVA_STREAM_RATELIMIT_SLEEP", str(max(self._ratelimit_sleep, 1800)))
         )
+        self._recent_gps_429s: dict[str, float] = {}
 
         self._use_api = bool(self._client_id and self._client_secret and self._refresh_token)
         self._use_web = bool(self._session_cookie)
@@ -161,13 +163,28 @@ class StravaCollector(BaseCollector):
         return time.time() < self._gps_stream_cooldown_until
 
     def _set_gps_stream_cooldown(self, activity_id: str | int, context: str) -> None:
-        self._gps_stream_cooldown_until = time.time() + self._gps_stream_cooldown_seconds
-        logger.warning(
-            "strava: streams 429 for %s via %s; cooling GPS backfill for %ds",
+        now = time.time()
+        self._gps_stream_cooldown_until = max(
+            self._gps_stream_cooldown_until,
+            now + self._gps_stream_cooldown_seconds,
+        )
+        activity_key = str(activity_id)
+        recent_at = self._recent_gps_429s.get(activity_key)
+        is_duplicate = recent_at is not None and now - recent_at < _GPS_429_EVENT_DEDUPE_SECONDS
+        log = logger.info if is_duplicate else logger.warning
+        log(
+            "strava: streams 429 for %s via %s; cooling GPS backfill for %ds%s",
             activity_id,
             context,
             self._gps_stream_cooldown_seconds,
+            " (duplicate suppressed)" if is_duplicate else "",
         )
+        if is_duplicate:
+            return
+        self._recent_gps_429s[activity_key] = now
+        for key, ts in list(self._recent_gps_429s.items()):
+            if now - ts > _GPS_429_EVENT_DEDUPE_SECONDS * 4:
+                self._recent_gps_429s.pop(key, None)
         self._note_rate_limit(
             scope="gps_streams",
             account=context.split("web:", 1)[1] if context.startswith("web:") else None,
@@ -1101,7 +1118,7 @@ class StravaCollector(BaseCollector):
                     scope="api_athlete_activities",
                     cooldown_seconds=self._ratelimit_sleep,
                     reason=f"athlete activities page {page} returned 429",
-                    metadata={"page": page, "athlete_id": athlete_id},
+                    metadata={"page": page, "athlete_id": aid},
                 )
                 await asyncio.sleep(self._ratelimit_sleep)
                 continue
@@ -2577,8 +2594,6 @@ class StravaCollector(BaseCollector):
                 # Kudos: the props block has kudosCount but individual kudoers
                 # are only available via the kudos modal API endpoint
                 kudos_count = props.get("kudosCount", 0)
-                owner_id = props.get("ownerAthleteId")
-                owner_name = props.get("ownerName", "")
 
                 if kudos_count and kudos_count > 0:
                     try:
@@ -2659,7 +2674,7 @@ class StravaCollector(BaseCollector):
         # Strava removed polylines from HTML in 2024, but the web streams path
         # still returns JSON with cookie auth (the old stravatoolkit used this).
         # URL: /activities/{id}/streams?stream_types[]=latlng&stream_types[]=time
-        if not result["polyline"] and self._gps_enabled:
+        if not result["polyline"] and self._gps_enabled and not self._gps_stream_cooling_down():
             try:
                 streams_url = f"{STRAVA_WEB}/activities/{activity_id}/streams"
                 sresp = await client.get(

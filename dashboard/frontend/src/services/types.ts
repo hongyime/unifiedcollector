@@ -648,6 +648,12 @@ export interface StravaFeedActivity {
   summary_polyline: string | null;
   start_latlng: string | null;
   stream_status: string | null;
+  route_status: string | null;
+  route_status_detail: string | null;
+  gps_rate_limit_at: string | null;
+  gps_rate_limit_until: string | null;
+  gps_rate_limit_reason: string | null;
+  gps_rate_limit_context: string | null;
   platform_athlete_id: number | null;
   username: string | null;
   firstname: string | null;
