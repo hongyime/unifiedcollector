@@ -151,7 +151,7 @@ def raw_payload_reference_count(payload: dict[str, Any]) -> int:
             count += 1
         if raw_payload.get("path"):
             count += 1
-    if payload.get("artifact_kind") in {"raw", "json", "jsonl", "compressed_jsonl"}:
+    if payload.get("artifact_kind") in {"raw", "raw_payload", "json", "jsonl", "compressed_jsonl"}:
         metadata = payload.get("metadata")
         if isinstance(metadata, dict) and metadata.get("raw_payload") is True:
             count += 1

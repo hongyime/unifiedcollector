@@ -98,7 +98,7 @@ def test_scan_sidecars_counts_artifact_rebuild_table_hints(tmp_path):
     sidecar.parent.mkdir(parents=True)
     sidecar.write_text(
         json.dumps({
-            "artifact_kind": "json",
+            "artifact_kind": "raw_payload",
             "artifact_id": "strava:route-1",
             "source": "strava",
             "file": {

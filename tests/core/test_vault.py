@@ -218,6 +218,47 @@ def test_write_artifact_sidecar_records_json_artifact(tmp_path, monkeypatch):
     assert "file.sha256" in payload["rebuild"]["required_fields"]
 
 
+def test_write_raw_payload_records_raw_file_and_sidecar(tmp_path, monkeypatch):
+    monkeypatch.setattr(vault, "SIDECARS_ENABLED", True)
+    root = tmp_path / "vault"
+    root.mkdir()
+
+    result = vault.write_raw_payload(
+        source="telegram",
+        artifact_id="chat/123/message/456",
+        payload={"id": 456, "text": "hello"},
+        metadata={"collection_account": "bryan"},
+        target_tables=["telegram_messages"],
+        root=root,
+    )
+
+    assert result.ok is True
+    assert result.relative_path is not None
+    assert result.relative_path.startswith("raw/telegram/")
+    raw_payload = json.loads(result.path.read_text(encoding="utf-8"))
+    assert raw_payload == {"id": 456, "text": "hello"}
+    sidecar = json.loads(result.sidecar.path.read_text(encoding="utf-8"))
+    assert sidecar["artifact_kind"] == "raw_payload"
+    assert sidecar["file"]["path"] == result.relative_path
+    assert sidecar["metadata"]["raw_payload"] is True
+    assert sidecar["metadata"]["artifact_id"] == "chat/123/message/456"
+    assert sidecar["rebuild"]["target_tables"] == ["telegram_messages"]
+
+
+def test_write_raw_payload_reports_missing_vault(tmp_path, monkeypatch):
+    monkeypatch.setattr(vault, "SIDECARS_ENABLED", True)
+
+    result = vault.write_raw_payload(
+        source="telegram",
+        artifact_id="message/1",
+        payload={"id": 1},
+        root=tmp_path / "missing",
+    )
+
+    assert result.ok is False
+    assert "vault" in result.error.lower()
+
+
 def test_ensure_vault_available_raises_for_missing_vault(tmp_path):
     with pytest.raises(RuntimeError, match="collector vault unavailable"):
         vault.ensure_vault_available(tmp_path / "missing")

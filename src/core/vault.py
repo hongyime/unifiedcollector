@@ -68,6 +68,15 @@ class SidecarResult:
     error: str | None = None
 
 
+@dataclass(frozen=True)
+class RawPayloadResult:
+    ok: bool
+    path: Path | None = None
+    relative_path: str | None = None
+    sidecar: SidecarResult | None = None
+    error: str | None = None
+
+
 _SIDECAR_REQUIRED_TOP_LEVEL_FIELDS = (
     "schema_version",
     "artifact_kind",
@@ -392,6 +401,47 @@ def sidecar_path_for_artifact(
     )
 
 
+def raw_payload_path(
+    *,
+    source: str,
+    artifact_id: str,
+    extension: str = "json",
+    collected_at: datetime | None = None,
+    root: Path = VAULT_ROOT,
+) -> Path:
+    ts = collected_at or datetime.now(timezone.utc)
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    safe_ext = _safe_part(extension, fallback="json", limit=16).lstrip(".") or "json"
+    digest = hashlib.sha256(f"{source}:{artifact_id}".encode("utf-8")).hexdigest()[:16]
+    leaf = f"{digest}_{_safe_part(Path(artifact_id).name, fallback='payload', limit=96)}.{safe_ext}"
+    return (
+        root
+        / "raw"
+        / _safe_part(source)
+        / f"{ts:%Y}"
+        / f"{ts:%m}"
+        / leaf
+    )
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            f.write(content)
+            if content and not content.endswith("\n"):
+                f.write("\n")
+        tmp.replace(path)
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
@@ -406,6 +456,13 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
             tmp.unlink(missing_ok=True)
         except OSError:
             pass
+
+
+def _raw_payload_text(payload: Any, *, extension: str) -> str:
+    if extension == "jsonl":
+        rows = payload if isinstance(payload, list) else [payload]
+        return "".join(json.dumps(row, ensure_ascii=False, sort_keys=True, default=str) + "\n" for row in rows)
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2, default=str) + "\n"
 
 
 def _rebuild_contract(
@@ -497,6 +554,56 @@ def write_artifact_sidecar(
         )
     except Exception as exc:
         return SidecarResult(enabled=True, ok=False, error=str(exc))
+
+
+def write_raw_payload(
+    *,
+    source: str,
+    artifact_id: str,
+    payload: Any,
+    metadata: dict | None = None,
+    target_tables: list[str] | None = None,
+    extension: str = "json",
+    root: Path = VAULT_ROOT,
+) -> RawPayloadResult:
+    """Persist a raw API/browser/message/route payload under the vault raw tree."""
+    try:
+        ensure_vault_available(root)
+        now = datetime.now(timezone.utc)
+        ext = _safe_part(extension, fallback="json", limit=16).lstrip(".") or "json"
+        path = raw_payload_path(
+            source=source,
+            artifact_id=artifact_id,
+            extension=ext,
+            collected_at=now,
+            root=root,
+        )
+        _atomic_write_text(path, _raw_payload_text(payload, extension=ext))
+        meta = dict(metadata or {})
+        meta["raw_payload"] = True
+        if target_tables is not None:
+            meta["rebuild_target_tables"] = target_tables
+        meta.setdefault(
+            "rebuild_required_fields",
+            ["source", "artifact_kind", "file.path", "file.size", "file.sha256"],
+        )
+        meta["artifact_id"] = artifact_id
+        sidecar = write_artifact_sidecar(
+            source=source,
+            artifact_kind="raw_payload",
+            file_path=str(path),
+            metadata=meta,
+            root=root,
+        )
+        return RawPayloadResult(
+            ok=sidecar.ok,
+            path=path,
+            relative_path=relative_to_vault(path, root),
+            sidecar=sidecar,
+            error=sidecar.error,
+        )
+    except Exception as exc:
+        return RawPayloadResult(ok=False, error=str(exc))
 
 
 def write_media_sidecar(
