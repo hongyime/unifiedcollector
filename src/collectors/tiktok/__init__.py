@@ -69,6 +69,7 @@ from src.core.base_collector import BaseCollector
 from src.collectors.tiktok.parse import safe_int as _parse_safe_int, to_dt as _parse_to_dt
 from src.core.file_naming import sanitize_name
 from src.core.proximity import refresh_account_proximity_cache
+from src.core.rate_limit_events import record_rate_limit_event
 from src.core.vault import assert_media_write_allowed
 from src.core.user_change_tracker import (
     UserChangeTracker,
@@ -457,6 +458,49 @@ class TiktokCollector(BaseCollector):
             path = self.media_dir / "default"
         path.mkdir(parents=True, exist_ok=True)
         return path
+
+    def _account_name(self) -> str:
+        return Path(self._cookies_file).stem if self._cookies_file else "tiktok_default"
+
+    async def _record_local_rate_limit_event(
+        self,
+        *,
+        username: str,
+        tool: str,
+        result,
+    ) -> None:
+        text = f"{result.stderr or ''}\n{result.stdout or ''}"
+        status_code = 429 if "429" in text else None
+        validation = classify_invalid_username(text, http_status=status_code)
+        if not validation.is_rate_limited:
+            return
+
+        cooldown_seconds = None
+        remaining = getattr(self.rate_limiter, "get_cooldown_remaining", None)
+        if callable(remaining):
+            try:
+                cooldown_seconds = int(remaining("tiktok.com") or 0) or None
+            except Exception:
+                cooldown_seconds = None
+
+        await record_rate_limit_event(
+            self.pool,
+            source="tiktok",
+            account=self._account_name(),
+            scope=f"{tool}_local",
+            status_code=status_code,
+            cooldown_seconds=cooldown_seconds,
+            reason="local tool output matched rate-limit signature",
+            metadata={
+                "username": username,
+                "tool": tool,
+                "returncode": result.returncode,
+                "timed_out": result.timed_out,
+                "file_count": result.file_count,
+                "stderr": result.err_summary(800),
+                "stdout": (result.stdout or "")[:400],
+            },
+        )
 
     async def collect(self, targets: list[str]):
         await self._load_tracker_state()
@@ -973,6 +1017,11 @@ class TiktokCollector(BaseCollector):
                         username, result.returncode, result.timed_out, result.file_count,
                         result.err_summary(800), (result.stdout or "")[:400],
                     )
+                    await self._record_local_rate_limit_event(
+                        username=username,
+                        tool="gallery-dl",
+                        result=result,
+                    )
                     # Even on timeout/non-zero rc, ingest any files already pulled —
                     # gallery-dl/yt-dlp write incrementally, so a partial download is
                     # still real data worth keeping rather than discarding.
@@ -986,6 +1035,11 @@ class TiktokCollector(BaseCollector):
                     username, result.file_count, result.err_summary(300),
                 )
                 if result.file_count == 0:
+                    await self._record_local_rate_limit_event(
+                        username=username,
+                        tool="gallery-dl",
+                        result=result,
+                    )
                     return False
                 await self._ingest_tmpdir(tmpdir, username)
                 return True
@@ -1014,6 +1068,11 @@ class TiktokCollector(BaseCollector):
                         username, result.returncode, result.timed_out, result.file_count,
                         result.err_summary(800), (result.stdout or "")[:400],
                     )
+                    await self._record_local_rate_limit_event(
+                        username=username,
+                        tool="yt-dlp",
+                        result=result,
+                    )
                     # Ingest partial downloads even on timeout (see gallery-dl note).
                     if result.file_count > 0:
                         await self._ingest_tmpdir(tmpdir, username)
@@ -1025,6 +1084,11 @@ class TiktokCollector(BaseCollector):
                     username, result.returncode, result.file_count, result.err_summary(300),
                 )
                 if result.file_count == 0:
+                    await self._record_local_rate_limit_event(
+                        username=username,
+                        tool="yt-dlp",
+                        result=result,
+                    )
                     return False
                 await self._ingest_tmpdir(tmpdir, username)
                 return True

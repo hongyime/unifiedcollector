@@ -932,6 +932,27 @@ class InstagramCollector(BaseCollector):
                 async with self.pool.acquire() as conn:
                     await conn.execute("UPDATE instagram_spider_queue SET status = 'failed', error_message = $1 WHERE platform_user_id = $2", str(e), row['platform_user_id'])
 
+    async def _record_rate_limit_event(
+        self,
+        *,
+        scope: str,
+        status_code: int,
+        cooldown_seconds: int | None = None,
+        reason: str | None = None,
+        metadata: dict | None = None,
+    ) -> None:
+        acct_name = self._current_account.name if self._current_account else None
+        await record_rate_limit_event(
+            self.pool,
+            source="instagram",
+            account=acct_name,
+            scope=scope,
+            status_code=status_code,
+            cooldown_seconds=cooldown_seconds,
+            reason=reason,
+            metadata=metadata,
+        )
+
     async def _handle_rate_limit(self, error):
         # Per-account cooldown (§22): isolate this account's 429 from siblings.
         # Exponential backoff: each consecutive 429 doubles the cooldown up to 4h.
@@ -994,10 +1015,7 @@ class InstagramCollector(BaseCollector):
                 logger.info("instagram: persisted rate-limit to DB (expiry=%.0f streak=%d)", _expiry, self._consecutive_429s)
             except Exception as _e:
                 logger.warning("instagram: failed to persist rate-limit to DB: %s", _e)
-            await record_rate_limit_event(
-                self.pool,
-                source="instagram",
-                account=acct_name,
+            await self._record_rate_limit_event(
                 scope="profile_fetch",
                 status_code=429,
                 cooldown_seconds=int(_effective_cooldown),
@@ -1190,6 +1208,13 @@ class InstagramCollector(BaseCollector):
             if resp.status_code == 404:
                 logger.warning("User not found: %s", username)
                 return
+            if resp.status_code in (401, 403):
+                await self._record_rate_limit_event(
+                    scope="profile_fetch",
+                    status_code=resp.status_code,
+                    reason="profile fetch auth/rate response",
+                    metadata={"username": username, "endpoint": "web_profile_info"},
+                )
             if resp.status_code == 429:
                 # If Playwright wasn't the primary path, try it now as a last
                 # resort before backing off (browser bypasses the httpx throttle).
@@ -1417,6 +1442,16 @@ class InstagramCollector(BaseCollector):
                         params=params,
                     )
                     if resp.status_code in (401, 403):
+                        await self._record_rate_limit_event(
+                            scope="graphql_posts",
+                            status_code=resp.status_code,
+                            reason="GraphQL auth/rate response",
+                            metadata={
+                                "username": entity_name,
+                                "uid": uid,
+                                "endpoint": "graphql/query",
+                            },
+                        )
                         logger.info(
                             "instagram/%s: GraphQL %s — signalling Playwright fallback",
                             entity_name, resp.status_code,
@@ -1821,6 +1856,12 @@ class InstagramCollector(BaseCollector):
                     # Dead/expired session for the active account — signal collect()
                     # to mark it and rotate to a healthy account.
                     self._session_auth_dead = True
+                    await self._record_rate_limit_event(
+                        scope="profile_fetch_playwright",
+                        status_code=status,
+                        reason="Playwright profile auth response",
+                        metadata={"username": username, "endpoint": "web_profile_info"},
+                    )
                     logger.warning(
                         "Playwright Mode-β: %s returned %s for %s — session expired/unauthorized",
                         self._current_account.name if self._current_account else "?",
@@ -2574,6 +2615,13 @@ class InstagramCollector(BaseCollector):
             if resp.status_code == 404:
                 logger.info("collect_user_profile: %s not found", username)
                 return {}
+            if resp.status_code in (401, 403):
+                await self._record_rate_limit_event(
+                    scope="profile_fetch",
+                    status_code=resp.status_code,
+                    reason="collect_user_profile auth/rate response",
+                    metadata={"username": username, "endpoint": "web_profile_info"},
+                )
             if resp.status_code == 429:
                 await self._handle_rate_limit(Exception("429"))
                 return {}
@@ -3182,6 +3230,13 @@ class InstagramCollector(BaseCollector):
                     params={"username": username},
                 )
                 if resp.status_code != 200:
+                    if resp.status_code in (401, 403, 429):
+                        await self._record_rate_limit_event(
+                            scope="profile_fetch",
+                            status_code=resp.status_code,
+                            reason="profile fetch fallback auth/rate response",
+                            metadata={"username": username, "endpoint": "web_profile_info"},
+                        )
                     return False
                 data = resp.json().get("data", {}).get("user", {}) or {}
                 uid = str(data.get("id") or "")
@@ -3269,6 +3324,16 @@ class InstagramCollector(BaseCollector):
                 # requests. Treat ALL of these as a soft rate-limit — STOP immediately,
                 # do NOT mark the account dead (the cookie is fine), and try again on
                 # the next throttle window. This is why the extension is the safe path.
+                await self._record_rate_limit_event(
+                    scope=f"multi_graph_{direction}",
+                    status_code=resp.status_code,
+                    reason="friendships endpoint auth/rate response",
+                    metadata={
+                        "owner_uid": owner_uid,
+                        "direction": direction,
+                        "endpoint": "friendships",
+                    },
+                )
                 logger.warning("multi-graph: HTTP %d on %s %s — rate-limited, backing off (conservative)",
                                resp.status_code, owner_uid, direction)
                 break
