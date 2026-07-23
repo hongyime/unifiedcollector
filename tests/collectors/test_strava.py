@@ -157,6 +157,61 @@ def test_gps_stream_429_event_dedupes_same_activity(monkeypatch):
     assert coll._note_rate_limit.call_count == 2
 
 
+def test_is_truncated_accepts_stored_latlng_strings():
+    assert strava_mod._is_truncated("1.300000,103.800000", [1.300001, 103.800001]) is False
+    assert strava_mod._is_truncated("1.300000,103.800000", [1.310000, 103.810000]) is True
+
+
+def test_derive_gps_route_fields_from_existing_stream_json():
+    fields = strava_mod._derive_gps_route_fields(
+        None,
+        None,
+        json.dumps([[1.37507, 103.750999], [1.376439, 103.75308]]),
+    )
+
+    assert fields["stream_status"] == "ok"
+    assert fields["start_latlng"] == "1.37507,103.750999"
+    assert fields["end_latlng"] == "1.376439,103.75308"
+    assert fields["privacy_zone_start"] is True
+    assert fields["privacy_zone_end"] is True
+    assert fields["summary_polyline"]
+    assert fields["point_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_repair_existing_gps_stream_routes_backfills_activity_row(monkeypatch):
+    _set_web_env(monkeypatch)
+    coll = StravaCollector()
+    pool = _make_pool()
+    pool._conn.fetch = AsyncMock(return_value=[
+        {
+            "id": "activity-uuid",
+            "platform_activity_id": 19283135496,
+            "start_latlng": None,
+            "end_latlng": None,
+            "summary_polyline": None,
+            "stream_status": None,
+            "privacy_zone_start": None,
+            "privacy_zone_end": None,
+            "latlng": json.dumps([[1.37507, 103.750999], [1.376439, 103.75308]]),
+        }
+    ])
+    coll.set_pool(pool)
+
+    repaired = await coll._repair_existing_gps_stream_routes(batch_size=10)
+
+    assert repaired == 1
+    pool._conn.fetch.assert_awaited_once()
+    pool._conn.execute.assert_awaited_once()
+    args = pool._conn.execute.await_args.args
+    assert "summary_polyline = COALESCE" in args[0]
+    assert args[1] == "1.37507,103.750999"
+    assert args[2] == "1.376439,103.75308"
+    assert args[3] == "ok"
+    assert args[8]
+    assert args[9] == "activity-uuid"
+
+
 # ── account_media_dir ──────────────────────────────────────────────────────
 
 

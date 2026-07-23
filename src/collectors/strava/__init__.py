@@ -46,6 +46,62 @@ def _haversine_m(lat1, lon1, lat2, lon2) -> float:
     return 2 * r * math.asin(min(1.0, math.sqrt(a)))
 
 
+def _coerce_latlng_point(value):
+    """Return a [lat, lng] list from Strava API arrays or stored 'lat,lng' strings."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        if raw.startswith("["):
+            try:
+                return _coerce_latlng_point(json.loads(raw))
+            except Exception:
+                return None
+        parts = [p.strip() for p in raw.split(",", 1)]
+        if len(parts) != 2:
+            return None
+        try:
+            return [float(parts[0]), float(parts[1])]
+        except (TypeError, ValueError):
+            return None
+    if isinstance(value, (list, tuple)) and len(value) == 2:
+        try:
+            return [float(value[0]), float(value[1])]
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _format_latlng_point(value) -> str | None:
+    point = _coerce_latlng_point(value)
+    if not point:
+        return None
+    return f"{point[0]},{point[1]}"
+
+
+def _coerce_latlng_stream(value) -> list[list[float]]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw or raw == "null":
+            return []
+        try:
+            value = json.loads(raw)
+        except Exception:
+            return []
+    if not isinstance(value, (list, tuple)):
+        return []
+    out: list[list[float]] = []
+    for item in value:
+        point = _coerce_latlng_point(item)
+        if point:
+            out.append(point)
+    return out
+
+
 def _encode_polyline(points, precision: int = 5) -> str:
     """Encode a list of [lat,lng] points into a Google encoded polyline string.
 
@@ -93,14 +149,49 @@ def _is_truncated(summary_latlng, track_point) -> bool:
     Privacy zone => either the summary was omitted entirely (but a track exists),
     or the summary point sits >threshold metres from the real track endpoint.
     """
-    if not track_point or len(track_point) != 2:
+    track = _coerce_latlng_point(track_point)
+    summary = _coerce_latlng_point(summary_latlng)
+    if not track:
         return False
-    if not summary_latlng or len(summary_latlng) != 2:
+    if not summary:
         # Summary omitted but a real track point exists => the endpoint was hidden.
         return True
     return _haversine_m(
-        summary_latlng[0], summary_latlng[1], track_point[0], track_point[1]
+        summary[0], summary[1], track[0], track[1]
     ) > _PRIVACY_ZONE_THRESHOLD_M
+
+
+def _derive_gps_route_fields(summary_start, summary_end, latlng_data) -> dict:
+    points = _coerce_latlng_stream(latlng_data)
+    stream_status = "ok" if points else "truncated_empty"
+    start = end = trunc_start = trunc_end = None
+    privacy_start = privacy_end = False
+
+    if points:
+        start = _format_latlng_point(points[0])
+        end = _format_latlng_point(points[-1])
+        privacy_start = _is_truncated(summary_start, points[0])
+        privacy_end = _is_truncated(summary_end, points[-1])
+        trunc_start = start if privacy_start else None
+        trunc_end = end if privacy_end else None
+    else:
+        # Fully hidden routes can still expose a privacy-safe summary start.
+        summary = _format_latlng_point(summary_start)
+        if summary:
+            privacy_start = True
+            trunc_start = summary
+
+    return {
+        "start_latlng": start,
+        "end_latlng": end,
+        "stream_status": stream_status,
+        "privacy_zone_start": privacy_start,
+        "privacy_zone_end": privacy_end,
+        "truncation_point_start": trunc_start,
+        "truncation_point_end": trunc_end,
+        "summary_polyline": _encode_polyline(points) if points else None,
+        "point_count": len(points),
+    }
 
 
 class StravaCollector(BaseCollector):
@@ -334,6 +425,11 @@ class StravaCollector(BaseCollector):
         # the tail call still runs as a second batch when the cycle completes.
         # Disable via STRAVA_GPS_BACKFILL_FIRST=false. Same pacing/requests as
         # the tail call (3-6s STRAVA_API_DELAY per activity) — no ban-risk delta.
+        try:
+            repair_batch = int(os.getenv("STRAVA_GPS_ROUTE_REPAIR_BATCH", "100"))
+            await self._repair_existing_gps_stream_routes(batch_size=repair_batch)
+        except Exception as e:
+            logger.warning("strava: GPS route repair failed: %s", e)
         if self._gps_enabled and self._use_web and \
                 os.getenv("STRAVA_GPS_BACKFILL_FIRST", "true").lower() == "true":
             try:
@@ -1303,9 +1399,22 @@ class StravaCollector(BaseCollector):
                 """
                 SELECT a.platform_activity_id, a.start_latlng, a.end_latlng
                 FROM strava_activities a
+                LEFT JOIN strava_athletes ath ON ath.id = a.athlete_id
                 LEFT JOIN strava_gps_streams s ON s.activity_id = a.id
+                LEFT JOIN LATERAL (
+                    SELECT MIN(ap.tier) AS tier
+                    FROM account_proximity_cache ap
+                    WHERE ap.platform = 'strava'
+                      AND ap.account_id = ath.platform_athlete_id::text
+                ) prox ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT MAX(ct.priority) AS priority
+                    FROM collection_targets ct
+                    WHERE ct.source = 'strava'
+                      AND ct.target_id = ath.platform_athlete_id::text
+                ) target ON TRUE
                 WHERE a.stream_status IS NULL
-                  AND (s.latlng IS NULL OR s.latlng::text IN ('[]','null',''))
+                  AND (s.latlng IS NULL OR s.latlng = '[]'::jsonb OR s.latlng = 'null'::jsonb)
                 -- EDIT 2026-07-13: was ORDER BY a.start_date DESC. Fetch-failures
                 -- (non-200 from both cookie accounts: private/deleted activities)
                 -- stay stream_status=NULL and re-sorted to the queue head forever —
@@ -1314,6 +1423,13 @@ class StravaCollector(BaseCollector):
                 -- permanent failures across the ~34k pool so each batch is almost
                 -- all fresh work, while transient failures still get retried later.
                 ORDER BY
+                    CASE WHEN target.priority IS NOT NULL THEN 0 ELSE 1 END,
+                    COALESCE(prox.tier, 9) ASC,
+                    CASE
+                        WHEN $2::text IS NOT NULL
+                         AND ath.platform_athlete_id::text = $2::text
+                        THEN 0 ELSE 1
+                    END,
                     CASE WHEN a.page_scraped_at IS NOT NULL THEN 0 ELSE 1 END,
                     CASE
                         WHEN COALESCE(a.sport_type, a.type, '') ILIKE '%run%'
@@ -1324,7 +1440,7 @@ class StravaCollector(BaseCollector):
                     END,
                     random()
                 LIMIT $1
-                """, batch_size)
+                """, batch_size, self._my_athlete_id)
         if not rows:
             return 0
         ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -1356,6 +1472,96 @@ class StravaCollector(BaseCollector):
                 self._progress_count += 1
         logger.info("strava: GPS backfill processed %d activities this cycle", done)
         return done
+
+    async def _repair_existing_gps_stream_routes(self, batch_size: int = 100) -> int:
+        """Derive route metadata for old rows that already have GPS streams.
+
+        Older page scrapes inserted strava_gps_streams.latlng but left
+        strava_activities.summary_polyline/stream_status blank. The fetch path
+        then skipped them because a stream existed, leaving dashboards and
+        downstream analyzer rebuilds with "detail pending" despite having route
+        data. This pass is local-only and bounded; it does not call Strava.
+        """
+        if not self.pool:
+            return 0
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT a.id, a.platform_activity_id, a.start_latlng, a.end_latlng,
+                       a.summary_polyline, a.stream_status, a.privacy_zone_start,
+                       a.privacy_zone_end, s.latlng
+                FROM strava_activities a
+                JOIN strava_gps_streams s ON s.activity_id = a.id
+                WHERE s.latlng IS NOT NULL
+                  AND jsonb_typeof(s.latlng) = 'array'
+                  AND jsonb_array_length(s.latlng) > 1
+                  AND (
+                        a.summary_polyline IS NULL
+                     OR a.summary_polyline = ''
+                     OR a.stream_status IS NULL
+                     OR a.start_latlng IS NULL
+                     OR a.end_latlng IS NULL
+                     OR a.privacy_zone_start IS NULL
+                     OR a.privacy_zone_end IS NULL
+                  )
+                LIMIT $1
+                """,
+                int(batch_size),
+            )
+        if not rows:
+            return 0
+
+        repaired = 0
+        async with self.pool.acquire() as conn:
+            for row in rows:
+                fields = _derive_gps_route_fields(
+                    row["start_latlng"],
+                    row["end_latlng"],
+                    row["latlng"],
+                )
+                if fields["point_count"] <= 1:
+                    continue
+                await conn.execute(
+                    """
+                    UPDATE strava_activities
+                    SET start_latlng = COALESCE(start_latlng, $1),
+                        end_latlng = COALESCE(end_latlng, $2),
+                        stream_status = CASE
+                            WHEN stream_status IS NULL
+                              OR stream_status IN ('incomplete', 'truncated_empty')
+                            THEN $3
+                            ELSE stream_status
+                        END,
+                        privacy_zone_start = CASE
+                            WHEN $4 THEN TRUE
+                            WHEN privacy_zone_start IS NULL THEN FALSE
+                            ELSE privacy_zone_start
+                        END,
+                        privacy_zone_end = CASE
+                            WHEN $5 THEN TRUE
+                            WHEN privacy_zone_end IS NULL THEN FALSE
+                            ELSE privacy_zone_end
+                        END,
+                        truncation_point_start = COALESCE(truncation_point_start, $6),
+                        truncation_point_end = COALESCE(truncation_point_end, $7),
+                        summary_polyline = COALESCE(NULLIF(summary_polyline, ''), $8)
+                    WHERE id = $9
+                    """,
+                    fields["start_latlng"],
+                    fields["end_latlng"],
+                    fields["stream_status"],
+                    fields["privacy_zone_start"],
+                    fields["privacy_zone_end"],
+                    fields["truncation_point_start"],
+                    fields["truncation_point_end"],
+                    fields["summary_polyline"],
+                    row["id"],
+                )
+                repaired += 1
+                self._progress_count += 1
+        if repaired:
+            logger.info("strava: repaired %d existing GPS stream route row(s)", repaired)
+        return repaired
 
     async def _fetch_streams(self, client: httpx.AsyncClient, activity_id: str):
         """Return (latlng, time, altitude) arrays for an activity, or (None,None,None) on failure.
@@ -1456,45 +1662,13 @@ class StravaCollector(BaseCollector):
                         await conn.execute("INSERT INTO strava_gps_streams (activity_id, latlng, time, altitude) VALUES ($1, $2, $3, $4)", act_row['id'], json.dumps(latlng_data), json.dumps(time_data or []), json.dumps(alt_data or []))
                         # Backfill start/end coords from the GPS track when the API
                         # summary omitted them, AND record privacy-zone/truncation
-                        # metadata. Privacy-zone activities return empty summary
-                        # start/end but the stream carries the privacy-safe (zone-
-                        # truncated) path. COALESCE only fills NULL coords so an
-                        # authoritative summary value is never lost. The privacy-zone
-                        # fields are derived fresh from the stream each fetch.
-                        # latlng_data is a list here (None already returned above).
-                        if latlng_data is None:
-                            stream_status = "incomplete"
-                        elif not latlng_data:
-                            stream_status = "truncated_empty"
-                        else:
-                            stream_status = "ok"
-
-                        def _fmt(pt):
-                            return f"{pt[0]},{pt[1]}" if pt and len(pt) == 2 else None
-
-                        sll = ell = tp_start = tp_end = None
-                        pz_start = pz_end = False
-                        if latlng_data:
-                            sll, ell = _fmt(latlng_data[0]), _fmt(latlng_data[-1])
-                            pz_start = _is_truncated(activity.get("start_latlng"), latlng_data[0])
-                            pz_end = _is_truncated(activity.get("end_latlng"), latlng_data[-1])
-                            tp_start = sll if pz_start else None
-                            tp_end = ell if pz_end else None
-                        elif stream_status == "truncated_empty":
-                            # Fully privacy-hidden activity: the API returns an
-                            # (empty) latlng stream object with zero points. If the
-                            # summary still carries a start coord, the track WAS
-                            # truncated by a privacy zone — flag it and keep the
-                            # summary start as the truncation point. (Ports the
-                            # truncated_empty branch of archive transform.py.)
-                            summ_start = activity.get("start_latlng")
-                            if summ_start and len(summ_start) == 2:
-                                pz_start = True
-                                tp_start = f"{summ_start[0]},{summ_start[1]}"
-
-                        # Derive summary_polyline from the track (API path is 401-
-                        # blocked) so the analyzer's map has a compact route line.
-                        derived_polyline = _encode_polyline(latlng_data) if latlng_data else None
+                        # metadata. The helper accepts API arrays and DB strings,
+                        # so the live fetch path and local repair pass stay aligned.
+                        fields = _derive_gps_route_fields(
+                            activity.get("start_latlng"),
+                            activity.get("end_latlng"),
+                            latlng_data,
+                        )
                         await conn.execute(
                             "UPDATE strava_activities SET "
                             "start_latlng           = COALESCE(start_latlng, $1), "
@@ -1506,9 +1680,12 @@ class StravaCollector(BaseCollector):
                             "truncation_point_end   = $7, "
                             "summary_polyline       = COALESCE(NULLIF(summary_polyline,''), $9) "
                             "WHERE id = $8",
-                            sll, ell, stream_status, pz_start, pz_end,
-                            tp_start, tp_end, act_row['id'],
-                            derived_polyline or None,
+                            fields["start_latlng"], fields["end_latlng"],
+                            fields["stream_status"],
+                            fields["privacy_zone_start"], fields["privacy_zone_end"],
+                            fields["truncation_point_start"], fields["truncation_point_end"],
+                            act_row['id'],
+                            fields["summary_polyline"] or None,
                         )
         except Exception as e: logger.debug("GPS stream fetch failed for activity %s: %s", activity_id, e)
 
