@@ -66,6 +66,17 @@ def main():
     rp.add_argument("--sidecar-limit", type=int, default=None, help="Limit sidecars scanned for a quick sample")
     rp.add_argument("--blob-limit", type=int, default=None, help="Limit canonical blob files scanned for a quick sample")
 
+    # rebuild-rehearsal
+    rr = sub.add_parser(
+        "rebuild-rehearsal",
+        help="Materialize media sidecars into a scratch SQLite DB",
+    )
+    rr.add_argument("--vault-root", default=None, help="Vault root (default: COLLECTOR_VAULT_ROOT)")
+    rr.add_argument("--scratch-db", default=None, help="Scratch SQLite path (default: in-memory)")
+    rr.add_argument("--sidecar-limit", type=int, default=None, help="Limit sidecars scanned for a quick sample")
+    rr.add_argument("--no-verify-files", action="store_true", help="Skip file existence/size checks")
+    rr.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+
     # schedule
     scp = sub.add_parser("schedule", help="Add/update a collection schedule")
     scp.add_argument("--source", required=True)
@@ -100,6 +111,14 @@ def main():
             args.sidecar_limit,
             args.blob_limit,
         ))
+    elif args.command == "rebuild-rehearsal":
+        _cmd_rebuild_rehearsal(
+            args.vault_root,
+            args.scratch_db,
+            args.sidecar_limit,
+            not args.no_verify_files,
+            args.json,
+        )
     elif args.command == "schedule":
         asyncio.run(_cmd_schedule(args.source, args.interval))
     elif args.command == "target":
@@ -239,6 +258,29 @@ async def _cmd_rebuild_report(
                 )
         finally:
             await close_pool()
+    if as_json:
+        print(json.dumps(report.to_dict(), indent=2, sort_keys=True, default=str))
+    else:
+        print(report.to_text())
+
+
+def _cmd_rebuild_rehearsal(
+    vault_root: str | None,
+    scratch_db: str | None,
+    sidecar_limit: int | None,
+    verify_files: bool,
+    as_json: bool,
+):
+    import json
+
+    from src.core.rebuild_rehearsal import rehearse_media_items_rebuild
+
+    report = rehearse_media_items_rebuild(
+        vault_root,
+        scratch_db=scratch_db,
+        sidecar_limit=sidecar_limit,
+        verify_files=verify_files,
+    )
     if as_json:
         print(json.dumps(report.to_dict(), indent=2, sort_keys=True, default=str))
     else:
