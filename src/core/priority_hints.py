@@ -28,9 +28,9 @@ DEFAULT_COLLECTOR_PRIORITY = 6
 DEFAULT_MIN_CONFIDENCE = 0.95
 DEFAULT_LIMIT = 5000
 
-USERNAME_TARGET_SOURCES = {"github", "instagram", "lemon8", "tiktok"}
+USERNAME_TARGET_SOURCES = {"github", "instagram", "lemon8", "threads", "tiktok", "x"}
 ID_TARGET_SOURCES = {"strava", "whatsapp", "youtube"}
-UNSUPPORTED_SOURCES = {"threads", "x"}
+UNSUPPORTED_SOURCES: set[str] = set()
 
 
 @dataclass(frozen=True)

@@ -55,6 +55,8 @@ def test_collector_target_for_hint_maps_usernames_and_native_ids(monkeypatch):
     instagram, reason = priority_hints.collector_target_for_hint(_hint("instagram", "123", "@Alice"))
     strava, strava_reason = priority_hints.collector_target_for_hint(_hint("strava", "72101656", None))
     telegram, telegram_reason = priority_hints.collector_target_for_hint(_hint("telegram", "9988", "SomeUser"))
+    threads, threads_reason = priority_hints.collector_target_for_hint(_hint("threads", "threads-id", "ThreadUser"))
+    x_target, x_reason = priority_hints.collector_target_for_hint(_hint("x", "x-id", "@XUser"))
     youtube, youtube_reason = priority_hints.collector_target_for_hint(_hint("youtube", "UC123", "Channel"))
 
     assert reason is None
@@ -69,13 +71,19 @@ def test_collector_target_for_hint_maps_usernames_and_native_ids(monkeypatch):
     assert telegram_reason is None
     assert telegram.target_id == "someuser"
 
+    assert threads_reason is None
+    assert threads.target_id == "threaduser"
+
+    assert x_reason is None
+    assert x_target.target_id == "xuser"
+
     assert youtube_reason is None
     assert youtube.target_id == "UC123"
 
 
 def test_build_targets_skips_bad_hints_and_dedupes_by_best_confidence():
     rows = [
-        _hint("x", "1", "xuser"),
+        _hint("unknown", "1", "xuser"),
         _hint("instagram", "1", None),
         _hint("instagram", "2", "A" * 101),
         _hint("instagram", "3", "alice", confidence=96),
