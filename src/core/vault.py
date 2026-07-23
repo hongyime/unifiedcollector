@@ -350,6 +350,7 @@ def relative_to_vault(path: str | os.PathLike[str] | None, root: Path = VAULT_RO
 
 
 _SAFE_PART_RE = re.compile(r"[^A-Za-z0-9_.=-]+")
+_SHA256_RE = re.compile(r"^[a-fA-F0-9]{64}$")
 
 
 def _safe_part(value: Any, *, fallback: str = "unknown", limit: int = 96) -> str:
@@ -424,6 +425,31 @@ def raw_payload_path(
         / f"{ts:%m}"
         / leaf
     )
+
+
+def blob_path_for_sha256(
+    sha256: str,
+    *,
+    extension: str | None = None,
+    root: Path = VAULT_ROOT,
+) -> Path:
+    """Canonical future location for a physical media blob keyed by sha256.
+
+    Source occurrences keep their own sidecars and DB rows. This path is only
+    the shared physical-file target, so provenance is not lost when multiple
+    sources resolve to the same bytes.
+    """
+    digest = str(sha256 or "").strip().lower()
+    if not _SHA256_RE.match(digest):
+        raise ValueError("sha256 must be a 64-character hex digest")
+
+    suffix = ""
+    if extension:
+        clean_ext = _safe_part(str(extension).lower(), fallback="", limit=16).lstrip(".")
+        if clean_ext:
+            suffix = f".{clean_ext}"
+
+    return root / "media" / "blobs" / digest[:2] / digest[2:4] / f"{digest}{suffix}"
 
 
 def _atomic_write_text(path: Path, content: str) -> None:
@@ -639,6 +665,9 @@ def write_media_sidecar(
         ensure_vault_available(root)
         now = datetime.now(timezone.utc)
         sidecar_path = sidecar_path_for_media(source=source, content_id=content_id, collected_at=now, root=root)
+        blob_path = None
+        if sha256 and _SHA256_RE.match(str(sha256).strip()):
+            blob_path = blob_path_for_sha256(sha256, extension=Path(filename or "").suffix, root=root)
         payload = {
             "schema_version": 1,
             "artifact_kind": "media",
@@ -666,6 +695,8 @@ def write_media_sidecar(
                 "width": width,
                 "height": height,
                 "sha256": sha256,
+                "blob_path": relative_to_vault(blob_path, root) if blob_path else None,
+                "blob_absolute_path": str(blob_path) if blob_path else None,
             },
             "timestamps": {
                 "collected_at": now.isoformat(),

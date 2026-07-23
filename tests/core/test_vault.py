@@ -66,6 +66,20 @@ def test_relative_to_vault_uses_stable_relative_paths(tmp_path):
     assert vault.relative_to_vault(media, root) == "media/instagram/a.jpg"
 
 
+def test_blob_path_for_sha256_uses_sharded_media_blob_path(tmp_path):
+    root = tmp_path / "vault"
+    digest = "ab" + "cd" + ("1" * 60)
+
+    path = vault.blob_path_for_sha256(digest, extension=".jpg", root=root)
+
+    assert path == root / "media" / "blobs" / "ab" / "cd" / f"{digest}.jpg"
+
+
+def test_blob_path_for_sha256_rejects_invalid_digest(tmp_path):
+    with pytest.raises(ValueError, match="64-character hex"):
+        vault.blob_path_for_sha256("abc123", extension="jpg", root=tmp_path)
+
+
 def test_validate_sidecar_payload_and_file_accept_valid_payload(tmp_path):
     payload = _valid_sidecar_payload()
 
@@ -129,6 +143,40 @@ def test_write_media_sidecar_records_rebuild_metadata(tmp_path, monkeypatch):
     assert payload["provenance"]["collection_account"] == "bryan"
     assert payload["rebuild"]["target_tables"] == ["media_items"]
     assert "file.sha256" in payload["rebuild"]["required_fields"]
+
+
+def test_write_media_sidecar_records_canonical_blob_reference(tmp_path, monkeypatch):
+    monkeypatch.setattr(vault, "SIDECARS_ENABLED", True)
+    root = tmp_path / "vault"
+    media = root / "media" / "instagram" / "a.jpg"
+    media.parent.mkdir(parents=True)
+    media.write_bytes(b"abc")
+    digest = "ab" + "cd" + ("2" * 60)
+
+    result = vault.write_media_sidecar(
+        source="instagram",
+        entity_id="u1",
+        entity_name="User One",
+        content_type="image",
+        content_id="post/123",
+        filename="a.jpg",
+        file_path=str(media),
+        file_size=3,
+        width=10,
+        height=20,
+        sha256=digest,
+        source_url="https://example.com/p/123",
+        metadata={},
+        ingest_path="extension",
+        kind="post",
+        root=root,
+    )
+
+    assert result.ok is True
+    payload = json.loads(result.path.read_text(encoding="utf-8"))
+    assert payload["file"]["path"] == "media/instagram/a.jpg"
+    assert payload["file"]["blob_path"] == f"media/blobs/ab/cd/{digest}.jpg"
+    assert payload["file"]["blob_absolute_path"] == str(root / "media" / "blobs" / "ab" / "cd" / f"{digest}.jpg")
 
 
 def test_write_media_sidecar_rejects_invalid_payload_before_write(tmp_path, monkeypatch):
