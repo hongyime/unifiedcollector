@@ -252,7 +252,8 @@ async def vault_artifact_counts(conn, *, timeout: float | None = 10.0) -> dict[s
              AND error_message LIKE 'vault sidecar write failed:%') AS artifacts_queued,
           (SELECT COUNT(*)::int
            FROM media_items
-           WHERE metadata->'vault_sidecar'->>'ok' = 'false') AS artifacts_partial
+           WHERE metadata ? 'vault_sidecar'
+             AND metadata->'vault_sidecar'->>'ok' = 'false') AS artifacts_partial
         """,
         timeout=timeout,
     )

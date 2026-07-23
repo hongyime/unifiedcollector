@@ -1189,7 +1189,8 @@ async def hourly_ingestion(hours: int = 12, _user: dict = Depends(require_role("
                count(*)::bigint AS records,
                0::bigint AS media_items,
                {("count(*)" if label == "messages" else "0")}::bigint AS messages,
-               0::bigint AS rate_limits
+               0::bigint AS rate_limits,
+               0::bigint AS access_errors
         FROM {table}
         WHERE {column} >= now() - ($1 || ' hours')::interval
         GROUP BY date_trunc('hour', {column})
@@ -1205,7 +1206,8 @@ async def hourly_ingestion(hours: int = 12, _user: dict = Depends(require_role("
                    0::bigint AS records,
                    count(*)::bigint AS media_items,
                    0::bigint AS messages,
-                   0::bigint AS rate_limits
+                   0::bigint AS rate_limits,
+                   0::bigint AS access_errors
             FROM media_items
             WHERE collected_at >= now() - ($1 || ' hours')::interval
             GROUP BY source, date_trunc('hour', collected_at)
@@ -1219,7 +1221,8 @@ async def hourly_ingestion(hours: int = 12, _user: dict = Depends(require_role("
                    0::bigint AS records,
                    0::bigint AS media_items,
                    0::bigint AS messages,
-                   count(*)::bigint AS rate_limits
+                   count(*) FILTER (WHERE status_code = 429)::bigint AS rate_limits,
+                   count(*) FILTER (WHERE status_code IS DISTINCT FROM 429)::bigint AS access_errors
             FROM rate_limit_events
             WHERE created_at >= now() - ($1 || ' hours')::interval
             GROUP BY source, date_trunc('hour', created_at)
@@ -1235,7 +1238,8 @@ async def hourly_ingestion(hours: int = 12, _user: dict = Depends(require_role("
                sum(records)::bigint AS records,
                sum(media_items)::bigint AS media_items,
                sum(messages)::bigint AS messages,
-               sum(rate_limits)::bigint AS rate_limits
+               sum(rate_limits)::bigint AS rate_limits,
+               sum(access_errors)::bigint AS access_errors
         FROM raw
         GROUP BY source, hour
         ORDER BY hour DESC, source

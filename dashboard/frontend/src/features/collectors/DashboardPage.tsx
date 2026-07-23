@@ -169,10 +169,18 @@ const hourlyColumns: ColumnDef<HourlyIngestionRow, unknown>[] = [
   },
   {
     accessorKey: "rate_limits",
-    header: "Recorded Limits",
+    header: "429s",
     cell: (info) => {
       const value = info.getValue() as number;
       return value > 0 ? <span className="text-warning font-semibold">{value}</span> : <span className="text-text-muted">0</span>;
+    },
+  },
+  {
+    accessorKey: "access_errors",
+    header: "Auth/HTTP",
+    cell: (info) => {
+      const value = info.getValue() as number;
+      return value > 0 ? <span className="text-danger font-semibold">{value}</span> : <span className="text-text-muted">0</span>;
     },
   },
 ];
@@ -231,6 +239,15 @@ const rateLimitColumns: ColumnDef<RateLimitEvent, unknown>[] = [
     accessorKey: "scope",
     header: "Scope",
     cell: (info) => (info.getValue() as string | null) ?? "—",
+  },
+  {
+    accessorKey: "status_code",
+    header: "HTTP",
+    cell: (info) => {
+      const value = info.getValue() as number | null;
+      if (value === 429) return <span className="text-warning font-semibold">429</span>;
+      return value ? <span className="text-danger font-semibold">{value}</span> : <span className="text-text-muted">—</span>;
+    },
   },
   {
     accessorKey: "cooldown_seconds",
@@ -295,6 +312,8 @@ export function DashboardPage() {
   const currentRows = currentHourRows.reduce((s, r) => s + r.records, 0);
   const currentMessages = currentHourRows.reduce((s, r) => s + r.messages, 0);
   const currentFiles = currentHourRows.reduce((s, r) => s + r.media_items, 0);
+  const current429s = currentHourRows.reduce((s, r) => s + r.rate_limits, 0);
+  const currentAccessErrors = currentHourRows.reduce((s, r) => s + (r.access_errors ?? 0), 0);
   const nowMs = Date.now();
   const activeCursorLimits = (rateLimits?.active ?? []).filter((r) => {
     const expiryMs = r.active_until ? new Date(r.active_until).getTime() : Number.NaN;
@@ -305,7 +324,8 @@ export function DashboardPage() {
   const activeEventLimits = recentLimitSummaries.filter(
     (r) => r.active_now && !activeCursorSources.has(normalizeRateLimitSource(r.source)),
   );
-  const recentRateLimitEvents = rateLimits?.events.length ?? 0;
+  const recent429Events = (rateLimits?.events ?? []).filter((r) => r.status_code === 429).length;
+  const recentAccessEvents = (rateLimits?.events ?? []).filter((r) => r.status_code !== 429).length;
   const recentRateLimitScopes = recentLimitSummaries.length;
   const activeRateLimits = activeCursorLimits.length + activeEventLimits.length;
   const vault = health?.vault;
@@ -363,8 +383,8 @@ export function DashboardPage() {
         <MetricCard
           label="This Hour"
           value={formatNumber(currentRows)}
-          sublabel={`${formatNumber(currentMessages)} msgs · ${formatNumber(currentFiles)} files`}
-          status={currentRows > 0 || currentFiles > 0 ? "success" : "warning"}
+          sublabel={`${formatNumber(currentMessages)} msgs · ${formatNumber(currentFiles)} files · ${formatNumber(current429s)} 429s · ${formatNumber(currentAccessErrors)} auth`}
+          status={current429s || currentAccessErrors ? "warning" : currentRows > 0 || currentFiles > 0 ? "success" : "warning"}
           icon={<Clock3 className="w-5 h-5" />}
         />
         <MetricCard
@@ -372,10 +392,10 @@ export function DashboardPage() {
           value={activeRateLimits ? `${activeRateLimits} active` : `${recentRateLimitScopes}`}
           sublabel={
             activeRateLimits
-              ? `${formatNumber(recentRateLimitEvents)} recorded events last 24h`
+              ? `${formatNumber(recent429Events)} 429s · ${formatNumber(recentAccessEvents)} auth/HTTP last 24h`
               : "recorded source/account scopes last 24h"
           }
-          status={activeRateLimits || recentRateLimitEvents ? "warning" : "success"}
+          status={activeRateLimits || recent429Events || recentAccessEvents ? "warning" : "success"}
           icon={<ShieldAlert className="w-5 h-5" />}
         />
       </div>
@@ -384,14 +404,14 @@ export function DashboardPage() {
         <div className="flex items-center justify-between mb-4">
           <div>
             <h2 className="text-xs uppercase tracking-wider text-text-muted">Hourly Ingestion</h2>
-            <p className="text-xs text-text-muted mt-1">Real rows/files by hour. This is the early-warning view; run history is only scheduler re-arms.</p>
+            <p className="text-xs text-text-muted mt-1">Real rows/files by hour. 429s are true rate limits; Auth/HTTP is non-429 session or access trouble.</p>
           </div>
         </div>
         <DataTable data={(hourly ?? []).slice(0, 80)} columns={hourlyColumns} />
       </div>
 
       <div className="bg-surface rounded-lg border border-border p-4 mb-6">
-        <h2 className="text-xs uppercase tracking-wider text-text-muted mb-4">Recorded Rate-Limit Events</h2>
+        <h2 className="text-xs uppercase tracking-wider text-text-muted mb-4">HTTP Pressure And Session Events</h2>
         {(activeCursorLimits.length > 0 || activeEventLimits.length > 0) && (
           <div className="mb-3 grid grid-cols-1 md:grid-cols-2 gap-2">
             {activeCursorLimits.map((r) => (
@@ -419,7 +439,7 @@ export function DashboardPage() {
         )}
         {recentLimitSummaries.length > 0 && (
           <div className="mb-4">
-            <div className="text-[10px] uppercase tracking-wide text-text-muted mb-2">Recorded Rate-Limit Scopes</div>
+            <div className="text-[10px] uppercase tracking-wide text-text-muted mb-2">Recorded 429/Auth Scopes</div>
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
               {recentLimitSummaries.slice(0, 8).map((r) => (
                 <div key={`${r.source}-${r.account ?? ""}-${r.scope ?? ""}-recent`} className="bg-background border border-border rounded-md px-3 py-2 text-xs">
@@ -427,7 +447,7 @@ export function DashboardPage() {
                     <div>
                       <div className="font-medium text-text-primary capitalize">{formatRateLimitSummaryLabel(r)}</div>
                       <div className="text-text-muted mt-0.5">
-                        {formatNumber(r.count)} events · last {relativeTime(r.last_seen_at)} · recorded cooldown {formatCooldown(r.cooldown_seconds)}
+                        HTTP {r.status_code ?? "—"} · {formatNumber(r.count)} events · last {relativeTime(r.last_seen_at)} · recorded cooldown {formatCooldown(r.cooldown_seconds)}
                       </div>
                     </div>
                     <StatusBadge status={r.active_now ? "warning" : "idle"} label={r.active_now ? "cooling" : "seen"} />

@@ -74,6 +74,7 @@ export interface HourlyIngestionRow {
   media_items: number;
   messages: number;
   rate_limits: number;
+  access_errors: number;
 }
 
 export interface RateLimitEvent {

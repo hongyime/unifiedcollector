@@ -152,6 +152,7 @@ if os.getenv("WATCHDOG_HEADLESS_ENABLED", "1") == "1":
     })
 
 _last_restart: dict[str, float] = {}
+_last_cooldown_stale_alert: dict[str, float] = {}
 
 
 async def _notify(text: str) -> None:
@@ -167,13 +168,19 @@ async def _notify(text: str) -> None:
         log.debug("notify failed: %s", e)
 
 
-async def _mark_degraded(db: asyncpg.Connection, source: str, age: float, restarted: bool) -> None:
+async def _mark_degraded(
+    db: asyncpg.Connection,
+    source: str,
+    age: float,
+    restarted: bool,
+    detail: str | None = None,
+) -> None:
     """Record a stale source in source_health so it's queryable, not just a log line.
 
     Self-clearing: the worker's _mark_source_healthy UPSERTs status='running' on the
     next observed progress, so a source that recovers flips back automatically.
     """
-    note = f"stale {age:.0f}s — watchdog {'restarted container' if restarted else 'in cooldown'}"
+    note = f"stale {age:.0f}s — watchdog {detail or ('restarted container' if restarted else 'in cooldown')}"
     try:
         await db.execute(
             "INSERT INTO source_health (source, status, last_error, crash_count, updated_at) "
@@ -197,6 +204,91 @@ async def _restart(container: str) -> None:
         log.error("restart %s failed: %s", container, e)
 
 
+def _row_get(row, key: str, default=None):
+    try:
+        return row[key]
+    except Exception:
+        return default
+
+
+def _parse_cursor_cooldown(raw: str, now: float) -> dict | None:
+    if ":" not in raw:
+        return None
+    left, right = raw.split(":", 1)
+    try:
+        expiry_ts = float(left)
+    except Exception:
+        return None
+    if expiry_ts <= now:
+        return None
+    try:
+        streak = int(right)
+    except Exception:
+        streak = None
+    return {
+        "seconds_remaining": int(expiry_ts - now),
+        "streak": streak,
+        "basis": "service_cursor",
+    }
+
+
+async def _active_source_cooldown(db: asyncpg.Connection, source: str, now: float) -> dict | None:
+    """Return active source-level HTTP 429 cooldown metadata, if known.
+
+    The freshness watchdog should not restart a collector that is deliberately
+    resting after HTTP 429s. Restarts reset process-local pacing and tend to
+    probe the same blocked endpoint again, which creates noisy stale/restart
+    loops without improving freshness.
+    """
+    try:
+        row = await db.fetchrow(
+            """
+            SELECT service, last_processed_id
+            FROM service_cursors
+            WHERE status = 'blocked'
+              AND service IN ($1, $2)
+            ORDER BY last_processed_at DESC NULLS LAST
+            LIMIT 1
+            """,
+            f"{source}_rate_limit",
+            f"{source}_ratelimit",
+        )
+        if row:
+            parsed = _parse_cursor_cooldown(str(_row_get(row, "last_processed_id") or ""), now)
+            if parsed:
+                parsed["basis"] = str(_row_get(row, "service") or parsed["basis"])
+                return parsed
+    except Exception as e:
+        log.debug("cooldown cursor check failed for %s: %s", source, e)
+
+    try:
+        row = await db.fetchrow(
+            """
+            SELECT extract(epoch FROM max(created_at + cooldown_seconds * interval '1 second')) AS expiry_ts,
+                   count(*)::int AS events,
+                   max(reason) AS reason
+            FROM rate_limit_events
+            WHERE source = $1
+              AND status_code = 429
+              AND cooldown_seconds IS NOT NULL
+              AND created_at + cooldown_seconds * interval '1 second' > now()
+            """,
+            source,
+        )
+        expiry_ts = _row_get(row, "expiry_ts") if row else None
+        if expiry_ts is not None and float(expiry_ts) > now:
+            return {
+                "seconds_remaining": int(float(expiry_ts) - now),
+                "streak": None,
+                "basis": "rate_limit_events",
+                "events": int(_row_get(row, "events", 0) or 0),
+                "reason": _row_get(row, "reason"),
+            }
+    except Exception as e:
+        log.debug("cooldown event check failed for %s: %s", source, e)
+    return None
+
+
 async def _tick(db: asyncpg.Connection) -> None:
     now = time.time()
     for src, (query, thresh, containers) in CHECKS.items():
@@ -208,6 +300,33 @@ async def _tick(db: asyncpg.Connection) -> None:
         if age is None:
             continue
         if age > thresh:
+            cooldown = await _active_source_cooldown(db, src, now)
+            if cooldown:
+                seconds = int(cooldown.get("seconds_remaining") or 0)
+                streak = cooldown.get("streak")
+                streak_text = f", streak {streak}" if streak else ""
+                log.warning(
+                    "%s STALE (%.0fs > %ds) but active HTTP 429 cooldown has %ds left%s — not restarting",
+                    src, age, thresh, seconds, streak_text,
+                )
+                await _mark_degraded(
+                    db,
+                    src,
+                    age,
+                    False,
+                    f"active HTTP 429 cooldown {seconds}s left; not restarted",
+                )
+                if now - _last_cooldown_stale_alert.get(src, 0) >= max(COOLDOWN, 3600):
+                    _last_cooldown_stale_alert[src] = now
+                    await _notify(
+                        f"⚠️ <b>watchdog: {src} stale but cooling down</b>\n"
+                        f"newest row {age:.0f}s ago (&gt; {thresh}s). "
+                        f"Active HTTP 429 cooldown has {seconds // 60}m left"
+                        + (f" after streak {streak}" if streak else "")
+                        + "; not restarting during cooldown."
+                    )
+                continue
+
             restarted_any = False
             for c in containers:
                 if now - _last_restart.get(c, 0) < COOLDOWN:

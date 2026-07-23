@@ -127,13 +127,16 @@ def _format_hourly_source(row: dict) -> str:
     records = int(row.get("records", 0) or 0)
     files = int(row.get("files", 0) or 0)
     rate_limits = int(row.get("rate_limits", 0) or 0)
+    access_errors = int(row.get("access_errors", 0) or 0)
     details = []
     if records:
         details.append(f"{records:,} {_plural(records, 'source row')}")
     if files:
         details.append(f"{files:,} {_plural(files, 'media file')}")
     if rate_limits:
-        details.append(f"{rate_limits:,} recorded rate-limit events")
+        details.append(f"{rate_limits:,} HTTP 429 {_plural(rate_limits, 'event')}")
+    if access_errors:
+        details.append(f"{access_errors:,} auth/access HTTP {_plural(access_errors, 'error')}")
     if not details:
         details.append("no new rows")
     return f"• {source}: " + ", ".join(details)
@@ -141,11 +144,23 @@ def _format_hourly_source(row: dict) -> str:
 
 def _format_cooldown(row: dict) -> str:
     service = _display_source(row.get("service", "unknown"))
+    account = str(row.get("account") or "").strip()
+    scope = _display_scope(row.get("scope"))
     remaining = _humanize_age(int(row.get("seconds_remaining", 0) or 0))
     streak = int(row.get("streak", 0) or 0)
+    events = int(row.get("events", 0) or 0)
+    reason = str(row.get("reason") or "").strip()
+    subject = service
+    if scope:
+        subject += f" {scope}"
+    if account:
+        subject += f" for {_esc(account)}"
     if streak:
-        return f"• {service}: recorded cooldown for {remaining} after {streak} consecutive rate-limit events."
-    return f"• {service}: recorded cooldown for {remaining}."
+        return f"• {subject}: active cooldown for {remaining} after {streak} consecutive HTTP 429s."
+    if events:
+        detail = f" ({_esc(reason)})" if reason else ""
+        return f"• {subject}: active cooldown for {remaining} after {events:,} HTTP 429 {_plural(events, 'event')}{detail}."
+    return f"• {subject}: active cooldown for {remaining}."
 
 
 def _format_rate_limit_event(row: dict) -> str:
@@ -162,6 +177,25 @@ def _format_rate_limit_event(row: dict) -> str:
         subject += f" for {_esc(account)}"
     events = f"{count:,} recorded event" if count == 1 else f"{count:,} recorded events"
     return f"• {subject}: HTTP {status}, {events} this hour."
+
+
+def _format_access_event(row: dict) -> str:
+    source = _display_source(row.get("source", "?"))
+    account = str(row.get("account") or "").strip()
+    scope = _display_scope(row.get("scope"))
+    status = row.get("status_code")
+    count = int(row.get("count", 0) or 0)
+    reason = str(row.get("reason") or "").strip()
+
+    subject = source
+    if scope:
+        subject += f" {scope}"
+    if account:
+        subject += f" for {_esc(account)}"
+    status_text = f"HTTP {int(status)}" if status is not None else "non-429 HTTP failure"
+    events = f"{count:,} event" if count == 1 else f"{count:,} events"
+    detail = f" ({_esc(reason)})" if reason else ""
+    return f"• {subject}: {status_text}, {events} this hour{detail}."
 
 
 def _fmt_count(n: int) -> str:
@@ -238,6 +272,7 @@ async def notify_status(snapshot: dict) -> bool:
         msgs = int(totals.get("messages", 0) or 0)
         files = int(totals.get("files", 0) or 0)
         r429 = int(totals.get("rate_limits", 0) or 0)
+        access_errors = int(totals.get("access_errors", 0) or 0)
         lines.append("")
         lines.append("<b>Current hour</b>")
         lines.append(
@@ -246,9 +281,11 @@ async def notify_status(snapshot: dict) -> bool:
             f"{files:,} {_plural(files, 'media file')}."
         )
         if r429:
-            lines.append(f"Recorded rate-limit events this hour: {r429:,}.")
+            lines.append(f"Recorded HTTP 429 events this hour: {r429:,}.")
         else:
-            lines.append("Recorded rate-limit events this hour: 0.")
+            lines.append("Recorded HTTP 429 events this hour: 0.")
+        if access_errors:
+            lines.append(f"Recorded auth/access HTTP errors this hour: {access_errors:,}.")
 
         top = [_format_hourly_source(row) for row in (hourly.get("sources") or [])[:6]]
         if top:
@@ -258,14 +295,18 @@ async def notify_status(snapshot: dict) -> bool:
 
     active_limits = snapshot.get("active_rate_limits") or []
     recent_limits = snapshot.get("rate_limit_events") or []
+    access_events = snapshot.get("access_events") or []
     lines.append("")
-    lines.append("<b>Rate limits and cooldowns</b>")
+    lines.append("<b>Rate limits, cooldowns, and sessions</b>")
     if active_limits:
         lines.extend(_format_cooldown(r) for r in active_limits[:4])
     if recent_limits:
         lines.extend(_format_rate_limit_event(r) for r in recent_limits[:5])
-    if not active_limits and not recent_limits:
-        lines.append("No recorded cooldowns from instrumented collectors this hour.")
+    if access_events:
+        lines.append("Session/auth HTTP failures this hour:")
+        lines.extend(_format_access_event(r) for r in access_events[:5])
+    if not active_limits and not recent_limits and not access_events:
+        lines.append("No recorded HTTP 429s, active cooldowns, or auth/session failures this hour.")
 
     vault = snapshot.get("vault") or {}
     if vault:
@@ -291,6 +332,11 @@ async def notify_status(snapshot: dict) -> bool:
                 f"Artifact health: {queued:,} sidecar DLQ rows, "
                 f"{partial:,} media rows with failed sidecar metadata, "
                 f"{failures:,} total sidecar failures recorded."
+            )
+        elif vault.get("counts_error"):
+            lines.append(
+                "Artifact health counts timed out; vault write check still passed. "
+                f"Query error: <code>{_esc(vault.get('counts_error'))}</code>."
             )
         else:
             lines.append("Artifact health: no sidecar DLQ rows or media rows with failed sidecar metadata.")

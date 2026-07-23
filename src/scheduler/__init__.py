@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 from src.db.connection import get_pool, close_pool
 from src.core.env import env_int
-from src.core.vault import vault_artifact_counts, vault_health
+from src.core.vault import VAULT_ROOT, vault_artifact_counts, vault_health
 
 logger = logging.getLogger(__name__)
 
@@ -246,7 +246,11 @@ class Scheduler:
                     try:
                         for row in await conn.fetch(
                             """
-                            SELECT source, count(*)::int AS rate_limits
+                            SELECT source,
+                                   count(*) FILTER (WHERE status_code = 429)::int AS rate_limits,
+                                   count(*) FILTER (
+                                     WHERE status_code IS DISTINCT FROM 429
+                                   )::int AS access_errors
                             FROM rate_limit_events
                             WHERE created_at >= date_trunc('hour', now())
                             GROUP BY source
@@ -254,9 +258,10 @@ class Scheduler:
                             timeout=10,
                         ):
                             d = by_source.setdefault(row["source"], {
-                                "records": 0, "messages": 0, "files": 0, "rate_limits": 0,
+                                "records": 0, "messages": 0, "files": 0, "rate_limits": 0, "access_errors": 0,
                             })
                             d["rate_limits"] = int(row["rate_limits"] or 0)
+                            d["access_errors"] = int(row["access_errors"] or 0)
                     except Exception:
                         pass
                     totals = {
@@ -264,6 +269,7 @@ class Scheduler:
                         "messages": sum(v["messages"] for v in by_source.values()),
                         "files": sum(v["files"] for v in by_source.values()),
                         "rate_limits": sum(v["rate_limits"] for v in by_source.values()),
+                        "access_errors": sum(v.get("access_errors", 0) for v in by_source.values()),
                     }
                     top = sorted(
                         ({"source": k, **v} for k, v in by_source.items()),
@@ -285,6 +291,27 @@ class Scheduler:
                                max(created_at) AS last_seen_at
                         FROM rate_limit_events
                         WHERE created_at >= date_trunc('hour', now())
+                          AND status_code = 429
+                        GROUP BY source, account, scope
+                        ORDER BY last_seen_at DESC
+                        LIMIT 5
+                        """,
+                        timeout=10,
+                    )]
+                except Exception:
+                    pass
+
+                try:
+                    snap["access_events"] = [dict(r) for r in await conn.fetch(
+                        """
+                        SELECT source, account, scope,
+                               max(status_code)::int AS status_code,
+                               count(*)::int AS count,
+                               max(reason) AS reason,
+                               max(created_at) AS last_seen_at
+                        FROM rate_limit_events
+                        WHERE created_at >= date_trunc('hour', now())
+                          AND status_code IS DISTINCT FROM 429
                         GROUP BY source, account, scope
                         ORDER BY last_seen_at DESC
                         LIMIT 5
@@ -296,6 +323,7 @@ class Scheduler:
 
                 try:
                     active_limits = []
+                    active_sources = set()
                     now_ts = datetime.now(timezone.utc).timestamp()
                     for row in await conn.fetch(
                         """
@@ -325,6 +353,44 @@ class Scheduler:
                             "service": row["service"],
                             "seconds_remaining": int(expiry_ts - now_ts),
                             "streak": streak,
+                            "basis": "service_cursor",
+                        })
+                        active_sources.add(
+                            str(row["service"] or "")
+                            .lower()
+                            .replace("_rate_limit", "")
+                            .replace("_ratelimit", "")
+                        )
+                    for row in await conn.fetch(
+                        """
+                        SELECT source, account, scope,
+                               extract(epoch FROM max(created_at + cooldown_seconds * interval '1 second')) AS expiry_ts,
+                               count(*)::int AS events,
+                               max(reason) AS reason
+                        FROM rate_limit_events
+                        WHERE status_code = 429
+                          AND cooldown_seconds IS NOT NULL
+                          AND created_at + cooldown_seconds * interval '1 second' > now()
+                        GROUP BY source, account, scope
+                        ORDER BY expiry_ts DESC
+                        LIMIT 8
+                        """,
+                        timeout=10,
+                    ):
+                        source = str(row["source"] or "").lower()
+                        if source in active_sources:
+                            continue
+                        expiry_ts = float(row["expiry_ts"] or 0)
+                        if expiry_ts <= now_ts:
+                            continue
+                        active_limits.append({
+                            "service": row["source"],
+                            "account": row["account"],
+                            "scope": row["scope"],
+                            "seconds_remaining": int(expiry_ts - now_ts),
+                            "events": int(row["events"] or 0),
+                            "reason": row["reason"],
+                            "basis": "rate_limit_events",
                         })
                     snap["active_rate_limits"] = active_limits[:5]
                 except Exception:
@@ -392,10 +458,24 @@ class Scheduler:
                         "total_bytes": vh.total_bytes,
                         "error": vh.error,
                     }
-                    vault.update(await vault_artifact_counts(conn))
+                    try:
+                        vault.update(await vault_artifact_counts(conn, timeout=5))
+                    except Exception as exc:
+                        vault["counts_error"] = exc.__class__.__name__
                     snap["vault"] = vault
                 except Exception as exc:
-                    snap["vault"] = {"available": False, "writable": False, "error": str(exc)}
+                    root = os.getenv("COLLECTOR_VAULT_ROOT") or str(VAULT_ROOT)
+                    snap["vault"] = {
+                        "root": root,
+                        "available": False,
+                        "writable": False,
+                        "free_bytes": None,
+                        "total_bytes": None,
+                        "sidecar_failures": 0,
+                        "artifacts_queued": 0,
+                        "artifacts_partial": 0,
+                        "error": str(exc),
+                    }
 
                 # Health flags from source_health (dead + degraded/auth_paused).
                 try:
