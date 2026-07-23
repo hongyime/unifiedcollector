@@ -123,32 +123,32 @@
 - [ ] The artifact write path verifies checksum, file size, sidecar write, and DB row consistency.
 - [ ] Duplicate physical files are stored once by checksum while multiple occurrence sidecars remain queryable.
 - [ ] Tier 1 raw payloads, messages, and route data are persisted enough to rebuild normalized records.
-- [ ] Rate-limit events include source, account, action scope, retry/cooldown times, and are shown in dashboard and Telegram status.
+- [x] Rate-limit events include source, account, action scope, retry/cooldown times, and are shown in dashboard and Telegram status.
 - [ ] Browser/extension captures produce auditable sidecars or raw capture records.
-- [ ] Scheduled collector DB backups land under `Z:\unifiedcollector\backups\db`.
-- [ ] A dry-run rebuild report can show what DB tables can be reconstructed from sidecars/raw payloads.
+- [x] Scheduled collector DB backups land under `Z:\unifiedcollector\backups\db`.
+- [x] A dry-run rebuild report can show what DB tables can be reconstructed from sidecars/raw payloads.
 
 ### Quality Standards
 - [ ] Shared artifact writer has unit tests for success, sidecar failure, checksum mismatch, missing vault, duplicate blob, and DB failure.
-- [ ] Reconciler has tests for DB-only, file-only, sidecar-only, and partial artifact states.
+- [x] Reconciler has tests for DB-only, file-only, sidecar-only, and partial artifact states.
 - [ ] Existing collectors keep passing smoke tests after migrating to the shared artifact writer.
 - [ ] Dashboard and Telegram wording are clear to a non-developer operator.
 
 ### User Acceptance
-- [ ] Dashboard answers: what collected this hour, what is blocked, what is rate-limited, what is queued, and whether the vault is safe.
-- [ ] No collector silently stores large media on C: when Z: is missing.
+- [x] Dashboard answers: what collected this hour, what is blocked, what is rate-limited, what is queued, and whether the vault is safe.
+- [x] No collector silently stores large media on C: when Z: is missing.
 - [ ] Future tools can inspect media plus JSON sidecars without needing analyzer.
 
 ## Execution Phases
 
 ### Phase 1: Vault Foundation
 **Goal**: Establish the durable storage contract before changing every collector.
-- [ ] Add central vault config for `Z:\unifiedcollector` with mount/free-space checks.
-- [ ] Add vault-root ID and relative-path conventions.
-- [ ] Add artifact sidecar schema and validator.
-- [ ] Add shared blob path strategy keyed by checksum.
-- [ ] Add `.gitignore` coverage for generated sidecars, raw payloads, queues, and backups.
-- [ ] Add dashboard/Telegram vault health fields.
+- [x] Add central vault config for `Z:\unifiedcollector` with mount/free-space checks.
+- [x] Add vault-root ID and relative-path conventions.
+- [x] Add artifact sidecar schema and validator.
+- [x] Add shared blob path strategy keyed by checksum.
+- [x] Add `.gitignore` coverage for generated sidecars, raw payloads, queues, and backups.
+- [x] Add dashboard/Telegram vault health fields.
 - **Deliverables**: Vault resolver, sidecar schema, health checks, tests.
 - **Time**: 1-2 days.
 
@@ -156,15 +156,15 @@
 **Goal**: Make file-backed collection reliable and repairable.
 - [ ] Build shared artifact writer: write temp file, hash, move to blob path, write sidecar, insert/update DB.
 - [ ] Mark any incomplete step as `partial`.
-- [ ] Add repair queue table or reuse existing queue mechanism.
-- [ ] Add reconciler dry-run: DB-only, blob-only, sidecar-only, checksum mismatch.
+- [x] Add repair queue table or reuse existing queue mechanism.
+- [x] Add reconciler dry-run: DB-only, blob-only, sidecar-only, checksum mismatch.
 - [ ] Migrate one low-risk source first, then Instagram/Telegram/WhatsApp/Beeper/Strava media paths.
 - **Deliverables**: Shared writer, partial-state model, repair queue, first migrated sources.
 - **Time**: 3-5 days.
 
 ### Phase 3: Raw Payload and Rebuild Layer
 **Goal**: Preserve enough raw data to rebuild indexes.
-- [ ] Define raw payload path conventions for Tier 1 and lower tiers.
+- [x] Define raw payload path conventions for Tier 1 and lower tiers.
 - [ ] Persist Tier 1 full raw payloads for messages, routes, profiles, posts, and browser captures.
 - [ ] Persist compressed JSON/JSONL for lower tiers where practical.
 - [ ] Link every sidecar to raw payload references.
@@ -175,17 +175,17 @@
 ### Phase 4: Priority and Rate-Limit Scheduler
 **Goal**: Make collection methodical without losing Tier 1 freshness.
 - [ ] Implement effective priority order: Tier 1 freshness, rich media, low rate-limit risk, historical backfill, broad discovery.
-- [ ] Add per-source/account/action rate-limit ledger.
+- [x] Add per-source/account/action rate-limit ledger.
 - [ ] Add one delayed randomized retry before cooldown.
 - [ ] Ensure cooldown stops exact scope, not unrelated safe scopes.
 - [ ] Import analyzer priority hints and surface provenance.
-- [ ] Add hourly ingest/rate-limit stats to dashboard and Telegram.
+- [x] Add hourly ingest/rate-limit stats to dashboard and Telegram.
 - **Deliverables**: Priority scheduler, cooldown ledger, telemetry.
 - **Time**: 3-5 days.
 
 ### Phase 5: Browser Capture as First-Class Ingest
 **Goal**: Make extension/browser evidence auditable and useful for routes/media.
-- [ ] Store extension version, tab platform/account, captured URL, request URL, response hash, and extraction IDs.
+- [x] Store extension version, tab platform/account, captured URL, request URL, response hash, and extraction IDs.
 - [ ] Add Strava GPS browser fallback for activities where API streams are missing or 429ed.
 - [ ] Queue browser route captures by Tier 1 priority first.
 - [ ] Add random delay and stop-on-challenge handling.
@@ -195,15 +195,24 @@
 
 ### Phase 6: Backups and Recovery Drills
 **Goal**: Prove the system can survive failure.
-- [ ] Add scheduled collector DB dumps to `Z:\unifiedcollector\backups\db`.
-- [ ] Implement retention: 7 daily, 4 weekly, 3 monthly.
+- [x] Add scheduled collector DB dumps to `Z:\unifiedcollector\backups\db`.
+- [x] Implement retention: 7 daily, 4 weekly, 3 monthly.
 - [ ] Add restore rehearsal checklist.
 - [ ] Run dry-run rebuild from sidecars/raw payloads into a scratch DB.
-- [ ] Report unrebuildable gaps by source.
+- [x] Report unrebuildable gaps by source.
 - **Deliverables**: Backup job, retention, recovery report.
 - **Time**: 2-4 days.
 
 ---
+
+## Implementation Status - 2026-07-23
+
+- Vault foundation is implemented in `src/core/vault.py`: canonical root detection, writability/free-space checks, media-root mirror checks, vault-relative paths, sidecar schema validation, raw payload paths, and checksum blob-path conventions.
+- Media/artifact/raw sidecar helpers are wired into the shared collector base path and tested. Sidecar failure is recorded on `media_items.metadata.vault_sidecar` and queued through the existing dead-letter queue.
+- Rebuild reporting exists in `src/core/rebuild_report.py` and covers sidecar scan, raw payload table hints, DB-only, sidecar-only, blob-only, missing file, size mismatch, and checksum mismatch states.
+- Collector DB backups are implemented with vault-mirror checks, status reporting, and retention tests.
+- Dashboard and Telegram hourly status now include vault health, artifact partial/queued counts, backup status, hourly ingest, scoped rate-limit/auth failures, Telegram FloodWait events, and browser extension hook/ingest counters.
+- Still not complete: a true atomic artifact writer that moves every file through a temp/hash/blob transaction before DB commit, physical cross-source blob dedupe for every collector, source-by-source migration proof, full Tier 1 raw payload coverage, analyzer priority-hint import, and Strava browser GPS fallback.
 
 **Document Version**: 1.0
 **Created**: 2026-07-20
