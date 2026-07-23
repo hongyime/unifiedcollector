@@ -157,6 +157,25 @@ def test_gps_stream_429_event_dedupes_same_activity(monkeypatch):
     assert coll._note_rate_limit.call_count == 2
 
 
+@pytest.mark.asyncio
+async def test_sync_persisted_gps_stream_cooldown_restores_after_restart(monkeypatch):
+    _set_web_env(monkeypatch)
+    coll = StravaCollector()
+    pool = _make_pool()
+    pool._conn.fetchrow = AsyncMock(return_value={
+        "created_at": datetime.now(timezone.utc),
+        "cooldown_seconds": 1800,
+        "reason": "streams 429 for 123 via web:bryanseah234",
+    })
+    coll.set_pool(pool)
+
+    restored = await coll._sync_persisted_gps_stream_cooldown()
+
+    assert restored is True
+    assert coll._gps_stream_cooling_down() is True
+    pool._conn.fetchrow.assert_awaited_once()
+
+
 def test_is_truncated_accepts_stored_latlng_strings():
     assert strava_mod._is_truncated("1.300000,103.800000", [1.300001, 103.800001]) is False
     assert strava_mod._is_truncated("1.300000,103.800000", [1.310000, 103.810000]) is True

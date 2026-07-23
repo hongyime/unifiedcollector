@@ -253,6 +253,49 @@ class StravaCollector(BaseCollector):
     def _gps_stream_cooling_down(self) -> bool:
         return time.time() < self._gps_stream_cooldown_until
 
+    async def _sync_persisted_gps_stream_cooldown(self) -> bool:
+        """Hydrate GPS cooldown from durable rate_limit_events after restarts."""
+        if not self.pool:
+            return False
+        try:
+            async with self.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """
+                    SELECT created_at, cooldown_seconds, reason
+                    FROM rate_limit_events
+                    WHERE source = 'strava'
+                      AND scope = 'gps_streams'
+                      AND status_code = 429
+                      AND cooldown_seconds IS NOT NULL
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """
+                )
+        except Exception as exc:
+            logger.debug("strava: persisted GPS cooldown check failed: %s", exc)
+            return self._gps_stream_cooling_down()
+        if not row:
+            return self._gps_stream_cooling_down()
+
+        cooldown_seconds = int(row["cooldown_seconds"] or 0)
+        created_at = row["created_at"]
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        cooldown_until = created_at.astimezone(timezone.utc) + timedelta(seconds=cooldown_seconds)
+        remaining = (cooldown_until - datetime.now(timezone.utc)).total_seconds()
+        if remaining <= 0:
+            return self._gps_stream_cooling_down()
+        self._gps_stream_cooldown_until = max(
+            self._gps_stream_cooldown_until,
+            time.time() + remaining,
+        )
+        logger.info(
+            "strava: GPS stream cooldown restored from rate_limit_events for %ds (%s)",
+            int(remaining),
+            row["reason"] or "HTTP 429",
+        )
+        return True
+
     def _set_gps_stream_cooldown(self, activity_id: str | int, context: str) -> None:
         now = time.time()
         self._gps_stream_cooldown_until = max(
@@ -514,6 +557,7 @@ class StravaCollector(BaseCollector):
         # Scrape activity pages for photos, polylines, kudos, comments
         page_batch = int(os.getenv("STRAVA_PAGE_SCRAPE_BATCH", "200"))
         try:
+            await self._sync_persisted_gps_stream_cooldown()
             await self._scrape_activity_pages(batch_size=page_batch)
         except Exception as e:
             logger.warning("strava: activity page scraping failed: %s", e)
@@ -1387,6 +1431,7 @@ class StravaCollector(BaseCollector):
         """
         if not self._use_web or not self.pool:
             return 0
+        await self._sync_persisted_gps_stream_cooldown()
         if self._gps_stream_cooling_down():
             left = int(self._gps_stream_cooldown_until - time.time())
             logger.info("strava: GPS backfill cooling down for %ds", max(0, left))
@@ -2597,7 +2642,7 @@ class StravaCollector(BaseCollector):
         # If hasStreams=true, fetch /activities/{id}/streams for the actual latlng array.
         has_streams_match = re.search(r'\.hasStreams\((\w+)\)', html)
         has_streams = has_streams_match and has_streams_match.group(1) == 'true'
-        if has_streams:
+        if has_streams and not self._gps_stream_cooling_down():
             try:
                 streams_url = f"{STRAVA_WEB}/activities/{activity_id}/streams"
                 streams_resp = await client.get(
