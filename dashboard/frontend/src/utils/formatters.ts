@@ -9,6 +9,17 @@ export function formatNumber(n: number): string {
   return n.toLocaleString();
 }
 
+export function formatDuration(seconds: number | null | undefined): string {
+  if (seconds == null || !Number.isFinite(seconds)) return "-";
+  const s = Math.max(0, Math.floor(seconds));
+  if (s < 90) return `${s}s`;
+  const mins = Math.floor(s / 60);
+  if (mins < 90) return `${mins}m`;
+  const hours = s / 3600;
+  if (hours < 48) return `${hours.toFixed(1)}h`;
+  return `${(s / 86400).toFixed(1)}d`;
+}
+
 export function formatTimestamp(iso: string | null | undefined): string {
   if (!iso) return "-";
   const d = new Date(iso);

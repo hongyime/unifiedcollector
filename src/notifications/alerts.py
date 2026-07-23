@@ -242,6 +242,45 @@ def _fmt_bytes(n) -> str:
     return f"{value:.1f} TB"
 
 
+def _format_backup_status(backups: dict) -> str:
+    status = str(backups.get("status") or "unknown")
+    root = _esc(backups.get("root") or "")
+    in_progress = bool(backups.get("in_progress"))
+    progress = " Backup is currently running." if in_progress else ""
+    stale_temp_count = int(backups.get("stale_in_progress_count") or 0)
+    stale_temp_age = backups.get("stale_in_progress_oldest_age_seconds")
+    stale_temp = ""
+    if stale_temp_count:
+        age = _humanize_age(int(stale_temp_age or 0))
+        stale_temp = (
+            f" {stale_temp_count:,} abandoned temp {_plural(stale_temp_count, 'dump')} "
+            f"older than the active-window threshold; oldest is {age} old."
+        )
+
+    if status in {"ok", "stale"}:
+        age = _humanize_age(int(backups.get("latest_age_seconds") or 0))
+        size = _fmt_bytes(backups.get("latest_size_bytes"))
+        count = int(backups.get("backup_count") or 0)
+        max_age = backups.get("max_age_hours")
+        base = (
+            f"Latest collector DB backup is {age} old ({size}); "
+            f"{count:,} {_plural(count, 'dump')} retained under <code>{root}</code>."
+        )
+        if status == "stale":
+            expected = f" Expected within {max_age}h." if max_age else ""
+            return "⚠️ " + base + expected + progress + stale_temp
+        return "✅ " + base + progress + stale_temp
+
+    if status == "missing":
+        return f"⚠️ No collector DB backup dump found under <code>{root}</code>." + progress + stale_temp
+
+    if status == "error":
+        err = _esc(backups.get("error") or "unknown error")
+        return f"❌ Could not read collector DB backup status at <code>{root}</code>: <code>{err}</code>."
+
+    return f"⚠️ Collector DB backup status is unknown at <code>{root}</code>." + progress + stale_temp
+
+
 def _backfill_phase(src: str, snap: dict) -> str:
     """Classify a source's ingestion phase for the Backfill heartbeat line.
 
@@ -364,6 +403,12 @@ async def notify_status(snapshot: dict) -> bool:
             )
         else:
             lines.append("Artifact health: no sidecar DLQ rows or media rows with failed sidecar metadata.")
+
+    backups = snapshot.get("backups") or {}
+    if backups:
+        lines.append("")
+        lines.append("<b>DB backups</b>")
+        lines.append(_format_backup_status(backups))
 
     ages: dict = snapshot.get("source_ages") or {}
     stale = set(snapshot.get("stale_sources") or [])

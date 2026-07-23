@@ -4,6 +4,7 @@ import os
 import signal
 from datetime import datetime, timedelta, timezone
 
+from src.backup.db_backup import backup_status
 from src.db.connection import get_pool, close_pool
 from src.core.env import env_int
 from src.core.vault import VAULT_ROOT, vault_artifact_counts, vault_health
@@ -538,6 +539,8 @@ class Scheduler:
                         "error": str(exc),
                     }
 
+                snap["backups"] = backup_status()
+
                 # Health flags from source_health (dead + degraded/auth_paused).
                 try:
                     rows = await conn.fetch(
@@ -561,7 +564,9 @@ class Scheduler:
             or int(vault.get("artifacts_queued") or 0) > 0
             or int(vault.get("artifacts_partial") or 0) > 0
         )
-        snap["ok"] = not (snap.get("dead_sources") or snap.get("stale_sources") or vault_bad)
+        backups = snap.get("backups") or {}
+        backups_bad = bool(backups) and backups.get("status") != "ok"
+        snap["ok"] = not (snap.get("dead_sources") or snap.get("stale_sources") or vault_bad or backups_bad)
         return snap
 
     async def _init_db(self):

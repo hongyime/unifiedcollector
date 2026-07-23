@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import time
 from pathlib import Path
 
 import pytest
@@ -10,7 +12,9 @@ from src.backup.db_backup import (
     RetentionPolicy,
     apply_retention_plan,
     assert_backup_mount_ready,
+    backup_status,
     build_retention_plan,
+    default_backup_dir,
     list_backup_files,
     parse_backup_file,
 )
@@ -45,6 +49,65 @@ def test_list_backup_files_ignores_temp_and_unrelated_files(tmp_path):
 
     assert len(backups) == 2
     assert backups[0].path == expected
+
+
+def test_default_backup_dir_prefers_collector_vault_root(monkeypatch, tmp_path):
+    vault = tmp_path / "vault"
+    monkeypatch.delenv("COLLECTOR_DB_BACKUP_DIR", raising=False)
+    monkeypatch.delenv("COLLECTOR_DB_BACKUP_VAULT_ROOT", raising=False)
+    monkeypatch.setenv("COLLECTOR_VAULT_ROOT", str(vault))
+
+    assert default_backup_dir() == vault / "backups" / "db"
+
+
+def test_backup_status_reports_latest_dump_and_in_progress(tmp_path):
+    old = _dump(tmp_path, "20260719_033012", size=2)
+    latest = _dump(tmp_path, "20260720_033012", size=5)
+    (tmp_path / ".inprogress_20260721_033012.dump").write_bytes(b"x")
+
+    status = backup_status(tmp_path, max_age_hours=999999)
+
+    assert status["status"] == "ok"
+    assert status["latest_path"] == str(latest)
+    assert status["latest_size_bytes"] == 5
+    assert status["backup_count"] == 2
+    assert status["in_progress"] is True
+    assert status["in_progress_count"] == 1
+    assert status["stale_in_progress_count"] == 0
+    assert str(old) != status["latest_path"]
+
+
+def test_backup_status_does_not_treat_old_temp_dump_as_running(tmp_path):
+    _dump(tmp_path, "20260720_033012", size=5)
+    stale_temp = tmp_path / ".inprogress_20260721_033012.dump"
+    stale_temp.write_bytes(b"x")
+    old = time.time() - (8 * 3600)
+    os.utime(stale_temp, (old, old))
+
+    status = backup_status(tmp_path, max_age_hours=999999)
+
+    assert status["status"] == "ok"
+    assert status["in_progress"] is False
+    assert status["in_progress_count"] == 0
+    assert status["stale_in_progress_count"] == 1
+    assert status["stale_in_progress_oldest_age_seconds"] >= 8 * 3600 - 5
+
+
+def test_backup_status_marks_old_dump_stale(tmp_path):
+    _dump(tmp_path, "20200101_000000")
+
+    status = backup_status(tmp_path, max_age_hours=1)
+
+    assert status["status"] == "stale"
+    assert status["max_age_hours"] == 1
+
+
+def test_backup_status_marks_empty_dir_missing(tmp_path):
+    status = backup_status(tmp_path, max_age_hours=1)
+
+    assert status["status"] == "missing"
+    assert status["latest_path"] is None
+    assert status["backup_count"] == 0
 
 
 def test_retention_keeps_newest_daily_weekly_monthly_buckets(tmp_path):

@@ -82,6 +82,21 @@ async def test_notify_status_splits_429s_from_auth_errors(monkeypatch):
             "sidecar_failures": 0,
             "counts_error": "TimeoutError",
         },
+        "backups": {
+            "status": "ok",
+            "root": "/vault/backups/db",
+            "latest_path": "/vault/backups/db/unifiedcollector_20260723_033005.dump",
+            "latest_created_at": "2026-07-23T03:30:05",
+            "latest_age_seconds": 7200,
+            "latest_size_bytes": 3_500_000_000,
+            "backup_count": 4,
+            "in_progress": False,
+            "in_progress_count": 0,
+            "stale_in_progress_count": 1,
+            "stale_in_progress_oldest_age_seconds": 90_000,
+            "max_age_hours": 30,
+            "error": None,
+        },
     })
 
     assert ok is True
@@ -96,3 +111,7 @@ async def test_notify_status_splits_429s_from_auth_errors(monkeypatch):
     assert "this hour 12 probe frames and 0 sample frames" in msg
     assert "Writable at <code>/vault</code>" in msg
     assert "Artifact health counts timed out" in msg
+    assert "<b>DB backups</b>" in msg
+    assert "Latest collector DB backup is 2.0h old" in msg
+    assert "4 dumps retained under <code>/vault/backups/db</code>" in msg
+    assert "1 abandoned temp dump" in msg

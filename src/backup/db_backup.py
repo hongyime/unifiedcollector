@@ -62,7 +62,16 @@ class RetentionPlan:
 
 
 def default_backup_dir() -> Path:
-    return Path(os.getenv("COLLECTOR_DB_BACKUP_DIR", DEFAULT_BACKUP_DIR))
+    configured = os.getenv("COLLECTOR_DB_BACKUP_DIR")
+    if configured:
+        return Path(configured)
+    vault_root = os.getenv("COLLECTOR_DB_BACKUP_VAULT_ROOT") or os.getenv("COLLECTOR_VAULT_ROOT")
+    if vault_root:
+        return Path(vault_root) / "backups" / "db"
+    container_vault = Path("/vault")
+    if container_vault.exists() and container_vault.is_dir():
+        return container_vault / "backups" / "db"
+    return Path(DEFAULT_BACKUP_DIR)
 
 
 def default_policy() -> RetentionPolicy:
@@ -108,6 +117,89 @@ def list_backup_files(backup_dir: Path, *, prefix: str = DEFAULT_PREFIX) -> list
         if backup is not None:
             files.append(backup)
     return sorted(files, key=lambda item: item.created_at, reverse=True)
+
+
+def backup_status(
+    backup_dir: Path | None = None,
+    *,
+    prefix: str = DEFAULT_PREFIX,
+    max_age_hours: int | None = None,
+) -> dict:
+    """Return JSON-safe latest-backup status for dashboards and Telegram."""
+    root = backup_dir or default_backup_dir()
+    try:
+        threshold_hours = max_age_hours if max_age_hours is not None else _env_int(
+            "COLLECTOR_DB_BACKUP_MAX_AGE_HOURS",
+            30,
+        )
+        temp_threshold_hours = _env_int("COLLECTOR_DB_BACKUP_IN_PROGRESS_MAX_AGE_HOURS", 6)
+        backups = list_backup_files(root, prefix=prefix)
+        temp_files = sorted(root.glob(".inprogress_*.dump")) if root.exists() else []
+    except Exception as exc:
+        return {
+            "status": "error",
+            "root": str(root),
+            "latest_path": None,
+            "latest_created_at": None,
+            "latest_age_seconds": None,
+            "latest_size_bytes": None,
+            "backup_count": 0,
+            "in_progress": False,
+            "in_progress_count": 0,
+            "stale_in_progress_count": 0,
+            "stale_in_progress_oldest_age_seconds": None,
+            "max_age_hours": max_age_hours,
+            "error": str(exc),
+        }
+
+    now = datetime.now()
+    temp_ages: list[int] = []
+    for path in temp_files:
+        try:
+            temp_ages.append(max(0, int(now.timestamp() - path.stat().st_mtime)))
+        except OSError:
+            continue
+    active_temp_count = sum(1 for age in temp_ages if temp_threshold_hours <= 0 or age <= temp_threshold_hours * 3600)
+    stale_temp_ages = [age for age in temp_ages if temp_threshold_hours > 0 and age > temp_threshold_hours * 3600]
+    temp_payload = {
+        "in_progress": active_temp_count > 0,
+        "in_progress_count": active_temp_count,
+        "stale_in_progress_count": len(stale_temp_ages),
+        "stale_in_progress_oldest_age_seconds": max(stale_temp_ages) if stale_temp_ages else None,
+    }
+    latest = backups[0] if backups else None
+    if latest is None:
+        return {
+            "status": "missing",
+            "root": str(root),
+            "latest_path": None,
+            "latest_created_at": None,
+            "latest_age_seconds": None,
+            "latest_size_bytes": None,
+            "backup_count": 0,
+            "max_age_hours": threshold_hours,
+            "error": None,
+            **temp_payload,
+        }
+
+    age_seconds = max(0, int((now - latest.created_at).total_seconds()))
+    stale = threshold_hours > 0 and age_seconds > threshold_hours * 3600
+    try:
+        latest_size = latest.path.stat().st_size
+    except OSError:
+        latest_size = None
+    return {
+        "status": "stale" if stale else "ok",
+        "root": str(root),
+        "latest_path": str(latest.path),
+        "latest_created_at": latest.created_at.isoformat(),
+        "latest_age_seconds": age_seconds,
+        "latest_size_bytes": latest_size,
+        "backup_count": len(backups),
+        "max_age_hours": threshold_hours,
+        "error": None,
+        **temp_payload,
+    }
 
 
 def build_retention_plan(

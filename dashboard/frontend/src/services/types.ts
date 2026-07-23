@@ -14,6 +14,21 @@ export interface HealthStatus {
     artifacts_partial: number;
     counts_error?: string | null;
   };
+  backups?: {
+    status: "ok" | "stale" | "missing" | "error";
+    root: string;
+    latest_path: string | null;
+    latest_created_at: string | null;
+    latest_age_seconds: number | null;
+    latest_size_bytes: number | null;
+    backup_count: number;
+    in_progress: boolean;
+    in_progress_count?: number;
+    stale_in_progress_count?: number;
+    stale_in_progress_oldest_age_seconds?: number | null;
+    max_age_hours?: number | null;
+    error?: string | null;
+  };
 }
 
 export interface CollectorStatus {

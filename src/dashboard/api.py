@@ -19,6 +19,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from src.backup.db_backup import backup_status
 from src.db.connection import get_pool
 from src.dashboard.websocket import health_ws
 from src.core.vault import vault_artifact_counts, vault_health
@@ -241,6 +242,7 @@ def require_role(min_role: str):
 async def health():
     pool = await get_pool()
     vault = _vault_payload()
+    backups = backup_status()
     try:
         async with pool.acquire() as conn:
             await conn.fetchval("SELECT 1")
@@ -260,12 +262,14 @@ async def health():
         and int(vault.get("artifacts_queued") or 0) == 0
         and int(vault.get("artifacts_partial") or 0) == 0
     )
+    backups_ok = backups.get("status") == "ok"
 
     return {
-        "status": "ok" if db_status == "healthy" and drive_ok and vault_ok else "degraded",
+        "status": "ok" if db_status == "healthy" and drive_ok and vault_ok and backups_ok else "degraded",
         "database": db_status,
         "drive": "mounted" if drive_ok else "missing",
         "vault": vault,
+        "backups": backups,
     }
 
 

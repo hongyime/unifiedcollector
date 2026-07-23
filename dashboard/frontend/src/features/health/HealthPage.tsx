@@ -6,8 +6,8 @@ import { LoadingSpinner } from "../../components/ui/LoadingSpinner";
 import { ErrorState } from "../../components/ui/ErrorState";
 import { JSONViewer } from "../../components/shared/JSONViewer";
 import { api } from "../../services/api";
-import { formatBytes, formatNumber } from "../../utils/formatters";
-import { Database, HardDrive, Server } from "lucide-react";
+import { formatBytes, formatDuration, formatNumber } from "../../utils/formatters";
+import { Archive, Database, HardDrive, Server } from "lucide-react";
 
 export function HealthPage() {
   const { data, isLoading, error, refetch } = useQuery({
@@ -23,12 +23,28 @@ export function HealthPage() {
   const vault = data?.vault;
   const vaultOk = vault?.available && vault?.writable;
   const vaultIssues = (vault?.artifacts_queued ?? 0) + (vault?.artifacts_partial ?? 0);
+  const backups = data?.backups;
+  const backupStatus = backups?.status ?? "missing";
+  const backupOk = backupStatus === "ok";
+  const backupValue =
+    backupStatus === "ok" ? "Fresh" :
+    backupStatus === "stale" ? "Stale" :
+    backupStatus === "error" ? "Error" :
+    "Missing";
+  const backupSublabel = backups?.latest_age_seconds != null
+    ? `${formatDuration(backups.latest_age_seconds)} old · ${formatBytes(backups.latest_size_bytes)} · ${formatNumber(backups.backup_count)} kept`
+    : backups?.in_progress
+      ? "backup running"
+      : "no restorable dump found";
+  const backupDetail = backups?.stale_in_progress_count
+    ? `${backupSublabel} · ${formatNumber(backups.stale_in_progress_count)} stale temp`
+    : backupSublabel;
 
   return (
     <div>
       <Header title="Health" subtitle="System health status" onRefresh={() => refetch()} />
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3 mb-6">
+      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-3 mb-6">
         <MetricCard
           label="Overall"
           value={data?.status === "ok" ? "Healthy" : "Degraded"}
@@ -57,6 +73,13 @@ export function HealthPage() {
               : "unknown"
           }
           status={vaultIssues ? "warning" : "success"}
+        />
+        <MetricCard
+          label="DB Backups"
+          value={backupValue}
+          sublabel={backupDetail}
+          status={backupOk ? "success" : backupStatus === "stale" ? "warning" : "error"}
+          icon={<Archive className="w-5 h-5" />}
         />
       </div>
 
