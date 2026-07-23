@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from src.core.vault import VAULT_ROOT
+from src.core.vault import VAULT_ROOT, blob_path_for_sha256
 
 
 MEDIA_ITEM_FIELDS = {
@@ -37,6 +37,15 @@ class RebuildReport:
     raw_payloads_by_source: Counter[str] = field(default_factory=Counter)
     invalid_files: list[str] = field(default_factory=list)
     checksum_verification: bool = False
+    sidecar_scan_limit: int | None = None
+    blob_scan_limit: int | None = None
+    db_comparison_enabled: bool = False
+    db_media_rows_scanned: int = 0
+    sidecar_media_keys_scanned: int = 0
+    blob_files_scanned: int = 0
+    artifact_states_by_source: dict[str, Counter[str]] = field(default_factory=lambda: defaultdict(Counter))
+    db_file_errors_by_source: dict[str, Counter[str]] = field(default_factory=lambda: defaultdict(Counter))
+    artifact_samples_by_state: dict[str, list[str]] = field(default_factory=lambda: defaultdict(list))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -58,6 +67,26 @@ class RebuildReport:
             "raw_payloads_by_source": dict(sorted(self.raw_payloads_by_source.items())),
             "invalid_files": self.invalid_files[:100],
             "checksum_verification": self.checksum_verification,
+            "sidecar_scan_limit": self.sidecar_scan_limit,
+            "blob_scan_limit": self.blob_scan_limit,
+            "artifact_reconciliation": {
+                "enabled": self.db_comparison_enabled,
+                "db_media_rows_scanned": self.db_media_rows_scanned,
+                "sidecar_media_keys_scanned": self.sidecar_media_keys_scanned,
+                "blob_files_scanned": self.blob_files_scanned,
+                "states_by_source": {
+                    source: dict(sorted(counter.items()))
+                    for source, counter in sorted(self.artifact_states_by_source.items())
+                },
+                "db_file_errors_by_source": {
+                    source: dict(sorted(counter.items()))
+                    for source, counter in sorted(self.db_file_errors_by_source.items())
+                },
+                "samples_by_state": {
+                    state: samples[:100]
+                    for state, samples in sorted(self.artifact_samples_by_state.items())
+                },
+            },
         }
 
     def to_text(self) -> str:
@@ -98,6 +127,22 @@ class RebuildReport:
             lines.append("")
             lines.append("Raw payload references:")
             lines.extend(f"  {source}: {count}" for source, count in sorted(self.raw_payloads_by_source.items()))
+        if self.db_comparison_enabled:
+            lines.append("")
+            lines.append("Artifact reconciliation:")
+            lines.append(f"  DB media rows scanned: {self.db_media_rows_scanned}")
+            lines.append(f"  Media sidecar keys scanned: {self.sidecar_media_keys_scanned}")
+            lines.append(f"  Canonical blob files scanned: {self.blob_files_scanned}")
+            if self.artifact_states_by_source:
+                lines.append("  States by source:")
+                for source, counter in sorted(self.artifact_states_by_source.items()):
+                    details = ", ".join(f"{state}={count}" for state, count in sorted(counter.items()))
+                    lines.append(f"    {source}: {details}")
+            if self.db_file_errors_by_source:
+                lines.append("  DB file reference problems:")
+                for source, counter in sorted(self.db_file_errors_by_source.items()):
+                    details = ", ".join(f"{state}={count}" for state, count in sorted(counter.items()))
+                    lines.append(f"    {source}: {details}")
         return "\n".join(lines)
 
 
@@ -222,14 +267,21 @@ def scan_sidecars(
     root: str | Path | None = None,
     *,
     verify_checksums: bool = False,
+    sidecar_limit: int | None = None,
 ) -> RebuildReport:
     vault_root = Path(root).resolve() if root else VAULT_ROOT
-    report = RebuildReport(root=vault_root, checksum_verification=verify_checksums)
+    report = RebuildReport(
+        root=vault_root,
+        checksum_verification=verify_checksums,
+        sidecar_scan_limit=sidecar_limit,
+    )
     sidecar_root = vault_root / "sidecars"
     if not sidecar_root.exists():
         return report
 
-    for path in sorted(sidecar_root.rglob("*.json")):
+    for path in _iter_sidecar_paths(sidecar_root, limit=sidecar_limit):
+        if sidecar_limit is not None and sidecar_limit > 0 and report.sidecars_scanned >= sidecar_limit:
+            break
         report.sidecars_scanned += 1
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -274,6 +326,184 @@ def scan_sidecars(
     return report
 
 
+async def compare_db_media_artifacts(
+    report: RebuildReport,
+    conn,
+    root: str | Path | None = None,
+    *,
+    verify_checksums: bool = False,
+    limit: int | None = None,
+    sidecar_limit: int | None = None,
+    blob_limit: int | None = None,
+) -> RebuildReport:
+    """Compare media_items rows with vault sidecars/files/blobs.
+
+    This is intentionally read-only. It reports inventory states so repair code
+    can be built against a measured contract later.
+    """
+    vault_root = Path(root).resolve() if root else report.root
+    report.db_comparison_enabled = True
+    report.blob_scan_limit = blob_limit
+    sidecars, sidecar_blob_refs = _scan_media_sidecar_index(vault_root, limit=sidecar_limit)
+    report.sidecar_media_keys_scanned = len(sidecars)
+    blob_files = _scan_blob_files(vault_root, limit=blob_limit)
+    report.blob_files_scanned = len(blob_files)
+
+    db_rows = await _fetch_media_rows(conn, limit=limit)
+    report.db_media_rows_scanned = len(db_rows)
+    db_keys: set[tuple[str, str]] = set()
+    referenced_blobs = set(sidecar_blob_refs)
+
+    for row in db_rows:
+        source = str(_row_get(row, "source") or "unknown")
+        content_id = str(_row_get(row, "content_id") or "")
+        key = (source, content_id)
+        if content_id:
+            db_keys.add(key)
+            if key not in sidecars:
+                _note_artifact_state(report, source, "db_only", _format_media_key(source, content_id))
+
+        blob = _db_row_blob_path(row, vault_root)
+        if blob is not None:
+            referenced_blobs.add(_norm_path(blob, vault_root))
+
+        for error in db_media_file_reference_errors(row, vault_root, verify_checksums=verify_checksums):
+            report.db_file_errors_by_source[source][error] += 1
+            _note_artifact_state(report, source, error, _format_media_key(source, content_id))
+
+    for source, content_id in sorted(set(sidecars) - db_keys):
+        _note_artifact_state(report, source, "sidecar_only", _format_media_key(source, content_id))
+
+    for blob in sorted(blob_files - referenced_blobs):
+        _note_artifact_state(report, "unknown", "blob_only", _safe_relative(Path(blob), vault_root))
+
+    return report
+
+
+def db_media_file_reference_errors(
+    row,
+    root: Path,
+    *,
+    verify_checksums: bool = False,
+) -> list[str]:
+    raw_path = _row_get(row, "file_path")
+    if not raw_path:
+        return ["file_path_missing"]
+    path = _vault_file_path(raw_path, root)
+    if not path.exists() or not path.is_file():
+        return ["file_missing"]
+
+    errors: list[str] = []
+    expected_size = _row_get(row, "file_size")
+    if expected_size is not None:
+        try:
+            if path.stat().st_size != int(expected_size):
+                errors.append("file_size_mismatch")
+        except Exception:
+            errors.append("file_size_invalid")
+
+    expected_sha = _row_get(row, "sha256")
+    if verify_checksums and expected_sha:
+        actual = _sha256_file(path)
+        if str(expected_sha).lower() != actual:
+            errors.append("file_sha256_mismatch")
+    return errors
+
+
+async def _fetch_media_rows(conn, *, limit: int | None = None) -> list:
+    sql = (
+        "SELECT source, content_id, filename, file_path, file_size, sha256 "
+        "FROM media_items"
+    )
+    if limit is not None and limit > 0:
+        sql += f" LIMIT {int(limit)}"
+    else:
+        sql += " ORDER BY source, content_id"
+    return list(await conn.fetch(sql))
+
+
+def _scan_media_sidecar_index(
+    root: Path,
+    *,
+    limit: int | None = None,
+) -> tuple[dict[tuple[str, str], dict[str, Any]], set[str]]:
+    sidecar_root = root / "sidecars"
+    entries: dict[tuple[str, str], dict[str, Any]] = {}
+    blob_refs: set[str] = set()
+    if not sidecar_root.exists():
+        return entries, blob_refs
+    scanned = 0
+    for path in _iter_sidecar_paths(sidecar_root, limit=limit):
+        if limit is not None and limit > 0 and scanned >= limit:
+            break
+        scanned += 1
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(payload, dict) or payload.get("artifact_kind") != "media":
+            continue
+        source = str(payload.get("source") or "unknown")
+        content_id = nested_get(payload, ("content", "id"))
+        if content_id:
+            entries[(source, str(content_id))] = payload
+        blob_path = nested_get(payload, ("file", "blob_path")) or nested_get(payload, ("file", "blob_absolute_path"))
+        if blob_path:
+            blob_refs.add(_norm_path(_vault_file_path(blob_path, root), root))
+    return entries, blob_refs
+
+
+def _scan_blob_files(root: Path, *, limit: int | None = None) -> set[str]:
+    blob_root = root / "media" / "blobs"
+    if not blob_root.exists():
+        return set()
+    paths: set[str] = set()
+    for path in blob_root.rglob("*"):
+        if not path.is_file():
+            continue
+        if limit is not None and limit > 0 and len(paths) >= limit:
+            break
+        paths.add(_norm_path(path, root))
+    return paths
+
+
+def _iter_sidecar_paths(sidecar_root: Path, *, limit: int | None = None):
+    paths = sidecar_root.rglob("*.json")
+    if limit is not None and limit > 0:
+        return paths
+    return sorted(paths)
+
+
+def _db_row_blob_path(row, root: Path) -> Path | None:
+    sha = _row_get(row, "sha256")
+    if not sha:
+        return None
+    try:
+        return blob_path_for_sha256(str(sha), extension=Path(str(_row_get(row, "filename") or "")).suffix, root=root)
+    except ValueError:
+        return None
+
+
+def _row_get(row, key: str) -> Any:
+    if isinstance(row, dict):
+        return row.get(key)
+    try:
+        return row[key]
+    except Exception:
+        return getattr(row, key, None)
+
+
+def _note_artifact_state(report: RebuildReport, source: str, state: str, sample: str) -> None:
+    report.artifact_states_by_source[source][state] += 1
+    samples = report.artifact_samples_by_state[state]
+    if sample and len(samples) < 100:
+        samples.append(sample)
+
+
+def _format_media_key(source: str, content_id: str) -> str:
+    return f"{source}:{content_id}" if content_id else f"{source}:<missing-content-id>"
+
+
 def _sha256_file(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:
@@ -294,3 +524,10 @@ def _vault_file_path(path: Any, root: Path) -> Path:
     if not resolved.is_absolute():
         resolved = root / resolved
     return resolved
+
+
+def _norm_path(path: Path, root: Path) -> str:
+    try:
+        return str(path.resolve())
+    except Exception:
+        return str(_vault_file_path(path, root))

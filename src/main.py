@@ -61,6 +61,10 @@ def main():
     rp.add_argument("--vault-root", default=None, help="Vault root (default: COLLECTOR_VAULT_ROOT)")
     rp.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     rp.add_argument("--verify-checksums", action="store_true", help="Hash referenced files while scanning")
+    rp.add_argument("--compare-db", action="store_true", help="Also compare vault artifacts against media_items")
+    rp.add_argument("--compare-db-limit", type=int, default=None, help="Limit media_items rows for a quick sample")
+    rp.add_argument("--sidecar-limit", type=int, default=None, help="Limit sidecars scanned for a quick sample")
+    rp.add_argument("--blob-limit", type=int, default=None, help="Limit canonical blob files scanned for a quick sample")
 
     # schedule
     scp = sub.add_parser("schedule", help="Add/update a collection schedule")
@@ -87,7 +91,15 @@ def main():
     elif args.command == "status":
         asyncio.run(_cmd_status(getattr(args, "source", None)))
     elif args.command == "rebuild-report":
-        _cmd_rebuild_report(args.vault_root, args.json, args.verify_checksums)
+        asyncio.run(_cmd_rebuild_report(
+            args.vault_root,
+            args.json,
+            args.verify_checksums,
+            args.compare_db,
+            args.compare_db_limit,
+            args.sidecar_limit,
+            args.blob_limit,
+        ))
     elif args.command == "schedule":
         asyncio.run(_cmd_schedule(args.source, args.interval))
     elif args.command == "target":
@@ -198,12 +210,35 @@ async def _cmd_status(source: str | None):
     await close_pool()
 
 
-def _cmd_rebuild_report(vault_root: str | None, as_json: bool, verify_checksums: bool = False):
+async def _cmd_rebuild_report(
+    vault_root: str | None,
+    as_json: bool,
+    verify_checksums: bool = False,
+    compare_db: bool = False,
+    compare_db_limit: int | None = None,
+    sidecar_limit: int | None = None,
+    blob_limit: int | None = None,
+):
     import json
 
-    from src.core.rebuild_report import scan_sidecars
+    from src.core.rebuild_report import compare_db_media_artifacts, scan_sidecars
 
-    report = scan_sidecars(vault_root, verify_checksums=verify_checksums)
+    report = scan_sidecars(vault_root, verify_checksums=verify_checksums, sidecar_limit=sidecar_limit)
+    if compare_db:
+        pool = await get_pool()
+        try:
+            async with pool.acquire() as conn:
+                await compare_db_media_artifacts(
+                    report,
+                    conn,
+                    vault_root,
+                    verify_checksums=verify_checksums,
+                    limit=compare_db_limit,
+                    sidecar_limit=sidecar_limit,
+                    blob_limit=blob_limit,
+                )
+        finally:
+            await close_pool()
     if as_json:
         print(json.dumps(report.to_dict(), indent=2, sort_keys=True, default=str))
     else:
