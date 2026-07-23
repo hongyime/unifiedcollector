@@ -384,6 +384,27 @@ class Scheduler:
                     pass
 
                 try:
+                    if await conn.fetchval("SELECT to_regclass('browser_ingest_events')", timeout=5) is not None:
+                        snap["browser_ingest_events"] = [dict(r) for r in await conn.fetch(
+                            """
+                            SELECT platform,
+                                   endpoint,
+                                   count(*)::int AS requests,
+                                   sum(observed_count)::int AS observed_count,
+                                   sum(stored_count)::int AS stored_count,
+                                   max(created_at) AS last_seen_at
+                            FROM browser_ingest_events
+                            WHERE created_at >= date_trunc('hour', now())
+                            GROUP BY platform, endpoint
+                            ORDER BY observed_count DESC, stored_count DESC, last_seen_at DESC
+                            LIMIT 8
+                            """,
+                            timeout=10,
+                        )]
+                except Exception:
+                    pass
+
+                try:
                     active_limits = []
                     active_sources = set()
                     now_ts = datetime.now(timezone.utc).timestamp()

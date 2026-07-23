@@ -72,6 +72,22 @@ async def test_notify_status_splits_429s_from_auth_errors(monkeypatch):
                 "samples_shipped": 0,
             }
         ],
+        "browser_ingest_events": [
+            {
+                "platform": "threads",
+                "endpoint": "media",
+                "requests": 2,
+                "observed_count": 12,
+                "stored_count": 3,
+            },
+            {
+                "platform": "instagram",
+                "endpoint": "profile",
+                "requests": 1,
+                "observed_count": 1,
+                "stored_count": 1,
+            },
+        ],
         "degraded_sources": ["instagram"],
         "degraded_details": [
             {
@@ -119,6 +135,9 @@ async def test_notify_status_splits_429s_from_auth_errors(monkeypatch):
     assert "<b>Chrome extension hooks</b>" in msg
     assert "Instagram: hook v1.21.8 last heartbeat 21s ago" in msg
     assert "this hour 12 probe frames and 0 sample frames" in msg
+    assert "<b>Browser extension ingest</b>" in msg
+    assert "Threads media files: browser saw 12 items; stored 3; 2 POSTs this hour." in msg
+    assert "Instagram profiles: browser saw 1 item; stored 1; 1 POST this hour." in msg
     assert "Degraded sources: Instagram" in msg
     assert "Why degraded:" in msg
     assert "newest row 4.0d ago; expected within 2.0d" in msg

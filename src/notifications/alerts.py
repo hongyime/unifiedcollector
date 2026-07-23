@@ -93,10 +93,13 @@ _SOURCE_LABELS = {
 }
 
 _SCOPE_LABELS = {
+    "comments": "comments",
     "feed": "feed fetches",
     "gps_streams": "GPS route streams",
+    "media": "media files",
+    "posts": "posts",
     "profile_fetch": "profile fetches",
-    "profile": "profile fetches",
+    "profile": "profiles",
     "stories": "story fetches",
     "story": "story fetches",
 }
@@ -220,6 +223,21 @@ def _format_extension_hook(row: dict) -> str:
         f"session counters {probes_sent:,} probes / {samples_shipped:,} samples shipped",
     ]
     return f"• {source}: " + "; ".join(details) + "."
+
+
+def _format_browser_ingest_event(row: dict) -> str:
+    source = _display_source(row.get("platform", "?"))
+    endpoint = _display_scope(row.get("endpoint"))
+    if not endpoint:
+        endpoint = _esc(str(row.get("endpoint") or "browser ingest").replace("_", " "))
+    requests = int(row.get("requests", 0) or 0)
+    observed = int(row.get("observed_count", 0) or 0)
+    stored = int(row.get("stored_count", 0) or 0)
+    return (
+        f"• {source} {endpoint}: browser saw {observed:,} "
+        f"{_plural(observed, 'item')}; stored {stored:,}; "
+        f"{requests:,} {_plural(requests, 'POST')} this hour."
+    )
 
 
 def _format_degraded_source(row: dict) -> str:
@@ -447,6 +465,12 @@ async def notify_status(snapshot: dict) -> bool:
         lines.append("")
         lines.append("<b>Chrome extension hooks</b>")
         lines.extend(_format_extension_hook(row) for row in hooks[:4])
+
+    browser_ingest = snapshot.get("browser_ingest_events") or []
+    if browser_ingest:
+        lines.append("")
+        lines.append("<b>Browser extension ingest</b>")
+        lines.extend(_format_browser_ingest_event(row) for row in browser_ingest[:6])
 
     # Headless coverage: how many are fresh, and name any that are stale.
     headless = [s for s in ages if s not in _REALTIME]

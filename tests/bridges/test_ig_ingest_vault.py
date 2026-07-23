@@ -102,6 +102,28 @@ def test_archive_browser_capture_writes_profile_raw_payload(monkeypatch):
     assert pool.conn.executes == []
 
 
+def test_record_browser_ingest_event_writes_observed_and_stored_counts():
+    pool = _FakePool()
+
+    asyncio.run(
+        ig_ingest._record_browser_ingest_event(
+            pool,
+            "threads",
+            "media",
+            "feed",
+            observed_count=12,
+            stored_count=3,
+            metadata={"extension_version": "1.21.20"},
+        )
+    )
+
+    assert len(pool.conn.executes) == 1
+    query, args = pool.conn.executes[0]
+    assert "browser_ingest_events" in query
+    assert args[:5] == ("threads", "media", "feed", 12, 3)
+    assert "extension_version" in args[5]
+
+
 def test_archive_browser_capture_writes_dm_sample_raw_payload(monkeypatch):
     pool = _FakePool()
     calls = []

@@ -702,6 +702,14 @@ async def _drain(app, platform, username, items):
                 saved += 1
 
     await asyncio.gather(*(one(it) for it in items), return_exceptions=True)
+    await _record_browser_ingest_event(
+        pool,
+        platform,
+        "media",
+        username,
+        observed_count=len(items),
+        stored_count=saved,
+    )
     if platform == "instagram":
         try:
             async with pool.acquire() as conn:
@@ -712,6 +720,41 @@ async def _drain(app, platform, username, items):
         except Exception:
             pass
     logger.info("ingest[%s] %s: %d/%d saved", platform, username, saved, len(items))
+
+
+async def _record_browser_ingest_event(
+    pool,
+    platform: str,
+    endpoint: str,
+    subject: str | None = None,
+    *,
+    observed_count: int = 0,
+    stored_count: int = 0,
+    metadata: dict | None = None,
+) -> None:
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO browser_ingest_events
+                  (platform, endpoint, subject, observed_count, stored_count, metadata)
+                VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+                """,
+                platform,
+                endpoint,
+                subject,
+                max(0, int(observed_count or 0)),
+                max(0, int(stored_count or 0)),
+                json.dumps(metadata or {}),
+            )
+    except Exception:
+        logger.debug(
+            "browser ingest telemetry insert failed platform=%s endpoint=%s subject=%s",
+            platform,
+            endpoint,
+            subject,
+            exc_info=True,
+        )
 
 
 async def _ingest(app, platform, body):
@@ -2037,6 +2080,14 @@ async def profile_handler(request):
     await _archive_browser_capture(request.app["pool"], platform, "profile", body)
     p = body.get("profile") or {}
     await _save_profile(request.app["pool"], platform, p)
+    await _record_browser_ingest_event(
+        request.app["pool"],
+        platform,
+        "profile",
+        (p.get("username") or body.get("username") or "").strip().lstrip("@") or None,
+        observed_count=1 if p else 0,
+        stored_count=1 if p else 0,
+    )
     # Follow-aware access recording (Phase 0): the extension just successfully
     # fetched this profile with its logged-in account (body["owner"]) — so that
     # account CAN see the target. Populates profile_access for the selector.
@@ -2059,9 +2110,18 @@ async def posts_handler(request):
     body = await _safe_json(request)
     platform = _norm_platform(body.get("platform"))
     await _archive_browser_capture(request.app["pool"], platform, "posts", body)
-    n = await _save_posts(request.app["pool"], platform, body.get("posts") or [])
+    posts = body.get("posts") or []
+    n = await _save_posts(request.app["pool"], platform, posts)
+    await _record_browser_ingest_event(
+        request.app["pool"],
+        platform,
+        "posts",
+        body.get("username") or body.get("owner"),
+        observed_count=len(posts),
+        stored_count=n,
+    )
     # post authors (threads/facebook carry author_username) count as seen users
-    authors = [{"username": p.get("author_username")} for p in (body.get("posts") or []) if p.get("author_username")]
+    authors = [{"username": p.get("author_username")} for p in posts if p.get("author_username")]
     await _record_users(request.app["pool"], platform, authors, "author")
     return _cors(web.json_response({"saved": n}))
 
@@ -2072,6 +2132,14 @@ async def comments_handler(request):
     await _archive_browser_capture(request.app["pool"], platform, "comments", body)
     comments = body.get("comments") or []
     n = await _save_comments(request.app["pool"], platform, body.get("post_id"), comments)
+    await _record_browser_ingest_event(
+        request.app["pool"],
+        platform,
+        "comments",
+        body.get("post_id"),
+        observed_count=len(comments),
+        stored_count=n,
+    )
     # every commenter is a user we've seen
     authors = [{"username": c.get("author_username"), "user_id": c.get("author_platform_id")} for c in comments if c.get("author_username") or c.get("author_platform_id")]
     await _record_users(request.app["pool"], platform, authors, "comment")
