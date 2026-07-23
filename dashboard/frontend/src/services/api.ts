@@ -23,6 +23,7 @@ import type {
   StravaFeedDate,
   StravaFeedActivity,
   StravaFeedStats,
+  StravaRouteCaptureQueue,
   CollectorsLive,
   NetworkStat,
   SocialUser,
@@ -359,4 +360,6 @@ export const api = {
     if (athleteId !== undefined) params.set("athlete_id", String(athleteId));
     return get<StravaFeedStats>(`/strava/feed/stats?${params}`);
   },
+  stravaRouteCaptureQueue: (limit = 8) =>
+    get<StravaRouteCaptureQueue>(`/strava/route-capture-queue?limit=${limit}`),
 };

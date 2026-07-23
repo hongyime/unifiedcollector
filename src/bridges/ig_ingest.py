@@ -44,6 +44,7 @@ from src.db.connection import get_pool, close_pool
 from src.core.media_filter import inspect as inspect_media
 from src.core.priority_hints import refresh_collector_priority_hints
 from src.core.proximity import refresh_account_proximity_cache
+from src.core.strava_route_queue import fetch_strava_route_capture_queue
 from src.core.vault import assert_media_write_allowed, write_media_sidecar, write_raw_payload
 from src.collectors.strava import _derive_gps_route_fields
 
@@ -2181,6 +2182,43 @@ async def strava_streams_handler(request):
     return _cors(web.json_response(result, status=status))
 
 
+async def strava_route_queue_handler(request):
+    raw_limit = request.query.get("limit", "5")
+    try:
+        limit = int(raw_limit)
+    except (TypeError, ValueError):
+        limit = 5
+    queue = await fetch_strava_route_capture_queue(
+        request.app["pool"],
+        limit=limit,
+        respect_cooldown=True,
+    )
+    return _cors(web.json_response(queue))
+
+
+async def strava_route_visit_handler(request):
+    body = await _safe_json(request)
+    raw_activity_id = body.get("activity_id") or body.get("platform_activity_id")
+    activity_id = str(raw_activity_id or "").strip()
+    if not activity_id:
+        return _cors(web.json_response({"ok": False, "reason": "bad_activity_id"}, status=400))
+    await _record_browser_ingest_event(
+        request.app["pool"],
+        "strava",
+        "strava_route_visit",
+        activity_id,
+        observed_count=1,
+        stored_count=0,
+        metadata={
+            "status": body.get("status") or "observed",
+            "url": body.get("url"),
+            "activity_url": body.get("activity_url"),
+            "extension_version": body.get("extension_version"),
+        },
+    )
+    return _cors(web.json_response({"ok": True, "activity_id": activity_id}))
+
+
 CREDENTIALS_ROOT = os.getenv("CREDENTIALS_ROOT", "/app/credentials")
 
 
@@ -2389,6 +2427,8 @@ def make_app():
     app.router.add_post("/social/dm-probe", dm_probe_handler)
     app.router.add_post("/social/dm-heartbeat", dm_hook_heartbeat_handler)
     app.router.add_post("/social/dm-decoded", dm_decoded_handler)
+    app.router.add_get("/social/strava-route-queue", strava_route_queue_handler)
+    app.router.add_post("/social/strava-route-visit", strava_route_visit_handler)
     app.router.add_post("/social/strava-streams", strava_streams_handler)
     # instagram back-compat aliases
     app.router.add_get("/ig/targets", get_targets_ig)

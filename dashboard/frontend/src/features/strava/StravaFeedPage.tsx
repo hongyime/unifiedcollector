@@ -1,6 +1,6 @@
 import { useState, useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { AlertTriangle, CheckCircle2, Clock3, Map as MapIcon, MousePointer2, ShieldOff } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Clock3, ExternalLink, Map as MapIcon, MousePointer2, ShieldOff } from "lucide-react";
 import { api } from "../../services/api";
 import { Header } from "../../components/layout/Header";
 import { LoadingSpinner } from "../../components/ui/LoadingSpinner";
@@ -174,6 +174,11 @@ export function StravaFeedPage() {
     queryFn: () => api.stravaFeedStats(athleteId),
   });
 
+  const routeQueue = useQuery({
+    queryKey: ["strava-route-capture-queue"],
+    queryFn: () => api.stravaRouteCaptureQueue(8),
+  });
+
   const dates = useQuery({
     queryKey: ["strava-feed-dates", athleteId],
     queryFn: () => api.stravaFeedDates(athleteId),
@@ -188,12 +193,14 @@ export function StravaFeedPage() {
   const refresh = () => {
     athletes.refetch();
     stats.refetch();
+    routeQueue.refetch();
     dates.refetch();
     if (date) activities.refetch();
   };
 
   const dateOptions = useMemo(() => dates.data ?? [], [dates.data]);
   const coverage = stats.data?.route_coverage;
+  const queueItems = routeQueue.data?.items ?? [];
 
   if (athletes.error) return <ErrorState message={String(athletes.error)} onRetry={refresh} />;
 
@@ -287,6 +294,73 @@ export function StravaFeedPage() {
           </div>
         </div>
       ) : null}
+
+      <div className="bg-surface border border-border rounded-lg p-4 mb-4">
+        <div className="flex flex-wrap items-start justify-between gap-3 mb-3">
+          <div>
+            <div className="flex items-center gap-2 text-sm font-semibold">
+              <MapIcon className="w-4 h-4 text-orange-400" />
+              Route capture queue
+            </div>
+            <div className="text-xs text-text-muted mt-1">
+              {routeQueue.data?.cooldown.active
+                ? `Cooldown until ${routeQueue.data.cooldown.until ? new Date(routeQueue.data.cooldown.until).toLocaleTimeString() : "later"}`
+                : `${queueItems.length} next candidate${queueItems.length === 1 ? "" : "s"}`}
+            </div>
+          </div>
+          <div className="text-xs text-text-muted">
+            Revisit TTL: {routeQueue.data?.recent_visit_ttl_hours ?? 6}h
+          </div>
+        </div>
+
+        {routeQueue.isLoading ? (
+          <LoadingSpinner />
+        ) : routeQueue.error ? (
+          <ErrorState message={String(routeQueue.error)} onRetry={() => routeQueue.refetch()} />
+        ) : routeQueue.data?.cooldown.active ? (
+          <div
+            className="rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100"
+            title={routeQueue.data.cooldown.reason ?? undefined}
+          >
+            {routeQueue.data.cooldown.reason ?? "Strava GPS stream cooldown is active"}
+          </div>
+        ) : queueItems.length === 0 ? (
+          <div className="text-sm text-text-muted">No eligible route candidates right now.</div>
+        ) : (
+          <div className="divide-y divide-border/60">
+            {queueItems.map((item) => (
+              <div key={item.platform_activity_id} className="flex items-center justify-between gap-3 py-2">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="truncate font-medium">{item.name ?? "(no name)"}</span>
+                    <span className="rounded border border-border/80 px-1.5 py-0.5 text-[10px] uppercase text-text-muted">
+                      tier {item.proximity_tier}
+                    </span>
+                    {item.target_priority > 0 ? (
+                      <span className="rounded border border-orange-400/40 px-1.5 py-0.5 text-[10px] uppercase text-orange-200">
+                        p{item.target_priority}
+                      </span>
+                    ) : null}
+                  </div>
+                  <div className="text-xs text-text-muted mt-1">
+                    {item.athlete_name ?? "Unknown athlete"} · {item.start_date ? new Date(item.start_date).toLocaleDateString() : "no date"} · {item.sport_type ?? item.type ?? "activity"}
+                  </div>
+                </div>
+                <a
+                  href={item.activity_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded border border-border hover:bg-white/5"
+                  title="Open activity"
+                  aria-label="Open activity"
+                >
+                  <ExternalLink className="h-4 w-4" />
+                </a>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
 
       {/* Filters */}
       <div className="flex items-center gap-3 mb-4">

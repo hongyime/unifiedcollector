@@ -1280,9 +1280,96 @@ const facebook = {
 };
 
 // ===========================================================================
+// Strava route capture driver
+// ===========================================================================
+// This never calls Strava stream APIs directly. It asks the local bridge for one
+// prioritized missing-route activity, opens the normal Strava activity page, and
+// lets inject.js passively capture Strava's own route-stream response.
+const STRAVA_ROUTE_NAV_MIN_MS = 12 * 60 * 1000;
+const STRAVA_ROUTE_VISIT_TTL_MS = 6 * 60 * 60 * 1000;
+
+function stravaActivityIdFromLocation() {
+  const m = location.pathname.match(/^\/activities\/(\d+)(?:[/?#]|$)/);
+  return m ? m[1] : "";
+}
+
+async function stravaQueueNext(excludeId = "") {
+  const q = await send({ type: "getStravaRouteQueue", limit: 2 }).catch(() => null);
+  if (!q || q.ok === false) return { queue: q, item: null };
+  const items = Array.isArray(q.items) ? q.items : [];
+  const item = items.find((it) => String(it.platform_activity_id || "") !== String(excludeId || "")) || null;
+  return { queue: q, item };
+}
+
+const strava = {
+  id: "strava", host: "www.strava.com", label: "Strava",
+  async recordActivityPage(activityId) {
+    const key = "uc_strava_route_seen_" + activityId;
+    const last = lsNum(key);
+    if (Date.now() - last < STRAVA_ROUTE_VISIT_TTL_MS) return false;
+    lsSet(key, String(Date.now()));
+    await send({
+      type: "stravaRouteVisit",
+      activity_id: activityId,
+      url: location.href,
+      status: "page_loaded",
+    }).catch(() => {});
+    return true;
+  },
+  nextAllowedAt() {
+    return lsNum("uc_strava_route_next_at");
+  },
+  setNextAllowed() {
+    lsSet("uc_strava_route_next_at", String(Date.now() + human(STRAVA_ROUTE_NAV_MIN_MS)));
+  },
+  async runCycle() {
+    const activityId = stravaActivityIdFromLocation();
+    if (activityId) {
+      const recorded = await this.recordActivityPage(activityId);
+      if (recorded) clog("info", `activity ${activityId}: waiting for route stream`, "strava");
+      await hsleep(22000);
+    }
+
+    const waitMs = this.nextAllowedAt() - Date.now();
+    if (waitMs > 0) {
+      clog("info", `route queue paused ${(waitMs / 60000).toFixed(1)}m before next activity`, "strava");
+      return { targets: activityId ? 1 : 0, saved: 0, discovered: 0 };
+    }
+
+    const { queue, item } = await stravaQueueNext(activityId);
+    if (!queue || queue.ok === false) {
+      clog("warn", "route queue unavailable", "strava");
+      return { targets: activityId ? 1 : 0, saved: 0, discovered: 0 };
+    }
+    if (queue.cooldown && queue.cooldown.active) {
+      const until = queue.cooldown.until ? new Date(queue.cooldown.until).toLocaleTimeString() : "later";
+      clog("warn", `route queue cooldown until ${until}`, "strava");
+      return { targets: activityId ? 1 : 0, saved: 0, discovered: 0 };
+    }
+    if (!item || !item.activity_url) {
+      clog("info", "route queue empty", "strava");
+      return { targets: activityId ? 1 : 0, saved: 0, discovered: 0 };
+    }
+
+    this.setNextAllowed();
+    await send({
+      type: "stravaRouteVisit",
+      activity_id: item.platform_activity_id,
+      activity_url: item.activity_url,
+      url: location.href,
+      status: "navigate",
+    }).catch(() => {});
+    clog("info", `opening route candidate ${item.platform_activity_id} (${item.athlete_name || "unknown"})`, "strava");
+    await hsleep(2000);
+    location.href = item.activity_url;
+    return { targets: 1, saved: 0, discovered: 0 };
+  },
+};
+
+// ===========================================================================
 // Registry + dispatch
 // ===========================================================================
-const PLATFORMS = [instagram, tiktok, lemon8, x, threads, facebook];
+const PLATFORMS = [instagram, tiktok, lemon8, x, threads, facebook, strava];
 
 function currentPlatform() {
   return PLATFORMS.find((p) => location.hostname === p.host || location.hostname.endsWith("." + p.host)) || null;

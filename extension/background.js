@@ -21,7 +21,7 @@ globalThis.UC_PLATFORMS = [
   { id: "lemon8",    label: "Lemon8",      url: "https://www.lemon8-app.com/",      host: "www.lemon8-app.com", cookieUrl: "https://www.lemon8-app.com",     cookie: "sessionid",  scraper: true, noLogin: true },
   { id: "x",         label: "Twitter / X", url: "https://x.com/home",               host: "x.com",              cookieUrl: "https://x.com",                  cookie: "auth_token", scraper: true },
   { id: "facebook",  label: "Facebook",    url: "https://www.facebook.com/",        host: "www.facebook.com",   cookieUrl: "https://www.facebook.com",       cookie: "c_user",     scraper: true },
-  { id: "strava",    label: "Strava",      url: "https://www.strava.com/dashboard", host: "www.strava.com",     cookieUrl: "https://www.strava.com",         cookie: "_strava4_session", scraper: false },
+  { id: "strava",    label: "Strava",      url: "https://www.strava.com/dashboard", host: "www.strava.com",     cookieUrl: "https://www.strava.com",         cookie: "_strava4_session", scraper: true },
 ];
 
 const ALARM = "uc-scrape";
@@ -470,6 +470,37 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           if (n) await log("info", `📨 ${msg.platform} DM decoded: ${n} msg`);
         } catch (e) {}
         sendResponse({ ok: true });
+        break;
+      }
+      case "getStravaRouteQueue": {
+        try {
+          const limit = Math.max(1, Math.min(Number(msg.limit || 1), 10));
+          const r = await fetch(base + `/social/strava-route-queue?limit=${limit}`);
+          const j = await r.json().catch(() => ({}));
+          sendResponse({ ok: r.ok, ...j });
+        } catch (e) {
+          sendResponse({ ok: false, error: String(e.message || e), items: [] });
+        }
+        break;
+      }
+      case "stravaRouteVisit": {
+        try {
+          const ver = (chrome.runtime.getManifest && chrome.runtime.getManifest().version) || null;
+          const r = await fetch(base + "/social/strava-route-visit", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              activity_id: msg.activity_id,
+              activity_url: msg.activity_url || null,
+              url: msg.url || null,
+              status: msg.status || "observed",
+              extension_version: ver,
+            }),
+          });
+          const j = await r.json().catch(() => ({}));
+          sendResponse({ ok: r.ok, ...j });
+        } catch (e) {
+          sendResponse({ ok: false, error: String(e.message || e) });
+        }
         break;
       }
       case "strava_streams": {  // passive route stream observed from Strava's own browser request

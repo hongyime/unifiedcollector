@@ -706,6 +706,32 @@ export interface StravaFeedStats {
   };
 }
 
+export interface StravaRouteCaptureQueueItem {
+  platform_activity_id: number;
+  activity_url: string;
+  name: string | null;
+  type: string | null;
+  sport_type: string | null;
+  start_date: string | null;
+  start_latlng: string | null;
+  stream_status: string | null;
+  platform_athlete_id: number | null;
+  athlete_name: string | null;
+  proximity_tier: number;
+  target_priority: number;
+  last_browser_visit_at: string | null;
+}
+
+export interface StravaRouteCaptureQueue {
+  items: StravaRouteCaptureQueueItem[];
+  cooldown: {
+    active: boolean;
+    until: string | null;
+    reason: string | null;
+  };
+  recent_visit_ttl_hours: number;
+}
+
 export interface CollectorLiveSource {
   source: string;
   status: "live" | "stale" | "degraded" | "dead" | "unknown";

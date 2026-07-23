@@ -187,9 +187,9 @@
 **Goal**: Make extension/browser evidence auditable and useful for routes/media.
 - [x] Store extension version, tab platform/account, captured URL, request URL, response hash, and extraction IDs.
 - [x] Add passive Strava GPS browser fallback for activities where API streams are missing or 429ed.
-- [ ] Queue browser route captures by Tier 1 priority first.
-- [ ] Add random delay and stop-on-challenge handling.
-- [ ] Add dashboard coverage for route detail pending vs route captured.
+- [x] Queue browser route captures by Tier 1 priority first.
+- [x] Add random delay and stop-on-challenge handling.
+- [x] Add dashboard coverage for route detail pending vs route captured.
 - **Deliverables**: Browser capture records, Strava GPS fallback path, coverage dashboard.
 - **Time**: 4-7 days.
 
@@ -213,8 +213,9 @@
 - Collector DB backups are implemented with vault-mirror checks, status reporting, and retention tests.
 - Dashboard and Telegram hourly status now include vault health, artifact partial/queued counts, backup status, hourly ingest, scoped rate-limit/auth failures, Telegram FloodWait events, and browser extension hook/ingest counters.
 - Passive Strava browser route fallback is implemented in extension v1.21.21 and `/social/strava-streams`: when the real browser loads a Strava route stream, the bridge archives the raw payload and upserts `strava_gps_streams` plus `strava_activities.summary_polyline`.
+- Priority-driven Strava browser route capture is implemented in extension v1.21.22, `/social/strava-route-queue`, `/social/strava-route-visit`, and `/strava/route-capture-queue`: the browser gets one missing-route activity at a time, ordered by Tier 1/2 proximity and collector target priority, while respecting active GPS-stream 429 cooldowns and recent visit TTLs.
 - Analyzer priority hints are imported by `src/core/priority_hints.py`, merged into `collection_targets.metadata.analyzer_priority_hint`, used by target loading, and surfaced on the Targets dashboard.
-- Still not complete: a true atomic artifact writer that moves every file through a temp/hash/blob transaction before DB commit, physical cross-source blob dedupe for every collector, source-by-source migration proof, full Tier 1 raw payload coverage, and automatic priority-driven Strava route capture/backfill.
+- Still not complete: a true atomic artifact writer that moves every file through a temp/hash/blob transaction before DB commit, physical cross-source blob dedupe for every collector, source-by-source migration proof, full Tier 1 raw payload coverage, and restore/rebuild rehearsal from sidecars/raw payloads into a scratch DB.
 
 **Document Version**: 1.0
 **Created**: 2026-07-20

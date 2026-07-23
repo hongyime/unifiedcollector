@@ -22,6 +22,7 @@ from pydantic import BaseModel
 from src.backup.db_backup import backup_status
 from src.db.connection import get_pool
 from src.dashboard.websocket import health_ws
+from src.core.strava_route_queue import fetch_strava_route_capture_queue
 from src.core.vault import vault_artifact_counts, vault_health
 
 logger = logging.getLogger(__name__)
@@ -2903,6 +2904,20 @@ async def strava_feed_stats(
         "latest_browser_capture_at": latest_browser_capture_at.isoformat() if latest_browser_capture_at else None,
     }
     return d
+
+
+@app.get("/strava/route-capture-queue")
+async def strava_route_capture_queue(
+    limit: int = 8,
+    respect_cooldown: bool = True,
+    _user: dict = Depends(require_role("viewer")),
+):
+    pool = await get_pool()
+    return await fetch_strava_route_capture_queue(
+        pool,
+        limit=limit,
+        respect_cooldown=respect_cooldown,
+    )
 
 
 @app.websocket("/ws/health")
