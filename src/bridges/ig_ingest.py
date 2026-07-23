@@ -45,6 +45,7 @@ from src.core.media_filter import inspect as inspect_media
 from src.core.priority_hints import refresh_collector_priority_hints
 from src.core.proximity import refresh_account_proximity_cache
 from src.core.vault import assert_media_write_allowed, write_media_sidecar, write_raw_payload
+from src.collectors.strava import _derive_gps_route_fields
 
 # Follow-aware access recording (Phase 0). The extension IS the live IG path, so
 # recording access outcomes here populates profile_access_{summary,attempts} far
@@ -85,7 +86,7 @@ _SAFE = re.compile(r"[^A-Za-z0-9._-]")
 # Platforms the bridge may push. Each may carry its own famous-cap / hop config.
 # Only instagram currently spiders (followers/following graph); the others scrape
 # whatever the open page exposes, so they have no spider table.
-KNOWN_PLATFORMS = {"instagram", "tiktok", "lemon8", "x", "threads", "facebook"}
+KNOWN_PLATFORMS = {"instagram", "tiktok", "lemon8", "x", "threads", "facebook", "strava"}
 _DM_PROBE_TARGET_TABLES = {platform: ["dm_probe_log"] for platform in KNOWN_PLATFORMS}
 
 _BROWSER_CAPTURE_TARGET_TABLES = {
@@ -112,6 +113,9 @@ _BROWSER_CAPTURE_TARGET_TABLES = {
     "dm_decoded": {
         "instagram": ["instagram_dm_thread", "instagram_dm"],
         "tiktok": ["tiktok_dm_thread", "tiktok_dm"],
+    },
+    "strava_streams": {
+        "strava": ["strava_activities", "strava_gps_streams"],
     },
 }
 
@@ -1937,6 +1941,8 @@ def _browser_capture_subject(endpoint: str, body: dict) -> str:
             or first_thread.get("thread_id")
             or f"{len(messages)}_messages"
         )
+    if endpoint == "strava_streams":
+        return str(body.get("activity_id") or body.get("platform_activity_id") or "strava_streams")
     return endpoint
 
 
@@ -2006,6 +2012,173 @@ async def _archive_browser_capture(pool, platform: str, endpoint: str, body: dic
             endpoint,
             exc_info=True,
         )
+
+
+def _stream_values(container, key: str) -> list:
+    """Extract a Strava stream array from web or API-shaped payloads."""
+    if not container:
+        return []
+    if isinstance(container, dict):
+        raw = container.get(key)
+        if isinstance(raw, list):
+            return raw
+        if isinstance(raw, dict) and isinstance(raw.get("data"), list):
+            return raw["data"]
+    if isinstance(container, list):
+        for item in container:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == key or item.get("name") == key or item.get("key") == key:
+                data = item.get("data")
+                return data if isinstance(data, list) else []
+    return []
+
+
+def _json_array_or_none(value: list | None) -> str | None:
+    return json.dumps(value) if isinstance(value, list) and value else None
+
+
+async def _upsert_strava_browser_stream(pool, body: dict) -> dict:
+    """Persist a Strava route stream observed by the browser extension."""
+    if not pool:
+        return {"stored": 0, "point_count": 0, "reason": "no_pool"}
+    raw_activity_id = body.get("activity_id") or body.get("platform_activity_id")
+    try:
+        activity_id = int(raw_activity_id)
+    except (TypeError, ValueError):
+        return {"stored": 0, "point_count": 0, "reason": "bad_activity_id"}
+
+    streams = body.get("streams") if isinstance(body.get("streams"), (dict, list)) else body
+    latlng = _stream_values(streams, "latlng")
+    point_count = len(latlng) if isinstance(latlng, list) else 0
+    if point_count < 2:
+        return {"stored": 0, "point_count": point_count, "reason": "no_route_points"}
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO strava_activities (platform_activity_id, metadata, collected_at)
+            VALUES (
+                $1,
+                jsonb_build_object(
+                    'browser_stream_stub', TRUE,
+                    'browser_stream_first_seen_at', now(),
+                    'browser_stream_request_url', $2::text
+                ),
+                now()
+            )
+            ON CONFLICT (platform_activity_id) DO NOTHING
+            """,
+            activity_id,
+            body.get("request_url") or body.get("url"),
+        )
+        act_row = await conn.fetchrow(
+            """
+            SELECT id, start_latlng, end_latlng
+            FROM strava_activities
+            WHERE platform_activity_id = $1
+            """,
+            activity_id,
+        )
+        if not act_row:
+            return {"stored": 0, "point_count": point_count, "reason": "activity_missing"}
+
+        await conn.execute(
+            """
+            INSERT INTO strava_gps_streams (
+                activity_id, latlng, altitude, distance, time, heartrate,
+                cadence, watts, speed, grade_smooth, collected_at
+            )
+            VALUES (
+                $1, $2::jsonb, $3::jsonb, $4::jsonb, $5::jsonb, $6::jsonb,
+                $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb, now()
+            )
+            ON CONFLICT (activity_id) DO UPDATE SET
+                latlng = EXCLUDED.latlng,
+                altitude = COALESCE(EXCLUDED.altitude, strava_gps_streams.altitude),
+                distance = COALESCE(EXCLUDED.distance, strava_gps_streams.distance),
+                time = COALESCE(EXCLUDED.time, strava_gps_streams.time),
+                heartrate = COALESCE(EXCLUDED.heartrate, strava_gps_streams.heartrate),
+                cadence = COALESCE(EXCLUDED.cadence, strava_gps_streams.cadence),
+                watts = COALESCE(EXCLUDED.watts, strava_gps_streams.watts),
+                speed = COALESCE(EXCLUDED.speed, strava_gps_streams.speed),
+                grade_smooth = COALESCE(EXCLUDED.grade_smooth, strava_gps_streams.grade_smooth),
+                collected_at = now()
+            """,
+            act_row["id"],
+            json.dumps(latlng),
+            _json_array_or_none(_stream_values(streams, "altitude")),
+            _json_array_or_none(_stream_values(streams, "distance")),
+            _json_array_or_none(_stream_values(streams, "time")),
+            _json_array_or_none(_stream_values(streams, "heartrate")),
+            _json_array_or_none(_stream_values(streams, "cadence")),
+            _json_array_or_none(_stream_values(streams, "watts")),
+            _json_array_or_none(_stream_values(streams, "speed")),
+            _json_array_or_none(_stream_values(streams, "grade_smooth")),
+        )
+
+        fields = _derive_gps_route_fields(
+            act_row["start_latlng"],
+            act_row["end_latlng"],
+            latlng,
+        )
+        await conn.execute(
+            """
+            UPDATE strava_activities
+            SET start_latlng = COALESCE(start_latlng, $1),
+                end_latlng = COALESCE(end_latlng, $2),
+                stream_status = 'ok',
+                privacy_zone_start = $3,
+                privacy_zone_end = $4,
+                truncation_point_start = COALESCE(truncation_point_start, $5),
+                truncation_point_end = COALESCE(truncation_point_end, $6),
+                summary_polyline = COALESCE(NULLIF(summary_polyline, ''), $7),
+                metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+                    'browser_stream_last_seen_at', now(),
+                    'browser_stream_extension_version', $8::text,
+                    'browser_stream_request_url', $9::text,
+                    'browser_stream_point_count', $10::int
+                ),
+                collected_at = COALESCE(collected_at, now())
+            WHERE id = $11
+            """,
+            fields["start_latlng"],
+            fields["end_latlng"],
+            fields["privacy_zone_start"],
+            fields["privacy_zone_end"],
+            fields["truncation_point_start"],
+            fields["truncation_point_end"],
+            fields["summary_polyline"] or None,
+            body.get("extension_version"),
+            body.get("request_url") or body.get("url"),
+            point_count,
+            act_row["id"],
+        )
+    return {"stored": 1, "point_count": point_count, "activity_id": activity_id}
+
+
+async def strava_streams_handler(request):
+    body = await _safe_json(request)
+    body["platform"] = "strava"
+    pool = request.app["pool"]
+    await _archive_browser_capture(pool, "strava", "strava_streams", body)
+    result = await _upsert_strava_browser_stream(pool, body)
+    await _record_browser_ingest_event(
+        pool,
+        "strava",
+        "strava_streams",
+        str(body.get("activity_id") or body.get("platform_activity_id") or "unknown"),
+        observed_count=1 if body.get("activity_id") or body.get("platform_activity_id") else 0,
+        stored_count=int(result.get("stored") or 0),
+        metadata={
+            "point_count": int(result.get("point_count") or 0),
+            "reason": result.get("reason"),
+            "request_url": body.get("request_url") or body.get("url"),
+            "extension_version": body.get("extension_version"),
+        },
+    )
+    status = 200 if result.get("stored") else 422
+    return _cors(web.json_response(result, status=status))
 
 
 CREDENTIALS_ROOT = os.getenv("CREDENTIALS_ROOT", "/app/credentials")
@@ -2216,6 +2389,7 @@ def make_app():
     app.router.add_post("/social/dm-probe", dm_probe_handler)
     app.router.add_post("/social/dm-heartbeat", dm_hook_heartbeat_handler)
     app.router.add_post("/social/dm-decoded", dm_decoded_handler)
+    app.router.add_post("/social/strava-streams", strava_streams_handler)
     # instagram back-compat aliases
     app.router.add_get("/ig/targets", get_targets_ig)
     app.router.add_post("/ig/ingest", ingest_ig)

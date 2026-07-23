@@ -1304,7 +1304,7 @@ const PASS_REST_MS = 180000; // ~2.4m-6.6m + occasional longer breaks via human(
 
 async function mainLoop() {
   const p = currentPlatform();
-  if (!p) { clog("warn", `no scraper for ${location.hostname}`); return; }
+  if (!p) return;
   if (LOOP_RUNNING) return;            // one loop per tab
   LOOP_RUNNING = true;
   clog("info", `${p.label} loop started — continuous & human-paced (no fixed timer)`, p.label);
@@ -1382,6 +1382,15 @@ window.addEventListener("message", (ev) => {
     send({
       type: "dm_decoded", platform: m.platform, owner: m.owner || "",
       threads: m.threads || [], messages: m.messages || [],
+    }).catch(() => {});
+  } else if (m.type === "strava_streams" && m.activity_id) {
+    send({
+      type: "strava_streams",
+      activity_id: m.activity_id,
+      request_url: m.request_url,
+      http_status: m.http_status,
+      point_count: m.point_count,
+      streams: m.streams || {},
     }).catch(() => {});
   }
 });

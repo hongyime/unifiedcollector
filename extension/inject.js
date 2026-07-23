@@ -15,7 +15,8 @@
     : /instagram\.com$/.test(HOST) ? "instagram"
     : /(^|\.)x\.com$/.test(HOST) || /twitter\.com$/.test(HOST) ? "x"
     : /facebook\.com$/.test(HOST) ? "facebook"
-    : /tiktok\.com$/.test(HOST) ? "tiktok" : null;
+    : /tiktok\.com$/.test(HOST) ? "tiktok"
+    : /strava\.com$/.test(HOST) ? "strava" : null;
   if (!platform) return;
 
   function emit(posts) {
@@ -207,6 +208,7 @@
 
   const tkListRe = /\/api\/user\/list\//;  // TikTok follower/following modal
   const dmRe = /\/direct_v2\/(inbox|threads|thread)/;  // IG DMs (observe-only)
+  const stravaStreamsRe = /\/(?:api\/v3\/)?activities\/(\d+)\/streams(?:[?#/]|$)/;
 
   // Investigation probe: IG DMs weren't reaching the bridge via the direct_v2
   // HTTP path, so log EVERY IG url that mentions "direct" (once per distinct
@@ -237,6 +239,63 @@
     let ownerId = null;
     try { ownerId = (document.cookie.match(/ds_user_id=(\d+)/) || [])[1] || null; } catch (e) {}
     window.postMessage({ __uc: true, type: "dms", platform: "instagram", owner: { id: ownerId }, threads }, "*");
+  }
+
+  const _emittedStravaStreams = new Set();
+  function _streamData(container, key) {
+    try {
+      if (!container) return [];
+      if (Array.isArray(container)) {
+        for (const item of container) {
+          if (!item || typeof item !== "object") continue;
+          if (item.type === key || item.name === key || item.key === key) {
+            return Array.isArray(item.data) ? item.data : [];
+          }
+        }
+        return [];
+      }
+      if (typeof container === "object") {
+        const raw = container[key];
+        if (Array.isArray(raw)) return raw;
+        if (raw && typeof raw === "object" && Array.isArray(raw.data)) return raw.data;
+      }
+    } catch (e) {}
+    return [];
+  }
+  function harvestStravaStreams(url, text, status) {
+    try {
+      if (platform !== "strava" || !text || text.length > 12_000_000) return;
+      const m = String(url || "").match(stravaStreamsRe);
+      const activityId = m && m[1];
+      if (!activityId) return;
+      let json; try { json = JSON.parse(text); } catch (e) { return; }
+      const latlng = _streamData(json, "latlng");
+      if (!Array.isArray(latlng) || latlng.length < 2) return;
+      const key = activityId + ":" + latlng.length;
+      if (_emittedStravaStreams.has(key)) return;
+      if (_emittedStravaStreams.size > 1000) _emittedStravaStreams.clear();
+      _emittedStravaStreams.add(key);
+      window.postMessage({
+        __uc: true,
+        type: "strava_streams",
+        platform: "strava",
+        activity_id: activityId,
+        request_url: String(url).slice(0, 500),
+        http_status: status || null,
+        point_count: latlng.length,
+        streams: {
+          latlng,
+          time: _streamData(json, "time"),
+          altitude: _streamData(json, "altitude"),
+          distance: _streamData(json, "distance"),
+          heartrate: _streamData(json, "heartrate"),
+          cadence: _streamData(json, "cadence"),
+          watts: _streamData(json, "watts"),
+          speed: _streamData(json, "speed"),
+          grade_smooth: _streamData(json, "grade_smooth"),
+        },
+      }, "*");
+    } catch (e) {}
   }
 
   // Modern IG web has been migrating DM inbox/thread fetches off /direct_v2/
@@ -304,6 +363,8 @@
         // Modern IG web DM path — investigate whether these responses
         // contain the inbox/thread data direct_v2 used to serve.
         p.then((r) => { try { r.clone().text().then((t) => harvestIGGraphQL(url, t)).catch(() => {}); } catch (e) {} }).catch(() => {});
+      } else if (platform === "strava" && stravaStreamsRe.test(url)) {
+        p.then((r) => { try { r.clone().text().then((t) => harvestStravaStreams(url, t, r.status)).catch(() => {}); } catch (e) {} }).catch(() => {});
       } else if (apiRe.test(url)) {
         p.then((r) => { try { r.clone().text().then(harvestText).catch(() => {}); } catch (e) {} }).catch(() => {});
       }
@@ -337,6 +398,10 @@
         // XHR-path mirror of the fetch-path GraphQL harvester above.
         this.addEventListener("load", function () {
           try { if (typeof this.responseText === "string") harvestIGGraphQL(url, this.responseText); } catch (e) {}
+        });
+      } else if (platform === "strava" && stravaStreamsRe.test(url)) {
+        this.addEventListener("load", function () {
+          try { if (typeof this.responseText === "string") harvestStravaStreams(url, this.responseText, this.status); } catch (e) {}
         });
       } else if (apiRe.test(url)) {
         this.addEventListener("load", function () {

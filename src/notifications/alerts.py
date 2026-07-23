@@ -101,6 +101,7 @@ _SCOPE_LABELS = {
     "posts": "posts",
     "profile_fetch": "profile fetches",
     "profile": "profiles",
+    "strava_streams": "browser route captures",
     "stories": "story fetches",
     "story": "story fetches",
 }

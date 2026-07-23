@@ -21,6 +21,7 @@ globalThis.UC_PLATFORMS = [
   { id: "lemon8",    label: "Lemon8",      url: "https://www.lemon8-app.com/",      host: "www.lemon8-app.com", cookieUrl: "https://www.lemon8-app.com",     cookie: "sessionid",  scraper: true, noLogin: true },
   { id: "x",         label: "Twitter / X", url: "https://x.com/home",               host: "x.com",              cookieUrl: "https://x.com",                  cookie: "auth_token", scraper: true },
   { id: "facebook",  label: "Facebook",    url: "https://www.facebook.com/",        host: "www.facebook.com",   cookieUrl: "https://www.facebook.com",       cookie: "c_user",     scraper: true },
+  { id: "strava",    label: "Strava",      url: "https://www.strava.com/dashboard", host: "www.strava.com",     cookieUrl: "https://www.strava.com",         cookie: "_strava4_session", scraper: false },
 ];
 
 const ALARM = "uc-scrape";
@@ -157,7 +158,8 @@ async function scheduleAlarm() {
   chrome.alarms.create(ALARM, { periodInMinutes: WATCHDOG_MIN });
   chrome.alarms.create(ALARM_REFRESH, { periodInMinutes: REFRESH_MIN });
   await setStatus({ swStartedAt: Date.now() });
-  await log("info", `worker started v1.21.18 - jittered tabs + ${WATCHDOG_MIN}-min watchdog + ${REFRESH_MIN}-min refresh`);
+  const ver = (chrome.runtime.getManifest && chrome.runtime.getManifest().version) || "?";
+  await log("info", `worker started v${ver} - jittered tabs + ${WATCHDOG_MIN}-min watchdog + ${REFRESH_MIN}-min refresh`);
 }
 // onInstalled fires on every extension reload/update — the exact moment content
 // scripts in already-open tabs get SEVERED ("Extension context invalidated") and go
@@ -468,6 +470,31 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           if (n) await log("info", `📨 ${msg.platform} DM decoded: ${n} msg`);
         } catch (e) {}
         sendResponse({ ok: true });
+        break;
+      }
+      case "strava_streams": {  // passive route stream observed from Strava's own browser request
+        try {
+          const ver = (chrome.runtime.getManifest && chrome.runtime.getManifest().version) || null;
+          const pointCount = msg.point_count || (msg.streams && msg.streams.latlng && msg.streams.latlng.length) || 0;
+          const r = await fetch(base + "/social/strava-streams", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              platform: "strava",
+              activity_id: msg.activity_id,
+              request_url: msg.request_url || msg.url || null,
+              http_status: msg.http_status || null,
+              streams: msg.streams || {},
+              point_count: pointCount,
+              extension_version: ver,
+            }),
+          });
+          const j = await r.json().catch(() => ({}));
+          if (j.stored) await log("info", `🗺 strava · activity ${msg.activity_id} · route ${j.point_count || pointCount} point(s) captured`);
+          sendResponse({ ok: r.ok, ...j });
+        } catch (e) {
+          await log("error", `strava route capture failed: ${e.message}`);
+          sendResponse({ ok: false, error: String(e.message || e) });
+        }
         break;
       }
       case "wall": {  // the in-tab loop hit a throttle/login wall and is sleeping

@@ -7,9 +7,13 @@ from src.bridges import ig_ingest
 class _FakeConn:
     def __init__(self):
         self.executes = []
+        self.fetchrow_result = None
 
     async def fetchval(self, query, *args):
         return None
+
+    async def fetchrow(self, query, *args):
+        return self.fetchrow_result
 
     async def execute(self, query, *args):
         self.executes.append((query, args))
@@ -200,6 +204,77 @@ def test_archive_browser_capture_writes_decoded_dm_target_hints(monkeypatch):
     assert call["target_tables"] == ["tiktok_dm_thread", "tiktok_dm"]
     assert call["payload"]["messages"][0]["message_id"] == "9988"
     assert call["metadata"]["collection_account"] == "72101656"
+
+
+def test_archive_browser_capture_writes_strava_stream_raw_payload(monkeypatch):
+    pool = _FakePool()
+    calls = []
+
+    def fake_write_raw_payload(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(ok=True, error=None)
+
+    monkeypatch.setattr(ig_ingest, "write_raw_payload", fake_write_raw_payload)
+
+    asyncio.run(
+        ig_ingest._archive_browser_capture(
+            pool,
+            "strava",
+            "strava_streams",
+            {
+                "platform": "strava",
+                "activity_id": "19283135496",
+                "request_url": "https://www.strava.com/activities/19283135496/streams",
+                "streams": {"latlng": [[1.37507, 103.750999], [1.376439, 103.75308]]},
+            },
+        )
+    )
+
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["source"] == "strava"
+    assert call["artifact_id"].startswith("extension/strava_streams/19283135496/")
+    assert call["target_tables"] == ["strava_activities", "strava_gps_streams"]
+    assert call["metadata"]["request_url"].endswith("/19283135496/streams")
+
+
+def test_upsert_strava_browser_stream_writes_route_tables():
+    pool = _FakePool()
+    pool.conn.fetchrow_result = {
+        "id": "activity-uuid",
+        "start_latlng": None,
+        "end_latlng": None,
+    }
+
+    result = asyncio.run(
+        ig_ingest._upsert_strava_browser_stream(
+            pool,
+            {
+                "activity_id": "19283135496",
+                "request_url": "https://www.strava.com/activities/19283135496/streams",
+                "extension_version": "1.21.21",
+                "streams": {
+                    "latlng": [[1.37507, 103.750999], [1.376439, 103.75308]],
+                    "time": [0, 60],
+                    "altitude": [12.3, 13.4],
+                },
+            },
+        )
+    )
+
+    assert result["stored"] == 1
+    assert result["point_count"] == 2
+    queries = [q for q, _ in pool.conn.executes]
+    assert any("INSERT INTO strava_activities" in q for q in queries)
+    assert any("INSERT INTO strava_gps_streams" in q for q in queries)
+    assert any("UPDATE strava_activities" in q for q in queries)
+    stream_args = next(args for q, args in pool.conn.executes if "INSERT INTO strava_gps_streams" in q)
+    assert stream_args[0] == "activity-uuid"
+    assert "1.37507" in stream_args[1]
+    update_args = next(args for q, args in pool.conn.executes if "UPDATE strava_activities" in q)
+    assert update_args[0] == "1.37507,103.750999"
+    assert update_args[1] == "1.376439,103.75308"
+    assert update_args[6]
 
 
 def test_archive_browser_capture_failure_records_dlq(monkeypatch):

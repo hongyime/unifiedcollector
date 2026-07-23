@@ -124,7 +124,7 @@
 - [ ] Duplicate physical files are stored once by checksum while multiple occurrence sidecars remain queryable.
 - [ ] Tier 1 raw payloads, messages, and route data are persisted enough to rebuild normalized records.
 - [x] Rate-limit events include source, account, action scope, retry/cooldown times, and are shown in dashboard and Telegram status.
-- [ ] Browser/extension captures produce auditable sidecars or raw capture records.
+- [x] Browser/extension captures produce auditable sidecars or raw capture records.
 - [x] Scheduled collector DB backups land under `Z:\unifiedcollector\backups\db`.
 - [x] A dry-run rebuild report can show what DB tables can be reconstructed from sidecars/raw payloads.
 
@@ -186,7 +186,7 @@
 ### Phase 5: Browser Capture as First-Class Ingest
 **Goal**: Make extension/browser evidence auditable and useful for routes/media.
 - [x] Store extension version, tab platform/account, captured URL, request URL, response hash, and extraction IDs.
-- [ ] Add Strava GPS browser fallback for activities where API streams are missing or 429ed.
+- [x] Add passive Strava GPS browser fallback for activities where API streams are missing or 429ed.
 - [ ] Queue browser route captures by Tier 1 priority first.
 - [ ] Add random delay and stop-on-challenge handling.
 - [ ] Add dashboard coverage for route detail pending vs route captured.
@@ -212,7 +212,8 @@
 - Rebuild reporting exists in `src/core/rebuild_report.py` and covers sidecar scan, raw payload table hints, DB-only, sidecar-only, blob-only, missing file, size mismatch, and checksum mismatch states.
 - Collector DB backups are implemented with vault-mirror checks, status reporting, and retention tests.
 - Dashboard and Telegram hourly status now include vault health, artifact partial/queued counts, backup status, hourly ingest, scoped rate-limit/auth failures, Telegram FloodWait events, and browser extension hook/ingest counters.
-- Still not complete: a true atomic artifact writer that moves every file through a temp/hash/blob transaction before DB commit, physical cross-source blob dedupe for every collector, source-by-source migration proof, full Tier 1 raw payload coverage, analyzer priority-hint import, and Strava browser GPS fallback.
+- Passive Strava browser route fallback is implemented in extension v1.21.21 and `/social/strava-streams`: when the real browser loads a Strava route stream, the bridge archives the raw payload and upserts `strava_gps_streams` plus `strava_activities.summary_polyline`.
+- Still not complete: a true atomic artifact writer that moves every file through a temp/hash/blob transaction before DB commit, physical cross-source blob dedupe for every collector, source-by-source migration proof, full Tier 1 raw payload coverage, analyzer priority-hint import, automatic priority-driven Strava route capture/backfill, and Strava route coverage dashboarding.
 
 **Document Version**: 1.0
 **Created**: 2026-07-20

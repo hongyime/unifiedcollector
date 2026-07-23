@@ -12,6 +12,7 @@ globalThis.UC_PLATFORMS = [
   { id: "lemon8",    label: "Lemon8",      url: "https://www.lemon8-app.com/",  host: "www.lemon8-app.com",  cookieUrl: "https://www.lemon8-app.com",  cookie: "sessionid",  scraper: true, noLogin: true },
   { id: "x",         label: "Twitter / X", url: "https://x.com/home",           host: "x.com",               cookieUrl: "https://x.com",               cookie: "auth_token", scraper: true  },
   { id: "facebook",  label: "Facebook",    url: "https://www.facebook.com/",    host: "www.facebook.com",    cookieUrl: "https://www.facebook.com",    cookie: "c_user",     scraper: true  },
+  { id: "strava",    label: "Strava",      url: "https://www.strava.com/dashboard", host: "www.strava.com",  cookieUrl: "https://www.strava.com",      cookie: "_strava4_session", scraper: false },
 ];
 
 // Also expose as a normal const for <script>-included pages.

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "UnifiedCollector Bridge",
-  "version": "1.21.20",
+  "version": "1.21.21",
   "description": "Collects social media from your logged-in browser session and forwards it to your local UnifiedCollector. Multi-platform (Instagram live; extensible).",
   "permissions": ["storage", "alarms", "scripting", "tabs", "cookies"],
   "host_permissions": [
@@ -14,6 +14,7 @@
     "https://x.com/*",
     "https://twitter.com/*",
     "https://www.facebook.com/*",
+    "https://www.strava.com/*",
     "http://127.0.0.1/*",
     "http://localhost/*"
   ],
@@ -28,13 +29,14 @@
         "https://www.lemon8-app.com/*",
         "https://x.com/*",
         "https://www.threads.com/*",
-        "https://www.facebook.com/*"
+        "https://www.facebook.com/*",
+        "https://www.strava.com/*"
       ],
       "js": ["content.js"],
       "run_at": "document_idle"
     },
     {
-      "matches": ["https://www.threads.com/*", "https://www.instagram.com/*", "https://x.com/*", "https://twitter.com/*", "https://www.facebook.com/*", "https://www.tiktok.com/*"],
+      "matches": ["https://www.threads.com/*", "https://www.instagram.com/*", "https://x.com/*", "https://twitter.com/*", "https://www.facebook.com/*", "https://www.tiktok.com/*", "https://www.strava.com/*"],
       "js": ["inject.js"],
       "run_at": "document_start",
       "world": "MAIN"
