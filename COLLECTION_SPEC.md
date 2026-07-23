@@ -166,3 +166,41 @@ Working & verified: Tier 2 media (all sources download files), Tier 3 docs/audio
 2. Reuse `media_items` for all media (incl. stories) and `BaseCollector` patterns (dedup, backfill, media_download).
 3. Honour the follow-aware account model and tier-ordered scheduling.
 4. Update this spec's matrix.
+
+---
+
+## Implementation status — refreshed 2026-07-23
+
+Current shipped recovery/ops work:
+
+- **External vault fail-closed guard:** `src/core/vault.py::assert_media_write_allowed`
+  verifies `/vault`, media-root placement, and the `/media` ↔ `/vault/media`
+  relationship before normal collector writes. `BaseCollector.run()` and
+  `BaseCollector.save_json()` use it.
+- **Sidecars and raw payload helpers:** media sidecars, artifact sidecars, raw
+  payload writes, and validation live in `src/core/vault.py`; `BaseCollector`
+  and extension ingest record sidecar status into metadata/DLQ.
+- **Rebuild report:** `python -m src.main rebuild-report --compare-db
+  --verify-checksums` reports sidecar coverage plus DB-only, sidecar-only,
+  blob-only, missing-file, and checksum-mismatch states.
+- **Browser-extension observability:** extension hooks are tracked through
+  `dm_hook_heartbeat`; browser ingest requests are recorded in
+  `browser_ingest_events` and shown in the hourly Telegram status as browser
+  saw/stored/POST counts for the current UTC hour.
+- **Rate-limit visibility:** recorded HTTP 429/auth events are split in dashboard
+  and Telegram status. Instagram and Strava cooldowns are persisted and surfaced
+  with source/account/scope.
+- **Strava GPS routes:** existing stored `strava_gps_streams.latlng` rows are
+  repaired into route fields without network calls; GPS stream 429 cooldown is
+  restored after restart so the backfill does not hammer Strava again.
+
+Known remaining gaps:
+
+- Legacy audit/status docs may still overstate exhaustive rate-limit coverage;
+  every new 429/FloodWait/quota branch must call `record_rate_limit_event()`.
+- Rebuild report is a dry-run report, not a full scratch DB rebuild.
+- Physical-file dedupe stores canonical blob references in sidecars, but a full
+  cross-source blob-store writer is still future work.
+- External-drive loss behavior is strong for base collector writes, but each
+  long-running realtime/direct file write path should continue moving toward
+  the same shared guard instead of local ad hoc checks.
