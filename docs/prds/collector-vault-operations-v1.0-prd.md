@@ -197,11 +197,20 @@
 **Goal**: Prove the system can survive failure.
 - [x] Add scheduled collector DB dumps to `Z:\unifiedcollector\backups\db`.
 - [x] Implement retention: 7 daily, 4 weekly, 3 monthly.
-- [ ] Add restore rehearsal checklist.
+- [x] Add restore rehearsal checklist.
 - [x] Run dry-run rebuild from sidecars/raw payloads into a scratch DB.
 - [x] Report unrebuildable gaps by source.
 - **Deliverables**: Backup job, retention, recovery report.
 - **Time**: 2-4 days.
+
+Restore rehearsal checklist:
+- Verify external vault is mounted and writable, then record free space and latest backup path.
+- Restore the latest collector DB dump into a scratch database, never production.
+- Run `python -m src.main rebuild-report --vault-root /vault --compare-db --json` against the scratch DB context and save the report under the vault exports area.
+- Run `python -m src.main rebuild-rehearsal --vault-root /vault --scratch-db <scratch.sqlite> --sidecar-limit <sample> --raw-payload-limit <sample> --json` for bounded media/raw materialization.
+- Compare scratch counts for `media_items`, `raw_payloads`, rate-limit ledger rows, and Tier 1 source records against live dashboard totals.
+- List unrebuildable gaps by source, artifact kind, and missing field; create repair queue rows only after review.
+- Drop the scratch database and scratch SQLite file after the report is archived.
 
 ---
 
