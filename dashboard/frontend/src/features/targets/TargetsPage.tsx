@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../services/api";
+import type { Target } from "../../services/types";
 import { Header } from "../../components/layout/Header";
 import { FilterDropdown } from "../../components/ui/FilterDropdown";
 import { Button } from "../../components/ui/Button";
@@ -24,6 +25,22 @@ const SOURCE_LABELS: Record<string, string> = {
 };
 
 const friendly = (s: string) => SOURCE_LABELS[s] ?? (s.charAt(0).toUpperCase() + s.slice(1));
+
+function targetName(t: Target): string {
+  return t.target_id ?? t.target ?? "";
+}
+
+function analyzerHint(t: Target): Record<string, unknown> | null {
+  const hint = t.metadata?.analyzer_priority_hint;
+  return hint && typeof hint === "object" && !Array.isArray(hint) ? hint as Record<string, unknown> : null;
+}
+
+function confidenceLabel(value: unknown): string | null {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  const pct = n <= 1 ? n * 100 : n;
+  return `${Math.round(pct)}%`;
+}
 
 const sourceOptions = [
   { value: "", label: "All sources" },
@@ -147,19 +164,36 @@ export function TargetsPage() {
         {isLoading ? <LoadingSpinner /> : (
           <table className="w-full text-sm">
             <thead><tr className="text-left text-text-muted border-b border-border">
-              <th className="pb-2">ID</th><th className="pb-2">Source</th><th className="pb-2">Target</th><th className="pb-2">Priority</th><th className="pb-2">Created</th><th className="pb-2" />
+              <th className="pb-2">ID</th><th className="pb-2">Source</th><th className="pb-2">Target</th><th className="pb-2">Priority</th><th className="pb-2">Provenance</th><th className="pb-2">Created</th><th className="pb-2" />
             </tr></thead>
             <tbody>
-              {data?.map((t) => (
-                <tr key={t.id} className="border-b border-border/50 hover:bg-white/5">
-                  <td className="py-2">{t.id}</td>
-                  <td className="py-2 uppercase text-xs">{friendly(t.source)}</td>
-                  <td className="py-2 font-medium">{t.target}</td>
-                  <td className="py-2">{t.priority}</td>
-                  <td className="py-2 text-text-muted">{relativeTime(t.created_at)}</td>
-                  <td className="py-2"><button onClick={() => remove.mutate(t.id)} className="text-error hover:text-error/80"><Trash2 className="w-4 h-4" /></button></td>
-                </tr>
-              ))}
+              {data?.map((t) => {
+                const hint = analyzerHint(t);
+                const hintType = String(hint?.hint_type ?? "").replaceAll("_", " ");
+                const confidence = confidenceLabel(hint?.confidence);
+                return (
+                  <tr key={t.id} className="border-b border-border/50 hover:bg-white/5">
+                    <td className="py-2">{t.id}</td>
+                    <td className="py-2 uppercase text-xs">{friendly(t.source)}</td>
+                    <td className="py-2 font-medium">{targetName(t)}</td>
+                    <td className="py-2">{t.priority}</td>
+                    <td className="py-2 max-w-[240px]">
+                      {hint ? (
+                        <div>
+                          <span className="inline-flex items-center rounded border border-sky-400/40 bg-sky-400/10 px-2 py-0.5 text-[11px] text-sky-200">
+                            Analyzer{confidence ? ` · ${confidence}` : ""}
+                          </span>
+                          {hintType ? <div className="mt-1 truncate text-[11px] text-text-muted" title={hintType}>{hintType}</div> : null}
+                        </div>
+                      ) : (
+                        <span className="text-xs text-text-muted">manual/local</span>
+                      )}
+                    </td>
+                    <td className="py-2 text-text-muted">{relativeTime(t.created_at)}</td>
+                    <td className="py-2"><button onClick={() => remove.mutate(t.id)} className="text-error hover:text-error/80"><Trash2 className="w-4 h-4" /></button></td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         )}

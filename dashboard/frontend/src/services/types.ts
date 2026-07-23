@@ -147,8 +147,13 @@ export interface DLQItem {
 export interface Target {
   id: number;
   source: string;
-  target: string;
+  target_id?: string;
+  target_name?: string | null;
+  target_type?: string | null;
+  status?: string | null;
+  target?: string;
   priority: number;
+  metadata?: Record<string, unknown> | null;
   created_at: string;
 }
 

@@ -178,7 +178,7 @@
 - [x] Add per-source/account/action rate-limit ledger.
 - [ ] Add one delayed randomized retry before cooldown.
 - [ ] Ensure cooldown stops exact scope, not unrelated safe scopes.
-- [ ] Import analyzer priority hints and surface provenance.
+- [x] Import analyzer priority hints and surface provenance.
 - [x] Add hourly ingest/rate-limit stats to dashboard and Telegram.
 - **Deliverables**: Priority scheduler, cooldown ledger, telemetry.
 - **Time**: 3-5 days.
@@ -213,7 +213,8 @@
 - Collector DB backups are implemented with vault-mirror checks, status reporting, and retention tests.
 - Dashboard and Telegram hourly status now include vault health, artifact partial/queued counts, backup status, hourly ingest, scoped rate-limit/auth failures, Telegram FloodWait events, and browser extension hook/ingest counters.
 - Passive Strava browser route fallback is implemented in extension v1.21.21 and `/social/strava-streams`: when the real browser loads a Strava route stream, the bridge archives the raw payload and upserts `strava_gps_streams` plus `strava_activities.summary_polyline`.
-- Still not complete: a true atomic artifact writer that moves every file through a temp/hash/blob transaction before DB commit, physical cross-source blob dedupe for every collector, source-by-source migration proof, full Tier 1 raw payload coverage, analyzer priority-hint import, automatic priority-driven Strava route capture/backfill, and Strava route coverage dashboarding.
+- Analyzer priority hints are imported by `src/core/priority_hints.py`, merged into `collection_targets.metadata.analyzer_priority_hint`, used by target loading, and surfaced on the Targets dashboard.
+- Still not complete: a true atomic artifact writer that moves every file through a temp/hash/blob transaction before DB commit, physical cross-source blob dedupe for every collector, source-by-source migration proof, full Tier 1 raw payload coverage, and automatic priority-driven Strava route capture/backfill.
 
 **Document Version**: 1.0
 **Created**: 2026-07-20
