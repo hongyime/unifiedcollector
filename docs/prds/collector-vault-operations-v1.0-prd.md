@@ -198,7 +198,7 @@
 - [x] Add scheduled collector DB dumps to `Z:\unifiedcollector\backups\db`.
 - [x] Implement retention: 7 daily, 4 weekly, 3 monthly.
 - [ ] Add restore rehearsal checklist.
-- [ ] Run dry-run rebuild from sidecars/raw payloads into a scratch DB.
+- [x] Run dry-run rebuild from sidecars/raw payloads into a scratch DB.
 - [x] Report unrebuildable gaps by source.
 - **Deliverables**: Backup job, retention, recovery report.
 - **Time**: 2-4 days.
@@ -210,13 +210,13 @@
 - Vault foundation is implemented in `src/core/vault.py`: canonical root detection, writability/free-space checks, media-root mirror checks, vault-relative paths, sidecar schema validation, raw payload paths, and checksum blob-path conventions.
 - Media/artifact/raw sidecar helpers are wired into the shared collector base path and tested. Sidecar failure is recorded on `media_items.metadata.vault_sidecar` and queued through the existing dead-letter queue.
 - Rebuild reporting exists in `src/core/rebuild_report.py` and covers sidecar scan, raw payload table hints, DB-only, sidecar-only, blob-only, missing file, size mismatch, and checksum mismatch states.
-- Media-items rebuild rehearsal exists in `src/core/rebuild_rehearsal.py` and `python -m src.main rebuild-rehearsal`: media sidecars can be materialized into a scratch SQLite DB without touching production Postgres.
+- Media/raw rebuild rehearsal exists in `src/core/rebuild_rehearsal.py` and `python -m src.main rebuild-rehearsal`: media sidecars and raw-payload sidecars can be materialized into scratch SQLite tables without touching production Postgres.
 - Collector DB backups are implemented with vault-mirror checks, status reporting, and retention tests.
 - Dashboard and Telegram hourly status now include vault health, artifact partial/queued counts, backup status, hourly ingest, scoped rate-limit/auth failures, Telegram FloodWait events, browser extension hook/ingest counters, decoded-frame freshness, and stale Chrome extension version warnings.
 - Passive Strava browser route fallback is implemented in extension v1.21.21 and `/social/strava-streams`: when the real browser loads a Strava route stream, the bridge archives the raw payload and upserts `strava_gps_streams` plus `strava_activities.summary_polyline`.
 - Priority-driven Strava browser route capture is implemented in extension v1.21.22, `/social/strava-route-queue`, `/social/strava-route-visit`, and `/strava/route-capture-queue`: the browser gets one missing-route activity at a time, ordered by Tier 1/2 proximity and collector target priority, while respecting active GPS-stream 429 cooldowns and recent visit TTLs.
 - Analyzer priority hints are imported by `src/core/priority_hints.py`, merged into `collection_targets.metadata.analyzer_priority_hint`, used by target loading, and surfaced on the Targets dashboard.
-- Still not complete: a true atomic artifact writer that moves every file through a temp/hash/blob transaction before DB commit, physical cross-source blob dedupe for every collector, source-by-source migration proof, full Tier 1 raw payload coverage, and raw-payload table materialization during restore/rebuild rehearsal.
+- Still not complete: a true atomic artifact writer that moves every file through a temp/hash/blob transaction before DB commit, physical cross-source blob dedupe for every collector, source-by-source migration proof, full Tier 1 raw payload coverage, and restore replay from a real DB dump.
 
 **Document Version**: 1.0
 **Created**: 2026-07-20

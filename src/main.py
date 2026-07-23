@@ -69,11 +69,12 @@ def main():
     # rebuild-rehearsal
     rr = sub.add_parser(
         "rebuild-rehearsal",
-        help="Materialize media sidecars into a scratch SQLite DB",
+        help="Materialize media and raw-payload sidecars into a scratch SQLite DB",
     )
     rr.add_argument("--vault-root", default=None, help="Vault root (default: COLLECTOR_VAULT_ROOT)")
     rr.add_argument("--scratch-db", default=None, help="Scratch SQLite path (default: in-memory)")
-    rr.add_argument("--sidecar-limit", type=int, default=None, help="Limit sidecars scanned for a quick sample")
+    rr.add_argument("--sidecar-limit", type=int, default=None, help="Limit media sidecars scanned for a quick sample")
+    rr.add_argument("--raw-payload-limit", type=int, default=None, help="Limit raw-payload sidecars scanned (defaults to --sidecar-limit)")
     rr.add_argument("--no-verify-files", action="store_true", help="Skip file existence/size checks")
     rr.add_argument("--json", action="store_true", help="Print machine-readable JSON")
 
@@ -116,6 +117,7 @@ def main():
             args.vault_root,
             args.scratch_db,
             args.sidecar_limit,
+            args.raw_payload_limit,
             not args.no_verify_files,
             args.json,
         )
@@ -268,6 +270,7 @@ def _cmd_rebuild_rehearsal(
     vault_root: str | None,
     scratch_db: str | None,
     sidecar_limit: int | None,
+    raw_payload_limit: int | None,
     verify_files: bool,
     as_json: bool,
 ):
@@ -279,6 +282,7 @@ def _cmd_rebuild_rehearsal(
         vault_root,
         scratch_db=scratch_db,
         sidecar_limit=sidecar_limit,
+        raw_payload_limit=raw_payload_limit,
         verify_files=verify_files,
     )
     if as_json:
