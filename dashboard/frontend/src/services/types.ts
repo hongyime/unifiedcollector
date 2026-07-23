@@ -684,6 +684,21 @@ export interface StravaFeedStats {
   total_elevation_gain: number;
   earliest: string | null;
   latest: string | null;
+  route_coverage?: {
+    total: number;
+    mapped: number;
+    queued: number;
+    start_only: number;
+    privacy_zone: number;
+    no_gps: number;
+    unverifiable: number;
+    browser_captured: number;
+    completion_pct: number;
+    recent_gps_429_events: number;
+    active_gps_cooldown_until: string | null;
+    active_gps_cooldown_reason: string | null;
+    latest_browser_capture_at: string | null;
+  };
 }
 
 export interface CollectorLiveSource {

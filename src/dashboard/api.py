@@ -2823,12 +2823,85 @@ async def strava_feed_stats(
         "       MAX(start_date) AS latest "
         f"FROM strava_activities WHERE {' AND '.join(where)}"
     )
+    coverage_sql = (
+        "WITH base AS ( "
+        "  SELECT *, "
+        "         COALESCE((summary_polyline IS NOT NULL AND summary_polyline <> '') OR stream_status = 'ok', FALSE) AS is_mapped, "
+        "         (COALESCE(metadata, '{}'::jsonb) ? 'browser_stream_last_seen_at') AS is_browser_captured "
+        "  FROM strava_activities "
+        f"  WHERE {' AND '.join(where)} "
+        ") "
+        "SELECT COUNT(*)::int AS total, "
+        "       COUNT(*) FILTER (WHERE is_mapped)::int AS mapped, "
+        "       COUNT(*) FILTER (WHERE is_browser_captured)::int AS browser_captured, "
+        "       COUNT(*) FILTER (WHERE NOT is_mapped AND stream_status = 'truncated_empty')::int AS privacy_zone, "
+        "       COUNT(*) FILTER (WHERE NOT is_mapped AND stream_status = 'incomplete')::int AS no_gps, "
+        "       COUNT(*) FILTER (WHERE NOT is_mapped AND stream_status = 'ok_unverifiable')::int AS unverifiable, "
+        "       COUNT(*) FILTER (WHERE NOT is_mapped AND stream_status IS NULL AND start_latlng IS NOT NULL)::int AS start_only, "
+        "       COUNT(*) FILTER (WHERE NOT is_mapped AND stream_status IS NULL AND start_latlng IS NULL)::int AS queued "
+        "FROM base"
+    )
     async with pool.acquire() as conn:
         row = await conn.fetchrow(sql, *args)
+        coverage = await conn.fetchrow(coverage_sql, *args)
+        recent_429_events = int(await conn.fetchval(
+            """
+            SELECT COUNT(*)::int
+            FROM rate_limit_events
+            WHERE source = 'strava'
+              AND scope = 'gps_streams'
+              AND status_code = 429
+              AND created_at >= date_trunc('hour', now())
+            """
+        ) or 0)
+        active_cooldown = await conn.fetchrow(
+            """
+            SELECT created_at + (COALESCE(cooldown_seconds, 0) * INTERVAL '1 second') AS cooldown_until,
+                   reason
+            FROM rate_limit_events
+            WHERE source = 'strava'
+              AND scope = 'gps_streams'
+              AND status_code = 429
+              AND cooldown_seconds IS NOT NULL
+              AND created_at + (COALESCE(cooldown_seconds, 0) * INTERVAL '1 second') > now()
+            ORDER BY created_at DESC
+            LIMIT 1
+            """
+        )
+        latest_browser_capture_at = await conn.fetchval(
+            """
+            SELECT max(created_at)
+            FROM browser_ingest_events
+            WHERE platform = 'strava'
+              AND endpoint = 'strava_streams'
+            """
+        )
     d = dict(row) if row else {}
     for k in ("earliest", "latest"):
         if d.get(k):
             d[k] = d[k].isoformat()
+    c = dict(coverage) if coverage else {}
+    total = int(c.get("total") or 0)
+    mapped = int(c.get("mapped") or 0)
+    d["route_coverage"] = {
+        "total": total,
+        "mapped": mapped,
+        "queued": int(c.get("queued") or 0),
+        "start_only": int(c.get("start_only") or 0),
+        "privacy_zone": int(c.get("privacy_zone") or 0),
+        "no_gps": int(c.get("no_gps") or 0),
+        "unverifiable": int(c.get("unverifiable") or 0),
+        "browser_captured": int(c.get("browser_captured") or 0),
+        "completion_pct": round((mapped / total) * 100, 1) if total else 0.0,
+        "recent_gps_429_events": recent_429_events,
+        "active_gps_cooldown_until": (
+            active_cooldown["cooldown_until"].isoformat()
+            if active_cooldown and active_cooldown["cooldown_until"]
+            else None
+        ),
+        "active_gps_cooldown_reason": active_cooldown["reason"] if active_cooldown else None,
+        "latest_browser_capture_at": latest_browser_capture_at.isoformat() if latest_browser_capture_at else None,
+    }
     return d
 
 

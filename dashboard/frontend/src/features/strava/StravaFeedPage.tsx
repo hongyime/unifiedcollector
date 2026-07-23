@@ -1,5 +1,6 @@
 import { useState, useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { AlertTriangle, CheckCircle2, Clock3, Map as MapIcon, MousePointer2, ShieldOff } from "lucide-react";
 import { api } from "../../services/api";
 import { Header } from "../../components/layout/Header";
 import { LoadingSpinner } from "../../components/ui/LoadingSpinner";
@@ -23,6 +24,22 @@ function formatDistanceKm(m: number | null): string {
   if (m == null) return "—";
   if (m >= 1000) return `${(m / 1000).toFixed(2)} km`;
   return `${Math.round(m)} m`;
+}
+
+function formatCount(n: number | null | undefined): string {
+  return Number(n ?? 0).toLocaleString();
+}
+
+function formatCaptureAge(iso: string | null | undefined): string {
+  if (!iso) return "none yet";
+  const ms = Date.now() - new Date(iso).getTime();
+  if (!Number.isFinite(ms) || ms < 0) return "just now";
+  const mins = Math.floor(ms / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 48) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
 }
 
 // mm:ss for sub-hour, h:mm:ss for longer. Matches what Strava shows for a run.
@@ -176,6 +193,7 @@ export function StravaFeedPage() {
   };
 
   const dateOptions = useMemo(() => dates.data ?? [], [dates.data]);
+  const coverage = stats.data?.route_coverage;
 
   if (athletes.error) return <ErrorState message={String(athletes.error)} onRetry={refresh} />;
 
@@ -214,6 +232,61 @@ export function StravaFeedPage() {
           </div>
         </div>
       </div>
+
+      {coverage ? (
+        <div className="grid grid-cols-2 xl:grid-cols-6 gap-3 mb-4">
+          <div className="bg-surface border border-border rounded-lg p-3">
+            <div className="flex items-center gap-2 text-[10px] uppercase text-text-muted mb-1">
+              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+              Mapped
+            </div>
+            <div className="text-xl font-semibold">{formatCount(coverage.mapped)}</div>
+            <div className="text-[11px] text-text-muted">{coverage.completion_pct.toFixed(1)}% of {formatCount(coverage.total)}</div>
+          </div>
+          <div className="bg-surface border border-border rounded-lg p-3">
+            <div className="flex items-center gap-2 text-[10px] uppercase text-text-muted mb-1">
+              <MousePointer2 className="w-3.5 h-3.5 text-sky-400" />
+              Browser Captured
+            </div>
+            <div className="text-xl font-semibold">{formatCount(coverage.browser_captured)}</div>
+            <div className="text-[11px] text-text-muted">last {formatCaptureAge(coverage.latest_browser_capture_at)}</div>
+          </div>
+          <div className="bg-surface border border-border rounded-lg p-3">
+            <div className="flex items-center gap-2 text-[10px] uppercase text-text-muted mb-1">
+              <Clock3 className="w-3.5 h-3.5 text-amber-300" />
+              Pending
+            </div>
+            <div className="text-xl font-semibold">{formatCount(coverage.queued + coverage.start_only)}</div>
+            <div className="text-[11px] text-text-muted">{formatCount(coverage.queued)} queued · {formatCount(coverage.start_only)} start-only</div>
+          </div>
+          <div className="bg-surface border border-border rounded-lg p-3">
+            <div className="flex items-center gap-2 text-[10px] uppercase text-text-muted mb-1">
+              <AlertTriangle className="w-3.5 h-3.5 text-orange-300" />
+              GPS 429
+            </div>
+            <div className="text-xl font-semibold">{formatCount(coverage.recent_gps_429_events)}</div>
+            <div className="text-[11px] text-text-muted truncate" title={coverage.active_gps_cooldown_reason ?? undefined}>
+              {coverage.active_gps_cooldown_until ? `cooldown until ${new Date(coverage.active_gps_cooldown_until).toLocaleTimeString()}` : "no active cooldown"}
+            </div>
+          </div>
+          <div className="bg-surface border border-border rounded-lg p-3">
+            <div className="flex items-center gap-2 text-[10px] uppercase text-text-muted mb-1">
+              <ShieldOff className="w-3.5 h-3.5 text-rose-300" />
+              Hidden / No GPS
+            </div>
+            <div className="text-xl font-semibold">{formatCount(coverage.privacy_zone + coverage.no_gps)}</div>
+            <div className="text-[11px] text-text-muted">{formatCount(coverage.privacy_zone)} hidden · {formatCount(coverage.no_gps)} no GPS</div>
+          </div>
+          <div className="bg-surface border border-border rounded-lg p-3">
+            <div className="flex items-center gap-2 text-[10px] uppercase text-text-muted mb-1">
+              <MapIcon className="w-3.5 h-3.5 text-text-muted" />
+              Unverified
+            </div>
+            <div className="text-xl font-semibold">{formatCount(coverage.unverifiable)}</div>
+            <div className="text-[11px] text-text-muted">old route rows skipped safely</div>
+          </div>
+        </div>
+      ) : null}
 
       {/* Filters */}
       <div className="flex items-center gap-3 mb-4">
