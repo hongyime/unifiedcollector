@@ -198,6 +198,30 @@ def _format_access_event(row: dict) -> str:
     return f"• {subject}: {status_text}, {events} this hour{detail}."
 
 
+def _format_extension_hook(row: dict) -> str:
+    source = _display_source(row.get("platform", "?"))
+    version = str(row.get("extension_version") or "").strip()
+    if version:
+        version_text = _esc(version if version.lower().startswith("v") else f"v{version}")
+    else:
+        version_text = "version unknown"
+    age = _humanize_age(int(row.get("age_seconds", 0) or 0))
+    owners = int(row.get("owner_count", 0) or 0)
+    probes_hour = int(row.get("probes_current_hour", 0) or 0)
+    samples_hour = int(row.get("samples_current_hour", 0) or 0)
+    probes_sent = int(row.get("probes_sent", 0) or 0)
+    samples_shipped = int(row.get("samples_shipped", 0) or 0)
+
+    details = [
+        f"hook {version_text} last heartbeat {age} ago",
+        f"{owners:,} {_plural(owners, 'account')}" if owners else "no owner account recorded",
+        f"this hour {probes_hour:,} probe {_plural(probes_hour, 'frame')} and "
+        f"{samples_hour:,} sample {_plural(samples_hour, 'frame')}",
+        f"session counters {probes_sent:,} probes / {samples_shipped:,} samples shipped",
+    ]
+    return f"• {source}: " + "; ".join(details) + "."
+
+
 def _fmt_count(n: int) -> str:
     """1_317_543 -> 1.3M, 13213 -> 13k, 940 -> 940."""
     if n >= 1_000_000:
@@ -354,6 +378,12 @@ async def notify_status(snapshot: dict) -> bool:
         lines.append("")
         lines.append("<b>Realtime freshness</b>")
         lines.append("; ".join(live) + ".")
+
+    hooks = snapshot.get("extension_hooks") or []
+    if hooks:
+        lines.append("")
+        lines.append("<b>Chrome extension hooks</b>")
+        lines.extend(_format_extension_hook(row) for row in hooks[:4])
 
     # Headless coverage: how many are fresh, and name any that are stale.
     headless = [s for s in ages if s not in _REALTIME]

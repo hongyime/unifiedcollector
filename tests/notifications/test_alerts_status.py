@@ -60,6 +60,18 @@ async def test_notify_status_splits_429s_from_auth_errors(monkeypatch):
                 "reason": "Playwright profile auth response",
             }
         ],
+        "extension_hooks": [
+            {
+                "platform": "instagram",
+                "age_seconds": 21,
+                "extension_version": "1.21.8",
+                "owner_count": 1,
+                "probes_current_hour": 12,
+                "samples_current_hour": 0,
+                "probes_sent": 144,
+                "samples_shipped": 0,
+            }
+        ],
         "vault": {
             "root": "/vault",
             "available": True,
@@ -79,5 +91,8 @@ async def test_notify_status_splits_429s_from_auth_errors(monkeypatch):
     assert "Instagram: 4 source rows, 1 media file, 1 HTTP 429 event, 1 auth/access HTTP error" in msg
     assert "Session/auth HTTP failures this hour:" in msg
     assert "HTTP 401" in msg
+    assert "<b>Chrome extension hooks</b>" in msg
+    assert "Instagram: hook v1.21.8 last heartbeat 21s ago" in msg
+    assert "this hour 12 probe frames and 0 sample frames" in msg
     assert "Writable at <code>/vault</code>" in msg
     assert "Artifact health counts timed out" in msg

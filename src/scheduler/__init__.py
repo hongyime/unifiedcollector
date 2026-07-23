@@ -322,6 +322,67 @@ class Scheduler:
                     pass
 
                 try:
+                    if await conn.fetchval("SELECT to_regclass('dm_hook_heartbeat')", timeout=5) is not None:
+                        probe_counts: dict[str, dict[str, int]] = {}
+                        if await conn.fetchval("SELECT to_regclass('dm_probe_log')", timeout=5) is not None:
+                            for row in await conn.fetch(
+                                """
+                                SELECT platform,
+                                       count(*) FILTER (
+                                         WHERE event_type = 'probe'
+                                           AND seen_at >= date_trunc('hour', now())
+                                       )::int AS probes_current_hour,
+                                       count(*) FILTER (
+                                         WHERE event_type = 'sample'
+                                           AND seen_at >= date_trunc('hour', now())
+                                       )::int AS samples_current_hour,
+                                       max(seen_at) AS last_frame_seen_at
+                                FROM dm_probe_log
+                                GROUP BY platform
+                                """,
+                                timeout=10,
+                            ):
+                                probe_counts[str(row["platform"])] = {
+                                    "probes_current_hour": int(row["probes_current_hour"] or 0),
+                                    "samples_current_hour": int(row["samples_current_hour"] or 0),
+                                    "last_frame_age_seconds": int(
+                                        (
+                                            datetime.now(timezone.utc) - row["last_frame_seen_at"]
+                                        ).total_seconds()
+                                    ) if row["last_frame_seen_at"] else None,
+                                }
+                        hooks = []
+                        for row in await conn.fetch(
+                            """
+                            SELECT platform,
+                                   max(last_seen) AS last_seen_at,
+                                   extract(epoch FROM now() - max(last_seen))::int AS age_seconds,
+                                   sum(probes_sent)::int AS probes_sent,
+                                   sum(samples_shipped)::int AS samples_shipped,
+                                   (array_agg(extension_version ORDER BY last_seen DESC))[1] AS extension_version,
+                                   count(*) FILTER (WHERE COALESCE(owner_account, '') <> '')::int AS owner_count
+                            FROM dm_hook_heartbeat
+                            GROUP BY platform
+                            ORDER BY last_seen_at DESC
+                            """,
+                            timeout=10,
+                        ):
+                            platform = str(row["platform"])
+                            counts = probe_counts.get(platform, {})
+                            hooks.append({
+                                "platform": platform,
+                                "age_seconds": int(row["age_seconds"] or 0),
+                                "probes_sent": int(row["probes_sent"] or 0),
+                                "samples_shipped": int(row["samples_shipped"] or 0),
+                                "extension_version": row["extension_version"],
+                                "owner_count": int(row["owner_count"] or 0),
+                                **counts,
+                            })
+                        snap["extension_hooks"] = hooks
+                except Exception:
+                    pass
+
+                try:
                     active_limits = []
                     active_sources = set()
                     now_ts = datetime.now(timezone.utc).timestamp()
