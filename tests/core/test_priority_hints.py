@@ -94,6 +94,18 @@ def test_build_targets_skips_bad_hints_and_dedupes_by_best_confidence():
     assert targets[0].metadata["analyzer_priority_hint"]["hint_id"] == "hint-best"
 
 
+def test_confidence_threshold_defaults_to_analyzer_scale(monkeypatch):
+    monkeypatch.delenv("COLLECTOR_PRIORITY_HINTS_MIN_CONFIDENCE", raising=False)
+
+    assert priority_hints._confidence_threshold(None, priority_hints.DEFAULT_MIN_CONFIDENCE) == 0.95
+
+
+def test_confidence_threshold_accepts_legacy_percent_env():
+    assert priority_hints._confidence_threshold("95", priority_hints.DEFAULT_MIN_CONFIDENCE) == 0.95
+    assert priority_hints._confidence_threshold("99.5", priority_hints.DEFAULT_MIN_CONFIDENCE) == 0.995
+    assert priority_hints._confidence_threshold("0.96", priority_hints.DEFAULT_MIN_CONFIDENCE) == 0.96
+
+
 def test_upsert_collection_targets_raises_priority_without_resetting_status():
     pool = _FakePool()
     target = priority_hints.CollectorPriorityTarget(

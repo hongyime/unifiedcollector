@@ -25,7 +25,7 @@ _LAST_REFRESH = 0.0
 _REFRESH_LOCK: asyncio.Lock | None = None
 
 DEFAULT_COLLECTOR_PRIORITY = 6
-DEFAULT_MIN_CONFIDENCE = 95.0
+DEFAULT_MIN_CONFIDENCE = 0.95
 DEFAULT_LIMIT = 5000
 
 USERNAME_TARGET_SOURCES = {"github", "instagram", "lemon8", "tiktok"}
@@ -96,7 +96,10 @@ async def refresh_collector_priority_hints(pool, *, force: bool = False) -> dict
 
 
 async def _fetch_active_analyzer_hints(dsn: str):
-    min_confidence = float(os.getenv("COLLECTOR_PRIORITY_HINTS_MIN_CONFIDENCE", str(DEFAULT_MIN_CONFIDENCE)))
+    min_confidence = _confidence_threshold(
+        os.getenv("COLLECTOR_PRIORITY_HINTS_MIN_CONFIDENCE"),
+        DEFAULT_MIN_CONFIDENCE,
+    )
     limit = int(os.getenv("COLLECTOR_PRIORITY_HINTS_LIMIT", str(DEFAULT_LIMIT)))
     conn = await asyncpg.connect(dsn, command_timeout=120)
     try:
@@ -125,6 +128,23 @@ async def _fetch_active_analyzer_hints(dsn: str):
         )
     finally:
         await conn.close()
+
+
+def _confidence_threshold(value: str | None, default: float) -> float:
+    if value is None or not str(value).strip():
+        return default
+    try:
+        threshold = float(str(value).strip())
+    except ValueError:
+        logger.warning(
+            "Invalid COLLECTOR_PRIORITY_HINTS_MIN_CONFIDENCE=%r; using %.2f",
+            value,
+            default,
+        )
+        return default
+    if threshold > 1:
+        threshold = threshold / 100.0
+    return max(0.0, min(1.0, threshold))
 
 
 def build_collector_priority_targets(rows) -> tuple[list[CollectorPriorityTarget], dict[str, int]]:
