@@ -1,8 +1,10 @@
 import asyncio
+import json
 import logging
 import os
 import signal
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from src.backup.db_backup import backup_status
 from src.db.connection import get_pool, close_pool
@@ -10,6 +12,20 @@ from src.core.env import env_int
 from src.core.vault import VAULT_ROOT, vault_artifact_counts, vault_health
 
 logger = logging.getLogger(__name__)
+
+
+def _expected_extension_version() -> str | None:
+    """Best-effort repo extension version for operator status messages."""
+    env_version = str(os.getenv("UC_EXTENSION_EXPECTED_VERSION") or "").strip()
+    if env_version:
+        return env_version
+    try:
+        manifest = Path(__file__).resolve().parents[2] / "extension" / "manifest.json"
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        version = str(data.get("version") or "").strip()
+        return version or None
+    except Exception:
+        return None
 
 
 class Scheduler:
@@ -324,6 +340,7 @@ class Scheduler:
 
                 try:
                     if await conn.fetchval("SELECT to_regclass('dm_hook_heartbeat')", timeout=5) is not None:
+                        expected_ext_version = _expected_extension_version()
                         probe_counts: dict[str, dict[str, int]] = {}
                         if await conn.fetchval("SELECT to_regclass('dm_probe_log')", timeout=5) is not None:
                             for row in await conn.fetch(
@@ -376,6 +393,7 @@ class Scheduler:
                                 "probes_sent": int(row["probes_sent"] or 0),
                                 "samples_shipped": int(row["samples_shipped"] or 0),
                                 "extension_version": row["extension_version"],
+                                "expected_extension_version": expected_ext_version,
                                 "owner_count": int(row["owner_count"] or 0),
                                 **counts,
                             })

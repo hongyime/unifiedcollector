@@ -211,16 +211,19 @@ def _format_access_event(row: dict) -> str:
 def _format_extension_hook(row: dict) -> str:
     source = _display_source(row.get("platform", "?"))
     version = str(row.get("extension_version") or "").strip()
+    expected = str(row.get("expected_extension_version") or "").strip()
     if version:
         version_text = _esc(version if version.lower().startswith("v") else f"v{version}")
     else:
         version_text = "version unknown"
+    expected_text = _esc(expected if expected.lower().startswith("v") else f"v{expected}") if expected else ""
     age = _humanize_age(int(row.get("age_seconds", 0) or 0))
     owners = int(row.get("owner_count", 0) or 0)
     probes_hour = int(row.get("probes_current_hour", 0) or 0)
     samples_hour = int(row.get("samples_current_hour", 0) or 0)
     probes_sent = int(row.get("probes_sent", 0) or 0)
     samples_shipped = int(row.get("samples_shipped", 0) or 0)
+    frame_age = row.get("last_frame_age_seconds")
 
     details = [
         f"hook {version_text} last heartbeat {age} ago",
@@ -229,6 +232,10 @@ def _format_extension_hook(row: dict) -> str:
         f"{samples_hour:,} sample {_plural(samples_hour, 'frame')}",
         f"session counters {probes_sent:,} probes / {samples_shipped:,} samples shipped",
     ]
+    if frame_age is not None:
+        details.append(f"last decoded frame {_humanize_age(int(frame_age or 0))} ago")
+    if expected and version and version.lstrip("vV") != expected.lstrip("vV"):
+        details.append(f"repo expects {expected_text}; reload the unpacked extension")
     return f"• {source}: " + "; ".join(details) + "."
 
 

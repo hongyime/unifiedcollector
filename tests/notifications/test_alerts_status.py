@@ -73,11 +73,13 @@ async def test_notify_status_splits_429s_from_auth_errors(monkeypatch):
                 "platform": "instagram",
                 "age_seconds": 21,
                 "extension_version": "1.21.8",
+                "expected_extension_version": "1.21.22",
                 "owner_count": 1,
                 "probes_current_hour": 12,
                 "samples_current_hour": 0,
                 "probes_sent": 144,
                 "samples_shipped": 0,
+                "last_frame_age_seconds": 93,
             }
         ],
         "browser_ingest_events": [
@@ -144,6 +146,8 @@ async def test_notify_status_splits_429s_from_auth_errors(monkeypatch):
     assert "<b>Chrome extension hooks</b>" in msg
     assert "Instagram: hook v1.21.8 last heartbeat 21s ago" in msg
     assert "this hour 12 probe frames and 0 sample frames" in msg
+    assert "last decoded frame 1m ago" in msg
+    assert "repo expects v1.21.22; reload the unpacked extension" in msg
     assert "<b>Browser extension ingest</b>" in msg
     assert "Threads media files: browser saw 12 items; stored 3; 2 POSTs this hour." in msg
     assert "Instagram profiles: browser saw 1 item; stored 1; 1 POST this hour." in msg
