@@ -542,14 +542,28 @@ class Scheduler:
                 snap["backups"] = backup_status()
 
                 # Health flags from source_health (dead + degraded/auth_paused).
+                # Include freshness context so the Telegram heartbeat explains
+                # why a source is degraded instead of only naming it.
                 try:
+                    stale_after = {name: thresh for name, _query, thresh in self._FRESHNESS}
                     rows = await conn.fetch(
-                        "SELECT source, status FROM source_health "
+                        "SELECT source, status, last_error FROM source_health "
                         "WHERE status IN ('dead','degraded','auth_paused')"
                     )
                     snap["dead_sources"] = sorted(r["source"] for r in rows if r["status"] == "dead")
                     snap["degraded_sources"] = sorted(
                         r["source"] for r in rows if r["status"] in ("degraded", "auth_paused"))
+                    snap["degraded_details"] = [
+                        {
+                            "source": r["source"],
+                            "status": r["status"],
+                            "reason": r["last_error"],
+                            "age_seconds": ages.get(r["source"]),
+                            "stale_after_seconds": stale_after.get(r["source"]),
+                        }
+                        for r in rows
+                        if r["status"] in ("degraded", "auth_paused")
+                    ]
                 except Exception:
                     pass
         except Exception as e:

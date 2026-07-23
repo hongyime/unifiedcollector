@@ -222,6 +222,24 @@ def _format_extension_hook(row: dict) -> str:
     return f"• {source}: " + "; ".join(details) + "."
 
 
+def _format_degraded_source(row: dict) -> str:
+    source = _display_source(row.get("source", "?"))
+    status = str(row.get("status") or "degraded").replace("_", " ")
+    reason = str(row.get("reason") or "").strip()
+    age = row.get("age_seconds")
+    stale_after = row.get("stale_after_seconds")
+
+    details = [status]
+    if age is not None:
+        freshness = f"newest row {_humanize_age(int(age or 0))} ago"
+        if stale_after is not None:
+            freshness += f"; expected within {_humanize_age(int(stale_after or 0))}"
+        details.append(freshness)
+    if reason:
+        details.append(_esc(reason))
+    return f"• {source}: " + "; ".join(details) + "."
+
+
 def _fmt_count(n: int) -> str:
     """1_317_543 -> 1.3M, 13213 -> 13k, 940 -> 940."""
     if n >= 1_000_000:
@@ -488,5 +506,9 @@ async def notify_status(snapshot: dict) -> bool:
     if degraded:
         lines.append("")
         lines.append("Degraded sources: " + ", ".join(_display_source(s) for s in degraded))
+        details = snapshot.get("degraded_details") or []
+        if details:
+            lines.append("Why degraded:")
+            lines.extend(_format_degraded_source(row) for row in details[:5])
 
     return await telegram.send("\n".join(lines))

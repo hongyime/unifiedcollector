@@ -72,6 +72,16 @@ async def test_notify_status_splits_429s_from_auth_errors(monkeypatch):
                 "samples_shipped": 0,
             }
         ],
+        "degraded_sources": ["instagram"],
+        "degraded_details": [
+            {
+                "source": "instagram",
+                "status": "degraded",
+                "age_seconds": 341_849,
+                "stale_after_seconds": 172_800,
+                "reason": "stale 341849s — watchdog active HTTP 429 cooldown 13263s left; not restarted",
+            }
+        ],
         "vault": {
             "root": "/vault",
             "available": True,
@@ -109,6 +119,10 @@ async def test_notify_status_splits_429s_from_auth_errors(monkeypatch):
     assert "<b>Chrome extension hooks</b>" in msg
     assert "Instagram: hook v1.21.8 last heartbeat 21s ago" in msg
     assert "this hour 12 probe frames and 0 sample frames" in msg
+    assert "Degraded sources: Instagram" in msg
+    assert "Why degraded:" in msg
+    assert "newest row 4.0d ago; expected within 2.0d" in msg
+    assert "active HTTP 429 cooldown" in msg
     assert "Writable at <code>/vault</code>" in msg
     assert "Artifact health counts timed out" in msg
     assert "<b>DB backups</b>" in msg
