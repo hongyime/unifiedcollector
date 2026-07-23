@@ -1226,8 +1226,8 @@ async def hourly_ingestion(hours: int = 12, _user: dict = Depends(require_role("
                    0::bigint AS records,
                    0::bigint AS media_items,
                    0::bigint AS messages,
-                   count(*) FILTER (WHERE status_code = 429)::bigint AS rate_limits,
-                   count(*) FILTER (WHERE status_code IS DISTINCT FROM 429)::bigint AS access_errors
+                   count(*) FILTER (WHERE status_code = 429 OR status_code IS NULL)::bigint AS rate_limits,
+                   count(*) FILTER (WHERE status_code IS NOT NULL AND status_code <> 429)::bigint AS access_errors
             FROM rate_limit_events
             WHERE created_at >= now() - ($1 || ' hours')::interval
             GROUP BY source, date_trunc('hour', created_at)

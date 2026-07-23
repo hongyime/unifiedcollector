@@ -953,7 +953,13 @@ class InstagramCollector(BaseCollector):
             metadata=metadata,
         )
 
-    async def _handle_rate_limit(self, error):
+    async def _handle_rate_limit(
+        self,
+        error,
+        *,
+        scope: str = "profile_fetch",
+        metadata: dict | None = None,
+    ):
         # Per-account cooldown (§22): isolate this account's 429 from siblings.
         # Exponential backoff: each consecutive 429 doubles the cooldown up to 4h.
         acct_name = self._current_account.name if self._current_account else None
@@ -1015,17 +1021,19 @@ class InstagramCollector(BaseCollector):
                 logger.info("instagram: persisted rate-limit to DB (expiry=%.0f streak=%d)", _expiry, self._consecutive_429s)
             except Exception as _e:
                 logger.warning("instagram: failed to persist rate-limit to DB: %s", _e)
+            event_metadata = dict(metadata or {})
+            event_metadata.update({
+                "streak": self._consecutive_429s,
+                "expiry_epoch": _expiry,
+                "proposed_expiry_epoch": _proposed_expiry,
+                "previous_expiry_epoch": _existing_expiry or None,
+            })
             await self._record_rate_limit_event(
-                scope="profile_fetch",
+                scope=scope,
                 status_code=429,
                 cooldown_seconds=int(_effective_cooldown),
                 reason=f"429 streak {self._consecutive_429s}",
-                metadata={
-                    "streak": self._consecutive_429s,
-                    "expiry_epoch": _expiry,
-                    "proposed_expiry_epoch": _proposed_expiry,
-                    "previous_expiry_epoch": _existing_expiry or None,
-                },
+                metadata=event_metadata,
             )
         else:
             logger.warning("instagram: rate-limit NOT persisted — pool is None")
@@ -1226,7 +1234,11 @@ class InstagramCollector(BaseCollector):
                             username,
                         )
                 if not user_data:
-                    await self._handle_rate_limit(Exception("429"))
+                    await self._handle_rate_limit(
+                        Exception("429"),
+                        scope="profile_fetch",
+                        metadata={"username": username, "endpoint": "web_profile_info"},
+                    )
                     raise _RateLimitHandled("429")
             else:
                 resp.raise_for_status()
@@ -1458,7 +1470,15 @@ class InstagramCollector(BaseCollector):
                         )
                         return False
                     if resp.status_code == 429:
-                        await self._handle_rate_limit(Exception("429"))
+                        await self._handle_rate_limit(
+                            Exception("429"),
+                            scope="graphql_posts",
+                            metadata={
+                                "username": entity_name,
+                                "uid": uid,
+                                "endpoint": "graphql/query",
+                            },
+                        )
                         return False
                     resp.raise_for_status()
                 except Exception as e:
@@ -1852,21 +1872,33 @@ class InstagramCollector(BaseCollector):
                     return None
 
                 status = result.get("status") if isinstance(result, dict) else None
-                if status in (401, 403):
-                    # Dead/expired session for the active account — signal collect()
-                    # to mark it and rotate to a healthy account.
-                    self._session_auth_dead = True
+                if status in (401, 403, 429):
+                    # Dead/expired sessions are 401/403. A 429 is a throttle signal:
+                    # record it, but do not mark the cookie dead.
+                    is_auth_failure = status in (401, 403)
+                    if is_auth_failure:
+                        self._session_auth_dead = True
                     await self._record_rate_limit_event(
                         scope="profile_fetch_playwright",
                         status_code=status,
-                        reason="Playwright profile auth response",
+                        reason=(
+                            "Playwright profile auth response"
+                            if is_auth_failure
+                            else "Playwright profile rate-limit response"
+                        ),
                         metadata={"username": username, "endpoint": "web_profile_info"},
                     )
-                    logger.warning(
-                        "Playwright Mode-β: %s returned %s for %s — session expired/unauthorized",
-                        self._current_account.name if self._current_account else "?",
-                        status, username,
-                    )
+                    if is_auth_failure:
+                        logger.warning(
+                            "Playwright Mode-β: %s returned %s for %s — session expired/unauthorized",
+                            self._current_account.name if self._current_account else "?",
+                            status, username,
+                        )
+                    else:
+                        logger.info(
+                            "Playwright Mode-β: in-page fetch for %s returned 429 — rate-limited",
+                            username,
+                        )
                     return None
                 if status != 200:
                     logger.info(
@@ -2623,7 +2655,11 @@ class InstagramCollector(BaseCollector):
                     metadata={"username": username, "endpoint": "web_profile_info"},
                 )
             if resp.status_code == 429:
-                await self._handle_rate_limit(Exception("429"))
+                await self._handle_rate_limit(
+                    Exception("429"),
+                    scope="profile_fetch",
+                    metadata={"username": username, "endpoint": "web_profile_info"},
+                )
                 return {}
             resp.raise_for_status()
             user = resp.json().get("data", {}).get("user", {}) or {}

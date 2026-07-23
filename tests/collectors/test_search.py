@@ -224,6 +224,34 @@ async def test_search_query_consults_serper_when_under_threshold(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_search_query_records_serper_quota_exhaustion(monkeypatch):
+    _set_clean_env(monkeypatch)
+    monkeypatch.setenv("SERPER_API_KEY", "abcd1234efgh")
+    coll = SearchCollector()
+    coll._DDGS = None
+    coll._BS = None
+    coll._serper_has_quota = AsyncMock(return_value=False)
+    coll._search_serper = AsyncMock(return_value=[])
+    coll._record_search_rate_limit = AsyncMock()
+
+    out = await coll.search_query("q", engines=("serper",))
+
+    assert out == []
+    coll._search_serper.assert_not_called()
+    coll._record_search_rate_limit.assert_awaited_once_with(
+        engine="serper",
+        account="abcd1234",
+        scope="serper_quota",
+        status_code=None,
+        reason="serper account quota exhausted",
+        metadata={
+            "query": "q",
+            "daily_quota": 2500,
+        },
+    )
+
+
+@pytest.mark.asyncio
 async def test_search_query_dedupes_across_engines(monkeypatch):
     _set_clean_env(monkeypatch)
     coll = SearchCollector()

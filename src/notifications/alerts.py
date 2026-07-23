@@ -142,7 +142,9 @@ def _format_hourly_source(row: dict) -> str:
     if rate_limits:
         details.append(f"{rate_limits:,} rate-limit {_plural(rate_limits, 'event')}")
     if access_errors:
-        details.append(f"{access_errors:,} auth/access HTTP {_plural(access_errors, 'error')}")
+        details.append(
+            f"{access_errors:,} auth/access or other non-429 {_plural(access_errors, 'event')}"
+        )
     if not details:
         details.append("no new rows")
     return f"• {source}: " + ", ".join(details)
@@ -157,14 +159,14 @@ def _format_cooldown(row: dict) -> str:
     events = int(row.get("events", 0) or 0)
     reason = str(row.get("reason") or "").strip()
     raw_scope = str(row.get("scope") or "").strip().lower()
-    event_label = "FloodWait" if raw_scope == "flood_wait" else "HTTP 429"
+    event_label = "FloodWait" if raw_scope == "flood_wait" else "recorded rate-limit"
     subject = service
     if scope:
         subject += f" {scope}"
     if account:
         subject += f" for {_esc(account)}"
     if streak:
-        return f"• {subject}: active cooldown for {remaining} after {streak} consecutive HTTP 429s."
+        return f"• {subject}: active cooldown for {remaining} after {streak} instrumented rate-limit {_plural(streak, 'event')}."
     if events:
         detail = f" ({_esc(reason)})" if reason else ""
         return f"• {subject}: active cooldown for {remaining} after {events:,} {event_label} {_plural(events, 'event')}{detail}."
@@ -398,7 +400,7 @@ async def notify_status(snapshot: dict) -> bool:
         else:
             lines.append("Recorded rate-limit events this hour: 0.")
         if access_errors:
-            lines.append(f"Recorded auth/access HTTP errors this hour: {access_errors:,}.")
+            lines.append(f"Recorded auth/access or other non-429 events this hour: {access_errors:,}.")
 
         top = [_format_hourly_source(row) for row in (hourly.get("sources") or [])[:6]]
         if top:
@@ -416,10 +418,10 @@ async def notify_status(snapshot: dict) -> bool:
     if recent_limits:
         lines.extend(_format_rate_limit_event(r) for r in recent_limits[:5])
     if access_events:
-        lines.append("Session/auth HTTP failures this hour:")
+        lines.append("Session/auth or other non-429 events this hour:")
         lines.extend(_format_access_event(r) for r in access_events[:5])
     if not active_limits and not recent_limits and not access_events:
-        lines.append("No recorded HTTP 429s, active cooldowns, or auth/session failures this hour.")
+        lines.append("No recorded rate-limit events, active cooldowns, or auth/session failures this hour.")
 
     vault = snapshot.get("vault") or {}
     if vault:
