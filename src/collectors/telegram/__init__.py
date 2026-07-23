@@ -29,7 +29,6 @@ import json
 import logging
 import os
 import tempfile
-import time
 from collections import deque
 from datetime import datetime, date, timezone
 from enum import Enum
@@ -48,6 +47,7 @@ from src.core.hub_notifier import HubNotifier, NotifyCategory
 from src.core.file_naming import sanitize_name
 from src.core.circuit_breaker import CircuitBreaker, CircuitOpenError
 from src.core.proximity import refresh_account_proximity_cache
+from src.core.rate_limit_events import record_rate_limit_event
 from src.core.user_change_tracker import (
     UserChangeTracker,
     TELEGRAM_TRACKED_FIELDS,
@@ -1159,6 +1159,20 @@ class TelegramCollector(BaseCollector):
         # Use the actual flood-wait seconds so the pool doesn't release the
         # account until Telegram lets us back in.
         self.account_pool.record_flood_wait(worker.account.name, float(wait_seconds))
+        await record_rate_limit_event(
+            self.pool,
+            source="telegram",
+            account=worker.account.name,
+            scope="flood_wait",
+            status_code=429,
+            cooldown_seconds=int(wait_seconds),
+            reason="Telegram FloodWaitError",
+            metadata={
+                "worker_id": worker.worker_id,
+                "exception": type(error).__name__,
+                "wait_seconds": wait_seconds,
+            },
+        )
         # Sleep at least until the flood-wait elapses (capped to 5min so we
         # don't block the worker on truly long bans — those are surfaced by
         # is_available() and the next cycle skips this acct).
@@ -1448,7 +1462,6 @@ class TelegramCollector(BaseCollector):
         abort_reason: str | None = None
         members_collected = 0
         messages_collected = 0
-        joined_at = None
 
         try:
             if not already_member:
@@ -1457,7 +1470,6 @@ class TelegramCollector(BaseCollector):
                     worker.worker_id, discussion_title, discussion_platform_id, channel_platform_id,
                 )
                 await client(JoinChannelRequest(discussion_entity))
-                joined_at = asyncio.get_event_loop().time()
 
                 # Human-like dwell before scraping.
                 dwell = random.randint(self._discussion_dwell_min, self._discussion_dwell_max)
@@ -1619,7 +1631,7 @@ class TelegramCollector(BaseCollector):
                 getattr(user, "deleted", False),
                 )
                 return row['id']
-        except Exception as e:
+        except Exception:
             try:
                 async with self.pool.acquire() as conn:
                     row = await conn.fetchrow("""
@@ -2704,7 +2716,6 @@ class TelegramCollector(BaseCollector):
             from telethon.tl.types import (
                 ReactionEmoji,
                 ReactionCustomEmoji,
-                MessageReactions,
             )
 
             peer = getattr(update, "peer", None)

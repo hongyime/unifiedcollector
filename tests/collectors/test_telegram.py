@@ -19,12 +19,11 @@ MagicMock/AsyncMock stand-in. Exercises:
 
 from __future__ import annotations
 
-import asyncio
 import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -298,6 +297,19 @@ async def test_handle_flood_wait_records_and_sleeps(monkeypatch):
     await coll._handle_flood_wait(worker, err)
 
     coll.account_pool.record_flood_wait.assert_called_once_with(worker.account.name, 12.0)
+    event_call = coll.pool.conn.execute.await_args
+    assert "INSERT INTO rate_limit_events" in event_call.args[0]
+    assert event_call.args[1:7] == (
+        "telegram",
+        worker.account.name,
+        "flood_wait",
+        429,
+        12,
+        "Telegram FloodWaitError",
+    )
+    metadata = json.loads(event_call.args[7])
+    assert metadata["exception"] == "FloodWaitError"
+    assert metadata["wait_seconds"] == 12
     assert sleeps == [12]  # min(12, 300) == 12
     assert worker.state == SessionState.CONNECTED
 
@@ -316,6 +328,8 @@ async def test_handle_flood_wait_caps_sleep_at_300(monkeypatch):
     await coll._handle_flood_wait(worker, _FakeFloodWait(seconds=9_999))
     assert sleeps == [300]
     coll.account_pool.record_flood_wait.assert_called_once_with(worker.account.name, 9999.0)
+    event_call = coll.pool.conn.execute.await_args
+    assert event_call.args[5] == 9999
 
 
 # ── _process_spider_queue ─────────────────────────────────────────────────

@@ -95,6 +95,7 @@ _SOURCE_LABELS = {
 _SCOPE_LABELS = {
     "comments": "comments",
     "feed": "feed fetches",
+    "flood_wait": "FloodWait throttles",
     "gps_streams": "GPS route streams",
     "media": "media files",
     "posts": "posts",
@@ -137,7 +138,7 @@ def _format_hourly_source(row: dict) -> str:
     if files:
         details.append(f"{files:,} {_plural(files, 'media file')}")
     if rate_limits:
-        details.append(f"{rate_limits:,} HTTP 429 {_plural(rate_limits, 'event')}")
+        details.append(f"{rate_limits:,} rate-limit {_plural(rate_limits, 'event')}")
     if access_errors:
         details.append(f"{access_errors:,} auth/access HTTP {_plural(access_errors, 'error')}")
     if not details:
@@ -153,6 +154,8 @@ def _format_cooldown(row: dict) -> str:
     streak = int(row.get("streak", 0) or 0)
     events = int(row.get("events", 0) or 0)
     reason = str(row.get("reason") or "").strip()
+    raw_scope = str(row.get("scope") or "").strip().lower()
+    event_label = "FloodWait" if raw_scope == "flood_wait" else "HTTP 429"
     subject = service
     if scope:
         subject += f" {scope}"
@@ -162,7 +165,7 @@ def _format_cooldown(row: dict) -> str:
         return f"• {subject}: active cooldown for {remaining} after {streak} consecutive HTTP 429s."
     if events:
         detail = f" ({_esc(reason)})" if reason else ""
-        return f"• {subject}: active cooldown for {remaining} after {events:,} HTTP 429 {_plural(events, 'event')}{detail}."
+        return f"• {subject}: active cooldown for {remaining} after {events:,} {event_label} {_plural(events, 'event')}{detail}."
     return f"• {subject}: active cooldown for {remaining}."
 
 
@@ -172,6 +175,8 @@ def _format_rate_limit_event(row: dict) -> str:
     scope = _display_scope(row.get("scope"))
     status = int(row.get("status_code", 429) or 429)
     count = int(row.get("count", 0) or 0)
+    raw_scope = str(row.get("scope") or "").strip().lower()
+    status_text = "FloodWait" if raw_scope == "flood_wait" else f"HTTP {status}"
 
     subject = source
     if scope:
@@ -179,7 +184,7 @@ def _format_rate_limit_event(row: dict) -> str:
     if account:
         subject += f" for {_esc(account)}"
     events = f"{count:,} recorded event" if count == 1 else f"{count:,} recorded events"
-    return f"• {subject}: HTTP {status}, {events} this hour."
+    return f"• {subject}: {status_text}, {events} this hour."
 
 
 def _format_access_event(row: dict) -> str:
@@ -380,9 +385,9 @@ async def notify_status(snapshot: dict) -> bool:
             f"{files:,} {_plural(files, 'media file')}."
         )
         if r429:
-            lines.append(f"Recorded HTTP 429 events this hour: {r429:,}.")
+            lines.append(f"Recorded rate-limit events this hour: {r429:,}.")
         else:
-            lines.append("Recorded HTTP 429 events this hour: 0.")
+            lines.append("Recorded rate-limit events this hour: 0.")
         if access_errors:
             lines.append(f"Recorded auth/access HTTP errors this hour: {access_errors:,}.")
 

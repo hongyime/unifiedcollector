@@ -34,13 +34,6 @@ async def test_notify_status_splits_429s_from_auth_errors(monkeypatch):
                 }
             ],
         },
-        "active_rate_limits": [
-            {
-                "service": "instagram_rate_limit",
-                "seconds_remaining": 3600,
-                "streak": 7,
-            }
-        ],
         "rate_limit_events": [
             {
                 "source": "instagram",
@@ -49,6 +42,21 @@ async def test_notify_status_splits_429s_from_auth_errors(monkeypatch):
                 "status_code": 429,
                 "count": 1,
             }
+        ],
+        "active_rate_limits": [
+            {
+                "service": "instagram_rate_limit",
+                "seconds_remaining": 3600,
+                "streak": 7,
+            },
+            {
+                "service": "telegram",
+                "account": "acct1",
+                "scope": "flood_wait",
+                "seconds_remaining": 120,
+                "events": 1,
+                "reason": "Telegram FloodWaitError",
+            },
         ],
         "access_events": [
             {
@@ -127,11 +135,12 @@ async def test_notify_status_splits_429s_from_auth_errors(monkeypatch):
 
     assert ok is True
     msg = sent[0]
-    assert "Recorded HTTP 429 events this hour: 1." in msg
+    assert "Recorded rate-limit events this hour: 1." in msg
     assert "Recorded auth/access HTTP errors this hour: 1." in msg
-    assert "Instagram: 4 source rows, 1 media file, 1 HTTP 429 event, 1 auth/access HTTP error" in msg
+    assert "Instagram: 4 source rows, 1 media file, 1 rate-limit event, 1 auth/access HTTP error" in msg
     assert "Session/auth HTTP failures this hour:" in msg
     assert "HTTP 401" in msg
+    assert "Telegram FloodWait throttles for acct1: active cooldown for 2m after 1 FloodWait event" in msg
     assert "<b>Chrome extension hooks</b>" in msg
     assert "Instagram: hook v1.21.8 last heartbeat 21s ago" in msg
     assert "this hour 12 probe frames and 0 sample frames" in msg
