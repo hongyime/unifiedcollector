@@ -33,6 +33,7 @@ class RebuildReport:
     reconstructable_tables: Counter[str] = field(default_factory=Counter)
     missing_fields_by_source: dict[str, Counter[str]] = field(default_factory=lambda: defaultdict(Counter))
     file_errors_by_source: dict[str, Counter[str]] = field(default_factory=lambda: defaultdict(Counter))
+    blob_fallbacks_by_source: Counter[str] = field(default_factory=Counter)
     raw_payloads_by_source: Counter[str] = field(default_factory=Counter)
     invalid_files: list[str] = field(default_factory=list)
     checksum_verification: bool = False
@@ -53,6 +54,7 @@ class RebuildReport:
                 source: dict(sorted(counter.items()))
                 for source, counter in sorted(self.file_errors_by_source.items())
             },
+            "blob_fallbacks_by_source": dict(sorted(self.blob_fallbacks_by_source.items())),
             "raw_payloads_by_source": dict(sorted(self.raw_payloads_by_source.items())),
             "invalid_files": self.invalid_files[:100],
             "checksum_verification": self.checksum_verification,
@@ -88,6 +90,10 @@ class RebuildReport:
             for source, counter in sorted(self.file_errors_by_source.items()):
                 details = ", ".join(f"{field}={count}" for field, count in sorted(counter.items()))
                 lines.append(f"  {source}: {details}")
+        if self.blob_fallbacks_by_source:
+            lines.append("")
+            lines.append("Blob fallback references:")
+            lines.extend(f"  {source}: {count}" for source, count in sorted(self.blob_fallbacks_by_source.items()))
         if self.raw_payloads_by_source:
             lines.append("")
             lines.append("Raw payload references:")
@@ -164,17 +170,37 @@ def file_reference_errors(
     *,
     verify_checksums: bool = False,
 ) -> list[str]:
+    errors, _ = file_reference_errors_with_blob_fallback(
+        payload,
+        root,
+        verify_checksums=verify_checksums,
+    )
+    return errors
+
+
+def file_reference_errors_with_blob_fallback(
+    payload: dict[str, Any],
+    root: Path,
+    *,
+    verify_checksums: bool = False,
+) -> tuple[list[str], bool]:
     info = payload.get("file")
     if not isinstance(info, dict):
-        return ["file_missing"]
+        return ["file_missing"], False
     raw_path = info.get("path") or info.get("absolute_path")
     if not raw_path:
-        return ["file_path_missing"]
-    path = Path(str(raw_path))
-    if not path.is_absolute():
-        path = root / path
+        return ["file_path_missing"], False
+    path = _vault_file_path(raw_path, root)
+    used_blob_fallback = False
     if not path.exists() or not path.is_file():
-        return ["file_missing"]
+        blob_path = info.get("blob_path") or info.get("blob_absolute_path")
+        if not blob_path:
+            return ["file_missing"], False
+        candidate = _vault_file_path(blob_path, root)
+        if not candidate.exists() or not candidate.is_file():
+            return ["file_missing"], False
+        path = candidate
+        used_blob_fallback = True
 
     errors: list[str] = []
     expected_size = info.get("size")
@@ -189,7 +215,7 @@ def file_reference_errors(
         actual = _sha256_file(path)
         if str(expected_sha).lower() != actual:
             errors.append("file_sha256_mismatch")
-    return errors
+    return errors, used_blob_fallback
 
 
 def scan_sidecars(
@@ -231,9 +257,15 @@ def scan_sidecars(
         for field_name in missing:
             report.missing_fields_by_source[source][field_name] += 1
 
-        file_errors = file_reference_errors(payload, vault_root, verify_checksums=verify_checksums)
+        file_errors, used_blob_fallback = file_reference_errors_with_blob_fallback(
+            payload,
+            vault_root,
+            verify_checksums=verify_checksums,
+        )
         for error in file_errors:
             report.file_errors_by_source[source][error] += 1
+        if used_blob_fallback and not file_errors:
+            report.blob_fallbacks_by_source[source] += 1
 
         if not missing and not file_errors:
             for table in rebuild_target_tables(payload):
@@ -255,3 +287,10 @@ def _safe_relative(path: Path, root: Path) -> str:
         return path.resolve().relative_to(root.resolve()).as_posix()
     except Exception:
         return str(path)
+
+
+def _vault_file_path(path: Any, root: Path) -> Path:
+    resolved = Path(str(path))
+    if not resolved.is_absolute():
+        resolved = root / resolved
+    return resolved
