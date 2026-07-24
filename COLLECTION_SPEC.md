@@ -183,9 +183,11 @@ Current shipped recovery/ops work:
 - **Shared atomic artifact writer:** `src/core/vault.py::write_atomic_artifact`
   writes bytes through vault temp storage, verifies checksum/size, moves to the
   canonical sha256 blob path, writes a sidecar, optionally calls a DB writer,
-  and marks post-blob sidecar/DB failures as partial for repair. New Beeper,
-  Telegram, WhatsApp, Lemon8, YouTube, TikTok, Website, Search, GitHub direct
-  media, and Strava activity photo/route-map
+  and marks post-blob sidecar/DB failures as partial for repair. Duplicate-row
+  cleanup preserves canonical `media/blobs/...` files and only removes legacy
+  per-occurrence duplicate files. New Beeper, Telegram, WhatsApp, Lemon8,
+  YouTube, TikTok, Website, Search, GitHub direct media, shared profile-photo,
+  and Strava activity photo/route-map
   downloads use this path for physical blobs while preserving each source
   occurrence as its own `media_items` row and media sidecar.
 - **Rebuild report:** `python -m src.main rebuild-report --compare-db
@@ -230,11 +232,11 @@ Known remaining gaps:
   should migrate to shared helpers as they are touched.
 - Rebuild report is a dry-run report, not a full scratch DB rebuild.
 - Physical-file dedupe now has a core sha256 blob writer, and Beeper, Telegram,
-  WhatsApp, Lemon8, YouTube, TikTok, Website, Search, GitHub direct media, and
-  Strava activity photo/route-map downloads use it. Remaining Instagram, GitHub
-  profile-photo/avatar helper paths, shared profile photo, and generic legacy
-  helper paths still need source-by-source migration proof before cross-source
-  dedupe is complete.
+  WhatsApp, Lemon8, YouTube, TikTok, Website, Search, GitHub direct media,
+  shared profile-photo, and Strava activity photo/route-map downloads use it.
+  Remaining Instagram post/story/tagged media paths, GitHub bulk avatar range,
+  and generic legacy helper paths still need source-by-source migration proof
+  before cross-source dedupe is complete.
 - External-drive loss behavior is strong for base collector writes, but each
   long-running realtime/direct file write path should continue moving toward
   the same shared guard instead of local ad hoc checks.

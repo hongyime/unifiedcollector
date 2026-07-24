@@ -5,7 +5,7 @@ from pathlib import Path
 
 import aiohttp
 
-from src.core.vault import assert_media_write_allowed
+from src.core.vault import VAULT_ROOT, AtomicArtifactResult, write_atomic_artifact
 
 logger = logging.getLogger(__name__)
 
@@ -60,9 +60,28 @@ class ProfilePhotoTracker:
         # workers tracking many entities.
         self._url_cache: _LRU = _LRU(_CACHE_MAX_ENTRIES)
         self._hash_cache: _LRU = _LRU(_CACHE_MAX_ENTRIES)
+        self._last_artifact: AtomicArtifactResult | None = None
 
     def set_pool(self, pool):
         self.pool = pool
+
+    def last_artifact_metadata(self) -> dict | None:
+        artifact = self._last_artifact
+        if artifact is None:
+            return None
+        sidecar = artifact.sidecar
+        return {
+            "ok": artifact.ok,
+            "partial": artifact.partial,
+            "path": artifact.relative_path,
+            "blob_path": artifact.blob_relative_path,
+            "sha256": artifact.sha256,
+            "file_size": artifact.file_size,
+            "sidecar_ok": sidecar.ok if sidecar else None,
+            "sidecar_path": sidecar.relative_path if sidecar else None,
+            "duplicate_blob": artifact.duplicate_blob,
+            "error": artifact.error,
+        }
 
     async def check_and_download(
         self,
@@ -77,6 +96,7 @@ class ProfilePhotoTracker:
         Returns (changed, path) where changed=True means a genuine new photo
         was saved to disk.
         """
+        self._last_artifact = None
         cache_key = f"{source}:{entity_id}"
 
         old_url = self._url_cache.get(cache_key)
@@ -105,7 +125,7 @@ class ProfilePhotoTracker:
 
         new_phash = self._compute_phash(data)
         if new_phash is None:
-            path = self._save(data, entity_id, source, save_dir)
+            path = self._save(data, entity_id, source, save_dir, url=url)
             await self._store_metadata(source, entity_id, url, None)
             return True, path
 
@@ -129,7 +149,7 @@ class ProfilePhotoTracker:
                 )
                 return False, None
 
-        path = self._save(data, entity_id, source, save_dir)
+        path = self._save(data, entity_id, source, save_dir, url=url)
         await self._store_metadata(source, entity_id, url, str(new_phash))
         return True, path
 
@@ -154,34 +174,41 @@ class ProfilePhotoTracker:
             logger.debug("Profile photo download failed: %s", e)
             return None
 
-    def _save(self, data: bytes, entity_id: str, source: str, save_dir: Path) -> Path:
+    def _save(self, data: bytes, entity_id: str, source: str, save_dir: Path, *, url: str | None = None) -> Path:
         # SHA-256 of content prevents collisions and is non-cryptographic-use safe.
-        digest = hashlib.sha256(data).hexdigest()[:16]
+        digest = hashlib.sha256(data).hexdigest()
+        short_digest = digest[:16]
         ext = "jpg"
         if data[:4] == b"\x89PNG":
             ext = "png"
         elif data[:4] == b"RIFF":
             ext = "webp"
-        path = save_dir / f"{source}_{entity_id}_profile_{digest}.{ext}"
-        assert_media_write_allowed(path)
-        save_dir.mkdir(parents=True, exist_ok=True)
-        # Atomic write: tempfile + fsync + rename.
-        import os as _os
-        import tempfile as _tempfile
-        fd, tmp = _tempfile.mkstemp(dir=save_dir, suffix=".tmp")
-        try:
-            with _os.fdopen(fd, "wb") as f:
-                f.write(data)
-                f.flush()
-                _os.fsync(f.fileno())
-            _os.replace(tmp, path)
-        except BaseException:
-            try:
-                _os.remove(tmp)
-            except OSError:
-                pass
-            raise
-        return path
+        filename = f"{source}_{entity_id}_profile_{short_digest}.{ext}"
+        artifact = write_atomic_artifact(
+            source=source,
+            artifact_id=f"profile_photo/{entity_id}/{short_digest}",
+            artifact_kind="media_blob",
+            data=data,
+            extension=ext,
+            expected_sha256=digest,
+            metadata={
+                "entity_id": str(entity_id),
+                "entity_name": str(entity_id),
+                "content_type": "profile_photo",
+                "content_id": f"profile_{entity_id}",
+                "filename": filename,
+                "source_url": url,
+                "legacy_save_dir": str(save_dir),
+                "rebuild_target_tables": ["media_items"],
+            },
+            root=VAULT_ROOT,
+        )
+        self._last_artifact = artifact
+        if artifact.path is None:
+            raise RuntimeError(f"profile photo artifact write failed: {artifact.error}")
+        if not artifact.ok and not artifact.partial:
+            raise RuntimeError(f"profile photo artifact write failed: {artifact.error}")
+        return artifact.path
 
     async def _store_metadata(self, source: str, entity_id: str, url: str, phash: str | None):
         if not self.pool:

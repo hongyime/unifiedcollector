@@ -1110,7 +1110,25 @@ class StravaCollector(BaseCollector):
                 dest_dir.mkdir(parents=True, exist_ok=True)
                 changed, path = await self._photo_tracker.check_and_download(athlete["profile"], aid, "strava", dest_dir)
                 if changed and path:
-                    await self.insert_media_item(entity_id=aid, entity_name=aname, content_type="profile_photo", content_id=f"profile_{aid}", filename=path.name, file_path=str(path), file_size=path.stat().st_size, sha256=self.sha256_bytes(path.read_bytes()), metadata={"raw": athlete}, source_url=self._build_strava_source_url({"content_type": "profile_photo", "content_id": f"profile_{aid}"}))
+                    metadata = {"raw": athlete}
+                    artifact_meta = self._photo_tracker.last_artifact_metadata()
+                    if artifact_meta:
+                        metadata["vault_artifact"] = artifact_meta
+                    await self.insert_media_item(
+                        entity_id=aid,
+                        entity_name=aname,
+                        content_type="profile_photo",
+                        content_id=f"profile_{aid}",
+                        filename=path.name,
+                        file_path=str(path),
+                        file_size=path.stat().st_size,
+                        sha256=self.sha256_bytes(path.read_bytes()),
+                        metadata=metadata,
+                        source_url=self._build_strava_source_url({
+                            "content_type": "profile_photo",
+                            "content_id": f"profile_{aid}",
+                        }),
+                    )
             await self._collect_activities_api(client, aid, aname)
 
     async def _upsert_athlete(self, athlete: dict):

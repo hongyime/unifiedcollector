@@ -121,7 +121,7 @@
 - [ ] Collector refuses file-heavy writes when `Z:\unifiedcollector` is unavailable and records queued work instead of success.
 - [ ] Every new file-backed artifact has a JSON sidecar with required provenance fields.
 - [ ] The artifact write path verifies checksum, file size, sidecar write, and DB row consistency.
-- [ ] Duplicate physical files are stored once by checksum while multiple occurrence sidecars remain queryable.
+- [x] Duplicate physical files are stored once by checksum while multiple occurrence sidecars remain queryable.
 - [ ] Tier 1 raw payloads, messages, and route data are persisted enough to rebuild normalized records.
 - [x] Rate-limit events include source, account, action scope, retry/cooldown times, and are shown in dashboard and Telegram status.
 - [x] Browser/extension captures produce auditable sidecars or raw capture records.
@@ -227,9 +227,9 @@ Restore rehearsal checklist:
 - Priority-driven Strava browser route capture is implemented in extension v1.21.23, `/social/strava-route-queue`, `/social/strava-route-visit`, and `/strava/route-capture-queue`: the browser gets one missing-route activity at a time, ordered by Tier 1/2 proximity and collector target priority, while respecting active GPS-stream 429 cooldowns and recent visit TTLs.
 - Analyzer priority hints are imported by `src/core/priority_hints.py`, merged into `collection_targets.metadata.analyzer_priority_hint`, used by target loading, and surfaced on the Targets dashboard.
 - `src/core/scrape_pacing.py` now provides a tunable one-shot pre-cooldown retry delay (`COLLECTOR_PRE_COOLDOWN_RETRY_*`). Instagram Playwright profile fetches, Strava GPS stream fetches, and Search HTTP fetch paths use it; recovered Strava/Search 429s are logged without creating an active cooldown, while repeated 429s still open scoped cooldowns where the collector can safely skip that exact scope.
-- Beeper, Telegram, WhatsApp, Lemon8, YouTube, TikTok, Website, Search, GitHub direct media, and Strava activity photo/route-map downloads now write physical bytes through `write_atomic_artifact` or `write_atomic_artifact_from_path` to canonical `media/blobs/<sha256>` paths while retaining per-occurrence `media_items` rows and sidecars. The collector dashboard media resolver accepts both legacy media-root paths and vault-backed blob paths.
+- Beeper, Telegram, WhatsApp, Lemon8, YouTube, TikTok, Website, Search, GitHub direct media, shared profile-photo, and Strava activity photo/route-map downloads now write physical bytes through `write_atomic_artifact` or `write_atomic_artifact_from_path` to canonical `media/blobs/<sha256>` paths while retaining per-occurrence `media_items` rows and sidecars. Duplicate-row cleanup in `BaseCollector.insert_media_item` preserves canonical blob files and only removes legacy per-occurrence duplicate files. The collector dashboard media resolver accepts both legacy media-root paths and vault-backed blob paths.
 - `src/core/health.py` no longer imports the full DB connection module for Docker health checks; live Telegram/WhatsApp health checks dropped from roughly 50s to roughly 10s and fit the configured 30s timeout.
-- Still not complete: migrating remaining Instagram, GitHub profile-photo/avatar helper paths, shared profile-photo, and generic legacy helper paths through the shared artifact writers; source-by-source migration proof; full Tier 1 raw payload coverage; and restore replay from a real DB dump.
+- Still not complete: migrating remaining Instagram post/story/tagged media paths, GitHub bulk avatar range, and generic legacy helper paths through the shared artifact writers; source-by-source migration proof; full Tier 1 raw payload coverage; and restore replay from a real DB dump.
 
 **Document Version**: 1.0
 **Created**: 2026-07-20

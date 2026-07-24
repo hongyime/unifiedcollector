@@ -581,6 +581,10 @@ class GithubCollector(BaseCollector):
         )
         if changed and path is not None:
             try:
+                metadata = {"raw": user}
+                artifact_meta = self._photo_tracker.last_artifact_metadata()
+                if artifact_meta:
+                    metadata["vault_artifact"] = artifact_meta
                 await self.insert_media_item(
                     entity_id=uid,
                     entity_name=user.get("login", username),
@@ -590,7 +594,7 @@ class GithubCollector(BaseCollector):
                     file_path=str(path),
                     file_size=path.stat().st_size,
                     sha256=_sha256_bytes(path.read_bytes()),
-                    metadata={"raw": user},
+                    metadata=metadata,
                     source_url=self._build_github_source_url(user.get("login", username)),
                 )
             except Exception as e:
@@ -1056,6 +1060,10 @@ class GithubCollector(BaseCollector):
                 avatar_url, uid, "github", dest_dir
             )
             if changed and path:
+                metadata = {"raw": user}
+                artifact_meta = self._photo_tracker.last_artifact_metadata()
+                if artifact_meta:
+                    metadata["vault_artifact"] = artifact_meta
                 await self.insert_media_item(
                     entity_id=uid,
                     entity_name=login,
@@ -1065,7 +1073,7 @@ class GithubCollector(BaseCollector):
                     file_path=str(path),
                     file_size=path.stat().st_size,
                     sha256=self.sha256_bytes(path.read_bytes()),
-                    metadata={"raw": user},
+                    metadata=metadata,
                     source_url=self._build_github_source_url(login),
                 )
 

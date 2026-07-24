@@ -1279,6 +1279,10 @@ class InstagramCollector(BaseCollector):
             )
             if changed and path:
                 data = path.read_bytes()
+                metadata = {"raw": user_data}
+                artifact_meta = self._photo_tracker.last_artifact_metadata()
+                if artifact_meta:
+                    metadata["vault_artifact"] = artifact_meta
                 await self.insert_media_item(
                     entity_id=uid,
                     entity_name=entity_name,
@@ -1288,7 +1292,7 @@ class InstagramCollector(BaseCollector):
                     file_path=str(path),
                     file_size=len(data),
                     sha256=self.sha256_bytes(data),
-                    metadata={"raw": user_data}
+                    metadata=metadata,
                 )
 
         # 3. Spidering (if enabled)
@@ -2841,6 +2845,10 @@ class InstagramCollector(BaseCollector):
             _dedupe_sha256(data) if _dedupe_sha256 is not None
             else self.sha256_bytes(data)
         )
+        metadata = {"raw": raw or {}, "source_url": photo_url}
+        artifact_meta = self._photo_tracker.last_artifact_metadata()
+        if artifact_meta:
+            metadata["vault_artifact"] = artifact_meta
 
         await self.insert_media_item(
             entity_id=uid,
@@ -2851,7 +2859,7 @@ class InstagramCollector(BaseCollector):
             file_path=str(path),
             file_size=len(data),
             sha256=sha,
-            metadata={"raw": raw or {}, "source_url": photo_url},
+            metadata=metadata,
         )
 
         # Best-effort audit-log append.  Table may not exist yet — that's

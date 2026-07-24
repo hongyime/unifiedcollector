@@ -15,9 +15,33 @@ from .rate_limiter import AdaptiveRateLimiter
 from .resilience import CircuitBreaker, wait_for_internet
 from .scrape_pacing import sleep_rate_limit
 from .user_agent import UserAgentPool
-from .vault import assert_media_write_allowed, write_artifact_sidecar, write_media_sidecar
+from .vault import VAULT_ROOT, assert_media_write_allowed, write_artifact_sidecar, write_media_sidecar
 
 logger = logging.getLogger(__name__)
+
+
+def _is_canonical_vault_blob_path(file_path: str | os.PathLike[str] | None) -> bool:
+    if not file_path:
+        return False
+    try:
+        path = Path(file_path).resolve(strict=False)
+        blob_root = (VAULT_ROOT / "media" / "blobs").resolve(strict=False)
+        path.relative_to(blob_root)
+        return True
+    except Exception:
+        return False
+
+
+def _unlink_duplicate_media_file(file_path: str | os.PathLike[str] | None) -> None:
+    """Remove only per-occurrence duplicate files, never shared vault blobs."""
+    if not file_path or _is_canonical_vault_blob_path(file_path):
+        return
+    try:
+        path = Path(file_path)
+        if path.exists():
+            path.unlink()
+    except Exception:
+        pass
 
 
 class BaseCollector(ABC):
@@ -466,13 +490,9 @@ class BaseCollector(ABC):
                     dup = await conn.fetchval(
                         "SELECT 1 FROM media_items WHERE source=$1 AND sha256=$2 LIMIT 1",
                         self.SOURCE_NAME, sha256,
-                    )
+                )
                 if dup:
-                    try:
-                        if file_path and Path(file_path).exists():
-                            Path(file_path).unlink()
-                    except Exception:
-                        pass
+                    _unlink_duplicate_media_file(file_path)
                     logger.debug("cross-collector dup skipped: %s sha=%s", self.SOURCE_NAME, sha256[:12])
                     return False
             except Exception:
