@@ -183,9 +183,10 @@ Current shipped recovery/ops work:
 - **Shared atomic artifact writer:** `src/core/vault.py::write_atomic_artifact`
   writes bytes through vault temp storage, verifies checksum/size, moves to the
   canonical sha256 blob path, writes a sidecar, optionally calls a DB writer,
-  and marks post-blob sidecar/DB failures as partial for repair. New Beeper
-  attachment downloads use this path for physical blobs while preserving each
-  message attachment as its own `media_items` occurrence and media sidecar.
+  and marks post-blob sidecar/DB failures as partial for repair. New Beeper,
+  Telegram, and WhatsApp chat-media downloads use this path for physical blobs
+  while preserving each message attachment as its own `media_items` occurrence
+  and media sidecar.
 - **Rebuild report:** `python -m src.main rebuild-report --compare-db
   --verify-checksums` reports sidecar coverage plus DB-only, sidecar-only,
   blob-only, missing-file, and checksum-mismatch states. DB comparison is
@@ -226,9 +227,10 @@ Known remaining gaps:
   durable rate-limit events plus jittered sleep. Remaining 429/FloodWait branches
   should migrate to shared helpers as they are touched.
 - Rebuild report is a dry-run report, not a full scratch DB rebuild.
-- Physical-file dedupe now has a core sha256 blob writer, and new Beeper
-  attachment downloads use it. Other collector media paths still need migration
-  proof before cross-source dedupe is complete.
+- Physical-file dedupe now has a core sha256 blob writer, and new Beeper,
+  Telegram, and WhatsApp chat-media downloads use it. Remaining non-chat media
+  paths still need source-by-source migration proof before cross-source dedupe
+  is complete.
 - External-drive loss behavior is strong for base collector writes, but each
   long-running realtime/direct file write path should continue moving toward
   the same shared guard instead of local ad hoc checks.
