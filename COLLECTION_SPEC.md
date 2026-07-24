@@ -187,9 +187,10 @@ Current shipped recovery/ops work:
   cleanup preserves canonical `media/blobs/...` files and only removes legacy
   per-occurrence duplicate files. New Beeper, Telegram, WhatsApp, Lemon8,
   YouTube, TikTok, Website, Search, Instagram headless/extension media,
-  GitHub direct media, shared profile-photo, and Strava activity photo/route-map
-  downloads use this path for physical blobs while preserving each source
-  occurrence as its own `media_items` row and media sidecar.
+  GitHub direct media, GitHub bulk avatar artifacts, shared profile-photo, and
+  Strava activity photo/route-map downloads use this path for physical blobs
+  while preserving each source occurrence as its own `media_items` row and
+  media sidecar where a concrete source occurrence should be indexed.
 - **Rebuild report:** `python -m src.main rebuild-report --compare-db
   --verify-checksums` reports sidecar coverage plus DB-only, sidecar-only,
   blob-only, missing-file, and checksum-mismatch states. DB comparison is
@@ -233,10 +234,12 @@ Known remaining gaps:
 - Rebuild report is a dry-run report, not a full scratch DB rebuild.
 - Physical-file dedupe now has a core sha256 blob writer, and Beeper, Telegram,
   WhatsApp, Lemon8, YouTube, TikTok, Website, Search, Instagram
-  headless/extension media, GitHub direct media, shared profile-photo, and
-  Strava activity photo/route-map downloads use it. Remaining GitHub bulk
-  avatar range and generic legacy helper paths still need source-by-source
-  migration proof before cross-source dedupe is complete.
+  headless/extension media, GitHub direct media, GitHub bulk avatar artifacts,
+  shared profile-photo, and Strava activity photo/route-map downloads use it.
+  Remaining generic legacy helper paths still need source-by-source migration
+  proof before cross-source dedupe is complete. GitHub bulk avatar range writes
+  artifact sidecars only and intentionally does not create `media_items` rows
+  for unknown numeric IDs.
 - External-drive loss behavior is strong for base collector writes, but each
   long-running realtime/direct file write path should continue moving toward
   the same shared guard instead of local ad hoc checks.

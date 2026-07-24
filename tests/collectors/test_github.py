@@ -8,6 +8,7 @@ an AsyncMock chain.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -598,6 +599,34 @@ async def test_download_media_writes_vault_blob(monkeypatch, tmp_path):
     assert kwargs["metadata"]["vault_artifact"]["ok"] is True
     assert kwargs["metadata"]["vault_artifact"]["partial"] is False
     assert kwargs["metadata"]["vault_artifact"]["blob_path"].startswith("media/blobs/")
+    coll.send_to_dlq.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_download_avatars_by_id_range_writes_vault_artifact(monkeypatch, tmp_path):
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    monkeypatch.setattr(github_mod, "VAULT_ROOT", vault_root)
+    coll = _new_collector(monkeypatch)
+    coll.send_to_dlq = AsyncMock()
+
+    data = b"github avatar bytes"
+    digest = hashlib.sha256(data).hexdigest()
+    client = MagicMock()
+    client.get = AsyncMock(return_value=_make_response(status=200, content=data))
+    _patch_make_client(coll, client)
+
+    stats = await coll.download_avatars_by_id_range(42, 42, concurrency=1, delay=0)
+
+    blob = vault_root / "media" / "blobs" / digest[:2] / digest[2:4] / f"{digest}.jpg"
+    assert stats == {"downloaded": 1, "skipped_on_disk": 0, "errors": 0}
+    assert blob.read_bytes() == data
+    assert not (coll.account_media_dir / "avatars" / "42.jpg").exists()
+    sidecar = next((vault_root / "sidecars" / "artifacts" / "github").rglob("*.json"))
+    payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert payload["metadata"]["bulk_avatar_range"] is True
+    assert payload["metadata"]["content_id"] == "avatar_42"
+    assert payload["metadata"]["legacy_path"].endswith("avatars\\42.jpg") or payload["metadata"]["legacy_path"].endswith("avatars/42.jpg")
     coll.send_to_dlq.assert_not_awaited()
 
 

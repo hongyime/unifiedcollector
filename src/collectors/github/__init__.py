@@ -81,7 +81,6 @@ import base64
 import json
 import logging
 import os
-import tempfile
 import time
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
@@ -104,7 +103,7 @@ from src.core.file_naming import sanitize_name
 from src.core.proximity import refresh_account_proximity_cache
 from src.core.profile_photo_tracker import ProfilePhotoTracker
 from src.core.spider_discover import Edge, EdgeType, SpiderDiscover
-from src.core.vault import VAULT_ROOT, assert_media_write_allowed, write_atomic_artifact
+from src.core.vault import VAULT_ROOT, write_atomic_artifact
 from src.core.user_change_tracker import (
     UserChangeTracker,
     GITHUB_TRACKED_FIELDS,
@@ -711,17 +710,40 @@ class GithubCollector(BaseCollector):
                         return
                     data = resp.content
                     dest = save_dir / f"{uid}.jpg"
-                    fd, tmp = tempfile.mkstemp(dir=save_dir, suffix=".tmp")
-                    try:
-                        with os.fdopen(fd, "wb") as f:
-                            f.write(data)
-                            f.flush()
-                            os.fsync(f.fileno())
-                        os.replace(tmp, dest)
-                    except BaseException:
-                        if os.path.exists(tmp):
-                            os.remove(tmp)
-                        raise
+                    sha = self.sha256_bytes(data)
+                    artifact = write_atomic_artifact(
+                        source=self.SOURCE_NAME,
+                        artifact_id=f"bulk_avatar/{uid}",
+                        artifact_kind="media_blob",
+                        data=data,
+                        extension="jpg",
+                        expected_sha256=sha,
+                        metadata={
+                            "entity_id": str(uid),
+                            "entity_name": str(uid),
+                            "content_type": "profile_photo",
+                            "content_id": f"avatar_{uid}",
+                            "filename": dest.name,
+                            "source_url": url,
+                            "request_url": url,
+                            "legacy_path": str(dest),
+                            "bulk_avatar_range": True,
+                            "rebuild_target_tables": ["media_items"],
+                        },
+                        root=VAULT_ROOT,
+                    )
+                    if not artifact.path:
+                        counters["errors"] += 1
+                        try:
+                            await self.send_to_dlq(str(uid), f"avatar_{uid}", f"vault artifact write failed: {artifact.error}")
+                        except Exception:
+                            pass
+                        return
+                    if artifact.partial:
+                        try:
+                            await self.send_to_dlq(str(uid), f"avatar_{uid}", f"vault artifact partial: {artifact.error}")
+                        except Exception:
+                            pass
                     counters["downloaded"] += 1
                 except Exception as e:
                     logger.debug("avatar_by_id %d failed: %s", uid, e)
