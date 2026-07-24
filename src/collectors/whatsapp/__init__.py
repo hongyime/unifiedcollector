@@ -57,11 +57,16 @@ from src.core.user_change_tracker import (
 )
 from src.core.link_extractor import extract_all_links
 from src.core.file_naming import sanitize_name
-from src.core.vault import VAULT_ROOT, write_atomic_artifact
+from src.core.vault import VAULT_ROOT, write_atomic_artifact, write_raw_payload
 
 logger = logging.getLogger(__name__)
 
 MEDIA_EXTS = {"jpg", "jpeg", "png", "mp4", "opus", "webp", "gif", "pdf", "3gp", "m4a"}
+
+
+def _tier1_raw_archives_enabled() -> bool:
+    raw = os.getenv("COLLECTOR_TIER1_RAW_PAYLOADS_ENABLED", "1")
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
 
 
 class WhatsappCollector(BaseCollector):
@@ -342,6 +347,17 @@ class WhatsappCollector(BaseCollector):
             return
         if "@lid" not in lid or "@s.whatsapp.net" not in jid:
             return
+        self._archive_raw_event(
+            artifact_id=f"contacts/{lid}",
+            payload=event,
+            target_tables=["whatsapp_lid_map", "whatsapp_users"],
+            metadata={
+                "lid": lid,
+                "phone_jid": jid,
+                "ingest_path": self.INGEST_PATH,
+                "raw_payload_kind": "contact",
+            },
+        )
         display_name = event.get("display_name")
         if not self.pool:
             return
@@ -361,6 +377,18 @@ class WhatsappCollector(BaseCollector):
     async def _handle_message_event(self, event: dict, targets: list[str]):
         # WhatsApp "delete for everyone" (revoke) — flag the original message + when.
         if event.get("deletion"):
+            rid_for_archive = event.get("revoked_message_id") or event.get("message_id") or event.get("key", {}).get("id", "")
+            if rid_for_archive:
+                self._archive_raw_event(
+                    artifact_id=f"messages/{rid_for_archive}/deletion",
+                    payload=event,
+                    target_tables=["whatsapp_messages"],
+                    metadata={
+                        "platform_message_id": rid_for_archive,
+                        "ingest_path": self.INGEST_PATH,
+                        "raw_payload_kind": "message_deletion",
+                    },
+                )
             rid = event.get("revoked_message_id")
             if rid and self.pool is not None:
                 ts = event.get("timestamp")
@@ -390,6 +418,19 @@ class WhatsappCollector(BaseCollector):
 
         if targets and "*" not in targets and "all" not in targets and not any(t.lower() in chat_jid.lower() for t in targets):
             return
+
+        self._archive_raw_event(
+            artifact_id=f"messages/{chat_jid}/{msg_id}",
+            payload=event,
+            target_tables=["whatsapp_messages"],
+            metadata={
+                "platform_message_id": msg_id,
+                "platform_chat_id": chat_jid,
+                "session_name": event.get("session_name"),
+                "ingest_path": self.INGEST_PATH,
+                "raw_payload_kind": "message",
+            },
+        )
 
         if await self._is_duplicate(msg_id, chat_jid):
             return
@@ -440,6 +481,28 @@ class WhatsappCollector(BaseCollector):
 
         if data:
             await self._save_media(data, cid, chat_jid, chat_name, content_type, ext, event)
+
+    def _archive_raw_event(
+        self,
+        *,
+        artifact_id: str,
+        payload: dict,
+        target_tables: list[str],
+        metadata: dict | None = None,
+    ) -> None:
+        if not _tier1_raw_archives_enabled():
+            return
+        try:
+            write_raw_payload(
+                source=self.SOURCE_NAME,
+                artifact_id=artifact_id,
+                payload=payload,
+                metadata=metadata or {},
+                target_tables=target_tables,
+                root=VAULT_ROOT,
+            )
+        except Exception as exc:
+            logger.debug("whatsapp raw archive failed for %s: %s", artifact_id, exc)
 
     async def _upsert_chat(self, jid: str, name: str, event: dict):
         # WhatsApp JID suffixes: @g.us = group, @newsletter = channel (one-to-many

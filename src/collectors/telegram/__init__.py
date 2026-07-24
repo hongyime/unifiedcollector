@@ -51,7 +51,7 @@ from src.core.user_change_tracker import (
     UserChangeTracker,
     TELEGRAM_TRACKED_FIELDS,
 )
-from src.core.vault import VAULT_ROOT, write_atomic_artifact
+from src.core.vault import VAULT_ROOT, write_atomic_artifact, write_raw_payload
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +84,30 @@ def _tg_jsonb(obj) -> str:
     telegram_reaction_counts / telegram_polls rows.)
     """
     return json.dumps(obj, default=_tg_json, ensure_ascii=False)
+
+
+def _tier1_raw_archives_enabled() -> bool:
+    raw = os.getenv("COLLECTOR_TIER1_RAW_PAYLOADS_ENABLED", "1")
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _telethon_payload(obj) -> dict:
+    if hasattr(obj, "to_dict"):
+        try:
+            payload = obj.to_dict()
+            if isinstance(payload, dict):
+                return payload
+        except Exception:
+            logger.debug("Telethon to_dict failed for raw archive", exc_info=True)
+    if isinstance(obj, dict):
+        return obj
+    if hasattr(obj, "__dict__"):
+        return {
+            key: value
+            for key, value in vars(obj).items()
+            if not key.startswith("_")
+        }
+    return {"repr": str(obj)}
 
 
 _MIME_EXT_MAP = _parse_MIME_EXT_MAP
@@ -1560,6 +1584,39 @@ class TelegramCollector(BaseCollector):
             getattr(entity, 'about', None),
             getattr(entity, 'participants_count', None)
             )
+        self._archive_raw_payload(
+            artifact_id=f"chats/{getattr(entity, 'id', 'unknown')}",
+            payload=_telethon_payload(entity),
+            target_tables=["telegram_chats"],
+            metadata={
+                "platform_chat_id": str(getattr(entity, "id", "")),
+                "username": getattr(entity, "username", None),
+                "ingest_path": self.INGEST_PATH,
+                "raw_payload_kind": "chat",
+            },
+        )
+
+    def _archive_raw_payload(
+        self,
+        *,
+        artifact_id: str,
+        payload: dict,
+        target_tables: list[str],
+        metadata: dict | None = None,
+    ) -> None:
+        if not _tier1_raw_archives_enabled():
+            return
+        try:
+            write_raw_payload(
+                source=self.SOURCE_NAME,
+                artifact_id=artifact_id,
+                payload=payload,
+                metadata=metadata or {},
+                target_tables=target_tables,
+                root=VAULT_ROOT,
+            )
+        except Exception as exc:
+            logger.debug("telegram raw archive failed for %s: %s", artifact_id, exc)
 
     async def _enqueue_forward_edges(self, message, parent_chat_platform_id: str) -> None:
         """If a message is a forward, enqueue its source as a spider seed.
@@ -1629,6 +1686,18 @@ class TelegramCollector(BaseCollector):
                 getattr(user, "bot", None),  # SYNC #40: Telethon User.bot
                 getattr(user, "deleted", False),
                 )
+                self._archive_raw_payload(
+                    artifact_id=f"users/{user.id}",
+                    payload=_telethon_payload(user),
+                    target_tables=["telegram_users"],
+                    metadata={
+                        "platform_user_id": str(user.id),
+                        "username": getattr(user, "username", None),
+                        "collection_account": getattr(worker.account, "name", None),
+                        "ingest_path": self.INGEST_PATH,
+                        "raw_payload_kind": "user",
+                    },
+                )
                 return row['id']
         except Exception:
             try:
@@ -1679,6 +1748,7 @@ class TelegramCollector(BaseCollector):
             # (different Telegram chats reuse low message IDs starting from 1).
             platform_msg_id = f"{chat_id}:{message.id}"
             reply_to, fwd_chat, fwd_msg, via_bot = self._msg_refs(message)
+            payload = _telethon_payload(message)
             row = await conn.fetchrow("""
                 INSERT INTO telegram_messages (
                     platform_message_id, chat_id, sender_id, text, caption,
@@ -1690,7 +1760,7 @@ class TelegramCollector(BaseCollector):
                 RETURNING id
             """,
             platform_msg_id, chat_uuid, sender_uuid, message.message, getattr(message, 'caption', None),
-            media_type, message.date, json.dumps(message.to_dict(), default=_tg_json),
+            media_type, message.date, json.dumps(payload, default=_tg_json),
             reply_to, fwd_chat, fwd_msg, via_bot,
             bool(getattr(message, 'pinned', False) or False)
             )
@@ -1703,6 +1773,18 @@ class TelegramCollector(BaseCollector):
                 await self._capture_poll(conn, row["id"], message)
             # Tier 6: venue/event extraction (best effort — never breaks flow).
             await self._extract_message_event(message, chat_uuid, platform_msg_id, conn=conn)
+        self._archive_raw_payload(
+            artifact_id=f"messages/{platform_msg_id}",
+            payload=payload,
+            target_tables=["telegram_messages"],
+            metadata={
+                "platform_message_id": platform_msg_id,
+                "platform_chat_id": str(chat_id),
+                "platform_sender_id": str(getattr(message, "sender_id", "") or ""),
+                "ingest_path": self.INGEST_PATH,
+                "raw_payload_kind": "message",
+            },
+        )
 
     async def _capture_message_reaction_counts(self, conn, message_uuid, message) -> None:
         """Extract message.reactions.results → write telegram_reaction_counts.
@@ -2847,10 +2929,8 @@ class TelegramCollector(BaseCollector):
 
             media_type = self._detect_message_type(message)
             platform_msg_id = f"{chat_id}:{message.id}"
-            payload_json = (
-                json.dumps(message.to_dict(), default=_tg_json)
-                if hasattr(message, "to_dict") else "{}"
-            )
+            payload = _telethon_payload(message)
+            payload_json = json.dumps(payload, default=_tg_json)
             reply_to, fwd_chat, fwd_msg, via_bot = self._msg_refs(message)
             # Tier 6: Telethon exposes message.pinned (bool) on Message objects;
             # backfill re-fetches also refresh it via the edit/upsert branches.
@@ -2899,6 +2979,18 @@ class TelegramCollector(BaseCollector):
             # Tier 6: venue/event extraction (best effort — never breaks the
             # hot realtime path; helper swallows all exceptions internally).
             await self._extract_message_event(message, chat_uuid, platform_msg_id, conn=conn)
+        self._archive_raw_payload(
+            artifact_id=f"messages/{platform_msg_id}",
+            payload=payload,
+            target_tables=["telegram_messages"],
+            metadata={
+                "platform_message_id": platform_msg_id,
+                "platform_chat_id": str(chat_id),
+                "platform_sender_id": str(getattr(message, "sender_id", "") or ""),
+                "ingest_path": self.INGEST_PATH,
+                "raw_payload_kind": "message_edit" if is_edit else "message",
+            },
+        )
 
     async def _extract_message_event(self, message, chat_uuid, platform_msg_id, conn=None):
         """Tier 6 (best effort): extract venue/event info → telegram_events.
@@ -3006,6 +3098,17 @@ class TelegramCollector(BaseCollector):
                 new_row["bio"],
                 new_row["is_bot"],
                 )
+            self._archive_raw_payload(
+                artifact_id=f"users/{user.id}",
+                payload=_telethon_payload(user),
+                target_tables=["telegram_users"],
+                metadata={
+                    "platform_user_id": str(user.id),
+                    "username": getattr(user, "username", None),
+                    "ingest_path": self.INGEST_PATH,
+                    "raw_payload_kind": "user_profile",
+                },
+            )
         except Exception as exc:
             logger.debug("_upsert_user_full failed for %s: %s", getattr(user, "id", "?"), exc)
 

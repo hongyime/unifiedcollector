@@ -31,7 +31,7 @@ import os
 import re
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Optional
-from urllib.parse import quote, urlencode
+from urllib.parse import quote
 
 import httpx
 
@@ -41,7 +41,7 @@ from src.core.user_change_tracker import (
     UserChangeTracker,
     BEEPER_TRACKED_FIELDS,
 )
-from src.core.vault import VAULT_ROOT, write_atomic_artifact
+from src.core.vault import VAULT_ROOT, write_atomic_artifact, write_raw_payload
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +66,11 @@ _BEEPER_TRANSIENT_BACKOFF = float(os.getenv("BEEPER_TRANSIENT_BACKOFF", "1.5"))
 _BEEPER_MEDIA_TOMBSTONE_AFTER = int(os.getenv("BEEPER_MEDIA_TOMBSTONE_AFTER", "3"))
 _BEEPER_429_COOLDOWN_SECONDS = int(os.getenv("BEEPER_429_COOLDOWN_SECONDS", "900"))
 _BEEPER_HTTP_STATUS_RE = re.compile(r"->\s*(\d{3})")
+
+
+def _tier1_raw_archives_enabled() -> bool:
+    raw = os.getenv("COLLECTOR_TIER1_RAW_PAYLOADS_ENABLED", "1")
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
 
 
 # ── feature gate ──────────────────────────────────────────────────────────
@@ -360,6 +365,28 @@ class BeeperWriter:
         self.pool = pool
         self.log = log or logger
 
+    def _archive_raw_payload(
+        self,
+        *,
+        artifact_id: str,
+        payload: dict | list,
+        target_tables: list[str],
+        metadata: dict | None = None,
+    ) -> None:
+        if not _tier1_raw_archives_enabled():
+            return
+        try:
+            write_raw_payload(
+                source="beeper",
+                artifact_id=artifact_id,
+                payload=payload,
+                metadata=metadata or {},
+                target_tables=target_tables,
+                root=VAULT_ROOT,
+            )
+        except Exception as exc:
+            self.log.debug("beeper raw archive failed for %s: %s", artifact_id, exc)
+
     async def upsert_account(self, acc: dict) -> None:
         async with self.pool.acquire() as conn:
             await conn.execute(
@@ -402,6 +429,18 @@ class BeeperWriter:
                 acc.get("status"),
                 json.dumps(acc, default=str),
             )
+        account_id = acc.get("accountID") or "unknown"
+        self._archive_raw_payload(
+            artifact_id=f"accounts/{account_id}",
+            payload=acc,
+            target_tables=["beeper_shadow_accounts"],
+            metadata={
+                "account_id": account_id,
+                "network": acc.get("network"),
+                "ingest_path": "messaging",
+                "raw_payload_kind": "account",
+            },
+        )
 
     async def upsert_chat(self, chat: dict) -> None:
         async with self.pool.acquire() as conn:
@@ -454,6 +493,19 @@ class BeeperWriter:
         participants = _opt(chat, "participants", "items") or []
         if isinstance(participants, list) and participants:
             await self._upsert_participants(chat["id"], chat.get("network", ""), participants)
+        chat_id = chat.get("id") or "unknown"
+        self._archive_raw_payload(
+            artifact_id=f"chats/{chat_id}",
+            payload=chat,
+            target_tables=["beeper_shadow_chats", "beeper_shadow_participants"],
+            metadata={
+                "chat_id": chat_id,
+                "account_id": chat.get("accountID"),
+                "network": chat.get("network"),
+                "ingest_path": "messaging",
+                "raw_payload_kind": "chat",
+            },
+        )
 
     async def _upsert_participants(
         self, chat_id: str, network: str, participants: list[dict]
@@ -516,6 +568,17 @@ class BeeperWriter:
                         bool(p.get("cannotMessage", False)),
                         json.dumps(p, default=str),
                     )
+        self._archive_raw_payload(
+            artifact_id=f"chats/{chat_id}/participants",
+            payload=participants,
+            target_tables=["beeper_shadow_participants"],
+            metadata={
+                "chat_id": chat_id,
+                "network": network,
+                "ingest_path": "messaging",
+                "raw_payload_kind": "participants",
+            },
+        )
 
         # ── Change-log write (non-fatal, after the upsert transaction closes
         # so we never hold two pool connections at once). Diffs are computed
@@ -621,6 +684,19 @@ class BeeperWriter:
                 json.dumps(msg, default=str),
                 datetime.now(timezone.utc) if msg.get("isDeleted") else None,
             )
+        self._archive_raw_payload(
+            artifact_id=f"messages/{msg.get('chatID') or 'unknown'}/{msg.get('id') or 'unknown'}",
+            payload=msg,
+            target_tables=["beeper_shadow_messages"],
+            metadata={
+                "message_id": msg.get("id"),
+                "chat_id": msg.get("chatID"),
+                "account_id": msg.get("accountID"),
+                "network": msg.get("network"),
+                "ingest_path": "messaging",
+                "raw_payload_kind": "message",
+            },
+        )
         return bool(row and row["inserted"])
 
     async def update_sync_state(

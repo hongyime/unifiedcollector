@@ -12,11 +12,8 @@ No network calls; no docker; no live Beeper Desktop required.
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
-import json
-import os
-from datetime import datetime, timezone
+from datetime import timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -38,6 +35,11 @@ from src.collectors.beeper import (
 
 
 # ── helpers ───────────────────────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _disable_tier1_raw_archives(monkeypatch):
+    monkeypatch.setenv("COLLECTOR_TIER1_RAW_PAYLOADS_ENABLED", "0")
 
 
 def test_parse_ts_iso_z():
@@ -325,6 +327,59 @@ async def test_writer_upsert_message_returns_inserted_flag():
     sql = conn.fetchrow.await_args.args[0]
     assert "INSERT INTO beeper_shadow_messages" in sql
     assert "RETURNING (xmax = 0)" in sql
+
+
+@pytest.mark.asyncio
+async def test_writer_upsert_account_archives_raw_payload(monkeypatch):
+    monkeypatch.setenv("COLLECTOR_TIER1_RAW_PAYLOADS_ENABLED", "1")
+    calls = []
+
+    def fake_write_raw_payload(**kwargs):
+        calls.append(kwargs)
+        return MagicMock(ok=True)
+
+    monkeypatch.setattr(beeper_mod, "write_raw_payload", fake_write_raw_payload)
+    pool, _conn = _mock_pool()
+    w = BeeperWriter(pool)
+    account = {"accountID": "discord", "network": "Discord", "status": "connected"}
+
+    await w.upsert_account(account)
+
+    assert calls
+    assert calls[0]["source"] == "beeper"
+    assert calls[0]["artifact_id"] == "accounts/discord"
+    assert calls[0]["target_tables"] == ["beeper_shadow_accounts"]
+    assert calls[0]["payload"] == account
+
+
+@pytest.mark.asyncio
+async def test_writer_upsert_message_archives_raw_payload(monkeypatch):
+    monkeypatch.setenv("COLLECTOR_TIER1_RAW_PAYLOADS_ENABLED", "1")
+    calls = []
+
+    def fake_write_raw_payload(**kwargs):
+        calls.append(kwargs)
+        return MagicMock(ok=True)
+
+    monkeypatch.setattr(beeper_mod, "write_raw_payload", fake_write_raw_payload)
+    pool, _conn = _mock_pool()
+    w = BeeperWriter(pool)
+    message = {
+        "id": "m1",
+        "chatID": "!a:b",
+        "accountID": "discord",
+        "network": "Discord",
+        "senderID": "@u:b",
+        "timestamp": "2026-05-27T13:55:06.532Z",
+        "text": "hello",
+    }
+
+    await w.upsert_message(message)
+
+    assert calls
+    assert calls[0]["artifact_id"] == "messages/!a:b/m1"
+    assert calls[0]["target_tables"] == ["beeper_shadow_messages"]
+    assert calls[0]["metadata"]["network"] == "Discord"
 
 
 @pytest.mark.asyncio

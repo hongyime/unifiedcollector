@@ -214,6 +214,11 @@ Current shipped recovery/ops work:
   `dm_hook_heartbeat`; browser ingest requests are recorded in
   `browser_ingest_events` and shown in the hourly Telegram status as browser
   saw/stored/POST counts for the current UTC hour.
+- **Tier 1 raw messaging payloads:** Telegram chat/user/message/profile
+  payloads, WhatsApp bridge message/contact/delete events, and Beeper
+  account/chat/participant/message shadow payloads are archived through
+  `write_raw_payload()` with rebuild table hints, so these live messaging
+  records are not rebuild-dependent on Postgres JSONB alone.
 - **Dashboard media joins:** chat/video dashboards join media by stable source
   keys first (`wa_<message_id>`, YouTube thumbnail/video content IDs) and use
   file-path matches only as legacy fallback.
@@ -249,6 +254,10 @@ Known remaining gaps:
   durable rate-limit events plus jittered sleep. Remaining 429/FloodWait branches
   should migrate to shared helpers as they are touched.
 - Rebuild report is a dry-run report, not a full scratch DB rebuild.
+- Tier 1 raw payload coverage is now strong for browser/extension captures,
+  browser Strava streams, authenticated Strava clubs, Telegram/WhatsApp/Beeper
+  messaging, and Beeper shadow rooms. Remaining raw coverage gaps are Strava API
+  activity/GPS pages and Instagram headless/httpx profile/post payloads.
 - Physical-file dedupe now has a core sha256 blob writer, and Beeper, Telegram,
   WhatsApp, Lemon8, YouTube, TikTok, Website, Search, Instagram
   headless/extension media, GitHub direct media, GitHub bulk avatar artifacts,

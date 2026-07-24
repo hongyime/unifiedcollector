@@ -8,9 +8,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-import time
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -47,8 +46,10 @@ def collector(tmp_path, monkeypatch):
         "WHATSAPP_RABBITMQ_URL", "RABBITMQ_URL",
         "WHATSAPP_REDIS_URL", "REDIS_URL",
         "WHATSAPP_SPIDER_SESSIONS",
+        "COLLECTOR_TIER1_RAW_PAYLOADS_ENABLED",
     ):
         monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("COLLECTOR_TIER1_RAW_PAYLOADS_ENABLED", "0")
     monkeypatch.setattr(
         "src.core.base_collector.DRIVE_PATH", str(tmp_path),
     )
@@ -68,6 +69,7 @@ def configured_collector(tmp_path, monkeypatch):
     )
     monkeypatch.setenv("WHATSAPP_MEDIA_BRIDGE_SECRET", "topsecret")
     monkeypatch.setenv("WHATSAPP_SESSION_NAMES", "sess1")
+    monkeypatch.setenv("COLLECTOR_TIER1_RAW_PAYLOADS_ENABLED", "0")
     monkeypatch.setattr(
         "src.core.base_collector.DRIVE_PATH", str(tmp_path),
     )
@@ -361,6 +363,58 @@ async def test_handle_message_event_dedupes(collector):
     collector._is_duplicate = AsyncMock(return_value=True)
     await collector._handle_message_event(event, [])
     collector._test_conn.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_handle_message_event_archives_raw_payload_before_duplicate(collector, monkeypatch):
+    monkeypatch.setenv("COLLECTOR_TIER1_RAW_PAYLOADS_ENABLED", "1")
+    calls = []
+
+    def fake_write_raw_payload(**kwargs):
+        calls.append(kwargs)
+        return MagicMock(ok=True)
+
+    monkeypatch.setattr(wa_mod, "write_raw_payload", fake_write_raw_payload)
+    event = {
+        "message_id": "m1",
+        "chat_jid": "111@s.whatsapp.net",
+        "body": "hello",
+        "session_name": "sess1",
+    }
+    collector._is_duplicate = AsyncMock(return_value=True)
+
+    await collector._handle_message_event(event, [])
+
+    assert calls
+    assert calls[0]["source"] == "whatsapp"
+    assert calls[0]["artifact_id"] == "messages/111@s.whatsapp.net/m1"
+    assert calls[0]["target_tables"] == ["whatsapp_messages"]
+    assert calls[0]["metadata"]["platform_message_id"] == "m1"
+    collector._test_conn.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_handle_contact_event_archives_raw_payload(collector, monkeypatch):
+    monkeypatch.setenv("COLLECTOR_TIER1_RAW_PAYLOADS_ENABLED", "1")
+    calls = []
+
+    def fake_write_raw_payload(**kwargs):
+        calls.append(kwargs)
+        return MagicMock(ok=True)
+
+    monkeypatch.setattr(wa_mod, "write_raw_payload", fake_write_raw_payload)
+    event = {
+        "lid": "abc@lid",
+        "jid": "15551234567@s.whatsapp.net",
+        "display_name": "Alice",
+    }
+
+    await collector._handle_contact_event(event)
+
+    assert calls
+    assert calls[0]["artifact_id"] == "contacts/abc@lid"
+    assert calls[0]["target_tables"] == ["whatsapp_lid_map", "whatsapp_users"]
+    assert calls[0]["payload"] == event
 
 
 @pytest.mark.asyncio

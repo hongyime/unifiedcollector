@@ -131,7 +131,7 @@
 ### Quality Standards
 - [x] Shared artifact writer has unit tests for success, sidecar failure, checksum mismatch, missing vault, duplicate blob, and DB failure.
 - [x] Reconciler has tests for DB-only, file-only, sidecar-only, and partial artifact states.
-- [ ] Existing collectors keep passing smoke tests after migrating to the shared artifact writer.
+- [x] Existing collectors keep passing smoke tests after migrating to the shared artifact writer.
 - [ ] Dashboard and Telegram wording are clear to a non-developer operator.
 
 ### User Acceptance
@@ -222,6 +222,7 @@ Restore rehearsal checklist:
 - Rebuild reporting exists in `src/core/rebuild_report.py` and covers sidecar scan, raw payload table hints, DB-only, sidecar-only, blob-only, missing file, size mismatch, and checksum mismatch states.
 - Generic media reconciliation repair now canonicalizes recovered files: `_redownload` writes through `write_atomic_artifact`, then updates `media_items.file_path/file_size/sha256` and `metadata.vault_artifact` so repaired legacy rows point at vault blobs.
 - Authenticated Strava club membership payloads now archive through `write_raw_payload()` under `raw/strava/...` with rebuild metadata for `strava_athletes`, replacing the old media-tree JSON write.
+- Tier 1 messaging raw payloads now archive outside Postgres before/after normalized writes as applicable: Telegram chat/user/message/profile payloads, WhatsApp message/contact/delete bridge events, and Beeper account/chat/participant/message shadow payloads write through `write_raw_payload()` with rebuild table hints. Unit tests disable raw archives by default to avoid writing test fixtures into the real vault, then explicitly enable and mock the writer in raw-coverage tests.
 - Media/raw rebuild rehearsal exists in `src/core/rebuild_rehearsal.py` and `python -m src.main rebuild-rehearsal`: media sidecars and raw-payload sidecars can be materialized into scratch SQLite tables without touching production Postgres.
 - Collector DB backups are implemented with vault-mirror checks, status reporting, and retention tests.
 - Dashboard and Telegram hourly status now include vault health, artifact partial/queued counts, backup status, hourly ingest, scoped rate-limit/auth failures, Telegram FloodWait events, browser extension hook/ingest counters, decoded-frame freshness, and stale Chrome extension version warnings.
@@ -232,7 +233,8 @@ Restore rehearsal checklist:
 - `src/core/scrape_pacing.py` now provides a tunable one-shot pre-cooldown retry delay (`COLLECTOR_PRE_COOLDOWN_RETRY_*`). Instagram Playwright profile fetches, Strava GPS stream fetches, and Search HTTP fetch paths use it; recovered Strava/Search 429s are logged without creating an active cooldown, while repeated 429s still open scoped cooldowns where the collector can safely skip that exact scope.
 - Beeper, Telegram, WhatsApp, Lemon8, YouTube, TikTok, Website, Search, Instagram headless/extension media, GitHub direct media, GitHub bulk avatar artifacts, shared profile-photo, generic `BaseCollector.save_file`, shared `media_download` HTTP/delegated single-file calls, and Strava activity photo/route-map downloads now write physical bytes through `write_atomic_artifact` or `write_atomic_artifact_from_path` to canonical `media/blobs/<sha256>` paths while retaining per-occurrence `media_items` rows and sidecars where a concrete source occurrence should be indexed. TikTok Playwright fallback uses vault-temp intermediate files and deletes them after re-ingest, so browser fallback no longer leaves duplicate legacy MP4s. Duplicate-row cleanup in `BaseCollector.insert_media_item` preserves canonical blob files and only removes legacy per-occurrence duplicate files. The collector dashboard media resolver accepts both legacy media-root paths and vault-backed blob paths.
 - `src/core/health.py` no longer imports the full DB connection module for Docker health checks; live Telegram/WhatsApp health checks dropped from roughly 50s to roughly 10s and fit the configured 30s timeout.
-- Still not complete: source-by-source migration proof, full Tier 1 raw payload coverage, and restore replay from a real DB dump. GitHub bulk avatar range writes artifact sidecars only and intentionally does not create `media_items` rows for unknown numeric IDs.
+- Broad post-migration smoke/regression test passed on 2026-07-24: `python -m pytest -q tests\collectors tests\bridges\test_ig_ingest_vault.py tests\dashboard tests\core\test_base_collector.py tests\core\test_media_download.py tests\core\test_vault.py tests\test_reconciler.py` covered 524 collector/dashboard/vault/reconciler tests successfully.
+- Still not complete: Strava API activity/GPS raw archive coverage, Instagram headless/httpx raw archive coverage, and restore replay from a real DB dump. GitHub bulk avatar range writes artifact sidecars only and intentionally does not create `media_items` rows for unknown numeric IDs.
 
 **Document Version**: 1.0
 **Created**: 2026-07-20

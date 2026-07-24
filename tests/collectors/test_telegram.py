@@ -119,6 +119,7 @@ def _make_collector(monkeypatch, *, accounts=None, api_id="123", api_hash="x"):
     monkeypatch.setenv("TELEGRAM_API_ID", api_id)
     monkeypatch.setenv("TELEGRAM_API_HASH", api_hash)
     monkeypatch.setenv("PROXIMITY_CACHE_ENABLED", "false")
+    monkeypatch.setenv("COLLECTOR_TIER1_RAW_PAYLOADS_ENABLED", "0")
     # Avoid noisy disk scans
     monkeypatch.setattr(tg_mod, "logger", tg_mod.logger)  # no-op, kept for symmetry
 
@@ -692,6 +693,73 @@ async def test_download_media_writes_vault_blob(monkeypatch, tmp_path):
     assert kwargs["metadata"]["vault_artifact"]["partial"] is False
     assert kwargs["metadata"]["vault_artifact"]["blob_path"].startswith("media/blobs/")
     coll.send_to_dlq.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_upsert_message_archives_raw_payload(monkeypatch):
+    coll = _make_collector(monkeypatch)
+    monkeypatch.setenv("COLLECTOR_TIER1_RAW_PAYLOADS_ENABLED", "1")
+    calls = []
+
+    def fake_write_raw_payload(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(ok=True, path=None, relative_path=None, sidecar=None, error=None)
+
+    monkeypatch.setattr(tg_mod, "write_raw_payload", fake_write_raw_payload)
+    message = SimpleNamespace(
+        id=99,
+        sender_id=123,
+        message="hello",
+        caption=None,
+        date=datetime(2026, 7, 24, tzinfo=timezone.utc),
+        photo=None,
+        video=None,
+        voice=None,
+        pinned=False,
+        reactions=None,
+        media=None,
+        action=None,
+        to_dict=lambda: {"id": 99, "message": "hello", "sender_id": 123},
+    )
+
+    await coll._upsert_message(message, 42, "sender-uuid")
+
+    assert calls
+    assert calls[0]["source"] == "telegram"
+    assert calls[0]["artifact_id"] == "messages/42:99"
+    assert calls[0]["target_tables"] == ["telegram_messages"]
+    assert calls[0]["payload"]["message"] == "hello"
+    assert calls[0]["metadata"]["platform_chat_id"] == "42"
+
+
+@pytest.mark.asyncio
+async def test_upsert_user_full_archives_raw_payload(monkeypatch):
+    coll = _make_collector(monkeypatch)
+    monkeypatch.setenv("COLLECTOR_TIER1_RAW_PAYLOADS_ENABLED", "1")
+    calls = []
+
+    def fake_write_raw_payload(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(ok=True, path=None, relative_path=None, sidecar=None, error=None)
+
+    monkeypatch.setattr(tg_mod, "write_raw_payload", fake_write_raw_payload)
+    user = SimpleNamespace(
+        id=77,
+        username="alice",
+        first_name="Alice",
+        last_name="Example",
+        phone="+1",
+        bio="bio",
+        bot=False,
+        to_dict=lambda: {"id": 77, "username": "alice"},
+    )
+
+    await coll._upsert_user_full(user)
+
+    assert calls
+    assert calls[0]["artifact_id"] == "users/77"
+    assert calls[0]["target_tables"] == ["telegram_users"]
+    assert calls[0]["payload"]["username"] == "alice"
 
 
 @pytest.mark.asyncio
