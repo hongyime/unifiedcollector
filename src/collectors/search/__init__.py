@@ -91,6 +91,7 @@ import httpx
 
 from src.core.base_collector import BaseCollector
 from src.core.rate_limit_events import record_rate_limit_event
+from src.core.scrape_pacing import sleep_before_pre_cooldown_retry
 from src.collectors.search.parse import (
     is_content_url as _parse_is_content_url,
     CONTENT_EXTENSIONS as _parse_CONTENT_EXTENSIONS,
@@ -259,6 +260,7 @@ class SearchCollector(BaseCollector):
         # handled by BaseCollector.
         self._content_hashes: set[str] = set()
         self._duplicates_skipped = 0
+        self._search_scope_cooldowns: dict[str, float] = {}
 
         # Register Serper quota with the unified tracker if available.
         self._register_serper_quota()
@@ -338,6 +340,57 @@ class SearchCollector(BaseCollector):
             )
         )
 
+    @staticmethod
+    def _default_429_cooldown_seconds() -> int | None:
+        raw = os.getenv("SEARCH_RATE_LIMIT_COOLDOWN_SECONDS", "600")
+        try:
+            value = int(float(raw))
+        except (TypeError, ValueError):
+            value = 600
+        return value if value > 0 else None
+
+    @staticmethod
+    def _search_cooldown_key(engine: str, scope: str, account: str | None = None) -> str:
+        return f"{engine}:{account or '-'}:{scope}"
+
+    def _search_scope_cooldown_remaining(
+        self,
+        engine: str,
+        scope: str,
+        account: str | None = None,
+    ) -> float:
+        key = self._search_cooldown_key(engine, scope, account)
+        remaining = self._search_scope_cooldowns.get(key, 0.0) - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            self._search_scope_cooldowns.pop(key, None)
+            return 0.0
+        return remaining
+
+    def _search_scope_cooling_down(
+        self,
+        engine: str,
+        scope: str,
+        account: str | None = None,
+    ) -> bool:
+        remaining = self._search_scope_cooldown_remaining(engine, scope, account)
+        if remaining > 0:
+            logger.info("search/%s scope %s cooling down for %.0fs", engine, scope, remaining)
+            return True
+        return False
+
+    def _set_search_scope_cooldown(
+        self,
+        engine: str,
+        scope: str,
+        seconds: int | None,
+        account: str | None = None,
+    ) -> None:
+        if not seconds or seconds <= 0:
+            return
+        key = self._search_cooldown_key(engine, scope, account)
+        deadline = asyncio.get_running_loop().time() + float(seconds)
+        self._search_scope_cooldowns[key] = max(self._search_scope_cooldowns.get(key, 0.0), deadline)
+
     async def _record_search_rate_limit(
         self,
         *,
@@ -346,15 +399,23 @@ class SearchCollector(BaseCollector):
         account: str | None = None,
         status_code: int | None = 429,
         cooldown_seconds: int | None = None,
+        cooldown_active: bool = True,
         reason: str | None = None,
         metadata: dict[str, Any] | None = None,
         response: httpx.Response | None = None,
     ) -> None:
-        if response is not None and cooldown_seconds is None:
+        if cooldown_active and response is not None and cooldown_seconds is None:
             cooldown_seconds = self._retry_after_seconds(response)
         event_metadata = {"engine": engine}
         if metadata:
             event_metadata.update(metadata)
+        if not cooldown_active:
+            event_metadata["cooldown_active"] = False
+            cooldown_seconds = None
+        elif status_code == 429 and cooldown_seconds is None:
+            cooldown_seconds = self._default_429_cooldown_seconds()
+        if cooldown_active and status_code == 429:
+            self._set_search_scope_cooldown(engine, scope, cooldown_seconds, account)
         await record_rate_limit_event(
             self.pool,
             source="search",
@@ -365,6 +426,49 @@ class SearchCollector(BaseCollector):
             reason=reason,
             metadata=event_metadata,
         )
+
+    async def _retry_search_after_429(
+        self,
+        fetch,
+        *,
+        engine: str,
+        scope: str,
+        account: str | None = None,
+        reason: str,
+        metadata: dict[str, Any] | None = None,
+    ):
+        retry_delay = await sleep_before_pre_cooldown_retry(
+            "search",
+            scope,
+            account=account,
+            status_code=429,
+            reason=reason,
+        )
+        if retry_delay is None:
+            return None
+        try:
+            retry_resp = await fetch()
+        except Exception as exc:
+            logger.debug("search/%s pre-cooldown retry failed for %s: %s", engine, scope, exc)
+            return None
+        retry_status = getattr(retry_resp, "status_code", None)
+        if retry_status != 429:
+            event_metadata = dict(metadata or {})
+            event_metadata.update({
+                "pre_cooldown_retry": True,
+                "retry_status_code": retry_status,
+                "retry_delay_seconds": retry_delay,
+            })
+            await self._record_search_rate_limit(
+                engine=engine,
+                scope=scope,
+                account=account,
+                status_code=429,
+                cooldown_active=False,
+                reason=f"{reason}; retry returned HTTP {retry_status}",
+                metadata=event_metadata,
+            )
+        return retry_resp
 
     # ------------------------------------------------------------------ #
     # Quota wiring
@@ -613,16 +717,33 @@ class SearchCollector(BaseCollector):
             if url in seen:
                 continue
             seen.add(url)
+            scope = urlparse(url).netloc or host or "crawl_seed"
+            if self._search_scope_cooling_down("spider", scope):
+                continue
             try:
-                await self.wait_rate_limit(urlparse(url).netloc or host)
-                resp = await client.get(url, headers=self._headers(urlparse(url).netloc))
+                await self.wait_rate_limit(scope)
+
+                async def _get_seed():
+                    return await client.get(url, headers=self._headers(urlparse(url).netloc))
+
+                resp = await _get_seed()
+                if resp.status_code == 429:
+                    retry_resp = await self._retry_search_after_429(
+                        _get_seed,
+                        engine="spider",
+                        scope=scope,
+                        reason="seed crawl returned 429",
+                        metadata={"url": url, "seed": seed},
+                    )
+                    if retry_resp is not None:
+                        resp = retry_resp
             except Exception:
                 continue
             if resp.status_code != 200:
                 if resp.status_code == 429:
                     await self._record_search_rate_limit(
                         engine="spider",
-                        scope=urlparse(url).netloc or host or "crawl_seed",
+                        scope=scope,
                         status_code=429,
                         reason="seed crawl returned 429",
                         metadata={"url": url, "seed": seed},
@@ -777,14 +898,30 @@ class SearchCollector(BaseCollector):
                 if self._stop.is_set():
                     break
                 url = f"{DEFAULT_BING_DOMAIN}/search?q={encoded_query}&first={page}"
-                await self.wait_rate_limit("bing.com")
+                scope = "bing.com"
+                if self._search_scope_cooling_down("bing", scope):
+                    break
+                await self.wait_rate_limit(scope)
                 try:
-                    resp = await client.get(url, headers=self._headers("bing.com"))
+                    async def _get_bing():
+                        return await client.get(url, headers=self._headers(scope))
+
+                    resp = await _get_bing()
+                    if resp.status_code == 429:
+                        retry_resp = await self._retry_search_after_429(
+                            _get_bing,
+                            engine="bing",
+                            scope=scope,
+                            reason="bing search returned 429",
+                            metadata={"query": query, "page": page, "url": url},
+                        )
+                        if retry_resp is not None:
+                            resp = retry_resp
                     if resp.status_code != 200:
                         if resp.status_code == 429:
                             await self._record_search_rate_limit(
                                 engine="bing",
-                                scope="bing.com",
+                                scope=scope,
                                 status_code=429,
                                 reason="bing search returned 429",
                                 metadata={"query": query, "page": page, "url": url},
@@ -850,17 +987,39 @@ class SearchCollector(BaseCollector):
                     "gl": os.getenv("SERPER_GL", "sg"),
                     "hl": os.getenv("SERPER_HL", "en"),
                 }
-                await self.wait_rate_limit("google.serper.dev")
+                scope = "google.serper.dev"
+                account = self._serper_api_key[:8] or None
+                if self._search_scope_cooling_down("serper", scope, account):
+                    break
+                await self.wait_rate_limit(scope)
                 try:
-                    resp = await client.post(url, headers=headers, json=payload)
+                    async def _post_serper():
+                        return await client.post(url, headers=headers, json=payload)
+
+                    resp = await _post_serper()
                     if resp.status_code == 401:
                         logger.error("[Serper] API key unauthorized")
                         break
                     if resp.status_code == 429:
+                        retry_resp = await self._retry_search_after_429(
+                            _post_serper,
+                            engine="serper",
+                            account=account,
+                            scope=scope,
+                            reason="serper search returned 429",
+                            metadata={
+                                "query": query,
+                                "page": page + 1,
+                                "url": url,
+                            },
+                        )
+                        if retry_resp is not None:
+                            resp = retry_resp
+                    if resp.status_code == 429:
                         await self._record_search_rate_limit(
                             engine="serper",
-                            account=self._serper_api_key[:8] or None,
-                            scope="google.serper.dev",
+                            account=account,
+                            scope=scope,
                             status_code=429,
                             reason="serper search returned 429",
                             metadata={
@@ -997,13 +1156,29 @@ class SearchCollector(BaseCollector):
         body = first_body
         for _page in range(max_pages):
             if body is None:
+                scope = urlparse(url).netloc or "bucket"
+                if self._search_scope_cooling_down("bucket", scope):
+                    break
                 try:
-                    r = await client.get(url, headers=self._headers(urlparse(url).netloc))
+                    async def _get_bucket():
+                        return await client.get(url, headers=self._headers(urlparse(url).netloc))
+
+                    r = await _get_bucket()
+                    if r.status_code == 429:
+                        retry_resp = await self._retry_search_after_429(
+                            _get_bucket,
+                            engine="bucket",
+                            scope=scope,
+                            reason="bucket listing returned 429",
+                            metadata={"url": url, "root": root},
+                        )
+                        if retry_resp is not None:
+                            r = retry_resp
                     if r.status_code != 200:
                         if r.status_code == 429:
                             await self._record_search_rate_limit(
                                 engine="bucket",
-                                scope=urlparse(url).netloc or "bucket",
+                                scope=scope,
                                 status_code=429,
                                 reason="bucket listing returned 429",
                                 metadata={"url": url, "root": root},
@@ -1037,13 +1212,29 @@ class SearchCollector(BaseCollector):
         if self._BS is None:
             return set()
         discovered: set[str] = set()
+        scope = urlparse(page_url).netloc or "spider_page"
+        if self._search_scope_cooling_down("spider", scope):
+            return discovered
         try:
-            resp = await client.get(page_url, headers=self._headers(urlparse(page_url).netloc))
+            async def _get_spider_page():
+                return await client.get(page_url, headers=self._headers(urlparse(page_url).netloc))
+
+            resp = await _get_spider_page()
+            if resp.status_code == 429:
+                retry_resp = await self._retry_search_after_429(
+                    _get_spider_page,
+                    engine="spider",
+                    scope=scope,
+                    reason="spider page returned 429",
+                    metadata={"url": page_url},
+                )
+                if retry_resp is not None:
+                    resp = retry_resp
             if resp.status_code != 200:
                 if resp.status_code == 429:
                     await self._record_search_rate_limit(
                         engine="spider",
-                        scope=urlparse(page_url).netloc or "spider_page",
+                        scope=scope,
                         status_code=429,
                         reason="spider page returned 429",
                         metadata={"url": page_url},
@@ -1141,15 +1332,38 @@ class SearchCollector(BaseCollector):
         if self._download_videos and _ext in VIDEO_EXTENSIONS:
             return await self._stream_video(query, cid, url, source_url or url)
 
+        engine = hit.get("engine") or "download"
+        scope = urlparse(url).netloc or "download"
+        if self._search_scope_cooling_down(engine, scope):
+            return False
+
         async with self._sem:
             try:
                 async with self._make_client(timeout=30.0) as client:
-                    resp = await client.get(url, headers=self._headers(urlparse(url).netloc))
+                    async def _get_asset():
+                        return await client.get(url, headers=self._headers(urlparse(url).netloc))
+
+                    resp = await _get_asset()
+                    if resp.status_code == 429:
+                        retry_resp = await self._retry_search_after_429(
+                            _get_asset,
+                            engine=engine,
+                            scope=scope,
+                            reason="asset download returned 429",
+                            metadata={
+                                "query": query,
+                                "url": url,
+                                "source_url": source_url,
+                                "rank": hit.get("rank"),
+                            },
+                        )
+                        if retry_resp is not None:
+                            resp = retry_resp
                     if resp.status_code != 200:
                         if resp.status_code == 429:
                             await self._record_search_rate_limit(
-                                engine=hit.get("engine") or "download",
-                                scope=urlparse(url).netloc or "download",
+                                engine=engine,
+                                scope=scope,
                                 status_code=429,
                                 reason="asset download returned 429",
                                 metadata={
@@ -1453,6 +1667,10 @@ class SearchCollector(BaseCollector):
         by default (SEARCH_MAX_VIDEO_BYTES=0). content_type 'video'."""
         if self.is_known(content_id):
             return False
+        engine = "video"
+        scope = urlparse(url).netloc or "video"
+        if self._search_scope_cooling_down(engine, scope):
+            return False
         ext = (os.path.splitext(urlparse(url.lower()).path)[1] or ".mp4").lstrip(".") or "mp4"
         q_slug = hashlib.sha256(query.encode()).hexdigest()[:12] if query else "spider"
         q_name = (query or "spider")[:50]
@@ -1468,36 +1686,65 @@ class SearchCollector(BaseCollector):
             async with self._sem:
                 with os.fdopen(fd, "wb") as f:
                     async with self._make_client(timeout=120.0) as client:
-                        async with client.stream(
-                            "GET", url, headers=self._headers(urlparse(url).netloc)
-                        ) as resp:
-                            if resp.status_code != 200:
-                                if resp.status_code == 429:
-                                    await self._record_search_rate_limit(
-                                        engine="video",
-                                        scope=urlparse(url).netloc or "video",
+                        retry_delay: float | None = None
+                        for attempt in (1, 2):
+                            async with client.stream(
+                                "GET", url, headers=self._headers(urlparse(url).netloc)
+                            ) as resp:
+                                if resp.status_code == 429 and attempt == 1:
+                                    retry_delay = await sleep_before_pre_cooldown_retry(
+                                        "search",
+                                        scope,
                                         status_code=429,
                                         reason="video stream returned 429",
+                                    )
+                                    if retry_delay is not None:
+                                        continue
+                                if retry_delay is not None and resp.status_code != 429:
+                                    await self._record_search_rate_limit(
+                                        engine=engine,
+                                        scope=scope,
+                                        status_code=429,
+                                        cooldown_active=False,
+                                        reason=f"video stream returned 429; retry returned HTTP {resp.status_code}",
                                         metadata={
                                             "query": query,
                                             "url": url,
                                             "source_url": source_url,
+                                            "pre_cooldown_retry": True,
+                                            "retry_status_code": resp.status_code,
+                                            "retry_delay_seconds": retry_delay,
                                         },
-                                        response=resp,
                                     )
-                                raise RuntimeError(f"status {resp.status_code}")
-                            ct = resp.headers.get("content-type", "").lower()
-                            if ct and not (ct.startswith("video/")
-                                           or ct == "application/octet-stream"):
-                                raise RuntimeError(f"non-video content-type {ct}")
-                            async for chunk in resp.aiter_bytes(self._video_chunk_bytes):
-                                if not chunk:
-                                    continue
-                                size += len(chunk)
-                                if self._max_video_bytes and size > self._max_video_bytes:
-                                    raise RuntimeError("video exceeds cap")
-                                f.write(chunk)
-                                hasher.update(chunk)
+                                    retry_delay = None
+                                if resp.status_code != 200:
+                                    if resp.status_code == 429:
+                                        await self._record_search_rate_limit(
+                                            engine=engine,
+                                            scope=scope,
+                                            status_code=429,
+                                            reason="video stream returned 429",
+                                            metadata={
+                                                "query": query,
+                                                "url": url,
+                                                "source_url": source_url,
+                                            },
+                                            response=resp,
+                                        )
+                                    raise RuntimeError(f"status {resp.status_code}")
+                                ct = resp.headers.get("content-type", "").lower()
+                                if ct and not (ct.startswith("video/")
+                                               or ct == "application/octet-stream"):
+                                    raise RuntimeError(f"non-video content-type {ct}")
+                                async for chunk in resp.aiter_bytes(self._video_chunk_bytes):
+                                    if not chunk:
+                                        continue
+                                    size += len(chunk)
+                                    if self._max_video_bytes and size > self._max_video_bytes:
+                                        raise RuntimeError("video exceeds cap")
+                                    f.write(chunk)
+                                    hasher.update(chunk)
+                                break
             if size < self._min_file_size:
                 raise RuntimeError("video too small")
             os.replace(tmp_path, dest)

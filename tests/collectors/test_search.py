@@ -100,6 +100,65 @@ def test_constructor_env_overrides(monkeypatch):
     assert coll._serper_quota == 100
 
 
+@pytest.mark.asyncio
+async def test_search_scope_cooldown_is_exact(monkeypatch):
+    _set_clean_env(monkeypatch)
+    coll = SearchCollector()
+
+    coll._set_search_scope_cooldown("bing", "bing.com", 60)
+
+    assert coll._search_scope_cooling_down("bing", "bing.com") is True
+    assert coll._search_scope_cooling_down("spider", "bing.com") is False
+    assert coll._search_scope_cooling_down("bing", "example.com") is False
+
+
+@pytest.mark.asyncio
+async def test_record_search_rate_limit_defaults_cooldown(monkeypatch):
+    _set_clean_env(monkeypatch)
+    monkeypatch.setenv("SEARCH_RATE_LIMIT_COOLDOWN_SECONDS", "123")
+    coll = SearchCollector()
+    record_event = AsyncMock()
+    monkeypatch.setattr(search_mod, "record_rate_limit_event", record_event)
+
+    await coll._record_search_rate_limit(
+        engine="bing",
+        scope="bing.com",
+        status_code=429,
+        reason="bing search returned 429",
+    )
+
+    record_event.assert_awaited_once()
+    assert record_event.await_args.kwargs["cooldown_seconds"] == 123
+    assert coll._search_scope_cooldown_remaining("bing", "bing.com") > 100
+
+
+@pytest.mark.asyncio
+async def test_retry_search_after_429_records_transient(monkeypatch):
+    _set_clean_env(monkeypatch)
+    coll = SearchCollector()
+    retry_sleep = AsyncMock(return_value=0.0)
+    monkeypatch.setattr(search_mod, "sleep_before_pre_cooldown_retry", retry_sleep)
+    coll._record_search_rate_limit = AsyncMock()
+    retry_resp = MagicMock(status_code=200)
+    fetch = AsyncMock(return_value=retry_resp)
+
+    out = await coll._retry_search_after_429(
+        fetch,
+        engine="bing",
+        scope="bing.com",
+        reason="bing search returned 429",
+        metadata={"query": "q"},
+    )
+
+    assert out is retry_resp
+    fetch.assert_awaited_once()
+    coll._record_search_rate_limit.assert_awaited_once()
+    kwargs = coll._record_search_rate_limit.await_args.kwargs
+    assert kwargs["cooldown_active"] is False
+    assert kwargs["metadata"]["pre_cooldown_retry"] is True
+    assert kwargs["metadata"]["retry_status_code"] == 200
+
+
 # ── account_media_dir ──────────────────────────────────────────────────────
 
 
@@ -323,6 +382,70 @@ async def test_search_bing_cache_hit(monkeypatch):
     assert out == cached
 
 
+@pytest.mark.asyncio
+async def test_search_bing_retries_transient_429(monkeypatch):
+    _set_clean_env(monkeypatch)
+    coll = SearchCollector()
+    coll._cache.get = MagicMock(return_value=None)
+    coll._cache.put = MagicMock()
+    coll.wait_rate_limit = AsyncMock()
+    coll._BS = MagicMock(return_value=MagicMock(select=MagicMock(return_value=[])))
+    coll._record_search_rate_limit = AsyncMock()
+    monkeypatch.setattr(search_mod, "sleep_before_pre_cooldown_retry", AsyncMock(return_value=0.0))
+    monkeypatch.setattr(search_mod.asyncio, "sleep", AsyncMock(return_value=None))
+
+    first = MagicMock(status_code=429)
+    second = MagicMock(status_code=200, text="<html></html>")
+    client = MagicMock()
+    client.get = AsyncMock(side_effect=[first, second])
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+
+    with patch.object(coll, "_make_client", return_value=client):
+        out = await coll._search_bing("q", num_pages=1)
+
+    assert out == []
+    assert client.get.await_count == 2
+    coll._record_search_rate_limit.assert_awaited_once()
+    kwargs = coll._record_search_rate_limit.await_args.kwargs
+    assert kwargs["cooldown_active"] is False
+    assert kwargs["metadata"]["pre_cooldown_retry"] is True
+    assert kwargs["metadata"]["retry_status_code"] == 200
+
+
+@pytest.mark.asyncio
+async def test_search_bing_sets_cooldown_when_retry_still_429(monkeypatch):
+    _set_clean_env(monkeypatch)
+    monkeypatch.setenv("SEARCH_RATE_LIMIT_COOLDOWN_SECONDS", "91")
+    coll = SearchCollector()
+    coll._cache.get = MagicMock(return_value=None)
+    coll.wait_rate_limit = AsyncMock()
+    coll._BS = MagicMock()
+    record_event = AsyncMock()
+    monkeypatch.setattr(search_mod, "record_rate_limit_event", record_event)
+    monkeypatch.setattr(search_mod, "sleep_before_pre_cooldown_retry", AsyncMock(return_value=0.0))
+    monkeypatch.setattr(search_mod.asyncio, "sleep", AsyncMock(return_value=None))
+
+    client = MagicMock()
+    client.get = AsyncMock(side_effect=[
+        MagicMock(status_code=429, headers={}),
+        MagicMock(status_code=429, headers={}),
+    ])
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+
+    with patch.object(coll, "_make_client", return_value=client):
+        out = await coll._search_bing("q", num_pages=1)
+
+    assert out == []
+    assert client.get.await_count == 2
+    record_event.assert_awaited_once()
+    assert record_event.await_args.kwargs["source"] == "search"
+    assert record_event.await_args.kwargs["scope"] == "bing.com"
+    assert record_event.await_args.kwargs["cooldown_seconds"] == 91
+    assert coll._search_scope_cooldown_remaining("bing", "bing.com") > 80
+
+
 # ── _search_serper ─────────────────────────────────────────────────────────
 
 
@@ -382,6 +505,7 @@ async def test_expand_paste_sites_no_bs_returns_empty(monkeypatch):
 @pytest.mark.asyncio
 async def test_expand_paste_sites_returns_discovered(monkeypatch):
     _set_clean_env(monkeypatch)
+    monkeypatch.setenv("SEARCH_SPIDER_DEPTH", "0")
     coll = SearchCollector()
     coll._BS = MagicMock()  # presence-only
 
