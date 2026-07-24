@@ -169,7 +169,7 @@ Working & verified: Tier 2 media (all sources download files), Tier 3 docs/audio
 
 ---
 
-## Implementation status — refreshed 2026-07-23
+## Implementation status — refreshed 2026-07-24
 
 Current shipped recovery/ops work:
 
@@ -182,7 +182,9 @@ Current shipped recovery/ops work:
   and extension ingest record sidecar status into metadata/DLQ.
 - **Rebuild report:** `python -m src.main rebuild-report --compare-db
   --verify-checksums` reports sidecar coverage plus DB-only, sidecar-only,
-  blob-only, missing-file, and checksum-mismatch states.
+  blob-only, missing-file, and checksum-mismatch states. DB comparison is
+  bounded by `REBUILD_REPORT_DB_COMPARE_TIMEOUT_SECONDS` and JSON output keeps
+  logs on stderr so automation can parse stdout directly.
 - **Browser-extension observability:** extension hooks are tracked through
   `dm_hook_heartbeat`; browser ingest requests are recorded in
   `browser_ingest_events` and shown in the hourly Telegram status as browser
@@ -193,6 +195,12 @@ Current shipped recovery/ops work:
 - **Strava GPS routes:** existing stored `strava_gps_streams.latlng` rows are
   repaired into route fields without network calls; GPS stream 429 cooldown is
   restored after restart so the backfill does not hammer Strava again.
+- **Live bounded probe:** On 2026-07-24, `rebuild-report --compare-db
+  --compare-db-limit 200 --sidecar-limit 200 --blob-limit 200 --json` parsed as
+  clean JSON, scanned 200 DB media rows and 200 sidecars, and returned
+  `db_compare_error=null` within the 10s DB compare budget. The sample reported
+  200 `website` rows as `db_only` plus `file_missing`, which is now measurable
+  repair input instead of a hanging scan.
 
 Known remaining gaps:
 
