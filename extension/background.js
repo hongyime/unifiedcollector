@@ -521,6 +521,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           });
           const j = await r.json().catch(() => ({}));
           if (j.stored) await log("info", `🗺 strava · activity ${msg.activity_id} · route ${j.point_count || pointCount} point(s) captured`);
+          else if (j.rate_limit_recorded) await log("warn", `strava · activity ${msg.activity_id} · HTTP ${msg.http_status} route stream recorded`);
           sendResponse({ ok: r.ok, ...j });
         } catch (e) {
           await log("error", `strava route capture failed: ${e.message}`);

@@ -268,6 +268,24 @@
       const m = String(url || "").match(stravaStreamsRe);
       const activityId = m && m[1];
       if (!activityId) return;
+      const statusCode = Number(status || 0);
+      if (statusCode === 429 || statusCode === 401 || statusCode === 403) {
+        const statusKey = activityId + ":http:" + statusCode;
+        if (_emittedStravaStreams.has(statusKey)) return;
+        if (_emittedStravaStreams.size > 1000) _emittedStravaStreams.clear();
+        _emittedStravaStreams.add(statusKey);
+        window.postMessage({
+          __uc: true,
+          type: "strava_streams",
+          platform: "strava",
+          activity_id: activityId,
+          request_url: String(url).slice(0, 500),
+          http_status: statusCode,
+          point_count: 0,
+          streams: {},
+        }, "*");
+        return;
+      }
       let json; try { json = JSON.parse(text); } catch (e) { return; }
       const latlng = _streamData(json, "latlng");
       if (!Array.isArray(latlng) || latlng.length < 2) return;

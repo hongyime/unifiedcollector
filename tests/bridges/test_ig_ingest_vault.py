@@ -128,6 +128,38 @@ def test_record_browser_ingest_event_writes_observed_and_stored_counts():
     assert "extension_version" in args[5]
 
 
+def test_record_strava_stream_http_429_writes_rate_limit_event(monkeypatch):
+    pool = _FakePool()
+    monkeypatch.setattr(ig_ingest, "STRAVA_BROWSER_429_COOLDOWN_SECONDS", 1234)
+
+    recorded = asyncio.run(
+        ig_ingest._record_strava_stream_http_event(
+            pool,
+            {
+                "activity_id": "19283135496",
+                "request_url": "https://www.strava.com/activities/19283135496/streams",
+                "http_status": 429,
+                "owner": "bryanseah234",
+                "extension_version": "1.21.23",
+            },
+        )
+    )
+
+    assert recorded is True
+    assert len(pool.conn.executes) == 1
+    query, args = pool.conn.executes[0]
+    assert "rate_limit_events" in query
+    assert args[:6] == (
+        "strava",
+        "bryanseah234",
+        "browser_strava_streams",
+        429,
+        1234,
+        "browser Strava stream HTTP 429 for 19283135496",
+    )
+    assert "19283135496" in args[6]
+
+
 def test_archive_browser_capture_writes_dm_sample_raw_payload(monkeypatch):
     pool = _FakePool()
     calls = []

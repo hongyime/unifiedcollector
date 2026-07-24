@@ -73,7 +73,7 @@ async def test_notify_status_splits_rate_limit_from_auth_events(monkeypatch):
                 "platform": "instagram",
                 "age_seconds": 21,
                 "extension_version": "1.21.8",
-                "expected_extension_version": "1.21.22",
+                "expected_extension_version": "1.21.23",
                 "owner_count": 1,
                 "probes_current_hour": 12,
                 "samples_current_hour": 0,
@@ -148,7 +148,7 @@ async def test_notify_status_splits_rate_limit_from_auth_events(monkeypatch):
     assert "Instagram: hook v1.21.8 last heartbeat 21s ago" in msg
     assert "this hour 12 probe frames and 0 sample frames" in msg
     assert "last decoded frame 1m ago" in msg
-    assert "repo expects v1.21.22; reload the unpacked extension" in msg
+    assert "repo expects v1.21.23; reload the unpacked extension" in msg
     assert "<b>Browser extension ingest</b>" in msg
     assert "Threads media files: browser saw 12 items; stored 3; 2 POSTs this hour." in msg
     assert "Instagram profiles: browser saw 1 item; stored 1; 1 POST this hour." in msg

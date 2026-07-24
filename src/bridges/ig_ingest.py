@@ -44,6 +44,7 @@ from src.db.connection import get_pool, close_pool
 from src.core.media_filter import inspect as inspect_media
 from src.core.priority_hints import refresh_collector_priority_hints
 from src.core.proximity import refresh_account_proximity_cache
+from src.core.rate_limit_events import record_rate_limit_event
 from src.core.strava_route_queue import fetch_strava_route_capture_queue
 from src.core.vault import assert_media_write_allowed, write_media_sidecar, write_raw_payload
 from src.collectors.strava import _derive_gps_route_fields
@@ -82,6 +83,7 @@ DM_SAMPLE_DIR = "/tmp/dm_samples"
 DM_SAMPLE_CAP_PER_PLATFORM = int(os.getenv("DM_SAMPLE_CAP", "200"))
 MIN_BYTES = int(os.getenv("IG_INGEST_MIN_BYTES", "1024"))
 DL_CONCURRENCY = int(os.getenv("SOCIAL_INGEST_CONCURRENCY", "4"))
+STRAVA_BROWSER_429_COOLDOWN_SECONDS = int(os.getenv("STRAVA_BROWSER_429_COOLDOWN_SECONDS", "1800"))
 _SAFE = re.compile(r"[^A-Za-z0-9._-]")
 
 # Platforms the bridge may push. Each may carry its own famous-cap / hop config.
@@ -2158,12 +2160,59 @@ async def _upsert_strava_browser_stream(pool, body: dict) -> dict:
     return {"stored": 1, "point_count": point_count, "activity_id": activity_id}
 
 
+def _browser_http_status(body: dict) -> int | None:
+    for key in ("http_status", "status_code"):
+        try:
+            value = body.get(key)
+            if value is not None:
+                return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _browser_account_label(body: dict, *, fallback: str = "extension") -> str:
+    owner = body.get("owner") or body.get("owner_account") or body.get("account")
+    if isinstance(owner, dict):
+        owner = owner.get("username") or owner.get("id")
+    text = str(owner or fallback).strip() or fallback
+    return text[:128]
+
+
+async def _record_strava_stream_http_event(pool, body: dict) -> bool:
+    status = _browser_http_status(body)
+    if status not in {401, 403, 429}:
+        return False
+    activity_id = str(body.get("activity_id") or body.get("platform_activity_id") or "unknown")
+    cooldown = STRAVA_BROWSER_429_COOLDOWN_SECONDS if status == 429 else None
+    await record_rate_limit_event(
+        pool,
+        source="strava",
+        account=_browser_account_label(body),
+        scope="browser_strava_streams",
+        status_code=status,
+        cooldown_seconds=cooldown,
+        reason=f"browser Strava stream HTTP {status} for {activity_id}",
+        metadata={
+            "activity_id": activity_id,
+            "request_url": body.get("request_url") or body.get("url"),
+            "extension_version": body.get("extension_version"),
+            "point_count": body.get("point_count"),
+            "browser_capture": True,
+        },
+    )
+    return True
+
+
 async def strava_streams_handler(request):
     body = await _safe_json(request)
     body["platform"] = "strava"
     pool = request.app["pool"]
     await _archive_browser_capture(pool, "strava", "strava_streams", body)
+    http_event_recorded = await _record_strava_stream_http_event(pool, body)
     result = await _upsert_strava_browser_stream(pool, body)
+    if http_event_recorded:
+        result["rate_limit_recorded"] = True
     await _record_browser_ingest_event(
         pool,
         "strava",
