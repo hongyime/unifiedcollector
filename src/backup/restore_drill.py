@@ -563,7 +563,7 @@ def _table_counts_docker(config: RestoreDrillConfig, scratch_database: str) -> d
             config,
             'PGPASSWORD="${POSTGRES_PASSWORD:-}" '
             f'psql -v ON_ERROR_STOP=1 -U "${{POSTGRES_USER:-collector}}" -d "{scratch_database}" '
-            f'-tAc "SELECT to_regclass('"'public.{table}'"')"',
+            f'-tAc "SELECT to_regclass(\'public.{table}\')"',
             f"docker psql table existence check failed for {table}",
         )
         stdout = exists.stdout.decode("utf-8", errors="replace") if isinstance(exists.stdout, bytes) else exists.stdout

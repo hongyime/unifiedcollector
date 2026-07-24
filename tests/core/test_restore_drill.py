@@ -83,6 +83,38 @@ def test_docker_pg_restore_streams_dump_without_password_in_args(monkeypatch: py
     assert seen["stdin"] is not None
 
 
+def test_docker_table_counts_interpolates_table_name(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    calls: list[str] = []
+
+    class Proc:
+        def __init__(self, stdout: str):
+            self.returncode = 0
+            self.stdout = stdout
+            self.stderr = ""
+
+    def fake_run(_config, shell: str, _message: str, **_kwargs):
+        calls.append(shell)
+        if "to_regclass('public.media_items')" in shell:
+            return Proc("media_items\n")
+        if "SELECT count(*)::bigint FROM media_items" in shell:
+            return Proc("1\n")
+        return Proc("\n")
+
+    monkeypatch.setattr(rd, "_run_docker_shell", fake_run)
+    config = rd.RestoreDrillConfig(
+        database_url="postgresql://collector:secret@localhost:5500/unifiedcollector",
+        backup_dir=tmp_path,
+        docker_container="unifiedcollector_postgres",
+        docker_exe="docker",
+    )
+
+    counts = rd._table_counts_docker(config, "uc_restore_drill_20260724_123045")
+
+    assert counts["media_items"] == 1
+    assert counts["telegram_messages"] is None
+    assert all("{table}" not in shell for shell in calls)
+
+
 @pytest.mark.asyncio
 async def test_restore_drill_drops_scratch_when_restore_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     calls: list[str] = []
