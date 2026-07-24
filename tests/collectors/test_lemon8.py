@@ -7,6 +7,7 @@ this suite *must not* hit the network.
 
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -265,12 +266,12 @@ async def test_upsert_profile_calls_db(collector):
         "uid-1", "alice",
         {"nickname": "Alice", "avatar_url": "https://x/y.jpg"},
     )
-    collector._test_conn.execute.assert_awaited_once()
-    args = collector._test_conn.execute.await_args.args
-    assert "lemon8_profiles" in args[0]
+    calls = [call.args for call in collector._test_conn.execute.await_args_list]
+    insert = next(args for args in calls if "INSERT INTO lemon8_profiles" in args[0])
+    assert any("UPDATE lemon8_profiles SET platform_user_id" in args[0] for args in calls)
     # positional params include user_id and username
-    assert "uid-1" in args
-    assert "alice" in args
+    assert "uid-1" in insert
+    assert "alice" in insert
 
 
 @pytest.mark.asyncio
@@ -296,17 +297,19 @@ async def test_upsert_post_writes_post_row(collector):
         ],
     }
     await collector._upsert_post("uid-1", post)
-    # one fetchrow (profile lookup) + one execute (insert)
-    collector._test_conn.fetchrow.assert_awaited_once()
-    collector._test_conn.execute.assert_awaited_once()
+    assert any(
+        "INSERT INTO lemon8_posts" in call.args[0]
+        for call in collector._test_conn.execute.await_args_list
+    )
 
 
 # ── collect / collect_user_profile / collect_user_posts ───────────────────
 
 
-def _make_httpx_response(*, text: str = "", status_code: int = 200):
+def _make_httpx_response(*, text: str = "", status_code: int = 200, content: bytes = b""):
     resp = MagicMock()
     resp.text = text
+    resp.content = content
     resp.status_code = status_code
     resp.raise_for_status = MagicMock()
     return resp
@@ -328,6 +331,46 @@ def _patch_async_client(monkeypatch, *, get_response=None, get_raises=None):
     cm.__aexit__ = AsyncMock(return_value=None)
     monkeypatch.setattr(lemon8_mod.httpx, "AsyncClient", MagicMock(return_value=cm))
     return client
+
+
+@pytest.mark.asyncio
+async def test_download_media_writes_vault_blob(collector, monkeypatch, tmp_path):
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    monkeypatch.setattr(lemon8_mod, "VAULT_ROOT", vault_root)
+    collector._min_file_size = 1
+    collector.insert_media_item = AsyncMock(return_value=True)
+    collector.send_to_dlq = AsyncMock()
+
+    data = b"lemon8 image bytes"
+    digest = hashlib.sha256(data).hexdigest()
+    _patch_async_client(
+        monkeypatch,
+        get_response=_make_httpx_response(status_code=200, content=data),
+    )
+
+    await collector.download_media({
+        "entity_id": "alice",
+        "entity_name": "alice",
+        "content_type": "photo",
+        "content_id": "post1_img1",
+        "extension": "jpg",
+        "url": "https://cdn.lemon8-app.com/post1.jpg",
+        "raw": {"post_id": "post1"},
+    })
+
+    kwargs = collector.insert_media_item.await_args.kwargs
+    stored_path = Path(kwargs["file_path"])
+    assert stored_path == vault_root / "media" / "blobs" / digest[:2] / digest[2:4] / f"{digest}.jpg"
+    assert stored_path.read_bytes() == data
+    assert kwargs["sha256"] == digest
+    assert kwargs["file_size"] == len(data)
+    assert kwargs["source_url"] == "https://cdn.lemon8-app.com/post1.jpg"
+    assert kwargs["metadata"]["raw"] == {"post_id": "post1"}
+    assert kwargs["metadata"]["vault_artifact"]["ok"] is True
+    assert kwargs["metadata"]["vault_artifact"]["partial"] is False
+    assert kwargs["metadata"]["vault_artifact"]["blob_path"].startswith("media/blobs/")
+    collector.send_to_dlq.assert_not_awaited()
 
 
 @pytest.mark.asyncio

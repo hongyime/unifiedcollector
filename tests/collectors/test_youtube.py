@@ -5,6 +5,7 @@ Pure unit. yt-dlp / Google OAuth / httpx are mocked at boundaries.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -421,6 +422,42 @@ async def test_resolve_channel_search_when_no_prefix(monkeypatch):
     cid, name = await coll._resolve_channel("just a query")
     assert cid == "UCfound"
     assert name == "Found"
+
+
+@pytest.mark.asyncio
+async def test_download_media_writes_vault_blob(monkeypatch, tmp_path):
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    monkeypatch.setattr(youtube_mod, "VAULT_ROOT", vault_root)
+    coll = _new_collector(monkeypatch)
+    coll.insert_media_item = AsyncMock(return_value=True)
+    coll.send_to_dlq = AsyncMock()
+
+    data = b"youtube thumbnail bytes"
+    digest = hashlib.sha256(data).hexdigest()
+
+    await coll.download_media({
+        "entity_id": "UC123",
+        "entity_name": "Example Channel",
+        "content_type": "thumbnail",
+        "content_id": "abc123xyz90",
+        "extension": "jpg",
+        "data": data,
+        "raw": {"video_id": "abc123xyz90"},
+    })
+
+    kwargs = coll.insert_media_item.await_args.kwargs
+    stored_path = Path(kwargs["file_path"])
+    assert stored_path == vault_root / "media" / "blobs" / digest[:2] / digest[2:4] / f"{digest}.jpg"
+    assert stored_path.read_bytes() == data
+    assert kwargs["sha256"] == digest
+    assert kwargs["file_size"] == len(data)
+    assert kwargs["source_url"] == "https://www.youtube.com/watch?v=abc123xyz90"
+    assert kwargs["metadata"]["raw"] == {"video_id": "abc123xyz90"}
+    assert kwargs["metadata"]["vault_artifact"]["ok"] is True
+    assert kwargs["metadata"]["vault_artifact"]["partial"] is False
+    assert kwargs["metadata"]["vault_artifact"]["blob_path"].startswith("media/blobs/")
+    coll.send_to_dlq.assert_not_awaited()
 
 
 # ── collect() error path ─────────────────────────────────────────────────

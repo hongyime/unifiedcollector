@@ -23,7 +23,7 @@ ABSORBED (parity targets, ~95%):
     - Per-account daily quota cap (Wave 0 ``account_quota``)
     - Content dedupe via ``dedupe_hash.sha256_bytes`` (BaseCollector
       delegates to the Wave 0 module)
-    - Atomic media-file writes via tempfile + ``os.replace``
+    - Atomic media-file writes via vault blobs + source-occurrence sidecars
     - Profile + post upserts (``lemon8_profiles``, ``lemon8_posts``)
       with deterministic FYP card-id synthesis when no platform id exists
 
@@ -73,7 +73,6 @@ import json
 import logging
 import os
 import re
-import tempfile
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Optional
@@ -91,7 +90,7 @@ from src.collectors.lemon8.parse import (
 )
 from src.core.human_rate_limiter import OperationType
 from src.core.file_naming import sanitize_name
-from src.core.vault import assert_media_write_allowed
+from src.core.vault import VAULT_ROOT, write_atomic_artifact
 from src.core.user_change_tracker import (
     UserChangeTracker,
     LEMON8_TRACKED_FIELDS,
@@ -1961,10 +1960,6 @@ class Lemon8Collector(BaseCollector):
         cid = item["content_id"]
         if self.is_known(cid): return
         filename = self.build_filename(item["entity_id"], item["entity_name"], item["content_type"], cid, extension=item.get("extension", "jpg"))
-        dest_dir = self.account_media_dir / item["content_type"]
-        dest = dest_dir / filename
-        assert_media_write_allowed(dest)
-        dest_dir.mkdir(parents=True, exist_ok=True)
         try:
             await self.rate_limiter.async_wait("lemon8-app.com", OperationType.MEDIA_DOWNLOAD)
             async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
@@ -1972,14 +1967,55 @@ class Lemon8Collector(BaseCollector):
                 resp.raise_for_status()
                 data = resp.content
             if len(data) < self._min_file_size: return
-            sha = self.sha256_bytes(data)
-            fd, tmp_path = tempfile.mkstemp(dir=dest_dir, suffix=".tmp")
-            with os.fdopen(fd, "wb") as f:
-                f.write(data); f.flush(); os.fsync(f.fileno())
-            os.replace(tmp_path, dest)
-            metadata = {"entity_id": item["entity_id"], "entity_name": item["entity_name"], "content_type": item["content_type"], "content_id": cid, "collected_at": datetime.now(timezone.utc).isoformat(), "raw": item.get("raw", {})}
-            self.save_json(metadata, dest_dir / f"{Path(filename).stem}_metadata.json")
-            await self.insert_media_item(entity_id=item["entity_id"], entity_name=item["entity_name"], content_type=item["content_type"], content_id=cid, filename=filename, file_path=str(dest), file_size=len(data), sha256=sha, metadata=metadata, source_url=self._build_lemon8_source_url(item))
+            source_url = self._build_lemon8_source_url(item)
+            metadata = {
+                "entity_id": item["entity_id"],
+                "entity_name": item["entity_name"],
+                "content_type": item["content_type"],
+                "content_id": cid,
+                "collected_at": datetime.now(timezone.utc).isoformat(),
+                "raw": item.get("raw", {}),
+                "rebuild_target_tables": ["media_items", "lemon8_posts", "lemon8_profiles"],
+            }
+            artifact = write_atomic_artifact(
+                source=self.SOURCE_NAME,
+                artifact_id=cid,
+                artifact_kind="media_blob",
+                data=data,
+                extension=item.get("extension", "jpg"),
+                metadata={
+                    **metadata,
+                    "filename": filename,
+                    "source_url": source_url,
+                    "request_url": item.get("url"),
+                },
+                root=VAULT_ROOT,
+            )
+            if not artifact.path:
+                raise RuntimeError(f"vault artifact write failed: {artifact.error}")
+            metadata["vault_artifact"] = {
+                "ok": artifact.ok,
+                "partial": artifact.partial,
+                "path": artifact.relative_path,
+                "blob_path": artifact.blob_relative_path,
+                "sidecar_path": artifact.sidecar.relative_path if artifact.sidecar else None,
+                "duplicate_blob": artifact.duplicate_blob,
+                "error": artifact.error,
+            }
+            await self.insert_media_item(
+                entity_id=item["entity_id"],
+                entity_name=item["entity_name"],
+                content_type=item["content_type"],
+                content_id=cid,
+                filename=filename,
+                file_path=str(artifact.path),
+                file_size=artifact.file_size,
+                sha256=artifact.sha256,
+                metadata=metadata,
+                source_url=source_url,
+            )
+            if artifact.partial:
+                await self.send_to_dlq(item["entity_id"], cid, f"vault artifact partial: {artifact.error}")
             self._known_ids.add(cid)
         except Exception as e:
             logger.error("Download failed %s: %s", cid, e)
