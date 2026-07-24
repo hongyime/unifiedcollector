@@ -129,7 +129,7 @@
 - [x] A dry-run rebuild report can show what DB tables can be reconstructed from sidecars/raw payloads.
 
 ### Quality Standards
-- [ ] Shared artifact writer has unit tests for success, sidecar failure, checksum mismatch, missing vault, duplicate blob, and DB failure.
+- [x] Shared artifact writer has unit tests for success, sidecar failure, checksum mismatch, missing vault, duplicate blob, and DB failure.
 - [x] Reconciler has tests for DB-only, file-only, sidecar-only, and partial artifact states.
 - [ ] Existing collectors keep passing smoke tests after migrating to the shared artifact writer.
 - [ ] Dashboard and Telegram wording are clear to a non-developer operator.
@@ -154,8 +154,8 @@
 
 ### Phase 2: Atomic Artifact Writes
 **Goal**: Make file-backed collection reliable and repairable.
-- [ ] Build shared artifact writer: write temp file, hash, move to blob path, write sidecar, insert/update DB.
-- [ ] Mark any incomplete step as `partial`.
+- [x] Build shared artifact writer: write temp file, hash, move to blob path, write sidecar, insert/update DB.
+- [x] Mark any incomplete step as `partial`.
 - [x] Add repair queue table or reuse existing queue mechanism.
 - [x] Add reconciler dry-run: DB-only, blob-only, sidecar-only, checksum mismatch.
 - [ ] Migrate one low-risk source first, then Instagram/Telegram/WhatsApp/Beeper/Strava media paths.
@@ -218,6 +218,7 @@ Restore rehearsal checklist:
 
 - Vault foundation is implemented in `src/core/vault.py`: canonical root detection, writability/free-space checks, media-root mirror checks, vault-relative paths, sidecar schema validation, raw payload paths, and checksum blob-path conventions.
 - Media/artifact/raw sidecar helpers are wired into the shared collector base path and tested. Sidecar failure is recorded on `media_items.metadata.vault_sidecar` and queued through the existing dead-letter queue.
+- `src/core/vault.py::write_atomic_artifact` is now the shared Phase-2 writer for new migrations: it writes bytes to a temp file under the vault, verifies checksum/size, moves to the canonical sha256 blob path, writes the sidecar, optionally runs a DB callback, and returns `partial=True` for sidecar/DB failures after the blob exists.
 - Rebuild reporting exists in `src/core/rebuild_report.py` and covers sidecar scan, raw payload table hints, DB-only, sidecar-only, blob-only, missing file, size mismatch, and checksum mismatch states.
 - Media/raw rebuild rehearsal exists in `src/core/rebuild_rehearsal.py` and `python -m src.main rebuild-rehearsal`: media sidecars and raw-payload sidecars can be materialized into scratch SQLite tables without touching production Postgres.
 - Collector DB backups are implemented with vault-mirror checks, status reporting, and retention tests.
@@ -225,7 +226,7 @@ Restore rehearsal checklist:
 - Passive Strava browser route fallback is implemented in extension v1.21.21 and `/social/strava-streams`: when the real browser loads a Strava route stream, the bridge archives the raw payload and upserts `strava_gps_streams` plus `strava_activities.summary_polyline`.
 - Priority-driven Strava browser route capture is implemented in extension v1.21.22, `/social/strava-route-queue`, `/social/strava-route-visit`, and `/strava/route-capture-queue`: the browser gets one missing-route activity at a time, ordered by Tier 1/2 proximity and collector target priority, while respecting active GPS-stream 429 cooldowns and recent visit TTLs.
 - Analyzer priority hints are imported by `src/core/priority_hints.py`, merged into `collection_targets.metadata.analyzer_priority_hint`, used by target loading, and surfaced on the Targets dashboard.
-- Still not complete: a true atomic artifact writer that moves every file through a temp/hash/blob transaction before DB commit, physical cross-source blob dedupe for every collector, source-by-source migration proof, full Tier 1 raw payload coverage, and restore replay from a real DB dump.
+- Still not complete: migrating every collector media path through `write_atomic_artifact`, physical cross-source blob dedupe for every legacy path, source-by-source migration proof, full Tier 1 raw payload coverage, and restore replay from a real DB dump.
 
 **Document Version**: 1.0
 **Created**: 2026-07-20

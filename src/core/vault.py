@@ -14,7 +14,7 @@ import tempfile
 import time
 import hashlib
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -74,6 +74,25 @@ class RawPayloadResult:
     path: Path | None = None
     relative_path: str | None = None
     sidecar: SidecarResult | None = None
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class AtomicArtifactResult:
+    ok: bool
+    partial: bool
+    source: str
+    artifact_id: str
+    artifact_kind: str
+    sha256: str | None = None
+    file_size: int | None = None
+    path: Path | None = None
+    relative_path: str | None = None
+    blob_path: Path | None = None
+    blob_relative_path: str | None = None
+    sidecar: SidecarResult | None = None
+    duplicate_blob: bool = False
+    db_recorded: bool = False
     error: str | None = None
 
 
@@ -485,6 +504,17 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
             pass
 
 
+def _sha256_path(path: Path, chunk_size: int = 1024 * 1024) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(chunk_size)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def _raw_payload_text(payload: Any, *, extension: str) -> str:
     if extension == "jsonl":
         rows = payload if isinstance(payload, list) else [payload]
@@ -522,6 +552,182 @@ def _rebuild_contract(
         "target_tables": target_tables,
         "required_fields": required_fields,
     }
+
+
+def write_atomic_artifact(
+    *,
+    source: str,
+    artifact_id: str,
+    artifact_kind: str,
+    data: bytes,
+    extension: str | None = None,
+    metadata: dict | None = None,
+    expected_sha256: str | None = None,
+    root: Path = VAULT_ROOT,
+    db_writer=None,
+) -> AtomicArtifactResult:
+    """Write a file-backed artifact as one logical vault operation.
+
+    This is the shared Phase-2 primitive for new migrations: bytes go to a temp
+    file under the vault, the hash and size are verified, the file moves to the
+    canonical sha256 blob path, a sidecar is written, and an optional DB callback
+    records the occurrence. Any failure after a blob write is reported as
+    ``partial=True`` so a repair queue can safely pick it up.
+    """
+    metadata = dict(metadata or {})
+    try:
+        ensure_vault_available(root)
+    except Exception as exc:
+        return AtomicArtifactResult(
+            ok=False,
+            partial=False,
+            source=source,
+            artifact_id=artifact_id,
+            artifact_kind=artifact_kind,
+            error=str(exc),
+        )
+
+    if not isinstance(data, (bytes, bytearray)):
+        return AtomicArtifactResult(
+            ok=False,
+            partial=False,
+            source=source,
+            artifact_id=artifact_id,
+            artifact_kind=artifact_kind,
+            error="artifact data must be bytes",
+        )
+
+    payload = bytes(data)
+    size = len(payload)
+    digest = hashlib.sha256(payload).hexdigest()
+    if expected_sha256 and expected_sha256.lower() != digest:
+        return AtomicArtifactResult(
+            ok=False,
+            partial=False,
+            source=source,
+            artifact_id=artifact_id,
+            artifact_kind=artifact_kind,
+            sha256=digest,
+            file_size=size,
+            error="checksum mismatch before write",
+        )
+
+    try:
+        blob_path = blob_path_for_sha256(digest, extension=extension, root=root)
+    except Exception as exc:
+        return AtomicArtifactResult(
+            ok=False,
+            partial=False,
+            source=source,
+            artifact_id=artifact_id,
+            artifact_kind=artifact_kind,
+            sha256=digest,
+            file_size=size,
+            error=str(exc),
+        )
+
+    tmp_dir = root / "media" / ".tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{_safe_part(artifact_kind)}.", suffix=".tmp", dir=str(tmp_dir))
+    tmp = Path(tmp_name)
+    duplicate_blob = False
+    blob_written = False
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if tmp.stat().st_size != size or _sha256_path(tmp) != digest:
+            raise RuntimeError("checksum mismatch after temp write")
+
+        blob_path.parent.mkdir(parents=True, exist_ok=True)
+        if blob_path.exists():
+            duplicate_blob = True
+            if blob_path.stat().st_size != size or _sha256_path(blob_path) != digest:
+                raise RuntimeError("existing blob checksum mismatch")
+            tmp.unlink(missing_ok=True)
+        else:
+            tmp.replace(blob_path)
+            blob_written = True
+
+        if blob_path.stat().st_size != size or _sha256_path(blob_path) != digest:
+            raise RuntimeError("checksum mismatch after blob move")
+
+        sidecar_meta = {
+            **metadata,
+            "original_artifact_id": artifact_id,
+            "blob_path": relative_to_vault(blob_path, root),
+            "sha256": digest,
+            "file_size": size,
+        }
+        sidecar = write_artifact_sidecar(
+            source=source,
+            artifact_kind=artifact_kind,
+            file_path=str(blob_path),
+            metadata=sidecar_meta,
+            root=root,
+        )
+        if not sidecar.ok:
+            return AtomicArtifactResult(
+                ok=False,
+                partial=True,
+                source=source,
+                artifact_id=artifact_id,
+                artifact_kind=artifact_kind,
+                sha256=digest,
+                file_size=size,
+                path=blob_path,
+                relative_path=relative_to_vault(blob_path, root),
+                blob_path=blob_path,
+                blob_relative_path=relative_to_vault(blob_path, root),
+                sidecar=sidecar,
+                duplicate_blob=duplicate_blob,
+                error=f"sidecar write failed: {sidecar.error}",
+            )
+
+        result = AtomicArtifactResult(
+            ok=True,
+            partial=False,
+            source=source,
+            artifact_id=artifact_id,
+            artifact_kind=artifact_kind,
+            sha256=digest,
+            file_size=size,
+            path=blob_path,
+            relative_path=relative_to_vault(blob_path, root),
+            blob_path=blob_path,
+            blob_relative_path=relative_to_vault(blob_path, root),
+            sidecar=sidecar,
+            duplicate_blob=duplicate_blob,
+        )
+        if db_writer is None:
+            return result
+        try:
+            db_writer(result)
+        except Exception as exc:
+            return replace(result, ok=False, partial=True, error=f"db write failed: {exc}")
+        return replace(result, db_recorded=True)
+    except Exception as exc:
+        return AtomicArtifactResult(
+            ok=False,
+            partial=blob_written or blob_path.exists(),
+            source=source,
+            artifact_id=artifact_id,
+            artifact_kind=artifact_kind,
+            sha256=digest,
+            file_size=size,
+            path=blob_path if blob_path.exists() else None,
+            relative_path=relative_to_vault(blob_path, root) if blob_path.exists() else None,
+            blob_path=blob_path if blob_path.exists() else None,
+            blob_relative_path=relative_to_vault(blob_path, root) if blob_path.exists() else None,
+            duplicate_blob=duplicate_blob,
+            error=str(exc),
+        )
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def write_artifact_sidecar(

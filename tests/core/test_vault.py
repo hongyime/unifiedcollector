@@ -179,6 +179,147 @@ def test_write_media_sidecar_records_canonical_blob_reference(tmp_path, monkeypa
     assert payload["file"]["blob_absolute_path"] == str(root / "media" / "blobs" / "ab" / "cd" / f"{digest}.jpg")
 
 
+def test_write_atomic_artifact_success_writes_blob_sidecar_and_db(tmp_path, monkeypatch):
+    monkeypatch.setattr(vault, "SIDECARS_ENABLED", True)
+    root = tmp_path / "vault"
+    root.mkdir()
+    db_seen = []
+
+    result = vault.write_atomic_artifact(
+        source="telegram",
+        artifact_id="chat/1/message/2/photo",
+        artifact_kind="media_blob",
+        data=b"hello",
+        extension=".jpg",
+        metadata={"collection_account": "bryan"},
+        root=root,
+        db_writer=db_seen.append,
+    )
+
+    assert result.ok is True
+    assert result.partial is False
+    assert result.db_recorded is True
+    assert result.duplicate_blob is False
+    assert result.path.exists()
+    assert result.path.read_bytes() == b"hello"
+    assert result.blob_relative_path.startswith("media/blobs/")
+    assert result.sidecar.ok is True
+    sidecar = json.loads(result.sidecar.path.read_text(encoding="utf-8"))
+    assert sidecar["metadata"]["original_artifact_id"] == "chat/1/message/2/photo"
+    assert sidecar["metadata"]["collection_account"] == "bryan"
+    assert db_seen[0].sha256 == result.sha256
+
+
+def test_write_atomic_artifact_reports_sidecar_failure_as_partial(tmp_path, monkeypatch):
+    root = tmp_path / "vault"
+    root.mkdir()
+
+    def fail_sidecar(**_kwargs):
+        return vault.SidecarResult(enabled=True, ok=False, error="disk full")
+
+    monkeypatch.setattr(vault, "write_artifact_sidecar", fail_sidecar)
+
+    result = vault.write_atomic_artifact(
+        source="telegram",
+        artifact_id="message/1",
+        artifact_kind="media_blob",
+        data=b"hello",
+        extension=".jpg",
+        root=root,
+    )
+
+    assert result.ok is False
+    assert result.partial is True
+    assert result.path.exists()
+    assert "sidecar write failed" in result.error
+
+
+def test_write_atomic_artifact_rejects_expected_checksum_mismatch(tmp_path):
+    root = tmp_path / "vault"
+    root.mkdir()
+
+    result = vault.write_atomic_artifact(
+        source="telegram",
+        artifact_id="message/1",
+        artifact_kind="media_blob",
+        data=b"hello",
+        extension=".jpg",
+        expected_sha256="0" * 64,
+        root=root,
+    )
+
+    assert result.ok is False
+    assert result.partial is False
+    assert "checksum mismatch" in result.error
+    assert not list((root / "media").rglob("*")) if (root / "media").exists() else True
+
+
+def test_write_atomic_artifact_reports_missing_vault(tmp_path):
+    result = vault.write_atomic_artifact(
+        source="telegram",
+        artifact_id="message/1",
+        artifact_kind="media_blob",
+        data=b"hello",
+        root=tmp_path / "missing",
+    )
+
+    assert result.ok is False
+    assert result.partial is False
+    assert "vault" in result.error.lower()
+
+
+def test_write_atomic_artifact_reuses_duplicate_blob(tmp_path):
+    root = tmp_path / "vault"
+    root.mkdir()
+    first = vault.write_atomic_artifact(
+        source="telegram",
+        artifact_id="message/1",
+        artifact_kind="media_blob",
+        data=b"hello",
+        extension=".jpg",
+        root=root,
+    )
+    second = vault.write_atomic_artifact(
+        source="whatsapp",
+        artifact_id="message/2",
+        artifact_kind="media_blob",
+        data=b"hello",
+        extension=".jpg",
+        root=root,
+    )
+
+    assert first.ok is True
+    assert second.ok is True
+    assert second.duplicate_blob is True
+    assert second.path == first.path
+    assert len(list((root / "media" / "blobs").rglob("*.jpg"))) == 1
+    assert len(list((root / "sidecars" / "artifacts").rglob("*.json"))) == 2
+
+
+def test_write_atomic_artifact_reports_db_failure_as_partial(tmp_path):
+    root = tmp_path / "vault"
+    root.mkdir()
+
+    def fail_db(_result):
+        raise RuntimeError("db down")
+
+    result = vault.write_atomic_artifact(
+        source="telegram",
+        artifact_id="message/1",
+        artifact_kind="media_blob",
+        data=b"hello",
+        extension=".jpg",
+        root=root,
+        db_writer=fail_db,
+    )
+
+    assert result.ok is False
+    assert result.partial is True
+    assert result.db_recorded is False
+    assert result.path.exists()
+    assert "db write failed" in result.error
+
+
 def test_write_media_sidecar_rejects_invalid_payload_before_write(tmp_path, monkeypatch):
     monkeypatch.setattr(vault, "SIDECARS_ENABLED", True)
     root = tmp_path / "vault"

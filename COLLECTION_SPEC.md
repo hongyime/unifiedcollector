@@ -180,6 +180,10 @@ Current shipped recovery/ops work:
 - **Sidecars and raw payload helpers:** media sidecars, artifact sidecars, raw
   payload writes, and validation live in `src/core/vault.py`; `BaseCollector`
   and extension ingest record sidecar status into metadata/DLQ.
+- **Shared atomic artifact writer:** `src/core/vault.py::write_atomic_artifact`
+  writes bytes through vault temp storage, verifies checksum/size, moves to the
+  canonical sha256 blob path, writes a sidecar, optionally calls a DB writer,
+  and marks post-blob sidecar/DB failures as partial for repair.
 - **Rebuild report:** `python -m src.main rebuild-report --compare-db
   --verify-checksums` reports sidecar coverage plus DB-only, sidecar-only,
   blob-only, missing-file, and checksum-mismatch states. DB comparison is
@@ -207,8 +211,8 @@ Known remaining gaps:
 - Legacy audit/status docs may still overstate exhaustive rate-limit coverage;
   every new 429/FloodWait/quota branch must call `record_rate_limit_event()`.
 - Rebuild report is a dry-run report, not a full scratch DB rebuild.
-- Physical-file dedupe stores canonical blob references in sidecars, but a full
-  cross-source blob-store writer is still future work.
+- Physical-file dedupe now has a core sha256 blob writer, but every collector
+  media path still needs migration proof before cross-source dedupe is complete.
 - External-drive loss behavior is strong for base collector writes, but each
   long-running realtime/direct file write path should continue moving toward
   the same shared guard instead of local ad hoc checks.
