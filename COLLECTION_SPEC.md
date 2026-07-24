@@ -184,9 +184,9 @@ Current shipped recovery/ops work:
   writes bytes through vault temp storage, verifies checksum/size, moves to the
   canonical sha256 blob path, writes a sidecar, optionally calls a DB writer,
   and marks post-blob sidecar/DB failures as partial for repair. New Beeper,
-  Telegram, and WhatsApp chat-media downloads use this path for physical blobs
-  while preserving each message attachment as its own `media_items` occurrence
-  and media sidecar.
+  Telegram, WhatsApp, Lemon8, and YouTube media downloads use this path for
+  physical blobs while preserving each source occurrence as its own
+  `media_items` row and media sidecar.
 - **Rebuild report:** `python -m src.main rebuild-report --compare-db
   --verify-checksums` reports sidecar coverage plus DB-only, sidecar-only,
   blob-only, missing-file, and checksum-mismatch states. DB comparison is
@@ -204,7 +204,8 @@ Current shipped recovery/ops work:
   paths use it. GitHub API quota exhaustion, which GitHub reports as HTTP 403,
   is stored as a rate-limit event with the real HTTP status preserved in metadata
   so hourly status/dashboard views treat it as quota pressure, not generic auth
-  failure.
+  failure. Browser-captured Strava stream HTTP 429/401/403 responses are also
+  recorded as durable events under `browser_strava_streams`.
 - **Strava GPS routes:** existing stored `strava_gps_streams.latlng` rows are
   repaired into route fields without network calls; GPS stream 429 cooldown is
   restored after restart so the backfill does not hammer Strava again. Recovered
@@ -227,10 +228,11 @@ Known remaining gaps:
   durable rate-limit events plus jittered sleep. Remaining 429/FloodWait branches
   should migrate to shared helpers as they are touched.
 - Rebuild report is a dry-run report, not a full scratch DB rebuild.
-- Physical-file dedupe now has a core sha256 blob writer, and new Beeper,
-  Telegram, and WhatsApp chat-media downloads use it. Remaining non-chat media
-  paths still need source-by-source migration proof before cross-source dedupe
-  is complete.
+- Physical-file dedupe now has a core sha256 blob writer, and Beeper, Telegram,
+  WhatsApp, Lemon8, and YouTube media downloads use it. Remaining Instagram,
+  TikTok, Website, Search, GitHub avatar/media, Strava photo/map, shared profile
+  photo, and generic legacy helper paths still need source-by-source migration
+  proof before cross-source dedupe is complete.
 - External-drive loss behavior is strong for base collector writes, but each
   long-running realtime/direct file write path should continue moving toward
   the same shared guard instead of local ad hoc checks.
