@@ -48,6 +48,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -56,7 +57,13 @@ from urllib.parse import urlparse
 
 from . import subprocess_downloader as _sub
 from .resilience import async_retry
-from .vault import assert_media_write_allowed
+from .vault import (
+    VAULT_ROOT,
+    AtomicArtifactResult,
+    assert_media_write_allowed,
+    ensure_vault_available,
+    write_atomic_artifact_from_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +87,13 @@ class MediaOptions:
     timeout: float = 300.0
     cookies_file: Optional[str] = None
     extra_args: Optional[Sequence[str]] = None
-    output_filename: Optional[str] = None  # if set, used as final basename (httpx/delegated)
+    output_filename: Optional[str] = None  # if set, used as the occurrence basename (httpx/delegated)
+    source: str = "media_download"
+    artifact_kind: str = "media_blob"
+    artifact_id: Optional[str] = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    vault_root: Optional[Path] = None
+    media_root: Optional[Path] = None
 
     # Behaviour
     overwrite: bool = False
@@ -117,6 +130,8 @@ class MediaResult:
     error: Optional[str] = None
     # Raw subprocess result (for collectors that want stderr tail / metadata)
     subprocess_result: Optional[_sub.DownloadResult] = None
+    # Canonical vault commit for single-file tiers (httpx/delegated).
+    vault_artifact: Optional[AtomicArtifactResult] = None
 
     @property
     def file_count(self) -> int:
@@ -196,7 +211,13 @@ def _sha256_of_file(path: Path, chunk: int = 1 << 20) -> str:
     return h.hexdigest()
 
 
-def _atomic_replace(tmp_path: Path, final_path: Path) -> None:
+def _atomic_replace(
+    tmp_path: Path,
+    final_path: Path,
+    *,
+    root: Path = VAULT_ROOT,
+    media_root: str | os.PathLike[str] | None = None,
+) -> None:
     """fsync the tmp file (best-effort on Windows), then os.replace to the
     final destination.
 
@@ -218,9 +239,105 @@ def _atomic_replace(tmp_path: Path, final_path: Path) -> None:
         # Windows / odd FS — proceed; replace is still atomic
         if os.name != "nt":
             logger.debug("fsync failed for %s", tmp_path, exc_info=True)
-    assert_media_write_allowed(final_path)
+    assert_media_write_allowed(final_path, root=root, media_root=media_root)
     final_path.parent.mkdir(parents=True, exist_ok=True)
     os.replace(str(tmp_path), str(final_path))
+
+
+def _option_vault_root(opts: MediaOptions) -> Path:
+    return Path(opts.vault_root).resolve(strict=False) if opts.vault_root is not None else VAULT_ROOT
+
+
+def _option_media_root(opts: MediaOptions) -> Path | None:
+    if opts.media_root is None:
+        return None
+    return Path(opts.media_root).resolve(strict=False)
+
+
+def _artifact_id_for(url: str, backend: str, filename: str, opts: MediaOptions) -> str:
+    if opts.artifact_id:
+        return opts.artifact_id
+    digest = hashlib.sha256(f"{backend}:{url}:{filename}".encode("utf-8")).hexdigest()[:16]
+    return f"{backend}/{digest}/{filename}"
+
+
+def _download_metadata(
+    url: str,
+    backend: str,
+    filename: str,
+    dest_dir: Path,
+    opts: MediaOptions,
+) -> dict[str, Any]:
+    return {
+        **dict(opts.metadata or {}),
+        "ingest_path": "media_download",
+        "backend": backend,
+        "source_url": url,
+        "request_url": url,
+        "filename": filename,
+        "legacy_dest_dir": str(dest_dir),
+    }
+
+
+def _open_download_temp(root: Path, filename: str, backend: str) -> tuple[int, Path]:
+    ensure_vault_available(root)
+    tmp_dir = root / "media" / ".tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    suffix = Path(filename).suffix or ".bin"
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".media_download.{backend}.",
+        suffix=f"{suffix}.tmp",
+        dir=str(tmp_dir),
+    )
+    return fd, Path(tmp_name)
+
+
+def _commit_vault_artifact(
+    *,
+    url: str,
+    backend: str,
+    filename: str,
+    source_path: Path,
+    dest_dir: Path,
+    opts: MediaOptions,
+    expected_sha256: str | None = None,
+    delete_source: bool,
+) -> AtomicArtifactResult:
+    root = _option_vault_root(opts)
+    return write_atomic_artifact_from_path(
+        source=opts.source,
+        artifact_id=_artifact_id_for(url, backend, filename, opts),
+        artifact_kind=opts.artifact_kind,
+        source_path=source_path,
+        extension=Path(filename).suffix,
+        metadata=_download_metadata(url, backend, filename, dest_dir, opts),
+        expected_sha256=expected_sha256,
+        root=root,
+        delete_source=delete_source,
+    )
+
+
+def _artifact_result_to_media_result(
+    artifact: AtomicArtifactResult,
+    *,
+    url: str,
+    backend: str,
+    elapsed: float,
+    fallback_bytes_total: int = 0,
+    fallback_sha256: str | None = None,
+) -> MediaResult:
+    files = [artifact.path] if artifact.path else []
+    return MediaResult(
+        ok=artifact.ok,
+        url=url,
+        backend=backend,
+        files=files,
+        bytes_total=int(artifact.file_size or fallback_bytes_total or 0),
+        sha256=artifact.sha256 or fallback_sha256,
+        elapsed=elapsed,
+        error=None if artifact.ok else artifact.error,
+        vault_artifact=artifact,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -229,18 +346,15 @@ def _atomic_replace(tmp_path: Path, final_path: Path) -> None:
 
 async def _httpx_download_one(
     url: str,
-    final_path: Path,
+    tmp_path: Path,
+    tmp_fd: int,
     opts: MediaOptions,
 ) -> tuple[int, str]:
-    """Download a single URL to final_path with atomic-rename + sha256.
+    """Download a single URL to a vault temp file and return size + sha256.
 
     Returns (bytes_total, sha256_hex). Raises on error.
     """
     import httpx  # local import — keeps module import-clean if httpx missing
-
-    assert_media_write_allowed(final_path)
-    final_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = final_path.with_suffix(final_path.suffix + ".tmp")
 
     proxies = opts.tor_proxy_url or None
     client_kwargs: dict[str, Any] = {
@@ -254,21 +368,24 @@ async def _httpx_download_one(
     bytes_total = 0
     h = hashlib.sha256()
 
-    async with httpx.AsyncClient(**client_kwargs) as client:
-        async with client.stream("GET", url) as resp:
-            resp.raise_for_status()
-            content_length: Optional[int] = None
-            cl = resp.headers.get("content-length")
-            if cl and cl.isdigit():
-                content_length = int(cl)
+    tmp_handle = None
+    try:
+        async with httpx.AsyncClient(**client_kwargs) as client:
+            async with client.stream("GET", url) as resp:
+                resp.raise_for_status()
+                content_length: Optional[int] = None
+                cl = resp.headers.get("content-length")
+                if cl and cl.isdigit():
+                    content_length = int(cl)
 
-            # Race the byte-stream against stop_event.
-            stop_task: Optional[asyncio.Task] = None
-            if opts.stop_event is not None:
-                stop_task = asyncio.create_task(opts.stop_event.wait())
+                # Race the byte-stream against stop_event.
+                stop_task: Optional[asyncio.Task] = None
+                if opts.stop_event is not None:
+                    stop_task = asyncio.create_task(opts.stop_event.wait())
 
-            try:
-                with open(tmp_path, "wb") as f:
+                try:
+                    tmp_handle = os.fdopen(tmp_fd, "wb")
+                    tmp_fd = -1
                     aiter = resp.aiter_bytes(chunk_size=64 * 1024).__aiter__()
                     while True:
                         next_task = asyncio.create_task(aiter.__anext__())
@@ -296,7 +413,7 @@ async def _httpx_download_one(
 
                         if not chunk:
                             continue
-                        f.write(chunk)
+                        tmp_handle.write(chunk)
                         h.update(chunk)
                         bytes_total += len(chunk)
                         if opts.progress_cb is not None:
@@ -304,12 +421,29 @@ async def _httpx_download_one(
                                 opts.progress_cb(bytes_total, content_length)
                             except Exception:
                                 logger.debug("progress_cb raised", exc_info=True)
-            finally:
-                if stop_task is not None and not stop_task.done():
-                    stop_task.cancel()
+                    tmp_handle.flush()
+                    os.fsync(tmp_handle.fileno())
+                finally:
+                    if stop_task is not None and not stop_task.done():
+                        stop_task.cancel()
+    except BaseException:
+        if tmp_handle is not None:
+            tmp_handle.close()
+            tmp_handle = None
+        elif tmp_fd >= 0:
+            os.close(tmp_fd)
+            tmp_fd = -1
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+    finally:
+        if tmp_handle is not None:
+            tmp_handle.close()
+        elif tmp_fd >= 0:
+            os.close(tmp_fd)
 
-    # Atomic publish
-    _atomic_replace(tmp_path, final_path)
     return bytes_total, h.hexdigest()
 
 
@@ -342,7 +476,8 @@ async def download(
     """
     opts = options or MediaOptions()
     dest_dir = Path(dest_dir)
-    assert_media_write_allowed(dest_dir / ".media_download_check")
+    root = _option_vault_root(opts)
+    assert_media_write_allowed(dest_dir / ".media_download_check", root=root, media_root=_option_media_root(opts))
     dest_dir.mkdir(parents=True, exist_ok=True)
 
     # Pre-flight: rate-limiter hook (Agent C will populate)
@@ -423,13 +558,20 @@ async def _do_httpx(
     final_path = dest_dir / name
 
     if final_path.exists() and not opts.overwrite:
-        # Treat as success — already present. Hash the existing file so
-        # callers can dedupe without re-downloading.
-        return MediaResult(
-            ok=True, url=url, backend="httpx",
-            files=[final_path],
-            bytes_total=final_path.stat().st_size,
-            sha256=_sha256_of_file(final_path),
+        artifact = _commit_vault_artifact(
+            url=url,
+            backend="httpx",
+            filename=name,
+            source_path=final_path,
+            dest_dir=dest_dir,
+            opts=opts,
+            expected_sha256=_sha256_of_file(final_path),
+            delete_source=False,
+        )
+        return _artifact_result_to_media_result(
+            artifact,
+            url=url,
+            backend="httpx",
             elapsed=time.perf_counter() - started,
         )
 
@@ -441,10 +583,20 @@ async def _do_httpx(
         retryable_exceptions=(Exception,),
     )
     async def _attempt():
-        return await _httpx_download_one(url, final_path, opts)
+        root = _option_vault_root(opts)
+        tmp_fd, tmp_path = _open_download_temp(root, name, "httpx")
+        try:
+            bytes_total, sha = await _httpx_download_one(url, tmp_path, tmp_fd, opts)
+            return tmp_path, bytes_total, sha
+        except BaseException:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
 
     try:
-        bytes_total, sha = await _attempt()
+        tmp_path, bytes_total, sha = await _attempt()
     except asyncio.CancelledError:
         # Surface cancel cleanly (don't let async_retry swallow as last_exc)
         raise
@@ -455,12 +607,23 @@ async def _do_httpx(
             elapsed=time.perf_counter() - started,
         )
 
-    return MediaResult(
-        ok=True, url=url, backend="httpx",
-        files=[final_path],
-        bytes_total=bytes_total,
-        sha256=sha,
+    artifact = _commit_vault_artifact(
+        url=url,
+        backend="httpx",
+        filename=name,
+        source_path=tmp_path,
+        dest_dir=dest_dir,
+        opts=opts,
+        expected_sha256=sha,
+        delete_source=True,
+    )
+    return _artifact_result_to_media_result(
+        artifact,
+        url=url,
+        backend="httpx",
         elapsed=time.perf_counter() - started,
+        fallback_bytes_total=bytes_total,
+        fallback_sha256=sha,
     )
 
 
@@ -551,17 +714,25 @@ async def _do_delegated(
     name = opts.output_filename or _filename_from_url(url, fallback="delegated.bin")
     final_path = dest_dir / name
     if final_path.exists() and not opts.overwrite:
-        return MediaResult(
-            ok=True, url=url, backend="delegated",
-            files=[final_path],
-            bytes_total=final_path.stat().st_size,
-            sha256=_sha256_of_file(final_path),
+        artifact = _commit_vault_artifact(
+            url=url,
+            backend="delegated",
+            filename=name,
+            source_path=final_path,
+            dest_dir=dest_dir,
+            opts=opts,
+            expected_sha256=_sha256_of_file(final_path),
+            delete_source=False,
+        )
+        return _artifact_result_to_media_result(
+            artifact,
+            url=url,
+            backend="delegated",
             elapsed=time.perf_counter() - started,
         )
 
-    tmp_path = final_path.with_suffix(final_path.suffix + ".tmp")
-    assert_media_write_allowed(final_path)
-    final_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_fd, tmp_path = _open_download_temp(_option_vault_root(opts), name, "delegated")
+    os.close(tmp_fd)
 
     # Race the writer against stop_event.
     writer_task = asyncio.create_task(opts.delegated_writer(tmp_path, opts))
@@ -624,14 +795,23 @@ async def _do_delegated(
             elapsed=time.perf_counter() - started,
         )
 
-    _atomic_replace(tmp_path, final_path)
-    sha = _sha256_of_file(final_path)
-    return MediaResult(
-        ok=True, url=url, backend="delegated",
-        files=[final_path],
-        bytes_total=final_path.stat().st_size,
-        sha256=sha,
+    sha = _sha256_of_file(tmp_path)
+    artifact = _commit_vault_artifact(
+        url=url,
+        backend="delegated",
+        filename=name,
+        source_path=tmp_path,
+        dest_dir=dest_dir,
+        opts=opts,
+        expected_sha256=sha,
+        delete_source=True,
+    )
+    return _artifact_result_to_media_result(
+        artifact,
+        url=url,
+        backend="delegated",
         elapsed=time.perf_counter() - started,
+        fallback_sha256=sha,
     )
 
 

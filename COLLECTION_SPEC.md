@@ -194,7 +194,10 @@ Current shipped recovery/ops work:
   while preserving each source occurrence as its own `media_items` row and
   media sidecar where a concrete source occurrence should be indexed. TikTok
   Playwright fallback writes only vault-temp intermediates and removes them
-  after the collector re-ingests the bytes into canonical blobs.
+  after the collector re-ingests the bytes into canonical blobs. The shared
+  `src/core/media_download.py` HTTP/delegated single-file helper also streams to
+  vault temp and commits to canonical sha256 blobs with artifact sidecars, so
+  future callers do not reintroduce final per-source file writes.
 - **Rebuild report:** `python -m src.main rebuild-report --compare-db
   --verify-checksums` reports sidecar coverage plus DB-only, sidecar-only,
   blob-only, missing-file, and checksum-mismatch states. DB comparison is
@@ -249,11 +252,13 @@ Known remaining gaps:
 - Physical-file dedupe now has a core sha256 blob writer, and Beeper, Telegram,
   WhatsApp, Lemon8, YouTube, TikTok, Website, Search, Instagram
   headless/extension media, GitHub direct media, GitHub bulk avatar artifacts,
-  shared profile-photo, and Strava activity photo/route-map downloads use it.
-  No known high-volume collector media path remains on direct per-source file
-  writes, but future source-local write paths found by audit should migrate to
-  the same helpers. GitHub bulk avatar range writes artifact sidecars only and
-  intentionally does not create `media_items` rows for unknown numeric IDs.
+  shared profile-photo, generic `BaseCollector.save_file`, shared
+  `media_download` HTTP/delegated single-file calls, and Strava activity
+  photo/route-map downloads use it. No known high-volume collector media path
+  remains on direct per-source file writes, but future source-local write paths
+  found by audit should migrate to the same helpers. GitHub bulk avatar range
+  writes artifact sidecars only and intentionally does not create `media_items`
+  rows for unknown numeric IDs.
 - External-drive loss behavior is strong for base collector writes, but each
   long-running realtime/direct file write path should continue moving toward
   the same shared guard instead of local ad hoc checks.
