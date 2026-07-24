@@ -27,7 +27,6 @@ import math
 import os
 import random
 import re
-import tempfile
 import time
 import uuid
 from datetime import datetime, timezone
@@ -48,7 +47,7 @@ from src.core.proximity import refresh_account_proximity_cache
 from src.core.profile_photo_tracker import ProfilePhotoTracker
 from src.core.rate_limit_events import record_rate_limit_event
 from src.core.scrape_pacing import headless_dwell, sleep_before_pre_cooldown_retry
-from src.core.vault import assert_media_write_allowed
+from src.core.vault import VAULT_ROOT, assert_media_write_allowed, write_atomic_artifact
 from src.core.user_change_tracker import (
     UserChangeTracker,
     INSTAGRAM_TRACKED_FIELDS,
@@ -2393,7 +2392,6 @@ class InstagramCollector(BaseCollector):
 
             sha = self.sha256_bytes(data)
             
-            # Use updated save_file to also save metadata JSON
             metadata = {
                 "entity_id": item["entity_id"],
                 "entity_name": item["entity_name"],
@@ -2403,31 +2401,38 @@ class InstagramCollector(BaseCollector):
                 "collected_at": datetime.now(timezone.utc).isoformat(),
                 "raw": item.get("raw", {})
             }
-            
-            # Temporary override media_dir to use the account-specific one for save_file
-            old_media_dir = self.media_dir
-            try:
-                self.__dict__["media_dir_override"] = dest_dir
-                # Note: save_file uses self.media_dir internally. 
-                # We need a cleaner way or just use the Path directly.
-                # Let's use save_json and manual write for now to be safe.
-                
-                # Atomic write
-                fd, tmp_path = tempfile.mkstemp(dir=dest_dir, suffix=".tmp")
-                with os.fdopen(fd, "wb") as f:
-                    f.write(data)
-                    f.flush()
-                    os.fsync(f.fileno())
-                os.replace(tmp_path, dest)
-                
-                # Save metadata
-                self.save_json(metadata, dest_dir / f"{Path(filename).stem}_metadata.json")
-                if "raw" in metadata:
-                    self.save_json(metadata["raw"], dest_dir / f"{Path(filename).stem}_raw.json")
-                
-                self._known_ids.add(cid)
-            finally:
-                if "media_dir_override" in self.__dict__: del self.__dict__["media_dir_override"]
+            artifact = write_atomic_artifact(
+                source="instagram",
+                artifact_id=f"headless/{item['content_type']}/{cid}",
+                artifact_kind="media_blob",
+                data=data,
+                extension=item.get("extension", "jpg"),
+                expected_sha256=sha,
+                metadata={
+                    **metadata,
+                    "filename": filename,
+                    "request_url": item["url"],
+                    "ingest_path": self.INGEST_PATH,
+                    "legacy_path": str(dest),
+                    "rebuild_target_tables": ["media_items"],
+                },
+                root=VAULT_ROOT,
+            )
+            if artifact.path is None:
+                raise RuntimeError(artifact.error or "artifact write failed")
+            metadata["vault_artifact"] = {
+                "ok": artifact.ok,
+                "partial": artifact.partial,
+                "path": artifact.relative_path,
+                "blob_path": artifact.blob_relative_path,
+                "sha256": artifact.sha256,
+                "file_size": artifact.file_size,
+                "sidecar_ok": artifact.sidecar.ok if artifact.sidecar else None,
+                "sidecar_path": artifact.sidecar.relative_path if artifact.sidecar else None,
+                "duplicate_blob": artifact.duplicate_blob,
+                "error": artifact.error,
+            }
+            self._known_ids.add(cid)
 
             self.rate_limiter.record_success("instagram.com")
 
@@ -2437,7 +2442,7 @@ class InstagramCollector(BaseCollector):
                 content_type=item["content_type"],
                 content_id=cid,
                 filename=filename,
-                file_path=str(dest),
+                file_path=str(artifact.path),
                 file_size=len(data),
                 sha256=sha,
                 source_url=item.get("source_url"),

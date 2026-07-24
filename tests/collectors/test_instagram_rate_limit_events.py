@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 import types
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -32,6 +34,77 @@ def _bare_collector():
     coll.account_pool = MagicMock()
     coll.account_pool._accounts = []
     return coll
+
+
+class _MediaResponse:
+    def __init__(self, data: bytes):
+        self.content = data
+
+    def raise_for_status(self):
+        return None
+
+
+class _MediaClient:
+    def __init__(self, data: bytes):
+        self.data = data
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def get(self, *_args, **_kwargs):
+        return _MediaResponse(self.data)
+
+
+@pytest.mark.asyncio
+async def test_download_media_writes_headless_instagram_to_vault_blob(monkeypatch, tmp_path):
+    coll = _bare_collector()
+    coll._known_ids = set()
+    coll.reconciler = SimpleNamespace(should_recover=lambda _content_id: False)
+    coll._get_session_cookies = MagicMock(return_value={})
+    coll.rate_limiter = SimpleNamespace(
+        async_wait=AsyncMock(),
+        record_success=MagicMock(),
+        record_failure=MagicMock(),
+    )
+    coll.insert_media_item = AsyncMock(return_value=True)
+    coll.send_to_dlq = AsyncMock()
+    data = b"instagram media bytes"
+    digest = hashlib.sha256(data).hexdigest()
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+
+    monkeypatch.setattr(instagram_mod, "VAULT_ROOT", vault_root)
+    monkeypatch.setattr(instagram_mod, "assert_media_write_allowed", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        instagram_mod.InstagramCollector,
+        "account_media_dir",
+        property(lambda self: tmp_path / "media" / "account_acct1"),
+    )
+    monkeypatch.setattr(instagram_mod.httpx, "AsyncClient", lambda *args, **kwargs: _MediaClient(data))
+
+    await coll.download_media({
+        "entity_id": "123",
+        "entity_name": "alice",
+        "content_type": "post",
+        "content_id": "post123",
+        "extension": "jpg",
+        "url": "https://cdn.example.test/p.jpg",
+        "source_url": "https://www.instagram.com/p/post123/",
+        "raw": {"shortcode": "post123"},
+    })
+
+    blob = vault_root / "media" / "blobs" / digest[:2] / digest[2:4] / f"{digest}.jpg"
+    assert blob.read_bytes() == data
+    kwargs = coll.insert_media_item.await_args.kwargs
+    assert Path(kwargs["file_path"]) == blob
+    assert kwargs["sha256"] == digest
+    assert kwargs["metadata"]["raw"] == {"shortcode": "post123"}
+    assert kwargs["metadata"]["vault_artifact"]["ok"] is True
+    assert kwargs["metadata"]["vault_artifact"]["blob_path"] == f"media/blobs/{digest[:2]}/{digest[2:4]}/{digest}.jpg"
+    coll.send_to_dlq.assert_not_awaited()
 
 
 @pytest.mark.asyncio

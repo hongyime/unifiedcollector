@@ -46,7 +46,7 @@ from src.core.priority_hints import refresh_collector_priority_hints
 from src.core.proximity import refresh_account_proximity_cache
 from src.core.rate_limit_events import record_rate_limit_event
 from src.core.strava_route_queue import fetch_strava_route_capture_queue
-from src.core.vault import assert_media_write_allowed, write_media_sidecar, write_raw_payload
+from src.core.vault import VAULT_ROOT, assert_media_write_allowed, write_atomic_artifact, write_media_sidecar, write_raw_payload
 from src.collectors.strava import _derive_gps_route_fields
 
 # Follow-aware access recording (Phase 0). The extension IS the live IG path, so
@@ -604,17 +604,49 @@ async def _download_and_save(pool, session, platform, username, item) -> bool:
         except RuntimeError as exc:
             await _record_vault_pause(str(exc))
             return False
-        if dest.exists():
-            return False
-
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        tmp = dest.with_suffix(dest.suffix + ".tmp")
-        tmp.write_bytes(data)
-        os.replace(tmp, dest)
 
         # caption + likes/comments/views/location come along free from the scrape
         meta = item.get("meta") or {}
-        meta_obj = meta if isinstance(meta, dict) else {}
+        meta_obj = dict(meta) if isinstance(meta, dict) else {}
+        artifact = write_atomic_artifact(
+            source=platform,
+            artifact_id=f"extension/{media_kind}/{store_cid}",
+            artifact_kind="media_blob",
+            data=data,
+            extension=ext,
+            expected_sha256=sha,
+            metadata={
+                **meta_obj,
+                "entity_id": safe_user,
+                "entity_name": item.get("entity_name") or username,
+                "content_type": ctype,
+                "content_id": store_cid,
+                "kind": media_kind,
+                "filename": dest.name,
+                "source_url": url,
+                "request_url": url,
+                "ingest_path": "extension",
+                "legacy_path": str(dest),
+                "rebuild_target_tables": ["media_items"],
+            },
+            root=VAULT_ROOT,
+        )
+        if artifact.path is None:
+            await _record_vault_pause(artifact.error or "artifact write failed")
+            return False
+        stored_path = artifact.path
+        meta_obj["vault_artifact"] = {
+            "ok": artifact.ok,
+            "partial": artifact.partial,
+            "path": artifact.relative_path,
+            "blob_path": artifact.blob_relative_path,
+            "sha256": artifact.sha256,
+            "file_size": artifact.file_size,
+            "sidecar_ok": artifact.sidecar.ok if artifact.sidecar else None,
+            "sidecar_path": artifact.sidecar.relative_path if artifact.sidecar else None,
+            "duplicate_blob": artifact.duplicate_blob,
+            "error": artifact.error,
+        }
         meta_json = json.dumps(meta_obj)
         async with pool.acquire() as conn:
             await conn.execute(
@@ -634,8 +666,19 @@ async def _download_and_save(pool, session, platform, username, item) -> bool:
                    ingest_path = 'extension'
                 """,
                 platform, safe_user, item.get("entity_name") or username, ctype, store_cid,
-                dest.name, str(dest), len(data), sha, url, meta_json, media_kind,
+                dest.name, str(stored_path), len(data), sha, url, meta_json, media_kind,
             )
+            if artifact.partial or not artifact.ok:
+                await conn.execute(
+                    """
+                    INSERT INTO dead_letter_queue (source, entity_id, content_id, error_message)
+                    VALUES ($1, $2, $3, $4)
+                    """,
+                    platform,
+                    safe_user,
+                    store_cid,
+                    f"vault artifact partial: {artifact.error}",
+                )
         sidecar = write_media_sidecar(
             source=platform,
             entity_id=safe_user,
@@ -643,7 +686,7 @@ async def _download_and_save(pool, session, platform, username, item) -> bool:
             content_type=ctype,
             content_id=store_cid,
             filename=dest.name,
-            file_path=str(dest),
+            file_path=str(stored_path),
             file_size=len(data),
             width=None,
             height=None,

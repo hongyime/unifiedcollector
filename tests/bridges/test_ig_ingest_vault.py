@@ -1,4 +1,7 @@
 import asyncio
+import hashlib
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 from src.bridges import ig_ingest
@@ -44,6 +47,30 @@ class _NoDownloadSession:
         raise AssertionError("extension ingest should not download when vault is unavailable")
 
 
+class _DownloadResponse:
+    def __init__(self, data: bytes):
+        self.status = 200
+        self.headers = {"content-type": "image/jpeg"}
+        self._data = data
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def read(self):
+        return self._data
+
+
+class _DownloadSession:
+    def __init__(self, data: bytes):
+        self.data = data
+
+    def get(self, *args, **kwargs):
+        return _DownloadResponse(self.data)
+
+
 def test_extension_ingest_pauses_media_download_when_vault_unavailable(monkeypatch, tmp_path):
     pool = _FakePool()
     monkeypatch.setattr(
@@ -68,6 +95,55 @@ def test_extension_ingest_pauses_media_download_when_vault_unavailable(monkeypat
     assert "dead_letter_queue" in query
     assert args[:3] == ("instagram", "bryan", "abc123")
     assert "vault/media unavailable before extension media write" in args[3]
+
+
+def test_extension_ingest_writes_media_to_vault_blob(monkeypatch, tmp_path):
+    pool = _FakePool()
+    vault_root = tmp_path / "vault"
+    media_root = tmp_path / "media"
+    vault_root.mkdir()
+    monkeypatch.setattr(ig_ingest, "VAULT_ROOT", vault_root)
+    monkeypatch.setattr(ig_ingest, "MEDIA_ROOT", str(media_root))
+    monkeypatch.setattr(ig_ingest, "assert_media_write_allowed", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        ig_ingest,
+        "write_media_sidecar",
+        lambda **kwargs: SimpleNamespace(enabled=True, ok=True, relative_path="sidecars/media.json", error=None),
+    )
+    data = b"\xff\xd8\xff" + (b"a" * 21000)
+    digest = hashlib.sha256(data).hexdigest()
+
+    saved = asyncio.run(
+        ig_ingest._download_and_save(
+            pool,
+            _DownloadSession(data),
+            "instagram",
+            "bryan",
+            {
+                "content_id": "abc123",
+                "kind": "story",
+                "url": "https://cdn.example.test/image.jpg",
+                "entity_name": "Bryan",
+                "meta": {"caption": "hello"},
+            },
+        )
+    )
+
+    assert saved is True
+    blob = vault_root / "media" / "blobs" / digest[:2] / digest[2:4] / f"{digest}.jpg"
+    assert blob.read_bytes() == data
+    assert not (media_root / "instagram").exists()
+    media_args = next(args for query, args in pool.conn.executes if "INSERT INTO media_items" in query)
+    assert media_args[4] == "story_abc123"
+    assert Path(media_args[6]) == blob
+    metadata = json.loads(media_args[10])
+    assert metadata["caption"] == "hello"
+    assert metadata["vault_artifact"]["ok"] is True
+    assert metadata["vault_artifact"]["blob_path"] == f"media/blobs/{digest[:2]}/{digest[2:4]}/{digest}.jpg"
+    sidecar = next((vault_root / "sidecars" / "artifacts" / "instagram").rglob("*.json"))
+    payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert payload["metadata"]["ingest_path"] == "extension"
+    assert payload["metadata"]["legacy_path"].endswith("story_abc123.jpg")
 
 
 def test_archive_browser_capture_writes_profile_raw_payload(monkeypatch):
