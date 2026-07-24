@@ -25,10 +25,12 @@ from __future__ import annotations
 
 import logging
 import os
+import json
 from collections.abc import Callable
+from pathlib import Path
 
 from .drive_check import check_drive
-from .vault import assert_media_write_allowed
+from .vault import VAULT_ROOT, write_atomic_artifact
 
 logger = logging.getLogger(__name__)
 
@@ -228,32 +230,87 @@ class Reconciler:
     _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
            "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 
-    async def _redownload(self, source_url: str, file_path: str) -> bool:
+    async def _redownload(
+        self,
+        source_url: str,
+        file_path: str,
+        *,
+        content_id: str | None = None,
+    ) -> dict[str, object] | None:
         """Generic GET of source_url -> file_path (atomic). For direct-CDN media.
-        Returns False on any failure (caller tombstones after N)."""
+        Returns repair metadata on success, else None (caller tombstones after N)."""
         if not source_url or not file_path:
-            return False
+            return None
         import httpx
-        import tempfile
-        from pathlib import Path
         try:
             async with httpx.AsyncClient(timeout=60, follow_redirects=True) as c:
                 r = await c.get(source_url, headers={"User-Agent": self._UA})
                 r.raise_for_status()
                 data = r.content
             if len(data) < 1024:  # html error page / empty -> treat as failure
-                return False
-            dest = Path(file_path)
-            assert_media_write_allowed(dest)
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            fd, tmp = tempfile.mkstemp(dir=str(dest.parent), suffix=".tmp")
-            with os.fdopen(fd, "wb") as f:
-                f.write(data)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, str(dest))
-            return True
+                return None
+            legacy_path = Path(file_path)
+            artifact_id = f"reconciler/{content_id or legacy_path.stem}"
+            artifact = write_atomic_artifact(
+                source=self.source,
+                artifact_id=artifact_id,
+                artifact_kind="media_blob",
+                data=data,
+                extension=legacy_path.suffix.lstrip(".") or None,
+                metadata={
+                    "content_id": content_id,
+                    "source_url": source_url,
+                    "legacy_path": file_path,
+                    "repaired_by": "reconciler",
+                    "rebuild_target_tables": ["media_items"],
+                },
+                root=VAULT_ROOT,
+            )
+            if not artifact.path:
+                return None
+            return {
+                "file_path": str(artifact.path),
+                "file_size": artifact.file_size,
+                "sha256": artifact.sha256,
+                "vault_artifact": {
+                    "ok": artifact.ok,
+                    "partial": artifact.partial,
+                    "path": artifact.relative_path,
+                    "blob_path": artifact.blob_relative_path,
+                    "sidecar_path": artifact.sidecar.relative_path if artifact.sidecar else None,
+                    "duplicate_blob": artifact.duplicate_blob,
+                    "error": artifact.error,
+                    "repaired_by": "reconciler",
+                    "legacy_path": file_path,
+                },
+            }
         except Exception:
+            return None
+
+    async def _update_repaired_media_item(self, content_id: str, repair: dict[str, object]) -> bool:
+        if self.pool is None:
+            return False
+        try:
+            async with self.pool.acquire() as conn:
+                result = await conn.execute(
+                    """
+                    UPDATE media_items
+                    SET file_path = $3,
+                        file_size = $4,
+                        sha256 = $5,
+                        metadata = COALESCE(metadata, '{}'::jsonb) || $6::jsonb
+                    WHERE source = $1 AND content_id = $2
+                    """,
+                    self.source,
+                    content_id,
+                    repair.get("file_path"),
+                    repair.get("file_size"),
+                    repair.get("sha256"),
+                    json.dumps({"vault_artifact": repair.get("vault_artifact")}, default=str),
+                )
+            return str(result).endswith(" 1")
+        except Exception:
+            logger.debug("%s: reconciler media_items update failed", self.source, exc_info=True)
             return False
 
     async def sweep(self) -> int:
@@ -294,7 +351,8 @@ class Reconciler:
             self._missing_seen += 1  # keeps auto-complete from firing prematurely
             if is_video or downloaded >= self.budget:
                 continue  # count missing, but defer (video) or budget-capped
-            if await self._redownload(r["source_url"], fp):
+            repair = await self._redownload(r["source_url"], fp, content_id=r["content_id"])
+            if repair and await self._update_repaired_media_item(r["content_id"], repair):
                 downloaded += 1
             else:
                 self.record_failure(r["content_id"])

@@ -200,6 +200,10 @@ Current shipped recovery/ops work:
   blob-only, missing-file, and checksum-mismatch states. DB comparison is
   bounded by `REBUILD_REPORT_DB_COMPARE_TIMEOUT_SECONDS` and JSON output keeps
   logs on stderr so automation can parse stdout directly.
+- **Repair canonicalization:** the generic media reconciler re-download path
+  writes recovered bytes through the same canonical sha256 blob writer and
+  updates `media_items.file_path/file_size/sha256` plus `metadata.vault_artifact`
+  to point at the repaired vault blob.
 - **Browser-extension observability:** extension hooks are tracked through
   `dm_hook_heartbeat`; browser ingest requests are recorded in
   `browser_ingest_events` and shown in the hourly Telegram status as browser

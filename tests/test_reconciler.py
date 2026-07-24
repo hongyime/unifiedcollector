@@ -4,8 +4,13 @@ DB persistence is exercised separately (integration); these cover the bounded /
 tombstoning / sharding / alert logic that protects live collection.
 """
 import hashlib
+import json
 import tempfile
+from types import SimpleNamespace
 
+import pytest
+
+import httpx
 from src.core.reconciler import Reconciler
 
 
@@ -149,3 +154,114 @@ def test_file_sha256_matches_hashlib(tmp_path=None):
 
 def test_file_sha256_missing_returns_none():
     assert Reconciler.file_sha256("/no/such/file/xyz") is None
+
+
+@pytest.mark.asyncio
+async def test_redownload_writes_repair_as_vault_artifact(monkeypatch, tmp_path):
+    r = _make("website")
+    payload = b"x" * 2048
+    seen: dict[str, object] = {}
+
+    class _Response:
+        content = payload
+
+        def raise_for_status(self):
+            return None
+
+    class _Client:
+        def __init__(self, **kwargs):
+            seen["client_kwargs"] = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return None
+
+        async def get(self, url, **kwargs):
+            seen["url"] = url
+            seen["headers"] = kwargs.get("headers")
+            return _Response()
+
+    def fake_write_atomic_artifact(**kwargs):
+        seen["artifact_kwargs"] = kwargs
+        return SimpleNamespace(
+            ok=True,
+            partial=False,
+            path=tmp_path / "media" / "blobs" / ("a" * 64) / "x.jpg",
+            relative_path="media/blobs/aa/x.jpg",
+            blob_relative_path="media/blobs/aa/x.jpg",
+            sidecar=SimpleNamespace(relative_path="sidecars/website/x.json"),
+            duplicate_blob=False,
+            error=None,
+            file_size=len(payload),
+            sha256="a" * 64,
+        )
+
+    monkeypatch.setattr(httpx, "AsyncClient", _Client)
+    monkeypatch.setattr("src.core.reconciler.write_atomic_artifact", fake_write_atomic_artifact)
+
+    repair = await r._redownload(
+        "https://cdn.example/image.jpg",
+        "/legacy/website/image.jpg",
+        content_id="image-1",
+    )
+
+    artifact_kwargs = seen["artifact_kwargs"]
+    assert artifact_kwargs["source"] == "website"
+    assert artifact_kwargs["artifact_id"] == "reconciler/image-1"
+    assert artifact_kwargs["artifact_kind"] == "media_blob"
+    assert artifact_kwargs["data"] == payload
+    assert artifact_kwargs["extension"] == "jpg"
+    assert artifact_kwargs["metadata"]["legacy_path"] == "/legacy/website/image.jpg"
+    assert repair["file_path"].endswith("x.jpg")
+    assert repair["vault_artifact"]["repaired_by"] == "reconciler"
+
+
+@pytest.mark.asyncio
+async def test_update_repaired_media_item_points_row_at_canonical_blob():
+    r = _make("website")
+    seen: dict[str, object] = {}
+
+    class _Conn:
+        async def execute(self, sql, *args):
+            seen["sql"] = sql
+            seen["args"] = args
+            return "UPDATE 1"
+
+    class _Acquire:
+        async def __aenter__(self):
+            return _Conn()
+
+        async def __aexit__(self, *_exc):
+            return None
+
+    class _Pool:
+        def acquire(self):
+            return _Acquire()
+
+    r.pool = _Pool()
+    repair = {
+        "file_path": "/vault/media/blobs/aa/blob.jpg",
+        "file_size": 2048,
+        "sha256": "a" * 64,
+        "vault_artifact": {
+            "path": "media/blobs/aa/blob.jpg",
+            "repaired_by": "reconciler",
+            "legacy_path": "/legacy/website/image.jpg",
+        },
+    }
+
+    updated = await r._update_repaired_media_item("image-1", repair)
+
+    assert updated is True
+    assert "UPDATE media_items" in seen["sql"]
+    assert seen["args"][:5] == (
+        "website",
+        "image-1",
+        "/vault/media/blobs/aa/blob.jpg",
+        2048,
+        "a" * 64,
+    )
+    metadata = json.loads(seen["args"][5])
+    assert metadata["vault_artifact"]["repaired_by"] == "reconciler"
