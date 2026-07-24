@@ -20,7 +20,7 @@ from src.core.rebuild_rehearsal import rehearse_media_items_rebuild
 
 
 SCRATCH_DB_RE = re.compile(r"^uc_restore_drill_[a-z0-9_]{8,80}$")
-DEFAULT_RESTORE_TIMEOUT_SECONDS = int(os.getenv("COLLECTOR_RESTORE_DRILL_TIMEOUT_SECONDS", "7200"))
+DEFAULT_RESTORE_TIMEOUT_SECONDS = int(os.getenv("COLLECTOR_RESTORE_DRILL_TIMEOUT_SECONDS", "21600"))
 
 
 class RestoreDrillError(RuntimeError):
@@ -217,8 +217,12 @@ async def run_restore_drill(config: RestoreDrillConfig) -> RestoreDrillReport:
             report.gaps.append(f"restore drill failed: {exc}")
     finally:
         if created and not config.keep_scratch:
-            await _drop_scratch_database_for_config(config, scratch_database)
-            report.dropped_scratch = True
+            try:
+                await _drop_scratch_database_for_config(config, scratch_database)
+                report.dropped_scratch = True
+            except Exception as exc:
+                report.error = report.error or f"scratch drop failed: {exc}"
+                report.gaps.append(f"scratch drop failed: {exc}")
         elif created:
             report.kept_scratch = True
     return report
@@ -497,13 +501,19 @@ def _drop_scratch_database_docker(config: RestoreDrillConfig, scratch_database: 
     terminate_sql = (
         "SELECT pg_terminate_backend(pid) "
         "FROM pg_stat_activity "
-        f"WHERE datname = '{scratch_database}' AND pid <> pg_backend_pid(); "
-        f'DROP DATABASE IF EXISTS "{scratch_database}"'
+        f"WHERE datname = '{scratch_database}' AND pid <> pg_backend_pid()"
     )
     _run_docker_shell(
         config,
         'PGPASSWORD="${POSTGRES_PASSWORD:-}" '
         f'psql -v ON_ERROR_STOP=1 -U "${{POSTGRES_USER:-collector}}" -d postgres -c "{terminate_sql}"',
+        "docker psql scratch database terminate failed",
+    )
+    drop_sql = f'DROP DATABASE IF EXISTS "{scratch_database}"'
+    _run_docker_shell(
+        config,
+        'PGPASSWORD="${POSTGRES_PASSWORD:-}" '
+        f'psql -v ON_ERROR_STOP=1 -U "${{POSTGRES_USER:-collector}}" -d postgres -c "{drop_sql}"',
         "docker psql scratch database drop failed",
     )
 
