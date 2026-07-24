@@ -24,14 +24,11 @@ service needs `extra_hosts: ["host.docker.internal:host-gateway"]` in compose.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 import mimetypes
 import os
-import tempfile
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, AsyncIterator, Optional
 from urllib.parse import quote, urlencode
 
@@ -42,7 +39,7 @@ from src.core.user_change_tracker import (
     UserChangeTracker,
     BEEPER_TRACKED_FIELDS,
 )
-from src.core.vault import assert_media_write_allowed
+from src.core.vault import VAULT_ROOT, write_atomic_artifact
 
 logger = logging.getLogger(__name__)
 
@@ -775,40 +772,65 @@ class BeeperCollector(BaseCollector):
         # separator (seen: "...011839.gg/depress"), which made os.replace target
         # a non-existent subdir -> ENOENT. Strip separators from the basename.
         filename = filename.replace("/", "_").replace("\\", "_")
-        dest_dir = self.media_dir / network / content_type
-        dest = dest_dir / filename
-        assert_media_write_allowed(dest)
-        dest_dir.mkdir(parents=True, exist_ok=True)
-
         try:
             data = await self.client.serve_asset(src_url)
-            sha = self.sha256_bytes(data)
-            fd, tmp_path = tempfile.mkstemp(dir=dest_dir, suffix=".tmp")
-            with os.fdopen(fd, "wb") as f:
-                f.write(data)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp_path, str(dest))
+            metadata = {
+                "network": network,
+                "chat_id": chat_id,
+                "message_id": item.get("message_id"),
+                "original_filename": item.get("original_filename"),
+                "mime_type": item.get("mime_type"),
+                "raw": item,
+                "rebuild_target_tables": ["media_items", "beeper_shadow_messages"],
+            }
+            artifact = write_atomic_artifact(
+                source=self.SOURCE_NAME,
+                artifact_id=cid,
+                artifact_kind="media_blob",
+                data=data,
+                extension=ext,
+                metadata={
+                    **metadata,
+                    "entity_id": entity_id,
+                    "entity_name": entity_name,
+                    "content_type": content_type,
+                    "content_id": cid,
+                    "filename": filename,
+                    "source_url": src_url.split("?")[0],
+                },
+                root=VAULT_ROOT,
+            )
+            if not artifact.path:
+                raise RuntimeError(f"vault artifact write failed: {artifact.error}")
+            metadata["vault_artifact"] = {
+                "ok": artifact.ok,
+                "partial": artifact.partial,
+                "path": artifact.relative_path,
+                "blob_path": artifact.blob_relative_path,
+                "sidecar_path": artifact.sidecar.relative_path if artifact.sidecar else None,
+                "duplicate_blob": artifact.duplicate_blob,
+                "error": artifact.error,
+            }
             await self.insert_media_item(
                 entity_id=entity_id,
                 entity_name=entity_name,
                 content_type=content_type,
                 content_id=cid,
                 filename=filename,
-                file_path=str(dest),
-                file_size=len(data),
+                file_path=str(artifact.path),
+                file_size=artifact.file_size,
                 width=item.get("width"),
                 height=item.get("height"),
-                sha256=sha,
+                sha256=artifact.sha256,
                 source_url=src_url.split("?")[0],
-                metadata={
-                    "network": network,
-                    "chat_id": chat_id,
-                    "message_id": item.get("message_id"),
-                    "original_filename": item.get("original_filename"),
-                    "mime_type": item.get("mime_type"),
-                },
+                metadata=metadata,
             )
+            if artifact.partial:
+                await self.send_to_dlq(
+                    entity_id,
+                    cid,
+                    f"vault artifact partial: {artifact.error}",
+                )
             self._known_ids.add(cid)
             logger.debug("Beeper media saved: %s (%d bytes)", cid, len(data))
         except Exception as e:

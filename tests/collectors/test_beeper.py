@@ -13,9 +13,11 @@ No network calls; no docker; no live Beeper Desktop required.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -422,6 +424,50 @@ async def test_collector_download_media_is_noop(monkeypatch, tmp_path):
     coll = BeeperCollector(client=MagicMock(spec=BeeperClient))
     # Should return None without raising
     assert await coll.download_media({"id": "anything"}) is None
+
+
+@pytest.mark.asyncio
+async def test_collector_download_media_writes_vault_blob(monkeypatch, tmp_path):
+    monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    monkeypatch.setattr(beeper_mod, "VAULT_ROOT", vault_root)
+    data = b"beeper attachment bytes"
+    digest = hashlib.sha256(data).hexdigest()
+    client = MagicMock(spec=BeeperClient)
+    client.serve_asset = AsyncMock(return_value=data)
+    coll = BeeperCollector(client=client)
+    coll.insert_media_item = AsyncMock(return_value=True)
+    coll.send_to_dlq = AsyncMock()
+
+    await coll.download_media({
+        "content_id": "msg1_att1",
+        "src_url": "mxc://beeper.local/abc?token=secret",
+        "extension": "jpg",
+        "network": "discord",
+        "chat_id": "!room:beeper.local",
+        "message_id": "msg1",
+        "content_type": "image",
+        "original_filename": "photo.jpg",
+        "mime_type": "image/jpeg",
+        "width": 640,
+        "height": 480,
+    })
+
+    kwargs = coll.insert_media_item.await_args.kwargs
+    stored_path = Path(kwargs["file_path"])
+    assert stored_path == vault_root / "media" / "blobs" / digest[:2] / digest[2:4] / f"{digest}.jpg"
+    assert stored_path.read_bytes() == data
+    assert kwargs["sha256"] == digest
+    assert kwargs["file_size"] == len(data)
+    assert kwargs["source_url"] == "mxc://beeper.local/abc"
+    assert kwargs["metadata"]["network"] == "discord"
+    assert kwargs["metadata"]["chat_id"] == "!room:beeper.local"
+    assert kwargs["metadata"]["message_id"] == "msg1"
+    assert kwargs["metadata"]["vault_artifact"]["ok"] is True
+    assert kwargs["metadata"]["vault_artifact"]["partial"] is False
+    assert kwargs["metadata"]["vault_artifact"]["blob_path"].startswith("media/blobs/")
+    coll.send_to_dlq.assert_not_awaited()
 
 
 # ── transient DNS / name-resolution handling ───────────────────────────────
