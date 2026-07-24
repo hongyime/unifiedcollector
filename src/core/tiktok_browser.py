@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from src.core.scrape_pacing import headless_dwell
-from src.core.vault import assert_media_write_allowed
+from src.core.vault import VAULT_ROOT, assert_media_write_allowed, ensure_vault_available
 
 logger = logging.getLogger(__name__)
 
@@ -113,9 +113,24 @@ def _parse_netscape_cookies(cookies_file: Path) -> list[dict[str, Any]]:
     return cookies
 
 
-def _atomic_write_bytes(dest: Path, data: bytes) -> None:
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def _atomic_write_bytes(dest: Path, data: bytes, *, media_guard: bool = True) -> None:
     """Write ``data`` to ``dest`` via .tmp + os.replace (best-effort fsync)."""
-    assert_media_write_allowed(dest)
+    if media_guard:
+        assert_media_write_allowed(dest)
+    else:
+        ensure_vault_available(VAULT_ROOT)
+        root = VAULT_ROOT.resolve(strict=False)
+        resolved = dest.resolve(strict=False)
+        if not _is_relative_to(resolved, root):
+            raise RuntimeError(f"temporary TikTok browser destination escapes vault root: {resolved}")
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".tmp")
     with open(tmp, "wb") as fh:
@@ -159,8 +174,14 @@ class TikTokBrowserDownloader:
     ) -> None:
         self.cookies_file: Optional[Path] = Path(cookies_file) if cookies_file else None
         self.headless = bool(headless)
+        self._output_is_vault_temp = output_dir is None
         if output_dir is None:
-            output_dir = Path(os.getenv("MEDIA_ROOT", "/data/media")) / "tiktok"
+            output_dir = Path(
+                os.getenv(
+                    "TIKTOK_BROWSER_TEMP_DIR",
+                    str(VAULT_ROOT / "tmp" / "tiktok_browser"),
+                )
+            )
         self.output_dir: Path = Path(output_dir)
         self.timeout_ms = int(timeout_ms)
 
@@ -461,7 +482,7 @@ class TikTokBrowserDownloader:
             return None
 
         try:
-            _atomic_write_bytes(dest, data)
+            _atomic_write_bytes(dest, data, media_guard=not self._output_is_vault_temp)
         except Exception as exc:
             logger.warning("download_video %s: atomic write failed: %s", vid, exc)
             return None

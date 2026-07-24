@@ -229,7 +229,7 @@ def validate_cookies(cookies_file: str) -> dict:
                     continue
                 parts = line.split("\t")
                 if len(parts) >= 7:
-                    name, value = parts[5], parts[6]
+                    name = parts[5]
                     expiry = int(parts[4]) if parts[4].isdigit() else 0
                     result["total"] += 1
                     result["present"].add(name)
@@ -1250,6 +1250,9 @@ class TiktokCollector(BaseCollector):
             else Path(os.getenv("TIKTOK_COOKIES_FILE", "/data/cookies/tiktok.txt"))
         )
         max_videos = int(os.getenv("TIKTOK_BROWSER_MAX_VIDEOS", "50"))
+        browser_output_dir = Path(
+            os.getenv("TIKTOK_BROWSER_TEMP_DIR", str(VAULT_ROOT / "tmp" / "tiktok_browser"))
+        )
         browser = TikTokBrowserDownloader(cookies_file=cookies_path)
         try:
             try:
@@ -1296,22 +1299,38 @@ class TiktokCollector(BaseCollector):
                     "tiktok fallback playwright: read %s failed: %s", fp, exc,
                 )
                 continue
-            await self.download_media({
-                "entity_id": username,
-                "entity_name": username,
-                "content_type": "video",
-                "content_id": vid,
-                "data": data,
-                "extension": "mp4",
-                "raw": (it or {}).get("metadata") or {},
-            })
-            ingested += 1
+            try:
+                await self.download_media({
+                    "entity_id": username,
+                    "entity_name": username,
+                    "content_type": "video",
+                    "content_id": vid,
+                    "data": data,
+                    "extension": "mp4",
+                    "raw": (it or {}).get("metadata") or {},
+                })
+                ingested += 1
+            finally:
+                self._unlink_browser_temp_file(fp, browser_output_dir)
             await asyncio.sleep(random.uniform(self._min_sleep, self._max_sleep))
         logger.info(
             "tiktok fallback playwright: ingested %d/%d items for %s",
             ingested, len(items), username,
         )
         return ingested > 0
+
+    @staticmethod
+    def _unlink_browser_temp_file(file_path: str | os.PathLike[str], output_dir: Path) -> None:
+        try:
+            path = Path(file_path).resolve(strict=False)
+            root = output_dir.resolve(strict=False)
+            path.relative_to(root)
+        except Exception:
+            return
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            logger.debug("tiktok fallback playwright: temp cleanup failed for %s", path, exc_info=True)
 
     async def _load_tracker_state(self):
         if self.pool:

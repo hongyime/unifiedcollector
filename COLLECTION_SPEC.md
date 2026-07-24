@@ -192,7 +192,9 @@ Current shipped recovery/ops work:
   GitHub direct media, GitHub bulk avatar artifacts, shared profile-photo, and
   Strava activity photo/route-map downloads use this path for physical blobs
   while preserving each source occurrence as its own `media_items` row and
-  media sidecar where a concrete source occurrence should be indexed.
+  media sidecar where a concrete source occurrence should be indexed. TikTok
+  Playwright fallback writes only vault-temp intermediates and removes them
+  after the collector re-ingests the bytes into canonical blobs.
 - **Rebuild report:** `python -m src.main rebuild-report --compare-db
   --verify-checksums` reports sidecar coverage plus DB-only, sidecar-only,
   blob-only, missing-file, and checksum-mismatch states. DB comparison is

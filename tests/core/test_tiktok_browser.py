@@ -220,8 +220,9 @@ def test_constructor_wires_cookies(tmp_path: Path, monkeypatch):
     assert dl.cookies_file == cookies
     assert dl.headless is True
     assert dl.timeout_ms == 5_000
-    # Default output_dir uses MEDIA_ROOT/tiktok
-    assert dl.output_dir == tmp_path / "tiktok"
+    # Default output_dir is a vault temp folder; the collector re-ingests and
+    # removes these files after canonical artifact storage.
+    assert dl.output_dir == tb_mod.VAULT_ROOT / "tmp" / "tiktok_browser"
     # No browser brought up yet — close should be a no-op
     asyncio.run(dl.close())
     assert dl._browser is None

@@ -600,7 +600,10 @@ async def test_browser_fallback_triggered_on_gallery_dl_failure(monkeypatch, tmp
     c.download_media = AsyncMock(return_value=None)
     c.is_known = lambda _id: False  # type: ignore[assignment]
 
-    fp = tmp_path / "v.mp4"
+    browser_tmp = tmp_path / "browser_tmp"
+    monkeypatch.setenv("TIKTOK_BROWSER_TEMP_DIR", str(browser_tmp))
+    fp = browser_tmp / "v.mp4"
+    fp.parent.mkdir(parents=True)
     fp.write_bytes(b"x" * 100)
 
     calls: dict[str, list] = {"init": [], "download_user": [], "close": []}
@@ -629,6 +632,8 @@ async def test_browser_fallback_triggered_on_gallery_dl_failure(monkeypatch, tmp
     assert calls["download_user"] == [("alice", 50)]
     assert calls["close"] == [True]
     c.download_media.assert_awaited()  # at least one ingest happened
+    assert fp.exists() is False
+    assert "output_dir" not in calls["init"][0]
 
 
 @pytest.mark.asyncio
