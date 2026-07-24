@@ -47,7 +47,12 @@ from src.core.proximity import refresh_account_proximity_cache
 from src.core.profile_photo_tracker import ProfilePhotoTracker
 from src.core.rate_limit_events import record_rate_limit_event
 from src.core.scrape_pacing import headless_dwell, sleep_before_pre_cooldown_retry
-from src.core.vault import VAULT_ROOT, assert_media_write_allowed, write_atomic_artifact
+from src.core.vault import (
+    VAULT_ROOT,
+    assert_media_write_allowed,
+    write_atomic_artifact,
+    write_raw_payload,
+)
 from src.core.user_change_tracker import (
     UserChangeTracker,
     INSTAGRAM_TRACKED_FIELDS,
@@ -166,6 +171,11 @@ PLAYWRIGHT_LAUNCH_ARGS = [
 ]
 
 
+def _tier1_raw_archives_enabled() -> bool:
+    raw = os.getenv("COLLECTOR_TIER1_RAW_PAYLOADS_ENABLED", "1")
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
 class InstagramCollector(BaseCollector):
     SOURCE_NAME = "instagram"
     USE_HUMAN_RATE_LIMITER = True
@@ -247,6 +257,28 @@ class InstagramCollector(BaseCollector):
         # Profile analyzer instance — cheap, stateless. Falls back to
         # None when the import failed (don't break the collector).
         self._profile_analyzer = ProfileAnalyzer() if ProfileAnalyzer else None
+
+    def _archive_raw_payload(
+        self,
+        *,
+        artifact_id: str,
+        payload: dict | list,
+        target_tables: list[str],
+        metadata: dict | None = None,
+    ) -> None:
+        if not _tier1_raw_archives_enabled():
+            return
+        try:
+            write_raw_payload(
+                source=self.SOURCE_NAME,
+                artifact_id=artifact_id,
+                payload=payload,
+                metadata=metadata or {},
+                target_tables=target_tables,
+                root=VAULT_ROOT,
+            )
+        except Exception as exc:
+            logger.debug("instagram raw archive failed for %s: %s", artifact_id, exc)
 
     def _auto_discover_cookies(self) -> dict:
         """Auto-discover cookie files for all accounts.
@@ -353,7 +385,6 @@ class InstagramCollector(BaseCollector):
         session_file = self._session_dir / f"{username}.session"
         try:
             if session_file.exists() and self._check_session_age(username):
-                import instaloader
                 self._loader.load_session_from_file(username, str(session_file))
                 # Skip test_login() — it blocks for minutes on 401 errors.
                 # Session file existence + age check is sufficient.
@@ -466,7 +497,6 @@ class InstagramCollector(BaseCollector):
                 logger.warning("Cookie file missing required keys (sessionid/csrftoken)")
                 return False
 
-            import requests
             session = self._loader.context._session
             for name, value in cookies.items():
                 session.cookies.set(name, value, domain=".instagram.com")
@@ -595,7 +625,6 @@ class InstagramCollector(BaseCollector):
         Runs the httpx-based collection logic with per-target timeouts so a
         rate-limited account never blocks the event loop for > 120s.
         """
-        import concurrent.futures
         import asyncio
         import time as _time
 
@@ -1241,7 +1270,21 @@ class InstagramCollector(BaseCollector):
                     raise _RateLimitHandled("429")
             else:
                 resp.raise_for_status()
-                user_data = resp.json().get("data", {}).get("user", {})
+                profile_response = resp.json()
+                self._archive_raw_payload(
+                    artifact_id=f"httpx/profiles/{username}/{time.time_ns()}",
+                    payload=profile_response,
+                    target_tables=["instagram_profiles"],
+                    metadata={
+                        "payload_type": "instagram_httpx_profile_response",
+                        "username": username,
+                        "collection_account": acct_name,
+                        "request_url": f"{GRAPH_API}/users/web_profile_info/",
+                        "http_status": resp.status_code,
+                        "ingest_path": "httpx_profile_fetch",
+                    },
+                )
+                user_data = profile_response.get("data", {}).get("user", {})
 
         if not user_data:
             logger.warning("Empty profile data for %s", username)
@@ -1419,6 +1462,18 @@ class InstagramCollector(BaseCollector):
             data.get("is_verified", False), data.get("is_private", False),
             data.get("profile_pic_url_hd"), data.get("external_url")
             )
+        self._archive_raw_payload(
+            artifact_id=f"profiles/{data.get('id') or data.get('username') or 'unknown'}/{time.time_ns()}",
+            payload=data,
+            target_tables=["instagram_profiles"],
+            metadata={
+                "payload_type": "instagram_profile",
+                "platform_user_id": data.get("id"),
+                "username": data.get("username"),
+                "collection_account": self._current_account.name if self._current_account else None,
+                "ingest_path": self.INGEST_PATH,
+            },
+        )
 
     # _spider_followers is now defined in the F-B section below — wired to
     # src/core/spider_discover.SpiderDiscover with read-only follower BFS.
@@ -1491,6 +1546,22 @@ class InstagramCollector(BaseCollector):
                     return any_success
 
             data = resp.json()
+            self._archive_raw_payload(
+                artifact_id=f"graphql/posts/{uid}/page_{page_depth}/{time.time_ns()}",
+                payload=data,
+                target_tables=["instagram_posts"],
+                metadata={
+                    "payload_type": "instagram_graphql_posts_page",
+                    "platform_user_id": uid,
+                    "username": entity_name,
+                    "page_depth": page_depth,
+                    "end_cursor": end_cursor,
+                    "request_url": "https://www.instagram.com/graphql/query/",
+                    "query_hash": params["query_hash"],
+                    "collection_account": self._current_account.name if self._current_account else None,
+                    "ingest_path": "httpx_graphql",
+                },
+            )
             media_data = (data.get("data", {})
                           .get("user", {})
                           .get("edge_owner_to_timeline_media", {}))
@@ -1758,6 +1829,7 @@ class InstagramCollector(BaseCollector):
                                 "lat": getattr(loc, "lat", None),
                                 "lng": getattr(loc, "lng", None),
                             } if loc else None,
+                            "raw": post._asdict() if hasattr(post, "_asdict") else {},
                         })
                 except Exception as e:
                     logger.debug("instaloader post fetch for %s failed: %s", entity_name, e)
@@ -1957,6 +2029,19 @@ class InstagramCollector(BaseCollector):
                 except Exception as e:
                     logger.warning("Playwright Mode-β: JSON parse failed for %s: %s", username, e)
                     return None
+                self._archive_raw_payload(
+                    artifact_id=f"playwright/profiles/{username}/{time.time_ns()}",
+                    payload=data,
+                    target_tables=["instagram_profiles"],
+                    metadata={
+                        "payload_type": "instagram_playwright_profile_response",
+                        "username": username,
+                        "collection_account": acct_name,
+                        "request_url": f"{GRAPH_API}/users/web_profile_info/",
+                        "http_status": status,
+                        "ingest_path": "playwright_profile_fetch",
+                    },
+                )
                 user_data = data.get("data", {}).get("user", {})
                 if user_data:
                     logger.info("Playwright Mode-β: recovered profile JSON for %s", username)
@@ -2049,6 +2134,20 @@ class InstagramCollector(BaseCollector):
                 )
 
                 edges = self._extract_post_edges_from_payload(payload)
+                self._archive_raw_payload(
+                    artifact_id=f"playwright/posts/{entity_name}/{time.time_ns()}",
+                    payload=payload,
+                    target_tables=["instagram_posts"],
+                    metadata={
+                        "payload_type": "instagram_playwright_posts_window",
+                        "platform_user_id": uid,
+                        "username": entity_name,
+                        "edge_count": len(edges),
+                        "request_url": url,
+                        "collection_account": acct_name,
+                        "ingest_path": "playwright_posts",
+                    },
+                )
                 if not edges:
                     logger.info(
                         "Playwright fallback: no post edges parsed for %s "
@@ -2274,6 +2373,19 @@ class InstagramCollector(BaseCollector):
             # except) => instagram_posts stayed empty. Encode to a JSON string.
             json.dumps(node, default=str),
             )
+        self._archive_raw_payload(
+            artifact_id=f"posts/{node.get('shortcode') or node.get('id') or 'unknown'}/{time.time_ns()}",
+            payload=node,
+            target_tables=["instagram_posts"],
+            metadata={
+                "payload_type": "instagram_post_node",
+                "platform_user_id": uid,
+                "platform_post_id": node.get("shortcode") or node.get("id"),
+                "media_type": node.get("__typename"),
+                "collection_account": self._current_account.name if self._current_account else None,
+                "ingest_path": self.INGEST_PATH,
+            },
+        )
 
     async def _download_node(self, node: dict, uid: str, entity_name: str, content_id: str, parent_node: dict | None = None):
         is_video = node.get("is_video", False)
@@ -2714,7 +2826,21 @@ class InstagramCollector(BaseCollector):
                 )
                 return {}
             resp.raise_for_status()
-            user = resp.json().get("data", {}).get("user", {}) or {}
+            profile_response = resp.json()
+            self._archive_raw_payload(
+                artifact_id=f"httpx/profiles/{username}/{time.time_ns()}",
+                payload=profile_response,
+                target_tables=["instagram_profiles"],
+                metadata={
+                    "payload_type": "instagram_httpx_profile_response",
+                    "username": username,
+                    "collection_account": acct,
+                    "request_url": f"{GRAPH_API}/users/web_profile_info/",
+                    "http_status": resp.status_code,
+                    "ingest_path": "collect_user_profile",
+                },
+            )
+            user = profile_response.get("data", {}).get("user", {}) or {}
             if not user:
                 await self._record_profile_access(username, False, error="empty profile data")
                 return {}
@@ -3832,6 +3958,20 @@ class InstagramCollector(BaseCollector):
         if not payload:
             return 0
         edges = self._extract_post_edges_from_payload(payload)
+        self._archive_raw_payload(
+            artifact_id=f"playwright/reels/{entity_name}/{time.time_ns()}",
+            payload=payload,
+            target_tables=["instagram_posts"],
+            metadata={
+                "payload_type": "instagram_playwright_reels_window",
+                "platform_user_id": uid,
+                "username": entity_name,
+                "edge_count": len(edges),
+                "request_url": url,
+                "collection_account": acct_name,
+                "ingest_path": "playwright_reels",
+            },
+        )
         if not edges:
             return 0
         n = 0

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import sys
@@ -13,9 +14,15 @@ import pytest
 from src.collectors import instagram as instagram_mod
 
 
-def _make_pool(fetchval_result=None):
+@pytest.fixture(autouse=True)
+def _disable_tier1_raw_archives(monkeypatch):
+    monkeypatch.setenv("COLLECTOR_TIER1_RAW_PAYLOADS_ENABLED", "0")
+
+
+def _make_pool(fetchval_result=None, fetchrow_result=None):
     pool = MagicMock()
     conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=fetchrow_result)
     conn.fetchval = AsyncMock(return_value=fetchval_result)
     conn.execute = AsyncMock(return_value=None)
     cm = MagicMock()
@@ -105,6 +112,115 @@ async def test_download_media_writes_headless_instagram_to_vault_blob(monkeypatc
     assert kwargs["metadata"]["vault_artifact"]["ok"] is True
     assert kwargs["metadata"]["vault_artifact"]["blob_path"] == f"media/blobs/{digest[:2]}/{digest[2:4]}/{digest}.jpg"
     coll.send_to_dlq.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_upsert_profile_archives_raw_payload(monkeypatch):
+    coll = _bare_collector()
+    monkeypatch.setenv("COLLECTOR_TIER1_RAW_PAYLOADS_ENABLED", "1")
+    calls = []
+
+    def fake_write_raw_payload(**kwargs):
+        calls.append(kwargs)
+        return MagicMock(ok=True)
+
+    monkeypatch.setattr(instagram_mod, "write_raw_payload", fake_write_raw_payload)
+
+    profile = {
+        "id": "123",
+        "username": "alice",
+        "full_name": "Alice",
+        "biography": "bio",
+        "edge_followed_by": {"count": 10},
+        "edge_follow": {"count": 5},
+        "edge_owner_to_timeline_media": {"count": 2},
+    }
+
+    await coll._upsert_profile(profile)
+
+    assert calls
+    assert calls[0]["source"] == "instagram"
+    assert calls[0]["artifact_id"].startswith("profiles/123/")
+    assert calls[0]["payload"] == profile
+    assert calls[0]["target_tables"] == ["instagram_profiles"]
+    assert calls[0]["metadata"]["collection_account"] == "acct1"
+
+
+@pytest.mark.asyncio
+async def test_upsert_post_archives_raw_payload(monkeypatch):
+    coll = _bare_collector()
+    coll.pool = _make_pool(fetchrow_result={"id": "profile-uuid"})
+    monkeypatch.setenv("COLLECTOR_TIER1_RAW_PAYLOADS_ENABLED", "1")
+    calls = []
+
+    def fake_write_raw_payload(**kwargs):
+        calls.append(kwargs)
+        return MagicMock(ok=True)
+
+    monkeypatch.setattr(instagram_mod, "write_raw_payload", fake_write_raw_payload)
+    post = {
+        "shortcode": "post123",
+        "__typename": "GraphImage",
+        "taken_at_timestamp": 1_700_000_000,
+        "edge_media_preview_like": {"count": 3},
+        "edge_media_to_comment": {"count": 1},
+        "edge_media_to_caption": {"edges": [{"node": {"text": "hello"}}]},
+    }
+
+    await coll._upsert_post(post, "123")
+
+    assert calls
+    assert calls[0]["artifact_id"].startswith("posts/post123/")
+    assert calls[0]["payload"] == post
+    assert calls[0]["target_tables"] == ["instagram_posts"]
+    assert calls[0]["metadata"]["platform_user_id"] == "123"
+
+
+@pytest.mark.asyncio
+async def test_collect_posts_archives_graphql_page(monkeypatch):
+    coll = _bare_collector()
+    coll._sem = asyncio.Semaphore(1)
+    coll._stop = SimpleNamespace(is_set=lambda: False)
+    coll.rate_limiter = SimpleNamespace(
+        async_wait=AsyncMock(),
+        record_success=MagicMock(),
+        record_failure=MagicMock(),
+    )
+    coll.circuit_breaker = SimpleNamespace(record_success=MagicMock(), record_failure=MagicMock())
+    coll._process_post = AsyncMock()
+    monkeypatch.setenv("COLLECTOR_TIER1_RAW_PAYLOADS_ENABLED", "1")
+    calls = []
+
+    def fake_write_raw_payload(**kwargs):
+        calls.append(kwargs)
+        return MagicMock(ok=True)
+
+    monkeypatch.setattr(instagram_mod, "write_raw_payload", fake_write_raw_payload)
+
+    response_payload = {
+        "data": {
+            "user": {
+                "edge_owner_to_timeline_media": {
+                    "edges": [{"node": {"shortcode": "post123"}}],
+                    "page_info": {"has_next_page": False, "end_cursor": None},
+                }
+            }
+        }
+    }
+    response = MagicMock(status_code=200)
+    response.raise_for_status = MagicMock()
+    response.json = MagicMock(return_value=response_payload)
+    client = SimpleNamespace(get=AsyncMock(return_value=response))
+
+    ok = await coll._collect_posts(client, "123", "alice")
+
+    assert ok is True
+    assert calls
+    assert calls[0]["artifact_id"].startswith("graphql/posts/123/page_0/")
+    assert calls[0]["payload"] == response_payload
+    assert calls[0]["target_tables"] == ["instagram_posts"]
+    assert calls[0]["metadata"]["ingest_path"] == "httpx_graphql"
+    coll._process_post.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -246,3 +362,58 @@ async def test_fetch_profile_playwright_retries_transient_429(monkeypatch):
     assert kwargs["reason"] == "Playwright profile transient rate-limit retried"
     assert kwargs["metadata"]["pre_cooldown_retry"] is True
     assert kwargs["metadata"]["retry_status_code"] == 200
+
+
+@pytest.mark.asyncio
+async def test_fetch_profile_playwright_archives_raw_response(monkeypatch):
+    coll = _bare_collector()
+    coll._session_auth_dead = False
+    coll._build_playwright_storage_state = MagicMock(return_value=None)
+    coll.user_agents = MagicMock()
+    coll.user_agents.get_for_domain = MagicMock(return_value="ua")
+    coll._record_rate_limit_event = AsyncMock()
+    monkeypatch.setenv("COLLECTOR_TIER1_RAW_PAYLOADS_ENABLED", "1")
+    calls = []
+
+    def fake_write_raw_payload(**kwargs):
+        calls.append(kwargs)
+        return MagicMock(ok=True)
+
+    monkeypatch.setattr(instagram_mod, "write_raw_payload", fake_write_raw_payload)
+
+    payload = {"data": {"user": {"id": "123", "username": "target_user"}}}
+    page = MagicMock()
+    page.goto = AsyncMock(return_value=None)
+    page.evaluate = AsyncMock(return_value={"status": 200, "body": json.dumps(payload)})
+
+    context = MagicMock()
+    context.new_page = AsyncMock(return_value=page)
+
+    browser = MagicMock()
+    browser.new_context = AsyncMock(return_value=context)
+    browser.close = AsyncMock(return_value=None)
+
+    chromium = MagicMock()
+    chromium.launch = AsyncMock(return_value=browser)
+
+    playwright_ctx = MagicMock()
+    playwright_ctx.chromium = chromium
+    playwright_ctx.stop = AsyncMock(return_value=None)
+
+    starter = MagicMock()
+    starter.start = AsyncMock(return_value=playwright_ctx)
+
+    fake_async_api = types.ModuleType("playwright.async_api")
+    fake_async_api.async_playwright = MagicMock(return_value=starter)
+    monkeypatch.setitem(sys.modules, "playwright", types.ModuleType("playwright"))
+    monkeypatch.setitem(sys.modules, "playwright.async_api", fake_async_api)
+    monkeypatch.setattr(instagram_mod, "headless_dwell", AsyncMock(return_value=None))
+
+    result = await coll._fetch_profile_playwright("target_user")
+
+    assert result == payload["data"]["user"]
+    assert calls
+    assert calls[0]["artifact_id"].startswith("playwright/profiles/target_user/")
+    assert calls[0]["payload"] == payload
+    assert calls[0]["target_tables"] == ["instagram_profiles"]
+    assert calls[0]["metadata"]["ingest_path"] == "playwright_profile_fetch"

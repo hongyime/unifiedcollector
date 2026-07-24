@@ -260,8 +260,8 @@ Known remaining gaps:
 - Tier 1 raw payload coverage is now strong for browser/extension captures,
   browser Strava streams, authenticated Strava clubs, Telegram/WhatsApp/Beeper
   messaging, Beeper shadow rooms, Strava API activity pages, individual Strava
-  activities, and Strava API/web GPS streams. The remaining raw coverage gap is
-  Instagram headless/httpx profile/post payloads.
+  activities, Strava API/web GPS streams, and Instagram headless/httpx/Playwright
+  profile and post payloads.
 - Physical-file dedupe now has a core sha256 blob writer, and Beeper, Telegram,
   WhatsApp, Lemon8, YouTube, TikTok, Website, Search, Instagram
   headless/extension media, GitHub direct media, GitHub bulk avatar artifacts,
