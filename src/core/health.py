@@ -11,16 +11,39 @@ genuinely-down DB still fails (correct). Tuned to finish well under the compose
 healthcheck timeout (30s).
 """
 import asyncio
+import os
+import ssl as _ssl
 import sys
 
 import asyncpg
-
-from src.db.connection import _dsn, _ssl_context
 
 ATTEMPTS = 3
 CONNECT_TIMEOUT = 6.0
 QUERY_TIMEOUT = 4.0
 RETRY_SLEEP = 2.0
+
+
+def _dsn() -> str:
+    return os.environ.get(
+        "DATABASE_URL",
+        "postgresql://collector:***@localhost:5432/unifiedcollector",
+    )
+
+
+def _ssl_context():
+    mode = os.environ.get("POSTGRES_SSL_MODE", "")
+    if not mode or mode == "disable":
+        return None
+    if mode == "prefer":
+        return "prefer"
+    ctx = _ssl.create_default_context()
+    cert = os.environ.get("POSTGRES_SSL_CERT", "")
+    if cert:
+        ctx.load_verify_locations(cert)
+    elif mode == "require-noverify":
+        ctx.check_hostname = False
+        ctx.verify_mode = _ssl.CERT_NONE
+    return ctx
 
 
 async def _check():
