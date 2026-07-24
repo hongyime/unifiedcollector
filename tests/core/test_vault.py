@@ -1,3 +1,4 @@
+import hashlib
 import json
 
 import pytest
@@ -294,6 +295,99 @@ def test_write_atomic_artifact_reuses_duplicate_blob(tmp_path):
     assert second.path == first.path
     assert len(list((root / "media" / "blobs").rglob("*.jpg"))) == 1
     assert len(list((root / "sidecars" / "artifacts").rglob("*.json"))) == 2
+
+
+def test_write_atomic_artifact_from_path_moves_temp_file(tmp_path):
+    root = tmp_path / "vault"
+    root.mkdir()
+    temp_dir = root / "media" / ".tmp"
+    temp_dir.mkdir(parents=True)
+    source_path = temp_dir / "video.part"
+    data = b"streamed video bytes"
+    source_path.write_bytes(data)
+    digest = hashlib.sha256(data).hexdigest()
+
+    result = vault.write_atomic_artifact_from_path(
+        source="website",
+        artifact_id="video/1",
+        artifact_kind="media_blob",
+        source_path=source_path,
+        extension=".mp4",
+        metadata={"source_url": "https://example.com/v.mp4"},
+        expected_sha256=digest,
+        root=root,
+        delete_source=True,
+    )
+
+    assert result.ok is True
+    assert result.partial is False
+    assert result.path == root / "media" / "blobs" / digest[:2] / digest[2:4] / f"{digest}.mp4"
+    assert result.path.read_bytes() == data
+    assert source_path.exists() is False
+    assert result.sidecar.ok is True
+    sidecar = json.loads(result.sidecar.path.read_text(encoding="utf-8"))
+    assert sidecar["metadata"]["original_artifact_id"] == "video/1"
+    assert sidecar["metadata"]["source_url"] == "https://example.com/v.mp4"
+
+
+def test_write_atomic_artifact_from_path_reuses_duplicate_blob(tmp_path):
+    root = tmp_path / "vault"
+    root.mkdir()
+    data = b"same bytes"
+    first_path = tmp_path / "one.part"
+    second_path = tmp_path / "two.part"
+    first_path.write_bytes(data)
+    second_path.write_bytes(data)
+
+    first = vault.write_atomic_artifact_from_path(
+        source="website",
+        artifact_id="video/1",
+        artifact_kind="media_blob",
+        source_path=first_path,
+        extension=".mp4",
+        root=root,
+        delete_source=True,
+    )
+    second = vault.write_atomic_artifact_from_path(
+        source="search",
+        artifact_id="video/2",
+        artifact_kind="media_blob",
+        source_path=second_path,
+        extension=".mp4",
+        root=root,
+        delete_source=True,
+    )
+
+    assert first.ok is True
+    assert second.ok is True
+    assert second.duplicate_blob is True
+    assert second.path == first.path
+    assert second_path.exists() is False
+    assert len(list((root / "media" / "blobs").rglob("*.mp4"))) == 1
+    assert len(list((root / "sidecars" / "artifacts").rglob("*.json"))) == 2
+
+
+def test_write_atomic_artifact_from_path_can_keep_source_file(tmp_path):
+    root = tmp_path / "vault"
+    root.mkdir()
+    source_path = tmp_path / "keep.part"
+    data = b"keep source"
+    source_path.write_bytes(data)
+
+    result = vault.write_atomic_artifact_from_path(
+        source="website",
+        artifact_id="video/keep",
+        artifact_kind="media_blob",
+        source_path=source_path,
+        extension=".mp4",
+        root=root,
+        delete_source=False,
+    )
+
+    assert result.ok is True
+    assert source_path.exists() is True
+    assert source_path.read_bytes() == data
+    assert result.path.read_bytes() == data
 
 
 def test_write_atomic_artifact_reports_db_failure_as_partial(tmp_path):

@@ -130,7 +130,12 @@ from urllib.parse import urljoin, urlparse, urlunparse
 import httpx
 
 from src.core.base_collector import BaseCollector
-from src.core.vault import VAULT_ROOT, assert_media_write_allowed, write_atomic_artifact
+from src.core.vault import (
+    VAULT_ROOT,
+    assert_media_write_allowed,
+    write_atomic_artifact,
+    write_atomic_artifact_from_path,
+)
 from src.core.scrape_pacing import headless_dwell
 from src.core.url_filter import URLFilter
 
@@ -1221,9 +1226,6 @@ class WebsiteCollector(BaseCollector):
                 raise RuntimeError("empty video body")
             sha = hasher.hexdigest()
             filename = self.build_filename(domain, domain, "video", cid, extension=ext)
-            dest = dest_dir / filename
-            os.replace(tmp_path, dest)
-            tmp_path = None
             metadata = {
                 "entity_id": domain,
                 "entity_name": domain,
@@ -1232,20 +1234,50 @@ class WebsiteCollector(BaseCollector):
                 "source_url": video_url,
                 "file_size": size,
                 "collected_at": datetime.now(timezone.utc).isoformat(),
+                "rebuild_target_tables": ["media_items", "website_pages", "website_targets"],
             }
-            self.save_json(metadata, dest_dir / f"{Path(filename).stem}_metadata.json")
+            artifact = write_atomic_artifact_from_path(
+                source=self.SOURCE_NAME,
+                artifact_id=cid,
+                artifact_kind="media_blob",
+                source_path=tmp_path,
+                extension=ext,
+                expected_sha256=sha,
+                metadata={
+                    **metadata,
+                    "filename": filename,
+                    "request_url": video_url,
+                },
+                root=VAULT_ROOT,
+                delete_source=True,
+            )
+            if tmp_path and not os.path.exists(tmp_path):
+                tmp_path = None
+            if not artifact.path:
+                raise RuntimeError(f"vault artifact write failed: {artifact.error}")
+            metadata["vault_artifact"] = {
+                "ok": artifact.ok,
+                "partial": artifact.partial,
+                "path": artifact.relative_path,
+                "blob_path": artifact.blob_relative_path,
+                "sidecar_path": artifact.sidecar.relative_path if artifact.sidecar else None,
+                "duplicate_blob": artifact.duplicate_blob,
+                "error": artifact.error,
+            }
             await self.insert_media_item(
                 entity_id=domain,
                 entity_name=domain,
                 content_type="video",
                 content_id=cid,
                 filename=filename,
-                file_path=str(dest),
-                file_size=size,
-                sha256=sha,
+                file_path=str(artifact.path),
+                file_size=artifact.file_size,
+                sha256=artifact.sha256,
                 source_url=video_url,
                 metadata=metadata,
             )
+            if artifact.partial:
+                await self.send_to_dlq(domain, cid, f"vault artifact partial: {artifact.error}")
             self._known_ids.add(cid)
             logger.debug("video stored: %s (%d bytes)", video_url, size)
             return True

@@ -730,6 +730,171 @@ def write_atomic_artifact(
             pass
 
 
+def write_atomic_artifact_from_path(
+    *,
+    source: str,
+    artifact_id: str,
+    artifact_kind: str,
+    source_path: str | os.PathLike[str],
+    extension: str | None = None,
+    metadata: dict | None = None,
+    expected_sha256: str | None = None,
+    root: Path = VAULT_ROOT,
+    db_writer=None,
+    delete_source: bool = False,
+) -> AtomicArtifactResult:
+    """Commit an already-streamed temp file into the canonical vault blob path."""
+    metadata = dict(metadata or {})
+    try:
+        ensure_vault_available(root)
+    except Exception as exc:
+        return AtomicArtifactResult(
+            ok=False,
+            partial=False,
+            source=source,
+            artifact_id=artifact_id,
+            artifact_kind=artifact_kind,
+            error=str(exc),
+        )
+
+    src = Path(source_path)
+    try:
+        if not src.exists() or not src.is_file():
+            raise RuntimeError(f"artifact source missing: {src}")
+        size = src.stat().st_size
+        digest = _sha256_path(src)
+    except Exception as exc:
+        return AtomicArtifactResult(
+            ok=False,
+            partial=False,
+            source=source,
+            artifact_id=artifact_id,
+            artifact_kind=artifact_kind,
+            error=str(exc),
+        )
+
+    if expected_sha256 and expected_sha256.lower() != digest:
+        return AtomicArtifactResult(
+            ok=False,
+            partial=False,
+            source=source,
+            artifact_id=artifact_id,
+            artifact_kind=artifact_kind,
+            sha256=digest,
+            file_size=size,
+            error="checksum mismatch before write",
+        )
+
+    try:
+        blob_path = blob_path_for_sha256(digest, extension=extension, root=root)
+    except Exception as exc:
+        return AtomicArtifactResult(
+            ok=False,
+            partial=False,
+            source=source,
+            artifact_id=artifact_id,
+            artifact_kind=artifact_kind,
+            sha256=digest,
+            file_size=size,
+            error=str(exc),
+        )
+
+    duplicate_blob = False
+    blob_written = False
+    try:
+        blob_path.parent.mkdir(parents=True, exist_ok=True)
+        if blob_path.exists():
+            duplicate_blob = True
+            if blob_path.stat().st_size != size or _sha256_path(blob_path) != digest:
+                raise RuntimeError("existing blob checksum mismatch")
+            if delete_source and src.resolve(strict=False) != blob_path.resolve(strict=False):
+                src.unlink(missing_ok=True)
+        else:
+            if delete_source:
+                try:
+                    src.replace(blob_path)
+                except OSError:
+                    shutil.copy2(src, blob_path)
+                    src.unlink(missing_ok=True)
+            else:
+                shutil.copy2(src, blob_path)
+            blob_written = True
+
+        if blob_path.stat().st_size != size or _sha256_path(blob_path) != digest:
+            raise RuntimeError("checksum mismatch after blob move")
+
+        sidecar_meta = {
+            **metadata,
+            "original_artifact_id": artifact_id,
+            "blob_path": relative_to_vault(blob_path, root),
+            "sha256": digest,
+            "file_size": size,
+        }
+        sidecar = write_artifact_sidecar(
+            source=source,
+            artifact_kind=artifact_kind,
+            file_path=str(blob_path),
+            metadata=sidecar_meta,
+            root=root,
+        )
+        if not sidecar.ok:
+            return AtomicArtifactResult(
+                ok=False,
+                partial=True,
+                source=source,
+                artifact_id=artifact_id,
+                artifact_kind=artifact_kind,
+                sha256=digest,
+                file_size=size,
+                path=blob_path,
+                relative_path=relative_to_vault(blob_path, root),
+                blob_path=blob_path,
+                blob_relative_path=relative_to_vault(blob_path, root),
+                sidecar=sidecar,
+                duplicate_blob=duplicate_blob,
+                error=f"sidecar write failed: {sidecar.error}",
+            )
+
+        result = AtomicArtifactResult(
+            ok=True,
+            partial=False,
+            source=source,
+            artifact_id=artifact_id,
+            artifact_kind=artifact_kind,
+            sha256=digest,
+            file_size=size,
+            path=blob_path,
+            relative_path=relative_to_vault(blob_path, root),
+            blob_path=blob_path,
+            blob_relative_path=relative_to_vault(blob_path, root),
+            sidecar=sidecar,
+            duplicate_blob=duplicate_blob,
+        )
+        if db_writer is None:
+            return result
+        try:
+            db_writer(result)
+        except Exception as exc:
+            return replace(result, ok=False, partial=True, error=f"db write failed: {exc}")
+        return replace(result, db_recorded=True)
+    except Exception as exc:
+        return AtomicArtifactResult(
+            ok=False,
+            partial=blob_written or blob_path.exists(),
+            source=source,
+            artifact_id=artifact_id,
+            artifact_kind=artifact_kind,
+            sha256=digest,
+            file_size=size,
+            path=blob_path if blob_path.exists() else None,
+            relative_path=relative_to_vault(blob_path, root) if blob_path.exists() else None,
+            blob_path=blob_path if blob_path.exists() else None,
+            blob_relative_path=relative_to_vault(blob_path, root) if blob_path.exists() else None,
+            duplicate_blob=duplicate_blob,
+            error=str(exc),
+        )
+
+
 def write_artifact_sidecar(
     *,
     source: str,

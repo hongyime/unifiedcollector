@@ -538,6 +538,57 @@ async def test_download_media_writes_vault_blob(monkeypatch, tmp_path):
     c.send_to_dlq.assert_not_awaited()
 
 
+class _VideoStreamResponse:
+    status_code = 200
+    headers = {"content-type": "video/mp4"}
+
+    def __init__(self, chunks):
+        self._chunks = list(chunks)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc):
+        return None
+
+    async def aiter_bytes(self, _chunk_size):
+        for chunk in self._chunks:
+            yield chunk
+
+
+@pytest.mark.asyncio
+async def test_stream_video_writes_vault_blob(monkeypatch, tmp_path):
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    monkeypatch.setattr(website_mod, "VAULT_ROOT", vault_root)
+    monkeypatch.setattr(website_mod, "assert_media_write_allowed", lambda *_a, **_kw: None)
+    c = WebsiteCollector()
+    c.insert_media_item = AsyncMock(return_value=True)
+    c.send_to_dlq = AsyncMock()
+
+    data = b"video-chunk-1video-chunk-2"
+    video_url = "https://example.com/video.mp4"
+    client = MagicMock()
+    client.stream = MagicMock(return_value=_VideoStreamResponse([data[:13], data[13:]]))
+
+    ok = await c._stream_video(client, video_url, "example.com")
+
+    assert ok is True
+    cid = hashlib.sha256(video_url.encode("utf-8")).hexdigest()[:16]
+    digest = hashlib.sha256(data).hexdigest()
+    kwargs = c.insert_media_item.await_args.kwargs
+    stored_path = Path(kwargs["file_path"])
+    assert kwargs["content_id"] == cid
+    assert stored_path == vault_root / "media" / "blobs" / digest[:2] / digest[2:4] / f"{digest}.mp4"
+    assert stored_path.read_bytes() == data
+    assert kwargs["sha256"] == digest
+    assert kwargs["file_size"] == len(data)
+    assert kwargs["source_url"] == video_url
+    assert kwargs["metadata"]["vault_artifact"]["ok"] is True
+    assert kwargs["metadata"]["vault_artifact"]["partial"] is False
+    c.send_to_dlq.assert_not_awaited()
+
+
 # ── cleanup / module exports ──────────────────────────────────────────────
 
 
