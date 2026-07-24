@@ -202,7 +202,8 @@ Current shipped recovery/ops work:
   repaired into route fields without network calls; GPS stream 429 cooldown is
   restored after restart so the backfill does not hammer Strava again. Recovered
   stream 429s are logged as transient without creating an active cooldown; a
-  second 429 still opens the scoped GPS stream cooldown.
+  second 429 still opens the scoped GPS stream cooldown. Strava 429 waits use
+  the shared jittered sleep helper instead of fixed sleeps.
 - **Live bounded probe:** On 2026-07-24, `rebuild-report --compare-db
   --compare-db-limit 200 --sidecar-limit 200 --blob-limit 200 --json` parsed as
   clean JSON, scanned 200 DB media rows and 200 sidecars, and returned

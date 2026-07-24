@@ -158,6 +158,13 @@ def test_gps_stream_429_event_dedupes_same_activity(monkeypatch):
     assert coll._note_rate_limit.call_count == 2
 
 
+def test_strava_429_sleeps_use_jittered_helper():
+    source = Path(strava_mod.__file__).read_text(encoding="utf-8")
+
+    assert "await asyncio.sleep(self._ratelimit_sleep)" not in source
+    assert "await asyncio.sleep(_heavy)" not in source
+
+
 @pytest.mark.asyncio
 async def test_note_rate_limit_can_record_transient_without_cooldown(monkeypatch):
     _set_web_env(monkeypatch)

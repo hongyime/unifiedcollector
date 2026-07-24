@@ -21,7 +21,7 @@ from src.core.profile_photo_tracker import ProfilePhotoTracker
 from src.core.file_naming import sanitize_name
 from src.core.proximity import refresh_account_proximity_cache
 from src.core.rate_limit_events import record_rate_limit_event
-from src.core.scrape_pacing import sleep_before_pre_cooldown_retry
+from src.core.scrape_pacing import sleep_before_pre_cooldown_retry, sleep_rate_limit
 from src.core.vault import assert_media_write_allowed
 
 logger = logging.getLogger(__name__)
@@ -1012,7 +1012,7 @@ class StravaCollector(BaseCollector):
                         reason=f"training_activities page {page} returned 429",
                         metadata={"page": page},
                     )
-                    await asyncio.sleep(self._ratelimit_sleep)
+                    await sleep_rate_limit(self._ratelimit_sleep)
                     continue
                 if resp.status_code != 200:
                     logger.warning("strava: training_activities page %d HTTP %d (cookie likely stale); stopping",
@@ -1302,7 +1302,7 @@ class StravaCollector(BaseCollector):
                     reason=f"athlete activities page {page} returned 429",
                     metadata={"page": page, "athlete_id": aid},
                 )
-                await asyncio.sleep(self._ratelimit_sleep)
+                await sleep_rate_limit(self._ratelimit_sleep)
                 continue
             resp.raise_for_status()
             activities = resp.json()
@@ -2054,7 +2054,7 @@ class StravaCollector(BaseCollector):
                         reason=f"feed page {page} returned 429",
                         metadata={"page": page},
                     )
-                    await asyncio.sleep(self._ratelimit_sleep)
+                    await sleep_rate_limit(self._ratelimit_sleep)
                     continue
                 if resp.status_code != 200:
                     logger.warning("strava feed: stopped at page %d HTTP %d", page, resp.status_code)
@@ -2242,7 +2242,7 @@ class StravaCollector(BaseCollector):
                         reason=f"following-feed page {page} returned 429",
                         metadata={"page": page, "athlete_id": self._my_athlete_id},
                     )
-                    await asyncio.sleep(self._ratelimit_sleep)
+                    await sleep_rate_limit(self._ratelimit_sleep)
                     continue
                 if resp.status_code != 200:
                     logger.warning(
@@ -2531,7 +2531,7 @@ class StravaCollector(BaseCollector):
                         reason=f"history for {athlete_id} returned 429",
                         metadata={"athlete_id": str(athlete_id)},
                     )
-                    await asyncio.sleep(_heavy)
+                    await sleep_rate_limit(_heavy)
                     continue
                 if resp.status_code != 200:
                     logger.warning("strava history %s month %s: HTTP %d", athlete_id, cursor, resp.status_code)
@@ -3375,7 +3375,7 @@ class StravaCollector(BaseCollector):
                             reason=f"api activities page {page} returned 429",
                             metadata={"page": page},
                         )
-                        await asyncio.sleep(self._ratelimit_sleep)
+                        await sleep_rate_limit(self._ratelimit_sleep)
                         continue
                     if resp.status_code != 200:
                         logger.info("strava: starred segments HTTP %d page %d", resp.status_code, page)
@@ -3637,7 +3637,7 @@ class StravaCollector(BaseCollector):
                         reason=f"roster {roster_type} page {page} for {athlete_id} returned 429",
                         metadata={"page": page, "athlete_id": str(athlete_id), "roster_type": roster_type},
                     )
-                    await asyncio.sleep(self._ratelimit_sleep); continue
+                    await sleep_rate_limit(self._ratelimit_sleep); continue
                 if resp.status_code != 200 or not resp.text.strip():
                     break
                 html = resp.text
