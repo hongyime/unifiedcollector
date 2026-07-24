@@ -28,6 +28,7 @@ import json
 import logging
 import mimetypes
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Optional
 from urllib.parse import quote, urlencode
@@ -35,6 +36,7 @@ from urllib.parse import quote, urlencode
 import httpx
 
 from src.core.base_collector import BaseCollector
+from src.core.rate_limit_events import record_rate_limit_event
 from src.core.user_change_tracker import (
     UserChangeTracker,
     BEEPER_TRACKED_FIELDS,
@@ -62,6 +64,8 @@ _BEEPER_TRANSIENT_BACKOFF = float(os.getenv("BEEPER_TRANSIENT_BACKOFF", "1.5"))
 # After this many failed download attempts, tombstone the content_id so it is
 # never retried. Recoverable blips fail < this and recover normally.
 _BEEPER_MEDIA_TOMBSTONE_AFTER = int(os.getenv("BEEPER_MEDIA_TOMBSTONE_AFTER", "3"))
+_BEEPER_429_COOLDOWN_SECONDS = int(os.getenv("BEEPER_429_COOLDOWN_SECONDS", "900"))
+_BEEPER_HTTP_STATUS_RE = re.compile(r"->\s*(\d{3})")
 
 
 # ── feature gate ──────────────────────────────────────────────────────────
@@ -716,6 +720,42 @@ class BeeperCollector(BaseCollector):
             return False
         return True
 
+    @staticmethod
+    def _api_error_status(error: BaseException) -> int | None:
+        match = _BEEPER_HTTP_STATUS_RE.search(str(error))
+        if not match:
+            return None
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return None
+
+    async def _record_api_http_event(
+        self,
+        error: BaseException,
+        *,
+        scope: str,
+        account: str | None = None,
+        metadata: dict | None = None,
+    ) -> bool:
+        status = self._api_error_status(error)
+        if status not in {401, 403, 429}:
+            return False
+        await record_rate_limit_event(
+            self.pool,
+            source=self.SOURCE_NAME,
+            account=account or "desktop_api",
+            scope=scope,
+            status_code=status,
+            cooldown_seconds=_BEEPER_429_COOLDOWN_SECONDS if status == 429 else None,
+            reason=f"Beeper {scope} HTTP {status}",
+            metadata={
+                **(metadata or {}),
+                "error": str(error)[:500],
+            },
+        )
+        return True
+
     # ── BaseCollector hooks ───────────────────────────────────────────
 
     async def collect(self, targets: list[str]) -> dict:
@@ -740,6 +780,7 @@ class BeeperCollector(BaseCollector):
             stats["transient"] += 1
         except BeeperAPIError as exc:
             logger.error("Beeper sync failed: %s", exc)
+            await self._record_api_http_event(exc, scope="desktop_api")
             stats["errors"] += 1
 
         logger.info(
@@ -835,6 +876,18 @@ class BeeperCollector(BaseCollector):
             logger.debug("Beeper media saved: %s (%d bytes)", cid, len(data))
         except Exception as e:
             logger.warning("Beeper media download failed %s: %s", cid, e)
+            if isinstance(e, BeeperAPIError):
+                await self._record_api_http_event(
+                    e,
+                    scope="asset_serve",
+                    account=f"{network}:{chat_id}",
+                    metadata={
+                        "content_id": cid,
+                        "network": network,
+                        "chat_id": chat_id,
+                        "message_id": item.get("message_id"),
+                    },
+                )
             # Count the failure; permanently-dead assets get tombstoned so the
             # backfill stops re-selecting them forever (see _record_media_failure).
             await self._record_media_failure(cid)
@@ -1176,5 +1229,11 @@ class BeeperCollector(BaseCollector):
             logger.debug("chat %s transient blip (retry next cycle): %s", chat_id, exc)
         except BeeperAPIError as exc:
             logger.warning("chat %s sync error: %s", chat_id, exc)
+            await self._record_api_http_event(
+                exc,
+                scope="desktop_api",
+                account=f"{network}:{chat_id}",
+                metadata={"network": network, "chat_id": chat_id},
+            )
             await w.update_sync_state(chat_id, error=str(exc)[:500])
         return inserted

@@ -571,3 +571,73 @@ async def test_collect_swallows_transient_without_error_count(monkeypatch, tmp_p
     stats = await coll.collect([])
     assert stats["transient"] == 1
     assert stats["errors"] == 0
+
+
+@pytest.mark.asyncio
+async def test_record_api_http_event_writes_rate_limit_event(monkeypatch, tmp_path):
+    monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
+    monkeypatch.setenv("COLLECTOR_DRIVE_PATH", str(tmp_path))
+    monkeypatch.setattr(beeper_mod, "_BEEPER_429_COOLDOWN_SECONDS", 321)
+
+    pool, conn = _mock_pool()
+    coll = BeeperCollector(client=MagicMock(spec=BeeperClient))
+    coll.set_pool(pool)
+
+    recorded = await coll._record_api_http_event(
+        BeeperAPIError("GET /v1/accounts -> 429: too many requests"),
+        scope="desktop_api",
+        account="local",
+        metadata={"path": "/v1/accounts"},
+    )
+
+    assert recorded is True
+    call_args = conn.execute.await_args.args
+    query = call_args[0]
+    args = call_args[1:]
+    assert "rate_limit_events" in query
+    assert args[:6] == (
+        "beeper",
+        "local",
+        "desktop_api",
+        429,
+        321,
+        "Beeper desktop_api HTTP 429",
+    )
+    assert "too many requests" in args[6]
+
+
+@pytest.mark.asyncio
+async def test_download_media_records_asset_serve_http_event(monkeypatch, tmp_path):
+    monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
+    monkeypatch.setenv("COLLECTOR_DRIVE_PATH", str(tmp_path))
+    pool, conn = _mock_pool()
+    client = MagicMock(spec=BeeperClient)
+    client.serve_asset = AsyncMock(
+        side_effect=BeeperAPIError("asset serve -> 403: token rejected")
+    )
+    coll = BeeperCollector(client=client)
+    coll.set_pool(pool)
+    coll.send_to_dlq = AsyncMock()
+
+    await coll.download_media({
+        "content_id": "msg1_att1",
+        "src_url": "mxc://beeper.local/abc",
+        "network": "discord",
+        "chat_id": "!room:beeper.local",
+        "message_id": "msg1",
+        "content_type": "image",
+        "extension": "jpg",
+    })
+
+    calls = [call.args for call in conn.execute.await_args_list]
+    rate_call = next(args for args in calls if "rate_limit_events" in args[0])
+    assert rate_call[1:7] == (
+        "beeper",
+        "discord:!room:beeper.local",
+        "asset_serve",
+        403,
+        None,
+        "Beeper asset_serve HTTP 403",
+    )
+    assert any("media_recover_state" in args[0] for args in calls)
+    coll.send_to_dlq.assert_awaited_once()
