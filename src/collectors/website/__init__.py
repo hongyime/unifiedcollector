@@ -130,7 +130,7 @@ from urllib.parse import urljoin, urlparse, urlunparse
 import httpx
 
 from src.core.base_collector import BaseCollector
-from src.core.vault import assert_media_write_allowed
+from src.core.vault import VAULT_ROOT, assert_media_write_allowed, write_atomic_artifact
 from src.core.scrape_pacing import headless_dwell
 from src.core.url_filter import URLFilter
 
@@ -1269,10 +1269,6 @@ class WebsiteCollector(BaseCollector):
             item["entity_id"], item["entity_name"],
             item["content_type"], cid, extension=ext,
         )
-        dest_dir = self.account_media_dir / item["content_type"]
-        dest = dest_dir / filename
-        assert_media_write_allowed(dest)
-        dest_dir.mkdir(parents=True, exist_ok=True)
         try:
             data = item.get("data")
             if data is None:
@@ -1281,48 +1277,61 @@ class WebsiteCollector(BaseCollector):
                     resp.raise_for_status()
                     data = resp.content
             sha = self.sha256_bytes(data)
-            fd, tmp_path = tempfile.mkstemp(dir=dest_dir, suffix=".tmp")
-            try:
-                with os.fdopen(fd, "wb") as f:
-                    f.write(data)
-                    f.flush()
-                    os.fsync(f.fileno())
-                os.replace(tmp_path, dest)
-            except BaseException:
-                if os.path.exists(tmp_path):
-                    try:
-                        os.remove(tmp_path)
-                    except OSError:
-                        pass
-                raise
-
+            source_url = item.get("source_url") or item.get("url")
             metadata = {
                 "entity_id": item["entity_id"],
                 "entity_name": item["entity_name"],
                 "content_type": item["content_type"],
                 "content_id": cid,
-                "source_url": item.get("source_url"),
+                "source_url": source_url,
                 "alt": item.get("alt"),
                 "width": item.get("width"),
                 "height": item.get("height"),
                 "collected_at": datetime.now(timezone.utc).isoformat(),
                 "raw": item.get("raw", {}),
+                "rebuild_target_tables": ["media_items", "website_pages", "website_targets"],
             }
-            self.save_json(metadata, dest_dir / f"{Path(filename).stem}_metadata.json")
+            artifact = write_atomic_artifact(
+                source=self.SOURCE_NAME,
+                artifact_id=cid,
+                artifact_kind="media_blob",
+                data=data,
+                extension=ext,
+                expected_sha256=sha,
+                metadata={
+                    **metadata,
+                    "filename": filename,
+                    "request_url": item.get("url"),
+                },
+                root=VAULT_ROOT,
+            )
+            if not artifact.path:
+                raise RuntimeError(f"vault artifact write failed: {artifact.error}")
+            metadata["vault_artifact"] = {
+                "ok": artifact.ok,
+                "partial": artifact.partial,
+                "path": artifact.relative_path,
+                "blob_path": artifact.blob_relative_path,
+                "sidecar_path": artifact.sidecar.relative_path if artifact.sidecar else None,
+                "duplicate_blob": artifact.duplicate_blob,
+                "error": artifact.error,
+            }
             await self.insert_media_item(
                 entity_id=item["entity_id"],
                 entity_name=item["entity_name"],
                 content_type=item["content_type"],
                 content_id=cid,
                 filename=filename,
-                file_path=str(dest),
-                file_size=len(data),
+                file_path=str(artifact.path),
+                file_size=artifact.file_size,
                 width=item.get("width"),
                 height=item.get("height"),
-                sha256=sha,
-                source_url=item.get("source_url"),
+                sha256=artifact.sha256,
+                source_url=source_url,
                 metadata=metadata,
             )
+            if artifact.partial:
+                await self.send_to_dlq(item["entity_id"], cid, f"vault artifact partial: {artifact.error}")
             self._known_ids.add(cid)
         except Exception as e:
             logger.debug("download_media failed %s: %s", item.get("url"), e)

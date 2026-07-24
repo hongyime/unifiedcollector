@@ -7,8 +7,10 @@ DB pool acquire, render) is faked.
 
 from __future__ import annotations
 
+import hashlib
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -488,6 +490,52 @@ async def test_upsert_page_inserts_with_target_id():
         external_links=["https://other.com/b"],
     )
     c.pool._conn.execute.assert_awaited_once()
+
+
+# ── download_media ───────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_download_media_writes_vault_blob(monkeypatch, tmp_path):
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    monkeypatch.setattr(website_mod, "VAULT_ROOT", vault_root)
+    c = WebsiteCollector()
+    c.insert_media_item = AsyncMock(return_value=True)
+    c.send_to_dlq = AsyncMock()
+
+    data = b"website image bytes"
+    digest = hashlib.sha256(data).hexdigest()
+
+    await c.download_media({
+        "entity_id": "example.com",
+        "entity_name": "example.com",
+        "content_type": "image",
+        "content_id": "img1",
+        "extension": "jpg",
+        "url": "https://example.com/img1.jpg",
+        "source_url": "https://example.com/page",
+        "alt": "Example",
+        "width": 640,
+        "height": 480,
+        "data": data,
+        "raw": {"page": "https://example.com/page"},
+    })
+
+    kwargs = c.insert_media_item.await_args.kwargs
+    stored_path = Path(kwargs["file_path"])
+    assert stored_path == vault_root / "media" / "blobs" / digest[:2] / digest[2:4] / f"{digest}.jpg"
+    assert stored_path.read_bytes() == data
+    assert kwargs["sha256"] == digest
+    assert kwargs["file_size"] == len(data)
+    assert kwargs["source_url"] == "https://example.com/page"
+    assert kwargs["width"] == 640
+    assert kwargs["height"] == 480
+    assert kwargs["metadata"]["raw"] == {"page": "https://example.com/page"}
+    assert kwargs["metadata"]["vault_artifact"]["ok"] is True
+    assert kwargs["metadata"]["vault_artifact"]["partial"] is False
+    assert kwargs["metadata"]["vault_artifact"]["blob_path"].startswith("media/blobs/")
+    c.send_to_dlq.assert_not_awaited()
 
 
 # ── cleanup / module exports ──────────────────────────────────────────────
