@@ -74,7 +74,24 @@ def test_backup_status_reports_latest_dump_and_in_progress(tmp_path):
     assert status["in_progress"] is True
     assert status["in_progress_count"] == 1
     assert status["stale_in_progress_count"] == 0
+    assert status["in_progress_recent_max_age_seconds"] == 15 * 60
     assert str(old) != status["latest_path"]
+
+
+def test_backup_status_treats_quiet_temp_dump_as_stale_not_running(tmp_path):
+    _dump(tmp_path, "20260720_033012", size=5)
+    quiet_temp = tmp_path / ".inprogress_20260721_033012.dump"
+    quiet_temp.write_bytes(b"x")
+    old = time.time() - (30 * 60)
+    os.utime(quiet_temp, (old, old))
+
+    status = backup_status(tmp_path, max_age_hours=999999)
+
+    assert status["status"] == "ok"
+    assert status["in_progress"] is False
+    assert status["in_progress_count"] == 0
+    assert status["stale_in_progress_count"] == 1
+    assert status["stale_in_progress_oldest_age_seconds"] >= 30 * 60 - 5
 
 
 def test_backup_status_does_not_treat_old_temp_dump_as_running(tmp_path):

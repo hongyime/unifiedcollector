@@ -132,7 +132,7 @@ def backup_status(
             "COLLECTOR_DB_BACKUP_MAX_AGE_HOURS",
             30,
         )
-        temp_threshold_hours = _env_int("COLLECTOR_DB_BACKUP_IN_PROGRESS_MAX_AGE_HOURS", 6)
+        active_temp_minutes = _env_int("COLLECTOR_DB_BACKUP_IN_PROGRESS_ACTIVE_MINUTES", 15)
         backups = list_backup_files(root, prefix=prefix)
         temp_files = sorted(root.glob(".inprogress_*.dump")) if root.exists() else []
     except Exception as exc:
@@ -148,24 +148,35 @@ def backup_status(
             "in_progress_count": 0,
             "stale_in_progress_count": 0,
             "stale_in_progress_oldest_age_seconds": None,
+            "in_progress_recent_max_age_seconds": None,
             "max_age_hours": max_age_hours,
             "error": str(exc),
         }
 
     now = datetime.now()
+    active_temp_max_age_seconds = active_temp_minutes * 60
     temp_ages: list[int] = []
     for path in temp_files:
         try:
             temp_ages.append(max(0, int(now.timestamp() - path.stat().st_mtime)))
         except OSError:
             continue
-    active_temp_count = sum(1 for age in temp_ages if temp_threshold_hours <= 0 or age <= temp_threshold_hours * 3600)
-    stale_temp_ages = [age for age in temp_ages if temp_threshold_hours > 0 and age > temp_threshold_hours * 3600]
+    active_temp_count = sum(
+        1
+        for age in temp_ages
+        if active_temp_max_age_seconds <= 0 or age <= active_temp_max_age_seconds
+    )
+    stale_temp_ages = [
+        age
+        for age in temp_ages
+        if active_temp_max_age_seconds > 0 and age > active_temp_max_age_seconds
+    ]
     temp_payload = {
         "in_progress": active_temp_count > 0,
         "in_progress_count": active_temp_count,
         "stale_in_progress_count": len(stale_temp_ages),
         "stale_in_progress_oldest_age_seconds": max(stale_temp_ages) if stale_temp_ages else None,
+        "in_progress_recent_max_age_seconds": active_temp_max_age_seconds,
     }
     latest = backups[0] if backups else None
     if latest is None:
