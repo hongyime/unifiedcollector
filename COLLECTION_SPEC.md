@@ -176,7 +176,9 @@ Current shipped recovery/ops work:
 - **External vault fail-closed guard:** `src/core/vault.py::assert_media_write_allowed`
   verifies `/vault`, media-root placement, and the `/media` ↔ `/vault/media`
   relationship before normal collector writes. `BaseCollector.run()` and
-  `BaseCollector.save_json()` use it.
+  `BaseCollector.save_json()` use it. `BaseCollector.save_file()` now writes
+  binary artifacts through the canonical sha256 blob writer instead of a
+  legacy per-source file path.
 - **Sidecars and raw payload helpers:** media sidecars, artifact sidecars, raw
   payload writes, and validation live in `src/core/vault.py`; `BaseCollector`
   and extension ingest record sidecar status into metadata/DLQ.
@@ -236,10 +238,10 @@ Known remaining gaps:
   WhatsApp, Lemon8, YouTube, TikTok, Website, Search, Instagram
   headless/extension media, GitHub direct media, GitHub bulk avatar artifacts,
   shared profile-photo, and Strava activity photo/route-map downloads use it.
-  Remaining generic legacy helper paths still need source-by-source migration
-  proof before cross-source dedupe is complete. GitHub bulk avatar range writes
-  artifact sidecars only and intentionally does not create `media_items` rows
-  for unknown numeric IDs.
+  No known high-volume collector media path remains on direct per-source file
+  writes, but future source-local write paths found by audit should migrate to
+  the same helpers. GitHub bulk avatar range writes artifact sidecars only and
+  intentionally does not create `media_items` rows for unknown numeric IDs.
 - External-drive loss behavior is strong for base collector writes, but each
   long-running realtime/direct file write path should continue moving toward
   the same shared guard instead of local ad hoc checks.

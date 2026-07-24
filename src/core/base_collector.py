@@ -15,7 +15,13 @@ from .rate_limiter import AdaptiveRateLimiter
 from .resilience import CircuitBreaker, wait_for_internet
 from .scrape_pacing import sleep_rate_limit
 from .user_agent import UserAgentPool
-from .vault import VAULT_ROOT, assert_media_write_allowed, write_artifact_sidecar, write_media_sidecar
+from .vault import (
+    VAULT_ROOT,
+    assert_media_write_allowed,
+    write_artifact_sidecar,
+    write_atomic_artifact,
+    write_media_sidecar,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -375,37 +381,39 @@ class BaseCollector(ABC):
             raise
 
     def save_file(self, data: bytes, filename: str, metadata: dict | None = None) -> Path:
-        """Atomic write: temp file -> fsync -> rename into media_dir.
-        Also saves a _metadata.json and _raw.json if metadata is provided.
-        """
+        """Persist a binary artifact through the canonical vault blob writer."""
         dest = self.media_dir / filename
         assert_media_write_allowed(dest)
-        self.media_dir.mkdir(parents=True, exist_ok=True)
-        fd, tmp_path = tempfile.mkstemp(dir=self.media_dir, suffix=".tmp")
-        try:
-            with os.fdopen(fd, "wb") as f:
-                f.write(data)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp_path, dest)
+        meta = dict(metadata or {})
+        artifact = write_atomic_artifact(
+            source=self.SOURCE_NAME,
+            artifact_id=f"save_file/{Path(filename).stem}",
+            artifact_kind="media_blob",
+            data=data,
+            extension=Path(filename).suffix.lstrip(".") or None,
+            metadata={
+                **meta,
+                "filename": str(filename),
+                "legacy_path": str(dest),
+                "rebuild_target_tables": ["media_items"],
+            },
+            root=VAULT_ROOT,
+        )
+        if artifact.path is None:
+            raise RuntimeError(f"vault artifact write failed: {artifact.error}")
+        if artifact.partial:
+            logger.warning(
+                "%s: save_file artifact partial for %s: %s",
+                self.SOURCE_NAME,
+                filename,
+                artifact.error,
+            )
 
-            if metadata:
-                stem = Path(filename).stem
-                # Save processed metadata
-                self.save_json(metadata, f"{stem}_metadata.json")
-                # Save raw API response if available
-                if "raw" in metadata:
-                    self.save_json(metadata["raw"], f"{stem}_raw.json")
-
-            parsed = parse_filename(filename, source_name=self.SOURCE_NAME)
-            if parsed:
-                self._known_ids.add(parsed["content_id"])
-            logger.debug("Saved %s", dest)
-            return dest
-        except BaseException:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-            raise
+        parsed = parse_filename(filename, source_name=self.SOURCE_NAME)
+        if parsed:
+            self._known_ids.add(parsed["content_id"])
+        logger.debug("Saved %s via vault blob %s", filename, artifact.path)
+        return artifact.path
 
     def build_filename(self, entity_id: str, entity_name: str,
                        content_type: str, content_id: str,

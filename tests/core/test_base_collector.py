@@ -1,4 +1,5 @@
 import hashlib
+import json
 from contextlib import asynccontextmanager
 
 import pytest
@@ -36,6 +37,31 @@ def _collector(monkeypatch):
     coll = _Collector()
     coll.pool = _Pool()
     return coll
+
+
+def test_save_file_writes_canonical_vault_blob(tmp_path, monkeypatch):
+    vault_root = tmp_path / "vault"
+    drive_root = tmp_path / "media"
+    vault_root.mkdir()
+    monkeypatch.setattr(base_collector, "VAULT_ROOT", vault_root)
+    monkeypatch.setattr(base_collector, "DRIVE_PATH", str(drive_root))
+    monkeypatch.setattr(base_collector, "assert_media_write_allowed", lambda *args, **kwargs: None)
+    coll = _collector(monkeypatch)
+    data = b"base collector media"
+    digest = hashlib.sha256(data).hexdigest()
+    filename = coll.build_filename("u1", "User One", "image", "post123", extension="jpg")
+
+    path = coll.save_file(data, filename, metadata={"raw": {"id": "post123"}})
+
+    assert path == vault_root / "media" / "blobs" / digest[:2] / digest[2:4] / f"{digest}.jpg"
+    assert path.read_bytes() == data
+    assert "post123" in coll._known_ids
+    assert not (drive_root / "github" / filename).exists()
+    sidecar = next((vault_root / "sidecars" / "artifacts" / "github").rglob("*.json"))
+    payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert payload["metadata"]["filename"] == filename
+    assert payload["metadata"]["raw"] == {"id": "post123"}
+    assert payload["metadata"]["legacy_path"].endswith(filename)
 
 
 @pytest.mark.asyncio
