@@ -214,7 +214,7 @@ Restore rehearsal checklist:
 
 ---
 
-## Implementation Status - 2026-07-23
+## Implementation Status - 2026-07-24
 
 - Vault foundation is implemented in `src/core/vault.py`: canonical root detection, writability/free-space checks, media-root mirror checks, vault-relative paths, sidecar schema validation, raw payload paths, and checksum blob-path conventions.
 - Media/artifact/raw sidecar helpers are wired into the shared collector base path and tested. Sidecar failure is recorded on `media_items.metadata.vault_sidecar` and queued through the existing dead-letter queue.
@@ -227,9 +227,9 @@ Restore rehearsal checklist:
 - Priority-driven Strava browser route capture is implemented in extension v1.21.23, `/social/strava-route-queue`, `/social/strava-route-visit`, and `/strava/route-capture-queue`: the browser gets one missing-route activity at a time, ordered by Tier 1/2 proximity and collector target priority, while respecting active GPS-stream 429 cooldowns and recent visit TTLs.
 - Analyzer priority hints are imported by `src/core/priority_hints.py`, merged into `collection_targets.metadata.analyzer_priority_hint`, used by target loading, and surfaced on the Targets dashboard.
 - `src/core/scrape_pacing.py` now provides a tunable one-shot pre-cooldown retry delay (`COLLECTOR_PRE_COOLDOWN_RETRY_*`). Instagram Playwright profile fetches, Strava GPS stream fetches, and Search HTTP fetch paths use it; recovered Strava/Search 429s are logged without creating an active cooldown, while repeated 429s still open scoped cooldowns where the collector can safely skip that exact scope.
-- Beeper, Telegram, WhatsApp, Lemon8, and YouTube media downloads now write physical bytes through `write_atomic_artifact` to canonical `media/blobs/<sha256>` paths while retaining per-occurrence `media_items` rows and sidecars. The collector dashboard media resolver accepts both legacy media-root paths and vault-backed blob paths.
+- Beeper, Telegram, WhatsApp, Lemon8, YouTube, and TikTok media downloads now write physical bytes through `write_atomic_artifact` to canonical `media/blobs/<sha256>` paths while retaining per-occurrence `media_items` rows and sidecars. The collector dashboard media resolver accepts both legacy media-root paths and vault-backed blob paths.
 - `src/core/health.py` no longer imports the full DB connection module for Docker health checks; live Telegram/WhatsApp health checks dropped from roughly 50s to roughly 10s and fit the configured 30s timeout.
-- Still not complete: migrating remaining Instagram, TikTok, Website, Search, GitHub avatar/media, Strava photo/map, shared profile-photo, and generic legacy helper paths through `write_atomic_artifact`; source-by-source migration proof; full Tier 1 raw payload coverage; and restore replay from a real DB dump.
+- Still not complete: migrating remaining Instagram, Website, Search, GitHub avatar/media, Strava photo/map, shared profile-photo, and generic legacy helper paths through `write_atomic_artifact`; source-by-source migration proof; full Tier 1 raw payload coverage; and restore replay from a real DB dump.
 
 **Document Version**: 1.0
 **Created**: 2026-07-20
