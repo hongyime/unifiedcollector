@@ -6,8 +6,10 @@ no real DB pool. All side-effecting paths are stubbed.
 
 from __future__ import annotations
 
+import hashlib
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -250,7 +252,10 @@ async def test_upsert_profile_returns_uuid(monkeypatch):
              "videoCount": 4, "diggCount": 5}
     out = await c._upsert_profile(author, stats)
     assert out == "uuid-abc"
-    pool._conn.fetchrow.assert_awaited_once()
+    assert pool._conn.fetchrow.await_count == 2
+    fetch_sql = [call.args[0] for call in pool._conn.fetchrow.await_args_list]
+    assert "FROM tiktok_profiles" in fetch_sql[0]
+    assert "INSERT INTO tiktok_profiles" in fetch_sql[1]
 
 
 @pytest.mark.asyncio
@@ -529,6 +534,46 @@ async def test_load_tracker_state_no_pool_is_noop():
     c.pool = None
     await c._load_tracker_state()
     assert c._tracked_ids == set()
+
+
+# ── download_media ───────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_download_media_writes_vault_blob(monkeypatch, tmp_path):
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    monkeypatch.setattr(tiktok_mod, "VAULT_ROOT", vault_root)
+    with patch.object(TiktokCollector, "_check_tool", staticmethod(lambda *_: False)):
+        c = TiktokCollector()
+    c.insert_media_item = AsyncMock(return_value=True)
+    c.send_to_dlq = AsyncMock()
+
+    data = b"tiktok video bytes"
+    digest = hashlib.sha256(data).hexdigest()
+
+    await c.download_media({
+        "entity_id": "alice",
+        "entity_name": "alice",
+        "content_type": "video",
+        "content_id": "7000000000000000001",
+        "extension": "mp4",
+        "data": data,
+        "raw": {"video_id": "7000000000000000001"},
+    })
+
+    kwargs = c.insert_media_item.await_args.kwargs
+    stored_path = Path(kwargs["file_path"])
+    assert stored_path == vault_root / "media" / "blobs" / digest[:2] / digest[2:4] / f"{digest}.mp4"
+    assert stored_path.read_bytes() == data
+    assert kwargs["sha256"] == digest
+    assert kwargs["file_size"] == len(data)
+    assert kwargs["source_url"] == "https://www.tiktok.com/@alice/video/7000000000000000001"
+    assert kwargs["metadata"]["raw"] == {"video_id": "7000000000000000001"}
+    assert kwargs["metadata"]["vault_artifact"]["ok"] is True
+    assert kwargs["metadata"]["vault_artifact"]["partial"] is False
+    assert kwargs["metadata"]["vault_artifact"]["blob_path"].startswith("media/blobs/")
+    c.send_to_dlq.assert_not_awaited()
 
 
 # ── _collect_via_playwright (browser fallback) ────────────────────────────

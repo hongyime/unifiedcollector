@@ -55,7 +55,6 @@ import os
 import random
 import re
 import subprocess
-import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -70,7 +69,7 @@ from src.collectors.tiktok.parse import safe_int as _parse_safe_int, to_dt as _p
 from src.core.file_naming import sanitize_name
 from src.core.proximity import refresh_account_proximity_cache
 from src.core.rate_limit_events import record_rate_limit_event
-from src.core.vault import assert_media_write_allowed
+from src.core.vault import VAULT_ROOT, write_atomic_artifact
 from src.core.user_change_tracker import (
     UserChangeTracker,
     TIKTOK_TRACKED_FIELDS,
@@ -1383,11 +1382,6 @@ class TiktokCollector(BaseCollector):
             item["content_type"], cid, extension=item.get("extension", "mp4")
         )
 
-        dest_dir = self.account_media_dir / item["content_type"]
-        dest = dest_dir / filename
-        assert_media_write_allowed(dest)
-        dest_dir.mkdir(parents=True, exist_ok=True)
-
         try:
             if "data" in item:
                 data = item["data"]
@@ -1403,32 +1397,52 @@ class TiktokCollector(BaseCollector):
                 _dedupe_sha256_bytes(data) if _dedupe_sha256_bytes is not None
                 else self.sha256_bytes(data)
             )
-            
-            # Atomic save
-            fd, tmp_path = tempfile.mkstemp(dir=dest_dir, suffix=".tmp")
-            with os.fdopen(fd, "wb") as f:
-                f.write(data)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp_path, dest)
-            
+            source_url = self._build_tiktok_source_url(item)
             metadata = {
                 "entity_id": item["entity_id"],
                 "entity_name": item["entity_name"],
                 "content_type": item["content_type"],
                 "content_id": cid,
                 "collected_at": datetime.now(timezone.utc).isoformat(),
-                "raw": item.get("raw", {})
+                "raw": item.get("raw", {}),
+                "rebuild_target_tables": ["media_items", "tiktok_posts", "tiktok_profiles"],
             }
-            self.save_json(metadata, dest_dir / f"{Path(filename).stem}_metadata.json")
+            artifact = write_atomic_artifact(
+                source=self.SOURCE_NAME,
+                artifact_id=cid,
+                artifact_kind="media_blob",
+                data=data,
+                extension=item.get("extension", "mp4"),
+                expected_sha256=sha,
+                metadata={
+                    **metadata,
+                    "filename": filename,
+                    "source_url": source_url,
+                    "request_url": item.get("url"),
+                },
+                root=VAULT_ROOT,
+            )
+            if not artifact.path:
+                raise RuntimeError(f"vault artifact write failed: {artifact.error}")
+            metadata["vault_artifact"] = {
+                "ok": artifact.ok,
+                "partial": artifact.partial,
+                "path": artifact.relative_path,
+                "blob_path": artifact.blob_relative_path,
+                "sidecar_path": artifact.sidecar.relative_path if artifact.sidecar else None,
+                "duplicate_blob": artifact.duplicate_blob,
+                "error": artifact.error,
+            }
 
             await self.insert_media_item(
                 entity_id=item["entity_id"], entity_name=item["entity_name"],
                 content_type=item["content_type"], content_id=cid,
-                filename=filename, file_path=str(dest),
-                file_size=len(data), sha256=sha, metadata=metadata,
-                source_url=self._build_tiktok_source_url(item),
+                filename=filename, file_path=str(artifact.path),
+                file_size=artifact.file_size, sha256=artifact.sha256,
+                metadata=metadata, source_url=source_url,
             )
+            if artifact.partial:
+                await self.send_to_dlq(item["entity_id"], cid, f"vault artifact partial: {artifact.error}")
             self._known_ids.add(cid)
         except Exception as e:
             logger.error("Download failed %s: %s", cid, e)

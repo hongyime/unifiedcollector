@@ -229,6 +229,8 @@ def test_constructor_wires_cookies(tmp_path: Path, monkeypatch):
 
 def test_download_user_yields_items_via_mock(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("MEDIA_ROOT", str(tmp_path))
+    monkeypatch.setenv("COLLECTOR_DRIVE_PATH", str(tmp_path))
+    monkeypatch.setattr(tb_mod, "assert_media_write_allowed", lambda *_a, **_kw: None)
     page = FakePage(
         video_links=[
             "/@bob/video/7000000000000000001",
@@ -274,6 +276,7 @@ def test_download_video_returns_none_on_404(tmp_path: Path, monkeypatch):
 
 def test_close_idempotent(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("MEDIA_ROOT", str(tmp_path))
+    monkeypatch.setenv("COLLECTOR_DRIVE_PATH", str(tmp_path))
     page = FakePage(video_links=[])
     _wire_fake_playwright(monkeypatch, page)
     dl = TikTokBrowserDownloader(output_dir=tmp_path / "out")
