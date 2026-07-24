@@ -5,7 +5,6 @@ import logging
 import os
 import random
 import re
-import tempfile
 import time
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
@@ -22,7 +21,7 @@ from src.core.file_naming import sanitize_name
 from src.core.proximity import refresh_account_proximity_cache
 from src.core.rate_limit_events import record_rate_limit_event
 from src.core.scrape_pacing import sleep_before_pre_cooldown_retry, sleep_rate_limit
-from src.core.vault import VAULT_ROOT, assert_media_write_allowed, write_atomic_artifact
+from src.core.vault import VAULT_ROOT, write_atomic_artifact, write_raw_payload
 
 logger = logging.getLogger(__name__)
 
@@ -3390,17 +3389,26 @@ class StravaCollector(BaseCollector):
             clubs = resp.json() or []
             if not clubs:
                 return
-            # Save sidecar JSON under media_dir/clubs/ so we don't lose
-            # data when the schema lacks a clubs table. This mirrors
-            # the approach the toolkit took for ad-hoc payloads.
-            dest_dir = self.account_media_dir / "clubs"
-            assert_media_write_allowed(dest_dir / f"clubs_{athlete_id}.json")
-            dest_dir.mkdir(parents=True, exist_ok=True)
-            self.save_json(
-                {"athlete_id": athlete_id, "clubs": clubs,
-                 "collected_at": datetime.now(timezone.utc).isoformat()},
-                dest_dir / f"clubs_{athlete_id}.json",
+            # Archive the raw club payload under the vault raw tree. There is no
+            # dedicated clubs table yet, so the raw payload is the durable source.
+            raw = write_raw_payload(
+                source=self.SOURCE_NAME,
+                artifact_id=f"clubs/{athlete_id}",
+                payload={
+                    "athlete_id": athlete_id,
+                    "clubs": clubs,
+                    "collected_at": datetime.now(timezone.utc).isoformat(),
+                },
+                metadata={
+                    "athlete_id": athlete_id,
+                    "payload_type": "strava_clubs",
+                    "rebuild_target_tables": ["strava_athletes"],
+                },
+                target_tables=["strava_athletes"],
+                root=VAULT_ROOT,
             )
+            if not raw.ok:
+                logger.warning("strava: clubs raw payload sidecar failed for %s: %s", athlete_id, raw.error)
             logger.info("strava: captured %d clubs for athlete %s", len(clubs), athlete_id)
         except Exception as e:
             logger.warning("strava: clubs fetch failed for %s: %s", athlete_id, e)

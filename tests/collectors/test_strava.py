@@ -716,6 +716,37 @@ async def test_collect_clubs_skips_when_no_api(monkeypatch, caplog):
     assert any("requires API auth" in r.getMessage() for r in caplog.records)
 
 
+@pytest.mark.asyncio
+async def test_collect_clubs_archives_raw_payload(monkeypatch):
+    _set_api_env(monkeypatch)
+    coll = StravaCollector()
+    coll._ensure_token = AsyncMock()
+    coll._access_token = "access-token"
+    response = MagicMock(
+        status_code=200,
+        json=MagicMock(return_value=[{"id": 1, "name": "Run Club"}]),
+    )
+    client = _stub_async_client(get_responses=response)
+    seen: dict[str, object] = {}
+
+    def fake_write_raw_payload(**kwargs):
+        seen.update(kwargs)
+        return MagicMock(ok=True, error=None)
+
+    monkeypatch.setattr(strava_mod.httpx, "AsyncClient", MagicMock(return_value=client))
+    monkeypatch.setattr(strava_mod, "write_raw_payload", fake_write_raw_payload)
+
+    await coll.collect_clubs("42")
+
+    coll._ensure_token.assert_awaited_once()
+    client.get.assert_awaited_once()
+    assert seen["source"] == "strava"
+    assert seen["artifact_id"] == "clubs/42"
+    assert seen["target_tables"] == ["strava_athletes"]
+    assert seen["payload"]["clubs"] == [{"id": 1, "name": "Run Club"}]
+    assert seen["metadata"]["payload_type"] == "strava_clubs"
+
+
 # ── collect_following_roster ───────────────────────────────────────────────
 
 
