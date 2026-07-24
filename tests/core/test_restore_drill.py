@@ -57,6 +57,32 @@ def test_pg_restore_command_does_not_put_password_in_args(monkeypatch: pytest.Mo
     assert "collector" in cmd
 
 
+def test_docker_pg_restore_streams_dump_without_password_in_args(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    dump = tmp_path / "dump.dump"
+    dump.write_bytes(b"dump")
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        seen["stdin"] = kwargs.get("stdin")
+        return type("Proc", (), {"returncode": 0, "stdout": b"", "stderr": b""})()
+
+    monkeypatch.setattr(rd.subprocess, "run", fake_run)
+    config = rd.RestoreDrillConfig(
+        database_url="postgresql://collector:supersecret@localhost:5500/unifiedcollector",
+        backup_dir=tmp_path,
+        docker_container="unifiedcollector_postgres",
+        docker_exe="docker",
+    )
+
+    rd._run_docker_pg_restore(config, dump, "uc_restore_drill_20260724_123045")
+
+    assert seen["cmd"][:3] == ["docker", "exec", "-i"]
+    assert "unifiedcollector_postgres" in seen["cmd"]
+    assert "supersecret" not in " ".join(seen["cmd"])
+    assert seen["stdin"] is not None
+
+
 @pytest.mark.asyncio
 async def test_restore_drill_drops_scratch_when_restore_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     calls: list[str] = []

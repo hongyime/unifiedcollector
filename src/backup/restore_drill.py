@@ -34,6 +34,8 @@ class RestoreDrillConfig:
     backup_path: Path | None = None
     scratch_database: str | None = None
     pg_restore_bin: str = "pg_restore"
+    docker_container: str | None = None
+    docker_exe: str | None = None
     restore_timeout_seconds: int = DEFAULT_RESTORE_TIMEOUT_SECONDS
     keep_scratch: bool = False
     dry_run: bool = False
@@ -154,6 +156,7 @@ def pg_restore_command(
         restore_bin,
         "--no-owner",
         "--no-privileges",
+        "--exit-on-error",
         "--dbname",
         scratch_database,
         "--host",
@@ -187,7 +190,7 @@ async def run_restore_drill(config: RestoreDrillConfig) -> RestoreDrillReport:
         report.gaps.append("dry run only: backup was selected but not restored")
         return report
 
-    await _create_scratch_database(config.database_url, scratch_database)
+    await _create_scratch_database_for_config(config, scratch_database)
     created = True
     try:
         try:
@@ -196,12 +199,8 @@ async def run_restore_drill(config: RestoreDrillConfig) -> RestoreDrillReport:
             report.restore_seconds = round(time.monotonic() - started, 3)
             report.restored = True
 
-            scratch_conn = await _connect_database(config.database_url, scratch_database)
-            try:
-                report.table_counts = await _table_counts(scratch_conn)
-                report.gaps.extend(_gaps_from_table_counts(report.table_counts))
-            finally:
-                await scratch_conn.close()
+            report.table_counts = await _table_counts_for_config(config, scratch_database)
+            report.gaps.extend(_gaps_from_table_counts(report.table_counts))
 
             if config.rehearse_sidecars:
                 sidecar_report = await asyncio.to_thread(
@@ -218,7 +217,7 @@ async def run_restore_drill(config: RestoreDrillConfig) -> RestoreDrillReport:
             report.gaps.append(f"restore drill failed: {exc}")
     finally:
         if created and not config.keep_scratch:
-            await _drop_scratch_database(config.database_url, scratch_database)
+            await _drop_scratch_database_for_config(config, scratch_database)
             report.dropped_scratch = True
         elif created:
             report.kept_scratch = True
@@ -243,6 +242,8 @@ def config_from_env(
     database_url: str | None = None,
     scratch_database: str | None = None,
     pg_restore_bin: str | None = None,
+    docker_container: str | None = None,
+    docker_exe: str | None = None,
     restore_timeout_seconds: int | None = None,
     keep_scratch: bool = False,
     dry_run: bool = False,
@@ -258,6 +259,12 @@ def config_from_env(
         backup_path=Path(backup_path) if backup_path else None,
         scratch_database=scratch_database,
         pg_restore_bin=pg_restore_bin or os.getenv("PG_RESTORE_EXE", "pg_restore"),
+        docker_container=(
+            docker_container
+            or os.getenv("COLLECTOR_RESTORE_DRILL_DOCKER_CONTAINER")
+            or os.getenv("COLLECTOR_DB_BACKUP_DOCKER_CONTAINER")
+        ),
+        docker_exe=docker_exe or os.getenv("DOCKER_EXE") or os.getenv("DOCKER"),
         restore_timeout_seconds=restore_timeout_seconds or DEFAULT_RESTORE_TIMEOUT_SECONDS,
         keep_scratch=keep_scratch,
         dry_run=dry_run,
@@ -270,6 +277,10 @@ def config_from_env(
 
 
 def _run_pg_restore(config: RestoreDrillConfig, backup_path: Path, scratch_database: str) -> None:
+    if config.docker_container:
+        _run_docker_pg_restore(config, backup_path, scratch_database)
+        return
+
     cmd, env = pg_restore_command(config, backup_path, scratch_database)
     try:
         proc = subprocess.run(
@@ -304,6 +315,13 @@ async def _create_scratch_database(database_url: str, scratch_database: str) -> 
         await admin.close()
 
 
+async def _create_scratch_database_for_config(config: RestoreDrillConfig, scratch_database: str) -> None:
+    if config.docker_container:
+        await asyncio.to_thread(_create_scratch_database_docker, config, scratch_database)
+        return
+    await _create_scratch_database(config.database_url, scratch_database)
+
+
 async def _drop_scratch_database(database_url: str, scratch_database: str) -> None:
     validate_scratch_database_name(scratch_database)
     admin = await _connect_database(database_url, "postgres")
@@ -320,6 +338,13 @@ async def _drop_scratch_database(database_url: str, scratch_database: str) -> No
         await admin.execute(f'DROP DATABASE IF EXISTS "{scratch_database}"')
     finally:
         await admin.close()
+
+
+async def _drop_scratch_database_for_config(config: RestoreDrillConfig, scratch_database: str) -> None:
+    if config.docker_container:
+        await asyncio.to_thread(_drop_scratch_database_docker, config, scratch_database)
+        return
+    await _drop_scratch_database(config.database_url, scratch_database)
 
 
 async def _connect_database(database_url: str, database: str):
@@ -360,6 +385,16 @@ async def _table_counts(conn) -> dict[str, int | None]:
     return counts
 
 
+async def _table_counts_for_config(config: RestoreDrillConfig, scratch_database: str) -> dict[str, int | None]:
+    if config.docker_container:
+        return await asyncio.to_thread(_table_counts_docker, config, scratch_database)
+    scratch_conn = await _connect_database(config.database_url, scratch_database)
+    try:
+        return await _table_counts(scratch_conn)
+    finally:
+        await scratch_conn.close()
+
+
 def _gaps_from_table_counts(table_counts: dict[str, int | None]) -> list[str]:
     gaps = []
     for name, count in sorted(table_counts.items()):
@@ -398,6 +433,143 @@ def _resolve_pg_restore(pg_restore_bin: str) -> str:
     if Path(pg_restore_bin).exists():
         return pg_restore_bin
     raise RestoreDrillError(f"pg_restore binary not found: {pg_restore_bin}")
+
+
+def _docker_exe(config: RestoreDrillConfig) -> str:
+    if config.docker_exe:
+        return config.docker_exe
+    windows_default = Path(r"C:\Program Files\Docker\Docker\resources\bin\docker.exe")
+    if windows_default.exists():
+        return str(windows_default)
+    return "docker"
+
+
+def _run_docker_shell(
+    config: RestoreDrillConfig,
+    shell: str,
+    message: str,
+    *,
+    stdin=None,
+    timeout: int | None = None,
+) -> subprocess.CompletedProcess[str]:
+    if not config.docker_container:
+        raise RestoreDrillError("docker container is not configured")
+    proc = subprocess.run(
+        [_docker_exe(config), "exec", "-i", config.docker_container, "sh", "-c", shell],
+        stdin=stdin,
+        text=False if stdin is not None else True,
+        capture_output=True,
+        timeout=timeout,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        check=False,
+    )
+    if proc.returncode != 0:
+        stderr = proc.stderr.decode("utf-8", errors="replace") if isinstance(proc.stderr, bytes) else proc.stderr
+        stdout = proc.stdout.decode("utf-8", errors="replace") if isinstance(proc.stdout, bytes) else proc.stdout
+        detail = (stderr or stdout or "").strip()
+        raise RestoreDrillError(f"{message}: {detail or 'exit code ' + str(proc.returncode)}")
+    return proc
+
+
+def _create_scratch_database_docker(config: RestoreDrillConfig, scratch_database: str) -> None:
+    validate_scratch_database_name(scratch_database)
+    exists_sql = f"SELECT 1 FROM pg_database WHERE datname = '{scratch_database}'"
+    exists = _run_docker_shell(
+        config,
+        'PGPASSWORD="${POSTGRES_PASSWORD:-}" '
+        f'psql -v ON_ERROR_STOP=1 -U "${{POSTGRES_USER:-collector}}" -d postgres -tAc "{exists_sql}"',
+        "docker psql scratch database existence check failed",
+    )
+    stdout = exists.stdout.decode("utf-8", errors="replace") if isinstance(exists.stdout, bytes) else exists.stdout
+    if str(stdout or "").strip():
+        raise RestoreDrillError(f"scratch database already exists: {scratch_database}")
+    create_sql = f'CREATE DATABASE "{scratch_database}" TEMPLATE template0'
+    _run_docker_shell(
+        config,
+        'PGPASSWORD="${POSTGRES_PASSWORD:-}" '
+        f'psql -v ON_ERROR_STOP=1 -U "${{POSTGRES_USER:-collector}}" -d postgres -c "{create_sql}"',
+        "docker psql scratch database create failed",
+    )
+
+
+def _drop_scratch_database_docker(config: RestoreDrillConfig, scratch_database: str) -> None:
+    validate_scratch_database_name(scratch_database)
+    terminate_sql = (
+        "SELECT pg_terminate_backend(pid) "
+        "FROM pg_stat_activity "
+        f"WHERE datname = '{scratch_database}' AND pid <> pg_backend_pid(); "
+        f'DROP DATABASE IF EXISTS "{scratch_database}"'
+    )
+    _run_docker_shell(
+        config,
+        'PGPASSWORD="${POSTGRES_PASSWORD:-}" '
+        f'psql -v ON_ERROR_STOP=1 -U "${{POSTGRES_USER:-collector}}" -d postgres -c "{terminate_sql}"',
+        "docker psql scratch database drop failed",
+    )
+
+
+def _run_docker_pg_restore(config: RestoreDrillConfig, backup_path: Path, scratch_database: str) -> None:
+    validate_scratch_database_name(scratch_database)
+    shell = (
+        'PGPASSWORD="${POSTGRES_PASSWORD:-}" '
+        f'pg_restore --no-owner --no-privileges --exit-on-error --dbname "{scratch_database}" '
+        '--username "${POSTGRES_USER:-collector}"'
+    )
+    try:
+        with backup_path.open("rb") as fh:
+            _run_docker_shell(
+                config,
+                shell,
+                "docker pg_restore failed",
+                stdin=fh,
+                timeout=config.restore_timeout_seconds,
+            )
+    except subprocess.TimeoutExpired as exc:
+        raise RestoreDrillError(
+            f"docker pg_restore timed out after {config.restore_timeout_seconds}s: "
+            f"{_tail_text(exc.stderr or exc.stdout)}"
+        ) from exc
+
+
+def _table_counts_docker(config: RestoreDrillConfig, scratch_database: str) -> dict[str, int | None]:
+    validate_scratch_database_name(scratch_database)
+    tables = [
+        "media_items",
+        "collection_runs",
+        "collection_targets",
+        "rate_limit_events",
+        "dead_letter_queue",
+        "telegram_messages",
+        "whatsapp_messages",
+        "beeper_messages",
+        "strava_activities",
+        "strava_gps_streams",
+        "instagram_posts",
+        "browser_ingest_events",
+    ]
+    counts: dict[str, int | None] = {}
+    for table in tables:
+        exists = _run_docker_shell(
+            config,
+            'PGPASSWORD="${POSTGRES_PASSWORD:-}" '
+            f'psql -v ON_ERROR_STOP=1 -U "${{POSTGRES_USER:-collector}}" -d "{scratch_database}" '
+            f'-tAc "SELECT to_regclass('"'public.{table}'"')"',
+            f"docker psql table existence check failed for {table}",
+        )
+        stdout = exists.stdout.decode("utf-8", errors="replace") if isinstance(exists.stdout, bytes) else exists.stdout
+        if not str(stdout or "").strip():
+            counts[table] = None
+            continue
+        result = _run_docker_shell(
+            config,
+            'PGPASSWORD="${POSTGRES_PASSWORD:-}" '
+            f'psql -v ON_ERROR_STOP=1 -U "${{POSTGRES_USER:-collector}}" -d "{scratch_database}" '
+            f'-tAc "SELECT count(*)::bigint FROM {table}"',
+            f"docker psql count failed for {table}",
+        )
+        value = result.stdout.decode("utf-8", errors="replace") if isinstance(result.stdout, bytes) else result.stdout
+        counts[table] = int(str(value or "0").strip() or "0")
+    return counts
 
 
 def _is_only_transaction_timeout_restore_warning(detail: str) -> bool:

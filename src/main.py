@@ -95,6 +95,8 @@ def main():
     rd.add_argument("--database-url", default=None, help="Admin/source database URL (default: DATABASE_URL)")
     rd.add_argument("--scratch-db", default=None, help="Scratch database name (must start uc_restore_drill_)")
     rd.add_argument("--pg-restore-bin", default=None, help="pg_restore binary path/name")
+    rd.add_argument("--docker-container", default=None, help="Postgres container to run psql/pg_restore in")
+    rd.add_argument("--docker-exe", default=None, help="Docker executable for --docker-container mode")
     rd.add_argument("--restore-timeout-seconds", type=int, default=None, help="pg_restore timeout")
     rd.add_argument("--keep-scratch", action="store_true", help="Keep the scratch DB for manual inspection")
     rd.add_argument("--dry-run", action="store_true", help="Select backup and scratch name without restoring")
@@ -374,6 +376,8 @@ async def _cmd_restore_drill(args):
             database_url=args.database_url,
             scratch_database=args.scratch_db,
             pg_restore_bin=args.pg_restore_bin,
+            docker_container=args.docker_container,
+            docker_exe=args.docker_exe,
             restore_timeout_seconds=args.restore_timeout_seconds,
             keep_scratch=args.keep_scratch,
             dry_run=args.dry_run,
