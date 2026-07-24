@@ -40,6 +40,11 @@ from src.collectors.strava import StravaCollector
 # ── helpers ────────────────────────────────────────────────────────────────
 
 
+@pytest.fixture(autouse=True)
+def _disable_tier1_raw_archives(monkeypatch):
+    monkeypatch.setenv("COLLECTOR_TIER1_RAW_PAYLOADS_ENABLED", "0")
+
+
 def _set_api_env(monkeypatch):
     monkeypatch.setenv("STRAVA_CLIENT_ID", "cid12345")
     monkeypatch.setenv("STRAVA_CLIENT_SECRET", "csec")
@@ -219,6 +224,38 @@ async def test_fetch_streams_retries_web_429_before_gps_cooldown(monkeypatch):
     assert coll._gps_stream_cooling_down() is False
     coll._note_rate_limit.assert_called_once()
     assert coll._note_rate_limit.call_args.kwargs["cooldown_active"] is False
+
+
+@pytest.mark.asyncio
+async def test_fetch_streams_archives_web_raw_payload(monkeypatch):
+    _set_web_env(monkeypatch)
+    monkeypatch.setenv("COLLECTOR_TIER1_RAW_PAYLOADS_ENABLED", "1")
+    coll = StravaCollector()
+    coll._cookie_accounts = [("acct1", "FAKE_SESSION_COOKIE_VALUE")]
+    coll._use_web = True
+    calls = []
+
+    def fake_write_raw_payload(**kwargs):
+        calls.append(kwargs)
+        return MagicMock(ok=True)
+
+    monkeypatch.setattr(strava_mod, "write_raw_payload", fake_write_raw_payload)
+    response = MagicMock(status_code=200)
+    response.json.return_value = {
+        "latlng": [[1.0, 2.0], [1.1, 2.1]],
+        "time": [0, 60],
+        "altitude": [10, 11],
+    }
+    fake_client = _stub_async_client(get_responses=[response])
+    monkeypatch.setattr(strava_mod.httpx, "AsyncClient", MagicMock(return_value=fake_client))
+
+    latlng, _times, _altitude = await coll._fetch_streams(MagicMock(), "123")
+
+    assert latlng == [[1.0, 2.0], [1.1, 2.1]]
+    assert calls
+    assert calls[0]["artifact_id"] == "gps_streams/web/acct1/123"
+    assert calls[0]["target_tables"] == ["strava_gps_streams", "strava_activities"]
+    assert calls[0]["metadata"]["collection_account"] == "acct1"
 
 
 @pytest.mark.asyncio
@@ -477,6 +514,37 @@ async def test_upsert_activity_resolves_athlete_uuid(monkeypatch):
     pool._conn.execute.assert_awaited_once()
     sql = pool._conn.execute.await_args.args[0]
     assert "INSERT INTO strava_activities" in sql
+
+
+@pytest.mark.asyncio
+async def test_upsert_activity_archives_raw_payload(monkeypatch):
+    _set_api_env(monkeypatch)
+    monkeypatch.setenv("COLLECTOR_TIER1_RAW_PAYLOADS_ENABLED", "1")
+    coll = StravaCollector()
+    pool = _make_pool()
+    coll.set_pool(pool)
+    calls = []
+
+    def fake_write_raw_payload(**kwargs):
+        calls.append(kwargs)
+        return MagicMock(ok=True)
+
+    monkeypatch.setattr(strava_mod, "write_raw_payload", fake_write_raw_payload)
+    activity = {
+        "id": 999,
+        "name": "Run",
+        "type": "Run",
+        "sport_type": "Run",
+        "start_date": "2026-04-15T08:00:00Z",
+    }
+
+    await coll._upsert_activity(activity, "42")
+
+    assert calls
+    assert calls[0]["source"] == "strava"
+    assert calls[0]["artifact_id"] == "activities/999"
+    assert calls[0]["target_tables"] == ["strava_activities"]
+    assert calls[0]["metadata"]["platform_athlete_id"] == "42"
 
 
 # ── collect dispatch ───────────────────────────────────────────────────────

@@ -210,6 +210,9 @@ Current shipped recovery/ops work:
 - **Raw Strava payloads:** authenticated Strava club memberships are archived
   with `write_raw_payload()` under `raw/strava/...` and marked as rebuild input
   for `strava_athletes`, instead of writing ad hoc JSON into the media tree.
+  API activity pages, individual activities, and API/web GPS stream responses
+  are also archived with rebuild hints for `strava_activities` and
+  `strava_gps_streams`.
 - **Browser-extension observability:** extension hooks are tracked through
   `dm_hook_heartbeat`; browser ingest requests are recorded in
   `browser_ingest_events` and shown in the hourly Telegram status as browser
@@ -256,8 +259,9 @@ Known remaining gaps:
 - Rebuild report is a dry-run report, not a full scratch DB rebuild.
 - Tier 1 raw payload coverage is now strong for browser/extension captures,
   browser Strava streams, authenticated Strava clubs, Telegram/WhatsApp/Beeper
-  messaging, and Beeper shadow rooms. Remaining raw coverage gaps are Strava API
-  activity/GPS pages and Instagram headless/httpx profile/post payloads.
+  messaging, Beeper shadow rooms, Strava API activity pages, individual Strava
+  activities, and Strava API/web GPS streams. The remaining raw coverage gap is
+  Instagram headless/httpx profile/post payloads.
 - Physical-file dedupe now has a core sha256 blob writer, and Beeper, Telegram,
   WhatsApp, Lemon8, YouTube, TikTok, Website, Search, Instagram
   headless/extension media, GitHub direct media, GitHub bulk avatar artifacts,

@@ -194,6 +194,11 @@ def _derive_gps_route_fields(summary_start, summary_end, latlng_data) -> dict:
     }
 
 
+def _tier1_raw_archives_enabled() -> bool:
+    raw = os.getenv("COLLECTOR_TIER1_RAW_PAYLOADS_ENABLED", "1")
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
 class StravaCollector(BaseCollector):
     SOURCE_NAME = "strava"
 
@@ -249,6 +254,28 @@ class StravaCollector(BaseCollector):
         self._my_athlete_id: str | None = None
         # Only ingest activities that carry media (photos) or a map/GPS polyline.
         self._require_media_or_map = os.getenv("STRAVA_REQUIRE_MEDIA_OR_MAP", "false").lower() == "true"
+
+    def _archive_raw_payload(
+        self,
+        *,
+        artifact_id: str,
+        payload: dict | list,
+        target_tables: list[str],
+        metadata: dict | None = None,
+    ) -> None:
+        if not _tier1_raw_archives_enabled():
+            return
+        try:
+            write_raw_payload(
+                source=self.SOURCE_NAME,
+                artifact_id=artifact_id,
+                payload=payload,
+                metadata=metadata or {},
+                target_tables=target_tables,
+                root=VAULT_ROOT,
+            )
+        except Exception as exc:
+            logger.debug("strava raw archive failed for %s: %s", artifact_id, exc)
 
     def _gps_stream_cooling_down(self) -> bool:
         return time.time() < self._gps_stream_cooldown_until
@@ -1248,6 +1275,17 @@ class StravaCollector(BaseCollector):
             start_date, start_latlng, end_latlng,
             activity.get("timezone"), utc_offset,
             polyline, metadata_json)
+        self._archive_raw_payload(
+            artifact_id=f"activities/{activity.get('id') or 'unknown'}",
+            payload=activity,
+            target_tables=["strava_activities"],
+            metadata={
+                "payload_type": "strava_activity",
+                "platform_activity_id": activity.get("id"),
+                "platform_athlete_id": athlete_id,
+                "ingest_path": "api_or_web",
+            },
+        )
 
     # (following-feed implementation is at _collect_following_feed below)
 
@@ -1323,6 +1361,19 @@ class StravaCollector(BaseCollector):
                 continue
             resp.raise_for_status()
             activities = resp.json()
+            self._archive_raw_payload(
+                artifact_id=f"api/athlete_activities/{aid}/page_{page}",
+                payload={"athlete_id": aid, "page": page, "per_page": per_page, "activities": activities},
+                target_tables=["strava_activities"],
+                metadata={
+                    "payload_type": "strava_athlete_activities_page",
+                    "athlete_id": aid,
+                    "page": page,
+                    "per_page": per_page,
+                    "ingest_path": "api",
+                    "request_url": f"{STRAVA_API}/athlete/activities",
+                },
+            )
             if not activities: break
             for activity in activities:
                 if self._stop.is_set(): break
@@ -1721,6 +1772,18 @@ class StravaCollector(BaseCollector):
                                 resp = retry_resp
                     if resp.status_code == 200:
                         d = resp.json()
+                        self._archive_raw_payload(
+                            artifact_id=f"gps_streams/web/{name}/{activity_id}",
+                            payload=d,
+                            target_tables=["strava_gps_streams", "strava_activities"],
+                            metadata={
+                                "payload_type": "strava_web_gps_stream",
+                                "platform_activity_id": activity_id,
+                                "collection_account": name,
+                                "ingest_path": "web",
+                                "request_url": f"{STRAVA_WEB}/activities/{activity_id}/streams",
+                            },
+                        )
                         latlng = d.get("latlng") or []
                         if latlng:
                             return (latlng, d.get("time") or [], d.get("altitude") or [])
@@ -1754,6 +1817,17 @@ class StravaCollector(BaseCollector):
                         resp = retry_resp
                 if resp.status_code == 200:
                     s = resp.json()
+                    self._archive_raw_payload(
+                        artifact_id=f"gps_streams/api/{activity_id}",
+                        payload=s,
+                        target_tables=["strava_gps_streams", "strava_activities"],
+                        metadata={
+                            "payload_type": "strava_api_gps_stream",
+                            "platform_activity_id": activity_id,
+                            "ingest_path": "api",
+                            "request_url": f"{STRAVA_API}/activities/{activity_id}/streams",
+                        },
+                    )
                     return (s.get("latlng", {}).get("data", []),
                             s.get("time", {}).get("data", []),
                             s.get("altitude", {}).get("data", []))
