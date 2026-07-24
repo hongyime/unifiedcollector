@@ -208,6 +208,9 @@ Current shipped recovery/ops work:
   `dm_hook_heartbeat`; browser ingest requests are recorded in
   `browser_ingest_events` and shown in the hourly Telegram status as browser
   saw/stored/POST counts for the current UTC hour.
+- **Dashboard media joins:** chat/video dashboards join media by stable source
+  keys first (`wa_<message_id>`, YouTube thumbnail/video content IDs) and use
+  file-path matches only as legacy fallback.
 - **Rate-limit visibility:** recorded HTTP 429/auth events are split in dashboard
   and Telegram status. Instagram and Strava cooldowns are persisted and surfaced
   with source/account/scope. A shared pre-cooldown retry primitive now performs

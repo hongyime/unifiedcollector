@@ -2291,8 +2291,19 @@ async def wa_chat_messages(jid: str, limit: int = 200,
                    mi.id::text         AS media_id
             FROM msgs m
             LEFT JOIN whatsapp_users u ON u.id = m.sender_id
-            LEFT JOIN media_items mi ON mi.source = 'whatsapp'
-                                    AND mi.file_path = m.media_url
+            LEFT JOIN LATERAL (
+                SELECT mi.id
+                FROM media_items mi
+                WHERE mi.source = 'whatsapp'
+                  AND (
+                       mi.content_id = 'wa_' || m.platform_message_id
+                    OR (m.media_url IS NOT NULL AND mi.file_path = m.media_url)
+                  )
+                ORDER BY
+                    CASE WHEN mi.content_id = 'wa_' || m.platform_message_id THEN 0 ELSE 1 END,
+                    mi.collected_at DESC
+                LIMIT 1
+            ) mi ON TRUE
             ORDER BY m."timestamp" DESC NULLS LAST
             """,
             jid, limit,
@@ -4029,12 +4040,18 @@ async def youtube_channel_detail(channel_id: str, limit: int = 200, _user: dict 
                    v.duration,
                    v.platform_published_at,
                    v.collected_at,
-                   mi.id AS media_item_id,
-                   mi.content_type AS media_content_type
+                   COALESCE(thumb.id, video_mi.id) AS media_item_id,
+                   COALESCE(thumb.content_type, video_mi.content_type) AS media_content_type,
+                   thumb.id AS thumbnail_media_item_id,
+                   video_mi.id AS video_media_item_id
             FROM youtube_videos v
-            LEFT JOIN media_items mi
-                   ON mi.source = 'youtube'
-                  AND mi.content_id = v.platform_video_id
+            LEFT JOIN media_items thumb
+                   ON thumb.source = 'youtube'
+                  AND thumb.content_id = v.platform_video_id
+                  AND thumb.content_type = 'thumbnail'
+            LEFT JOIN media_items video_mi
+                   ON video_mi.source = 'youtube'
+                  AND video_mi.content_id = 'video_' || v.platform_video_id
             WHERE v.channel_id = $1
             ORDER BY v.platform_published_at DESC NULLS LAST, v.collected_at DESC
             LIMIT $2
