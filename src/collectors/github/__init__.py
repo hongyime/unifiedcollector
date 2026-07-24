@@ -87,11 +87,14 @@ from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 import httpx
 
 from src.core.account_quota import AccountQuotaTracker, QuotaConfig
 from src.core.base_collector import BaseCollector
+from src.core.rate_limit_events import record_rate_limit_event
+from src.core.scrape_pacing import sleep_rate_limit
 from src.collectors.github.parse import (
     get_pat_display as _parse_get_pat_display,
     validate_pat_format as _parse_validate_pat_format,
@@ -275,6 +278,47 @@ class GithubCollector(BaseCollector):
         return False
 
     @staticmethod
+    def _rate_limit_scope(url: str) -> str:
+        """Stable, low-cardinality-ish scope for rate-limit dashboards."""
+        parsed = urlparse(url)
+        path = parsed.path.strip("/") or "root"
+        parts = [p for p in path.split("/") if p]
+        if len(parts) >= 4 and parts[0] == "repos":
+            return "/".join(parts[:4])
+        if len(parts) >= 3 and parts[0] == "users":
+            return "/".join(parts[:3])
+        return "/".join(parts[:2]) if len(parts) >= 2 else parts[0]
+
+    async def _record_api_rate_limit(
+        self,
+        *,
+        url: str,
+        resp: httpx.Response,
+        cooldown_seconds: int,
+        reason: str,
+    ) -> None:
+        await record_rate_limit_event(
+            self.pool,
+            source="github",
+            account=self._pat_account_name(),
+            scope=self._rate_limit_scope(url),
+            # GitHub API quota exhaustion is reported as HTTP 403. Store it as
+            # a rate-limit event for dashboard grouping, with the real status in
+            # metadata for audit/debug.
+            status_code=429,
+            cooldown_seconds=cooldown_seconds,
+            reason=reason,
+            metadata={
+                "http_status_code": resp.status_code,
+                "url": url,
+                "rate_limit_remaining": self.rate_limit_remaining,
+                "rate_limit_reset": self.rate_limit_reset,
+                "rate_limit_limit": self.rate_limit_limit,
+                "retry_after": resp.headers.get("Retry-After"),
+            },
+        )
+
+    @staticmethod
     def get_pat_display(pat: str) -> str:
         """Mask a PAT for safe display: ``ghp_xxxx****...****yyyy``."""
         return _parse_get_pat_display(pat)
@@ -336,18 +380,53 @@ class GithubCollector(BaseCollector):
             except Exception:  # noqa: BLE001
                 logger.debug("quota.consume swallowed", exc_info=True)
 
+            retry_after = None
+            try:
+                retry_after_raw = resp.headers.get("Retry-After")
+                retry_after = int(float(retry_after_raw)) if retry_after_raw else None
+            except (TypeError, ValueError):
+                retry_after = None
+            body = str(getattr(resp, "text", "") or "").lower()
+            is_rate_limited = (
+                resp.status_code == 429
+                or (
+                    resp.status_code == 403
+                    and (
+                        (self.rate_limit_remaining is not None and self.rate_limit_remaining <= 0)
+                        or "rate limit" in body
+                        or "abuse detection" in body
+                    )
+                )
+            )
+            if is_rate_limited:
+                reset_wait = max(0, (self.rate_limit_reset or 0) - int(time.time()))
+                wait = max(retry_after or 0, reset_wait) + 5
+                if wait <= 5:
+                    wait = int(os.getenv("GITHUB_RATE_LIMIT_DEFAULT_COOLDOWN_SECONDS", "300"))
+                await self._record_api_rate_limit(
+                    url=url,
+                    resp=resp,
+                    cooldown_seconds=int(wait),
+                    reason="github_api_rate_limit",
+                )
+                rotated = self._rotate_pat()
+                if not rotated:
+                    max_sleep = int(os.getenv("GITHUB_RATE_LIMIT_MAX_SLEEP_SECONDS", "300"))
+                    sleep_for = min(wait, max(0, max_sleep))
+                    logger.warning(
+                        "GitHub rate limit hit for %s; sleeping %.0fs (cooldown %ds)",
+                        self._pat_account_name(),
+                        sleep_for,
+                        int(wait),
+                    )
+                    await sleep_rate_limit(sleep_for)
+                return None
             if (
                 self.rate_limit_remaining is not None
                 and self.rate_limit_remaining < self._rate_limit_buffer
                 and self._pats
             ):
                 self._rotate_pat()
-            if resp.status_code == 403 and (self.rate_limit_remaining or 0) == 0:
-                wait = max(0, (self.rate_limit_reset or 0) - int(time.time())) + 5
-                logger.warning("GitHub rate limit hit, waiting %ds", wait)
-                await asyncio.sleep(min(wait, 300))
-                self._rotate_pat()
-                return None
             if resp.status_code == 404:
                 return None
             if resp.status_code == 401:

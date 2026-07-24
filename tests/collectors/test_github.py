@@ -311,6 +311,84 @@ async def test_api_get_returns_none_on_401():
     assert out is None
 
 
+@pytest.mark.asyncio
+async def test_api_get_records_github_quota_as_rate_limit_and_sleeps(monkeypatch):
+    coll = _new_collector()
+    coll._api_delay = 0
+    coll._pats = ["one-token"]
+    coll._quota.consume = AsyncMock()
+    monkeypatch.setattr(github_mod.time, "time", lambda: 1_000)
+    events = []
+    sleeps = []
+
+    async def record_event(pool, **kwargs):
+        events.append(kwargs)
+
+    async def sleep_event(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(github_mod, "record_rate_limit_event", record_event)
+    monkeypatch.setattr(github_mod, "sleep_rate_limit", sleep_event)
+    http = MagicMock()
+    http.get = AsyncMock(return_value=_make_response(
+        status=403,
+        headers={
+            "X-RateLimit-Remaining": "0",
+            "X-RateLimit-Reset": "1120",
+            "X-RateLimit-Limit": "5000",
+        },
+    ))
+
+    out = await coll._api_get(http, "https://api.github.com/users/octocat/repos?page=1")
+
+    assert out is None
+    assert sleeps == [125]
+    assert events[0]["source"] == "github"
+    assert events[0]["account"] == "token_1"
+    assert events[0]["scope"] == "users/octocat/repos"
+    assert events[0]["status_code"] == 429
+    assert events[0]["cooldown_seconds"] == 125
+    assert events[0]["metadata"]["http_status_code"] == 403
+    assert events[0]["metadata"]["rate_limit_remaining"] == 0
+
+
+@pytest.mark.asyncio
+async def test_api_get_rotates_available_pat_without_sleeping(monkeypatch):
+    coll = _new_collector()
+    coll._api_delay = 0
+    coll._pats = ["one-token", "two-token"]
+    coll._quota.consume = AsyncMock()
+    monkeypatch.setattr(github_mod.time, "time", lambda: 1_000)
+    events = []
+    sleeps = []
+
+    async def record_event(pool, **kwargs):
+        events.append(kwargs)
+
+    async def sleep_event(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(github_mod, "record_rate_limit_event", record_event)
+    monkeypatch.setattr(github_mod, "sleep_rate_limit", sleep_event)
+    http = MagicMock()
+    http.get = AsyncMock(return_value=_make_response(
+        status=403,
+        headers={
+            "X-RateLimit-Remaining": "0",
+            "X-RateLimit-Reset": "1120",
+            "X-RateLimit-Limit": "5000",
+        },
+    ))
+
+    out = await coll._api_get(http, "https://api.github.com/repos/a/b/contributors")
+
+    assert out is None
+    assert sleeps == []
+    assert coll._pat_idx == 1
+    assert events[0]["account"] == "token_1"
+    assert events[0]["scope"] == "repos/a/b/contributors"
+
+
 # ── upserts (DB seam) ─────────────────────────────────────────────────────
 
 

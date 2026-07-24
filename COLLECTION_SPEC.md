@@ -198,7 +198,10 @@ Current shipped recovery/ops work:
   with source/account/scope. A shared pre-cooldown retry primitive now performs
   one randomized delayed retry before cooldown-capable paths escalate; Instagram
   Playwright profile fetches, Strava GPS stream fetches, and Search HTTP fetch
-  paths use it.
+  paths use it. GitHub API quota exhaustion, which GitHub reports as HTTP 403,
+  is stored as a rate-limit event with the real HTTP status preserved in metadata
+  so hourly status/dashboard views treat it as quota pressure, not generic auth
+  failure.
 - **Strava GPS routes:** existing stored `strava_gps_streams.latlng` rows are
   repaired into route fields without network calls; GPS stream 429 cooldown is
   restored after restart so the backfill does not hammer Strava again. Recovered
@@ -217,8 +220,9 @@ Known remaining gaps:
 - Legacy audit/status docs may still overstate exhaustive rate-limit coverage;
   every new 429/FloodWait/quota branch must call `record_rate_limit_event()`.
 - Pre-cooldown retry is wired into the active Instagram Playwright profile,
-  Strava GPS stream, and Search HTTP hot paths; remaining 429 branches should
-  migrate to the shared helper as they are touched.
+  Strava GPS stream, and Search HTTP hot paths. GitHub quota exhaustion now uses
+  durable rate-limit events plus jittered sleep. Remaining 429/FloodWait branches
+  should migrate to shared helpers as they are touched.
 - Rebuild report is a dry-run report, not a full scratch DB rebuild.
 - Physical-file dedupe now has a core sha256 blob writer, but every collector
   media path still needs migration proof before cross-source dedupe is complete.
