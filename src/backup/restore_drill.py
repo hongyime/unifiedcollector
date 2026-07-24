@@ -20,7 +20,7 @@ from src.core.rebuild_rehearsal import rehearse_media_items_rebuild
 
 
 SCRATCH_DB_RE = re.compile(r"^uc_restore_drill_[a-z0-9_]{8,80}$")
-DEFAULT_RESTORE_TIMEOUT_SECONDS = int(os.getenv("COLLECTOR_RESTORE_DRILL_TIMEOUT_SECONDS", "21600"))
+DEFAULT_RESTORE_TIMEOUT_SECONDS = int(os.getenv("COLLECTOR_RESTORE_DRILL_TIMEOUT_SECONDS", "43200"))
 
 
 class RestoreDrillError(RuntimeError):
