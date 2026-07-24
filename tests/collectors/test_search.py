@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -638,6 +639,142 @@ async def test_download_asset_http_failure_returns_false(monkeypatch):
     with patch.object(coll, "_make_client", return_value=client):
         ok = await coll._download_asset("q", {"url": "https://e.com/x.jpg"})
     assert ok is False
+
+
+class _FakeImage:
+    size = (320, 240)
+    mode = "RGB"
+
+    def save(self, out, **_kwargs):
+        out.write(b"encoded search image")
+
+
+class _FakePIL:
+    @staticmethod
+    def open(_data):
+        return _FakeImage()
+
+
+@pytest.mark.asyncio
+async def test_save_image_writes_vault_blob(monkeypatch, tmp_path):
+    _set_clean_env(monkeypatch)
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    monkeypatch.setattr(search_mod, "VAULT_ROOT", vault_root)
+    coll = SearchCollector()
+    coll._PIL = _FakePIL()
+    coll.insert_media_item = AsyncMock(return_value=True)
+    coll.send_to_dlq = AsyncMock()
+    digest = hashlib.sha256(b"encoded search image").hexdigest()
+
+    ok = await coll._save_image(
+        "query-id",
+        "query name",
+        "imgcid",
+        b"raw image bytes",
+        "https://example.com/page",
+    )
+
+    assert ok is True
+    kwargs = coll.insert_media_item.await_args.kwargs
+    stored_path = Path(kwargs["file_path"])
+    assert stored_path == vault_root / "media" / "blobs" / digest[:2] / digest[2:4] / f"{digest}.jpg"
+    assert stored_path.read_bytes() == b"encoded search image"
+    assert kwargs["sha256"] == digest
+    assert kwargs["file_size"] == len(b"encoded search image")
+    assert kwargs["metadata"]["vault_artifact"]["ok"] is True
+    coll.send_to_dlq.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_save_document_writes_vault_blob(monkeypatch, tmp_path):
+    _set_clean_env(monkeypatch)
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    monkeypatch.setattr(search_mod, "VAULT_ROOT", vault_root)
+    coll = SearchCollector()
+    coll.insert_media_item = AsyncMock(return_value=True)
+    coll.send_to_dlq = AsyncMock()
+    data = b"search document bytes"
+    digest = hashlib.sha256(data).hexdigest()
+
+    ok = await coll._save_document(
+        "query-id",
+        "query name",
+        "doccid",
+        data,
+        "https://example.com/doc.txt",
+        ".txt",
+    )
+
+    assert ok is True
+    kwargs = coll.insert_media_item.await_args.kwargs
+    stored_path = Path(kwargs["file_path"])
+    assert stored_path == vault_root / "media" / "blobs" / digest[:2] / digest[2:4] / f"{digest}.txt"
+    assert stored_path.read_bytes() == data
+    assert kwargs["sha256"] == digest
+    assert kwargs["file_size"] == len(data)
+    assert kwargs["source_url"] == "https://example.com/doc.txt"
+    assert kwargs["metadata"]["vault_artifact"]["ok"] is True
+    coll.send_to_dlq.assert_not_awaited()
+
+
+class _SearchVideoResponse:
+    status_code = 200
+    headers = {"content-type": "video/mp4"}
+
+    def __init__(self, chunks):
+        self._chunks = list(chunks)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc):
+        return None
+
+    async def aiter_bytes(self, _chunk_size):
+        for chunk in self._chunks:
+            yield chunk
+
+
+@pytest.mark.asyncio
+async def test_stream_video_writes_vault_blob(monkeypatch, tmp_path):
+    _set_clean_env(monkeypatch)
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    monkeypatch.setattr(search_mod, "VAULT_ROOT", vault_root)
+    monkeypatch.setattr(search_mod, "assert_media_write_allowed", lambda *_a, **_kw: None)
+    coll = SearchCollector()
+    coll._min_file_size = 1
+    coll.insert_media_item = AsyncMock(return_value=True)
+    coll.send_to_dlq = AsyncMock()
+
+    data = b"search-video-1search-video-2"
+    client = MagicMock()
+    client.stream = MagicMock(return_value=_SearchVideoResponse([data[:14], data[14:]]))
+    client_cm = MagicMock()
+    client_cm.__aenter__ = AsyncMock(return_value=client)
+    client_cm.__aexit__ = AsyncMock(return_value=None)
+    monkeypatch.setattr(coll, "_make_client", MagicMock(return_value=client_cm))
+
+    ok = await coll._stream_video(
+        "query name",
+        "videocid",
+        "https://example.com/video.mp4",
+        "https://example.com/page",
+    )
+
+    assert ok is True
+    digest = hashlib.sha256(data).hexdigest()
+    kwargs = coll.insert_media_item.await_args.kwargs
+    stored_path = Path(kwargs["file_path"])
+    assert stored_path == vault_root / "media" / "blobs" / digest[:2] / digest[2:4] / f"{digest}.mp4"
+    assert stored_path.read_bytes() == data
+    assert kwargs["sha256"] == digest
+    assert kwargs["file_size"] == len(data)
+    assert kwargs["source_url"] == "https://example.com/page"
+    assert kwargs["metadata"]["vault_artifact"]["ok"] is True
+    coll.send_to_dlq.assert_not_awaited()
 
 
 # ── collect (top-level entry) ─────────────────────────────────────────────

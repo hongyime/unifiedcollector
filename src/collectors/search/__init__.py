@@ -98,7 +98,12 @@ from src.collectors.search.parse import (
     ICON_KEYWORDS as _parse_ICON_KEYWORDS,
 )
 from src.core.search_cache import SearchCache
-from src.core.vault import assert_media_write_allowed
+from src.core.vault import (
+    VAULT_ROOT,
+    assert_media_write_allowed,
+    write_atomic_artifact,
+    write_atomic_artifact_from_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1438,35 +1443,21 @@ class SearchCollector(BaseCollector):
         filename = self.build_filename(
             entity_id, entity_name, "image", content_id, extension="jpg",
         )
-        dest_dir = self.account_media_dir / "image"
-        dest = dest_dir / filename
-        assert_media_write_allowed(dest)
-        dest_dir.mkdir(parents=True, exist_ok=True)
 
         loop = asyncio.get_event_loop()
 
-        def _encode_and_write() -> int:
-            fd, tmp_path = tempfile.mkstemp(dir=dest_dir, suffix=".tmp")
-            try:
-                with os.fdopen(fd, "wb") as f:
-                    img.save(f, format="JPEG", quality=95)
-                    f.flush()
-                    os.fsync(f.fileno())
-                size = os.path.getsize(tmp_path)
-                os.replace(tmp_path, dest)
-                return size
-            except BaseException:
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
-                raise
+        def _encode_image() -> bytes:
+            out = io.BytesIO()
+            img.save(out, format="JPEG", quality=95)
+            return out.getvalue()
 
         try:
-            file_size = await loop.run_in_executor(None, _encode_and_write)
+            stored_data = await loop.run_in_executor(None, _encode_image)
         except Exception:
             logger.exception("save image failed cid=%s url=%s", content_id, source_url)
             return False
 
-        sha = self.sha256_bytes(data)
+        sha = self.sha256_bytes(stored_data)
         meta = {
             "entity_id": entity_id,
             "entity_name": entity_name,
@@ -1476,11 +1467,34 @@ class SearchCollector(BaseCollector):
             "source_url": source_url,
             "width": w,
             "height": h,
+            "rebuild_target_tables": ["media_items", "search_results", "search_queries"],
         }
-        try:
-            self.save_json(meta, dest_dir / f"{Path(filename).stem}_metadata.json")
-        except Exception:
-            pass
+        artifact = write_atomic_artifact(
+            source=self.SOURCE_NAME,
+            artifact_id=content_id,
+            artifact_kind="media_blob",
+            data=stored_data,
+            extension="jpg",
+            expected_sha256=sha,
+            metadata={
+                **meta,
+                "filename": filename,
+                "request_url": source_url,
+            },
+            root=VAULT_ROOT,
+        )
+        if not artifact.path:
+            logger.debug("save image vault write failed cid=%s: %s", content_id, artifact.error)
+            return False
+        meta["vault_artifact"] = {
+            "ok": artifact.ok,
+            "partial": artifact.partial,
+            "path": artifact.relative_path,
+            "blob_path": artifact.blob_relative_path,
+            "sidecar_path": artifact.sidecar.relative_path if artifact.sidecar else None,
+            "duplicate_blob": artifact.duplicate_blob,
+            "error": artifact.error,
+        }
 
         try:
             await self.insert_media_item(
@@ -1489,14 +1503,16 @@ class SearchCollector(BaseCollector):
                 content_type="image",
                 content_id=content_id,
                 filename=filename,
-                file_path=str(dest),
-                file_size=file_size,
+                file_path=str(artifact.path),
+                file_size=artifact.file_size,
                 width=w,
                 height=h,
-                sha256=sha,
+                sha256=artifact.sha256,
                 source_url=source_url,
                 metadata=meta,
             )
+            if artifact.partial:
+                await self.send_to_dlq(entity_id, content_id, f"vault artifact partial: {artifact.error}")
         except Exception as e:
             logger.debug("insert_media_item failed: %s", e)
 
@@ -1516,33 +1532,7 @@ class SearchCollector(BaseCollector):
             entity_id, entity_name, "pdf", content_id, extension="pdf",
         )
         dest_dir = self.account_media_dir / "pdf"
-        dest = dest_dir / filename
-        assert_media_write_allowed(dest)
-        dest_dir.mkdir(parents=True, exist_ok=True)
-
         loop = asyncio.get_event_loop()
-
-        def _atomic_write() -> int:
-            fd, tmp_path = tempfile.mkstemp(dir=dest_dir, suffix=".tmp")
-            try:
-                with os.fdopen(fd, "wb") as f:
-                    f.write(data)
-                    f.flush()
-                    os.fsync(f.fileno())
-                size = os.path.getsize(tmp_path)
-                os.replace(tmp_path, dest)
-                return size
-            except BaseException:
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
-                raise
-
-        try:
-            file_size = await loop.run_in_executor(None, _atomic_write)
-        except Exception:
-            logger.exception("save pdf failed cid=%s url=%s", content_id, source_url)
-            return False
-
         sha = self.sha256_bytes(data)
         meta = {
             "entity_id": entity_id,
@@ -1551,11 +1541,34 @@ class SearchCollector(BaseCollector):
             "content_id": content_id,
             "collected_at": datetime.now(timezone.utc).isoformat(),
             "source_url": source_url,
+            "rebuild_target_tables": ["media_items", "search_results", "search_queries"],
         }
-        try:
-            self.save_json(meta, dest_dir / f"{Path(filename).stem}_metadata.json")
-        except Exception:
-            pass
+        artifact = write_atomic_artifact(
+            source=self.SOURCE_NAME,
+            artifact_id=content_id,
+            artifact_kind="media_blob",
+            data=data,
+            extension="pdf",
+            expected_sha256=sha,
+            metadata={
+                **meta,
+                "filename": filename,
+                "request_url": source_url,
+            },
+            root=VAULT_ROOT,
+        )
+        if not artifact.path:
+            logger.debug("save pdf vault write failed cid=%s: %s", content_id, artifact.error)
+            return False
+        meta["vault_artifact"] = {
+            "ok": artifact.ok,
+            "partial": artifact.partial,
+            "path": artifact.relative_path,
+            "blob_path": artifact.blob_relative_path,
+            "sidecar_path": artifact.sidecar.relative_path if artifact.sidecar else None,
+            "duplicate_blob": artifact.duplicate_blob,
+            "error": artifact.error,
+        }
         try:
             await self.insert_media_item(
                 entity_id=entity_id,
@@ -1563,12 +1576,14 @@ class SearchCollector(BaseCollector):
                 content_type="pdf",
                 content_id=content_id,
                 filename=filename,
-                file_path=str(dest),
-                file_size=file_size,
-                sha256=sha,
+                file_path=str(artifact.path),
+                file_size=artifact.file_size,
+                sha256=artifact.sha256,
                 source_url=source_url,
                 metadata=meta,
             )
+            if artifact.partial:
+                await self.send_to_dlq(entity_id, content_id, f"vault artifact partial: {artifact.error}")
         except Exception as e:
             logger.debug("insert_media_item failed: %s", e)
 
@@ -1598,33 +1613,6 @@ class SearchCollector(BaseCollector):
         filename = self.build_filename(
             entity_id, entity_name, "document", content_id, extension=clean_ext,
         )
-        dest_dir = self.account_media_dir / "document"
-        dest = dest_dir / filename
-        assert_media_write_allowed(dest)
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        loop = asyncio.get_event_loop()
-
-        def _atomic_write() -> int:
-            fd, tmp_path = tempfile.mkstemp(dir=dest_dir, suffix=".tmp")
-            try:
-                with os.fdopen(fd, "wb") as f:
-                    f.write(data)
-                    f.flush()
-                    os.fsync(f.fileno())
-                size = os.path.getsize(tmp_path)
-                os.replace(tmp_path, dest)
-                return size
-            except BaseException:
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
-                raise
-
-        try:
-            file_size = await loop.run_in_executor(None, _atomic_write)
-        except Exception:
-            logger.exception("save document failed cid=%s url=%s", content_id, source_url)
-            return False
-
         sha = self.sha256_bytes(data)
         meta = {
             "entity_id": entity_id,
@@ -1633,11 +1621,34 @@ class SearchCollector(BaseCollector):
             "content_id": content_id,
             "collected_at": datetime.now(timezone.utc).isoformat(),
             "source_url": source_url,
+            "rebuild_target_tables": ["media_items", "search_results", "search_queries"],
         }
-        try:
-            self.save_json(meta, dest_dir / f"{Path(filename).stem}_metadata.json")
-        except Exception:
-            pass
+        artifact = write_atomic_artifact(
+            source=self.SOURCE_NAME,
+            artifact_id=content_id,
+            artifact_kind="media_blob",
+            data=data,
+            extension=clean_ext,
+            expected_sha256=sha,
+            metadata={
+                **meta,
+                "filename": filename,
+                "request_url": source_url,
+            },
+            root=VAULT_ROOT,
+        )
+        if not artifact.path:
+            logger.debug("save document vault write failed cid=%s: %s", content_id, artifact.error)
+            return False
+        meta["vault_artifact"] = {
+            "ok": artifact.ok,
+            "partial": artifact.partial,
+            "path": artifact.relative_path,
+            "blob_path": artifact.blob_relative_path,
+            "sidecar_path": artifact.sidecar.relative_path if artifact.sidecar else None,
+            "duplicate_blob": artifact.duplicate_blob,
+            "error": artifact.error,
+        }
         try:
             await self.insert_media_item(
                 entity_id=entity_id,
@@ -1645,12 +1656,14 @@ class SearchCollector(BaseCollector):
                 content_type="document",
                 content_id=content_id,
                 filename=filename,
-                file_path=str(dest),
-                file_size=file_size,
-                sha256=sha,
+                file_path=str(artifact.path),
+                file_size=artifact.file_size,
+                sha256=artifact.sha256,
                 source_url=source_url,
                 metadata=meta,
             )
+            if artifact.partial:
+                await self.send_to_dlq(entity_id, content_id, f"vault artifact partial: {artifact.error}")
         except Exception as e:
             logger.debug("insert_media_item failed: %s", e)
         self._known_ids.add(content_id)
@@ -1676,8 +1689,7 @@ class SearchCollector(BaseCollector):
         q_name = (query or "spider")[:50]
         filename = self.build_filename(q_slug, q_name, "video", content_id, extension=ext)
         dest_dir = self.account_media_dir / "video"
-        dest = dest_dir / filename
-        assert_media_write_allowed(dest)
+        assert_media_write_allowed(dest_dir / filename)
         dest_dir.mkdir(parents=True, exist_ok=True)
         hasher = hashlib.sha256()
         size = 0
@@ -1747,8 +1759,6 @@ class SearchCollector(BaseCollector):
                                 break
             if size < self._min_file_size:
                 raise RuntimeError("video too small")
-            os.replace(tmp_path, dest)
-            tmp_path = None
         except Exception as e:
             logger.debug("video stream failed for %s: %s", url, e)
             if tmp_path and os.path.exists(tmp_path):
@@ -1767,11 +1777,42 @@ class SearchCollector(BaseCollector):
             "collected_at": datetime.now(timezone.utc).isoformat(),
             "source_url": source_url,
             "file_size": size,
+            "rebuild_target_tables": ["media_items", "search_results", "search_queries"],
         }
-        try:
-            self.save_json(meta, dest_dir / f"{Path(filename).stem}_metadata.json")
-        except Exception:
-            pass
+        artifact = write_atomic_artifact_from_path(
+            source=self.SOURCE_NAME,
+            artifact_id=content_id,
+            artifact_kind="media_blob",
+            source_path=tmp_path,
+            extension=ext,
+            expected_sha256=sha,
+            metadata={
+                **meta,
+                "filename": filename,
+                "request_url": url,
+            },
+            root=VAULT_ROOT,
+            delete_source=True,
+        )
+        if tmp_path and not os.path.exists(tmp_path):
+            tmp_path = None
+        if not artifact.path:
+            logger.debug("video stream vault write failed cid=%s: %s", content_id, artifact.error)
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+            return False
+        meta["vault_artifact"] = {
+            "ok": artifact.ok,
+            "partial": artifact.partial,
+            "path": artifact.relative_path,
+            "blob_path": artifact.blob_relative_path,
+            "sidecar_path": artifact.sidecar.relative_path if artifact.sidecar else None,
+            "duplicate_blob": artifact.duplicate_blob,
+            "error": artifact.error,
+        }
         try:
             await self.insert_media_item(
                 entity_id=q_slug,
@@ -1779,12 +1820,14 @@ class SearchCollector(BaseCollector):
                 content_type="video",
                 content_id=content_id,
                 filename=filename,
-                file_path=str(dest),
-                file_size=size,
-                sha256=sha,
+                file_path=str(artifact.path),
+                file_size=artifact.file_size,
+                sha256=artifact.sha256,
                 source_url=source_url,
                 metadata=meta,
             )
+            if artifact.partial:
+                await self.send_to_dlq(q_slug, content_id, f"vault artifact partial: {artifact.error}")
         except Exception as e:
             logger.debug("insert_media_item failed: %s", e)
         self._known_ids.add(content_id)
