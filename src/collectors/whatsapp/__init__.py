@@ -50,6 +50,7 @@ import httpx
 
 from src.core.base_collector import BaseCollector
 from src.core.change_tracker import ChangeTracker
+from src.core.rate_limit_events import record_rate_limit_event
 from src.core.user_change_tracker import (
     UserChangeTracker,
     WHATSAPP_TRACKED_FIELDS,
@@ -126,6 +127,52 @@ class WhatsappCollector(BaseCollector):
         if not self._spider_sessions:
             return True
         return session_name.lower() in self._spider_sessions
+
+    async def _record_http_event(
+        self,
+        *,
+        session_name: str | None,
+        scope: str,
+        status_code: int | None,
+        reason: str,
+        metadata: dict | None = None,
+    ) -> bool:
+        if status_code not in {401, 403, 429}:
+            return False
+        await record_rate_limit_event(
+            self.pool,
+            source=self.SOURCE_NAME,
+            account=session_name or "bridge",
+            scope=scope,
+            status_code=status_code,
+            cooldown_seconds=self._session_cooldown if status_code == 429 else None,
+            reason=reason,
+            metadata=metadata or {},
+        )
+        return True
+
+    async def _record_http_exception(
+        self,
+        exc: BaseException,
+        *,
+        session_name: str | None,
+        scope: str,
+        reason_prefix: str,
+        metadata: dict | None = None,
+    ) -> bool:
+        response = getattr(exc, "response", None)
+        status_code = getattr(response, "status_code", None)
+        try:
+            status_code = int(status_code) if status_code is not None else None
+        except (TypeError, ValueError):
+            status_code = None
+        return await self._record_http_event(
+            session_name=session_name,
+            scope=scope,
+            status_code=status_code,
+            reason=f"{reason_prefix}: HTTP {status_code}" if status_code else reason_prefix,
+            metadata={**(metadata or {}), "error": str(exc)[:500]},
+        )
 
     @property
     def account_media_dir(self) -> Path:
@@ -670,6 +717,13 @@ class WhatsappCollector(BaseCollector):
                         resp = await client.get(f"{bridge_url}/health")
                         if resp.status_code != 200:
                             self._record_session_failure(session_name)
+                            await self._record_http_event(
+                                session_name=session_name,
+                                scope="bridge_health",
+                                status_code=resp.status_code,
+                                reason=f"WhatsApp bridge health HTTP {resp.status_code}",
+                                metadata={"bridge_url": bridge_url},
+                            )
                             continue
 
                         health = resp.json()
@@ -687,6 +741,13 @@ class WhatsappCollector(BaseCollector):
                             headers=self._bridge_headers(),
                         )
                         if resp.status_code != 200:
+                            await self._record_http_event(
+                                session_name=session_name,
+                                scope="recent_messages",
+                                status_code=resp.status_code,
+                                reason=f"WhatsApp recent messages HTTP {resp.status_code}",
+                                metadata={"bridge_url": bridge_url},
+                            )
                             continue
 
                         messages = resp.json()
@@ -753,6 +814,13 @@ class WhatsappCollector(BaseCollector):
             return correlation_id
         except Exception as exc:
             logger.warning("backfill_chat failed jid=%s err=%s", chat_jid, exc)
+            await self._record_http_exception(
+                exc,
+                session_name=session_name,
+                scope="backfill_request",
+                reason_prefix=f"WhatsApp backfill request failed for {chat_jid}",
+                metadata={"chat_jid": chat_jid, "bridge_url": bridge_url},
+            )
             return None
 
     async def _extract_wa_location(self, event: dict, chat_jid: str, msg_id: str):
@@ -910,8 +978,22 @@ class WhatsappCollector(BaseCollector):
                     if resp.status_code == 200:
                         return resp.content
                     logger.warning("Bridge decrypt failed %s: %d", msg_id, resp.status_code)
+                    await self._record_http_event(
+                        session_name=session,
+                        scope="media_decrypt",
+                        status_code=resp.status_code,
+                        reason=f"WhatsApp media decrypt HTTP {resp.status_code}",
+                        metadata={"message_id": msg_id, "bridge_url": bridge_url},
+                    )
         except Exception as e:
             logger.error("Bridge download failed %s: %s", msg_id, e)
+            await self._record_http_exception(
+                e,
+                session_name=session,
+                scope="media_decrypt",
+                reason_prefix=f"WhatsApp bridge download failed for {msg_id}",
+                metadata={"message_id": msg_id, "bridge_url": bridge_url},
+            )
         return None
 
     async def _download_direct(self, url: str) -> bytes | None:
@@ -923,6 +1005,13 @@ class WhatsappCollector(BaseCollector):
                     return resp.content
         except Exception as e:
             logger.error("Direct download failed: %s", e)
+            await self._record_http_exception(
+                e,
+                session_name="direct",
+                scope="direct_media",
+                reason_prefix="WhatsApp direct media download failed",
+                metadata={"url": url},
+            )
         return None
 
     def _bridge_headers(self) -> dict[str, str]:

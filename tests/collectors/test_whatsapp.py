@@ -319,6 +319,20 @@ def _patch_async_client(monkeypatch, *, response=None, raises=None,
     return client
 
 
+def _http_error(status_code: int, message: str = "http error"):
+    exc = RuntimeError(message)
+    exc.response = MagicMock(status_code=status_code)
+    return exc
+
+
+def _rate_limit_calls(conn):
+    return [
+        call.args
+        for call in conn.execute.await_args_list
+        if call.args and "rate_limit_events" in call.args[0]
+    ]
+
+
 @pytest.mark.asyncio
 async def test_handle_message_event_skips_when_no_msg_id(collector):
     # No msg_id and no chat_jid → early return, no DB calls
@@ -536,6 +550,25 @@ async def test_backfill_chat_returns_none_on_http_error(
 
 
 @pytest.mark.asyncio
+async def test_backfill_chat_records_http_status_error(
+    configured_collector, monkeypatch,
+):
+    _patch_async_client(monkeypatch, raises=_http_error(429, "too many"))
+    out = await configured_collector.backfill_chat("111@s.whatsapp.net")
+    assert out is None
+    calls = _rate_limit_calls(configured_collector._test_conn)
+    assert len(calls) == 1
+    assert calls[0][1:7] == (
+        "whatsapp",
+        "sess1",
+        "backfill_request",
+        429,
+        configured_collector._session_cooldown,
+        "WhatsApp backfill request failed for 111@s.whatsapp.net: HTTP 429",
+    )
+
+
+@pytest.mark.asyncio
 async def test_backfill_chat_falls_back_to_first_bridge(
     configured_collector, monkeypatch,
 ):
@@ -594,6 +627,16 @@ async def test_download_via_bridge_returns_none_on_non_200(
         "sess1", "m1", "key", "/path",
     )
     assert out is None
+    calls = _rate_limit_calls(configured_collector._test_conn)
+    assert len(calls) == 1
+    assert calls[0][1:7] == (
+        "whatsapp",
+        "sess1",
+        "media_decrypt",
+        403,
+        None,
+        "WhatsApp media decrypt HTTP 403",
+    )
 
 
 @pytest.mark.asyncio
@@ -610,6 +653,23 @@ async def test_download_direct_returns_none_on_error(collector, monkeypatch):
     _patch_async_client(monkeypatch, raises=RuntimeError("dns fail"))
     out = await collector._download_direct("https://cdn/x.jpg")
     assert out is None
+
+
+@pytest.mark.asyncio
+async def test_download_direct_records_http_status_error(collector, monkeypatch):
+    _patch_async_client(monkeypatch, raises=_http_error(429, "too many"))
+    out = await collector._download_direct("https://cdn/x.jpg")
+    assert out is None
+    calls = _rate_limit_calls(collector._test_conn)
+    assert len(calls) == 1
+    assert calls[0][1:7] == (
+        "whatsapp",
+        "direct",
+        "direct_media",
+        429,
+        collector._session_cooldown,
+        "WhatsApp direct media download failed: HTTP 429",
+    )
 
 
 # ── download_media ────────────────────────────────────────────────────────
