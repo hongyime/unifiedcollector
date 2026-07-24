@@ -22,7 +22,7 @@ from src.core.file_naming import sanitize_name
 from src.core.proximity import refresh_account_proximity_cache
 from src.core.rate_limit_events import record_rate_limit_event
 from src.core.scrape_pacing import sleep_before_pre_cooldown_retry, sleep_rate_limit
-from src.core.vault import assert_media_write_allowed
+from src.core.vault import VAULT_ROOT, assert_media_write_allowed, write_atomic_artifact
 
 logger = logging.getLogger(__name__)
 
@@ -1885,10 +1885,6 @@ class StravaCollector(BaseCollector):
         cid = item["content_id"]
         if self.is_known(cid): return False
         filename = self.build_filename(item["entity_id"], item["entity_name"], item["content_type"], cid, extension=item.get("extension", "jpg"))
-        dest_dir = self.account_media_dir / item["content_type"]
-        dest = dest_dir / filename
-        assert_media_write_allowed(dest)
-        dest_dir.mkdir(parents=True, exist_ok=True)
         try:
             await self._delay()
             async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
@@ -1896,13 +1892,56 @@ class StravaCollector(BaseCollector):
                 resp.raise_for_status()
                 data = resp.content
             sha = self.sha256_bytes(data)
-            fd, tmp_path = tempfile.mkstemp(dir=dest_dir, suffix=".tmp")
-            with os.fdopen(fd, "wb") as f:
-                f.write(data); f.flush(); os.fsync(f.fileno())
-            os.replace(tmp_path, dest)
-            metadata = {"entity_id": item["entity_id"], "entity_name": item["entity_name"], "content_type": item["content_type"], "content_id": cid, "collected_at": datetime.now(timezone.utc).isoformat(), "raw": item.get("raw", {})}
-            self.save_json(metadata, dest_dir / f"{Path(filename).stem}_metadata.json")
-            inserted = await self.insert_media_item(entity_id=item["entity_id"], entity_name=item["entity_name"], content_type=item["content_type"], content_id=cid, filename=filename, file_path=str(dest), file_size=len(data), sha256=sha, metadata=metadata, source_url=self._build_strava_source_url(item))
+            source_url = self._build_strava_source_url(item)
+            metadata = {
+                "entity_id": item["entity_id"],
+                "entity_name": item["entity_name"],
+                "content_type": item["content_type"],
+                "content_id": cid,
+                "collected_at": datetime.now(timezone.utc).isoformat(),
+                "raw": item.get("raw", {}),
+                "rebuild_target_tables": ["media_items", "strava_activity_photos", "strava_activities"],
+            }
+            artifact = write_atomic_artifact(
+                source=self.SOURCE_NAME,
+                artifact_id=cid,
+                artifact_kind="media_blob",
+                data=data,
+                extension=item.get("extension", "jpg"),
+                expected_sha256=sha,
+                metadata={
+                    **metadata,
+                    "filename": filename,
+                    "source_url": source_url,
+                    "request_url": item.get("url"),
+                },
+                root=VAULT_ROOT,
+            )
+            if not artifact.path:
+                raise RuntimeError(f"vault artifact write failed: {artifact.error}")
+            metadata["vault_artifact"] = {
+                "ok": artifact.ok,
+                "partial": artifact.partial,
+                "path": artifact.relative_path,
+                "blob_path": artifact.blob_relative_path,
+                "sidecar_path": artifact.sidecar.relative_path if artifact.sidecar else None,
+                "duplicate_blob": artifact.duplicate_blob,
+                "error": artifact.error,
+            }
+            inserted = await self.insert_media_item(
+                entity_id=item["entity_id"],
+                entity_name=item["entity_name"],
+                content_type=item["content_type"],
+                content_id=cid,
+                filename=filename,
+                file_path=str(artifact.path),
+                file_size=artifact.file_size,
+                sha256=artifact.sha256,
+                metadata=metadata,
+                source_url=source_url,
+            )
+            if artifact.partial:
+                await self.send_to_dlq(item["entity_id"], cid, f"vault artifact partial: {artifact.error}")
             if inserted:
                 self._known_ids.add(cid)
             return inserted
@@ -3430,10 +3469,9 @@ class StravaCollector(BaseCollector):
 
         The Strava-issued summary_polyline is sufficient to reconstruct the
         route. We do not call out to a paid map tile provider — instead we
-        save the polyline + bounds as a JSON sidecar under
-        media_dir/routes/ and register the file in collected_media so the
-        unified store can serve it. Render-time conversion to PNG is
-        deferred to consumers.
+        save the polyline + bounds as a vault JSON blob and register the file
+        in media_items so the unified store can serve it. Render-time
+        conversion to PNG is deferred to consumers.
         """
         try:
             activity_id = str(activity.get("id") or activity.get("activity_id") or "")
@@ -3457,8 +3495,8 @@ class StravaCollector(BaseCollector):
                 "name": activity.get("name"),
                 "distance": activity.get("distance"),
                 "collected_at": datetime.now(timezone.utc).isoformat(),
+                "rebuild_target_tables": ["media_items", "strava_activities", "strava_gps_streams"],
             }
-            dest_dir = self.account_media_dir / "routes"
             filename = self.build_filename(
                 str(athlete_id or "unknown"),
                 str(athlete_id or "unknown"),
@@ -3466,26 +3504,49 @@ class StravaCollector(BaseCollector):
                 activity_id,
                 extension="json",
             )
-            dest = dest_dir / filename
-            assert_media_write_allowed(dest)
-            dest_dir.mkdir(parents=True, exist_ok=True)
             data = json.dumps(payload, indent=2).encode("utf-8")
-            fd, tmp_path = tempfile.mkstemp(dir=dest_dir, suffix=".tmp")
-            with os.fdopen(fd, "wb") as f:
-                f.write(data); f.flush(); os.fsync(f.fileno())
-            os.replace(tmp_path, dest)
+            sha = self.sha256_bytes(data)
+            source_url = self._build_strava_source_url({"content_type": "route_map", "content_id": activity_id})
+            artifact = write_atomic_artifact(
+                source=self.SOURCE_NAME,
+                artifact_id=f"route_{activity_id}",
+                artifact_kind="media_blob",
+                data=data,
+                extension="json",
+                expected_sha256=sha,
+                metadata={
+                    **payload,
+                    "filename": filename,
+                    "source_url": source_url,
+                    "request_url": source_url,
+                },
+                root=VAULT_ROOT,
+            )
+            if not artifact.path:
+                raise RuntimeError(f"vault artifact write failed: {artifact.error}")
+            payload["vault_artifact"] = {
+                "ok": artifact.ok,
+                "partial": artifact.partial,
+                "path": artifact.relative_path,
+                "blob_path": artifact.blob_relative_path,
+                "sidecar_path": artifact.sidecar.relative_path if artifact.sidecar else None,
+                "duplicate_blob": artifact.duplicate_blob,
+                "error": artifact.error,
+            }
             await self.insert_media_item(
                 entity_id=str(athlete_id or "unknown"),
                 entity_name=str(athlete_id or "unknown"),
                 content_type="route_map",
                 content_id=activity_id,
                 filename=filename,
-                file_path=str(dest),
-                file_size=len(data),
-                sha256=self.sha256_bytes(data),
+                file_path=str(artifact.path),
+                file_size=artifact.file_size,
+                sha256=artifact.sha256,
                 metadata=payload,
-                source_url=self._build_strava_source_url({"content_type": "route_map", "content_id": activity_id}),
+                source_url=source_url,
             )
+            if artifact.partial:
+                await self.send_to_dlq(str(athlete_id or "unknown"), activity_id, f"vault artifact partial: {artifact.error}")
             self._known_ids.add(f"route_{activity_id}")
         except Exception as e:
             logger.warning("strava: route map persist failed for %s: %s",

@@ -24,6 +24,7 @@ level so we can assert request shape without opening sockets.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -582,8 +583,14 @@ async def test_download_media_happy_path(monkeypatch, tmp_path):
 
     coll.insert_media_item.assert_awaited_once()
     kwargs = coll.insert_media_item.await_args.kwargs
+    digest = hashlib.sha256(b"\xff\xd8\xff\xe0fakejpg").hexdigest()
+    stored_path = Path(kwargs["file_path"])
     assert kwargs["entity_id"] == "42"
     assert kwargs["content_id"] == "ACT_1"
+    assert stored_path == tmp_path / "media" / "blobs" / digest[:2] / digest[2:4] / f"{digest}.jpg"
+    assert stored_path.read_bytes() == b"\xff\xd8\xff\xe0fakejpg"
+    assert kwargs["sha256"] == digest
+    assert kwargs["metadata"]["vault_artifact"]["ok"] is True
     assert "ACT_1" in coll._known_ids
 
 
@@ -679,10 +686,13 @@ async def test_download_route_maps_writes_sidecar(monkeypatch, tmp_path):
     kwargs = coll.insert_media_item.await_args.kwargs
     assert kwargs["content_type"] == "route_map"
     assert kwargs["content_id"] == "12345"
-    # sidecar file exists on disk
-    assert Path(kwargs["file_path"]).exists()
-    payload = json.loads(Path(kwargs["file_path"]).read_text(encoding="utf-8"))
+    stored_path = Path(kwargs["file_path"])
+    assert stored_path.exists()
+    assert stored_path.suffix == ".json"
+    assert "media" in stored_path.parts and "blobs" in stored_path.parts
+    payload = json.loads(stored_path.read_text(encoding="utf-8"))
     assert payload["polyline"] == "abc_FAKE_POLY"
+    assert kwargs["metadata"]["vault_artifact"]["ok"] is True
 
 
 @pytest.mark.asyncio
