@@ -7,6 +7,7 @@ an AsyncMock chain.
 
 from __future__ import annotations
 
+import hashlib
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -557,6 +558,47 @@ async def test_edge_fetcher_rejects_unsupported_type():
 
 
 # ── reconcile_avatars ────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_download_media_writes_vault_blob(monkeypatch, tmp_path):
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    monkeypatch.setattr(github_mod, "VAULT_ROOT", vault_root)
+    coll = _new_collector(monkeypatch)
+    coll._download_delay = 0
+    coll.insert_media_item = AsyncMock(return_value=True)
+    coll.send_to_dlq = AsyncMock()
+
+    data = b"github asset bytes"
+    digest = hashlib.sha256(data).hexdigest()
+    client = MagicMock()
+    client.get = AsyncMock(return_value=_make_response(status=200, content=data))
+    _patch_make_client(coll, client)
+
+    await coll.download_media({
+        "entity_id": "owner/repo",
+        "entity_name": "owner",
+        "content_type": "release_asset",
+        "content_id": "asset1",
+        "extension": "zip",
+        "url": "https://github.com/owner/repo/releases/download/v1/a.zip",
+        "source_url": "https://github.com/owner/repo/releases/tag/v1",
+        "raw": {"asset": "a.zip"},
+    })
+
+    kwargs = coll.insert_media_item.await_args.kwargs
+    stored_path = Path(kwargs["file_path"])
+    assert stored_path == vault_root / "media" / "blobs" / digest[:2] / digest[2:4] / f"{digest}.zip"
+    assert stored_path.read_bytes() == data
+    assert kwargs["sha256"] == digest
+    assert kwargs["file_size"] == len(data)
+    assert kwargs["source_url"] == "https://github.com/owner/repo/releases/tag/v1"
+    assert kwargs["metadata"]["raw"] == {"asset": "a.zip"}
+    assert kwargs["metadata"]["vault_artifact"]["ok"] is True
+    assert kwargs["metadata"]["vault_artifact"]["partial"] is False
+    assert kwargs["metadata"]["vault_artifact"]["blob_path"].startswith("media/blobs/")
+    coll.send_to_dlq.assert_not_awaited()
 
 
 @pytest.mark.asyncio
