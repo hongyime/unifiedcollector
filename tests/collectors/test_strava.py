@@ -23,6 +23,7 @@ level so we can assert request shape without opening sockets.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -155,6 +156,88 @@ def test_gps_stream_429_event_dedupes_same_activity(monkeypatch):
     coll._set_gps_stream_cooldown("123", "page")
 
     assert coll._note_rate_limit.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_note_rate_limit_can_record_transient_without_cooldown(monkeypatch):
+    _set_web_env(monkeypatch)
+    coll = StravaCollector()
+    coll.pool = object()
+    record_event = AsyncMock()
+    monkeypatch.setattr(strava_mod, "record_rate_limit_event", record_event)
+
+    coll._note_rate_limit(
+        scope="gps_streams",
+        account="acct1",
+        cooldown_seconds=None,
+        cooldown_active=False,
+        reason="streams 429 recovered by retry",
+    )
+    await asyncio.sleep(0)
+
+    record_event.assert_awaited_once()
+    assert record_event.await_args.kwargs["cooldown_seconds"] is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_streams_retries_web_429_before_gps_cooldown(monkeypatch):
+    _set_web_env(monkeypatch)
+    coll = StravaCollector()
+    coll._cookie_accounts = [("acct1", "FAKE_SESSION_COOKIE_VALUE")]
+    coll._use_web = True
+    coll._note_rate_limit = MagicMock()
+    monkeypatch.setattr(
+        strava_mod,
+        "sleep_before_pre_cooldown_retry",
+        AsyncMock(return_value=0.0),
+    )
+
+    first = MagicMock(status_code=429)
+    second = MagicMock(status_code=200)
+    second.json.return_value = {
+        "latlng": [[1.0, 2.0], [1.1, 2.1]],
+        "time": [0, 60],
+        "altitude": [10, 11],
+    }
+    fake_client = _stub_async_client(get_responses=[first, second])
+    monkeypatch.setattr(strava_mod.httpx, "AsyncClient", MagicMock(return_value=fake_client))
+
+    latlng, times, altitude = await coll._fetch_streams(MagicMock(), "123")
+
+    assert latlng == [[1.0, 2.0], [1.1, 2.1]]
+    assert times == [0, 60]
+    assert altitude == [10, 11]
+    assert fake_client.get.await_count == 2
+    assert coll._gps_stream_cooling_down() is False
+    coll._note_rate_limit.assert_called_once()
+    assert coll._note_rate_limit.call_args.kwargs["cooldown_active"] is False
+
+
+@pytest.mark.asyncio
+async def test_fetch_streams_sets_gps_cooldown_after_retry_still_429(monkeypatch):
+    _set_web_env(monkeypatch)
+    coll = StravaCollector()
+    coll._cookie_accounts = [("acct1", "FAKE_SESSION_COOKIE_VALUE")]
+    coll._use_web = True
+    coll._note_rate_limit = MagicMock()
+    monkeypatch.setattr(
+        strava_mod,
+        "sleep_before_pre_cooldown_retry",
+        AsyncMock(return_value=0.0),
+    )
+
+    fake_client = _stub_async_client(
+        get_responses=[MagicMock(status_code=429), MagicMock(status_code=429)]
+    )
+    monkeypatch.setattr(strava_mod.httpx, "AsyncClient", MagicMock(return_value=fake_client))
+
+    latlng, times, altitude = await coll._fetch_streams(MagicMock(), "123")
+
+    assert (latlng, times, altitude) == (None, None, None)
+    assert fake_client.get.await_count == 2
+    assert coll._gps_stream_cooling_down() is True
+    coll._note_rate_limit.assert_called_once()
+    assert coll._note_rate_limit.call_args.kwargs["cooldown_seconds"] == coll._gps_stream_cooldown_seconds
 
 
 @pytest.mark.asyncio

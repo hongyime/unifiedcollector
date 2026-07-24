@@ -47,7 +47,7 @@ from src.core.sliding_window_limiter import SlidingWindowRateLimiter, WindowConf
 from src.core.proximity import refresh_account_proximity_cache
 from src.core.profile_photo_tracker import ProfilePhotoTracker
 from src.core.rate_limit_events import record_rate_limit_event
-from src.core.scrape_pacing import headless_dwell
+from src.core.scrape_pacing import headless_dwell, sleep_before_pre_cooldown_retry
 from src.core.vault import assert_media_write_allowed
 from src.core.user_change_tracker import (
     UserChangeTracker,
@@ -1854,8 +1854,8 @@ class InstagramCollector(BaseCollector):
 
                 # Same-origin in-page fetch: executes inside the page's JS context
                 # with the browser's own cookies, TLS fingerprint and headers.
-                try:
-                    result = await page.evaluate(
+                async def _evaluate_profile_info() -> dict:
+                    return await page.evaluate(
                         """async (uname) => {
                             try {
                                 const r = await fetch(
@@ -1867,11 +1867,54 @@ class InstagramCollector(BaseCollector):
                         }""",
                         username,
                     )
+
+                try:
+                    result = await _evaluate_profile_info()
                 except Exception as e:
                     logger.warning("Playwright Mode-β evaluate failed for %s: %s", username, e)
                     return None
 
                 status = result.get("status") if isinstance(result, dict) else None
+                if status == 429:
+                    retry_delay = await sleep_before_pre_cooldown_retry(
+                        "instagram",
+                        "profile_fetch_playwright",
+                        account=acct_name,
+                        status_code=429,
+                        reason=f"username={username}",
+                    )
+                    if retry_delay is not None:
+                        try:
+                            retry_result = await _evaluate_profile_info()
+                        except Exception as e:
+                            logger.warning(
+                                "Playwright Mode-β retry evaluate failed for %s: %s",
+                                username,
+                                e,
+                            )
+                            retry_result = None
+                        retry_status = (
+                            retry_result.get("status")
+                            if isinstance(retry_result, dict)
+                            else None
+                        )
+                        if retry_result is not None:
+                            if retry_status != 429:
+                                await self._record_rate_limit_event(
+                                    scope="profile_fetch_playwright",
+                                    status_code=429,
+                                    reason="Playwright profile transient rate-limit retried",
+                                    metadata={
+                                        "username": username,
+                                        "endpoint": "web_profile_info",
+                                        "pre_cooldown_retry": True,
+                                        "retry_status_code": retry_status,
+                                        "retry_delay_seconds": retry_delay,
+                                    },
+                                )
+                            result = retry_result
+                            status = retry_status
+
                 if status in (401, 403, 429):
                     # Dead/expired sessions are 401/403. A 429 is a throttle signal:
                     # record it, but do not mark the cookie dead.

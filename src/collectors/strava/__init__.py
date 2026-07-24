@@ -21,6 +21,7 @@ from src.core.profile_photo_tracker import ProfilePhotoTracker
 from src.core.file_naming import sanitize_name
 from src.core.proximity import refresh_account_proximity_cache
 from src.core.rate_limit_events import record_rate_limit_event
+from src.core.scrape_pacing import sleep_before_pre_cooldown_retry
 from src.core.vault import assert_media_write_allowed
 
 logger = logging.getLogger(__name__)
@@ -327,12 +328,53 @@ class StravaCollector(BaseCollector):
             metadata={"activity_id": str(activity_id), "context": context},
         )
 
+    async def _retry_gps_stream_after_429(
+        self,
+        fetch,
+        *,
+        activity_id: str | int,
+        context: str,
+        account: str | None = None,
+    ):
+        retry_delay = await sleep_before_pre_cooldown_retry(
+            "strava",
+            "gps_streams",
+            account=account,
+            status_code=429,
+            reason=f"activity={activity_id} via {context}",
+        )
+        if retry_delay is None:
+            return None
+        try:
+            retry_resp = await fetch()
+        except Exception as exc:
+            logger.debug("strava: GPS stream pre-cooldown retry failed for %s via %s: %s", activity_id, context, exc)
+            return None
+        retry_status = getattr(retry_resp, "status_code", None)
+        if retry_status != 429:
+            self._note_rate_limit(
+                scope="gps_streams",
+                account=account,
+                cooldown_seconds=None,
+                cooldown_active=False,
+                reason=f"streams 429 for {activity_id} via {context}; retry returned HTTP {retry_status}",
+                metadata={
+                    "activity_id": str(activity_id),
+                    "context": context,
+                    "pre_cooldown_retry": True,
+                    "retry_status_code": retry_status,
+                    "retry_delay_seconds": retry_delay,
+                },
+            )
+        return retry_resp
+
     def _note_rate_limit(
         self,
         *,
         scope: str,
         account: str | None = None,
         cooldown_seconds: int | None = None,
+        cooldown_active: bool = True,
         reason: str | None = None,
         metadata: dict | None = None,
     ) -> None:
@@ -349,7 +391,7 @@ class StravaCollector(BaseCollector):
                 account=account,
                 scope=scope,
                 status_code=429,
-                cooldown_seconds=cooldown_seconds or self._ratelimit_sleep,
+                cooldown_seconds=(cooldown_seconds or self._ratelimit_sleep) if cooldown_active else None,
                 reason=reason,
                 metadata=metadata,
             )
@@ -1641,13 +1683,25 @@ class StravaCollector(BaseCollector):
                     async with httpx.AsyncClient(
                             timeout=30, cookies=jar, follow_redirects=True,
                             headers={"User-Agent": _ua}) as c:
-                        resp = await c.get(
-                            f"https://www.strava.com/activities/{activity_id}/streams",
-                            params=[("stream_types[]", "latlng"), ("stream_types[]", "time"),
-                                    ("stream_types[]", "altitude")],
-                            headers={"X-Requested-With": "XMLHttpRequest",
-                                     "Accept": "application/json",
-                                     "Referer": f"https://www.strava.com/activities/{activity_id}"})
+                        async def _get_web_streams():
+                            return await c.get(
+                                f"https://www.strava.com/activities/{activity_id}/streams",
+                                params=[("stream_types[]", "latlng"), ("stream_types[]", "time"),
+                                        ("stream_types[]", "altitude")],
+                                headers={"X-Requested-With": "XMLHttpRequest",
+                                         "Accept": "application/json",
+                                         "Referer": f"https://www.strava.com/activities/{activity_id}"})
+
+                        resp = await _get_web_streams()
+                        if resp.status_code == 429:
+                            retry_resp = await self._retry_gps_stream_after_429(
+                                _get_web_streams,
+                                activity_id=activity_id,
+                                context=f"web:{name}",
+                                account=name,
+                            )
+                            if retry_resp is not None:
+                                resp = retry_resp
                     if resp.status_code == 200:
                         d = resp.json()
                         latlng = d.get("latlng") or []
@@ -1666,10 +1720,21 @@ class StravaCollector(BaseCollector):
         # Fallback: OAuth API (only the token owner's own activities).
         if self._access_token:
             try:
-                resp = await client.get(
-                    f"{STRAVA_API}/activities/{activity_id}/streams",
-                    headers={"Authorization": f"Bearer {self._access_token}"},
-                    params={"keys": "latlng,time,altitude", "key_by_type": "true"})
+                async def _get_api_streams():
+                    return await client.get(
+                        f"{STRAVA_API}/activities/{activity_id}/streams",
+                        headers={"Authorization": f"Bearer {self._access_token}"},
+                        params={"keys": "latlng,time,altitude", "key_by_type": "true"})
+
+                resp = await _get_api_streams()
+                if resp.status_code == 429:
+                    retry_resp = await self._retry_gps_stream_after_429(
+                        _get_api_streams,
+                        activity_id=activity_id,
+                        context="api",
+                    )
+                    if retry_resp is not None:
+                        resp = retry_resp
                 if resp.status_code == 200:
                     s = resp.json()
                     return (s.get("latlng", {}).get("data", []),
@@ -2645,15 +2710,26 @@ class StravaCollector(BaseCollector):
         if has_streams and not self._gps_stream_cooling_down():
             try:
                 streams_url = f"{STRAVA_WEB}/activities/{activity_id}/streams"
-                streams_resp = await client.get(
-                    streams_url,
-                    params={"stream_types[]": ["latlng"]},
-                    headers={
-                        "X-Requested-With": "XMLHttpRequest",
-                        "Accept": "application/json, text/javascript, */*; q=0.01",
-                        "Referer": url,
-                    },
-                )
+                async def _get_page_streams():
+                    return await client.get(
+                        streams_url,
+                        params={"stream_types[]": ["latlng"]},
+                        headers={
+                            "X-Requested-With": "XMLHttpRequest",
+                            "Accept": "application/json, text/javascript, */*; q=0.01",
+                            "Referer": url,
+                        },
+                    )
+
+                streams_resp = await _get_page_streams()
+                if streams_resp.status_code == 429:
+                    retry_resp = await self._retry_gps_stream_after_429(
+                        _get_page_streams,
+                        activity_id=activity_id,
+                        context="page",
+                    )
+                    if retry_resp is not None:
+                        streams_resp = retry_resp
                 if streams_resp.status_code == 200:
                     streams_data = streams_resp.json()
                     latlng = streams_data.get("latlng", [])
@@ -2899,15 +2975,26 @@ class StravaCollector(BaseCollector):
         if not result["polyline"] and self._gps_enabled and not self._gps_stream_cooling_down():
             try:
                 streams_url = f"{STRAVA_WEB}/activities/{activity_id}/streams"
-                sresp = await client.get(
-                    streams_url,
-                    headers={
-                        "Accept": "application/json, text/plain, */*",
-                        "X-Requested-With": "XMLHttpRequest",
-                        "Referer": f"{STRAVA_WEB}/activities/{activity_id}",
-                    },
-                    params={"stream_types[]": ["latlng", "time"]},
-                )
+                async def _get_fallback_streams():
+                    return await client.get(
+                        streams_url,
+                        headers={
+                            "Accept": "application/json, text/plain, */*",
+                            "X-Requested-With": "XMLHttpRequest",
+                            "Referer": f"{STRAVA_WEB}/activities/{activity_id}",
+                        },
+                        params={"stream_types[]": ["latlng", "time"]},
+                    )
+
+                sresp = await _get_fallback_streams()
+                if sresp.status_code == 429:
+                    retry_resp = await self._retry_gps_stream_after_429(
+                        _get_fallback_streams,
+                        activity_id=activity_id,
+                        context="page-fallback",
+                    )
+                    if retry_resp is not None:
+                        sresp = retry_resp
                 ctype = sresp.headers.get("content-type", "")
                 if sresp.status_code == 200 and "application/json" in ctype:
                     sdata = sresp.json()

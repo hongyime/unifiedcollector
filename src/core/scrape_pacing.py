@@ -67,6 +67,64 @@ async def sleep_rate_limit(seconds: float) -> None:
         await asyncio.sleep(delay)
 
 
+def pre_cooldown_retry_delay(attempt: int = 1) -> float:
+    """Return the randomized pause before the single pre-cooldown retry."""
+    if not _enabled("COLLECTOR_PRE_COOLDOWN_RETRY_ENABLED", True):
+        return -1.0
+
+    base = _float_env(
+        "COLLECTOR_PRE_COOLDOWN_RETRY_BASE_SECONDS",
+        45.0,
+        minimum=0.0,
+    )
+    cap = _float_env(
+        "COLLECTOR_PRE_COOLDOWN_RETRY_MAX_SECONDS",
+        240.0,
+        minimum=base,
+    )
+    multiplier = _float_env(
+        "COLLECTOR_PRE_COOLDOWN_RETRY_MULTIPLIER",
+        1.7,
+        minimum=1.0,
+    )
+    raw = min(cap, base * (multiplier ** max(0, int(attempt) - 1)))
+    return jittered_delay(raw)
+
+
+async def sleep_before_pre_cooldown_retry(
+    source: str,
+    scope: str,
+    *,
+    account: str | None = None,
+    status_code: int = 429,
+    attempt: int = 1,
+    reason: str | None = None,
+) -> float | None:
+    """Pause once after a throttle response before handing off to cooldown logic.
+
+    Returns ``None`` when the feature is disabled. A returned float, including
+    ``0.0`` in tests, means callers should perform the retry.
+    """
+    delay = pre_cooldown_retry_delay(attempt)
+    if delay < 0:
+        return None
+
+    subject = f"{source}/{scope}"
+    if account:
+        subject = f"{subject}/{account}"
+    detail = f" ({reason})" if reason else ""
+    logger.info(
+        "%s received HTTP %s%s; retrying once after %.1fs before cooldown",
+        subject,
+        status_code,
+        detail,
+        delay,
+    )
+    if delay > 0:
+        await asyncio.sleep(delay)
+    return delay
+
+
 async def headless_dwell(label: str = "") -> None:
     """Small random dwell for Playwright/headless browser navigation paths."""
     if not _enabled("HEADLESS_NAV_DWELL_ENABLED", True):

@@ -195,10 +195,14 @@ Current shipped recovery/ops work:
   saw/stored/POST counts for the current UTC hour.
 - **Rate-limit visibility:** recorded HTTP 429/auth events are split in dashboard
   and Telegram status. Instagram and Strava cooldowns are persisted and surfaced
-  with source/account/scope.
+  with source/account/scope. A shared pre-cooldown retry primitive now performs
+  one randomized delayed retry before cooldown-capable paths escalate; Instagram
+  Playwright profile fetches and Strava GPS stream fetches use it.
 - **Strava GPS routes:** existing stored `strava_gps_streams.latlng` rows are
   repaired into route fields without network calls; GPS stream 429 cooldown is
-  restored after restart so the backfill does not hammer Strava again.
+  restored after restart so the backfill does not hammer Strava again. Recovered
+  stream 429s are logged as transient without creating an active cooldown; a
+  second 429 still opens the scoped GPS stream cooldown.
 - **Live bounded probe:** On 2026-07-24, `rebuild-report --compare-db
   --compare-db-limit 200 --sidecar-limit 200 --blob-limit 200 --json` parsed as
   clean JSON, scanned 200 DB media rows and 200 sidecars, and returned
@@ -210,6 +214,9 @@ Known remaining gaps:
 
 - Legacy audit/status docs may still overstate exhaustive rate-limit coverage;
   every new 429/FloodWait/quota branch must call `record_rate_limit_event()`.
+- Pre-cooldown retry is wired into the active Instagram Playwright profile and
+  Strava GPS stream hot paths; remaining 429 branches should migrate to the
+  shared helper as they are touched.
 - Rebuild report is a dry-run report, not a full scratch DB rebuild.
 - Physical-file dedupe now has a core sha256 blob writer, but every collector
   media path still needs migration proof before cross-source dedupe is complete.

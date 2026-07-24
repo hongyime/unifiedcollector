@@ -176,7 +176,7 @@
 **Goal**: Make collection methodical without losing Tier 1 freshness.
 - [ ] Implement effective priority order: Tier 1 freshness, rich media, low rate-limit risk, historical backfill, broad discovery.
 - [x] Add per-source/account/action rate-limit ledger.
-- [ ] Add one delayed randomized retry before cooldown.
+- [x] Add one delayed randomized retry before cooldown.
 - [ ] Ensure cooldown stops exact scope, not unrelated safe scopes.
 - [x] Import analyzer priority hints and surface provenance.
 - [x] Add hourly ingest/rate-limit stats to dashboard and Telegram.
@@ -226,6 +226,7 @@ Restore rehearsal checklist:
 - Passive Strava browser route fallback is implemented in extension v1.21.21 and `/social/strava-streams`: when the real browser loads a Strava route stream, the bridge archives the raw payload and upserts `strava_gps_streams` plus `strava_activities.summary_polyline`.
 - Priority-driven Strava browser route capture is implemented in extension v1.21.22, `/social/strava-route-queue`, `/social/strava-route-visit`, and `/strava/route-capture-queue`: the browser gets one missing-route activity at a time, ordered by Tier 1/2 proximity and collector target priority, while respecting active GPS-stream 429 cooldowns and recent visit TTLs.
 - Analyzer priority hints are imported by `src/core/priority_hints.py`, merged into `collection_targets.metadata.analyzer_priority_hint`, used by target loading, and surfaced on the Targets dashboard.
+- `src/core/scrape_pacing.py` now provides a tunable one-shot pre-cooldown retry delay (`COLLECTOR_PRE_COOLDOWN_RETRY_*`). Instagram Playwright profile fetches and Strava GPS stream fetches use it; recovered Strava GPS stream 429s are logged without creating an active cooldown, while repeated stream 429s still open the scoped GPS cooldown.
 - Still not complete: migrating every collector media path through `write_atomic_artifact`, physical cross-source blob dedupe for every legacy path, source-by-source migration proof, full Tier 1 raw payload coverage, and restore replay from a real DB dump.
 
 **Document Version**: 1.0
