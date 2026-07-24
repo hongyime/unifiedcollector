@@ -28,7 +28,6 @@ import asyncio
 import json
 import logging
 import os
-import tempfile
 from collections import deque
 from datetime import datetime, date, timezone
 from enum import Enum
@@ -52,7 +51,7 @@ from src.core.user_change_tracker import (
     UserChangeTracker,
     TELEGRAM_TRACKED_FIELDS,
 )
-from src.core.vault import assert_media_write_allowed
+from src.core.vault import VAULT_ROOT, write_atomic_artifact
 
 logger = logging.getLogger(__name__)
 
@@ -2088,16 +2087,6 @@ class TelegramCollector(BaseCollector):
             item["content_type"], cid, extension=item.get("extension", "jpg")
         )
 
-        # Use worker's per-account dir if provided, else fall back to legacy session dir.
-        if worker is not None:
-            base_dir = self._account_media_dir_for(worker)
-        else:
-            base_dir = self.account_media_dir
-        dest_dir = base_dir / item["content_type"]
-        dest = dest_dir / filename
-        assert_media_write_allowed(dest)
-        dest_dir.mkdir(parents=True, exist_ok=True)
-
         try:
             if "data" in item:
                 data = item["data"]
@@ -2108,33 +2097,53 @@ class TelegramCollector(BaseCollector):
             if not data:
                 return
 
-            sha = self.sha256_bytes(data)
-
-            fd, tmp_path = tempfile.mkstemp(dir=dest_dir, suffix=".tmp")
-            with os.fdopen(fd, "wb") as f:
-                f.write(data)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp_path, dest)
-
+            source_url = self._build_telegram_source_url(item)
             metadata = {
                 "entity_id": item["entity_id"],
                 "entity_name": item["entity_name"],
                 "content_type": item["content_type"],
                 "content_id": cid,
+                "filename": filename,
+                "source_url": source_url,
                 "collected_at": datetime.now(timezone.utc).isoformat(),
-                "raw": item.get("raw", {})
+                "raw": item.get("raw", {}),
+                "rebuild_target_tables": ["media_items", "telegram_messages"],
             }
-            self.save_json(metadata, dest_dir / f"{Path(filename).stem}_metadata.json")
+            artifact = write_atomic_artifact(
+                source=self.SOURCE_NAME,
+                artifact_id=f"{item['entity_id']}:{cid}",
+                artifact_kind="media_blob",
+                data=data,
+                extension=item.get("extension", "jpg"),
+                metadata=metadata,
+                root=VAULT_ROOT,
+            )
+            if not artifact.path:
+                raise RuntimeError(f"vault artifact write failed: {artifact.error}")
+            metadata["vault_artifact"] = {
+                "ok": artifact.ok,
+                "partial": artifact.partial,
+                "path": artifact.relative_path,
+                "blob_path": artifact.blob_relative_path,
+                "sidecar_path": artifact.sidecar.relative_path if artifact.sidecar else None,
+                "duplicate_blob": artifact.duplicate_blob,
+                "error": artifact.error,
+            }
 
             await self.insert_media_item(
                 entity_id=item["entity_id"], entity_name=item["entity_name"],
                 content_type=item["content_type"], content_id=cid,
-                filename=filename, file_path=str(dest),
-                file_size=len(data), sha256=sha, metadata=metadata,
-                source_url=self._build_telegram_source_url(item),
+                filename=filename, file_path=str(artifact.path),
+                file_size=artifact.file_size, sha256=artifact.sha256, metadata=metadata,
+                source_url=source_url,
                 kind=item.get("kind"),
             )
+            if artifact.partial:
+                await self.send_to_dlq(
+                    item["entity_id"],
+                    cid,
+                    f"vault artifact partial: {artifact.error}",
+                )
             self._known_ids.add(cid)
         except Exception as e:
             if _is_flood_wait(e):

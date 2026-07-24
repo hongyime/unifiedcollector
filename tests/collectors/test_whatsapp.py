@@ -6,6 +6,7 @@ pool replaced with AsyncMock. aio_pika / redis are never imported live.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from pathlib import Path
@@ -652,6 +653,46 @@ async def test_download_media_calls_save(collector):
     args = collector._save_media.await_args.args
     assert args[0] == b"hello"
     assert args[1] == "wa_new"
+
+
+@pytest.mark.asyncio
+async def test_save_media_writes_vault_blob_and_links_message(collector, monkeypatch, tmp_path):
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    monkeypatch.setattr(wa_mod, "VAULT_ROOT", vault_root)
+    collector.insert_media_item = AsyncMock(return_value=True)
+    collector.send_to_dlq = AsyncMock()
+
+    data = b"whatsapp image bytes"
+    digest = hashlib.sha256(data).hexdigest()
+    await collector._save_media(
+        data,
+        "wa_msg123",
+        "15551234567@s.whatsapp.net",
+        "Alice",
+        "image",
+        "jpg",
+        {"key": {"id": "msg123"}},
+    )
+
+    kwargs = collector.insert_media_item.await_args.kwargs
+    stored_path = Path(kwargs["file_path"])
+    assert stored_path == vault_root / "media" / "blobs" / digest[:2] / digest[2:4] / f"{digest}.jpg"
+    assert stored_path.read_bytes() == data
+    assert kwargs["sha256"] == digest
+    assert kwargs["file_size"] == len(data)
+    assert kwargs["source_url"] == "whatsapp://15551234567@s.whatsapp.net/msg123"
+    assert kwargs["metadata"]["raw"] == {"key": {"id": "msg123"}}
+    assert kwargs["metadata"]["vault_artifact"]["ok"] is True
+    assert kwargs["metadata"]["vault_artifact"]["partial"] is False
+    assert kwargs["metadata"]["vault_artifact"]["blob_path"].startswith("media/blobs/")
+
+    update_args = collector._test_conn.execute.await_args.args
+    assert "UPDATE whatsapp_messages SET media_url=$1" in update_args[0]
+    assert update_args[1] == str(stored_path)
+    assert update_args[2] == len(data)
+    assert update_args[3] == "msg123"
+    collector.send_to_dlq.assert_not_awaited()
 
 
 # ── _cleanup_connections ──────────────────────────────────────────────────

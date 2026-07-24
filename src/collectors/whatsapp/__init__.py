@@ -42,7 +42,6 @@ import os
 import re
 import time
 import zipfile
-import tempfile
 from pathlib import Path
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -57,7 +56,7 @@ from src.core.user_change_tracker import (
 )
 from src.core.link_extractor import extract_all_links
 from src.core.file_naming import sanitize_name
-from src.core.vault import assert_media_write_allowed
+from src.core.vault import VAULT_ROOT, write_atomic_artifact
 
 logger = logging.getLogger(__name__)
 
@@ -476,54 +475,65 @@ class WhatsappCollector(BaseCollector):
             extension=ext,
         )
 
-        dest_dir = self.account_media_dir / content_type
-        dest = dest_dir / filename
-        assert_media_write_allowed(dest)
-        dest_dir.mkdir(parents=True, exist_ok=True)
-
-        if dest.exists():
-            return
-
         try:
-            sha = self.sha256_bytes(data)
-            
-            # Atomic write
-            fd, tmp_path = tempfile.mkstemp(dir=dest_dir, suffix=".tmp")
-            with os.fdopen(fd, "wb") as f:
-                f.write(data)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp_path, dest)
-            
-            self.circuit_breaker.record_success()
-
+            source_url = self._build_whatsapp_source_url(chat_jid, cid)
             metadata = {
                 "entity_id": entity_id,
                 "entity_name": chat_name,
                 "content_type": content_type,
                 "content_id": cid,
+                "filename": filename,
+                "source_url": source_url,
                 "collected_at": datetime.now(timezone.utc).isoformat(),
-                "raw": event or {}
+                "raw": event or {},
+                "rebuild_target_tables": ["media_items", "whatsapp_messages"],
             }
-            self.save_json(metadata, dest_dir / f"{Path(filename).stem}_metadata.json")
-
             # WhatsApp status ("stories") arrive on the status@broadcast JID.
             # Tag them kind='story' (same convention as Instagram/Telegram) so
             # the dashboard Stories view surfaces them.
             _kind = "story" if str(chat_jid) == "status@broadcast" else None
+            artifact = write_atomic_artifact(
+                source=self.SOURCE_NAME,
+                artifact_id=f"{chat_jid}:{cid}",
+                artifact_kind="media_blob",
+                data=data,
+                extension=ext,
+                metadata={**metadata, "kind": _kind},
+                root=VAULT_ROOT,
+            )
+            if not artifact.path:
+                raise RuntimeError(f"vault artifact write failed: {artifact.error}")
+            metadata["vault_artifact"] = {
+                "ok": artifact.ok,
+                "partial": artifact.partial,
+                "path": artifact.relative_path,
+                "blob_path": artifact.blob_relative_path,
+                "sidecar_path": artifact.sidecar.relative_path if artifact.sidecar else None,
+                "duplicate_blob": artifact.duplicate_blob,
+                "error": artifact.error,
+            }
+
+            self.circuit_breaker.record_success()
+
             await self.insert_media_item(
                 entity_id=entity_id,
                 entity_name=chat_name,
                 content_type=content_type,
                 content_id=cid,
                 filename=filename,
-                file_path=str(dest),
-                file_size=len(data),
-                sha256=sha,
+                file_path=str(artifact.path),
+                file_size=artifact.file_size,
+                sha256=artifact.sha256,
                 metadata=metadata,
-                source_url=self._build_whatsapp_source_url(chat_jid, cid),
+                source_url=source_url,
                 kind=_kind,
             )
+            if artifact.partial:
+                await self.send_to_dlq(
+                    entity_id,
+                    cid,
+                    f"vault artifact partial: {artifact.error}",
+                )
             # Link the media back to its message so the row carries media_url/size
             # (was 0% — the analyzer couldn't join a message to its image). cid is
             # "wa_<platform_message_id>".
@@ -534,7 +544,7 @@ class WhatsappCollector(BaseCollector):
                             "UPDATE whatsapp_messages SET media_url=$1, "
                             "media_size=COALESCE(media_size,$2) "
                             "WHERE platform_message_id=$3 AND media_url IS NULL",
-                            str(dest), len(data), cid[3:],
+                            str(artifact.path), artifact.file_size, cid[3:],
                         )
                 except Exception:
                     logger.debug("wa media-link update failed for %s", cid, exc_info=True)

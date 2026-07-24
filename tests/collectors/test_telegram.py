@@ -19,9 +19,11 @@ MagicMock/AsyncMock stand-in. Exercises:
 
 from __future__ import annotations
 
+import hashlib
 import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -652,6 +654,44 @@ async def test_collect_user_profile_returns_none_on_resolve_failure(monkeypatch,
 
 
 # ── download_message_media ────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_download_media_writes_vault_blob(monkeypatch, tmp_path):
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    monkeypatch.setattr(tg_mod, "VAULT_ROOT", vault_root)
+    coll = _make_collector(monkeypatch)
+    coll.insert_media_item = AsyncMock(return_value=True)
+    coll.send_to_dlq = AsyncMock()
+
+    data = b"telegram image bytes"
+    digest = hashlib.sha256(data).hexdigest()
+
+    await coll.download_media({
+        "entity_id": "12345",
+        "entity_name": "Test Chat",
+        "content_type": "photo",
+        "content_id": "99",
+        "data": data,
+        "extension": "jpg",
+        "raw": {"message": "hello"},
+        "chat_username": "testchat",
+        "message_id": 99,
+    })
+
+    kwargs = coll.insert_media_item.await_args.kwargs
+    stored_path = Path(kwargs["file_path"])
+    assert stored_path == vault_root / "media" / "blobs" / digest[:2] / digest[2:4] / f"{digest}.jpg"
+    assert stored_path.read_bytes() == data
+    assert kwargs["sha256"] == digest
+    assert kwargs["file_size"] == len(data)
+    assert kwargs["source_url"] == "https://t.me/testchat/99"
+    assert kwargs["metadata"]["raw"] == {"message": "hello"}
+    assert kwargs["metadata"]["vault_artifact"]["ok"] is True
+    assert kwargs["metadata"]["vault_artifact"]["partial"] is False
+    assert kwargs["metadata"]["vault_artifact"]["blob_path"].startswith("media/blobs/")
+    coll.send_to_dlq.assert_not_awaited()
 
 
 @pytest.mark.asyncio

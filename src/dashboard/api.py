@@ -23,7 +23,7 @@ from src.backup.db_backup import backup_status
 from src.db.connection import get_pool
 from src.dashboard.websocket import health_ws
 from src.core.strava_route_queue import fetch_strava_route_capture_queue
-from src.core.vault import vault_artifact_counts, vault_health
+from src.core.vault import VAULT_ROOT, vault_artifact_counts, vault_health
 
 logger = logging.getLogger(__name__)
 _MESSAGING_COVERAGE_CACHE: dict[str, object] = {"ts": 0.0, "rows": None}
@@ -1995,6 +1995,49 @@ def _parse_media_uuid(media_id: str) -> _uuid.UUID:
         raise HTTPException(status_code=404, detail="Invalid media id")
 
 
+def _is_relative_to_path(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _allowed_media_roots() -> list[Path]:
+    """Roots that are allowed to serve media_items.file_path values.
+
+    Legacy collectors store paths under COLLECTOR_DRIVE_PATH. New vault-backed
+    media blobs are keyed by sha256 under VAULT_ROOT/media. Both locations map
+    to the same external vault in production, but containers can see them as
+    distinct mount points.
+    """
+    from src.core.drive_check import DRIVE_PATH as _DRIVE_PATH
+
+    roots = [
+        Path(_DRIVE_PATH).resolve(),
+        (Path(VAULT_ROOT) / "media").resolve(),
+    ]
+    unique: list[Path] = []
+    for root in roots:
+        if root not in unique:
+            unique.append(root)
+    return unique
+
+
+def _resolve_media_path(file_path_str: str) -> Path:
+    """Resolve a media_items.file_path, constrained to configured media roots.
+
+    Raises HTTPException (403/404) on traversal or a missing file. Shared by the
+    thumbnail + file endpoints so a poisoned file_path can't serve host files.
+    """
+    file_path = Path(file_path_str).resolve()
+    if not any(_is_relative_to_path(file_path, root) for root in _allowed_media_roots()):
+        raise HTTPException(status_code=403, detail="Path outside media roots")
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail="File not found on disk")
+    return file_path
+
+
 def _thumbnail_placeholder(label: str, detail: str = "") -> Response:
     safe_label = html.escape((label or "media").upper()[:24])
     safe_detail = html.escape((detail or "preview unavailable")[:64])
@@ -2024,16 +2067,11 @@ async def media_thumbnail(media_id: str, _user: dict = Depends(require_role("vie
     if not row:
         raise HTTPException(status_code=404, detail="Media not found")
 
-    file_path = Path(row["file_path"]).resolve()
-    # Constrain access to the configured drive root so a poisoned file_path
-    # column can't make us serve arbitrary host files.
-    from src.core.drive_check import DRIVE_PATH as _DRIVE_PATH
-    drive_root = Path(_DRIVE_PATH).resolve()
     try:
-        file_path.relative_to(drive_root)
-    except ValueError:
-        raise HTTPException(status_code=403, detail="Path outside media root")
-    if not file_path.is_file():
+        file_path = _resolve_media_path(row["file_path"])
+    except HTTPException as exc:
+        if exc.status_code != 404:
+            raise
         return _thumbnail_placeholder("missing", "file not on disk")
 
     if row["content_type"] in ("video", "audio", "document"):
@@ -2049,24 +2087,6 @@ async def media_thumbnail(media_id: str, _user: dict = Depends(require_role("vie
         return StreamingResponse(buf, media_type="image/jpeg")
     except Exception:
         return FileResponse(str(file_path))
-
-
-def _resolve_media_path(file_path_str: str) -> Path:
-    """Resolve a media_items.file_path, constrained to the drive root.
-
-    Raises HTTPException (403/404) on traversal or a missing file. Shared by the
-    thumbnail + file endpoints so a poisoned file_path can't serve host files.
-    """
-    file_path = Path(file_path_str).resolve()
-    from src.core.drive_check import DRIVE_PATH as _DRIVE_PATH
-    drive_root = Path(_DRIVE_PATH).resolve()
-    try:
-        file_path.relative_to(drive_root)
-    except ValueError:
-        raise HTTPException(status_code=403, detail="Path outside media root")
-    if not file_path.is_file():
-        raise HTTPException(status_code=404, detail="File not found on disk")
-    return file_path
 
 
 @app.get("/media/{media_id}/file")
