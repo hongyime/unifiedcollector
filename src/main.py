@@ -23,6 +23,13 @@ for _noisy in ("httpx", "httpcore", "telethon", "asyncio"):
 logger = logging.getLogger("unifiedcollector")
 
 
+def _route_logs_to_stderr_for_json() -> None:
+    """Keep stdout machine-readable for JSON CLI commands."""
+    for handler in logging.getLogger().handlers:
+        if isinstance(handler, logging.StreamHandler) and getattr(handler, "stream", None) is sys.stdout:
+            handler.setStream(sys.stderr)
+
+
 async def init_db(pool):
     # P0-1/P0-2: single DDL authority. Applies base schemas/ then pending
     # migrations/ via the ledger-backed runner. The old code globbed schemas/
@@ -91,6 +98,8 @@ def main():
     tp.add_argument("--priority", type=int, default=0)
 
     args = parser.parse_args()
+    if getattr(args, "json", False):
+        _route_logs_to_stderr_for_json()
 
     if args.command == "worker":
         asyncio.run(_cmd_worker(args))

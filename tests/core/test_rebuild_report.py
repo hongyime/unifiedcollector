@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 import json
+import logging
 
 import pytest
 
@@ -263,6 +265,29 @@ async def test_rebuild_report_command_reports_compare_timeout(monkeypatch, tmp_p
     assert reconciliation["enabled"] is True
     assert reconciliation["db_compare_error"] == "compare_db_timeout"
     assert reconciliation["db_compare_timeout_seconds"] == 0.01
+
+
+def test_json_cli_routes_logs_to_stderr(monkeypatch):
+    from src import main as cli
+
+    root = logging.getLogger()
+    original_handlers = root.handlers[:]
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    handler = logging.StreamHandler(stdout)
+    handler.setLevel(logging.INFO)
+    root.handlers = [handler]
+    root.setLevel(logging.INFO)
+    monkeypatch.setattr(cli.sys, "stdout", stdout)
+    monkeypatch.setattr(cli.sys, "stderr", stderr)
+    try:
+        cli._route_logs_to_stderr_for_json()
+        logging.getLogger("src.db.connection").info("Database pool created")
+    finally:
+        root.handlers = original_handlers
+
+    assert stdout.getvalue() == ""
+    assert "Database pool created" in stderr.getvalue()
 
 
 @pytest.mark.asyncio
