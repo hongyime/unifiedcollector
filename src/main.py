@@ -242,28 +242,63 @@ async def _cmd_rebuild_report(
 ):
     import json
 
-    from src.core.rebuild_report import compare_db_media_artifacts, scan_sidecars
+    from src.core.rebuild_report import (
+        db_compare_timeout_seconds,
+        scan_sidecars,
+    )
 
     report = scan_sidecars(vault_root, verify_checksums=verify_checksums, sidecar_limit=sidecar_limit)
     if compare_db:
-        pool = await get_pool()
+        timeout = db_compare_timeout_seconds()
         try:
-            async with pool.acquire() as conn:
-                await compare_db_media_artifacts(
+            await asyncio.wait_for(
+                _attach_rebuild_report_db_comparison(
                     report,
-                    conn,
                     vault_root,
-                    verify_checksums=verify_checksums,
-                    limit=compare_db_limit,
-                    sidecar_limit=sidecar_limit,
-                    blob_limit=blob_limit,
-                )
-        finally:
-            await close_pool()
+                    verify_checksums,
+                    compare_db_limit,
+                    sidecar_limit,
+                    blob_limit,
+                    timeout,
+                ),
+                timeout=timeout,
+            )
+        except TimeoutError:
+            report.db_comparison_enabled = True
+            report.db_compare_error = "compare_db_timeout"
+            report.db_compare_timeout_seconds = timeout
     if as_json:
         print(json.dumps(report.to_dict(), indent=2, sort_keys=True, default=str))
     else:
         print(report.to_text())
+
+
+async def _attach_rebuild_report_db_comparison(
+    report,
+    vault_root: str | None,
+    verify_checksums: bool,
+    compare_db_limit: int | None,
+    sidecar_limit: int | None,
+    blob_limit: int | None,
+    timeout: float,
+):
+    from src.core.rebuild_report import compare_db_media_artifacts
+
+    pool = await get_pool()
+    try:
+        async with pool.acquire() as conn:
+            await compare_db_media_artifacts(
+                report,
+                conn,
+                vault_root,
+                verify_checksums=verify_checksums,
+                limit=compare_db_limit,
+                sidecar_limit=sidecar_limit,
+                blob_limit=blob_limit,
+                db_fetch_timeout=timeout,
+            )
+    finally:
+        await close_pool()
 
 
 def _cmd_rebuild_rehearsal(

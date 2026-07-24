@@ -1,14 +1,18 @@
 from __future__ import annotations
 
-import json
+import asyncio
 import hashlib
+import json
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from src.core.env import env_float
 from src.core.vault import VAULT_ROOT, blob_path_for_sha256
 
+
+DEFAULT_DB_COMPARE_TIMEOUT_SECONDS = 10.0
 
 MEDIA_ITEM_FIELDS = {
     "source": ("source",),
@@ -40,6 +44,8 @@ class RebuildReport:
     sidecar_scan_limit: int | None = None
     blob_scan_limit: int | None = None
     db_comparison_enabled: bool = False
+    db_compare_error: str | None = None
+    db_compare_timeout_seconds: float | None = None
     db_media_rows_scanned: int = 0
     sidecar_media_keys_scanned: int = 0
     blob_files_scanned: int = 0
@@ -71,6 +77,8 @@ class RebuildReport:
             "blob_scan_limit": self.blob_scan_limit,
             "artifact_reconciliation": {
                 "enabled": self.db_comparison_enabled,
+                "db_compare_error": self.db_compare_error,
+                "db_compare_timeout_seconds": self.db_compare_timeout_seconds,
                 "db_media_rows_scanned": self.db_media_rows_scanned,
                 "sidecar_media_keys_scanned": self.sidecar_media_keys_scanned,
                 "blob_files_scanned": self.blob_files_scanned,
@@ -130,6 +138,10 @@ class RebuildReport:
         if self.db_comparison_enabled:
             lines.append("")
             lines.append("Artifact reconciliation:")
+            if self.db_compare_error:
+                lines.append(f"  DB compare error: {self.db_compare_error}")
+            if self.db_compare_timeout_seconds is not None:
+                lines.append(f"  DB compare timeout: {self.db_compare_timeout_seconds:g}s")
             lines.append(f"  DB media rows scanned: {self.db_media_rows_scanned}")
             lines.append(f"  Media sidecar keys scanned: {self.sidecar_media_keys_scanned}")
             lines.append(f"  Canonical blob files scanned: {self.blob_files_scanned}")
@@ -326,6 +338,14 @@ def scan_sidecars(
     return report
 
 
+def db_compare_timeout_seconds() -> float:
+    return env_float(
+        "REBUILD_REPORT_DB_COMPARE_TIMEOUT_SECONDS",
+        DEFAULT_DB_COMPARE_TIMEOUT_SECONDS,
+        min_value=0.1,
+    )
+
+
 async def compare_db_media_artifacts(
     report: RebuildReport,
     conn,
@@ -335,6 +355,7 @@ async def compare_db_media_artifacts(
     limit: int | None = None,
     sidecar_limit: int | None = None,
     blob_limit: int | None = None,
+    db_fetch_timeout: float | None = None,
 ) -> RebuildReport:
     """Compare media_items rows with vault sidecars/files/blobs.
 
@@ -344,13 +365,27 @@ async def compare_db_media_artifacts(
     vault_root = Path(root).resolve() if root else report.root
     report.db_comparison_enabled = True
     report.blob_scan_limit = blob_limit
+    timeout = db_compare_timeout_seconds() if db_fetch_timeout is None else db_fetch_timeout
+    report.db_compare_timeout_seconds = timeout
+
+    try:
+        db_rows = await _fetch_media_rows(conn, limit=limit, timeout=timeout)
+    except TimeoutError:
+        report.db_compare_error = "db_fetch_timeout"
+        _note_artifact_state(
+            report,
+            "unknown",
+            "db_fetch_timeout",
+            f"media_items>{timeout:g}s",
+        )
+        return report
+
+    report.db_media_rows_scanned = len(db_rows)
     sidecars, sidecar_blob_refs = _scan_media_sidecar_index(vault_root, limit=sidecar_limit)
     report.sidecar_media_keys_scanned = len(sidecars)
     blob_files = _scan_blob_files(vault_root, limit=blob_limit)
     report.blob_files_scanned = len(blob_files)
 
-    db_rows = await _fetch_media_rows(conn, limit=limit)
-    report.db_media_rows_scanned = len(db_rows)
     db_keys: set[tuple[str, str]] = set()
     referenced_blobs = set(sidecar_blob_refs)
 
@@ -410,7 +445,7 @@ def db_media_file_reference_errors(
     return errors
 
 
-async def _fetch_media_rows(conn, *, limit: int | None = None) -> list:
+async def _fetch_media_rows(conn, *, limit: int | None = None, timeout: float | None = None) -> list:
     sql = (
         "SELECT source, content_id, filename, file_path, file_size, sha256 "
         "FROM media_items"
@@ -419,7 +454,10 @@ async def _fetch_media_rows(conn, *, limit: int | None = None) -> list:
         sql += f" LIMIT {int(limit)}"
     else:
         sql += " ORDER BY source, content_id"
-    return list(await conn.fetch(sql))
+    fetch = conn.fetch(sql)
+    if timeout is not None and timeout > 0:
+        return list(await asyncio.wait_for(fetch, timeout=timeout))
+    return list(await fetch)
 
 
 def _scan_media_sidecar_index(

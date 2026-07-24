@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import json
+import asyncio
 import hashlib
+import json
 
 import pytest
 
@@ -205,6 +206,63 @@ def test_file_reference_errors_verifies_checksum_against_blob_fallback(tmp_path)
     }
 
     assert file_reference_errors(payload, tmp_path, verify_checksums=True) == []
+
+
+@pytest.mark.asyncio
+async def test_compare_db_media_artifacts_times_out_db_fetch_and_returns_report(tmp_path):
+    class SlowConn:
+        async def fetch(self, _sql):
+            await asyncio.sleep(1)
+            return []
+
+    report = scan_sidecars(tmp_path)
+
+    await compare_db_media_artifacts(
+        report,
+        SlowConn(),
+        tmp_path,
+        limit=200,
+        sidecar_limit=200,
+        blob_limit=200,
+        db_fetch_timeout=0.01,
+    )
+    payload = report.to_dict()["artifact_reconciliation"]
+
+    assert payload["enabled"] is True
+    assert payload["db_compare_error"] == "db_fetch_timeout"
+    assert payload["db_compare_timeout_seconds"] == 0.01
+    assert payload["db_media_rows_scanned"] == 0
+    assert payload["sidecar_media_keys_scanned"] == 0
+    assert payload["blob_files_scanned"] == 0
+    assert payload["states_by_source"]["unknown"]["db_fetch_timeout"] == 1
+
+
+@pytest.mark.asyncio
+async def test_rebuild_report_command_reports_compare_timeout(monkeypatch, tmp_path, capsys):
+    from src import main as cli
+    import src.core.rebuild_report as rebuild_report
+
+    async def slow_compare(*_args):
+        await asyncio.sleep(1)
+
+    monkeypatch.setattr(cli, "_attach_rebuild_report_db_comparison", slow_compare)
+    monkeypatch.setattr(rebuild_report, "db_compare_timeout_seconds", lambda: 0.01)
+
+    await cli._cmd_rebuild_report(
+        str(tmp_path),
+        as_json=True,
+        verify_checksums=False,
+        compare_db=True,
+        compare_db_limit=200,
+        sidecar_limit=200,
+        blob_limit=200,
+    )
+    payload = json.loads(capsys.readouterr().out)
+    reconciliation = payload["artifact_reconciliation"]
+
+    assert reconciliation["enabled"] is True
+    assert reconciliation["db_compare_error"] == "compare_db_timeout"
+    assert reconciliation["db_compare_timeout_seconds"] == 0.01
 
 
 @pytest.mark.asyncio
