@@ -118,7 +118,7 @@
 ## Acceptance Criteria
 
 ### Functional Acceptance
-- [ ] Collector refuses file-heavy writes when `Z:\unifiedcollector` is unavailable and records queued work instead of success.
+- [x] Collector refuses file-heavy writes when `Z:\unifiedcollector` is unavailable and records queued work instead of success.
 - [ ] Every new file-backed artifact has a JSON sidecar with required provenance fields.
 - [ ] The artifact write path verifies checksum, file size, sidecar write, and DB row consistency.
 - [x] Duplicate physical files are stored once by checksum while multiple occurrence sidecars remain queryable.
@@ -219,6 +219,7 @@ Restore rehearsal checklist:
 
 - Vault foundation is implemented in `src/core/vault.py`: canonical root detection, writability/free-space checks, media-root mirror checks, vault-relative paths, sidecar schema validation, raw payload paths, and checksum blob-path conventions.
 - Media/artifact/raw sidecar helpers are wired into the shared collector base path and tested. Sidecar failure is recorded on `media_items.metadata.vault_sidecar` and queued through the existing dead-letter queue.
+- `BaseCollector.run()` now queues a `dead_letter_queue` pause row for the source and raises before collection when the drive is missing or the vault/media write guard fails, so file-heavy collectors do not silently record successful cycles against an absent external drive.
 - `src/core/vault.py::write_atomic_artifact` is now the shared Phase-2 writer for new migrations: it writes bytes to a temp file under the vault, verifies checksum/size, moves to the canonical sha256 blob path, writes the sidecar, optionally runs a DB callback, and returns `partial=True` for sidecar/DB failures after the blob exists.
 - Rebuild reporting exists in `src/core/rebuild_report.py` and covers sidecar scan, raw payload table hints, DB-only, sidecar-only, blob-only, missing file, size mismatch, and checksum mismatch states.
 - Generic media reconciliation repair now canonicalizes recovered files: `_redownload` writes through `write_atomic_artifact`, then updates `media_items.file_path/file_size/sha256` and `metadata.vault_artifact` so repaired legacy rows point at vault blobs.

@@ -176,11 +176,15 @@ class BaseCollector(ABC):
         """Entry point with all safety checks."""
         self.drive_ok = check_drive()
         if not self.drive_ok:
-            raise RuntimeError(f"Drive not mounted. Pausing {self.SOURCE_NAME}.")
+            message = f"Drive not mounted. Pausing {self.SOURCE_NAME}."
+            await self._queue_file_heavy_pause(message)
+            raise RuntimeError(message)
         try:
             assert_media_write_allowed(self.media_dir / ".collector_write_check")
         except RuntimeError as exc:
-            raise RuntimeError(f"Vault/media path not writable. Pausing {self.SOURCE_NAME}: {exc}") from exc
+            message = f"Vault/media path not writable. Pausing {self.SOURCE_NAME}: {exc}"
+            await self._queue_file_heavy_pause(message)
+            raise RuntimeError(message) from exc
 
         # Circuit breaker: skip entire cycle if open (too many recent failures).
         if not self.circuit_breaker.allow_request():
@@ -602,6 +606,20 @@ class BaseCollector(ABC):
                 """,
                 self.SOURCE_NAME, entity_id, content_id, error,
             )
+
+    async def _queue_file_heavy_pause(self, error: str) -> None:
+        """Record a visible queue item when file-backed collection is paused."""
+        if self.pool is None:
+            logger.warning("%s: %s", self.SOURCE_NAME, error)
+            return
+        try:
+            await self.send_to_dlq(
+                self.SOURCE_NAME,
+                "__vault_unavailable__",
+                f"file-heavy collection paused: {error}",
+            )
+        except Exception:
+            logger.warning("%s: failed to queue file-heavy pause", self.SOURCE_NAME, exc_info=True)
 
     # --- Helpers ---
 

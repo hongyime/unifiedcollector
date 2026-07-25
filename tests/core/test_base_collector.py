@@ -9,8 +9,15 @@ from src.core.base_collector import BaseCollector
 
 
 class _Conn:
+    def __init__(self):
+        self.execute_calls = []
+
     async def fetchval(self, *_args, **_kwargs):
         return 1
+
+    async def execute(self, *args, **kwargs):
+        self.execute_calls.append((args, kwargs))
+        return "INSERT 0 1"
 
 
 class _Pool:
@@ -37,6 +44,47 @@ def _collector(monkeypatch):
     coll = _Collector()
     coll.pool = _Pool()
     return coll
+
+
+@pytest.mark.asyncio
+async def test_run_queues_pause_when_drive_missing(monkeypatch):
+    monkeypatch.setattr(base_collector, "check_drive", lambda: False)
+    coll = _Collector()
+    coll.pool = _Pool()
+
+    with pytest.raises(RuntimeError, match="Drive not mounted"):
+        await coll.run(["target"])
+
+    assert coll.pool.conn.execute_calls
+    args, _kwargs = coll.pool.conn.execute_calls[0]
+    assert "dead_letter_queue" in args[0]
+    assert args[1:] == (
+        "github",
+        "github",
+        "__vault_unavailable__",
+        "file-heavy collection paused: Drive not mounted. Pausing github.",
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_queues_pause_when_vault_write_check_fails(monkeypatch):
+    monkeypatch.setattr(base_collector, "check_drive", lambda: True)
+
+    def fail_write_check(*_args, **_kwargs):
+        raise RuntimeError("media mirror missing")
+
+    monkeypatch.setattr(base_collector, "assert_media_write_allowed", fail_write_check)
+    coll = _Collector()
+    coll.pool = _Pool()
+
+    with pytest.raises(RuntimeError, match="Vault/media path not writable"):
+        await coll.run(["target"])
+
+    assert coll.pool.conn.execute_calls
+    args, _kwargs = coll.pool.conn.execute_calls[0]
+    assert "dead_letter_queue" in args[0]
+    assert args[1:4] == ("github", "github", "__vault_unavailable__")
+    assert "file-heavy collection paused: Vault/media path not writable. Pausing github: media mirror missing" == args[4]
 
 
 def test_save_file_writes_canonical_vault_blob(tmp_path, monkeypatch):
