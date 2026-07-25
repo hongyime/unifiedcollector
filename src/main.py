@@ -85,6 +85,16 @@ def main():
     rr.add_argument("--no-verify-files", action="store_true", help="Skip file existence/size checks")
     rr.add_argument("--json", action="store_true", help="Print machine-readable JSON")
 
+    # vault-inspect
+    vi = sub.add_parser(
+        "vault-inspect",
+        help="Inspect vault sidecars and file/raw references without DB access",
+    )
+    vi.add_argument("--vault-root", default=None, help="Vault root (default: COLLECTOR_VAULT_ROOT)")
+    vi.add_argument("--source", default=None, help="Optional source filter")
+    vi.add_argument("--limit", type=int, default=20, help="Maximum artifacts to return")
+    vi.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+
     # restore-drill
     rd = sub.add_parser(
         "restore-drill",
@@ -153,6 +163,8 @@ def main():
             not args.no_verify_files,
             args.json,
         )
+    elif args.command == "vault-inspect":
+        _cmd_vault_inspect(args.vault_root, args.source, args.limit, args.json)
     elif args.command == "restore-drill":
         asyncio.run(_cmd_restore_drill(args))
     elif args.command == "schedule":
@@ -354,6 +366,23 @@ def _cmd_rebuild_rehearsal(
         raw_payload_limit=raw_payload_limit,
         verify_files=verify_files,
     )
+    if as_json:
+        print(json.dumps(report.to_dict(), indent=2, sort_keys=True, default=str))
+    else:
+        print(report.to_text())
+
+
+def _cmd_vault_inspect(
+    vault_root: str | None,
+    source: str | None,
+    limit: int,
+    as_json: bool,
+):
+    import json
+
+    from src.core.vault_inspect import inspect_vault
+
+    report = inspect_vault(vault_root, source=source, limit=limit)
     if as_json:
         print(json.dumps(report.to_dict(), indent=2, sort_keys=True, default=str))
     else:

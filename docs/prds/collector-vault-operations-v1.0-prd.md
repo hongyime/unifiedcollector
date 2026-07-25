@@ -137,7 +137,7 @@
 ### User Acceptance
 - [x] Dashboard answers: what collected this hour, what is blocked, what is rate-limited, what is queued, and whether the vault is safe.
 - [x] No collector silently stores large media on C: when Z: is missing.
-- [ ] Future tools can inspect media plus JSON sidecars without needing analyzer.
+- [x] Future tools can inspect media plus JSON sidecars without needing analyzer.
 
 ## Execution Phases
 
@@ -246,6 +246,7 @@ Restore rehearsal checklist:
 - Lower-tier raw payload compression is implemented in `write_raw_payload()` for `json.gz` and `jsonl.gz`. Browser profile/posts/comments raw captures now use `json.gz`; DM captures, decoded DM payloads, and Strava route streams stay plain JSON because they are Tier 1/debug/route evidence where immediate inspection matters more than size.
 - Shared artifact sidecars now expose required provenance fields directly: `ingest_path`, `collection_priority`, `raw_payload`, `provenance`, `metadata`, and `rebuild`. This applies to raw payload sidecars, generic JSON artifact sidecars, and atomic blob artifact sidecars; media sidecars already carried the same provenance block.
 - Telegram status wording now avoids internal terms for operator-facing health: `DLQ rows` is reported as repair queue items, sidecar metadata failures are reported as media records waiting for sidecar repair, and non-429/auth wording is reported as login/access or other HTTP errors.
+- `python -m src.main vault-inspect` provides DB-free vault inspection for future tools: it reads sidecars directly, resolves file/blob/raw references against the vault root, supports source filtering and JSON output, and does not require analyzer or collector Postgres. A real `Z:\unifiedcollector --limit 2 --json` sample completed in about 3.6 seconds after switching the scan to stream sidecars instead of sorting the whole tree.
 
 **Document Version**: 1.0
 **Created**: 2026-07-20
