@@ -11,8 +11,7 @@ import hashlib
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -70,6 +69,25 @@ def _make_collector(monkeypatch=None, **env) -> WebsiteCollector:
         for k, v in env.items():
             monkeypatch.setenv(k, v)
     return WebsiteCollector()
+
+
+@pytest.mark.asyncio
+async def test_collect_crawls_targets_before_broad_discovery(monkeypatch):
+    c = WebsiteCollector()
+    events: list[tuple[str, str]] = []
+
+    async def _spider(seed, **_kwargs):
+        events.append(("target", seed))
+
+    async def _discover(**_kwargs):
+        events.append(("discovery", "sg"))
+
+    monkeypatch.setattr(c, "spider_domain", _spider)
+    monkeypatch.setattr(c, "_promote_discovered_sg_domains", _discover)
+
+    await c.collect(["example.com"])
+
+    assert events == [("target", "https://example.com"), ("discovery", "sg")]
 
 
 # ── module helpers (small pure functions) ─────────────────────────────────

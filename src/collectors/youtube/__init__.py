@@ -57,7 +57,6 @@ import os
 import re
 import subprocess
 import tempfile
-import time
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
@@ -249,54 +248,36 @@ class YoutubeCollector(BaseCollector):
                 logger.warning("YouTube collector has neither YOUTUBE_API_KEY nor OAuth pickle — calls will fail")
         self._has_auth = bool(self._api_key or self._oauth_credentials)
 
-        # Spawn transcript/comment enrichment as a background task so it runs
-        # concurrently with the 492-target channel loop instead of after it.
-        # Previously enrichment was at the END of collect() and never reached
-        # (492 channels * ~8s = 65min+ before enrichment could start).
-        enrich_task = None
-        if self._use_yt_dlp and (self._fetch_transcripts or self._fetch_comments_enabled):
-            logger.info("YouTube: launching enrichment background task (limit=%d)", self._enrich_batch_limit)
-            enrich_task = asyncio.create_task(
-                self._enrich_transcripts_and_comments(limit=self._enrich_batch_limit)
-            )
+        for target in targets:
+            if self._stop.is_set(): break
+            logger.info("Collecting youtube/%s", target)
+            try:
+                await self._collect_channel(target)
+                await self.checkpoint.save_progress(target)
+            except Exception as e:
+                logger.error("Failed youtube/%s: %s", target, e)
+                await self.send_to_dlq(target, target, str(e))
 
-        try:
-            for target in targets:
-                if self._stop.is_set(): break
-                logger.info("Collecting youtube/%s", target)
-                try:
-                    await self._collect_channel(target)
-                    await self.checkpoint.save_progress(target)
-                except Exception as e:
-                    logger.error("Failed youtube/%s: %s", target, e)
-                    await self.send_to_dlq(target, target, str(e))
+        # Rich enrichment runs after explicit channel targets so the source obeys
+        # the shared priority policy instead of competing with freshness work.
+        if self._use_yt_dlp and (self._fetch_transcripts or self._fetch_comments_enabled) and not self._stop.is_set():
+            try:
+                logger.info("YouTube: running enrichment phase (limit=%d)", self._enrich_batch_limit)
+                await self._enrich_transcripts_and_comments(limit=self._enrich_batch_limit)
+            except Exception as e:
+                logger.error("YouTube: enrichment phase failed: %s", e, exc_info=True)
 
-            # Community posts — BOUNDED sweep (15 channels/cycle, oldest first), not
-            # per-channel (that was 492 fetches/cycle -> 50% CPU). Covers all over time.
-            if os.getenv("YOUTUBE_COMMUNITY_ENABLED", "true").lower() == "true":
-                try:
-                    await self._community_pass(batch_size=int(os.getenv("YOUTUBE_COMMUNITY_BATCH", "15")))
-                except Exception as e:
-                    logger.debug("youtube community pass failed: %s", e)
+        # Community posts — BOUNDED sweep (15 channels/cycle, oldest first), not
+        # per-channel (that was 492 fetches/cycle -> 50% CPU). Covers all over time.
+        if os.getenv("YOUTUBE_COMMUNITY_ENABLED", "true").lower() == "true":
+            try:
+                await self._community_pass(batch_size=int(os.getenv("YOUTUBE_COMMUNITY_BATCH", "15")))
+            except Exception as e:
+                logger.debug("youtube community pass failed: %s", e)
 
-            # Spider queue processing
-            if os.getenv("YOUTUBE_SPIDER_ENABLED", "true").lower() == "true":
-                await self._process_spider_queue()
-        finally:
-            # Wait for enrichment to complete (or cancel on stop)
-            if enrich_task is not None:
-                if self._stop.is_set():
-                    enrich_task.cancel()
-                    try:
-                        await enrich_task
-                    except (asyncio.CancelledError, Exception):
-                        pass
-                else:
-                    try:
-                        await enrich_task
-                        logger.info("YouTube: enrichment background task complete")
-                    except Exception as e:
-                        logger.error("YouTube: enrichment background task failed: %s", e, exc_info=True)
+        # Spider queue processing
+        if os.getenv("YOUTUBE_SPIDER_ENABLED", "true").lower() == "true":
+            await self._process_spider_queue()
 
     async def _process_spider_queue(self):
         while not self._stop.is_set():

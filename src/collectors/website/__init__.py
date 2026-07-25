@@ -124,7 +124,7 @@ import re
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Optional
 from urllib.parse import urljoin, urlparse, urlunparse
 
 import httpx
@@ -505,13 +505,6 @@ class WebsiteCollector(BaseCollector):
         return path
 
     async def collect(self, targets: list[str]) -> None:
-        # Perpetual SG discovery: queue newly-found .sg domains for future cycles.
-        try:
-            await self._promote_discovered_sg_domains(
-                cap=int(os.getenv("WEBSITE_AUTODISCOVER_CAP", "50")))
-        except Exception as e:
-            logger.debug("website autodiscover failed: %s", e)
-
         for url in targets:
             if self._stop.is_set():
                 break
@@ -526,6 +519,14 @@ class WebsiteCollector(BaseCollector):
                     await self.send_to_dlq(seed, seed, str(e))
                 except Exception:
                     pass
+
+        # Broad discovery runs after explicit targets so it cannot starve root
+        # crawls when the discovered frontier is large.
+        try:
+            await self._promote_discovered_sg_domains(
+                cap=int(os.getenv("WEBSITE_AUTODISCOVER_CAP", "50")))
+        except Exception as e:
+            logger.debug("website autodiscover failed: %s", e)
 
     # ------------------------------------------------------------------ #
     # HTTP client construction (Tor-aware)

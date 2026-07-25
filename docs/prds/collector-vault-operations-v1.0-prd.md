@@ -174,7 +174,7 @@
 
 ### Phase 4: Priority and Rate-Limit Scheduler
 **Goal**: Make collection methodical without losing Tier 1 freshness.
-- [ ] Implement effective priority order: Tier 1 freshness, rich media, low rate-limit risk, historical backfill, broad discovery.
+- [x] Implement effective priority order: Tier 1 freshness, rich media, low rate-limit risk, historical backfill, broad discovery.
 - [x] Add per-source/account/action rate-limit ledger.
 - [x] Add one delayed randomized retry before cooldown.
 - [x] Ensure cooldown stops exact scope, not unrelated safe scopes.

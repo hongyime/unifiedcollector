@@ -67,8 +67,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import html as html_lib
-import io
 import json
 import logging
 import os
@@ -330,11 +328,6 @@ class Lemon8Collector(BaseCollector):
 
     async def collect(self, targets: list[str]):
         async with httpx.AsyncClient(timeout=30, cookies=self._cookies, headers=self._headers(), follow_redirects=True) as client:
-            if self._feed_enabled:
-                try:
-                    await self._collect_feed(client)
-                except Exception as e:
-                    logger.error("Feed collection failed: %s", e)
             for username in targets:
                 if self._stop.is_set(): break
                 if username.startswith("#"):
@@ -349,6 +342,11 @@ class Lemon8Collector(BaseCollector):
                 except Exception as e:
                     logger.error("Failed lemon8/%s: %s", username, e)
                     await self.send_to_dlq(username, username, str(e))
+            if self._feed_enabled:
+                try:
+                    await self._collect_feed(client)
+                except Exception as e:
+                    logger.error("Feed collection failed: %s", e)
 
         if os.getenv("LEMON8_SPIDER_ENABLED", "true").lower() == "true":
             await self._process_spider_queue()
@@ -917,7 +915,6 @@ class Lemon8Collector(BaseCollector):
         # Download media discovered from FYP. Skip profile photos unless enabled.
         # Also upsert a structured row into lemon8_posts so FYP-derived data is
         # queryable (synthesised id falls back to a hash when absent).
-        upserted_posts: set[str] = set()
         for item in media_items[: max(50, pages * 30)]:
             if self._stop.is_set(): break
             url = item.get("url")

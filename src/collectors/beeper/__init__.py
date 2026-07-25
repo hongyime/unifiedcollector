@@ -1089,9 +1089,10 @@ class BeeperCollector(BaseCollector):
                     AND COALESCE(s.last_error, '') LIKE '%NOT_FOUND%'
                 )
                 ORDER BY
-                    COALESCE(s.backfill_complete, FALSE) ASC,
+                    CASE WHEN s.newest_cursor IS NOT NULL THEN 1 ELSE 0 END DESC,
                     s.last_synced_at ASC NULLS FIRST,
-                    c.last_message_ts DESC NULLS LAST
+                    c.last_message_ts DESC NULLS LAST,
+                    COALESCE(s.backfill_complete, FALSE) ASC
                 LIMIT $1
                 """,
                 max_chats,
@@ -1254,16 +1255,42 @@ class BeeperCollector(BaseCollector):
         max_pages: int,
         w: BeeperWriter,
     ) -> int:
-        """Backfill (direction=before) until complete, then tail (direction=after)."""
+        """Tail fresh messages first, then perform bounded historical backfill."""
         inserted = 0
         try:
-            # Phase A: backfill (only while not complete)
+            # Phase A: freshness. If we have a newest cursor, tail it before
+            # historical pages so live DM/group traffic is not stuck behind old
+            # backfill.
+            tail_inserted = 0
+            new_newest = newest_cursor
+            if newest_cursor:
+                async for msg, meta in self.client.iter_messages(
+                    chat_id,
+                    start_cursor=newest_cursor,
+                    direction="after",
+                    page_size=_BEEPER_PAGE_SIZE,
+                ):
+                    is_new = await w.upsert_message(msg)
+                    if is_new:
+                        tail_inserted += 1
+                        msg.setdefault("network", network)
+                        await self._download_attachments(msg)
+                    new_newest = meta.get("newestCursor") or new_newest
+                    if tail_inserted >= max_pages * 50:
+                        break
+
+                # Always bump last_synced_at for chats with a freshness cursor so
+                # the round-robin continues rotating through active chats.
+                await w.update_sync_state(chat_id, newest_cursor=new_newest)
+                inserted += tail_inserted
+
+            # Phase B: bounded historical backfill.
             if not backfill_complete:
                 pages = 0
                 cursor = oldest_cursor
                 latest_oldest = oldest_cursor
                 final_oldest = oldest_cursor
-                latest_newest = newest_cursor
+                latest_newest = new_newest
                 async for msg, meta in self.client.iter_messages(
                     chat_id, start_cursor=cursor, direction="before", page_size=_BEEPER_PAGE_SIZE
                 ):
@@ -1275,10 +1302,9 @@ class BeeperCollector(BaseCollector):
                     final_oldest = meta.get("oldestCursor") or final_oldest
                     if meta.get("newestCursor") and not latest_newest:
                         latest_newest = meta["newestCursor"]
-                    pages_seen = inserted // 50
-                    if pages_seen >= max_pages:
-                        break
                     pages += 1
+                    if pages >= max_pages:
+                        break
 
                 done = final_oldest == latest_oldest and latest_oldest is not None
                 await w.update_sync_state(
@@ -1287,35 +1313,10 @@ class BeeperCollector(BaseCollector):
                     newest_cursor=latest_newest,
                     backfill_complete=done,
                 )
-
-            # Phase B: tail (always; pulls any messages newer than newest_cursor)
-            tail_inserted = 0
-            new_newest = newest_cursor
-            async for msg, meta in self.client.iter_messages(
-                chat_id,
-                start_cursor=newest_cursor,
-                direction="after",
-                page_size=_BEEPER_PAGE_SIZE,
-            ):
-                is_new = await w.upsert_message(msg)
-                if is_new:
-                    tail_inserted += 1
-                    msg.setdefault("network", network)
-                    await self._download_attachments(msg)
-                new_newest = meta.get("newestCursor") or new_newest
-                if tail_inserted >= max_pages * 50:
-                    break
-
-            # Always bump last_synced_at (update_sync_state sets it to now()),
-            # even when the tail found nothing new. Previously this was gated on
-            # `tail_inserted or new_newest != newest_cursor`, so a caught-up chat
-            # never advanced its last_synced_at — it stayed pinned at the front of
-            # the `ORDER BY last_synced_at ASC` selection queue and got re-picked
-            # every cycle, starving the round-robin so newer-but-quieter chats
-            # (e.g. active group chats) were only tailed every ~11 days. Bumping
-            # unconditionally makes the sweep actually rotate through all chats.
-            await w.update_sync_state(chat_id, newest_cursor=new_newest)
-            inserted += tail_inserted
+            elif not newest_cursor:
+                # First-ever sync has no freshness boundary. Establish one once
+                # the bounded backfill pass returns a newest cursor.
+                await w.update_sync_state(chat_id, newest_cursor=new_newest)
 
         except BeeperTransientError as exc:
             # Transient DNS/connect blip mid-chat — leave sync_state untouched

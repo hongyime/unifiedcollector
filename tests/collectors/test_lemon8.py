@@ -8,7 +8,6 @@ this suite *must not* hit the network.
 from __future__ import annotations
 
 import hashlib
-import os
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -158,6 +157,35 @@ def test_headers_includes_lemon8_referer(collector):
     assert h["Referer"] == "https://www.lemon8-app.com/"
     assert h["Accept"] == "application/json"
     assert "User-Agent" in h
+
+
+@pytest.mark.asyncio
+async def test_collect_runs_explicit_targets_before_feed(monkeypatch, collector):
+    monkeypatch.setenv("LEMON8_SPIDER_ENABLED", "false")
+    collector._feed_enabled = True
+    events = []
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+    monkeypatch.setattr(lemon8_mod.httpx, "AsyncClient", lambda *args, **kwargs: _Client())
+
+    async def _collect_user(_client, username):
+        events.append(("target", username))
+
+    async def _collect_feed(_client):
+        events.append(("feed", "feed"))
+
+    monkeypatch.setattr(collector, "_collect_user", _collect_user)
+    monkeypatch.setattr(collector, "_collect_feed", _collect_feed)
+
+    await collector.collect(["alice"])
+
+    assert events == [("target", "alice"), ("feed", "feed")]
 
 
 # ── _resolve_post_id ──────────────────────────────────────────────────────

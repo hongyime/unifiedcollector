@@ -10,7 +10,7 @@ import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -478,6 +478,36 @@ async def test_collect_swallows_per_target_exceptions(monkeypatch, caplog):
 
     coll.send_to_dlq.assert_awaited_once()
     assert any("Failed youtube/UC1" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_collect_runs_targets_before_enrichment_and_discovery(monkeypatch):
+    monkeypatch.setenv("YOUTUBE_COMMUNITY_ENABLED", "true")
+    monkeypatch.setenv("YOUTUBE_SPIDER_ENABLED", "false")
+    coll = _new_collector(monkeypatch, YOUTUBE_API_KEY="AIzaK")
+    coll._use_yt_dlp = True
+    coll._fetch_transcripts = True
+    coll._fetch_comments_enabled = False
+    coll._enrich_batch_limit = 3
+    events = []
+
+    async def _collect_channel(target):
+        events.append(("target", target))
+
+    async def _enrich_transcripts_and_comments(*, limit):
+        events.append(("enrich", str(limit)))
+
+    async def _community_pass(*, batch_size):
+        events.append(("community", str(batch_size)))
+
+    coll._collect_channel = _collect_channel
+    coll._enrich_transcripts_and_comments = _enrich_transcripts_and_comments
+    coll._community_pass = _community_pass
+    coll.checkpoint.save_progress = AsyncMock()
+
+    await coll.collect(["UC1"])
+
+    assert events == [("target", "UC1"), ("enrich", "3"), ("community", "15")]
 
 
 # ── collect_subscriptions ────────────────────────────────────────────────

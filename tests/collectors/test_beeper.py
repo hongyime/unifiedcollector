@@ -473,6 +473,53 @@ async def test_collector_full_cycle_smoke(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_sync_one_chat_tails_fresh_messages_before_backfill(monkeypatch):
+    monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
+    directions = []
+
+    fake_client = MagicMock(spec=BeeperClient)
+
+    async def _iter_messages(chat_id, **kw):
+        directions.append(kw["direction"])
+        yield (
+            {
+                "id": f"m-{kw['direction']}",
+                "chatID": chat_id,
+                "accountID": "tg",
+                "network": "Telegram",
+                "timestamp": "2026-05-27T13:55:06.532Z",
+                "type": "TEXT",
+                "text": "hi",
+            },
+            {"oldestCursor": "old-1", "newestCursor": "new-1", "hasMore": False},
+        )
+
+    fake_client.iter_messages = _iter_messages
+    coll = BeeperCollector(client=fake_client)
+
+    async def _no_attachments(_msg):
+        return None
+
+    monkeypatch.setattr(coll, "_download_attachments", _no_attachments)
+    writer = MagicMock(spec=BeeperWriter)
+    writer.upsert_message = AsyncMock(return_value=True)
+    writer.update_sync_state = AsyncMock()
+
+    inserted = await coll._sync_one_chat(
+        chat_id="!a:b",
+        network="Telegram",
+        oldest_cursor="old-0",
+        newest_cursor="new-0",
+        backfill_complete=False,
+        max_pages=1,
+        w=writer,
+    )
+
+    assert inserted == 2
+    assert directions == ["after", "before"]
+
+
+@pytest.mark.asyncio
 async def test_collector_download_media_is_noop(monkeypatch, tmp_path):
     monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
     monkeypatch.setenv("COLLECTOR_DRIVE_PATH", str(tmp_path))
