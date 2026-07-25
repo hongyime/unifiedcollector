@@ -618,7 +618,7 @@ class Scheduler:
             or int(vault.get("artifacts_partial") or 0) > 0
         )
         backups = snap.get("backups") or {}
-        backups_bad = bool(backups) and backups.get("status") != "ok"
+        backups_bad = bool(backups) and backups.get("status") not in {"ok", "refreshing"}
         snap["ok"] = not (snap.get("dead_sources") or snap.get("stale_sources") or vault_bad or backups_bad)
         return snap
 

@@ -1,6 +1,25 @@
 import pytest
 
 
+def test_format_backup_status_reports_first_dump_refreshing():
+    from src.notifications.alerts import _format_backup_status
+
+    msg = _format_backup_status({
+        "status": "refreshing",
+        "root": "/vault/backups/db",
+        "latest_path": None,
+        "latest_age_seconds": None,
+        "latest_size_bytes": None,
+        "backup_count": 0,
+        "in_progress": True,
+        "stale_in_progress_count": 0,
+    })
+
+    assert "No completed collector DB backup dump found" in msg
+    assert "writing a replacement dump" in msg
+    assert "Latest collector DB backup" not in msg
+
+
 @pytest.mark.asyncio
 async def test_notify_status_splits_rate_limit_from_auth_events(monkeypatch):
     from src.notifications import alerts

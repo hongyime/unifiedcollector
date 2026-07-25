@@ -119,12 +119,35 @@ def test_backup_status_marks_old_dump_stale(tmp_path):
     assert status["max_age_hours"] == 1
 
 
+def test_backup_status_marks_stale_dump_refreshing_when_new_dump_active(tmp_path):
+    _dump(tmp_path, "20200101_000000")
+    (tmp_path / ".inprogress_20260721_033012.dump").write_bytes(b"x")
+
+    status = backup_status(tmp_path, max_age_hours=1)
+
+    assert status["status"] == "refreshing"
+    assert status["in_progress"] is True
+    assert status["in_progress_count"] == 1
+    assert status["latest_path"] is not None
+
+
 def test_backup_status_marks_empty_dir_missing(tmp_path):
     status = backup_status(tmp_path, max_age_hours=1)
 
     assert status["status"] == "missing"
     assert status["latest_path"] is None
     assert status["backup_count"] == 0
+
+
+def test_backup_status_marks_empty_dir_refreshing_when_new_dump_active(tmp_path):
+    (tmp_path / ".inprogress_20260721_033012.dump").write_bytes(b"x")
+
+    status = backup_status(tmp_path, max_age_hours=1)
+
+    assert status["status"] == "refreshing"
+    assert status["latest_path"] is None
+    assert status["backup_count"] == 0
+    assert status["in_progress"] is True
 
 
 def test_retention_keeps_newest_daily_weekly_monthly_buckets(tmp_path):

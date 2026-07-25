@@ -343,6 +343,7 @@ export function DashboardPage() {
   const backupStatus = backups?.status ?? "missing";
   const backupValue =
     backupStatus === "ok" ? "Fresh" :
+    backupStatus === "refreshing" ? "Refreshing" :
     backupStatus === "stale" ? "Stale" :
     backupStatus === "error" ? "Error" :
     "Missing";
@@ -405,7 +406,7 @@ export function DashboardPage() {
           label="DB Backups"
           value={backupValue}
           sublabel={backupDetail}
-          status={backupStatus === "ok" ? "success" : backupStatus === "stale" ? "warning" : "error"}
+          status={backupStatus === "ok" ? "success" : backupStatus === "refreshing" || backupStatus === "stale" ? "warning" : "error"}
           icon={<Archive className="w-5 h-5" />}
         />
         <MetricCard

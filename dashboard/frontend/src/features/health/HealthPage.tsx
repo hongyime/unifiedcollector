@@ -25,9 +25,10 @@ export function HealthPage() {
   const vaultIssues = (vault?.artifacts_queued ?? 0) + (vault?.artifacts_partial ?? 0);
   const backups = data?.backups;
   const backupStatus = backups?.status ?? "missing";
-  const backupOk = backupStatus === "ok";
+  const backupOk = backupStatus === "ok" || backupStatus === "refreshing";
   const backupValue =
     backupStatus === "ok" ? "Fresh" :
+    backupStatus === "refreshing" ? "Refreshing" :
     backupStatus === "stale" ? "Stale" :
     backupStatus === "error" ? "Error" :
     "Missing";
@@ -78,7 +79,7 @@ export function HealthPage() {
           label="DB Backups"
           value={backupValue}
           sublabel={backupDetail}
-          status={backupOk ? "success" : backupStatus === "stale" ? "warning" : "error"}
+          status={backupStatus === "ok" ? "success" : backupOk || backupStatus === "stale" ? "warning" : "error"}
           icon={<Archive className="w-5 h-5" />}
         />
       </div>

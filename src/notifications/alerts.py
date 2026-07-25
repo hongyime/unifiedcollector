@@ -298,7 +298,7 @@ def _format_backup_status(backups: dict) -> str:
     status = str(backups.get("status") or "unknown")
     root = _esc(backups.get("root") or "")
     in_progress = bool(backups.get("in_progress"))
-    progress = " Backup is currently running." if in_progress else ""
+    progress = " Backup is currently writing a replacement dump." if in_progress else ""
     stale_temp_count = int(backups.get("stale_in_progress_count") or 0)
     stale_temp_age = backups.get("stale_in_progress_oldest_age_seconds")
     stale_temp = ""
@@ -309,7 +309,10 @@ def _format_backup_status(backups: dict) -> str:
             f"older than the active-window threshold; oldest is {age} old."
         )
 
-    if status in {"ok", "stale"}:
+    if status == "refreshing" and not backups.get("latest_path"):
+        return f"⏳ No completed collector DB backup dump found under <code>{root}</code> yet." + progress + stale_temp
+
+    if status in {"ok", "stale", "refreshing"}:
         age = _humanize_age(int(backups.get("latest_age_seconds") or 0))
         size = _fmt_bytes(backups.get("latest_size_bytes"))
         count = int(backups.get("backup_count") or 0)
@@ -321,6 +324,9 @@ def _format_backup_status(backups: dict) -> str:
         if status == "stale":
             expected = f" Expected within {max_age}h." if max_age else ""
             return "⚠️ " + base + expected + progress + stale_temp
+        if status == "refreshing":
+            expected = f" Previous completed dump is older than {max_age}h." if max_age else ""
+            return "⏳ " + base + expected + progress + stale_temp
         return "✅ " + base + progress + stale_temp
 
     if status == "missing":

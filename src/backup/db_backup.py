@@ -180,8 +180,9 @@ def backup_status(
     }
     latest = backups[0] if backups else None
     if latest is None:
+        status = "refreshing" if active_temp_count > 0 else "missing"
         return {
-            "status": "missing",
+            "status": status,
             "root": str(root),
             "latest_path": None,
             "latest_created_at": None,
@@ -195,12 +196,13 @@ def backup_status(
 
     age_seconds = max(0, int((now - latest.created_at).total_seconds()))
     stale = threshold_hours > 0 and age_seconds > threshold_hours * 3600
+    status = "refreshing" if stale and active_temp_count > 0 else ("stale" if stale else "ok")
     try:
         latest_size = latest.path.stat().st_size
     except OSError:
         latest_size = None
     return {
-        "status": "stale" if stale else "ok",
+        "status": status,
         "root": str(root),
         "latest_path": str(latest.path),
         "latest_created_at": latest.created_at.isoformat(),

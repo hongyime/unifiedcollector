@@ -263,7 +263,7 @@ async def health():
         and int(vault.get("artifacts_queued") or 0) == 0
         and int(vault.get("artifacts_partial") or 0) == 0
     )
-    backups_ok = backups.get("status") == "ok"
+    backups_ok = backups.get("status") in {"ok", "refreshing"}
 
     return {
         "status": "ok" if db_status == "healthy" and drive_ok and vault_ok and backups_ok else "degraded",

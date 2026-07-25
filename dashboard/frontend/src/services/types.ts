@@ -15,7 +15,7 @@ export interface HealthStatus {
     counts_error?: string | null;
   };
   backups?: {
-    status: "ok" | "stale" | "missing" | "error";
+    status: "ok" | "refreshing" | "stale" | "missing" | "error";
     root: string;
     latest_path: string | null;
     latest_created_at: string | null;
