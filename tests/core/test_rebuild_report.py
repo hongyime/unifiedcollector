@@ -210,6 +210,36 @@ def test_file_reference_errors_verifies_checksum_against_blob_fallback(tmp_path)
     assert file_reference_errors(payload, tmp_path, verify_checksums=True) == []
 
 
+def test_file_reference_errors_maps_container_mount_paths_to_vault_root(tmp_path):
+    media = tmp_path / "media" / "beeper" / "Telegram" / "p1.jpg"
+    media.parent.mkdir(parents=True)
+    media.write_bytes(b"beeper-bytes")
+    digest = hashlib.sha256(b"beeper-bytes").hexdigest()
+
+    assert file_reference_errors(
+        {
+            "file": {
+                "path": "/media/beeper/Telegram/p1.jpg",
+                "size": media.stat().st_size,
+                "sha256": digest,
+            },
+        },
+        tmp_path,
+        verify_checksums=True,
+    ) == []
+    assert file_reference_errors(
+        {
+            "file": {
+                "path": "/vault/media/beeper/Telegram/p1.jpg",
+                "size": media.stat().st_size,
+                "sha256": digest,
+            },
+        },
+        tmp_path,
+        verify_checksums=True,
+    ) == []
+
+
 @pytest.mark.asyncio
 async def test_compare_db_media_artifacts_times_out_db_fetch_and_returns_report(tmp_path):
     class SlowConn:

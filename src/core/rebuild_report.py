@@ -558,7 +558,17 @@ def _safe_relative(path: Path, root: Path) -> str:
 
 
 def _vault_file_path(path: Any, root: Path) -> Path:
-    resolved = Path(str(path))
+    raw = str(path)
+    normalized = raw.replace("\\", "/")
+    if normalized == "/vault" or normalized.startswith("/vault/"):
+        suffix = normalized.removeprefix("/vault").lstrip("/")
+        return root / suffix
+    if normalized == "/media" or normalized.startswith("/media/"):
+        suffix = normalized.removeprefix("/media").lstrip("/")
+        if root.as_posix().rstrip("/") == "/media":
+            return Path(normalized)
+        return root / "media" / suffix
+    resolved = Path(raw)
     if not resolved.is_absolute():
         resolved = root / resolved
     return resolved
