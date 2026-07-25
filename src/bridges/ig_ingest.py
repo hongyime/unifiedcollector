@@ -46,7 +46,14 @@ from src.core.priority_hints import refresh_collector_priority_hints
 from src.core.proximity import refresh_account_proximity_cache
 from src.core.rate_limit_events import record_rate_limit_event
 from src.core.strava_route_queue import fetch_strava_route_capture_queue
-from src.core.vault import VAULT_ROOT, assert_media_write_allowed, write_atomic_artifact, write_media_sidecar, write_raw_payload
+from src.core.vault import (
+    VAULT_ROOT,
+    assert_media_write_allowed,
+    verify_media_item_db_consistency,
+    write_atomic_artifact,
+    write_media_sidecar,
+    write_raw_payload,
+)
 from src.collectors.strava import _derive_gps_route_fields
 
 # Follow-aware access recording (Phase 0). The extension IS the live IG path, so
@@ -727,6 +734,43 @@ async def _download_and_save(pool, session, platform, username, item) -> bool:
                         safe_user,
                         store_cid,
                         f"vault sidecar write failed: {sidecar.error}",
+                    )
+                consistency = await verify_media_item_db_consistency(
+                    conn,
+                    source=platform,
+                    content_id=store_cid,
+                    file_path=str(stored_path),
+                    file_size=len(data),
+                    sha256=sha,
+                    sidecar_path=sidecar.relative_path if sidecar.enabled else None,
+                )
+                consistency_meta = {
+                    "vault_artifact_db_consistency": {
+                        "ok": consistency.ok,
+                        "errors": list(consistency.errors),
+                    }
+                }
+                await conn.execute(
+                    """
+                    UPDATE media_items
+                    SET metadata = COALESCE(metadata, '{}'::jsonb) || $3::jsonb
+                    WHERE source = $1 AND content_id = $2
+                    """,
+                    platform,
+                    store_cid,
+                    json.dumps(consistency_meta, default=str),
+                )
+                if not consistency.ok:
+                    await conn.execute(
+                        """
+                        INSERT INTO dead_letter_queue (source, entity_id, content_id, error_message)
+                        VALUES ($1, $2, $3, $4)
+                        """,
+                        platform,
+                        safe_user,
+                        store_cid,
+                        "vault artifact db consistency failed: "
+                        + "; ".join(consistency.errors),
                     )
         except Exception:
             logger.warning(

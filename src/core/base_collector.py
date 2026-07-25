@@ -18,6 +18,7 @@ from .user_agent import UserAgentPool
 from .vault import (
     VAULT_ROOT,
     assert_media_write_allowed,
+    verify_media_item_db_consistency,
     write_artifact_sidecar,
     write_atomic_artifact,
     write_media_sidecar,
@@ -588,6 +589,52 @@ class BaseCollector(ABC):
             except Exception:
                 logger.warning(
                     "vault sidecar status update failed for %s/%s",
+                    self.SOURCE_NAME,
+                    content_id,
+                    exc_info=True,
+                )
+            try:
+                async with self.pool.acquire() as conn:
+                    consistency = await verify_media_item_db_consistency(
+                        conn,
+                        source=self.SOURCE_NAME,
+                        content_id=content_id,
+                        file_path=file_path,
+                        file_size=file_size,
+                        sha256=sha256,
+                        sidecar_path=sidecar.relative_path if sidecar.enabled else None,
+                    )
+                    consistency_meta = {
+                        "vault_artifact_db_consistency": {
+                            "ok": consistency.ok,
+                            "errors": list(consistency.errors),
+                        }
+                    }
+                    await conn.execute(
+                        """
+                        UPDATE media_items
+                        SET metadata = COALESCE(metadata, '{}'::jsonb) || $3::jsonb
+                        WHERE source = $1 AND content_id = $2
+                        """,
+                        self.SOURCE_NAME,
+                        content_id,
+                        json.dumps(consistency_meta, default=str),
+                    )
+                    if not consistency.ok:
+                        await conn.execute(
+                            """
+                            INSERT INTO dead_letter_queue (source, entity_id, content_id, error_message)
+                            VALUES ($1, $2, $3, $4)
+                            """,
+                            self.SOURCE_NAME,
+                            entity_id,
+                            content_id,
+                            "vault artifact db consistency failed: "
+                            + "; ".join(consistency.errors),
+                        )
+            except Exception:
+                logger.warning(
+                    "vault artifact db consistency check failed for %s/%s",
                     self.SOURCE_NAME,
                     content_id,
                     exc_info=True,

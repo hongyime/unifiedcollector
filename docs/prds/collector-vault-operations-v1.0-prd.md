@@ -120,7 +120,7 @@
 ### Functional Acceptance
 - [x] Collector refuses file-heavy writes when `Z:\unifiedcollector` is unavailable and records queued work instead of success.
 - [x] Every new file-backed artifact has a JSON sidecar with required provenance fields.
-- [ ] The artifact write path verifies checksum, file size, sidecar write, and DB row consistency.
+- [x] The artifact write path verifies checksum, file size, sidecar write, and DB row consistency.
 - [x] Duplicate physical files are stored once by checksum while multiple occurrence sidecars remain queryable.
 - [ ] Tier 1 raw payloads, messages, and route data are persisted enough to rebuild normalized records.
 - [x] Rate-limit events include source, account, action scope, retry/cooldown times, and are shown in dashboard and Telegram status.

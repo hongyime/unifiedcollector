@@ -1,6 +1,7 @@
 import hashlib
 import json
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 
 import pytest
 
@@ -39,11 +40,43 @@ class _Collector(BaseCollector):
         return None
 
 
+class _TelegramCollector(BaseCollector):
+    SOURCE_NAME = "telegram"
+
+    async def collect(self, target=None):
+        return None
+
+    async def download_media(self, item):
+        return None
+
+
 def _collector(monkeypatch):
     monkeypatch.setattr(base_collector, "check_drive", lambda: True)
     coll = _Collector()
     coll.pool = _Pool()
     return coll
+
+
+class _InsertConn:
+    def __init__(self, row):
+        self.row = row
+        self.execute_calls = []
+
+    async def execute(self, *args, **kwargs):
+        self.execute_calls.append((args, kwargs))
+        return "INSERT 0 1"
+
+    async def fetchrow(self, *_args, **_kwargs):
+        return self.row
+
+
+class _InsertPool:
+    def __init__(self, row):
+        self.conn = _InsertConn(row)
+
+    @asynccontextmanager
+    async def acquire(self):
+        yield self.conn
 
 
 @pytest.mark.asyncio
@@ -162,3 +195,112 @@ async def test_duplicate_skip_can_remove_legacy_occurrence_file(tmp_path, monkey
 
     assert inserted is False
     assert not legacy.exists()
+
+
+@pytest.mark.asyncio
+async def test_insert_media_item_records_vault_db_consistency_ok(tmp_path, monkeypatch):
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    media_file = vault_root / "media" / "blobs" / "aa" / "bb" / "asset.jpg"
+    media_file.parent.mkdir(parents=True)
+    media_file.write_bytes(b"asset")
+    digest = hashlib.sha256(b"asset").hexdigest()
+    monkeypatch.setattr(base_collector, "VAULT_ROOT", vault_root)
+    monkeypatch.setattr(
+        base_collector,
+        "write_media_sidecar",
+        lambda **_kwargs: SimpleNamespace(
+            enabled=True,
+            ok=True,
+            relative_path="sidecars/media/telegram/asset.json",
+            error=None,
+        ),
+    )
+    row = {
+        "file_path": str(media_file),
+        "file_size": media_file.stat().st_size,
+        "sha256": digest,
+        "metadata": {
+            "vault_sidecar": {
+                "ok": True,
+                "path": "sidecars/media/telegram/asset.json",
+            }
+        },
+    }
+    coll = _TelegramCollector()
+    coll.pool = _InsertPool(row)
+
+    inserted = await coll.insert_media_item(
+        entity_id="chat1",
+        entity_name="Chat One",
+        content_type="photo",
+        content_id="m1",
+        filename="asset.jpg",
+        file_path=str(media_file),
+        file_size=media_file.stat().st_size,
+        sha256=digest,
+        metadata={},
+    )
+
+    assert inserted is True
+    consistency_updates = [
+        args for args, _kwargs in coll.pool.conn.execute_calls
+        if "vault_artifact_db_consistency" in " ".join(map(str, args))
+    ]
+    assert consistency_updates
+    assert not any("dead_letter_queue" in args[0] for args, _kwargs in coll.pool.conn.execute_calls)
+
+
+@pytest.mark.asyncio
+async def test_insert_media_item_queues_dlq_when_vault_db_consistency_fails(tmp_path, monkeypatch):
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    media_file = vault_root / "media" / "blobs" / "aa" / "bb" / "asset.jpg"
+    media_file.parent.mkdir(parents=True)
+    media_file.write_bytes(b"asset")
+    digest = hashlib.sha256(b"asset").hexdigest()
+    monkeypatch.setattr(base_collector, "VAULT_ROOT", vault_root)
+    monkeypatch.setattr(
+        base_collector,
+        "write_media_sidecar",
+        lambda **_kwargs: SimpleNamespace(
+            enabled=True,
+            ok=True,
+            relative_path="sidecars/media/telegram/asset.json",
+            error=None,
+        ),
+    )
+    coll = _TelegramCollector()
+    coll.pool = _InsertPool(
+        {
+            "file_path": str(media_file),
+            "file_size": media_file.stat().st_size,
+            "sha256": "0" * 64,
+            "metadata": {
+                "vault_sidecar": {
+                    "ok": True,
+                    "path": "sidecars/media/telegram/asset.json",
+                }
+            },
+        }
+    )
+
+    inserted = await coll.insert_media_item(
+        entity_id="chat1",
+        entity_name="Chat One",
+        content_type="photo",
+        content_id="m1",
+        filename="asset.jpg",
+        file_path=str(media_file),
+        file_size=media_file.stat().st_size,
+        sha256=digest,
+        metadata={},
+    )
+
+    assert inserted is True
+    dlq_calls = [
+        args for args, _kwargs in coll.pool.conn.execute_calls
+        if "dead_letter_queue" in args[0]
+    ]
+    assert dlq_calls
+    assert "sha256 mismatch" in dlq_calls[-1][4]

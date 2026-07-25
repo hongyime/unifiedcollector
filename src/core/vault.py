@@ -97,6 +97,12 @@ class AtomicArtifactResult:
     error: str | None = None
 
 
+@dataclass(frozen=True)
+class ArtifactDbConsistencyResult:
+    ok: bool
+    errors: tuple[str, ...] = ()
+
+
 _SIDECAR_REQUIRED_TOP_LEVEL_FIELDS = (
     "schema_version",
     "artifact_kind",
@@ -634,6 +640,92 @@ def _sidecar_provenance(metadata: Mapping[str, Any]) -> dict[str, Any]:
         "rate_limit_scope": metadata.get("rate_limit_scope"),
         "partial": bool(metadata.get("partial", False)),
     }
+
+
+def _row_value(row: Any, key: str) -> Any:
+    try:
+        return row[key]
+    except Exception:
+        return getattr(row, key, None)
+
+
+def _json_metadata(value: Any) -> dict[str, Any]:
+    if isinstance(value, Mapping):
+        return dict(value)
+    if isinstance(value, str) and value:
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, Mapping):
+                return dict(parsed)
+        except Exception:
+            return {}
+    return {}
+
+
+def _normalize_db_path(value: Any) -> str | None:
+    if value is None:
+        return None
+    raw = str(value)
+    try:
+        return os.path.normcase(str(Path(raw).resolve(strict=False)))
+    except Exception:
+        return os.path.normcase(raw)
+
+
+async def verify_media_item_db_consistency(
+    conn: Any,
+    *,
+    source: str,
+    content_id: str,
+    file_path: str | os.PathLike[str] | None,
+    file_size: int | None = None,
+    sha256: str | None = None,
+    sidecar_path: str | None = None,
+) -> ArtifactDbConsistencyResult:
+    """Verify the media_items row matches the artifact written to the vault."""
+    row = await conn.fetchrow(
+        """
+        SELECT file_path, file_size, sha256, metadata
+        FROM media_items
+        WHERE source = $1 AND content_id = $2
+        """,
+        source,
+        content_id,
+    )
+    if not row:
+        return ArtifactDbConsistencyResult(False, ("media_items row missing",))
+
+    errors: list[str] = []
+    expected_path = _normalize_db_path(file_path)
+    actual_path = _normalize_db_path(_row_value(row, "file_path"))
+    if expected_path and actual_path != expected_path:
+        errors.append("file_path mismatch")
+
+    if file_size is not None:
+        try:
+            actual_size = int(_row_value(row, "file_size"))
+        except Exception:
+            actual_size = None
+        if actual_size != int(file_size):
+            errors.append("file_size mismatch")
+
+    if sha256:
+        actual_sha = str(_row_value(row, "sha256") or "").lower()
+        if actual_sha != str(sha256).lower():
+            errors.append("sha256 mismatch")
+
+    if sidecar_path:
+        metadata = _json_metadata(_row_value(row, "metadata"))
+        sidecar = metadata.get("vault_sidecar") if isinstance(metadata, Mapping) else None
+        if not isinstance(sidecar, Mapping):
+            errors.append("vault_sidecar metadata missing")
+        else:
+            if sidecar.get("path") != sidecar_path:
+                errors.append("vault_sidecar path mismatch")
+            if sidecar.get("ok") is not True:
+                errors.append("vault_sidecar not ok")
+
+    return ArtifactDbConsistencyResult(not errors, tuple(errors))
 
 
 def write_atomic_artifact(

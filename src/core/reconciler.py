@@ -30,7 +30,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from .drive_check import check_drive
-from .vault import VAULT_ROOT, write_atomic_artifact
+from .vault import VAULT_ROOT, verify_media_item_db_consistency, write_atomic_artifact
 
 logger = logging.getLogger(__name__)
 
@@ -308,7 +308,51 @@ class Reconciler:
                     repair.get("sha256"),
                     json.dumps({"vault_artifact": repair.get("vault_artifact")}, default=str),
                 )
-            return str(result).endswith(" 1")
+                updated = str(result).endswith(" 1")
+                if not updated:
+                    return False
+                vault_artifact = repair.get("vault_artifact") or {}
+                sidecar_path = vault_artifact.get("sidecar_path") if isinstance(vault_artifact, dict) else None
+                consistency = await verify_media_item_db_consistency(
+                    conn,
+                    source=self.source,
+                    content_id=content_id,
+                    file_path=repair.get("file_path"),
+                    file_size=repair.get("file_size"),
+                    sha256=repair.get("sha256"),
+                    sidecar_path=sidecar_path,
+                )
+                await conn.execute(
+                    """
+                    UPDATE media_items
+                    SET metadata = COALESCE(metadata, '{}'::jsonb) || $3::jsonb
+                    WHERE source = $1 AND content_id = $2
+                    """,
+                    self.source,
+                    content_id,
+                    json.dumps(
+                        {
+                            "vault_artifact_db_consistency": {
+                                "ok": consistency.ok,
+                                "errors": list(consistency.errors),
+                            }
+                        },
+                        default=str,
+                    ),
+                )
+                if not consistency.ok:
+                    await conn.execute(
+                        """
+                        INSERT INTO dead_letter_queue (source, entity_id, content_id, error_message)
+                        VALUES ($1, $2, $3, $4)
+                        """,
+                        self.source,
+                        self.source,
+                        content_id,
+                        "vault artifact db consistency failed: "
+                        + "; ".join(consistency.errors),
+                    )
+                return consistency.ok
         except Exception:
             logger.debug("%s: reconciler media_items update failed", self.source, exc_info=True)
             return False

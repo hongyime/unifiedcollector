@@ -112,6 +112,18 @@ def test_extension_ingest_writes_media_to_vault_blob(monkeypatch, tmp_path):
     )
     data = b"\xff\xd8\xff" + (b"a" * 21000)
     digest = hashlib.sha256(data).hexdigest()
+    blob = vault_root / "media" / "blobs" / digest[:2] / digest[2:4] / f"{digest}.jpg"
+    pool.conn.fetchrow_result = {
+        "file_path": str(blob),
+        "file_size": len(data),
+        "sha256": digest,
+        "metadata": {
+            "vault_sidecar": {
+                "ok": True,
+                "path": "sidecars/media.json",
+            }
+        },
+    }
 
     saved = asyncio.run(
         ig_ingest._download_and_save(
@@ -130,7 +142,6 @@ def test_extension_ingest_writes_media_to_vault_blob(monkeypatch, tmp_path):
     )
 
     assert saved is True
-    blob = vault_root / "media" / "blobs" / digest[:2] / digest[2:4] / f"{digest}.jpg"
     assert blob.read_bytes() == data
     assert not (media_root / "instagram").exists()
     media_args = next(args for query, args in pool.conn.executes if "INSERT INTO media_items" in query)
@@ -140,6 +151,11 @@ def test_extension_ingest_writes_media_to_vault_blob(monkeypatch, tmp_path):
     assert metadata["caption"] == "hello"
     assert metadata["vault_artifact"]["ok"] is True
     assert metadata["vault_artifact"]["blob_path"] == f"media/blobs/{digest[:2]}/{digest[2:4]}/{digest}.jpg"
+    consistency_updates = [
+        args for query, args in pool.conn.executes
+        if "vault_artifact_db_consistency" in query or any("vault_artifact_db_consistency" in str(arg) for arg in args)
+    ]
+    assert consistency_updates
     sidecar = next((vault_root / "sidecars" / "artifacts" / "instagram").rglob("*.json"))
     payload = json.loads(sidecar.read_text(encoding="utf-8"))
     assert payload["metadata"]["ingest_path"] == "extension"
