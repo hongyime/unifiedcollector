@@ -158,7 +158,7 @@
 - [x] Mark any incomplete step as `partial`.
 - [x] Add repair queue table or reuse existing queue mechanism.
 - [x] Add reconciler dry-run: DB-only, blob-only, sidecar-only, checksum mismatch.
-- [ ] Migrate one low-risk source first, then Instagram/Telegram/WhatsApp/Beeper/Strava media paths.
+- [x] Migrate one low-risk source first, then Instagram/Telegram/WhatsApp/Beeper/Strava media paths.
 - **Deliverables**: Shared writer, partial-state model, repair queue, first migrated sources.
 - **Time**: 3-5 days.
 
