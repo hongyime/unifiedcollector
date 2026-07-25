@@ -2280,9 +2280,15 @@ async def strava_route_queue_handler(request):
         limit = int(raw_limit)
     except (TypeError, ValueError):
         limit = 5
+    account = str(
+        request.query.get("account")
+        or request.query.get("owner")
+        or ""
+    ).strip() or None
     queue = await fetch_strava_route_capture_queue(
         request.app["pool"],
         limit=limit,
+        account=account,
         respect_cooldown=True,
     )
     return _cors(web.json_response(queue))
@@ -2305,6 +2311,7 @@ async def strava_route_visit_handler(request):
             "status": body.get("status") or "observed",
             "url": body.get("url"),
             "activity_url": body.get("activity_url"),
+            "owner": body.get("owner") or body.get("owner_account") or body.get("account"),
             "extension_version": body.get("extension_version"),
         },
     )

@@ -1293,8 +1293,27 @@ function stravaActivityIdFromLocation() {
   return m ? m[1] : "";
 }
 
+function stravaLoggedInOwner() {
+  const owner = ownerFromStoredOrDom("strava", () => {
+    const root = document.querySelector("header, nav, #global-header, .global-header");
+    if (!root) return "";
+    const links = Array.from(root.querySelectorAll('a[href^="/athletes/"]'));
+    for (const link of links) {
+      const href = String(link.getAttribute("href") || "");
+      const m = href.match(/^\/athletes\/(\d+)(?:[/?#]|$)/);
+      if (m) return m[1];
+    }
+    return "";
+  });
+  return owner || "extension";
+}
+
 async function stravaQueueNext(excludeId = "") {
-  const q = await send({ type: "getStravaRouteQueue", limit: 2 }).catch(() => null);
+  const q = await send({
+    type: "getStravaRouteQueue",
+    limit: 2,
+    owner: stravaLoggedInOwner(),
+  }).catch(() => null);
   if (!q || q.ok === false) return { queue: q, item: null };
   const items = Array.isArray(q.items) ? q.items : [];
   const item = items.find((it) => String(it.platform_activity_id || "") !== String(excludeId || "")) || null;
@@ -1312,6 +1331,7 @@ const strava = {
       type: "stravaRouteVisit",
       activity_id: activityId,
       url: location.href,
+      owner: stravaLoggedInOwner(),
       status: "page_loaded",
     }).catch(() => {});
     return true;
@@ -1357,6 +1377,7 @@ const strava = {
       activity_id: item.platform_activity_id,
       activity_url: item.activity_url,
       url: location.href,
+      owner: stravaLoggedInOwner(),
       status: "navigate",
     }).catch(() => {});
     clog("info", `opening route candidate ${item.platform_activity_id} (${item.athlete_name || "unknown"})`, "strava");
@@ -1476,6 +1497,7 @@ window.addEventListener("message", (ev) => {
       activity_id: m.activity_id,
       request_url: m.request_url,
       http_status: m.http_status,
+      owner: stravaLoggedInOwner(),
       point_count: m.point_count,
       streams: m.streams || {},
     }).catch(() => {});

@@ -475,7 +475,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       case "getStravaRouteQueue": {
         try {
           const limit = Math.max(1, Math.min(Number(msg.limit || 1), 10));
-          const r = await fetch(base + `/social/strava-route-queue?limit=${limit}`);
+          const owner = String(msg.owner || msg.account || "").trim();
+          const accountQuery = owner ? `&account=${encodeURIComponent(owner)}` : "";
+          const r = await fetch(base + `/social/strava-route-queue?limit=${limit}${accountQuery}`);
           const j = await r.json().catch(() => ({}));
           sendResponse({ ok: r.ok, ...j });
         } catch (e) {
@@ -493,6 +495,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               activity_url: msg.activity_url || null,
               url: msg.url || null,
               status: msg.status || "observed",
+              owner: msg.owner || msg.account || null,
               extension_version: ver,
             }),
           });
@@ -514,6 +517,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               activity_id: msg.activity_id,
               request_url: msg.request_url || msg.url || null,
               http_status: msg.http_status || null,
+              owner: msg.owner || msg.account || null,
               streams: msg.streams || {},
               point_count: pointCount,
               extension_version: ver,

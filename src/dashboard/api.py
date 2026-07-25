@@ -2940,6 +2940,7 @@ async def strava_feed_stats(
 @app.get("/strava/route-capture-queue")
 async def strava_route_capture_queue(
     limit: int = 8,
+    account: str | None = None,
     respect_cooldown: bool = True,
     _user: dict = Depends(require_role("viewer")),
 ):
@@ -2947,6 +2948,7 @@ async def strava_route_capture_queue(
     return await fetch_strava_route_capture_queue(
         pool,
         limit=limit,
+        account=account,
         respect_cooldown=respect_cooldown,
     )
 

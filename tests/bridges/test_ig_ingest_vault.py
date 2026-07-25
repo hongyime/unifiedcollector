@@ -216,7 +216,7 @@ def test_record_strava_stream_http_429_writes_rate_limit_event(monkeypatch):
                 "request_url": "https://www.strava.com/activities/19283135496/streams",
                 "http_status": 429,
                 "owner": "bryanseah234",
-                "extension_version": "1.21.23",
+                "extension_version": "1.21.24",
             },
         )
     )

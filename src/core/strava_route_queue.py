@@ -21,6 +21,7 @@ async def fetch_strava_route_capture_queue(
     pool,
     *,
     limit: int = 5,
+    account: str | None = None,
     respect_cooldown: bool | None = None,
     recent_visit_hours: int | None = None,
 ) -> dict[str, Any]:
@@ -39,21 +40,29 @@ async def fetch_strava_route_capture_queue(
         recent_visit_hours = int(os.getenv("STRAVA_BROWSER_ROUTE_VISIT_TTL_HOURS", "6"))
     limit = max(1, min(int(limit or 5), 25))
     recent_visit_hours = max(1, min(int(recent_visit_hours or 6), 72))
+    account = str(account or "").strip() or None
 
     async with pool.acquire() as conn:
         cooldown = await conn.fetchrow(
             """
             SELECT created_at + (COALESCE(cooldown_seconds, 0) * INTERVAL '1 second') AS cooldown_until,
-                   reason
+                   reason,
+                   account,
+                   scope
             FROM rate_limit_events
             WHERE source = 'strava'
-              AND scope = 'gps_streams'
+              AND scope IN ('gps_streams', 'browser_strava_streams')
               AND status_code = 429
               AND cooldown_seconds IS NOT NULL
               AND created_at + (COALESCE(cooldown_seconds, 0) * INTERVAL '1 second') > now()
+              AND (
+                    NULLIF(account, '') IS NULL
+                 OR ($1::text IS NOT NULL AND account = $1::text)
+              )
             ORDER BY created_at DESC
             LIMIT 1
-            """
+            """,
+            account,
         )
         cooldown_until = cooldown["cooldown_until"] if cooldown else None
         cooldown_active = bool(cooldown_until)
@@ -64,7 +73,10 @@ async def fetch_strava_route_capture_queue(
                     "active": True,
                     "until": _iso(cooldown_until),
                     "reason": cooldown["reason"],
+                    "account": cooldown["account"],
+                    "scope": cooldown["scope"],
                 },
+                "account": account,
                 "recent_visit_ttl_hours": recent_visit_hours,
             }
 
@@ -151,7 +163,10 @@ async def fetch_strava_route_capture_queue(
             "active": cooldown_active,
             "until": _iso(cooldown_until),
             "reason": cooldown["reason"] if cooldown else None,
+            "account": cooldown["account"] if cooldown else None,
+            "scope": cooldown["scope"] if cooldown else None,
         },
+        "account": account,
         "recent_visit_ttl_hours": recent_visit_hours,
     }
 
