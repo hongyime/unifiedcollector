@@ -212,8 +212,26 @@ def raw_payload_reference_count(payload: dict[str, Any]) -> int:
     if isinstance(raw_payload, dict):
         if raw_payload.get("inline") not in (None, "", {}, []):
             count += 1
-        if raw_payload.get("path"):
-            count += 1
+        referenced: set[tuple[str | None, str | None, str | None]] = set()
+        primary_path = str(raw_payload.get("path")) if raw_payload.get("path") else None
+        if primary_path:
+            referenced.add((None, primary_path, None))
+        refs = raw_payload.get("refs")
+        if isinstance(refs, list):
+            for ref in refs:
+                if not isinstance(ref, dict):
+                    continue
+                ref_path = str(ref.get("path")) if ref.get("path") else None
+                if primary_path and ref_path == primary_path:
+                    continue
+                key = (
+                    str(ref.get("artifact_id")) if ref.get("artifact_id") else None,
+                    ref_path,
+                    str(ref.get("sidecar_path")) if ref.get("sidecar_path") else None,
+                )
+                if any(key):
+                    referenced.add(key)
+        count += len(referenced)
     if payload.get("artifact_kind") in {"raw", "raw_payload", "json", "jsonl", "compressed_jsonl"}:
         metadata = payload.get("metadata")
         if isinstance(metadata, dict) and metadata.get("raw_payload") is True:

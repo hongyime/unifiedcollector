@@ -554,6 +554,43 @@ def _rebuild_contract(
     }
 
 
+def _raw_payload_reference(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize raw-payload provenance into the sidecar's standard block."""
+    refs = metadata.get("raw_payload_refs")
+    if isinstance(refs, tuple):
+        refs = list(refs)
+    if not isinstance(refs, list):
+        refs = []
+
+    path = (
+        metadata.get("raw_payload_path")
+        or metadata.get("raw_payload_relative_path")
+        or metadata.get("raw_payload_file")
+    )
+    sidecar_path = (
+        metadata.get("raw_payload_sidecar_path")
+        or metadata.get("raw_payload_sidecar")
+    )
+    artifact_id = metadata.get("raw_payload_artifact_id")
+
+    if path or sidecar_path or artifact_id:
+        ref = {
+            "path": path,
+            "sidecar_path": sidecar_path,
+            "artifact_id": artifact_id,
+        }
+        if ref not in refs:
+            refs = [*refs, ref]
+
+    return {
+        "inline": metadata.get("raw"),
+        "path": path,
+        "sidecar_path": sidecar_path,
+        "artifact_id": artifact_id,
+        "refs": refs,
+    }
+
+
 def write_atomic_artifact(
     *,
     source: str,
@@ -937,6 +974,7 @@ def write_artifact_sidecar(
             "timestamps": {
                 "collected_at": now.isoformat(),
             },
+            "raw_payload": _raw_payload_reference(metadata),
             "metadata": metadata,
             "rebuild": _rebuild_contract(
                 metadata,
@@ -1075,8 +1113,7 @@ def write_media_sidecar(
                 "discovered_at": metadata.get("discovered_at"),
             },
             "raw_payload": {
-                "inline": metadata.get("raw"),
-                "path": metadata.get("raw_payload_path"),
+                **_raw_payload_reference(metadata),
             },
             "provenance": {
                 "platform_ids": metadata.get("platform_ids"),

@@ -167,7 +167,7 @@
 - [x] Define raw payload path conventions for Tier 1 and lower tiers.
 - [ ] Persist Tier 1 full raw payloads for messages, routes, profiles, posts, and browser captures.
 - [ ] Persist compressed JSON/JSONL for lower tiers where practical.
-- [ ] Link every sidecar to raw payload references.
+- [x] Link every sidecar to raw payload references.
 - [x] Build rebuild dry-run command that reports reconstructable tables and missing fields.
 - **Deliverables**: Raw archive contract, rebuild report, source coverage matrix.
 - **Time**: 3-5 days.
@@ -242,6 +242,7 @@ Restore rehearsal checklist:
 - Real collector DB restore drill passed on 2026-07-25 and is archived at `Z:\unifiedcollector\exports\recovery_drills\collector_restore_drill_20260725_0400.json`: backup `Z:\unifiedcollector\backups\db\unifiedcollector_20260723_133814.dump` restored into scratch DB `uc_restore_drill_20260724_200036` in 15,755.531 seconds, table counts were captured, and the scratch DB was dropped. Key restored counts: `media_items` 580,866; `telegram_messages` 1,375,665; `whatsapp_messages` 49,887; `strava_activities` 43,483; `strava_gps_streams` 19,719; `instagram_posts` 24,774; `rate_limit_events` 4,568; `collection_runs` 402; `collection_targets` 1,690; `browser_ingest_events` 217.
 - Restore-drill reporting was hardened after the proof run: Docker table existence checks now interpolate the actual table name, the restore timeout default is 12 hours, and the expected Beeper message table is `beeper_shadow_messages` rather than the stale `beeper_messages` name. The archived 2026-07-25 report still shows that stale Beeper expected-table gap because the fix landed after that run.
 - Host-side rebuild tooling now maps container paths under `/media/...` and `/vault/...` back to the selected vault root before checking files. Re-running the same bounded rehearsal after that fix scanned 500 media sidecars and 500 raw-payload sidecars, inserted 498 media rows and 465 raw-payload rows into scratch SQLite, and reduced `file_missing` skips from 384 to 2. The two remaining misses are true Beeper/WhatsApp MXC media gaps with DB rows and sidecars but no backing file/blob. GitHub bulk avatar range writes artifact sidecars only and intentionally does not create `media_items` rows for unknown numeric IDs.
+- New media/artifact sidecars normalize raw-payload provenance into a top-level `raw_payload` block. Writers accept `raw_payload_path`, `raw_payload_sidecar_path`, `raw_payload_artifact_id`, and `raw_payload_refs`; rebuild reporting counts these references without double-counting a primary path and matching ref.
 
 **Document Version**: 1.0
 **Created**: 2026-07-20

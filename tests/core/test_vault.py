@@ -211,6 +211,39 @@ def test_write_atomic_artifact_success_writes_blob_sidecar_and_db(tmp_path, monk
     assert db_seen[0].sha256 == result.sha256
 
 
+def test_write_atomic_artifact_records_raw_payload_reference(tmp_path, monkeypatch):
+    monkeypatch.setattr(vault, "SIDECARS_ENABLED", True)
+    root = tmp_path / "vault"
+    root.mkdir()
+
+    result = vault.write_atomic_artifact(
+        source="telegram",
+        artifact_id="chat/1/message/2/photo",
+        artifact_kind="media_blob",
+        data=b"hello",
+        extension=".jpg",
+        metadata={
+            "raw_payload_path": "raw/telegram/2026/07/message-2.json",
+            "raw_payload_sidecar_path": "sidecars/artifacts/telegram/message-2.json",
+            "raw_payload_artifact_id": "chat/1/message/2",
+        },
+        root=root,
+    )
+
+    assert result.ok is True
+    sidecar = json.loads(result.sidecar.path.read_text(encoding="utf-8"))
+    assert sidecar["raw_payload"]["path"] == "raw/telegram/2026/07/message-2.json"
+    assert sidecar["raw_payload"]["sidecar_path"] == "sidecars/artifacts/telegram/message-2.json"
+    assert sidecar["raw_payload"]["artifact_id"] == "chat/1/message/2"
+    assert sidecar["raw_payload"]["refs"] == [
+        {
+            "path": "raw/telegram/2026/07/message-2.json",
+            "sidecar_path": "sidecars/artifacts/telegram/message-2.json",
+            "artifact_id": "chat/1/message/2",
+        }
+    ]
+
+
 def test_write_atomic_artifact_reports_sidecar_failure_as_partial(tmp_path, monkeypatch):
     root = tmp_path / "vault"
     root.mkdir()
@@ -328,6 +361,29 @@ def test_write_atomic_artifact_from_path_moves_temp_file(tmp_path):
     sidecar = json.loads(result.sidecar.path.read_text(encoding="utf-8"))
     assert sidecar["metadata"]["original_artifact_id"] == "video/1"
     assert sidecar["metadata"]["source_url"] == "https://example.com/v.mp4"
+
+
+def test_write_atomic_artifact_from_path_records_raw_payload_reference(tmp_path):
+    root = tmp_path / "vault"
+    root.mkdir()
+    source_path = tmp_path / "photo.part"
+    source_path.write_bytes(b"photo bytes")
+
+    result = vault.write_atomic_artifact_from_path(
+        source="whatsapp",
+        artifact_id="chat/1/message/2/photo",
+        artifact_kind="media_blob",
+        source_path=source_path,
+        extension=".webp",
+        metadata={"raw_payload_path": "raw/whatsapp/2026/07/message-2.jsonl"},
+        root=root,
+        delete_source=True,
+    )
+
+    assert result.ok is True
+    sidecar = json.loads(result.sidecar.path.read_text(encoding="utf-8"))
+    assert sidecar["raw_payload"]["path"] == "raw/whatsapp/2026/07/message-2.jsonl"
+    assert sidecar["raw_payload"]["refs"][0]["path"] == "raw/whatsapp/2026/07/message-2.jsonl"
 
 
 def test_write_atomic_artifact_from_path_reuses_duplicate_blob(tmp_path):

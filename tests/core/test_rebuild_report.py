@@ -12,6 +12,7 @@ from src.core.rebuild_report import (
     compare_db_media_artifacts,
     file_reference_errors,
     missing_media_item_fields,
+    raw_payload_reference_count,
     scan_sidecars,
 )
 
@@ -51,6 +52,29 @@ def test_scan_sidecars_reports_reconstructable_media_items(tmp_path):
     assert report.reconstructable_tables["media_items"] == 1
     assert report.artifacts_by_source["instagram"] == 1
     assert report.raw_payloads_by_source["instagram"] == 1
+
+
+def test_raw_payload_reference_count_counts_refs_without_duplicate_primary_path():
+    payload = {
+        "artifact_kind": "media",
+        "raw_payload": {
+            "path": "raw/telegram/message-1.json",
+            "refs": [
+                {
+                    "path": "raw/telegram/message-1.json",
+                    "sidecar_path": "sidecars/artifacts/telegram/message-1.json",
+                    "artifact_id": "message-1",
+                },
+                {
+                    "path": "raw/telegram/message-2.json",
+                    "sidecar_path": "sidecars/artifacts/telegram/message-2.json",
+                    "artifact_id": "message-2",
+                },
+            ],
+        },
+    }
+
+    assert raw_payload_reference_count(payload) == 2
 
 
 def test_scan_sidecars_reports_missing_fields_and_bad_json(tmp_path):
