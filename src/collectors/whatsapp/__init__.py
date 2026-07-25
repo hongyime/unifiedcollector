@@ -57,6 +57,7 @@ from src.core.user_change_tracker import (
 )
 from src.core.link_extractor import extract_all_links
 from src.core.file_naming import sanitize_name
+from src.core.raw_archive import report_raw_archive_result
 from src.core.vault import VAULT_ROOT, write_atomic_artifact, write_raw_payload
 
 logger = logging.getLogger(__name__)
@@ -493,7 +494,7 @@ class WhatsappCollector(BaseCollector):
         if not _tier1_raw_archives_enabled():
             return
         try:
-            write_raw_payload(
+            result = write_raw_payload(
                 source=self.SOURCE_NAME,
                 artifact_id=artifact_id,
                 payload=payload,
@@ -501,8 +502,25 @@ class WhatsappCollector(BaseCollector):
                 target_tables=target_tables,
                 root=VAULT_ROOT,
             )
+            report_raw_archive_result(
+                self.pool,
+                source=self.SOURCE_NAME,
+                artifact_id=artifact_id,
+                result=result,
+                metadata=metadata,
+                log=logger,
+            )
         except Exception as exc:
             logger.debug("whatsapp raw archive failed for %s: %s", artifact_id, exc)
+            report_raw_archive_result(
+                self.pool,
+                source=self.SOURCE_NAME,
+                artifact_id=artifact_id,
+                result=None,
+                metadata=metadata,
+                log=logger,
+                error=str(exc),
+            )
 
     async def _upsert_chat(self, jid: str, name: str, event: dict):
         # WhatsApp JID suffixes: @g.us = group, @newsletter = channel (one-to-many

@@ -45,6 +45,7 @@ from src.core.human_rate_limiter import HumanLikeRateLimiter, OperationType
 from src.core.sliding_window_limiter import SlidingWindowRateLimiter, WindowConfig
 from src.core.proximity import refresh_account_proximity_cache
 from src.core.profile_photo_tracker import ProfilePhotoTracker
+from src.core.raw_archive import report_raw_archive_result
 from src.core.rate_limit_events import record_rate_limit_event
 from src.core.scrape_pacing import headless_dwell, sleep_before_pre_cooldown_retry
 from src.core.vault import (
@@ -269,7 +270,7 @@ class InstagramCollector(BaseCollector):
         if not _tier1_raw_archives_enabled():
             return
         try:
-            write_raw_payload(
+            result = write_raw_payload(
                 source=self.SOURCE_NAME,
                 artifact_id=artifact_id,
                 payload=payload,
@@ -277,8 +278,25 @@ class InstagramCollector(BaseCollector):
                 target_tables=target_tables,
                 root=VAULT_ROOT,
             )
+            report_raw_archive_result(
+                self.pool,
+                source=self.SOURCE_NAME,
+                artifact_id=artifact_id,
+                result=result,
+                metadata=metadata,
+                log=logger,
+            )
         except Exception as exc:
             logger.debug("instagram raw archive failed for %s: %s", artifact_id, exc)
+            report_raw_archive_result(
+                self.pool,
+                source=self.SOURCE_NAME,
+                artifact_id=artifact_id,
+                result=None,
+                metadata=metadata,
+                log=logger,
+                error=str(exc),
+            )
 
     def _auto_discover_cookies(self) -> dict:
         """Auto-discover cookie files for all accounts.

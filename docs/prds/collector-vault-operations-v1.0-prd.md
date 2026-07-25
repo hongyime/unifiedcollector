@@ -122,7 +122,7 @@
 - [x] Every new file-backed artifact has a JSON sidecar with required provenance fields.
 - [x] The artifact write path verifies checksum, file size, sidecar write, and DB row consistency.
 - [x] Duplicate physical files are stored once by checksum while multiple occurrence sidecars remain queryable.
-- [ ] Tier 1 raw payloads, messages, and route data are persisted enough to rebuild normalized records.
+- [x] Tier 1 raw payloads, messages, and route data are persisted enough to rebuild normalized records.
 - [x] Rate-limit events include source, account, action scope, retry/cooldown times, and are shown in dashboard and Telegram status.
 - [x] Browser/extension captures produce auditable sidecars or raw capture records.
 - [x] Scheduled collector DB backups land under `Z:\unifiedcollector\backups\db`.
@@ -165,7 +165,7 @@
 ### Phase 3: Raw Payload and Rebuild Layer
 **Goal**: Preserve enough raw data to rebuild indexes.
 - [x] Define raw payload path conventions for Tier 1 and lower tiers.
-- [ ] Persist Tier 1 full raw payloads for messages, routes, profiles, posts, and browser captures.
+- [x] Persist Tier 1 full raw payloads for messages, routes, profiles, posts, and browser captures.
 - [x] Persist compressed JSON/JSONL for lower tiers where practical.
 - [x] Link every sidecar to raw payload references.
 - [x] Build rebuild dry-run command that reports reconstructable tables and missing fields.

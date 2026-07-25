@@ -19,6 +19,7 @@ from src.collectors.strava.parse import (
 from src.core.profile_photo_tracker import ProfilePhotoTracker
 from src.core.file_naming import sanitize_name
 from src.core.proximity import refresh_account_proximity_cache
+from src.core.raw_archive import report_raw_archive_result
 from src.core.rate_limit_events import record_rate_limit_event
 from src.core.scrape_pacing import sleep_before_pre_cooldown_retry, sleep_rate_limit
 from src.core.vault import VAULT_ROOT, write_atomic_artifact, write_raw_payload
@@ -266,7 +267,7 @@ class StravaCollector(BaseCollector):
         if not _tier1_raw_archives_enabled():
             return
         try:
-            write_raw_payload(
+            result = write_raw_payload(
                 source=self.SOURCE_NAME,
                 artifact_id=artifact_id,
                 payload=payload,
@@ -274,8 +275,25 @@ class StravaCollector(BaseCollector):
                 target_tables=target_tables,
                 root=VAULT_ROOT,
             )
+            report_raw_archive_result(
+                self.pool,
+                source=self.SOURCE_NAME,
+                artifact_id=artifact_id,
+                result=result,
+                metadata=metadata,
+                log=logger,
+            )
         except Exception as exc:
             logger.debug("strava raw archive failed for %s: %s", artifact_id, exc)
+            report_raw_archive_result(
+                self.pool,
+                source=self.SOURCE_NAME,
+                artifact_id=artifact_id,
+                result=None,
+                metadata=metadata,
+                log=logger,
+                error=str(exc),
+            )
 
     def _gps_stream_cooling_down(self) -> bool:
         return time.time() < self._gps_stream_cooldown_until

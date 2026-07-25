@@ -37,6 +37,7 @@ import httpx
 
 from src.core.base_collector import BaseCollector
 from src.core.rate_limit_events import record_rate_limit_event
+from src.core.raw_archive import report_raw_archive_result
 from src.core.user_change_tracker import (
     UserChangeTracker,
     BEEPER_TRACKED_FIELDS,
@@ -376,7 +377,7 @@ class BeeperWriter:
         if not _tier1_raw_archives_enabled():
             return
         try:
-            write_raw_payload(
+            result = write_raw_payload(
                 source="beeper",
                 artifact_id=artifact_id,
                 payload=payload,
@@ -384,8 +385,25 @@ class BeeperWriter:
                 target_tables=target_tables,
                 root=VAULT_ROOT,
             )
+            report_raw_archive_result(
+                self.pool,
+                source="beeper",
+                artifact_id=artifact_id,
+                result=result,
+                metadata=metadata,
+                log=self.log,
+            )
         except Exception as exc:
             self.log.debug("beeper raw archive failed for %s: %s", artifact_id, exc)
+            report_raw_archive_result(
+                self.pool,
+                source="beeper",
+                artifact_id=artifact_id,
+                result=None,
+                metadata=metadata,
+                log=self.log,
+                error=str(exc),
+            )
 
     async def upsert_account(self, acc: dict) -> None:
         async with self.pool.acquire() as conn:

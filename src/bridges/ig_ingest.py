@@ -119,7 +119,7 @@ _BROWSER_CAPTURE_TARGET_TABLES = {
     },
     "dm_probe": _DM_PROBE_TARGET_TABLES,
     "dm_sample": _DM_PROBE_TARGET_TABLES,
-    "dm_frame": {},
+    "dm_frame": _DM_PROBE_TARGET_TABLES,
     "dm_decoded": {
         "instagram": ["instagram_dm_thread", "instagram_dm"],
         "tiktok": ["tiktok_dm_thread", "tiktok_dm"],

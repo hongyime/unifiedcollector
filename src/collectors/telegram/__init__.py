@@ -46,6 +46,7 @@ from src.core.hub_notifier import HubNotifier, NotifyCategory
 from src.core.file_naming import sanitize_name
 from src.core.circuit_breaker import CircuitBreaker, CircuitOpenError
 from src.core.proximity import refresh_account_proximity_cache
+from src.core.raw_archive import report_raw_archive_result
 from src.core.rate_limit_events import record_rate_limit_event
 from src.core.user_change_tracker import (
     UserChangeTracker,
@@ -1607,7 +1608,7 @@ class TelegramCollector(BaseCollector):
         if not _tier1_raw_archives_enabled():
             return
         try:
-            write_raw_payload(
+            result = write_raw_payload(
                 source=self.SOURCE_NAME,
                 artifact_id=artifact_id,
                 payload=payload,
@@ -1615,8 +1616,25 @@ class TelegramCollector(BaseCollector):
                 target_tables=target_tables,
                 root=VAULT_ROOT,
             )
+            report_raw_archive_result(
+                self.pool,
+                source=self.SOURCE_NAME,
+                artifact_id=artifact_id,
+                result=result,
+                metadata=metadata,
+                log=logger,
+            )
         except Exception as exc:
             logger.debug("telegram raw archive failed for %s: %s", artifact_id, exc)
+            report_raw_archive_result(
+                self.pool,
+                source=self.SOURCE_NAME,
+                artifact_id=artifact_id,
+                result=None,
+                metadata=metadata,
+                log=logger,
+                error=str(exc),
+            )
 
     async def _enqueue_forward_edges(self, message, parent_chat_platform_id: str) -> None:
         """If a message is a forward, enqueue its source as a spider seed.
