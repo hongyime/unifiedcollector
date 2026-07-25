@@ -199,6 +199,7 @@
 - [x] Implement retention: 7 daily, 4 weekly, 3 monthly.
 - [x] Add restore rehearsal checklist.
 - [x] Run dry-run rebuild from sidecars/raw payloads into a scratch DB.
+- [x] Run restore replay from a real collector DB dump into a scratch DB.
 - [x] Report unrebuildable gaps by source.
 - **Deliverables**: Backup job, retention, recovery report.
 - **Time**: 2-4 days.
@@ -214,7 +215,7 @@ Restore rehearsal checklist:
 
 ---
 
-## Implementation Status - 2026-07-24
+## Implementation Status - 2026-07-24 / 2026-07-25
 
 - Vault foundation is implemented in `src/core/vault.py`: canonical root detection, writability/free-space checks, media-root mirror checks, vault-relative paths, sidecar schema validation, raw payload paths, and checksum blob-path conventions.
 - Media/artifact/raw sidecar helpers are wired into the shared collector base path and tested. Sidecar failure is recorded on `media_items.metadata.vault_sidecar` and queued through the existing dead-letter queue.
@@ -236,7 +237,9 @@ Restore rehearsal checklist:
 - Beeper, Telegram, WhatsApp, Lemon8, YouTube, TikTok, Website, Search, Instagram headless/extension media, GitHub direct media, GitHub bulk avatar artifacts, shared profile-photo, generic `BaseCollector.save_file`, shared `media_download` HTTP/delegated single-file calls, and Strava activity photo/route-map downloads now write physical bytes through `write_atomic_artifact` or `write_atomic_artifact_from_path` to canonical `media/blobs/<sha256>` paths while retaining per-occurrence `media_items` rows and sidecars where a concrete source occurrence should be indexed. TikTok Playwright fallback uses vault-temp intermediate files and deletes them after re-ingest, so browser fallback no longer leaves duplicate legacy MP4s. Duplicate-row cleanup in `BaseCollector.insert_media_item` preserves canonical blob files and only removes legacy per-occurrence duplicate files. The collector dashboard media resolver accepts both legacy media-root paths and vault-backed blob paths.
 - `src/core/health.py` no longer imports the full DB connection module for Docker health checks; live Telegram/WhatsApp health checks dropped from roughly 50s to roughly 10s and fit the configured 30s timeout.
 - Broad post-migration smoke/regression test passed on 2026-07-24: `python -m pytest -q tests\collectors tests\bridges\test_ig_ingest_vault.py tests\dashboard tests\core\test_base_collector.py tests\core\test_media_download.py tests\core\test_vault.py tests\test_reconciler.py` covered 536 collector/dashboard/vault/reconciler tests successfully.
-- Still not complete: restore replay from a real DB dump. GitHub bulk avatar range writes artifact sidecars only and intentionally does not create `media_items` rows for unknown numeric IDs.
+- Real collector DB restore drill passed on 2026-07-25 and is archived at `Z:\unifiedcollector\exports\recovery_drills\collector_restore_drill_20260725_0400.json`: backup `Z:\unifiedcollector\backups\db\unifiedcollector_20260723_133814.dump` restored into scratch DB `uc_restore_drill_20260724_200036` in 15,755.531 seconds, table counts were captured, and the scratch DB was dropped. Key restored counts: `media_items` 580,866; `telegram_messages` 1,375,665; `whatsapp_messages` 49,887; `strava_activities` 43,483; `strava_gps_streams` 19,719; `instagram_posts` 24,774; `rate_limit_events` 4,568; `collection_runs` 402; `collection_targets` 1,690; `browser_ingest_events` 217.
+- Restore-drill reporting was hardened after the proof run: Docker table existence checks now interpolate the actual table name, the restore timeout default is 12 hours, and the expected Beeper message table is `beeper_shadow_messages` rather than the stale `beeper_messages` name. The archived 2026-07-25 report still shows that stale Beeper expected-table gap because the fix landed after that run.
+- Remaining recovery gap: the sampled sidecar rehearsal scanned 500 media sidecars and 500 raw-payload sidecars, inserted 116 media rows and 463 raw-payload rows into scratch SQLite, and skipped 384 media sidecars due to `file_missing`. GitHub bulk avatar range writes artifact sidecars only and intentionally does not create `media_items` rows for unknown numeric IDs.
 
 **Document Version**: 1.0
 **Created**: 2026-07-20
