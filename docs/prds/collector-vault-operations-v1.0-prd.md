@@ -119,7 +119,7 @@
 
 ### Functional Acceptance
 - [x] Collector refuses file-heavy writes when `Z:\unifiedcollector` is unavailable and records queued work instead of success.
-- [ ] Every new file-backed artifact has a JSON sidecar with required provenance fields.
+- [x] Every new file-backed artifact has a JSON sidecar with required provenance fields.
 - [ ] The artifact write path verifies checksum, file size, sidecar write, and DB row consistency.
 - [x] Duplicate physical files are stored once by checksum while multiple occurrence sidecars remain queryable.
 - [ ] Tier 1 raw payloads, messages, and route data are persisted enough to rebuild normalized records.
@@ -244,6 +244,7 @@ Restore rehearsal checklist:
 - Host-side rebuild tooling now maps container paths under `/media/...` and `/vault/...` back to the selected vault root before checking files. Re-running the same bounded rehearsal after that fix scanned 500 media sidecars and 500 raw-payload sidecars, inserted 498 media rows and 465 raw-payload rows into scratch SQLite, and reduced `file_missing` skips from 384 to 2. The two remaining misses are true Beeper/WhatsApp MXC media gaps with DB rows and sidecars but no backing file/blob. GitHub bulk avatar range writes artifact sidecars only and intentionally does not create `media_items` rows for unknown numeric IDs.
 - New media/artifact sidecars normalize raw-payload provenance into a top-level `raw_payload` block. Writers accept `raw_payload_path`, `raw_payload_sidecar_path`, `raw_payload_artifact_id`, and `raw_payload_refs`; rebuild reporting counts these references without double-counting a primary path and matching ref.
 - Lower-tier raw payload compression is implemented in `write_raw_payload()` for `json.gz` and `jsonl.gz`. Browser profile/posts/comments raw captures now use `json.gz`; DM captures, decoded DM payloads, and Strava route streams stay plain JSON because they are Tier 1/debug/route evidence where immediate inspection matters more than size.
+- Shared artifact sidecars now expose required provenance fields directly: `ingest_path`, `collection_priority`, `raw_payload`, `provenance`, `metadata`, and `rebuild`. This applies to raw payload sidecars, generic JSON artifact sidecars, and atomic blob artifact sidecars; media sidecars already carried the same provenance block.
 
 **Document Version**: 1.0
 **Created**: 2026-07-20

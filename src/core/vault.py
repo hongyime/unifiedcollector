@@ -623,6 +623,19 @@ def _raw_payload_reference(metadata: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _sidecar_provenance(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "platform_ids": metadata.get("platform_ids"),
+        "collection_account": metadata.get("collection_account"),
+        "scrape_run_id": metadata.get("scrape_run_id"),
+        "extension_version": metadata.get("extension_version"),
+        "request_url": metadata.get("request_url"),
+        "http_status": metadata.get("http_status"),
+        "rate_limit_scope": metadata.get("rate_limit_scope"),
+        "partial": bool(metadata.get("partial", False)),
+    }
+
+
 def write_atomic_artifact(
     *,
     source: str,
@@ -997,6 +1010,8 @@ def write_artifact_sidecar(
             "artifact_kind": artifact_kind,
             "artifact_id": artifact_id,
             "source": source,
+            "ingest_path": metadata.get("ingest_path"),
+            "collection_priority": metadata.get("collection_priority"),
             "file": {
                 "path": rel,
                 "absolute_path": str(path),
@@ -1007,6 +1022,7 @@ def write_artifact_sidecar(
                 "collected_at": now.isoformat(),
             },
             "raw_payload": _raw_payload_reference(metadata),
+            "provenance": _sidecar_provenance(metadata),
             "metadata": metadata,
             "rebuild": _rebuild_contract(
                 metadata,
@@ -1152,13 +1168,7 @@ def write_media_sidecar(
                 **_raw_payload_reference(metadata),
             },
             "provenance": {
-                "platform_ids": metadata.get("platform_ids"),
-                "collection_account": metadata.get("collection_account"),
-                "scrape_run_id": metadata.get("scrape_run_id"),
-                "extension_version": metadata.get("extension_version"),
-                "request_url": metadata.get("request_url"),
-                "http_status": metadata.get("http_status"),
-                "rate_limit_scope": metadata.get("rate_limit_scope"),
+                **_sidecar_provenance(metadata),
                 "partial": False,
             },
             "metadata": metadata,

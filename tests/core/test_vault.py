@@ -209,6 +209,8 @@ def test_write_atomic_artifact_success_writes_blob_sidecar_and_db(tmp_path, monk
     sidecar = json.loads(result.sidecar.path.read_text(encoding="utf-8"))
     assert sidecar["metadata"]["original_artifact_id"] == "chat/1/message/2/photo"
     assert sidecar["metadata"]["collection_account"] == "bryan"
+    assert sidecar["provenance"]["collection_account"] == "bryan"
+    assert sidecar["provenance"]["partial"] is False
     assert db_seen[0].sha256 == result.sha256
 
 
@@ -541,7 +543,13 @@ def test_write_artifact_sidecar_records_json_artifact(tmp_path, monkeypatch):
         source="strava",
         artifact_kind="json",
         file_path=str(artifact),
-        metadata={"purpose": "clubs"},
+        metadata={
+            "purpose": "clubs",
+            "ingest_path": "api",
+            "collection_account": "bryan",
+            "request_url": "https://www.strava.com/api/v3/athlete/clubs",
+            "http_status": 200,
+        },
         root=root,
     )
 
@@ -550,10 +558,14 @@ def test_write_artifact_sidecar_records_json_artifact(tmp_path, monkeypatch):
     payload = json.loads(result.path.read_text(encoding="utf-8"))
     assert payload["artifact_kind"] == "json"
     assert payload["source"] == "strava"
+    assert payload["ingest_path"] == "api"
     assert payload["file"]["path"] == "media/strava/clubs/clubs_1.json"
     assert payload["file"]["size"] == artifact.stat().st_size
     assert len(payload["file"]["sha256"]) == 64
-    assert payload["metadata"] == {"purpose": "clubs"}
+    assert payload["metadata"]["purpose"] == "clubs"
+    assert payload["provenance"]["collection_account"] == "bryan"
+    assert payload["provenance"]["request_url"].endswith("/athlete/clubs")
+    assert payload["provenance"]["http_status"] == 200
     assert payload["rebuild"]["target_tables"] == []
     assert "file.sha256" in payload["rebuild"]["required_fields"]
 
@@ -582,6 +594,7 @@ def test_write_raw_payload_records_raw_file_and_sidecar(tmp_path, monkeypatch):
     assert sidecar["file"]["path"] == result.relative_path
     assert sidecar["metadata"]["raw_payload"] is True
     assert sidecar["metadata"]["artifact_id"] == "chat/123/message/456"
+    assert sidecar["provenance"]["collection_account"] == "bryan"
     assert sidecar["rebuild"]["target_tables"] == ["telegram_messages"]
 
 
