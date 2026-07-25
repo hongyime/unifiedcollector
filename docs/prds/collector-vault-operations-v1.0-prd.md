@@ -166,7 +166,7 @@
 **Goal**: Preserve enough raw data to rebuild indexes.
 - [x] Define raw payload path conventions for Tier 1 and lower tiers.
 - [ ] Persist Tier 1 full raw payloads for messages, routes, profiles, posts, and browser captures.
-- [ ] Persist compressed JSON/JSONL for lower tiers where practical.
+- [x] Persist compressed JSON/JSONL for lower tiers where practical.
 - [x] Link every sidecar to raw payload references.
 - [x] Build rebuild dry-run command that reports reconstructable tables and missing fields.
 - **Deliverables**: Raw archive contract, rebuild report, source coverage matrix.
@@ -243,6 +243,7 @@ Restore rehearsal checklist:
 - Restore-drill reporting was hardened after the proof run: Docker table existence checks now interpolate the actual table name, the restore timeout default is 12 hours, and the expected Beeper message table is `beeper_shadow_messages` rather than the stale `beeper_messages` name. The archived 2026-07-25 report still shows that stale Beeper expected-table gap because the fix landed after that run.
 - Host-side rebuild tooling now maps container paths under `/media/...` and `/vault/...` back to the selected vault root before checking files. Re-running the same bounded rehearsal after that fix scanned 500 media sidecars and 500 raw-payload sidecars, inserted 498 media rows and 465 raw-payload rows into scratch SQLite, and reduced `file_missing` skips from 384 to 2. The two remaining misses are true Beeper/WhatsApp MXC media gaps with DB rows and sidecars but no backing file/blob. GitHub bulk avatar range writes artifact sidecars only and intentionally does not create `media_items` rows for unknown numeric IDs.
 - New media/artifact sidecars normalize raw-payload provenance into a top-level `raw_payload` block. Writers accept `raw_payload_path`, `raw_payload_sidecar_path`, `raw_payload_artifact_id`, and `raw_payload_refs`; rebuild reporting counts these references without double-counting a primary path and matching ref.
+- Lower-tier raw payload compression is implemented in `write_raw_payload()` for `json.gz` and `jsonl.gz`. Browser profile/posts/comments raw captures now use `json.gz`; DM captures, decoded DM payloads, and Strava route streams stay plain JSON because they are Tier 1/debug/route evidence where immediate inspection matters more than size.
 
 **Document Version**: 1.0
 **Created**: 2026-07-20

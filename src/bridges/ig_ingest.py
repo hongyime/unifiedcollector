@@ -121,6 +121,7 @@ _BROWSER_CAPTURE_TARGET_TABLES = {
         "strava": ["strava_activities", "strava_gps_streams"],
     },
 }
+_BROWSER_CAPTURE_COMPRESSED_ENDPOINTS = {"profile", "posts", "comments"}
 
 # 2-hop spider (instagram only): the extension scrapes a target's media AND, when
 # the target's hop < MAX_HOP, crawls its followers/following and POSTs them to
@@ -2029,6 +2030,7 @@ async def _archive_browser_capture(pool, platform: str, endpoint: str, body: dic
         payload=body,
         metadata=metadata,
         target_tables=target_tables,
+        extension="json.gz" if endpoint in _BROWSER_CAPTURE_COMPRESSED_ENDPOINTS else "json",
     )
     if result.ok:
         return

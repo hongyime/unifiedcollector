@@ -6,6 +6,7 @@ collectors do not each invent their own recovery metadata format.
 """
 from __future__ import annotations
 
+import gzip
 import json
 import os
 import re
@@ -488,6 +489,21 @@ def _atomic_write_text(path: Path, content: str) -> None:
             pass
 
 
+def _atomic_write_bytes(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(content)
+        tmp.replace(path)
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
@@ -516,10 +532,26 @@ def _sha256_path(path: Path, chunk_size: int = 1024 * 1024) -> str:
 
 
 def _raw_payload_text(payload: Any, *, extension: str) -> str:
-    if extension == "jsonl":
+    base_extension = extension[:-3] if extension.endswith(".gz") else extension
+    if base_extension == "jsonl":
         rows = payload if isinstance(payload, list) else [payload]
         return "".join(json.dumps(row, ensure_ascii=False, sort_keys=True, default=str) + "\n" for row in rows)
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2, default=str) + "\n"
+
+
+def _raw_payload_bytes(payload: Any, *, extension: str) -> tuple[bytes, int | None]:
+    text = _raw_payload_text(payload, extension=extension)
+    raw = text.encode("utf-8")
+    if extension.endswith(".gz"):
+        return gzip.compress(raw, compresslevel=6, mtime=0), len(raw)
+    return raw, None
+
+
+def _raw_payload_extension(extension: str | None) -> str:
+    raw = str(extension or "json").strip().lower().lstrip(".") or "json"
+    if raw in {"json", "jsonl", "json.gz", "jsonl.gz"}:
+        return raw
+    return _safe_part(raw, fallback="json", limit=16).lstrip(".") or "json"
 
 
 def _rebuild_contract(
@@ -1006,7 +1038,7 @@ def write_raw_payload(
     try:
         ensure_vault_available(root)
         now = datetime.now(timezone.utc)
-        ext = _safe_part(extension, fallback="json", limit=16).lstrip(".") or "json"
+        ext = _raw_payload_extension(extension)
         path = raw_payload_path(
             source=source,
             artifact_id=artifact_id,
@@ -1014,9 +1046,13 @@ def write_raw_payload(
             collected_at=now,
             root=root,
         )
-        _atomic_write_text(path, _raw_payload_text(payload, extension=ext))
+        payload_bytes, uncompressed_size = _raw_payload_bytes(payload, extension=ext)
+        _atomic_write_bytes(path, payload_bytes)
         meta = dict(metadata or {})
         meta["raw_payload"] = True
+        if ext.endswith(".gz"):
+            meta["compression"] = "gzip"
+            meta["uncompressed_size"] = uncompressed_size
         if target_tables is not None:
             meta["rebuild_target_tables"] = target_tables
         meta.setdefault(

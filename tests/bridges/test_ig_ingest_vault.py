@@ -178,6 +178,7 @@ def test_archive_browser_capture_writes_profile_raw_payload(monkeypatch):
     assert call["payload"]["profile"]["username"] == "alice"
     assert call["metadata"]["ingest_path"] == "extension"
     assert call["metadata"]["collection_account"] == "bryan"
+    assert call["extension"] == "json.gz"
     assert call["metadata"]["extension_version"] == "1.21.19"
     assert pool.conn.executes == []
 
@@ -344,6 +345,7 @@ def test_archive_browser_capture_writes_strava_stream_raw_payload(monkeypatch):
     assert call["artifact_id"].startswith("extension/strava_streams/19283135496/")
     assert call["target_tables"] == ["strava_activities", "strava_gps_streams"]
     assert call["metadata"]["request_url"].endswith("/19283135496/streams")
+    assert call["extension"] == "json"
 
 
 def test_upsert_strava_browser_stream_writes_route_tables():

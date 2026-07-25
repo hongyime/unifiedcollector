@@ -1,3 +1,4 @@
+import gzip
 import hashlib
 import json
 
@@ -582,6 +583,36 @@ def test_write_raw_payload_records_raw_file_and_sidecar(tmp_path, monkeypatch):
     assert sidecar["metadata"]["raw_payload"] is True
     assert sidecar["metadata"]["artifact_id"] == "chat/123/message/456"
     assert sidecar["rebuild"]["target_tables"] == ["telegram_messages"]
+
+
+def test_write_raw_payload_can_store_compressed_jsonl(tmp_path, monkeypatch):
+    monkeypatch.setattr(vault, "SIDECARS_ENABLED", True)
+    root = tmp_path / "vault"
+    root.mkdir()
+
+    result = vault.write_raw_payload(
+        source="search",
+        artifact_id="crawl/example",
+        payload=[{"url": "https://example.com/a"}, {"url": "https://example.com/b"}],
+        metadata={"collection_priority": "lower_tier"},
+        target_tables=["search_results"],
+        extension="jsonl.gz",
+        root=root,
+    )
+
+    assert result.ok is True
+    assert result.relative_path.endswith(".jsonl.gz")
+    with gzip.open(result.path, "rt", encoding="utf-8") as handle:
+        rows = [json.loads(line) for line in handle]
+    assert rows == [{"url": "https://example.com/a"}, {"url": "https://example.com/b"}]
+    sidecar = json.loads(result.sidecar.path.read_text(encoding="utf-8"))
+    assert sidecar["file"]["path"] == result.relative_path
+    assert sidecar["file"]["size"] == result.path.stat().st_size
+    assert sidecar["metadata"]["compression"] == "gzip"
+    with gzip.open(result.path, "rb") as handle:
+        decompressed = handle.read()
+    assert sidecar["metadata"]["uncompressed_size"] == len(decompressed)
+    assert sidecar["rebuild"]["target_tables"] == ["search_results"]
 
 
 def test_write_raw_payload_reports_missing_vault(tmp_path, monkeypatch):
