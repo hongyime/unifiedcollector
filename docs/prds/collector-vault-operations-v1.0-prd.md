@@ -132,7 +132,7 @@
 - [x] Shared artifact writer has unit tests for success, sidecar failure, checksum mismatch, missing vault, duplicate blob, and DB failure.
 - [x] Reconciler has tests for DB-only, file-only, sidecar-only, and partial artifact states.
 - [x] Existing collectors keep passing smoke tests after migrating to the shared artifact writer.
-- [ ] Dashboard and Telegram wording are clear to a non-developer operator.
+- [x] Dashboard and Telegram wording are clear to a non-developer operator.
 
 ### User Acceptance
 - [x] Dashboard answers: what collected this hour, what is blocked, what is rate-limited, what is queued, and whether the vault is safe.
@@ -245,6 +245,7 @@ Restore rehearsal checklist:
 - New media/artifact sidecars normalize raw-payload provenance into a top-level `raw_payload` block. Writers accept `raw_payload_path`, `raw_payload_sidecar_path`, `raw_payload_artifact_id`, and `raw_payload_refs`; rebuild reporting counts these references without double-counting a primary path and matching ref.
 - Lower-tier raw payload compression is implemented in `write_raw_payload()` for `json.gz` and `jsonl.gz`. Browser profile/posts/comments raw captures now use `json.gz`; DM captures, decoded DM payloads, and Strava route streams stay plain JSON because they are Tier 1/debug/route evidence where immediate inspection matters more than size.
 - Shared artifact sidecars now expose required provenance fields directly: `ingest_path`, `collection_priority`, `raw_payload`, `provenance`, `metadata`, and `rebuild`. This applies to raw payload sidecars, generic JSON artifact sidecars, and atomic blob artifact sidecars; media sidecars already carried the same provenance block.
+- Telegram status wording now avoids internal terms for operator-facing health: `DLQ rows` is reported as repair queue items, sidecar metadata failures are reported as media records waiting for sidecar repair, and non-429/auth wording is reported as login/access or other HTTP errors.
 
 **Document Version**: 1.0
 **Created**: 2026-07-20

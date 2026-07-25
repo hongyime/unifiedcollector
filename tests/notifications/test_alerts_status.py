@@ -138,9 +138,11 @@ async def test_notify_status_splits_rate_limit_from_auth_events(monkeypatch):
     assert ok is True
     msg = sent[0]
     assert "Recorded rate-limit events this hour: 1." in msg
-    assert "Recorded auth/access or other non-429 events this hour: 1." in msg
-    assert "Instagram: 4 source rows, 1 media file, 1 rate-limit event, 1 auth/access or other non-429 event" in msg
-    assert "Session/auth or other non-429 events this hour:" in msg
+    assert "Recorded login/access or other HTTP errors this hour: 1." in msg
+    assert "DLQ" not in msg
+    assert "non-429" not in msg
+    assert "Instagram: 4 source rows, 1 media file, 1 rate-limit event, 1 login/access or other HTTP error" in msg
+    assert "Login/access or other HTTP errors this hour:" in msg
     assert "HTTP 401" in msg
     assert "Instagram: active cooldown for 60m after 7 instrumented rate-limit events." in msg
     assert "Telegram FloodWait throttles for acct1: active cooldown for 2m after 1 FloodWait event" in msg

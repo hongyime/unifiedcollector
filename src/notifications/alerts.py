@@ -143,7 +143,7 @@ def _format_hourly_source(row: dict) -> str:
         details.append(f"{rate_limits:,} rate-limit {_plural(rate_limits, 'event')}")
     if access_errors:
         details.append(
-            f"{access_errors:,} auth/access or other non-429 {_plural(access_errors, 'event')}"
+            f"{access_errors:,} login/access or other HTTP {_plural(access_errors, 'error')}"
         )
     if not details:
         details.append("no new rows")
@@ -204,7 +204,7 @@ def _format_access_event(row: dict) -> str:
         subject += f" {scope}"
     if account:
         subject += f" for {_esc(account)}"
-    status_text = f"HTTP {int(status)}" if status is not None else "non-429 HTTP failure"
+    status_text = f"HTTP {int(status)}" if status is not None else "HTTP failure"
     events = f"{count:,} event" if count == 1 else f"{count:,} events"
     detail = f" ({_esc(reason)})" if reason else ""
     return f"• {subject}: {status_text}, {events} this hour{detail}."
@@ -400,7 +400,7 @@ async def notify_status(snapshot: dict) -> bool:
         else:
             lines.append("Recorded rate-limit events this hour: 0.")
         if access_errors:
-            lines.append(f"Recorded auth/access or other non-429 events this hour: {access_errors:,}.")
+            lines.append(f"Recorded login/access or other HTTP errors this hour: {access_errors:,}.")
 
         top = [_format_hourly_source(row) for row in (hourly.get("sources") or [])[:6]]
         if top:
@@ -418,10 +418,10 @@ async def notify_status(snapshot: dict) -> bool:
     if recent_limits:
         lines.extend(_format_rate_limit_event(r) for r in recent_limits[:5])
     if access_events:
-        lines.append("Session/auth or other non-429 events this hour:")
+        lines.append("Login/access or other HTTP errors this hour:")
         lines.extend(_format_access_event(r) for r in access_events[:5])
     if not active_limits and not recent_limits and not access_events:
-        lines.append("No recorded rate-limit events, active cooldowns, or auth/session failures this hour.")
+        lines.append("No recorded rate-limit events, active cooldowns, or login/session failures this hour.")
 
     vault = snapshot.get("vault") or {}
     if vault:
@@ -444,9 +444,9 @@ async def notify_status(snapshot: dict) -> bool:
             )
         if queued or partial or failures:
             lines.append(
-                f"Artifact health: {queued:,} sidecar DLQ rows, "
-                f"{partial:,} media rows with failed sidecar metadata, "
-                f"{failures:,} total sidecar failures recorded."
+                f"Artifact health: {queued:,} repair queue {_plural(queued, 'item')}, "
+                f"{partial:,} media {_plural(partial, 'record')} waiting for sidecar repair, "
+                f"{failures:,} total sidecar write {_plural(failures, 'failure')} recorded."
             )
         elif vault.get("counts_error"):
             lines.append(
@@ -454,7 +454,7 @@ async def notify_status(snapshot: dict) -> bool:
                 f"Query error: <code>{_esc(vault.get('counts_error'))}</code>."
             )
         else:
-            lines.append("Artifact health: no sidecar DLQ rows or media rows with failed sidecar metadata.")
+            lines.append("Artifact health: no queued artifact repairs and no media records waiting for sidecar repair.")
 
     backups = snapshot.get("backups") or {}
     if backups:
