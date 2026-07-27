@@ -130,6 +130,8 @@ export interface SourceCollectionMatrixRow {
   detail: string | null;
   source_health_status?: string | null;
   source_health_error?: string | null;
+  source_health_last_success_at?: string | null;
+  source_health_updated_at?: string | null;
   bridge_status?: string | null;
   bridge_detail?: string | null;
   current_hour: SourceWindowCounts;
@@ -219,6 +221,8 @@ export interface MediaStats {
   health_detail?: string | null;
   source_health_status?: string | null;
   source_health_error?: string | null;
+  source_health_last_success_at?: string | null;
+  source_health_updated_at?: string | null;
   stats_stale?: boolean;
   stats_error?: string | null;
 }
@@ -891,6 +895,8 @@ export interface CollectorLiveSource {
   freshness_basis?: string | null;
   source_health_status?: string | null;
   source_health_error?: string | null;
+  source_health_last_success_at?: string | null;
+  source_health_updated_at?: string | null;
   detail?: string | null;
   bridge_status?: string | null;
   bridge_detail?: string | null;
@@ -1027,6 +1033,8 @@ export interface PlatformSummary {
   health_detail?: string | null;
   source_health_status?: string | null;
   source_health_error?: string | null;
+  source_health_last_success_at?: string | null;
+  source_health_updated_at?: string | null;
   whatsapp_bridge_health?: Record<string, unknown> | null;
 }
 

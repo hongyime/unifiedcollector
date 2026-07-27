@@ -30,6 +30,8 @@ def _source(status: str = "live", **extra):
         "detail": "newest row is inside the freshness window",
         "source_health_status": "running",
         "source_health_error": None,
+        "source_health_last_success_at": datetime(2026, 7, 28, 1, 0, tzinfo=timezone.utc),
+        "source_health_updated_at": datetime(2026, 7, 28, 1, 5, tzinfo=timezone.utc),
     }
     row.update(extra)
     return row
@@ -169,6 +171,8 @@ def test_source_matrix_row_counts_and_live_blocker():
     assert row["current_hour"]["rate_limits"] == 1
     assert row["last_24h"]["records"] == 40
     assert row["total_media_items"] == 123
+    assert row["source_health_last_success_at"] == datetime(2026, 7, 28, 1, 0, tzinfo=timezone.utc)
+    assert row["source_health_updated_at"] == datetime(2026, 7, 28, 1, 5, tzinfo=timezone.utc)
     assert row["blocker"]["kind"] == "none"
 
 

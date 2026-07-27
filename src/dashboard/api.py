@@ -599,6 +599,8 @@ def _source_matrix_row(source_row: dict, current_content: dict | None, current_r
         "detail": source_row.get("detail"),
         "source_health_status": source_row.get("source_health_status"),
         "source_health_error": source_row.get("source_health_error"),
+        "source_health_last_success_at": source_row.get("source_health_last_success_at"),
+        "source_health_updated_at": source_row.get("source_health_updated_at"),
         "bridge_status": source_row.get("bridge_status"),
         "bridge_detail": source_row.get("bridge_detail"),
         "current_hour": _merge_source_window(current_content, current_rate),

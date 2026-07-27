@@ -89,8 +89,16 @@ async def compute_liveness(conn) -> list[dict]:
     """
     health: dict[str, dict] = {}
     try:
-        for r in await conn.fetch("SELECT source, status, last_error FROM source_health"):
-            health[r["source"]] = {"status": r["status"], "last_error": r["last_error"]}
+        for r in await conn.fetch(
+            "SELECT source, status, last_error, last_success_at, updated_at FROM source_health"
+        ):
+            row = dict(r)
+            health[row["source"]] = {
+                "status": row["status"],
+                "last_error": row["last_error"],
+                "last_success_at": row.get("last_success_at"),
+                "updated_at": row.get("updated_at"),
+            }
     except Exception:
         pass
 
@@ -133,6 +141,8 @@ async def compute_liveness(conn) -> list[dict]:
             "freshness_basis": FRESHNESS_BASIS.get(name),
             "source_health_status": hs,
             "source_health_error": h_error,
+            "source_health_last_success_at": h.get("last_success_at"),
+            "source_health_updated_at": h.get("updated_at"),
             "detail": detail,
         })
     return out

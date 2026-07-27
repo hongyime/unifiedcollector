@@ -9,6 +9,8 @@ class FakeConn:
                     "source": "website",
                     "status": "degraded",
                     "last_error": "stale 123s - watchdog in cooldown",
+                    "last_success_at": "2026-07-28T01:00:00Z",
+                    "updated_at": "2026-07-28T01:05:00Z",
                 }
             ]
         raise AssertionError(query)
@@ -45,6 +47,8 @@ async def test_compute_liveness_includes_collection_mode_basis_and_reason(monkey
     assert by_source["website"]["status"] == "stale"
     assert by_source["website"]["source_health_status"] == "degraded"
     assert by_source["website"]["source_health_error"] == "stale 123s - watchdog in cooldown"
+    assert by_source["website"]["source_health_last_success_at"] == "2026-07-28T01:00:00Z"
+    assert by_source["website"]["source_health_updated_at"] == "2026-07-28T01:05:00Z"
 
 
 @pytest.mark.asyncio
