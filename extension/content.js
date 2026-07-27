@@ -167,6 +167,41 @@ function deepCollectMedia(obj, sink, entity, depth = 0) {
     const url = vid.downloadAddr || vid.playAddr || vid.PlayAddr;
     if (typeof url === "string") sink.add({ content_id: String(obj.id || obj.awemeId || url), content_type: "video", url, entity_name: entity });
   }
+  // cover/poster node (tiktok). TikTok video CDN URLs are often short-lived
+  // and cookie-bound when fetched server-side; cover images survive much more
+  // reliably and still preserve the post as media evidence.
+  const coverSources = [
+    obj.cover,
+    obj.originCover,
+    obj.dynamicCover,
+    obj.video && obj.video.cover,
+    obj.video && obj.video.originCover,
+    obj.video && obj.video.dynamicCover,
+    obj.Video && obj.Video.cover,
+    obj.Video && obj.Video.originCover,
+    obj.Video && obj.Video.dynamicCover,
+  ];
+  coverSources.forEach((cover, i) => {
+    const u = typeof cover === "string"
+      ? cover
+      : cover && (
+          (cover.urlList && cover.urlList[0]) ||
+          (cover.url_list && cover.url_list[0]) ||
+          cover.url ||
+          cover.imageUrl ||
+          cover.image_url
+        );
+    if (typeof u === "string" && /^https?:/.test(u)) {
+      sink.add({
+        content_id: String(obj.id || obj.awemeId || obj.postId || u) + "_cover_" + i,
+        content_type: "photo",
+        url: u,
+        entity_name: entity,
+        kind: "post",
+        meta: { tiktok_asset_role: "cover" },
+      });
+    }
+  });
   // image post (tiktok photo mode / lemon8)
   const imgs = (obj.imagePost && obj.imagePost.images) || obj.images || obj.imageList || obj.imageInfo;
   if (Array.isArray(imgs)) {
@@ -758,6 +793,34 @@ const tiktok = {
     document.querySelectorAll("video").forEach((v, i) => {
       const u = v.src || (v.querySelector("source") && v.querySelector("source").src);
       if (u && /^https?:/.test(u)) sink.add({ content_id: "dom_" + urlId(u), content_type: "video", url: u, entity_name: entity });
+      const poster = v.getAttribute("poster") || v.poster;
+      if (poster && /^https?:/.test(poster)) {
+        sink.add({
+          content_id: "poster_" + urlId(poster),
+          content_type: "photo",
+          url: poster,
+          entity_name: entity,
+          kind: "post",
+          meta: { tiktok_asset_role: "poster" },
+        });
+      }
+    });
+    document.querySelectorAll("img").forEach((im) => {
+      const u = im.currentSrc || im.src;
+      if (!u || !/^https?:/.test(u)) return;
+      if (!/tiktokcdn|tiktokv|byteimg|muscdn|p16|p19/i.test(u)) return;
+      if (/avatar|emoji|icon|logo|profile/i.test(u)) return;
+      const w = im.naturalWidth || im.width || 0;
+      const h = im.naturalHeight || im.height || 0;
+      if ((w && w < 160) || (h && h < 160)) return;
+      sink.add({
+        content_id: "img_" + urlId(u),
+        content_type: "photo",
+        url: u,
+        entity_name: entity,
+        kind: "post",
+        meta: { tiktok_asset_role: "dom_image", width: w || null, height: h || null },
+      });
     });
     if (sink.items.length) await send({ type: "ingest", platform: "tiktok", username: entity, items: sink.items });
     return { targets: 1, saved: sink.items.length, discovered: 0 };

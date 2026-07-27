@@ -518,11 +518,20 @@ async def target_status_handler(request):
 # ---------------------------------------------------------------------------
 # download + persist (generic over platform)
 # ---------------------------------------------------------------------------
-async def _download_and_save(pool, session, platform, username, item) -> bool:
+async def _download_and_save(pool, session, platform, username, item, reject_stats: dict | None = None) -> bool:
+    def _reject(reason: str, detail: str | None = None) -> bool:
+        if reject_stats is not None:
+            reject_stats[reason] = int(reject_stats.get(reason, 0)) + 1
+            if detail:
+                examples = reject_stats.setdefault("examples", {})
+                if isinstance(examples, dict) and reason not in examples:
+                    examples[reason] = detail[:180]
+        return False
+
     url = item.get("url")
     cid = str(item.get("content_id") or "")
     if not url or not cid:
-        return False
+        return _reject("missing_url_or_content_id")
     # media kind: post (default) | story | highlight. Stories/highlights live in
     # their own subtree and get a namespaced content_id so they never collide with
     # a feed post that happens to share an id.
@@ -571,7 +580,7 @@ async def _download_and_save(pool, session, platform, username, item) -> bool:
                 "SELECT 1 FROM media_items WHERE source=$1 AND content_id=$2", platform, store_cid
             )
         if seen:
-            return False
+            return _reject("duplicate_content_id")
 
         try:
             assert_media_write_allowed(
@@ -580,11 +589,11 @@ async def _download_and_save(pool, session, platform, username, item) -> bool:
             )
         except RuntimeError as exc:
             await _record_vault_pause(str(exc))
-            return False
+            return _reject("vault_unavailable", str(exc))
 
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=60)) as r:
             if r.status != 200:
-                return False
+                return _reject("http_status", str(r.status))
             ct_header = r.headers.get("content-type")
             data = await r.read()
 
@@ -593,7 +602,7 @@ async def _download_and_save(pool, session, platform, username, item) -> bool:
         ok, ext, mtype, reason = inspect_media(data, ct_header)
         if not ok:
             logger.debug("reject %s %s: %s", platform, store_cid, reason)
-            return False
+            return _reject("invalid_media", reason)
         sha = hashlib.sha256(data).hexdigest()
         # CONTENT DEDUP: if these exact bytes are already stored for this source
         # (e.g. the same For-You image re-scraped under a different DOM content_id),
@@ -601,7 +610,7 @@ async def _download_and_save(pool, session, platform, username, item) -> bool:
         # re-scrape duplication. Needs the (source, sha256) index for speed.
         async with pool.acquire() as conn:
             if await conn.fetchval("SELECT 1 FROM media_items WHERE source=$1 AND sha256=$2 LIMIT 1", platform, sha):
-                return False
+                return _reject("duplicate_sha256")
         ctype = "video" if mtype == "video" else ("pdf" if mtype == "pdf" else "photo")
         # Flat layout: /<platform>/account_<user>/<ctype>/  — kind + date live in the
         # filename: <YYYYMMDD>_<platform>_<user>_<kindtag><cid>.<ext> (sortable by date).
@@ -611,7 +620,7 @@ async def _download_and_save(pool, session, platform, username, item) -> bool:
             assert_media_write_allowed(dest, media_root=MEDIA_ROOT)
         except RuntimeError as exc:
             await _record_vault_pause(str(exc))
-            return False
+            return _reject("vault_unavailable", str(exc))
 
         # caption + likes/comments/views/location come along free from the scrape
         meta = item.get("meta") or {}
@@ -641,7 +650,7 @@ async def _download_and_save(pool, session, platform, username, item) -> bool:
         )
         if artifact.path is None:
             await _record_vault_pause(artifact.error or "artifact write failed")
-            return False
+            return _reject("artifact_write_failed", artifact.error or "artifact write failed")
         stored_path = artifact.path
         meta_obj["vault_artifact"] = {
             "ok": artifact.ok,
@@ -782,18 +791,19 @@ async def _download_and_save(pool, session, platform, username, item) -> bool:
         return True
     except Exception:
         logger.debug("save failed platform=%s cid=%s", platform, cid, exc_info=True)
-        return False
+        return _reject("exception")
 
 
 async def _drain(app, platform, username, items):
     """Background download worker — bounded concurrency, never blocks the POST."""
     pool, session, sem = app["pool"], app["session"], app["sem"]
     saved = 0
+    reject_stats: dict = {}
 
     async def one(it):
         nonlocal saved
         async with sem:
-            if await _download_and_save(pool, session, platform, username, it):
+            if await _download_and_save(pool, session, platform, username, it, reject_stats):
                 saved += 1
 
     await asyncio.gather(*(one(it) for it in items), return_exceptions=True)
@@ -804,6 +814,7 @@ async def _drain(app, platform, username, items):
         username,
         observed_count=len(items),
         stored_count=saved,
+        metadata={"reject_stats": reject_stats} if reject_stats else None,
     )
     if platform == "instagram":
         try:
