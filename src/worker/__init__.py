@@ -522,6 +522,11 @@ class WorkerService:
         # Reset the progress baseline to THIS collector's counter (a fresh
         # instance starts at 0) so a relaunch doesn't inherit a stale streak.
         self._progress_baseline[source] = collector.progress_count
+        # Same reset for the watchdog's source_health heartbeat. Without this,
+        # a fresh collector with progress_count=0 can be compared against the
+        # previous collector instance's larger progress total, so real progress
+        # stops refreshing last_success_at until it surpasses that old value.
+        self._last_success_progress[source] = collector.progress_count
         self._zero_progress_streak[source] = 0
 
         while not self._stop.is_set():

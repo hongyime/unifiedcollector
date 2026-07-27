@@ -40,6 +40,10 @@ async def fetch_strava_route_capture_queue(
         recent_visit_hours = int(os.getenv("STRAVA_BROWSER_ROUTE_VISIT_TTL_HOURS", "6"))
     limit = max(1, min(int(limit or 5), 25))
     recent_visit_hours = max(1, min(int(recent_visit_hours or 6), 72))
+    candidate_limit = max(
+        limit,
+        min(int(os.getenv("STRAVA_BROWSER_ROUTE_QUEUE_CANDIDATE_LIMIT", "300")), 10000),
+    )
     account = str(account or "").strip() or None
 
     async with pool.acquire() as conn:
@@ -82,6 +86,43 @@ async def fetch_strava_route_capture_queue(
 
         rows = await conn.fetch(
             """
+            WITH candidates AS MATERIALIZED (
+                SELECT a.id,
+                       a.platform_activity_id,
+                       a.name,
+                       a.type,
+                       a.sport_type,
+                       a.start_date,
+                       a.start_latlng,
+                       a.stream_status,
+                       a.athlete_id
+                FROM strava_activities a
+                LEFT JOIN strava_gps_streams s ON s.activity_id = a.id
+                WHERE (a.summary_polyline IS NULL OR a.summary_polyline = '')
+                  AND COALESCE(a.stream_status, '') NOT IN ('ok', 'incomplete', 'truncated_empty', 'ok_unverifiable')
+                  AND (
+                        s.latlng IS NULL
+                     OR s.latlng = '[]'::jsonb
+                     OR s.latlng = 'null'::jsonb
+                     OR CASE
+                          WHEN jsonb_typeof(s.latlng) = 'array' THEN jsonb_array_length(s.latlng) <= 1
+                          ELSE TRUE
+                        END
+                  )
+                  AND lower(COALESCE(a.sport_type, a.type, '')) NOT IN (
+                        'crossfit', 'elliptical', 'hiit', 'pilates',
+                        'stairstepper', 'weighttraining', 'workout', 'yoga'
+                  )
+                  AND lower(COALESCE(a.sport_type, a.type, '')) NOT LIKE 'virtual%'
+                  AND lower(COALESCE(a.sport_type, a.type, '')) NOT LIKE 'indoor%'
+                  AND (
+                        a.start_latlng IS NOT NULL
+                     OR lower(COALESCE(a.sport_type, a.type, '')) ~
+                        '(run|ride|walk|hike|trail|bike|cycle|ski|snowboard|kayak|canoe|row|paddle|surf|sail|skate|wheelchair|velomobile)'
+                  )
+                ORDER BY a.start_date DESC NULLS LAST, a.platform_activity_id DESC
+                LIMIT $3
+            )
             SELECT a.platform_activity_id,
                    a.name,
                    a.type,
@@ -94,9 +135,8 @@ async def fetch_strava_route_capture_queue(
                    COALESCE(prox.tier, 9)::int AS proximity_tier,
                    COALESCE(target.priority, 0)::int AS target_priority,
                    recent_visit.created_at AS last_browser_visit_at
-            FROM strava_activities a
+            FROM candidates a
             LEFT JOIN strava_athletes ath ON ath.id = a.athlete_id
-            LEFT JOIN strava_gps_streams s ON s.activity_id = a.id
             LEFT JOIN LATERAL (
                 SELECT MIN(ap.tier) AS tier
                 FROM account_proximity_cache ap
@@ -118,31 +158,9 @@ async def fetch_strava_route_capture_queue(
                   AND bie.endpoint = 'strava_route_visit'
                   AND bie.subject = a.platform_activity_id::text
             ) recent_visit ON TRUE
-            WHERE (a.summary_polyline IS NULL OR a.summary_polyline = '')
-              AND COALESCE(a.stream_status, '') NOT IN ('ok', 'incomplete', 'truncated_empty', 'ok_unverifiable')
-              AND (
-                    s.latlng IS NULL
-                 OR s.latlng = '[]'::jsonb
-                 OR s.latlng = 'null'::jsonb
-                 OR CASE
-                      WHEN jsonb_typeof(s.latlng) = 'array' THEN jsonb_array_length(s.latlng) <= 1
-                      ELSE TRUE
-                    END
-              )
-              AND (
+            WHERE (
                     recent_visit.created_at IS NULL
                  OR recent_visit.created_at < now() - ($2::int * INTERVAL '1 hour')
-              )
-              AND lower(COALESCE(a.sport_type, a.type, '')) NOT IN (
-                    'crossfit', 'elliptical', 'hiit', 'pilates',
-                    'stairstepper', 'weighttraining', 'workout', 'yoga'
-              )
-              AND lower(COALESCE(a.sport_type, a.type, '')) NOT LIKE 'virtual%'
-              AND lower(COALESCE(a.sport_type, a.type, '')) NOT LIKE 'indoor%'
-              AND (
-                    a.start_latlng IS NOT NULL
-                 OR lower(COALESCE(a.sport_type, a.type, '')) ~
-                    '(run|ride|walk|hike|trail|bike|cycle|ski|snowboard|kayak|canoe|row|paddle|surf|sail|skate|wheelchair|velomobile)'
               )
             ORDER BY
                 CASE WHEN prox.tier IN (1, 2) THEN 0 ELSE 1 END,
@@ -155,6 +173,7 @@ async def fetch_strava_route_capture_queue(
             """,
             limit,
             recent_visit_hours,
+            candidate_limit,
         )
 
     return {

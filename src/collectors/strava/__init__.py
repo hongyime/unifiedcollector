@@ -1092,6 +1092,7 @@ class StravaCollector(BaseCollector):
                         continue
                     try:
                         await self._upsert_activity(norm, athlete_id)
+                        self._progress_count += 1
                         total += 1
                     except Exception as e:
                         logger.warning("strava: upsert activity %s failed: %s", norm.get("id"), e)
@@ -1396,6 +1397,7 @@ class StravaCollector(BaseCollector):
             for activity in activities:
                 if self._stop.is_set(): break
                 await self._upsert_activity(activity, aid)
+                self._progress_count += 1
                 # MEDIA/MAP FILTER (Bryan): only spider/collect media from activities
                 # that carry photos or a map/GPS polyline. The activity row is still
                 # upserted above (metadata); we just skip the media-collection work.
@@ -2248,8 +2250,9 @@ class StravaCollector(BaseCollector):
                                    VALUES ($1, $2, NOW())
                                    ON CONFLICT (platform_athlete_id) DO NOTHING""",
                                 int(aoid), norm.get("_athlete_name") or str(aoid),
-                            )
+                        )
                         await self._upsert_activity(norm, str(aoid))
+                        self._progress_count += 1
                     except Exception as e:
                         logger.warning("strava feed: upsert activity %s failed: %s", aid, e)
 
@@ -2435,8 +2438,9 @@ class StravaCollector(BaseCollector):
                                    ON CONFLICT (platform_athlete_id) DO NOTHING""",
                                 athlete_id_int,
                                 athlete_name,
-                            )
+                        )
                         await self._upsert_activity(norm, str(athlete_id_int))
+                        self._progress_count += 1
                         page_kept += 1
                     except Exception as e:
                         logger.warning(
@@ -2718,6 +2722,7 @@ class StravaCollector(BaseCollector):
                     # Upsert activity with polyline
                     try:
                         await self._upsert_activity(parsed, athlete_id)
+                        self._progress_count += 1
                         # Update polyline separately if present
                         if parsed.get("_polyline"):
                             logger.info("strava history: polyline found for activity %s (%d chars)",
@@ -3919,6 +3924,8 @@ class StravaCollector(BaseCollector):
                                        entry["athlete_id"], e)
                 logger.info("strava roster: page %d -> %d athletes (running seeded=%d)",
                             page, len(discovered), seeded)
+                if new_this_page:
+                    self._progress_count += new_this_page
                 if new_this_page == 0:
                     no_growth_pages += 1
                     if no_growth_pages >= 2:
