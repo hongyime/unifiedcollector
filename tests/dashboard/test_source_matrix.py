@@ -4,10 +4,18 @@ from datetime import datetime, timedelta, timezone
 
 import os
 
+import pytest
+
 os.environ.setdefault("DASHBOARD_JWT_SECRET", "test-secret-only-for-pytest-do-not-use")
 os.environ.setdefault("DASHBOARD_ADMIN_PASSWORD", "x")
 
-from src.dashboard.api import _rate_limit_cursor_payload, _source_matrix_blocker, _source_matrix_row
+from src.dashboard.api import (
+    _SOURCE_MEDIA_TOTALS_CACHE,
+    _rate_limit_cursor_payload,
+    _source_matrix_blocker,
+    _source_matrix_row,
+    _source_media_totals,
+)
 
 
 def _source(status: str = "live", **extra):
@@ -116,3 +124,29 @@ def test_source_matrix_row_counts_and_live_blocker():
     assert row["last_24h"]["records"] == 40
     assert row["total_media_items"] == 123
     assert row["blocker"]["kind"] == "none"
+
+
+class _MediaTotalsConn:
+    async def fetchval(self, *_args, **_kwargs):
+        return ["media_source_rollups", "media_items"]
+
+    async def fetch(self, query, *_args, **_kwargs):
+        assert "media_source_rollups" in query
+        assert "FROM media_items" not in query
+        return [
+            {
+                "source": "instagram",
+                "total_media_items": 12,
+                "total_media_bytes": 34,
+                "latest_media_at": datetime(2026, 7, 28, tzinfo=timezone.utc),
+            }
+        ]
+
+
+@pytest.mark.asyncio
+async def test_source_media_totals_prefers_rollup_table():
+    _SOURCE_MEDIA_TOTALS_CACHE.clear()
+
+    out = await _source_media_totals(_MediaTotalsConn())
+
+    assert out["instagram"]["total_media_items"] == 12

@@ -321,7 +321,23 @@ async def _source_media_totals(conn) -> dict[str, dict]:
     cache_age = time.time() - float(_SOURCE_MEDIA_TOTALS_CACHE.get("ts") or 0)
     if cached_rows is not None and cache_age < _SOURCE_MEDIA_TOTALS_TTL_SECONDS:
         return cached_rows  # type: ignore[return-value]
-    if "media_items" not in await _existing_public_tables(conn, ["media_items"]):
+    existing = await _existing_public_tables(conn, ["media_source_rollups", "media_items"])
+    if "media_source_rollups" in existing:
+        rows = await conn.fetch(
+            """
+            SELECT source,
+                   total_media_items,
+                   total_media_bytes,
+                   latest_media_at
+            FROM media_source_rollups
+            ORDER BY source
+            """,
+            timeout=8,
+        )
+        out = {row["source"]: dict(row) for row in rows}
+        _SOURCE_MEDIA_TOTALS_CACHE.update({"ts": time.time(), "rows": out})
+        return out
+    if "media_items" not in existing:
         return {}
     try:
         rows = await conn.fetch(
