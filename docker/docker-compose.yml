@@ -705,7 +705,7 @@ services:
       DB_POOL_MAX_SIZE: "4"
       # Operator status compares live Chrome hook heartbeats against this repo
       # extension build. Update with extension/manifest.json version bumps.
-      UC_EXTENSION_EXPECTED_VERSION: "1.21.31"
+      UC_EXTENSION_EXPECTED_VERSION: "1.21.32"
     volumes:
       - z:/unifiedcollector/media:/media
       - z:/unifiedcollector:/vault

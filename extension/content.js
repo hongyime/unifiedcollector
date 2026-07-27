@@ -861,12 +861,15 @@ const lemon8 = {
 // fetches and the home feed can load before the hook installs). Each <article> has
 // a permalink (author + id), tweetText, and a [role=group] whose aria-label carries
 // the full counts ("13 replies, 4 reposts, 88 likes, 9,000 views").
-function harvestXPosts(entity) {
+function harvestXPosts(entity, feed) {
   const posts = [];
   document.querySelectorAll('article[data-testid="tweet"], article[role="article"]').forEach((art) => {
     try {
       const link = art.querySelector('a[href*="/status/"]');
-      const m = link && (link.getAttribute("href") || "").match(/^\/([A-Za-z0-9_]{1,20})\/status\/(\d+)/);
+      const href = (link && (link.getAttribute("href") || ""))
+        .replace(/^https?:\/\/(?:www\.)?(?:x\.com|twitter\.com)/i, "")
+        .split("?")[0];
+      const m = href.match(/^\/([A-Za-z0-9_]{1,20})\/status\/(\d+)/);
       if (!m) return;
       const author = m[1], pid = m[2];
       const textEl = art.querySelector('[data-testid="tweetText"]');
@@ -874,13 +877,17 @@ function harvestXPosts(entity) {
       const grp = art.querySelector('[role="group"][aria-label]');
       const al = grp ? (grp.getAttribute("aria-label") || "") : "";
       const num = (re) => { const x = al.match(re); return x ? parseInt(x[1].replace(/[,.\s]/g, ""), 10) : null; };
+      const timeEl = art.querySelector("time[datetime]");
+      const takenAtMs = timeEl ? Date.parse(timeEl.getAttribute("datetime") || "") : NaN;
       posts.push({
         platform_post_id: pid, author_username: author, caption: caption || null,
         comments_count: num(/([\d,.]+)\s+repl/i), reposts_count: num(/([\d,.]+)\s+repost/i),
         likes_count: num(/([\d,.]+)\s+like/i), views_count: num(/([\d,.]+)\s+view/i),
         media_type: "tweet",
+        taken_at: Number.isFinite(takenAtMs) ? Math.floor(takenAtMs / 1000) : null,
         hashtags: caption ? (caption.match(/#[\w]+/g) || []).map((s) => s.slice(1)) : [],
         mentions: caption ? (caption.match(/@[\w]+/g) || []).map((s) => s.slice(1)) : [],
+        metadata: { source: "x_dom_tweet", feed, url: "https://x.com" + href },
       });
     } catch (e) {}
   });
@@ -1011,7 +1018,7 @@ const x = {
       }
     }
     // post engagement (the x_posts gap) — DOM-harvested, hook-independent.
-    const xposts = harvestXPosts(feed);
+    const xposts = harvestXPosts(entity, feed);
     if (xposts.length) {
       await send({ type: "posts", platform: "x", username: feed, posts: xposts });
       clog("info", `X ${feed}: ${xposts.length} tweet(s) w/ counts`, "x");
