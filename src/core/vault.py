@@ -278,17 +278,24 @@ async def vault_artifact_counts(conn, *, timeout: float | None = 10.0) -> dict[s
              AND error_message LIKE 'vault sidecar write failed:%') AS artifacts_queued,
           (SELECT COUNT(*)::int
            FROM media_items
-           WHERE (
-             metadata ? 'vault_sidecar'
-             AND metadata->'vault_sidecar'->>'ok' = 'false'
-           ) OR (
-             metadata ? 'vault_artifact'
+           WHERE COALESCE(metadata->'vault_artifact'->>'quarantined', 'false') <> 'true'
              AND (
-               metadata->'vault_artifact'->>'ok' = 'false'
-               OR metadata->'vault_artifact'->>'sidecar_ok' = 'false'
-               OR metadata->'vault_artifact'->>'partial' = 'true'
-             )
-           )) AS artifacts_partial,
+               (
+                 metadata ? 'vault_sidecar'
+                 AND metadata->'vault_sidecar'->>'ok' = 'false'
+               ) OR (
+                 metadata ? 'vault_artifact'
+                 AND (
+                   metadata->'vault_artifact'->>'ok' = 'false'
+                   OR metadata->'vault_artifact'->>'sidecar_ok' = 'false'
+                   OR metadata->'vault_artifact'->>'partial' = 'true'
+                 )
+               )
+             )) AS artifacts_partial,
+          (SELECT COUNT(*)::int
+           FROM media_items
+           WHERE metadata ? 'vault_artifact'
+             AND metadata->'vault_artifact'->>'quarantined' = 'true') AS artifacts_quarantined,
           (SELECT COALESCE(
              (
                SELECT CASE
@@ -307,6 +314,7 @@ async def vault_artifact_counts(conn, *, timeout: float | None = 10.0) -> dict[s
         "sidecar_failures": int(row["sidecar_failures"] or 0),
         "artifacts_queued": int(row["artifacts_queued"] or 0),
         "artifacts_partial": int(row["artifacts_partial"] or 0),
+        "artifacts_quarantined": int(row["artifacts_quarantined"] or 0),
         "artifacts_missing_sidecar": int(row["artifacts_missing_sidecar"] or 0),
         "artifacts_missing_sidecar_estimated": True,
     }

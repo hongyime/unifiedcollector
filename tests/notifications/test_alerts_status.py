@@ -163,6 +163,7 @@ async def test_notify_status_splits_rate_limit_from_auth_events(monkeypatch):
             "free_bytes": 1024,
             "artifacts_queued": 0,
             "artifacts_partial": 0,
+            "artifacts_quarantined": 0,
             "artifacts_missing_sidecar": 0,
             "artifacts_missing_sidecar_estimated": True,
             "sidecar_failures": 0,

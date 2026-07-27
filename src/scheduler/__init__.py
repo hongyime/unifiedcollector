@@ -632,6 +632,7 @@ class Scheduler:
                         "sidecar_failures": 0,
                         "artifacts_queued": 0,
                         "artifacts_partial": 0,
+                        "artifacts_quarantined": 0,
                         "error": str(exc),
                     }
 

@@ -575,18 +575,21 @@ async def test_vault_artifact_counts_checks_both_sidecar_metadata_shapes():
             assert "vault_artifact" in query
             assert "sidecar_ok" in query
             assert "partial" in query
+            assert "quarantined" in query
             assert "idx_media_missing_occurrence_sidecar" in query
             assert "to_regclass" in query
             return {
                 "sidecar_failures": 0,
                 "artifacts_queued": 0,
                 "artifacts_partial": 2,
+                "artifacts_quarantined": 1,
                 "artifacts_missing_sidecar": 3,
             }
 
     counts = await vault.vault_artifact_counts(Conn())
 
     assert counts["artifacts_partial"] == 2
+    assert counts["artifacts_quarantined"] == 1
     assert counts["artifacts_missing_sidecar"] == 3
     assert counts["artifacts_missing_sidecar_estimated"] is True
 

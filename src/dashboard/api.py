@@ -154,6 +154,7 @@ def _vault_payload() -> dict:
         "sidecar_failures": 0,
         "artifacts_queued": 0,
         "artifacts_partial": 0,
+        "artifacts_quarantined": 0,
         "artifacts_missing_sidecar": 0,
         "artifacts_missing_sidecar_estimated": False,
     }
@@ -1131,6 +1132,8 @@ async def metrics():
                      "Vault sidecar dead-letter queue rows", "gauge")
                 emit("uc_vault_artifacts_partial", vault["artifacts_partial"],
                      "Media rows with failed vault sidecar metadata", "gauge")
+                emit("uc_vault_artifacts_quarantined", vault.get("artifacts_quarantined", 0),
+                     "Media rows with reviewed bad vault artifacts excluded from active partial health", "gauge")
                 emit("uc_vault_artifacts_missing_sidecar_estimate", vault.get("artifacts_missing_sidecar", 0),
                      "Estimated media rows with no successful occurrence sidecar metadata", "gauge")
             except Exception:
