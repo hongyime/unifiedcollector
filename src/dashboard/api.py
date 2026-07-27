@@ -3390,7 +3390,12 @@ async def whatsapp_qr(bridge: str):
             import base64
             import io
 
-            import qrcode  # noqa: PLC0415
+            try:
+                import qrcode  # noqa: PLC0415
+            except Exception as qr_exc:  # noqa: BLE001
+                out["status"] = "qr_renderer_missing"
+                out["error"] = f"dashboard QR renderer missing: {qr_exc}"
+                return out
 
             buf = io.BytesIO()
             qrcode.make(raw_qr).save(buf, "PNG")
@@ -3474,6 +3479,12 @@ async def whatsapp_disconnect(bridge: str, _user: dict = Depends(require_role("v
 async def whatsapp_reconnect(bridge: str, _user: dict = Depends(require_role("viewer"))):
     """Soft-reconnect a wa-bridge (keeps creds — no re-scan)."""
     return await _wa_bridge_post(bridge, "reconnect")
+
+
+@app.post("/whatsapp/{bridge}/fresh-qr")
+async def whatsapp_fresh_qr(bridge: str, _user: dict = Depends(require_role("viewer"))):
+    """Clear local bridge auth and restart into QR-pairing mode."""
+    return await _wa_bridge_post(bridge, "fresh-qr")
 
 
 @app.get("/whatsapp/link")

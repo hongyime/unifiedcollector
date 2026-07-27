@@ -901,7 +901,7 @@ services:
       rabbitmq:
         condition: service_started
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3001/health"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3001/livez"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -933,7 +933,7 @@ services:
       rabbitmq:
         condition: service_started
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3001/health"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3001/livez"]
       interval: 10s
       timeout: 5s
       retries: 3

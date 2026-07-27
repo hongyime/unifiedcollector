@@ -284,11 +284,12 @@ export const api = {
 
   // WhatsApp bridge QR linking (auto-refresh on the client)
   waQr: (bridge: 1 | 2) =>
-    get<{ bridge: string; status: string; qr: string; ready: boolean; error: string | null }>(
+    get<{ bridge: string; status: string; qr: string; ready: boolean; error: string | null; qr_available?: boolean; last_qr_at?: string | null }>(
       `/whatsapp/qr/${bridge}`
     ),
   waDisconnect: (bridge: 1 | 2) => post<{ bridge: string; ok: boolean; status?: string; error?: string }>(`/whatsapp/${bridge}/disconnect`, {}),
   waReconnect: (bridge: 1 | 2) => post<{ bridge: string; ok: boolean; status?: string; error?: string }>(`/whatsapp/${bridge}/reconnect`, {}),
+  waFreshQr: (bridge: 1 | 2) => post<{ bridge: string; ok: boolean; status?: string; warning?: string; error?: string }>(`/whatsapp/${bridge}/fresh-qr`, {}),
 
   // Per-bridge session identity (phone number, push name, connected state).
   // Populated after a QR scan so the Link page can show WHICH account is on

@@ -80,7 +80,7 @@ function saveWatermarks(): void {
     }
 }
 
-export function registerHistoryHandler(sock: WASocket): void {
+export function registerHistoryHandler(sock: WASocket, canFetchHistory?: () => boolean): void {
     loadWatermarks();
     currentSock = sock;  // always track the live socket (reconnects recreate it)
 
@@ -128,6 +128,26 @@ export function registerHistoryHandler(sock: WASocket): void {
         backfillInterval = setInterval(async () => {
             const sk = currentSock;
             if (!sk) return;  // no live socket yet
+            const readyForHistory =
+                (canFetchHistory ? canFetchHistory() : true) &&
+                Boolean((sk as any)?.authState?.creds?.registered);
+            if (!readyForHistory) {
+                // The interval survives reconnects. If the socket is currently
+                // unpaired or waiting for a QR scan, do not call
+                // fetchMessageHistory(): Baileys throws "Not authenticated",
+                // which used to create thousands of retry warnings and could
+                // starve the bridge's HTTP endpoints while the user was trying
+                // to scan the QR.
+                let dirty = false;
+                for (const wm of Object.values(watermarks)) {
+                    if (wm.pendingSince) {
+                        wm.pendingSince = undefined;
+                        dirty = true;
+                    }
+                }
+                if (dirty) saveWatermarks();
+                return;
+            }
             const nowMs = Date.now();
             // Retire chats whose in-flight request made no progress (exhausted), and
             // chats that reached the configured depth.
@@ -174,7 +194,12 @@ export function registerHistoryHandler(sock: WASocket): void {
                     // transient (socket reconnecting / rate limit) — DON'T mark the
                     // chat exhausted; just clear the in-flight flag and retry later.
                     pickWm.pendingSince = undefined;
-                    logger.warn({ err: (err as Error)?.message, jid: pickJid }, 'on-demand fetch failed (will retry)');
+                    const message = (err as Error)?.message || '';
+                    if (/not authenticated/i.test(message)) {
+                        logger.debug({ jid: pickJid }, 'on-demand fetch skipped while unauthenticated');
+                    } else {
+                        logger.warn({ err: message, jid: pickJid }, 'on-demand fetch failed (will retry)');
+                    }
                 }
             }
         }, Math.max(1500, Math.floor(60000 / reqPerMin)));

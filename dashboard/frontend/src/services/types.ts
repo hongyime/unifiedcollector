@@ -525,6 +525,10 @@ export interface WaBridgeSession {
   ok: boolean;                  // false when the bridge itself is unreachable
   error?: string;
   connected?: boolean;          // bridge paired AND socket open
+  status?: string | null;       // ready, awaiting_scan, connecting, etc.
+  registered?: boolean;         // Baileys has valid local creds
+  qr_available?: boolean;       // bridge currently has a scannable QR payload
+  last_qr_at?: string | null;   // ISO timestamp of newest QR
   session_name?: string | null; // bridge slot label from env (e.g. "session_1")
   wid?: string | null;          // full JID e.g. 6591234567:12@s.whatsapp.net
   phone_number?: string | null; // just the digits

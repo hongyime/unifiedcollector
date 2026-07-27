@@ -40,6 +40,13 @@ function BridgeCard({ bridge }: { bridge: 1 | 2 }) {
     mutationFn: () => api.waReconnect(bridge),
     onSuccess: (r) => { setMsg(r.ok ? "Reconnecting (keeping session)…" : `Failed: ${r.error}`); refresh(); },
   });
+  const freshQr = useMutation({
+    mutationFn: () => api.waFreshQr(bridge),
+    onSuccess: (r) => {
+      setMsg(r.ok ? "Fresh QR requested. Leave this panel open for the next code." : `Failed: ${r.error}`);
+      refresh();
+    },
+  });
 
   const ready = data?.ready;
   const status = data?.status ?? "loading";
@@ -70,17 +77,28 @@ function BridgeCard({ bridge }: { bridge: 1 | 2 }) {
           <span className="text-text-muted text-sm">Loading&hellip;</span>
         )}
       </div>
-      <p className="mt-3 text-center text-sm">
+      <p className="mt-3 text-center text-sm min-h-[20px]">
         {ready ? (
           <span className="text-success font-semibold">Connected</span>
         ) : status === "unreachable" ? (
           <span className="text-danger">Bridge unreachable</span>
+        ) : status === "qr_renderer_missing" ? (
+          <span className="text-danger">Dashboard QR renderer missing</span>
         ) : qrSrc ? (
-          <span className="text-text-muted">Waiting for scan&hellip; (auto-refreshing)</span>
+          <span className="text-text-muted">Scan this code now. It refreshes automatically.</span>
+        ) : status === "connecting_unpaired" || status === "connecting" ? (
+          <span className="text-text-muted">Bridge is starting. A QR should appear shortly.</span>
+        ) : status === "fresh_qr_requested" || status === "auth_cleared" ? (
+          <span className="text-text-muted">Fresh QR requested. Waiting for the new code.</span>
         ) : (
           <span className="text-text-muted">{status}&hellip;</span>
         )}
       </p>
+      {data?.last_qr_at && !ready && (
+        <p className="mt-1 text-center text-[11px] text-text-muted">
+          QR issued {new Date(data.last_qr_at).toLocaleTimeString()}
+        </p>
+      )}
 
       {/* Session identity — surfaces the paired account (phone + WhatsApp
           display name) so we can tell WHICH account is on WHICH bridge slot.
@@ -112,6 +130,12 @@ function BridgeCard({ bridge }: { bridge: 1 | 2 }) {
           className="text-xs px-2.5 py-1 rounded-md border border-border text-text-secondary hover:bg-white/5 disabled:opacity-50"
           title="Soft reconnect — keeps the session, no re-scan"
         >{reconnect.isPending ? "…" : "Reconnect"}</button>
+        <button
+          onClick={() => freshQr.mutate()}
+          disabled={freshQr.isPending}
+          className="text-xs px-2.5 py-1 rounded-md border border-border text-text-secondary hover:bg-white/5 disabled:opacity-50"
+          title="Clear local auth and request a fresh QR"
+        >{freshQr.isPending ? "…" : "Fresh QR"}</button>
         <button
           onClick={() => { if (confirm(`Unpair Bridge ${bridge}? You'll need to scan a new QR to re-link.`)) disconnect.mutate(); }}
           disabled={disconnect.isPending}

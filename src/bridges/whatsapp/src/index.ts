@@ -2,7 +2,7 @@
 //
 // Connects to WhatsApp via Baileys, registers event handlers that publish
 // normalized events to the RabbitMQ 'whatsapp.events' topic exchange, and
-// exposes a /health endpoint for the Docker healthcheck.
+// exposes liveness/readiness endpoints for Docker + dashboard status.
 //
 // Session auth is loaded from AUTH_STORAGE_PATH (mounted from host
 // sessions/whatsapp/<account>). syncFullHistory defaults ON so historical
@@ -42,29 +42,58 @@ let retryCount = 0;
 let isFirstConnect = true;
 let cachedVersion: [number, number, number] | null = null;
 let latestQr: string | null = null;
+let latestQrAt: number | null = null;
+let connectionState = 'starting';
+let socketRegistered = false;
+let lastDisconnectStatusCode: number | null = null;
+let lastDisconnectReason: string | null = null;
+let terminalQrPrinted = false;
 
 let stream515: number[] = [];
 const MAX_RAPID_515 = 3;
 const WINDOW_515_MS = 60_000;
 
+function bridgeState() {
+    const user = activeSock?.user || null;
+    const wid: string | null = user?.id || null;
+    const phone_number = wid ? wid.split(':')[0].split('@')[0] : null;
+    return {
+        status: serviceHealthy ? 'ready' : (latestQr ? 'awaiting_scan' : connectionState),
+        whatsapp_ready: serviceHealthy,
+        connected: serviceHealthy,
+        registered: socketRegistered,
+        qr_available: Boolean(latestQr),
+        last_qr_at: latestQrAt ? new Date(latestQrAt).toISOString() : null,
+        session_name: process.env.SESSION_NAME || 'default',
+        wid,
+        phone_number,
+        push_name: user?.name || user?.notify || null,
+        last_disconnect_status_code: lastDisconnectStatusCode,
+        last_disconnect_reason: lastDisconnectReason,
+    };
+}
+
+app.get('/livez', (_req, res) => {
+    res.status(200).json({ status: 'alive', session_name: process.env.SESSION_NAME || 'default' });
+});
 app.get('/health', (_req, res) => {
-    res.status(200).json({ status: 'ok', whatsapp_ready: serviceHealthy });
+    res.status(200).json(bridgeState());
 });
 app.get('/ready', (_req, res) => {
-    res.status(serviceHealthy ? 200 : 503).json({ status: serviceHealthy ? 'ready' : 'not_ready' });
+    res.status(serviceHealthy ? 200 : 503).json(bridgeState());
 });
 app.get('/qr', (_req, res) => {
     if (serviceHealthy) {
-        res.status(200).json({ status: 'already_paired', qr: null, ready: true });
+        res.status(200).json({ ...bridgeState(), status: 'already_paired', qr: null, ready: true });
     } else if (latestQr) {
         // Return the raw wa.me QR payload. The dashboard's
         // /whatsapp/qr/{bridge} handler encodes it to a PNG data URI (via
         // Python's `qrcode` library) — keeping image encoding on the
         // dashboard side means the bridge stays a small event forwarder
         // with no extra npm deps.
-        res.status(200).json({ status: 'awaiting_scan', qr: latestQr, ready: false });
+        res.status(200).json({ ...bridgeState(), status: 'awaiting_scan', qr: latestQr, ready: false });
     } else {
-        res.status(202).json({ status: 'connecting', qr: null, ready: false });
+        res.status(202).json({ ...bridgeState(), qr: null, ready: false });
     }
 });
 
@@ -80,16 +109,7 @@ app.get('/qr', (_req, res) => {
 //                    display name if the user set one, else phone number)
 // Returns 200 always; `connected=false` when not paired yet.
 app.get('/session', (_req, res) => {
-    const user = activeSock?.user || null;
-    const wid: string | null = user?.id || null;
-    const phone_number = wid ? wid.split(':')[0].split('@')[0] : null;
-    res.status(200).json({
-        connected: serviceHealthy,
-        session_name: process.env.SESSION_NAME || 'default',
-        wid,
-        phone_number,
-        push_name: user?.name || user?.notify || null,
-    });
+    res.status(200).json(bridgeState());
 });
 
 // POST /disconnect — unpair THIS device (logout): removes it from the phone's
@@ -111,10 +131,38 @@ app.post('/disconnect', async (_req, res) => {
 // stuck-but-paired session without unpairing.
 app.post('/reconnect', (_req, res) => {
     try {
+        connectionState = 'manual_reconnect';
         activeSock?.end?.(new Error('manual reconnect'));
         res.status(200).json({ status: 'reconnecting' });
     } catch (err: any) {
         res.status(500).json({ error: err?.message || 'reconnect failed' });
+    }
+});
+
+// POST /fresh-qr — force a new pairable QR. This is intentionally stronger
+// than /reconnect: reconnect keeps creds, while fresh-qr clears local auth and
+// restarts into QR-pairing mode. Use this when a panel is stuck at connecting
+// or the phone reports the previous QR as expired.
+app.post('/fresh-qr', async (_req, res) => {
+    connectionState = 'fresh_qr_requested';
+    serviceHealthy = false;
+    socketRegistered = false;
+    latestQr = null;
+    latestQrAt = null;
+    try {
+        if (activeSock?.authState?.creds?.registered) {
+            await activeSock.logout();
+        } else {
+            clearAuthState();
+            activeSock?.end?.(new Error('manual fresh QR'));
+            setTimeout(() => connectToWhatsApp().catch((e) => logger.error({ err: e }, 'Fresh QR reconnect failed')), 1000);
+        }
+        res.status(200).json({ status: 'fresh_qr_requested' });
+    } catch (err: any) {
+        clearAuthState();
+        activeSock?.end?.(new Error('manual fresh QR after logout failure'));
+        setTimeout(() => connectToWhatsApp().catch((e) => logger.error({ err: e }, 'Fresh QR reconnect failed')), 1000);
+        res.status(200).json({ status: 'fresh_qr_requested', warning: err?.message || 'logout failed; local auth cleared' });
     }
 });
 
@@ -184,6 +232,11 @@ function clearAuthState(): void {
     const authPath = process.env.AUTH_STORAGE_PATH || `./auth_info/${getEnv('SESSION_NAME', 'default')}`;
     try {
         fs.rmSync(authPath, { recursive: true, force: true });
+        socketRegistered = false;
+        serviceHealthy = false;
+        latestQr = null;
+        latestQrAt = null;
+        connectionState = 'auth_cleared';
         logger.info({ authPath }, 'Auth state cleared');
     } catch (e) {
         logger.error({ err: e }, 'Failed to clear auth state');
@@ -269,9 +322,11 @@ async function connectToWhatsApp(): Promise<void> {
     });
 
     activeSock = sock;
+    socketRegistered = Boolean(sock.authState.creds.registered);
+    connectionState = socketRegistered ? 'connecting' : 'connecting_unpaired';
     bindStore(sock);
     registerMessagesHandler(sock);
-    registerHistoryHandler(sock);
+    registerHistoryHandler(sock, () => activeSock === sock && serviceHealthy && Boolean(sock.authState.creds.registered));
     registerContactsHandler(sock);
     registerGroupsHandler(sock);
 
@@ -289,17 +344,30 @@ async function connectToWhatsApp(): Promise<void> {
 
         if (qr) {
             latestQr = qr;
-            logger.info('QR code received -- scan with your phone:');
-            qrcode.generate(qr, { small: true });
+            latestQrAt = Date.now();
+            socketRegistered = false;
+            connectionState = 'awaiting_scan';
+            logger.info({ qr_available: true }, 'QR code refreshed; scan it from the dashboard link page');
+            if (!terminalQrPrinted || getEnv('WHATSAPP_PRINT_TERMINAL_QR', 'false') === 'true') {
+                terminalQrPrinted = true;
+                qrcode.generate(qr, { small: true });
+            }
         }
 
         if (connection === 'connecting') {
+            connectionState = latestQr ? 'awaiting_scan' : (sock.authState.creds.registered ? 'connecting' : 'connecting_unpaired');
             logger.info('Connecting to WhatsApp...');
             await producer.publish('session.status', { session_name: sessionName, status: 'connecting' }).catch(() => {});
         } else if (connection === 'open') {
             logger.info('Connected to WhatsApp successfully!');
             latestQr = null;
+            latestQrAt = null;
+            terminalQrPrinted = false;
             serviceHealthy = true;
+            socketRegistered = true;
+            connectionState = 'open';
+            lastDisconnectStatusCode = null;
+            lastDisconnectReason = null;
             retryCount = 0;
             if (sock.user?.id) phoneNumber = sock.user.id.split(':')[0];
             await producer.publish('session.status', {
@@ -332,12 +400,18 @@ async function connectToWhatsApp(): Promise<void> {
         } else if (connection === 'close') {
             if (heartbeat) clearInterval(heartbeat);
             serviceHealthy = false;
+            socketRegistered = Boolean(sock.authState.creds.registered);
             // Clear the stale QR — a new one will be emitted by the next
             // connection.update tick if reauth is needed.
             latestQr = null;
+            latestQrAt = null;
+            terminalQrPrinted = false;
 
             const error = lastDisconnect?.error as Boom;
             const statusCode = error?.output?.statusCode;
+            lastDisconnectStatusCode = typeof statusCode === 'number' ? statusCode : null;
+            lastDisconnectReason = error?.message || null;
+            connectionState = 'disconnected';
             logger.error({ statusCode, reason: error?.message }, 'Connection closed');
             await producer.publish('session.status', {
                 session_name: sessionName, phone_number: phoneNumber, status: 'disconnected',
