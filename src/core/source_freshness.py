@@ -70,6 +70,13 @@ FRESHNESS_BASIS = {
 REALTIME = ("telegram", "whatsapp", "beeper")
 
 
+def _stale_watchdog_marker(error: str | None) -> bool:
+    if not error:
+        return False
+    lowered = error.lower()
+    return lowered.startswith("stale ") and "watchdog" in lowered
+
+
 async def compute_liveness(conn) -> list[dict]:
     """Return per-source liveness using an open asyncpg connection.
 
@@ -105,12 +112,18 @@ async def compute_liveness(conn) -> list[dict]:
         elif age > thresh:
             status = "stale"
             detail = f"newest row is older than {thresh} seconds"
-        elif hs in ("degraded", "auth_paused"):
+        elif hs == "auth_paused":
             status = "degraded"
-            detail = h_error or f"source_health reports {hs}"
+            detail = h_error or "source_health reports auth_paused"
+        elif hs == "degraded" and not _stale_watchdog_marker(h_error):
+            status = "degraded"
+            detail = h_error or "source_health reports degraded"
         else:
             status = "live"
-            detail = "newest row is inside the freshness window"
+            if hs == "degraded" and _stale_watchdog_marker(h_error):
+                detail = "newest row is inside the freshness window; stale watchdog marker ignored"
+            else:
+                detail = "newest row is inside the freshness window"
         out.append({
             "source": name,
             "status": status,

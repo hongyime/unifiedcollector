@@ -45,3 +45,28 @@ async def test_compute_liveness_includes_collection_mode_basis_and_reason(monkey
     assert by_source["website"]["status"] == "stale"
     assert by_source["website"]["source_health_status"] == "degraded"
     assert by_source["website"]["source_health_error"] == "stale 123s - watchdog in cooldown"
+
+
+@pytest.mark.asyncio
+async def test_compute_liveness_ignores_stale_watchdog_marker_when_data_is_fresh(monkeypatch):
+    from src.core import source_freshness
+
+    class FreshWebsiteConn(FakeConn):
+        async def fetchval(self, query: str, timeout: int = 8):
+            if "website_pages" in query:
+                return 120
+            return 10
+
+    monkeypatch.setattr(
+        source_freshness,
+        "FRESHNESS",
+        [
+            ("website", "SELECT extract(epoch FROM now()-max(collected_at)) FROM website_pages", 259200),
+        ],
+    )
+
+    rows = await source_freshness.compute_liveness(FreshWebsiteConn())
+
+    assert rows[0]["status"] == "live"
+    assert "stale watchdog marker ignored" in rows[0]["detail"]
+    assert rows[0]["source_health_status"] == "degraded"
