@@ -145,6 +145,18 @@ export interface SourceCollectionMatrix {
   errors?: Array<{ section: string; error: string }>;
 }
 
+export interface RunIngestionCounts {
+  records: number;
+  messages: number;
+  media_items: number;
+  rate_limits: number;
+  access_errors: number;
+  latest_at: string | null;
+  window_seconds: number | null;
+  basis?: string;
+  exact_window?: boolean;
+}
+
 export interface MediaItem {
   id: string;
   source: string;
@@ -284,6 +296,9 @@ export interface Run {
   finished_at: string | null;
   items_collected: number;
   errors: number;
+  items_label?: string;
+  ingestion?: RunIngestionCounts;
+  ingestion_items?: number;
 }
 
 export interface CollectorDetail {

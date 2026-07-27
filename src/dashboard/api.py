@@ -526,6 +526,158 @@ def _source_matrix_row(source_row: dict, current_content: dict | None, current_r
     }
 
 
+def _empty_run_ingestion() -> dict:
+    return {
+        "records": 0,
+        "messages": 0,
+        "media_items": 0,
+        "rate_limits": 0,
+        "access_errors": 0,
+        "latest_at": None,
+        "window_seconds": None,
+    }
+
+
+def _collection_run_payload(row) -> dict:
+    data = dict(row)
+    data["finished_at"] = data.get("finished_at") or data.get("completed_at")
+    data["errors"] = int(data.get("errors") if data.get("errors") is not None else data.get("items_failed") or 0)
+    data["items_collected"] = int(data.get("items_collected") or 0)
+    return data
+
+
+async def _enrich_runs_with_ingestion(conn, runs: list[dict]) -> list[dict]:
+    if not runs:
+        return runs
+
+    def _floor_hour(value: datetime | None) -> datetime | None:
+        if not value:
+            return None
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+
+    now_utc = datetime.now(timezone.utc)
+    started_hours = [_floor_hour(row.get("started_at")) for row in runs]
+    started_hours = [hour for hour in started_hours if hour is not None]
+    if not started_hours:
+        return runs
+    start_bound = min(started_hours)
+    end_bound = (now_utc + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+    required_tables = [table for _source, table, _column, _label in _INGESTION_CONTENT_PARTS]
+    required_tables.extend(["media_items", "rate_limit_events"])
+    existing_tables = await _existing_public_tables(conn, required_tables)
+    raw_parts = [
+        f"""
+        SELECT '{source}'::text AS source,
+               date_trunc('hour', {column}) AS hour,
+               count(t.*)::bigint AS records,
+               {("count(t.*)" if label == "messages" else "0")}::bigint AS messages,
+               0::bigint AS media_items,
+               0::bigint AS rate_limits,
+               0::bigint AS access_errors,
+               max(t.{column}) AS latest_at
+        FROM {table} t
+        WHERE t.{column} >= $1
+          AND t.{column} < $2
+        GROUP BY date_trunc('hour', {column})
+        """
+        for source, table, column, label in _INGESTION_CONTENT_PARTS
+        if table in existing_tables
+    ]
+    if "media_items" in existing_tables:
+        raw_parts.append(
+            """
+            SELECT m.source,
+                   date_trunc('hour', m.collected_at) AS hour,
+                   0::bigint AS records,
+                   0::bigint AS messages,
+                   count(m.*)::bigint AS media_items,
+                   0::bigint AS rate_limits,
+                   0::bigint AS access_errors,
+                   max(m.collected_at) AS latest_at
+            FROM media_items m
+            WHERE m.collected_at >= $1
+              AND m.collected_at < $2
+            GROUP BY m.source, date_trunc('hour', m.collected_at)
+            """
+        )
+    if "rate_limit_events" in existing_tables:
+        raw_parts.append(
+            """
+            SELECT rl.source,
+                   date_trunc('hour', rl.created_at) AS hour,
+                   0::bigint AS records,
+                   0::bigint AS messages,
+                   0::bigint AS media_items,
+                   count(rl.*) FILTER (WHERE rl.status_code = 429 OR rl.status_code IS NULL)::bigint AS rate_limits,
+                   count(rl.*) FILTER (WHERE rl.status_code IS NOT NULL AND rl.status_code <> 429)::bigint AS access_errors,
+                   max(rl.created_at) AS latest_at
+            FROM rate_limit_events rl
+            WHERE rl.created_at >= $1
+              AND rl.created_at < $2
+            GROUP BY rl.source, date_trunc('hour', rl.created_at)
+            """
+        )
+    hourly: dict[tuple[str, datetime], dict] = {}
+    if raw_parts:
+        rows = await conn.fetch(
+            f"""
+            WITH raw AS (
+                {" UNION ALL ".join(raw_parts)}
+            )
+            SELECT source,
+                   hour,
+                   COALESCE(sum(raw.records), 0)::bigint AS records,
+                   COALESCE(sum(raw.messages), 0)::bigint AS messages,
+                   COALESCE(sum(raw.media_items), 0)::bigint AS media_items,
+                   COALESCE(sum(raw.rate_limits), 0)::bigint AS rate_limits,
+                   COALESCE(sum(raw.access_errors), 0)::bigint AS access_errors,
+                   max(raw.latest_at) AS latest_at
+            FROM raw
+            GROUP BY source, hour
+            """,
+            start_bound,
+            end_bound,
+            timeout=30,
+        )
+        hourly = {
+            (row["source"], _floor_hour(row["hour"])): dict(row)
+            for row in rows
+            if row.get("source") and _floor_hour(row["hour"]) is not None
+        }
+    for run in runs:
+        summary = _empty_run_ingestion()
+        started = _floor_hour(run.get("started_at"))
+        ended = _floor_hour(run.get("finished_at") or now_utc)
+        if started and ended:
+            cursor = started
+            while cursor <= ended:
+                item = hourly.get((run.get("source"), cursor))
+                if item:
+                    for key in ("records", "messages", "media_items", "rate_limits", "access_errors"):
+                        summary[key] += int(item.get(key) or 0)
+                    latest = item.get("latest_at")
+                    if latest and (summary.get("latest_at") is None or latest > summary["latest_at"]):
+                        summary["latest_at"] = latest
+                cursor += timedelta(hours=1)
+            end_actual = run.get("finished_at") or now_utc
+            if end_actual and run.get("started_at"):
+                summary["window_seconds"] = int((end_actual - run["started_at"]).total_seconds())
+        summary["basis"] = "source_hour"
+        summary["exact_window"] = False
+        for key in ("records", "messages", "media_items", "rate_limits", "access_errors"):
+            summary[key] = int(summary.get(key) or 0)
+        if summary.get("window_seconds") is not None:
+            summary["window_seconds"] = int(summary["window_seconds"])
+        run["ingestion"] = summary
+        run["ingestion_items"] = (
+            summary["records"] + summary["media_items"] + summary["rate_limits"] + summary["access_errors"]
+        )
+        run["items_label"] = "targets_rearmed"
+    return runs
+
+
 async def _browser_extension_payload(conn) -> dict:
     expected = _expected_extension_version()
     payload = {
@@ -2299,9 +2451,10 @@ async def get_run(run_id: int, _user: dict = Depends(require_role("viewer"))):
         row = await conn.fetchrow(
             "SELECT * FROM collection_runs WHERE id = $1", run_id,
         )
+        rows = await _enrich_runs_with_ingestion(conn, [_collection_run_payload(row)] if row else [])
     if not row:
         raise HTTPException(status_code=404, detail="Run not found")
-    return dict(row)
+    return rows[0]
 
 
 # ── Per-collector deep view ──
@@ -3340,7 +3493,8 @@ async def list_runs(source: str | None = None, limit: int = 20,
                 "SELECT * FROM collection_runs ORDER BY started_at DESC LIMIT $1",
                 limit,
             )
-    return [dict(r) for r in rows]
+        out = await _enrich_runs_with_ingestion(conn, [_collection_run_payload(r) for r in rows])
+    return out
 
 
 # ── Strava following-feed endpoints ──

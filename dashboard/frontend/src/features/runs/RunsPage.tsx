@@ -5,7 +5,7 @@ import { Header } from "../../components/layout/Header";
 import { FilterDropdown } from "../../components/ui/FilterDropdown";
 import { LoadingSpinner } from "../../components/ui/LoadingSpinner";
 import { ErrorState } from "../../components/ui/ErrorState";
-import { relativeTime } from "../../utils/formatters";
+import { formatDuration, formatNumber, relativeTime } from "../../utils/formatters";
 import { SOURCES } from "../../utils/constants";
 import type { Run } from "../../services/types";
 
@@ -15,6 +15,24 @@ const sourceOptions = [
 ];
 
 const statusColor: Record<string, string> = { completed: "bg-success", running: "bg-warning", failed: "bg-error" };
+
+function runStoredSummary(run: Run) {
+  const ingestion = run.ingestion;
+  if (!ingestion) return "—";
+  return `${formatNumber(ingestion.records)} rows · ${formatNumber(ingestion.media_items)} files`;
+}
+
+function runHttpSummary(run: Run) {
+  const ingestion = run.ingestion;
+  if (!ingestion) return "—";
+  const total = ingestion.rate_limits + ingestion.access_errors;
+  if (!total) return <span className="text-text-muted">0</span>;
+  return (
+    <span className={ingestion.access_errors ? "text-error" : "text-warning"}>
+      {formatNumber(ingestion.rate_limits)} 429 · {formatNumber(ingestion.access_errors)} auth/other
+    </span>
+  );
+}
 
 export function RunsPage() {
   const [source, setSource] = useState("");
@@ -35,7 +53,7 @@ export function RunsPage() {
 
   return (
     <div>
-      <Header title="Runs" subtitle="Scheduler trigger history · use Dashboard hourly ingestion for real row/file counts" onRefresh={() => refetch()} />
+      <Header title="Runs" subtitle="Scheduler run windows with real stored rows, files, messages, and HTTP pressure" onRefresh={() => refetch()} />
       <div className="flex items-center gap-3 mb-4">
         <FilterDropdown label="Source" value={source} onChange={setSource} options={sourceOptions} />
       </div>
@@ -43,7 +61,7 @@ export function RunsPage() {
         {isLoading ? <LoadingSpinner /> : (
           <table className="w-full text-sm">
             <thead><tr className="text-left text-text-muted border-b border-border">
-              <th className="pb-2">ID</th><th className="pb-2">Source</th><th className="pb-2">Status</th><th className="pb-2">Started</th><th className="pb-2">Targets rearmed</th><th className="pb-2">Errors</th>
+              <th className="pb-2">ID</th><th className="pb-2">Source</th><th className="pb-2">Status</th><th className="pb-2">Started</th><th className="pb-2">Stored</th><th className="pb-2">Messages</th><th className="pb-2">HTTP</th><th className="pb-2">Targets rearmed</th><th className="pb-2">Errors</th>
             </tr></thead>
             <tbody>
               {data?.map((r) => (
@@ -52,7 +70,10 @@ export function RunsPage() {
                   <td className="py-2 uppercase text-xs">{r.source}</td>
                   <td className="py-2"><span className={`inline-flex items-center gap-1.5 text-xs`}><span className={`w-2 h-2 rounded-full ${statusColor[r.status] ?? "bg-text-muted"}`} />{r.status}</span></td>
                   <td className="py-2 text-text-muted">{relativeTime(r.started_at)}</td>
-                  <td className="py-2">{r.items_collected}</td>
+                  <td className="py-2">{runStoredSummary(r)}</td>
+                  <td className="py-2">{formatNumber(r.ingestion?.messages ?? 0)}</td>
+                  <td className="py-2">{runHttpSummary(r)}</td>
+                  <td className="py-2">{formatNumber(r.items_collected)}</td>
                   <td className="py-2">{r.errors > 0 ? <span className="text-error">{r.errors}</span> : 0}</td>
                 </tr>
               ))}
@@ -70,7 +91,14 @@ export function RunsPage() {
                 <dt className="text-text-muted">Status</dt><dd>{detail.data.status}</dd>
                 <dt className="text-text-muted">Started</dt><dd>{relativeTime(detail.data.started_at)}</dd>
                 <dt className="text-text-muted">Finished</dt><dd>{relativeTime(detail.data.finished_at)}</dd>
-                <dt className="text-text-muted">Targets rearmed</dt><dd>{detail.data.items_collected}</dd>
+                <dt className="text-text-muted">Window</dt><dd>{detail.data.ingestion?.window_seconds == null ? "—" : formatDuration(detail.data.ingestion.window_seconds)}</dd>
+                <dt className="text-text-muted">Count basis</dt><dd>{detail.data.ingestion?.exact_window ? "exact run window" : "source-hour bucket"}</dd>
+                <dt className="text-text-muted">Stored rows</dt><dd>{formatNumber(detail.data.ingestion?.records ?? 0)}</dd>
+                <dt className="text-text-muted">Messages</dt><dd>{formatNumber(detail.data.ingestion?.messages ?? 0)}</dd>
+                <dt className="text-text-muted">Media files</dt><dd>{formatNumber(detail.data.ingestion?.media_items ?? 0)}</dd>
+                <dt className="text-text-muted">HTTP pressure</dt><dd>{runHttpSummary(detail.data)}</dd>
+                <dt className="text-text-muted">Latest stored row</dt><dd>{relativeTime(detail.data.ingestion?.latest_at ?? null)}</dd>
+                <dt className="text-text-muted">Targets rearmed</dt><dd>{formatNumber(detail.data.items_collected)}</dd>
                 <dt className="text-text-muted">Errors</dt><dd>{detail.data.errors}</dd>
               </dl>
             ) : null}
