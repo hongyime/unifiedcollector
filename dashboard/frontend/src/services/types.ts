@@ -996,6 +996,7 @@ export interface PlatformSummary {
   last_activity?: string | null;
   activity_basis?: string | null;
   users_count: number;
+  users_basis?: string | null;
   bots_count?: number;
   posts_count?: number;
   posts_label?: string;

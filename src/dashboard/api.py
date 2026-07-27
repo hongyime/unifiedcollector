@@ -135,6 +135,13 @@ async def _estimated_table_rows(conn, table: str) -> int:
     return int(value or 0)
 
 
+async def _safe_fetch_int(conn, query: str, *args, timeout: float = 8.0, default: int = 0) -> int:
+    try:
+        return int(await conn.fetchval(query, *args, timeout=timeout) or 0)
+    except Exception:
+        return default
+
+
 def _vault_payload() -> dict:
     health = vault_health()
     return {
@@ -1602,46 +1609,52 @@ async def platform_summary(name: str, _user: dict = Depends(require_role("viewer
                 out["media_count"] = 0
                 out["media_last"] = None
                 out["media_recent"] = []
+            out["posts_count"] = await _safe_fetch_int(
+                conn,
+                "SELECT count(*) FROM beeper_shadow_chats WHERE network = $1",
+                "Discord",
+                timeout=8,
+            )
+            out["posts_label"] = "chats"
+            out["messages_count"] = await _safe_fetch_int(
+                conn,
+                """
+                SELECT count(*)
+                FROM beeper_shadow_messages
+                WHERE network = $1
+                  AND message_id IS NOT NULL
+                """,
+                "Discord",
+                timeout=10,
+            )
             try:
-                out["posts_count"] = int(await conn.fetchval(
-                    "SELECT count(*) FROM beeper_shadow_chats WHERE network = 'Discord'",
-                    timeout=6,
-                ) or 0)
-                out["posts_label"] = "chats"
-                msg_row = await conn.fetchrow(
+                out["messages_last"] = await conn.fetchval(
                     """
-                    SELECT count(*) AS messages,
-                           (
-                             SELECT "timestamp"
-                             FROM beeper_shadow_messages
-                             WHERE network = 'Discord'
-                               AND "timestamp" IS NOT NULL
-                             ORDER BY "timestamp" DESC
-                             LIMIT 1
-                           ) AS messages_last
+                    SELECT "timestamp"
                     FROM beeper_shadow_messages
-                    WHERE network = 'Discord'
-                      AND message_id IS NOT NULL
+                    WHERE network = $1
+                      AND "timestamp" IS NOT NULL
+                    ORDER BY "timestamp" DESC
+                    LIMIT 1
                     """,
-                    timeout=12,
+                    "Discord",
+                    timeout=8,
                 )
-                out["messages_count"] = int((msg_row and msg_row["messages"]) or 0)
-                out["messages_last"] = msg_row["messages_last"] if msg_row else None
-                out["users_count"] = int(await conn.fetchval(
-                    """
-                    SELECT count(DISTINCT NULLIF(sender_id, ''))
-                    FROM beeper_shadow_messages
-                    WHERE network = 'Discord'
-                      AND sender_id IS NOT NULL
-                      AND sender_id <> ''
-                    """,
-                    timeout=20,
-                ) or 0)
             except Exception:
-                out["users_count"] = 0
-                out["posts_count"] = 0
-                out["posts_label"] = "chats"
-                out["messages_count"] = 0
+                out["messages_last"] = out.get("media_last")
+            out["users_count"] = await _safe_fetch_int(
+                conn,
+                """
+                SELECT count(DISTINCT participant_id)
+                FROM beeper_shadow_participants
+                WHERE network = $1
+                  AND participant_id IS NOT NULL
+                  AND participant_id <> ''
+                """,
+                "Discord",
+                timeout=10,
+            )
+            out["users_basis"] = "Beeper participants"
             out["follow_edges"] = []
             try:
                 from src.core.source_freshness import compute_liveness
@@ -1677,8 +1690,21 @@ async def platform_summary(name: str, _user: dict = Depends(require_role("viewer
                 out["activity_basis"] = "media"
         try:
             if name == "whatsapp":
-                out["users_count"] = int(await conn.fetchval(
-                    "SELECT count(*) FROM whatsapp_users", timeout=6) or 0)
+                users = await _safe_fetch_int(conn, "SELECT count(*) FROM whatsapp_users", timeout=6)
+                if users:
+                    out["users_count"] = users
+                    out["users_basis"] = "whatsapp_users"
+                else:
+                    out["users_count"] = await _safe_fetch_int(
+                        conn,
+                        """
+                        SELECT count(DISTINCT sender_id)
+                        FROM whatsapp_messages
+                        WHERE sender_id IS NOT NULL
+                        """,
+                        timeout=8,
+                    )
+                    out["users_basis"] = "distinct whatsapp message senders"
             elif name == "telegram":
                 row = await conn.fetchrow(
                     """

@@ -63,7 +63,7 @@ export function PlatformPage() {
       </div>
       <div className="flex flex-wrap gap-2 mb-6">
         <Stat label="Media" value={data.media_count} />
-        <Stat label="People" value={data.users_count} />
+        <Stat label="People" value={data.users_count} sub={data.users_basis ?? undefined} />
         {data.bots_count != null && data.bots_count > 0 && <Stat label="Bots excluded" value={data.bots_count} />}
         {data.posts_count != null && <Stat label={data.posts_label || "Posts"} value={data.posts_count} />}
         {data.messages_count != null && <Stat label="Messages" value={data.messages_count} />}
