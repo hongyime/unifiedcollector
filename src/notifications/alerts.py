@@ -274,6 +274,19 @@ def _format_degraded_source(row: dict) -> str:
     return f"• {source}: " + "; ".join(details) + "."
 
 
+def _format_operational_event(row: dict) -> str:
+    source = _display_source(row.get("source", "?"))
+    event_type = str(row.get("event_type") or "event").replace("_", " ")
+    severity = str(row.get("severity") or "info")
+    summary = _esc(str(row.get("summary") or "").strip())
+    age = row.get("age_seconds")
+    age_text = f" {_humanize_age(int(age or 0))} ago" if age is not None else ""
+    metadata = row.get("metadata") or {}
+    hit_count = metadata.get("hit_count") if isinstance(metadata, dict) else None
+    suffix = f"; {int(hit_count):,} fatal log events" if hit_count is not None else ""
+    return f"• {source}: {event_type} ({severity}){age_text}{suffix}. {summary}"
+
+
 def _fmt_count(n: int) -> str:
     """1_317_543 -> 1.3M, 13213 -> 13k, 940 -> 940."""
     if n >= 1_000_000:
@@ -450,6 +463,12 @@ async def notify_status(snapshot: dict) -> bool:
         lines.extend(_format_access_event(r) for r in access_events[:5])
     if not active_limits and not recent_limits and not access_events:
         lines.append("No recorded rate-limit events, active cooldowns, or login/session failures this hour.")
+
+    operational_events = snapshot.get("operational_events") or []
+    if operational_events:
+        lines.append("")
+        lines.append("<b>Recent self-heals and operational events</b>")
+        lines.extend(_format_operational_event(row) for row in operational_events[:5])
 
     vault = snapshot.get("vault") or {}
     if vault:

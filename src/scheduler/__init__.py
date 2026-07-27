@@ -680,6 +680,28 @@ class Scheduler:
                     snap["degraded_details"] = degraded_details
                 except Exception:
                     pass
+
+                try:
+                    if await conn.fetchval("SELECT to_regclass('collector_operational_events')") is not None:
+                        rows = await conn.fetch(
+                            """
+                            SELECT source,
+                                   event_type,
+                                   severity,
+                                   summary,
+                                   metadata,
+                                   created_at,
+                                   extract(epoch FROM now() - created_at)::int AS age_seconds
+                            FROM collector_operational_events
+                            WHERE created_at >= now() - interval '24 hours'
+                            ORDER BY created_at DESC
+                            LIMIT 8
+                            """,
+                            timeout=8,
+                        )
+                        snap["operational_events"] = [dict(r) for r in rows]
+                except Exception:
+                    pass
         except Exception as e:
             return {"ok": False, "error": str(e)}
 

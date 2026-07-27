@@ -1,5 +1,7 @@
 import asyncio
 import collections
+import html
+import json
 import logging
 import os
 import signal
@@ -38,12 +40,108 @@ class _FatalSpinLogWatcher(logging.Handler):
         "database is locked",               # sqlite OS-level lock
     )
 
-    def __init__(self):
+    def __init__(self, sources: list[str] | None = None):
         super().__init__(level=logging.WARNING)
         self._window = float(os.getenv("COLLECTOR_SELFHEAL_LOG_WINDOW", "120"))
         self._threshold = int(os.getenv("COLLECTOR_SELFHEAL_LOG_THRESHOLD", "25"))
+        self._persist_timeout = float(os.getenv("COLLECTOR_SELFHEAL_PERSIST_TIMEOUT", "3"))
+        names = [str(s).strip().lower() for s in (sources or []) if str(s).strip()]
+        self._source_hint = names[0] if len(names) == 1 else None
         self._hits: "collections.deque[float]" = collections.deque()
         self._lock = threading.Lock()
+
+    def _infer_source(self, record: logging.LogRecord, msg: str) -> str:
+        if self._source_hint:
+            return self._source_hint
+        logger_name = str(getattr(record, "name", "") or "").lower()
+        if "telethon" in logger_name or "mtproto" in msg or "telegram" in msg:
+            return "telegram"
+        return "worker"
+
+    def _persist_self_heal_event(self, source: str, reason: str, count: int) -> None:
+        dsn = os.getenv("DATABASE_URL", "").strip()
+        if not dsn:
+            return
+        metadata = json.dumps({
+            "hit_count": count,
+            "window_seconds": self._window,
+            "threshold": self._threshold,
+            "exit_code": 42,
+            "trigger": "fatal_log_flood",
+        })
+
+        async def _write() -> None:
+            import asyncpg
+            conn = await asyncpg.connect(dsn, command_timeout=max(1, self._persist_timeout))
+            try:
+                await conn.execute(
+                    """
+                    INSERT INTO source_health
+                      (source, status, last_error, crash_count, updated_at)
+                    VALUES ($1, 'degraded', $2, 1, NOW())
+                    ON CONFLICT (source) DO UPDATE
+                    SET status='degraded',
+                        last_error=$2,
+                        crash_count=COALESCE(source_health.crash_count, 0) + 1,
+                        updated_at=NOW()
+                    """,
+                    source,
+                    reason[:2000],
+                )
+                try:
+                    await conn.execute(
+                        """
+                        INSERT INTO collector_operational_events
+                          (source, event_type, severity, summary, metadata)
+                        VALUES ($1, 'self_heal_restart', 'warning', $2, $3::jsonb)
+                        """,
+                        source,
+                        reason[:2000],
+                        metadata,
+                    )
+                except Exception:
+                    pass
+            finally:
+                await conn.close()
+
+        def _runner() -> None:
+            try:
+                asyncio.run(_write())
+            except Exception:
+                pass
+
+        thread = threading.Thread(target=_runner, name="selfheal-event-writer", daemon=True)
+        thread.start()
+        thread.join(timeout=self._persist_timeout)
+
+    def _notify_self_heal(self, source: str, reason: str, count: int) -> None:
+        token = os.getenv("NOTIFY_TELEGRAM_BOT_TOKEN", "").strip() or os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+        chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+        if not token or not chat_id:
+            return
+        try:
+            import urllib.request
+            payload = {
+                "chat_id": chat_id,
+                "text": (
+                    f"🔄 <b>Collector self-heal restart</b>\n"
+                    f"Source: <b>{html.escape(source)}</b>\n"
+                    f"Reason: <code>{html.escape(reason[:500])}</code>\n"
+                    f"Seen {count} fatal log events in {int(self._window)}s; exiting so Docker restarts it cleanly."
+                ),
+                "parse_mode": "HTML",
+            }
+            thread_id = os.getenv("NOTIFY_TELEGRAM_THREAD_ID", "").strip() or os.getenv("TELEGRAM_THREAD_ID", "").strip()
+            if thread_id:
+                payload["message_thread_id"] = thread_id
+            req = urllib.request.Request(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
+            urllib.request.urlopen(req, timeout=5)
+        except Exception:
+            pass
 
     def emit(self, record):
         if os.getenv("COLLECTOR_SELF_HEAL_RESTART", "true").lower() != "true":
@@ -61,11 +159,18 @@ class _FatalSpinLogWatcher(logging.Handler):
                 self._hits.popleft()
             count = len(self._hits)
         if count >= self._threshold:
+            source = self._infer_source(record, msg)
+            reason = (
+                f"{source}: fatal log pattern flooded "
+                f"({count} hits in {self._window:.0f}s): {record.getMessage()[:500]}"
+            )
             # "selfheal" logger name avoids re-matching our own message here.
             logging.getLogger("selfheal").critical(
                 "SELF-HEAL: fatal log pattern flooded (%d hits in %.0fs) — exiting "
                 "for clean container restart", count, self._window,
             )
+            self._persist_self_heal_event(source, reason, count)
+            self._notify_self_heal(source, reason, count)
             try:
                 sys.stdout.flush()
                 sys.stderr.flush()
@@ -155,7 +260,7 @@ class WorkerService:
         # desync) that don't crash/hang/zero-progress. Attached to root so it
         # sees telethon's own logger too.
         try:
-            logging.getLogger().addHandler(_FatalSpinLogWatcher())
+            logging.getLogger().addHandler(_FatalSpinLogWatcher(sources))
             logger.info("worker: fatal-spin log watcher installed (self-heal on error flood)")
         except Exception:
             logger.warning("worker: could not install fatal-spin log watcher", exc_info=True)

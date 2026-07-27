@@ -106,6 +106,16 @@ async def test_notify_status_splits_rate_limit_from_auth_events(monkeypatch):
                 "reason": "Playwright profile auth response",
             }
         ],
+        "operational_events": [
+            {
+                "source": "telegram",
+                "event_type": "self_heal_restart",
+                "severity": "warning",
+                "summary": "telegram: fatal log pattern flooded: wrong session ID",
+                "metadata": {"hit_count": 25},
+                "age_seconds": 30,
+            }
+        ],
         "extension_hooks": [
             {
                 "platform": "instagram",
@@ -190,6 +200,8 @@ async def test_notify_status_splits_rate_limit_from_auth_events(monkeypatch):
     assert "HTTP 401" in msg
     assert "Instagram: active cooldown for 60m after 7 instrumented rate-limit events." in msg
     assert "Telegram FloodWait throttles for acct1: active cooldown for 2m after 1 FloodWait event" in msg
+    assert "<b>Recent self-heals and operational events</b>" in msg
+    assert "Telegram: self heal restart (warning) 30s ago; 25 fatal log events" in msg
     assert "<b>Chrome extension hooks</b>" in msg
     assert "Instagram: hook v1.21.8 last heartbeat 21s ago" in msg
     assert "this hour 12 probe frames and 0 sample frames" in msg
