@@ -1470,8 +1470,22 @@ function currentPlatform() {
 // ===========================================================================
 let LOOP_RUNNING = false;
 
-// Rest between passes — a person doesn't scrape non-stop. Tunable.
-const PASS_REST_MS = 180000; // ~2.4m-6.6m + occasional longer breaks via human()
+// Rest between passes — a person doesn't scrape non-stop. Instagram stays slower
+// because it is the account most likely to hit 429; lower-risk platforms can loop
+// more often so they do not wait behind Instagram's safety budget.
+const PASS_REST_MS = 180000; // fallback: ~2.4m-6.6m + occasional longer breaks via human()
+const PASS_REST_MS_BY_PLATFORM = {
+  instagram: 180000,
+  tiktok: 90000,
+  lemon8: 90000,
+  threads: 120000,
+  x: 120000,
+  facebook: 120000,
+  strava: 90000,
+};
+function passRestMs(platformId) {
+  return PASS_REST_MS_BY_PLATFORM[platformId] || PASS_REST_MS;
+}
 
 async function mainLoop() {
   const p = currentPlatform();
@@ -1497,7 +1511,7 @@ async function mainLoop() {
       }
       // heartbeat so the popup shows the loop is alive between passes
       await send({ type: "loopStatus", platform: p.label, running: true }).catch(() => {});
-      await sleep(human(PASS_REST_MS)); // long human rest between passes
+      await sleep(human(passRestMs(p.id))); // long human rest between passes
     }
   } finally {
     LOOP_RUNNING = false;
