@@ -504,6 +504,27 @@ class TelegramCollector(BaseCollector):
         # Tracker is generic — needs the asyncpg pool to write to telegram_user_changes.
         self._user_change_tracker = UserChangeTracker(pool)
 
+    async def _mark_runtime_healthy(self, detail: str) -> None:
+        """Clear stale source_health failures after a clean Telegram reconnect."""
+        if self.pool is None:
+            return
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO source_health (source, status, last_success_at, last_error, updated_at)
+                    VALUES ('telegram', 'running', NOW(), NULL, NOW())
+                    ON CONFLICT (source) DO UPDATE
+                    SET status='running',
+                        last_success_at=NOW(),
+                        last_error=NULL,
+                        updated_at=NOW()
+                    """,
+                )
+            logger.info("telegram source_health recovered: %s", detail)
+        except Exception:
+            logger.debug("telegram source_health recovery update failed", exc_info=True)
+
     @property
     def account_media_dir(self) -> Path:
         # Use session name for isolation (kept for backward compat).
@@ -578,6 +599,7 @@ class TelegramCollector(BaseCollector):
                 "Telegram parallel mode: %d/%d worker(s) connected",
                 len(live), len(workers),
             )
+            await self._mark_runtime_healthy("all configured workers connected")
         return live
 
     async def _auto_backfill_new_accounts(self) -> None:

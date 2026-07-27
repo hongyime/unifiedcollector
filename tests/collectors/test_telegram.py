@@ -184,6 +184,18 @@ def test_session_state_enum_complete():
     assert SessionState.CONNECTED.value == "connected"
 
 
+@pytest.mark.asyncio
+async def test_mark_runtime_healthy_clears_stale_source_health(monkeypatch):
+    coll = _make_collector(monkeypatch)
+
+    await coll._mark_runtime_healthy("connected")
+
+    sql = coll.pool.conn.execute.await_args.args[0]
+    assert "INSERT INTO source_health" in sql
+    assert "last_error=NULL" in sql
+    assert "status='running'" in sql
+
+
 # ── construction + feature gate ───────────────────────────────────────────
 
 
