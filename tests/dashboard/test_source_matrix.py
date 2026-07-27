@@ -7,7 +7,7 @@ import os
 os.environ.setdefault("DASHBOARD_JWT_SECRET", "test-secret-only-for-pytest-do-not-use")
 os.environ.setdefault("DASHBOARD_ADMIN_PASSWORD", "x")
 
-from src.dashboard.api import _source_matrix_blocker, _source_matrix_row
+from src.dashboard.api import _rate_limit_cursor_payload, _source_matrix_blocker, _source_matrix_row
 
 
 def _source(status: str = "live", **extra):
@@ -59,6 +59,23 @@ def test_source_matrix_blocker_reports_active_cooldown_before_extension_issue():
     assert blocker["kind"] == "cooldown"
     assert blocker["severity"] == "warning"
     assert "cooldown" in blocker["summary"].lower()
+
+
+def test_rate_limit_cursor_payload_marks_expired_cursor_inactive():
+    now = datetime(2026, 7, 28, 0, 0, tzinfo=timezone.utc)
+    payload = _rate_limit_cursor_payload(
+        {
+            "service": "instagram_rate_limit",
+            "last_processed_id": f"{(now - timedelta(minutes=5)).timestamp()}:9",
+            "last_processed_at": now - timedelta(hours=1),
+            "status": "blocked",
+        },
+        now,
+    )
+
+    assert payload["streak"] == 9
+    assert payload["active_now"] is False
+    assert payload["active_until"] < now
 
 
 def test_source_matrix_blocker_reports_auth_error():

@@ -257,6 +257,7 @@ export interface RateLimitRecentSummary {
 export interface RateLimitSummary {
   events: RateLimitEvent[];
   active: ActiveRateLimit[];
+  cursor_history?: ActiveRateLimit[];
   recent_summary: RateLimitRecentSummary[];
 }
 

@@ -357,29 +357,34 @@ async def _active_rate_limit_cursor_summary(conn) -> dict[str, dict]:
         return out
     now_utc = datetime.now(timezone.utc)
     for row in rows:
-        d = dict(row)
+        d = _rate_limit_cursor_payload(row, now_utc)
         source = _normalize_rate_limit_source(d.get("service"))
         if not source:
             continue
-        expiry = None
-        streak = None
-        raw = str(d.get("last_processed_id") or "")
-        if ":" in raw:
-            left, right = raw.split(":", 1)
-            try:
-                expiry = datetime.fromtimestamp(float(left), tz=timezone.utc)
-            except Exception:
-                expiry = None
-            try:
-                streak = int(right)
-            except Exception:
-                streak = None
-        d["active_until"] = expiry
-        d["streak"] = streak
-        d["active_now"] = bool(expiry and expiry > now_utc)
         if source not in out or d["active_now"]:
             out[source] = d
     return out
+
+
+def _rate_limit_cursor_payload(row, now_utc: datetime) -> dict:
+    d = dict(row)
+    expiry = None
+    streak = None
+    raw = str(d.get("last_processed_id") or "")
+    if ":" in raw:
+        left, right = raw.split(":", 1)
+        try:
+            expiry = datetime.fromtimestamp(float(left), tz=timezone.utc)
+        except Exception:
+            expiry = None
+        try:
+            streak = int(right)
+        except Exception:
+            streak = None
+    d["active_until"] = expiry
+    d["streak"] = streak
+    d["active_now"] = bool(expiry and expiry > now_utc)
+    return d
 
 
 def _extension_issues_by_source(extension_payload: dict | None) -> dict[str, list[dict]]:
@@ -2134,7 +2139,9 @@ async def recent_rate_limits(hours: int = 24, limit: int = 100,
             events = []
             recent_summary = []
         active = []
+        cursor_history = []
         try:
+            now_utc = datetime.now(timezone.utc)
             for r in await conn.fetch(
                 """
                 SELECT service, last_processed_id, last_processed_at, status
@@ -2145,27 +2152,19 @@ async def recent_rate_limits(hours: int = 24, limit: int = 100,
                 """,
                 timeout=8,
             ):
-                d = dict(r)
-                expiry = None
-                streak = None
-                raw = str(d.get("last_processed_id") or "")
-                if ":" in raw:
-                    left, right = raw.split(":", 1)
-                    try:
-                        expiry = datetime.fromtimestamp(float(left), tz=timezone.utc)
-                    except Exception:
-                        expiry = None
-                    try:
-                        streak = int(right)
-                    except Exception:
-                        streak = None
-                d["active_until"] = expiry
-                d["streak"] = streak
-                d["active_now"] = bool(expiry and expiry > datetime.now(timezone.utc))
-                active.append(d)
+                d = _rate_limit_cursor_payload(r, now_utc)
+                cursor_history.append(d)
+                if d["active_now"] or (d.get("status") == "blocked" and not d.get("active_until")):
+                    active.append(d)
         except Exception:
             active = []
-    return {"events": events, "active": active, "recent_summary": recent_summary}
+            cursor_history = []
+    return {
+        "events": events,
+        "active": active,
+        "cursor_history": cursor_history,
+        "recent_summary": recent_summary,
+    }
 
 
 # ---------------------------------------------------------------------------

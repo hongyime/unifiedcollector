@@ -455,6 +455,10 @@ export function DashboardPage() {
     const expiryMs = r.active_until ? new Date(r.active_until).getTime() : Number.NaN;
     return r.status === "blocked" && (!r.active_until || Number.isNaN(expiryMs) || expiryMs > nowMs);
   });
+  const expiredCursorLimits = (rateLimits?.cursor_history ?? []).filter((r) => {
+    const expiryMs = r.active_until ? new Date(r.active_until).getTime() : Number.NaN;
+    return r.status === "blocked" && r.active_until && !Number.isNaN(expiryMs) && expiryMs <= nowMs;
+  });
   const activeCursorSources = new Set(activeCursorLimits.map((r) => formatRateLimitService(r.service)));
   const recentLimitSummaries = rateLimits?.recent_summary ?? [];
   const activeEventLimits = recentLimitSummaries.filter(
@@ -617,6 +621,12 @@ export function DashboardPage() {
                 </div>
               </div>
             ))}
+          </div>
+        )}
+        {activeCursorLimits.length === 0 && activeEventLimits.length === 0 && recentLimitSummaries.length > 0 && (
+          <div className="mb-3 bg-background border border-border rounded-md px-3 py-2 text-xs text-text-muted">
+            No active cooldowns right now. The scopes below are recent historical HTTP pressure or session events
+            {expiredCursorLimits.length ? `; ${formatNumber(expiredCursorLimits.length)} expired persisted cooldown cursor${expiredCursorLimits.length === 1 ? "" : "s"} kept for audit.` : "."}
           </div>
         )}
         {recentLimitSummaries.length > 0 && (
