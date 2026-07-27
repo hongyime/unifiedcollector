@@ -7,7 +7,7 @@ import { LoadingSpinner } from "../../components/ui/LoadingSpinner";
 import { ErrorState } from "../../components/ui/ErrorState";
 import { api } from "../../services/api";
 import { formatBytes, formatDuration, formatNumber, relativeTime } from "../../utils/formatters";
-import { Archive, Database, HardDrive, Activity, AlertCircle, Clock3, ShieldAlert } from "lucide-react";
+import { Archive, Database, HardDrive, Activity, AlertCircle, Clock3, ShieldAlert, Puzzle } from "lucide-react";
 import type { ColumnDef } from "@tanstack/react-table";
 import type {
   HourlyIngestionRow,
@@ -16,6 +16,7 @@ import type {
   RateLimitEvent,
   RateLimitRecentSummary,
   CollectorLiveSource,
+  BrowserExtensionIssue,
 } from "../../services/types";
 
 function liveBadgeStatus(status: MediaStats["live"]) {
@@ -23,6 +24,16 @@ function liveBadgeStatus(status: MediaStats["live"]) {
   if (status === "stale" || status === "degraded") return "warning";
   if (status === "dead" || status === "unpaired" || status === "unreachable") return "error";
   return "idle";
+}
+
+function formatVersion(version: string | null | undefined) {
+  if (!version) return "unknown";
+  return version.toLowerCase().startsWith("v") ? version : `v${version}`;
+}
+
+function extensionIssueTitle(issue: BrowserExtensionIssue) {
+  const endpoint = issue.endpoint ? ` · ${issue.endpoint.replace(/_/g, " ")}` : "";
+  return `${issue.platform}${endpoint}`;
 }
 
 const columns: ColumnDef<MediaStats, unknown>[] = [
@@ -407,6 +418,10 @@ export function DashboardPage() {
   const vaultFailedMetadataRows = vault?.artifacts_partial ?? 0;
   const vaultIssues = vaultSidecarDlqRows + vaultFailedMetadataRows;
   const backups = health?.backups;
+  const extension = health?.browser_extension;
+  const extensionIssues = extension?.issues ?? [];
+  const extensionHooks = extension?.hooks ?? [];
+  const extensionIngest = extension?.ingest ?? [];
   const backupStatus = backups?.status ?? "missing";
   const backupValue =
     backupStatus === "ok" ? "Fresh" :
@@ -494,6 +509,23 @@ export function DashboardPage() {
           status={activeRateLimits || recentRecordedRateLimitEvents || recentAccessEvents ? "warning" : "success"}
           icon={<ShieldAlert className="w-5 h-5" />}
         />
+        <MetricCard
+          label="Chrome Extension"
+          value={
+            !extension
+              ? "Unknown"
+              : extensionIssues.length
+                ? `${formatNumber(extensionIssues.length)} issues`
+                : "Current"
+          }
+          sublabel={
+            extension?.expected_version
+              ? `expected ${formatVersion(extension.expected_version)}`
+              : "expected version unknown"
+          }
+          status={!extension ? "idle" : extensionIssues.length ? "warning" : "success"}
+          icon={<Puzzle className="w-5 h-5" />}
+        />
       </div>
 
       <div className="bg-surface rounded-lg border border-border p-4 mb-6">
@@ -566,6 +598,96 @@ export function DashboardPage() {
           <div className="bg-background border border-border rounded-md p-3"><b className="text-text-primary">crawl</b><p className="text-text-muted mt-1">open-ended discovery queue, expected not to hit zero</p></div>
         </div>
       </div>
+
+      {extension && (
+        <div className="bg-surface rounded-lg border border-border p-4 mb-6">
+          <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between mb-4">
+            <div>
+              <h2 className="text-xs uppercase tracking-wider text-text-muted">Chrome Extension</h2>
+              <p className="text-xs text-text-muted mt-1">
+                Expected {formatVersion(extension.expected_version)}. Active hooks and browser-ingest events are compared against that build.
+              </p>
+            </div>
+            <StatusBadge
+              status={extensionIssues.length ? "warning" : "online"}
+              label={extensionIssues.length ? `${formatNumber(extensionIssues.length)} needs reload` : "current"}
+            />
+          </div>
+
+          {extensionIssues.length > 0 && (
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-2 mb-4">
+              {extensionIssues.slice(0, 8).map((issue, index) => (
+                <div
+                  key={`${issue.platform}-${issue.endpoint ?? ""}-${issue.kind}-${index}`}
+                  className="bg-warning/10 border border-warning/30 rounded-md px-3 py-2 text-xs"
+                >
+                  <div className="font-medium text-warning capitalize">{extensionIssueTitle(issue)}</div>
+                  <div className="text-text-muted mt-0.5">{issue.detail}</div>
+                  {(issue.extension_version || issue.expected_version || issue.age_seconds != null) && (
+                    <div className="text-text-muted mt-1">
+                      {issue.extension_version && `loaded ${formatVersion(issue.extension_version)}`}
+                      {issue.extension_version && issue.expected_version && " · "}
+                      {issue.expected_version && `expected ${formatVersion(issue.expected_version)}`}
+                      {issue.age_seconds != null && ` · last heartbeat ${formatDuration(issue.age_seconds)} ago`}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+            <div>
+              <div className="text-[10px] uppercase tracking-wide text-text-muted mb-2">Hooks</div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                {extensionHooks.slice(0, 6).map((hook) => (
+                  <div key={hook.platform} className="bg-background border border-border rounded-md px-3 py-2 text-xs">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-medium text-text-primary capitalize">{hook.platform}</span>
+                      <StatusBadge status={hook.version_ok ? "online" : "warning"} label={formatVersion(hook.extension_version)} />
+                    </div>
+                    <div className="text-text-muted mt-1">
+                      heartbeat {formatDuration(hook.age_seconds)} ago · {formatNumber(hook.owner_count)} owners
+                    </div>
+                    <div className="text-text-muted">
+                      {formatNumber(hook.probes_sent)} probes · {formatNumber(hook.samples_shipped)} samples
+                    </div>
+                  </div>
+                ))}
+                {extensionHooks.length === 0 && (
+                  <div className="text-xs text-text-muted">No browser hook heartbeat rows found.</div>
+                )}
+              </div>
+            </div>
+
+            <div>
+              <div className="text-[10px] uppercase tracking-wide text-text-muted mb-2">Recent Browser Ingest</div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                {extensionIngest.slice(0, 8).map((row) => (
+                  <div
+                    key={`${row.platform}-${row.endpoint}`}
+                    className="bg-background border border-border rounded-md px-3 py-2 text-xs"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-medium text-text-primary capitalize">
+                        {row.platform} · {row.endpoint.replace(/_/g, " ")}
+                      </span>
+                      <StatusBadge status={row.version_ok ? "online" : "warning"} label={formatVersion(row.extension_version)} />
+                    </div>
+                    <div className="text-text-muted mt-1">
+                      {formatNumber(row.requests)} POSTs · saw {formatNumber(row.observed_count)} · stored {formatNumber(row.stored_count)}
+                    </div>
+                    <div className="text-text-muted">last seen {formatDuration(row.age_seconds)} ago</div>
+                  </div>
+                ))}
+                {extensionIngest.length === 0 && (
+                  <div className="text-xs text-text-muted">No browser ingest events in the last 24h.</div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="bg-surface rounded-lg border border-border p-4">
         <h2 className="text-xs uppercase tracking-wider text-text-muted mb-4">Source Health</h2>

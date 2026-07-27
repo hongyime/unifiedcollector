@@ -32,6 +32,47 @@ export interface HealthStatus {
   sources?: CollectorLiveSource[];
   source_issues?: CollectorLiveSource[];
   whatsapp_bridge_health?: Record<string, unknown> | null;
+  browser_extension?: BrowserExtensionHealth | null;
+}
+
+export interface BrowserExtensionHook {
+  platform: string;
+  last_seen_at: string | null;
+  age_seconds: number;
+  extension_version: string | null;
+  version_ok: boolean;
+  owner_count: number;
+  probes_sent: number;
+  samples_shipped: number;
+}
+
+export interface BrowserExtensionIngest {
+  platform: string;
+  endpoint: string;
+  requests: number;
+  observed_count: number;
+  stored_count: number;
+  last_seen_at: string | null;
+  age_seconds: number;
+  extension_version: string | null;
+  version_ok: boolean;
+}
+
+export interface BrowserExtensionIssue {
+  platform: string;
+  endpoint?: string | null;
+  kind: "hook_stale" | "extension_version_mismatch" | string;
+  detail: string;
+  age_seconds?: number;
+  extension_version?: string | null;
+  expected_version?: string | null;
+}
+
+export interface BrowserExtensionHealth {
+  expected_version: string | null;
+  hooks: BrowserExtensionHook[];
+  ingest: BrowserExtensionIngest[];
+  issues: BrowserExtensionIssue[];
 }
 
 export interface CollectorStatus {

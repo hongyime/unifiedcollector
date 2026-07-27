@@ -109,7 +109,7 @@ async function del<T>(path: string): Promise<T> {
 }
 
 export const api = {
-  health: () => get<HealthStatus>("/health"),
+  health: () => get<HealthStatus>("/health?include_sources=true"),
   collectors: () => get<CollectorStatus[]>("/collectors"),
   collectorsLive: () => get<CollectorsLive>("/collectors/live"),
   collectorDetail: (source: string) => get<CollectorDetail>(`/collectors/${source}`),
