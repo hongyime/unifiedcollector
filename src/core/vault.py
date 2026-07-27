@@ -278,27 +278,15 @@ async def vault_artifact_counts(conn, *, timeout: float | None = 10.0) -> dict[s
              AND error_message LIKE 'vault sidecar write failed:%') AS artifacts_queued,
           (SELECT COUNT(*)::int
            FROM media_items
-           WHERE NOT (
-             (
-               metadata ? 'vault_sidecar'
-               AND metadata->'vault_sidecar'->>'ok' = 'true'
-             ) OR (
-               metadata ? 'vault_artifact'
-               AND COALESCE(metadata->'vault_artifact'->>'sidecar_path', '') <> ''
-               AND COALESCE(metadata->'vault_artifact'->>'sidecar_ok', 'true') <> 'false'
-             )
-           )
-           AND (
-             (
-               metadata ? 'vault_sidecar'
-               AND metadata->'vault_sidecar'->>'ok' = 'false'
-             ) OR (
-               metadata ? 'vault_artifact'
-               AND (
-                 metadata->'vault_artifact'->>'ok' = 'false'
-                 OR metadata->'vault_artifact'->>'sidecar_ok' = 'false'
-                 OR metadata->'vault_artifact'->>'partial' = 'true'
-               )
+           WHERE (
+             metadata ? 'vault_sidecar'
+             AND metadata->'vault_sidecar'->>'ok' = 'false'
+           ) OR (
+             metadata ? 'vault_artifact'
+             AND (
+               metadata->'vault_artifact'->>'ok' = 'false'
+               OR metadata->'vault_artifact'->>'sidecar_ok' = 'false'
+               OR metadata->'vault_artifact'->>'partial' = 'true'
              )
            )) AS artifacts_partial,
           (SELECT COALESCE(
@@ -882,6 +870,8 @@ def write_atomic_artifact(
             artifact_kind=artifact_kind,
             file_path=str(blob_path),
             metadata=sidecar_meta,
+            file_size=size,
+            sha256=digest,
             root=root,
         )
         if not sidecar.ok:
@@ -1052,6 +1042,8 @@ def write_atomic_artifact_from_path(
             artifact_kind=artifact_kind,
             file_path=str(blob_path),
             metadata=sidecar_meta,
+            file_size=size,
+            sha256=digest,
             root=root,
         )
         if not sidecar.ok:
@@ -1118,6 +1110,8 @@ def write_artifact_sidecar(
     artifact_kind: str,
     file_path: str,
     metadata: dict | None = None,
+    file_size: int | None = None,
+    sha256: str | None = None,
     root: Path = VAULT_ROOT,
 ) -> SidecarResult:
     """Write a sidecar for non-media artifacts such as raw/metadata JSON."""
@@ -1128,8 +1122,11 @@ def write_artifact_sidecar(
         ensure_vault_available(root)
         path = Path(file_path)
         stat = path.stat()
-        data = path.read_bytes()
-        sha = hashlib.sha256(data).hexdigest()
+        size = int(stat.st_size)
+        if file_size is not None and int(file_size) != size:
+            raise ValueError(f"file_size mismatch: expected {file_size}, got {size}")
+        normalized_sha = str(sha256 or "").strip().lower()
+        sha = normalized_sha if _SHA256_RE.match(normalized_sha) else _sha256_path(path)
         rel = relative_to_vault(path, root)
         artifact_id = f"{source}:{rel or path.name}"
         now = datetime.now(timezone.utc)
@@ -1150,7 +1147,7 @@ def write_artifact_sidecar(
             "file": {
                 "path": rel,
                 "absolute_path": str(path),
-                "size": int(stat.st_size),
+                "size": size,
                 "sha256": sha,
             },
             "timestamps": {
@@ -1216,6 +1213,7 @@ def write_raw_payload(
             artifact_kind="raw_payload",
             file_path=str(path),
             metadata=meta,
+            file_size=path.stat().st_size,
             root=root,
         )
         return RawPayloadResult(

@@ -105,6 +105,11 @@ def main():
     msr.add_argument("--since-hours", type=int, default=None, help="Only inspect rows collected in this window")
     msr.add_argument("--vault-root", default=None, help="Vault root (default: COLLECTOR_VAULT_ROOT)")
     msr.add_argument("--dry-run", action="store_true", help="Report repairable rows without writing sidecars")
+    msr.add_argument(
+        "--partial-artifacts",
+        action="store_true",
+        help="Repair media rows whose canonical vault artifact sidecar previously failed",
+    )
     msr.add_argument("--json", action="store_true", help="Print machine-readable JSON")
 
     # restore-drill
@@ -406,19 +411,28 @@ def _cmd_vault_inspect(
 async def _cmd_repair_media_sidecars(args):
     import json
 
-    from src.core.media_sidecar_repair import repair_missing_media_sidecars
+    from src.core.media_sidecar_repair import repair_missing_media_sidecars, repair_partial_vault_artifacts
 
     pool = await get_pool()
     try:
         async with pool.acquire() as conn:
-            report = await repair_missing_media_sidecars(
-                conn,
-                source=args.source,
-                limit=args.limit,
-                since_hours=args.since_hours,
-                vault_root=args.vault_root,
-                dry_run=args.dry_run,
-            )
+            if args.partial_artifacts:
+                report = await repair_partial_vault_artifacts(
+                    conn,
+                    source=args.source,
+                    limit=args.limit,
+                    vault_root=args.vault_root,
+                    dry_run=args.dry_run,
+                )
+            else:
+                report = await repair_missing_media_sidecars(
+                    conn,
+                    source=args.source,
+                    limit=args.limit,
+                    since_hours=args.since_hours,
+                    vault_root=args.vault_root,
+                    dry_run=args.dry_run,
+                )
         if args.json:
             print(json.dumps(report.to_dict(), indent=2, sort_keys=True, default=str))
         else:

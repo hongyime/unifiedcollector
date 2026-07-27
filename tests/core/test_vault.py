@@ -1,6 +1,7 @@
 import gzip
 import hashlib
 import json
+from pathlib import Path
 
 import pytest
 
@@ -572,6 +573,8 @@ async def test_vault_artifact_counts_checks_both_sidecar_metadata_shapes():
         async def fetchrow(self, query, **_kwargs):
             assert "vault_sidecar" in query
             assert "vault_artifact" in query
+            assert "sidecar_ok" in query
+            assert "partial" in query
             assert "idx_media_missing_occurrence_sidecar" in query
             assert "to_regclass" in query
             return {
@@ -652,6 +655,29 @@ def test_write_raw_payload_records_raw_file_and_sidecar(tmp_path, monkeypatch):
     assert sidecar["metadata"]["artifact_id"] == "chat/123/message/456"
     assert sidecar["provenance"]["collection_account"] == "bryan"
     assert sidecar["rebuild"]["target_tables"] == ["telegram_messages"]
+
+
+def test_write_artifact_sidecar_hashes_without_reading_whole_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(vault, "SIDECARS_ENABLED", True)
+    root = tmp_path / "vault"
+    artifact = root / "media" / "large.bin"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(b"chunked artifact")
+
+    def fail_read_bytes(_path):
+        raise AssertionError("write_artifact_sidecar must stream file hashing")
+
+    monkeypatch.setattr(Path, "read_bytes", fail_read_bytes)
+
+    result = vault.write_artifact_sidecar(
+        source="search",
+        artifact_kind="media_blob",
+        file_path=str(artifact),
+        metadata={"rebuild_target_tables": ["media_items"]},
+        root=root,
+    )
+
+    assert result.ok is True
 
 
 def test_write_raw_payload_can_store_compressed_jsonl(tmp_path, monkeypatch):

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime, timezone
 
 import pytest
 
 from src.core import vault
-from src.core.media_sidecar_repair import repair_missing_media_sidecars
+from src.core.media_sidecar_repair import repair_missing_media_sidecars, repair_partial_vault_artifacts
 
 
 class FakeConn:
@@ -114,3 +115,65 @@ async def test_repair_missing_media_sidecars_accepts_string_metadata(tmp_path, m
     sidecar_meta = json.loads(conn.updates[0][1])
     payload = json.loads((tmp_path / sidecar_meta["vault_sidecar"]["path"]).read_text(encoding="utf-8"))
     assert payload["content"]["caption"] == "from legacy string"
+
+
+@pytest.mark.asyncio
+async def test_repair_partial_vault_artifacts_writes_artifact_sidecar(tmp_path, monkeypatch):
+    monkeypatch.setattr(vault, "SIDECARS_ENABLED", True)
+    row = _row(tmp_path)
+    media = tmp_path / "media" / "telegram" / "photo.jpg"
+    row["sha256"] = hashlib.sha256(media.read_bytes()).hexdigest()
+    row["metadata"] = {
+        "vault_artifact": {
+            "ok": False,
+            "partial": True,
+            "error": "sidecar write failed: out of memory",
+            "duplicate_blob": False,
+        }
+    }
+    conn = FakeConn([row])
+
+    report = await repair_partial_vault_artifacts(conn, vault_root=tmp_path)
+
+    assert report.scanned == 1
+    assert report.repaired == 1
+    assert report.failed == 0
+    assert len(conn.updates) == 1
+    artifact_meta = json.loads(conn.updates[0][1])["vault_artifact"]
+    assert artifact_meta["ok"] is True
+    assert artifact_meta["partial"] is False
+    assert artifact_meta["sidecar_path"]
+    assert (tmp_path / artifact_meta["sidecar_path"]).is_file()
+
+
+@pytest.mark.asyncio
+async def test_repair_partial_vault_artifacts_dry_run_skips_hashing(tmp_path, monkeypatch):
+    monkeypatch.setattr(vault, "SIDECARS_ENABLED", True)
+    row = _row(tmp_path)
+    row["sha256"] = "b" * 64
+    row["metadata"] = {"vault_artifact": {"ok": False, "partial": True}}
+    conn = FakeConn([row])
+
+    report = await repair_partial_vault_artifacts(conn, vault_root=tmp_path, dry_run=True)
+
+    assert report.scanned == 1
+    assert report.skipped == 1
+    assert report.failed == 0
+    assert conn.updates == []
+
+
+@pytest.mark.asyncio
+async def test_repair_partial_vault_artifacts_keeps_checksum_mismatch_degraded(tmp_path, monkeypatch):
+    monkeypatch.setattr(vault, "SIDECARS_ENABLED", True)
+    row = _row(tmp_path)
+    row["sha256"] = "b" * 64
+    row["metadata"] = {"vault_artifact": {"ok": False, "partial": True}}
+    conn = FakeConn([row])
+
+    report = await repair_partial_vault_artifacts(conn, vault_root=tmp_path)
+
+    assert report.scanned == 1
+    assert report.repaired == 0
+    assert report.failed == 1
+    assert "sha256 mismatch" in report.failures[0]["error"]
+    assert conn.updates == []
