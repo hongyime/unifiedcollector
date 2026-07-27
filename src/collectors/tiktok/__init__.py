@@ -636,18 +636,11 @@ class TiktokCollector(BaseCollector):
         # For V2, we try to get metadata first (placeholder for now)
         await self._scrape_profile_metadata(username)
 
-        # Hard outer timeout: if gallery-dl/yt-dlp hang (event-loop starvation),
-        # cancel the entire _collect_user coroutine after timeout+30s grace.
-        outer_timeout = self._timeout + 30
-
         if self._use_gallery_dl:
             try:
-                ok = await asyncio.wait_for(
-                    self._collect_via_gallery_dl(username, profile_url),
-                    timeout=outer_timeout,
-                )
+                ok = await self._collect_via_gallery_dl(username, profile_url)
             except asyncio.TimeoutError:
-                logger.warning("tiktok: _collect_via_gallery_dl hard-timeout for %s (%.0fs)", username, outer_timeout)
+                logger.warning("tiktok: gallery-dl coroutine timed out for %s", username)
                 ok = False
             if ok:
                 # Success: this cookie identity CAN see the target — record for
@@ -659,12 +652,9 @@ class TiktokCollector(BaseCollector):
 
         if self._use_yt_dlp and self._ytdlp_fallback:
             try:
-                ok = await asyncio.wait_for(
-                    self._collect_via_yt_dlp(username, profile_url),
-                    timeout=outer_timeout,
-                )
+                ok = await self._collect_via_yt_dlp(username, profile_url)
             except asyncio.TimeoutError:
-                logger.warning("tiktok: _collect_via_yt_dlp hard-timeout for %s (%.0fs)", username, outer_timeout)
+                logger.warning("tiktok: yt-dlp coroutine timed out for %s", username)
                 ok = False
             if ok:
                 # Success (see gallery-dl note above): record can_access=True.
@@ -1141,6 +1131,9 @@ class TiktokCollector(BaseCollector):
                 "tiktok ingest: parsed %d sidecars, upserted %d profile(s) and %d post(s) for %s",
                 sidecar_count, len(profile_uuids), post_count, username,
             )
+            # Post/profile sidecar upserts are real collector progress even when
+            # all media files are duplicates. Let the worker watchdog see that.
+            self._progress_count += max(1, post_count)
 
         # Pass 2: copy media files into our store (existing behavior).
         for f in Path(tmpdir).rglob("*"):
