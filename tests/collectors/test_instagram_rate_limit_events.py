@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import sys
+import time
 import types
 from pathlib import Path
 from types import SimpleNamespace
@@ -37,6 +38,8 @@ def _bare_collector():
     coll.pool = _make_pool()
     coll._current_account = SimpleNamespace(name="acct1", fingerprint={})
     coll._consecutive_429s = 0
+    coll._daily_views = {}
+    coll._daily_actions = {}
     coll.rate_limiter = object()
     coll.account_pool = MagicMock()
     coll.account_pool._accounts = []
@@ -250,6 +253,20 @@ async def test_handle_rate_limit_records_scoped_event_metadata(monkeypatch):
     assert kwargs["metadata"]["uid"] == "123"
     assert kwargs["metadata"]["endpoint"] == "graphql/query"
     assert kwargs["metadata"]["streak"] == 1
+
+
+@pytest.mark.asyncio
+async def test_process_target_respects_cooldown_with_playwright_primary(monkeypatch):
+    coll = _bare_collector()
+    monkeypatch.setenv("INSTA_PLAYWRIGHT_PRIMARY", "true")
+    limiter = instagram_mod.HumanLikeRateLimiter()
+    limiter._in_emergency["instagram.com:acct1"] = time.monotonic() + 120
+    coll.rate_limiter = limiter
+    coll._collect_user = AsyncMock()
+
+    await coll._process_target(MagicMock(), "target_user")
+
+    coll._collect_user.assert_not_awaited()
 
 
 @pytest.mark.asyncio

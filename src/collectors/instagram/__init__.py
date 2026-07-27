@@ -883,17 +883,9 @@ class InstagramCollector(BaseCollector):
             return
 
         # §21 Hard gate: respect per-account emergency cooldown set by 429 responses.
-        # Without this the worker re-enters every 5min and re-triggers the cooldown.
-        # Now per-account isolated — only THIS account's cooldown blocks it.
-        #
-        # BUT: the cooldown is set by the raw-httpx web_profile_info IP/endpoint
-        # throttle. When Playwright is the PRIMARY path it bypasses that throttle
-        # entirely (real browser, in-page fetch), so honouring this gate would
-        # freeze every target for the whole cooldown over a throttle Playwright
-        # doesn't even hit — defeating playwright-primary. Skip the gate in that
-        # mode; Playwright's own pacing + the PLAYWRIGHT_SEMAPHORE bound the rate.
-        playwright_primary = os.getenv("INSTA_PLAYWRIGHT_PRIMARY", "true").lower() == "true"
-        if not playwright_primary and isinstance(self.rate_limiter, HumanLikeRateLimiter):
+        # Without this the worker keeps entering target work and then sleeps inside
+        # rate_limiter.async_wait() until the 120s per-target timeout fires.
+        if isinstance(self.rate_limiter, HumanLikeRateLimiter):
             acct_name = self._current_account.name if self._current_account else None
             remaining = self.rate_limiter.cooldown_remaining_seconds(
                 "instagram.com", account=acct_name,
