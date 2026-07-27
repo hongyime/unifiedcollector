@@ -892,30 +892,46 @@ class Scheduler:
         import time as _time
         now = _time.monotonic()
         interval = env_int("GRAPH_EDGES_BUILD_INTERVAL_SECONDS", 21600, min_value=1800)
+        max_group_senders = env_int("GRAPH_EDGES_MAX_GROUP_SENDERS", 80, min_value=2)
         if now - getattr(self, "_last_graph_build", 0) < interval:
             return
         self._last_graph_build = now
         try:
             async with self.pool.acquire() as conn:
-                # Co-group edges: distinct (chat, sender) pairs joined against themselves.
-                # Using CTEs to avoid O(n²) message self-join.
+                # Co-group edges: distinct (chat, sender) pairs joined against
+                # themselves. Very large groups are intentionally excluded: they
+                # are weak OSINT evidence and create O(n²) edge explosions.
                 inserted_cg = await conn.fetchval("""
-                    WITH distinct_senders AS (
-                        SELECT DISTINCT wm.chat_id, wm.sender_id
+                    WITH group_members AS (
+                        SELECT
+                            wm.chat_id,
+                            wm.sender_id,
+                            MIN(wm.timestamp) AS first_seen_at,
+                            MAX(wm.timestamp) AS last_seen_at
                         FROM whatsapp_messages wm
                         JOIN whatsapp_chats wc ON wm.chat_id = wc.id
                         WHERE wm.sender_id IS NOT NULL AND wc.is_group = true
+                        GROUP BY wm.chat_id, wm.sender_id
+                    ),
+                    eligible_groups AS (
+                        SELECT chat_id
+                        FROM group_members
+                        GROUP BY chat_id
+                        HAVING COUNT(*) BETWEEN 2 AND $1
                     ),
                     co_group AS (
                         SELECT
-                            ds1.sender_id AS sender1,
-                            ds2.sender_id AS sender2,
-                            COUNT(DISTINCT ds1.chat_id) AS shared_groups
-                        FROM distinct_senders ds1
-                        JOIN distinct_senders ds2
-                            ON ds1.chat_id = ds2.chat_id
-                            AND ds1.sender_id < ds2.sender_id
-                        GROUP BY ds1.sender_id, ds2.sender_id
+                            gm1.sender_id AS sender1,
+                            gm2.sender_id AS sender2,
+                            COUNT(DISTINCT gm1.chat_id) AS shared_groups,
+                            MIN(LEAST(gm1.first_seen_at, gm2.first_seen_at)) AS first_seen_at,
+                            MAX(GREATEST(gm1.last_seen_at, gm2.last_seen_at)) AS last_seen_at
+                        FROM group_members gm1
+                        JOIN group_members gm2
+                            ON gm1.chat_id = gm2.chat_id
+                            AND gm1.sender_id < gm2.sender_id
+                        JOIN eligible_groups eg ON eg.chat_id = gm1.chat_id
+                        GROUP BY gm1.sender_id, gm2.sender_id
                     ),
                     upserted AS (
                         INSERT INTO graph_edges
@@ -927,19 +943,21 @@ class Scheduler:
                             u2.platform_user_id,
                             'co_group',
                             cg.shared_groups::integer,
-                            NOW(),
-                            NOW()
+                            COALESCE(cg.first_seen_at, NOW()),
+                            COALESCE(cg.last_seen_at, NOW())
                         FROM co_group cg
                         JOIN whatsapp_users u1 ON cg.sender1 = u1.id
                         JOIN whatsapp_users u2 ON cg.sender2 = u2.id
                         ON CONFLICT (source, source_user, target_user, edge_type)
                         DO UPDATE SET
                             weight = EXCLUDED.weight,
-                            last_seen_at = NOW()
+                            last_seen_at = GREATEST(graph_edges.last_seen_at, EXCLUDED.last_seen_at)
+                        WHERE graph_edges.weight IS DISTINCT FROM EXCLUDED.weight
+                           OR graph_edges.last_seen_at < EXCLUDED.last_seen_at
                         RETURNING 1
                     )
                     SELECT COUNT(*) FROM upserted
-                """, timeout=180)
+                """, max_group_senders, timeout=180)
 
                 # DM edges: who sent messages in which 1:1 chat.
                 inserted_dm = await conn.fetchval("""
@@ -969,12 +987,18 @@ class Scheduler:
                         JOIN whatsapp_users u ON ds.sender_id = u.id
                         ON CONFLICT (source, source_user, target_user, edge_type)
                         DO UPDATE SET last_seen_at = NOW()
+                        WHERE graph_edges.last_seen_at < NOW() - interval '1 hour'
                         RETURNING 1
                     )
                     SELECT COUNT(*) FROM upserted
                 """, timeout=180)
 
-            logger.info("graph_edges build: co_group=%d dm=%d", inserted_cg or 0, inserted_dm or 0)
+            logger.info(
+                "graph_edges build: co_group=%d dm=%d max_group_senders=%d",
+                inserted_cg or 0,
+                inserted_dm or 0,
+                max_group_senders,
+            )
         except Exception:
             logger.warning("graph_edges build failed", exc_info=True)
 
