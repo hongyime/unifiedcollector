@@ -64,3 +64,6 @@ async def test_browser_extension_payload_flags_stale_and_old_versions(monkeypatc
     assert payload["ingest"][0]["version_ok"] is False
     kinds = {issue["kind"] for issue in payload["issues"]}
     assert kinds == {"hook_stale", "extension_version_mismatch"}
+    mismatch = [issue for issue in payload["issues"] if issue["kind"] == "extension_version_mismatch"]
+    assert {issue["age_seconds"] for issue in mismatch} == {3700, 45}
+    assert all(issue["last_seen_at"] for issue in mismatch)

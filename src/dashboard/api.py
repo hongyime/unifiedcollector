@@ -426,6 +426,24 @@ def _extension_issues_by_source(extension_payload: dict | None) -> dict[str, lis
     return out
 
 
+def _short_age(seconds: object) -> str | None:
+    try:
+        value = int(seconds or 0)
+    except Exception:
+        return None
+    if value < 0:
+        return None
+    if value < 90:
+        return f"{value}s"
+    minutes = value // 60
+    if minutes < 90:
+        return f"{minutes}m"
+    hours = minutes // 60
+    if hours < 48:
+        return f"{hours}h"
+    return f"{hours // 24}d"
+
+
 def _empty_source_counts() -> dict:
     return {
         "records": 0,
@@ -523,11 +541,24 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
         }
     if extension_issues:
         issue = extension_issues[0]
+        age_text = _short_age(issue.get("age_seconds"))
+        endpoint = issue.get("endpoint")
+        version = issue.get("extension_version") or "unknown"
+        expected = issue.get("expected_version") or "current"
+        detail = issue.get("detail") or "Chrome extension issue detected."
+        if issue.get("kind") == "extension_version_mismatch":
+            scope = f"on {endpoint}" if endpoint else "from hook"
+            detail = f"{detail} Saw v{version} {scope}; expected v{expected}."
+        if age_text:
+            detail = f"{detail} Last seen {age_text} ago."
         return {
             "kind": issue.get("kind") or "extension_issue",
             "severity": "warning",
-            "summary": issue.get("detail") or "Chrome extension issue detected.",
-            "next_action": "Reload the unpacked Chrome extension and refresh the platform tab.",
+            "summary": detail,
+            "next_action": (
+                "Reload the unpacked Chrome extension, then refresh or reopen every tab for this platform. "
+                "If it still reports the old version, close duplicate platform tabs/windows."
+            ),
         }
     if source_row.get("source_health_status") in {"dead", "auth_paused", "degraded"}:
         return {
@@ -785,14 +816,18 @@ async def _browser_extension_payload(conn) -> dict:
                     "kind": "hook_stale",
                     "detail": "Chrome extension DM hook heartbeat is older than 1 hour.",
                     "age_seconds": item["age_seconds"],
+                    "last_seen_at": item["last_seen_at"],
                 })
             if not item["version_ok"]:
                 payload["issues"].append({
                     "platform": row["platform"],
                     "kind": "extension_version_mismatch",
-                    "detail": "Reload the unpacked extension and refresh the platform tab.",
+                    "detail": "Chrome extension hook is still running an older bundle.",
                     "extension_version": current,
                     "expected_version": expected,
+                    "age_seconds": item["age_seconds"],
+                    "last_seen_at": item["last_seen_at"],
+                    "owner_count": item["owner_count"],
                 })
 
     if await conn.fetchval("SELECT to_regclass('browser_ingest_events')", timeout=5) is not None:
@@ -834,9 +869,14 @@ async def _browser_extension_payload(conn) -> dict:
                     "platform": row["platform"],
                     "endpoint": row["endpoint"],
                     "kind": "extension_version_mismatch",
-                    "detail": "Browser ingest event came from an older extension version.",
+                    "detail": "Browser ingest event came from an older extension bundle.",
                     "extension_version": current,
                     "expected_version": expected,
+                    "age_seconds": item["age_seconds"],
+                    "last_seen_at": item["last_seen_at"],
+                    "requests": item["requests"],
+                    "observed_count": item["observed_count"],
+                    "stored_count": item["stored_count"],
                 })
 
     return payload

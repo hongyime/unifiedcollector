@@ -70,6 +70,51 @@ def test_source_matrix_blocker_reports_active_cooldown_before_extension_issue():
     assert "cooldown" in blocker["summary"].lower()
 
 
+def test_source_matrix_blocker_reports_extension_version_context():
+    blocker = _source_matrix_blocker(
+        _source(),
+        rate_row=None,
+        cursor_row=None,
+        extension_issues=[
+            {
+                "kind": "extension_version_mismatch",
+                "detail": "Browser ingest event came from an older extension bundle.",
+                "endpoint": "strava_streams",
+                "extension_version": "1.21.28",
+                "expected_version": "1.21.33",
+                "age_seconds": 45,
+            }
+        ],
+    )
+
+    assert blocker["kind"] == "extension_version_mismatch"
+    assert blocker["severity"] == "warning"
+    assert "v1.21.28" in blocker["summary"]
+    assert "v1.21.33" in blocker["summary"]
+    assert "45s ago" in blocker["summary"]
+    assert "duplicate" in blocker["next_action"]
+
+
+def test_source_matrix_blocker_reports_extension_hook_context_without_endpoint():
+    blocker = _source_matrix_blocker(
+        _source(),
+        rate_row=None,
+        cursor_row=None,
+        extension_issues=[
+            {
+                "kind": "extension_version_mismatch",
+                "detail": "Chrome extension hook is still running an older bundle.",
+                "extension_version": "1.21.28",
+                "expected_version": "1.21.33",
+                "age_seconds": 502,
+            }
+        ],
+    )
+
+    assert "from hook" in blocker["summary"]
+    assert "on;" not in blocker["summary"]
+
+
 def test_rate_limit_cursor_payload_marks_expired_cursor_inactive():
     now = datetime(2026, 7, 28, 0, 0, tzinfo=timezone.utc)
     payload = _rate_limit_cursor_payload(
