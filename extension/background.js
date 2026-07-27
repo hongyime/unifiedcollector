@@ -61,6 +61,12 @@ async function controlBase() {
   const { controlBase } = await chrome.storage.local.get("controlBase");
   return controlBase || DEFAULT_CONTROL;
 }
+function extensionVersion() {
+  return (chrome.runtime.getManifest && chrome.runtime.getManifest().version) || null;
+}
+function withExtensionVersion(payload) {
+  return { ...payload, extension_version: extensionVersion() };
+}
 async function fetchJsonWithTimeout(url, timeoutMs = 12000) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -151,10 +157,10 @@ async function syncCookies() {
     const base = await ingestBase();
     const r = await fetch(base + "/social/cookies", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+      body: JSON.stringify(withExtensionVersion({
         platform: "instagram", account,
         cookies: cookies.map((c) => ({ name: c.name, value: c.value, domain: c.domain, path: c.path, secure: c.secure, expirationDate: c.expirationDate })),
-      }),
+      })),
     });
     if (r.ok) await log("info", `synced live IG session → headless backup (${account})`);
   } catch (e) { /* cookies perm / ingest down */ }
@@ -300,7 +306,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         try {
           const r = await fetch(base + "/social/ingest", {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ platform: msg.platform || "instagram", username: msg.username, items: msg.items }),
+            body: JSON.stringify(withExtensionVersion({ platform: msg.platform || "instagram", username: msg.username, items: msg.items })),
           });
           const j = await r.json().catch(() => ({}));
           await log("info", `📥 ${msg.platform || "instagram"} · ${msg.username} · ${j.accepted ?? msg.items.length} media candidate(s) queued`);
@@ -315,7 +321,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         try {
           const r = await fetch(base + "/social/discover", {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ platform: msg.platform || "instagram", source: msg.source, hop: msg.hop, discovered: msg.discovered }),
+            body: JSON.stringify(withExtensionVersion({ platform: msg.platform || "instagram", source: msg.source, hop: msg.hop, discovered: msg.discovered })),
           });
           const j = await r.json().catch(() => ({}));
           await log("info", `🕸 ${msg.platform || "instagram"} · spider from ${msg.source} (hop ${msg.hop}) · +${j.added ?? "?"} new accounts`);
@@ -330,12 +336,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         try {
           const r = await fetch(base + "/social/target-status", {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
+            body: JSON.stringify(withExtensionVersion({
               platform: msg.platform || "instagram",
               username: msg.username,
               status: msg.status,
               reason: msg.reason || null,
-            }),
+            })),
           });
           sendResponse({ ok: r.ok });
         } catch (e) {
@@ -347,7 +353,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         try {
           const r = await fetch(base + "/social/posts", {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ platform: msg.platform || "instagram", username: msg.username, posts: msg.posts }),
+            body: JSON.stringify(withExtensionVersion({ platform: msg.platform || "instagram", username: msg.username, posts: msg.posts })),
           });
           const j = await r.json().catch(() => ({}));
           await log("info", `📝 ${msg.platform || "instagram"} · ${msg.username} · ${j.saved ?? msg.posts.length} post(s) w/ captions+counts`);
@@ -359,7 +365,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         try {
           const r = await fetch(base + "/social/comments", {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ platform: msg.platform || "instagram", post_id: msg.post_id, comments: msg.comments }),
+            body: JSON.stringify(withExtensionVersion({ platform: msg.platform || "instagram", post_id: msg.post_id, comments: msg.comments })),
           });
           const j = await r.json().catch(() => ({}));
           await log("info", `💬 ${msg.platform || "instagram"} · post ${msg.post_id} · ${j.saved ?? "?"} comment(s)`);
@@ -371,7 +377,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         try {
           const r = await fetch(base + "/social/seed", {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ platform: msg.platform || "instagram", users: msg.users }),
+            body: JSON.stringify(withExtensionVersion({ platform: msg.platform || "instagram", users: msg.users })),
           });
           const j = await r.json().catch(() => ({}));
           await log("info", `self-seed: +${j.added ?? "?"} seed target(s)`);
@@ -383,7 +389,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         try {
           const r = await fetch(base + "/social/profile", {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ platform: msg.platform || "instagram", profile: msg.profile }),
+            body: JSON.stringify(withExtensionVersion({ platform: msg.platform || "instagram", profile: msg.profile })),
           });
           sendResponse({ ok: r.ok });
         } catch (e) { sendResponse({ ok: false }); }
@@ -393,7 +399,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         try {
           const r = await fetch(base + "/social/users", {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ platform: msg.platform || "instagram", context: msg.context || "seen", owner: msg.owner || null, users: msg.users }),
+            body: JSON.stringify(withExtensionVersion({ platform: msg.platform || "instagram", context: msg.context || "seen", owner: msg.owner || null, users: msg.users })),
           });
           const j = await r.json().catch(() => ({}));
           await log("info", `👤 ${msg.platform || "instagram"} · +${j.recorded ?? "?"} users (via ${msg.context || "seen"})`);
@@ -405,7 +411,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         try {
           const r = await fetch(base + "/social/dms", {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ platform: msg.platform || "instagram", owner: msg.owner || null, threads: msg.threads }),
+            body: JSON.stringify(withExtensionVersion({ platform: msg.platform || "instagram", owner: msg.owner || null, threads: msg.threads })),
           });
           const j = await r.json().catch(() => ({}));
           await log("info", `✉️ ${msg.platform || "instagram"} · +${j.recorded ?? "?"} DM messages`);
@@ -418,7 +424,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         try {
           const r = await fetch(base + "/social/dm-frame", {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ platform: msg.platform, frame: msg.frame }),
+            body: JSON.stringify(withExtensionVersion({ platform: msg.platform, frame: msg.frame })),
           });
           sendResponse({ ok: r.ok });
         } catch (e) { sendResponse({ ok: false }); }
@@ -428,8 +434,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         try {
           await fetch(base + "/social/dm-probe", {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ platform: msg.platform, transport: msg.transport,
-              url: msg.url, frame_kind: msg.frame_kind, frame_size: msg.frame_size }),
+            body: JSON.stringify(withExtensionVersion({ platform: msg.platform, transport: msg.transport,
+              url: msg.url, frame_kind: msg.frame_kind, frame_size: msg.frame_size })),
           });
           await log("info", `🔎 ${msg.platform} DM ${msg.transport}: ${msg.frame_kind || "url"} ${msg.frame_size ? "~" + msg.frame_size + "B " : ""}${msg.url || ""}`);
         } catch (e) {}
@@ -440,7 +446,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         try {
           await fetch(base + "/social/dm-sample", {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ platform: msg.platform, url: msg.url, size: msg.size, b64: msg.b64 }),
+            body: JSON.stringify(withExtensionVersion({ platform: msg.platform, url: msg.url, size: msg.size, b64: msg.b64 })),
           });
           await log("info", `🧪 ${msg.platform} DM sample: ${msg.size}B`);
         } catch (e) {}
@@ -459,15 +465,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               owner = (c && c.value) || "";
             }
           } catch (e) { /* cookies perm not granted */ }
-          const ver = (chrome.runtime.getManifest && chrome.runtime.getManifest().version) || null;
           await fetch(base + "/social/dm-heartbeat", {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
+            body: JSON.stringify(withExtensionVersion({
               platform: msg.platform, owner,
               probes_sent: msg.probes_sent || 0,
               samples_shipped: msg.samples_shipped || 0,
-              extension_version: ver,
-            }),
+            })),
           });
         } catch (e) {}
         sendResponse({ ok: true });
@@ -477,10 +481,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         try {
           await fetch(base + "/social/dm-decoded", {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
+            body: JSON.stringify(withExtensionVersion({
               platform: msg.platform, owner: msg.owner || "",
               threads: msg.threads || [], messages: msg.messages || [],
-            }),
+            })),
           });
           const n = (msg.messages && msg.messages.length) || 0;
           if (n) await log("info", `📨 ${msg.platform} DM decoded: ${n} msg`);
@@ -509,17 +513,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
       case "stravaRouteVisit": {
         try {
-          const ver = (chrome.runtime.getManifest && chrome.runtime.getManifest().version) || null;
           const r = await fetch(base + "/social/strava-route-visit", {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
+            body: JSON.stringify(withExtensionVersion({
               activity_id: msg.activity_id,
               activity_url: msg.activity_url || null,
               url: msg.url || null,
               status: msg.status || "observed",
               owner: msg.owner || msg.account || null,
-              extension_version: ver,
-            }),
+            })),
           });
           const j = await r.json().catch(() => ({}));
           sendResponse({ ok: r.ok, ...j });
@@ -530,11 +532,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
       case "strava_streams": {  // passive route stream observed from Strava's own browser request
         try {
-          const ver = (chrome.runtime.getManifest && chrome.runtime.getManifest().version) || null;
           const pointCount = msg.point_count || (msg.streams && msg.streams.latlng && msg.streams.latlng.length) || 0;
           const r = await fetch(base + "/social/strava-streams", {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
+            body: JSON.stringify(withExtensionVersion({
               platform: "strava",
               activity_id: msg.activity_id,
               request_url: msg.request_url || msg.url || null,
@@ -542,8 +543,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               owner: msg.owner || msg.account || null,
               streams: msg.streams || {},
               point_count: pointCount,
-              extension_version: ver,
-            }),
+            })),
           });
           const j = await r.json().catch(() => ({}));
           if (j.stored) await log("info", `🗺 strava · activity ${msg.activity_id} · route ${j.point_count || pointCount} point(s) captured`);
@@ -570,17 +570,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           lastLoopPing: Date.now(),
         });
         try {
-          const ver = (chrome.runtime.getManifest && chrome.runtime.getManifest().version) || null;
           await fetch(base + "/social/browser-heartbeat", {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
+            body: JSON.stringify(withExtensionVersion({
               platform: msg.platform,
               label: msg.label || null,
               running: !!msg.running,
               url: msg.url || (sender && sender.tab && sender.tab.url) || null,
               tab_id: sender && sender.tab ? sender.tab.id : null,
-              extension_version: ver,
-            }),
+            })),
           });
         } catch (e) {}
         sendResponse({ ok: true });
