@@ -229,7 +229,7 @@ def _date_prefix(item, platform="") -> str:
 
 def _norm_platform(p):
     p = (p or "instagram").strip().lower()
-    if p == "twitter":
+    if p in {"twitter", "twitter / x", "twitter/x", "x.com"}:
         p = "x"
     return p if p in KNOWN_PLATFORMS else "instagram"
 
@@ -2375,6 +2375,34 @@ async def strava_route_visit_handler(request):
     return _cors(web.json_response({"ok": True, "activity_id": activity_id}))
 
 
+async def browser_heartbeat_handler(request):
+    body = await _safe_json(request)
+    platform = _norm_platform(body.get("platform"))
+    running = bool(body.get("running"))
+    url = body.get("url")
+    label = body.get("label")
+    subject = (
+        str(body.get("owner") or body.get("account") or body.get("tab_id") or platform)
+        .strip()[:128]
+    )
+    await _record_browser_ingest_event(
+        request.app["pool"],
+        platform,
+        "browser_heartbeat",
+        subject,
+        observed_count=1,
+        stored_count=0,
+        metadata={
+            "running": running,
+            "url": url,
+            "label": label,
+            "tab_id": body.get("tab_id"),
+            "extension_version": body.get("extension_version"),
+        },
+    )
+    return _cors(web.json_response({"ok": True, "platform": platform, "running": running}))
+
+
 CREDENTIALS_ROOT = os.getenv("CREDENTIALS_ROOT", "/app/credentials")
 
 
@@ -2586,6 +2614,7 @@ def make_app():
     app.router.add_get("/social/strava-route-queue", strava_route_queue_handler)
     app.router.add_post("/social/strava-route-visit", strava_route_visit_handler)
     app.router.add_post("/social/strava-streams", strava_streams_handler)
+    app.router.add_post("/social/browser-heartbeat", browser_heartbeat_handler)
     # instagram back-compat aliases
     app.router.add_get("/ig/targets", get_targets_ig)
     app.router.add_post("/ig/ingest", ingest_ig)

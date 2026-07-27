@@ -541,7 +541,26 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         break;
       }
       case "loopStatus": {  // continuous loop liveness ping
-        await setStatus({ loopRunning: !!msg.running, loopPlatform: msg.platform, lastLoopPing: Date.now() });
+        await setStatus({
+          loopRunning: !!msg.running,
+          loopPlatform: msg.platform,
+          loopPlatformLabel: msg.label || msg.platform,
+          lastLoopPing: Date.now(),
+        });
+        try {
+          const ver = (chrome.runtime.getManifest && chrome.runtime.getManifest().version) || null;
+          await fetch(base + "/social/browser-heartbeat", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              platform: msg.platform,
+              label: msg.label || null,
+              running: !!msg.running,
+              url: msg.url || (sender && sender.tab && sender.tab.url) || null,
+              tab_id: sender && sender.tab ? sender.tab.id : null,
+              extension_version: ver,
+            }),
+          });
+        } catch (e) {}
         sendResponse({ ok: true });
         break;
       }

@@ -1611,7 +1611,7 @@ async function mainLoop() {
   if (LOOP_RUNNING) return;            // one loop per tab
   LOOP_RUNNING = true;
   clog("info", `${p.label} loop started — continuous & human-paced (no fixed timer)`, p.label);
-  await send({ type: "loopStatus", platform: p.label, running: true }).catch(() => {});
+  await send({ type: "loopStatus", platform: p.id, label: p.label, running: true, url: location.href }).catch(() => {});
   try {
     while (LOOP_RUNNING) {
       try {
@@ -1628,12 +1628,12 @@ async function mainLoop() {
         await sleep(human(60000));
       }
       // heartbeat so the popup shows the loop is alive between passes
-      await send({ type: "loopStatus", platform: p.label, running: true }).catch(() => {});
+      await send({ type: "loopStatus", platform: p.id, label: p.label, running: true, url: location.href }).catch(() => {});
       await sleep(human(passRestMs(p.id))); // long human rest between passes
     }
   } finally {
     LOOP_RUNNING = false;
-    await send({ type: "loopStatus", platform: p.label, running: false }).catch(() => {});
+    await send({ type: "loopStatus", platform: p.id, label: p.label, running: false, url: location.href }).catch(() => {});
   }
 }
 

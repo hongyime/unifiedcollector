@@ -42,6 +42,16 @@ class _FakePool:
         return _AcquireContext(self.conn)
 
 
+class _FakeRequest(dict):
+    def __init__(self, app, body):
+        super().__init__()
+        self.app = app
+        self._body = body
+
+    async def json(self):
+        return self._body
+
+
 class _NoDownloadSession:
     def get(self, *args, **kwargs):
         raise AssertionError("extension ingest should not download when vault is unavailable")
@@ -219,6 +229,29 @@ def test_record_browser_ingest_event_writes_observed_and_stored_counts():
     assert "browser_ingest_events" in query
     assert args[:5] == ("threads", "media", "feed", 12, 3)
     assert "extension_version" in args[5]
+
+
+def test_browser_heartbeat_handler_records_platform_loop():
+    pool = _FakePool()
+    req = _FakeRequest(
+        {"pool": pool},
+        {
+            "platform": "Twitter / X",
+            "label": "Twitter / X",
+            "running": True,
+            "url": "https://x.com/home",
+            "tab_id": 123,
+            "extension_version": "1.21.29",
+        },
+    )
+
+    resp = asyncio.run(ig_ingest.browser_heartbeat_handler(req))
+
+    assert resp.status == 200
+    query, args = pool.conn.executes[0]
+    assert "browser_ingest_events" in query
+    assert args[:5] == ("x", "browser_heartbeat", "123", 1, 0)
+    assert "1.21.29" in args[5]
 
 
 def test_record_strava_stream_http_429_writes_rate_limit_event(monkeypatch):
