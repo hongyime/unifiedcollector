@@ -3483,6 +3483,15 @@ async def whatsapp_qr(bridge: str):
             qrd = __import__("json").loads(r.read().decode())
         out["status"] = qrd.get("status", out["status"])
         raw_qr = qrd.get("qr", "")
+        if not raw_qr and _should_request_fresh_wa_qr(health, qrd):
+            kick = await _wa_bridge_post(bridge, "fresh-qr")
+            out["status"] = "requesting_fresh_qr"
+            out["error"] = (
+                "Bridge had no active QR; requested a fresh QR. "
+                "The next poll should render it."
+                if kick.get("ok")
+                else f"Bridge had no active QR; fresh QR request failed: {kick.get('error')}"
+            )
         if raw_qr:
             # Convert the raw Baileys QR string to a base64-encoded PNG so the
             # browser can use it directly as <img src="data:image/png;base64,…">
@@ -3505,6 +3514,28 @@ async def whatsapp_qr(bridge: str):
         out["error"] = str(exc)
         out["status"] = "unreachable"
     return out
+
+
+def _should_request_fresh_wa_qr(health: dict, qrd: dict) -> bool:
+    """Nudge an unpaired bridge out of the no-QR retry gap.
+
+    Baileys expires a QR after several refresh attempts and briefly reports
+    disconnected with no QR until the next reconnect timer fires. The link page
+    polls /whatsapp/qr/{bridge}; use that poll to request a fresh QR only when
+    the bridge is clearly unregistered. Registered-but-disconnected sessions
+    should keep their credentials and use the manual reconnect path instead.
+    """
+    if bool(health.get("whatsapp_ready")) or bool(health.get("registered")):
+        return False
+    if qrd.get("qr"):
+        return False
+    status = str(qrd.get("status") or health.get("status") or "").lower()
+    return status in {
+        "disconnected",
+        "connecting_unpaired",
+        "fresh_qr_requested",
+        "auth_cleared",
+    }
 
 
 def _wa_bridge_base(bridge: str) -> str:
