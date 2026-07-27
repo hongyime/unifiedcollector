@@ -26,6 +26,7 @@ globalThis.UC_PLATFORMS = [
 
 const ALARM = "uc-scrape";
 const DEFAULT_INGEST = "http://127.0.0.1:8765";
+const DEFAULT_CONTROL = "http://127.0.0.1:8700";
 const LOG_KEY = "ucLog";
 const LOG_MAX = 200;
 const WATCHDOG_MIN = 13;         // re-nudge any open scraper tab whose loop died
@@ -55,6 +56,21 @@ async function getStatus() {
 async function ingestBase() {
   const { ingestBase } = await chrome.storage.local.get("ingestBase");
   return ingestBase || DEFAULT_INGEST;
+}
+async function controlBase() {
+  const { controlBase } = await chrome.storage.local.get("controlBase");
+  return controlBase || DEFAULT_CONTROL;
+}
+async function fetchJsonWithTimeout(url, timeoutMs = 12000) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const r = await fetch(url, { signal: ctrl.signal });
+    const j = await r.json().catch(() => ({}));
+    return { response: r, json: j };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // ---- watchdog + AUTO-TABS (open + refresh) --------------------------------
@@ -477,9 +493,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           const limit = Math.max(1, Math.min(Number(msg.limit || 1), 10));
           const owner = String(msg.owner || msg.account || "").trim();
           const accountQuery = owner ? `&account=${encodeURIComponent(owner)}` : "";
-          const r = await fetch(base + `/social/strava-route-queue?limit=${limit}${accountQuery}`);
-          const j = await r.json().catch(() => ({}));
-          sendResponse({ ok: r.ok, ...j });
+          const query = `?limit=${limit}${accountQuery}`;
+          let result;
+          try {
+            const ctl = await controlBase();
+            result = await fetchJsonWithTimeout(ctl + `/strava/route-capture-queue${query}`);
+          } catch (e) {
+            result = await fetchJsonWithTimeout(base + `/social/strava-route-queue${query}`, 30000);
+          }
+          sendResponse({ ok: result.response.ok, ...result.json });
         } catch (e) {
           sendResponse({ ok: false, error: String(e.message || e), items: [] });
         }
