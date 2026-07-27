@@ -203,6 +203,8 @@ export interface MediaStats {
   health_detail?: string | null;
   source_health_status?: string | null;
   source_health_error?: string | null;
+  stats_stale?: boolean;
+  stats_error?: string | null;
 }
 
 export interface HourlyIngestionRow {

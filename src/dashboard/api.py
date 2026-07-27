@@ -32,6 +32,7 @@ from src.core.whatsapp_bridge_health import (
 logger = logging.getLogger(__name__)
 _MESSAGING_COVERAGE_CACHE: dict[str, object] = {"ts": 0.0, "rows": None}
 _SOURCE_MEDIA_TOTALS_CACHE: dict[str, object] = {"ts": 0.0, "rows": None}
+_SOURCE_MEDIA_TOTALS_TTL_SECONDS = int(os.getenv("SOURCE_MEDIA_TOTALS_TTL_SECONDS", "300"))
 
 
 def _encode_polyline(points, precision: int = 5) -> str:
@@ -310,21 +311,30 @@ async def _source_rate_summary(conn, since_sql: str) -> dict[str, dict]:
 
 async def _source_media_totals(conn) -> dict[str, dict]:
     cached_rows = _SOURCE_MEDIA_TOTALS_CACHE.get("rows")
-    if cached_rows is not None and time.time() - float(_SOURCE_MEDIA_TOTALS_CACHE.get("ts") or 0) < 180:
+    cache_age = time.time() - float(_SOURCE_MEDIA_TOTALS_CACHE.get("ts") or 0)
+    if cached_rows is not None and cache_age < _SOURCE_MEDIA_TOTALS_TTL_SECONDS:
         return cached_rows  # type: ignore[return-value]
     if "media_items" not in await _existing_public_tables(conn, ["media_items"]):
         return {}
-    rows = await conn.fetch(
-        """
-        SELECT source,
-               count(*)::bigint AS total_media_items,
-               COALESCE(sum(file_size), 0)::bigint AS total_media_bytes,
-               max(collected_at) AS latest_media_at
-        FROM media_items
-        GROUP BY source
-        """,
-        timeout=45,
-    )
+    try:
+        rows = await conn.fetch(
+            """
+            SELECT source,
+                   count(*)::bigint AS total_media_items,
+                   COALESCE(sum(file_size), 0)::bigint AS total_media_bytes,
+                   max(collected_at) AS latest_media_at
+            FROM media_items
+            GROUP BY source
+            """,
+            timeout=20,
+        )
+    except Exception:
+        if cached_rows is not None:
+            for row in cached_rows.values():  # type: ignore[union-attr]
+                row["stats_stale"] = True
+            _SOURCE_MEDIA_TOTALS_CACHE["ts"] = time.time()
+            return cached_rows  # type: ignore[return-value]
+        raise
     out = {row["source"]: dict(row) for row in rows}
     _SOURCE_MEDIA_TOTALS_CACHE.update({"ts": time.time(), "rows": out})
     return out
@@ -1925,17 +1935,13 @@ async def list_media(source: str | None = None, limit: int = 50,
 async def media_stats(_user: dict = Depends(require_role("viewer"))):
     pool = await get_pool()
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT source,
-                   COUNT(*) AS total_items,
-                   COALESCE(SUM(file_size), 0) AS total_bytes,
-                   MAX(collected_at) AS last_collected
-            FROM media_items
-            GROUP BY source
-            ORDER BY source
-            """
-        )
+        media_totals_error = None
+        try:
+            media_totals = await _source_media_totals(conn)
+        except Exception as exc:  # noqa: BLE001 - dashboard must degrade, not 500
+            logger.warning("media stats totals failed: %s", exc)
+            media_totals_error = exc.__class__.__name__
+            media_totals = {}
         try:
             from src.core.source_freshness import compute_liveness
             live_sources = await compute_liveness(conn)
@@ -1945,10 +1951,18 @@ async def media_stats(_user: dict = Depends(require_role("viewer"))):
             live = {}
         out = []
         now = datetime.now(timezone.utc)
-        for r in rows:
-            d = dict(r)
-            query_spec = _LATEST_ACTIVITY_QUERIES.get(d["source"])
-            cur = live.get(d["source"])
+        for source in sorted(set(media_totals) | set(live)):
+            stats = media_totals.get(source, {})
+            d = {
+                "source": source,
+                "total_items": int(stats.get("total_media_items") or 0),
+                "total_bytes": int(stats.get("total_media_bytes") or 0),
+                "last_collected": stats.get("latest_media_at"),
+                "stats_stale": bool(stats.get("stats_stale")),
+                "stats_error": media_totals_error,
+            }
+            query_spec = _LATEST_ACTIVITY_QUERIES.get(source)
+            cur = live.get(source)
             if cur:
                 d["live"] = cur["status"]
                 d["age_seconds"] = cur["age_seconds"]

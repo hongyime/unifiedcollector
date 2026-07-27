@@ -85,6 +85,12 @@ const columns: ColumnDef<MediaStats, unknown>[] = [
               {row.health_detail}
             </div>
           )}
+          {(row.stats_stale || row.stats_error) && (
+            <div className="text-[10px] text-warning max-w-[320px] truncate">
+              media totals {row.stats_stale ? "cached" : "degraded"}
+              {row.stats_error ? ` (${row.stats_error})` : ""}
+            </div>
+          )}
         </div>
       );
     },
