@@ -67,3 +67,7 @@ async def test_browser_extension_payload_flags_stale_and_old_versions(monkeypatc
     mismatch = [issue for issue in payload["issues"] if issue["kind"] == "extension_version_mismatch"]
     assert {issue["age_seconds"] for issue in mismatch} == {3700, 45}
     assert all(issue["last_seen_at"] for issue in mismatch)
+    by_age = {issue["age_seconds"]: issue for issue in mismatch}
+    assert by_age[3700]["needs_new_event"] is True
+    assert "waiting for a fresh heartbeat" in by_age[3700]["detail"]
+    assert by_age[45]["needs_new_event"] is False

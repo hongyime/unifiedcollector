@@ -178,6 +178,9 @@ def _extension_versions_match(current: str | None, expected: str | None) -> bool
     return current.lstrip("vV") == expected.lstrip("vV")
 
 
+_EXTENSION_RECENT_MISMATCH_SECONDS = 15 * 60
+
+
 _INGESTION_CONTENT_PARTS = [
     ("telegram", "telegram_messages", "collected_at", "messages"),
     ("whatsapp", "whatsapp_messages", "collected_at", "messages"),
@@ -550,6 +553,11 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
         if issue.get("kind") == "extension_version_mismatch":
             scope = f"on {endpoint}" if endpoint else "from hook"
             detail = f"{detail} Saw v{version} {scope}; expected v{expected}."
+            if issue.get("needs_new_event"):
+                detail = (
+                    f"Last browser signal {scope} was from old v{version}; expected v{expected}. "
+                    "No newer signal has arrived yet to prove the reload took."
+                )
         if age_text:
             detail = f"{detail} Last seen {age_text} ago."
         return {
@@ -557,8 +565,13 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
             "severity": "warning",
             "summary": detail,
             "next_action": (
-                "Reload the unpacked Chrome extension, then refresh or reopen every tab for this platform. "
-                "If it still reports the old version, close duplicate platform tabs/windows."
+                "Refresh or reopen the platform tab so the current extension emits one fresh signal. "
+                "If it still reports the old version, reload the unpacked extension and close duplicate platform tabs/windows."
+                if issue.get("needs_new_event")
+                else (
+                    "Reload the unpacked Chrome extension, then refresh or reopen every tab for this platform. "
+                    "If it still reports the old version, close duplicate platform tabs/windows."
+                )
             ),
         }
     if source_row.get("source_health_status") in {"dead", "auth_paused", "degraded"}:
@@ -822,15 +835,21 @@ async def _browser_extension_payload(conn) -> dict:
                     "last_seen_at": item["last_seen_at"],
                 })
             if not item["version_ok"]:
+                recent = item["age_seconds"] <= _EXTENSION_RECENT_MISMATCH_SECONDS
                 payload["issues"].append({
                     "platform": row["platform"],
                     "kind": "extension_version_mismatch",
-                    "detail": "Chrome extension hook is still running an older bundle.",
+                    "detail": (
+                        "Chrome extension hook is still running an older bundle."
+                        if recent
+                        else "Chrome extension hook last reported an older bundle; waiting for a fresh heartbeat."
+                    ),
                     "extension_version": current,
                     "expected_version": expected,
                     "age_seconds": item["age_seconds"],
                     "last_seen_at": item["last_seen_at"],
                     "owner_count": item["owner_count"],
+                    "needs_new_event": not recent,
                 })
 
     if await conn.fetchval("SELECT to_regclass('browser_ingest_events')", timeout=5) is not None:
@@ -868,11 +887,16 @@ async def _browser_extension_payload(conn) -> dict:
             }
             payload["ingest"].append(item)
             if not item["version_ok"]:
+                recent = item["age_seconds"] <= _EXTENSION_RECENT_MISMATCH_SECONDS
                 payload["issues"].append({
                     "platform": row["platform"],
                     "endpoint": row["endpoint"],
                     "kind": "extension_version_mismatch",
-                    "detail": "Browser ingest event came from an older extension bundle.",
+                    "detail": (
+                        "Browser ingest event came from an older extension bundle."
+                        if recent
+                        else "Last browser ingest event used an older extension bundle; waiting for a fresh event."
+                    ),
                     "extension_version": current,
                     "expected_version": expected,
                     "age_seconds": item["age_seconds"],
@@ -880,6 +904,7 @@ async def _browser_extension_payload(conn) -> dict:
                     "requests": item["requests"],
                     "observed_count": item["observed_count"],
                     "stored_count": item["stored_count"],
+                    "needs_new_event": not recent,
                 })
 
     return payload

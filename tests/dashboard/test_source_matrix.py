@@ -127,6 +127,29 @@ def test_source_matrix_blocker_reports_extension_hook_context_without_endpoint()
     assert "on;" not in blocker["summary"]
 
 
+def test_source_matrix_blocker_reports_extension_waiting_for_new_event():
+    blocker = _source_matrix_blocker(
+        _source(),
+        rate_row=None,
+        cursor_row=None,
+        extension_issues=[
+            {
+                "kind": "extension_version_mismatch",
+                "detail": "Last browser ingest event used an older extension bundle; waiting for a fresh event.",
+                "endpoint": "strava_route_visit",
+                "extension_version": "1.21.28",
+                "expected_version": "1.21.33",
+                "age_seconds": 1288,
+                "needs_new_event": True,
+            }
+        ],
+    )
+
+    assert "No newer signal has arrived" in blocker["summary"]
+    assert "21m ago" in blocker["summary"]
+    assert "one fresh signal" in blocker["next_action"]
+
+
 def test_rate_limit_cursor_payload_marks_expired_cursor_inactive():
     now = datetime(2026, 7, 28, 0, 0, tzinfo=timezone.utc)
     payload = _rate_limit_cursor_payload(
