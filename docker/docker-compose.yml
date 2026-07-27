@@ -568,7 +568,7 @@ services:
       # Headless Playwright is more detectable than a real browser, so run it as a
       # GENTLE periodic backup: lower daily profile-view quota, fully-serial spider,
       # and a long idle between cycles. The extension is the primary live path.
-      INSTA_DAILY_QUOTA_PROFILE_VIEWS: "100"
+      INSTA_DAILY_QUOTA_PROFILE_VIEWS: "60"
       INSTA_SPIDER_CONCURRENCY: "1"
       INSTA_SPIDER_HOPS: "1"
       # ANTI-BAN (P2 review §4): the flagged IG account shares ONE cookie jar with
@@ -578,7 +578,7 @@ services:
       # extension remains the sole IG discovery path (it uses its own IG_SPIDER_MAX_HOP,
       # unaffected by this flag — read only at instagram/__init__.py:1071).
       INSTA_SPIDER_FOLLOWERS: "false"
-      COLLECTOR_CYCLE_SLEEP_INSTAGRAM: "1200"
+      COLLECTOR_CYCLE_SLEEP_INSTAGRAM: "1800"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     cap_add:
