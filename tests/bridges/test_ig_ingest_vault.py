@@ -161,6 +161,8 @@ def test_extension_ingest_writes_media_to_vault_blob(monkeypatch, tmp_path):
     assert metadata["caption"] == "hello"
     assert metadata["vault_artifact"]["ok"] is True
     assert metadata["vault_artifact"]["blob_path"] == f"media/blobs/{digest[:2]}/{digest[2:4]}/{digest}.jpg"
+    assert metadata["vault_sidecar"]["ok"] is True
+    assert metadata["vault_sidecar"]["path"] == "sidecars/media.json"
     consistency_updates = [
         args for query, args in pool.conn.executes
         if "vault_artifact_db_consistency" in query or any("vault_artifact_db_consistency" in str(arg) for arg in args)

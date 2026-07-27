@@ -664,6 +664,29 @@ async def _download_and_save(pool, session, platform, username, item, reject_sta
             "duplicate_blob": artifact.duplicate_blob,
             "error": artifact.error,
         }
+        sidecar = write_media_sidecar(
+            source=platform,
+            entity_id=safe_user,
+            entity_name=item.get("entity_name") or username,
+            content_type=ctype,
+            content_id=store_cid,
+            filename=dest.name,
+            file_path=str(stored_path),
+            file_size=len(data),
+            width=None,
+            height=None,
+            sha256=sha,
+            source_url=url,
+            metadata=meta_obj,
+            ingest_path="extension",
+            kind=media_kind,
+        )
+        meta_obj["vault_sidecar"] = {
+            "enabled": sidecar.enabled,
+            "ok": sidecar.ok,
+            "path": sidecar.relative_path,
+            "error": sidecar.error,
+        }
         meta_json = json.dumps(meta_obj)
         async with pool.acquire() as conn:
             await conn.execute(
@@ -696,54 +719,19 @@ async def _download_and_save(pool, session, platform, username, item, reject_sta
                     store_cid,
                     f"vault artifact partial: {artifact.error}",
                 )
-        sidecar = write_media_sidecar(
-            source=platform,
-            entity_id=safe_user,
-            entity_name=item.get("entity_name") or username,
-            content_type=ctype,
-            content_id=store_cid,
-            filename=dest.name,
-            file_path=str(stored_path),
-            file_size=len(data),
-            width=None,
-            height=None,
-            sha256=sha,
-            source_url=url,
-            metadata=meta_obj,
-            ingest_path="extension",
-            kind=media_kind,
-        )
-        sidecar_meta = {
-            "vault_sidecar": {
-                "enabled": sidecar.enabled,
-                "ok": sidecar.ok,
-                "path": sidecar.relative_path,
-                "error": sidecar.error,
-            }
-        }
-        try:
-            async with pool.acquire() as conn:
+            if sidecar.enabled and not sidecar.ok:
                 await conn.execute(
                     """
-                    UPDATE media_items
-                    SET metadata = COALESCE(metadata, '{}'::jsonb) || $3::jsonb
-                    WHERE source = $1 AND content_id = $2
+                    INSERT INTO dead_letter_queue (source, entity_id, content_id, error_message)
+                    VALUES ($1, $2, $3, $4)
                     """,
                     platform,
+                    safe_user,
                     store_cid,
-                    json.dumps(sidecar_meta, default=str),
+                    f"vault sidecar write failed: {sidecar.error}",
                 )
-                if sidecar.enabled and not sidecar.ok:
-                    await conn.execute(
-                        """
-                        INSERT INTO dead_letter_queue (source, entity_id, content_id, error_message)
-                        VALUES ($1, $2, $3, $4)
-                        """,
-                        platform,
-                        safe_user,
-                        store_cid,
-                        f"vault sidecar write failed: {sidecar.error}",
-                    )
+        try:
+            async with pool.acquire() as conn:
                 consistency = await verify_media_item_db_consistency(
                     conn,
                     source=platform,

@@ -95,6 +95,18 @@ def main():
     vi.add_argument("--limit", type=int, default=20, help="Maximum artifacts to return")
     vi.add_argument("--json", action="store_true", help="Print machine-readable JSON")
 
+    # repair-media-sidecars
+    msr = sub.add_parser(
+        "repair-media-sidecars",
+        help="Repair media_items rows that have files but lack occurrence sidecar metadata",
+    )
+    msr.add_argument("--source", default=None, help="Optional source filter")
+    msr.add_argument("--limit", type=int, default=500, help="Maximum rows to scan")
+    msr.add_argument("--since-hours", type=int, default=None, help="Only inspect rows collected in this window")
+    msr.add_argument("--vault-root", default=None, help="Vault root (default: COLLECTOR_VAULT_ROOT)")
+    msr.add_argument("--dry-run", action="store_true", help="Report repairable rows without writing sidecars")
+    msr.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+
     # restore-drill
     rd = sub.add_parser(
         "restore-drill",
@@ -165,6 +177,8 @@ def main():
         )
     elif args.command == "vault-inspect":
         _cmd_vault_inspect(args.vault_root, args.source, args.limit, args.json)
+    elif args.command == "repair-media-sidecars":
+        asyncio.run(_cmd_repair_media_sidecars(args))
     elif args.command == "restore-drill":
         asyncio.run(_cmd_restore_drill(args))
     elif args.command == "schedule":
@@ -387,6 +401,36 @@ def _cmd_vault_inspect(
         print(json.dumps(report.to_dict(), indent=2, sort_keys=True, default=str))
     else:
         print(report.to_text())
+
+
+async def _cmd_repair_media_sidecars(args):
+    import json
+
+    from src.core.media_sidecar_repair import repair_missing_media_sidecars
+
+    pool = await get_pool()
+    try:
+        async with pool.acquire() as conn:
+            report = await repair_missing_media_sidecars(
+                conn,
+                source=args.source,
+                limit=args.limit,
+                since_hours=args.since_hours,
+                vault_root=args.vault_root,
+                dry_run=args.dry_run,
+            )
+        if args.json:
+            print(json.dumps(report.to_dict(), indent=2, sort_keys=True, default=str))
+        else:
+            print(
+                "Media sidecar repair: "
+                f"scanned={report.scanned} repaired={report.repaired} "
+                f"failed={report.failed} skipped={report.skipped}"
+            )
+            for failure in report.failures[:10]:
+                print(f"  failed {failure.get('source')}/{failure.get('content_id')}: {failure.get('error')}")
+    finally:
+        await close_pool()
 
 
 async def _cmd_restore_drill(args):
