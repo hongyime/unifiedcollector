@@ -7,6 +7,7 @@ DB pool acquire, render) is faked.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
 from contextlib import asynccontextmanager
@@ -88,6 +89,56 @@ async def test_collect_crawls_targets_before_broad_discovery(monkeypatch):
     await c.collect(["example.com"])
 
     assert events == [("target", "https://example.com"), ("discovery", "sg")]
+
+
+@pytest.mark.asyncio
+async def test_collect_marks_successful_target_completed(monkeypatch):
+    c = WebsiteCollector()
+    c.pool = _make_pool()
+    c.checkpoint.save_progress = AsyncMock()
+
+    async def _spider(seed, **_kwargs):
+        return {
+            "pages": 2,
+            "images": 3,
+            "pdfs": 1,
+            "docs": 0,
+            "videos": 0,
+            "errors": 0,
+            "skipped": 0,
+        }
+
+    monkeypatch.setattr(c, "spider_domain", _spider)
+    monkeypatch.setattr(c, "_promote_discovered_sg_domains", AsyncMock())
+
+    await c.collect(["https://example.com"])
+
+    sql_calls = [call.args[0] for call in c.pool._conn.execute.await_args_list]
+    assert any("status = 'completed'" in sql for sql in sql_calls)
+    c.checkpoint.save_progress.assert_awaited_once_with("https://example.com")
+
+
+@pytest.mark.asyncio
+async def test_collect_demotes_timed_out_target(monkeypatch):
+    monkeypatch.setenv("WEBSITE_TARGET_TIMEOUT_SECONDS", "0.01")
+    c = WebsiteCollector()
+    c.pool = _make_pool()
+    c.checkpoint.save_progress = AsyncMock()
+    c.send_to_dlq = AsyncMock()
+
+    async def _spider(seed, **_kwargs):
+        await asyncio.sleep(1)
+        return {}
+
+    monkeypatch.setattr(c, "spider_domain", _spider)
+    monkeypatch.setattr(c, "_promote_discovered_sg_domains", AsyncMock())
+
+    await c.collect(["https://example.com"])
+
+    sql_calls = [call.args[0] for call in c.pool._conn.execute.await_args_list]
+    assert any("status = 'error'" in sql and "priority = LEAST" in sql for sql in sql_calls)
+    c.checkpoint.save_progress.assert_not_called()
+    c.send_to_dlq.assert_not_called()
 
 
 # ── module helpers (small pure functions) ─────────────────────────────────

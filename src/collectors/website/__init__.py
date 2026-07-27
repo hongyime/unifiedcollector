@@ -101,6 +101,9 @@ WEBSITE_MAX_DEPTH               BFS depth cap (default 3).
 WEBSITE_MAX_PAGES               Pages-per-domain cap (default 500).
 WEBSITE_MAX_CONCURRENT_TASKS    Parallel page fetches (default 5).
 WEBSITE_TIMEOUT                 Per-request timeout in seconds (default 30).
+WEBSITE_TARGET_TIMEOUT_SECONDS  Per-target wall-clock cap before deferring
+                                the site behind the rest of the queue
+                                (default 1500).
 WEBSITE_RESPECT_ROBOTS          '0' to ignore robots.txt (default '1').
 WEBSITE_FOLLOW_EXTERNAL         '1' to follow links off the seed domain
                                 (default 0; same-host BFS).
@@ -457,6 +460,7 @@ class WebsiteCollector(BaseCollector):
         self._sem = asyncio.Semaphore(self._max_concurrent)
         # HTTP
         self._timeout = httpx.Timeout(float(os.getenv("WEBSITE_TIMEOUT", "30")), connect=10.0)
+        self._target_timeout = float(os.getenv("WEBSITE_TARGET_TIMEOUT_SECONDS", "1500"))
         # Behaviour toggles
         self._respect_robots = os.getenv("WEBSITE_RESPECT_ROBOTS", "1") == "1"
         self._follow_external = os.getenv("WEBSITE_FOLLOW_EXTERNAL", "0") == "1"
@@ -511,10 +515,19 @@ class WebsiteCollector(BaseCollector):
             seed = url if url.startswith(("http://", "https://")) else f"https://{url}"
             logger.info("Collecting website/%s", seed)
             try:
-                await self.spider_domain(seed, max_depth=self._max_depth, max_pages=self._max_pages)
+                stats = await asyncio.wait_for(
+                    self.spider_domain(seed, max_depth=self._max_depth, max_pages=self._max_pages),
+                    timeout=self._target_timeout,
+                )
+                await self._mark_target_finished(url, seed, stats)
                 await self.checkpoint.save_progress(seed)
+            except asyncio.TimeoutError:
+                msg = f"target exceeded {self._target_timeout:.0f}s wall-clock cap"
+                logger.warning("Deferred website/%s: %s", seed, msg)
+                await self._defer_target(url, seed, msg)
             except Exception as e:
                 logger.error("Failed website/%s: %s", seed, e)
+                await self._defer_target(url, seed, str(e))
                 try:
                     await self.send_to_dlq(seed, seed, str(e))
                 except Exception:
@@ -1448,6 +1461,96 @@ class WebsiteCollector(BaseCollector):
                 )
         except Exception as e:
             logger.debug("upsert_target failed for %s: %s", domain, e)
+
+    async def _mark_target_finished(
+        self,
+        target_id: str,
+        seed_url: str,
+        stats: dict[str, Any],
+    ) -> None:
+        """Mark a configured website target as attempted so one site cannot
+        recrawl forever from the top of the queue.
+        """
+        if not self.pool:
+            return
+        domain = urlparse(seed_url).netloc
+        target_ids = list({target_id, seed_url, seed_url.rstrip("/")})
+        pages = int(stats.get("pages") or 0)
+        images = int(stats.get("images") or 0)
+        pdfs = int(stats.get("pdfs") or 0)
+        docs = int(stats.get("docs") or 0)
+        videos = int(stats.get("videos") or 0)
+        errors = int(stats.get("errors") or 0)
+        summary = (
+            f"last crawl: pages={pages} images={images} pdfs={pdfs} "
+            f"docs={docs} videos={videos} errors={errors}"
+        )
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE collection_targets
+                       SET collection_count = collection_count + 1,
+                           last_collection_at = NOW(),
+                           status = 'completed',
+                           error_message = $2
+                     WHERE source = 'website'
+                       AND target_id = ANY($1::text[])
+                    """,
+                    target_ids,
+                    summary[:1000],
+                )
+                await conn.execute(
+                    """
+                    UPDATE website_targets
+                       SET status = 'completed',
+                           collected_at = NOW(),
+                           updated_at = NOW()
+                     WHERE domain = $1
+                    """,
+                    domain,
+                )
+        except Exception as e:
+            logger.debug("mark website target finished failed for %s: %s", seed_url, e)
+
+    async def _defer_target(self, target_id: str, seed_url: str, reason: str) -> None:
+        """Move a failing website target behind fresh pending targets.
+
+        The generic worker still retries status='error' rows eventually, but
+        lowering priority prevents a single slow/broken site from starving the
+        whole website backlog after every watchdog restart.
+        """
+        if not self.pool:
+            return
+        domain = urlparse(seed_url).netloc
+        target_ids = list({target_id, seed_url, seed_url.rstrip("/")})
+        error = reason[:1000]
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE collection_targets
+                       SET status = 'error',
+                           priority = LEAST(COALESCE(priority, 0), 0),
+                           last_collection_at = NOW(),
+                           error_message = $2
+                     WHERE source = 'website'
+                       AND target_id = ANY($1::text[])
+                    """,
+                    target_ids,
+                    error,
+                )
+                await conn.execute(
+                    """
+                    UPDATE website_targets
+                       SET status = 'error',
+                           updated_at = NOW()
+                     WHERE domain = $1
+                    """,
+                    domain,
+                )
+        except Exception as e:
+            logger.debug("defer website target failed for %s: %s", seed_url, e)
 
     async def _upsert_page(
         self,
