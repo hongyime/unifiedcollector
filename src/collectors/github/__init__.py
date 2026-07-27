@@ -426,7 +426,9 @@ class GithubCollector(BaseCollector):
                 and self._pats
             ):
                 self._rotate_pat()
-            if resp.status_code == 404:
+            if resp.status_code in (404, 409, 410, 422, 451):
+                if resp.status_code == 409:
+                    logger.debug("GitHub endpoint returned 409 empty/conflict for %s; skipping", url)
                 return None
             if resp.status_code == 401:
                 logger.error("GitHub auth failed (401) for %s", url)

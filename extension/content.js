@@ -1348,7 +1348,8 @@ const facebook = {
 // This never calls Strava stream APIs directly. It asks the local bridge for one
 // prioritized missing-route activity, opens the normal Strava activity page, and
 // lets inject.js passively capture Strava's own route-stream response.
-const STRAVA_ROUTE_NAV_MIN_MS = 12 * 60 * 1000;
+const STRAVA_ROUTE_NAV_MIN_MS = 4 * 60 * 1000;
+const STRAVA_ROUTE_NAV_MAX_WAIT_MS = 10 * 60 * 1000;
 const STRAVA_ROUTE_VISIT_TTL_MS = 6 * 60 * 60 * 1000;
 
 function stravaActivityIdFromLocation() {
@@ -1400,16 +1401,42 @@ const strava = {
     return true;
   },
   nextAllowedAt() {
-    return lsNum("uc_strava_route_next_at");
+    const nextAt = lsNum("uc_strava_route_next_at");
+    if (nextAt && nextAt - Date.now() > STRAVA_ROUTE_NAV_MAX_WAIT_MS) {
+      const capped = Date.now() + human(STRAVA_ROUTE_NAV_MIN_MS);
+      lsSet("uc_strava_route_next_at", String(capped));
+      return capped;
+    }
+    return nextAt;
   },
   setNextAllowed() {
     lsSet("uc_strava_route_next_at", String(Date.now() + human(STRAVA_ROUTE_NAV_MIN_MS)));
+  },
+  async nudgeRouteMapIntoView() {
+    const selectors = [
+      '[data-testid*="map" i]',
+      '[class*="map" i]',
+      ".leaflet-container",
+      ".mapboxgl-map",
+      "#map",
+    ];
+    for (const sel of selectors) {
+      const node = document.querySelector(sel);
+      if (node && typeof node.scrollIntoView === "function") {
+        node.scrollIntoView({ behavior: "smooth", block: "center" });
+        await hsleep(1800);
+        return;
+      }
+    }
+    window.scrollBy({ top: Math.round(window.innerHeight * 0.8), behavior: "smooth" });
+    await hsleep(1800);
   },
   async runCycle() {
     const activityId = stravaActivityIdFromLocation();
     if (activityId) {
       const recorded = await this.recordActivityPage(activityId);
       if (recorded) clog("info", `activity ${activityId}: waiting for route stream`, "strava");
+      await this.nudgeRouteMapIntoView();
       await hsleep(22000);
     }
 
