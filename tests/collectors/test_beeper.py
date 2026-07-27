@@ -573,6 +573,69 @@ async def test_collector_download_media_writes_vault_blob(monkeypatch, tmp_path)
     coll.send_to_dlq.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_collector_download_media_skips_unsafe_attachment(monkeypatch, tmp_path):
+    monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
+    monkeypatch.setenv("COLLECTOR_DRIVE_PATH", str(tmp_path))
+    client = MagicMock(spec=BeeperClient)
+    client.serve_asset = AsyncMock(return_value=b"bad")
+    coll = BeeperCollector(client=client)
+    coll.insert_media_item = AsyncMock()
+
+    await coll.download_media({
+        "content_id": "msg1_bad",
+        "src_url": "mxc://beeper.local/bad",
+        "extension": "js",
+        "network": "discord",
+        "chat_id": "!room:beeper.local",
+        "message_id": "msg1",
+        "content_type": "file",
+        "original_filename": "payload.js",
+        "mime_type": "text/javascript",
+    })
+
+    client.serve_asset.assert_not_awaited()
+    coll.insert_media_item.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_download_attachments_filters_unsafe_files(monkeypatch, tmp_path):
+    monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
+    monkeypatch.setenv("COLLECTOR_DRIVE_PATH", str(tmp_path))
+    coll = BeeperCollector(client=MagicMock(spec=BeeperClient))
+    coll.download_media = AsyncMock()
+
+    await coll._download_attachments({
+        "id": "msg1",
+        "chatID": "!room:beeper.local",
+        "network": "Discord",
+        "attachments": [
+            {
+                "id": "mxc://beeper.local/good",
+                "srcURL": "mxc://beeper.local/good",
+                "type": "file",
+                "fileName": "report.pdf",
+                "mimeType": "application/pdf",
+                "size": {},
+            },
+            {
+                "id": "mxc://beeper.local/bad",
+                "srcURL": "mxc://beeper.local/bad",
+                "type": "file",
+                "fileName": "payload.js",
+                "mimeType": "text/javascript",
+                "size": {},
+            },
+        ],
+    })
+
+    coll.download_media.assert_awaited_once()
+    item = coll.download_media.await_args.args[0]
+    assert item["content_id"] == "msg1_good"
+    assert item["content_type"] == "document"
+    assert item["extension"] == "pdf"
+
+
 # ── transient DNS / name-resolution handling ───────────────────────────────
 
 

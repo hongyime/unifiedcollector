@@ -133,8 +133,11 @@ stores audio, keeps **static** stickers and **skips animated** (.tgs / animated
 to extract Telethon `DocumentAttribute*` (filename/sticker/animated/audio/video),
 classify, and skip-or-download with the right `content_type`; routed **all**
 documents through it (was image/video-only). Tests: `tests/core/test_document_filter.py`.
-_Follow-up: whatsapp `documentMessage` + beeper attachments still download
-without the whitelist — wire `classify_document` there too._
+DONE 2026-07-28: WhatsApp `documentMessage`/sticker/audio bridge media and
+Beeper attachments now call `classify_document` before download; executable and
+code-like files are skipped, safe documents/static media continue through the
+normal vault path. Tests: `tests/collectors/test_whatsapp.py` and
+`tests/collectors/test_beeper.py`.
 
 ### Task 8 — Phase 4 Tier 4 Profile content — ✅ verified present
 Change history (`change_tracker`/`user_change_tracker`/`profile_photo_tracker`
@@ -160,10 +163,9 @@ telegram parse). Polls/pinned/events: telegram (matrix ✅). Links feed the spid
 
 ### Remaining honest follow-ups (not blocking; logged for the next agent)
 1. tiktok Tier-1 stories (env-gated, ban-aware).
-2. whatsapp/beeper document whitelist via `classify_document`.
-3. telegram/whatsapp shared/live-location message → structured coords.
-4. telegram media size-cap vs spec "no cap" (env decision).
-5. dashboard container shows `unhealthy` though `/health` returns 200 OK on every
+2. telegram/whatsapp shared/live-location message → structured coords.
+3. telegram media size-cap vs spec "no cap" (env decision).
+4. dashboard container shows `unhealthy` though `/health` returns 200 OK on every
    probe — cosmetic/intermittent-timeout, not a collection blocker.
 
 ---

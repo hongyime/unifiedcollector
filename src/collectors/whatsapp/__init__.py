@@ -50,6 +50,7 @@ import httpx
 
 from src.core.base_collector import BaseCollector
 from src.core.change_tracker import ChangeTracker
+from src.core.document_filter import classify_document
 from src.core.rate_limit_events import record_rate_limit_event
 from src.core.user_change_tracker import (
     UserChangeTracker,
@@ -63,6 +64,24 @@ from src.core.vault import VAULT_ROOT, write_atomic_artifact, write_raw_payload
 logger = logging.getLogger(__name__)
 
 MEDIA_EXTS = {"jpg", "jpeg", "png", "mp4", "opus", "webp", "gif", "pdf", "3gp", "m4a"}
+_MIME_EXT = {
+    "application/pdf": "pdf",
+    "application/msword": "doc",
+    "application/vnd.ms-excel": "xls",
+    "application/vnd.ms-powerpoint": "ppt",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
+    "image/jpeg": "jpg",
+    "image/png": "png",
+    "image/gif": "gif",
+    "image/webp": "webp",
+    "video/mp4": "mp4",
+    "video/webm": "webm",
+    "audio/ogg": "ogg",
+    "audio/mpeg": "mp3",
+    "text/plain": "txt",
+}
 
 
 def _tier1_raw_archives_enabled() -> bool:
@@ -464,8 +483,10 @@ class WhatsappCollector(BaseCollector):
             if not (event.get("media_url") or event.get("directPath")):
                 return
 
-        ext = self._media_type_to_ext(media_type)
-        content_type = self._media_type_to_content_type(media_type)
+        classified = self._classify_bridge_media(media_type, event)
+        if classified is None:
+            return
+        ext, content_type = classified
         cid = f"wa_{msg_id}"
 
         if self.is_known(cid):
@@ -475,7 +496,13 @@ class WhatsappCollector(BaseCollector):
         direct_path = event.get("directPath")
 
         if media_key and direct_path and session:
-            data = await self._download_via_bridge(session, msg_id, media_key, direct_path)
+            data = await self._download_via_bridge(
+                session,
+                msg_id,
+                media_key,
+                direct_path,
+                mimetype=event.get("mimetype") or event.get("mime_type"),
+            )
         else:
             media_url = event.get("media_url", "")
             data = await self._download_direct(media_url) if media_url else None
@@ -1027,7 +1054,8 @@ class WhatsappCollector(BaseCollector):
             await asyncio.sleep(self._media_poll)
 
     async def _download_via_bridge(self, session: str, msg_id: str,
-                                    media_key: str, direct_path: str) -> bytes | None:
+                                    media_key: str, direct_path: str,
+                                    mimetype: str | None = None) -> bytes | None:
         bridge_url = self._session_bridges.get(session)
         if not bridge_url:
             return None
@@ -1049,6 +1077,7 @@ class WhatsappCollector(BaseCollector):
                             "messageId": msg_id,
                             "mediaKey": media_key,
                             "directPath": direct_path,
+                            "mimetype": mimetype,
                         },
                         headers={
                             **self._bridge_headers(),
@@ -1160,6 +1189,47 @@ class WhatsappCollector(BaseCollector):
             "documentMessage": "document",
             "stickerMessage": "sticker",
         }.get(media_type, "media")
+
+    @staticmethod
+    def _event_filename(event: dict) -> str | None:
+        for key in ("fileName", "filename", "file_name", "title", "body", "text"):
+            value = event.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
+
+    @staticmethod
+    def _ext_from_event(mime: str | None, filename: str | None, fallback: str) -> str:
+        if filename and "." in Path(filename).name:
+            return Path(filename).name.rsplit(".", 1)[-1].lower()[:12]
+        clean = (mime or "").split(";")[0].strip().lower()
+        return _MIME_EXT.get(clean, fallback)
+
+    def _classify_bridge_media(self, media_type: str, event: dict) -> tuple[str, str] | None:
+        content_type = self._media_type_to_content_type(media_type)
+        fallback_ext = self._media_type_to_ext(media_type)
+
+        if media_type in {"imageMessage", "videoMessage"}:
+            return fallback_ext, content_type
+
+        mime = event.get("mimetype") or event.get("mime_type")
+        filename = self._event_filename(event)
+        decision = classify_document(
+            mime,
+            filename,
+            is_sticker=media_type == "stickerMessage",
+            is_audio=media_type == "audioMessage",
+            is_video=media_type == "videoMessage",
+        )
+        if not decision.download:
+            logger.info(
+                "Skipping WhatsApp media %s (%s): %s",
+                event.get("message_id") or event.get("id") or "<unknown>",
+                media_type or "unknown",
+                decision.reason,
+            )
+            return None
+        return self._ext_from_event(mime, filename, fallback_ext), decision.content_type
 
     # ── Export reader (offline import mode) ──
 

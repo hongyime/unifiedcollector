@@ -36,6 +36,7 @@ from urllib.parse import quote
 import httpx
 
 from src.core.base_collector import BaseCollector
+from src.core.document_filter import classify_document
 from src.core.rate_limit_events import record_rate_limit_event
 from src.core.raw_archive import report_raw_archive_result
 from src.core.user_change_tracker import (
@@ -342,6 +343,22 @@ def _ext_from_mime(mime: str | None, filename: str | None) -> str:
         if guess:
             return guess.lstrip(".")
     return "bin"
+
+
+def _classify_beeper_attachment(att: dict) -> tuple[bool, str, str, str]:
+    """Return (download, content_type, extension, reason) for a Beeper attachment."""
+    mime = att.get("mimeType") or att.get("mime_type")
+    filename = att.get("fileName") or att.get("file_name") or att.get("name")
+    att_type = str(att.get("type") or "unknown").lower()
+    ext = _ext_from_mime(mime, filename)
+    decision = classify_document(
+        mime,
+        filename or (f"attachment.{ext}" if ext and ext != "bin" else None),
+        is_sticker=att_type == "sticker",
+        is_audio=att_type == "audio",
+        is_video=att_type == "video",
+    )
+    return decision.download, decision.content_type, ext, decision.reason
 
 
 def _opt(d: dict, *keys: str) -> Any:
@@ -897,6 +914,17 @@ class BeeperCollector(BaseCollector):
         network = item.get("network", "unknown")
         chat_id = item.get("chat_id", "unknown")
         content_type = item.get("content_type", "attachment")
+        decision = classify_document(
+            item.get("mime_type"),
+            item.get("original_filename") or (f"attachment.{ext}" if ext and ext != "bin" else None),
+            is_sticker=content_type == "sticker",
+            is_audio=content_type == "audio",
+            is_video=content_type == "video",
+        )
+        if not decision.download:
+            logger.info("Beeper media skipped %s: %s", cid, decision.reason)
+            return
+        content_type = decision.content_type
 
         entity_id = f"{network}_{chat_id}"
         entity_name = network
@@ -915,6 +943,7 @@ class BeeperCollector(BaseCollector):
                 "message_id": item.get("message_id"),
                 "original_filename": item.get("original_filename"),
                 "mime_type": item.get("mime_type"),
+                "classification_reason": decision.reason,
                 "raw": item,
                 "rebuild_target_tables": ["media_items", "beeper_shadow_messages"],
             }
@@ -1172,11 +1201,10 @@ class BeeperCollector(BaseCollector):
                 if self.is_known(content_id):
                     continue
                 mime = att.get("mimeType")
-                att_type = att.get("type", "unknown")
-                content_type = {"img": "image", "video": "video", "audio": "audio"}.get(
-                    att_type, "file"
-                )
-                ext = _ext_from_mime(mime, att.get("fileName"))
+                should_download, content_type, ext, reason = _classify_beeper_attachment(att)
+                if not should_download:
+                    logger.debug("Beeper attachment skipped %s: %s", content_id, reason)
+                    continue
                 size = att.get("size") or {}
                 items.append({
                     "content_id": content_id,
@@ -1189,6 +1217,7 @@ class BeeperCollector(BaseCollector):
                     "content_type": content_type,
                     "original_filename": att.get("fileName"),
                     "mime_type": mime,
+                    "classification_reason": reason,
                     "width": size.get("width"),
                     "height": size.get("height"),
                 })
@@ -1223,11 +1252,10 @@ class BeeperCollector(BaseCollector):
                 continue
 
             mime = att.get("mimeType")
-            att_type = att.get("type", "unknown")
-            content_type = {"img": "image", "video": "video", "audio": "audio"}.get(
-                att_type, "file"
-            )
-            ext = _ext_from_mime(mime, att.get("fileName"))
+            should_download, content_type, ext, reason = _classify_beeper_attachment(att)
+            if not should_download:
+                logger.debug("Beeper attachment skipped %s: %s", content_id, reason)
+                continue
             size = att.get("size") or {}
 
             await self.download_media({
@@ -1240,6 +1268,7 @@ class BeeperCollector(BaseCollector):
                 "content_type": content_type,
                 "original_filename": att.get("fileName"),
                 "mime_type": mime,
+                "classification_reason": reason,
                 "width": size.get("width"),
                 "height": size.get("height"),
             })

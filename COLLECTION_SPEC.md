@@ -222,6 +222,11 @@ Current shipped recovery/ops work:
   account/chat/participant/message shadow payloads are archived through
   `write_raw_payload()` with rebuild table hints, so these live messaging
   records are not rebuild-dependent on Postgres JSONB alone.
+- **Tier 3 shared attachment policy:** Telegram, WhatsApp bridge media, and
+  Beeper attachments now route arbitrary file/document/sticker/audio decisions
+  through `src/core/document_filter.py`, so safe documents and static media are
+  kept while executable/code-like files and disabled audio are skipped before
+  download.
 - **Dashboard media joins:** chat/video dashboards join media by stable source
   keys first (`wa_<message_id>`, YouTube thumbnail/video content IDs) and use
   file-path matches only as legacy fallback.

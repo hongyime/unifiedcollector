@@ -465,6 +465,62 @@ async def test_handle_message_event_text_message_discovers_links_before_media_re
 
 
 @pytest.mark.asyncio
+async def test_handle_message_event_skips_unsafe_document_media(collector):
+    event = {
+        "message_id": "m-doc-bad",
+        "chat_jid": "111@s.whatsapp.net",
+        "pushName": "Bob",
+        "body": "payload.js",
+        "media_type": "documentMessage",
+        "mimetype": "text/javascript",
+        "mediaKey": "k",
+        "directPath": "/bad",
+        "session_name": "sess1",
+    }
+    collector._is_duplicate = AsyncMock(return_value=False)
+    collector._upsert_chat = AsyncMock()
+    collector._track_user_profile = AsyncMock(return_value="user-uuid")
+    collector._upsert_message = AsyncMock()
+    collector._extract_wa_location = AsyncMock()
+    collector._download_via_bridge = AsyncMock(return_value=b"bad")
+    collector._save_media = AsyncMock()
+
+    await collector._handle_message_event(event, [])
+
+    collector._download_via_bridge.assert_not_awaited()
+    collector._save_media.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_handle_message_event_allows_safe_document_media(collector):
+    event = {
+        "message_id": "m-doc-pdf",
+        "chat_jid": "111@s.whatsapp.net",
+        "pushName": "Bob",
+        "body": "report.pdf",
+        "media_type": "documentMessage",
+        "mimetype": "application/pdf",
+        "mediaKey": "k",
+        "directPath": "/good",
+        "session_name": "sess1",
+    }
+    collector._is_duplicate = AsyncMock(return_value=False)
+    collector._upsert_chat = AsyncMock()
+    collector._track_user_profile = AsyncMock(return_value="user-uuid")
+    collector._upsert_message = AsyncMock()
+    collector._extract_wa_location = AsyncMock()
+    collector._download_via_bridge = AsyncMock(return_value=b"%PDF")
+    collector._save_media = AsyncMock()
+
+    await collector._handle_message_event(event, [])
+
+    collector._download_via_bridge.assert_awaited_once()
+    args = collector._save_media.await_args.args
+    assert args[4] == "document"
+    assert args[5] == "pdf"
+
+
+@pytest.mark.asyncio
 async def test_track_user_profile_uses_pool_and_returns_uuid(collector):
     """Regression: ``_track_user_profile`` used to check ``self._pool``
     (typo) and always raise AttributeError before any DB work, breaking
@@ -660,10 +716,12 @@ async def test_download_via_bridge_signs_request_and_returns_bytes(
         monkeypatch, post_response=resp, response=resp,
     )
     out = await configured_collector._download_via_bridge(
-        "sess1", "m1", "media-key", "/v/t/abc",
+        "sess1", "m1", "media-key", "/v/t/abc", mimetype="application/pdf",
     )
     assert out == b"binary-blob"
     client.post.assert_awaited_once()
+    body = client.post.await_args.kwargs["json"]
+    assert body["mimetype"] == "application/pdf"
     headers = client.post.await_args.kwargs["headers"]
     assert "X-Timestamp" in headers
     assert "X-Signature" in headers
