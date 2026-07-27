@@ -44,6 +44,13 @@ async def fetch_strava_route_capture_queue(
         limit,
         min(int(os.getenv("STRAVA_BROWSER_ROUTE_QUEUE_CANDIDATE_LIMIT", "300")), 10000),
     )
+    important_candidate_limit = max(
+        limit,
+        min(
+            int(os.getenv("STRAVA_BROWSER_ROUTE_QUEUE_IMPORTANT_CANDIDATE_LIMIT", "10000")),
+            25000,
+        ),
+    )
     account = str(account or "").strip() or None
 
     async with pool.acquire() as conn:
@@ -86,7 +93,24 @@ async def fetch_strava_route_capture_queue(
 
         rows = await conn.fetch(
             """
-            WITH candidates AS MATERIALIZED (
+            WITH important_accounts AS MATERIALIZED (
+                SELECT account_id
+                FROM (
+                    SELECT ap.account_id
+                    FROM account_proximity_cache ap
+                    WHERE ap.platform = 'strava'
+                      AND ap.tier <= 2
+                      AND ($4::text IS NULL OR ap.owner_account = $4::text)
+                    UNION
+                    SELECT ct.target_id AS account_id
+                    FROM collection_targets ct
+                    WHERE ct.source = 'strava'
+                      AND COALESCE(ct.priority, 0) > 0
+                      AND COALESCE(ct.status, 'active') NOT IN ('disabled', 'paused')
+                ) ids
+                WHERE NULLIF(account_id, '') IS NOT NULL
+            ),
+            important_candidates AS MATERIALIZED (
                 SELECT a.id,
                        a.platform_activity_id,
                        a.name,
@@ -95,8 +119,11 @@ async def fetch_strava_route_capture_queue(
                        a.start_date,
                        a.start_latlng,
                        a.stream_status,
-                       a.athlete_id
-                FROM strava_activities a
+                       a.athlete_id,
+                       ath.platform_athlete_id
+                FROM important_accounts ia
+                JOIN strava_athletes ath ON ath.platform_athlete_id::text = ia.account_id
+                JOIN strava_activities a ON a.athlete_id = ath.id
                 LEFT JOIN strava_gps_streams s ON s.activity_id = a.id
                 WHERE (a.summary_polyline IS NULL OR a.summary_polyline = '')
                   AND COALESCE(a.stream_status, '') NOT IN ('ok', 'incomplete', 'truncated_empty', 'ok_unverifiable')
@@ -121,7 +148,66 @@ async def fetch_strava_route_capture_queue(
                         '(run|ride|walk|hike|trail|bike|cycle|ski|snowboard|kayak|canoe|row|paddle|surf|sail|skate|wheelchair|velomobile)'
                   )
                 ORDER BY a.start_date DESC NULLS LAST, a.platform_activity_id DESC
+                LIMIT $5
+            ),
+            recent_candidates AS MATERIALIZED (
+                SELECT a.id,
+                       a.platform_activity_id,
+                       a.name,
+                       a.type,
+                       a.sport_type,
+                       a.start_date,
+                       a.start_latlng,
+                       a.stream_status,
+                       a.athlete_id,
+                       ath.platform_athlete_id
+                FROM strava_activities a
+                LEFT JOIN strava_gps_streams s ON s.activity_id = a.id
+                LEFT JOIN strava_athletes ath ON ath.id = a.athlete_id
+                WHERE (a.summary_polyline IS NULL OR a.summary_polyline = '')
+                  AND COALESCE(a.stream_status, '') NOT IN ('ok', 'incomplete', 'truncated_empty', 'ok_unverifiable')
+                  AND (
+                        s.latlng IS NULL
+                     OR s.latlng = '[]'::jsonb
+                     OR s.latlng = 'null'::jsonb
+                     OR CASE
+                          WHEN jsonb_typeof(s.latlng) = 'array' THEN jsonb_array_length(s.latlng) <= 1
+                          ELSE TRUE
+                        END
+                  )
+                  AND lower(COALESCE(a.sport_type, a.type, '')) NOT IN (
+                        'crossfit', 'elliptical', 'hiit', 'pilates',
+                        'stairstepper', 'weighttraining', 'workout', 'yoga'
+                  )
+                  AND lower(COALESCE(a.sport_type, a.type, '')) NOT LIKE 'virtual%'
+                  AND lower(COALESCE(a.sport_type, a.type, '')) NOT LIKE 'indoor%'
+                  AND (
+                        a.start_latlng IS NOT NULL
+                     OR lower(COALESCE(a.sport_type, a.type, '')) ~
+                        '(run|ride|walk|hike|trail|bike|cycle|ski|snowboard|kayak|canoe|row|paddle|surf|sail|skate|wheelchair|velomobile)'
+                  )
+                ORDER BY a.start_date DESC NULLS LAST, a.platform_activity_id DESC
                 LIMIT $3
+            ),
+            candidates AS MATERIALIZED (
+                SELECT DISTINCT ON (id) id,
+                       platform_activity_id,
+                       name,
+                       type,
+                       sport_type,
+                       start_date,
+                       start_latlng,
+                       stream_status,
+                       athlete_id,
+                       platform_athlete_id
+                FROM (
+                    SELECT 0 AS candidate_rank, ic.*
+                    FROM important_candidates ic
+                    UNION ALL
+                    SELECT 1 AS candidate_rank, rc.*
+                    FROM recent_candidates rc
+                ) merged
+                ORDER BY id, candidate_rank
             )
             SELECT a.platform_activity_id,
                    a.name,
@@ -143,6 +229,7 @@ async def fetch_strava_route_capture_queue(
                 WHERE ap.platform = 'strava'
                   AND ath.platform_athlete_id IS NOT NULL
                   AND ap.account_id = ath.platform_athlete_id::text
+                  AND ($4::text IS NULL OR ap.owner_account = $4::text)
             ) prox ON TRUE
             LEFT JOIN LATERAL (
                 SELECT MAX(ct.priority) AS priority
@@ -174,6 +261,8 @@ async def fetch_strava_route_capture_queue(
             limit,
             recent_visit_hours,
             candidate_limit,
+            account,
+            important_candidate_limit,
         )
 
     return {
@@ -187,6 +276,8 @@ async def fetch_strava_route_capture_queue(
         },
         "account": account,
         "recent_visit_ttl_hours": recent_visit_hours,
+        "recent_candidate_limit": candidate_limit,
+        "important_candidate_limit": important_candidate_limit,
     }
 
 

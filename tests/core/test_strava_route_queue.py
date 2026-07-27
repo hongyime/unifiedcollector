@@ -30,6 +30,7 @@ class _Conn:
         self.cooldowns = cooldowns or []
         self.rows = rows or []
         self.fetchrow_args = None
+        self.fetch_query = None
         self.fetch_called = False
         self.fetch_args = None
 
@@ -44,6 +45,7 @@ class _Conn:
 
     async def fetch(self, _query, *args):
         self.fetch_called = True
+        self.fetch_query = _query
         self.fetch_args = args
         return self.rows
 
@@ -162,8 +164,10 @@ def test_route_capture_queue_normalizes_rows_when_not_cooling_down():
         fetch_strava_route_capture_queue(_Pool(conn), limit=2, respect_cooldown=False)
     )
 
-    assert conn.fetch_args == (2, 6)
+    assert conn.fetch_args == (2, 6, 300, None, 10000)
     assert out["cooldown"]["active"] is False
+    assert out["recent_candidate_limit"] == 300
+    assert out["important_candidate_limit"] == 10000
     assert out["items"] == [
         {
             "platform_activity_id": 19283135496,
@@ -181,3 +185,21 @@ def test_route_capture_queue_normalizes_rows_when_not_cooling_down():
             "last_browser_visit_at": None,
         }
     ]
+
+
+def test_route_capture_queue_keeps_important_candidates_outside_recent_cap():
+    conn = _Conn(rows=[])
+
+    asyncio.run(
+        fetch_strava_route_capture_queue(
+            _Pool(conn),
+            limit=2,
+            account="72101656",
+            respect_cooldown=False,
+        )
+    )
+
+    assert conn.fetch_args == (2, 6, 300, "72101656", 10000)
+    assert "important_candidates AS MATERIALIZED" in conn.fetch_query
+    assert "ap.tier <= 2" in conn.fetch_query
+    assert "recent_candidates AS MATERIALIZED" in conn.fetch_query
