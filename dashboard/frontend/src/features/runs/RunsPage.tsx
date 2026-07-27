@@ -22,6 +22,13 @@ function runStoredSummary(run: Run) {
   return `${formatNumber(ingestion.records)} rows · ${formatNumber(ingestion.media_items)} files`;
 }
 
+function runIngestedCount(run: Run) {
+  if (run.ingestion_items != null) return run.ingestion_items;
+  const ingestion = run.ingestion;
+  if (!ingestion) return run.items_collected;
+  return ingestion.records + ingestion.media_items + ingestion.rate_limits + ingestion.access_errors;
+}
+
 function runHttpSummary(run: Run) {
   const ingestion = run.ingestion;
   if (!ingestion) return "—";
@@ -61,7 +68,7 @@ export function RunsPage() {
         {isLoading ? <LoadingSpinner /> : (
           <table className="w-full text-sm">
             <thead><tr className="text-left text-text-muted border-b border-border">
-              <th className="pb-2">ID</th><th className="pb-2">Source</th><th className="pb-2">Status</th><th className="pb-2">Started</th><th className="pb-2">Stored</th><th className="pb-2">Messages</th><th className="pb-2">HTTP</th><th className="pb-2">Targets rearmed</th><th className="pb-2">Errors</th>
+              <th className="pb-2">ID</th><th className="pb-2">Source</th><th className="pb-2">Status</th><th className="pb-2">Started</th><th className="pb-2">Ingested</th><th className="pb-2">Stored</th><th className="pb-2">Messages</th><th className="pb-2">HTTP</th><th className="pb-2">Errors</th>
             </tr></thead>
             <tbody>
               {data?.map((r) => (
@@ -70,10 +77,10 @@ export function RunsPage() {
                   <td className="py-2 uppercase text-xs">{r.source}</td>
                   <td className="py-2"><span className={`inline-flex items-center gap-1.5 text-xs`}><span className={`w-2 h-2 rounded-full ${statusColor[r.status] ?? "bg-text-muted"}`} />{r.status}</span></td>
                   <td className="py-2 text-text-muted">{relativeTime(r.started_at)}</td>
+                  <td className="py-2">{formatNumber(runIngestedCount(r))}</td>
                   <td className="py-2">{runStoredSummary(r)}</td>
                   <td className="py-2">{formatNumber(r.ingestion?.messages ?? 0)}</td>
                   <td className="py-2">{runHttpSummary(r)}</td>
-                  <td className="py-2">{formatNumber(r.items_collected)}</td>
                   <td className="py-2">{r.errors > 0 ? <span className="text-error">{r.errors}</span> : 0}</td>
                 </tr>
               ))}
@@ -93,12 +100,13 @@ export function RunsPage() {
                 <dt className="text-text-muted">Finished</dt><dd>{relativeTime(detail.data.finished_at)}</dd>
                 <dt className="text-text-muted">Window</dt><dd>{detail.data.ingestion?.window_seconds == null ? "—" : formatDuration(detail.data.ingestion.window_seconds)}</dd>
                 <dt className="text-text-muted">Count basis</dt><dd>{detail.data.ingestion?.exact_window ? "exact run window" : "source-hour bucket"}</dd>
+                <dt className="text-text-muted">Total ingested</dt><dd>{formatNumber(runIngestedCount(detail.data))}</dd>
                 <dt className="text-text-muted">Stored rows</dt><dd>{formatNumber(detail.data.ingestion?.records ?? 0)}</dd>
                 <dt className="text-text-muted">Messages</dt><dd>{formatNumber(detail.data.ingestion?.messages ?? 0)}</dd>
                 <dt className="text-text-muted">Media files</dt><dd>{formatNumber(detail.data.ingestion?.media_items ?? 0)}</dd>
                 <dt className="text-text-muted">HTTP pressure</dt><dd>{runHttpSummary(detail.data)}</dd>
                 <dt className="text-text-muted">Latest stored row</dt><dd>{relativeTime(detail.data.ingestion?.latest_at ?? null)}</dd>
-                <dt className="text-text-muted">Targets rearmed</dt><dd>{formatNumber(detail.data.items_collected)}</dd>
+                <dt className="text-text-muted">Scheduler targets rearmed</dt><dd>{formatNumber(detail.data.items_collected)}</dd>
                 <dt className="text-text-muted">Errors</dt><dd>{detail.data.errors}</dd>
               </dl>
             ) : null}
