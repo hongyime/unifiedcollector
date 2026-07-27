@@ -840,22 +840,28 @@ services:
     restart: unless-stopped
 
   rabbitmq:
-    image: rabbitmq:3.13-management-alpine
+    image: rabbitmq:3.13-alpine
     container_name: unifiedcollector_rabbitmq
+    hostname: rabbitmq
     init: true
     restart: unless-stopped
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-wac_user}
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-localdevrabbit123}
       RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST:-/}
-    # Management UI port (15672) intentionally NOT exposed:
-    # blocked on Windows by reserved port range. AMQP (5672) stays internal-only on docker network.
+      RABBITMQ_NODENAME: rabbit@rabbitmq
+      RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: "+S 2:2"
+    # AMQP (5672) stays internal-only on the docker network.
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
+      - ./rabbitmq.conf:/etc/rabbitmq/conf.d/20-unifiedcollector.conf:ro
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      # `rabbitmq-diagnostics ping` can hang under WSL2/Docker host load and
+      # burn CPU while collection is otherwise flowing. For this local broker,
+      # the actionable signal is whether AMQP accepts connections.
+      test: ["CMD", "nc", "-z", "127.0.0.1", "5672"]
       interval: 30s
-      timeout: 45s
+      timeout: 5s
       retries: 5
       start_period: 60s
 
