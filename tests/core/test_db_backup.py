@@ -14,6 +14,7 @@ from src.backup.db_backup import (
     assert_backup_mount_ready,
     backup_status,
     build_retention_plan,
+    cleanup_stale_temp_dumps,
     default_backup_dir,
     list_backup_files,
     parse_backup_file,
@@ -207,6 +208,37 @@ def test_apply_retention_plan_dry_run_does_not_delete(tmp_path):
     assert deleted == [prune_path]
     assert keep_path.exists()
     assert prune_path.exists()
+
+
+def test_cleanup_stale_temp_dumps_only_removes_old_inprogress_files(tmp_path):
+    stale = tmp_path / ".inprogress_20260720_090000.dump"
+    active = tmp_path / ".inprogress_20260720_100000.dump"
+    unrelated = tmp_path / "notes.txt"
+    stale.write_bytes(b"stale")
+    active.write_bytes(b"active")
+    unrelated.write_text("do not touch")
+    now = time.time()
+    os.utime(stale, (now - 7200, now - 7200))
+    os.utime(active, (now - 120, now - 120))
+
+    deleted = cleanup_stale_temp_dumps(tmp_path, max_age_minutes=60, now_ts=now)
+
+    assert deleted == [stale]
+    assert not stale.exists()
+    assert active.exists()
+    assert unrelated.exists()
+
+
+def test_cleanup_stale_temp_dumps_dry_run_does_not_delete(tmp_path):
+    stale = tmp_path / ".inprogress_20260720_090000.dump"
+    stale.write_bytes(b"stale")
+    now = time.time()
+    os.utime(stale, (now - 7200, now - 7200))
+
+    deleted = cleanup_stale_temp_dumps(tmp_path, max_age_minutes=60, now_ts=now, dry_run=True)
+
+    assert deleted == [stale]
+    assert stale.exists()
 
 
 def test_pg_dump_prefers_pg_env_over_host_database_url(monkeypatch, tmp_path):

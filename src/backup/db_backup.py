@@ -27,6 +27,7 @@ DEFAULT_DAILY = 7
 DEFAULT_WEEKLY = 4
 DEFAULT_MONTHLY = 3
 TIMESTAMP_FORMAT = "%Y%m%d_%H%M%S"
+DEFAULT_STALE_TEMP_MAX_AGE_MINUTES = 60
 
 _BACKUP_RE = re.compile(r"^(?P<prefix>.+)_(?P<stamp>\d{8}_\d{6})\.dump$")
 
@@ -282,6 +283,34 @@ def apply_retention_plan(plan: RetentionPlan, *, dry_run: bool = False) -> list[
     return deleted
 
 
+def cleanup_stale_temp_dumps(
+    backup_dir: Path,
+    *,
+    max_age_minutes: int = DEFAULT_STALE_TEMP_MAX_AGE_MINUTES,
+    now_ts: float | None = None,
+    dry_run: bool = False,
+) -> list[Path]:
+    """Remove abandoned pg_dump temp files from previous interrupted runs."""
+    if max_age_minutes <= 0 or not backup_dir.exists():
+        return []
+    now_ts = time.time() if now_ts is None else now_ts
+    cutoff_seconds = max_age_minutes * 60
+    deleted: list[Path] = []
+    for path in sorted(backup_dir.glob(".inprogress_*.dump")):
+        if not path.is_file():
+            continue
+        try:
+            age_seconds = max(0, now_ts - path.stat().st_mtime)
+        except OSError:
+            continue
+        if age_seconds <= cutoff_seconds:
+            continue
+        if not dry_run:
+            path.unlink()
+        deleted.append(path)
+    return deleted
+
+
 def _env_bool(name: str, default: bool = False) -> bool:
     raw = os.getenv(name)
     if raw is None:
@@ -521,6 +550,18 @@ def run_once(args: argparse.Namespace) -> int:
         return 0
 
     if args.command == "run":
+        stale_temp_minutes = _env_int(
+            "COLLECTOR_DB_BACKUP_STALE_TEMP_MAX_AGE_MINUTES",
+            DEFAULT_STALE_TEMP_MAX_AGE_MINUTES,
+        )
+        removed_temp = cleanup_stale_temp_dumps(
+            backup_dir,
+            max_age_minutes=stale_temp_minutes,
+            dry_run=args.dry_run,
+        )
+        if removed_temp:
+            action = "would remove" if args.dry_run else "removed"
+            print(f"[backup] {action} {len(removed_temp)} stale temp dump(s)")
         if args.dry_run:
             planned = create_dump(backup_dir, prefix=prefix, now=datetime.now(), dry_run=True)
             print(f"DRY RUN: would create {planned}")
