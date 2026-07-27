@@ -54,7 +54,7 @@ async function renderStatus() {
   }
 
   $("last").textContent = ucStatus.lastCycle
-    ? `${ago(ucStatus.lastCycleAt)} · ${ucStatus.lastCycle.saved} media, ${ucStatus.lastCycle.discovered} found`
+    ? `${ago(ucStatus.lastCycleAt)} · ${ucStatus.lastCycle.saved} media candidate(s), ${ucStatus.lastCycle.discovered} found`
     : "—";
 
   $("keepalive").textContent =

@@ -287,7 +287,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             body: JSON.stringify({ platform: msg.platform || "instagram", username: msg.username, items: msg.items }),
           });
           const j = await r.json().catch(() => ({}));
-          await log("info", `📥 ${msg.platform || "instagram"} · ${msg.username} · ${j.accepted ?? msg.items.length} media → download`);
+          await log("info", `📥 ${msg.platform || "instagram"} · ${msg.username} · ${j.accepted ?? msg.items.length} media candidate(s) queued`);
           sendResponse({ ok: r.ok });
         } catch (e) {
           await log("error", `ingest ${msg.username} failed: ${e.message}`);
@@ -555,7 +555,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         break;
       case "cycleReport":
         setStatus({ lastCycleAt: Date.now(), lastCycle: { platform: msg.platform, targets: msg.targets, saved: msg.saved, discovered: msg.discovered } });
-        log("info", `✅ cycle done [${msg.platform}]: ${msg.targets} targets, ${msg.saved} media, ${msg.discovered} discovered`);
+        log("info", `✅ cycle done [${msg.platform}]: ${msg.targets} targets, ${msg.saved} media candidate(s), ${msg.discovered} discovered`);
         sendResponse({ ok: true });
         break;
       case "getPlatforms":
