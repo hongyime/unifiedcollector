@@ -1047,9 +1047,14 @@ export interface MessagingCoverageRow {
   native_messages: number;
   native_chats: number;
   native_people: number;
+  native_people_basis?: string | null;
+  native_bots?: number;
   native_last_message: string | null;
   beeper_messages: number;
   beeper_chats: number;
   beeper_people: number;
+  beeper_people_basis?: string | null;
+  beeper_message_senders?: number;
   beeper_last_message: string | null;
+  coverage_note?: string | null;
 }

@@ -11,6 +11,8 @@ os.environ.setdefault("DASHBOARD_ADMIN_PASSWORD", "x")
 
 from src.dashboard.api import (
     _SOURCE_MEDIA_TOTALS_CACHE,
+    _messaging_policy,
+    _normalize_beeper_network,
     _rate_limit_cursor_payload,
     _source_matrix_blocker,
     _source_matrix_row,
@@ -53,6 +55,14 @@ def test_source_matrix_blocker_prioritizes_whatsapp_pairing():
     assert blocker["kind"] == "whatsapp_pairing"
     assert blocker["severity"] == "warning"
     assert "QR" in blocker["next_action"]
+
+
+def test_messaging_coverage_normalizes_unknown_beeper_messages_from_chat_network():
+    assert _normalize_beeper_network("unknown", "Discord") == "Discord"
+    assert _normalize_beeper_network("", "WhatsApp") == "WhatsApp"
+    assert _normalize_beeper_network(None, None) == "Unmapped Beeper"
+    assert _messaging_policy("telegram").startswith("telegram native is canonical")
+    assert "native collector" in _messaging_policy(None)
 
 
 def test_source_matrix_blocker_reports_active_cooldown_before_extension_issue():

@@ -1683,6 +1683,22 @@ _PLATFORM_MESSAGES = {
     "whatsapp": ("whatsapp_messages", "collected_at"),
     "beeper": ("beeper_shadow_messages", "ingested_at"),
 }
+
+
+def _normalize_beeper_network(message_network: str | None, chat_network: str | None = None) -> str:
+    for value in (message_network, chat_network):
+        text = str(value or "").strip()
+        if text and text.lower() != "unknown":
+            return text
+    return "Unmapped Beeper"
+
+
+def _messaging_policy(native_source: str | None) -> str:
+    if native_source:
+        return f"{native_source} native is canonical; Beeper is a mirror/backstop"
+    return "Beeper is canonical until a native collector exists"
+
+
 _LATEST_ACTIVITY_QUERIES = {
     "telegram": ("SELECT max(collected_at) FROM telegram_messages", "telegram messages"),
     "whatsapp": ("SELECT max(collected_at) FROM whatsapp_messages", "whatsapp messages"),
@@ -2718,22 +2734,42 @@ async def messaging_coverage(_user: dict = Depends(require_role("viewer"))):
         "Telegram": {
             "native_source": "telegram",
             "canonical_source": "native",
-            "policy": "native primary, Beeper mirror",
+            "policy": _messaging_policy("telegram"),
         },
         "WhatsApp": {
             "native_source": "whatsapp",
             "canonical_source": "native",
-            "policy": "native primary, Beeper mirror",
+            "policy": _messaging_policy("whatsapp"),
         },
     }
     async with pool.acquire() as conn:
+        telegram_people_row = await conn.fetchrow(
+            """
+            SELECT count(*) FILTER (WHERE COALESCE(is_bot, false) = false) AS people,
+                   count(*) FILTER (WHERE is_bot = true) AS bots
+            FROM telegram_users
+            """,
+            timeout=8,
+        )
+        whatsapp_people = await conn.fetchval("SELECT COUNT(*) FROM whatsapp_users", timeout=8)
+        whatsapp_people_basis = "whatsapp_users"
+        if not whatsapp_people:
+            whatsapp_people = await conn.fetchval(
+                """
+                SELECT count(DISTINCT sender_id)
+                FROM whatsapp_messages
+                WHERE sender_id IS NOT NULL
+                """,
+                timeout=10,
+            )
+            whatsapp_people_basis = "distinct whatsapp message senders"
         native = {
             "telegram": {
                 "messages": await _estimated_table_rows(conn, "telegram_messages"),
                 "chats": await conn.fetchval("SELECT COUNT(*) FROM telegram_chats"),
-                "people": await conn.fetchval(
-                    "SELECT COUNT(*) FROM telegram_users WHERE NOT COALESCE(is_bot, false)"
-                ),
+                "people": int((telegram_people_row and telegram_people_row["people"]) or 0),
+                "people_basis": "telegram_users excluding bots",
+                "bots": int((telegram_people_row and telegram_people_row["bots"]) or 0),
                 "last_message": await conn.fetchval(
                     "SELECT platform_created_at FROM telegram_messages "
                     "ORDER BY platform_created_at DESC NULLS LAST LIMIT 1"
@@ -2742,7 +2778,9 @@ async def messaging_coverage(_user: dict = Depends(require_role("viewer"))):
             "whatsapp": {
                 "messages": await conn.fetchval("SELECT COUNT(*) FROM whatsapp_messages"),
                 "chats": await conn.fetchval("SELECT COUNT(*) FROM whatsapp_chats"),
-                "people": await conn.fetchval("SELECT COUNT(*) FROM whatsapp_users"),
+                "people": int(whatsapp_people or 0),
+                "people_basis": whatsapp_people_basis,
+                "bots": 0,
                 "last_message": await conn.fetchval(
                     'SELECT "timestamp" FROM whatsapp_messages ORDER BY "timestamp" DESC NULLS LAST LIMIT 1'
                 ),
@@ -2750,44 +2788,93 @@ async def messaging_coverage(_user: dict = Depends(require_role("viewer"))):
         }
         beeper_message_rows = await conn.fetch(
             """
-            WITH networks AS (
-                SELECT DISTINCT network FROM beeper_shadow_chats
-                UNION
-                SELECT DISTINCT network FROM beeper_shadow_messages
-            )
-            SELECT n.network,
-                   (
-                       SELECT COUNT(*)::bigint
-                       FROM beeper_shadow_messages m
-                       WHERE m.network = n.network
-                   ) AS messages,
-                   (
-                       SELECT MAX(timestamp)
-                       FROM beeper_shadow_messages m
-                       WHERE m.network = n.network
-                   ) AS last_message
-            FROM networks n
-            ORDER BY n.network
+            SELECT network,
+                   COUNT(*)::bigint AS messages,
+                   COUNT(DISTINCT chat_id)::int AS message_chats,
+                   MAX(timestamp) AS last_message
+            FROM beeper_shadow_messages
+            WHERE network IS NOT NULL
+              AND network <> ''
+              AND network <> 'unknown'
+            GROUP BY network
+            ORDER BY network
             """,
-            timeout=30,
+            timeout=45,
+        )
+        beeper_unknown_message_rows = await conn.fetch(
+            """
+            SELECT COALESCE(
+                       NULLIF(
+                           CASE
+                               WHEN lower(trim(COALESCE(c.network, ''))) = 'unknown' THEN ''
+                               ELSE trim(COALESCE(c.network, ''))
+                           END,
+                           ''
+                       ),
+                       'Unmapped Beeper'
+                   ) AS network,
+                   COUNT(*)::bigint AS messages,
+                   COUNT(DISTINCT m.chat_id)::int AS message_chats,
+                   MAX(m.timestamp) AS last_message
+            FROM beeper_shadow_messages m
+            LEFT JOIN beeper_shadow_chats c ON c.chat_id = m.chat_id
+            WHERE m.network = 'unknown'
+               OR m.network IS NULL
+               OR m.network = ''
+            GROUP BY 1
+            ORDER BY 1
+            """,
+            timeout=20,
         )
         beeper_chat_rows = await conn.fetch(
             """
-            SELECT network, COUNT(*) AS chats, MAX(last_seen_at) AS last_seen
+            SELECT COALESCE(
+                       NULLIF(
+                           CASE
+                               WHEN lower(trim(COALESCE(network, ''))) = 'unknown' THEN ''
+                               ELSE trim(COALESCE(network, ''))
+                           END,
+                           ''
+                       ),
+                       'Unmapped Beeper'
+                   ) AS network,
+                   COUNT(*) AS chats,
+                   MAX(last_seen_at) AS last_seen
             FROM beeper_shadow_chats
-            GROUP BY network
+            GROUP BY 1
             """,
             timeout=30,
         )
         beeper_people_rows = await conn.fetch(
             """
-            SELECT network, COUNT(DISTINCT participant_id)::int AS people
+            SELECT COALESCE(
+                       NULLIF(
+                           CASE
+                               WHEN lower(trim(COALESCE(network, ''))) = 'unknown' THEN ''
+                               ELSE trim(COALESCE(network, ''))
+                           END,
+                           ''
+                       ),
+                       'Unmapped Beeper'
+                   ) AS network,
+                   COUNT(DISTINCT participant_id)::int AS people
             FROM beeper_shadow_participants
-            GROUP BY network
+            GROUP BY 1
             """,
             timeout=30,
         )
-    beeper_messages = {r["network"]: dict(r) for r in beeper_message_rows}
+    beeper_messages = {}
+    for r in list(beeper_message_rows) + list(beeper_unknown_message_rows):
+        net = _normalize_beeper_network(r["network"])
+        row = beeper_messages.setdefault(
+            net,
+            {"network": net, "messages": 0, "message_chats": 0, "last_message": None},
+        )
+        row["messages"] += int(r["messages"] or 0)
+        row["message_chats"] += int(r["message_chats"] or 0)
+        last_message = r["last_message"]
+        if last_message and (not row["last_message"] or last_message > row["last_message"]):
+            row["last_message"] = last_message
     beeper_chats = {r["network"]: dict(r) for r in beeper_chat_rows}
     beeper_people = {r["network"]: dict(r) for r in beeper_people_rows}
     networks = sorted(
@@ -2799,13 +2886,22 @@ async def messaging_coverage(_user: dict = Depends(require_role("viewer"))):
         row = native_networks.get(net, {
             "native_source": None,
             "canonical_source": "beeper",
-            "policy": "Beeper only",
+            "policy": _messaging_policy(None),
         })
         src = row["native_source"]
-        native_stats = native.get(src or "", {"messages": 0, "chats": 0, "people": 0, "last_message": None})
+        native_stats = native.get(
+            src or "",
+            {"messages": 0, "chats": 0, "people": 0, "people_basis": None, "bots": 0, "last_message": None},
+        )
         mirror_messages = beeper_messages.get(net, {})
         mirror_chats = beeper_chats.get(net, {})
         mirror_people = beeper_people.get(net, {})
+        beeper_people_count = int(mirror_people.get("people") or 0)
+        coverage_note = None
+        if src:
+            coverage_note = "Native rows are the canonical count; Beeper rows are a mirror/backstop and should not be added on top."
+        elif net == "Unmapped Beeper":
+            coverage_note = "Messages could not be mapped to a Beeper network; chat metadata needs repair before analyzer should infer relationships."
         d = {
             **row,
             "network": net,
@@ -2813,11 +2909,16 @@ async def messaging_coverage(_user: dict = Depends(require_role("viewer"))):
             "native_messages": native_stats.get("messages") or 0,
             "native_chats": native_stats.get("chats") or 0,
             "native_people": native_stats.get("people") or 0,
+            "native_people_basis": native_stats.get("people_basis"),
+            "native_bots": native_stats.get("bots") or 0,
             "native_last_message": native_stats.get("last_message"),
             "beeper_messages": mirror_messages.get("messages") or 0,
-            "beeper_chats": mirror_chats.get("chats") or 0,
-            "beeper_people": mirror_people.get("people") or 0,
+            "beeper_chats": mirror_chats.get("chats") or mirror_messages.get("message_chats") or 0,
+            "beeper_people": beeper_people_count,
+            "beeper_people_basis": "beeper_shadow_participants" if beeper_people_count else None,
+            "beeper_message_senders": None,
             "beeper_last_message": mirror_messages.get("last_message") or mirror_chats.get("last_seen"),
+            "coverage_note": coverage_note,
         }
         for key in ("native_last_message", "beeper_last_message"):
             if d[key]:

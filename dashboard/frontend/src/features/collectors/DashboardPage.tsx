@@ -223,6 +223,11 @@ const messagingColumns: ColumnDef<MessagingCoverageRow, unknown>[] = [
         <div>
           <StatusBadge status={value === "native" ? "online" : "processing"} label={value} />
           <div className="text-[10px] uppercase tracking-wide text-text-muted mt-1">{row.policy}</div>
+          {row.coverage_note ? (
+            <div className="mt-1 max-w-[260px] text-[10px] leading-snug text-text-muted normal-case tracking-normal">
+              {row.coverage_note}
+            </div>
+          ) : null}
         </div>
       );
     },
@@ -239,6 +244,12 @@ const messagingColumns: ColumnDef<MessagingCoverageRow, unknown>[] = [
           <div className="text-[10px] uppercase tracking-wide text-text-muted">
             {formatNumber(row.native_chats)} chats · {formatNumber(row.native_people)} people
           </div>
+          {row.native_people_basis ? (
+            <div className="text-[10px] text-text-muted">{row.native_people_basis}</div>
+          ) : null}
+          {row.native_bots ? (
+            <div className="text-[10px] text-text-muted">{formatNumber(row.native_bots)} bots excluded</div>
+          ) : null}
         </div>
       );
     },
@@ -254,6 +265,14 @@ const messagingColumns: ColumnDef<MessagingCoverageRow, unknown>[] = [
           <div className="text-[10px] uppercase tracking-wide text-text-muted">
             {formatNumber(row.beeper_chats)} chats · {formatNumber(row.beeper_people)} people
           </div>
+          {row.beeper_people_basis ? (
+            <div className="text-[10px] text-text-muted">{row.beeper_people_basis}</div>
+          ) : null}
+          {row.beeper_message_senders && row.beeper_people_basis !== "distinct beeper message senders" ? (
+            <div className="text-[10px] text-text-muted">
+              {formatNumber(row.beeper_message_senders)} message senders
+            </div>
+          ) : null}
         </div>
       );
     },
@@ -794,7 +813,12 @@ export function DashboardPage() {
       </div>
 
       <div className="bg-surface rounded-lg border border-border p-4 mt-6">
-        <h2 className="text-xs uppercase tracking-wider text-text-muted mb-4">Messaging Coverage</h2>
+        <div className="mb-4">
+          <h2 className="text-xs uppercase tracking-wider text-text-muted">Messaging Coverage</h2>
+          <p className="mt-1 text-xs text-text-muted">
+            Telegram and WhatsApp native collectors are canonical. Beeper remains a mirror/backstop for those networks and is canonical for Discord, Slack, LinkedIn, Signal, Instagram DMs, and Beeper-only rooms.
+          </p>
+        </div>
         <DataTable data={messagingCoverage ?? []} columns={messagingColumns} />
       </div>
     </div>
