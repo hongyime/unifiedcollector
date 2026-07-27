@@ -194,6 +194,27 @@ async def _mark_degraded(
         log.error("source_health upsert failed for %s: %s", source, e)
 
 
+async def _mark_running_if_stale_watchdog(db: asyncpg.Connection, source: str) -> None:
+    """Clear stale-watchdog source_health rows after fresh source data resumes."""
+    try:
+        await db.execute(
+            """
+            UPDATE source_health
+            SET status='running',
+                last_error=NULL,
+                crash_count=0,
+                last_success_at=COALESCE(last_success_at, NOW()),
+                updated_at=NOW()
+            WHERE source=$1
+              AND status='degraded'
+              AND lower(coalesce(last_error, '')) LIKE 'stale %watchdog%'
+            """,
+            source,
+        )
+    except Exception as e:
+        log.error("source_health recovery update failed for %s: %s", source, e)
+
+
 async def _restart(container: str) -> None:
     try:
         connector = aiohttp.UnixConnector(path=DOCKER_SOCK)
@@ -289,6 +310,24 @@ async def _active_source_cooldown(db: asyncpg.Connection, source: str, now: floa
     return None
 
 
+async def _whatsapp_pairing_needed() -> str | None:
+    """Return an operator-action detail when WhatsApp is waiting for QR pairing."""
+    try:
+        from src.core.whatsapp_bridge_health import (
+            fetch_whatsapp_bridge_health,
+            summarize_whatsapp_bridge_health,
+        )
+
+        summary = summarize_whatsapp_bridge_health(await fetch_whatsapp_bridge_health(timeout=4))
+    except Exception as e:
+        log.debug("whatsapp bridge health check failed: %s", e)
+        return None
+
+    if summary.get("status") == "unpaired":
+        return "waiting for QR pairing; not restarted"
+    return None
+
+
 async def _tick(db: asyncpg.Connection) -> None:
     now = time.time()
     for src, (query, thresh, containers) in CHECKS.items():
@@ -300,6 +339,16 @@ async def _tick(db: asyncpg.Connection) -> None:
         if age is None:
             continue
         if age > thresh:
+            if src == "whatsapp":
+                pairing_detail = await _whatsapp_pairing_needed()
+                if pairing_detail:
+                    log.warning(
+                        "%s STALE (%.0fs > %ds) but bridge is awaiting QR pairing — not restarting",
+                        src, age, thresh,
+                    )
+                    await _mark_degraded(db, src, age, False, pairing_detail)
+                    continue
+
             cooldown = await _active_source_cooldown(db, src, now)
             if cooldown:
                 seconds = int(cooldown.get("seconds_remaining") or 0)
@@ -346,6 +395,7 @@ async def _tick(db: asyncpg.Connection) -> None:
                     + ", ".join(containers)
                 )
         else:
+            await _mark_running_if_stale_watchdog(db, src)
             log.info("%s ok (newest %.0fs ago)", src, age)
 
 

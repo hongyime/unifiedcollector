@@ -60,3 +60,86 @@ async def test_watchdog_skips_stale_restart_during_active_429_cooldown(monkeypat
     assert "not restarted" in detail
     assert notified
     assert "stale but cooling down" in notified[0]
+
+
+@pytest.mark.asyncio
+async def test_watchdog_clears_stale_marker_after_source_recovers(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgres://collector:collector@localhost/unifiedcollector")
+    import src.watchdog.freshness as freshness
+
+    freshness = importlib.reload(freshness)
+    monkeypatch.setattr(
+        freshness,
+        "CHECKS",
+        {"website": ("SELECT 5", 10, ["unifiedcollector_collector_website"])},
+    )
+
+    restarted: list[str] = []
+    degraded: list[tuple[str, float, bool, str | None]] = []
+    executed: list[tuple[str, tuple]] = []
+
+    async def fake_restart(container: str) -> None:
+        restarted.append(container)
+
+    async def fake_mark_degraded(db, source: str, age: float, restarted_any: bool, detail: str | None = None) -> None:
+        degraded.append((source, age, restarted_any, detail))
+
+    monkeypatch.setattr(freshness, "_restart", fake_restart)
+    monkeypatch.setattr(freshness, "_mark_degraded", fake_mark_degraded)
+
+    class FakeDB:
+        async def fetchval(self, query: str):
+            assert query == "SELECT 5"
+            return 5
+
+        async def execute(self, query: str, *args):
+            executed.append((query, args))
+
+    await freshness._tick(FakeDB())
+
+    assert restarted == []
+    assert degraded == []
+    assert len(executed) == 1
+    query, args = executed[0]
+    assert "UPDATE source_health" in query
+    assert "LIKE 'stale %watchdog%'" in query
+    assert args == ("website",)
+
+
+@pytest.mark.asyncio
+async def test_watchdog_does_not_restart_whatsapp_waiting_for_qr(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgres://collector:collector@localhost/unifiedcollector")
+    import src.watchdog.freshness as freshness
+
+    freshness = importlib.reload(freshness)
+    monkeypatch.setattr(
+        freshness,
+        "CHECKS",
+        {"whatsapp": ("SELECT 20", 10, ["unifiedcollector_wa_bridge_1", "unifiedcollector_wa_bridge_2"])},
+    )
+
+    restarted: list[str] = []
+    degraded: list[tuple[str, float, bool, str | None]] = []
+
+    async def fake_restart(container: str) -> None:
+        restarted.append(container)
+
+    async def fake_mark_degraded(db, source: str, age: float, restarted_any: bool, detail: str | None = None) -> None:
+        degraded.append((source, age, restarted_any, detail))
+
+    async def fake_whatsapp_pairing_needed() -> str:
+        return "waiting for QR pairing; not restarted"
+
+    monkeypatch.setattr(freshness, "_restart", fake_restart)
+    monkeypatch.setattr(freshness, "_mark_degraded", fake_mark_degraded)
+    monkeypatch.setattr(freshness, "_whatsapp_pairing_needed", fake_whatsapp_pairing_needed)
+
+    class FakeDB:
+        async def fetchval(self, query: str):
+            assert query == "SELECT 20"
+            return 20
+
+    await freshness._tick(FakeDB())
+
+    assert restarted == []
+    assert degraded == [("whatsapp", 20, False, "waiting for QR pairing; not restarted")]
