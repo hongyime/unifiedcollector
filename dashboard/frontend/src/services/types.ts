@@ -82,6 +82,69 @@ export interface CollectorStatus {
   status: string;
 }
 
+export interface SourceWindowCounts {
+  records: number;
+  messages: number;
+  media_items: number;
+  rate_limits: number;
+  access_errors: number;
+  latest_record_at: string | null;
+  latest_media_at: string | null;
+  latest_event_at: string | null;
+}
+
+export interface SourceBlocker {
+  kind: string;
+  severity: "ok" | "warning" | "error" | string;
+  summary: string;
+  next_action: string;
+}
+
+export interface SourceRateLimitState {
+  active_now: boolean;
+  active_until: string | null;
+  streak: number | null;
+  latest_status_code: number | null;
+  latest_account: string | null;
+  latest_scope: string | null;
+  latest_reason: string | null;
+}
+
+export interface SourceCollectionMatrixRow {
+  source: string;
+  status: CollectorLiveSource["status"];
+  collection_mode: string | null;
+  collection_methods: string[];
+  freshness_basis: string | null;
+  age_seconds: number | null;
+  stale_after_seconds: number | null;
+  detail: string | null;
+  source_health_status?: string | null;
+  source_health_error?: string | null;
+  bridge_status?: string | null;
+  bridge_detail?: string | null;
+  current_hour: SourceWindowCounts;
+  last_24h: SourceWindowCounts;
+  total_media_items: number;
+  total_media_bytes: number;
+  latest_media_at: string | null;
+  rate_limit: SourceRateLimitState;
+  extension_issues: BrowserExtensionIssue[];
+  blocker: SourceBlocker;
+}
+
+export interface SourceCollectionMatrix {
+  generated_at: string;
+  current_hour_started_at: string;
+  sources: SourceCollectionMatrixRow[];
+  whatsapp_bridge_health?: Record<string, unknown> | null;
+  browser_extension?: {
+    expected_version: string | null;
+    issues: BrowserExtensionIssue[];
+  } | null;
+  errors?: Array<{ section: string; error: string }>;
+}
+
 export interface MediaItem {
   id: string;
   source: string;

@@ -31,6 +31,7 @@ from src.core.whatsapp_bridge_health import (
 
 logger = logging.getLogger(__name__)
 _MESSAGING_COVERAGE_CACHE: dict[str, object] = {"ts": 0.0, "rows": None}
+_SOURCE_MEDIA_TOTALS_CACHE: dict[str, object] = {"ts": 0.0, "rows": None}
 
 
 def _encode_polyline(points, precision: int = 5) -> str:
@@ -164,6 +165,365 @@ def _extension_versions_match(current: str | None, expected: str | None) -> bool
     if not current or not expected:
         return True
     return current.lstrip("vV") == expected.lstrip("vV")
+
+
+_INGESTION_CONTENT_PARTS = [
+    ("telegram", "telegram_messages", "collected_at", "messages"),
+    ("whatsapp", "whatsapp_messages", "collected_at", "messages"),
+    ("beeper", "beeper_shadow_messages", "ingested_at", "messages"),
+    ("instagram", "instagram_posts", "collected_at", "posts"),
+    ("tiktok", "tiktok_posts", "collected_at", "posts"),
+    ("lemon8", "lemon8_posts", "collected_at", "posts"),
+    ("threads", "threads_posts", "collected_at", "posts"),
+    ("facebook", "facebook_posts", "collected_at", "posts"),
+    ("x", "x_posts", "collected_at", "posts"),
+    ("youtube", "youtube_videos", "collected_at", "videos"),
+    ("github", "github_commits", "collected_at", "commits"),
+    ("website", "website_pages", "collected_at", "pages"),
+    ("strava", "strava_activities", "collected_at", "activities"),
+    ("search", "search_results", "collected_at", "results"),
+]
+
+_SOURCE_METHODS = {
+    "telegram": ["native api", "realtime"],
+    "whatsapp": ["browser bridge", "realtime"],
+    "beeper": ["beeper bridge", "shadow rooms"],
+    "instagram": ["chrome extension", "headless cookies"],
+    "tiktok": ["chrome extension", "headless cookies"],
+    "lemon8": ["chrome extension", "headless cookies"],
+    "threads": ["chrome extension"],
+    "facebook": ["chrome extension"],
+    "x": ["chrome extension"],
+    "youtube": ["headless cookies"],
+    "website": ["headless crawler"],
+    "github": ["api", "headless fallback"],
+    "strava": ["api cookies", "browser route capture"],
+    "search": ["headless search"],
+}
+
+
+def _normalize_rate_limit_source(service: str | None) -> str:
+    value = (service or "").lower()
+    value = value.replace("_rate_limit", "").replace("_ratelimit", "")
+    value = value.replace(" rate limit", "").replace(" ratelimit", "")
+    return "".join(ch if ch.isalnum() else " " for ch in value).strip()
+
+
+async def _existing_public_tables(conn, tables: list[str]) -> set[str]:
+    if not tables:
+        return set()
+    rows = await conn.fetchval(
+        """
+        SELECT COALESCE(array_agg(table_name), ARRAY[]::text[])
+        FROM information_schema.tables
+        WHERE table_schema = 'public'
+          AND table_name = ANY($1::text[])
+        """,
+        tables,
+        timeout=8,
+    )
+    return set(rows or [])
+
+
+async def _source_content_summary(conn, since_sql: str) -> dict[str, dict]:
+    required_tables = [table for _source, table, _column, _label in _INGESTION_CONTENT_PARTS]
+    required_tables.append("media_items")
+    existing_tables = await _existing_public_tables(conn, required_tables)
+    raw_parts = [
+        f"""
+        SELECT '{source}'::text AS source,
+               count(*)::bigint AS records,
+               {("count(*)" if label == "messages" else "0")}::bigint AS messages,
+               0::bigint AS media_items,
+               max({column}) AS latest_record_at,
+               NULL::timestamptz AS latest_media_at
+        FROM {table}
+        WHERE {column} >= {since_sql}
+        """
+        for source, table, column, label in _INGESTION_CONTENT_PARTS
+        if table in existing_tables
+    ]
+    if "media_items" in existing_tables:
+        raw_parts.append(
+            f"""
+            SELECT source,
+                   0::bigint AS records,
+                   0::bigint AS messages,
+                   count(*)::bigint AS media_items,
+                   NULL::timestamptz AS latest_record_at,
+                   max(collected_at) AS latest_media_at
+            FROM media_items
+            WHERE collected_at >= {since_sql}
+            GROUP BY source
+            """
+        )
+    if not raw_parts:
+        return {}
+    rows = await conn.fetch(
+        f"""
+        WITH raw AS (
+            {" UNION ALL ".join(raw_parts)}
+        )
+        SELECT source,
+               sum(records)::bigint AS records,
+               sum(messages)::bigint AS messages,
+               sum(media_items)::bigint AS media_items,
+               max(latest_record_at) AS latest_record_at,
+               max(latest_media_at) AS latest_media_at
+        FROM raw
+        GROUP BY source
+        """,
+        timeout=30,
+    )
+    return {row["source"]: dict(row) for row in rows}
+
+
+async def _source_rate_summary(conn, since_sql: str) -> dict[str, dict]:
+    if "rate_limit_events" not in await _existing_public_tables(conn, ["rate_limit_events"]):
+        return {}
+    rows = await conn.fetch(
+        f"""
+        SELECT source,
+               count(*) FILTER (WHERE status_code = 429 OR status_code IS NULL)::int AS rate_limits,
+               count(*) FILTER (WHERE status_code IS NOT NULL AND status_code <> 429)::int AS access_errors,
+               (array_agg(account ORDER BY created_at DESC))[1] AS latest_account,
+               (array_agg(scope ORDER BY created_at DESC))[1] AS latest_scope,
+               (array_agg(status_code ORDER BY created_at DESC))[1]::int AS latest_status_code,
+               (array_agg(reason ORDER BY created_at DESC))[1] AS latest_reason,
+               max(created_at) AS latest_event_at,
+               max(created_at + COALESCE(cooldown_seconds, 0) * interval '1 second') AS active_until
+        FROM rate_limit_events
+        WHERE created_at >= {since_sql}
+        GROUP BY source
+        """,
+        timeout=15,
+    )
+    now_utc = datetime.now(timezone.utc)
+    out = {}
+    for row in rows:
+        d = dict(row)
+        active_until = d.get("active_until")
+        d["active_now"] = bool(active_until and active_until > now_utc)
+        out[d["source"]] = d
+    return out
+
+
+async def _source_media_totals(conn) -> dict[str, dict]:
+    cached_rows = _SOURCE_MEDIA_TOTALS_CACHE.get("rows")
+    if cached_rows is not None and time.time() - float(_SOURCE_MEDIA_TOTALS_CACHE.get("ts") or 0) < 180:
+        return cached_rows  # type: ignore[return-value]
+    if "media_items" not in await _existing_public_tables(conn, ["media_items"]):
+        return {}
+    rows = await conn.fetch(
+        """
+        SELECT source,
+               count(*)::bigint AS total_media_items,
+               COALESCE(sum(file_size), 0)::bigint AS total_media_bytes,
+               max(collected_at) AS latest_media_at
+        FROM media_items
+        GROUP BY source
+        """,
+        timeout=45,
+    )
+    out = {row["source"]: dict(row) for row in rows}
+    _SOURCE_MEDIA_TOTALS_CACHE.update({"ts": time.time(), "rows": out})
+    return out
+
+
+async def _active_rate_limit_cursor_summary(conn) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    try:
+        rows = await conn.fetch(
+            """
+            SELECT service, last_processed_id, last_processed_at, status
+            FROM service_cursors
+            WHERE service ILIKE '%rate_limit'
+               OR service ILIKE '%ratelimit'
+            ORDER BY last_processed_at DESC NULLS LAST
+            """,
+            timeout=8,
+        )
+    except Exception:
+        return out
+    now_utc = datetime.now(timezone.utc)
+    for row in rows:
+        d = dict(row)
+        source = _normalize_rate_limit_source(d.get("service"))
+        if not source:
+            continue
+        expiry = None
+        streak = None
+        raw = str(d.get("last_processed_id") or "")
+        if ":" in raw:
+            left, right = raw.split(":", 1)
+            try:
+                expiry = datetime.fromtimestamp(float(left), tz=timezone.utc)
+            except Exception:
+                expiry = None
+            try:
+                streak = int(right)
+            except Exception:
+                streak = None
+        d["active_until"] = expiry
+        d["streak"] = streak
+        d["active_now"] = bool(expiry and expiry > now_utc)
+        if source not in out or d["active_now"]:
+            out[source] = d
+    return out
+
+
+def _extension_issues_by_source(extension_payload: dict | None) -> dict[str, list[dict]]:
+    out: dict[str, list[dict]] = {}
+    for issue in (extension_payload or {}).get("issues", []):
+        source = str(issue.get("platform") or "").lower()
+        if source:
+            out.setdefault(source, []).append(issue)
+    return out
+
+
+def _empty_source_counts() -> dict:
+    return {
+        "records": 0,
+        "messages": 0,
+        "media_items": 0,
+        "rate_limits": 0,
+        "access_errors": 0,
+        "latest_record_at": None,
+        "latest_media_at": None,
+        "latest_event_at": None,
+    }
+
+
+def _merge_source_window(content: dict | None, rate: dict | None) -> dict:
+    out = _empty_source_counts()
+    if content:
+        out.update({
+            "records": int(content.get("records") or 0),
+            "messages": int(content.get("messages") or 0),
+            "media_items": int(content.get("media_items") or 0),
+            "latest_record_at": content.get("latest_record_at"),
+            "latest_media_at": content.get("latest_media_at"),
+        })
+    if rate:
+        out.update({
+            "rate_limits": int(rate.get("rate_limits") or 0),
+            "access_errors": int(rate.get("access_errors") or 0),
+            "latest_event_at": rate.get("latest_event_at"),
+        })
+    return out
+
+
+def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: dict | None,
+                           extension_issues: list[dict]) -> dict:
+    source = source_row.get("source")
+    status = source_row.get("status")
+    bridge_status = source_row.get("bridge_status")
+    if source == "whatsapp" and bridge_status in {"unpaired", "unreachable"}:
+        return {
+            "kind": "whatsapp_pairing",
+            "severity": "error" if bridge_status == "unreachable" else "warning",
+            "summary": source_row.get("bridge_detail") or "WhatsApp bridge is not paired.",
+            "next_action": "Open Link WhatsApp and scan the QR for any unpaired bridge.",
+        }
+    if cursor_row and cursor_row.get("active_now"):
+        active_until = cursor_row.get("active_until")
+        return {
+            "kind": "cooldown",
+            "severity": "warning",
+            "summary": (
+                f"Active collector cooldown"
+                f"{' until ' + active_until.isoformat() if active_until else ''}"
+                f"{' after streak ' + str(cursor_row.get('streak')) if cursor_row.get('streak') else ''}."
+            ),
+            "next_action": "Let the cooldown expire; do not force this source unless it is Tier 1 emergency data.",
+        }
+    if rate_row and rate_row.get("active_now"):
+        active_until = rate_row.get("active_until")
+        scope = " / ".join(str(v) for v in (rate_row.get("latest_account"), rate_row.get("latest_scope")) if v)
+        return {
+            "kind": "cooldown",
+            "severity": "warning",
+            "summary": (
+                f"Recent HTTP pressure is cooling down"
+                f"{' for ' + scope if scope else ''}"
+                f"{' until ' + active_until.isoformat() if active_until else ''}."
+            ),
+            "next_action": "Wait for the scoped backoff before retrying that path.",
+        }
+    if rate_row and int(rate_row.get("access_errors") or 0) > 0:
+        status_code = rate_row.get("latest_status_code")
+        return {
+            "kind": "auth_or_access",
+            "severity": "error",
+            "summary": rate_row.get("latest_reason") or f"Latest HTTP access event was {status_code}.",
+            "next_action": "Refresh auth cookies/session or inspect the account-specific scraper log.",
+        }
+    if extension_issues:
+        issue = extension_issues[0]
+        return {
+            "kind": issue.get("kind") or "extension_issue",
+            "severity": "warning",
+            "summary": issue.get("detail") or "Chrome extension issue detected.",
+            "next_action": "Reload the unpacked Chrome extension and refresh the platform tab.",
+        }
+    if source_row.get("source_health_status") in {"dead", "auth_paused", "degraded"}:
+        return {
+            "kind": source_row.get("source_health_status"),
+            "severity": "error" if source_row.get("source_health_status") == "dead" else "warning",
+            "summary": source_row.get("source_health_error") or source_row.get("detail") or "source_health reports trouble.",
+            "next_action": "Check the source-specific Docker logs and account/session state.",
+        }
+    if status not in {"live"}:
+        return {
+            "kind": status or "unknown",
+            "severity": "warning",
+            "summary": source_row.get("detail") or "No fresh source row is available.",
+            "next_action": "Check whether the scraper tab, cookies, or source account are still valid.",
+        }
+    return {
+        "kind": "none",
+        "severity": "ok",
+        "summary": "Collecting normally.",
+        "next_action": "No operator action.",
+    }
+
+
+def _source_matrix_row(source_row: dict, current_content: dict | None, current_rate: dict | None,
+                       day_content: dict | None, day_rate: dict | None, media_total: dict | None,
+                       cursor_row: dict | None, extension_issues: list[dict]) -> dict:
+    blocker = _source_matrix_blocker(source_row, day_rate, cursor_row, extension_issues)
+    source = source_row.get("source")
+    total_media = media_total or {}
+    return {
+        "source": source,
+        "status": source_row.get("status"),
+        "collection_mode": source_row.get("collection_mode"),
+        "collection_methods": _SOURCE_METHODS.get(source, []),
+        "freshness_basis": source_row.get("freshness_basis"),
+        "age_seconds": source_row.get("age_seconds"),
+        "stale_after_seconds": source_row.get("stale_after_seconds"),
+        "detail": source_row.get("detail"),
+        "source_health_status": source_row.get("source_health_status"),
+        "source_health_error": source_row.get("source_health_error"),
+        "bridge_status": source_row.get("bridge_status"),
+        "bridge_detail": source_row.get("bridge_detail"),
+        "current_hour": _merge_source_window(current_content, current_rate),
+        "last_24h": _merge_source_window(day_content, day_rate),
+        "total_media_items": int(total_media.get("total_media_items") or 0),
+        "total_media_bytes": int(total_media.get("total_media_bytes") or 0),
+        "latest_media_at": total_media.get("latest_media_at"),
+        "rate_limit": {
+            "active_now": bool((cursor_row and cursor_row.get("active_now")) or (day_rate and day_rate.get("active_now"))),
+            "active_until": (cursor_row or {}).get("active_until") or (day_rate or {}).get("active_until"),
+            "streak": (cursor_row or {}).get("streak"),
+            "latest_status_code": (day_rate or {}).get("latest_status_code"),
+            "latest_account": (day_rate or {}).get("latest_account"),
+            "latest_scope": (day_rate or {}).get("latest_scope"),
+            "latest_reason": (day_rate or {}).get("latest_reason"),
+        },
+        "extension_issues": extension_issues,
+        "blocker": blocker,
+    }
 
 
 async def _browser_extension_payload(conn) -> dict:
@@ -922,6 +1282,91 @@ async def collectors_live(_user: dict = Depends(require_role("viewer"))):
     }
 
 
+@app.get("/collectors/source-matrix")
+async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))):
+    """Operator matrix: source status, collection method, volume, and blocker."""
+    from src.core.source_freshness import compute_liveness
+    pool = await get_pool()
+    errors = []
+    async with pool.acquire() as conn:
+        live_sources = await compute_liveness(conn)
+        live_sources, whatsapp_bridge_health = await _with_bridge_overrides(live_sources)
+        try:
+            current_content = await _source_content_summary(conn, "date_trunc('hour', now())")
+        except Exception as exc:  # noqa: BLE001 - dashboard matrix should degrade, not 500
+            logger.warning("source matrix current content summary failed: %s", exc)
+            errors.append({"section": "current_content", "error": exc.__class__.__name__})
+            current_content = {}
+        try:
+            current_rate = await _source_rate_summary(conn, "date_trunc('hour', now())")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("source matrix current rate summary failed: %s", exc)
+            errors.append({"section": "current_rate", "error": exc.__class__.__name__})
+            current_rate = {}
+        try:
+            day_content = await _source_content_summary(conn, "now() - interval '24 hours'")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("source matrix 24h content summary failed: %s", exc)
+            errors.append({"section": "day_content", "error": exc.__class__.__name__})
+            day_content = {}
+        try:
+            day_rate = await _source_rate_summary(conn, "now() - interval '24 hours'")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("source matrix 24h rate summary failed: %s", exc)
+            errors.append({"section": "day_rate", "error": exc.__class__.__name__})
+            day_rate = {}
+        try:
+            media_totals = await _source_media_totals(conn)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("source matrix media totals failed: %s", exc)
+            errors.append({"section": "media_totals", "error": exc.__class__.__name__})
+            media_totals = {}
+        try:
+            active_cursors = await _active_rate_limit_cursor_summary(conn)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("source matrix active cursor summary failed: %s", exc)
+            errors.append({"section": "active_cursors", "error": exc.__class__.__name__})
+            active_cursors = {}
+        try:
+            browser_extension = await _browser_extension_payload(conn)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("source matrix browser extension summary failed: %s", exc)
+            errors.append({"section": "browser_extension", "error": exc.__class__.__name__})
+            browser_extension = {"expected_version": _expected_extension_version(), "issues": []}
+
+    extension_by_source = _extension_issues_by_source(browser_extension)
+    rows = [
+        _source_matrix_row(
+            source_row,
+            current_content.get(source_row["source"]),
+            current_rate.get(source_row["source"]),
+            day_content.get(source_row["source"]),
+            day_rate.get(source_row["source"]),
+            media_totals.get(source_row["source"]),
+            active_cursors.get(source_row["source"]),
+            extension_by_source.get(source_row["source"], []),
+        )
+        for source_row in live_sources
+    ]
+    severity_rank = {"error": 0, "warning": 1, "ok": 2}
+    rows.sort(key=lambda r: (
+        severity_rank.get((r.get("blocker") or {}).get("severity"), 3),
+        r.get("source") or "",
+    ))
+    generated_at = datetime.now(timezone.utc)
+    return {
+        "generated_at": generated_at,
+        "current_hour_started_at": generated_at.replace(minute=0, second=0, microsecond=0),
+        "sources": rows,
+        "whatsapp_bridge_health": whatsapp_bridge_health,
+        "browser_extension": {
+            "expected_version": browser_extension.get("expected_version"),
+            "issues": browser_extension.get("issues", []),
+        },
+        "errors": errors,
+    }
+
+
 _PLATFORM_POSTS = {
     "instagram": "instagram_posts", "tiktok": "tiktok_posts", "lemon8": "lemon8_posts",
     "youtube": "youtube_videos", "threads": "threads_posts", "facebook": "facebook_posts",
@@ -1382,22 +1827,7 @@ async def hourly_ingestion(hours: int = 12, _user: dict = Depends(require_role("
     """
     hours = max(1, min(hours, 72))
     pool = await get_pool()
-    content_parts = [
-        ("telegram", "telegram_messages", "collected_at", "messages"),
-        ("whatsapp", "whatsapp_messages", "collected_at", "messages"),
-        ("beeper", "beeper_shadow_messages", "ingested_at", "messages"),
-        ("instagram", "instagram_posts", "collected_at", "posts"),
-        ("tiktok", "tiktok_posts", "collected_at", "posts"),
-        ("lemon8", "lemon8_posts", "collected_at", "posts"),
-        ("threads", "threads_posts", "collected_at", "posts"),
-        ("facebook", "facebook_posts", "collected_at", "posts"),
-        ("x", "x_posts", "collected_at", "posts"),
-        ("youtube", "youtube_videos", "collected_at", "videos"),
-        ("github", "github_commits", "collected_at", "commits"),
-        ("website", "website_pages", "collected_at", "pages"),
-        ("strava", "strava_activities", "collected_at", "activities"),
-        ("search", "search_results", "collected_at", "results"),
-    ]
+    content_parts = _INGESTION_CONTENT_PARTS
     required_tables = [table for _source, table, _column, _label in content_parts]
     required_tables.extend(["media_items", "rate_limit_events"])
     async with pool.acquire() as conn:

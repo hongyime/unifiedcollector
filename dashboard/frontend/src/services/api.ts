@@ -3,6 +3,7 @@ import type {
   HealthStatus,
   CollectorStatus,
   CollectorDetail,
+  SourceCollectionMatrix,
   MediaItem,
   MediaStats,
   HourlyIngestionRow,
@@ -112,6 +113,7 @@ export const api = {
   health: () => get<HealthStatus>("/health?include_sources=true"),
   collectors: () => get<CollectorStatus[]>("/collectors"),
   collectorsLive: () => get<CollectorsLive>("/collectors/live"),
+  sourceMatrix: () => get<SourceCollectionMatrix>("/collectors/source-matrix"),
   collectorDetail: (source: string) => get<CollectorDetail>(`/collectors/${source}`),
 
   media: (source?: string, limit = 50) => {

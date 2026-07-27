@@ -15,8 +15,8 @@ import type {
   MessagingCoverageRow,
   RateLimitEvent,
   RateLimitRecentSummary,
-  CollectorLiveSource,
   BrowserExtensionIssue,
+  SourceCollectionMatrixRow,
 } from "../../services/types";
 
 function liveBadgeStatus(status: MediaStats["live"]) {
@@ -96,7 +96,24 @@ const columns: ColumnDef<MediaStats, unknown>[] = [
   },
 ];
 
-const liveColumns: ColumnDef<CollectorLiveSource, unknown>[] = [
+function blockerBadgeStatus(severity: string) {
+  if (severity === "ok") return "online";
+  if (severity === "error") return "error";
+  return "warning";
+}
+
+function renderWindow(row: SourceCollectionMatrixRow["current_hour"]) {
+  return (
+    <div>
+      <div>{formatNumber(row.records)} rows · {formatNumber(row.media_items)} files</div>
+      <div className="text-[10px] uppercase tracking-wide text-text-muted">
+        {formatNumber(row.messages)} msgs · {formatNumber(row.rate_limits)} 429 · {formatNumber(row.access_errors)} auth/other
+      </div>
+    </div>
+  );
+}
+
+const sourceMatrixColumns: ColumnDef<SourceCollectionMatrixRow, unknown>[] = [
   {
     accessorKey: "source",
     header: "Source",
@@ -108,7 +125,7 @@ const liveColumns: ColumnDef<CollectorLiveSource, unknown>[] = [
           <div>
             <div className="uppercase font-medium text-text-primary">{info.getValue() as string}</div>
             <div className="text-[10px] uppercase tracking-wide text-text-muted">
-              {row.collection_mode ?? "unknown mode"}
+              {row.collection_methods.length ? row.collection_methods.join(" + ") : row.collection_mode ?? "unknown mode"}
             </div>
           </div>
         </div>
@@ -117,32 +134,57 @@ const liveColumns: ColumnDef<CollectorLiveSource, unknown>[] = [
   },
   {
     accessorKey: "age_seconds",
-    header: "Newest Row",
+    header: "Freshness",
     cell: (info) => {
+      const row = info.row.original;
       const value = info.getValue() as number | null;
-      return value == null ? "never" : `${formatDuration(value)} ago`;
+      return (
+        <div>
+          <div>{value == null ? "never" : `${formatDuration(value)} ago`}</div>
+          <div className="text-[10px] uppercase tracking-wide text-text-muted truncate max-w-[260px]">
+            {row.freshness_basis ?? "-"}
+          </div>
+        </div>
+      );
     },
   },
   {
-    accessorKey: "freshness_basis",
-    header: "Proof",
-    cell: (info) => <span className="text-text-muted">{(info.getValue() as string | null) ?? "-"}</span>,
+    accessorKey: "current_hour",
+    header: "This Hour",
+    cell: (info) => renderWindow(info.getValue() as SourceCollectionMatrixRow["current_hour"]),
   },
   {
-    accessorKey: "detail",
-    header: "Meaning",
+    accessorKey: "last_24h",
+    header: "24h",
+    cell: (info) => renderWindow(info.getValue() as SourceCollectionMatrixRow["last_24h"]),
+  },
+  {
+    accessorKey: "total_media_items",
+    header: "Media Vault",
     cell: (info) => {
       const row = info.row.original;
       return (
         <div>
-          <div className={row.status === "live" ? "text-text-muted" : "text-warning"}>
-            {(info.getValue() as string | null) ?? "-"}
+          <div>{formatNumber(info.getValue() as number)} files</div>
+          <div className="text-[10px] uppercase tracking-wide text-text-muted">
+            {formatBytes(row.total_media_bytes)} · {relativeTime(row.latest_media_at)}
           </div>
-          {row.source_health_error && row.source_health_error !== info.getValue() && (
-            <div className="text-[10px] text-text-muted truncate max-w-[420px]">
-              {row.source_health_error}
-            </div>
-          )}
+        </div>
+      );
+    },
+  },
+  {
+    accessorKey: "blocker",
+    header: "Blocker / Action",
+    cell: (info) => {
+      const blocker = info.getValue() as SourceCollectionMatrixRow["blocker"];
+      return (
+        <div>
+          <div className="flex items-center gap-2">
+            <StatusBadge status={blockerBadgeStatus(blocker.severity)} label={blocker.kind.replace(/_/g, " ")} />
+            <span className={blocker.severity === "ok" ? "text-text-muted" : "text-warning"}>{blocker.summary}</span>
+          </div>
+          <div className="text-[10px] text-text-muted mt-1">{blocker.next_action}</div>
         </div>
       );
     },
@@ -359,6 +401,12 @@ export function DashboardPage() {
     queryKey: ["collectors-live"],
     queryFn: api.collectorsLive,
     refetchInterval: 15_000,
+  });
+
+  const { data: sourceMatrix } = useQuery({
+    queryKey: ["source-matrix"],
+    queryFn: api.sourceMatrix,
+    refetchInterval: 30_000,
   });
 
   const { data: messagingCoverage } = useQuery({
@@ -690,8 +738,8 @@ export function DashboardPage() {
       )}
 
       <div className="bg-surface rounded-lg border border-border p-4">
-        <h2 className="text-xs uppercase tracking-wider text-text-muted mb-4">Source Health</h2>
-        <DataTable data={collectorsLive?.sources ?? []} columns={liveColumns} />
+        <h2 className="text-xs uppercase tracking-wider text-text-muted mb-4">Source Collection Matrix</h2>
+        <DataTable data={sourceMatrix?.sources ?? []} columns={sourceMatrixColumns} />
       </div>
 
       <div className="bg-surface rounded-lg border border-border p-4 mt-6">
