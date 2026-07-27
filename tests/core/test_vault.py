@@ -532,6 +532,62 @@ def test_write_media_sidecar_reports_missing_vault(tmp_path, monkeypatch):
     assert "vault" in result.error.lower()
 
 
+@pytest.mark.asyncio
+async def test_verify_media_item_db_consistency_accepts_vault_artifact_sidecar(tmp_path):
+    media = tmp_path / "media" / "telegram" / "photo.jpg"
+    media.parent.mkdir(parents=True)
+    media.write_bytes(b"photo")
+
+    class Conn:
+        async def fetchrow(self, *_args, **_kwargs):
+            return {
+                "file_path": str(media),
+                "file_size": 5,
+                "sha256": "a" * 64,
+                "metadata": {
+                    "vault_artifact": {
+                        "ok": True,
+                        "sidecar_path": "sidecars/artifacts/telegram/photo.json",
+                    }
+                },
+            }
+
+    result = await vault.verify_media_item_db_consistency(
+        Conn(),
+        source="telegram",
+        content_id="msg-1",
+        file_path=media,
+        file_size=5,
+        sha256="a" * 64,
+        sidecar_path="sidecars/artifacts/telegram/photo.json",
+    )
+
+    assert result.ok is True
+    assert result.errors == ()
+
+
+@pytest.mark.asyncio
+async def test_vault_artifact_counts_checks_both_sidecar_metadata_shapes():
+    class Conn:
+        async def fetchrow(self, query, **_kwargs):
+            assert "vault_sidecar" in query
+            assert "vault_artifact" in query
+            assert "idx_media_missing_occurrence_sidecar" in query
+            assert "to_regclass" in query
+            return {
+                "sidecar_failures": 0,
+                "artifacts_queued": 0,
+                "artifacts_partial": 2,
+                "artifacts_missing_sidecar": 3,
+            }
+
+    counts = await vault.vault_artifact_counts(Conn())
+
+    assert counts["artifacts_partial"] == 2
+    assert counts["artifacts_missing_sidecar"] == 3
+    assert counts["artifacts_missing_sidecar_estimated"] is True
+
+
 def test_write_artifact_sidecar_records_json_artifact(tmp_path, monkeypatch):
     monkeypatch.setattr(vault, "SIDECARS_ENABLED", True)
     root = tmp_path / "vault"

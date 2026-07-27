@@ -457,6 +457,8 @@ async def notify_status(snapshot: dict) -> bool:
         writable = bool(vault.get("writable"))
         queued = int(vault.get("artifacts_queued") or 0)
         partial = int(vault.get("artifacts_partial") or 0)
+        missing = int(vault.get("artifacts_missing_sidecar") or 0)
+        missing_label = f"about {missing:,}" if vault.get("artifacts_missing_sidecar_estimated") else f"{missing:,}"
         failures = int(vault.get("sidecar_failures") or 0)
         lines.append("")
         lines.append("<b>Vault</b>")
@@ -470,10 +472,11 @@ async def notify_status(snapshot: dict) -> bool:
                 f"Not safe for file-backed artifacts at <code>{_esc(vault.get('root') or '')}</code>"
                 + (f": {_esc(vault.get('error'))}" if vault.get("error") else ".")
             )
-        if queued or partial or failures:
+        if queued or partial or missing or failures:
             lines.append(
                 f"Artifact health: {queued:,} repair queue {_plural(queued, 'item')}, "
-                f"{partial:,} media {_plural(partial, 'record')} waiting for sidecar repair, "
+                f"{partial:,} active partial media {_plural(partial, 'record')}, "
+                f"{missing_label} historical media {_plural(missing, 'record')} missing occurrence sidecars, "
                 f"{failures:,} total sidecar write {_plural(failures, 'failure')} recorded."
             )
         elif vault.get("counts_error"):
@@ -482,7 +485,9 @@ async def notify_status(snapshot: dict) -> bool:
                 f"Query error: <code>{_esc(vault.get('counts_error'))}</code>."
             )
         else:
-            lines.append("Artifact health: no queued artifact repairs and no media records waiting for sidecar repair.")
+            lines.append(
+                "Artifact health: no queued artifact repairs and no historical media records missing occurrence sidecars."
+            )
 
     backups = snapshot.get("backups") or {}
     if backups:

@@ -51,7 +51,15 @@ async def repair_missing_media_sidecars(
     report = MediaSidecarRepairReport(dry_run=dry_run)
 
     where = [
-        "NOT (COALESCE(metadata, '{}'::jsonb) ? 'vault_sidecar')",
+        """
+        NOT (
+            COALESCE(metadata, '{}'::jsonb) ? 'vault_sidecar'
+            OR (
+                COALESCE(metadata, '{}'::jsonb) ? 'vault_artifact'
+                AND COALESCE(metadata->'vault_artifact'->>'sidecar_path', '') <> ''
+            )
+        )
+        """,
         "file_path IS NOT NULL",
         "file_path <> ''",
         "content_id IS NOT NULL",

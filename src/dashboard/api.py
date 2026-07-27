@@ -154,6 +154,8 @@ def _vault_payload() -> dict:
         "sidecar_failures": 0,
         "artifacts_queued": 0,
         "artifacts_partial": 0,
+        "artifacts_missing_sidecar": 0,
+        "artifacts_missing_sidecar_estimated": False,
     }
 
 
@@ -997,7 +999,7 @@ async def health(include_sources: bool = False):
         async with pool.acquire() as conn:
             await conn.fetchval("SELECT 1")
             try:
-                vault.update(await vault_artifact_counts(conn, timeout=3))
+                vault.update(await vault_artifact_counts(conn, timeout=5))
             except Exception as exc:
                 vault["counts_error"] = exc.__class__.__name__
             if include_sources:
@@ -1087,6 +1089,8 @@ async def metrics():
                      "Vault sidecar dead-letter queue rows", "gauge")
                 emit("uc_vault_artifacts_partial", vault["artifacts_partial"],
                      "Media rows with failed vault sidecar metadata", "gauge")
+                emit("uc_vault_artifacts_missing_sidecar_estimate", vault.get("artifacts_missing_sidecar", 0),
+                     "Estimated media rows with no successful occurrence sidecar metadata", "gauge")
             except Exception:
                 pass
 

@@ -12,6 +12,8 @@ export interface HealthStatus {
     sidecar_failures: number;
     artifacts_queued: number;
     artifacts_partial: number;
+    artifacts_missing_sidecar?: number;
+    artifacts_missing_sidecar_estimated?: boolean;
     counts_error?: string | null;
   };
   backups?: {

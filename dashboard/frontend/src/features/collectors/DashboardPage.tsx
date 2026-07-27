@@ -477,7 +477,10 @@ export function DashboardPage() {
   const vaultOk = vault?.available && vault?.writable;
   const vaultSidecarDlqRows = vault?.artifacts_queued ?? 0;
   const vaultFailedMetadataRows = vault?.artifacts_partial ?? 0;
+  const vaultMissingSidecarRows = vault?.artifacts_missing_sidecar ?? 0;
+  const vaultMissingPrefix = vault?.artifacts_missing_sidecar_estimated ? "~" : "";
   const vaultIssues = vaultSidecarDlqRows + vaultFailedMetadataRows;
+  const vaultWarnings = vaultIssues + vaultMissingSidecarRows;
   const backups = health?.backups;
   const extension = health?.browser_extension;
   const extensionIssues = extension?.issues ?? [];
@@ -540,10 +543,10 @@ export function DashboardPage() {
           value={vaultOk ? "Writable" : "Blocked"}
           sublabel={
             vault?.free_bytes != null
-              ? `${formatBytes(vault.free_bytes)} free · ${formatNumber(vaultSidecarDlqRows)} DLQ · ${formatNumber(vaultFailedMetadataRows)} metadata rows`
+              ? `${formatBytes(vault.free_bytes)} free · ${formatNumber(vaultSidecarDlqRows)} DLQ · ${formatNumber(vaultFailedMetadataRows)} partial · ${vaultMissingPrefix}${formatNumber(vaultMissingSidecarRows)} historical missing`
               : health?.drive ?? "unknown"
           }
-          status={vaultOk && vaultIssues === 0 ? "success" : vaultOk ? "warning" : "error"}
+          status={vaultOk && vaultWarnings === 0 ? "success" : vaultOk ? "warning" : "error"}
         />
         <MetricCard
           label="DB Backups"

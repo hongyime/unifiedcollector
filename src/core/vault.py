@@ -264,7 +264,7 @@ def vault_health(root: Path = VAULT_ROOT) -> VaultHealth:
         )
 
 
-async def vault_artifact_counts(conn, *, timeout: float | None = 10.0) -> dict[str, int]:
+async def vault_artifact_counts(conn, *, timeout: float | None = 10.0) -> dict[str, int | bool]:
     """DB-backed artifact health counts used by dashboards and Telegram."""
     row = await conn.fetchrow(
         """
@@ -278,8 +278,40 @@ async def vault_artifact_counts(conn, *, timeout: float | None = 10.0) -> dict[s
              AND error_message LIKE 'vault sidecar write failed:%') AS artifacts_queued,
           (SELECT COUNT(*)::int
            FROM media_items
-           WHERE metadata ? 'vault_sidecar'
-             AND metadata->'vault_sidecar'->>'ok' = 'false') AS artifacts_partial
+           WHERE NOT (
+             (
+               metadata ? 'vault_sidecar'
+               AND metadata->'vault_sidecar'->>'ok' = 'true'
+             ) OR (
+               metadata ? 'vault_artifact'
+               AND COALESCE(metadata->'vault_artifact'->>'sidecar_path', '') <> ''
+               AND COALESCE(metadata->'vault_artifact'->>'sidecar_ok', 'true') <> 'false'
+             )
+           )
+           AND (
+             (
+               metadata ? 'vault_sidecar'
+               AND metadata->'vault_sidecar'->>'ok' = 'false'
+             ) OR (
+               metadata ? 'vault_artifact'
+               AND (
+                 metadata->'vault_artifact'->>'ok' = 'false'
+                 OR metadata->'vault_artifact'->>'sidecar_ok' = 'false'
+                 OR metadata->'vault_artifact'->>'partial' = 'true'
+               )
+             )
+           )) AS artifacts_partial,
+          (SELECT COALESCE(
+             (
+               SELECT CASE
+                 WHEN c.reltuples < 0 THEN 0
+                 ELSE c.reltuples::bigint
+               END
+               FROM pg_class c
+               WHERE c.oid = to_regclass('public.idx_media_missing_occurrence_sidecar')
+             ),
+             0
+           )::int) AS artifacts_missing_sidecar
         """,
         timeout=timeout,
     )
@@ -287,6 +319,8 @@ async def vault_artifact_counts(conn, *, timeout: float | None = 10.0) -> dict[s
         "sidecar_failures": int(row["sidecar_failures"] or 0),
         "artifacts_queued": int(row["artifacts_queued"] or 0),
         "artifacts_partial": int(row["artifacts_partial"] or 0),
+        "artifacts_missing_sidecar": int(row["artifacts_missing_sidecar"] or 0),
+        "artifacts_missing_sidecar_estimated": True,
     }
 
 
@@ -717,13 +751,22 @@ async def verify_media_item_db_consistency(
     if sidecar_path:
         metadata = _json_metadata(_row_value(row, "metadata"))
         sidecar = metadata.get("vault_sidecar") if isinstance(metadata, Mapping) else None
-        if not isinstance(sidecar, Mapping):
-            errors.append("vault_sidecar metadata missing")
-        else:
-            if sidecar.get("path") != sidecar_path:
-                errors.append("vault_sidecar path mismatch")
-            if sidecar.get("ok") is not True:
+        artifact = metadata.get("vault_artifact") if isinstance(metadata, Mapping) else None
+        sidecar_ok = False
+        if isinstance(sidecar, Mapping):
+            if sidecar.get("path") == sidecar_path and sidecar.get("ok") is True:
+                sidecar_ok = True
+            elif sidecar.get("path") == sidecar_path:
                 errors.append("vault_sidecar not ok")
+        if isinstance(artifact, Mapping):
+            artifact_sidecar_path = artifact.get("sidecar_path")
+            artifact_ok = artifact.get("sidecar_ok")
+            if artifact_sidecar_path == sidecar_path and artifact_ok is not False:
+                sidecar_ok = True
+            elif artifact_sidecar_path == sidecar_path:
+                errors.append("vault_artifact sidecar not ok")
+        if not sidecar_ok:
+            errors.append("vault sidecar metadata missing")
 
     return ArtifactDbConsistencyResult(not errors, tuple(errors))
 

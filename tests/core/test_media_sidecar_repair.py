@@ -12,11 +12,13 @@ from src.core.media_sidecar_repair import repair_missing_media_sidecars
 class FakeConn:
     def __init__(self, rows):
         self.rows = rows
+        self.fetch_query = None
         self.fetch_args = None
         self.updates = []
         self.dlq = []
 
-    async def fetch(self, _query, *args):
+    async def fetch(self, query, *args):
+        self.fetch_query = query
         self.fetch_args = args
         return self.rows
 
@@ -69,6 +71,8 @@ async def test_repair_missing_media_sidecars_dry_run_does_not_write(tmp_path):
     assert report.skipped == 1
     assert report.repaired == 0
     assert conn.updates == []
+    assert "vault_artifact" in conn.fetch_query
+    assert "sidecar_path" in conn.fetch_query
 
 
 @pytest.mark.asyncio
