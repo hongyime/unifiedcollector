@@ -76,7 +76,7 @@ services:
     healthcheck:
       test: ["CMD", "python", "-m", "src.core.health"]
       interval: 60s
-      timeout: 30s
+      timeout: 45s
       retries: 3
       start_period: 30s
     restart: unless-stopped
@@ -123,7 +123,7 @@ services:
     healthcheck:
       test: ["CMD", "python", "-m", "src.core.health"]
       interval: 60s
-      timeout: 30s
+      timeout: 45s
       retries: 3
       start_period: 30s
     restart: unless-stopped
@@ -175,7 +175,7 @@ services:
     healthcheck:
       test: ["CMD", "python", "-m", "src.core.health"]
       interval: 60s
-      timeout: 30s
+      timeout: 45s
       retries: 3
       start_period: 30s
     restart: unless-stopped
@@ -272,7 +272,7 @@ services:
     healthcheck:
       test: ["CMD", "python", "-m", "src.core.health"]
       interval: 60s
-      timeout: 30s
+      timeout: 45s
       retries: 3
       start_period: 30s
     restart: unless-stopped
@@ -354,7 +354,7 @@ services:
     healthcheck:
       test: ["CMD", "python", "-m", "src.core.health"]
       interval: 60s
-      timeout: 30s
+      timeout: 45s
       retries: 3
       start_period: 30s
     restart: unless-stopped
@@ -389,7 +389,7 @@ services:
     healthcheck:
       test: ["CMD", "python", "-m", "src.core.health"]
       interval: 60s
-      timeout: 30s
+      timeout: 45s
       retries: 3
       start_period: 30s
     restart: unless-stopped
@@ -447,7 +447,7 @@ services:
     healthcheck:
       test: ["CMD", "python", "-m", "src.core.health"]
       interval: 60s
-      timeout: 30s
+      timeout: 45s
       retries: 3
       start_period: 30s
     restart: unless-stopped
@@ -499,7 +499,7 @@ services:
     healthcheck:
       test: ["CMD", "python", "-m", "src.core.health"]
       interval: 60s
-      timeout: 30s
+      timeout: 45s
       retries: 3
       start_period: 30s
     restart: unless-stopped
@@ -548,7 +548,7 @@ services:
     healthcheck:
       test: ["CMD", "python", "-m", "src.core.health"]
       interval: 60s
-      timeout: 30s
+      timeout: 45s
       retries: 3
       start_period: 30s
     restart: unless-stopped
@@ -598,7 +598,7 @@ services:
     healthcheck:
       test: ["CMD", "python", "-m", "src.core.health"]
       interval: 60s
-      timeout: 30s
+      timeout: 45s
       retries: 3
       start_period: 30s
     restart: unless-stopped
@@ -655,7 +655,7 @@ services:
     healthcheck:
       test: ["CMD", "python", "-m", "src.core.health"]
       interval: 60s
-      timeout: 30s
+      timeout: 45s
       retries: 3
       start_period: 30s
     restart: unless-stopped
@@ -723,7 +723,7 @@ services:
     healthcheck:
       test: ["CMD", "python", "-m", "src.core.health"]
       interval: 60s
-      timeout: 30s
+      timeout: 45s
       retries: 3
       start_period: 30s
     restart: unless-stopped
@@ -854,7 +854,7 @@ services:
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 30s
-      timeout: 30s
+      timeout: 45s
       retries: 5
       start_period: 60s
 
