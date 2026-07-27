@@ -1791,6 +1791,8 @@ class TelegramCollector(BaseCollector):
                 await self._capture_poll(conn, row["id"], message)
             # Tier 6: venue/event extraction (best effort — never breaks flow).
             await self._extract_message_event(message, chat_uuid, platform_msg_id, conn=conn)
+        if row is not None:
+            self._progress_count += 1
         self._archive_raw_payload(
             artifact_id=f"messages/{platform_msg_id}",
             payload=payload,
@@ -2954,6 +2956,7 @@ class TelegramCollector(BaseCollector):
             # backfill re-fetches also refresh it via the edit/upsert branches.
             is_pinned = bool(getattr(message, "pinned", False) or False)
 
+            wrote_row = False
             if is_edit:
                 # Update existing if present; else insert.
                 await conn.execute("""
@@ -2976,8 +2979,9 @@ class TelegramCollector(BaseCollector):
                 reply_to, fwd_chat, fwd_msg, via_bot,
                 is_pinned,
                 )
+                wrote_row = True
             else:
-                await conn.execute("""
+                row = await conn.fetchrow("""
                     INSERT INTO telegram_messages (
                         platform_message_id, chat_id, sender_id, text, caption,
                         media_type, platform_created_at, metadata,
@@ -2985,6 +2989,7 @@ class TelegramCollector(BaseCollector):
                         is_pinned
                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
                     ON CONFLICT (platform_message_id) DO NOTHING
+                    RETURNING id
                 """,
                 platform_msg_id, chat_uuid, sender_uuid,
                 getattr(message, "message", None),
@@ -2993,10 +2998,13 @@ class TelegramCollector(BaseCollector):
                 reply_to, fwd_chat, fwd_msg, via_bot,
                 is_pinned,
                 )
+                wrote_row = row is not None
 
             # Tier 6: venue/event extraction (best effort — never breaks the
             # hot realtime path; helper swallows all exceptions internally).
             await self._extract_message_event(message, chat_uuid, platform_msg_id, conn=conn)
+        if wrote_row:
+            self._progress_count += 1
         self._archive_raw_payload(
             artifact_id=f"messages/{platform_msg_id}",
             payload=payload,

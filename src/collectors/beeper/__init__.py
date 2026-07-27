@@ -1273,6 +1273,7 @@ class BeeperCollector(BaseCollector):
                     is_new = await w.upsert_message(msg)
                     if is_new:
                         tail_inserted += 1
+                        self._progress_count += 1
                         msg.setdefault("network", network)
                         await self._download_attachments(msg)
                     new_newest = meta.get("newestCursor") or new_newest
@@ -1297,6 +1298,7 @@ class BeeperCollector(BaseCollector):
                     is_new = await w.upsert_message(msg)
                     if is_new:
                         inserted += 1
+                        self._progress_count += 1
                         msg.setdefault("network", network)
                         await self._download_attachments(msg)
                     final_oldest = meta.get("oldestCursor") or final_oldest

@@ -724,6 +724,7 @@ async def test_upsert_message_archives_raw_payload(monkeypatch):
 
     await coll._upsert_message(message, 42, "sender-uuid")
 
+    assert coll.progress_count == 1
     assert calls
     assert calls[0]["source"] == "telegram"
     assert calls[0]["artifact_id"] == "messages/42:99"

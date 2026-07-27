@@ -516,6 +516,7 @@ async def test_sync_one_chat_tails_fresh_messages_before_backfill(monkeypatch):
     )
 
     assert inserted == 2
+    assert coll.progress_count == 2
     assert directions == ["after", "before"]
 
 
