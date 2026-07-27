@@ -525,9 +525,11 @@ class WebsiteCollector(BaseCollector):
                 msg = f"target exceeded {self._target_timeout:.0f}s wall-clock cap"
                 logger.warning("Deferred website/%s: %s", seed, msg)
                 await self._defer_target(url, seed, msg)
+                await self.checkpoint.save_progress(seed)
             except Exception as e:
                 logger.error("Failed website/%s: %s", seed, e)
                 await self._defer_target(url, seed, str(e))
+                await self.checkpoint.save_progress(seed)
                 try:
                     await self.send_to_dlq(seed, seed, str(e))
                 except Exception:

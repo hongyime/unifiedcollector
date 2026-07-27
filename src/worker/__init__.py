@@ -678,8 +678,9 @@ class WorkerService:
                      AND ap.account_id = lower(ct.target_id)
                     WHERE ct.source = $1
                       AND ct.status IN ('pending', 'error')
-                    GROUP BY ct.target_id, ct.priority, ct.created_at
+                    GROUP BY ct.target_id, ct.status, ct.priority, ct.created_at
                     ORDER BY
+                        CASE WHEN ct.status = 'pending' THEN 0 ELSE 1 END,
                         {proximity_score_sql} DESC,
                         ct.priority DESC,
                         ct.created_at ASC

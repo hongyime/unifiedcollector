@@ -75,6 +75,7 @@ def _make_collector(monkeypatch=None, **env) -> WebsiteCollector:
 @pytest.mark.asyncio
 async def test_collect_crawls_targets_before_broad_discovery(monkeypatch):
     c = WebsiteCollector()
+    c.checkpoint.save_progress = AsyncMock()
     events: list[tuple[str, str]] = []
 
     async def _spider(seed, **_kwargs):
@@ -137,8 +138,27 @@ async def test_collect_demotes_timed_out_target(monkeypatch):
 
     sql_calls = [call.args[0] for call in c.pool._conn.execute.await_args_list]
     assert any("status = 'error'" in sql and "priority = LEAST" in sql for sql in sql_calls)
-    c.checkpoint.save_progress.assert_not_called()
+    c.checkpoint.save_progress.assert_awaited_once_with("https://example.com")
     c.send_to_dlq.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_collect_checkpoints_failed_target_and_dlqs(monkeypatch):
+    c = WebsiteCollector()
+    c.pool = _make_pool()
+    c.checkpoint.save_progress = AsyncMock()
+    c.send_to_dlq = AsyncMock()
+
+    async def _spider(seed, **_kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(c, "spider_domain", _spider)
+    monkeypatch.setattr(c, "_promote_discovered_sg_domains", AsyncMock())
+
+    await c.collect(["https://example.com"])
+
+    c.checkpoint.save_progress.assert_awaited_once_with("https://example.com")
+    c.send_to_dlq.assert_awaited_once()
 
 
 # ── module helpers (small pure functions) ─────────────────────────────────
