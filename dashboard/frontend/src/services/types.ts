@@ -93,6 +93,13 @@ export interface SourceWindowCounts {
   latest_event_at: string | null;
 }
 
+export interface SourceWindowSummary extends SourceWindowCounts {
+  active_sources: number;
+  total_activity: number;
+  started_at: string;
+  elapsed_seconds: number;
+}
+
 export interface SourceBlocker {
   kind: string;
   severity: "ok" | "warning" | "error" | string;
@@ -124,6 +131,7 @@ export interface SourceCollectionMatrixRow {
   bridge_status?: string | null;
   bridge_detail?: string | null;
   current_hour: SourceWindowCounts;
+  last_complete_hour?: SourceWindowCounts;
   last_24h: SourceWindowCounts;
   total_media_items: number;
   total_media_bytes: number;
@@ -136,6 +144,12 @@ export interface SourceCollectionMatrixRow {
 export interface SourceCollectionMatrix {
   generated_at: string;
   current_hour_started_at: string;
+  last_complete_hour_started_at?: string;
+  summary?: {
+    current_hour: SourceWindowSummary;
+    last_complete_hour: SourceWindowSummary;
+    last_24h: SourceWindowSummary;
+  };
   sources: SourceCollectionMatrixRow[];
   whatsapp_bridge_health?: Record<string, unknown> | null;
   browser_extension?: {

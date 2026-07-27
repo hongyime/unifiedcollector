@@ -52,6 +52,25 @@ async def test_notify_status_splits_rate_limit_from_auth_events(monkeypatch):
                     "access_errors": 1,
                 }
             ],
+            "previous_complete_hour": {
+                "totals": {
+                    "records": 20,
+                    "messages": 8,
+                    "files": 3,
+                    "rate_limits": 0,
+                    "access_errors": 0,
+                },
+                "sources": [
+                    {
+                        "source": "telegram",
+                        "records": 8,
+                        "messages": 8,
+                        "files": 1,
+                        "rate_limits": 0,
+                        "access_errors": 0,
+                    }
+                ],
+            },
         },
         "rate_limit_events": [
             {
@@ -156,8 +175,12 @@ async def test_notify_status_splits_rate_limit_from_auth_events(monkeypatch):
 
     assert ok is True
     msg = sent[0]
+    assert "This is the partial clock-hour window" in msg
     assert "Recorded rate-limit events this hour: 1." in msg
     assert "Recorded login/access or other HTTP errors this hour: 1." in msg
+    assert "<b>Previous complete hour</b>" in msg
+    assert "Stored 20 source rows, including 8 chat messages and 3 media files" in msg
+    assert "Telegram: 8 source rows, 1 media file" in msg
     assert "DLQ" not in msg
     assert "non-429" not in msg
     assert "Instagram: 4 source rows, 1 media file, 1 rate-limit event, 1 login/access or other HTTP error" in msg

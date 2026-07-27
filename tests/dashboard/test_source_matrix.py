@@ -14,6 +14,7 @@ from src.dashboard.api import (
     _rate_limit_cursor_payload,
     _source_matrix_blocker,
     _source_matrix_row,
+    _source_window_totals,
     _source_media_totals,
 )
 
@@ -124,6 +125,48 @@ def test_source_matrix_row_counts_and_live_blocker():
     assert row["last_24h"]["records"] == 40
     assert row["total_media_items"] == 123
     assert row["blocker"]["kind"] == "none"
+
+
+def test_source_window_totals_sums_counts_and_active_sources():
+    rows = [
+        {
+            "source": "telegram",
+            "current_hour": {
+                "records": 8,
+                "messages": 8,
+                "media_items": 1,
+                "rate_limits": 0,
+                "access_errors": 0,
+                "latest_record_at": datetime(2026, 7, 28, 1, 5, tzinfo=timezone.utc),
+                "latest_media_at": None,
+                "latest_event_at": None,
+            },
+        },
+        {
+            "source": "instagram",
+            "current_hour": {
+                "records": 0,
+                "messages": 0,
+                "media_items": 2,
+                "rate_limits": 1,
+                "access_errors": 1,
+                "latest_record_at": None,
+                "latest_media_at": datetime(2026, 7, 28, 1, 10, tzinfo=timezone.utc),
+                "latest_event_at": datetime(2026, 7, 28, 1, 11, tzinfo=timezone.utc),
+            },
+        },
+        {"source": "x", "current_hour": {}},
+    ]
+
+    out = _source_window_totals(rows, "current_hour")
+
+    assert out["records"] == 8
+    assert out["messages"] == 8
+    assert out["media_items"] == 3
+    assert out["rate_limits"] == 1
+    assert out["access_errors"] == 1
+    assert out["active_sources"] == 2
+    assert out["total_activity"] == 13
 
 
 class _MediaTotalsConn:

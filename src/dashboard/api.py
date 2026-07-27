@@ -233,10 +233,11 @@ async def _existing_public_tables(conn, tables: list[str]) -> set[str]:
     return set(rows or [])
 
 
-async def _source_content_summary(conn, since_sql: str) -> dict[str, dict]:
+async def _source_content_summary(conn, since_sql: str, before_sql: str | None = None) -> dict[str, dict]:
     required_tables = [table for _source, table, _column, _label in _INGESTION_CONTENT_PARTS]
     required_tables.append("media_items")
     existing_tables = await _existing_public_tables(conn, required_tables)
+    media_before = f" AND collected_at < {before_sql}" if before_sql else ""
     raw_parts = [
         f"""
         SELECT '{source}'::text AS source,
@@ -247,6 +248,7 @@ async def _source_content_summary(conn, since_sql: str) -> dict[str, dict]:
                NULL::timestamptz AS latest_media_at
         FROM {table}
         WHERE {column} >= {since_sql}
+          {f"AND {column} < {before_sql}" if before_sql else ""}
         """
         for source, table, column, label in _INGESTION_CONTENT_PARTS
         if table in existing_tables
@@ -262,6 +264,7 @@ async def _source_content_summary(conn, since_sql: str) -> dict[str, dict]:
                    max(collected_at) AS latest_media_at
             FROM media_items
             WHERE collected_at >= {since_sql}
+              {media_before}
             GROUP BY source
             """
         )
@@ -286,9 +289,10 @@ async def _source_content_summary(conn, since_sql: str) -> dict[str, dict]:
     return {row["source"]: dict(row) for row in rows}
 
 
-async def _source_rate_summary(conn, since_sql: str) -> dict[str, dict]:
+async def _source_rate_summary(conn, since_sql: str, before_sql: str | None = None) -> dict[str, dict]:
     if "rate_limit_events" not in await _existing_public_tables(conn, ["rate_limit_events"]):
         return {}
+    before_clause = f" AND created_at < {before_sql}" if before_sql else ""
     rows = await conn.fetch(
         f"""
         SELECT source,
@@ -302,6 +306,7 @@ async def _source_rate_summary(conn, since_sql: str) -> dict[str, dict]:
                max(created_at + COALESCE(cooldown_seconds, 0) * interval '1 second') AS active_until
         FROM rate_limit_events
         WHERE created_at >= {since_sql}
+          {before_clause}
         GROUP BY source
         """,
         timeout=15,
@@ -448,6 +453,24 @@ def _merge_source_window(content: dict | None, rate: dict | None) -> dict:
             "access_errors": int(rate.get("access_errors") or 0),
             "latest_event_at": rate.get("latest_event_at"),
         })
+    return out
+
+
+def _source_window_totals(rows: list[dict], window_key: str) -> dict:
+    out = _empty_source_counts()
+    active_sources = 0
+    for row in rows:
+        window = row.get(window_key) or {}
+        if any(int(window.get(key) or 0) for key in ("records", "messages", "media_items", "rate_limits", "access_errors")):
+            active_sources += 1
+        for key in ("records", "messages", "media_items", "rate_limits", "access_errors"):
+            out[key] += int(window.get(key) or 0)
+        for key in ("latest_record_at", "latest_media_at", "latest_event_at"):
+            value = window.get(key)
+            if value and (out.get(key) is None or value > out[key]):
+                out[key] = value
+    out["active_sources"] = active_sources
+    out["total_activity"] = out["records"] + out["media_items"] + out["rate_limits"] + out["access_errors"]
     return out
 
 
@@ -1494,6 +1517,26 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
             errors.append({"section": "current_rate", "error": exc.__class__.__name__})
             current_rate = {}
         try:
+            previous_content = await _source_content_summary(
+                conn,
+                "date_trunc('hour', now()) - interval '1 hour'",
+                "date_trunc('hour', now())",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("source matrix previous-hour content summary failed: %s", exc)
+            errors.append({"section": "previous_hour_content", "error": exc.__class__.__name__})
+            previous_content = {}
+        try:
+            previous_rate = await _source_rate_summary(
+                conn,
+                "date_trunc('hour', now()) - interval '1 hour'",
+                "date_trunc('hour', now())",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("source matrix previous-hour rate summary failed: %s", exc)
+            errors.append({"section": "previous_hour_rate", "error": exc.__class__.__name__})
+            previous_rate = {}
+        try:
             day_content = await _source_content_summary(conn, "now() - interval '24 hours'")
         except Exception as exc:  # noqa: BLE001
             logger.warning("source matrix 24h content summary failed: %s", exc)
@@ -1538,15 +1581,41 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
         )
         for source_row in live_sources
     ]
+    for row in rows:
+        source = row["source"]
+        row["last_complete_hour"] = _merge_source_window(
+            previous_content.get(source),
+            previous_rate.get(source),
+        )
     severity_rank = {"error": 0, "warning": 1, "ok": 2}
     rows.sort(key=lambda r: (
         severity_rank.get((r.get("blocker") or {}).get("severity"), 3),
         r.get("source") or "",
     ))
     generated_at = datetime.now(timezone.utc)
+    current_hour_started_at = generated_at.replace(minute=0, second=0, microsecond=0)
+    previous_hour_started_at = current_hour_started_at - timedelta(hours=1)
     return {
         "generated_at": generated_at,
-        "current_hour_started_at": generated_at.replace(minute=0, second=0, microsecond=0),
+        "current_hour_started_at": current_hour_started_at,
+        "last_complete_hour_started_at": previous_hour_started_at,
+        "summary": {
+            "current_hour": {
+                **_source_window_totals(rows, "current_hour"),
+                "started_at": current_hour_started_at,
+                "elapsed_seconds": int((generated_at - current_hour_started_at).total_seconds()),
+            },
+            "last_complete_hour": {
+                **_source_window_totals(rows, "last_complete_hour"),
+                "started_at": previous_hour_started_at,
+                "elapsed_seconds": 3600,
+            },
+            "last_24h": {
+                **_source_window_totals(rows, "last_24h"),
+                "started_at": generated_at - timedelta(hours=24),
+                "elapsed_seconds": 86400,
+            },
+        },
         "sources": rows,
         "whatsapp_bridge_health": whatsapp_bridge_health,
         "browser_extension": {

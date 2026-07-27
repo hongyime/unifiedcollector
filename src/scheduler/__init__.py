@@ -28,6 +28,114 @@ def _expected_extension_version() -> str | None:
         return None
 
 
+_STATUS_CONTENT_PARTS = (
+    ("telegram", "telegram_messages", "collected_at", "messages"),
+    ("whatsapp", "whatsapp_messages", "collected_at", "messages"),
+    ("beeper", "beeper_shadow_messages", "ingested_at", "messages"),
+    ("instagram", "instagram_posts", "collected_at", "posts"),
+    ("tiktok", "tiktok_posts", "collected_at", "posts"),
+    ("lemon8", "lemon8_posts", "collected_at", "posts"),
+    ("threads", "threads_posts", "collected_at", "posts"),
+    ("facebook", "facebook_posts", "collected_at", "posts"),
+    ("x", "x_posts", "collected_at", "posts"),
+    ("youtube", "youtube_videos", "collected_at", "videos"),
+    ("github", "github_commits", "collected_at", "commits"),
+    ("website", "website_pages", "collected_at", "pages"),
+    ("strava", "strava_activities", "collected_at", "activities"),
+    ("search", "search_results", "collected_at", "results"),
+)
+
+
+def _summarize_ingestion_window(by_source: dict[str, dict[str, int]]) -> dict:
+    totals = {
+        "records": sum(v.get("records", 0) for v in by_source.values()),
+        "messages": sum(v.get("messages", 0) for v in by_source.values()),
+        "files": sum(v.get("files", 0) for v in by_source.values()),
+        "rate_limits": sum(v.get("rate_limits", 0) for v in by_source.values()),
+        "access_errors": sum(v.get("access_errors", 0) for v in by_source.values()),
+    }
+    top = sorted(
+        ({"source": k, **v} for k, v in by_source.items()),
+        key=lambda r: (
+            r.get("records", 0) + r.get("files", 0) + r.get("rate_limits", 0) + r.get("access_errors", 0),
+            r["source"],
+        ),
+        reverse=True,
+    )[:6]
+    return {"totals": totals, "sources": top}
+
+
+async def _fetch_ingestion_window(conn, start_sql: str, end_sql: str | None = None) -> dict:
+    by_source: dict[str, dict[str, int]] = {}
+    for src, tbl, col, label in _STATUS_CONTENT_PARTS:
+        end_clause = f" AND {col} < {end_sql}" if end_sql else ""
+        try:
+            n = int(await conn.fetchval(
+                f"SELECT count(*) FROM {tbl} WHERE {col} >= {start_sql}{end_clause}",
+                timeout=10,
+            ) or 0)
+        except Exception:
+            continue
+        if n:
+            by_source[src] = {
+                "records": n,
+                "messages": n if label == "messages" else 0,
+                "files": 0,
+                "rate_limits": 0,
+                "access_errors": 0,
+            }
+    media_end_clause = f" AND collected_at < {end_sql}" if end_sql else ""
+    try:
+        for row in await conn.fetch(
+            f"""
+            SELECT source, count(*)::int AS files
+            FROM media_items
+            WHERE collected_at >= {start_sql}
+              {media_end_clause}
+            GROUP BY source
+            """,
+            timeout=15,
+        ):
+            d = by_source.setdefault(row["source"], {
+                "records": 0,
+                "messages": 0,
+                "files": 0,
+                "rate_limits": 0,
+                "access_errors": 0,
+            })
+            d["files"] = int(row["files"] or 0)
+    except Exception:
+        pass
+    rate_end_clause = f" AND created_at < {end_sql}" if end_sql else ""
+    try:
+        for row in await conn.fetch(
+            f"""
+            SELECT source,
+                   count(*) FILTER (WHERE status_code = 429 OR status_code IS NULL)::int AS rate_limits,
+                   count(*) FILTER (
+                     WHERE status_code IS NOT NULL AND status_code <> 429
+                   )::int AS access_errors
+            FROM rate_limit_events
+            WHERE created_at >= {start_sql}
+              {rate_end_clause}
+            GROUP BY source
+            """,
+            timeout=10,
+        ):
+            d = by_source.setdefault(row["source"], {
+                "records": 0,
+                "messages": 0,
+                "files": 0,
+                "rate_limits": 0,
+                "access_errors": 0,
+            })
+            d["rate_limits"] = int(row["rate_limits"] or 0)
+            d["access_errors"] = int(row["access_errors"] or 0)
+    except Exception:
+        pass
+    return _summarize_ingestion_window(by_source)
+
+
 class Scheduler:
     """Triggers collection runs on a per-source interval schedule."""
 
@@ -211,89 +319,16 @@ class Scheduler:
                 # mirrors the dashboard's early-warning view but keeps the
                 # heartbeat payload compact.
                 try:
-                    content_parts = (
-                        ("telegram", "telegram_messages", "collected_at", "messages"),
-                        ("whatsapp", "whatsapp_messages", "collected_at", "messages"),
-                        ("beeper", "beeper_shadow_messages", "ingested_at", "messages"),
-                        ("instagram", "instagram_posts", "collected_at", "posts"),
-                        ("tiktok", "tiktok_posts", "collected_at", "posts"),
-                        ("lemon8", "lemon8_posts", "collected_at", "posts"),
-                        ("threads", "threads_posts", "collected_at", "posts"),
-                        ("facebook", "facebook_posts", "collected_at", "posts"),
-                        ("x", "x_posts", "collected_at", "posts"),
-                        ("youtube", "youtube_videos", "collected_at", "videos"),
-                        ("github", "github_commits", "collected_at", "commits"),
-                        ("website", "website_pages", "collected_at", "pages"),
-                        ("strava", "strava_activities", "collected_at", "activities"),
-                        ("search", "search_results", "collected_at", "results"),
+                    current = await _fetch_ingestion_window(conn, "date_trunc('hour', now())")
+                    previous = await _fetch_ingestion_window(
+                        conn,
+                        "date_trunc('hour', now()) - interval '1 hour'",
+                        "date_trunc('hour', now())",
                     )
-                    by_source: dict[str, dict[str, int]] = {}
-                    for src, tbl, col, label in content_parts:
-                        try:
-                            n = int(await conn.fetchval(
-                                f"SELECT count(*) FROM {tbl} "
-                                f"WHERE {col} >= date_trunc('hour', now())",
-                                timeout=10,
-                            ) or 0)
-                        except Exception:
-                            continue
-                        if n:
-                            by_source[src] = {
-                                "records": n,
-                                "messages": n if label == "messages" else 0,
-                                "files": 0,
-                                "rate_limits": 0,
-                            }
-                    try:
-                        for row in await conn.fetch(
-                            """
-                            SELECT source, count(*)::int AS files
-                            FROM media_items
-                            WHERE collected_at >= date_trunc('hour', now())
-                            GROUP BY source
-                            """,
-                            timeout=15,
-                        ):
-                            d = by_source.setdefault(row["source"], {
-                                "records": 0, "messages": 0, "files": 0, "rate_limits": 0,
-                            })
-                            d["files"] = int(row["files"] or 0)
-                    except Exception:
-                        pass
-                    try:
-                        for row in await conn.fetch(
-                            """
-                            SELECT source,
-                                   count(*) FILTER (WHERE status_code = 429)::int AS rate_limits,
-                                   count(*) FILTER (
-                                     WHERE status_code IS DISTINCT FROM 429
-                                   )::int AS access_errors
-                            FROM rate_limit_events
-                            WHERE created_at >= date_trunc('hour', now())
-                            GROUP BY source
-                            """,
-                            timeout=10,
-                        ):
-                            d = by_source.setdefault(row["source"], {
-                                "records": 0, "messages": 0, "files": 0, "rate_limits": 0, "access_errors": 0,
-                            })
-                            d["rate_limits"] = int(row["rate_limits"] or 0)
-                            d["access_errors"] = int(row["access_errors"] or 0)
-                    except Exception:
-                        pass
-                    totals = {
-                        "records": sum(v["records"] for v in by_source.values()),
-                        "messages": sum(v["messages"] for v in by_source.values()),
-                        "files": sum(v["files"] for v in by_source.values()),
-                        "rate_limits": sum(v["rate_limits"] for v in by_source.values()),
-                        "access_errors": sum(v.get("access_errors", 0) for v in by_source.values()),
+                    snap["hourly_ingestion"] = {
+                        **current,
+                        "previous_complete_hour": previous,
                     }
-                    top = sorted(
-                        ({"source": k, **v} for k, v in by_source.items()),
-                        key=lambda r: (r["records"] + r["files"] + r["rate_limits"], r["source"]),
-                        reverse=True,
-                    )[:6]
-                    snap["hourly_ingestion"] = {"totals": totals, "sources": top}
                 except Exception:
                     pass
 

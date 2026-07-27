@@ -445,11 +445,14 @@ export function DashboardPage() {
   const degradedCollectors = collectorsLive?.degraded ?? Math.max(0, totalCollectors - liveCollectors);
   const newestHour = hourly?.[0]?.hour;
   const currentHourRows = hourly?.filter((r) => r.hour === newestHour) ?? [];
-  const currentRows = currentHourRows.reduce((s, r) => s + r.records, 0);
-  const currentMessages = currentHourRows.reduce((s, r) => s + r.messages, 0);
-  const currentFiles = currentHourRows.reduce((s, r) => s + r.media_items, 0);
-  const currentRateLimitEvents = currentHourRows.reduce((s, r) => s + r.rate_limits, 0);
-  const currentAccessErrors = currentHourRows.reduce((s, r) => s + (r.access_errors ?? 0), 0);
+  const currentSummary = sourceMatrix?.summary?.current_hour;
+  const previousSummary = sourceMatrix?.summary?.last_complete_hour;
+  const currentRows = currentSummary?.records ?? currentHourRows.reduce((s, r) => s + r.records, 0);
+  const currentMessages = currentSummary?.messages ?? currentHourRows.reduce((s, r) => s + r.messages, 0);
+  const currentFiles = currentSummary?.media_items ?? currentHourRows.reduce((s, r) => s + r.media_items, 0);
+  const currentRateLimitEvents = currentSummary?.rate_limits ?? currentHourRows.reduce((s, r) => s + r.rate_limits, 0);
+  const currentAccessErrors = currentSummary?.access_errors ?? currentHourRows.reduce((s, r) => s + (r.access_errors ?? 0), 0);
+  const currentActiveSources = currentSummary?.active_sources ?? new Set(currentHourRows.map((r) => r.source)).size;
   const nowMs = Date.now();
   const activeCursorLimits = (rateLimits?.active ?? []).filter((r) => {
     const expiryMs = r.active_until ? new Date(r.active_until).getTime() : Number.NaN;
@@ -552,8 +555,15 @@ export function DashboardPage() {
         <MetricCard
           label="This Hour"
           value={formatNumber(currentRows)}
-          sublabel={`${formatNumber(currentMessages)} msgs · ${formatNumber(currentFiles)} files · ${formatNumber(currentRateLimitEvents)} recorded rate-limit events · ${formatNumber(currentAccessErrors)} auth/other`}
+          sublabel={`${formatNumber(currentActiveSources)} active sources · ${formatNumber(currentMessages)} msgs · ${formatNumber(currentFiles)} files · ${formatNumber(currentRateLimitEvents)} 429 · ${formatNumber(currentAccessErrors)} auth/other`}
           status={currentRateLimitEvents || currentAccessErrors ? "warning" : currentRows > 0 || currentFiles > 0 ? "success" : "warning"}
+          icon={<Clock3 className="w-5 h-5" />}
+        />
+        <MetricCard
+          label="Previous Hour"
+          value={formatNumber(previousSummary?.records ?? 0)}
+          sublabel={`${formatNumber(previousSummary?.messages ?? 0)} msgs · ${formatNumber(previousSummary?.media_items ?? 0)} files · ${formatNumber(previousSummary?.active_sources ?? 0)} active sources`}
+          status={(previousSummary?.rate_limits ?? 0) || (previousSummary?.access_errors ?? 0) ? "warning" : "success"}
           icon={<Clock3 className="w-5 h-5" />}
         />
         <MetricCard
@@ -754,7 +764,14 @@ export function DashboardPage() {
       )}
 
       <div className="bg-surface rounded-lg border border-border p-4">
-        <h2 className="text-xs uppercase tracking-wider text-text-muted mb-4">Source Collection Matrix</h2>
+        <div className="flex items-center justify-between gap-3 mb-4">
+          <div>
+            <h2 className="text-xs uppercase tracking-wider text-text-muted">Source Collection Matrix</h2>
+            <p className="text-xs text-text-muted mt-1">
+              Current hour started {formatClock(sourceMatrix?.current_hour_started_at)}; previous hour is the last full 60-minute window.
+            </p>
+          </div>
+        </div>
         <DataTable data={sourceMatrix?.sources ?? []} columns={sourceMatrixColumns} />
       </div>
 

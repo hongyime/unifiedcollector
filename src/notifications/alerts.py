@@ -401,6 +401,7 @@ async def notify_status(snapshot: dict) -> bool:
             f"{msgs:,} {_plural(msgs, 'chat message')} and "
             f"{files:,} {_plural(files, 'media file')}."
         )
+        lines.append("This is the partial clock-hour window; it resets at the top of each hour.")
         if r429:
             lines.append(f"Recorded rate-limit events this hour: {r429:,}.")
         else:
@@ -413,6 +414,27 @@ async def notify_status(snapshot: dict) -> bool:
             lines.append("")
             lines.append("<b>Top activity this hour</b>")
             lines.extend(top)
+
+        previous = hourly.get("previous_complete_hour") or {}
+        previous_totals = previous.get("totals") or {}
+        if previous_totals:
+            prev_rows = int(previous_totals.get("records", 0) or 0)
+            prev_msgs = int(previous_totals.get("messages", 0) or 0)
+            prev_files = int(previous_totals.get("files", 0) or 0)
+            prev_429 = int(previous_totals.get("rate_limits", 0) or 0)
+            prev_access = int(previous_totals.get("access_errors", 0) or 0)
+            lines.append("")
+            lines.append("<b>Previous complete hour</b>")
+            lines.append(
+                f"Stored {prev_rows:,} {_plural(prev_rows, 'source row')}, including "
+                f"{prev_msgs:,} {_plural(prev_msgs, 'chat message')} and "
+                f"{prev_files:,} {_plural(prev_files, 'media file')}; "
+                f"{prev_429:,} rate-limit {_plural(prev_429, 'event')} and "
+                f"{prev_access:,} login/access or other HTTP {_plural(prev_access, 'error')}."
+            )
+            previous_top = [_format_hourly_source(row) for row in (previous.get("sources") or [])[:4]]
+            if previous_top:
+                lines.extend(previous_top)
 
     active_limits = snapshot.get("active_rate_limits") or []
     recent_limits = snapshot.get("rate_limit_events") or []
