@@ -29,6 +29,9 @@ export interface HealthStatus {
     max_age_hours?: number | null;
     error?: string | null;
   };
+  sources?: CollectorLiveSource[];
+  source_issues?: CollectorLiveSource[];
+  whatsapp_bridge_health?: Record<string, unknown> | null;
 }
 
 export interface CollectorStatus {
@@ -76,9 +79,14 @@ export interface MediaStats {
   last_collected: string | null;
   last_activity?: string | null;
   activity_basis?: string | null;
-  live?: "live" | "stale" | "degraded" | "dead" | "unknown";
+  live?: CollectorLiveSource["status"];
   age_seconds?: number | null;
   stale_after_seconds?: number | null;
+  collection_mode?: string | null;
+  freshness_basis?: string | null;
+  health_detail?: string | null;
+  source_health_status?: string | null;
+  source_health_error?: string | null;
 }
 
 export interface HourlyIngestionRow {
@@ -738,15 +746,25 @@ export interface StravaRouteCaptureQueue {
 
 export interface CollectorLiveSource {
   source: string;
-  status: "live" | "stale" | "degraded" | "dead" | "unknown";
+  status: "live" | "stale" | "degraded" | "dead" | "unknown" | "unpaired" | "unreachable";
   age_seconds: number | null;
   stale_after_seconds?: number | null;
+  collection_mode?: string | null;
+  freshness_basis?: string | null;
+  source_health_status?: string | null;
+  source_health_error?: string | null;
+  detail?: string | null;
+  bridge_status?: string | null;
+  bridge_detail?: string | null;
+  whatsapp_bridges?: WaBridgeSession[];
 }
 
 export interface CollectorsLive {
   total: number;
   live: number;
+  degraded?: number;
   sources: CollectorLiveSource[];
+  whatsapp_bridge_health?: Record<string, unknown> | null;
 }
 
 export interface NetworkStat {
@@ -865,6 +883,12 @@ export interface PlatformSummary {
   live?: string | null;
   age_seconds?: number | null;
   stale_after_seconds?: number | null;
+  collection_mode?: string | null;
+  freshness_basis?: string | null;
+  health_detail?: string | null;
+  source_health_status?: string | null;
+  source_health_error?: string | null;
+  whatsapp_bridge_health?: Record<string, unknown> | null;
 }
 
 export interface MessagingCoverageRow {

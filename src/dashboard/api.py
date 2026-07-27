@@ -24,6 +24,10 @@ from src.db.connection import get_pool
 from src.dashboard.websocket import health_ws
 from src.core.strava_route_queue import fetch_strava_route_capture_queue
 from src.core.vault import VAULT_ROOT, vault_artifact_counts, vault_health
+from src.core.whatsapp_bridge_health import (
+    fetch_whatsapp_bridge_health,
+    summarize_whatsapp_bridge_health,
+)
 
 logger = logging.getLogger(__name__)
 _MESSAGING_COVERAGE_CACHE: dict[str, object] = {"ts": 0.0, "rows": None}
@@ -143,6 +147,56 @@ def _vault_payload() -> dict:
         "artifacts_partial": 0,
     }
 
+
+async def _with_bridge_overrides(sources: list[dict]) -> tuple[list[dict], dict | None]:
+    """Overlay process-level bridge state on top of DB freshness.
+
+    A WhatsApp row can be stale because the bridge is not paired. Reporting that
+    as generic "stale" hides the one operator action that matters: scan a QR.
+    """
+    bridge_summary = None
+    try:
+        states = await fetch_whatsapp_bridge_health(timeout=4)
+        bridge_summary = {
+            "summary": summarize_whatsapp_bridge_health(states),
+            "bridges": states,
+        }
+    except Exception as exc:  # noqa: BLE001 - dashboard health must not raise
+        bridge_summary = {
+            "summary": {
+                "status": "unreachable",
+                "detail": f"WhatsApp bridge health check failed: {exc}",
+                "ready_count": 0,
+                "reachable_count": 0,
+                "total": 2,
+            },
+            "bridges": [],
+        }
+
+    summary = bridge_summary.get("summary") or {}
+    bridge_status = summary.get("status")
+    if bridge_status and bridge_status != "paired":
+        for source in sources:
+            if source.get("source") == "whatsapp":
+                source["bridge_status"] = bridge_status
+                source["bridge_detail"] = summary.get("detail")
+                source["whatsapp_bridges"] = bridge_summary.get("bridges", [])
+                if bridge_status in {"unpaired", "unreachable"}:
+                    source["status"] = bridge_status
+                elif source.get("status") == "live":
+                    source["status"] = "degraded"
+                source["detail"] = summary.get("detail") or source.get("detail")
+                break
+    elif bridge_status == "paired":
+        for source in sources:
+            if source.get("source") == "whatsapp":
+                source["bridge_status"] = bridge_status
+                source["bridge_detail"] = summary.get("detail")
+                source["whatsapp_bridges"] = bridge_summary.get("bridges", [])
+                break
+
+    return sources, bridge_summary
+
 app = FastAPI(title="UnifiedCollector Dashboard")
 
 app.add_middleware(
@@ -240,10 +294,12 @@ def require_role(min_role: str):
 
 
 @app.get("/health")
-async def health():
+async def health(include_sources: bool = False):
     pool = await get_pool()
     vault = _vault_payload()
     backups = backup_status()
+    sources = []
+    whatsapp_bridge_health = None
     try:
         async with pool.acquire() as conn:
             await conn.fetchval("SELECT 1")
@@ -251,9 +307,18 @@ async def health():
                 vault.update(await vault_artifact_counts(conn, timeout=3))
             except Exception as exc:
                 vault["counts_error"] = exc.__class__.__name__
+            if include_sources:
+                try:
+                    from src.core.source_freshness import compute_liveness
+                    sources = await compute_liveness(conn)
+                except Exception as exc:
+                    logger.debug("source liveness health section failed: %s", exc)
         db_status = "healthy"
     except Exception as e:
         db_status = f"error: {e}"
+
+    if include_sources and sources:
+        sources, whatsapp_bridge_health = await _with_bridge_overrides(sources)
 
     from src.core.drive_check import check_drive
     drive_ok = check_drive()
@@ -264,14 +329,24 @@ async def health():
         and int(vault.get("artifacts_partial") or 0) == 0
     )
     backups_ok = backups.get("status") in {"ok", "refreshing"}
+    source_issues = [s for s in sources if s.get("status") not in {"live"}] if include_sources else []
 
-    return {
-        "status": "ok" if db_status == "healthy" and drive_ok and vault_ok and backups_ok else "degraded",
+    payload = {
+        "status": "ok" if (
+            db_status == "healthy" and drive_ok and vault_ok and backups_ok and not source_issues
+        ) else "degraded",
         "database": db_status,
         "drive": "mounted" if drive_ok else "missing",
         "vault": vault,
         "backups": backups,
     }
+    if include_sources:
+        payload.update({
+            "sources": sources,
+            "source_issues": source_issues,
+            "whatsapp_bridge_health": whatsapp_bridge_health,
+        })
+    return payload
 
 
 @app.get("/metrics")
@@ -710,8 +785,16 @@ async def collectors_live(_user: dict = Depends(require_role("viewer"))):
     pool = await get_pool()
     async with pool.acquire() as conn:
         sources = await compute_liveness(conn)
+    sources, whatsapp_bridge_health = await _with_bridge_overrides(sources)
     live = sum(1 for s in sources if s["status"] == "live")
-    return {"total": len(sources), "live": live, "sources": sources}
+    degraded = sum(1 for s in sources if s["status"] in {"degraded", "stale", "unpaired", "unreachable"})
+    return {
+        "total": len(sources),
+        "live": live,
+        "degraded": degraded,
+        "sources": sources,
+        "whatsapp_bridge_health": whatsapp_bridge_health,
+    }
 
 
 _PLATFORM_POSTS = {
@@ -910,12 +993,21 @@ async def platform_summary(name: str, _user: dict = Depends(require_role("viewer
         # coarse running/idle flag.
         try:
             from src.core.source_freshness import compute_liveness
-            live = {s["source"]: s for s in await compute_liveness(conn)}
+            live_sources = await compute_liveness(conn)
+            if name == "whatsapp":
+                live_sources, whatsapp_bridge_health = await _with_bridge_overrides(live_sources)
+                out["whatsapp_bridge_health"] = whatsapp_bridge_health
+            live = {s["source"]: s for s in live_sources}
             cur = live.get(name)
             if cur:
                 out["live"] = cur["status"]
                 out["age_seconds"] = cur["age_seconds"]
                 out["stale_after_seconds"] = cur.get("stale_after_seconds")
+                out["collection_mode"] = cur.get("collection_mode")
+                out["freshness_basis"] = cur.get("freshness_basis")
+                out["health_detail"] = cur.get("detail")
+                out["source_health_status"] = cur.get("source_health_status")
+                out["source_health_error"] = cur.get("source_health_error")
         except Exception:
             pass
     return out
@@ -1124,7 +1216,9 @@ async def media_stats(_user: dict = Depends(require_role("viewer"))):
         )
         try:
             from src.core.source_freshness import compute_liveness
-            live = {s["source"]: s for s in await compute_liveness(conn)}
+            live_sources = await compute_liveness(conn)
+            live_sources, _whatsapp_bridge_health = await _with_bridge_overrides(live_sources)
+            live = {s["source"]: s for s in live_sources}
         except Exception:
             live = {}
         out = []
@@ -1137,6 +1231,11 @@ async def media_stats(_user: dict = Depends(require_role("viewer"))):
                 d["live"] = cur["status"]
                 d["age_seconds"] = cur["age_seconds"]
                 d["stale_after_seconds"] = cur.get("stale_after_seconds")
+                d["collection_mode"] = cur.get("collection_mode")
+                d["freshness_basis"] = cur.get("freshness_basis")
+                d["health_detail"] = cur.get("detail")
+                d["source_health_status"] = cur.get("source_health_status")
+                d["source_health_error"] = cur.get("source_health_error")
                 if cur["age_seconds"] is not None:
                     d["last_activity"] = now - timedelta(seconds=cur["age_seconds"])
                 else:

@@ -513,6 +513,28 @@ class Scheduler:
                 snap["source_ages"] = ages
                 snap["stale_sources"] = sorted(stale)
 
+                try:
+                    from src.core.whatsapp_bridge_health import (
+                        fetch_whatsapp_bridge_health,
+                        summarize_whatsapp_bridge_health,
+                    )
+                    wa_states = await fetch_whatsapp_bridge_health(timeout=4)
+                    snap["whatsapp_bridge_health"] = {
+                        "summary": summarize_whatsapp_bridge_health(wa_states),
+                        "bridges": wa_states,
+                    }
+                except Exception as exc:
+                    snap["whatsapp_bridge_health"] = {
+                        "summary": {
+                            "status": "unreachable",
+                            "detail": f"WhatsApp bridge health check failed: {exc}",
+                            "ready_count": 0,
+                            "reachable_count": 0,
+                            "total": 2,
+                        },
+                        "bridges": [],
+                    }
+
                 # Backfill-vs-realtime signals (for the "Backfill:" heartbeat line).
                 # (a) messaging realtime %: of rows INGESTED in the last hour, how
                 # many carry a message timestamp also within the hour. ~100% = caught
@@ -589,10 +611,10 @@ class Scheduler:
                         "SELECT source, status, last_error FROM source_health "
                         "WHERE status IN ('dead','degraded','auth_paused')"
                     )
-                    snap["dead_sources"] = sorted(r["source"] for r in rows if r["status"] == "dead")
-                    snap["degraded_sources"] = sorted(
+                    dead_sources = set(r["source"] for r in rows if r["status"] == "dead")
+                    degraded_sources = set(
                         r["source"] for r in rows if r["status"] in ("degraded", "auth_paused"))
-                    snap["degraded_details"] = [
+                    degraded_details = [
                         {
                             "source": r["source"],
                             "status": r["status"],
@@ -603,6 +625,24 @@ class Scheduler:
                         for r in rows
                         if r["status"] in ("degraded", "auth_paused")
                     ]
+                    wa_summary = (snap.get("whatsapp_bridge_health") or {}).get("summary") or {}
+                    wa_status = wa_summary.get("status")
+                    if wa_status and wa_status != "paired":
+                        degraded_sources.add("whatsapp")
+                        degraded_details = [
+                            row for row in degraded_details
+                            if row.get("source") != "whatsapp"
+                        ]
+                        degraded_details.append({
+                            "source": "whatsapp",
+                            "status": wa_status,
+                            "reason": wa_summary.get("detail"),
+                            "age_seconds": ages.get("whatsapp"),
+                            "stale_after_seconds": stale_after.get("whatsapp"),
+                        })
+                    snap["dead_sources"] = sorted(dead_sources)
+                    snap["degraded_sources"] = sorted(degraded_sources)
+                    snap["degraded_details"] = degraded_details
                 except Exception:
                     pass
         except Exception as e:

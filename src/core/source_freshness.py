@@ -15,6 +15,23 @@ from __future__ import annotations
 
 _DAY = 86400
 
+SOURCE_MODES = {
+    "telegram": "messaging",
+    "whatsapp": "whatsapp bridge",
+    "beeper": "messaging bridge",
+    "instagram": "chrome extension + headless",
+    "tiktok": "chrome extension + headless",
+    "lemon8": "chrome extension + headless",
+    "threads": "chrome extension",
+    "facebook": "chrome extension",
+    "x": "chrome extension",
+    "youtube": "headless cookies",
+    "website": "headless web crawl",
+    "github": "api/headless",
+    "strava": "api cookies + browser route capture",
+    "search": "headless web search",
+}
+
 FRESHNESS: list[tuple[str, str, int]] = [
     ("telegram",  "SELECT extract(epoch FROM now()-max(collected_at)) FROM telegram_messages", 7200),
     ("whatsapp",  "SELECT extract(epoch FROM now()-max(collected_at)) FROM whatsapp_messages", 14400),
@@ -32,6 +49,22 @@ FRESHNESS: list[tuple[str, str, int]] = [
     ("search",    "SELECT extract(epoch FROM now()-max(collected_at)) FROM search_results", 3 * _DAY),
 ]
 FRESHNESS_BY_SOURCE = {name: (query, threshold) for name, query, threshold in FRESHNESS}
+FRESHNESS_BASIS = {
+    "telegram": "telegram_messages.collected_at",
+    "whatsapp": "whatsapp_messages.collected_at",
+    "beeper": "beeper_shadow_messages.ingested_at",
+    "instagram": "media_items.collected_at where source=instagram",
+    "tiktok": "media_items.collected_at where source=tiktok",
+    "lemon8": "media_items.collected_at where source=lemon8",
+    "threads": "threads_posts.collected_at",
+    "facebook": "facebook_posts.collected_at",
+    "x": "x_posts.collected_at",
+    "youtube": "youtube_videos.collected_at",
+    "website": "website_pages.collected_at",
+    "github": "github_commits.collected_at",
+    "strava": "strava_activities.collected_at",
+    "search": "search_results.collected_at",
+}
 
 # Realtime messaging feeds (surfaced distinctly by some consumers).
 REALTIME = ("telegram", "whatsapp", "beeper")
@@ -47,10 +80,10 @@ async def compute_liveness(conn) -> list[dict]:
       dead      – source_health says dead (crash-looped out)
       unknown   – no data yet / query failed
     """
-    health: dict[str, str] = {}
+    health: dict[str, dict] = {}
     try:
-        for r in await conn.fetch("SELECT source, status FROM source_health"):
-            health[r["source"]] = r["status"]
+        for r in await conn.fetch("SELECT source, status, last_error FROM source_health"):
+            health[r["source"]] = {"status": r["status"], "last_error": r["last_error"]}
     except Exception:
         pass
 
@@ -60,21 +93,33 @@ async def compute_liveness(conn) -> list[dict]:
             age = await conn.fetchval(query, timeout=8)
         except Exception:
             age = None
-        hs = health.get(name)
+        h = health.get(name) or {}
+        hs = h.get("status")
+        h_error = h.get("last_error")
         if hs == "dead":
             status = "dead"
+            detail = h_error or "source_health reports the source as dead"
         elif age is None:
             status = "unknown"
+            detail = "no freshness row could be read"
         elif age > thresh:
             status = "stale"
+            detail = f"newest row is older than {thresh} seconds"
         elif hs in ("degraded", "auth_paused"):
             status = "degraded"
+            detail = h_error or f"source_health reports {hs}"
         else:
             status = "live"
+            detail = "newest row is inside the freshness window"
         out.append({
             "source": name,
             "status": status,
             "age_seconds": int(age) if age is not None else None,
             "stale_after_seconds": thresh,
+            "collection_mode": SOURCE_MODES.get(name, "unknown"),
+            "freshness_basis": FRESHNESS_BASIS.get(name),
+            "source_health_status": hs,
+            "source_health_error": h_error,
+            "detail": detail,
         })
     return out

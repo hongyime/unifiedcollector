@@ -15,12 +15,13 @@ import type {
   MessagingCoverageRow,
   RateLimitEvent,
   RateLimitRecentSummary,
+  CollectorLiveSource,
 } from "../../services/types";
 
 function liveBadgeStatus(status: MediaStats["live"]) {
   if (status === "live") return "online";
   if (status === "stale" || status === "degraded") return "warning";
-  if (status === "dead") return "error";
+  if (status === "dead" || status === "unpaired" || status === "unreachable") return "error";
   return "idle";
 }
 
@@ -33,7 +34,14 @@ const columns: ColumnDef<MediaStats, unknown>[] = [
       return (
         <div className="flex items-center gap-2">
           <StatusBadge status={liveBadgeStatus(row.live)} label={row.live ?? "unknown"} />
-          <span className="uppercase font-medium text-text-primary">{info.getValue() as string}</span>
+          <div>
+            <div className="uppercase font-medium text-text-primary">{info.getValue() as string}</div>
+            {row.collection_mode && (
+              <div className="text-[10px] uppercase tracking-wide text-text-muted">
+                {row.collection_mode}
+              </div>
+            )}
+          </div>
         </div>
       );
     },
@@ -61,6 +69,11 @@ const columns: ColumnDef<MediaStats, unknown>[] = [
               {row.activity_basis}
             </div>
           )}
+          {row.live && row.live !== "live" && row.health_detail && (
+            <div className="text-[10px] text-warning max-w-[320px] truncate">
+              {row.health_detail}
+            </div>
+          )}
         </div>
       );
     },
@@ -69,6 +82,59 @@ const columns: ColumnDef<MediaStats, unknown>[] = [
     accessorKey: "last_collected",
     header: "Media",
     cell: (info) => relativeTime(info.getValue() as string | null),
+  },
+];
+
+const liveColumns: ColumnDef<CollectorLiveSource, unknown>[] = [
+  {
+    accessorKey: "source",
+    header: "Source",
+    cell: (info) => {
+      const row = info.row.original;
+      return (
+        <div className="flex items-center gap-2">
+          <StatusBadge status={liveBadgeStatus(row.status)} label={row.status} />
+          <div>
+            <div className="uppercase font-medium text-text-primary">{info.getValue() as string}</div>
+            <div className="text-[10px] uppercase tracking-wide text-text-muted">
+              {row.collection_mode ?? "unknown mode"}
+            </div>
+          </div>
+        </div>
+      );
+    },
+  },
+  {
+    accessorKey: "age_seconds",
+    header: "Newest Row",
+    cell: (info) => {
+      const value = info.getValue() as number | null;
+      return value == null ? "never" : `${formatDuration(value)} ago`;
+    },
+  },
+  {
+    accessorKey: "freshness_basis",
+    header: "Proof",
+    cell: (info) => <span className="text-text-muted">{(info.getValue() as string | null) ?? "-"}</span>,
+  },
+  {
+    accessorKey: "detail",
+    header: "Meaning",
+    cell: (info) => {
+      const row = info.row.original;
+      return (
+        <div>
+          <div className={row.status === "live" ? "text-text-muted" : "text-warning"}>
+            {(info.getValue() as string | null) ?? "-"}
+          </div>
+          {row.source_health_error && row.source_health_error !== info.getValue() && (
+            <div className="text-[10px] text-text-muted truncate max-w-[420px]">
+              {row.source_health_error}
+            </div>
+          )}
+        </div>
+      );
+    },
   },
 ];
 
@@ -311,6 +377,7 @@ export function DashboardPage() {
   // service_cursors.status proxy that flickered for healthy idle/realtime collectors.
   const liveCollectors = collectorsLive?.live ?? 0;
   const totalCollectors = collectorsLive?.total ?? 0;
+  const degradedCollectors = collectorsLive?.degraded ?? Math.max(0, totalCollectors - liveCollectors);
   const newestHour = hourly?.[0]?.hour;
   const currentHourRows = hourly?.filter((r) => r.hour === newestHour) ?? [];
   const currentRows = currentHourRows.reduce((s, r) => s + r.records, 0);
@@ -380,7 +447,7 @@ export function DashboardPage() {
         <MetricCard
           label="Collectors"
           value={`${liveCollectors} / ${totalCollectors}`}
-          sublabel={liveCollectors === totalCollectors ? "all live" : "live"}
+          sublabel={liveCollectors === totalCollectors ? "all live" : `${degradedCollectors} need attention`}
           status={liveCollectors === totalCollectors ? "success" : liveCollectors > 0 ? "warning" : "idle"}
           icon={<Activity className="w-5 h-5" />}
         />
@@ -501,6 +568,11 @@ export function DashboardPage() {
       </div>
 
       <div className="bg-surface rounded-lg border border-border p-4">
+        <h2 className="text-xs uppercase tracking-wider text-text-muted mb-4">Source Health</h2>
+        <DataTable data={collectorsLive?.sources ?? []} columns={liveColumns} />
+      </div>
+
+      <div className="bg-surface rounded-lg border border-border p-4 mt-6">
         <h2 className="text-xs uppercase tracking-wider text-text-muted mb-4">Collection Stats by Source</h2>
         {sLoading ? <LoadingSpinner /> : <DataTable data={stats ?? []} columns={columns} />}
       </div>
