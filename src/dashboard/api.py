@@ -3108,6 +3108,8 @@ def _resolve_media_path(file_path_str: str) -> Path:
     Raises HTTPException (403/404) on traversal or a missing file. Shared by the
     thumbnail + file endpoints so a poisoned file_path can't serve host files.
     """
+    if not file_path_str:
+        raise HTTPException(status_code=404, detail="Media path missing")
     file_path = Path(file_path_str).resolve()
     if not any(_is_relative_to_path(file_path, root) for root in _allowed_media_roots()):
         raise HTTPException(status_code=403, detail="Path outside media roots")
@@ -3148,9 +3150,8 @@ async def media_thumbnail(media_id: str, _user: dict = Depends(require_role("vie
     try:
         file_path = _resolve_media_path(row["file_path"])
     except HTTPException as exc:
-        if exc.status_code != 404:
-            raise
-        return _thumbnail_placeholder("missing", "file not on disk")
+        detail = "path blocked" if exc.status_code == 403 else "file not on disk"
+        return _thumbnail_placeholder("missing", detail)
 
     if row["content_type"] in ("video", "audio", "document"):
         return _thumbnail_placeholder(row["content_type"], file_path.suffix.lstrip(".") or "stored file")

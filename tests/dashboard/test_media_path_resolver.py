@@ -39,3 +39,10 @@ def test_resolve_media_path_rejects_paths_outside_allowed_roots(monkeypatch, tmp
         api._resolve_media_path(str(outside))
 
     assert exc.value.status_code == 403
+
+
+def test_resolve_media_path_rejects_missing_path():
+    with pytest.raises(HTTPException) as exc:
+        api._resolve_media_path("")
+
+    assert exc.value.status_code == 404

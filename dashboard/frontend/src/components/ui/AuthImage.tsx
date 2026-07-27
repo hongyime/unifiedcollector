@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { API_BASE } from "../../utils/constants";
 
 type AuthImageProps = {
   src: string;
@@ -11,7 +12,20 @@ type AuthImageProps = {
 function shouldFetchWithAuth(src: string): boolean {
   const token = localStorage.getItem("auth_token");
   if (!token) return false;
-  return src.startsWith("/") || src.startsWith(window.location.origin) || src.includes("/media/");
+  if (src.startsWith("/")) return src.startsWith("/media/");
+  try {
+    const url = new URL(src, window.location.origin);
+    if (url.origin === window.location.origin && url.pathname.startsWith("/media/")) {
+      return true;
+    }
+    if (API_BASE) {
+      const apiUrl = new URL(API_BASE, window.location.origin);
+      return url.origin === apiUrl.origin && url.pathname.startsWith("/media/");
+    }
+  } catch {
+    return false;
+  }
+  return false;
 }
 
 export function AuthImage({ src, alt, className, loading = "lazy", fallbackLabel = "preview" }: AuthImageProps) {
