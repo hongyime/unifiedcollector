@@ -760,6 +760,7 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
+      UC_EXTENSION_EXPECTED_VERSION: "1.21.32"
       # Localhost-only single-user deployment: skip bearer-token auth so the
       # dashboard works without a login flow. Remove/false for network exposure.
       DASHBOARD_AUTH_DISABLED: "true"

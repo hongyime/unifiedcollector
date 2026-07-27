@@ -148,6 +148,125 @@ def _vault_payload() -> dict:
     }
 
 
+def _expected_extension_version() -> str | None:
+    env_version = str(os.getenv("UC_EXTENSION_EXPECTED_VERSION") or "").strip()
+    if env_version:
+        return env_version
+    try:
+        manifest = Path(__file__).resolve().parent.parent.parent / "extension" / "manifest.json"
+        version = str(json.loads(manifest.read_text(encoding="utf-8")).get("version") or "").strip()
+        return version or None
+    except Exception:
+        return None
+
+
+def _extension_versions_match(current: str | None, expected: str | None) -> bool:
+    if not current or not expected:
+        return True
+    return current.lstrip("vV") == expected.lstrip("vV")
+
+
+async def _browser_extension_payload(conn) -> dict:
+    expected = _expected_extension_version()
+    payload = {
+        "expected_version": expected,
+        "hooks": [],
+        "ingest": [],
+        "issues": [],
+    }
+
+    if await conn.fetchval("SELECT to_regclass('dm_hook_heartbeat')", timeout=5) is not None:
+        rows = await conn.fetch(
+            """
+            SELECT platform,
+                   max(last_seen) AS last_seen_at,
+                   extract(epoch FROM now() - max(last_seen))::int AS age_seconds,
+                   (array_agg(extension_version ORDER BY last_seen DESC))[1] AS extension_version,
+                   count(*) FILTER (WHERE COALESCE(owner_account, '') <> '')::int AS owner_count,
+                   sum(probes_sent)::int AS probes_sent,
+                   sum(samples_shipped)::int AS samples_shipped
+            FROM dm_hook_heartbeat
+            GROUP BY platform
+            ORDER BY last_seen_at DESC
+            """,
+            timeout=10,
+        )
+        for row in rows:
+            current = row["extension_version"]
+            item = {
+                "platform": row["platform"],
+                "last_seen_at": row["last_seen_at"],
+                "age_seconds": int(row["age_seconds"] or 0),
+                "extension_version": current,
+                "version_ok": _extension_versions_match(current, expected),
+                "owner_count": int(row["owner_count"] or 0),
+                "probes_sent": int(row["probes_sent"] or 0),
+                "samples_shipped": int(row["samples_shipped"] or 0),
+            }
+            payload["hooks"].append(item)
+            if int(item["age_seconds"]) > 3600:
+                payload["issues"].append({
+                    "platform": row["platform"],
+                    "kind": "hook_stale",
+                    "detail": "Chrome extension DM hook heartbeat is older than 1 hour.",
+                    "age_seconds": item["age_seconds"],
+                })
+            if not item["version_ok"]:
+                payload["issues"].append({
+                    "platform": row["platform"],
+                    "kind": "extension_version_mismatch",
+                    "detail": "Reload the unpacked extension and refresh the platform tab.",
+                    "extension_version": current,
+                    "expected_version": expected,
+                })
+
+    if await conn.fetchval("SELECT to_regclass('browser_ingest_events')", timeout=5) is not None:
+        rows = await conn.fetch(
+            """
+            SELECT platform,
+                   endpoint,
+                   count(*)::int AS requests,
+                   sum(observed_count)::int AS observed_count,
+                   sum(stored_count)::int AS stored_count,
+                   max(created_at) AS last_seen_at,
+                   extract(epoch FROM now() - max(created_at))::int AS age_seconds,
+                   (array_agg(NULLIF(metadata->>'extension_version', '') ORDER BY created_at DESC))[1]
+                       AS extension_version
+            FROM browser_ingest_events
+            WHERE created_at >= now() - interval '24 hours'
+            GROUP BY platform, endpoint
+            ORDER BY last_seen_at DESC
+            LIMIT 30
+            """,
+            timeout=10,
+        )
+        for row in rows:
+            current = row["extension_version"]
+            item = {
+                "platform": row["platform"],
+                "endpoint": row["endpoint"],
+                "requests": int(row["requests"] or 0),
+                "observed_count": int(row["observed_count"] or 0),
+                "stored_count": int(row["stored_count"] or 0),
+                "last_seen_at": row["last_seen_at"],
+                "age_seconds": int(row["age_seconds"] or 0),
+                "extension_version": current,
+                "version_ok": _extension_versions_match(current, expected),
+            }
+            payload["ingest"].append(item)
+            if not item["version_ok"]:
+                payload["issues"].append({
+                    "platform": row["platform"],
+                    "endpoint": row["endpoint"],
+                    "kind": "extension_version_mismatch",
+                    "detail": "Browser ingest event came from an older extension version.",
+                    "extension_version": current,
+                    "expected_version": expected,
+                })
+
+    return payload
+
+
 async def _with_bridge_overrides(sources: list[dict]) -> tuple[list[dict], dict | None]:
     """Overlay process-level bridge state on top of DB freshness.
 
@@ -300,6 +419,7 @@ async def health(include_sources: bool = False):
     backups = backup_status()
     sources = []
     whatsapp_bridge_health = None
+    browser_extension = None
     try:
         async with pool.acquire() as conn:
             await conn.fetchval("SELECT 1")
@@ -313,6 +433,10 @@ async def health(include_sources: bool = False):
                     sources = await compute_liveness(conn)
                 except Exception as exc:
                     logger.debug("source liveness health section failed: %s", exc)
+                try:
+                    browser_extension = await _browser_extension_payload(conn)
+                except Exception as exc:
+                    logger.debug("browser extension health section failed: %s", exc)
         db_status = "healthy"
     except Exception as e:
         db_status = f"error: {e}"
@@ -345,6 +469,7 @@ async def health(include_sources: bool = False):
             "sources": sources,
             "source_issues": source_issues,
             "whatsapp_bridge_health": whatsapp_bridge_health,
+            "browser_extension": browser_extension,
         })
     return payload
 
