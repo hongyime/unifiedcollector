@@ -717,6 +717,26 @@ async def test_download_videos_skips_channel_fallback_when_api_videos_are_known(
 
 
 @pytest.mark.asyncio
+async def test_collect_channel_limits_live_video_downloads(monkeypatch):
+    coll = _new_collector(monkeypatch, YOUTUBE_VIDEO_DOWNLOADS_PER_TARGET="2")
+    coll._has_auth = True
+    coll._use_yt_dlp = True
+    coll._download_videos = True
+    coll._resolve_channel = AsyncMock(return_value=("UC_a", "Channel A"))
+    coll._upsert_channel = AsyncMock(return_value=("UUA", 0))
+    coll._collect_video_list_via_api = AsyncMock(return_value=["v1", "v2", "v3"])
+    coll._download_videos_via_yt_dlp = AsyncMock(return_value=0)
+
+    await coll._collect_channel("UC_a")
+
+    coll._download_videos_via_yt_dlp.assert_awaited_once_with(
+        "UC_a",
+        "Channel A",
+        ["v1", "v2"],
+    )
+
+
+@pytest.mark.asyncio
 async def test_filter_video_ids_for_download_respects_duration_cap(monkeypatch):
     coll = _new_collector(monkeypatch, YOUTUBE_MAX_VIDEO_DURATION_MINUTES="10")
     coll.pool._conn.fetch.return_value = [
@@ -766,6 +786,25 @@ async def test_video_backfill_groups_are_bounded_and_duration_filtered(monkeypat
         ("UC_a", "Channel A"): ["short_1"],
         ("UC_b", "Channel B"): ["short_2"],
     }
+
+
+@pytest.mark.asyncio
+async def test_run_backfill_uses_actual_video_insert_count(monkeypatch):
+    coll = _new_collector(monkeypatch, YOUTUBE_VIDEO_BACKFILL_BATCH_SIZE="10")
+    coll._download_videos = True
+    coll._use_yt_dlp = True
+    coll._get_video_backfill_groups = AsyncMock(
+        return_value={
+            ("UC_a", "Channel A"): ["v1", "v2"],
+            ("UC_b", "Channel B"): ["v3"],
+        }
+    )
+    coll._download_videos_via_yt_dlp = AsyncMock(side_effect=[1, 0])
+    coll._progress_count = 999
+
+    out = await coll.run_backfill()
+
+    assert out == 1
 
 
 # ── _get_last_scrape_time ────────────────────────────────────────────────

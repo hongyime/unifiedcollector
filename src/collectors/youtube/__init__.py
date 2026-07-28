@@ -133,6 +133,7 @@ class YoutubeCollector(BaseCollector):
         self._max_liked_videos = int(os.getenv("YOUTUBE_MAX_LIKED_VIDEOS", "1000"))
         self._max_subscriptions = int(os.getenv("YOUTUBE_MAX_SUBSCRIPTIONS", "999"))
         self._max_videos_per_channel = int(os.getenv("YOUTUBE_MAX_VIDEOS_PER_CHANNEL", "0"))
+        self._video_downloads_per_target = int(os.getenv("YOUTUBE_VIDEO_DOWNLOADS_PER_TARGET", "5"))
         self._video_backfill_batch_size = int(
             os.getenv("YOUTUBE_VIDEO_BACKFILL_BATCH_SIZE", os.getenv("BACKFILL_BATCH_SIZE", "100"))
         )
@@ -339,7 +340,16 @@ class YoutubeCollector(BaseCollector):
 
         if self._use_yt_dlp:
             if self._download_videos:
-                await self._download_videos_via_yt_dlp(channel_id, channel_name, video_ids)
+                download_video_ids = video_ids
+                if self._video_downloads_per_target > 0 and len(download_video_ids) > self._video_downloads_per_target:
+                    logger.info(
+                        "youtube: limiting live video downloads for %s to %d/%d this cycle",
+                        channel_id,
+                        self._video_downloads_per_target,
+                        len(download_video_ids),
+                    )
+                    download_video_ids = download_video_ids[: self._video_downloads_per_target]
+                await self._download_videos_via_yt_dlp(channel_id, channel_name, download_video_ids)
             else:
                 await self._collect_thumbnails_via_yt_dlp(channel_id, channel_name)
 
@@ -748,7 +758,7 @@ class YoutubeCollector(BaseCollector):
         video_ids: list[str],
         *,
         allow_channel_fallback: bool = True,
-    ):
+    ) -> int:
         from src.core.subprocess_downloader import yt_dlp_download, managed_tempdir
         candidates, skipped_duration = await self._filter_video_ids_for_download(video_ids)
         urls = [
@@ -765,15 +775,24 @@ class YoutubeCollector(BaseCollector):
                     known_count,
                     skipped_duration,
                 )
-                return
+                return 0
             if not allow_channel_fallback:
                 logger.info("youtube: no explicit video IDs for %s; channel fallback disabled", channel_id)
-                return
+                return 0
             urls = [f"https://www.youtube.com/channel/{channel_id}/videos"]
+        logger.info(
+            "youtube yt-dlp starting video downloads for %s: urls=%d candidates=%d skipped_duration=%d",
+            channel_id,
+            len(urls),
+            len(candidates),
+            skipped_duration,
+        )
+        stored_total = 0
         for url in urls:
             if self._stop.is_set(): break
             await asyncio.sleep(self._download_delay)
             async with managed_tempdir("yt_") as tmpdir:
+                logger.info("youtube yt-dlp starting %s", url)
                 extra: list[str] = ["-f", self._ytdlp_format, "--merge-output-format", self._merge_format]
                 if self._max_duration:
                     extra.extend(["--match-filter", f"duration<={self._max_duration * 60}"])
@@ -801,15 +820,37 @@ class YoutubeCollector(BaseCollector):
                         url, result.returncode, result.timed_out, result.err_summary(400),
                     )
                     self._progress_count += 1  # tick watchdog so metadata-only runs don't look hung
+                eligible_files = 0
+                stored_files = 0
+                skipped_known = 0
+                skipped_extension = 0
                 for f in result.files:
                     if self._stop.is_set(): break
                     ext = f.suffix.lstrip(".").lower()
-                    if ext not in ("jpg", "jpeg", "png", "webp", "mp4", "webm", "mkv"): continue
+                    if ext not in ("jpg", "jpeg", "png", "webp", "mp4", "webm", "mkv"):
+                        skipped_extension += 1
+                        continue
+                    eligible_files += 1
                     cid = f.stem
                     is_video = ext in ("mp4", "webm", "mkv")
                     if is_video: cid = f"video_{cid}"
-                    if self.is_known(cid): continue
-                    await self.download_media({"entity_id": channel_id, "entity_name": channel_name, "content_type": "video" if is_video else "thumbnail", "content_id": cid, "data": f.read_bytes(), "extension": ext if ext != "jpeg" else "jpg", "source_url": url if "watch?v=" in url else f"https://www.youtube.com/watch?v={f.stem}"})
+                    if self.is_known(cid):
+                        skipped_known += 1
+                        continue
+                    inserted = await self.download_media({"entity_id": channel_id, "entity_name": channel_name, "content_type": "video" if is_video else "thumbnail", "content_id": cid, "data": f.read_bytes(), "extension": ext if ext != "jpeg" else "jpg", "source_url": url if "watch?v=" in url else f"https://www.youtube.com/watch?v={f.stem}"})
+                    if inserted:
+                        stored_files += 1
+                        stored_total += 1
+                logger.info(
+                    "youtube yt-dlp media ingest for %s: result_files=%d eligible=%d stored=%d skipped_known=%d skipped_ext=%d",
+                    url,
+                    len(result.files),
+                    eligible_files,
+                    stored_files,
+                    skipped_known,
+                    skipped_extension,
+                )
+        return stored_total
 
     async def _collect_thumbnails_via_yt_dlp(self, channel_id: str, channel_name: str):
         from src.core.subprocess_downloader import yt_dlp_download, managed_tempdir
@@ -1130,18 +1171,17 @@ class YoutubeCollector(BaseCollector):
         if not groups:
             return thumbnail_count
 
-        progress_before = self._progress_count
         attempted = sum(len(v) for v in groups.values())
+        stored = 0
         for (channel_id, channel_name), video_ids in groups.items():
             if self._stop.is_set():
                 break
-            await self._download_videos_via_yt_dlp(
+            stored += await self._download_videos_via_yt_dlp(
                 channel_id,
                 channel_name,
                 video_ids,
                 allow_channel_fallback=False,
             )
-        stored = self._progress_count - progress_before
         logger.info(
             "youtube: video backfill attempted %d candidate(s) across %d channel(s), stored %d media item(s)",
             attempted,
@@ -1179,7 +1219,7 @@ class YoutubeCollector(BaseCollector):
 
     async def download_media(self, item: dict):
         cid = item["content_id"]
-        if self.is_known(cid): return
+        if self.is_known(cid): return False
         filename = self.build_filename(item["entity_id"], item["entity_name"], item["content_type"], cid, extension=item.get("extension", "jpg"))
         try:
             if "data" in item: data = item["data"]
@@ -1192,7 +1232,7 @@ class YoutubeCollector(BaseCollector):
                         resp = await client.get(fallback)
                     resp.raise_for_status()
                     data = resp.content
-            else: return
+            else: return False
             source_url = self._build_youtube_source_url(item)
             metadata = {
                 "entity_id": item["entity_id"],
@@ -1228,7 +1268,7 @@ class YoutubeCollector(BaseCollector):
                 "duplicate_blob": artifact.duplicate_blob,
                 "error": artifact.error,
             }
-            await self.insert_media_item(
+            inserted = await self.insert_media_item(
                 entity_id=item["entity_id"],
                 entity_name=item["entity_name"],
                 content_type=item["content_type"],
@@ -1243,9 +1283,11 @@ class YoutubeCollector(BaseCollector):
             if artifact.partial:
                 await self.send_to_dlq(item["entity_id"], cid, f"vault artifact partial: {artifact.error}")
             self._known_ids.add(cid)
+            return inserted
         except Exception as e:
             logger.error("Download failed %s: %s", cid, e)
             await self.send_to_dlq(item["entity_id"], cid, str(e))
+            return False
 
     # ─────────────────────────────────────────────────────────────────────
     # Wave 2: toolkit-parity public verbs.
