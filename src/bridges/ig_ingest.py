@@ -955,10 +955,27 @@ async def _ingest_uploaded_media(app, platform, body):
     reject_stats: dict = {}
     async with app["sem"]:
         saved = await _download_and_save(app["pool"], app["session"], platform, username, item, reject_stats)
+    dedupe_reasons = {"duplicate_content_id", "duplicate_sha256"}
+    deduped = any(int(reject_stats.get(reason) or 0) > 0 for reason in dedupe_reasons)
+    accepted = bool(saved or deduped)
+    reason = None
+    if not accepted and reject_stats:
+        reason = max(reject_stats.items(), key=lambda kv: int(kv[1] or 0))[0]
     event_meta = {
         "extension_version": extension_version,
         "ingest_mode": "browser_upload",
+        "accepted": accepted,
+        "saved": bool(saved),
+        "deduped": deduped,
     }
+    if item.get("content_id"):
+        event_meta["content_id"] = str(item.get("content_id"))[:200]
+    if body.get("file_size") is not None:
+        event_meta["file_size"] = body.get("file_size")
+    if body.get("mime_type"):
+        event_meta["mime_type"] = body.get("mime_type")
+    if reason:
+        event_meta["reason"] = reason
     if reject_stats:
         event_meta["reject_stats"] = reject_stats
     await _record_browser_ingest_event(
@@ -967,11 +984,27 @@ async def _ingest_uploaded_media(app, platform, body):
         "media",
         username,
         observed_count=1,
-        stored_count=1 if saved else 0,
+        stored_count=1 if accepted else 0,
         metadata=event_meta,
     )
-    logger.info("browser-upload[%s] %s: %d/1 saved", platform, username, 1 if saved else 0)
-    return {"stored": 1 if saved else 0, "platform": platform, "reject_stats": reject_stats}
+    logger.info(
+        "browser-upload[%s] %s: accepted=%d saved=%d deduped=%d reason=%s",
+        platform,
+        username,
+        1 if accepted else 0,
+        1 if saved else 0,
+        1 if deduped else 0,
+        reason or "ok",
+    )
+    return {
+        "accepted": 1 if accepted else 0,
+        "stored": 1 if accepted else 0,
+        "saved": 1 if saved else 0,
+        "deduped": deduped,
+        "platform": platform,
+        "reason": reason,
+        "reject_stats": reject_stats,
+    }
 
 
 def _int(v):

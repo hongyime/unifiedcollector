@@ -721,7 +721,7 @@ services:
       DB_POOL_MAX_SIZE: "4"
       # Operator status compares live Chrome hook heartbeats against this repo
       # extension build. Update with extension/manifest.json version bumps.
-      UC_EXTENSION_EXPECTED_VERSION: "1.21.41"
+      UC_EXTENSION_EXPECTED_VERSION: "1.21.42"
     volumes:
       - z:/unifiedcollector/media:/media
       - z:/unifiedcollector:/vault
@@ -776,6 +776,7 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
+      UC_EXTENSION_EXPECTED_VERSION: "1.21.42"
       # Localhost-only single-user deployment: skip bearer-token auth so the
       # dashboard works without a login flow. Remove/false for network exposure.
       DASHBOARD_AUTH_DISABLED: "true"

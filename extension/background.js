@@ -497,7 +497,20 @@ async function uploadMediaViaBrowser(base, msg, item) {
       body: JSON.stringify(payload),
     });
     const j = await r.json().catch(() => ({}));
-    return { ok: r.ok && !!j.stored, stored: j.stored || 0, reject_stats: j.reject_stats || null };
+    const accepted = Number(j.accepted ?? j.stored ?? 0);
+    const saved = Number(j.saved ?? (j.deduped ? 0 : j.stored || 0));
+    const deduped = j.deduped === true ? 1 : 0;
+    const rejectStats = j.reject_stats || null;
+    const reason = j.reason || topRejectReason(rejectStats) || (r.ok ? "not_accepted" : "http_" + r.status);
+    return {
+      ok: r.ok && accepted > 0,
+      accepted,
+      stored: accepted,
+      saved,
+      deduped,
+      reason,
+      reject_stats: rejectStats,
+    };
   } catch (e) {
     return { ok: false, reason: e && e.name === "AbortError" ? "timeout" : String(e.message || e) };
   } finally {
@@ -505,25 +518,46 @@ async function uploadMediaViaBrowser(base, msg, item) {
   }
 }
 
+function topRejectReason(stats) {
+  if (!stats || typeof stats !== "object") return "";
+  let best = "";
+  let bestCount = -1;
+  for (const [key, raw] of Object.entries(stats)) {
+    const count = Number(raw || 0);
+    if (count > bestCount) {
+      best = key;
+      bestCount = count;
+    }
+  }
+  return best;
+}
+
 async function uploadBrowserMediaCandidates(base, msg, items) {
   const candidates = (items || []).filter(shouldBrowserUploadMedia);
-  let stored = 0;
+  let accepted = 0;
+  let saved = 0;
+  let deduped = 0;
   let attempted = 0;
   const failures = {};
   for (const item of candidates) {
     attempted++;
     const result = await uploadMediaViaBrowser(base, msg, item);
-    if (result.ok) stored += 1;
+    if (result.ok) {
+      accepted += Number(result.accepted || 1);
+      saved += Number(result.saved || 0);
+      deduped += Number(result.deduped || 0);
+    }
     else failures[result.reason || "failed"] = (failures[result.reason || "failed"] || 0) + 1;
   }
   if (attempted) {
+    const detail = ` (${saved} new${deduped ? `, ${deduped} duplicate` : ""})`;
     await log(
-      stored ? "info" : "warn",
-      `📦 ${msg.platform || "instagram"} · ${msg.username} · browser-upload ${stored}/${attempted} full media stored`
+      accepted ? (Object.keys(failures).length ? "warn" : "info") : "warn",
+      `📦 ${msg.platform || "instagram"} · ${msg.username} · browser-upload ${accepted}/${attempted} accepted${detail}`
     );
     if (Object.keys(failures).length) await log("warn", `browser-upload misses: ${JSON.stringify(failures)}`);
   }
-  return { attempted, stored, failures };
+  return { attempted, stored: accepted, accepted, saved, deduped, failures };
 }
 // Returns {opened|focused, tabId}. `active` brings the tab to the foreground so
 // the user actually SEES it (the old version opened pinned+inactive, which made

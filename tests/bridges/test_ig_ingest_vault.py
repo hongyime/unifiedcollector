@@ -290,6 +290,72 @@ def test_record_browser_ingest_event_writes_observed_and_stored_counts():
     assert "extension_version" in args[5]
 
 
+def test_browser_upload_duplicate_counts_as_accepted(monkeypatch):
+    pool = _FakePool()
+    events = []
+
+    async def fake_download(_pool, _session, _platform, _username, _item, reject_stats):
+        reject_stats["duplicate_content_id"] = 1
+        return False
+
+    async def fake_event(_pool, platform, endpoint, subject, **kwargs):
+        events.append((platform, endpoint, subject, kwargs))
+
+    monkeypatch.setattr(ig_ingest, "_download_and_save", fake_download)
+    monkeypatch.setattr(ig_ingest, "_record_browser_ingest_event", fake_event)
+
+    app = {
+        "pool": pool,
+        "session": object(),
+        "sem": asyncio.Semaphore(1),
+    }
+    resp = asyncio.run(
+        ig_ingest._ingest_uploaded_media(
+            app,
+            "instagram",
+            {
+                "username": "alice",
+                "extension_version": "1.21.42",
+                "file_size": 12345,
+                "mime_type": "image/jpeg",
+                "item": {
+                    "content_id": "story_abc123",
+                    "url": "https://scontent.cdninstagram.com/v/t51.29350-15/abc.jpg",
+                },
+                "data_b64": base64.b64encode(b"\xff\xd8\xff" + b"x" * 21000).decode("ascii"),
+            },
+        )
+    )
+
+    assert resp["accepted"] == 1
+    assert resp["stored"] == 1
+    assert resp["saved"] == 0
+    assert resp["deduped"] is True
+    assert resp["reject_stats"] == {"duplicate_content_id": 1}
+    assert events == [
+        (
+            "instagram",
+            "media",
+            "alice",
+            {
+                "observed_count": 1,
+                "stored_count": 1,
+                "metadata": {
+                    "extension_version": "1.21.42",
+                    "ingest_mode": "browser_upload",
+                    "accepted": True,
+                    "saved": False,
+                    "deduped": True,
+                    "content_id": "story_abc123",
+                    "file_size": 12345,
+                    "mime_type": "image/jpeg",
+                    "reject_stats": {"duplicate_content_id": 1},
+                },
+            },
+        )
+    ]
+
+
 def test_drain_propagates_extension_version_to_media_and_telemetry(monkeypatch):
     pool = _FakePool()
     saved_items = []
