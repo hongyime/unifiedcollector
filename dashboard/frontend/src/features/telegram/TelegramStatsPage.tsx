@@ -4,12 +4,21 @@ import { Header } from "../../components/layout/Header";
 import { LoadingSpinner } from "../../components/ui/LoadingSpinner";
 import { ErrorState } from "../../components/ui/ErrorState";
 
-function StatCard({ label, value }: { label: string; value: number | undefined }) {
+function StatCard({
+  label,
+  value,
+  approximate = false,
+}: {
+  label: string;
+  value: number | undefined;
+  approximate?: boolean;
+}) {
+  const formatted = value === undefined ? "-" : `${approximate ? "~" : ""}${value.toLocaleString()}`;
   return (
     <div className="bg-surface border border-border rounded-lg p-4">
       <p className="text-xs text-text-muted uppercase tracking-wide">{label}</p>
       <p className="text-2xl font-semibold font-mono mt-1">
-        {value === undefined ? "-" : value.toLocaleString()}
+        {formatted}
       </p>
     </div>
   );
@@ -26,22 +35,25 @@ export function TelegramStatsPage() {
   if (isLoading || !data) return <LoadingSpinner />;
 
   const t = data.totals;
+  const estimated = data.estimated ?? {};
   return (
     <div>
       <Header title="Telegram" subtitle="Collection stats" onRefresh={() => refetch()} />
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
-        <StatCard label="Messages" value={t.messages} />
-        <StatCard label="Users" value={t.users} />
-        <StatCard label="Chats" value={t.chats} />
-        <StatCard label="Reactions" value={t.reactions} />
+        <StatCard label="Messages" value={t.messages} approximate={estimated.messages} />
+        <StatCard label="Users" value={t.users} approximate={estimated.users} />
+        <StatCard label="Chats" value={t.chats} approximate={estimated.chats} />
+        <StatCard label="Reactions" value={t.reactions} approximate={estimated.reactions} />
         <StatCard label="Accounts" value={t.accounts} />
         <StatCard label="Spider queue" value={t.spider_queue} />
         <StatCard label="Messages (24h)" value={data.recent.messages_24h} />
         <StatCard label="Messages (1h)" value={data.recent.messages_1h} />
+        <StatCard label="Media (24h)" value={data.recent.media_24h} />
+        <StatCard label="Media (1h)" value={data.recent.media_1h} />
       </div>
 
-      <h3 className="text-sm font-semibold mb-3">Top chats by messages</h3>
+      <h3 className="text-sm font-semibold mb-3">Top chats by messages ({data.top_chats_window ?? "24h"})</h3>
       <div className="bg-surface rounded-lg border border-border p-4">
         <table className="w-full text-sm">
           <thead>

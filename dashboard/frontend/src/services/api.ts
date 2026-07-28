@@ -313,9 +313,12 @@ export const api = {
   // Telegram collection stats
   telegramStats: () =>
     get<{
+      generated_at?: string;
       totals: Record<string, number>;
+      estimated?: Record<string, boolean>;
       recent: Record<string, number>;
-      top_chats: { title: string | null; username: string | null; messages: number }[];
+      top_chats_window?: string;
+      top_chats: { title: string | null; username: string | null; messages: number; last_message_at?: string | null }[];
     }>("/api/telegram/stats"),
 
   // Telegram accounts

@@ -38,6 +38,8 @@ _BEEPER_SUBSOURCE_CONTENT_CACHE: dict[tuple[str, str | None], dict[str, object]]
 _BEEPER_SUBSOURCE_CONTENT_TTL_SECONDS = int(os.getenv("BEEPER_SUBSOURCE_CONTENT_TTL_SECONDS", "45"))
 _BEEPER_SUBSOURCE_LIVENESS_CACHE: dict[str, object] = {"ts": 0.0, "rows": None}
 _BEEPER_SUBSOURCE_LIVENESS_TTL_SECONDS = int(os.getenv("BEEPER_SUBSOURCE_LIVENESS_TTL_SECONDS", "75"))
+_TELEGRAM_STATS_CACHE: dict[str, object] = {"ts": 0.0, "payload": None}
+_TELEGRAM_STATS_TTL_SECONDS = int(os.getenv("TELEGRAM_STATS_TTL_SECONDS", "30"))
 _YOUTUBE_MEDIA_BACKLOG_CACHE: dict[str, object] = {"ts": 0.0, "row": None}
 _YOUTUBE_MEDIA_BACKLOG_TTL_SECONDS = int(os.getenv("YOUTUBE_MEDIA_BACKLOG_TTL_SECONDS", "600"))
 _WA_FRESH_QR_LAST_REQUEST: dict[str, float] = {}
@@ -142,6 +144,13 @@ async def _estimated_table_rows(conn, table: str) -> int:
         table,
     )
     return int(value or 0)
+
+
+async def _safe_estimated_table_rows(conn, table: str) -> int:
+    try:
+        return await _estimated_table_rows(conn, table)
+    except Exception:
+        return 0
 
 
 async def _safe_fetch_int(conn, query: str, *args, timeout: float = 8.0, default: int = 0) -> int:
@@ -5050,50 +5059,133 @@ async def enable_telegram_account(
 async def telegram_stats(_user: dict = Depends(require_role("viewer"))):
     """Aggregate Telegram collection stats for the dashboard Telegram section.
 
-    Returns totals (messages, users, chats, reactions), top chats by message
-    count, and recent ingest activity, so the UI can show "users, links" and
-    overall health at a glance. Each count is guarded so a missing table never
-    500s the whole panel.
+    Uses planner estimates for large all-time tables and exact indexed counts
+    for recent windows. The previous exact COUNT(*) + all-chat aggregate timed
+    out once telegram_messages grew into the seven-figure range.
     """
+    cached_payload = _TELEGRAM_STATS_CACHE.get("payload")
+    if (
+        cached_payload is not None
+        and _TELEGRAM_STATS_TTL_SECONDS > 0
+        and time.time() - float(_TELEGRAM_STATS_CACHE.get("ts") or 0.0) < _TELEGRAM_STATS_TTL_SECONDS
+    ):
+        return cached_payload
+
     pool = await get_pool()
-    out: dict = {"totals": {}, "top_chats": [], "recent": {}}
+    out: dict = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "totals": {},
+        "estimated": {},
+        "top_chats": [],
+        "top_chats_window": "24h",
+        "recent": {},
+    }
     async with pool.acquire() as conn:
-        async def _count(sql: str) -> int:
-            try:
-                v = await conn.fetchval(sql)
-                return int(v or 0)
-            except Exception:
-                return 0
+        tables = await _existing_public_tables(
+            conn,
+            [
+                "telegram_messages",
+                "telegram_users",
+                "telegram_chats",
+                "telegram_reactions",
+                "telegram_user_accounts",
+                "telegram_spider_queue",
+                "media_items",
+            ],
+        )
+
+        async def _estimate(table: str) -> int:
+            return await _safe_estimated_table_rows(conn, table) if table in tables else 0
+
+        async def _exact(query: str, *args, timeout: float = 8.0) -> int:
+            return await _safe_fetch_int(conn, query, *args, timeout=timeout)
+
+        queue_counts = {
+            "total": 0,
+            "pending": 0,
+            "processing": 0,
+            "failed": 0,
+            "unresolvable": 0,
+            "completed": 0,
+        }
+        if "telegram_spider_queue" in tables:
+            row = await conn.fetchrow(
+                """
+                SELECT count(*)::bigint AS total,
+                       count(*) FILTER (WHERE status = 'pending')::bigint AS pending,
+                       count(*) FILTER (WHERE status = 'processing')::bigint AS processing,
+                       count(*) FILTER (WHERE status = 'failed')::bigint AS failed,
+                       count(*) FILTER (WHERE status = 'unresolvable')::bigint AS unresolvable,
+                       count(*) FILTER (WHERE status = 'completed')::bigint AS completed
+                FROM telegram_spider_queue
+                """,
+                timeout=10,
+            )
+            if row:
+                queue_counts = {key: int(row[key] or 0) for key in queue_counts}
 
         out["totals"] = {
-            "messages": await _count("SELECT COUNT(*) FROM telegram_messages"),
-            "users": await _count("SELECT COUNT(*) FROM telegram_users"),
-            "chats": await _count("SELECT COUNT(*) FROM telegram_chats"),
-            "reactions": await _count("SELECT COUNT(*) FROM telegram_reactions"),
-            "accounts": await _count("SELECT COUNT(*) FROM telegram_user_accounts"),
-            "spider_queue": await _count("SELECT COUNT(*) FROM telegram_spider_queue"),
+            "messages": await _estimate("telegram_messages"),
+            "users": await _estimate("telegram_users"),
+            "chats": await _estimate("telegram_chats"),
+            "reactions": await _estimate("telegram_reactions"),
+            "accounts": await _exact("SELECT COUNT(*) FROM telegram_user_accounts", timeout=6)
+            if "telegram_user_accounts" in tables else 0,
+            "spider_queue": queue_counts["total"],
+            "spider_queue_pending": queue_counts["pending"],
+            "spider_queue_processing": queue_counts["processing"],
+            "spider_queue_failed": queue_counts["failed"],
+            "spider_queue_unresolvable": queue_counts["unresolvable"],
+            "spider_queue_completed": queue_counts["completed"],
+        }
+        out["estimated"] = {
+            "messages": "telegram_messages" in tables,
+            "users": "telegram_users" in tables,
+            "chats": "telegram_chats" in tables,
+            "reactions": "telegram_reactions" in tables,
+            "accounts": False,
+            "spider_queue": False,
         }
         out["recent"] = {
-            "messages_24h": await _count(
+            "messages_24h": await _exact(
                 "SELECT COUNT(*) FROM telegram_messages "
-                "WHERE collected_at > now() - interval '24 hours'"
-            ),
-            "messages_1h": await _count(
+                "WHERE collected_at > now() - interval '24 hours'",
+                timeout=12,
+            ) if "telegram_messages" in tables else 0,
+            "messages_1h": await _exact(
                 "SELECT COUNT(*) FROM telegram_messages "
-                "WHERE collected_at > now() - interval '1 hour'"
-            ),
+                "WHERE collected_at > now() - interval '1 hour'",
+                timeout=8,
+            ) if "telegram_messages" in tables else 0,
+            "media_24h": await _exact(
+                "SELECT COUNT(*) FROM media_items "
+                "WHERE source = 'telegram' AND collected_at > now() - interval '24 hours'",
+                timeout=12,
+            ) if "media_items" in tables else 0,
+            "media_1h": await _exact(
+                "SELECT COUNT(*) FROM media_items "
+                "WHERE source = 'telegram' AND collected_at > now() - interval '1 hour'",
+                timeout=8,
+            ) if "media_items" in tables else 0,
         }
-        try:
+        if {"telegram_messages", "telegram_chats"}.issubset(tables):
             rows = await conn.fetch(
-                "SELECT c.title, c.username, COUNT(m.*) AS messages "
-                "FROM telegram_chats c "
-                "LEFT JOIN telegram_messages m ON m.chat_id = c.id "
-                "GROUP BY c.id, c.title, c.username "
-                "ORDER BY messages DESC LIMIT 10"
+                """
+                SELECT c.title,
+                       c.username,
+                       count(*)::bigint AS messages,
+                       max(m.platform_created_at) AS last_message_at
+                FROM telegram_messages m
+                JOIN telegram_chats c ON c.id = m.chat_id
+                WHERE m.collected_at > now() - interval '24 hours'
+                GROUP BY c.id, c.title, c.username
+                ORDER BY messages DESC
+                LIMIT 10
+                """,
+                timeout=12,
             )
             out["top_chats"] = [dict(r) for r in rows]
-        except Exception:
-            out["top_chats"] = []
+    _TELEGRAM_STATS_CACHE.update({"ts": time.time(), "payload": out})
     return out
 
 
