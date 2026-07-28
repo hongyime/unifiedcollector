@@ -33,6 +33,8 @@ logger = logging.getLogger(__name__)
 _MESSAGING_COVERAGE_CACHE: dict[str, object] = {"ts": 0.0, "rows": None}
 _SOURCE_MEDIA_TOTALS_CACHE: dict[str, object] = {"ts": 0.0, "rows": None}
 _SOURCE_MEDIA_TOTALS_TTL_SECONDS = int(os.getenv("SOURCE_MEDIA_TOTALS_TTL_SECONDS", "300"))
+_YOUTUBE_MEDIA_BACKLOG_CACHE: dict[str, object] = {"ts": 0.0, "row": None}
+_YOUTUBE_MEDIA_BACKLOG_TTL_SECONDS = int(os.getenv("YOUTUBE_MEDIA_BACKLOG_TTL_SECONDS", "600"))
 _WA_FRESH_QR_LAST_REQUEST: dict[str, float] = {}
 _WA_FRESH_QR_MIN_INTERVAL_SECONDS = int(os.getenv("WA_FRESH_QR_MIN_INTERVAL_SECONDS", "45"))
 
@@ -427,29 +429,94 @@ async def _source_media_totals(conn) -> dict[str, dict]:
 
 
 async def _youtube_media_backlog(conn) -> dict:
+    now = time.time()
+    cached_row = _YOUTUBE_MEDIA_BACKLOG_CACHE.get("row")
+    if (
+        cached_row is not None
+        and now - float(_YOUTUBE_MEDIA_BACKLOG_CACHE.get("ts") or 0.0) < _YOUTUBE_MEDIA_BACKLOG_TTL_SECONDS
+    ):
+        out = dict(cached_row)  # type: ignore[arg-type]
+        out["stats_stale"] = True
+        return out
+
     existing = await _existing_public_tables(conn, ["youtube_videos", "media_items"])
     if "youtube_videos" not in existing or "media_items" not in existing:
         return {}
-    row = await conn.fetchrow(
-        """
-        SELECT COUNT(*)::bigint AS total_videos,
-               COUNT(*) FILTER (WHERE thumb.id IS NULL)::bigint AS missing_thumbnails,
-               COUNT(*) FILTER (WHERE video.id IS NULL)::bigint AS missing_videos,
-               COUNT(*) FILTER (
-                   WHERE video.id IS NULL
-                     AND v.collected_at >= now() - interval '24 hours'
-               )::bigint AS missing_videos_touched_24h
-        FROM youtube_videos v
-        LEFT JOIN media_items thumb
-          ON thumb.source = 'youtube'
-         AND thumb.content_id = v.platform_video_id
-        LEFT JOIN media_items video
-          ON video.source = 'youtube'
-         AND video.content_id = 'video_' || v.platform_video_id
-        """,
-        timeout=20,
-    )
-    return dict(row) if row else {}
+    try:
+        duration_cap_seconds = max(0, int(os.getenv("YOUTUBE_MAX_VIDEO_DURATION_MINUTES", "0")) * 60)
+    except (TypeError, ValueError):
+        duration_cap_seconds = 0
+    try:
+        row = await conn.fetchrow(
+            """
+            WITH missing AS (
+                SELECT v.duration,
+                       v.collected_at,
+                       upper(coalesce(v.duration, '')) AS duration_text,
+                       (
+                           coalesce((substring(v.duration from 'PT([0-9]+)H'))::int, 0) * 3600
+                           + coalesce((substring(v.duration from '([0-9]+)M'))::int, 0) * 60
+                           + coalesce((substring(v.duration from '([0-9]+)S'))::int, 0)
+                       ) AS duration_seconds
+                FROM youtube_videos v
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM media_items video
+                    WHERE video.source = 'youtube'
+                      AND video.content_id = 'video_' || v.platform_video_id
+                )
+            )
+            SELECT (SELECT COUNT(*) FROM youtube_videos)::bigint AS total_videos,
+                   (
+                       SELECT COUNT(*)
+                       FROM youtube_videos v
+                       WHERE NOT EXISTS (
+                           SELECT 1
+                           FROM media_items thumb
+                           WHERE thumb.source = 'youtube'
+                             AND thumb.content_id = v.platform_video_id
+                       )
+                   )::bigint AS missing_thumbnails,
+                   COUNT(*)::bigint AS missing_videos,
+                   COUNT(*) FILTER (
+                       WHERE duration_text IN ('P0D', 'PT0S')
+                   )::bigint AS placeholder_missing_videos,
+                   COUNT(*) FILTER (
+                       WHERE duration_text NOT IN ('P0D', 'PT0S')
+                         AND ($1::int <= 0 OR duration_seconds <= $1::int OR duration_text = '')
+                   )::bigint AS eligible_missing_videos,
+                   COUNT(*) FILTER (
+                       WHERE duration_text NOT IN ('P0D', 'PT0S', '')
+                         AND $1::int > 0
+                         AND duration_seconds > $1::int
+                   )::bigint AS over_duration_missing_videos,
+                   COUNT(*) FILTER (
+                       WHERE duration_text = ''
+                   )::bigint AS unknown_duration_missing_videos,
+                   COUNT(*) FILTER (
+                       WHERE duration_text NOT IN ('P0D', 'PT0S')
+                         AND ($1::int <= 0 OR duration_seconds <= $1::int OR duration_text = '')
+                         AND collected_at >= now() - interval '24 hours'
+                   )::bigint AS eligible_missing_videos_touched_24h,
+                   COUNT(*) FILTER (
+                       WHERE collected_at >= now() - interval '24 hours'
+                   )::bigint AS missing_videos_touched_24h
+            FROM missing
+            """,
+            duration_cap_seconds,
+            timeout=20,
+        )
+    except Exception:
+        cached_row = _YOUTUBE_MEDIA_BACKLOG_CACHE.get("row")
+        if cached_row is not None:
+            out = dict(cached_row)  # type: ignore[arg-type]
+            out["stats_stale"] = True
+            return out
+        raise
+    out = dict(row) if row else {}
+    out["duration_cap_seconds"] = duration_cap_seconds
+    _YOUTUBE_MEDIA_BACKLOG_CACHE.update({"ts": time.time(), "row": out})
+    return out
 
 
 async def _active_rate_limit_cursor_summary(conn) -> dict[str, dict]:
@@ -815,16 +882,30 @@ def _source_matrix_row(source_row: dict, current_content: dict | None, current_r
     if (
         blocker.get("kind") == "none"
         and source == "youtube"
-        and int(backlog.get("missing_videos") or 0) > 0
+        and int(backlog.get("eligible_missing_videos", backlog.get("missing_videos") or 0) or 0) > 0
     ):
-        missing = int(backlog.get("missing_videos") or 0)
-        recent = int(backlog.get("missing_videos_touched_24h") or 0)
+        missing = int(backlog.get("eligible_missing_videos", backlog.get("missing_videos") or 0) or 0)
+        total_missing = int(backlog.get("missing_videos") or 0)
+        recent = int(backlog.get("eligible_missing_videos_touched_24h", backlog.get("missing_videos_touched_24h") or 0) or 0)
+        over_cap = int(backlog.get("over_duration_missing_videos") or 0)
+        placeholders = int(backlog.get("placeholder_missing_videos") or 0)
+        duration_cap_seconds = int(backlog.get("duration_cap_seconds") or 0)
+        excluded_parts = []
+        if over_cap:
+            cap_label = f">{duration_cap_seconds // 60}m" if duration_cap_seconds else "over cap"
+            excluded_parts.append(f"{over_cap:,} {cap_label}")
+        if placeholders:
+            excluded_parts.append(f"{placeholders:,} live/scheduled")
+        excluded = f" ({'; '.join(excluded_parts)} excluded from action)" if excluded_parts else ""
+        total_note = f" out of {total_missing:,} missing total" if total_missing and total_missing != missing else ""
         blocker = {
             "kind": "media_backlog",
             "severity": "warning",
             "summary": (
-                f"{missing:,} YouTube video row(s) still have no archived video file"
-                + (f"; {recent:,} were touched in the last 24h." if recent else ".")
+                f"{missing:,} eligible YouTube video row(s) still have no archived video file"
+                + total_note
+                + excluded
+                + (f"; {recent:,} eligible rows were touched in the last 24h." if recent else ".")
             ),
             "next_action": (
                 "Let collector_youtube video backfill run; if stored media stays at 0, "

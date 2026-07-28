@@ -862,6 +862,22 @@ async def test_filter_video_ids_for_download_respects_duration_cap(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_filter_video_ids_already_archived_uses_db(monkeypatch):
+    coll = _new_collector(monkeypatch)
+    coll.pool._conn.fetch.return_value = [
+        {"content_id": "video_v1"},
+        {"content_id": "video_v3"},
+    ]
+
+    kept, skipped = await coll._filter_video_ids_already_archived(["v1", "v2", "v3"])
+
+    assert kept == ["v2"]
+    assert skipped == 2
+    assert "video_v1" in coll._known_ids
+    assert "video_v3" in coll._known_ids
+
+
+@pytest.mark.asyncio
 async def test_video_backfill_groups_are_bounded_and_duration_filtered(monkeypatch):
     coll = _new_collector(monkeypatch, YOUTUBE_MAX_VIDEO_DURATION_MINUTES="10")
     coll.pool._conn.fetch.return_value = [

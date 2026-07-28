@@ -281,13 +281,21 @@ def test_source_matrix_reports_youtube_video_backlog_as_blocker():
             "missing_thumbnails": 1,
             "missing_videos": 10591,
             "missing_videos_touched_24h": 85,
+            "eligible_missing_videos": 8327,
+            "eligible_missing_videos_touched_24h": 44,
+            "over_duration_missing_videos": 2188,
+            "placeholder_missing_videos": 8,
+            "duration_cap_seconds": 1080,
         },
     )
 
     assert row["blocker"]["kind"] == "media_backlog"
     assert row["blocker"]["severity"] == "warning"
-    assert "10,591" in row["blocker"]["summary"]
-    assert row["media_backlog"]["missing_videos_touched_24h"] == 85
+    assert "8,327 eligible" in row["blocker"]["summary"]
+    assert "out of 10,591" in row["blocker"]["summary"]
+    assert "2,188 >18m" in row["blocker"]["summary"]
+    assert "8 live/scheduled" in row["blocker"]["summary"]
+    assert row["media_backlog"]["eligible_missing_videos_touched_24h"] == 44
 
 
 def test_source_media_freshness_does_not_warn_for_github_commits():

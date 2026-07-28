@@ -804,6 +804,7 @@ class YoutubeCollector(BaseCollector):
     ) -> int:
         from src.core.subprocess_downloader import yt_dlp_download, managed_tempdir
         candidates, skipped_duration = await self._filter_video_ids_for_download(video_ids)
+        candidates, skipped_db = await self._filter_video_ids_already_archived(candidates)
         urls = [
             f"https://www.youtube.com/watch?v={vid}"
             for vid in candidates
@@ -824,11 +825,12 @@ class YoutubeCollector(BaseCollector):
                 return 0
             urls = [f"https://www.youtube.com/channel/{channel_id}/videos"]
         logger.info(
-            "youtube yt-dlp starting video downloads for %s: urls=%d candidates=%d skipped_duration=%d",
+            "youtube yt-dlp starting video downloads for %s: urls=%d candidates=%d skipped_duration=%d skipped_db=%d",
             channel_id,
             len(urls),
             len(candidates),
             skipped_duration,
+            skipped_db,
         )
         stored_total = 0
         for url in urls:
@@ -894,6 +896,42 @@ class YoutubeCollector(BaseCollector):
                     skipped_extension,
                 )
         return stored_total
+
+    async def _filter_video_ids_already_archived(self, video_ids: list[str]) -> tuple[list[str], int]:
+        """Drop explicit video IDs that Postgres already has archived files for.
+
+        The in-memory known-id cache is a speed hint, not the source of truth.
+        Long-running YouTube cycles can miss older DB rows and repeatedly invoke
+        yt-dlp for already-archived videos; this DB check prevents that wasted
+        bandwidth before subprocess work starts.
+        """
+        if not video_ids or self.pool is None:
+            return list(video_ids or []), 0
+        content_ids = [f"video_{vid}" for vid in video_ids if vid]
+        if not content_ids:
+            return [], 0
+        try:
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT content_id
+                    FROM media_items
+                    WHERE source = 'youtube'
+                      AND content_id = ANY($1::text[])
+                    """,
+                    content_ids,
+                    timeout=10,
+                )
+        except Exception:
+            logger.debug("youtube: DB archived-video filter failed", exc_info=True)
+            return list(video_ids), 0
+
+        archived = {str(row["content_id"]) for row in rows}
+        if not archived:
+            return list(video_ids), 0
+        self._known_ids.update(archived)
+        kept = [vid for vid in video_ids if f"video_{vid}" not in archived]
+        return kept, len(video_ids) - len(kept)
 
     async def _collect_thumbnails_via_yt_dlp(self, channel_id: str, channel_name: str):
         from src.core.subprocess_downloader import yt_dlp_download, managed_tempdir
