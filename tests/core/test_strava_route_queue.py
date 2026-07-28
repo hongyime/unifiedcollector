@@ -31,6 +31,7 @@ class _Conn:
         self.rows = rows or []
         self.fetchrow_query = None
         self.fetchrow_args = None
+        self.fetchval_result = False
         self.fetch_query = None
         self.fetch_called = False
         self.fetch_args = None
@@ -46,10 +47,21 @@ class _Conn:
         return None
 
     async def fetch(self, _query, *args):
+        if "FROM rate_limit_events rl" in _query:
+            self.fetchrow_query = _query
+            self.fetchrow_args = args
+            account = args[0] if args else None
+            return [
+                row for row in self.cooldowns
+                if not row.get("account") or (account and row.get("account") == account)
+            ]
         self.fetch_called = True
         self.fetch_query = _query
         self.fetch_args = args
         return self.rows
+
+    async def fetchval(self, _query, *args):
+        return self.fetchval_result
 
 
 def test_route_capture_queue_respects_active_gps_cooldown():
@@ -59,6 +71,8 @@ def test_route_capture_queue_respects_active_gps_cooldown():
             "reason": "streams 429",
             "account": None,
             "scope": "gps_streams",
+            "activity_id": "19283135496",
+            "created_at": datetime(2026, 7, 23, 12, 30, tzinfo=timezone.utc),
         }
     )
 
@@ -71,8 +85,7 @@ def test_route_capture_queue_respects_active_gps_cooldown():
     assert out["cooldown"]["until"] == "2026-07-23T13:00:00+00:00"
     assert out["cooldown"]["scope"] == "gps_streams"
     assert conn.fetch_called is False
-    assert "strava_gps_streams s" in conn.fetchrow_query
-    assert "a.platform_activity_id = (rl.metadata->>'activity_id')::bigint" in conn.fetchrow_query
+    assert "rl.metadata->>'activity_id' AS activity_id" in conn.fetchrow_query
 
 
 def test_route_capture_queue_respects_matching_account_cooldown():
@@ -82,6 +95,8 @@ def test_route_capture_queue_respects_matching_account_cooldown():
             "reason": "browser Strava stream HTTP 429",
             "account": "bryanseah234",
             "scope": "browser_strava_streams",
+            "activity_id": "19283135496",
+            "created_at": datetime(2026, 7, 23, 12, 30, tzinfo=timezone.utc),
         }
     )
 
@@ -109,6 +124,8 @@ def test_route_capture_queue_ignores_other_account_cooldown():
             "reason": "browser Strava stream HTTP 429",
             "account": "bryanseah234",
             "scope": "browser_strava_streams",
+            "activity_id": "19283135496",
+            "created_at": datetime(2026, 7, 23, 12, 30, tzinfo=timezone.utc),
         },
         rows=[
             {
@@ -141,6 +158,50 @@ def test_route_capture_queue_ignores_other_account_cooldown():
     assert conn.fetch_called is True
     assert out["cooldown"]["active"] is False
     assert out["account"] == "shotsbyseah234"
+    assert [item["platform_activity_id"] for item in out["items"]] == [19283135496]
+
+
+def test_route_capture_queue_ignores_cooldown_cleared_by_successful_stream():
+    conn = _Conn(
+        cooldown={
+            "cooldown_until": datetime(2026, 7, 23, 13, 0, tzinfo=timezone.utc),
+            "reason": "browser Strava stream HTTP 429",
+            "account": "72101656",
+            "scope": "browser_strava_streams",
+            "activity_id": "19486128997",
+            "created_at": datetime(2026, 7, 23, 12, 30, tzinfo=timezone.utc),
+        },
+        rows=[
+            {
+                "platform_activity_id": 19283135496,
+                "name": "Morning Run",
+                "type": "Run",
+                "sport_type": "Run",
+                "start_date": datetime(2026, 7, 22, 1, 2, 3, tzinfo=timezone.utc),
+                "start_latlng": "[1.3,103.8]",
+                "stream_status": None,
+                "platform_athlete_id": 72101656,
+                "athlete_name": "Me",
+                "proximity_tier": 1,
+                "target_priority": 95,
+                "last_browser_visit_at": None,
+            }
+        ],
+    )
+    conn.fetchval_result = True
+
+    out = asyncio.run(
+        fetch_strava_route_capture_queue(
+            _Pool(conn),
+            limit=2,
+            account="72101656",
+            respect_cooldown=True,
+        )
+    )
+
+    assert conn.fetchrow_args == ("72101656",)
+    assert conn.fetch_called is True
+    assert out["cooldown"]["active"] is False
     assert [item["platform_activity_id"] for item in out["items"]] == [19283135496]
 
 

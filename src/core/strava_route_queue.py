@@ -54,12 +54,14 @@ async def fetch_strava_route_capture_queue(
     account = str(account or "").strip() or None
 
     async with pool.acquire() as conn:
-        cooldown = await conn.fetchrow(
+        cooldown_rows = await conn.fetch(
             """
             SELECT rl.created_at + (COALESCE(rl.cooldown_seconds, 0) * INTERVAL '1 second') AS cooldown_until,
                    rl.reason,
                    rl.account,
-                   rl.scope
+                   rl.scope,
+                   rl.metadata->>'activity_id' AS activity_id,
+                   rl.created_at
             FROM rate_limit_events rl
             WHERE rl.source = 'strava'
               AND rl.scope IN ('gps_streams', 'browser_strava_streams')
@@ -70,21 +72,16 @@ async def fetch_strava_route_capture_queue(
                     NULLIF(rl.account, '') IS NULL
                  OR ($1::text IS NOT NULL AND rl.account = $1::text)
               )
-              AND NOT EXISTS (
-                    SELECT 1
-                    FROM strava_activities a
-                    JOIN strava_gps_streams s ON s.activity_id = a.id
-                    WHERE rl.metadata->>'activity_id' ~ '^[0-9]+$'
-                      AND a.platform_activity_id = (rl.metadata->>'activity_id')::bigint
-                      AND s.collected_at > rl.created_at
-                      AND jsonb_typeof(s.latlng) = 'array'
-                      AND jsonb_array_length(s.latlng) > 1
-              )
             ORDER BY rl.created_at DESC
-            LIMIT 1
+            LIMIT 20
             """,
             account,
         )
+        cooldown = None
+        for row in cooldown_rows:
+            if not await _strava_cooldown_cleared_by_stream(conn, row):
+                cooldown = row
+                break
         cooldown_until = cooldown["cooldown_until"] if cooldown else None
         cooldown_active = bool(cooldown_until)
         if cooldown_active and respect_cooldown:
@@ -289,6 +286,34 @@ async def fetch_strava_route_capture_queue(
         "recent_candidate_limit": candidate_limit,
         "important_candidate_limit": important_candidate_limit,
     }
+
+
+async def _strava_cooldown_cleared_by_stream(conn, row) -> bool:
+    try:
+        raw_activity_id = row["activity_id"]
+    except Exception:
+        raw_activity_id = row.get("activity_id") if hasattr(row, "get") else None
+    activity_id = str(raw_activity_id or "").strip()
+    if not activity_id.isdigit():
+        return False
+    try:
+        return bool(await conn.fetchval(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM strava_activities a
+                JOIN strava_gps_streams s ON s.activity_id = a.id
+                WHERE a.platform_activity_id = $1::bigint
+                  AND s.collected_at > $2
+                  AND jsonb_typeof(s.latlng) = 'array'
+                  AND jsonb_array_length(s.latlng) > 1
+            )
+            """,
+            int(activity_id),
+            row["created_at"],
+        ))
+    except Exception:
+        return False
 
 
 def _route_row(row) -> dict[str, Any]:
