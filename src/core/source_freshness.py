@@ -15,6 +15,17 @@ from __future__ import annotations
 
 _DAY = 86400
 
+STRAVA_PROGRESS_QUERY = """
+SELECT extract(epoch FROM now()-max(ts))
+FROM (
+    SELECT max(collected_at) AS ts FROM strava_activities
+    UNION ALL
+    SELECT max(collected_at) AS ts FROM strava_gps_streams
+    UNION ALL
+    SELECT max(collected_at) AS ts FROM media_items WHERE source='strava'
+) progress
+"""
+
 SOURCE_MODES = {
     "telegram": "messaging",
     "whatsapp": "whatsapp bridge",
@@ -45,7 +56,7 @@ FRESHNESS: list[tuple[str, str, int]] = [
     ("youtube",   "SELECT extract(epoch FROM now()-max(collected_at)) FROM youtube_videos", 2 * _DAY),
     ("website",   "SELECT extract(epoch FROM now()-max(collected_at)) FROM website_pages", 3 * _DAY),
     ("github",    "SELECT extract(epoch FROM now()-max(collected_at)) FROM github_commits", 3 * _DAY),
-    ("strava",    "SELECT extract(epoch FROM now()-max(collected_at)) FROM strava_activities", 3 * _DAY),
+    ("strava",    STRAVA_PROGRESS_QUERY, 3 * _DAY),
     ("search",    "SELECT extract(epoch FROM now()-max(collected_at)) FROM search_results", 3 * _DAY),
 ]
 FRESHNESS_BY_SOURCE = {name: (query, threshold) for name, query, threshold in FRESHNESS}
@@ -62,7 +73,7 @@ FRESHNESS_BASIS = {
     "youtube": "youtube_videos.collected_at",
     "website": "website_pages.collected_at",
     "github": "github_commits.collected_at",
-    "strava": "strava_activities.collected_at",
+    "strava": "newest Strava activity, GPS stream, or media row",
     "search": "search_results.collected_at",
 }
 

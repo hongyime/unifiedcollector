@@ -140,7 +140,16 @@ if os.getenv("WATCHDOG_HEADLESS_ENABLED", "1") == "1":
             ["unifiedcollector_collector_lowrisk"],
         ),
         "strava": (
-            "SELECT extract(epoch FROM now()-max(collected_at)) FROM strava_activities",
+            """
+            SELECT extract(epoch FROM now()-max(ts))
+            FROM (
+                SELECT max(collected_at) AS ts FROM strava_activities
+                UNION ALL
+                SELECT max(collected_at) AS ts FROM strava_gps_streams
+                UNION ALL
+                SELECT max(collected_at) AS ts FROM media_items WHERE source='strava'
+            ) progress
+            """,
             int(os.getenv("WATCHDOG_STALE_STRAVA", str(_D * 3))),      # 72h
             ["unifiedcollector_collector_lowrisk"],
         ),

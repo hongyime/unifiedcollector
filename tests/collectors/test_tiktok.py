@@ -183,6 +183,32 @@ def test_check_tool_returns_false_for_missing():
     assert TiktokCollector._check_tool("definitely-not-a-real-binary-xyz") is False
 
 
+def test_gallery_dl_archive_args_are_per_profile(tmp_path, monkeypatch):
+    monkeypatch.setenv("TIKTOK_GALLERY_DL_ARCHIVE_DIR", str(tmp_path / "archives"))
+    monkeypatch.setenv("TIKTOK_GALLERY_DL_ARCHIVE_ENABLED", "true")
+    with patch.object(TiktokCollector, "_check_tool", staticmethod(lambda *_: False)), \
+         patch.object(TiktokCollector, "_discover_cookie_file", staticmethod(lambda: "")):
+        c = TiktokCollector()
+
+    args = c._gallery_dl_archive_args("bad/name user")
+
+    assert args[0] == "--download-archive"
+    assert Path(args[1]).parent == tmp_path / "archives"
+    assert Path(args[1]).name.endswith(".txt")
+    assert "/" not in Path(args[1]).name
+    assert Path(args[1]).parent.exists()
+
+
+def test_gallery_dl_archive_args_can_be_disabled(tmp_path, monkeypatch):
+    monkeypatch.setenv("TIKTOK_GALLERY_DL_ARCHIVE_DIR", str(tmp_path / "archives"))
+    monkeypatch.setenv("TIKTOK_GALLERY_DL_ARCHIVE_ENABLED", "false")
+    with patch.object(TiktokCollector, "_check_tool", staticmethod(lambda *_: False)), \
+         patch.object(TiktokCollector, "_discover_cookie_file", staticmethod(lambda: "")):
+        c = TiktokCollector()
+
+    assert c._gallery_dl_archive_args("alice") == []
+
+
 def test_account_media_dir_uses_default_when_no_cookies(monkeypatch):
     monkeypatch.delenv("TIKTOK_COOKIES_FILE", raising=False)
     with patch.object(TiktokCollector, "_check_tool", staticmethod(lambda *_: False)), \

@@ -259,7 +259,16 @@ class Scheduler:
         ("youtube",   "SELECT extract(epoch FROM now()-max(collected_at)) FROM youtube_videos", 172800),
         ("website",   "SELECT extract(epoch FROM now()-max(collected_at)) FROM website_pages", 259200),
         ("github",    "SELECT extract(epoch FROM now()-max(collected_at)) FROM github_commits", 259200),
-        ("strava",    "SELECT extract(epoch FROM now()-max(collected_at)) FROM strava_activities", 259200),
+        ("strava",    """
+            SELECT extract(epoch FROM now()-max(ts))
+            FROM (
+                SELECT max(collected_at) AS ts FROM strava_activities
+                UNION ALL
+                SELECT max(collected_at) AS ts FROM strava_gps_streams
+                UNION ALL
+                SELECT max(collected_at) AS ts FROM media_items WHERE source='strava'
+            ) progress
+        """, 259200),
         ("search",    "SELECT extract(epoch FROM now()-max(collected_at)) FROM search_results", 259200),
     ]
 

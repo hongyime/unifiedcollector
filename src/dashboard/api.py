@@ -1980,7 +1980,19 @@ _LATEST_ACTIVITY_QUERIES = {
     "youtube": ("SELECT max(collected_at) FROM youtube_videos", "youtube videos"),
     "website": ("SELECT max(collected_at) FROM website_pages", "website pages"),
     "github": ("SELECT max(collected_at) FROM github_commits", "github commits"),
-    "strava": ("SELECT max(collected_at) FROM strava_activities", "strava activities"),
+    "strava": (
+        """
+        SELECT max(ts)
+        FROM (
+            SELECT max(collected_at) AS ts FROM strava_activities
+            UNION ALL
+            SELECT max(collected_at) AS ts FROM strava_gps_streams
+            UNION ALL
+            SELECT max(collected_at) AS ts FROM media_items WHERE source='strava'
+        ) progress
+        """,
+        "strava activity, GPS stream, or media rows",
+    ),
     "search": ("SELECT max(collected_at) FROM search_results", "search results"),
 }
 

@@ -74,3 +74,31 @@ async def test_compute_liveness_ignores_stale_watchdog_marker_when_data_is_fresh
     assert rows[0]["status"] == "live"
     assert "stale watchdog marker ignored" in rows[0]["detail"]
     assert rows[0]["source_health_status"] == "degraded"
+
+
+@pytest.mark.asyncio
+async def test_strava_liveness_counts_route_and_media_progress(monkeypatch):
+    from src.core import source_freshness
+
+    class StravaConn:
+        async def fetch(self, query: str):
+            if "FROM source_health" in query:
+                return []
+            raise AssertionError(query)
+
+        async def fetchval(self, query: str, timeout: int = 8):
+            assert "strava_gps_streams" in query
+            assert "media_items WHERE source='strava'" in query
+            return 30
+
+    monkeypatch.setattr(
+        source_freshness,
+        "FRESHNESS",
+        [("strava", source_freshness.STRAVA_PROGRESS_QUERY, 259200)],
+    )
+
+    rows = await source_freshness.compute_liveness(StravaConn())
+
+    assert rows[0]["status"] == "live"
+    assert rows[0]["age_seconds"] == 30
+    assert rows[0]["freshness_basis"] == "newest Strava activity, GPS stream, or media row"

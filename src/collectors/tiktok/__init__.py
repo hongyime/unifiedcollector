@@ -386,6 +386,15 @@ class TiktokCollector(BaseCollector):
         self._timeout = int(os.getenv("TIKTOK_TIMEOUT_SECONDS", "300"))
         self._browser_fallback = os.getenv("TIKTOK_BROWSER_FALLBACK_ENABLED", "true").lower() == "true"
         self._ytdlp_fallback = os.getenv("TIKTOK_YTDLP_FALLBACK_ENABLED", "true").lower() == "true"
+        self._gallery_dl_archive_enabled = (
+            os.getenv("TIKTOK_GALLERY_DL_ARCHIVE_ENABLED", "true").lower() == "true"
+        )
+        self._gallery_dl_archive_dir = Path(
+            os.getenv(
+                "TIKTOK_GALLERY_DL_ARCHIVE_DIR",
+                str(VAULT_ROOT / "state" / "tiktok" / "gallery_dl_archives"),
+            )
+        )
         self._use_gallery_dl = (
             self._check_tool("gallery-dl")
             and os.getenv("TIKTOK_GALLERY_DL_ENABLED", "true").lower() == "true"
@@ -447,6 +456,29 @@ class TiktokCollector(BaseCollector):
             return True
         except (FileNotFoundError, subprocess.CalledProcessError):
             return False
+
+    def _gallery_dl_archive_args(self, username: str) -> list[str]:
+        """Use gallery-dl's archive to avoid re-downloading known profile media.
+
+        DB-level duplicate checks happen after gallery-dl downloads into a tempdir,
+        so a timed-out large profile can otherwise spend every cycle fetching the
+        same newest files. A per-username archive lets gallery-dl skip files it has
+        already fetched and continue deeper on later cycles.
+        """
+        if not self._gallery_dl_archive_enabled:
+            return []
+        safe_user = sanitize_name(username or "unknown")[:120] or "unknown"
+        try:
+            self._gallery_dl_archive_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            logger.debug(
+                "tiktok: gallery-dl archive dir unavailable: %s",
+                self._gallery_dl_archive_dir,
+                exc_info=True,
+            )
+            return []
+        archive = self._gallery_dl_archive_dir / f"{safe_user}.txt"
+        return ["--download-archive", str(archive)]
 
     @property
     def account_media_dir(self) -> Path:
@@ -994,6 +1026,7 @@ class TiktokCollector(BaseCollector):
                 result = await gallery_dl_download(
                     profile_url,
                     cookies_file=self._cookies_file,
+                    extra_args=self._gallery_dl_archive_args(username),
                     timeout=self._timeout,
                     tempdir=tmpdir,
                     stop_event=self._stop if hasattr(self._stop, "wait") else None,
