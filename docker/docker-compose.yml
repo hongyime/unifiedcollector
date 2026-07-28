@@ -247,6 +247,7 @@ services:
       STRAVA_GPS_BACKFILL_FIRST: "true"
       # CPU hygiene (A#4): low-volume / API-ceiling sources idle longer between
       # cycles — fewer wakeups, lower steady-state CPU, zero data loss.
+      GITHUB_API_TRANSPORT_RETRIES: "2"
       COLLECTOR_CYCLE_SLEEP_GITHUB: "900"
       COLLECTOR_CYCLE_SLEEP_STRAVA: "600"
       COLLECTOR_CYCLE_SLEEP_SEARCH: "600"

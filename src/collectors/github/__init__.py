@@ -370,7 +370,29 @@ class GithubCollector(BaseCollector):
         """
         async with self._sem:
             await asyncio.sleep(self._api_delay)
-            resp = await client.get(url, headers=self._headers())
+            try:
+                transport_retries = int(os.getenv("GITHUB_API_TRANSPORT_RETRIES", "2"))
+            except ValueError:
+                transport_retries = 2
+            transport_retries = max(0, min(transport_retries, 5))
+            attempts = transport_retries + 1
+            for attempt in range(1, attempts + 1):
+                try:
+                    resp = await client.get(url, headers=self._headers())
+                    break
+                except httpx.TransportError as exc:
+                    if attempt >= attempts:
+                        raise
+                    delay = min(10.0, float(2 ** (attempt - 1)))
+                    logger.warning(
+                        "GitHub API transport error on %s (%s); retry %d/%d after %.1fs",
+                        url,
+                        type(exc).__name__,
+                        attempt,
+                        transport_retries,
+                        delay,
+                    )
+                    await sleep_rate_limit(delay)
             self.requests_made += 1
             self._update_rate_limit(resp.headers)
             # Best-effort quota bookkeeping (no-op when no PAT registered).
