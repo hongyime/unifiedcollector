@@ -430,6 +430,44 @@ def _extension_issues_by_source(extension_payload: dict | None) -> dict[str, lis
     return out
 
 
+def _dt_for_compare(value) -> datetime | None:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    return None
+
+
+def _fresh_current_extension_seen(payload: dict, platform: str, since: datetime | None) -> bool:
+    if not platform or since is None:
+        return False
+    for item in [*payload.get("hooks", []), *payload.get("ingest", [])]:
+        if str(item.get("platform") or "").lower() != platform:
+            continue
+        if not item.get("version_ok"):
+            continue
+        seen_at = _dt_for_compare(item.get("last_seen_at"))
+        if seen_at and seen_at > since:
+            return True
+    return False
+
+
+def _suppress_shadowed_extension_mismatches(payload: dict) -> None:
+    kept = []
+    for issue in payload.get("issues", []):
+        if issue.get("kind") != "extension_version_mismatch" or not issue.get("needs_new_event"):
+            kept.append(issue)
+            continue
+        platform = str(issue.get("platform") or "").lower()
+        last_seen = _dt_for_compare(issue.get("last_seen_at"))
+        if _fresh_current_extension_seen(payload, platform, last_seen):
+            continue
+        kept.append(issue)
+    payload["issues"] = kept
+
+
 def _short_age(seconds: object) -> str | None:
     try:
         value = int(seconds or 0)
@@ -907,6 +945,7 @@ async def _browser_extension_payload(conn) -> dict:
                     "needs_new_event": not recent,
                 })
 
+    _suppress_shadowed_extension_mismatches(payload)
     return payload
 
 

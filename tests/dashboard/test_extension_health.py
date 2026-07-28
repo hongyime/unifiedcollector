@@ -71,3 +71,51 @@ async def test_browser_extension_payload_flags_stale_and_old_versions(monkeypatc
     assert by_age[3700]["needs_new_event"] is True
     assert "waiting for a fresh heartbeat" in by_age[3700]["detail"]
     assert by_age[45]["needs_new_event"] is False
+
+
+@pytest.mark.asyncio
+async def test_browser_extension_payload_suppresses_old_endpoint_after_newer_current_signal(monkeypatch):
+    monkeypatch.setenv("UC_EXTENSION_EXPECTED_VERSION", "1.21.33")
+
+    class FakeConn:
+        async def fetchval(self, query: str, timeout: int | None = None):
+            if "dm_hook_heartbeat" in query:
+                return None
+            if "browser_ingest_events" in query:
+                return "browser_ingest_events"
+            raise AssertionError(query)
+
+        async def fetch(self, query: str, timeout: int | None = None):
+            if "FROM browser_ingest_events" in query:
+                return [
+                    {
+                        "platform": "strava",
+                        "endpoint": "strava_route_visit",
+                        "requests": 118,
+                        "observed_count": 118,
+                        "stored_count": 0,
+                        "last_seen_at": datetime(2026, 7, 27, 22, tzinfo=timezone.utc),
+                        "age_seconds": 3904,
+                        "extension_version": "1.21.28",
+                    },
+                    {
+                        "platform": "strava",
+                        "endpoint": "browser_heartbeat",
+                        "requests": 16,
+                        "observed_count": 16,
+                        "stored_count": 0,
+                        "last_seen_at": datetime(2026, 7, 27, 23, tzinfo=timezone.utc),
+                        "age_seconds": 30,
+                        "extension_version": "1.21.33",
+                    },
+                ]
+            raise AssertionError(query)
+
+    payload = await _browser_extension_payload(FakeConn())
+
+    assert len(payload["ingest"]) == 2
+    assert {item["endpoint"]: item["version_ok"] for item in payload["ingest"]} == {
+        "strava_route_visit": False,
+        "browser_heartbeat": True,
+    }
+    assert payload["issues"] == []

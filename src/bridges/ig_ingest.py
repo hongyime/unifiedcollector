@@ -2272,11 +2272,14 @@ async def _record_strava_stream_http_event(pool, body: dict) -> bool:
     if status not in {401, 403, 429}:
         return False
     activity_id = str(body.get("activity_id") or body.get("platform_activity_id") or "unknown")
+    account = _browser_account_label(body)
+    if status == 429 and await _active_strava_stream_cooldown_exists(pool, account, activity_id):
+        return False
     cooldown = STRAVA_BROWSER_429_COOLDOWN_SECONDS if status == 429 else None
     await record_rate_limit_event(
         pool,
         source="strava",
-        account=_browser_account_label(body),
+        account=account,
         scope="browser_strava_streams",
         status_code=status,
         cooldown_seconds=cooldown,
@@ -2290,6 +2293,36 @@ async def _record_strava_stream_http_event(pool, body: dict) -> bool:
         },
     )
     return True
+
+
+async def _active_strava_stream_cooldown_exists(pool, account: str, activity_id: str) -> bool:
+    try:
+        async with pool.acquire() as conn:
+            return bool(await conn.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM rate_limit_events
+                    WHERE source = 'strava'
+                      AND account IS NOT DISTINCT FROM $1
+                      AND scope = 'browser_strava_streams'
+                      AND status_code = 429
+                      AND metadata->>'activity_id' = $2
+                      AND cooldown_seconds IS NOT NULL
+                      AND created_at + cooldown_seconds * interval '1 second' > now()
+                )
+                """,
+                account,
+                activity_id,
+            ))
+    except Exception:
+        logger.debug(
+            "active Strava stream cooldown check failed account=%s activity=%s",
+            account,
+            activity_id,
+            exc_info=True,
+        )
+        return False
 
 
 async def strava_streams_handler(request):
