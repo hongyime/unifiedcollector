@@ -2472,6 +2472,16 @@ async def browser_heartbeat_handler(request):
             "label": label,
             "tab_id": body.get("tab_id"),
             "extension_version": body.get("extension_version"),
+            "health_status": body.get("health_status"),
+            "health_reason": body.get("health_reason"),
+            "page_title": body.get("page_title"),
+            "text_sample": body.get("text_sample"),
+            "content_counts": body.get("content_counts"),
+            "recovery_scheduled": body.get("recovery_scheduled"),
+            "recovery_pending": body.get("recovery_pending"),
+            "recovery_attempt": body.get("recovery_attempt"),
+            "recovery_delay_ms": body.get("recovery_delay_ms"),
+            "recovery_limit": body.get("recovery_limit"),
         },
     )
     return _cors(web.json_response({"ok": True, "platform": platform, "running": running}))

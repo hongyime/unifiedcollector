@@ -31,6 +31,14 @@ const LOG_KEY = "ucLog";
 const LOG_MAX = 200;
 const WATCHDOG_MIN = 13;         // re-nudge any open scraper tab whose loop died
 const KICK_DEBOUNCE_MS = 30000;  // don't re-nudge the same tab more often than this
+const PAGE_RECOVERY_PREFIX = "uc-page-recovery:";
+const PAGE_RECOVERY_STATE_KEY = "ucPageRecovery";
+const PAGE_RECOVERY_MAX_ATTEMPTS = 3;
+const PAGE_RECOVERY_DELAY_WINDOWS_MS = [
+  [45000, 150000],
+  [240000, 480000],
+  [720000, 1200000],
+];
 
 // ---- persistent logging --------------------------------------------------
 async function log(level, msg) {
@@ -98,6 +106,7 @@ const _humanGap = (base) => {
   if (Math.random() < 0.12) ms += 3000 + Math.random() * 9000;
   return Math.max(750, Math.round(ms));
 };
+const _randBetween = (min, max) => Math.round(min + Math.random() * (max - min));
 const _alarmJitter = () => _sleep(15000 + Math.random() * 120000);
 let _tabsOpInProgress = false; // guard against overlapping open/refresh runs (no spam)
 
@@ -198,13 +207,158 @@ chrome.runtime.onInstalled.addListener(() => {
 chrome.runtime.onStartup.addListener(() => { scheduleAlarm(); syncCookies(); ensureScraperTabsOpen("startup").then(() => ensureLoops("startup")); });
 
 chrome.alarms.onAlarm.addListener(async (a) => {
-  if (a.name === ALARM) { await _alarmJitter(); await ensureScraperTabsOpen("watchdog"); await ensureLoops("watchdog"); }
+  if (a.name && a.name.startsWith(PAGE_RECOVERY_PREFIX)) { await runPageRecovery(a.name.slice(PAGE_RECOVERY_PREFIX.length)); }
+  else if (a.name === ALARM) { await _alarmJitter(); await ensureScraperTabsOpen("watchdog"); await ensureLoops("watchdog"); }
   else if (a.name === ALARM_REFRESH) { await _alarmJitter(); await refreshScraperTabs(); await syncCookies(); }
 });
 
 // scraper hosts that have a content-script scraper
 function scraperPlatforms() { return (globalThis.UC_PLATFORMS || []).filter((p) => p.scraper); }
 function scraperUrlPatterns() { return scraperPlatforms().map((p) => `https://${p.host}/*`); }
+function platformById(id) { return scraperPlatforms().find((p) => p.id === id) || null; }
+function pageRecoveryAlarm(tabId) { return PAGE_RECOVERY_PREFIX + String(tabId); }
+function normalizeRecoveryUrl(url) {
+  try {
+    const u = new URL(url || "");
+    return u.origin + u.pathname.replace(/\/$/, "");
+  } catch (e) {
+    return String(url || "").split("#")[0].split("?")[0];
+  }
+}
+async function pageRecoveryState() {
+  const { [PAGE_RECOVERY_STATE_KEY]: cur = {} } = await chrome.storage.local.get(PAGE_RECOVERY_STATE_KEY);
+  return cur && typeof cur === "object" ? cur : {};
+}
+async function savePageRecoveryState(state) {
+  await chrome.storage.local.set({ [PAGE_RECOVERY_STATE_KEY]: state || {} });
+}
+async function clearPageRecoveryForTab(tabId, reason) {
+  if (tabId == null) return;
+  const state = await pageRecoveryState();
+  const prefix = String(tabId) + ":";
+  let changed = false;
+  for (const key of Object.keys(state)) {
+    if (key.startsWith(prefix)) {
+      delete state[key];
+      changed = true;
+    }
+  }
+  if (changed) {
+    try { await chrome.alarms.clear(pageRecoveryAlarm(tabId)); } catch (e) {}
+    await savePageRecoveryState(state);
+    if (reason) await log("info", `page recovery cleared for tab ${tabId} (${reason})`);
+  }
+}
+async function recordPageHealth(base, msg, sender, extra = {}) {
+  try {
+    await fetch(base + "/social/browser-heartbeat", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(withExtensionVersion({
+        platform: msg.platform,
+        label: msg.label || msg.platform,
+        running: true,
+        url: msg.url || (sender && sender.tab && sender.tab.url) || null,
+        tab_id: sender && sender.tab ? sender.tab.id : null,
+        health_status: msg.status || "unknown",
+        health_reason: msg.reason || null,
+        page_title: msg.title || null,
+        text_sample: msg.sample || null,
+        content_counts: msg.content_counts || null,
+        ...extra,
+      })),
+    });
+  } catch (e) {}
+}
+function recoveryDelayMs(attempt) {
+  const idx = Math.min(PAGE_RECOVERY_DELAY_WINDOWS_MS.length - 1, Math.max(0, attempt - 1));
+  const win = PAGE_RECOVERY_DELAY_WINDOWS_MS[idx];
+  return _randBetween(win[0], win[1]);
+}
+async function schedulePageRecovery(base, msg, sender) {
+  const tab = sender && sender.tab;
+  if (!tab || tab.id == null) return { ok: false, reason: "no_sender_tab" };
+  const platform = platformById(msg.platform);
+  if (!platform) return { ok: false, reason: "unknown_platform" };
+  const url = msg.url || tab.url || "";
+  const current = normalizeRecoveryUrl(url);
+  const state = await pageRecoveryState();
+  const key = `${tab.id}:${platform.id}`;
+  const prev = state[key] || {};
+  const samePage = prev.url === current;
+  let attempts = samePage ? Number(prev.attempts || 0) : 0;
+  const now = Date.now();
+
+  if (prev.nextAt && now < prev.nextAt && samePage) {
+    const delay = Math.max(0, prev.nextAt - now);
+    await recordPageHealth(base, msg, sender, {
+      recovery_scheduled: true,
+      recovery_pending: true,
+      recovery_attempt: attempts,
+      recovery_delay_ms: delay,
+    });
+    return { ok: true, scheduled: true, pending: true, attempt: attempts, delay_ms: delay };
+  }
+
+  if (attempts >= PAGE_RECOVERY_MAX_ATTEMPTS) {
+    state[key] = { ...prev, url: current, lastSeenAt: now, limitLogged: true };
+    await savePageRecoveryState(state);
+    if (!prev.limitLogged) {
+      await log("warn", `${platform.label} page recovery hit attempt limit on tab ${tab.id}; cooling instead of reload loop`);
+    }
+    await recordPageHealth(base, msg, sender, {
+      recovery_scheduled: false,
+      recovery_attempt: attempts,
+      recovery_limit: true,
+    });
+    return { ok: true, scheduled: false, reason: "attempt_limit", attempt: attempts, cooldown_mins: 30 };
+  }
+
+  attempts += 1;
+  const delay = recoveryDelayMs(attempts);
+  state[key] = {
+    url: current,
+    platform: platform.id,
+    attempt: attempts,
+    attempts,
+    nextAt: now + delay,
+    lastSeenAt: now,
+    reason: msg.reason || "recoverable_error_shell",
+    title: msg.title || "",
+  };
+  await savePageRecoveryState(state);
+  await chrome.alarms.create(pageRecoveryAlarm(tab.id), { when: now + delay });
+  await log("warn", `${platform.label} page looks stuck (${msg.reason || "error shell"}); reload scheduled in ${Math.round(delay / 1000)}s (attempt ${attempts}/${PAGE_RECOVERY_MAX_ATTEMPTS})`);
+  await recordPageHealth(base, msg, sender, {
+    recovery_scheduled: true,
+    recovery_attempt: attempts,
+    recovery_delay_ms: delay,
+  });
+  return { ok: true, scheduled: true, attempt: attempts, delay_ms: delay };
+}
+async function runPageRecovery(tabId) {
+  const state = await pageRecoveryState();
+  const prefix = String(tabId) + ":";
+  const key = Object.keys(state).find((k) => k.startsWith(prefix));
+  if (!key) return;
+  const rec = state[key] || {};
+  try {
+    const tab = await chrome.tabs.get(Number(tabId));
+    const current = normalizeRecoveryUrl(tab && tab.url);
+    if (!tab || current !== rec.url) {
+      delete state[key];
+      await savePageRecoveryState(state);
+      await log("info", `page recovery skipped for tab ${tabId}; tab moved away`);
+      return;
+    }
+    await chrome.tabs.reload(Number(tabId), { bypassCache: true });
+    state[key] = { ...rec, nextAt: 0, lastReloadAt: Date.now() };
+    await savePageRecoveryState(state);
+    await log("warn", `page recovery reloaded tab ${tabId} (${rec.platform || "scraper"}, attempt ${rec.attempts || rec.attempt || 1})`);
+  } catch (e) {
+    delete state[key];
+    await savePageRecoveryState(state);
+  }
+}
 
 // Nudge every open scraper tab to ensure its continuous loop is running. The tab
 // auto-starts the loop on load; this only RESPAWNS it if it died (page reload,
@@ -556,6 +710,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
         break;
       }
+      case "pageHealth": {
+        if (msg.status === "recoverable_error_shell") {
+          sendResponse(await schedulePageRecovery(base, msg, sender));
+        } else if (msg.status === "healthy") {
+          await clearPageRecoveryForTab(sender && sender.tab ? sender.tab.id : null, "healthy");
+          await recordPageHealth(base, msg, sender, { recovery_scheduled: false });
+          sendResponse({ ok: true });
+        } else {
+          await recordPageHealth(base, msg, sender, { recovery_scheduled: false });
+          sendResponse({ ok: true });
+        }
+        break;
+      }
       case "wall": {  // the in-tab loop hit a throttle/login wall and is sleeping
         const mins = msg.mins || 45;
         await setStatus({ cooldownUntil: Date.now() + mins * 60000 });
@@ -595,6 +762,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         break;
       case "cycleReport":
         setStatus({ lastCycleAt: Date.now(), lastCycle: { platform: msg.platform, targets: msg.targets, saved: msg.saved, discovered: msg.discovered } });
+        await clearPageRecoveryForTab(sender && sender.tab ? sender.tab.id : null, "cycle-ok");
         log("info", `✅ cycle done [${msg.platform}]: ${msg.targets} targets, ${msg.saved} media candidate(s), ${msg.discovered} discovered`);
         sendResponse({ ok: true });
         break;

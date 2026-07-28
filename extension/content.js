@@ -100,6 +100,93 @@ function clog(level, msg, platform) {
   send({ type: "log", level, msg, platform }).catch(() => {});
 }
 
+const PAGE_HEALTH_REPORT_GAP_MS = 60000;
+const WALL_LOG_GAP_MS = 10 * 60000;
+const LAST_PAGE_HEALTH_REPORT = {};
+const LAST_WALL_LOG_AT = {};
+const PAGE_RECOVERY_ENABLED = new Set(["tiktok"]);
+const RECOVERABLE_PAGE_SHELL_PATTERNS = {
+  tiktok: [
+    { reason: "sorry_could_not_show_page", re: /sorry,?\s*we\s+couldn(?:'|\u2019)?t\s+show\s+that\s+page/i },
+    { reason: "could_not_show_page", re: /couldn(?:'|\u2019)?t\s+show\s+(?:this|that)\s+page/i },
+    { reason: "page_not_available", re: /this\s+page\s+isn(?:'|\u2019)?t\s+available/i },
+    { reason: "page_not_found", re: /page\s+not\s+found/i },
+    { reason: "something_went_wrong", re: /something\s+went\s+wrong/i, lowContent: true },
+    { reason: "try_again_empty_state", re: /\btry\s+again\b/i, lowContent: true },
+    { reason: "no_internet_connection", re: /no\s+internet\s+connection/i, lowContent: true },
+    { reason: "video_unavailable", re: /video\s+currently\s+unavailable/i, lowContent: true },
+  ],
+  default: [
+    { reason: "page_not_available", re: /this\s+page\s+isn(?:'|\u2019)?t\s+available/i },
+    { reason: "page_not_found", re: /page\s+not\s+found/i },
+    { reason: "something_went_wrong", re: /something\s+went\s+wrong/i, lowContent: true },
+    { reason: "try_again_empty_state", re: /\btry\s+again\b/i, lowContent: true },
+    { reason: "no_internet_connection", re: /no\s+internet\s+connection/i, lowContent: true },
+  ],
+};
+
+function pageContentCounts() {
+  try {
+    return {
+      articles: document.querySelectorAll("article").length,
+      videos: document.querySelectorAll("video").length,
+      images: document.querySelectorAll("img[src], img[srcset]").length,
+      links: document.querySelectorAll("a[href]").length,
+    };
+  } catch (e) {
+    return { articles: 0, videos: 0, images: 0, links: 0 };
+  }
+}
+function visiblePageText() {
+  try {
+    const focused = [...document.querySelectorAll('[role="alert"], [data-e2e*="error" i], [data-e2e*="empty" i], h1, h2, button')]
+      .map((el) => (el.innerText || el.textContent || "").trim())
+      .filter(Boolean)
+      .slice(0, 80)
+      .join("\n");
+    const body = (document.body && document.body.innerText) ? document.body.innerText.slice(0, 9000) : "";
+    return [document.title || "", focused, body].filter(Boolean).join("\n");
+  } catch (e) {
+    return document.title || "";
+  }
+}
+function compactSample(text) {
+  return String(text || "").replace(/\s+/g, " ").trim().slice(0, 260);
+}
+function detectRecoverablePageShell(platformId) {
+  if (!PAGE_RECOVERY_ENABLED.has(platformId)) return null;
+  const text = visiblePageText();
+  if (!text) return null;
+  const counts = pageContentCounts();
+  const usefulNodes = counts.articles + counts.videos + counts.images;
+  const lowContent = usefulNodes < 4 && counts.links < 40;
+  const patterns = [...(RECOVERABLE_PAGE_SHELL_PATTERNS[platformId] || []), ...RECOVERABLE_PAGE_SHELL_PATTERNS.default];
+  for (const pat of patterns) {
+    if (pat.re.test(text) && (!pat.lowContent || lowContent)) {
+      return { reason: pat.reason, sample: compactSample(text), content_counts: counts };
+    }
+  }
+  return null;
+}
+async function reportRecoverablePageShell(p, shell) {
+  const key = `${p.id}:${shell.reason}:${location.href}`;
+  const now = Date.now();
+  if (LAST_PAGE_HEALTH_REPORT[key] && now - LAST_PAGE_HEALTH_REPORT[key] < PAGE_HEALTH_REPORT_GAP_MS) return null;
+  LAST_PAGE_HEALTH_REPORT[key] = now;
+  clog("warn", `${p.label} page looks stuck (${shell.reason}); asking extension to reload with backoff`, p.label);
+  return send({
+    type: "pageHealth",
+    platform: p.id,
+    label: p.label,
+    status: "recoverable_error_shell",
+    reason: shell.reason,
+    url: location.href,
+    title: document.title || "",
+    sample: shell.sample,
+    content_counts: shell.content_counts,
+  }).catch(() => null);
+}
+
 // Capture is ALWAYS ON (user: "i want them on at all times"). Stories, highlights
 // and comments are captured every cycle — no toggles. Pacing is handled by the
 // human-paced loop + wall cooldown, not by disabling capture.
@@ -1641,6 +1728,26 @@ async function mainLoop() {
   try {
     while (LOOP_RUNNING) {
       try {
+        const leftMs = wallLeftMs(p.id);
+        if (leftMs > 0) {
+          const now = Date.now();
+          if (!LAST_WALL_LOG_AT[p.id] || now - LAST_WALL_LOG_AT[p.id] > WALL_LOG_GAP_MS) {
+            LAST_WALL_LOG_AT[p.id] = now;
+            clog("warn", `${p.label} cooldown active for ${Math.ceil(leftMs / 60000)}m; pausing this tab`, p.label);
+          }
+          await sleep(Math.min(leftMs, human(Math.min(passRestMs(p.id), 300000))));
+          continue;
+        }
+        const shell = detectRecoverablePageShell(p.id);
+        if (shell) {
+          const recovery = await reportRecoverablePageShell(p, shell);
+          if (recovery && recovery.cooldown_mins) {
+            setWall(p.id, recovery.cooldown_mins);
+          }
+          const delay = Number((recovery && recovery.delay_ms) || passRestMs(p.id));
+          await sleep(human(Math.max(30000, Math.min(delay, 300000))));
+          continue;
+        }
         const stats = await p.runCycle();  // one pass: IG = a few profiles; others = scrape current page
         await send({ type: "cycleReport", platform: p.label, ...stats }).catch(() => {});
       } catch (e) {

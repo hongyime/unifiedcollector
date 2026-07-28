@@ -305,6 +305,40 @@ def test_browser_heartbeat_handler_records_platform_loop():
     assert "1.21.29" in args[5]
 
 
+def test_browser_heartbeat_handler_records_page_recovery_metadata():
+    pool = _FakePool()
+    req = _FakeRequest(
+        {"pool": pool},
+        {
+            "platform": "tiktok",
+            "label": "TikTok",
+            "running": True,
+            "url": "https://www.tiktok.com/following",
+            "tab_id": 321,
+            "extension_version": "1.21.36",
+            "health_status": "recoverable_error_shell",
+            "health_reason": "sorry_could_not_show_page",
+            "text_sample": "Sorry, we couldn't show that page",
+            "recovery_scheduled": True,
+            "recovery_attempt": 1,
+            "recovery_delay_ms": 90000,
+        },
+    )
+
+    resp = asyncio.run(ig_ingest.browser_heartbeat_handler(req))
+
+    assert resp.status == 200
+    query, args = pool.conn.executes[0]
+    assert "browser_ingest_events" in query
+    assert args[:5] == ("tiktok", "browser_heartbeat", "321", 1, 0)
+    metadata = json.loads(args[5])
+    assert metadata["health_status"] == "recoverable_error_shell"
+    assert metadata["health_reason"] == "sorry_could_not_show_page"
+    assert metadata["recovery_scheduled"] is True
+    assert metadata["recovery_attempt"] == 1
+    assert metadata["extension_version"] == "1.21.36"
+
+
 def test_record_strava_stream_http_429_writes_rate_limit_event(monkeypatch):
     pool = _FakePool()
     monkeypatch.setattr(ig_ingest, "STRAVA_BROWSER_429_COOLDOWN_SECONDS", 1234)
