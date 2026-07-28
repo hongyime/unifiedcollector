@@ -5,6 +5,7 @@ import { Header } from "../../components/layout/Header";
 import { LoadingSpinner } from "../../components/ui/LoadingSpinner";
 import { ErrorState } from "../../components/ui/ErrorState";
 import { Button } from "../../components/ui/Button";
+import { AuthImage } from "../../components/ui/AuthImage";
 import { formatBytes, relativeTime } from "../../utils/formatters";
 import type { MediaItem } from "../../services/types";
 
@@ -43,23 +44,15 @@ function Tile({ item, onClick }: { item: MediaItem; onClick: () => void }) {
     <div onClick={onClick} className="cursor-pointer group border border-border rounded-lg overflow-hidden hover:border-white/30 transition-colors">
       <div className="aspect-square bg-background flex items-center justify-center relative">
         {cat === "image" ? (
-          <img
+          <AuthImage
             src={api.thumbnailUrl(item.id)}
             alt={item.filename}
             className="w-full h-full object-cover"
             loading="lazy"
-            onError={(e) => {
-              // Fall back to an icon tile instead of a blank/broken image.
-              const el = e.target as HTMLImageElement;
-              el.style.display = "none";
-              el.parentElement?.querySelector(".fallback-icon")?.classList.remove("hidden");
-            }}
+            fallbackLabel={item.content_type}
           />
         ) : null}
         {cat !== "image" && <CategoryIcon category={cat} />}
-        <div className={`fallback-icon absolute inset-0 items-center justify-center ${cat === "image" ? "hidden flex" : "hidden"}`}>
-          <CategoryIcon category={cat} />
-        </div>
         <span className="absolute bottom-1 right-1 text-[10px] uppercase bg-black/60 px-1 rounded text-text-muted">
           {item.content_type}
         </span>
@@ -79,7 +72,7 @@ function PreviewModal({ item, onClose }: { item: MediaItem; onClose: () => void 
     <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50" onClick={onClose}>
       <div className="max-w-3xl max-h-[80vh] flex flex-col items-center" onClick={(e) => e.stopPropagation()}>
         {cat === "image" && (
-          <img src={api.thumbnailUrl(item.id)} alt={item.filename} className="max-w-full max-h-[70vh] object-contain rounded-lg" />
+          <AuthImage src={fileUrl} alt={item.filename} className="max-w-full max-h-[70vh] object-contain rounded-lg" loading="eager" fallbackLabel={item.content_type} />
         )}
         {cat === "video" && (
           <video src={fileUrl} controls autoPlay className="max-w-full max-h-[70vh] rounded-lg bg-black" />
