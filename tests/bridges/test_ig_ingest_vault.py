@@ -339,6 +339,34 @@ def test_browser_heartbeat_handler_records_page_recovery_metadata():
     assert metadata["extension_version"] == "1.21.36"
 
 
+def test_browser_heartbeat_handler_records_bridge_diagnostic_platform():
+    pool = _FakePool()
+    req = _FakeRequest(
+        {"pool": pool},
+        {
+            "platform": "bridge",
+            "label": "UnifiedCollector Bridge",
+            "running": True,
+            "url": "chrome-extension://abc/background.js",
+            "tab_id": "service_worker",
+            "extension_version": "1.21.37",
+            "health_status": "service_worker_active",
+            "health_reason": "warm_start",
+        },
+    )
+
+    resp = asyncio.run(ig_ingest.browser_heartbeat_handler(req))
+
+    assert resp.status == 200
+    query, args = pool.conn.executes[0]
+    assert "browser_ingest_events" in query
+    assert args[:5] == ("bridge", "browser_heartbeat", "service_worker", 1, 0)
+    metadata = json.loads(args[5])
+    assert metadata["health_status"] == "service_worker_active"
+    assert metadata["health_reason"] == "warm_start"
+    assert metadata["extension_version"] == "1.21.37"
+
+
 def test_record_strava_stream_http_429_writes_rate_limit_event(monkeypatch):
     pool = _FakePool()
     monkeypatch.setattr(ig_ingest, "STRAVA_BROWSER_429_COOLDOWN_SECONDS", 1234)

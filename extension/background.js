@@ -75,6 +75,24 @@ function extensionVersion() {
 function withExtensionVersion(payload) {
   return { ...payload, extension_version: extensionVersion() };
 }
+async function reportBridgeHeartbeat(reason) {
+  try {
+    const base = await ingestBase();
+    await fetch(base + "/social/browser-heartbeat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(withExtensionVersion({
+        platform: "bridge",
+        label: "UnifiedCollector Bridge",
+        running: true,
+        tab_id: "service_worker",
+        url: "chrome-extension://" + chrome.runtime.id + "/background.js",
+        health_status: "service_worker_active",
+        health_reason: reason || "startup",
+      })),
+    });
+  } catch (e) {}
+}
 async function fetchJsonWithTimeout(url, timeoutMs = 12000) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -191,6 +209,7 @@ async function scheduleAlarm() {
   await setStatus({ swStartedAt: Date.now() });
   const ver = (chrome.runtime.getManifest && chrome.runtime.getManifest().version) || "?";
   await log("info", `worker started v${ver} - jittered tabs + ${WATCHDOG_MIN}-min watchdog + ${REFRESH_MIN}-min refresh`);
+  await reportBridgeHeartbeat("schedule_alarm");
 }
 // onInstalled fires on every extension reload/update — the exact moment content
 // scripts in already-open tabs get SEVERED ("Extension context invalidated") and go
@@ -804,3 +823,4 @@ async function scrapeNow() {
 // Warm start (worker waking from sleep)
 setStatus({ swStartedAt: Date.now() });
 log("info", "service worker active");
+reportBridgeHeartbeat("warm_start").catch(() => {});

@@ -97,6 +97,7 @@ _SAFE = re.compile(r"[^A-Za-z0-9._-]")
 # Only instagram currently spiders (followers/following graph); the others scrape
 # whatever the open page exposes, so they have no spider table.
 KNOWN_PLATFORMS = {"instagram", "tiktok", "lemon8", "x", "threads", "facebook", "strava"}
+BROWSER_DIAGNOSTIC_PLATFORMS = {"bridge"}
 _DM_PROBE_TARGET_TABLES = {platform: ["dm_probe_log"] for platform in KNOWN_PLATFORMS}
 
 _BROWSER_CAPTURE_TARGET_TABLES = {
@@ -227,10 +228,12 @@ def _date_prefix(item, platform="") -> str:
     return datetime.now(tz=timezone.utc).strftime("%Y%m%d")
 
 
-def _norm_platform(p):
+def _norm_platform(p, *, allow_diagnostics: bool = False):
     p = (p or "instagram").strip().lower()
     if p in {"twitter", "twitter / x", "twitter/x", "x.com"}:
         p = "x"
+    if allow_diagnostics and p in BROWSER_DIAGNOSTIC_PLATFORMS:
+        return p
     return p if p in KNOWN_PLATFORMS else "instagram"
 
 
@@ -2451,7 +2454,7 @@ async def strava_route_visit_handler(request):
 
 async def browser_heartbeat_handler(request):
     body = await _safe_json(request)
-    platform = _norm_platform(body.get("platform"))
+    platform = _norm_platform(body.get("platform"), allow_diagnostics=True)
     running = bool(body.get("running"))
     url = body.get("url")
     label = body.get("label")
