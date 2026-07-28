@@ -137,6 +137,7 @@ class YoutubeCollector(BaseCollector):
         self._video_backfill_batch_size = int(
             os.getenv("YOUTUBE_VIDEO_BACKFILL_BATCH_SIZE", os.getenv("BACKFILL_BATCH_SIZE", "100"))
         )
+        self._video_backfill_scan_limit = int(os.getenv("YOUTUBE_VIDEO_BACKFILL_SCAN_LIMIT", "5000"))
         self._prefill_media_backlog = os.getenv("YOUTUBE_PREFILL_MEDIA_BACKLOG", "true").lower() == "true"
         # FAMOUS-FILTER (Bryan): skip channels at or above this subscriber count,
         # even if subscribed. 0 disables. Overrides the subscription seed.
@@ -1134,7 +1135,7 @@ class YoutubeCollector(BaseCollector):
     async def _get_video_backfill_groups(self, batch_size: int) -> dict[tuple[str, str], list[str]]:
         if not self.pool or batch_size <= 0:
             return {}
-        scan_limit = max(batch_size * 4, batch_size)
+        scan_limit = max(batch_size, self._video_backfill_scan_limit)
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
                 """
@@ -1170,9 +1171,10 @@ class YoutubeCollector(BaseCollector):
             selected += 1
         if skipped_duration:
             logger.info(
-                "youtube: video backfill skipped %d over-duration candidate(s) before selecting %d",
+                "youtube: video backfill skipped %d over-duration candidate(s) before selecting %d from scan_limit=%d",
                 skipped_duration,
                 selected,
+                scan_limit,
             )
         return groups
 
