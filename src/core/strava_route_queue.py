@@ -56,21 +56,39 @@ async def fetch_strava_route_capture_queue(
     async with pool.acquire() as conn:
         cooldown = await conn.fetchrow(
             """
-            SELECT created_at + (COALESCE(cooldown_seconds, 0) * INTERVAL '1 second') AS cooldown_until,
-                   reason,
-                   account,
-                   scope
-            FROM rate_limit_events
-            WHERE source = 'strava'
-              AND scope IN ('gps_streams', 'browser_strava_streams')
-              AND status_code = 429
-              AND cooldown_seconds IS NOT NULL
-              AND created_at + (COALESCE(cooldown_seconds, 0) * INTERVAL '1 second') > now()
+            SELECT rl.created_at + (COALESCE(rl.cooldown_seconds, 0) * INTERVAL '1 second') AS cooldown_until,
+                   rl.reason,
+                   rl.account,
+                   rl.scope
+            FROM rate_limit_events rl
+            WHERE rl.source = 'strava'
+              AND rl.scope IN ('gps_streams', 'browser_strava_streams')
+              AND rl.status_code = 429
+              AND rl.cooldown_seconds IS NOT NULL
+              AND rl.created_at + (COALESCE(rl.cooldown_seconds, 0) * INTERVAL '1 second') > now()
               AND (
-                    NULLIF(account, '') IS NULL
-                 OR ($1::text IS NOT NULL AND account = $1::text)
+                    NULLIF(rl.account, '') IS NULL
+                 OR ($1::text IS NOT NULL AND rl.account = $1::text)
               )
-            ORDER BY created_at DESC
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM browser_ingest_events bie
+                    WHERE bie.platform = 'strava'
+                      AND bie.endpoint = 'strava_streams'
+                      AND bie.subject = rl.metadata->>'activity_id'
+                      AND bie.stored_count > 0
+                      AND bie.created_at > rl.created_at
+              )
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM strava_activities a
+                    JOIN strava_gps_streams s ON s.activity_id = a.id
+                    WHERE a.platform_activity_id::text = rl.metadata->>'activity_id'
+                      AND s.collected_at > rl.created_at
+                      AND jsonb_typeof(s.latlng) = 'array'
+                      AND jsonb_array_length(s.latlng) > 1
+              )
+            ORDER BY rl.created_at DESC
             LIMIT 1
             """,
             account,

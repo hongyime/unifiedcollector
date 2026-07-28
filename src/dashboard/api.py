@@ -296,11 +296,48 @@ async def _source_content_summary(conn, since_sql: str, before_sql: str | None =
 
 
 async def _source_rate_summary(conn, since_sql: str, before_sql: str | None = None) -> dict[str, dict]:
-    if "rate_limit_events" not in await _existing_public_tables(conn, ["rate_limit_events"]):
+    existing = await _existing_public_tables(
+        conn,
+        ["rate_limit_events", "browser_ingest_events", "strava_activities", "strava_gps_streams"],
+    )
+    if "rate_limit_events" not in existing:
         return {}
     before_clause = f" AND created_at < {before_sql}" if before_sql else ""
+    if {"browser_ingest_events", "strava_activities", "strava_gps_streams"}.issubset(existing):
+        cleared_by_success_sql = """
+                   EXISTS (
+                       SELECT 1
+                       FROM browser_ingest_events bie
+                       WHERE rl.source = 'strava'
+                         AND rl.scope IN ('gps_streams', 'browser_strava_streams')
+                         AND bie.platform = 'strava'
+                         AND bie.endpoint = 'strava_streams'
+                         AND bie.subject = rl.metadata->>'activity_id'
+                         AND bie.stored_count > 0
+                         AND bie.created_at > rl.created_at
+                   ) OR EXISTS (
+                       SELECT 1
+                       FROM strava_activities a
+                       JOIN strava_gps_streams s ON s.activity_id = a.id
+                       WHERE rl.source = 'strava'
+                         AND rl.scope IN ('gps_streams', 'browser_strava_streams')
+                         AND a.platform_activity_id::text = rl.metadata->>'activity_id'
+                         AND s.collected_at > rl.created_at
+                         AND jsonb_typeof(s.latlng) = 'array'
+                         AND jsonb_array_length(s.latlng) > 1
+                   )
+        """
+    else:
+        cleared_by_success_sql = "FALSE"
     rows = await conn.fetch(
         f"""
+        WITH events AS (
+            SELECT rl.*,
+                   ({cleared_by_success_sql}) AS cleared_by_success
+            FROM rate_limit_events rl
+            WHERE rl.created_at >= {since_sql}
+              {before_clause}
+        )
         SELECT source,
                count(*) FILTER (WHERE status_code = 429 OR status_code IS NULL)::int AS rate_limits,
                count(*) FILTER (WHERE status_code IS NOT NULL AND status_code <> 429)::int AS access_errors,
@@ -309,10 +346,14 @@ async def _source_rate_summary(conn, since_sql: str, before_sql: str | None = No
                (array_agg(status_code ORDER BY created_at DESC))[1]::int AS latest_status_code,
                (array_agg(reason ORDER BY created_at DESC))[1] AS latest_reason,
                max(created_at) AS latest_event_at,
-               max(created_at + COALESCE(cooldown_seconds, 0) * interval '1 second') AS active_until
-        FROM rate_limit_events
-        WHERE created_at >= {since_sql}
-          {before_clause}
+               max(
+                   CASE
+                       WHEN NOT cleared_by_success
+                       THEN created_at + COALESCE(cooldown_seconds, 0) * interval '1 second'
+                       ELSE NULL
+                   END
+               ) AS active_until
+        FROM events
         GROUP BY source
         """,
         timeout=15,

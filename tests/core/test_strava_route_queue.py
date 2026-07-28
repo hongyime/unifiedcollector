@@ -29,12 +29,14 @@ class _Conn:
             cooldowns = [cooldown]
         self.cooldowns = cooldowns or []
         self.rows = rows or []
+        self.fetchrow_query = None
         self.fetchrow_args = None
         self.fetch_query = None
         self.fetch_called = False
         self.fetch_args = None
 
     async def fetchrow(self, _query, *args):
+        self.fetchrow_query = _query
         self.fetchrow_args = args
         account = args[0] if args else None
         for row in self.cooldowns:
@@ -69,6 +71,8 @@ def test_route_capture_queue_respects_active_gps_cooldown():
     assert out["cooldown"]["until"] == "2026-07-23T13:00:00+00:00"
     assert out["cooldown"]["scope"] == "gps_streams"
     assert conn.fetch_called is False
+    assert "browser_ingest_events bie" in conn.fetchrow_query
+    assert "strava_gps_streams s" in conn.fetchrow_query
 
 
 def test_route_capture_queue_respects_matching_account_cooldown():
