@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import hashlib
 import json
 from pathlib import Path
@@ -181,6 +182,53 @@ def test_extension_ingest_writes_media_to_vault_blob(monkeypatch, tmp_path):
     payload = json.loads(sidecar.read_text(encoding="utf-8"))
     assert payload["metadata"]["ingest_path"] == "extension"
     assert payload["metadata"]["legacy_path"].endswith("story_abc123.jpg")
+
+
+def test_extension_ingest_accepts_browser_uploaded_media(monkeypatch, tmp_path):
+    pool = _FakePool()
+    vault_root = tmp_path / "vault"
+    media_root = tmp_path / "media"
+    vault_root.mkdir()
+    monkeypatch.setattr(ig_ingest, "VAULT_ROOT", vault_root)
+    monkeypatch.setattr(ig_ingest, "MEDIA_ROOT", str(media_root))
+    monkeypatch.setattr(ig_ingest, "assert_media_write_allowed", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        ig_ingest,
+        "write_media_sidecar",
+        lambda **kwargs: SimpleNamespace(enabled=True, ok=True, relative_path="sidecars/media.json", error=None),
+    )
+    data = b"\xff\xd8\xff" + (b"b" * 22000)
+    digest = hashlib.sha256(data).hexdigest()
+    blob = vault_root / "media" / "blobs" / digest[:2] / digest[2:4] / f"{digest}.jpg"
+    pool.conn.fetchrow_result = {
+        "file_path": str(blob),
+        "file_size": len(data),
+        "sha256": digest,
+        "metadata": {"vault_sidecar": {"ok": True, "path": "sidecars/media.json"}},
+    }
+
+    saved = asyncio.run(
+        ig_ingest._download_and_save(
+            pool,
+            _NoDownloadSession(),
+            "tiktok",
+            "feed",
+            {
+                "content_id": "video123",
+                "url": "https://v16m.tiktokcdn.com/video.mp4",
+                "data_b64": base64.b64encode(data).decode("ascii"),
+                "mime_type": "image/jpeg",
+                "meta": {"browser_upload": True},
+            },
+        )
+    )
+
+    assert saved is True
+    assert blob.read_bytes() == data
+    media_args = next(args for query, args in pool.conn.executes if "INSERT INTO media_items" in query)
+    metadata = json.loads(media_args[10])
+    assert metadata["browser_upload"] is True
+    assert metadata["vault_artifact"]["sha256"] == digest
 
 
 def test_archive_browser_capture_writes_profile_raw_payload(monkeypatch):

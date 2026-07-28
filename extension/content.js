@@ -297,6 +297,24 @@ function deepCollectMedia(obj, sink, entity, depth = 0) {
     return;
   }
   if (typeof obj !== "object") return;
+  // Full video node (TikTok). These URLs usually 403 outside Chrome, so send
+  // them through the browser-upload path rather than the server URL fetcher.
+  const vid = obj.video || obj.Video;
+  if (vid && (vid.playAddr || vid.downloadAddr || vid.PlayAddr)) {
+    const url = vid.downloadAddr || vid.playAddr || vid.PlayAddr;
+    if (typeof url === "string") {
+      sink.add({
+        content_id: String(obj.id || obj.awemeId || url) + "_video",
+        content_type: "video",
+        url,
+        entity_name: entity,
+        kind: "post",
+        browser_upload: true,
+        browser_upload_only: true,
+        meta: { tiktok_asset_role: "video_playaddr" },
+      });
+    }
+  }
   // cover/poster node (tiktok). TikTok video CDN URLs are often short-lived
   // and cookie-bound when fetched server-side; cover images survive much more
   // reliably and still preserve the post as media evidence.
@@ -919,10 +937,23 @@ const tiktok = {
     await autoScroll(10);
     const state = parseEmbeddedState(["__UNIVERSAL_DATA_FOR_REHYDRATION__", "SIGI_STATE", "sigi-persisted-data"]);
     if (state) { deepCollectMedia(state, sink, entity); const us = []; deepCollectUsers(state, us); if (us.length) await send({ type: "users", platform: "tiktok", context: "seen", users: us }); }
-    // also harvest whatever the DOM rendered. Avoid direct video src URLs here:
-    // TikTok's playback URLs are short-lived/cookie-bound and produce server-side
-    // 403s. Posters/covers and photo posts are the durable file-backed evidence.
+    // also harvest whatever the DOM rendered. TikTok playback URLs are
+    // short-lived/cookie-bound, so videos go through browser_upload_only while
+    // posters/covers can still use normal URL ingest.
     document.querySelectorAll("video").forEach((v, i) => {
+      const u = v.src || (v.querySelector("source") && v.querySelector("source").src);
+      if (u && /^https?:/.test(u)) {
+        sink.add({
+          content_id: "dom_video_" + urlId(u),
+          content_type: "video",
+          url: u,
+          entity_name: entity,
+          kind: "post",
+          browser_upload: true,
+          browser_upload_only: true,
+          meta: { tiktok_asset_role: "dom_video" },
+        });
+      }
       const poster = v.getAttribute("poster") || v.poster;
       if (poster && /^https?:/.test(poster)) {
         sink.add({
@@ -1215,6 +1246,8 @@ const x = {
             url: u,
             entity_name: ctx.author || entity,
             kind: "post",
+            browser_upload: true,
+            browser_upload_only: true,
             meta: { x_asset_role: "video", post_id: ctx.post_id || null, author_username: ctx.author || null },
           });
         }
@@ -1279,7 +1312,16 @@ function harvestDom(entity, { imgRe, junkRe }) {
       sink.add({ content_id: "poster_" + urlId(v.poster), content_type: "photo", url: v.poster, entity_name: entity });
     const u = v.src || (v.querySelector("source") && v.querySelector("source").src);
     if (u && /^https?:/.test(u) && !u.startsWith("blob:"))
-      sink.add({ content_id: "vid_" + urlId(u), content_type: "video", url: u, entity_name: entity });
+      sink.add({
+        content_id: "vid_" + urlId(u),
+        content_type: "video",
+        url: u,
+        entity_name: entity,
+        kind: "post",
+        browser_upload: true,
+        browser_upload_only: true,
+        meta: { dom_asset_role: "video" },
+      });
   });
   return sink;
 }

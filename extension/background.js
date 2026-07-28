@@ -31,6 +31,7 @@ const LOG_KEY = "ucLog";
 const LOG_MAX = 200;
 const WATCHDOG_MIN = 13;         // re-nudge any open scraper tab whose loop died
 const KICK_DEBOUNCE_MS = 30000;  // don't re-nudge the same tab more often than this
+const BROWSER_UPLOAD_MAX_BYTES = 256 * 1024 * 1024;
 const PAGE_RECOVERY_PREFIX = "uc-page-recovery:";
 const PAGE_RECOVERY_STATE_KEY = "ucPageRecovery";
 const PAGE_RECOVERY_MAX_ATTEMPTS = 3;
@@ -430,6 +431,100 @@ async function platformStatuses() {
   }
   return out;
 }
+
+function browserUploadAllowed(platform, rawUrl) {
+  let host = "";
+  try { host = new URL(rawUrl || "").hostname.toLowerCase(); } catch (e) { return false; }
+  const rules = {
+    tiktok: /(^|\.)((tiktokcdn|tiktokv|byteoversea|byteimg|ibytedtos|muscdn)\.com)$/i,
+    facebook: /(^|\.)(fbcdn\.net)$/i,
+    threads: /(^|\.)((fbcdn\.net)|(cdninstagram\.com))$/i,
+    instagram: /(^|\.)((fbcdn\.net)|(cdninstagram\.com))$/i,
+    x: /(^|\.)((twimg\.com)|(twitter\.com)|(x\.com))$/i,
+    lemon8: /(^|\.)((lemon8-app\.com)|(byteimg\.com)|(ibytedtos\.com))$/i,
+  };
+  return Boolean((rules[platform] || /$a/).test(host));
+}
+
+function shouldBrowserUploadMedia(item) {
+  if (!item || !item.url) return false;
+  if (item.browser_upload === true || item.browser_upload_only === true) return true;
+  return String(item.content_type || "").toLowerCase() === "video";
+}
+
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let out = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    out += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(out);
+}
+
+async function uploadMediaViaBrowser(base, msg, item) {
+  const platform = msg.platform || "instagram";
+  if (!browserUploadAllowed(platform, item.url)) return { ok: false, reason: "disallowed_host" };
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 180000);
+  try {
+    const response = await fetch(item.url, {
+      credentials: "include",
+      cache: "force-cache",
+      signal: ctrl.signal,
+    });
+    if (!response.ok) return { ok: false, reason: "http_" + response.status };
+    const headerSize = Number(response.headers.get("content-length") || 0);
+    if (headerSize && headerSize > BROWSER_UPLOAD_MAX_BYTES) return { ok: false, reason: "too_large_header", bytes: headerSize };
+    const blob = await response.blob();
+    if (blob.size > BROWSER_UPLOAD_MAX_BYTES) return { ok: false, reason: "too_large", bytes: blob.size };
+    const b64 = arrayBufferToBase64(await blob.arrayBuffer());
+    const payload = withExtensionVersion({
+      platform,
+      username: msg.username,
+      item: {
+        ...item,
+        data_b64: b64,
+        mime_type: blob.type || response.headers.get("content-type") || null,
+        meta: { ...(item.meta || {}), browser_upload: true },
+      },
+      file_size: blob.size,
+      mime_type: blob.type || response.headers.get("content-type") || null,
+    });
+    const r = await fetch(base + "/social/ingest-upload", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const j = await r.json().catch(() => ({}));
+    return { ok: r.ok && !!j.stored, stored: j.stored || 0, reject_stats: j.reject_stats || null };
+  } catch (e) {
+    return { ok: false, reason: e && e.name === "AbortError" ? "timeout" : String(e.message || e) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function uploadBrowserMediaCandidates(base, msg, items) {
+  const candidates = (items || []).filter(shouldBrowserUploadMedia);
+  let stored = 0;
+  let attempted = 0;
+  const failures = {};
+  for (const item of candidates) {
+    attempted++;
+    const result = await uploadMediaViaBrowser(base, msg, item);
+    if (result.ok) stored += 1;
+    else failures[result.reason || "failed"] = (failures[result.reason || "failed"] || 0) + 1;
+  }
+  if (attempted) {
+    await log(
+      stored ? "info" : "warn",
+      `📦 ${msg.platform || "instagram"} · ${msg.username} · browser-upload ${stored}/${attempted} full media stored`
+    );
+    if (Object.keys(failures).length) await log("warn", `browser-upload misses: ${JSON.stringify(failures)}`);
+  }
+  return { attempted, stored, failures };
+}
 // Returns {opened|focused, tabId}. `active` brings the tab to the foreground so
 // the user actually SEES it (the old version opened pinned+inactive, which made
 // "Open all" look like nothing happened).
@@ -477,20 +572,23 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
       case "ingest": {
         try {
+          const allItems = Array.isArray(msg.items) ? msg.items : [];
+          const urlItems = allItems.filter((it) => !(it && it.browser_upload_only === true));
           const r = await fetch(base + "/social/ingest", {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify(withExtensionVersion({
               platform: msg.platform || "instagram",
               username: msg.username,
-              items: msg.items,
+              items: urlItems,
               record_empty: !!msg.record_empty,
               probe_reason: msg.probe_reason || null,
               probe_meta: msg.probe_meta || null,
             })),
           });
           const j = await r.json().catch(() => ({}));
-          await log("info", `📥 ${msg.platform || "instagram"} · ${msg.username} · ${j.accepted ?? msg.items.length} media candidate(s) queued`);
-          sendResponse({ ok: r.ok });
+          const upload = await uploadBrowserMediaCandidates(base, msg, allItems);
+          await log("info", `📥 ${msg.platform || "instagram"} · ${msg.username} · ${j.accepted ?? urlItems.length} URL media queued, ${upload.stored}/${upload.attempted} browser-uploaded`);
+          sendResponse({ ok: r.ok, upload });
         } catch (e) {
           await log("error", `ingest ${msg.username} failed: ${e.message}`);
           sendResponse({ ok: false, error: String(e) });

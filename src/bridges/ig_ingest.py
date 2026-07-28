@@ -90,6 +90,7 @@ DM_SAMPLE_DIR = "/tmp/dm_samples"
 DM_SAMPLE_CAP_PER_PLATFORM = int(os.getenv("DM_SAMPLE_CAP", "200"))
 MIN_BYTES = int(os.getenv("IG_INGEST_MIN_BYTES", "1024"))
 DL_CONCURRENCY = int(os.getenv("SOCIAL_INGEST_CONCURRENCY", "4"))
+SOCIAL_INGEST_CLIENT_MAX_MB = int(os.getenv("SOCIAL_INGEST_CLIENT_MAX_MB", "512"))
 STRAVA_BROWSER_429_COOLDOWN_SECONDS = int(os.getenv("STRAVA_BROWSER_429_COOLDOWN_SECONDS", "1800"))
 _SAFE = re.compile(r"[^A-Za-z0-9._-]")
 
@@ -621,15 +622,23 @@ async def _download_and_save(pool, session, platform, username, item, reject_sta
             await _record_vault_pause(str(exc))
             return _reject("vault_unavailable", str(exc))
 
-        async with session.get(
-            url,
-            headers=_download_headers(platform, url, item),
-            timeout=aiohttp.ClientTimeout(total=60),
-        ) as r:
-            if r.status != 200:
-                return _reject("http_status", str(r.status))
-            ct_header = r.headers.get("content-type")
-            data = await r.read()
+        data_b64 = item.get("data_b64")
+        if data_b64:
+            try:
+                data = base64.b64decode(str(data_b64), validate=True)
+            except Exception as exc:
+                return _reject("bad_uploaded_media", exc.__class__.__name__)
+            ct_header = item.get("mime_type") or item.get("content_type_header")
+        else:
+            async with session.get(
+                url,
+                headers=_download_headers(platform, url, item),
+                timeout=aiohttp.ClientTimeout(total=60),
+            ) as r:
+                if r.status != 200:
+                    return _reject("http_status", str(r.status))
+                ct_header = r.headers.get("content-type")
+                data = await r.read()
 
         # GATE: keep only real PDF/image/video/audio above min size — drop
         # favicons, thumbnails, tracking pixels, sprite sheets, HTML error pages.
@@ -920,6 +929,49 @@ async def _ingest(app, platform, body):
             metadata=meta or None,
         )
     return {"accepted": len(items), "platform": platform}
+
+
+async def _ingest_uploaded_media(app, platform, body):
+    username = body.get("username") or "unknown"
+    item = body.get("item") or {}
+    if not isinstance(item, dict):
+        item = {}
+    item = dict(item)
+    if body.get("data_b64") and not item.get("data_b64"):
+        item["data_b64"] = body.get("data_b64")
+    if body.get("mime_type") and not item.get("mime_type"):
+        item["mime_type"] = body.get("mime_type")
+    if body.get("url") and not item.get("url"):
+        item["url"] = body.get("url")
+    extension_version = body.get("extension_version")
+    meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
+    item["meta"] = {
+        **meta,
+        "extension_version": extension_version,
+        "browser_upload": True,
+        "browser_upload_size": body.get("file_size"),
+        "browser_upload_mime_type": body.get("mime_type"),
+    }
+    reject_stats: dict = {}
+    async with app["sem"]:
+        saved = await _download_and_save(app["pool"], app["session"], platform, username, item, reject_stats)
+    event_meta = {
+        "extension_version": extension_version,
+        "ingest_mode": "browser_upload",
+    }
+    if reject_stats:
+        event_meta["reject_stats"] = reject_stats
+    await _record_browser_ingest_event(
+        app["pool"],
+        platform,
+        "media",
+        username,
+        observed_count=1,
+        stored_count=1 if saved else 0,
+        metadata=event_meta,
+    )
+    logger.info("browser-upload[%s] %s: %d/1 saved", platform, username, 1 if saved else 0)
+    return {"stored": 1 if saved else 0, "platform": platform, "reject_stats": reject_stats}
 
 
 def _int(v):
@@ -2682,6 +2734,12 @@ async def ingest(request):
     return _cors(web.json_response(await _ingest(request.app, platform, body)))
 
 
+async def ingest_upload(request):
+    body = await _safe_json(request)
+    platform = _norm_platform(body.get("platform"))
+    return _cors(web.json_response(await _ingest_uploaded_media(request.app, platform, body)))
+
+
 async def ingest_ig(request):  # /ig/ingest alias
     body = await _safe_json(request)
     return _cors(web.json_response(await _ingest(request.app, "instagram", body)))
@@ -2726,12 +2784,13 @@ async def _on_cleanup(app):
 
 
 def make_app():
-    app = web.Application(client_max_size=64 * 1024 * 1024)
+    app = web.Application(client_max_size=SOCIAL_INGEST_CLIENT_MAX_MB * 1024 * 1024)
     app.router.add_route("OPTIONS", "/{tail:.*}", handle_options)
     # generic multi-platform
     app.router.add_get("/social/targets", get_targets)
     app.router.add_get("/social/ig_cooldown", ig_cooldown)
     app.router.add_post("/social/ingest", ingest)
+    app.router.add_post("/social/ingest-upload", ingest_upload)
     app.router.add_post("/social/discover", discover)
     app.router.add_post("/social/target-status", target_status_handler)
     app.router.add_post("/social/posts", posts_handler)
