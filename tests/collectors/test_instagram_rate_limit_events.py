@@ -33,6 +33,15 @@ def _make_pool(fetchval_result=None, fetchrow_result=None):
     return pool
 
 
+def _make_pool_with_conn(conn):
+    pool = MagicMock()
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=conn)
+    cm.__aexit__ = AsyncMock(return_value=None)
+    pool.acquire = MagicMock(return_value=cm)
+    return pool
+
+
 def _bare_collector():
     coll = instagram_mod.InstagramCollector.__new__(instagram_mod.InstagramCollector)
     coll.pool = _make_pool()
@@ -288,6 +297,48 @@ async def test_collect_user_skips_raw_profile_fallback_when_disabled(monkeypatch
         False,
         error="empty profile data",
     )
+
+
+@pytest.mark.asyncio
+async def test_fresh_extension_activity_detects_recent_browser_ingest(monkeypatch):
+    coll = _bare_collector()
+    conn = MagicMock()
+    conn.fetchval = AsyncMock(return_value=True)
+    conn.fetchrow = AsyncMock(return_value={
+        "latest_at": "2026-07-28T01:31:33Z",
+        "events": 4,
+        "observed": 120,
+        "stored": 12,
+    })
+    coll.pool = _make_pool_with_conn(conn)
+
+    result = await coll._fresh_extension_activity()
+
+    assert result == {
+        "latest_at": "2026-07-28T01:31:33Z",
+        "events": 4,
+        "observed": 120,
+        "stored": 12,
+    }
+    conn.fetchrow.assert_awaited_once()
+    assert "browser_ingest_events" in conn.fetchrow.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_collect_skips_headless_when_instagram_extension_is_fresh(monkeypatch):
+    coll = _bare_collector()
+    coll._fresh_extension_activity = AsyncMock(return_value={
+        "latest_at": "2026-07-28T01:31:33Z",
+        "events": 4,
+        "observed": 120,
+        "stored": 12,
+    })
+    coll._auto_discover_cookies = MagicMock()
+
+    await coll.collect(["target_user"])
+
+    assert "browser extension is fresh" in coll.intentional_idle_reason
+    coll._auto_discover_cookies.assert_not_called()
 
 
 @pytest.mark.asyncio

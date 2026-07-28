@@ -646,6 +646,19 @@ class InstagramCollector(BaseCollector):
         import asyncio
         import time as _time
 
+        self._intentional_idle_reason = None
+        fresh_extension = await self._fresh_extension_activity()
+        if fresh_extension:
+            self._intentional_idle_reason = (
+                "Instagram browser extension is fresh "
+                f"({fresh_extension['events']} events, "
+                f"{fresh_extension['observed']} observed, "
+                f"{fresh_extension['stored']} stored, latest "
+                f"{fresh_extension['latest_at']}); skipped headless profile loop"
+            )
+            logger.info("instagram: %s", self._intentional_idle_reason)
+            return
+
         # OWN-GRAPH: ensure each logged-in account's OWN profile is in the target set
         # so _collect_own_follow_graph fires (who follows me / who I follow). The graph
         # scrape itself is throttled per-owner below, so this just makes the owner a
@@ -876,6 +889,56 @@ class InstagramCollector(BaseCollector):
                     )
             except Exception as _e:
                 logger.warning("instagram: failed to clear rate-limit from DB: %s", _e)
+
+    async def _fresh_extension_activity(self) -> dict | None:
+        if os.getenv("INSTA_SKIP_HEADLESS_WHEN_EXTENSION_FRESH", "true").lower() not in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }:
+            return None
+        if self.pool is None:
+            return None
+        try:
+            seconds = int(os.getenv("INSTA_EXTENSION_FRESH_SKIP_SECONDS", "7200"))
+        except ValueError:
+            seconds = 7200
+        seconds = max(300, min(seconds, 86400))
+        try:
+            async with self.pool.acquire() as conn:
+                exists = await conn.fetchval(
+                    "SELECT to_regclass('public.browser_ingest_events') IS NOT NULL",
+                    timeout=5,
+                )
+                if not exists:
+                    return None
+                row = await conn.fetchrow(
+                    """
+                    SELECT max(created_at) AS latest_at,
+                           count(*)::int AS events,
+                           COALESCE(sum(observed_count), 0)::int AS observed,
+                           COALESCE(sum(stored_count), 0)::int AS stored
+                    FROM browser_ingest_events
+                    WHERE platform = 'instagram'
+                      AND endpoint = ANY($2::text[])
+                      AND created_at >= now() - ($1::int * interval '1 second')
+                    """,
+                    seconds,
+                    ["media", "posts", "profile", "comments"],
+                    timeout=8,
+                )
+        except Exception as exc:
+            logger.debug("instagram: extension freshness check failed: %s", exc)
+            return None
+        if not row or not row.get("latest_at") or int(row.get("observed") or 0) <= 0:
+            return None
+        return {
+            "latest_at": row["latest_at"],
+            "events": int(row.get("events") or 0),
+            "observed": int(row.get("observed") or 0),
+            "stored": int(row.get("stored") or 0),
+        }
 
 
     async def _process_target(self, client: httpx.AsyncClient, username: str):

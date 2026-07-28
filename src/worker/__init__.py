@@ -676,7 +676,14 @@ class WorkerService:
                 # a quiet broker (no messages arriving) is legitimate idle, and
                 # collector.run() blocks for them anyway so this rarely runs.
                 advanced = collector.progress_count - before
-                if is_realtime or advanced > 0:
+                idle_reason = getattr(collector, "intentional_idle_reason", None)
+                if is_realtime or advanced > 0 or idle_reason:
+                    if idle_reason and not is_realtime and advanced <= 0:
+                        logger.info(
+                            "worker/%s: intentional idle cycle — %s",
+                            source,
+                            idle_reason,
+                        )
                     self._zero_progress_streak[source] = 0
                 else:
                     self._zero_progress_streak[source] = (

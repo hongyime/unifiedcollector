@@ -91,11 +91,18 @@ class BaseCollector(ABC):
         # The worker samples this before/after each collect cycle; a cycle that
         # had targets but did not advance this counter is a "zero-progress" cycle.
         self._progress_count: int = 0
+        # Set by a collector when a no-write cycle is intentional, for example
+        # when a safer browser/extension path is already fresh.
+        self._intentional_idle_reason: str | None = None
 
     @property
     def progress_count(self) -> int:
         """Monotonic count of items actually persisted since process start."""
         return self._progress_count
+
+    @property
+    def intentional_idle_reason(self) -> str | None:
+        return self._intentional_idle_reason
 
     def set_pool(self, pool):
         self.pool = pool
