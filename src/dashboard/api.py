@@ -426,6 +426,32 @@ async def _source_media_totals(conn) -> dict[str, dict]:
     return out
 
 
+async def _youtube_media_backlog(conn) -> dict:
+    existing = await _existing_public_tables(conn, ["youtube_videos", "media_items"])
+    if "youtube_videos" not in existing or "media_items" not in existing:
+        return {}
+    row = await conn.fetchrow(
+        """
+        SELECT COUNT(*)::bigint AS total_videos,
+               COUNT(*) FILTER (WHERE thumb.id IS NULL)::bigint AS missing_thumbnails,
+               COUNT(*) FILTER (WHERE video.id IS NULL)::bigint AS missing_videos,
+               COUNT(*) FILTER (
+                   WHERE video.id IS NULL
+                     AND v.collected_at >= now() - interval '24 hours'
+               )::bigint AS missing_videos_touched_24h
+        FROM youtube_videos v
+        LEFT JOIN media_items thumb
+          ON thumb.source = 'youtube'
+         AND thumb.content_id = v.platform_video_id
+        LEFT JOIN media_items video
+          ON video.source = 'youtube'
+         AND video.content_id = 'video_' || v.platform_video_id
+        """,
+        timeout=20,
+    )
+    return dict(row) if row else {}
+
+
 async def _active_rate_limit_cursor_summary(conn) -> dict[str, dict]:
     out: dict[str, dict] = {}
     try:
@@ -778,12 +804,33 @@ def _source_media_freshness(source: str | None, current_window: dict, day_window
 def _source_matrix_row(source_row: dict, current_content: dict | None, current_rate: dict | None,
                        day_content: dict | None, day_rate: dict | None, media_total: dict | None,
                        cursor_row: dict | None, extension_issues: list[dict],
-                       now: datetime | None = None) -> dict:
+                       now: datetime | None = None, media_backlog: dict | None = None) -> dict:
     blocker = _source_matrix_blocker(source_row, day_rate, cursor_row, extension_issues)
     source = source_row.get("source")
     total_media = media_total or {}
     current_window = _merge_source_window(current_content, current_rate)
     day_window = _merge_source_window(day_content, day_rate)
+    media_freshness = _source_media_freshness(source, current_window, day_window, total_media, now)
+    backlog = dict(media_backlog or {})
+    if (
+        blocker.get("kind") == "none"
+        and source == "youtube"
+        and int(backlog.get("missing_videos") or 0) > 0
+    ):
+        missing = int(backlog.get("missing_videos") or 0)
+        recent = int(backlog.get("missing_videos_touched_24h") or 0)
+        blocker = {
+            "kind": "media_backlog",
+            "severity": "warning",
+            "summary": (
+                f"{missing:,} YouTube video row(s) still have no archived video file"
+                + (f"; {recent:,} were touched in the last 24h." if recent else ".")
+            ),
+            "next_action": (
+                "Let collector_youtube video backfill run; if stored media stays at 0, "
+                "check yt-dlp/cookie logs for duration, auth, or format skips."
+            ),
+        }
     return {
         "source": source,
         "status": source_row.get("status"),
@@ -804,7 +851,8 @@ def _source_matrix_row(source_row: dict, current_content: dict | None, current_r
         "total_media_items": int(total_media.get("total_media_items") or 0),
         "total_media_bytes": int(total_media.get("total_media_bytes") or 0),
         "latest_media_at": total_media.get("latest_media_at"),
-        "media_freshness": _source_media_freshness(source, current_window, day_window, total_media, now),
+        "media_freshness": media_freshness,
+        "media_backlog": backlog,
         "rate_limit": {
             "active_now": bool((cursor_row and cursor_row.get("active_now")) or (day_rate and day_rate.get("active_now"))),
             "active_until": (cursor_row or {}).get("active_until") or (day_rate or {}).get("active_until"),
@@ -1813,6 +1861,12 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
             errors.append({"section": "media_totals", "error": exc.__class__.__name__})
             media_totals = {}
         try:
+            youtube_media_backlog = await _youtube_media_backlog(conn)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("source matrix youtube media backlog failed: %s", exc)
+            errors.append({"section": "youtube_media_backlog", "error": exc.__class__.__name__})
+            youtube_media_backlog = {}
+        try:
             active_cursors = await _active_rate_limit_cursor_summary(conn)
         except Exception as exc:  # noqa: BLE001
             logger.warning("source matrix active cursor summary failed: %s", exc)
@@ -1838,6 +1892,7 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
             active_cursors.get(source_row["source"]),
             extension_by_source.get(source_row["source"], []),
             generated_at,
+            youtube_media_backlog if source_row["source"] == "youtube" else None,
         )
         for source_row in live_sources
     ]

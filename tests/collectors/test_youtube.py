@@ -701,6 +701,73 @@ async def test_batch_download_photos_only_routes_to_thumbs(monkeypatch):
     coll._download_videos_via_yt_dlp.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_download_videos_skips_channel_fallback_when_api_videos_are_known(monkeypatch):
+    coll = _new_collector(monkeypatch)
+    coll._known_ids.update({"video_v1", "video_v2"})
+
+    from src.core import subprocess_downloader
+
+    ytdlp = AsyncMock()
+    monkeypatch.setattr(subprocess_downloader, "yt_dlp_download", ytdlp)
+
+    await coll._download_videos_via_yt_dlp("UC_a", "Channel A", ["v1", "v2"])
+
+    ytdlp.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_filter_video_ids_for_download_respects_duration_cap(monkeypatch):
+    coll = _new_collector(monkeypatch, YOUTUBE_MAX_VIDEO_DURATION_MINUTES="10")
+    coll.pool._conn.fetch.return_value = [
+        {"platform_video_id": "short", "duration": "PT9M59S"},
+        {"platform_video_id": "long", "duration": "PT10M1S"},
+    ]
+
+    kept, skipped = await coll._filter_video_ids_for_download(["short", "long", "unknown"])
+
+    assert kept == ["short", "unknown"]
+    assert skipped == 1
+
+
+@pytest.mark.asyncio
+async def test_video_backfill_groups_are_bounded_and_duration_filtered(monkeypatch):
+    coll = _new_collector(monkeypatch, YOUTUBE_MAX_VIDEO_DURATION_MINUTES="10")
+    coll.pool._conn.fetch.return_value = [
+        {
+            "platform_video_id": "too_long",
+            "duration": "PT11M",
+            "platform_channel_id": "UC_a",
+            "channel_name": "Channel A",
+        },
+        {
+            "platform_video_id": "short_1",
+            "duration": "PT8M",
+            "platform_channel_id": "UC_a",
+            "channel_name": "Channel A",
+        },
+        {
+            "platform_video_id": "short_2",
+            "duration": "PT1M",
+            "platform_channel_id": "UC_b",
+            "channel_name": "Channel B",
+        },
+        {
+            "platform_video_id": "short_3",
+            "duration": "PT1M",
+            "platform_channel_id": "UC_b",
+            "channel_name": "Channel B",
+        },
+    ]
+
+    groups = await coll._get_video_backfill_groups(2)
+
+    assert groups == {
+        ("UC_a", "Channel A"): ["short_1"],
+        ("UC_b", "Channel B"): ["short_2"],
+    }
+
+
 # ── _get_last_scrape_time ────────────────────────────────────────────────
 
 

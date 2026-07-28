@@ -260,6 +260,36 @@ def test_source_matrix_reports_media_quiet_without_blocking_live_rows():
     assert "No media files in the last 24h" in row["media_freshness"]["summary"]
 
 
+def test_source_matrix_reports_youtube_video_backlog_as_blocker():
+    now = datetime(2026, 7, 28, 1, 30, tzinfo=timezone.utc)
+    row = _source_matrix_row(
+        _source(source="youtube", freshness_basis="youtube_videos.collected_at"),
+        current_content={"records": 12, "messages": 0, "media_items": 0},
+        current_rate=None,
+        day_content={"records": 500, "messages": 0, "media_items": 0},
+        day_rate=None,
+        media_total={
+            "total_media_items": 34416,
+            "total_media_bytes": 146170230207,
+            "latest_media_at": now - timedelta(hours=28),
+        },
+        cursor_row=None,
+        extension_issues=[],
+        now=now,
+        media_backlog={
+            "total_videos": 22476,
+            "missing_thumbnails": 1,
+            "missing_videos": 10591,
+            "missing_videos_touched_24h": 85,
+        },
+    )
+
+    assert row["blocker"]["kind"] == "media_backlog"
+    assert row["blocker"]["severity"] == "warning"
+    assert "10,591" in row["blocker"]["summary"]
+    assert row["media_backlog"]["missing_videos_touched_24h"] == 85
+
+
 def test_source_media_freshness_does_not_warn_for_github_commits():
     now = datetime(2026, 7, 28, 1, 30, tzinfo=timezone.utc)
     freshness = _source_media_freshness(

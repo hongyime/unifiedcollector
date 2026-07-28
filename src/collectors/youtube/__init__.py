@@ -133,6 +133,9 @@ class YoutubeCollector(BaseCollector):
         self._max_liked_videos = int(os.getenv("YOUTUBE_MAX_LIKED_VIDEOS", "1000"))
         self._max_subscriptions = int(os.getenv("YOUTUBE_MAX_SUBSCRIPTIONS", "999"))
         self._max_videos_per_channel = int(os.getenv("YOUTUBE_MAX_VIDEOS_PER_CHANNEL", "0"))
+        self._video_backfill_batch_size = int(
+            os.getenv("YOUTUBE_VIDEO_BACKFILL_BATCH_SIZE", os.getenv("BACKFILL_BATCH_SIZE", "100"))
+        )
         # FAMOUS-FILTER (Bryan): skip channels at or above this subscriber count,
         # even if subscribed. 0 disables. Overrides the subscription seed.
         self._famous_sub_cap = int(os.getenv("YOUTUBE_FAMOUS_SUB_CAP", "0") or "0")
@@ -708,10 +711,65 @@ class YoutubeCollector(BaseCollector):
                 except Exception as e:
                     logger.error("YouTube videos.list batch failed (chunk starting %s): %s", chunk[0] if chunk else "?", e)
 
-    async def _download_videos_via_yt_dlp(self, channel_id: str, channel_name: str, video_ids: list[str]):
+    async def _filter_video_ids_for_download(self, video_ids: list[str]) -> tuple[list[str], int]:
+        if not video_ids or not self._max_duration or not self.pool:
+            return list(video_ids or []), 0
+        try:
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT platform_video_id, duration
+                    FROM youtube_videos
+                    WHERE platform_video_id = ANY($1::text[])
+                    """,
+                    list(video_ids),
+                    timeout=10,
+                )
+        except Exception:
+            logger.debug("youtube: duration prefilter failed; keeping all candidates", exc_info=True)
+            return list(video_ids), 0
+
+        duration_by_id = {r["platform_video_id"]: r["duration"] for r in rows}
+        limit_seconds = self._max_duration * 60
+        kept: list[str] = []
+        skipped = 0
+        for vid in video_ids:
+            seconds = parse_iso8601_duration(duration_by_id.get(vid) or "")
+            if seconds and seconds > limit_seconds:
+                skipped += 1
+                continue
+            kept.append(vid)
+        return kept, skipped
+
+    async def _download_videos_via_yt_dlp(
+        self,
+        channel_id: str,
+        channel_name: str,
+        video_ids: list[str],
+        *,
+        allow_channel_fallback: bool = True,
+    ):
         from src.core.subprocess_downloader import yt_dlp_download, managed_tempdir
-        urls = [f"https://www.youtube.com/watch?v={vid}" for vid in video_ids if not self.is_known(f"video_{vid}")]
-        if not urls: urls = [f"https://www.youtube.com/channel/{channel_id}/videos"]
+        candidates, skipped_duration = await self._filter_video_ids_for_download(video_ids)
+        urls = [
+            f"https://www.youtube.com/watch?v={vid}"
+            for vid in candidates
+            if not self.is_known(f"video_{vid}")
+        ]
+        if not urls:
+            if video_ids:
+                known_count = sum(1 for vid in candidates if self.is_known(f"video_{vid}"))
+                logger.info(
+                    "youtube: no video files to download for %s (%d known, %d skipped by duration cap)",
+                    channel_id,
+                    known_count,
+                    skipped_duration,
+                )
+                return
+            if not allow_channel_fallback:
+                logger.info("youtube: no explicit video IDs for %s; channel fallback disabled", channel_id)
+                return
+            urls = [f"https://www.youtube.com/channel/{channel_id}/videos"]
         for url in urls:
             if self._stop.is_set(): break
             await asyncio.sleep(self._download_delay)
@@ -1018,6 +1076,79 @@ class YoutubeCollector(BaseCollector):
                  "source_url": f"https://www.youtube.com/watch?v={r['platform_video_id']}",
                  "_video_id": r["platform_video_id"]}
                 for r in rows]
+
+    async def _get_video_backfill_groups(self, batch_size: int) -> dict[tuple[str, str], list[str]]:
+        if not self.pool or batch_size <= 0:
+            return {}
+        scan_limit = max(batch_size * 4, batch_size)
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT v.platform_video_id, v.duration,
+                       COALESCE(c.platform_channel_id, 'unknown') AS platform_channel_id,
+                       COALESCE(c.title, 'unknown') AS channel_name
+                FROM youtube_videos v
+                LEFT JOIN youtube_channels c ON v.channel_id = c.id
+                LEFT JOIN media_items mi
+                  ON mi.source = 'youtube'
+                 AND mi.content_id = 'video_' || v.platform_video_id
+                WHERE mi.id IS NULL
+                ORDER BY v.collected_at DESC NULLS LAST
+                LIMIT $1
+                """,
+                scan_limit,
+                timeout=20,
+            )
+
+        groups: dict[tuple[str, str], list[str]] = {}
+        limit_seconds = self._max_duration * 60 if self._max_duration else 0
+        selected = 0
+        skipped_duration = 0
+        for row in rows:
+            if selected >= batch_size:
+                break
+            duration_seconds = parse_iso8601_duration(row["duration"] or "")
+            if limit_seconds and duration_seconds and duration_seconds > limit_seconds:
+                skipped_duration += 1
+                continue
+            key = (row["platform_channel_id"], row["channel_name"])
+            groups.setdefault(key, []).append(row["platform_video_id"])
+            selected += 1
+        if skipped_duration:
+            logger.info(
+                "youtube: video backfill skipped %d over-duration candidate(s) before selecting %d",
+                skipped_duration,
+                selected,
+            )
+        return groups
+
+    async def run_backfill(self):
+        thumbnail_count = await super().run_backfill()
+        if not self._download_videos or not self._use_yt_dlp or self._video_backfill_batch_size <= 0:
+            return thumbnail_count
+        groups = await self._get_video_backfill_groups(self._video_backfill_batch_size)
+        if not groups:
+            return thumbnail_count
+
+        progress_before = self._progress_count
+        attempted = sum(len(v) for v in groups.values())
+        for (channel_id, channel_name), video_ids in groups.items():
+            if self._stop.is_set():
+                break
+            await self._download_videos_via_yt_dlp(
+                channel_id,
+                channel_name,
+                video_ids,
+                allow_channel_fallback=False,
+            )
+        stored = self._progress_count - progress_before
+        logger.info(
+            "youtube: video backfill attempted %d candidate(s) across %d channel(s), stored %d media item(s)",
+            attempted,
+            len(groups),
+            stored,
+        )
+        return thumbnail_count + stored
 
     @staticmethod
     def _build_youtube_source_url(item: dict) -> str | None:
