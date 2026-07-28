@@ -752,6 +752,8 @@ services:
     command: python -m src.bots.onboard_bot
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+    volumes:
+      - ../src:/app/src
     depends_on:
       postgres:
         condition: service_healthy

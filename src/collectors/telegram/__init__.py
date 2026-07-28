@@ -455,6 +455,7 @@ class TelegramCollector(BaseCollector):
 
         # Realtime listener state — populated by collect_realtime()
         self._realtime_running = False
+        self._realtime_handler_clients: set[tuple[int, int]] = set()
         self._hub_group_id: int | None = None
         try:
             self._realtime_write_attempts = max(
@@ -781,6 +782,8 @@ class TelegramCollector(BaseCollector):
             await worker.connect()
             self._workers.append(worker)
             logger.info("[worker=%d account=%s] Hot-connected new worker", worker.worker_id, account_name)
+            if os.getenv("TELEGRAM_REALTIME_ENABLED", "true").lower() == "true":
+                self._register_realtime_handlers_for_worker(worker)
 
             # Trigger full dialog discovery + backfill for the new account.
             dialogs = await self.collect_dialogs()
@@ -2629,58 +2632,81 @@ class TelegramCollector(BaseCollector):
         for hours behind a multi-thousand-chat backfill)."""
         from telethon import events
 
-        if getattr(self, "_handlers_registered", False):
-            return
         if not self._workers:
             self._workers = await self._spawn_workers()
         if not self._workers:
             logger.error("_register_realtime_handlers: no Telegram workers connected")
             return
+        registered = 0
         for worker in self._workers:
-            client = worker.client
-            client.add_event_handler(
-                lambda e, w=worker: self._on_new_message(w, e),
-                events.NewMessage(),
-            )
-            client.add_event_handler(
-                lambda e, w=worker: self._on_message_edited(w, e),
-                events.MessageEdited(),
-            )
-            client.add_event_handler(
-                lambda e, w=worker: self._on_message_deleted(w, e),
-                events.MessageDeleted(),
-            )
-            client.add_event_handler(
-                lambda e, w=worker: self._on_chat_action(w, e),
-                events.ChatAction(),
-            )
-            client.add_event_handler(
-                lambda e, w=worker: self._on_user_update(w, e),
-                events.UserUpdate(),
-            )
-            # Reactions — Telethon delivers these via Raw updates rather than a
-            # dedicated event class. We listen for both message-level reaction
-            # updates (humans on channels/groups) and bot-message reactions.
-            try:
-                from telethon.tl.types import (
-                    UpdateMessageReactions,
-                    UpdateBotMessageReactions,
-                )
-                client.add_event_handler(
-                    lambda e, w=worker: self._on_raw_reactions(w, e),
-                    events.Raw(types=[UpdateMessageReactions, UpdateBotMessageReactions]),
-                )
-            except Exception as exc:
-                # Older Telethon may not expose UpdateBotMessageReactions; degrade.
-                logger.warning(
-                    "Reaction event registration failed (older Telethon?): %s",
-                    exc,
-                )
-            logger.info(
-                "[worker=%d account=%s] realtime handlers registered (early)",
+            if self._register_realtime_handlers_for_worker(worker, events):
+                registered += 1
+        if registered == 0:
+            logger.debug("telegram realtime handlers already registered for all connected workers")
+        self._handlers_registered = True
+
+    def _register_realtime_handlers_for_worker(self, worker, events_module=None) -> bool:
+        """Attach realtime handlers to one connected worker client, once per client."""
+        if events_module is None:
+            from telethon import events as events_module
+
+        client = getattr(worker, "client", None)
+        if client is None:
+            logger.warning(
+                "[worker=%d account=%s] realtime handler registration skipped: no client",
                 worker.worker_id, worker.account.name,
             )
-        self._handlers_registered = True
+            return False
+
+        client_key = (worker.worker_id, id(client))
+        if client_key in self._realtime_handler_clients:
+            return False
+
+        client.add_event_handler(
+            lambda e, w=worker: self._on_new_message(w, e),
+            events_module.NewMessage(),
+        )
+        client.add_event_handler(
+            lambda e, w=worker: self._on_message_edited(w, e),
+            events_module.MessageEdited(),
+        )
+        client.add_event_handler(
+            lambda e, w=worker: self._on_message_deleted(w, e),
+            events_module.MessageDeleted(),
+        )
+        client.add_event_handler(
+            lambda e, w=worker: self._on_chat_action(w, e),
+            events_module.ChatAction(),
+        )
+        client.add_event_handler(
+            lambda e, w=worker: self._on_user_update(w, e),
+            events_module.UserUpdate(),
+        )
+        # Reactions — Telethon delivers these via Raw updates rather than a
+        # dedicated event class. We listen for both message-level reaction
+        # updates (humans on channels/groups) and bot-message reactions.
+        try:
+            from telethon.tl.types import (
+                UpdateMessageReactions,
+                UpdateBotMessageReactions,
+            )
+            client.add_event_handler(
+                lambda e, w=worker: self._on_raw_reactions(w, e),
+                events_module.Raw(types=[UpdateMessageReactions, UpdateBotMessageReactions]),
+            )
+        except Exception as exc:
+            # Older Telethon may not expose UpdateBotMessageReactions; degrade.
+            logger.warning(
+                "Reaction event registration failed (older Telethon?): %s",
+                exc,
+            )
+
+        self._realtime_handler_clients.add(client_key)
+        logger.info(
+            "[worker=%d account=%s] realtime handlers registered",
+            worker.worker_id, worker.account.name,
+        )
+        return True
 
     async def collect_realtime(self):
         """Register Telethon event handlers on every connected worker and run forever.

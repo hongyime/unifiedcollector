@@ -49,6 +49,8 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     level=logging.INFO,
 )
+for noisy_logger in ("httpx", "httpcore"):
+    logging.getLogger(noisy_logger).setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 # Conversation states
