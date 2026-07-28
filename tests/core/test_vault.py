@@ -569,31 +569,50 @@ async def test_verify_media_item_db_consistency_accepts_vault_artifact_sidecar(t
 
 @pytest.mark.asyncio
 async def test_vault_artifact_counts_checks_both_sidecar_metadata_shapes():
+    queries: list[str] = []
+
     class Conn:
-        async def fetchrow(self, query, **_kwargs):
-            assert "vault_sidecar" in query
-            assert "vault_artifact" in query
-            assert "sidecar_ok" in query
-            assert "partial" in query
-            assert "quarantined" in query
-            assert "idx_media_missing_occurrence_sidecar" in query
-            assert "to_regclass" in query
-            return {
-                "sidecar_failures": 0,
-                "artifacts_queued": 0,
-                "artifacts_partial": 2,
-                "artifacts_quarantined": 1,
-                "artifacts_missing_sidecar": 3,
-                "artifacts_missing_sidecar_recent_24h": 0,
-            }
+        async def fetchval(self, query, **_kwargs):
+            queries.append(query)
+            if "sidecar_ok" in query and "partial" in query:
+                return 2
+            if "quarantined" in query:
+                return 1
+            if "idx_media_missing_occurrence_sidecar" in query:
+                return 3
+            return 0
 
     counts = await vault.vault_artifact_counts(Conn())
 
+    combined = "\n".join(queries)
+    assert "vault_sidecar" in combined
+    assert "vault_artifact" in combined
+    assert "sidecar_ok" in combined
+    assert "partial" in combined
+    assert "quarantined" in combined
+    assert "idx_media_missing_occurrence_sidecar" in combined
+    assert "to_regclass" in combined
     assert counts["artifacts_partial"] == 2
     assert counts["artifacts_quarantined"] == 1
     assert counts["artifacts_missing_sidecar"] == 3
     assert counts["artifacts_missing_sidecar_estimated"] is True
     assert counts["artifacts_missing_sidecar_recent_24h"] == 0
+
+
+@pytest.mark.asyncio
+async def test_vault_artifact_counts_returns_partial_results_on_one_timeout():
+    class Conn:
+        async def fetchval(self, query, **_kwargs):
+            if "metadata ? 'vault_artifact'" in query and "quarantined' = 'true'" in query:
+                raise TimeoutError()
+            return 4
+
+    counts = await vault.vault_artifact_counts(Conn())
+
+    assert counts["sidecar_failures"] == 4
+    assert counts["artifacts_quarantined"] == 0
+    assert counts["counts_partial"] is True
+    assert "artifacts_quarantined:TimeoutError" in counts["counts_error"]
 
 
 def test_write_artifact_sidecar_records_json_artifact(tmp_path, monkeypatch):

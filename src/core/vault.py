@@ -264,71 +264,108 @@ def vault_health(root: Path = VAULT_ROOT) -> VaultHealth:
         )
 
 
-async def vault_artifact_counts(conn, *, timeout: float | None = 10.0) -> dict[str, int | bool]:
+async def vault_artifact_counts(conn, *, timeout: float | None = 10.0) -> dict[str, int | bool | str]:
     """DB-backed artifact health counts used by dashboards and Telegram."""
-    row = await conn.fetchrow(
-        """
-        SELECT
-          (SELECT COUNT(*)::int
-           FROM dead_letter_queue
-           WHERE error_message LIKE 'vault sidecar write failed:%') AS sidecar_failures,
-          (SELECT COUNT(*)::int
-           FROM dead_letter_queue
-           WHERE status IN ('pending', 'in_progress')
-             AND error_message LIKE 'vault sidecar write failed:%') AS artifacts_queued,
-          (SELECT COUNT(*)::int
-           FROM media_items
-           WHERE COALESCE(metadata->'vault_artifact'->>'quarantined', 'false') <> 'true'
-             AND (
-               (
-                 metadata ? 'vault_sidecar'
-                 AND metadata->'vault_sidecar'->>'ok' = 'false'
-               ) OR (
-                 metadata ? 'vault_artifact'
-                 AND (
-                   metadata->'vault_artifact'->>'ok' = 'false'
-                   OR metadata->'vault_artifact'->>'sidecar_ok' = 'false'
-                   OR metadata->'vault_artifact'->>'partial' = 'true'
-                 )
-               )
-             )) AS artifacts_partial,
-          (SELECT COUNT(*)::int
-           FROM media_items
-           WHERE metadata ? 'vault_artifact'
-             AND metadata->'vault_artifact'->>'quarantined' = 'true') AS artifacts_quarantined,
-          (SELECT COALESCE(
-             (
-               SELECT CASE
-                 WHEN c.reltuples < 0 THEN 0
-                 ELSE c.reltuples::bigint
-               END
-               FROM pg_class c
-               WHERE c.oid = to_regclass('public.idx_media_missing_occurrence_sidecar')
-             ),
-             0
-           )::int) AS artifacts_missing_sidecar,
-          (SELECT COUNT(*)::int
-           FROM media_items
-           WHERE collected_at >= now() - interval '24 hours'
-             AND NOT (
-               COALESCE(metadata, '{}'::jsonb) ? 'vault_sidecar'
-               OR (
-                 COALESCE(metadata, '{}'::jsonb) ? 'vault_artifact'
-                 AND COALESCE(metadata->'vault_artifact'->>'sidecar_path', '') <> ''
-               )
-             )) AS artifacts_missing_sidecar_recent_24h
-        """,
-        timeout=timeout,
-    )
-    return {
-        "sidecar_failures": int(row["sidecar_failures"] or 0),
-        "artifacts_queued": int(row["artifacts_queued"] or 0),
-        "artifacts_partial": int(row["artifacts_partial"] or 0),
-        "artifacts_quarantined": int(row["artifacts_quarantined"] or 0),
-        "artifacts_missing_sidecar": int(row["artifacts_missing_sidecar"] or 0),
+    counts: dict[str, int | bool | str] = {
+        "sidecar_failures": 0,
+        "artifacts_queued": 0,
+        "artifacts_partial": 0,
+        "artifacts_quarantined": 0,
+        "artifacts_missing_sidecar": 0,
         "artifacts_missing_sidecar_estimated": True,
-        "artifacts_missing_sidecar_recent_24h": int(row["artifacts_missing_sidecar_recent_24h"] or 0),
+        "artifacts_missing_sidecar_recent_24h": 0,
     }
+    errors: list[str] = []
+
+    async def fetch_count(key: str, query: str) -> None:
+        try:
+            counts[key] = int(await conn.fetchval(query, timeout=timeout) or 0)
+        except Exception as exc:
+            errors.append(f"{key}:{exc.__class__.__name__}")
+
+    await fetch_count(
+        "sidecar_failures",
+        """
+        SELECT COUNT(*)::int
+        FROM dead_letter_queue
+        WHERE error_message LIKE 'vault sidecar write failed:%'
+        """,
+    )
+    await fetch_count(
+        "artifacts_queued",
+        """
+        SELECT COUNT(*)::int
+        FROM dead_letter_queue
+        WHERE status IN ('pending', 'in_progress')
+          AND error_message LIKE 'vault sidecar write failed:%'
+        """,
+    )
+    await fetch_count(
+        "artifacts_partial",
+        """
+        SELECT COUNT(*)::int
+        FROM media_items
+        WHERE COALESCE(metadata->'vault_artifact'->>'quarantined', 'false') <> 'true'
+          AND (
+            (
+              metadata ? 'vault_sidecar'
+              AND metadata->'vault_sidecar'->>'ok' = 'false'
+            ) OR (
+              metadata ? 'vault_artifact'
+              AND (
+                metadata->'vault_artifact'->>'ok' = 'false'
+                OR metadata->'vault_artifact'->>'sidecar_ok' = 'false'
+                OR metadata->'vault_artifact'->>'partial' = 'true'
+              )
+            )
+          )
+        """,
+    )
+    await fetch_count(
+        "artifacts_quarantined",
+        """
+        SELECT COUNT(*)::int
+        FROM media_items
+        WHERE metadata ? 'vault_artifact'
+          AND metadata->'vault_artifact'->>'quarantined' = 'true'
+        """,
+    )
+    await fetch_count(
+        "artifacts_missing_sidecar",
+        """
+        SELECT COALESCE(
+          (
+            SELECT CASE
+              WHEN c.reltuples < 0 THEN 0
+              ELSE c.reltuples::bigint
+            END
+            FROM pg_class c
+            WHERE c.oid = to_regclass('public.idx_media_missing_occurrence_sidecar')
+          ),
+          0
+        )::int
+        """,
+    )
+    await fetch_count(
+        "artifacts_missing_sidecar_recent_24h",
+        """
+        SELECT COUNT(*)::int
+        FROM media_items
+        WHERE collected_at >= now() - interval '24 hours'
+          AND NOT (
+            COALESCE(metadata, '{}'::jsonb) ? 'vault_sidecar'
+            OR (
+              COALESCE(metadata, '{}'::jsonb) ? 'vault_artifact'
+              AND COALESCE(metadata->'vault_artifact'->>'sidecar_path', '') <> ''
+            )
+          )
+        """,
+    )
+
+    if errors:
+        counts["counts_error"] = "; ".join(errors)
+        counts["counts_partial"] = True
+    return counts
 
 
 def ensure_vault_available(root: Path = VAULT_ROOT) -> None:

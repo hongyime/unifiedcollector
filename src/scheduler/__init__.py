@@ -686,16 +686,25 @@ class Scheduler:
                     if await conn.fetchval("SELECT to_regclass('collector_operational_events')") is not None:
                         rows = await conn.fetch(
                             """
-                            SELECT source,
-                                   event_type,
-                                   severity,
-                                   summary,
-                                   metadata,
-                                   created_at,
-                                   extract(epoch FROM now() - created_at)::int AS age_seconds
-                            FROM collector_operational_events
-                            WHERE created_at >= now() - interval '24 hours'
-                            ORDER BY created_at DESC
+                            SELECT e.source,
+                                   e.event_type,
+                                   e.severity,
+                                   e.summary,
+                                   e.metadata,
+                                   e.created_at,
+                                   extract(epoch FROM now() - e.created_at)::int AS age_seconds,
+                                   h.last_success_at,
+                                   CASE
+                                     WHEN h.last_success_at IS NOT NULL
+                                      AND h.last_success_at > e.created_at
+                                     THEN true
+                                     ELSE false
+                                   END AS resolved_by_success,
+                                   extract(epoch FROM now() - h.last_success_at)::int AS last_success_age_seconds
+                            FROM collector_operational_events e
+                            LEFT JOIN source_health h ON h.source = e.source
+                            WHERE e.created_at >= now() - interval '24 hours'
+                            ORDER BY e.created_at DESC
                             LIMIT 8
                             """,
                             timeout=8,

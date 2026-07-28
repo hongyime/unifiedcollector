@@ -284,7 +284,17 @@ def _format_operational_event(row: dict) -> str:
     metadata = row.get("metadata") or {}
     hit_count = metadata.get("hit_count") if isinstance(metadata, dict) else None
     suffix = f"; {int(hit_count):,} fatal log events" if hit_count is not None else ""
-    return f"• {source}: {event_type} ({severity}){age_text}{suffix}. {summary}"
+    resolved = ""
+    if row.get("resolved_by_success"):
+        success_age = row.get("last_success_age_seconds")
+        if success_age is not None:
+            resolved = (
+                f" Source has collected successfully since then; "
+                f"last success {_humanize_age(int(success_age or 0))} ago."
+            )
+        else:
+            resolved = " Source has collected successfully since then."
+    return f"• {source}: {event_type} ({severity}){age_text}{suffix}. {summary}{resolved}"
 
 
 def _fmt_count(n: int) -> str:
@@ -504,7 +514,7 @@ async def notify_status(snapshot: dict) -> bool:
             )
         elif vault.get("counts_error"):
             lines.append(
-                "Artifact health counts timed out; vault write check still passed. "
+                "Artifact health counts partially timed out; vault write check still passed. "
                 f"Query error: <code>{_esc(vault.get('counts_error'))}</code>."
             )
         else:

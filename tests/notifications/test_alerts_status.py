@@ -114,6 +114,8 @@ async def test_notify_status_splits_rate_limit_from_auth_events(monkeypatch):
                 "summary": "telegram: fatal log pattern flooded: wrong session ID",
                 "metadata": {"hit_count": 25},
                 "age_seconds": 30,
+                "resolved_by_success": True,
+                "last_success_age_seconds": 5,
             }
         ],
         "extension_hooks": [
@@ -203,6 +205,7 @@ async def test_notify_status_splits_rate_limit_from_auth_events(monkeypatch):
     assert "Telegram FloodWait throttles for acct1: active cooldown for 2m after 1 FloodWait event" in msg
     assert "<b>Recent self-heals and operational events</b>" in msg
     assert "Telegram: self heal restart (warning) 30s ago; 25 fatal log events" in msg
+    assert "Source has collected successfully since then; last success 5s ago." in msg
     assert "<b>Chrome extension hooks</b>" in msg
     assert "Instagram: hook v1.21.8 last heartbeat 21s ago" in msg
     assert "this hour 12 probe frames and 0 sample frames" in msg
@@ -216,7 +219,7 @@ async def test_notify_status_splits_rate_limit_from_auth_events(monkeypatch):
     assert "newest row 4.0d ago; expected within 2.0d" in msg
     assert "active HTTP 429 cooldown" in msg
     assert "Writable at <code>/vault</code>" in msg
-    assert "Artifact health counts timed out" in msg
+    assert "Artifact health counts partially timed out" in msg
     assert "<b>DB backups</b>" in msg
     assert "Latest collector DB backup is 2.0h old" in msg
     assert "4 dumps retained under <code>/vault/backups/db</code>" in msg
