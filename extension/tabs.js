@@ -56,6 +56,23 @@ $("refresh").addEventListener("click", render);
 $("scrape").addEventListener("click", async () => {
   await chrome.runtime.sendMessage({ type: "scrapeNow" });
 });
+$("reloadExtension").addEventListener("click", reloadExtension);
+
+async function reloadExtension() {
+  try {
+    await chrome.runtime.sendMessage({ type: "log", level: "info", msg: "manual extension reload requested" });
+  } catch (e) {}
+  try {
+    history.replaceState(null, "", location.pathname);
+  } catch (e) {}
+  chrome.runtime.reload();
+}
+
+try {
+  if (new URL(location.href).searchParams.get("reload") === "1") {
+    setTimeout(reloadExtension, 600);
+  }
+} catch (e) {}
 
 render();
 setInterval(render, 3000);
