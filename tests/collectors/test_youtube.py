@@ -737,6 +737,29 @@ async def test_collect_channel_limits_live_video_downloads(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_collect_runs_media_backlog_before_channel_targets(monkeypatch):
+    coll = _new_collector(monkeypatch, YOUTUBE_API_KEY="AIzaXX")
+    events = []
+
+    async def _backfill():
+        events.append("backfill")
+        return 1
+
+    async def _collect_channel(target):
+        events.append(f"target:{target}")
+
+    coll.run_backfill = AsyncMock(side_effect=_backfill)
+    coll._collect_channel = AsyncMock(side_effect=_collect_channel)
+    coll.checkpoint.save_progress = AsyncMock()
+    coll._use_yt_dlp = True
+    coll._download_videos = True
+
+    await coll.collect(["UC_a"])
+
+    assert events == ["backfill", "target:UC_a"]
+
+
+@pytest.mark.asyncio
 async def test_filter_video_ids_for_download_respects_duration_cap(monkeypatch):
     coll = _new_collector(monkeypatch, YOUTUBE_MAX_VIDEO_DURATION_MINUTES="10")
     coll.pool._conn.fetch.return_value = [

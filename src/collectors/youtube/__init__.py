@@ -137,6 +137,7 @@ class YoutubeCollector(BaseCollector):
         self._video_backfill_batch_size = int(
             os.getenv("YOUTUBE_VIDEO_BACKFILL_BATCH_SIZE", os.getenv("BACKFILL_BATCH_SIZE", "100"))
         )
+        self._prefill_media_backlog = os.getenv("YOUTUBE_PREFILL_MEDIA_BACKLOG", "true").lower() == "true"
         # FAMOUS-FILTER (Bryan): skip channels at or above this subscriber count,
         # even if subscribed. 0 disables. Overrides the subscription seed.
         self._famous_sub_cap = int(os.getenv("YOUTUBE_FAMOUS_SUB_CAP", "0") or "0")
@@ -251,6 +252,18 @@ class YoutubeCollector(BaseCollector):
             else:
                 logger.warning("YouTube collector has neither YOUTUBE_API_KEY nor OAuth pickle — calls will fail")
         self._has_auth = bool(self._api_key or self._oauth_credentials)
+
+        if (
+            self._prefill_media_backlog
+            and self._use_yt_dlp
+            and self._download_videos
+            and not self._stop.is_set()
+        ):
+            try:
+                stored = await self.run_backfill()
+                logger.info("youtube: pre-cycle media backlog pass stored %d item(s)", stored)
+            except Exception as e:
+                logger.warning("youtube: pre-cycle media backlog pass failed: %s", e)
 
         for target in targets:
             if self._stop.is_set(): break

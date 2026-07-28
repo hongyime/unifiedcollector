@@ -103,6 +103,8 @@ services:
       COLLECTOR_VAULT_ROOT: /vault
       COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
       YOUTUBE_ENRICH_BATCH_LIMIT: "5"
+      YOUTUBE_VIDEO_BACKFILL_BATCH_SIZE: "5"
+      YOUTUBE_VIDEO_DOWNLOADS_PER_TARGET: "5"
       YOUTUBE_COOKIE_FILE: /app/credentials/youtube/cookies.txt
     extra_hosts:
       - "host.docker.internal:host-gateway"
