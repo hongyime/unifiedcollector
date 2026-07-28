@@ -1159,16 +1159,26 @@ class YoutubeCollector(BaseCollector):
         limit_seconds = self._max_duration * 60 if self._max_duration else 0
         selected = 0
         skipped_duration = 0
+        skipped_live_placeholder = 0
         for row in rows:
             if selected >= batch_size:
                 break
-            duration_seconds = parse_iso8601_duration(row["duration"] or "")
+            duration = row["duration"] or ""
+            if duration.upper() in {"P0D", "PT0S"}:
+                skipped_live_placeholder += 1
+                continue
+            duration_seconds = parse_iso8601_duration(duration)
             if limit_seconds and duration_seconds and duration_seconds > limit_seconds:
                 skipped_duration += 1
                 continue
             key = (row["platform_channel_id"], row["channel_name"])
             groups.setdefault(key, []).append(row["platform_video_id"])
             selected += 1
+        if skipped_live_placeholder:
+            logger.info(
+                "youtube: video backfill skipped %d live/scheduled placeholder candidate(s)",
+                skipped_live_placeholder,
+            )
         if skipped_duration:
             logger.info(
                 "youtube: video backfill skipped %d over-duration candidate(s) before selecting %d from scan_limit=%d",

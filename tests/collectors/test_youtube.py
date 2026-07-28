@@ -779,6 +779,12 @@ async def test_video_backfill_groups_are_bounded_and_duration_filtered(monkeypat
     coll = _new_collector(monkeypatch, YOUTUBE_MAX_VIDEO_DURATION_MINUTES="10")
     coll.pool._conn.fetch.return_value = [
         {
+            "platform_video_id": "live_placeholder",
+            "duration": "P0D",
+            "platform_channel_id": "UC_live",
+            "channel_name": "Live Channel",
+        },
+        {
             "platform_video_id": "too_long",
             "duration": "PT11M",
             "platform_channel_id": "UC_a",
