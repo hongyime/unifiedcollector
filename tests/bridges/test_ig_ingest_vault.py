@@ -84,6 +84,12 @@ class _DownloadSession:
         return _DownloadResponse(self.data)
 
 
+def test_download_headers_include_platform_referers():
+    assert ig_ingest._download_headers("tiktok", "https://cdn.example.test/v.jpg", {})["Referer"] == "https://www.tiktok.com/"
+    assert ig_ingest._download_headers("facebook", "https://scontent.example.test/i.jpg", {})["Referer"] == "https://www.facebook.com/"
+    assert ig_ingest._download_headers("x", "https://pbs.twimg.com/media/x.jpg", {})["Referer"] == "https://x.com/"
+
+
 def test_extension_ingest_pauses_media_download_when_vault_unavailable(monkeypatch, tmp_path):
     pool = _FakePool()
     monkeypatch.setattr(

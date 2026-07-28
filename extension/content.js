@@ -258,6 +258,25 @@ function imageUrlsFromElement(im) {
   return out;
 }
 
+function urlsFromCssValue(value) {
+  const out = [];
+  const text = String(value || "");
+  const re = /url\(["']?([^"')]+)["']?\)/gi;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    if (m[1] && /^https?:/i.test(m[1]) && !out.includes(m[1])) out.push(m[1]);
+  }
+  return out;
+}
+
+function elementLooksTooSmall(el, min = 120) {
+  try {
+    const r = el.getBoundingClientRect && el.getBoundingClientRect();
+    if (r && r.width && r.height && (r.width < min || r.height < min)) return true;
+  } catch (e) {}
+  return false;
+}
+
 function imageLooksTooSmall(im, min = 120) {
   try {
     const nw = im.naturalWidth || 0;
@@ -278,12 +297,6 @@ function deepCollectMedia(obj, sink, entity, depth = 0) {
     return;
   }
   if (typeof obj !== "object") return;
-  // video node (tiktok)
-  const vid = obj.video || obj.Video;
-  if (vid && (vid.playAddr || vid.downloadAddr || vid.PlayAddr)) {
-    const url = vid.downloadAddr || vid.playAddr || vid.PlayAddr;
-    if (typeof url === "string") sink.add({ content_id: String(obj.id || obj.awemeId || url), content_type: "video", url, entity_name: entity });
-  }
   // cover/poster node (tiktok). TikTok video CDN URLs are often short-lived
   // and cookie-bound when fetched server-side; cover images survive much more
   // reliably and still preserve the post as media evidence.
@@ -906,10 +919,10 @@ const tiktok = {
     await autoScroll(10);
     const state = parseEmbeddedState(["__UNIVERSAL_DATA_FOR_REHYDRATION__", "SIGI_STATE", "sigi-persisted-data"]);
     if (state) { deepCollectMedia(state, sink, entity); const us = []; deepCollectUsers(state, us); if (us.length) await send({ type: "users", platform: "tiktok", context: "seen", users: us }); }
-    // also harvest whatever the DOM rendered (posters/sources already loaded)
+    // also harvest whatever the DOM rendered. Avoid direct video src URLs here:
+    // TikTok's playback URLs are short-lived/cookie-bound and produce server-side
+    // 403s. Posters/covers and photo posts are the durable file-backed evidence.
     document.querySelectorAll("video").forEach((v, i) => {
-      const u = v.src || (v.querySelector("source") && v.querySelector("source").src);
-      if (u && /^https?:/.test(u)) sink.add({ content_id: "dom_" + urlId(u), content_type: "video", url: u, entity_name: entity });
       const poster = v.getAttribute("poster") || v.poster;
       if (poster && /^https?:/.test(poster)) {
         sink.add({
@@ -1240,6 +1253,25 @@ function harvestDom(entity, { imgRe, junkRe }) {
     imageUrlsFromElement(im).forEach((u) => {
       if (u && imgRe.test(u) && !junkRe.test(u))
         sink.add({ content_id: "img_" + urlId(u), content_type: "photo", url: u, entity_name: entity });
+    });
+  });
+  document.querySelectorAll('[style*="url("]').forEach((el) => {
+    if (elementLooksTooSmall(el, 140)) return;
+    const values = [
+      el.getAttribute && el.getAttribute("style"),
+      (() => { try { return getComputedStyle(el).backgroundImage; } catch (e) { return ""; } })(),
+    ];
+    values.flatMap(urlsFromCssValue).forEach((u) => {
+      if (u && imgRe.test(u) && !junkRe.test(u)) {
+        sink.add({
+          content_id: "bg_" + urlId(u),
+          content_type: "photo",
+          url: u,
+          entity_name: entity,
+          kind: "post",
+          meta: { dom_asset_role: "background_image" },
+        });
+      }
     });
   });
   document.querySelectorAll("video").forEach((v) => {
@@ -1789,7 +1821,9 @@ const strava = {
 const PLATFORMS = [instagram, tiktok, lemon8, x, threads, facebook, strava];
 
 function currentPlatform() {
-  return PLATFORMS.find((p) => location.hostname === p.host || location.hostname.endsWith("." + p.host)) || null;
+  const host = location.hostname;
+  if (host === "twitter.com" || host.endsWith(".twitter.com")) return x;
+  return PLATFORMS.find((p) => host === p.host || host.endsWith("." + p.host)) || null;
 }
 
 // ===========================================================================

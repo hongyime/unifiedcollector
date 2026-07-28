@@ -521,6 +521,33 @@ async def target_status_handler(request):
 # ---------------------------------------------------------------------------
 # download + persist (generic over platform)
 # ---------------------------------------------------------------------------
+def _download_headers(platform: str, url: str, item: dict | None = None) -> dict:
+    """Browser-like headers for CDN media fetched from extension-discovered URLs."""
+    accept = "image/avif,image/webp,image/apng,image/svg+xml,image/*,video/*,*/*;q=0.8"
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
+        ),
+        "Accept": accept,
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    referers = {
+        "facebook": "https://www.facebook.com/",
+        "instagram": "https://www.instagram.com/",
+        "threads": "https://www.threads.com/",
+        "tiktok": "https://www.tiktok.com/",
+        "x": "https://x.com/",
+    }
+    referer = referers.get(platform)
+    if referer:
+        headers["Referer"] = referer
+        headers["Sec-Fetch-Site"] = "cross-site"
+        headers["Sec-Fetch-Mode"] = "no-cors"
+        headers["Sec-Fetch-Dest"] = "image"
+    return headers
+
+
 async def _download_and_save(pool, session, platform, username, item, reject_stats: dict | None = None) -> bool:
     def _reject(reason: str, detail: str | None = None) -> bool:
         if reject_stats is not None:
@@ -594,7 +621,11 @@ async def _download_and_save(pool, session, platform, username, item, reject_sta
             await _record_vault_pause(str(exc))
             return _reject("vault_unavailable", str(exc))
 
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=60)) as r:
+        async with session.get(
+            url,
+            headers=_download_headers(platform, url, item),
+            timeout=aiohttp.ClientTimeout(total=60),
+        ) as r:
             if r.status != 200:
                 return _reject("http_status", str(r.status))
             ct_header = r.headers.get("content-type")
