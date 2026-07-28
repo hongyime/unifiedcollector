@@ -13,7 +13,7 @@ from src.collectors import get_collector
 from src.core.collection_priority import proximity_priority_score_sql
 from src.core.drive_check import check_drive, wait_for_drive
 from src.core.priority_hints import refresh_collector_priority_hints
-from src.core.proximity import refresh_account_proximity_cache
+from src.core.proximity import ensure_account_proximity_cache, refresh_account_proximity_cache
 from src.db.connection import get_pool, close_pool
 
 logger = logging.getLogger(__name__)
@@ -622,6 +622,13 @@ class WorkerService:
                     continue
         return 300.0
 
+    def _should_refresh_target_priorities(self, source: str) -> bool:
+        """Avoid blocking realtime chat collectors on analyzer-side priority sync."""
+        if source not in self.REALTIME_SOURCES:
+            return True
+        raw = os.getenv("COLLECTOR_REFRESH_REALTIME_TARGET_PRIORITIES", "false")
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+
     async def _run_source(self, source: str, startup_delay: float = 0.0):
         if startup_delay > 0:
             logger.info("worker/%s: staggered startup, waiting %.0fs", source, startup_delay)
@@ -786,8 +793,11 @@ class WorkerService:
 
     async def _load_targets(self, source: str) -> list[str]:
         try:
-            await refresh_account_proximity_cache(self.pool)
-            await refresh_collector_priority_hints(self.pool)
+            if self._should_refresh_target_priorities(source):
+                await refresh_account_proximity_cache(self.pool)
+                await refresh_collector_priority_hints(self.pool)
+            else:
+                await ensure_account_proximity_cache(self.pool)
             proximity_score_sql = proximity_priority_score_sql("MIN(ap.tier)")
             async with self.pool.acquire() as conn:
                 rows = await conn.fetch(
