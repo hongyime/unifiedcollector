@@ -246,6 +246,11 @@ Current shipped recovery/ops work:
   stream 429s are logged as transient without creating an active cooldown; a
   second 429 still opens the scoped GPS stream cooldown. Strava 429 waits use
   the shared jittered sleep helper instead of fixed sleeps.
+- **Chat shared/live locations:** Telegram message-location extraction is live
+  (`telegram_message_locations`). WhatsApp bridge normalization now preserves
+  Baileys `locationMessage` and `liveLocationMessage` events as
+  `messages.location`, and the Python collector stores them in
+  `whatsapp_message_locations` for analyzer map ingestion.
 - **Live bounded probe:** On 2026-07-24, `rebuild-report --compare-db
   --compare-db-limit 200 --sidecar-limit 200 --blob-limit 200 --json` parsed as
   clean JSON, scanned 200 DB media rows and 200 sidecars, and returned

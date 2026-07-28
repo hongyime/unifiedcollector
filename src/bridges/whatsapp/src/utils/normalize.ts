@@ -38,8 +38,27 @@ export interface NormalizedMessage {
     is_forwarded: boolean;
     forwarding_score: number;
     quoted_msg_id: string | null;
+    location: {
+        degreesLatitude: number | null;
+        degreesLongitude: number | null;
+        latitude: number | null;
+        longitude: number | null;
+        name: string | null;
+        address: string | null;
+        isLive: boolean;
+        sequenceNumber: number | null;
+    } | null;
     session_name: string;
     routing_key: string;
+}
+
+function toNumber(value: any): number | null {
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (typeof value === 'string' && value.trim()) {
+        const parsed = Number(value);
+        return Number.isFinite(parsed) ? parsed : null;
+    }
+    return null;
 }
 
 export function normalizeMessage(msg: WAMessage): NormalizedMessage | null {
@@ -82,6 +101,9 @@ export function normalizeMessage(msg: WAMessage): NormalizedMessage | null {
     } else if (rawType === 'stickerMessage') {
         messageType = 'sticker';
         routingKey = 'messages.media';
+    } else if (rawType === 'locationMessage' || rawType === 'liveLocationMessage') {
+        messageType = rawType === 'liveLocationMessage' ? 'live_location' : 'location';
+        routingKey = 'messages.location';
     } else if (rawType === 'reactionMessage') {
         return null; // skip reactions
     }
@@ -106,10 +128,23 @@ export function normalizeMessage(msg: WAMessage): NormalizedMessage | null {
     }
 
     const hasMedia = ['image', 'video', 'video_note', 'audio', 'document', 'sticker'].includes(messageType);
+    const lat = toNumber(content?.degreesLatitude ?? content?.latitude);
+    const lon = toNumber(content?.degreesLongitude ?? content?.longitude);
+    const isLocation = messageType === 'location' || messageType === 'live_location';
+    const location = isLocation ? {
+        degreesLatitude: lat,
+        degreesLongitude: lon,
+        latitude: lat,
+        longitude: lon,
+        name: content?.name || null,
+        address: content?.address || null,
+        isLive: messageType === 'live_location',
+        sequenceNumber: toNumber(content?.sequenceNumber),
+    } : null;
 
     // The consumer's has_media test compares against RAW baileys types
     // (imageMessage/videoMessage/...). Expose that raw type as messageType/media_type.
-    const rawMediaType = hasMedia ? rawType : (messageType === 'status' ? rawType : '');
+    const rawMediaType = hasMedia || isLocation ? rawType : (messageType === 'status' ? rawType : '');
 
     return {
         message_id: msg.key.id,
@@ -135,6 +170,7 @@ export function normalizeMessage(msg: WAMessage): NormalizedMessage | null {
         is_forwarded: contextInfo?.isForwarded || false,
         forwarding_score: contextInfo?.forwardingScore || 0,
         quoted_msg_id: contextInfo?.stanzaId || null,
+        location,
         session_name: process.env.SESSION_NAME || 'default',
         routing_key: routingKey,
     };

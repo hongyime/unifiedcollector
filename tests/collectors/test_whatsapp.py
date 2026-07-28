@@ -521,6 +521,57 @@ async def test_handle_message_event_allows_safe_document_media(collector):
 
 
 @pytest.mark.asyncio
+async def test_extract_wa_location_persists_nested_location(collector):
+    event = {
+        "message_id": "loc-1",
+        "messageType": "locationMessage",
+        "location": {
+            "degreesLatitude": 1.3521,
+            "degreesLongitude": 103.8198,
+            "name": "Singapore",
+            "address": "Central",
+        },
+    }
+
+    await collector._extract_wa_location(event, "111@g.us", "loc-1")
+
+    sql, *args = collector._test_conn.execute.await_args.args
+    assert "INSERT INTO whatsapp_message_locations" in sql
+    assert args == [
+        "loc-1",
+        "111@g.us",
+        1.3521,
+        103.8198,
+        False,
+        "Singapore",
+        "Central",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_extract_wa_location_persists_flat_live_location(collector):
+    event = {
+        "message_id": "loc-2",
+        "media_type": "liveLocationMessage",
+        "latitude": "-33.8688",
+        "longitude": "151.2093",
+        "sequenceNumber": 3,
+    }
+
+    await collector._extract_wa_location(event, "222@g.us", "loc-2")
+
+    sql, *args = collector._test_conn.execute.await_args.args
+    assert "INSERT INTO whatsapp_message_locations" in sql
+    assert args[:5] == [
+        "loc-2",
+        "222@g.us",
+        -33.8688,
+        151.2093,
+        True,
+    ]
+
+
+@pytest.mark.asyncio
 async def test_track_user_profile_uses_pool_and_returns_uuid(collector):
     """Regression: ``_track_user_profile`` used to check ``self._pool``
     (typo) and always raise AttributeError before any DB work, breaking
