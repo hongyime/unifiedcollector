@@ -823,8 +823,13 @@ class TelegramCollector(BaseCollector):
         # For each connected worker, check if their account name has been seen
         # before. If not, run full collect_dialogs() to discover all their chats
         # and queue them for backfill.
+        # Keep startup media/realtime-first. This path can be expensive because
+        # collect_dialogs() iterates every connected worker; a weak "new account"
+        # heuristic previously re-ran it for old accounts after each restart and
+        # destabilized MTProto sessions. Hot-added accounts still use the explicit
+        # _handle_new_account backfill path below.
         auto_backfill_enabled = (
-            os.getenv("TELEGRAM_AUTO_BACKFILL_NEW_ACCOUNTS", "true").lower() == "true"
+            os.getenv("TELEGRAM_AUTO_BACKFILL_NEW_ACCOUNTS", "false").lower() == "true"
         )
         if auto_backfill_enabled and self.pool is not None:
             logger.info("[telegram.collect] starting _auto_backfill_new_accounts")

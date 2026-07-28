@@ -55,6 +55,7 @@ function BridgeCard({ bridge }: { bridge: 1 | 2 }) {
       ? data.qr
       : `data:image/png;base64,${data.qr}`
     : null;
+  const staleDisconnectReason = !ready && !qrSrc ? data?.last_disconnect_reason : null;
 
   return (
     <div className="bg-surface border border-border rounded-lg p-5 w-[340px]">
@@ -86,10 +87,12 @@ function BridgeCard({ bridge }: { bridge: 1 | 2 }) {
           <span className="text-danger">Dashboard QR renderer missing</span>
         ) : qrSrc ? (
           <span className="text-text-muted">Scan this code now. It refreshes automatically.</span>
+        ) : status === "requesting_fresh_qr" || status === "waiting_for_fresh_qr" || status === "fresh_qr_requested" || status === "auth_cleared" ? (
+          <span className="text-text-muted">Requesting a fresh QR. Keep this page open.</span>
+        ) : status === "awaiting_scan" ? (
+          <span className="text-text-muted">Waiting for the next QR. Keep this page open.</span>
         ) : status === "connecting_unpaired" || status === "connecting" ? (
           <span className="text-text-muted">Bridge is starting. A QR should appear shortly.</span>
-        ) : status === "fresh_qr_requested" || status === "auth_cleared" ? (
-          <span className="text-text-muted">Fresh QR requested. Waiting for the new code.</span>
         ) : (
           <span className="text-text-muted">{status}&hellip;</span>
         )}
@@ -97,6 +100,11 @@ function BridgeCard({ bridge }: { bridge: 1 | 2 }) {
       {data?.last_qr_at && !ready && (
         <p className="mt-1 text-center text-[11px] text-text-muted">
           QR issued {new Date(data.last_qr_at).toLocaleTimeString()}
+        </p>
+      )}
+      {staleDisconnectReason && (
+        <p className="mt-1 text-center text-[11px] text-text-muted">
+          Last bridge note: {staleDisconnectReason}
         </p>
       )}
 

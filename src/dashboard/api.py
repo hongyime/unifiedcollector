@@ -33,6 +33,8 @@ logger = logging.getLogger(__name__)
 _MESSAGING_COVERAGE_CACHE: dict[str, object] = {"ts": 0.0, "rows": None}
 _SOURCE_MEDIA_TOTALS_CACHE: dict[str, object] = {"ts": 0.0, "rows": None}
 _SOURCE_MEDIA_TOTALS_TTL_SECONDS = int(os.getenv("SOURCE_MEDIA_TOTALS_TTL_SECONDS", "300"))
+_WA_FRESH_QR_LAST_REQUEST: dict[str, float] = {}
+_WA_FRESH_QR_MIN_INTERVAL_SECONDS = int(os.getenv("WA_FRESH_QR_MIN_INTERVAL_SECONDS", "45"))
 
 
 def _encode_polyline(points, precision: int = 5) -> str:
@@ -606,7 +608,7 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
             ),
             "next_action": "Wait for the scoped backoff before retrying that path.",
         }
-    if rate_row and int(rate_row.get("access_errors") or 0) > 0:
+    if rate_row and int(rate_row.get("access_errors") or 0) > 0 and status != "live":
         status_code = rate_row.get("latest_status_code")
         return {
             "kind": "auth_or_access",
@@ -4550,29 +4552,69 @@ async def whatsapp_qr(bridge: str):
         f"WA_BRIDGE_{bridge}_URL",
         f"http://wa-bridge-{bridge}:3001",
     )
-    out = {"bridge": bridge, "status": "unknown", "qr": "", "ready": False, "error": None}
+    out = {
+        "bridge": bridge,
+        "status": "unknown",
+        "qr": "",
+        "ready": False,
+        "error": None,
+        "qr_available": False,
+        "last_qr_at": None,
+        "registered": None,
+        "connected": None,
+        "last_disconnect_status_code": None,
+        "last_disconnect_reason": None,
+    }
     try:
         # /health tells us if already paired; /qr gives the code when waiting
         with urllib.request.urlopen(f"{base}/health", timeout=8) as r:
             health = __import__("json").loads(r.read().decode())
         out["ready"] = bool(health.get("whatsapp_ready"))
         out["status"] = health.get("status", "unknown")
+        out["registered"] = health.get("registered")
+        out["connected"] = health.get("connected")
+        out["last_disconnect_status_code"] = health.get("last_disconnect_status_code")
+        out["last_disconnect_reason"] = health.get("last_disconnect_reason")
         if out["ready"]:
             out["status"] = "connected"
             return out
         with urllib.request.urlopen(f"{base}/qr", timeout=8) as r:
             qrd = __import__("json").loads(r.read().decode())
         out["status"] = qrd.get("status", out["status"])
+        out["qr_available"] = bool(qrd.get("qr_available") or qrd.get("qr"))
+        out["last_qr_at"] = qrd.get("last_qr_at") or health.get("last_qr_at")
+        out["registered"] = qrd.get("registered", out["registered"])
+        out["connected"] = qrd.get("connected", out["connected"])
+        out["last_disconnect_status_code"] = qrd.get(
+            "last_disconnect_status_code",
+            out["last_disconnect_status_code"],
+        )
+        out["last_disconnect_reason"] = qrd.get(
+            "last_disconnect_reason",
+            out["last_disconnect_reason"],
+        )
         raw_qr = qrd.get("qr", "")
         if not raw_qr and _should_request_fresh_wa_qr(health, qrd):
-            kick = await _wa_bridge_post(bridge, "fresh-qr")
-            out["status"] = "requesting_fresh_qr"
-            out["error"] = (
-                "Bridge had no active QR; requested a fresh QR. "
-                "The next poll should render it."
-                if kick.get("ok")
-                else f"Bridge had no active QR; fresh QR request failed: {kick.get('error')}"
-            )
+            now = time.monotonic()
+            last_request = _WA_FRESH_QR_LAST_REQUEST.get(bridge, 0.0)
+            if now - last_request < _WA_FRESH_QR_MIN_INTERVAL_SECONDS:
+                out["status"] = "waiting_for_fresh_qr"
+                out["last_disconnect_status_code"] = None
+                out["last_disconnect_reason"] = None
+                out["error"] = "Fresh QR was already requested recently; waiting for the bridge to publish it."
+            else:
+                kick = await _wa_bridge_post(bridge, "fresh-qr")
+                out["status"] = "requesting_fresh_qr"
+                if kick.get("ok"):
+                    _WA_FRESH_QR_LAST_REQUEST[bridge] = now
+                    out["last_disconnect_status_code"] = None
+                    out["last_disconnect_reason"] = None
+                out["error"] = (
+                    "Bridge had no active QR; requested a fresh QR. "
+                    "The next poll should render it."
+                    if kick.get("ok")
+                    else f"Bridge had no active QR; fresh QR request failed: {kick.get('error')}"
+                )
         if raw_qr:
             # Convert the raw Baileys QR string to a base64-encoded PNG so the
             # browser can use it directly as <img src="data:image/png;base64,…">

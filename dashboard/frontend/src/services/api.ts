@@ -286,7 +286,19 @@ export const api = {
 
   // WhatsApp bridge QR linking (auto-refresh on the client)
   waQr: (bridge: 1 | 2) =>
-    get<{ bridge: string; status: string; qr: string; ready: boolean; error: string | null; qr_available?: boolean; last_qr_at?: string | null }>(
+    get<{
+      bridge: string;
+      status: string;
+      qr: string;
+      ready: boolean;
+      error: string | null;
+      qr_available?: boolean;
+      last_qr_at?: string | null;
+      registered?: boolean | null;
+      connected?: boolean | null;
+      last_disconnect_status_code?: number | null;
+      last_disconnect_reason?: string | null;
+    }>(
       `/whatsapp/qr/${bridge}`
     ),
   waDisconnect: (bridge: 1 | 2) => post<{ bridge: string; ok: boolean; status?: string; error?: string }>(`/whatsapp/${bridge}/disconnect`, {}),

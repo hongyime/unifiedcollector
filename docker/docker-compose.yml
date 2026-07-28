@@ -413,6 +413,10 @@ services:
       # realtime capture resumes cleanly instead of logging errors for minutes.
       COLLECTOR_SELFHEAL_LOG_WINDOW: "300"
       COLLECTOR_SELFHEAL_LOG_THRESHOLD: "10"
+      # Startup should prioritize realtime/media. Dialog discovery is still
+      # available for hot-added accounts, but the startup heuristic can misread
+      # old accounts as new and churn Telegram sessions.
+      TELEGRAM_AUTO_BACKFILL_NEW_ACCOUNTS: "false"
       # All accounts backfill + spider at once (was restricted to 2). Empty =
       # every connected account drains the queue in parallel. Watch FloodWait;
       # set back to a subset if Telegram throttles.

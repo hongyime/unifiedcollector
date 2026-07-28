@@ -169,7 +169,7 @@ def test_rate_limit_cursor_payload_marks_expired_cursor_inactive():
 
 def test_source_matrix_blocker_reports_auth_error():
     blocker = _source_matrix_blocker(
-        _source(),
+        _source(status="stale"),
         rate_row={
             "active_now": False,
             "access_errors": 1,
@@ -183,6 +183,23 @@ def test_source_matrix_blocker_reports_auth_error():
     assert blocker["kind"] == "auth_or_access"
     assert blocker["severity"] == "error"
     assert "auth" in blocker["next_action"].lower()
+
+
+def test_source_matrix_blocker_does_not_block_live_source_for_rotated_auth_event():
+    blocker = _source_matrix_blocker(
+        _source(status="live"),
+        rate_row={
+            "active_now": False,
+            "access_errors": 1,
+            "latest_status_code": 401,
+            "latest_reason": "Playwright profile auth response",
+        },
+        cursor_row=None,
+        extension_issues=[],
+    )
+
+    assert blocker["kind"] == "none"
+    assert blocker["severity"] == "ok"
 
 
 def test_source_matrix_row_counts_and_live_blocker():

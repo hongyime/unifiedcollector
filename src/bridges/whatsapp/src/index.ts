@@ -48,6 +48,8 @@ let socketRegistered = false;
 let lastDisconnectStatusCode: number | null = null;
 let lastDisconnectReason: string | null = null;
 let terminalQrPrinted = false;
+let lastFreshQrRequestAt = 0;
+const FRESH_QR_MIN_INTERVAL_MS = Number(process.env.WHATSAPP_FRESH_QR_MIN_INTERVAL_MS || 30_000);
 
 let stream515: number[] = [];
 const MAX_RAPID_515 = 3;
@@ -144,11 +146,23 @@ app.post('/reconnect', (_req, res) => {
 // restarts into QR-pairing mode. Use this when a panel is stuck at connecting
 // or the phone reports the previous QR as expired.
 app.post('/fresh-qr', async (_req, res) => {
+    if (!serviceHealthy && latestQr) {
+        res.status(200).json({ ...bridgeState(), status: 'awaiting_scan', note: 'active QR already available' });
+        return;
+    }
+    const now = Date.now();
+    if (now - lastFreshQrRequestAt < FRESH_QR_MIN_INTERVAL_MS) {
+        res.status(202).json({ ...bridgeState(), status: 'fresh_qr_recently_requested' });
+        return;
+    }
+    lastFreshQrRequestAt = now;
     connectionState = 'fresh_qr_requested';
     serviceHealthy = false;
     socketRegistered = false;
     latestQr = null;
     latestQrAt = null;
+    lastDisconnectStatusCode = null;
+    lastDisconnectReason = null;
     try {
         if (activeSock?.authState?.creds?.registered) {
             await activeSock.logout();
@@ -347,8 +361,10 @@ async function connectToWhatsApp(): Promise<void> {
             latestQrAt = Date.now();
             socketRegistered = false;
             connectionState = 'awaiting_scan';
+            lastDisconnectStatusCode = null;
+            lastDisconnectReason = null;
             logger.info({ qr_available: true }, 'QR code refreshed; scan it from the dashboard link page');
-            if (!terminalQrPrinted || getEnv('WHATSAPP_PRINT_TERMINAL_QR', 'false') === 'true') {
+            if (getEnv('WHATSAPP_PRINT_TERMINAL_QR', 'false') === 'true') {
                 terminalQrPrinted = true;
                 qrcode.generate(qr, { small: true });
             }
