@@ -50,10 +50,15 @@ let lastDisconnectReason: string | null = null;
 let terminalQrPrinted = false;
 let lastFreshQrRequestAt = 0;
 const FRESH_QR_MIN_INTERVAL_MS = Number(process.env.WHATSAPP_FRESH_QR_MIN_INTERVAL_MS || 30_000);
+const UNPAIRED_QR_RECONNECT_MS = Number(process.env.WHATSAPP_UNPAIRED_QR_RECONNECT_MS || 5_000);
 
 let stream515: number[] = [];
 const MAX_RAPID_515 = 3;
 const WINDOW_515_MS = 60_000;
+
+function isQrRefsExpired(reason: string | null | undefined): boolean {
+    return String(reason || '').toLowerCase().includes('qr refs attempts ended');
+}
 
 function bridgeState() {
     const user = activeSock?.user || null;
@@ -458,6 +463,12 @@ async function connectToWhatsApp(): Promise<void> {
             } else if (statusCode === DisconnectReason.connectionReplaced) {
                 logger.error('Connection replaced by another session -- stopping');
                 process.exit(1);
+            } else if (!sock.authState.creds.registered && isQrRefsExpired(error?.message)) {
+                retryCount = 0;
+                connectionState = 'refreshing_qr';
+                const delay = Math.max(1000, UNPAIRED_QR_RECONNECT_MS);
+                logger.warn(`QR expired before scan; refreshing QR in ${Math.round(delay / 1000)}s`);
+                setTimeout(() => connectToWhatsApp().catch((e) => logger.error({ err: e }, 'Reconnect failed')), delay);
             } else {
                 retryCount++;
                 const delay = Math.min(2000 * Math.pow(1.5, retryCount), 60000);

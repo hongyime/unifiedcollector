@@ -33,6 +33,13 @@ def test_should_request_fresh_wa_qr_when_unregistered_and_no_qr():
     )
 
 
+def test_should_request_fresh_wa_qr_while_bridge_is_refreshing_qr():
+    assert _should_request_fresh_wa_qr(
+        {"whatsapp_ready": False, "registered": False, "status": "refreshing_qr"},
+        {"qr": None},
+    )
+
+
 def test_should_not_request_fresh_wa_qr_for_registered_session():
     assert not _should_request_fresh_wa_qr(
         {"whatsapp_ready": False, "registered": True, "status": "disconnected"},

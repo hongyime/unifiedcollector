@@ -4656,6 +4656,7 @@ def _should_request_fresh_wa_qr(health: dict, qrd: dict) -> bool:
     return status in {
         "disconnected",
         "connecting_unpaired",
+        "refreshing_qr",
         "fresh_qr_requested",
         "auth_cleared",
     }
@@ -4832,6 +4833,10 @@ async function poll(b){
       qEl.innerHTML='&#9888;'; qEl.style.background='#3d1414'; qEl.style.color='#ef4444'; qEl.style.fontSize='60px';
       sEl.innerHTML='<span class="dot err"></span> Bridge unreachable: '+(d.error||'');
       tEl.innerHTML='<span class="dot err"></span>';
+    } else if(d.status==='refreshing_qr'||d.status==='requesting_fresh_qr'||d.status==='waiting_for_fresh_qr'){
+      qEl.innerHTML='<span class="spinner"></span>'; qEl.style.background='#fff'; qEl.style.color='#111b21'; qEl.style.fontSize='16px';
+      sEl.innerHTML='<span class="dot wait"></span> QR expired; requesting a fresh code&hellip;';
+      tEl.innerHTML='<span class="dot wait"></span>';
     } else {
       sEl.innerHTML='<span class="dot wait"></span> '+(d.status||'starting')+'&hellip;';
     }
