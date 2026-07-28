@@ -782,7 +782,7 @@ async def _download_and_save(pool, session, platform, username, item, reject_sta
         return _reject("exception")
 
 
-async def _drain(app, platform, username, items):
+async def _drain(app, platform, username, items, extension_version: str | None = None):
     """Background download worker — bounded concurrency, never blocks the POST."""
     pool, session, sem = app["pool"], app["session"], app["sem"]
     saved = 0
@@ -791,10 +791,20 @@ async def _drain(app, platform, username, items):
     async def one(it):
         nonlocal saved
         async with sem:
-            if await _download_and_save(pool, session, platform, username, it, reject_stats):
+            payload = it
+            if extension_version and isinstance(it, dict):
+                payload = dict(it)
+                meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+                payload["meta"] = {**meta, "extension_version": extension_version}
+            if await _download_and_save(pool, session, platform, username, payload, reject_stats):
                 saved += 1
 
     await asyncio.gather(*(one(it) for it in items), return_exceptions=True)
+    event_meta = {}
+    if extension_version:
+        event_meta["extension_version"] = extension_version
+    if reject_stats:
+        event_meta["reject_stats"] = reject_stats
     await _record_browser_ingest_event(
         pool,
         platform,
@@ -802,7 +812,7 @@ async def _drain(app, platform, username, items):
         username,
         observed_count=len(items),
         stored_count=saved,
-        metadata={"reject_stats": reject_stats} if reject_stats else None,
+        metadata=event_meta or None,
     )
     if platform == "instagram":
         try:
@@ -855,7 +865,7 @@ async def _ingest(app, platform, body):
     username = body.get("username") or "unknown"
     items = body.get("items") or []
     if items:
-        task = asyncio.create_task(_drain(app, platform, username, items))
+        task = asyncio.create_task(_drain(app, platform, username, items, body.get("extension_version")))
         app["tasks"].add(task)
         task.add_done_callback(app["tasks"].discard)
     return {"accepted": len(items), "platform": platform}

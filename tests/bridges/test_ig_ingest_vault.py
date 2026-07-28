@@ -236,6 +236,52 @@ def test_record_browser_ingest_event_writes_observed_and_stored_counts():
     assert "extension_version" in args[5]
 
 
+def test_drain_propagates_extension_version_to_media_and_telemetry(monkeypatch):
+    pool = _FakePool()
+    saved_items = []
+    events = []
+
+    async def fake_download(_pool, _session, platform, username, item, reject_stats):
+        saved_items.append((platform, username, item, dict(reject_stats)))
+        return True
+
+    async def fake_event(_pool, platform, endpoint, subject, **kwargs):
+        events.append((platform, endpoint, subject, kwargs))
+
+    monkeypatch.setattr(ig_ingest, "_download_and_save", fake_download)
+    monkeypatch.setattr(ig_ingest, "_record_browser_ingest_event", fake_event)
+
+    app = {
+        "pool": pool,
+        "session": object(),
+        "sem": asyncio.Semaphore(2),
+    }
+
+    asyncio.run(
+        ig_ingest._drain(
+            app,
+            "instagram",
+            "alice",
+            [{"content_id": "m1", "url": "https://cdn/x.jpg", "meta": {"role": "story"}}],
+            "1.21.35",
+        )
+    )
+
+    assert saved_items[0][2]["meta"] == {"role": "story", "extension_version": "1.21.35"}
+    assert events == [
+        (
+            "instagram",
+            "media",
+            "alice",
+            {
+                "observed_count": 1,
+                "stored_count": 1,
+                "metadata": {"extension_version": "1.21.35"},
+            },
+        )
+    ]
+
+
 def test_browser_heartbeat_handler_records_platform_loop():
     pool = _FakePool()
     req = _FakeRequest(
