@@ -179,12 +179,19 @@ const sourceMatrixColumns: ColumnDef<SourceCollectionMatrixRow, unknown>[] = [
     header: "Media Vault",
     cell: (info) => {
       const row = info.row.original;
+      const media = row.media_freshness;
       return (
         <div>
           <div>{formatNumber(info.getValue() as number)} files</div>
           <div className="text-[10px] uppercase tracking-wide text-text-muted">
             {formatBytes(row.total_media_bytes)} · {relativeTime(row.latest_media_at)}
           </div>
+          {media ? (
+            <div className="mt-1 flex max-w-[260px] items-center gap-2 text-[10px]">
+              <StatusBadge status={blockerBadgeStatus(media.severity)} label={media.status.replace(/_/g, " ")} />
+              <span className={media.severity === "ok" ? "text-text-muted" : "text-warning"}>{media.summary}</span>
+            </div>
+          ) : null}
         </div>
       );
     },

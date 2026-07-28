@@ -120,6 +120,17 @@ export interface SourceRateLimitState {
   latest_reason: string | null;
 }
 
+export interface SourceMediaFreshness {
+  status: string;
+  severity: "ok" | "warning" | "error" | string;
+  expected: boolean;
+  current_hour_items: number;
+  last_24h_items: number;
+  latest_age_seconds: number | null;
+  summary: string;
+  next_action: string;
+}
+
 export interface SourceCollectionMatrixRow {
   source: string;
   status: CollectorLiveSource["status"];
@@ -141,6 +152,7 @@ export interface SourceCollectionMatrixRow {
   total_media_items: number;
   total_media_bytes: number;
   latest_media_at: string | null;
+  media_freshness: SourceMediaFreshness;
   rate_limit: SourceRateLimitState;
   extension_issues: BrowserExtensionIssue[];
   blocker: SourceBlocker;

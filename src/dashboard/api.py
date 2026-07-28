@@ -218,6 +218,23 @@ _SOURCE_METHODS = {
     "search": ["headless search"],
 }
 
+_MEDIA_PRIMARY_SOURCES = {
+    "beeper",
+    "facebook",
+    "instagram",
+    "lemon8",
+    "search",
+    "strava",
+    "telegram",
+    "threads",
+    "tiktok",
+    "website",
+    "whatsapp",
+    "x",
+    "youtube",
+}
+_MEDIA_QUIET_WARN_SECONDS = int(os.getenv("SOURCE_MEDIA_QUIET_WARN_SECONDS", str(24 * 3600)))
+
 
 def _normalize_rate_limit_source(service: str | None) -> str:
     value = (service or "").lower()
@@ -669,12 +686,104 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
     }
 
 
+def _source_media_freshness(source: str | None, current_window: dict, day_window: dict,
+                            media_total: dict | None, now: datetime | None = None) -> dict:
+    """Report media freshness separately from source liveness.
+
+    A source can have fresh rows while media downloads are quiet. Keeping this
+    out of ``blocker`` avoids false outages while still making stale media
+    visible in the operator matrix.
+    """
+    current_items = int((current_window or {}).get("media_items") or 0)
+    day_items = int((day_window or {}).get("media_items") or 0)
+    total = media_total or {}
+    total_items = int(total.get("total_media_items") or 0)
+    latest = total.get("latest_media_at")
+    expected = source in _MEDIA_PRIMARY_SOURCES
+    now = now or datetime.now(timezone.utc)
+
+    latest_age_seconds = None
+    if isinstance(latest, datetime):
+        if latest.tzinfo is None:
+            latest = latest.replace(tzinfo=timezone.utc)
+        latest_age_seconds = max(0, int((now - latest).total_seconds()))
+
+    if not expected:
+        return {
+            "status": "not_primary",
+            "severity": "ok",
+            "expected": False,
+            "current_hour_items": current_items,
+            "last_24h_items": day_items,
+            "latest_age_seconds": latest_age_seconds,
+            "summary": "Media is not the primary collection signal for this source.",
+            "next_action": "Judge freshness from rows/events for this source.",
+        }
+    if current_items > 0:
+        return {
+            "status": "fresh",
+            "severity": "ok",
+            "expected": True,
+            "current_hour_items": current_items,
+            "last_24h_items": day_items,
+            "latest_age_seconds": latest_age_seconds,
+            "summary": f"Stored {current_items:,} media file(s) this hour.",
+            "next_action": "No media action.",
+        }
+    if day_items > 0:
+        return {
+            "status": "recent",
+            "severity": "ok",
+            "expected": True,
+            "current_hour_items": current_items,
+            "last_24h_items": day_items,
+            "latest_age_seconds": latest_age_seconds,
+            "summary": f"Stored {day_items:,} media file(s) in the last 24h; none this hour.",
+            "next_action": "No action unless this source should be media-heavy right now.",
+        }
+    if total_items <= 0:
+        return {
+            "status": "none_yet",
+            "severity": "warning",
+            "expected": True,
+            "current_hour_items": current_items,
+            "last_24h_items": day_items,
+            "latest_age_seconds": latest_age_seconds,
+            "summary": "No media files captured yet for this source.",
+            "next_action": "Check whether this scraper has media extraction enabled.",
+        }
+
+    age_text = _short_age(latest_age_seconds)
+    quiet = latest_age_seconds is None or latest_age_seconds >= _MEDIA_QUIET_WARN_SECONDS
+    return {
+        "status": "quiet" if quiet else "idle",
+        "severity": "warning" if quiet else "ok",
+        "expected": True,
+        "current_hour_items": current_items,
+        "last_24h_items": day_items,
+        "latest_age_seconds": latest_age_seconds,
+        "summary": (
+            f"No media files in the last 24h; latest media was {age_text} ago."
+            if age_text
+            else "No media files in the last 24h; latest media time is unknown."
+        ),
+        "next_action": (
+            "If this source should contain media, inspect the scraper tab/session and media download logs."
+            if quiet
+            else "No action unless media is expected this hour."
+        ),
+    }
+
+
 def _source_matrix_row(source_row: dict, current_content: dict | None, current_rate: dict | None,
                        day_content: dict | None, day_rate: dict | None, media_total: dict | None,
-                       cursor_row: dict | None, extension_issues: list[dict]) -> dict:
+                       cursor_row: dict | None, extension_issues: list[dict],
+                       now: datetime | None = None) -> dict:
     blocker = _source_matrix_blocker(source_row, day_rate, cursor_row, extension_issues)
     source = source_row.get("source")
     total_media = media_total or {}
+    current_window = _merge_source_window(current_content, current_rate)
+    day_window = _merge_source_window(day_content, day_rate)
     return {
         "source": source,
         "status": source_row.get("status"),
@@ -690,11 +799,12 @@ def _source_matrix_row(source_row: dict, current_content: dict | None, current_r
         "source_health_updated_at": source_row.get("source_health_updated_at"),
         "bridge_status": source_row.get("bridge_status"),
         "bridge_detail": source_row.get("bridge_detail"),
-        "current_hour": _merge_source_window(current_content, current_rate),
-        "last_24h": _merge_source_window(day_content, day_rate),
+        "current_hour": current_window,
+        "last_24h": day_window,
         "total_media_items": int(total_media.get("total_media_items") or 0),
         "total_media_bytes": int(total_media.get("total_media_bytes") or 0),
         "latest_media_at": total_media.get("latest_media_at"),
+        "media_freshness": _source_media_freshness(source, current_window, day_window, total_media, now),
         "rate_limit": {
             "active_now": bool((cursor_row and cursor_row.get("active_now")) or (day_rate and day_rate.get("active_now"))),
             "active_until": (cursor_row or {}).get("active_until") or (day_rate or {}).get("active_until"),
@@ -1715,6 +1825,7 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
             errors.append({"section": "browser_extension", "error": exc.__class__.__name__})
             browser_extension = {"expected_version": _expected_extension_version(), "issues": []}
 
+    generated_at = datetime.now(timezone.utc)
     extension_by_source = _extension_issues_by_source(browser_extension)
     rows = [
         _source_matrix_row(
@@ -1726,6 +1837,7 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
             media_totals.get(source_row["source"]),
             active_cursors.get(source_row["source"]),
             extension_by_source.get(source_row["source"], []),
+            generated_at,
         )
         for source_row in live_sources
     ]
@@ -1740,7 +1852,6 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
         severity_rank.get((r.get("blocker") or {}).get("severity"), 3),
         r.get("source") or "",
     ))
-    generated_at = datetime.now(timezone.utc)
     current_hour_started_at = generated_at.replace(minute=0, second=0, microsecond=0)
     previous_hour_started_at = current_hour_started_at - timedelta(hours=1)
     return {

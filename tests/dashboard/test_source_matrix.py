@@ -15,6 +15,7 @@ from src.dashboard.api import (
     _normalize_beeper_network,
     _rate_limit_cursor_payload,
     _source_matrix_blocker,
+    _source_media_freshness,
     _source_matrix_row,
     _source_window_totals,
     _source_media_totals,
@@ -203,15 +204,21 @@ def test_source_matrix_blocker_does_not_block_live_source_for_rotated_auth_event
 
 
 def test_source_matrix_row_counts_and_live_blocker():
+    now = datetime(2026, 7, 28, 1, 30, tzinfo=timezone.utc)
     row = _source_matrix_row(
         _source(),
         current_content={"records": 4, "messages": 0, "media_items": 7},
         current_rate={"rate_limits": 1, "access_errors": 0},
         day_content={"records": 40, "messages": 0, "media_items": 70},
         day_rate={"rate_limits": 2, "access_errors": 0},
-        media_total={"total_media_items": 123, "total_media_bytes": 456},
+        media_total={
+            "total_media_items": 123,
+            "total_media_bytes": 456,
+            "latest_media_at": now - timedelta(minutes=5),
+        },
         cursor_row=None,
         extension_issues=[],
+        now=now,
     )
 
     assert row["source"] == "instagram"
@@ -221,9 +228,50 @@ def test_source_matrix_row_counts_and_live_blocker():
     assert row["current_hour"]["rate_limits"] == 1
     assert row["last_24h"]["records"] == 40
     assert row["total_media_items"] == 123
+    assert row["media_freshness"]["status"] == "fresh"
+    assert row["media_freshness"]["current_hour_items"] == 7
     assert row["source_health_last_success_at"] == datetime(2026, 7, 28, 1, 0, tzinfo=timezone.utc)
     assert row["source_health_updated_at"] == datetime(2026, 7, 28, 1, 5, tzinfo=timezone.utc)
     assert row["blocker"]["kind"] == "none"
+
+
+def test_source_matrix_reports_media_quiet_without_blocking_live_rows():
+    now = datetime(2026, 7, 28, 1, 30, tzinfo=timezone.utc)
+    row = _source_matrix_row(
+        _source(source="facebook", freshness_basis="facebook_posts.collected_at"),
+        current_content={"records": 12, "messages": 0, "media_items": 0},
+        current_rate=None,
+        day_content={"records": 30, "messages": 0, "media_items": 0},
+        day_rate=None,
+        media_total={
+            "total_media_items": 29,
+            "total_media_bytes": 1787223,
+            "latest_media_at": now - timedelta(days=2),
+        },
+        cursor_row=None,
+        extension_issues=[],
+        now=now,
+    )
+
+    assert row["status"] == "live"
+    assert row["blocker"]["kind"] == "none"
+    assert row["media_freshness"]["status"] == "quiet"
+    assert row["media_freshness"]["severity"] == "warning"
+    assert "No media files in the last 24h" in row["media_freshness"]["summary"]
+
+
+def test_source_media_freshness_does_not_warn_for_github_commits():
+    now = datetime(2026, 7, 28, 1, 30, tzinfo=timezone.utc)
+    freshness = _source_media_freshness(
+        "github",
+        {"records": 20, "media_items": 0},
+        {"records": 80, "media_items": 0},
+        {"total_media_items": 10, "latest_media_at": now - timedelta(days=3)},
+        now=now,
+    )
+
+    assert freshness["status"] == "not_primary"
+    assert freshness["severity"] == "ok"
 
 
 def test_source_window_totals_sums_counts_and_active_sources():
