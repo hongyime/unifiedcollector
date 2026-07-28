@@ -830,6 +830,7 @@ services:
       COLLECTOR_DB_BACKUP_WEEKLY: "4"
       COLLECTOR_DB_BACKUP_MONTHLY: "3"
       COLLECTOR_DB_BACKUP_INTERVAL_SECONDS: ${COLLECTOR_DB_BACKUP_INTERVAL_SECONDS:-86400}
+      COLLECTOR_DB_BACKUP_RETRY_SECONDS: ${COLLECTOR_DB_BACKUP_RETRY_SECONDS:-3600}
       COLLECTOR_DB_BACKUP_DATABASE: unifiedcollector
       COLLECTOR_DB_BACKUP_VAULT_ROOT: /vault
       COLLECTOR_DB_BACKUP_REQUIRE_VAULT_MIRROR: "1"
@@ -846,8 +847,11 @@ services:
       - -c
       - |
         while true; do
-          python3 -m src.backup.db_backup run
-          sleep "$${COLLECTOR_DB_BACKUP_INTERVAL_SECONDS:-86400}"
+          if python3 -m src.backup.db_backup run; then
+            sleep "$${COLLECTOR_DB_BACKUP_INTERVAL_SECONDS:-86400}"
+          else
+            sleep "$${COLLECTOR_DB_BACKUP_RETRY_SECONDS:-3600}"
+          fi
         done
     depends_on:
       postgres:
