@@ -1359,6 +1359,7 @@ const STRAVA_ROUTE_NAV_MIN_MS = 4 * 60 * 1000;
 const STRAVA_ROUTE_NAV_MAX_WAIT_MS = 10 * 60 * 1000;
 const STRAVA_ROUTE_VISIT_TTL_MS = 6 * 60 * 60 * 1000;
 const STRAVA_STREAM_SEEN_TTL_MS = 10 * 60 * 1000;
+const STRAVA_STREAM_ATTEMPT_TTL_MS = 12 * 60 * 1000;
 
 function stravaActivityIdFromLocation() {
   const m = location.pathname.match(/^\/activities\/(\d+)(?:[/?#]|$)/);
@@ -1396,14 +1397,29 @@ function stravaStreamSeenKey(activityId) {
   return "uc_strava_stream_seen_" + String(activityId || "");
 }
 
+function stravaStreamAttemptKey(activityId) {
+  return "uc_strava_stream_attempt_" + String(activityId || "");
+}
+
+function markStravaStreamAttempted(activityId) {
+  if (!activityId) return;
+  lsSet(stravaStreamAttemptKey(activityId), String(Date.now()));
+}
+
 function markStravaStreamSeen(activityId) {
   if (!activityId) return;
+  markStravaStreamAttempted(activityId);
   lsSet(stravaStreamSeenKey(activityId), String(Date.now()));
 }
 
 function stravaStreamRecentlySeen(activityId) {
   const seenAt = lsNum(stravaStreamSeenKey(activityId));
   return seenAt && Date.now() - seenAt < STRAVA_STREAM_SEEN_TTL_MS;
+}
+
+function stravaStreamRecentlyAttempted(activityId) {
+  const attemptedAt = lsNum(stravaStreamAttemptKey(activityId));
+  return attemptedAt && Date.now() - attemptedAt < STRAVA_STREAM_ATTEMPT_TTL_MS;
 }
 
 function stravaStreamPointCount(streams) {
@@ -1420,7 +1436,7 @@ function stravaStreamPointCount(streams) {
 }
 
 async function captureStravaStreamsDirect(activityId) {
-  if (!activityId || stravaStreamRecentlySeen(activityId)) return false;
+  if (!activityId || stravaStreamRecentlySeen(activityId) || stravaStreamRecentlyAttempted(activityId)) return false;
   const qs = [
     "latlng", "time", "altitude", "distance", "heartrate",
     "cadence", "watts", "velocity_smooth", "grade_smooth",
@@ -1433,6 +1449,7 @@ async function captureStravaStreamsDirect(activityId) {
       headers: { "X-Requested-With": "XMLHttpRequest" },
     });
     if (resp.status === 401 || resp.status === 403 || resp.status === 429) {
+      markStravaStreamAttempted(activityId);
       await send({
         type: "strava_streams",
         activity_id: activityId,
@@ -1448,6 +1465,7 @@ async function captureStravaStreamsDirect(activityId) {
     const streams = await resp.json().catch(() => null);
     const pointCount = stravaStreamPointCount(streams);
     if (pointCount < 2) {
+      markStravaStreamAttempted(activityId);
       await send({
         type: "strava_streams",
         activity_id: activityId,
@@ -1473,6 +1491,7 @@ async function captureStravaStreamsDirect(activityId) {
     clog("info", `activity ${activityId}: route ${pointCount} point(s) captured`, "strava");
     return true;
   } catch (e) {
+    markStravaStreamAttempted(activityId);
     clog("warn", `activity ${activityId}: route stream fetch failed`, "strava");
     return false;
   }
@@ -1695,6 +1714,7 @@ window.addEventListener("message", (ev) => {
     }).catch(() => {});
   } else if (m.type === "strava_streams" && m.activity_id) {
     if ((m.point_count || 0) > 1) markStravaStreamSeen(m.activity_id);
+    else markStravaStreamAttempted(m.activity_id);
     send({
       type: "strava_streams",
       activity_id: m.activity_id,

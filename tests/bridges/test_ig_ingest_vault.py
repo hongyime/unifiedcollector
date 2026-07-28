@@ -468,6 +468,18 @@ def test_upsert_strava_browser_stream_writes_route_tables():
     assert update_args[6]
 
 
+def test_strava_stream_response_status_treats_empty_stream_as_processed():
+    assert ig_ingest._strava_stream_response_status(
+        {"stored": 0, "point_count": 0, "reason": "no_route_points"}
+    ) == 200
+    assert ig_ingest._strava_stream_response_status(
+        {"stored": 0, "reason": "bad_activity_id"}
+    ) == 400
+    assert ig_ingest._strava_stream_response_status(
+        {"stored": 0, "reason": "other"}
+    ) == 422
+
+
 def test_archive_browser_capture_failure_records_dlq(monkeypatch):
     pool = _FakePool()
 

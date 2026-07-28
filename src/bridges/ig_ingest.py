@@ -2377,8 +2377,22 @@ async def strava_streams_handler(request):
             "extension_version": body.get("extension_version"),
         },
     )
-    status = 200 if result.get("stored") else 422
+    status = _strava_stream_response_status(result, http_event_recorded=http_event_recorded)
     return _cors(web.json_response(result, status=status))
+
+
+def _strava_stream_response_status(result: dict, *, http_event_recorded: bool = False) -> int:
+    """Return HTTP status for an accepted browser route-stream observation."""
+    if result.get("stored") or http_event_recorded:
+        return 200
+    reason = result.get("reason")
+    if reason == "no_route_points":
+        return 200
+    if reason == "bad_activity_id":
+        return 400
+    if reason == "no_pool":
+        return 503
+    return 422
 
 
 async def strava_route_queue_handler(request):
