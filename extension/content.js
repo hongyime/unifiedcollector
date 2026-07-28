@@ -1330,11 +1330,11 @@ const facebook = {
       await send({ type: "profile", platform: "facebook", profile });
       clog("info", `Facebook ${entity}: profile captured (person=${person})`, "facebook");
     }
-    // MEDIA — only real people's profiles.
-    if (person) {
-      const sink = harvestDom(entity, { imgRe: /fbcdn\.net/, junkRe: /rsrc\.php|emoji|static|\/s\d+x\d+\/|profile|sprite/ });
-      if (sink.items.length) { await send({ type: "ingest", platform: "facebook", username: entity, items: sink.items }); saved = sink.items.length; }
-    }
+    // MEDIA — capture rendered feed/profile media broadly. The bridge/file gate
+    // drops UI chrome and tiny avatars; collector policy now favors completeness
+    // over the older person-profile-only restriction.
+    const sink = harvestDom(entity, { imgRe: /fbcdn\.net/, junkRe: /rsrc\.php|emoji|static|\/s\d+x\d+\/|profile|sprite/ });
+    if (sink.items.length) { await send({ type: "ingest", platform: "facebook", username: entity, items: sink.items }); saved = sink.items.length; }
     // POSTS (captions) + USERS — captured EVERYWHERE incl. pages/groups, for the
     // user registry + spidering (user: "when spider we can use either").
     const posts = harvestPermalinkPosts(/\/(?:posts\/|permalink\.php\?story_fbid=|[^/]+\/posts\/)?(pfbid[\w]+|\d{6,})/, (m) => m[1]);
