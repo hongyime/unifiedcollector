@@ -2273,7 +2273,7 @@ async def _record_strava_stream_http_event(pool, body: dict) -> bool:
         return False
     activity_id = str(body.get("activity_id") or body.get("platform_activity_id") or "unknown")
     account = _browser_account_label(body)
-    if status == 429 and await _active_strava_stream_cooldown_exists(pool, account, activity_id):
+    if await _touch_recent_strava_stream_http_event(pool, account, activity_id, status, body):
         return False
     cooldown = STRAVA_BROWSER_429_COOLDOWN_SECONDS if status == 429 else None
     await record_rate_limit_event(
@@ -2295,31 +2295,60 @@ async def _record_strava_stream_http_event(pool, body: dict) -> bool:
     return True
 
 
-async def _active_strava_stream_cooldown_exists(pool, account: str, activity_id: str) -> bool:
+async def _touch_recent_strava_stream_http_event(
+    pool,
+    account: str,
+    activity_id: str,
+    status: int,
+    body: dict,
+) -> bool:
+    """Fold duplicate browser stream HTTP failures into the newest recent row."""
     try:
         async with pool.acquire() as conn:
             return bool(await conn.fetchval(
                 """
-                SELECT EXISTS (
-                    SELECT 1
+                WITH latest AS (
+                    SELECT id
                     FROM rate_limit_events
                     WHERE source = 'strava'
                       AND account IS NOT DISTINCT FROM $1
                       AND scope = 'browser_strava_streams'
-                      AND status_code = 429
+                      AND status_code = $3
                       AND metadata->>'activity_id' = $2
-                      AND cooldown_seconds IS NOT NULL
-                      AND created_at + cooldown_seconds * interval '1 second' > now()
+                      AND created_at >= now() - interval '6 hours'
+                    ORDER BY created_at DESC
+                    LIMIT 1
                 )
+                UPDATE rate_limit_events r
+                SET metadata = r.metadata || jsonb_build_object(
+                    'duplicate_suppressed_count',
+                    COALESCE((r.metadata->>'duplicate_suppressed_count')::int, 0) + 1,
+                    'duplicate_last_seen_at',
+                    now(),
+                    'latest_request_url',
+                    $4::text,
+                    'latest_extension_version',
+                    $5::text,
+                    'latest_point_count',
+                    $6::int
+                )
+                FROM latest
+                WHERE r.id = latest.id
+                RETURNING 1
                 """,
                 account,
                 activity_id,
+                status,
+                body.get("request_url") or body.get("url"),
+                body.get("extension_version"),
+                body.get("point_count"),
             ))
     except Exception:
         logger.debug(
-            "active Strava stream cooldown check failed account=%s activity=%s",
+            "recent Strava stream HTTP event touch failed account=%s activity=%s status=%s",
             account,
             activity_id,
+            status,
             exc_info=True,
         )
         return False

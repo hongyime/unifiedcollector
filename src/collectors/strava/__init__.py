@@ -558,7 +558,12 @@ class StravaCollector(BaseCollector):
             repair_batch = int(os.getenv("STRAVA_GPS_ROUTE_REPAIR_BATCH", "100"))
             await self._repair_existing_gps_stream_routes(batch_size=repair_batch)
         except Exception as e:
-            logger.warning("strava: GPS route repair failed: %s", e)
+            logger.warning(
+                "strava: GPS route repair failed: %s: %s",
+                type(e).__name__,
+                e,
+                exc_info=True,
+            )
         if self._gps_enabled and self._use_web and \
                 os.getenv("STRAVA_GPS_BACKFILL_FIRST", "true").lower() == "true":
             try:
@@ -1668,8 +1673,6 @@ class StravaCollector(BaseCollector):
                 FROM strava_activities a
                 JOIN strava_gps_streams s ON s.activity_id = a.id
                 WHERE s.latlng IS NOT NULL
-                  AND jsonb_typeof(s.latlng) = 'array'
-                  AND jsonb_array_length(s.latlng) > 1
                   AND (
                         a.summary_polyline IS NULL
                      OR a.summary_polyline = ''
@@ -1678,7 +1681,8 @@ class StravaCollector(BaseCollector):
                      OR a.end_latlng IS NULL
                      OR a.privacy_zone_start IS NULL
                      OR a.privacy_zone_end IS NULL
-                  )
+                   )
+                ORDER BY a.start_date DESC NULLS LAST, a.platform_activity_id DESC
                 LIMIT $1
                 """,
                 int(batch_size),

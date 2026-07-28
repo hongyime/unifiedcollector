@@ -10,10 +10,12 @@ from src.bridges import ig_ingest
 class _FakeConn:
     def __init__(self):
         self.executes = []
+        self.fetchvals = []
         self.fetchrow_result = None
         self.fetchval_result = None
 
     async def fetchval(self, query, *args):
+        self.fetchvals.append((query, args))
         return self.fetchval_result
 
     async def fetchrow(self, query, *args):
@@ -309,6 +311,11 @@ def test_record_strava_stream_http_429_does_not_extend_active_duplicate_cooldown
 
     assert recorded is False
     assert pool.conn.executes == []
+    query, args = pool.conn.fetchvals[0]
+    assert "UPDATE rate_limit_events" in query
+    assert "duplicate_suppressed_count" in query
+    assert args[:3] == ("bryanseah234", "19283135496", 429)
+    assert args[3] == "https://www.strava.com/activities/19283135496/streams"
 
 
 def test_archive_browser_capture_writes_dm_sample_raw_payload(monkeypatch):

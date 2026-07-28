@@ -349,6 +349,9 @@ async def test_repair_existing_gps_stream_routes_backfills_activity_row(monkeypa
 
     assert repaired == 1
     pool._conn.fetch.assert_awaited_once()
+    fetch_sql = pool._conn.fetch.await_args.args[0]
+    assert "jsonb_array_length" not in fetch_sql
+    assert "ORDER BY a.start_date DESC NULLS LAST" in fetch_sql
     pool._conn.execute.assert_awaited_once()
     args = pool._conn.execute.await_args.args
     assert "summary_polyline = COALESCE" in args[0]
