@@ -88,6 +88,8 @@ from src.collectors.lemon8.parse import (
 )
 from src.core.human_rate_limiter import OperationType
 from src.core.file_naming import sanitize_name
+from src.core.rate_limit_events import record_rate_limit_event
+from src.core.scrape_pacing import sleep_rate_limit
 from src.core.vault import VAULT_ROOT, write_atomic_artifact
 from src.core.user_change_tracker import (
     UserChangeTracker,
@@ -139,6 +141,13 @@ try:  # pragma: no cover - optional dep
 except Exception:  # ImportError or downstream errors
     _PyLemon8 = None
     PYLEMON8_AVAILABLE = False
+
+_URL_QUERY_RE = re.compile(r"(https?://[^\s'\"<>?]+)\?[^\s'\"<>]+")
+
+
+def _safe_log_text(value) -> str:
+    """Keep signed CDN/API query strings out of logs and DLQ rows."""
+    return _URL_QUERY_RE.sub(r"\1?<redacted>", str(value))
 
 
 def _enhance_image_url(url: str, target_width: int = 2160) -> str:
@@ -275,6 +284,13 @@ class Lemon8Collector(BaseCollector):
         self._profile_photos = os.getenv("LEMON8_PROFILE_PHOTO_ENABLED", "true").lower() == "true"
         self._feed_enabled = os.getenv("LEMON8_FEED_ENABLED", "true").lower() == "true"
         self._tag_pages = int(os.getenv("LEMON8_TAG_PAGES", "10"))
+        try:
+            self._rate_limit_cooldown_seconds = max(
+                0,
+                int(os.getenv("LEMON8_RATE_LIMIT_COOLDOWN_SECONDS", "900")),
+            )
+        except (TypeError, ValueError):
+            self._rate_limit_cooldown_seconds = 900
         self._discovered_users: set[str] = set()
         self._discovered_tags: set[str] = set()
         # FAMOUS-FILTER (Bryan): skip Lemon8 accounts at/above this follower count.
@@ -333,20 +349,46 @@ class Lemon8Collector(BaseCollector):
                 if username.startswith("#"):
                     try: await self._collect_tag(client, username.lstrip("#"))
                     except Exception as e:
-                        logger.error("Tag collection failed for %s: %s", username, e)
+                        safe_error = _safe_log_text(e)
+                        await self._record_http_status_event(
+                            e,
+                            scope="tag_fetch",
+                            subject=username,
+                            url=TAG_URL_PATTERN.format(username.lstrip("#")),
+                        )
+                        logger.error("Tag collection failed for %s: %s", username, safe_error)
                     continue
                 logger.info("Collecting lemon8/%s", username)
                 try:
                     await self._collect_user(client, username)
                     await self.checkpoint.save_progress(username)
                 except Exception as e:
-                    logger.error("Failed lemon8/%s: %s", username, e)
-                    await self.send_to_dlq(username, username, str(e))
+                    status_code = self._http_status_from_error(e)
+                    safe_error = _safe_log_text(e)
+                    if status_code == 404:
+                        logger.info("lemon8: skip unavailable profile %s: HTTP 404", username)
+                        await self.checkpoint.save_progress(username)
+                        continue
+                    await self._record_http_status_event(
+                        e,
+                        scope="profile_fetch",
+                        subject=username,
+                        url=USER_URL_PATTERN.format(username.lstrip("@")),
+                    )
+                    logger.error("Failed lemon8/%s: %s", username, safe_error)
+                    await self.send_to_dlq(username, username, safe_error)
             if self._feed_enabled:
                 try:
                     await self._collect_feed(client)
                 except Exception as e:
-                    logger.error("Feed collection failed: %s", e)
+                    safe_error = _safe_log_text(e)
+                    await self._record_http_status_event(
+                        e,
+                        scope="feed_fetch",
+                        subject="feed",
+                        url=FEED_URL,
+                    )
+                    logger.error("Feed collection failed: %s", safe_error)
 
         if os.getenv("LEMON8_SPIDER_ENABLED", "true").lower() == "true":
             await self._process_spider_queue()
@@ -371,7 +413,13 @@ class Lemon8Collector(BaseCollector):
                     await self._collect_user(client, row['platform_user_id'])
                     async with self.pool.acquire() as conn:
                         await conn.execute("UPDATE lemon8_spider_queue SET status = 'completed' WHERE platform_user_id = $1", row['platform_user_id'])
-                except Exception:
+                except Exception as e:
+                    await self._record_http_status_event(
+                        e,
+                        scope="spider_profile_fetch",
+                        subject=row['platform_user_id'],
+                        url=USER_URL_PATTERN.format(str(row['platform_user_id']).lstrip("@")),
+                    )
                     async with self.pool.acquire() as conn:
                         await conn.execute("UPDATE lemon8_spider_queue SET status = 'failed' WHERE platform_user_id = $1", row['platform_user_id'])
 
@@ -698,6 +746,92 @@ class Lemon8Collector(BaseCollector):
             pass
         return "lemon8_default"
 
+    @staticmethod
+    def _http_status_from_error(error: Exception) -> int | None:
+        response = getattr(error, "response", None)
+        status = getattr(response, "status_code", None)
+        if status is None:
+            return None
+        try:
+            return int(status)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _rate_limit_url_metadata(url: str | None) -> dict[str, str]:
+        if not url:
+            return {}
+        try:
+            parsed = urlparse(str(url))
+            metadata: dict[str, str] = {}
+            if parsed.netloc:
+                metadata["url_host"] = parsed.netloc
+            if parsed.path:
+                metadata["url_path"] = parsed.path[:200]
+            return metadata
+        except Exception:
+            return {}
+
+    async def _record_http_status_event(
+        self,
+        error: Exception,
+        *,
+        scope: str,
+        subject: str | None = None,
+        url: str | None = None,
+        record_access_errors: bool = True,
+        metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        """Persist Lemon8 throttle/auth failures for dashboards and Telegram.
+
+        404s are common for removed Lemon8 profiles, and CDN 403s are usually
+        expiring media signatures. Keep those out of source health unless the
+        caller explicitly identifies the failure as a source-page access issue.
+        """
+        status_code = self._http_status_from_error(error)
+        if status_code is None:
+            return False
+        if status_code == 429:
+            cooldown_seconds = self._rate_limit_cooldown_seconds or None
+        elif record_access_errors and status_code in (401, 403):
+            cooldown_seconds = None
+        else:
+            return False
+
+        event_metadata: dict[str, Any] = {
+            "subject": subject,
+            "collector": "lemon8",
+        }
+        event_metadata.update(self._rate_limit_url_metadata(url))
+        if metadata:
+            event_metadata.update(metadata)
+
+        await record_rate_limit_event(
+            self.pool,
+            source="lemon8",
+            account=self._access_account_label(),
+            scope=scope,
+            status_code=status_code,
+            cooldown_seconds=cooldown_seconds,
+            reason=f"HTTP {status_code} while collecting Lemon8 {scope}",
+            metadata=event_metadata,
+        )
+        if status_code == 429 and cooldown_seconds:
+            trigger = getattr(self.rate_limiter, "trigger_emergency_cooldown", None)
+            if callable(trigger):
+                previous = getattr(self.rate_limiter, "emergency_cooldown", None)
+                try:
+                    if previous is not None:
+                        self.rate_limiter.emergency_cooldown = float(cooldown_seconds)
+                    trigger("lemon8-app.com")
+                except Exception:
+                    logger.debug("lemon8: local cooldown trigger failed", exc_info=True)
+                finally:
+                    if previous is not None:
+                        self.rate_limiter.emergency_cooldown = previous
+            await sleep_rate_limit(cooldown_seconds)
+        return True
+
     async def _record_profile_access(self, username, can_access, is_private=None,
                                      is_followed=False, error=None):
         """Record whether this cookie-account could see ``username`` into
@@ -814,9 +948,28 @@ class Lemon8Collector(BaseCollector):
         try:
             resp = await client.get(url, headers=self._headers())
             if resp.status_code != 200:
+                if resp.status_code in (401, 403, 429):
+                    request = getattr(resp, "request", None) or httpx.Request("GET", url)
+                    err = httpx.HTTPStatusError(
+                        f"HTTP {resp.status_code}",
+                        request=request,
+                        response=resp,
+                    )
+                    await self._record_http_status_event(
+                        err,
+                        scope="note_detail_fetch",
+                        subject=f"{username}/{note_id}",
+                        url=url,
+                    )
                 return None
             html = resp.text
-        except Exception:
+        except Exception as e:
+            await self._record_http_status_event(
+                e,
+                scope="note_detail_fetch",
+                subject=f"{username}/{note_id}",
+                url=url,
+            )
             return None
 
         # Try to extract post data from embedded JSON
@@ -888,7 +1041,7 @@ class Lemon8Collector(BaseCollector):
             try:
                 result = await self._scrape_feed_with_api("foryou", pages)
             except Exception as e:
-                logger.info("pylemon8 feed failed, falling back to web: %s", e)
+                logger.info("pylemon8 feed failed, falling back to web: %s", _safe_log_text(e))
                 result = {}
 
         # 2) Web fallback
@@ -896,7 +1049,7 @@ class Lemon8Collector(BaseCollector):
             try:
                 result = await self._scrape_feed_with_web(client, pages)
             except Exception as e:
-                logger.error("Web feed scrape failed: %s", e)
+                logger.error("Web feed scrape failed: %s", _safe_log_text(e))
                 return
 
         media_items = result.get("media_items", []) or []
@@ -958,7 +1111,7 @@ class Lemon8Collector(BaseCollector):
                             if ok:
                                 logger.info("lemon8 FYP detail: upserted post %s for %s", note_id, uname)
                     except Exception as e:
-                        logger.debug("lemon8 FYP detail fetch %s failed: %s", note_id, e)
+                        logger.debug("lemon8 FYP detail fetch %s failed: %s", note_id, _safe_log_text(e))
 
             self._progress_count += 1
             if self.is_known(content_id):
@@ -985,7 +1138,18 @@ class Lemon8Collector(BaseCollector):
             resp.raise_for_status()
             html_content = resp.text
         except Exception as e:
-            logger.error("Tag fetch failed %s: %s", tag_id, e)
+            safe_error = _safe_log_text(e)
+            await self._record_http_status_event(
+                e,
+                scope="tag_fetch",
+                subject=tag_id,
+                url=url,
+            )
+            status_code = self._http_status_from_error(e)
+            if status_code == 404:
+                logger.info("lemon8: skip unavailable tag %s: HTTP 404", tag_id)
+            else:
+                logger.error("Tag fetch failed %s: %s", tag_id, safe_error)
             return
 
         media_items = self._extract_media_items_from_feed_cards(html_content, include_profile_images=self._profile_photos)
@@ -1077,7 +1241,14 @@ class Lemon8Collector(BaseCollector):
                 resp.raise_for_status()
                 html_content = resp.text
             except Exception as e:
-                logger.warning("Feed page %d fetch failed: %s", page + 1, e)
+                safe_error = _safe_log_text(e)
+                await self._record_http_status_event(
+                    e,
+                    scope="feed_fetch",
+                    subject=f"page:{page + 1}",
+                    url=url,
+                )
+                logger.warning("Feed page %d fetch failed: %s", page + 1, safe_error)
                 break
 
             media_items = self._extract_media_items_from_feed_cards(html_content, include_profile_images=self._profile_photos)
@@ -1856,7 +2027,7 @@ class Lemon8Collector(BaseCollector):
             try:
                 avatar_url = await self._resolve_avatar_url(username)
             except Exception as e:
-                logger.debug("lemon8 backfill avatar resolve %s: %s", username, e)
+                logger.debug("lemon8 backfill avatar resolve %s: %s", username, _safe_log_text(e))
                 continue
             if not avatar_url:
                 continue
@@ -1895,7 +2066,14 @@ class Lemon8Collector(BaseCollector):
                 resp.raise_for_status()
                 html = resp.text
             except Exception as e:
-                logger.debug("lemon8 avatar fetch %s: %s", username, e)
+                safe_error = _safe_log_text(e)
+                await self._record_http_status_event(
+                    e,
+                    scope="avatar_profile_fetch",
+                    subject=username,
+                    url=USER_URL_PATTERN.format(username),
+                )
+                logger.debug("lemon8 avatar fetch %s: %s", username, safe_error)
                 return None
             avatar = self._extract_avatar(html)
             if avatar:
@@ -2015,8 +2193,21 @@ class Lemon8Collector(BaseCollector):
                 await self.send_to_dlq(item["entity_id"], cid, f"vault artifact partial: {artifact.error}")
             self._known_ids.add(cid)
         except Exception as e:
-            logger.error("Download failed %s: %s", cid, e)
-            await self.send_to_dlq(item["entity_id"], cid, str(e))
+            safe_error = _safe_log_text(e)
+            await self._record_http_status_event(
+                e,
+                scope="media_download",
+                subject=str(item.get("entity_name") or item.get("entity_id") or cid),
+                url=item.get("url"),
+                record_access_errors=False,
+                metadata={"content_id": cid, "content_type": item.get("content_type")},
+            )
+            status_code = self._http_status_from_error(e)
+            if status_code in (403, 404):
+                logger.warning("lemon8 media unavailable %s: HTTP %s", cid, status_code)
+            else:
+                logger.error("Download failed %s: %s", cid, safe_error)
+            await self.send_to_dlq(item["entity_id"], cid, safe_error)
 
     async def cleanup(self):
         pass
@@ -2055,7 +2246,18 @@ class Lemon8Collector(BaseCollector):
                 resp.raise_for_status()
                 html = resp.text
             except Exception as e:
-                logger.warning("collect_user_profile %s: %s", username, e)
+                status_code = self._http_status_from_error(e)
+                safe_error = _safe_log_text(e)
+                if status_code == 404:
+                    logger.info("lemon8: skip unavailable profile %s: HTTP 404", username)
+                    return None
+                await self._record_http_status_event(
+                    e,
+                    scope="profile_fetch",
+                    subject=username,
+                    url=USER_URL_PATTERN.format(username),
+                )
+                logger.warning("collect_user_profile %s: %s", username, safe_error)
                 return None
 
             user_id = username
@@ -2085,7 +2287,7 @@ class Lemon8Collector(BaseCollector):
                         "url": avatar_url, "extension": "jpg",
                     })
                 except Exception as e:
-                    logger.debug("collect_user_profile avatar dl %s: %s", username, e)
+                    logger.debug("collect_user_profile avatar dl %s: %s", username, _safe_log_text(e))
 
             return {"user_id": user_id, "username": username, "avatar_url": avatar_url}
 
@@ -2113,7 +2315,18 @@ class Lemon8Collector(BaseCollector):
                 resp.raise_for_status()
                 html = resp.text
             except Exception as e:
-                logger.warning("collect_user_posts %s: %s", username, e)
+                status_code = self._http_status_from_error(e)
+                safe_error = _safe_log_text(e)
+                if status_code == 404:
+                    logger.info("lemon8: skip unavailable posts profile %s: HTTP 404", username)
+                    return []
+                await self._record_http_status_event(
+                    e,
+                    scope="profile_posts_fetch",
+                    subject=username,
+                    url=USER_URL_PATTERN.format(username),
+                )
+                logger.warning("collect_user_posts %s: %s", username, safe_error)
                 return []
 
             user_id = username
@@ -2138,7 +2351,7 @@ class Lemon8Collector(BaseCollector):
                         try:
                             await self.download_media(media_item)
                         except Exception as e:
-                            logger.debug("collect_user_posts media dl: %s", e)
+                            logger.debug("collect_user_posts media dl: %s", _safe_log_text(e))
             return posts
 
     async def collect_following(self, username: str) -> AsyncIterator[str]:
@@ -2164,7 +2377,18 @@ class Lemon8Collector(BaseCollector):
                 resp.raise_for_status()
                 html = resp.text
         except Exception as e:
-            logger.warning("collect_following %s: %s", username, e)
+            status_code = self._http_status_from_error(e)
+            safe_error = _safe_log_text(e)
+            if status_code == 404:
+                logger.info("lemon8: skip unavailable following profile %s: HTTP 404", username)
+                return
+            await self._record_http_status_event(
+                e,
+                scope="following_fetch",
+                subject=username,
+                url=USER_URL_PATTERN.format(username),
+            )
+            logger.warning("collect_following %s: %s", username, safe_error)
             return
 
         seen: set[str] = {username.lower()}

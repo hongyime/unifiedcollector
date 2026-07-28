@@ -11,6 +11,7 @@ import hashlib
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from src.collectors import lemon8 as lemon8_mod
@@ -18,6 +19,7 @@ from src.collectors.lemon8 import (
     Lemon8Collector,
     Lemon8EdgeFetcher,
     _enhance_image_url,
+    _safe_log_text,
 )
 
 
@@ -88,6 +90,17 @@ def test_enhance_image_url_strips_tplv_template():
     url = "https://cdn.lemon8.com/abc~tplv-abc12-img.jpeg"
     out = _enhance_image_url(url)
     assert "tplv" not in out
+
+
+def test_safe_log_text_redacts_signed_query_strings():
+    msg = (
+        "Client error for url "
+        "'https://p16-common-sign.tiktokcdn.com/avatar.jpg?refresh_token=abc&x-signature=secret'"
+    )
+    out = _safe_log_text(msg)
+    assert "refresh_token" not in out
+    assert "x-signature" not in out
+    assert "https://p16-common-sign.tiktokcdn.com/avatar.jpg?<redacted>" in out
 
 
 # ── constructor / config ──────────────────────────────────────────────────
@@ -186,6 +199,94 @@ async def test_collect_runs_explicit_targets_before_feed(monkeypatch, collector)
     await collector.collect(["alice"])
 
     assert events == [("target", "alice"), ("feed", "feed")]
+
+
+@pytest.mark.asyncio
+async def test_collect_skips_unavailable_profile_without_dlq(monkeypatch, collector):
+    monkeypatch.setenv("LEMON8_SPIDER_ENABLED", "false")
+    collector.send_to_dlq = AsyncMock()
+    collector.checkpoint.save_progress = AsyncMock()
+
+    request = httpx.Request("GET", "https://www.lemon8-app.com/@missing")
+    response = httpx.Response(404, request=request)
+    error = httpx.HTTPStatusError("not found", request=request, response=response)
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+    monkeypatch.setattr(lemon8_mod.httpx, "AsyncClient", lambda *args, **kwargs: _Client())
+    monkeypatch.setattr(collector, "_collect_user", AsyncMock(side_effect=error))
+
+    await collector.collect(["missing"])
+
+    collector.send_to_dlq.assert_not_awaited()
+    collector.checkpoint.save_progress.assert_awaited_once_with("missing")
+
+
+@pytest.mark.asyncio
+async def test_record_http_status_event_persists_429(monkeypatch, collector):
+    events = []
+
+    async def record_event(pool, **kwargs):
+        events.append((pool, kwargs))
+
+    sleep = AsyncMock()
+    monkeypatch.setattr(lemon8_mod, "record_rate_limit_event", record_event)
+    monkeypatch.setattr(lemon8_mod, "sleep_rate_limit", sleep)
+    collector._rate_limit_cooldown_seconds = 123
+
+    request = httpx.Request(
+        "GET",
+        "https://www.lemon8-app.com/@alice?session_secret=should_not_persist",
+    )
+    response = httpx.Response(429, request=request)
+    error = httpx.HTTPStatusError("too many requests", request=request, response=response)
+
+    recorded = await collector._record_http_status_event(
+        error,
+        scope="profile_fetch",
+        subject="alice",
+        url=str(request.url),
+    )
+
+    assert recorded is True
+    assert len(events) == 1
+    _, kwargs = events[0]
+    assert kwargs["source"] == "lemon8"
+    assert kwargs["account"] == "lemon8_default"
+    assert kwargs["scope"] == "profile_fetch"
+    assert kwargs["status_code"] == 429
+    assert kwargs["cooldown_seconds"] == 123
+    assert kwargs["metadata"]["subject"] == "alice"
+    assert kwargs["metadata"]["url_host"] == "www.lemon8-app.com"
+    assert kwargs["metadata"]["url_path"] == "/@alice"
+    assert "session_secret" not in str(kwargs["metadata"])
+    sleep.assert_awaited_once_with(123)
+
+
+@pytest.mark.asyncio
+async def test_record_http_status_event_ignores_media_403(monkeypatch, collector):
+    event = AsyncMock()
+    monkeypatch.setattr(lemon8_mod, "record_rate_limit_event", event)
+
+    request = httpx.Request("GET", "https://cdn.lemon8-app.com/avatar.jpg")
+    response = httpx.Response(403, request=request)
+    error = httpx.HTTPStatusError("forbidden", request=request, response=response)
+
+    recorded = await collector._record_http_status_event(
+        error,
+        scope="media_download",
+        subject="alice",
+        url=str(request.url),
+        record_access_errors=False,
+    )
+
+    assert recorded is False
+    event.assert_not_awaited()
 
 
 # ── _resolve_post_id ──────────────────────────────────────────────────────
