@@ -71,8 +71,8 @@ def test_route_capture_queue_respects_active_gps_cooldown():
     assert out["cooldown"]["until"] == "2026-07-23T13:00:00+00:00"
     assert out["cooldown"]["scope"] == "gps_streams"
     assert conn.fetch_called is False
-    assert "browser_ingest_events bie" in conn.fetchrow_query
     assert "strava_gps_streams s" in conn.fetchrow_query
+    assert "a.platform_activity_id = (rl.metadata->>'activity_id')::bigint" in conn.fetchrow_query
 
 
 def test_route_capture_queue_respects_matching_account_cooldown():

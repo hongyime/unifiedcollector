@@ -72,18 +72,10 @@ async def fetch_strava_route_capture_queue(
               )
               AND NOT EXISTS (
                     SELECT 1
-                    FROM browser_ingest_events bie
-                    WHERE bie.platform = 'strava'
-                      AND bie.endpoint = 'strava_streams'
-                      AND bie.subject = rl.metadata->>'activity_id'
-                      AND bie.stored_count > 0
-                      AND bie.created_at > rl.created_at
-              )
-              AND NOT EXISTS (
-                    SELECT 1
                     FROM strava_activities a
                     JOIN strava_gps_streams s ON s.activity_id = a.id
-                    WHERE a.platform_activity_id::text = rl.metadata->>'activity_id'
+                    WHERE rl.metadata->>'activity_id' ~ '^[0-9]+$'
+                      AND a.platform_activity_id = (rl.metadata->>'activity_id')::bigint
                       AND s.collected_at > rl.created_at
                       AND jsonb_typeof(s.latlng) = 'array'
                       AND jsonb_array_length(s.latlng) > 1
