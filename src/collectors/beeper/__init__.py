@@ -70,6 +70,25 @@ _BEEPER_429_COOLDOWN_SECONDS = int(os.getenv("BEEPER_429_COOLDOWN_SECONDS", "900
 _BEEPER_HTTP_STATUS_RE = re.compile(r"->\s*(\d{3})")
 
 
+def _beeper_backfill_candidate_limit(batch_size: int) -> int:
+    raw = os.getenv("BEEPER_BACKFILL_CANDIDATE_MESSAGES")
+    if raw:
+        try:
+            return max(batch_size, int(raw))
+        except ValueError:
+            logger.warning("Invalid BEEPER_BACKFILL_CANDIDATE_MESSAGES=%r; using default", raw)
+    return min(max(batch_size * 5, 250), 500)
+
+
+def _beeper_backfill_query_timeout() -> float:
+    raw = os.getenv("BEEPER_BACKFILL_QUERY_TIMEOUT", "20")
+    try:
+        return max(1.0, float(raw))
+    except ValueError:
+        logger.warning("Invalid BEEPER_BACKFILL_QUERY_TIMEOUT=%r; using 20s", raw)
+        return 20.0
+
+
 def _tier1_raw_archives_enabled() -> bool:
     raw = os.getenv("COLLECTOR_TIER1_RAW_PAYLOADS_ENABLED", "1")
     return raw.strip().lower() not in {"0", "false", "no", "off"}
@@ -1209,26 +1228,46 @@ class BeeperCollector(BaseCollector):
         """Return flat attachment items from messages missing media_items entries."""
         if self.pool is None:
             return []
-        async with self.pool.acquire() as conn:
-            rows = await conn.fetch(
-                """
-                SELECT m.message_id, m.chat_id,
-                       COALESCE(c.network, m.network, 'unknown') AS network,
-                       m.attachments
-                FROM beeper_shadow_messages m
-                LEFT JOIN beeper_shadow_chats c ON c.chat_id = m.chat_id
-                WHERE m.attachments IS NOT NULL
-                  AND m.attachments != '[]'
-                  AND NOT EXISTS (
-                      SELECT 1 FROM media_items mi
-                      WHERE mi.source = 'beeper'
-                        AND mi.content_id LIKE m.message_id || '_%'
-                  )
-                ORDER BY m.timestamp DESC
-                LIMIT $1
-                """,
-                batch_size * 3,
+        candidate_limit = _beeper_backfill_candidate_limit(batch_size)
+        query_timeout = _beeper_backfill_query_timeout()
+        try:
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """
+                    WITH candidate_messages AS (
+                        SELECT m.message_id,
+                               m.chat_id,
+                               m.network,
+                               m.attachments
+                        FROM beeper_shadow_messages m
+                        WHERE m.attachments IS NOT NULL
+                          AND m.attachments <> '[]'::jsonb
+                        LIMIT $1
+                    )
+                    SELECT m.message_id,
+                           m.chat_id,
+                           COALESCE(c.network, m.network, 'unknown') AS network,
+                           m.attachments
+                    FROM candidate_messages m
+                    LEFT JOIN beeper_shadow_chats c ON c.chat_id = m.chat_id
+                    """,
+                    candidate_limit,
+                    timeout=query_timeout,
+                )
+        except TimeoutError:
+            logger.warning(
+                "Beeper media backfill candidate query timed out after %.0fs; "
+                "skipping media backfill this cycle",
+                query_timeout,
             )
+            return []
+        except Exception as exc:
+            logger.warning(
+                "Beeper media backfill candidate query failed; skipping media "
+                "backfill this cycle: %s",
+                exc,
+            )
+            return []
         # Skip assets we've permanently given up on (Beeper-evicted / bad-token).
         # Without this they'd be re-selected every cycle forever (the storm).
         tombstoned = await self._load_media_tombstones()

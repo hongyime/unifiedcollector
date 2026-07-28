@@ -702,6 +702,71 @@ async def test_download_attachments_filters_unsafe_files(monkeypatch, tmp_path):
     assert item["extension"] == "pdf"
 
 
+@pytest.mark.asyncio
+async def test_get_backfill_items_uses_bounded_recent_scan(monkeypatch, tmp_path):
+    monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
+    monkeypatch.setenv("COLLECTOR_DRIVE_PATH", str(tmp_path))
+    monkeypatch.setenv("BEEPER_BACKFILL_CANDIDATE_MESSAGES", "4")
+    monkeypatch.setenv("BEEPER_BACKFILL_QUERY_TIMEOUT", "7")
+    pool, conn = _mock_pool()
+    conn.fetch = AsyncMock(side_effect=[
+        [
+            {
+                "message_id": "msg1",
+                "chat_id": "!room:beeper.local",
+                "network": "Discord",
+                "attachments": [
+                    {
+                        "id": "mxc://beeper.local/good",
+                        "srcURL": "mxc://beeper.local/good",
+                        "type": "image",
+                        "mimeType": "image/jpeg",
+                        "size": {"width": 10, "height": 20},
+                    },
+                    {
+                        "id": "mxc://beeper.local/existing",
+                        "srcURL": "mxc://beeper.local/existing",
+                        "type": "image",
+                        "mimeType": "image/jpeg",
+                        "size": {},
+                    },
+                ],
+            }
+        ],
+        [],
+    ])
+    coll = BeeperCollector(client=MagicMock(spec=BeeperClient))
+    coll.set_pool(pool)
+    coll._known_ids.add("msg1_existing")
+
+    items = await coll.get_backfill_items(2)
+
+    first_fetch = conn.fetch.await_args_list[0]
+    sql = first_fetch.args[0]
+    assert "NOT EXISTS" not in sql
+    assert "content_id LIKE" not in sql
+    assert "ORDER BY" not in sql
+    assert "candidate_messages" in sql
+    assert "m.attachments <> '[]'::jsonb" in sql
+    assert first_fetch.args[1] == 4
+    assert first_fetch.kwargs["timeout"] == 7.0
+    assert [item["content_id"] for item in items] == ["msg1_good"]
+    assert items[0]["network"] == "Discord"
+
+
+@pytest.mark.asyncio
+async def test_get_backfill_items_skips_cycle_on_candidate_timeout(monkeypatch, tmp_path):
+    monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
+    monkeypatch.setenv("COLLECTOR_DRIVE_PATH", str(tmp_path))
+    pool, conn = _mock_pool()
+    conn.fetch = AsyncMock(side_effect=TimeoutError())
+    coll = BeeperCollector(client=MagicMock(spec=BeeperClient))
+    coll.set_pool(pool)
+
+    assert await coll.get_backfill_items(5) == []
+    conn.fetch.assert_awaited_once()
+
+
 # ── transient DNS / name-resolution handling ───────────────────────────────
 
 
