@@ -306,7 +306,17 @@ async def vault_artifact_counts(conn, *, timeout: float | None = 10.0) -> dict[s
                WHERE c.oid = to_regclass('public.idx_media_missing_occurrence_sidecar')
              ),
              0
-           )::int) AS artifacts_missing_sidecar
+           )::int) AS artifacts_missing_sidecar,
+          (SELECT COUNT(*)::int
+           FROM media_items
+           WHERE collected_at >= now() - interval '24 hours'
+             AND NOT (
+               COALESCE(metadata, '{}'::jsonb) ? 'vault_sidecar'
+               OR (
+                 COALESCE(metadata, '{}'::jsonb) ? 'vault_artifact'
+                 AND COALESCE(metadata->'vault_artifact'->>'sidecar_path', '') <> ''
+               )
+             )) AS artifacts_missing_sidecar_recent_24h
         """,
         timeout=timeout,
     )
@@ -317,6 +327,7 @@ async def vault_artifact_counts(conn, *, timeout: float | None = 10.0) -> dict[s
         "artifacts_quarantined": int(row["artifacts_quarantined"] or 0),
         "artifacts_missing_sidecar": int(row["artifacts_missing_sidecar"] or 0),
         "artifacts_missing_sidecar_estimated": True,
+        "artifacts_missing_sidecar_recent_24h": int(row["artifacts_missing_sidecar_recent_24h"] or 0),
     }
 
 

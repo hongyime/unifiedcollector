@@ -584,6 +584,7 @@ async def test_vault_artifact_counts_checks_both_sidecar_metadata_shapes():
                 "artifacts_partial": 2,
                 "artifacts_quarantined": 1,
                 "artifacts_missing_sidecar": 3,
+                "artifacts_missing_sidecar_recent_24h": 0,
             }
 
     counts = await vault.vault_artifact_counts(Conn())
@@ -592,6 +593,7 @@ async def test_vault_artifact_counts_checks_both_sidecar_metadata_shapes():
     assert counts["artifacts_quarantined"] == 1
     assert counts["artifacts_missing_sidecar"] == 3
     assert counts["artifacts_missing_sidecar_estimated"] is True
+    assert counts["artifacts_missing_sidecar_recent_24h"] == 0
 
 
 def test_write_artifact_sidecar_records_json_artifact(tmp_path, monkeypatch):

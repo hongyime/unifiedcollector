@@ -574,6 +574,7 @@ services:
       # GENTLE periodic backup: lower daily profile-view quota, fully-serial spider,
       # and a long idle between cycles. The extension is the primary live path.
       INSTA_DAILY_QUOTA_PROFILE_VIEWS: "60"
+      INSTA_HTTPX_PROFILE_FALLBACK: "false"
       INSTA_SPIDER_CONCURRENCY: "1"
       INSTA_SPIDER_HOPS: "1"
       # ANTI-BAN (P2 review §4): the flagged IG account shares ONE cookie jar with

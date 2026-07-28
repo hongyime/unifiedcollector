@@ -1235,7 +1235,8 @@ class InstagramCollector(BaseCollector):
             if user_data:
                 logger.info("instagram/%s: profile fetched via Playwright (primary)", username)
 
-        if not user_data:
+        httpx_profile_fallback = os.getenv("INSTA_HTTPX_PROFILE_FALLBACK", "true").lower() == "true"
+        if not user_data and (httpx_profile_fallback or not playwright_primary):
             # httpx API path: primary when Playwright is disabled, else fallback.
             try:
                 resp = await asyncio.wait_for(
@@ -1295,6 +1296,11 @@ class InstagramCollector(BaseCollector):
                     },
                 )
                 user_data = profile_response.get("data", {}).get("user", {})
+        elif not user_data and playwright_primary:
+            logger.info(
+                "instagram/%s: skipped raw web_profile_info fallback; Playwright primary returned no usable profile",
+                username,
+            )
 
         if not user_data:
             logger.warning("Empty profile data for %s", username)

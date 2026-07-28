@@ -478,6 +478,7 @@ async def notify_status(snapshot: dict) -> bool:
         partial = int(vault.get("artifacts_partial") or 0)
         quarantined = int(vault.get("artifacts_quarantined") or 0)
         missing = int(vault.get("artifacts_missing_sidecar") or 0)
+        recent_missing = int(vault.get("artifacts_missing_sidecar_recent_24h") or 0)
         missing_label = f"about {missing:,}" if vault.get("artifacts_missing_sidecar_estimated") else f"{missing:,}"
         failures = int(vault.get("sidecar_failures") or 0)
         lines.append("")
@@ -492,11 +493,12 @@ async def notify_status(snapshot: dict) -> bool:
                 f"Not safe for file-backed artifacts at <code>{_esc(vault.get('root') or '')}</code>"
                 + (f": {_esc(vault.get('error'))}" if vault.get("error") else ".")
             )
-        if queued or partial or quarantined or missing or failures:
+        if queued or partial or quarantined or missing or recent_missing or failures:
             lines.append(
                 f"Artifact health: {queued:,} repair queue {_plural(queued, 'item')}, "
                 f"{partial:,} active partial media {_plural(partial, 'record')}, "
                 f"{quarantined:,} quarantined bad media {_plural(quarantined, 'record')}, "
+                f"{recent_missing:,} media {_plural(recent_missing, 'record')} from the last 24h missing occurrence sidecars, "
                 f"{missing_label} historical media {_plural(missing, 'record')} missing occurrence sidecars, "
                 f"{failures:,} total sidecar write {_plural(failures, 'failure')} recorded."
             )
@@ -507,7 +509,7 @@ async def notify_status(snapshot: dict) -> bool:
             )
         else:
             lines.append(
-                "Artifact health: no queued artifact repairs and no historical media records missing occurrence sidecars."
+                "Artifact health: no queued artifact repairs and no recent media records missing occurrence sidecars."
             )
 
     backups = snapshot.get("backups") or {}

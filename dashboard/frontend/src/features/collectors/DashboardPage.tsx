@@ -507,9 +507,10 @@ export function DashboardPage() {
   const vaultSidecarDlqRows = vault?.artifacts_queued ?? 0;
   const vaultFailedMetadataRows = vault?.artifacts_partial ?? 0;
   const vaultMissingSidecarRows = vault?.artifacts_missing_sidecar ?? 0;
+  const vaultRecentMissingSidecarRows = vault?.artifacts_missing_sidecar_recent_24h ?? 0;
   const vaultMissingPrefix = vault?.artifacts_missing_sidecar_estimated ? "~" : "";
   const vaultIssues = vaultSidecarDlqRows + vaultFailedMetadataRows;
-  const vaultWarnings = vaultIssues + vaultMissingSidecarRows;
+  const vaultWarnings = vaultIssues + vaultRecentMissingSidecarRows;
   const backups = health?.backups;
   const extension = health?.browser_extension;
   const extensionIssues = extension?.issues ?? [];
@@ -572,7 +573,7 @@ export function DashboardPage() {
           value={vaultOk ? "Writable" : "Blocked"}
           sublabel={
             vault?.free_bytes != null
-              ? `${formatBytes(vault.free_bytes)} free · ${formatNumber(vaultSidecarDlqRows)} DLQ · ${formatNumber(vaultFailedMetadataRows)} partial · ${vaultMissingPrefix}${formatNumber(vaultMissingSidecarRows)} historical missing`
+              ? `${formatBytes(vault.free_bytes)} free · ${formatNumber(vaultSidecarDlqRows)} DLQ · ${formatNumber(vaultFailedMetadataRows)} partial · ${formatNumber(vaultRecentMissingSidecarRows)} recent missing · ${vaultMissingPrefix}${formatNumber(vaultMissingSidecarRows)} historical`
               : health?.drive ?? "unknown"
           }
           status={vaultOk && vaultWarnings === 0 ? "success" : vaultOk ? "warning" : "error"}

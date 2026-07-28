@@ -157,6 +157,7 @@ def _vault_payload() -> dict:
         "artifacts_quarantined": 0,
         "artifacts_missing_sidecar": 0,
         "artifacts_missing_sidecar_estimated": False,
+        "artifacts_missing_sidecar_recent_24h": 0,
     }
 
 

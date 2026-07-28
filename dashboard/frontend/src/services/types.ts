@@ -14,6 +14,7 @@ export interface HealthStatus {
     artifacts_partial: number;
     artifacts_missing_sidecar?: number;
     artifacts_missing_sidecar_estimated?: boolean;
+    artifacts_missing_sidecar_recent_24h?: number;
     counts_error?: string | null;
   };
   backups?: {

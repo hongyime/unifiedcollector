@@ -270,6 +270,27 @@ async def test_process_target_respects_cooldown_with_playwright_primary(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_collect_user_skips_raw_profile_fallback_when_disabled(monkeypatch):
+    coll = _bare_collector()
+    monkeypatch.setenv("INSTA_PLAYWRIGHT_PRIMARY", "true")
+    monkeypatch.setenv("INSTA_HTTPX_PROFILE_FALLBACK", "false")
+    coll.rate_limiter = SimpleNamespace(async_wait=AsyncMock())
+    coll._fetch_profile_playwright = AsyncMock(return_value=None)
+    coll._record_profile_access = AsyncMock()
+    client = SimpleNamespace(get=AsyncMock())
+
+    await coll._collect_user(client, "target_user")
+
+    coll._fetch_profile_playwright.assert_awaited_once_with("target_user")
+    client.get.assert_not_awaited()
+    coll._record_profile_access.assert_awaited_once_with(
+        "target_user",
+        False,
+        error="empty profile data",
+    )
+
+
+@pytest.mark.asyncio
 async def test_fetch_profile_playwright_records_429_without_marking_session_dead(monkeypatch):
     coll = _bare_collector()
     coll._session_auth_dead = False
