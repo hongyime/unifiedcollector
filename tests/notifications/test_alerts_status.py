@@ -204,8 +204,9 @@ async def test_notify_status_splits_rate_limit_from_auth_events(monkeypatch):
     assert "Instagram: active cooldown for 60m after 7 instrumented rate-limit events." in msg
     assert "Telegram FloodWait throttles for acct1: active cooldown for 2m after 1 FloodWait event" in msg
     assert "<b>Recent self-heals and operational events</b>" in msg
-    assert "Telegram: self heal restart (warning) 30s ago; 25 fatal log events" in msg
-    assert "Source has collected successfully since then; last success 5s ago." in msg
+    assert "Resolved history: 1 older operational event for Telegram already recovered" in msg
+    assert "newest 30s ago; latest successful collection 5s ago" in msg
+    assert "telegram: fatal log pattern flooded: wrong session ID" not in msg
     assert "<b>Chrome extension hooks</b>" in msg
     assert "Instagram: hook v1.21.8 last heartbeat 21s ago" in msg
     assert "this hour 12 probe frames and 0 sample frames" in msg

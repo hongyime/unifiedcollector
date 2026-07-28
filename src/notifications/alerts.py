@@ -297,6 +297,38 @@ def _format_operational_event(row: dict) -> str:
     return f"• {source}: {event_type} ({severity}){age_text}{suffix}. {summary}{resolved}"
 
 
+def _format_operational_events(rows: list[dict]) -> list[str]:
+    active = [row for row in rows if not row.get("resolved_by_success")]
+    resolved = [row for row in rows if row.get("resolved_by_success")]
+    lines = [_format_operational_event(row) for row in active[:5]]
+
+    remaining_slots = max(0, 5 - len(lines))
+    if remaining_slots and resolved:
+        newest_age = min(
+            int(row.get("age_seconds") or 0)
+            for row in resolved
+            if row.get("age_seconds") is not None
+        ) if any(row.get("age_seconds") is not None for row in resolved) else None
+        latest_success_age = min(
+            int(row.get("last_success_age_seconds") or 0)
+            for row in resolved
+            if row.get("last_success_age_seconds") is not None
+        ) if any(row.get("last_success_age_seconds") is not None for row in resolved) else None
+        sources = ", ".join(sorted({_display_source(row.get("source", "?")) for row in resolved}))
+        age_text = f"; newest {_humanize_age(newest_age)} ago" if newest_age is not None else ""
+        success_text = (
+            f"; latest successful collection {_humanize_age(latest_success_age)} ago"
+            if latest_success_age is not None else ""
+        )
+        lines.append(
+            f"• Resolved history: {len(resolved):,} older operational "
+            f"{_plural(len(resolved), 'event')} for {sources} already recovered"
+            f"{age_text}{success_text}. Kept for audit, not an active failure."
+        )
+
+    return lines
+
+
 def _fmt_count(n: int) -> str:
     """1_317_543 -> 1.3M, 13213 -> 13k, 940 -> 940."""
     if n >= 1_000_000:
@@ -478,7 +510,7 @@ async def notify_status(snapshot: dict) -> bool:
     if operational_events:
         lines.append("")
         lines.append("<b>Recent self-heals and operational events</b>")
-        lines.extend(_format_operational_event(row) for row in operational_events[:5])
+        lines.extend(_format_operational_events(operational_events))
 
     vault = snapshot.get("vault") or {}
     if vault:
