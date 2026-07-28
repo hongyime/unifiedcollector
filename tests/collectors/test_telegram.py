@@ -19,6 +19,7 @@ MagicMock/AsyncMock stand-in. Exercises:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from contextlib import asynccontextmanager
@@ -825,6 +826,34 @@ async def test_download_message_media_no_media_returns_none(monkeypatch):
     msg = SimpleNamespace(id=1, media=None, chat_id=2)
     out = await coll.download_message_media(msg, worker=worker, chat_id=2)
     assert out is None
+
+
+@pytest.mark.asyncio
+async def test_realtime_write_retries_transient_timeout(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_REALTIME_WRITE_ATTEMPTS", "2")
+    monkeypatch.setenv("TELEGRAM_REALTIME_WRITE_RETRY_DELAY", "0")
+    coll = _make_collector(monkeypatch)
+    message = SimpleNamespace(id=99)
+    write = AsyncMock(side_effect=[asyncio.TimeoutError(), None])
+    coll._write_realtime_message = write
+
+    await coll._write_realtime_message_with_retry(message, 42)
+
+    assert write.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_realtime_write_does_not_retry_non_transient_error(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_REALTIME_WRITE_ATTEMPTS", "3")
+    coll = _make_collector(monkeypatch)
+    message = SimpleNamespace(id=99)
+    write = AsyncMock(side_effect=ValueError("bad row"))
+    coll._write_realtime_message = write
+
+    with pytest.raises(ValueError):
+        await coll._write_realtime_message_with_retry(message, 42)
+
+    assert write.await_count == 1
 
 
 @pytest.mark.asyncio

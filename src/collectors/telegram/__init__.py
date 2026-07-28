@@ -126,6 +126,27 @@ def _is_flood_wait(exc):
     return hasattr(exc, "seconds") and "flood" in name.lower()
 
 
+def _is_transient_realtime_write_error(exc) -> bool:
+    """Return True for DB/network blips worth retrying on the hot realtime path."""
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError, ConnectionError, OSError)):
+        return True
+    exc_type = type(exc)
+    name = exc_type.__name__.lower()
+    module = getattr(exc_type, "__module__", "").lower()
+    if "asyncpg" not in module:
+        return False
+    return any(
+        token in name
+        for token in (
+            "timeout",
+            "connection",
+            "interface",
+            "cannotconnect",
+            "connectiondoesnotexist",
+        )
+    )
+
+
 class EntityUnresolvable(Exception):
     """No connected account can resolve a chat entity.
 
@@ -434,6 +455,20 @@ class TelegramCollector(BaseCollector):
         # Realtime listener state — populated by collect_realtime()
         self._realtime_running = False
         self._hub_group_id: int | None = None
+        try:
+            self._realtime_write_attempts = max(
+                1,
+                int(os.getenv("TELEGRAM_REALTIME_WRITE_ATTEMPTS", "3")),
+            )
+        except ValueError:
+            self._realtime_write_attempts = 3
+        try:
+            self._realtime_write_retry_delay = max(
+                0.0,
+                float(os.getenv("TELEGRAM_REALTIME_WRITE_RETRY_DELAY", "0.75")),
+            )
+        except ValueError:
+            self._realtime_write_retry_delay = 0.75
 
         # User change tracker — wires telegram_user_changes writes into _upsert_user_full.
         # Lazy: created on first DB-bound call (since pool is set up by BaseCollector at startup).
@@ -2711,13 +2746,35 @@ class TelegramCollector(BaseCollector):
             except Exception as exc:
                 logger.debug("user photo pass failed: %s", exc)
 
+    async def _write_realtime_message_with_retry(self, message, chat_id: int, is_edit: bool = False):
+        attempts = max(1, int(getattr(self, "_realtime_write_attempts", 3) or 3))
+        delay = max(0.0, float(getattr(self, "_realtime_write_retry_delay", 0.75) or 0.0))
+        for attempt in range(1, attempts + 1):
+            try:
+                await self._write_realtime_message(message, chat_id, is_edit=is_edit)
+                if attempt > 1:
+                    logger.info(
+                        "telegram realtime write recovered after %d attempt(s): chat=%s msg=%s edit=%s",
+                        attempt, chat_id, getattr(message, "id", None), is_edit,
+                    )
+                return
+            except Exception as exc:
+                if attempt >= attempts or not _is_transient_realtime_write_error(exc):
+                    raise
+                logger.warning(
+                    "telegram realtime write transient failure; retrying %d/%d: chat=%s msg=%s edit=%s error=%s",
+                    attempt + 1, attempts, chat_id, getattr(message, "id", None), is_edit, exc,
+                )
+                if delay:
+                    await asyncio.sleep(delay * attempt)
+
     async def _on_new_message(self, worker: "TelegramWorker", event):
         try:
             chat_id = event.chat_id
             if self._hub_group_id is not None and chat_id == self._hub_group_id:
                 return  # discard hub-group messages
             message = event.message
-            await self._write_realtime_message(message, chat_id)
+            await self._write_realtime_message_with_retry(message, chat_id)
             # Sender resolution hits the network and can raise ChannelPrivateError
             # for private/restricted channels (or if we were removed). Isolate it so
             # it neither aborts persistence nor skips the media download below, and
@@ -2741,7 +2798,7 @@ class TelegramCollector(BaseCollector):
         try:
             chat_id = event.chat_id
             message = event.message
-            await self._write_realtime_message(message, chat_id, is_edit=True)
+            await self._write_realtime_message_with_retry(message, chat_id, is_edit=True)
         except Exception as exc:
             logger.error("_on_message_edited error: %s", exc, exc_info=True)
 
