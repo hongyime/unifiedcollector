@@ -1246,15 +1246,31 @@ class YoutubeCollector(BaseCollector):
         cid = item["content_id"]
         if self.is_known(cid): return False
         filename = self.build_filename(item["entity_id"], item["entity_name"], item["content_type"], cid, extension=item.get("extension", "jpg"))
+        request_url = item.get("url")
         try:
             if "data" in item: data = item["data"]
             elif "url" in item:
                 await self.wait_rate_limit("googleapis.com")
+                request_url = item["url"]
+                candidate_urls = [request_url]
+                if "maxresdefault" in request_url:
+                    candidate_urls.extend(
+                        request_url.replace("maxresdefault", fallback)
+                        for fallback in ("hqdefault", "mqdefault", "default")
+                    )
+                elif "hqdefault" in request_url:
+                    candidate_urls.extend(
+                        request_url.replace("hqdefault", fallback)
+                        for fallback in ("mqdefault", "default")
+                    )
                 async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
-                    resp = await client.get(item["url"])
-                    if resp.status_code == 404 and "maxresdefault" in item["url"]:
-                        fallback = item["url"].replace("maxresdefault", "hqdefault")
-                        resp = await client.get(fallback)
+                    resp = None
+                    for candidate_url in candidate_urls:
+                        resp = await client.get(candidate_url)
+                        request_url = candidate_url
+                        if resp.status_code != 404:
+                            break
+                    assert resp is not None
                     resp.raise_for_status()
                     data = resp.content
             else: return False
@@ -1278,7 +1294,7 @@ class YoutubeCollector(BaseCollector):
                     **metadata,
                     "filename": filename,
                     "source_url": source_url,
-                    "request_url": item.get("url"),
+                    "request_url": request_url if "url" in item else item.get("url"),
                 },
                 root=VAULT_ROOT,
             )

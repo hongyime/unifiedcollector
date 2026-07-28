@@ -461,6 +461,53 @@ async def test_download_media_writes_vault_blob(monkeypatch, tmp_path):
     coll.send_to_dlq.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_download_media_falls_back_to_mq_thumbnail(monkeypatch, tmp_path):
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    monkeypatch.setattr(youtube_mod, "VAULT_ROOT", vault_root)
+    coll = _new_collector(monkeypatch)
+    coll.insert_media_item = AsyncMock(return_value=True)
+    coll.send_to_dlq = AsyncMock()
+    calls = []
+    data = b"mq thumbnail bytes"
+
+    class _StubAsyncClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def get(self, url, *a, **kw):
+            calls.append(url)
+            if "mqdefault" in url:
+                return _make_response(status=200, content=data)
+            return _make_response(status=404)
+
+    monkeypatch.setattr(youtube_mod.httpx, "AsyncClient", _StubAsyncClient)
+
+    inserted = await coll.download_media({
+        "entity_id": "UC123",
+        "entity_name": "Example Channel",
+        "content_type": "thumbnail",
+        "content_id": "abc123xyz90",
+        "extension": "jpg",
+        "url": "https://i.ytimg.com/vi/abc123xyz90/maxresdefault.jpg",
+    })
+
+    assert inserted is True
+    assert calls == [
+        "https://i.ytimg.com/vi/abc123xyz90/maxresdefault.jpg",
+        "https://i.ytimg.com/vi/abc123xyz90/hqdefault.jpg",
+        "https://i.ytimg.com/vi/abc123xyz90/mqdefault.jpg",
+    ]
+    assert coll.insert_media_item.await_args.kwargs["metadata"]["vault_artifact"]["ok"] is True
+
+
 # ── collect() error path ─────────────────────────────────────────────────
 
 
