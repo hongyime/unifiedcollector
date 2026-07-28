@@ -408,6 +408,11 @@ services:
       # per-cycle heartbeat stops — give the watchdog a 24h budget so it doesn't
       # kill the parked-but-healthy listener (matches whatsapp's setting).
       COLLECTOR_HANG_TIMEOUT_SECONDS: "86400"
+      # Telethon "wrong session ID" bursts mean the MTProto session in this
+      # process is desynced. Restart sooner than the generic worker default so
+      # realtime capture resumes cleanly instead of logging errors for minutes.
+      COLLECTOR_SELFHEAL_LOG_WINDOW: "300"
+      COLLECTOR_SELFHEAL_LOG_THRESHOLD: "10"
       # All accounts backfill + spider at once (was restricted to 2). Empty =
       # every connected account drains the queue in parallel. Watch FloodWait;
       # set back to a subset if Telegram throttles.
