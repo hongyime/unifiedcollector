@@ -482,6 +482,14 @@ class TelegramCollector(BaseCollector):
         # Discussion-group dwell range — random jitter to look human (Q3 always-leave).
         self._discussion_dwell_min = int(os.getenv("TELEGRAM_DISCUSSION_DWELL_MIN", "60"))
         self._discussion_dwell_max = int(os.getenv("TELEGRAM_DISCUSSION_DWELL_MAX", "180"))
+        raw_discussion_limit = os.getenv("TELEGRAM_DISCUSSION_MESSAGE_LIMIT", "2000").strip()
+        try:
+            parsed_discussion_limit = int(raw_discussion_limit)
+        except ValueError:
+            parsed_discussion_limit = 2000
+        self._discussion_message_limit: int | None = (
+            None if parsed_discussion_limit <= 0 else parsed_discussion_limit
+        )
 
         # Hot-reload task (item 4.6) — listens for new accounts via NOTIFY.
         self._hot_reload_task: asyncio.Task | None = None
@@ -1476,8 +1484,9 @@ class TelegramCollector(BaseCollector):
              (within 24h) — if so, skip to avoid churn.
           3. If not already joined, call `JoinChannelRequest(linked_chat)`.
           4. Wait a random human-like dwell time (60-180s default).
-          5. Run `collect_chat_members()` + `backfill_chat(limit=2000)`.
-          6. Call `LeaveChannelRequest` (always leave per Bryan's requirement).
+          5. Run `collect_chat_members()` + read discussion messages. Set
+             TELEGRAM_DISCUSSION_MESSAGE_LIMIT=0 for all available history.
+          6. Call `LeaveChannelRequest` only if this pass joined the discussion.
           7. Record the visit in `telegram_discussion_visits`.
         """
         import random
@@ -1540,6 +1549,7 @@ class TelegramCollector(BaseCollector):
 
         # Check if we're already a member; if not, join.
         already_member = False
+        joined_this_pass = False
         try:
             # `get_participants` returns an empty iterator if not a member (for
             # supergroups you can't read). Alternatively, check left/banned flags.
@@ -1560,6 +1570,7 @@ class TelegramCollector(BaseCollector):
                     worker.worker_id, discussion_title, discussion_platform_id, channel_platform_id,
                 )
                 await client(JoinChannelRequest(discussion_entity))
+                joined_this_pass = True
 
                 # Human-like dwell before scraping.
                 dwell = random.randint(self._discussion_dwell_min, self._discussion_dwell_max)
@@ -1571,9 +1582,12 @@ class TelegramCollector(BaseCollector):
                 discussion_entity.id, worker=worker
             )
 
-            # Scrape recent messages (limit 2000).
+            # Scrape discussion messages. None means all available history.
             msg_count = 0
-            async for message in client.iter_messages(discussion_entity, limit=2000):
+            async for message in client.iter_messages(
+                discussion_entity,
+                limit=self._discussion_message_limit,
+            ):
                 if self._stop.is_set():
                     abort_reason = "stop_signal"
                     break
@@ -1597,15 +1611,22 @@ class TelegramCollector(BaseCollector):
                 abort_reason = str(type(exc).__name__)[:64]
 
         finally:
-            # Always leave (per Bryan's "always leave" requirement).
-            try:
-                logger.info(
-                    "[worker=%d] Leaving discussion group %s",
+            left_at = None
+            if joined_this_pass:
+                try:
+                    logger.info(
+                        "[worker=%d] Leaving discussion group %s",
+                        worker.worker_id, discussion_title,
+                    )
+                    await client(LeaveChannelRequest(discussion_entity))
+                    left_at = datetime.now(timezone.utc)
+                except Exception as leave_exc:
+                    logger.debug("LeaveChannelRequest failed: %s", leave_exc)
+            else:
+                logger.debug(
+                    "[worker=%d] Keeping existing discussion membership for %s",
                     worker.worker_id, discussion_title,
                 )
-                await client(LeaveChannelRequest(discussion_entity))
-            except Exception as leave_exc:
-                logger.debug("LeaveChannelRequest failed: %s", leave_exc)
 
             # Record the visit.
             if discussion_uuid is not None:
@@ -1614,21 +1635,25 @@ class TelegramCollector(BaseCollector):
                         """
                         INSERT INTO telegram_discussion_visits (
                             channel_chat_id, discussion_chat_id,
-                            joined_at, left_at,
+                            account_name, joined_at, left_at,
                             members_collected, messages_collected, abort_reason
-                        ) VALUES ($1, $2, NOW(), NOW(), $3, $4, $5)
+                        ) VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7)
                         """,
                         channel_uuid,
                         discussion_uuid,
+                        worker.account.name,
+                        left_at,
                         members_collected,
                         messages_collected,
                         abort_reason,
                     )
 
         logger.info(
-            "[worker=%d] Discussion spider done: channel=%s discussion=%s members=%d msgs=%d abort=%s",
+            "[worker=%d] Discussion spider done: channel=%s discussion=%s members=%d msgs=%d limit=%s joined=%s left=%s abort=%s",
             worker.worker_id, channel_platform_id, discussion_platform_id,
-            members_collected, messages_collected, abort_reason,
+            members_collected, messages_collected,
+            "all" if self._discussion_message_limit is None else self._discussion_message_limit,
+            joined_this_pass, left_at is not None, abort_reason,
         )
 
     async def _upsert_chat(self, entity):

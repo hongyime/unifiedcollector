@@ -421,21 +421,18 @@ services:
       # available for hot-added accounts, but the startup heuristic can misread
       # old accounts as new and churn Telegram sessions.
       TELEGRAM_AUTO_BACKFILL_NEW_ACCOUNTS: "false"
-      # All accounts backfill + spider at once (was restricted to 2). Empty =
-      # every connected account drains the queue in parallel. Watch FloodWait;
-      # set back to a subset if Telegram throttles.
-      TELEGRAM_SPIDER_ACCOUNTS: ""
-      # Throughput push: reads are cheap and FloodWait auto-throttles; 80->150
-      # msg/s/account. Continuous backfill drains every 60s while listening live.
-      # Backfill paced for SUSTAINABLE load (aggressive 250/30s/200 saturated the
-      # Z media drive -> load 43 -> healthcheck flapping). Still backfills ALL
-      # history + realtime, just at a rate the box can keep up with. 2026-06-26:
-      # eased further (120/90/75 -> 80/150/40) — with the box now also running the
-      # analyzer face_worker + WA deep backfill, rabbitmq was the top CPU consumer
-      # and load hovered in the ~43 flapping zone. Live capture is unaffected.
-      TELEGRAM_BACKFILL_MSG_PER_SEC: "80"
-      TELEGRAM_BACKFILL_DRAIN_INTERVAL: "150"
-      TELEGRAM_SPIDER_MAX_PER_CYCLE: "40"
+      # Only these lower-risk accounts may process spider/join work. Other
+      # Telegram accounts still collect existing dialogs and realtime messages.
+      TELEGRAM_SPIDER_ACCOUNTS: "oopspwned,johnfriend101"
+      # Discussion groups: 0 means read all available history, not just the old
+      # 2,000-message recent window. Member collection is already full-list when
+      # Telegram allows participant enumeration.
+      TELEGRAM_DISCUSSION_MESSAGE_LIMIT: "0"
+      # More aggressive but below the old 250/30s/200 setting that saturated the
+      # Z media drive. Live capture is unaffected by these backfill knobs.
+      TELEGRAM_BACKFILL_MSG_PER_SEC: "120"
+      TELEGRAM_BACKFILL_DRAIN_INTERVAL: "90"
+      TELEGRAM_SPIDER_MAX_PER_CYCLE: "75"
       # Get ALL historical chats: raise the enqueue cap so every dialog across all
       # 4 accounts is queued (user: "ensure we get ALL historical chats").
       TELEGRAM_SPIDER_QUEUE_MAX: "20000"
