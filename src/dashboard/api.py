@@ -4,6 +4,7 @@ import io
 import json
 import logging
 import os
+import re
 import time
 import traceback
 import uuid as _uuid
@@ -33,6 +34,10 @@ logger = logging.getLogger(__name__)
 _MESSAGING_COVERAGE_CACHE: dict[str, object] = {"ts": 0.0, "rows": None}
 _SOURCE_MEDIA_TOTALS_CACHE: dict[str, object] = {"ts": 0.0, "rows": None}
 _SOURCE_MEDIA_TOTALS_TTL_SECONDS = int(os.getenv("SOURCE_MEDIA_TOTALS_TTL_SECONDS", "300"))
+_BEEPER_SUBSOURCE_CONTENT_CACHE: dict[tuple[str, str | None], dict[str, object]] = {}
+_BEEPER_SUBSOURCE_CONTENT_TTL_SECONDS = int(os.getenv("BEEPER_SUBSOURCE_CONTENT_TTL_SECONDS", "45"))
+_BEEPER_SUBSOURCE_LIVENESS_CACHE: dict[str, object] = {"ts": 0.0, "rows": None}
+_BEEPER_SUBSOURCE_LIVENESS_TTL_SECONDS = int(os.getenv("BEEPER_SUBSOURCE_LIVENESS_TTL_SECONDS", "75"))
 _YOUTUBE_MEDIA_BACKLOG_CACHE: dict[str, object] = {"ts": 0.0, "row": None}
 _YOUTUBE_MEDIA_BACKLOG_TTL_SECONDS = int(os.getenv("YOUTUBE_MEDIA_BACKLOG_TTL_SECONDS", "600"))
 _WA_FRESH_QR_LAST_REQUEST: dict[str, float] = {}
@@ -220,6 +225,41 @@ _SOURCE_METHODS = {
     "search": ["headless search"],
 }
 
+_BEEPER_SUBSOURCE_STALE_SECONDS = int(os.getenv("BEEPER_SUBSOURCE_STALE_SECONDS", str(24 * 3600)))
+_BEEPER_SUBSOURCE_PREFIX = "beeper:"
+
+
+def _beeper_network_label(message_network: str | None, chat_network: str | None = None) -> str:
+    for value in (message_network, chat_network):
+        text = str(value or "").strip()
+        if text and text.lower() != "unknown":
+            return text
+    return "Unmapped Beeper"
+
+
+def _beeper_source_key(network: str | None) -> tuple[str, str]:
+    label = _beeper_network_label(network)
+    if label == "Unmapped Beeper":
+        slug = "unmapped"
+    else:
+        slug = re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_") or "unmapped"
+    return f"{_BEEPER_SUBSOURCE_PREFIX}{slug}", f"Beeper / {label}"
+
+
+def _source_collection_methods(source: str | None) -> list[str]:
+    if source and source.startswith(_BEEPER_SUBSOURCE_PREFIX):
+        return ["beeper bridge", "normalized sub-source"]
+    return _SOURCE_METHODS.get(source or "", [])
+
+
+def _copy_row_map(rows: dict[str, dict]) -> dict[str, dict]:
+    return {key: dict(value) for key, value in rows.items()}
+
+
+def _copy_row_list(rows: list[dict]) -> list[dict]:
+    return [dict(row) for row in rows]
+
+
 _MEDIA_PRIMARY_SOURCES = {
     "beeper",
     "facebook",
@@ -259,6 +299,95 @@ async def _existing_public_tables(conn, tables: list[str]) -> set[str]:
         timeout=8,
     )
     return set(rows or [])
+
+
+async def _beeper_subsource_content_summary(conn, since_sql: str, before_sql: str | None = None) -> dict[str, dict]:
+    cache_key = (since_sql, before_sql)
+    cached = _BEEPER_SUBSOURCE_CONTENT_CACHE.get(cache_key)
+    now_ts = time.time()
+    if (
+        cached
+        and now_ts - float(cached.get("ts") or 0.0) < _BEEPER_SUBSOURCE_CONTENT_TTL_SECONDS
+        and isinstance(cached.get("rows"), dict)
+    ):
+        return _copy_row_map(cached["rows"])  # type: ignore[arg-type]
+
+    existing_tables = await _existing_public_tables(conn, ["beeper_shadow_messages", "media_items"])
+    before_messages = f" AND ingested_at < {before_sql}" if before_sql else ""
+    before_media = f" AND collected_at < {before_sql}" if before_sql else ""
+    out: dict[str, dict] = {}
+
+    def merge(source: str, display_name: str, row: dict) -> None:
+        cur = out.setdefault(source, {
+            "source": source,
+            "display_name": display_name,
+            "parent_source": "beeper",
+            "rollup_exclude": True,
+            "records": 0,
+            "messages": 0,
+            "media_items": 0,
+            "latest_record_at": None,
+            "latest_media_at": None,
+        })
+        for key in ("records", "messages", "media_items"):
+            cur[key] += int(row.get(key) or 0)
+        for key in ("latest_record_at", "latest_media_at"):
+            value = row.get(key)
+            if value and (cur.get(key) is None or value > cur[key]):
+                cur[key] = value
+
+    if "beeper_shadow_messages" in existing_tables:
+        rows = await conn.fetch(
+            f"""
+            SELECT COALESCE(NULLIF(trim(network), ''), 'unknown') AS network,
+                   count(*)::bigint AS records,
+                   count(*)::bigint AS messages,
+                   0::bigint AS media_items,
+                   max(ingested_at) AS latest_record_at,
+                   NULL::timestamptz AS latest_media_at
+            FROM beeper_shadow_messages
+            WHERE ingested_at >= {since_sql}
+              {before_messages}
+            GROUP BY 1
+            """,
+            timeout=20,
+        )
+        for row in rows:
+            source, display_name = _beeper_source_key(row["network"])
+            merge(source, display_name, dict(row))
+
+    if "media_items" in existing_tables:
+        rows = await conn.fetch(
+            f"""
+            SELECT COALESCE(
+                       NULLIF(trim(metadata->>'network'), ''),
+                       NULLIF(split_part(entity_id, '_', 1), ''),
+                       'unknown'
+                   ) AS network,
+                   0::bigint AS records,
+                   0::bigint AS messages,
+                   count(*)::bigint AS media_items,
+                   NULL::timestamptz AS latest_record_at,
+                   max(collected_at) AS latest_media_at
+            FROM media_items
+            WHERE source = 'beeper'
+              AND collected_at >= {since_sql}
+              {before_media}
+            GROUP BY 1
+            """,
+            timeout=20,
+        )
+        for row in rows:
+            source, display_name = _beeper_source_key(row["network"])
+            merge(source, display_name, dict(row))
+    if len(_BEEPER_SUBSOURCE_CONTENT_CACHE) > 12:
+        oldest_key = min(
+            _BEEPER_SUBSOURCE_CONTENT_CACHE,
+            key=lambda key: float(_BEEPER_SUBSOURCE_CONTENT_CACHE[key].get("ts") or 0.0),
+        )
+        _BEEPER_SUBSOURCE_CONTENT_CACHE.pop(oldest_key, None)
+    _BEEPER_SUBSOURCE_CONTENT_CACHE[cache_key] = {"ts": now_ts, "rows": _copy_row_map(out)}
+    return out
 
 
 async def _source_content_summary(conn, since_sql: str, before_sql: str | None = None) -> dict[str, dict]:
@@ -314,7 +443,152 @@ async def _source_content_summary(conn, since_sql: str, before_sql: str | None =
         """,
         timeout=30,
     )
-    return {row["source"]: dict(row) for row in rows}
+    out = {row["source"]: dict(row) for row in rows}
+    try:
+        out.update(await _beeper_subsource_content_summary(conn, since_sql, before_sql))
+    except Exception as exc:  # noqa: BLE001 - dashboard should degrade, not 500
+        logger.warning("beeper sub-source content summary failed: %s", exc)
+    return out
+
+
+async def _beeper_subsource_media_totals(conn) -> dict[str, dict]:
+    existing = await _existing_public_tables(conn, ["media_items"])
+    if "media_items" not in existing:
+        return {}
+    rows = await conn.fetch(
+        """
+        SELECT COALESCE(
+                   NULLIF(trim(metadata->>'network'), ''),
+                   NULLIF(split_part(entity_id, '_', 1), ''),
+                   'unknown'
+               ) AS network,
+               count(*)::bigint AS total_media_items,
+               COALESCE(sum(file_size), 0)::bigint AS total_media_bytes,
+               max(collected_at) AS latest_media_at
+        FROM media_items
+        WHERE source = 'beeper'
+        GROUP BY 1
+        """,
+        timeout=20,
+    )
+    out: dict[str, dict] = {}
+    for row in rows:
+        source, display_name = _beeper_source_key(row["network"])
+        out[source] = {
+            **dict(row),
+            "source": source,
+            "display_name": display_name,
+            "parent_source": "beeper",
+            "rollup_exclude": True,
+        }
+    return out
+
+
+async def _beeper_subsource_liveness(conn) -> list[dict]:
+    cached_rows = _BEEPER_SUBSOURCE_LIVENESS_CACHE.get("rows")
+    if (
+        isinstance(cached_rows, list)
+        and time.time() - float(_BEEPER_SUBSOURCE_LIVENESS_CACHE.get("ts") or 0.0)
+        < _BEEPER_SUBSOURCE_LIVENESS_TTL_SECONDS
+    ):
+        return _copy_row_list(cached_rows)  # type: ignore[arg-type]
+
+    existing = await _existing_public_tables(
+        conn,
+        ["beeper_shadow_messages", "beeper_shadow_chats", "beeper_shadow_participants"],
+    )
+    networks: dict[str, dict] = {}
+
+    def ensure(network: str | None) -> dict:
+        source, display_name = _beeper_source_key(network)
+        return networks.setdefault(source, {
+            "source": source,
+            "display_name": display_name,
+            "parent_source": "beeper",
+            "rollup_exclude": True,
+            "recent_messages": 0,
+            "chats": 0,
+            "people": 0,
+            "latest_at": None,
+        })
+
+    if "beeper_shadow_messages" in existing:
+        for row in await conn.fetch(
+            """
+            SELECT COALESCE(NULLIF(trim(network), ''), 'unknown') AS network,
+                   count(*)::bigint AS recent_messages,
+                   max(ingested_at) AS latest_at
+            FROM beeper_shadow_messages
+            WHERE ingested_at >= now() - interval '7 days'
+            GROUP BY 1
+            """,
+            timeout=15,
+        ):
+            cur = ensure(row["network"])
+            cur["recent_messages"] += int(row["recent_messages"] or 0)
+            if row["latest_at"] and (cur["latest_at"] is None or row["latest_at"] > cur["latest_at"]):
+                cur["latest_at"] = row["latest_at"]
+
+    if "beeper_shadow_chats" in existing:
+        for row in await conn.fetch(
+            """
+            SELECT COALESCE(NULLIF(trim(network), ''), 'unknown') AS network,
+                   count(*)::int AS chats,
+                   max(last_seen_at) AS latest_at
+            FROM beeper_shadow_chats
+            GROUP BY 1
+            """,
+            timeout=20,
+        ):
+            cur = ensure(row["network"])
+            cur["chats"] = max(int(cur["chats"] or 0), int(row["chats"] or 0))
+            if row["latest_at"] and (cur["latest_at"] is None or row["latest_at"] > cur["latest_at"]):
+                cur["latest_at"] = row["latest_at"]
+
+    if "beeper_shadow_participants" in existing:
+        for row in await conn.fetch(
+            """
+            SELECT COALESCE(NULLIF(trim(network), ''), 'unknown') AS network,
+                   count(DISTINCT participant_id)::int AS people
+            FROM beeper_shadow_participants
+            GROUP BY 1
+            """,
+            timeout=20,
+        ):
+            cur = ensure(row["network"])
+            cur["people"] = max(int(cur["people"] or 0), int(row["people"] or 0))
+
+    now = datetime.now(timezone.utc)
+    out = []
+    for row in networks.values():
+        latest = row.get("latest_at")
+        age_seconds = None
+        if isinstance(latest, datetime):
+            if latest.tzinfo is None:
+                latest = latest.replace(tzinfo=timezone.utc)
+            age_seconds = max(0, int((now - latest).total_seconds()))
+        status = "dead"
+        if age_seconds is not None:
+            status = "live" if age_seconds <= _BEEPER_SUBSOURCE_STALE_SECONDS else "stale"
+        out.append({
+            "source": row["source"],
+            "display_name": row["display_name"],
+            "parent_source": "beeper",
+            "rollup_exclude": True,
+            "status": status,
+            "collection_mode": "messaging bridge",
+            "freshness_basis": "beeper_shadow_messages.ingested_at by network",
+            "age_seconds": age_seconds,
+            "stale_after_seconds": _BEEPER_SUBSOURCE_STALE_SECONDS,
+            "detail": (
+                f"{row['display_name']} via Beeper: "
+                f"{int(row['recent_messages'] or 0):,} messages in the last 7 days, "
+                f"{int(row['chats'] or 0):,} chats, "
+                f"{int(row['people'] or 0):,} people."
+            ),
+        })
+    _BEEPER_SUBSOURCE_LIVENESS_CACHE.update({"ts": time.time(), "rows": _copy_row_list(out)})
+    return out
 
 
 async def _source_rate_summary(conn, since_sql: str, before_sql: str | None = None) -> dict[str, dict]:
@@ -400,6 +674,10 @@ async def _source_media_totals(conn) -> dict[str, dict]:
             timeout=8,
         )
         out = {row["source"]: dict(row) for row in rows}
+        try:
+            out.update(await _beeper_subsource_media_totals(conn))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("beeper sub-source media totals failed: %s", exc)
         _SOURCE_MEDIA_TOTALS_CACHE.update({"ts": time.time(), "rows": out})
         return out
     if "media_items" not in existing:
@@ -424,6 +702,10 @@ async def _source_media_totals(conn) -> dict[str, dict]:
             return cached_rows  # type: ignore[return-value]
         raise
     out = {row["source"]: dict(row) for row in rows}
+    try:
+        out.update(await _beeper_subsource_media_totals(conn))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("beeper sub-source media totals failed: %s", exc)
     _SOURCE_MEDIA_TOTALS_CACHE.update({"ts": time.time(), "rows": out})
     return out
 
@@ -667,6 +949,8 @@ def _source_window_totals(rows: list[dict], window_key: str) -> dict:
     out = _empty_source_counts()
     active_sources = 0
     for row in rows:
+        if row.get("rollup_exclude"):
+            continue
         window = row.get(window_key) or {}
         if any(int(window.get(key) or 0) for key in ("records", "messages", "media_items", "rate_limits", "access_errors")):
             active_sources += 1
@@ -792,7 +1076,7 @@ def _source_media_freshness(source: str | None, current_window: dict, day_window
     total = media_total or {}
     total_items = int(total.get("total_media_items") or 0)
     latest = total.get("latest_media_at")
-    expected = source in _MEDIA_PRIMARY_SOURCES
+    expected = source in _MEDIA_PRIMARY_SOURCES or bool(source and source.startswith(_BEEPER_SUBSOURCE_PREFIX))
     now = now or datetime.now(timezone.utc)
 
     latest_age_seconds = None
@@ -914,9 +1198,12 @@ def _source_matrix_row(source_row: dict, current_content: dict | None, current_r
         }
     return {
         "source": source,
+        "display_name": source_row.get("display_name"),
+        "parent_source": source_row.get("parent_source"),
+        "rollup_exclude": bool(source_row.get("rollup_exclude")),
         "status": source_row.get("status"),
         "collection_mode": source_row.get("collection_mode"),
-        "collection_methods": _SOURCE_METHODS.get(source, []),
+        "collection_methods": _source_collection_methods(source),
         "freshness_basis": source_row.get("freshness_basis"),
         "age_seconds": source_row.get("age_seconds"),
         "stale_after_seconds": source_row.get("stale_after_seconds"),
@@ -1892,6 +2179,12 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
         live_sources = await compute_liveness(conn)
         live_sources, whatsapp_bridge_health = await _with_bridge_overrides(live_sources)
         try:
+            beeper_subsources = await _beeper_subsource_liveness(conn)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("source matrix beeper sub-source liveness failed: %s", exc)
+            errors.append({"section": "beeper_subsource_liveness", "error": exc.__class__.__name__})
+            beeper_subsources = []
+        try:
             current_content = await _source_content_summary(conn, "date_trunc('hour', now())")
         except Exception as exc:  # noqa: BLE001 - dashboard matrix should degrade, not 500
             logger.warning("source matrix current content summary failed: %s", exc)
@@ -1961,6 +2254,7 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
             browser_extension = {"expected_version": _expected_extension_version(), "issues": []}
 
     generated_at = datetime.now(timezone.utc)
+    live_sources = [*live_sources, *beeper_subsources]
     extension_by_source = _extension_issues_by_source(browser_extension)
     rows = [
         _source_matrix_row(
@@ -2035,11 +2329,7 @@ _PLATFORM_MESSAGES = {
 
 
 def _normalize_beeper_network(message_network: str | None, chat_network: str | None = None) -> str:
-    for value in (message_network, chat_network):
-        text = str(value or "").strip()
-        if text and text.lower() != "unknown":
-            return text
-    return "Unmapped Beeper"
+    return _beeper_network_label(message_network, chat_network)
 
 
 def _messaging_policy(native_source: str | None) -> str:
@@ -2485,6 +2775,10 @@ async def media_stats(_user: dict = Depends(require_role("viewer"))):
             from src.core.source_freshness import compute_liveness
             live_sources = await compute_liveness(conn)
             live_sources, _whatsapp_bridge_health = await _with_bridge_overrides(live_sources)
+            try:
+                live_sources = [*live_sources, *await _beeper_subsource_liveness(conn)]
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("media stats beeper sub-source liveness failed: %s", exc)
             live = {s["source"]: s for s in live_sources}
         except Exception:
             live = {}
@@ -2494,6 +2788,9 @@ async def media_stats(_user: dict = Depends(require_role("viewer"))):
             stats = media_totals.get(source, {})
             d = {
                 "source": source,
+                "display_name": stats.get("display_name"),
+                "parent_source": stats.get("parent_source"),
+                "rollup_exclude": bool(stats.get("rollup_exclude")),
                 "total_items": int(stats.get("total_media_items") or 0),
                 "total_bytes": int(stats.get("total_media_bytes") or 0),
                 "last_collected": stats.get("latest_media_at"),
@@ -2503,6 +2800,9 @@ async def media_stats(_user: dict = Depends(require_role("viewer"))):
             query_spec = _LATEST_ACTIVITY_QUERIES.get(source)
             cur = live.get(source)
             if cur:
+                d["display_name"] = d.get("display_name") or cur.get("display_name")
+                d["parent_source"] = d.get("parent_source") or cur.get("parent_source")
+                d["rollup_exclude"] = bool(d.get("rollup_exclude") or cur.get("rollup_exclude"))
                 d["live"] = cur["status"]
                 d["age_seconds"] = cur["age_seconds"]
                 d["stale_after_seconds"] = cur.get("stale_after_seconds")
@@ -2517,7 +2817,10 @@ async def media_stats(_user: dict = Depends(require_role("viewer"))):
                     d["last_activity"] = d.get("last_collected")
             else:
                 d["last_activity"] = d.get("last_collected")
-            d["activity_basis"] = query_spec[1] if query_spec else "media"
+            if source.startswith(_BEEPER_SUBSOURCE_PREFIX):
+                d["activity_basis"] = "beeper shadow network"
+            else:
+                d["activity_basis"] = query_spec[1] if query_spec else "media"
             out.append(d)
     return out
 

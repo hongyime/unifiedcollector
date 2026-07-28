@@ -133,6 +133,9 @@ export interface SourceMediaFreshness {
 
 export interface SourceCollectionMatrixRow {
   source: string;
+  display_name?: string | null;
+  parent_source?: string | null;
+  rollup_exclude?: boolean;
   status: CollectorLiveSource["status"];
   collection_mode: string | null;
   collection_methods: string[];
@@ -221,6 +224,9 @@ export interface StoriesOverview {
 
 export interface MediaStats {
   source: string;
+  display_name?: string | null;
+  parent_source?: string | null;
+  rollup_exclude?: boolean;
   total_items: number;
   total_bytes: number;
   last_collected: string | null;

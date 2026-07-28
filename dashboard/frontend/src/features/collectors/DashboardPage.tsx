@@ -46,10 +46,10 @@ const columns: ColumnDef<MediaStats, unknown>[] = [
         <div className="flex items-center gap-2">
           <StatusBadge status={liveBadgeStatus(row.live)} label={row.live ?? "unknown"} />
           <div>
-            <div className="uppercase font-medium text-text-primary">{info.getValue() as string}</div>
+            <div className="uppercase font-medium text-text-primary">{row.display_name ?? (info.getValue() as string)}</div>
             {row.collection_mode && (
               <div className="text-[10px] uppercase tracking-wide text-text-muted">
-                {row.collection_mode}
+                {row.parent_source ? `${row.collection_mode} · ${row.parent_source}` : row.collection_mode}
               </div>
             )}
           </div>
@@ -129,7 +129,7 @@ const sourceMatrixColumns: ColumnDef<SourceCollectionMatrixRow, unknown>[] = [
         <div className="flex items-center gap-2">
           <StatusBadge status={liveBadgeStatus(row.status)} label={row.status} />
           <div>
-            <div className="uppercase font-medium text-text-primary">{info.getValue() as string}</div>
+            <div className="uppercase font-medium text-text-primary">{row.display_name ?? (info.getValue() as string)}</div>
             <div className="text-[10px] uppercase tracking-wide text-text-muted">
               {row.collection_methods.length ? row.collection_methods.join(" + ") : row.collection_mode ?? "unknown mode"}
             </div>
@@ -472,8 +472,9 @@ export function DashboardPage() {
   if (hLoading && sLoading) return <LoadingSpinner />;
   if (error) return <ErrorState message={String(error)} onRetry={() => refetch()} />;
 
-  const totalItems = stats?.reduce((s, r) => s + r.total_items, 0) ?? 0;
-  const totalBytes = stats?.reduce((s, r) => s + r.total_bytes, 0) ?? 0;
+  const rollupStats = stats?.filter((r) => !r.rollup_exclude) ?? [];
+  const totalItems = rollupStats.reduce((s, r) => s + r.total_items, 0);
+  const totalBytes = rollupStats.reduce((s, r) => s + r.total_bytes, 0);
   // Real liveness from /collectors/live (data freshness + source_health), not the
   // service_cursors.status proxy that flickered for healthy idle/realtime collectors.
   const liveCollectors = collectorsLive?.live ?? 0;
