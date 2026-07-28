@@ -112,6 +112,34 @@ CREATE TABLE IF NOT EXISTS collection_runs (
 CREATE INDEX IF NOT EXISTS idx_runs_source ON collection_runs(source);
 CREATE INDEX IF NOT EXISTS idx_runs_status ON collection_runs(status);
 
+CREATE TABLE IF NOT EXISTS discovered_links (
+    id               SERIAL PRIMARY KEY,
+    source           VARCHAR(50) NOT NULL,
+    source_table     VARCHAR(100),
+    source_record_id TEXT NOT NULL,
+    context_id       TEXT,
+    entity_id        TEXT,
+    url              TEXT NOT NULL,
+    domain           TEXT,
+    link_type        TEXT,
+    status           TEXT NOT NULL DEFAULT 'pending',
+    title            TEXT,
+    description      TEXT,
+    discovered_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    fetched_at       TIMESTAMPTZ,
+    metadata         JSONB,
+    UNIQUE (source, source_record_id, url)
+);
+
+CREATE INDEX IF NOT EXISTS idx_discovered_links_source
+    ON discovered_links (source, discovered_at DESC);
+CREATE INDEX IF NOT EXISTS idx_discovered_links_domain
+    ON discovered_links (domain);
+CREATE INDEX IF NOT EXISTS idx_discovered_links_status
+    ON discovered_links (status, discovered_at DESC);
+CREATE INDEX IF NOT EXISTS idx_discovered_links_context
+    ON discovered_links (source, context_id);
+
 CREATE TABLE IF NOT EXISTS collection_schedules (
     id SERIAL PRIMARY KEY,
     source VARCHAR(20) UNIQUE NOT NULL,

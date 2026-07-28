@@ -43,6 +43,7 @@ from src.collectors.telegram.parse import (
 from src.core.account_pool import AccountPool
 from src.core.bot_pool import BotPool
 from src.core.hub_notifier import HubNotifier, NotifyCategory
+from src.core.discovered_links import persist_discovered_links
 from src.core.file_naming import sanitize_name
 from src.core.circuit_breaker import CircuitBreaker, CircuitOpenError
 from src.core.proximity import refresh_account_proximity_cache
@@ -1853,6 +1854,27 @@ class TelegramCollector(BaseCollector):
                 await self._capture_poll(conn, row["id"], message)
             # Tier 6: venue/event extraction (best effort — never breaks flow).
             await self._extract_message_event(message, chat_uuid, platform_msg_id, conn=conn)
+            await persist_discovered_links(
+                conn,
+                source="telegram",
+                source_table="telegram_messages",
+                source_record_id=platform_msg_id,
+                context_id=str(chat_id),
+                entity_id=str(getattr(message, "sender_id", "") or ""),
+                text=" ".join(
+                    v for v in (
+                        getattr(message, "message", None),
+                        getattr(message, "caption", None),
+                    )
+                    if v
+                ),
+                metadata={
+                    "platform_message_id": platform_msg_id,
+                    "platform_chat_id": str(chat_id),
+                    "platform_sender_id": str(getattr(message, "sender_id", "") or ""),
+                    "ingest_path": self.INGEST_PATH,
+                },
+            )
         if row is not None:
             self._progress_count += 1
         self._archive_raw_payload(
@@ -3087,6 +3109,28 @@ class TelegramCollector(BaseCollector):
             # Tier 6: venue/event extraction (best effort — never breaks the
             # hot realtime path; helper swallows all exceptions internally).
             await self._extract_message_event(message, chat_uuid, platform_msg_id, conn=conn)
+            await persist_discovered_links(
+                conn,
+                source="telegram",
+                source_table="telegram_messages",
+                source_record_id=platform_msg_id,
+                context_id=str(chat_id),
+                entity_id=str(sender_id or ""),
+                text=" ".join(
+                    v for v in (
+                        getattr(message, "message", None),
+                        getattr(message, "caption", None),
+                    )
+                    if v
+                ),
+                metadata={
+                    "platform_message_id": platform_msg_id,
+                    "platform_chat_id": str(chat_id),
+                    "platform_sender_id": str(sender_id or ""),
+                    "ingest_path": self.INGEST_PATH,
+                    "raw_payload_kind": "message_edit" if is_edit else "message",
+                },
+            )
         if wrote_row:
             self._progress_count += 1
         self._archive_raw_payload(

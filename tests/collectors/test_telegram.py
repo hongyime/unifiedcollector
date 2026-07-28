@@ -177,6 +177,39 @@ def test_is_flood_wait_detection():
     assert _is_flood_wait(RuntimeError("boom")) is False
 
 
+@pytest.mark.asyncio
+async def test_upsert_message_extracts_links(monkeypatch):
+    coll = _make_collector(monkeypatch)
+    message = SimpleNamespace(
+        id=12,
+        sender_id=77,
+        message="join https://t.me/example and read https://example.com/page.",
+        caption=None,
+        photo=False,
+        video=False,
+        voice=False,
+        date=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        pinned=False,
+        reactions=None,
+        media=None,
+        to_dict=lambda: {"id": 12, "message": "with links"},
+    )
+
+    await coll._upsert_message(message, chat_id=55, sender_uuid="sender-uuid")
+
+    link_calls = [
+        c for c in coll.pool.conn.execute.await_args_list
+        if "INSERT INTO discovered_links" in c.args[0]
+    ]
+    assert len(link_calls) == 2
+    assert {c.args[6] for c in link_calls} == {
+        "https://t.me/example",
+        "https://example.com/page",
+    }
+    assert all(c.args[1] == "telegram" for c in link_calls)
+    assert all(c.args[3] == "55:12" for c in link_calls)
+
+
 def test_session_state_enum_complete():
     # The enum is the worker FSM contract — nail down its members so
     # downstream callers (state == CONNECTED checks) don't silently break.

@@ -21,6 +21,7 @@ from src.collectors.youtube import (
     YT_API_BASE,
     YoutubeCollector,
     parse_iso8601_duration,
+    _safe_log_text,
 )
 
 
@@ -118,6 +119,19 @@ def test_parse_iso8601_duration_minutes_only():
 
 def test_parse_iso8601_duration_seconds_only():
     assert parse_iso8601_duration("PT42S") == 42
+
+
+def test_safe_log_text_redacts_url_query_secrets():
+    msg = (
+        "Client error for url "
+        "'https://www.googleapis.com/youtube/v3/playlistItems?part=snippet&key=AIzaSecret&token=abc'"
+    )
+
+    redacted = _safe_log_text(msg)
+
+    assert "AIzaSecret" not in redacted
+    assert "token=abc" not in redacted
+    assert "key=<redacted>" in redacted
 
 
 def test_parse_iso8601_duration_empty_or_garbage():
@@ -384,6 +398,32 @@ async def test_upsert_video_skips_when_no_id(monkeypatch):
     coll.pool._conn.fetchrow = AsyncMock(return_value={"id": "uuid-1"})
     await coll._upsert_video("UC123", {"id": None})
     coll.pool._conn.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_upsert_video_extracts_description_links(monkeypatch):
+    coll = _new_collector(monkeypatch)
+    coll.pool._conn.fetchrow = AsyncMock(return_value={"id": "uuid-1"})
+
+    video = {
+        "id": "VID999",
+        "snippet": {
+            "title": "Links",
+            "description": "More at https://example.com/a and https://x.com/b.",
+            "publishedAt": "2024-01-01T00:00:00Z",
+        },
+        "statistics": {},
+    }
+
+    await coll._upsert_video("UC123", video)
+
+    calls = coll.pool._conn.execute.await_args_list
+    assert any("INSERT INTO youtube_videos" in c.args[0] for c in calls)
+    link_calls = [c for c in calls if "INSERT INTO discovered_links" in c.args[0]]
+    assert len(link_calls) == 2
+    assert {c.args[6] for c in link_calls} == {"https://example.com/a", "https://x.com/b"}
+    assert all(c.args[1] == "youtube" for c in link_calls)
+    assert all(c.args[3] == "VID999" for c in link_calls)
 
 
 # ── _resolve_channel ─────────────────────────────────────────────────────

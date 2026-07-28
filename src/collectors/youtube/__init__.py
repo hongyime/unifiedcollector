@@ -67,6 +67,7 @@ from src.collectors.youtube.parse import (
     vtt_to_text as _parse_vtt_to_text,
     parse_relative_timestamp as _parse_rel_ts,
 )
+from src.core.discovered_links import persist_discovered_links
 from src.core.file_naming import sanitize_name
 from src.core.vault import VAULT_ROOT, write_atomic_artifact
 from src.core.user_change_tracker import (
@@ -78,6 +79,15 @@ logger = logging.getLogger(__name__)
 
 YT_API_BASE = "https://www.googleapis.com/youtube/v3"
 LIKED_VIDEOS_PLAYLIST_ID = "LL"
+_SECRET_QUERY_PARAM_RE = re.compile(
+    r"([?&](?:key|api_key|access_token|token|client_secret|oauth_token)=)[^&\s'\"<>]+",
+    re.IGNORECASE,
+)
+
+
+def _safe_log_text(value) -> str:
+    """Redact URL query secrets from exception text before logging/DLQ."""
+    return _SECRET_QUERY_PARAM_RE.sub(r"\1<redacted>", str(value))
 
 
 def parse_iso8601_duration(duration_str: str) -> int:
@@ -273,8 +283,9 @@ class YoutubeCollector(BaseCollector):
                 await self._collect_channel(target)
                 await self.checkpoint.save_progress(target)
             except Exception as e:
-                logger.error("Failed youtube/%s: %s", target, e)
-                await self.send_to_dlq(target, target, str(e))
+                safe_error = _safe_log_text(e)
+                logger.error("Failed youtube/%s: %s", target, safe_error)
+                await self.send_to_dlq(target, target, safe_error)
 
         # Rich enrichment runs after explicit channel targets so the source obeys
         # the shared priority policy instead of competing with freshness work.
@@ -397,7 +408,7 @@ class YoutubeCollector(BaseCollector):
                         statistics = item.get("statistics", {})
                         uploads_playlist = item.get("contentDetails", {}).get("relatedPlaylists", {}).get("uploads")
             except Exception as e:
-                logger.warning("YouTube _upsert_channel meta fetch failed for %s: %s", channel_id, e)
+                logger.warning("YouTube _upsert_channel meta fetch failed for %s: %s", channel_id, _safe_log_text(e))
 
         # ── User-intelligence diff (Tier 4): snapshot the row BEFORE upserting
         # so UserChangeTracker can compare old → new and emit one row per
@@ -604,6 +615,20 @@ class YoutubeCollector(BaseCollector):
             datetime.fromisoformat(snippet.get("publishedAt").replace("Z", "")) if snippet.get("publishedAt") else None,
             json.dumps(video_data)
             )
+            await persist_discovered_links(
+                conn,
+                source="youtube",
+                source_table="youtube_videos",
+                source_record_id=video_id,
+                context_id=channel_id,
+                entity_id=channel_id,
+                text=snippet.get("description"),
+                metadata={
+                    "platform_video_id": video_id,
+                    "platform_channel_id": channel_id,
+                    "title": snippet.get("title"),
+                },
+            )
 
     async def _resolve_channel(self, channel_input: str) -> tuple[str, str]:
         if not self._has_auth:
@@ -684,7 +709,7 @@ class YoutubeCollector(BaseCollector):
             try:
                 await self._enrich_video_stats(video_ids)
             except Exception as e:
-                logger.error("YouTube batch enrichment failed for channel %s: %s", channel_id, e)
+                logger.error("YouTube batch enrichment failed for channel %s: %s", channel_id, _safe_log_text(e))
         return video_ids
 
     async def _enrich_video_stats(self, video_ids: list[str]):
@@ -733,7 +758,11 @@ class YoutubeCollector(BaseCollector):
                             except Exception as e:
                                 logger.error("YouTube enrichment UPDATE failed for %s: %s", vid, e)
                 except Exception as e:
-                    logger.error("YouTube videos.list batch failed (chunk starting %s): %s", chunk[0] if chunk else "?", e)
+                    logger.error(
+                        "YouTube videos.list batch failed (chunk starting %s): %s",
+                        chunk[0] if chunk else "?",
+                        _safe_log_text(e),
+                    )
 
     async def _filter_video_ids_for_download(self, video_ids: list[str]) -> tuple[list[str], int]:
         if not video_ids or not self._max_duration or not self.pool:
@@ -1326,8 +1355,9 @@ class YoutubeCollector(BaseCollector):
             self._known_ids.add(cid)
             return inserted
         except Exception as e:
-            logger.error("Download failed %s: %s", cid, e)
-            await self.send_to_dlq(item["entity_id"], cid, str(e))
+            safe_error = _safe_log_text(e)
+            logger.error("Download failed %s: %s", cid, safe_error)
+            await self.send_to_dlq(item["entity_id"], cid, safe_error)
             return False
 
     # ─────────────────────────────────────────────────────────────────────
@@ -1739,8 +1769,9 @@ class YoutubeCollector(BaseCollector):
                 await self.collect_target_channel(ch)
                 processed.append(ch)
             except Exception as e:
-                logger.error("collect_target_channel failed for %s: %s", ch, e)
-                await self.send_to_dlq(ch, ch, str(e))
+                safe_error = _safe_log_text(e)
+                logger.error("collect_target_channel failed for %s: %s", ch, safe_error)
+                await self.send_to_dlq(ch, ch, safe_error)
             await asyncio.sleep(self._api_delay)
         return processed
 
@@ -1804,7 +1835,7 @@ class YoutubeCollector(BaseCollector):
                     await self._download_videos_via_yt_dlp(ch or "unknown", ch or "unknown", vids)
                 stats["successful"] += len(vids) or 1
             except Exception as e:
-                logger.error("batch_download failure for channel %s: %s", ch, e)
+                logger.error("batch_download failure for channel %s: %s", ch, _safe_log_text(e))
                 stats["failed"] += len(vids) or 1
 
         return stats

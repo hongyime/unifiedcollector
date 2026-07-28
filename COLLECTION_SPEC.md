@@ -217,6 +217,13 @@ Current shipped recovery/ops work:
   `dm_hook_heartbeat`; browser ingest requests are recorded in
   `browser_ingest_events` and shown in the hourly Telegram status as browser
   saw/stored/POST counts for the current UTC hour.
+- **Tier 6 discovered links:** `src/core/discovered_links.py` persists generic
+  URL occurrences into `discovered_links` with source, source table, source
+  record id, context id, domain, type, and provenance metadata. YouTube video
+  descriptions and Telegram backfill/realtime message text now feed this table;
+  WhatsApp continues to keep its richer `wa_discovered_links` table as a
+  platform-specific view. Historical YouTube/Telegram text can be filled in
+  bounded cursor batches with `python -m src.main backfill-discovered-links`.
 - **Tier 1 raw messaging payloads:** Telegram chat/user/message/profile
   payloads, WhatsApp bridge message/contact/delete events, and Beeper
   account/chat/participant/message shadow payloads are archived through

@@ -112,6 +112,15 @@ def main():
     )
     msr.add_argument("--json", action="store_true", help="Print machine-readable JSON")
 
+    # backfill-discovered-links
+    dlb = sub.add_parser(
+        "backfill-discovered-links",
+        help="Backfill generic discovered_links from historical source text",
+    )
+    dlb.add_argument("--source", default="all", choices=["all", "youtube", "telegram"])
+    dlb.add_argument("--limit", type=int, default=100, help="Maximum rows per source for this run")
+    dlb.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+
     # restore-drill
     rd = sub.add_parser(
         "restore-drill",
@@ -184,6 +193,8 @@ def main():
         _cmd_vault_inspect(args.vault_root, args.source, args.limit, args.json)
     elif args.command == "repair-media-sidecars":
         asyncio.run(_cmd_repair_media_sidecars(args))
+    elif args.command == "backfill-discovered-links":
+        asyncio.run(_cmd_backfill_discovered_links(args))
     elif args.command == "restore-drill":
         asyncio.run(_cmd_restore_drill(args))
     elif args.command == "schedule":
@@ -443,6 +454,31 @@ async def _cmd_repair_media_sidecars(args):
             )
             for failure in report.failures[:10]:
                 print(f"  failed {failure.get('source')}/{failure.get('content_id')}: {failure.get('error')}")
+    finally:
+        await close_pool()
+
+
+async def _cmd_backfill_discovered_links(args):
+    import json
+
+    from src.core.discovered_links_backfill import backfill_discovered_links
+
+    pool = await get_pool()
+    try:
+        async with pool.acquire() as conn:
+            results = await backfill_discovered_links(
+                conn,
+                source=args.source,
+                limit=args.limit,
+            )
+        if args.json:
+            print(json.dumps([r.to_dict() for r in results], indent=2, sort_keys=True, default=str))
+        else:
+            for r in results:
+                print(
+                    f"{r.source}: scanned={r.scanned} links_written={r.links_written} "
+                    f"last={r.last_processed_id} has_more={r.has_more}"
+                )
     finally:
         await close_pool()
 
