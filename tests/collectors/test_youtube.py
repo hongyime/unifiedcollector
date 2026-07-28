@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from src.core.base_collector import BaseCollector
 from src.collectors import youtube as youtube_mod
 from src.collectors.youtube import (
     LIKED_VIDEOS_PLAYLIST_ID,
@@ -828,6 +829,21 @@ async def test_run_backfill_uses_actual_video_insert_count(monkeypatch):
     out = await coll.run_backfill()
 
     assert out == 1
+
+
+@pytest.mark.asyncio
+async def test_base_backfill_does_not_count_false_download_result(monkeypatch):
+    coll = _new_collector(monkeypatch)
+    coll.get_backfill_items = AsyncMock(
+        return_value=[
+            {"entity_id": "UC_a", "content_id": "v1", "source_url": "https://example.test/v1"}
+        ]
+    )
+    coll.download_media = AsyncMock(return_value=False)
+
+    out = await BaseCollector.run_backfill(coll)
+
+    assert out == 0
 
 
 # ── _get_last_scrape_time ────────────────────────────────────────────────

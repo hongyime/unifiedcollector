@@ -156,8 +156,9 @@ class BaseCollector(ABC):
             if self.is_known(content_id):
                 continue
             try:
-                await self.download_media(item)
-                downloaded += 1
+                result = await self.download_media(item)
+                if result is not False:
+                    downloaded += 1
             except Exception as e:
                 logger.warning("%s backfill failed %s: %s",
                                self.SOURCE_NAME, content_id, e)
