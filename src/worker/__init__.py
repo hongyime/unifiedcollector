@@ -28,17 +28,24 @@ class _FatalSpinLogWatcher(logging.Handler):
     lives in the session/process and a soft collector relaunch can't clear it.
     Also covers SQLite "database is locked" OS-level locks.
 
+    Telethon can also emit recoverable "wrong session ID" warnings during
+    reconnect/session churn while collection continues to make progress. Those
+    warnings are deliberately excluded from the fatal restart counter.
+
     Attached to the root logger; when a known-fatal pattern floods past a rate
     threshold it hard-exits (os._exit 42) so Docker's restart:unless-stopped
     restarts the container with a clean slate. Gated by COLLECTOR_SELF_HEAL_RESTART.
     """
 
-    PATTERNS = (
+    FATAL_PATTERNS = (
         "too many messages had to be ignored consecutively",
-        "security error while unpacking a received message",
         "server sent a very new message",   # telethon message-id desync
         "database is locked",               # sqlite OS-level lock
     )
+    RECOVERABLE_PATTERNS = (
+        "server replied with a wrong session id",
+    )
+    PATTERNS = FATAL_PATTERNS
 
     def __init__(self, sources: list[str] | None = None):
         super().__init__(level=logging.WARNING)
@@ -150,7 +157,9 @@ class _FatalSpinLogWatcher(logging.Handler):
             msg = record.getMessage().lower()
         except Exception:
             return
-        if not any(p in msg for p in self.PATTERNS):
+        if any(p in msg for p in self.RECOVERABLE_PATTERNS):
+            return
+        if not any(p in msg for p in self.FATAL_PATTERNS):
             return
         now = time.monotonic()
         with self._lock:
