@@ -239,6 +239,36 @@ function makeSink() {
   };
 }
 
+function imageUrlsFromElement(im) {
+  const out = [];
+  const add = (u) => {
+    if (u && /^https?:/i.test(u) && !out.includes(u)) out.push(u);
+  };
+  try { add(im.currentSrc); } catch (e) {}
+  try { add(im.src); } catch (e) {}
+  try {
+    const srcset = im.getAttribute && im.getAttribute("srcset");
+    if (srcset) {
+      srcset.split(",").forEach((part) => {
+        const u = part.trim().split(/\s+/)[0];
+        add(u);
+      });
+    }
+  } catch (e) {}
+  return out;
+}
+
+function imageLooksTooSmall(im, min = 120) {
+  try {
+    const nw = im.naturalWidth || 0;
+    const nh = im.naturalHeight || 0;
+    if (nw && nh && (nw < min || nh < min)) return true;
+    const r = im.getBoundingClientRect && im.getBoundingClientRect();
+    if (r && r.width && r.height && (r.width < 48 || r.height < 48)) return true;
+  } catch (e) {}
+  return false;
+}
+
 // Walk an arbitrary embedded-state object collecting {url, type, id}. Used for
 // TikTok/Lemon8 where the page ships its data as JSON in a <script> tag.
 function deepCollectMedia(obj, sink, entity, depth = 0) {
@@ -1036,6 +1066,52 @@ function xProfileCount(handle, suffix) {
   } catch (e) { return null; }
 }
 
+function xStatusContext(root) {
+  try {
+    const link = root && root.querySelector && root.querySelector('a[href*="/status/"]');
+    const href = (link && (link.getAttribute("href") || ""))
+      .replace(/^https?:\/\/(?:www\.)?(?:x\.com|twitter\.com)/i, "")
+      .split("?")[0];
+    const m = href.match(/^\/([A-Za-z0-9_]{1,20})\/status\/(\d+)/);
+    if (m) return { author: m[1], post_id: m[2], href };
+  } catch (e) {}
+  return {};
+}
+
+function normalizeXMediaUrl(raw) {
+  if (!raw || !/^https?:/i.test(raw)) return "";
+  try {
+    const u = new URL(raw);
+    if (!/pbs\.twimg\.com$/i.test(u.hostname)) return "";
+    if (/\/profile_images\//i.test(u.pathname)) return "";
+    const useful = /\/(media|ext_tw_video_thumb|amplify_video_thumb|tweet_video_thumb|card_img)\//i.test(u.pathname);
+    if (!useful) return "";
+    if (/\/media\//i.test(u.pathname)) u.searchParams.set("name", "orig");
+    return u.toString();
+  } catch (e) {
+    return "";
+  }
+}
+
+function addXMediaCandidate(sink, u, entity, role, context = {}) {
+  const url = normalizeXMediaUrl(u);
+  if (!url) return;
+  const idBase = context.post_id ? `${context.post_id}_${urlId(url)}` : urlId(url);
+  sink.add({
+    content_id: `${role}_${idBase}`,
+    content_type: "photo",
+    url,
+    entity_name: context.author || entity,
+    kind: "post",
+    meta: {
+      x_asset_role: role,
+      post_id: context.post_id || null,
+      author_username: context.author || null,
+      post_url: context.href ? "https://x.com" + context.href : null,
+    },
+  });
+}
+
 function scrapeXProfile(handle) {
   const username = (handle || "").trim().replace(/^@/, "");
   if (!username || username === "timeline") return null;
@@ -1110,20 +1186,44 @@ const x = {
       await send({ type: "posts", platform: "x", username: feed, posts: xposts });
       clog("info", `X ${feed}: ${xposts.length} tweet(s) w/ counts`, "x");
     }
-    document.querySelectorAll('img[src*="pbs.twimg.com/media"]').forEach((im) => {
-      // strip size params → request the original
-      let u = im.src.replace(/&name=\w+/, "&name=orig").replace(/\?format=/, "?format=");
-      sink.add({ content_id: "img_" + u.split("/media/")[1], content_type: "photo", url: u, entity_name: entity });
+    document.querySelectorAll('article[data-testid="tweet"], article[role="article"]').forEach((art) => {
+      const ctx = xStatusContext(art);
+      art.querySelectorAll('img[src*="pbs.twimg.com"], img[srcset*="pbs.twimg.com"]').forEach((im) => {
+        if (imageLooksTooSmall(im, 120)) return;
+        imageUrlsFromElement(im).forEach((u) => addXMediaCandidate(sink, u, entity, "img", ctx));
+      });
+      art.querySelectorAll("video").forEach((v) => {
+        addXMediaCandidate(sink, v.poster, entity, "poster", ctx);
+        const u = v.src || (v.querySelector("source") && v.querySelector("source").src);
+        if (u && /^https?:/.test(u) && !u.startsWith("blob:")) {
+          sink.add({
+            content_id: "vid_" + (ctx.post_id ? `${ctx.post_id}_` : "") + urlId(u),
+            content_type: "video",
+            url: u,
+            entity_name: ctx.author || entity,
+            kind: "post",
+            meta: { x_asset_role: "video", post_id: ctx.post_id || null, author_username: ctx.author || null },
+          });
+        }
+      });
+    });
+    // Fallback for media lightboxes/profile media tabs where images may sit
+    // outside tweet <article> wrappers.
+    document.querySelectorAll('img[src*="pbs.twimg.com"], img[srcset*="pbs.twimg.com"]').forEach((im) => {
+      if (imageLooksTooSmall(im, 120)) return;
+      imageUrlsFromElement(im).forEach((u) => addXMediaCandidate(sink, u, entity, "img"));
     });
     const xu = collectPermalinkAuthors(/^\/([A-Za-z0-9_]{1,20})\/status\//, /^(home|explore|search|messages|notifications|i|settings)$/);
     if (xu.length) await send({ type: "users", platform: "x", context: "seen", users: xu });
-    document.querySelectorAll("video").forEach((v, i) => {
-      const poster = v.poster;
-      if (poster && /https?:/.test(poster)) sink.add({ content_id: "poster_" + urlId(poster), content_type: "photo", url: poster, entity_name: entity });
-      const u = v.src || (v.querySelector("source") && v.querySelector("source").src);
-      if (u && /^https?:/.test(u) && !u.startsWith("blob:")) sink.add({ content_id: "vid_" + urlId(u), content_type: "video", url: u, entity_name: entity });
+    await send({
+      type: "ingest",
+      platform: "x",
+      username: entity,
+      items: sink.items,
+      record_empty: true,
+      probe_reason: sink.items.length ? "media_candidates_found" : "no_dom_media_candidates",
+      probe_meta: { feed, posts: xposts.length },
     });
-    if (sink.items.length) await send({ type: "ingest", platform: "x", username: entity, items: sink.items });
     return { targets: 1, saved: sink.items.length, posts: xposts.length, discovered: xu.length };
   },
 };
@@ -1136,9 +1236,11 @@ const x = {
 function harvestDom(entity, { imgRe, junkRe }) {
   const sink = makeSink();
   document.querySelectorAll("img").forEach((im) => {
-    const u = im.currentSrc || im.src;
-    if (u && imgRe.test(u) && !junkRe.test(u))
-      sink.add({ content_id: "img_" + urlId(u), content_type: "photo", url: u, entity_name: entity });
+    if (imageLooksTooSmall(im, 120)) return;
+    imageUrlsFromElement(im).forEach((u) => {
+      if (u && imgRe.test(u) && !junkRe.test(u))
+        sink.add({ content_id: "img_" + urlId(u), content_type: "photo", url: u, entity_name: entity });
+    });
   });
   document.querySelectorAll("video").forEach((v) => {
     if (v.poster && /https?:/.test(v.poster) && !junkRe.test(v.poster))

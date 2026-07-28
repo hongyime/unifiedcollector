@@ -282,6 +282,49 @@ def test_drain_propagates_extension_version_to_media_and_telemetry(monkeypatch):
     ]
 
 
+def test_ingest_records_explicit_empty_media_probe(monkeypatch):
+    pool = _FakePool()
+    events = []
+
+    async def fake_event(_pool, platform, endpoint, subject, **kwargs):
+        events.append((platform, endpoint, subject, kwargs))
+
+    monkeypatch.setattr(ig_ingest, "_record_browser_ingest_event", fake_event)
+
+    resp = asyncio.run(
+        ig_ingest._ingest(
+            {"pool": pool},
+            "x",
+            {
+                "username": "timeline",
+                "items": [],
+                "record_empty": True,
+                "extension_version": "1.21.38",
+                "probe_reason": "no_dom_media_candidates",
+                "probe_meta": {"feed": "home/following", "posts": 5},
+            },
+        )
+    )
+
+    assert resp == {"accepted": 0, "platform": "x"}
+    assert events == [
+        (
+            "x",
+            "media",
+            "timeline",
+            {
+                "observed_count": 0,
+                "stored_count": 0,
+                "metadata": {
+                    "extension_version": "1.21.38",
+                    "probe_reason": "no_dom_media_candidates",
+                    "probe_meta": {"feed": "home/following", "posts": 5},
+                },
+            },
+        )
+    ]
+
+
 def test_browser_heartbeat_handler_records_platform_loop():
     pool = _FakePool()
     req = _FakeRequest(

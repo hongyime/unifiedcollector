@@ -871,6 +871,23 @@ async def _ingest(app, platform, body):
         task = asyncio.create_task(_drain(app, platform, username, items, body.get("extension_version")))
         app["tasks"].add(task)
         task.add_done_callback(app["tasks"].discard)
+    elif body.get("record_empty"):
+        meta = {}
+        if body.get("extension_version"):
+            meta["extension_version"] = body.get("extension_version")
+        if body.get("probe_reason"):
+            meta["probe_reason"] = body.get("probe_reason")
+        if isinstance(body.get("probe_meta"), dict):
+            meta["probe_meta"] = body.get("probe_meta")
+        await _record_browser_ingest_event(
+            app["pool"],
+            platform,
+            "media",
+            username,
+            observed_count=0,
+            stored_count=0,
+            metadata=meta or None,
+        )
     return {"accepted": len(items), "platform": platform}
 
 

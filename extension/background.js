@@ -479,7 +479,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         try {
           const r = await fetch(base + "/social/ingest", {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(withExtensionVersion({ platform: msg.platform || "instagram", username: msg.username, items: msg.items })),
+            body: JSON.stringify(withExtensionVersion({
+              platform: msg.platform || "instagram",
+              username: msg.username,
+              items: msg.items,
+              record_empty: !!msg.record_empty,
+              probe_reason: msg.probe_reason || null,
+              probe_meta: msg.probe_meta || null,
+            })),
           });
           const j = await r.json().catch(() => ({}));
           await log("info", `📥 ${msg.platform || "instagram"} · ${msg.username} · ${j.accepted ?? msg.items.length} media candidate(s) queued`);
