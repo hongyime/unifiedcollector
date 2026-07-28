@@ -27,6 +27,7 @@ from src.collectors.beeper import (
     BeeperCollector,
     BeeperTransientError,
     BeeperWriter,
+    _command_count,
     _is_transient_network_error,
     _opt,
     _parse_ts,
@@ -326,7 +327,29 @@ async def test_writer_upsert_message_returns_inserted_flag():
     assert is_new is True
     sql = conn.fetchrow.await_args.args[0]
     assert "INSERT INTO beeper_shadow_messages" in sql
+    assert "FROM beeper_shadow_chats" in sql
     assert "RETURNING (xmax = 0)" in sql
+
+
+@pytest.mark.asyncio
+async def test_writer_repairs_unknown_message_networks():
+    pool, conn = _mock_pool()
+    conn.execute.return_value = "UPDATE 42"
+    w = BeeperWriter(pool)
+
+    repaired = await w.repair_unknown_message_networks(limit=100)
+
+    assert repaired == 42
+    sql, limit = conn.execute.await_args.args
+    assert "UPDATE beeper_shadow_messages" in sql
+    assert "JOIN beeper_shadow_chats" in sql
+    assert limit == 100
+
+
+def test_command_count_parses_asyncpg_tags():
+    assert _command_count("UPDATE 42") == 42
+    assert _command_count("INSERT 0 3") == 3
+    assert _command_count(None) == 0
 
 
 @pytest.mark.asyncio
@@ -518,6 +541,49 @@ async def test_sync_one_chat_tails_fresh_messages_before_backfill(monkeypatch):
     assert inserted == 2
     assert coll.progress_count == 2
     assert directions == ["after", "before"]
+
+
+@pytest.mark.asyncio
+async def test_sync_one_chat_sets_chat_network_before_upsert(monkeypatch):
+    monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
+    fake_client = MagicMock(spec=BeeperClient)
+
+    async def _iter_messages(chat_id, **kw):
+        yield (
+            {
+                "id": "m1",
+                "chatID": chat_id,
+                "accountID": "discord",
+                "timestamp": "2026-05-27T13:55:06.532Z",
+                "type": "TEXT",
+                "text": "hi",
+            },
+            {"oldestCursor": "old-1", "newestCursor": "new-1", "hasMore": False},
+        )
+
+    fake_client.iter_messages = _iter_messages
+    coll = BeeperCollector(client=fake_client)
+
+    async def _no_attachments(_msg):
+        return None
+
+    monkeypatch.setattr(coll, "_download_attachments", _no_attachments)
+    writer = MagicMock(spec=BeeperWriter)
+    writer.upsert_message = AsyncMock(return_value=True)
+    writer.update_sync_state = AsyncMock()
+
+    await coll._sync_one_chat(
+        chat_id="!discord:room",
+        network="Discord",
+        oldest_cursor="old-0",
+        newest_cursor=None,
+        backfill_complete=False,
+        max_pages=1,
+        w=writer,
+    )
+
+    message = writer.upsert_message.await_args.args[0]
+    assert message["network"] == "Discord"
 
 
 @pytest.mark.asyncio

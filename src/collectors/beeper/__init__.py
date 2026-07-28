@@ -373,6 +373,14 @@ def _opt(d: dict, *keys: str) -> Any:
     return cur
 
 
+def _command_count(tag: Any) -> int:
+    """Parse asyncpg command tags like 'UPDATE 42'."""
+    try:
+        return int(str(tag).split()[-1])
+    except (IndexError, TypeError, ValueError):
+        return 0
+
+
 # ── DB writers ────────────────────────────────────────────────────────────
 
 
@@ -671,10 +679,34 @@ class BeeperWriter:
                     is_deleted, is_unread, mentions, seen,
                     reply_to_id, edited_at, attachments, reactions, raw, deleted_at
                 ) VALUES (
-                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+                    $1, $2, $3,
+                    COALESCE(
+                        CASE
+                            WHEN trim(COALESCE($4::text, '')) <> ''
+                             AND lower(trim(COALESCE($4::text, ''))) <> 'unknown'
+                            THEN trim($4::text)
+                        END,
+                        (
+                            SELECT CASE
+                                WHEN trim(COALESCE(c.network, '')) <> ''
+                                 AND lower(trim(COALESCE(c.network, ''))) <> 'unknown'
+                                THEN trim(c.network)
+                            END
+                            FROM beeper_shadow_chats c
+                            WHERE c.chat_id = $2
+                        ),
+                        'unknown'
+                    ),
+                    $5, $6, $7, $8, $9, $10, $11, $12, $13,
                     $14, $15, $16, $17, $18, $19, $20, $21
                 )
                 ON CONFLICT (chat_id, message_id) DO UPDATE SET
+                    network = CASE
+                        WHEN trim(COALESCE(beeper_shadow_messages.network, '')) = ''
+                          OR lower(trim(COALESCE(beeper_shadow_messages.network, ''))) = 'unknown'
+                        THEN EXCLUDED.network
+                        ELSE beeper_shadow_messages.network
+                    END,
                     sender_id = EXCLUDED.sender_id,
                     sender_name = EXCLUDED.sender_name,
                     is_sender = EXCLUDED.is_sender,
@@ -733,6 +765,33 @@ class BeeperWriter:
             },
         )
         return bool(row and row["inserted"])
+
+    async def repair_unknown_message_networks(self, limit: int = 50000) -> int:
+        """Backfill message.network from chat.network for dashboard/analyzer coverage."""
+        limit = max(1, min(int(limit or 50000), 200000))
+        async with self.pool.acquire() as conn:
+            tag = await conn.execute(
+                """
+                WITH repair AS (
+                    SELECT m.ctid, trim(c.network) AS network
+                    FROM beeper_shadow_messages m
+                    JOIN beeper_shadow_chats c ON c.chat_id = m.chat_id
+                    WHERE (
+                            trim(COALESCE(m.network, '')) = ''
+                         OR lower(trim(COALESCE(m.network, ''))) = 'unknown'
+                    )
+                      AND trim(COALESCE(c.network, '')) <> ''
+                      AND lower(trim(COALESCE(c.network, ''))) <> 'unknown'
+                    LIMIT $1
+                )
+                UPDATE beeper_shadow_messages m
+                SET network = repair.network
+                FROM repair
+                WHERE m.ctid = repair.ctid
+                """,
+                limit,
+            )
+        return _command_count(tag)
 
     async def update_sync_state(
         self,
@@ -878,10 +937,13 @@ class BeeperCollector(BaseCollector):
             raise RuntimeError("BeeperCollector requires a DB pool — call set_pool() first")
 
         stats = {"accounts": 0, "chats": 0, "messages_inserted": 0,
-                 "errors": 0, "transient": 0}
+                 "networks_repaired": 0, "errors": 0, "transient": 0}
         try:
             stats["accounts"] = await self._sync_accounts()
             stats["chats"] = await self._sync_chats()
+            w = self.writer
+            if w is not None:
+                stats["networks_repaired"] = await w.repair_unknown_message_networks()
             stats["messages_inserted"] = await self._sync_messages()
         except BeeperTransientError as exc:
             # Transient DNS/connect blip (e.g. resolver restart). The next cycle
@@ -895,9 +957,9 @@ class BeeperCollector(BaseCollector):
             stats["errors"] += 1
 
         logger.info(
-            "Beeper cycle done: accounts=%d chats=%d messages=%d errors=%d transient=%d",
+            "Beeper cycle done: accounts=%d chats=%d messages=%d network_repairs=%d errors=%d transient=%d",
             stats["accounts"], stats["chats"], stats["messages_inserted"],
-            stats["errors"], stats["transient"],
+            stats["networks_repaired"], stats["errors"], stats["transient"],
         )
         return stats
 
@@ -1299,11 +1361,11 @@ class BeeperCollector(BaseCollector):
                     direction="after",
                     page_size=_BEEPER_PAGE_SIZE,
                 ):
+                    msg.setdefault("network", network)
                     is_new = await w.upsert_message(msg)
                     if is_new:
                         tail_inserted += 1
                         self._progress_count += 1
-                        msg.setdefault("network", network)
                         await self._download_attachments(msg)
                     new_newest = meta.get("newestCursor") or new_newest
                     if tail_inserted >= max_pages * 50:
@@ -1324,11 +1386,11 @@ class BeeperCollector(BaseCollector):
                 async for msg, meta in self.client.iter_messages(
                     chat_id, start_cursor=cursor, direction="before", page_size=_BEEPER_PAGE_SIZE
                 ):
+                    msg.setdefault("network", network)
                     is_new = await w.upsert_message(msg)
                     if is_new:
                         inserted += 1
                         self._progress_count += 1
-                        msg.setdefault("network", network)
                         await self._download_attachments(msg)
                     final_oldest = meta.get("oldestCursor") or final_oldest
                     if meta.get("newestCursor") and not latest_newest:
