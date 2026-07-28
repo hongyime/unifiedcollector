@@ -18,6 +18,7 @@ import urllib.request
 logger = logging.getLogger(__name__)
 
 _API = "https://api.telegram.org"
+_MAX_TEXT_CHARS = 3800
 
 
 def _config() -> tuple[str, str, str]:
@@ -53,6 +54,36 @@ def _post(token: str, payload: dict) -> bool:
         return False
 
 
+def _split_text(text: str, *, limit: int | None = None) -> list[str]:
+    """Split long Telegram messages on line boundaries where possible."""
+    limit = int(limit or _MAX_TEXT_CHARS)
+    if len(text) <= limit:
+        return [text]
+
+    parts: list[str] = []
+    current = ""
+    for line in text.splitlines(keepends=True):
+        if len(line) > limit:
+            if current:
+                parts.append(current.rstrip("\n"))
+                current = ""
+            for start in range(0, len(line), limit):
+                chunk = line[start:start + limit]
+                if chunk:
+                    parts.append(chunk.rstrip("\n"))
+            continue
+
+        if current and len(current) + len(line) > limit:
+            parts.append(current.rstrip("\n"))
+            current = line
+        else:
+            current += line
+
+    if current:
+        parts.append(current.rstrip("\n"))
+    return parts or [""]
+
+
 async def send(text: str, parse_mode: str = "HTML") -> bool:
     """Send a message to the configured chat. No-op (False) if unconfigured."""
     token, chat_id, thread = _config()
@@ -60,20 +91,25 @@ async def send(text: str, parse_mode: str = "HTML") -> bool:
         logger.debug("telegram send skipped: token/chat_id not set")
         return False
 
-    payload = {
+    base_payload = {
         "chat_id": chat_id,
-        "text": text,
         "parse_mode": parse_mode,
         "disable_web_page_preview": True,
     }
     if thread:
         try:
-            payload["message_thread_id"] = int(thread)
+            base_payload["message_thread_id"] = int(thread)
         except ValueError:
             logger.warning("invalid TELEGRAM_THREAD_ID=%r (not an int)", thread)
 
+    parts = _split_text(text)
+    ok = True
     try:
-        return await asyncio.to_thread(_post, token, payload)
+        for part in parts:
+            payload = dict(base_payload)
+            payload["text"] = part
+            ok = bool(await asyncio.to_thread(_post, token, payload)) and ok
+        return ok
     except Exception as e:  # noqa: BLE001 - belt-and-suspenders
         logger.warning("telegram send error: %s", e)
         return False
