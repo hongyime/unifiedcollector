@@ -89,6 +89,27 @@ def _beeper_backfill_query_timeout() -> float:
         return 20.0
 
 
+def _beeper_tombstone_retry_limit() -> int:
+    marker = os.getenv("BEEPER_TOMBSTONE_RETRY_MARKER", "").strip()
+    if not marker:
+        return 0
+    raw = os.getenv("BEEPER_TOMBSTONE_RETRY_LIMIT", "0")
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        logger.warning("Invalid BEEPER_TOMBSTONE_RETRY_LIMIT=%r; disabling retry", raw)
+        return 0
+
+
+def _beeper_tombstone_retry_min_age_days() -> int:
+    raw = os.getenv("BEEPER_TOMBSTONE_RETRY_MIN_AGE_DAYS", "7")
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        logger.warning("Invalid BEEPER_TOMBSTONE_RETRY_MIN_AGE_DAYS=%r; using 7 days", raw)
+        return 7
+
+
 def _tier1_raw_archives_enabled() -> bool:
     raw = os.getenv("COLLECTOR_TIER1_RAW_PAYLOADS_ENABLED", "1")
     return raw.strip().lower() not in {"0", "false", "no", "off"}
@@ -1070,6 +1091,7 @@ class BeeperCollector(BaseCollector):
                 source_url=src_url.split("?")[0],
                 metadata=metadata,
             )
+            await self._record_media_success(cid)
             if artifact.partial:
                 await self.send_to_dlq(
                     entity_id,
@@ -1115,6 +1137,85 @@ class BeeperCollector(BaseCollector):
         except Exception:
             logger.debug("beeper: load tombstones failed", exc_info=True)
             return set()
+
+    async def _select_tombstone_retry_ids(self) -> set[str]:
+        """One-shot retry sample for old Beeper asset tombstones.
+
+        A non-empty BEEPER_TOMBSTONE_RETRY_MARKER is the operator signal that the
+        Beeper Desktop cache/session changed enough to justify probing old dead
+        assets. The marker is persisted, so the same marker cannot create a
+        every-cycle retry storm.
+        """
+        if self.pool is None:
+            return set()
+        marker = os.getenv("BEEPER_TOMBSTONE_RETRY_MARKER", "").strip()
+        limit = _beeper_tombstone_retry_limit()
+        if not marker or limit <= 0:
+            return set()
+        min_age_days = _beeper_tombstone_retry_min_age_days()
+        try:
+            async with self.pool.acquire() as conn:
+                seen_marker = await conn.fetchval(
+                    """
+                    SELECT last_processed_id
+                    FROM service_cursors
+                    WHERE service = 'beeper_tombstone_retry'
+                    """
+                )
+                if seen_marker == marker:
+                    return set()
+                rows = await conn.fetch(
+                    """
+                    SELECT content_id
+                    FROM media_recover_state
+                    WHERE source = 'beeper'
+                      AND tombstoned_at IS NOT NULL
+                      AND tombstoned_at <= now() - ($2::int * interval '1 day')
+                    ORDER BY last_attempt_at ASC, tombstoned_at ASC, content_id
+                    LIMIT $1
+                    """,
+                    limit,
+                    min_age_days,
+                )
+                await conn.execute(
+                    """
+                    INSERT INTO service_cursors
+                        (service, last_processed_id, last_processed_at, status)
+                    VALUES ('beeper_tombstone_retry', $1, now(), 'completed')
+                    ON CONFLICT (service) DO UPDATE SET
+                        last_processed_id = EXCLUDED.last_processed_id,
+                        last_processed_at = EXCLUDED.last_processed_at,
+                        status = EXCLUDED.status
+                    """,
+                    marker,
+                )
+            retry_ids = {r["content_id"] for r in rows if r["content_id"]}
+            if retry_ids:
+                logger.info(
+                    "beeper: retrying %d old tombstoned media asset(s) for marker %s",
+                    len(retry_ids),
+                    marker,
+                )
+            return retry_ids
+        except Exception:
+            logger.debug("beeper: tombstone retry selection failed", exc_info=True)
+            return set()
+
+    async def _record_media_success(self, content_id: str) -> None:
+        """Clear failed-download state after a previously missing asset succeeds."""
+        if self.pool is None or not content_id:
+            return
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    DELETE FROM media_recover_state
+                    WHERE source = 'beeper' AND content_id = $1
+                    """,
+                    content_id,
+                )
+        except Exception:
+            logger.debug("beeper: record_media_success failed %s", content_id, exc_info=True)
 
     async def _record_media_failure(self, content_id: str) -> None:
         """Persist a failed asset download; tombstone after N attempts so it is
@@ -1230,6 +1331,10 @@ class BeeperCollector(BaseCollector):
             return []
         candidate_limit = _beeper_backfill_candidate_limit(batch_size)
         query_timeout = _beeper_backfill_query_timeout()
+        retry_ids = await self._select_tombstone_retry_ids()
+        retry_message_ids = sorted(
+            {cid.rsplit("_", 1)[0] for cid in retry_ids if "_" in cid}
+        )
         try:
             async with self.pool.acquire() as conn:
                 rows = await conn.fetch(
@@ -1243,15 +1348,30 @@ class BeeperCollector(BaseCollector):
                         WHERE m.attachments IS NOT NULL
                           AND m.attachments <> '[]'::jsonb
                         LIMIT $1
+                    ),
+                    retry_messages AS (
+                        SELECT m.message_id,
+                               m.chat_id,
+                               m.network,
+                               m.attachments
+                        FROM beeper_shadow_messages m
+                        WHERE m.message_id = ANY($2::text[])
+                          AND m.attachments IS NOT NULL
+                          AND m.attachments <> '[]'::jsonb
                     )
                     SELECT m.message_id,
                            m.chat_id,
                            COALESCE(c.network, m.network, 'unknown') AS network,
                            m.attachments
-                    FROM candidate_messages m
+                    FROM (
+                        SELECT * FROM candidate_messages
+                        UNION
+                        SELECT * FROM retry_messages
+                    ) m
                     LEFT JOIN beeper_shadow_chats c ON c.chat_id = m.chat_id
                     """,
                     candidate_limit,
+                    retry_message_ids,
                     timeout=query_timeout,
                 )
         except TimeoutError:
@@ -1297,7 +1417,7 @@ class BeeperCollector(BaseCollector):
                     continue
                 att_id = att.get("id", "")
                 content_id = f"{message_id}_{att_id.split('/')[-1][:40]}" if att_id else message_id
-                if content_id in tombstoned:
+                if content_id in tombstoned and content_id not in retry_ids:
                     continue
                 if self.is_known(content_id):
                     continue

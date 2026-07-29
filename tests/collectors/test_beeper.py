@@ -755,6 +755,45 @@ async def test_get_backfill_items_uses_bounded_recent_scan(monkeypatch, tmp_path
 
 
 @pytest.mark.asyncio
+async def test_get_backfill_items_allows_one_shot_tombstone_retry(monkeypatch, tmp_path):
+    monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
+    monkeypatch.setenv("COLLECTOR_DRIVE_PATH", str(tmp_path))
+    monkeypatch.setenv("BEEPER_TOMBSTONE_RETRY_MARKER", "cache-refresh-1")
+    monkeypatch.setenv("BEEPER_TOMBSTONE_RETRY_LIMIT", "2")
+    monkeypatch.setenv("BEEPER_TOMBSTONE_RETRY_MIN_AGE_DAYS", "0")
+    pool, conn = _mock_pool()
+    conn.fetchval = AsyncMock(return_value=None)
+    conn.fetch = AsyncMock(side_effect=[
+        [{"content_id": "msg2_retry"}],
+        [
+            {
+                "message_id": "msg2",
+                "chat_id": "!room:beeper.local",
+                "network": "Discord",
+                "attachments": [
+                    {
+                        "id": "mxc://beeper.local/retry",
+                        "srcURL": "mxc://beeper.local/retry",
+                        "type": "image",
+                        "mimeType": "image/jpeg",
+                        "size": {"width": 10, "height": 20},
+                    },
+                ],
+            }
+        ],
+        [{"content_id": "msg2_retry"}],
+    ])
+    coll = BeeperCollector(client=MagicMock(spec=BeeperClient))
+    coll.set_pool(pool)
+
+    items = await coll.get_backfill_items(5)
+
+    assert [item["content_id"] for item in items] == ["msg2_retry"]
+    assert conn.execute.await_count == 1
+    assert "beeper_tombstone_retry" in conn.execute.await_args.args[0]
+
+
+@pytest.mark.asyncio
 async def test_get_backfill_items_skips_cycle_on_candidate_timeout(monkeypatch, tmp_path):
     monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
     monkeypatch.setenv("COLLECTOR_DRIVE_PATH", str(tmp_path))

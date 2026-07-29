@@ -501,6 +501,12 @@ services:
       BEEPER_BACKFILL_PAGES_PER_CYCLE: "8"
       BEEPER_BACKFILL_CANDIDATE_MESSAGES: "1000"
       BEEPER_BACKFILL_QUERY_TIMEOUT: "30"
+      # One-shot, bounded probe of old failed Beeper assets after cache/session
+      # changes. Bump the marker to retry another tiny sample; same marker is
+      # remembered in service_cursors and will not run every cycle.
+      BEEPER_TOMBSTONE_RETRY_MARKER: "2026-07-29-initial-cache-probe"
+      BEEPER_TOMBSTONE_RETRY_LIMIT: "5"
+      BEEPER_TOMBSTONE_RETRY_MIN_AGE_DAYS: "7"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     cap_add:
