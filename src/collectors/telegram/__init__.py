@@ -28,6 +28,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from collections import deque
 from datetime import datetime, date, timezone
 from enum import Enum
@@ -56,6 +57,21 @@ from src.core.user_change_tracker import (
 from src.core.vault import VAULT_ROOT, write_atomic_artifact, write_raw_payload
 
 logger = logging.getLogger(__name__)
+
+_TELEGRAM_USERNAME_RE = re.compile(
+    r"(?<![\w.])@(?P<username>[A-Za-z][A-Za-z0-9_]{4,31})(?![A-Za-z0-9_])"
+)
+_TELEGRAM_LINK_USERNAME_RE = re.compile(
+    r"https?://(?:t\.me|telegram\.me|telegram\.dog)/(?:(?:s)/)?"
+    r"(?P<username>[A-Za-z][A-Za-z0-9_]{4,31})(?:[/?#]|$)",
+    re.IGNORECASE,
+)
+_TELEGRAM_RESERVED_PATHS = {
+    "addstickers",
+    "c",
+    "joinchat",
+    "share",
+}
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -86,6 +102,28 @@ def _tg_jsonb(obj) -> str:
     telegram_reaction_counts / telegram_polls rows.)
     """
     return json.dumps(obj, default=_tg_json, ensure_ascii=False)
+
+
+def _normalize_telegram_username(value) -> str | None:
+    if value is None:
+        return None
+    handle = str(value).strip().lstrip("@").lower()
+    if not handle or handle in _TELEGRAM_RESERVED_PATHS:
+        return None
+    if not re.fullmatch(r"[a-z][a-z0-9_]{4,31}", handle):
+        return None
+    return handle
+
+
+def _message_text_for_mentions(message) -> str:
+    return " ".join(
+        str(v)
+        for v in (
+            getattr(message, "message", None),
+            getattr(message, "caption", None),
+        )
+        if v
+    )
 
 
 def _tier1_raw_archives_enabled() -> bool:
@@ -1894,6 +1932,13 @@ class TelegramCollector(BaseCollector):
             await self._record_message_membership_signals(
                 conn, message, chat_uuid, sender_uuid
             )
+            await self._record_message_mentions(
+                conn,
+                message,
+                message_uuid,
+                chat_platform_id=str(chat_id),
+                sender_platform_id=getattr(message, "sender_id", None),
+            )
             await persist_discovered_links(
                 conn,
                 source="telegram",
@@ -3350,6 +3395,13 @@ class TelegramCollector(BaseCollector):
             await self._record_message_membership_signals(
                 conn, message, chat_uuid, sender_uuid
             )
+            await self._record_message_mentions(
+                conn,
+                message,
+                message_uuid,
+                chat_platform_id=str(chat_id),
+                sender_platform_id=getattr(message, "sender_id", None),
+            )
             await persist_discovered_links(
                 conn,
                 source="telegram",
@@ -3478,6 +3530,226 @@ class TelegramCollector(BaseCollector):
         except Exception as exc:
             logger.debug("telegram user stub upsert failed for %s: %s", platform_user_id, exc)
             return None
+
+    @staticmethod
+    def _entity_text_slice(text: str, entity) -> str:
+        try:
+            offset = int(getattr(entity, "offset", 0) or 0)
+            length = int(getattr(entity, "length", 0) or 0)
+        except (TypeError, ValueError):
+            return ""
+        if offset < 0 or length <= 0:
+            return ""
+        return text[offset:offset + length]
+
+    def _extract_message_mentions(self, message) -> list[dict]:
+        """Extract Telegram mention targets from entities, text, and captions."""
+        text = _message_text_for_mentions(message)
+        mentions: list[dict] = []
+        seen: set[tuple[str, str, int, int]] = set()
+
+        def add_mention(
+            *,
+            username=None,
+            user_id=None,
+            source: str,
+            offset_start=None,
+            length=None,
+            raw_text=None,
+        ) -> None:
+            username_norm = _normalize_telegram_username(username)
+            user_id_str = str(user_id) if user_id is not None else None
+            if username_norm is None and user_id_str is None:
+                return
+            try:
+                offset_val = int(offset_start) if offset_start is not None else -1
+            except (TypeError, ValueError):
+                offset_val = -1
+            try:
+                length_val = int(length) if length is not None else -1
+            except (TypeError, ValueError):
+                length_val = -1
+            key = (user_id_str or "", username_norm or "", offset_val, length_val)
+            if key in seen:
+                return
+            seen.add(key)
+            mentions.append({
+                "username": username_norm,
+                "user_id": user_id_str,
+                "source": source,
+                "offset_start": None if offset_val < 0 else offset_val,
+                "length": None if length_val < 0 else length_val,
+                "raw_text": raw_text,
+            })
+
+        entity_sources = (
+            ("entities", str(getattr(message, "message", None) or "")),
+            ("caption_entities", str(getattr(message, "caption", None) or "")),
+        )
+        for attr, entity_text in entity_sources:
+            for ent in (getattr(message, attr, None) or []):
+                ent_name = type(ent).__name__
+                offset = getattr(ent, "offset", None)
+                length = getattr(ent, "length", None)
+                raw_text = self._entity_text_slice(entity_text, ent)
+                if ent_name == "MessageEntityMention":
+                    add_mention(
+                        username=raw_text,
+                        source=f"{attr}:entity_mention",
+                        offset_start=offset,
+                        length=length,
+                        raw_text=raw_text,
+                    )
+                elif ent_name in {"MessageEntityMentionName", "InputMessageEntityMentionName"}:
+                    add_mention(
+                        user_id=getattr(ent, "user_id", None),
+                        source=f"{attr}:entity_mention_name",
+                        offset_start=offset,
+                        length=length,
+                        raw_text=raw_text,
+                    )
+
+        for match in _TELEGRAM_USERNAME_RE.finditer(text):
+            add_mention(
+                username=match.group("username"),
+                source="regex_at_username",
+                offset_start=match.start(),
+                length=match.end() - match.start(),
+                raw_text=match.group(0),
+            )
+
+        for match in _TELEGRAM_LINK_USERNAME_RE.finditer(text):
+            add_mention(
+                username=match.group("username"),
+                source="regex_tme_username",
+                offset_start=match.start(),
+                length=match.end() - match.start(),
+                raw_text=match.group(0),
+            )
+
+        return mentions
+
+    async def _record_message_mentions(
+        self,
+        conn,
+        message,
+        message_uuid,
+        *,
+        chat_platform_id: str,
+        sender_platform_id=None,
+    ) -> int:
+        if message_uuid is None:
+            return 0
+        try:
+            mentions = self._extract_message_mentions(message)
+            if not mentions:
+                return 0
+
+            sender_key = str(sender_platform_id) if sender_platform_id else str(chat_platform_id)
+            edge_targets: set[str] = set()
+            written = 0
+            for mention in mentions:
+                mentioned_user_uuid = None
+                target_key = mention.get("user_id") or mention.get("username")
+                if not target_key:
+                    continue
+
+                if mention.get("user_id"):
+                    mentioned_user_uuid = await self._ensure_telegram_user_stub(
+                        conn, mention["user_id"]
+                    )
+                if mention.get("username"):
+                    await conn.execute(
+                        """
+                        INSERT INTO telegram_spider_queue
+                            (platform_chat_id, title, source, priority, status, collected_at)
+                        VALUES ($1, $2, 'mention', 6, 'pending', NOW())
+                        ON CONFLICT (platform_chat_id) DO NOTHING
+                        """,
+                        mention["username"],
+                        None,
+                    )
+
+                await conn.execute(
+                    """
+                    INSERT INTO telegram_message_mentions (
+                        message_id, mentioned_user_id, mention_username,
+                        mention_source, offset_start, length, raw_text, refreshed_at
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+                    ON CONFLICT DO NOTHING
+                    """,
+                    message_uuid,
+                    mentioned_user_uuid,
+                    mention.get("username"),
+                    mention.get("source"),
+                    mention.get("offset_start"),
+                    mention.get("length"),
+                    mention.get("raw_text"),
+                )
+
+                social_uid = mention.get("user_id") or mention.get("username")
+                if social_uid:
+                    await conn.execute(
+                        """
+                        INSERT INTO social_users (
+                            platform, uid, platform_user_id, username,
+                            contexts, metadata, first_seen, last_seen, times_seen
+                        ) VALUES (
+                            'telegram', $1, $2, $3,
+                            ARRAY['mentioned'], $4::jsonb, NOW(), NOW(), 1
+                        )
+                        ON CONFLICT (platform, uid) DO UPDATE SET
+                            platform_user_id = COALESCE(
+                                social_users.platform_user_id,
+                                EXCLUDED.platform_user_id
+                            ),
+                            username = COALESCE(social_users.username, EXCLUDED.username),
+                            contexts = (
+                                SELECT ARRAY(
+                                    SELECT DISTINCT v
+                                    FROM unnest(social_users.contexts || EXCLUDED.contexts) AS v
+                                )
+                            ),
+                            metadata = COALESCE(social_users.metadata, '{}'::jsonb)
+                                       || EXCLUDED.metadata,
+                            last_seen = NOW(),
+                            times_seen = social_users.times_seen + 1
+                        """,
+                        social_uid,
+                        mention.get("user_id"),
+                        mention.get("username"),
+                        _tg_jsonb({
+                            "context": "telegram_message_mention",
+                            "chat_id": str(chat_platform_id),
+                            "message_id": getattr(message, "id", None),
+                            "mention_source": mention.get("source"),
+                        }),
+                    )
+
+                if sender_key and target_key and sender_key != target_key:
+                    edge_targets.add(str(target_key))
+                written += 1
+
+            for target_key in edge_targets:
+                await conn.execute(
+                    """
+                    INSERT INTO graph_edges (
+                        source, source_user, target_user, edge_type,
+                        weight, first_seen_at, last_seen_at
+                    ) VALUES ('telegram', $1, $2, 'mentions', 1, NOW(), NOW())
+                    ON CONFLICT (source, source_user, target_user, edge_type)
+                    DO UPDATE SET
+                        weight = graph_edges.weight + 1,
+                        last_seen_at = NOW()
+                    """,
+                    sender_key,
+                    target_key,
+                )
+
+            return written
+        except Exception as exc:
+            logger.debug("_record_message_mentions failed: %s", exc)
+            return 0
 
     async def _upsert_chat_member_observation(
         self,

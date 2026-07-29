@@ -210,6 +210,50 @@ async def test_upsert_message_extracts_links(monkeypatch):
     assert all(c.args[3] == "55:12" for c in link_calls)
 
 
+@pytest.mark.asyncio
+async def test_upsert_message_records_mentions(monkeypatch):
+    coll = _make_collector(monkeypatch)
+    message = SimpleNamespace(
+        id=13,
+        sender_id=77,
+        message="hi @AliceDemo see https://t.me/BobDemo",
+        caption=None,
+        photo=False,
+        video=False,
+        voice=False,
+        date=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        pinned=False,
+        reactions=None,
+        media=None,
+        action=None,
+        entities=[],
+        caption_entities=[],
+        to_dict=lambda: {"id": 13, "message": "with mentions"},
+    )
+
+    await coll._upsert_message(message, chat_id=55, sender_uuid="sender-uuid")
+
+    mention_calls = [
+        c for c in coll.pool.conn.execute.await_args_list
+        if "INSERT INTO telegram_message_mentions" in c.args[0]
+    ]
+    assert len(mention_calls) == 2
+    assert {c.args[3] for c in mention_calls} == {"alicedemo", "bobdemo"}
+
+    queue_calls = [
+        c for c in coll.pool.conn.execute.await_args_list
+        if "INSERT INTO telegram_spider_queue" in c.args[0]
+        and "'mention'" in c.args[0]
+    ]
+    assert {c.args[1] for c in queue_calls} == {"alicedemo", "bobdemo"}
+
+    edge_calls = [
+        c for c in coll.pool.conn.execute.await_args_list
+        if "INSERT INTO graph_edges" in c.args[0]
+    ]
+    assert {c.args[2] for c in edge_calls} == {"alicedemo", "bobdemo"}
+
+
 def test_session_state_enum_complete():
     # The enum is the worker FSM contract — nail down its members so
     # downstream callers (state == CONNECTED checks) don't silently break.
@@ -866,11 +910,12 @@ async def test_realtime_write_retries_transient_timeout(monkeypatch):
     monkeypatch.setenv("TELEGRAM_REALTIME_WRITE_ATTEMPTS", "2")
     monkeypatch.setenv("TELEGRAM_REALTIME_WRITE_RETRY_DELAY", "0")
     coll = _make_collector(monkeypatch)
+    worker = _make_worker(coll)
     message = SimpleNamespace(id=99)
     write = AsyncMock(side_effect=[asyncio.TimeoutError(), None])
     coll._write_realtime_message = write
 
-    await coll._write_realtime_message_with_retry(message, 42)
+    await coll._write_realtime_message_with_retry(worker, message, 42)
 
     assert write.await_count == 2
 
@@ -879,12 +924,13 @@ async def test_realtime_write_retries_transient_timeout(monkeypatch):
 async def test_realtime_write_does_not_retry_non_transient_error(monkeypatch):
     monkeypatch.setenv("TELEGRAM_REALTIME_WRITE_ATTEMPTS", "3")
     coll = _make_collector(monkeypatch)
+    worker = _make_worker(coll)
     message = SimpleNamespace(id=99)
     write = AsyncMock(side_effect=ValueError("bad row"))
     coll._write_realtime_message = write
 
     with pytest.raises(ValueError):
-        await coll._write_realtime_message_with_retry(message, 42)
+        await coll._write_realtime_message_with_retry(worker, message, 42)
 
     assert write.await_count == 1
 
