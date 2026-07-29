@@ -710,6 +710,9 @@ services:
       COLLECTOR_VAULT_ROOT: /vault
       # skip accounts > 3k followers when spider-discovering (user: close network only)
       INSTA_SPIDER_FAMOUS_CAP: "3000"
+      STRAVA_ROUTE_STREAM_SHARED_COOLDOWN: "true"
+      STRAVA_BROWSER_ROUTE_QUEUE_CANDIDATE_LIMIT: "50"
+      STRAVA_BROWSER_ROUTE_QUEUE_IMPORTANT_CANDIDATE_LIMIT: "100"
     volumes:
       - z:/unifiedcollector/media:/media
       - z:/unifiedcollector:/vault
@@ -795,6 +798,9 @@ services:
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
       UC_EXTENSION_EXPECTED_VERSION: "1.21.42"
+      STRAVA_ROUTE_STREAM_SHARED_COOLDOWN: "true"
+      STRAVA_BROWSER_ROUTE_QUEUE_CANDIDATE_LIMIT: "50"
+      STRAVA_BROWSER_ROUTE_QUEUE_IMPORTANT_CANDIDATE_LIMIT: "100"
       # Localhost-only single-user deployment: skip bearer-token auth so the
       # dashboard works without a login flow. Remove/false for network exposure.
       DASHBOARD_AUTH_DISABLED: "true"

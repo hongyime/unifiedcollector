@@ -46,12 +46,12 @@ async def fetch_strava_route_capture_queue(
     recent_visit_hours = max(1, min(int(recent_visit_hours or 6), 72))
     candidate_limit = max(
         limit,
-        min(int(os.getenv("STRAVA_BROWSER_ROUTE_QUEUE_CANDIDATE_LIMIT", "300")), 10000),
+        min(int(os.getenv("STRAVA_BROWSER_ROUTE_QUEUE_CANDIDATE_LIMIT", "50")), 10000),
     )
     important_candidate_limit = max(
         limit,
         min(
-            int(os.getenv("STRAVA_BROWSER_ROUTE_QUEUE_IMPORTANT_CANDIDATE_LIMIT", "10000")),
+            int(os.getenv("STRAVA_BROWSER_ROUTE_QUEUE_IMPORTANT_CANDIDATE_LIMIT", "100")),
             25000,
         ),
     )

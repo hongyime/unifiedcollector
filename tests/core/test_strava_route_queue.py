@@ -276,10 +276,10 @@ def test_route_capture_queue_normalizes_rows_when_not_cooling_down():
         fetch_strava_route_capture_queue(_Pool(conn), limit=2, respect_cooldown=False)
     )
 
-    assert conn.fetch_args == (2, 6, 300, None, 10000)
+    assert conn.fetch_args == (2, 6, 50, None, 100)
     assert out["cooldown"]["active"] is False
-    assert out["recent_candidate_limit"] == 300
-    assert out["important_candidate_limit"] == 10000
+    assert out["recent_candidate_limit"] == 50
+    assert out["important_candidate_limit"] == 100
     assert out["items"] == [
         {
             "platform_activity_id": 19283135496,
@@ -311,7 +311,7 @@ def test_route_capture_queue_keeps_important_candidates_outside_recent_cap():
         )
     )
 
-    assert conn.fetch_args == (2, 6, 300, "72101656", 10000)
+    assert conn.fetch_args == (2, 6, 50, "72101656", 100)
     assert "important_candidates AS MATERIALIZED" in conn.fetch_query
     assert "ap.tier <= 2" in conn.fetch_query
     assert "recent_candidates AS MATERIALIZED" in conn.fetch_query
