@@ -46,7 +46,8 @@ EXPECTED_TABLES = {
     "youtube_spider_queue",
     # github
     "github_users", "github_repos", "github_commits", "github_issues",
-    "github_readmes", "github_spider_queue",
+    "github_readmes", "github_spider_queue", "github_issue_comments",
+    "github_pr_reviews", "github_pr_review_comments", "github_edges",
     # strava
     "strava_athletes", "strava_activities", "strava_segments", "strava_gps_streams",
     "strava_day_coverage", "strava_spider_queue",

@@ -511,6 +511,7 @@ async def test_upsert_commit_tolerates_none_author_blocks():
 @pytest.mark.asyncio
 async def test_upsert_issue_flags_pull_request():
     coll = _new_collector()
+    coll.pool._conn.fetchrow.return_value = {"id": "issue-uuid"}
     issue = {
         "id": 1, "number": 2, "title": "t", "body": "b",
         "state": "open", "pull_request": {"url": "..."},
@@ -518,10 +519,10 @@ async def test_upsert_issue_flags_pull_request():
         "created_at": None, "updated_at": None,
     }
     await coll._upsert_issue(0, issue)
-    args = coll.pool._conn.execute.await_args.args
-    # Positional 6 is is_pull_request bool
-    assert args[6] is True
-    assert args[7] == ["bug"]  # labels list
+    args = coll.pool._conn.fetchrow.await_args.args
+    # Positional 7 is is_pull_request bool after SQL + repo/id fields.
+    assert args[7] is True
+    assert args[8] == ["bug"]  # labels list
 
 
 # ── _enqueue_user behaviour ──────────────────────────────────────────────

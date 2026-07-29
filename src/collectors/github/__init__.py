@@ -68,9 +68,11 @@ GITHUB_SPIDER_ENABLED        master-switch for queue draining (default true).
 GITHUB_API_DELAY             between-API-call polite delay (default 0.1s).
 GITHUB_DOWNLOAD_DELAY        between-asset-download delay (default 0.5s).
 GITHUB_AVATAR_SIZE           ?s= query param value (default 460).
-GITHUB_MAX_COMMITS_PER_REPO  cap commit pull (default 200).
-GITHUB_MAX_ISSUES_PER_REPO   cap issue pull (default 100).
-GITHUB_MAX_CONTRIBUTORS_PER_REPO cap contributors enqueued (default 25).
+GITHUB_MAX_COMMITS_PER_REPO  cap commit pull; 0/none/unlimited means all.
+GITHUB_MAX_ISSUES_PER_REPO   cap issue/PR pull; 0/none/unlimited means all.
+GITHUB_MAX_CONTRIBUTORS_PER_REPO cap contributors; 0/none/unlimited means all.
+GITHUB_MAX_BRANCHES_PER_REPO cap branch refs; 0/none/unlimited means all.
+GITHUB_MAX_WEAK_FANOUT_PER_REPO cap forks/stargazers/watchers (default 500).
 GITHUB_RATE_LIMIT_BUFFER     rotate PAT when remaining < this (default 10).
 GITHUB_PROFILE_PHOTO_BLOB_MAX_SIZE_MB  pHash blob storage cap (default 5000).
 """
@@ -81,12 +83,13 @@ import base64
 import json
 import logging
 import os
+import re
 import time
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import httpx
 
@@ -115,6 +118,7 @@ logger = logging.getLogger(__name__)
 API_BASE = "https://api.github.com"
 PER_PAGE = 100
 AVATAR_CDN_BASE = "https://avatars.githubusercontent.com/u"
+MENTION_RE = re.compile(r"(?<![\w/-])@([A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?)")
 
 
 def _parse_iso(ts: Any) -> Optional[datetime]:
@@ -122,7 +126,10 @@ def _parse_iso(ts: Any) -> Optional[datetime]:
     if not ts or not isinstance(ts, str):
         return None
     try:
-        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        if parsed.tzinfo is not None:
+            return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
     except (ValueError, AttributeError):
         return None
 
@@ -228,6 +235,47 @@ class GithubCollector(BaseCollector):
         if not raw:
             raw = os.getenv("GITHUB_SPIDER_SEED", "bryanseah234")
         return {p.strip().lstrip("@").lower() for p in raw.split(",") if p.strip()}
+
+    @staticmethod
+    def _env_limit(name: str, default: str = "0") -> int | None:
+        raw = (os.getenv(name, default) or "").strip().lower()
+        if raw in {"", "0", "none", "all", "unlimited", "-1"}:
+            return None
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _is_human_login(login: str | None, payload: dict | None = None) -> bool:
+        if not login:
+            return False
+        value = login.strip()
+        if not value:
+            return False
+        if value.endswith("[bot]") or value.lower().endswith("-bot"):
+            return False
+        if (payload or {}).get("type") == "Bot":
+            return False
+        return True
+
+    @staticmethod
+    def _extract_mentions(*texts: Any) -> set[str]:
+        mentions: set[str] = set()
+        for text in texts:
+            if not isinstance(text, str) or "@" not in text:
+                continue
+            for match in MENTION_RE.finditer(text):
+                login = match.group(1)
+                if GithubCollector._is_human_login(login):
+                    mentions.add(login)
+        return mentions
+
+    @staticmethod
+    def _repo_owner(full_name: str | None) -> str | None:
+        if not full_name or "/" not in full_name:
+            return None
+        return full_name.split("/", 1)[0]
 
     # ---- pool wiring ----------------------------------------------------
 
@@ -668,36 +716,132 @@ class GithubCollector(BaseCollector):
                     contributors = await self._paginate(
                         client,
                         f"{API_BASE}/repos/{full_name}/contributors",
-                        max_items=int(os.getenv("GITHUB_MAX_CONTRIBUTORS_PER_REPO", "25")),
+                        max_items=self._env_limit("GITHUB_MAX_CONTRIBUTORS_PER_REPO"),
                     )
                     for c in contributors:
                         login = (c or {}).get("login")
                         if login and login != username and (c or {}).get("type") != "Bot":
-                            if await self._enqueue_user(login, priority):
+                            await self._upsert_edge(
+                                source_login=username,
+                                target_login=login,
+                                repo_full_name=full_name,
+                                edge_type="repo_contributor",
+                                strength=75,
+                                evidence_url=f"https://github.com/{full_name}/graphs/contributors",
+                                evidence_id=f"{full_name}:contributor:{login}",
+                                raw_payload=c,
+                                queue_priority=priority,
+                            )
+                            if await self._enqueue_user(login, priority, source="contributors"):
                                 contrib_n += 1
                 except Exception as e:
                     logger.debug("contributor fetch failed for %s: %s", full_name, e)
         return {"repos": repos_n, "contributors_enqueued": contrib_n}
 
-    async def _enqueue_user(self, login: str, priority: int) -> bool:
+    async def _enqueue_user(self, login: str, priority: int, source: str = "discovered") -> bool:
         """Insert a single user into the legacy spider queue.
 
         Returns True if the row was newly inserted (asyncpg's INSERT command
         tag ends in '1' on insert, '0' on conflict).
         """
+        login = (login or "").strip().lstrip("@").lower()
+        if not self._is_human_login(login):
+            return False
         try:
             async with self.pool.acquire() as conn:
                 result = await conn.execute(
                     "INSERT INTO github_spider_queue "
-                    "(target_type, target_identifier, status, priority, collected_at) "
-                    "VALUES ('user', $1, 'pending', $2, NOW()) "
+                    "(target_type, target_identifier, source, status, priority, collected_at) "
+                    "VALUES ('user', $1, $2, 'pending', $3, NOW()) "
                     "ON CONFLICT (target_type, target_identifier) DO NOTHING",
-                    login, priority,
+                    login, source, priority,
                 )
                 return bool(result and result.endswith(" 1"))
         except Exception as e:
             logger.debug("enqueue_user failed for %s: %s", login, e)
             return False
+
+    async def _upsert_edge(
+        self,
+        *,
+        source_login: str | None,
+        target_login: str | None,
+        repo_full_name: str | None,
+        edge_type: str,
+        strength: int,
+        evidence_url: str | None,
+        evidence_id: str | None,
+        raw_payload: dict | None = None,
+        queue_priority: int = 2,
+    ) -> bool:
+        source = (source_login or "").strip().lstrip("@").lower()
+        target = (target_login or "").strip().lstrip("@").lower()
+        repo_key = (repo_full_name or "").strip()
+        if not self._is_human_login(source) or not self._is_human_login(target):
+            return False
+        if source.lower() == target.lower():
+            return False
+        eid = evidence_id or f"{edge_type}:{source}:{target}:{repo_full_name or ''}"
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO github_edges (
+                        source_login, target_login, repo_full_name, edge_type,
+                        strength, evidence_url, evidence_id, raw_payload,
+                        first_seen, last_seen, collected_at
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, NOW(), NOW(), NOW())
+                    ON CONFLICT (source_login, target_login, repo_full_name, edge_type, evidence_id)
+                    DO UPDATE SET
+                        strength = GREATEST(github_edges.strength, EXCLUDED.strength),
+                        evidence_url = COALESCE(EXCLUDED.evidence_url, github_edges.evidence_url),
+                        raw_payload = COALESCE(EXCLUDED.raw_payload, github_edges.raw_payload),
+                        last_seen = NOW(),
+                        collected_at = NOW()
+                    """,
+                    source,
+                    target,
+                    repo_key,
+                    edge_type,
+                    max(0, min(100, int(strength))),
+                    evidence_url,
+                    eid,
+                    json.dumps(raw_payload or {}, default=str),
+                )
+            await self._enqueue_user(target, queue_priority, source=edge_type)
+            return True
+        except Exception as e:
+            logger.debug("github edge upsert failed %s -> %s (%s): %s", source, target, edge_type, e)
+            return False
+
+    async def _record_mentions(
+        self,
+        *,
+        source_login: str | None,
+        repo_full_name: str | None,
+        edge_type: str,
+        evidence_url: str | None,
+        evidence_id: str,
+        raw_payload: dict | None,
+        texts: tuple[Any, ...],
+        strength: int = 55,
+    ) -> int:
+        count = 0
+        for mention in self._extract_mentions(*texts):
+            if await self._upsert_edge(
+                source_login=source_login,
+                target_login=mention,
+                repo_full_name=repo_full_name,
+                edge_type=edge_type,
+                strength=strength,
+                evidence_url=evidence_url,
+                evidence_id=f"{evidence_id}:mention:{mention.lower()}",
+                raw_payload=raw_payload,
+                queue_priority=2,
+            ):
+                count += 1
+        return count
 
     # ===================================================================
     # Bulk avatar download by sequential id (toolkit avatar_downloader.py)
@@ -1003,11 +1147,23 @@ class GithubCollector(BaseCollector):
             users = await self._paginate(
                 client, f"{API_BASE}/users/{username}/{endpoint}"
             )
+            edge_type = "follower" if endpoint == "followers" else "following"
             for u in users:
                 login = (u or {}).get("login", "")
                 if not login:
                     continue
-                if await self._enqueue_user(login, depth):
+                await self._upsert_edge(
+                    source_login=username,
+                    target_login=login,
+                    repo_full_name=None,
+                    edge_type=edge_type,
+                    strength=70 if endpoint == "following" else 65,
+                    evidence_url=f"https://github.com/{username}?tab={endpoint}",
+                    evidence_id=f"{username}:{endpoint}:{login}",
+                    raw_payload=u,
+                    queue_priority=depth,
+                )
+                if await self._enqueue_user(login, depth, source=endpoint):
                     added += 1
         logger.info(
             "Spider neighbors of %s: enqueued %d new at depth %d",
@@ -1075,6 +1231,17 @@ class GithubCollector(BaseCollector):
                             target_username = COALESCE(EXCLUDED.target_username, follow_edges.target_username)
                         """,
                         owner, uid_s, direction, login,
+                    )
+                    await self._upsert_edge(
+                        source_login=owner,
+                        target_login=login,
+                        repo_full_name=None,
+                        edge_type=direction,
+                        strength=80 if direction == "following" else 70,
+                        evidence_url=f"https://github.com/{owner}?tab={endpoint}",
+                        evidence_id=f"{owner}:{endpoint}:{login}",
+                        raw_payload=u,
+                        queue_priority=1,
                     )
                     counts[direction] += 1
         logger.info(
@@ -1163,13 +1330,65 @@ class GithubCollector(BaseCollector):
         )
         await self.checkpoint.save_progress(full_name)
 
+    async def _store_commit_and_edges(
+        self,
+        repo_uuid,
+        full_name: str,
+        repo_owner: str | None,
+        commit: dict,
+        *,
+        edge_prefix: str = "commit",
+    ) -> None:
+        await self._upsert_commit(repo_uuid, commit)
+        commit_block = commit.get("commit") or {}
+        commit_author = (commit.get("author") or {}).get("login")
+        committer = (commit.get("committer") or {}).get("login")
+        html_url = commit.get("html_url")
+        sha = commit.get("sha") or ""
+        if self._is_human_login(commit_author, commit.get("author")):
+            await self._upsert_edge(
+                source_login=repo_owner,
+                target_login=commit_author,
+                repo_full_name=full_name,
+                edge_type=f"{edge_prefix}_author",
+                strength=80,
+                evidence_url=html_url,
+                evidence_id=f"{full_name}:{edge_prefix}:{sha}:author",
+                raw_payload=commit,
+                queue_priority=1,
+            )
+        if self._is_human_login(committer, commit.get("committer")):
+            await self._upsert_edge(
+                source_login=repo_owner,
+                target_login=committer,
+                repo_full_name=full_name,
+                edge_type=f"{edge_prefix}_committer",
+                strength=70,
+                evidence_url=html_url,
+                evidence_id=f"{full_name}:{edge_prefix}:{sha}:committer",
+                raw_payload=commit,
+                queue_priority=2,
+            )
+        await self._record_mentions(
+            source_login=commit_author or committer or repo_owner,
+            repo_full_name=full_name,
+            edge_type=f"{edge_prefix}_mention",
+            strength=55,
+            evidence_url=html_url,
+            evidence_id=f"{full_name}:{edge_prefix}:{sha}",
+            raw_payload=commit,
+            texts=(commit_block.get("message"),),
+        )
+
     async def _collect_repo_content(
         self, client: httpx.AsyncClient, full_name: str, uid: str, login: str,
         repo_pid: int | None = None,
     ):
-        max_commits = int(os.getenv("GITHUB_MAX_COMMITS_PER_REPO", "200"))
-        max_issues = int(os.getenv("GITHUB_MAX_ISSUES_PER_REPO", "100"))
-        max_contributors = int(os.getenv("GITHUB_MAX_CONTRIBUTORS_PER_REPO", "25"))
+        max_commits = self._env_limit("GITHUB_MAX_COMMITS_PER_REPO")
+        max_issues = self._env_limit("GITHUB_MAX_ISSUES_PER_REPO")
+        max_contributors = self._env_limit("GITHUB_MAX_CONTRIBUTORS_PER_REPO")
+        weak_fanout_limit = self._env_limit("GITHUB_MAX_WEAK_FANOUT_PER_REPO", "500")
+        repo_owner = self._repo_owner(full_name) or login
 
         # Resolve the internal repo UUID for foreign-key linking. Prefer the
         # STABLE platform_repo_id — looking up by full_name orphaned commits
@@ -1216,19 +1435,109 @@ class GithubCollector(BaseCollector):
                 readme.get("size"),
             )
 
-        # 2. Commits (capped)
+        # 2. Commits (unbounded when GITHUB_MAX_COMMITS_PER_REPO=0/unset)
         commits = await self._paginate(
             client, f"{API_BASE}/repos/{full_name}/commits", max_items=max_commits
         )
         for c in commits:
-            await self._upsert_commit(repo_uuid, c)
+            await self._store_commit_and_edges(repo_uuid, full_name, repo_owner, c)
 
-        # 3. Issues (capped)
+        if os.getenv("GITHUB_COLLECT_BRANCH_COMMITS", "true").lower() == "true":
+            branches = await self._paginate(
+                client,
+                f"{API_BASE}/repos/{full_name}/branches",
+                max_items=self._env_limit("GITHUB_MAX_BRANCHES_PER_REPO"),
+            )
+            for branch in branches:
+                branch_name = (branch or {}).get("name")
+                if not branch_name:
+                    continue
+                branch_commits = await self._paginate(
+                    client,
+                    f"{API_BASE}/repos/{full_name}/commits?sha={quote(branch_name, safe='')}",
+                    max_items=max_commits,
+                )
+                for c in branch_commits:
+                    await self._store_commit_and_edges(
+                        repo_uuid,
+                        full_name,
+                        repo_owner,
+                        c,
+                        edge_prefix="branch_commit",
+                    )
+
+        # 3. Issues and PRs (unbounded when GITHUB_MAX_ISSUES_PER_REPO=0/unset)
         issues = await self._paginate(
-            client, f"{API_BASE}/repos/{full_name}/issues", max_items=max_issues
+            client, f"{API_BASE}/repos/{full_name}/issues?state=all", max_items=max_issues
         )
         for i in issues:
-            await self._upsert_issue(0, i)
+            issue_uuid = await self._upsert_issue(repo_uuid, i)
+            issue_number = i.get("number")
+            issue_author = (i.get("user") or {}).get("login")
+            is_pr = bool(i.get("pull_request"))
+            html_url = i.get("html_url")
+            issue_edge_type = "pr_author" if is_pr else "issue_author"
+            if self._is_human_login(issue_author, i.get("user")):
+                await self._upsert_edge(
+                    source_login=repo_owner,
+                    target_login=issue_author,
+                    repo_full_name=full_name,
+                    edge_type=issue_edge_type,
+                    strength=85 if is_pr else 75,
+                    evidence_url=html_url,
+                    evidence_id=f"{full_name}:issue:{issue_number}:author",
+                    raw_payload=i,
+                    queue_priority=1,
+                )
+            for assignee in i.get("assignees") or []:
+                assignee_login = (assignee or {}).get("login")
+                if self._is_human_login(assignee_login, assignee):
+                    await self._upsert_edge(
+                        source_login=issue_author or repo_owner,
+                        target_login=assignee_login,
+                        repo_full_name=full_name,
+                        edge_type="issue_assignee",
+                        strength=65,
+                        evidence_url=html_url,
+                        evidence_id=f"{full_name}:issue:{issue_number}:assignee:{assignee_login}",
+                        raw_payload=assignee,
+                        queue_priority=2,
+                    )
+            await self._record_mentions(
+                source_login=issue_author or repo_owner,
+                repo_full_name=full_name,
+                edge_type="pr_mention" if is_pr else "issue_mention",
+                strength=60,
+                evidence_url=html_url,
+                evidence_id=f"{full_name}:issue:{issue_number}",
+                raw_payload=i,
+                texts=(i.get("title"), i.get("body")),
+            )
+            if issue_number is not None:
+                await self._collect_issue_comments(
+                    client,
+                    full_name,
+                    repo_uuid,
+                    issue_uuid,
+                    int(issue_number),
+                    source_login=issue_author or repo_owner,
+                    is_pr=is_pr,
+                )
+                if is_pr:
+                    await self._collect_pr_reviews(
+                        client,
+                        full_name,
+                        repo_uuid,
+                        int(issue_number),
+                        source_login=issue_author or repo_owner,
+                    )
+                    await self._collect_pr_review_comments(
+                        client,
+                        full_name,
+                        repo_uuid,
+                        int(issue_number),
+                        source_login=issue_author or repo_owner,
+                    )
 
         # 4. Releases / assets — skip for repos we don't own (too large)
         _own_logins = {login.lower()} if login else set()
@@ -1252,8 +1561,8 @@ class GithubCollector(BaseCollector):
                     "source_url": asset["browser_download_url"], "raw": asset,
                 })
 
-        # 5. Contributors → spider queue
-        if max_contributors > 0 and self._spider_depth > 0:
+        # 5. Contributors -> edges + spider queue. max_contributors=None means all pages.
+        if max_contributors != 0 and self._spider_depth > 0:
             try:
                 contributors = await self._paginate(
                     client,
@@ -1265,7 +1574,18 @@ class GithubCollector(BaseCollector):
                     contrib_login = (c or {}).get("login")
                     if not contrib_login or (c or {}).get("type") == "Bot":
                         continue
-                    if await self._enqueue_user(contrib_login, 2):
+                    await self._upsert_edge(
+                        source_login=repo_owner,
+                        target_login=contrib_login,
+                        repo_full_name=full_name,
+                        edge_type="repo_contributor",
+                        strength=75,
+                        evidence_url=f"https://github.com/{full_name}/graphs/contributors",
+                        evidence_id=f"{full_name}:contributor:{contrib_login}",
+                        raw_payload=c,
+                        queue_priority=2,
+                    )
+                    if await self._enqueue_user(contrib_login, 2, source="contributors"):
                         added += 1
                 if added:
                     logger.info(
@@ -1274,6 +1594,180 @@ class GithubCollector(BaseCollector):
                     )
             except Exception as e:
                 logger.debug("contributor fetch failed for %s: %s", full_name, e)
+
+        await self._collect_weak_repo_fanout(client, full_name, repo_owner, weak_fanout_limit)
+
+    async def _collect_issue_comments(
+        self,
+        client: httpx.AsyncClient,
+        full_name: str,
+        repo_uuid,
+        issue_uuid,
+        issue_number: int,
+        *,
+        source_login: str,
+        is_pr: bool,
+    ) -> int:
+        comments = await self._paginate(
+            client,
+            f"{API_BASE}/repos/{full_name}/issues/{issue_number}/comments",
+        )
+        count = 0
+        for comment in comments:
+            await self._upsert_issue_comment(repo_uuid, issue_uuid, issue_number, comment)
+            author = (comment.get("user") or {}).get("login")
+            if self._is_human_login(author, comment.get("user")):
+                await self._upsert_edge(
+                    source_login=source_login,
+                    target_login=author,
+                    repo_full_name=full_name,
+                    edge_type="pr_issue_commenter" if is_pr else "issue_commenter",
+                    strength=75 if is_pr else 65,
+                    evidence_url=comment.get("html_url"),
+                    evidence_id=f"{full_name}:issue:{issue_number}:comment:{comment.get('id')}",
+                    raw_payload=comment,
+                    queue_priority=1 if is_pr else 2,
+                )
+                count += 1
+            await self._record_mentions(
+                source_login=author or source_login,
+                repo_full_name=full_name,
+                edge_type="pr_comment_mention" if is_pr else "issue_comment_mention",
+                strength=60,
+                evidence_url=comment.get("html_url"),
+                evidence_id=f"{full_name}:issue:{issue_number}:comment:{comment.get('id')}",
+                raw_payload=comment,
+                texts=(comment.get("body"),),
+            )
+        return count
+
+    async def _collect_pr_reviews(
+        self,
+        client: httpx.AsyncClient,
+        full_name: str,
+        repo_uuid,
+        pr_number: int,
+        *,
+        source_login: str,
+    ) -> int:
+        reviews = await self._paginate(
+            client,
+            f"{API_BASE}/repos/{full_name}/pulls/{pr_number}/reviews",
+        )
+        count = 0
+        for review in reviews:
+            await self._upsert_pr_review(repo_uuid, pr_number, review)
+            reviewer = (review.get("user") or {}).get("login")
+            if self._is_human_login(reviewer, review.get("user")):
+                await self._upsert_edge(
+                    source_login=source_login,
+                    target_login=reviewer,
+                    repo_full_name=full_name,
+                    edge_type="pr_reviewer",
+                    strength=90,
+                    evidence_url=review.get("html_url"),
+                    evidence_id=f"{full_name}:pr:{pr_number}:review:{review.get('id')}",
+                    raw_payload=review,
+                    queue_priority=1,
+                )
+                count += 1
+            await self._record_mentions(
+                source_login=reviewer or source_login,
+                repo_full_name=full_name,
+                edge_type="pr_review_mention",
+                strength=65,
+                evidence_url=review.get("html_url"),
+                evidence_id=f"{full_name}:pr:{pr_number}:review:{review.get('id')}",
+                raw_payload=review,
+                texts=(review.get("body"),),
+            )
+        return count
+
+    async def _collect_pr_review_comments(
+        self,
+        client: httpx.AsyncClient,
+        full_name: str,
+        repo_uuid,
+        pr_number: int,
+        *,
+        source_login: str,
+    ) -> int:
+        comments = await self._paginate(
+            client,
+            f"{API_BASE}/repos/{full_name}/pulls/{pr_number}/comments",
+        )
+        count = 0
+        for comment in comments:
+            await self._upsert_pr_review_comment(repo_uuid, pr_number, comment)
+            commenter = (comment.get("user") or {}).get("login")
+            if self._is_human_login(commenter, comment.get("user")):
+                await self._upsert_edge(
+                    source_login=source_login,
+                    target_login=commenter,
+                    repo_full_name=full_name,
+                    edge_type="pr_review_commenter",
+                    strength=85,
+                    evidence_url=comment.get("html_url"),
+                    evidence_id=f"{full_name}:pr:{pr_number}:review_comment:{comment.get('id')}",
+                    raw_payload=comment,
+                    queue_priority=1,
+                )
+                count += 1
+            await self._record_mentions(
+                source_login=commenter or source_login,
+                repo_full_name=full_name,
+                edge_type="pr_review_comment_mention",
+                strength=65,
+                evidence_url=comment.get("html_url"),
+                evidence_id=f"{full_name}:pr:{pr_number}:review_comment:{comment.get('id')}",
+                raw_payload=comment,
+                texts=(comment.get("body"),),
+            )
+        return count
+
+    async def _collect_weak_repo_fanout(
+        self,
+        client: httpx.AsyncClient,
+        full_name: str,
+        repo_owner: str | None,
+        max_items: int | None,
+    ) -> dict[str, int]:
+        if not repo_owner:
+            return {"fork_owner": 0, "stargazer": 0, "watcher": 0}
+        endpoints = (
+            ("forks", "fork_owner", 45),
+            ("stargazers", "stargazer", 30),
+            ("subscribers", "watcher", 25),
+        )
+        counts = {"fork_owner": 0, "stargazer": 0, "watcher": 0}
+        for endpoint, edge_type, strength in endpoints:
+            try:
+                rows = await self._paginate(
+                    client,
+                    f"{API_BASE}/repos/{full_name}/{endpoint}",
+                    max_items=max_items,
+                )
+            except Exception as e:
+                logger.debug("github weak fanout %s failed for %s: %s", endpoint, full_name, e)
+                continue
+            for row in rows:
+                user = row.get("owner") if edge_type == "fork_owner" else row
+                login = (user or {}).get("login")
+                if not self._is_human_login(login, user):
+                    continue
+                await self._upsert_edge(
+                    source_login=repo_owner,
+                    target_login=login,
+                    repo_full_name=full_name,
+                    edge_type=edge_type,
+                    strength=strength,
+                    evidence_url=(row.get("html_url") if edge_type == "fork_owner" else f"https://github.com/{full_name}/{endpoint}"),
+                    evidence_id=f"{full_name}:{edge_type}:{login}",
+                    raw_payload=row,
+                    queue_priority=3,
+                )
+                counts[edge_type] += 1
+        return counts
 
     # ---- DB upserts -----------------------------------------------------
 
@@ -1416,25 +1910,124 @@ class GithubCollector(BaseCollector):
                 gh_author.get("login"), c.get("message"), commit_date,
             )
 
-    async def _upsert_issue(self, repo_id: int, issue: dict):
+    async def _upsert_issue(self, repo_id, issue: dict):
         async with self.pool.acquire() as conn:
-            await conn.execute(
+            row = await conn.fetchrow(
                 """
                 INSERT INTO github_issues (
-                    platform_issue_id, number, title, body, state,
+                    repo_id, platform_issue_id, number, title, body, state,
                     is_pull_request, labels, comments_count, created_at, updated_at
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                 ON CONFLICT (platform_issue_id) DO UPDATE SET
+                    repo_id = COALESCE(EXCLUDED.repo_id, github_issues.repo_id),
                     state = EXCLUDED.state, updated_at = EXCLUDED.updated_at
+                RETURNING id
                 """,
-                issue.get("id"), issue.get("number"), issue.get("title"),
+                repo_id, issue.get("id"), issue.get("number"), issue.get("title"),
                 issue.get("body"), issue.get("state"),
                 "pull_request" in issue,
                 [l.get("name") for l in issue.get("labels", [])],
                 issue.get("comments"),
                 _parse_iso(issue.get("created_at")),
                 _parse_iso(issue.get("updated_at")),
+            )
+            return row["id"] if row else None
+
+    async def _upsert_issue_comment(self, repo_id, issue_id, issue_number: int, comment: dict):
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO github_issue_comments (
+                    repo_id, issue_id, platform_comment_id, issue_number,
+                    author_login, body, html_url, platform_created_at,
+                    platform_updated_at, metadata, collected_at
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, NOW())
+                ON CONFLICT (platform_comment_id) DO UPDATE SET
+                    repo_id = COALESCE(EXCLUDED.repo_id, github_issue_comments.repo_id),
+                    issue_id = COALESCE(EXCLUDED.issue_id, github_issue_comments.issue_id),
+                    author_login = EXCLUDED.author_login,
+                    body = EXCLUDED.body,
+                    html_url = EXCLUDED.html_url,
+                    platform_updated_at = EXCLUDED.platform_updated_at,
+                    metadata = EXCLUDED.metadata,
+                    collected_at = NOW()
+                """,
+                repo_id,
+                issue_id,
+                comment.get("id"),
+                issue_number,
+                (comment.get("user") or {}).get("login"),
+                comment.get("body"),
+                comment.get("html_url"),
+                _parse_iso(comment.get("created_at")),
+                _parse_iso(comment.get("updated_at")),
+                json.dumps(comment, default=str),
+            )
+
+    async def _upsert_pr_review(self, repo_id, pr_number: int, review: dict):
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO github_pr_reviews (
+                    repo_id, platform_review_id, pr_number, author_login,
+                    state, body, html_url, platform_submitted_at, metadata, collected_at
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, NOW())
+                ON CONFLICT (platform_review_id) DO UPDATE SET
+                    repo_id = COALESCE(EXCLUDED.repo_id, github_pr_reviews.repo_id),
+                    author_login = EXCLUDED.author_login,
+                    state = EXCLUDED.state,
+                    body = EXCLUDED.body,
+                    html_url = EXCLUDED.html_url,
+                    platform_submitted_at = EXCLUDED.platform_submitted_at,
+                    metadata = EXCLUDED.metadata,
+                    collected_at = NOW()
+                """,
+                repo_id,
+                review.get("id"),
+                pr_number,
+                (review.get("user") or {}).get("login"),
+                review.get("state"),
+                review.get("body"),
+                review.get("html_url"),
+                _parse_iso(review.get("submitted_at")),
+                json.dumps(review, default=str),
+            )
+
+    async def _upsert_pr_review_comment(self, repo_id, pr_number: int, comment: dict):
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO github_pr_review_comments (
+                    repo_id, platform_comment_id, pr_number, author_login,
+                    body, html_url, path, position, platform_created_at,
+                    platform_updated_at, metadata, collected_at
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, NOW())
+                ON CONFLICT (platform_comment_id) DO UPDATE SET
+                    repo_id = COALESCE(EXCLUDED.repo_id, github_pr_review_comments.repo_id),
+                    author_login = EXCLUDED.author_login,
+                    body = EXCLUDED.body,
+                    html_url = EXCLUDED.html_url,
+                    path = EXCLUDED.path,
+                    position = EXCLUDED.position,
+                    platform_updated_at = EXCLUDED.platform_updated_at,
+                    metadata = EXCLUDED.metadata,
+                    collected_at = NOW()
+                """,
+                repo_id,
+                comment.get("id"),
+                pr_number,
+                (comment.get("user") or {}).get("login"),
+                comment.get("body"),
+                comment.get("html_url"),
+                comment.get("path"),
+                comment.get("position"),
+                _parse_iso(comment.get("created_at")),
+                _parse_iso(comment.get("updated_at")),
+                json.dumps(comment, default=str),
             )
 
     # ---- media download (release assets) -------------------------------

@@ -251,6 +251,20 @@ services:
       STRAVA_GPS_BACKFILL_FIRST: "true"
       STRAVA_ROUTE_STREAM_SHARED_COOLDOWN: "true"
       STRAVA_PROFILE_ENRICH_BATCH: "75"
+      # GitHub graph expansion: no hard caps on high-signal repo history.
+      # Keep weak repo fanout bounded; stargazers/watchers are weaker evidence
+      # and can explode far faster than commits/issues/contributors.
+      GITHUB_API_DELAY: "0.35"
+      GITHUB_MAX_CONCURRENT: "6"
+      GITHUB_TARGET_CONCURRENCY: "2"
+      GITHUB_SPIDER_CONCURRENCY: "3"
+      GITHUB_SPIDER_BATCH_SIZE: "120"
+      GITHUB_MAX_COMMITS_PER_REPO: "0"
+      GITHUB_MAX_ISSUES_PER_REPO: "0"
+      GITHUB_MAX_CONTRIBUTORS_PER_REPO: "0"
+      GITHUB_MAX_BRANCHES_PER_REPO: "0"
+      GITHUB_MAX_WEAK_FANOUT_PER_REPO: "500"
+      GITHUB_COLLECT_BRANCH_COMMITS: "true"
       # CPU hygiene (A#4): low-volume / API-ceiling sources idle longer between
       # cycles — fewer wakeups, lower steady-state CPU, zero data loss.
       GITHUB_API_TRANSPORT_RETRIES: "2"
