@@ -363,8 +363,8 @@ class GithubCollector(BaseCollector):
     ) -> httpx.Response | None:
         """One authenticated API GET with rate-limit accounting + PAT rotation.
 
-        Returns None on 404 / rate-limited (waited + retry exhausted). Raises
-        on transport / 5xx after retry. Mirrors the toolkit's ``_request`` but
+        Returns None on 404 / rate-limited / exhausted transport retry. Raises
+        on 5xx after retry. Mirrors the toolkit's ``_request`` but
         delegates persistence to ``account_quota`` for cross-collector
         observability.
         """
@@ -382,7 +382,13 @@ class GithubCollector(BaseCollector):
                     break
                 except httpx.TransportError as exc:
                     if attempt >= attempts:
-                        raise
+                        logger.warning(
+                            "GitHub API transport error on %s (%s); exhausted %d attempt(s), skipping endpoint",
+                            url,
+                            type(exc).__name__,
+                            attempts,
+                        )
+                        return None
                     delay = min(10.0, float(2 ** (attempt - 1)))
                     logger.warning(
                         "GitHub API transport error on %s (%s); retry %d/%d after %.1fs",

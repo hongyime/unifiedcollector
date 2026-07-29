@@ -340,6 +340,32 @@ async def test_api_get_retries_transient_transport_disconnect(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_api_get_returns_none_after_exhausted_transport_retries(monkeypatch):
+    coll = _new_collector()
+    coll._api_delay = 0
+    coll._quota.consume = AsyncMock()
+    sleeps = []
+
+    async def sleep_event(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(github_mod, "sleep_rate_limit", sleep_event)
+    http = MagicMock()
+    http.get = AsyncMock(side_effect=[
+        github_mod.httpx.RemoteProtocolError("Server disconnected without sending a response."),
+        github_mod.httpx.ConnectError("connection failed"),
+        github_mod.httpx.RemoteProtocolError("Server disconnected without sending a response."),
+    ])
+
+    out = await coll._api_get(http, "https://api.github.com/repos/a/b/releases")
+
+    assert out is None
+    assert http.get.await_count == 3
+    assert sleeps == [1.0, 2.0]
+    assert coll.requests_made == 0
+
+
+@pytest.mark.asyncio
 async def test_api_get_records_github_quota_as_rate_limit_and_sleeps(monkeypatch):
     coll = _new_collector()
     coll._api_delay = 0
