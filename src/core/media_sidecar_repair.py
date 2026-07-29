@@ -1022,14 +1022,14 @@ async def _record_platform_backfill(
         status = await conn.execute(
             """
             INSERT INTO dead_letter_queue (source, entity_id, content_id, error_message)
-            SELECT $1, $2, $3, $4
+            SELECT $1::varchar(20), $2::varchar(100), $3::varchar(100), $4::text
             WHERE NOT EXISTS (
                 SELECT 1
                 FROM dead_letter_queue
-                WHERE source = $1
-                  AND content_id = $3
+                WHERE source = $1::varchar(20)
+                  AND content_id = $3::varchar(100)
                   AND status IN ('pending', 'in_progress')
-                  AND error_message = $4
+                  AND error_message = $4::text
             )
             """,
             source,
