@@ -89,6 +89,26 @@ def _tier1_raw_archives_enabled() -> bool:
     return raw.strip().lower() not in {"0", "false", "no", "off"}
 
 
+def _first_nonempty(*values):
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return value
+    return None
+
+
+def _coerce_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+    return bool(value)
+
+
 class WhatsappCollector(BaseCollector):
     SOURCE_NAME = "whatsapp"
     INGEST_PATH = "messaging"  # realtime messaging path (P2 review §3 provenance)
@@ -314,6 +334,12 @@ class WhatsappCollector(BaseCollector):
         )
         await contact_queue.bind(exchange, routing_key="contacts.#")
 
+        # Groups queue: group subject/description/member-count metadata
+        group_queue = await self._broker_channel.declare_queue(
+            "unifiedcollector.groups", durable=True,
+        )
+        await group_queue.bind(exchange, routing_key="groups.#")
+
         async def _consume_contacts():
             async with contact_queue.iterator() as qi:
                 async for message in qi:
@@ -326,8 +352,21 @@ class WhatsappCollector(BaseCollector):
                         except Exception as e:
                             logger.debug("Contact event processing failed: %s", e)
 
+        async def _consume_groups():
+            async with group_queue.iterator() as qi:
+                async for message in qi:
+                    if self._stop.is_set():
+                        break
+                    async with message.process():
+                        try:
+                            body = json.loads(message.body.decode())
+                            await self._handle_group_event(body)
+                        except Exception as e:
+                            logger.debug("Group event processing failed: %s", e)
+
         import asyncio as _asyncio
         _asyncio.create_task(_consume_contacts())
+        _asyncio.create_task(_consume_groups())
 
         async with msg_queue.iterator() as qi:
             async for message in qi:
@@ -354,7 +393,7 @@ class WhatsappCollector(BaseCollector):
                         logger.error("Broker message processing failed: %s", e)
 
     async def _handle_contact_event(self, event: dict):
-        """Maintain whatsapp_lid_map from contacts.update events.
+        """Maintain whatsapp_users and whatsapp_lid_map from contacts.update events.
 
         When Baileys syncs contacts it may provide both the phone-based JID
         (event['jid']) and the linked-device ID (event['lid']). We store this
@@ -362,37 +401,144 @@ class WhatsappCollector(BaseCollector):
         group message senders.
         """
         lid = event.get("lid")
-        jid = event.get("jid")
-        if not lid or not jid:
+        jid = event.get("jid") or event.get("phone_jid")
+        platform_user_id = event.get("platform_user_id") or jid or lid
+        if not platform_user_id:
             return
-        if "@lid" not in lid or "@s.whatsapp.net" not in jid:
+
+        valid_lid_mapping = (
+            isinstance(lid, str) and "@lid" in lid
+            and isinstance(jid, str) and "@s.whatsapp.net" in jid
+        )
+        is_user_jid = isinstance(platform_user_id, str) and (
+            "@s.whatsapp.net" in platform_user_id or "@lid" in platform_user_id
+        )
+        if not valid_lid_mapping and not is_user_jid:
             return
+
+        target_tables = ["whatsapp_users"] if is_user_jid else []
+        if valid_lid_mapping:
+            target_tables.insert(0, "whatsapp_lid_map")
+        archive_id = lid if valid_lid_mapping else platform_user_id
         self._archive_raw_event(
-            artifact_id=f"contacts/{lid}",
+            artifact_id=f"contacts/{archive_id}",
             payload=event,
-            target_tables=["whatsapp_lid_map", "whatsapp_users"],
+            target_tables=target_tables,
             metadata={
                 "lid": lid,
                 "phone_jid": jid,
+                "platform_user_id": platform_user_id,
                 "ingest_path": self.INGEST_PATH,
                 "raw_payload_kind": "contact",
             },
         )
-        display_name = event.get("display_name")
+        if not self.pool:
+            return
+        display_name = _first_nonempty(
+            event.get("display_name"),
+            event.get("name"),
+            event.get("notify"),
+            event.get("verified_name"),
+            event.get("verifiedBizName"),
+            event.get("pushName"),
+            event.get("push_name"),
+        )
+        push_name = _first_nonempty(event.get("pushName"), event.get("push_name"), event.get("notify"), display_name)
+        phone_number = event.get("phone_number")
+        user_jid_for_phone = jid if isinstance(jid, str) and "@s.whatsapp.net" in jid else platform_user_id
+        if not phone_number and isinstance(user_jid_for_phone, str) and "@s.whatsapp.net" in user_jid_for_phone:
+            prefix = user_jid_for_phone.split("@")[0]
+            if re.fullmatch(r"\d{7,15}", prefix):
+                phone_number = prefix
+        try:
+            async with self.pool.acquire() as conn:
+                if is_user_jid:
+                    await conn.execute("""
+                        INSERT INTO whatsapp_users (platform_user_id, name, pushname, phone_number, is_business, collected_at)
+                        VALUES ($1, $2, $3, $4, $5, NOW())
+                        ON CONFLICT (platform_user_id) DO UPDATE SET
+                            name = COALESCE(EXCLUDED.name, whatsapp_users.name),
+                            pushname = COALESCE(EXCLUDED.pushname, whatsapp_users.pushname),
+                            phone_number = COALESCE(EXCLUDED.phone_number, whatsapp_users.phone_number),
+                            is_business = COALESCE(whatsapp_users.is_business, FALSE)
+                                OR COALESCE(EXCLUDED.is_business, FALSE),
+                            collected_at = NOW()
+                    """, platform_user_id, display_name, push_name,
+                        phone_number or None, _coerce_bool(event.get("is_business")))
+                if valid_lid_mapping:
+                    await conn.execute("""
+                        INSERT INTO whatsapp_lid_map (lid, phone_jid, display_name, updated_at)
+                        VALUES ($1, $2, $3, NOW())
+                        ON CONFLICT (lid) DO UPDATE SET
+                            phone_jid = EXCLUDED.phone_jid,
+                            display_name = COALESCE(EXCLUDED.display_name, whatsapp_lid_map.display_name),
+                            updated_at = NOW()
+                    """, lid, jid, display_name)
+        except Exception as e:
+            logger.debug("contact upsert failed: %s", e)
+
+    async def _handle_group_event(self, event: dict):
+        """Upsert WhatsApp group metadata from groups.update bridge events."""
+        chat_jid = event.get("chat_jid") or event.get("id") or event.get("jid")
+        if not chat_jid or "@g.us" not in str(chat_jid):
+            return
+
+        name = _first_nonempty(event.get("name"), event.get("subject"), event.get("chat_name"))
+        description = _first_nonempty(event.get("description"), event.get("desc"))
+        participant_count = _first_nonempty(event.get("participant_count"), event.get("size"))
+        if participant_count is None and isinstance(event.get("participants"), list) and not event.get("action"):
+            participant_count = len(event["participants"])
+        try:
+            participant_count = int(participant_count) if participant_count is not None else None
+        except (TypeError, ValueError):
+            participant_count = None
+
+        self._archive_raw_event(
+            artifact_id=f"groups/{chat_jid}",
+            payload=event,
+            target_tables=["whatsapp_chats"],
+            metadata={
+                "platform_chat_id": chat_jid,
+                "session_name": event.get("session_name"),
+                "ingest_path": self.INGEST_PATH,
+                "raw_payload_kind": "group",
+            },
+        )
         if not self.pool:
             return
         try:
             async with self.pool.acquire() as conn:
                 await conn.execute("""
-                    INSERT INTO whatsapp_lid_map (lid, phone_jid, display_name, updated_at)
-                    VALUES ($1, $2, $3, NOW())
-                    ON CONFLICT (lid) DO UPDATE SET
-                        phone_jid = EXCLUDED.phone_jid,
-                        display_name = COALESCE(EXCLUDED.display_name, whatsapp_lid_map.display_name),
+                    INSERT INTO whatsapp_chats
+                        (platform_chat_id, name, is_group, chat_type, participant_count, description, updated_at)
+                    VALUES ($1, $2, TRUE, 'group', $3, $4, NOW())
+                    ON CONFLICT (platform_chat_id) DO UPDATE SET
+                        name = COALESCE(EXCLUDED.name, whatsapp_chats.name),
+                        is_group = TRUE,
+                        chat_type = 'group',
+                        participant_count = COALESCE(EXCLUDED.participant_count, whatsapp_chats.participant_count),
+                        description = COALESCE(EXCLUDED.description, whatsapp_chats.description),
                         updated_at = NOW()
-                """, lid, jid, display_name)
+                """, chat_jid, name, participant_count, description)
         except Exception as e:
-            logger.debug("lid_map upsert failed: %s", e)
+            if "chat_type" not in str(e):
+                logger.debug("group metadata upsert failed: %s", e)
+                return
+            try:
+                async with self.pool.acquire() as conn:
+                    await conn.execute("""
+                        INSERT INTO whatsapp_chats
+                            (platform_chat_id, name, is_group, participant_count, description, updated_at)
+                        VALUES ($1, $2, TRUE, $3, $4, NOW())
+                        ON CONFLICT (platform_chat_id) DO UPDATE SET
+                            name = COALESCE(EXCLUDED.name, whatsapp_chats.name),
+                            is_group = TRUE,
+                            participant_count = COALESCE(EXCLUDED.participant_count, whatsapp_chats.participant_count),
+                            description = COALESCE(EXCLUDED.description, whatsapp_chats.description),
+                            updated_at = NOW()
+                    """, chat_jid, name, participant_count, description)
+            except Exception as fallback_exc:
+                logger.debug("group metadata fallback upsert failed: %s", fallback_exc)
 
     async def _handle_message_event(self, event: dict, targets: list[str]):
         # WhatsApp "delete for everyone" (revoke) — flag the original message + when.
@@ -577,6 +723,18 @@ class WhatsappCollector(BaseCollector):
         text = event.get("body") or event.get("text") or event.get("caption")
         timestamp = event.get("timestamp")
         dt = datetime.fromtimestamp(timestamp, tz=timezone.utc) if timestamp else datetime.now(timezone.utc)
+        from_me = _coerce_bool(_first_nonempty(
+            event.get("from_me"),
+            event.get("fromMe"),
+            event.get("key", {}).get("fromMe"),
+        ))
+        quoted_message_id = _first_nonempty(event.get("quoted_message_id"), event.get("quoted_msg_id"))
+        quoted_text = event.get("quoted_text")
+        forward_from_name = _first_nonempty(
+            event.get("forward_from_name"),
+            event.get("forwarded_newsletter_name"),
+            event.get("forwardFromName"),
+        )
         
         async with self.pool.acquire() as conn:
             chat_row = await conn.fetchrow("SELECT id FROM whatsapp_chats WHERE platform_chat_id = $1", chat_jid)
@@ -585,12 +743,14 @@ class WhatsappCollector(BaseCollector):
             await conn.execute("""
                 INSERT INTO whatsapp_messages (
                     platform_message_id, chat_id, sender_id, from_me,
-                    text, media_mime_type, timestamp, metadata
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    text, media_mime_type, quoted_message_id, quoted_text,
+                    forward_from_name, timestamp, metadata
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                 ON CONFLICT (platform_message_id) DO NOTHING
             """,
-            msg_id, chat_uuid, sender_uuid, event.get("key", {}).get("fromMe", False),
-            text, event.get("mimetype"), dt, json.dumps(event)
+            msg_id, chat_uuid, sender_uuid, from_me,
+            text, event.get("mimetype"), quoted_message_id, quoted_text,
+            forward_from_name, dt, json.dumps(event)
             )
 
     @staticmethod
@@ -779,7 +939,7 @@ class WhatsappCollector(BaseCollector):
                         name = COALESCE(EXCLUDED.name, whatsapp_users.name),
                         phone_number = COALESCE(EXCLUDED.phone_number, whatsapp_users.phone_number),
                         is_business = EXCLUDED.is_business,
-                        collected_at = NOW()
+                        updated_at = NOW()
                     RETURNING id
                 """, sender_jid, payload["display_name"], payload["push_name"],
                     payload["phone_number"] or None, payload["is_business"])
@@ -994,6 +1154,12 @@ class WhatsappCollector(BaseCollector):
                 )
                 spider_ok = self._is_spider_allowed(session) if session else True
                 for url, kind in links:
+                    if isinstance(url, str) and isinstance(kind, str):
+                        if (
+                            url in {"url", "group_invite", "group_invite_restricted", "contact_link"}
+                            and kind.startswith(("http://", "https://"))
+                        ):
+                            url, kind = kind, url
                     effective_kind = kind
                     if kind == "group_invite" and not spider_ok:
                         effective_kind = "group_invite_restricted"

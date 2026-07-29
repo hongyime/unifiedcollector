@@ -781,9 +781,13 @@ export interface WaChatDetail {
 
 export interface DiscoveredLink {
   id: number;
+  url: string;
   link: string;
   link_type: string;
   source_jid: string | null;
+  chat_id?: string | null;
+  message_id?: string | null;
+  domain?: string | null;
   status: string;
   discovered_at: string;
 }

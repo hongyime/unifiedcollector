@@ -10,19 +10,24 @@ import { formatTimestamp } from "../../utils/formatters";
 const typeOptions = [
   { value: "", label: "All types" },
   { value: "url", label: "URL" },
-  { value: "invite", label: "Invite" },
-  { value: "phone", label: "Phone" },
+  { value: "group_invite", label: "Group invite" },
+  { value: "group_invite_restricted", label: "Restricted invite" },
+  { value: "contact_link", label: "Contact link" },
 ];
 
 const statusOptions = [
   { value: "", label: "All statuses" },
-  { value: "new", label: "New" },
-  { value: "visited", label: "Visited" },
-  { value: "collected", label: "Collected" },
+  { value: "pending", label: "Pending" },
+  { value: "fetched", label: "Fetched" },
   { value: "error", label: "Error" },
 ];
 
-const typeBadge: Record<string, string> = { url: "bg-info/20 text-info", invite: "bg-warning/20 text-warning", phone: "bg-success/20 text-success" };
+const typeBadge: Record<string, string> = {
+  url: "bg-info/20 text-info",
+  group_invite: "bg-warning/20 text-warning",
+  group_invite_restricted: "bg-danger/20 text-danger",
+  contact_link: "bg-success/20 text-success",
+};
 
 export function LinksPage() {
   const [linkType, setLinkType] = useState("");
@@ -55,14 +60,17 @@ export function LinksPage() {
                 <th className="pb-2">Link</th><th className="pb-2">Type</th><th className="pb-2">Status</th><th className="pb-2">Discovered</th>
               </tr></thead>
               <tbody>
-                {data?.map((l) => (
-                  <tr key={l.id} className="border-b border-border/50 hover:bg-white/5">
-                    <td className="py-2 truncate max-w-[300px]"><a href={l.link} target="_blank" rel="noreferrer" className="text-info hover:underline">{l.link}</a></td>
-                    <td className="py-2"><span className={`text-xs px-1.5 py-0.5 rounded ${typeBadge[l.link_type] ?? "bg-text-muted/20 text-text-muted"}`}>{l.link_type}</span></td>
-                    <td className="py-2 text-xs">{l.status}</td>
-                    <td className="py-2 text-text-muted">{formatTimestamp(l.discovered_at)}</td>
-                  </tr>
-                ))}
+                {data?.map((l) => {
+                  const href = l.url || l.link;
+                  return (
+                    <tr key={l.id} className="border-b border-border/50 hover:bg-white/5">
+                      <td className="py-2 truncate max-w-[300px]"><a href={href} target="_blank" rel="noreferrer" className="text-info hover:underline">{href}</a></td>
+                      <td className="py-2"><span className={`text-xs px-1.5 py-0.5 rounded ${typeBadge[l.link_type] ?? "bg-text-muted/20 text-text-muted"}`}>{l.link_type}</span></td>
+                      <td className="py-2 text-xs">{l.status}</td>
+                      <td className="py-2 text-text-muted">{formatTimestamp(l.discovered_at)}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           )}

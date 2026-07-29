@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS whatsapp_chats (
     platform_chat_id VARCHAR(255) UNIQUE NOT NULL, -- jid
     name VARCHAR(500),
     is_group BOOLEAN DEFAULT FALSE,
+    chat_type TEXT DEFAULT 'dm',
     participant_count INTEGER DEFAULT 0,
     description TEXT,
     collected_at TIMESTAMP DEFAULT NOW(),

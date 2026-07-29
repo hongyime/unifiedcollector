@@ -16,8 +16,11 @@ export function registerGroupsHandler(sock: WASocket): void {
                 if (!u.id) continue;
                 await producer.publish('groups.update', {
                     chat_jid: u.id,
+                    name: u.subject || null,
                     subject: u.subject || null,
+                    description: (u as any).desc || null,
                     desc: (u as any).desc || null,
+                    participant_count: (u as any).size || null,
                     size: (u as any).size || null,
                 });
             }
@@ -32,6 +35,7 @@ export function registerGroupsHandler(sock: WASocket): void {
                 chat_jid: event.id,
                 action: event.action,
                 participants: event.participants,
+                participant_count: null,
             });
         } catch (err) {
             logger.error({ err }, 'Error in group-participants.update handler');

@@ -6,7 +6,7 @@
 //   messageType  -> RAW baileys type (e.g. 'imageMessage') used for has_media check
 //   media_type   -> alias of messageType (consumer reads either)
 //   body/text/caption, mediaKey (base64), directPath, media_url, mimetype
-//   timestamp, sender_jid, chat_type, is_forwarded
+//   timestamp, sender_jid, chat_type, fromMe/from_me, is_forwarded, quote/forward hints
 //
 // routing_key uses the 'messages.*' namespace so it matches the consumer's
 // queue binding 'messages.#'. (The old standalone bridge used 'msg.*', which
@@ -22,6 +22,10 @@ export interface NormalizedMessage {
     pushName: string | null;
     sender_jid: string;
     sender_lid: string | null;
+    fromMe: boolean;
+    from_me: boolean;
+    owner_jid: string | null;
+    owner_phone_number: string | null;
     timestamp: number;
     message_type: string;       // canonical: text/image/video/...
     messageType: string;        // RAW baileys key: conversation/imageMessage/...
@@ -38,6 +42,9 @@ export interface NormalizedMessage {
     is_forwarded: boolean;
     forwarding_score: number;
     quoted_msg_id: string | null;
+    quoted_message_id: string | null;
+    quoted_text: string | null;
+    forward_from_name: string | null;
     location: {
         degreesLatitude: number | null;
         degreesLongitude: number | null;
@@ -57,6 +64,43 @@ function toNumber(value: any): number | null {
     if (typeof value === 'string' && value.trim()) {
         const parsed = Number(value);
         return Number.isFinite(parsed) ? parsed : null;
+    }
+    return null;
+}
+
+function firstEnv(...names: string[]): string | null {
+    for (const name of names) {
+        const value = process.env[name];
+        if (value && value.trim()) return value.trim();
+    }
+    return null;
+}
+
+function ownerPhoneNumber(): string | null {
+    const raw = firstEnv('WHATSAPP_OWNER_PHONE_NUMBER', 'WHATSAPP_OWNER_PHONE', 'PAIRING_CODE_PHONE');
+    if (!raw) return null;
+    const digits = raw.replace(/\D/g, '');
+    return digits || null;
+}
+
+function ownerJid(phone: string | null): string | null {
+    const configured = firstEnv('WHATSAPP_OWNER_JID', 'OWNER_JID');
+    if (configured) return configured.includes('@') ? configured : `${configured}@s.whatsapp.net`;
+    return phone ? `${phone}@s.whatsapp.net` : null;
+}
+
+function messageText(message: any): string | null {
+    if (!message || typeof message !== 'object') return null;
+    if (typeof message.conversation === 'string') return message.conversation;
+    const candidates = [
+        message.extendedTextMessage?.text,
+        message.imageMessage?.caption,
+        message.videoMessage?.caption,
+        message.documentMessage?.title,
+        message.documentMessage?.fileName,
+    ];
+    for (const candidate of candidates) {
+        if (typeof candidate === 'string' && candidate.trim()) return candidate;
     }
     return null;
 }
@@ -119,8 +163,18 @@ export function normalizeMessage(msg: WAMessage): NormalizedMessage | null {
     }
 
     const contextInfo = content?.contextInfo || {};
+    const fromMe = Boolean(msg.key.fromMe);
+    const ownerPhone = ownerPhoneNumber();
+    const owner = ownerJid(ownerPhone);
     const participant = msg.key.participant || remoteJid || '';
-    const senderLid = participant.includes('@lid') ? participant : null;
+    const senderJid = fromMe && owner ? owner : participant;
+    const senderLid = senderJid.includes('@lid') ? senderJid : null;
+    const quotedMessageId = contextInfo?.stanzaId || null;
+    const quotedText = messageText(contextInfo?.quotedMessage);
+    const forwardFromName =
+        contextInfo?.forwardedNewsletterMessageInfo?.newsletterName ||
+        contextInfo?.externalAdReply?.title ||
+        null;
 
     let timestamp = msg.messageTimestamp as any;
     if (typeof timestamp !== 'number') {
@@ -152,8 +206,12 @@ export function normalizeMessage(msg: WAMessage): NormalizedMessage | null {
         chat_type: chatType,
         chat_name: (msg as any).pushName || remoteJid.split('@')[0],
         pushName: (msg as any).pushName || null,
-        sender_jid: participant,
+        sender_jid: senderJid,
         sender_lid: senderLid,
+        fromMe,
+        from_me: fromMe,
+        owner_jid: owner,
+        owner_phone_number: ownerPhone,
         timestamp,
         message_type: messageType,
         messageType: rawMediaType,
@@ -169,7 +227,10 @@ export function normalizeMessage(msg: WAMessage): NormalizedMessage | null {
         file_length: content?.fileLength ? Number(content.fileLength) : null,
         is_forwarded: contextInfo?.isForwarded || false,
         forwarding_score: contextInfo?.forwardingScore || 0,
-        quoted_msg_id: contextInfo?.stanzaId || null,
+        quoted_msg_id: quotedMessageId,
+        quoted_message_id: quotedMessageId,
+        quoted_text: quotedText,
+        forward_from_name: forwardFromName,
         location,
         session_name: process.env.SESSION_NAME || 'default',
         routing_key: routingKey,

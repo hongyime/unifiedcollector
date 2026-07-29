@@ -4337,6 +4337,77 @@ async def dm_telemetry(_user: dict = Depends(require_role("viewer"))):
 
 # ── WhatsApp: Links ──
 
+_WA_LINK_TYPE_FILTER_ALIASES = {
+    # Backward compatibility for older dashboard filter values.
+    "invite": ["group_invite", "group_invite_restricted"],
+    "phone": ["contact_link"],
+    "contact": ["contact_link"],
+}
+
+_WA_LINK_STATUS_FILTER_ALIASES = {
+    # Backward compatibility for older dashboard filter values.
+    "new": ["pending"],
+    "visited": ["fetched"],
+    "collected": ["fetched"],
+}
+
+_WA_LINK_TYPE_VALUES = {"url", "group_invite", "group_invite_restricted", "contact_link"}
+_WA_LINK_TYPE_SQL_VALUES = "'url', 'group_invite', 'group_invite_restricted', 'contact_link'"
+_WA_LINK_TYPE_EXPR = (
+    "CASE WHEN (l.link_type ILIKE 'http://%' OR l.link_type ILIKE 'https://%') "
+    f"AND lower(l.url) IN ({_WA_LINK_TYPE_SQL_VALUES}) THEN lower(l.url) "
+    "WHEN l.link_type IS NULL OR btrim(l.link_type) = '' "
+    "OR l.link_type ILIKE 'http://%' OR l.link_type ILIKE 'https://%' "
+    "THEN 'url' ELSE l.link_type END"
+)
+
+_WA_LINK_STATS_TYPE_EXPR = (
+    "CASE WHEN (link_type ILIKE 'http://%' OR link_type ILIKE 'https://%') "
+    f"AND lower(url) IN ({_WA_LINK_TYPE_SQL_VALUES}) THEN lower(url) "
+    "WHEN link_type IS NULL OR btrim(link_type) = '' "
+    "OR link_type ILIKE 'http://%' OR link_type ILIKE 'https://%' "
+    "THEN 'url' ELSE link_type END"
+)
+
+
+def _wa_link_filter_values(value: str | None, aliases: dict[str, list[str]]) -> list[str] | None:
+    if not value:
+        return None
+    normalized = value.strip()
+    if not normalized:
+        return None
+    return aliases.get(normalized, [normalized])
+
+
+def _wa_looks_like_url(value) -> bool:
+    return str(value or "").strip().lower().startswith(("http://", "https://"))
+
+
+def _wa_link_type_value(value) -> str:
+    text = str(value or "").strip()
+    if not text or _wa_looks_like_url(text):
+        return "url"
+    return text
+
+
+def _wa_link_payload(row) -> dict:
+    payload = dict(row)
+    raw_link_type = payload.pop("_raw_link_type", payload.get("link_type"))
+    url = payload.get("url") or payload.get("link")
+    link_type = payload.get("link_type")
+    if _wa_looks_like_url(raw_link_type) and not _wa_looks_like_url(url):
+        url = raw_link_type
+        link_type = _wa_link_type_value(payload.get("url"))
+        if link_type not in _WA_LINK_TYPE_VALUES:
+            link_type = "url"
+    if url is not None:
+        # The database column is url; older frontend code rendered link.
+        payload["url"] = url
+        payload["link"] = url
+    payload["link_type"] = _wa_link_type_value(link_type)
+    payload["source_jid"] = payload.get("source_jid") or payload.get("platform_chat_id")
+    return payload
+
 @app.get("/whatsapp/links")
 async def list_wa_links(link_type: str | None = None, status: str | None = None,
                         limit: int = 100,
@@ -4346,13 +4417,15 @@ async def list_wa_links(link_type: str | None = None, status: str | None = None,
     conditions = []
     params = []
     idx = 1
-    if link_type:
-        conditions.append(f"link_type = ${idx}")
-        params.append(link_type)
+    link_type_values = _wa_link_filter_values(link_type, _WA_LINK_TYPE_FILTER_ALIASES)
+    status_values = _wa_link_filter_values(status, _WA_LINK_STATUS_FILTER_ALIASES)
+    if link_type_values:
+        conditions.append(f"{_WA_LINK_TYPE_EXPR} = ANY(${idx}::text[])")
+        params.append(link_type_values)
         idx += 1
-    if status:
-        conditions.append(f"status = ${idx}")
-        params.append(status)
+    if status_values:
+        conditions.append(f"l.status = ANY(${idx}::text[])")
+        params.append(status_values)
         idx += 1
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
 
@@ -4362,10 +4435,32 @@ async def list_wa_links(link_type: str | None = None, status: str | None = None,
         if await conn.fetchval("SELECT to_regclass('wa_discovered_links')") is None:
             return []
         rows = await conn.fetch(
-            f"SELECT * FROM wa_discovered_links {where} ORDER BY discovered_at DESC LIMIT ${idx}",
+            f"""
+            SELECT l.id,
+                   l.chat_id::text AS chat_id,
+                   l.message_id::text AS message_id,
+                   l.url,
+                   l.url AS link,
+                   c.platform_chat_id AS source_jid,
+                   l.domain,
+                   l.link_type AS _raw_link_type,
+                   {_WA_LINK_TYPE_EXPR} AS link_type,
+                   l.status,
+                   l.title,
+                   l.description,
+                   l.thumbnail_url,
+                   l.discovered_at,
+                   l.fetched_at,
+                   l.metadata
+            FROM wa_discovered_links l
+            LEFT JOIN whatsapp_chats c ON c.id = l.chat_id
+            {where}
+            ORDER BY l.discovered_at DESC
+            LIMIT ${idx}
+            """,
             *params, limit,
         )
-    return [dict(r) for r in rows]
+    return [_wa_link_payload(r) for r in rows]
 
 
 @app.get("/whatsapp/links/stats")
@@ -4375,8 +4470,8 @@ async def wa_link_stats(_user: dict = Depends(require_role("viewer"))):
         if await conn.fetchval("SELECT to_regclass('wa_discovered_links')") is None:
             return []
         rows = await conn.fetch(
-            "SELECT link_type, status, COUNT(*) AS count "
-            "FROM wa_discovered_links GROUP BY link_type, status ORDER BY count DESC"
+            f"SELECT {_WA_LINK_STATS_TYPE_EXPR} AS link_type, status, COUNT(*) AS count "
+            f"FROM wa_discovered_links GROUP BY {_WA_LINK_STATS_TYPE_EXPR}, status ORDER BY count DESC"
         )
     return [dict(r) for r in rows]
 

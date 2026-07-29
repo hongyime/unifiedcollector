@@ -127,6 +127,28 @@ def main():
     mfpr.add_argument("--dry-run", action="store_true", help="Report repairable rows without updating DB")
     mfpr.add_argument("--json", action="store_true", help="Print machine-readable JSON")
 
+    # recover-missing-media-files
+    from src.core.media_sidecar_repair import MISSING_MEDIA_RECOVERY_SOURCES
+    mmr = sub.add_parser(
+        "recover-missing-media-files",
+        help="Safely recover missing media files from source-specific direct URLs",
+    )
+    mmr.add_argument("--source", choices=MISSING_MEDIA_RECOVERY_SOURCES, default=None, help="Optional source filter")
+    mmr.add_argument("--limit", type=int, default=25, help="Maximum rows to scan")
+    mmr.add_argument("--cursor-after", default="", help="Start after this content_id when --source is set")
+    mmr.add_argument("--timeout", type=float, default=10.0, help="DB timeout for the recovery scan in seconds")
+    mmr.add_argument("--request-timeout", type=float, default=20.0, help="HTTP timeout per direct media request")
+    mmr.add_argument("--max-bytes", type=int, default=50 * 1024 * 1024, help="Maximum bytes per recovered media file")
+    mmr.add_argument("--delay", type=float, default=0.25, help="Delay between network recovery attempts")
+    mmr.add_argument("--vault-root", default=None, help="Vault root (default: COLLECTOR_VAULT_ROOT)")
+    mmr.add_argument("--dry-run", action="store_true", help="Report candidate rows without network writes")
+    mmr.add_argument(
+        "--queue-platform-backfill",
+        action="store_true",
+        help="Queue report-only platform rows in dead_letter_queue",
+    )
+    mmr.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+
     # media-artifact-audit
     maa = sub.add_parser(
         "media-artifact-audit",
@@ -222,6 +244,8 @@ def main():
         asyncio.run(_cmd_repair_media_sidecars(args))
     elif args.command == "repair-media-file-paths":
         asyncio.run(_cmd_repair_media_file_paths(args))
+    elif args.command == "recover-missing-media-files":
+        asyncio.run(_cmd_recover_missing_media_files(args))
     elif args.command == "media-artifact-audit":
         asyncio.run(_cmd_media_artifact_audit(args))
     elif args.command == "backfill-discovered-links":
@@ -576,6 +600,55 @@ async def _cmd_repair_media_file_paths(args):
             )
             for failure in report.failures[:10]:
                 print(f"  failed {failure.get('source')}/{failure.get('content_id')}: {failure.get('error')}")
+    finally:
+        await close_pool()
+
+
+async def _cmd_recover_missing_media_files(args):
+    import json
+
+    from src.core.media_sidecar_repair import recover_missing_media_files
+
+    pool = await get_pool()
+    try:
+        async with pool.acquire() as conn:
+            report = await recover_missing_media_files(
+                conn,
+                source=args.source,
+                limit=args.limit,
+                cursor_after=args.cursor_after,
+                timeout=args.timeout,
+                vault_root=args.vault_root,
+                dry_run=args.dry_run,
+                max_bytes=args.max_bytes,
+                request_timeout=args.request_timeout,
+                delay_seconds=args.delay,
+                queue_platform_backfill=args.queue_platform_backfill,
+            )
+        if args.json:
+            print(json.dumps(report.to_dict(), indent=2, sort_keys=True, default=str))
+        else:
+            print(
+                "Missing media recovery: "
+                f"source={args.source or 'all'} scanned={report.scanned} repaired={report.repaired} "
+                f"redownloaded={report.redownloaded} failed={report.failed} skipped={report.skipped} "
+                f"would_repair={report.would_repair} already_ok={report.already_ok} "
+                f"file_missing={report.file_missing} size_mismatch={report.size_mismatch} "
+                f"canonical_blob_available={report.canonical_blob_available} "
+                f"unsafe_response={report.unsafe_response} "
+                f"platform_backfill_required={report.platform_backfill_required} "
+                f"no_direct_url={report.no_direct_url} queued_backfill={report.queued_backfill} "
+                f"next_cursor={report.next_cursor}"
+            )
+            for source_name, stats in sorted(report.sources.items()):
+                parts = [f"{key}={value}" for key, value in sorted(stats.items())]
+                print(f"  {source_name}: " + " ".join(parts))
+            for failure in report.failures[:10]:
+                print(
+                    "  "
+                    f"{failure.get('source')}/{failure.get('content_id')}: "
+                    f"{failure.get('action') or 'skipped'}: {failure.get('error')}"
+                )
     finally:
         await close_pool()
 

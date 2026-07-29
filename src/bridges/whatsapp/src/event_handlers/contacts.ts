@@ -19,17 +19,24 @@ async function processContact(contact: any): Promise<void> {
     const jid = normalizeJid(raw);
     const isLid = jid.includes('@lid');
     const displayName = contact.notify || contact.name || contact.verifiedName || null;
-    const phone = !isLid && jid.includes('@s.whatsapp.net') ? jid.split('@')[0] : null;
+    const phoneJid = !isLid && jid.includes('@s.whatsapp.net') ? jid : null;
+    const phone = phoneJid ? phoneJid.split('@')[0] : null;
     // contact.lid is set by Baileys on @s.whatsapp.net contacts to indicate
     // the paired linked-device ID. Publishing it lets the collector maintain
     // a lid → phone_jid mapping table for resolving group message senders.
     const contactLid = contact.lid ? normalizeJid(contact.lid) : null;
 
     await producer.publish('contacts.update', {
-        jid: isLid ? null : jid,
+        jid: phoneJid,
+        platform_user_id: phoneJid || jid,
         lid: isLid ? jid : contactLid,
         display_name: displayName,
+        name: contact.name || null,
+        notify: contact.notify || null,
+        pushName: contact.notify || contact.name || null,
+        verified_name: contact.verifiedName || null,
         phone_number: phone,
+        is_business: Boolean(contact.isBusiness),
     });
 }
 
@@ -58,6 +65,7 @@ export function registerContactsHandler(sock: WASocket): void {
             logger.debug({ lid, jid }, 'lid-mapping.update');
             await producer.publish('contacts.update', {
                 jid,
+                platform_user_id: jid,
                 lid,
                 display_name: null,
                 phone_number: phone,

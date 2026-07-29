@@ -3,11 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 
+import httpx
 import pytest
 
 from src.core import vault
 from src.core.media_sidecar_repair import (
+    recover_missing_media_files,
     repair_media_file_paths_from_blobs,
     repair_missing_media_sidecars,
     repair_partial_vault_artifacts,
@@ -294,4 +297,170 @@ async def test_repair_media_file_paths_from_blobs_skips_existing_good_path(tmp_p
     assert report.repaired == 0
     assert report.already_ok == 1
     assert report.skipped == 1
+    assert conn.updates == []
+
+
+def _httpx_client_factory(handler):
+    transport = httpx.MockTransport(handler)
+
+    def factory(**kwargs):
+        return httpx.AsyncClient(transport=transport, **kwargs)
+
+    return factory
+
+
+@pytest.mark.asyncio
+async def test_recover_missing_media_files_skips_html_error_page(tmp_path, monkeypatch):
+    monkeypatch.setattr(vault, "SIDECARS_ENABLED", True)
+    url = "https://cdn.example.test/media/photo.jpg"
+    row = _row(tmp_path)
+    row.update(
+        {
+            "source": "website",
+            "entity_id": "example.test",
+            "entity_name": "example.test",
+            "content_type": "image",
+            "content_id": "img-1",
+            "filename": "photo.jpg",
+            "file_path": str(tmp_path / "media" / "website" / "missing.jpg"),
+            "file_size": 12345,
+            "sha256": "",
+            "source_url": url,
+            "metadata": {},
+            "ingest_path": "target",
+        }
+    )
+
+    def handler(request):
+        if request.method == "HEAD":
+            return httpx.Response(
+                200,
+                headers={"content-type": "image/jpeg", "content-length": "128"},
+                request=request,
+            )
+        return httpx.Response(
+            200,
+            headers={"content-type": "image/jpeg"},
+            content=b"<html><body>not found</body></html>",
+            request=request,
+        )
+
+    conn = FakeConn([row])
+    report = await recover_missing_media_files(
+        conn,
+        source="website",
+        vault_root=tmp_path,
+        delay_seconds=0,
+        client_factory=_httpx_client_factory(handler),
+    )
+
+    assert report.scanned == 1
+    assert report.repaired == 0
+    assert report.redownloaded == 0
+    assert report.unsafe_response == 1
+    assert report.skipped == 1
+    assert report.failed == 0
+    assert "html/error page" in report.failures[0]["error"]
+    assert conn.updates == []
+
+
+@pytest.mark.asyncio
+async def test_recover_missing_media_files_writes_validated_direct_image(tmp_path, monkeypatch):
+    monkeypatch.setattr(vault, "SIDECARS_ENABLED", True)
+    data = b"\xff\xd8\xff\xe0" + (b"\x00" * 21000)
+    digest = hashlib.sha256(data).hexdigest()
+    url = "https://cdn.example.test/media/photo.jpg"
+    row = _row(tmp_path)
+    row.update(
+        {
+            "source": "website",
+            "entity_id": "example.test",
+            "entity_name": "example.test",
+            "content_type": "image",
+            "content_id": "img-2",
+            "filename": "old-name.jpeg",
+            "file_path": str(tmp_path / "media" / "website" / "missing.jpg"),
+            "file_size": len(data),
+            "sha256": digest,
+            "source_url": url,
+            "metadata": {"caption": "from old row"},
+            "ingest_path": "target",
+        }
+    )
+
+    def handler(request):
+        if request.method == "HEAD":
+            return httpx.Response(
+                200,
+                headers={"content-type": "image/jpeg", "content-length": str(len(data))},
+                request=request,
+            )
+        return httpx.Response(
+            200,
+            headers={"content-type": "image/jpeg", "content-length": str(len(data))},
+            content=data,
+            request=request,
+        )
+
+    conn = FakeConn([row])
+    report = await recover_missing_media_files(
+        conn,
+        source="website",
+        vault_root=tmp_path,
+        delay_seconds=0,
+        client_factory=_httpx_client_factory(handler),
+    )
+
+    assert report.scanned == 1
+    assert report.repaired == 1
+    assert report.redownloaded == 1
+    assert report.failed == 0
+    assert len(conn.updates) == 1
+    media_id, filename, file_path, file_size, width, height, sha256, metadata_json = conn.updates[0]
+    assert media_id == "media-1"
+    assert filename == "old-name.jpg"
+    assert Path(file_path).is_file()
+    assert Path(file_path).read_bytes() == data
+    assert file_size == len(data)
+    assert sha256 == digest
+    metadata = json.loads(metadata_json)
+    assert metadata["vault_artifact"]["ok"] is True
+    assert metadata["vault_sidecar"]["ok"] is True
+    assert metadata["missing_media_recovery"]["request_url"] == url
+    assert (tmp_path / metadata["vault_sidecar"]["path"]).is_file()
+
+
+@pytest.mark.asyncio
+async def test_recover_missing_media_files_reports_tiktok_platform_backfill(tmp_path):
+    row = _row(tmp_path)
+    row.update(
+        {
+            "source": "tiktok",
+            "content_type": "video",
+            "content_id": "video-1",
+            "filename": "video.mp4",
+            "file_path": str(tmp_path / "media" / "tiktok" / "missing.mp4"),
+            "file_size": 1000,
+            "sha256": "",
+            "source_url": "https://v16-webapp-prime.tiktokcdn.com/video.mp4",
+        }
+    )
+
+    def fail_if_called(**kwargs):
+        raise AssertionError("TikTok recovery must not use direct HTTP redownload")
+
+    conn = FakeConn([row])
+    report = await recover_missing_media_files(
+        conn,
+        source="tiktok",
+        vault_root=tmp_path,
+        delay_seconds=0,
+        client_factory=fail_if_called,
+    )
+
+    assert report.scanned == 1
+    assert report.repaired == 0
+    assert report.platform_backfill_required == 1
+    assert report.skipped == 1
+    assert "signed/ephemeral" in report.failures[0]["error"]
     assert conn.updates == []

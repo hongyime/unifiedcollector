@@ -418,6 +418,47 @@ async def test_handle_contact_event_archives_raw_payload(collector, monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_handle_contact_event_upserts_whatsapp_user_without_lid(collector):
+    event = {
+        "jid": "15551234567@s.whatsapp.net",
+        "platform_user_id": "15551234567@s.whatsapp.net",
+        "display_name": "Alice",
+        "pushName": "Ali",
+        "phone_number": "15551234567",
+        "is_business": False,
+    }
+
+    await collector._handle_contact_event(event)
+
+    sql, *args = collector._test_conn.execute.await_args.args
+    assert "INSERT INTO whatsapp_users" in sql
+    assert "collected_at = NOW()" in sql
+    assert args[:5] == [
+        "15551234567@s.whatsapp.net",
+        "Alice",
+        "Ali",
+        "15551234567",
+        False,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_handle_contact_event_preserves_lid_map_upsert(collector):
+    event = {
+        "lid": "abc@lid",
+        "jid": "15551234567@s.whatsapp.net",
+        "display_name": "Alice",
+    }
+
+    await collector._handle_contact_event(event)
+
+    sql_calls = [call.args for call in collector._test_conn.execute.await_args_list]
+    assert any("INSERT INTO whatsapp_users" in args[0] for args in sql_calls)
+    lid_call = next(args for args in sql_calls if "INSERT INTO whatsapp_lid_map" in args[0])
+    assert lid_call[1:] == ("abc@lid", "15551234567@s.whatsapp.net", "Alice")
+
+
+@pytest.mark.asyncio
 async def test_handle_message_event_text_message_no_media(collector):
     """Plain text message: upsert chat + user + message, no media path."""
     event = {
@@ -625,18 +666,66 @@ async def test_upsert_chat_marks_dms(collector):
 
 
 @pytest.mark.asyncio
+async def test_handle_group_event_upserts_group_metadata(collector):
+    event = {
+        "chat_jid": "111-222@g.us",
+        "subject": "Group A",
+        "desc": "Planning",
+        "size": 42,
+        "session_name": "sess1",
+    }
+
+    await collector._handle_group_event(event)
+
+    sql, *args = collector._test_conn.execute.await_args.args
+    assert "INSERT INTO whatsapp_chats" in sql
+    assert "participant_count" in sql
+    assert args == ["111-222@g.us", "Group A", 42, "Planning"]
+
+
+@pytest.mark.asyncio
 async def test_upsert_message_inserts_with_chat_uuid(collector):
     collector._test_conn.fetchrow = AsyncMock(return_value={"id": "chat-uuid"})
     event = {
         "message_id": "m1",
         "body": "hello",
         "timestamp": 1_700_000_000,
+        "fromMe": True,
+        "quoted_msg_id": "quoted-1",
+        "quoted_text": "earlier text",
+        "forward_from_name": "News",
+        "is_forwarded": True,
+        "forwarding_score": 2,
         "key": {"id": "m1", "fromMe": False},
         "mimetype": "text/plain",
     }
     await collector._upsert_message(event, "111@s.whatsapp.net", "user-uuid")
     collector._test_conn.fetchrow.assert_awaited()
     collector._test_conn.execute.assert_awaited_once()
+    sql, *args = collector._test_conn.execute.await_args.args
+    assert "quoted_message_id" in sql
+    assert args[3] is True
+    assert args[6:9] == ["quoted-1", "earlier text", "News"]
+    metadata = json.loads(args[10])
+    assert metadata["is_forwarded"] is True
+    assert metadata["forwarding_score"] == 2
+
+
+@pytest.mark.asyncio
+async def test_upsert_message_accepts_snake_case_from_me(collector):
+    collector._test_conn.fetchrow = AsyncMock(return_value={"id": "chat-uuid"})
+    event = {
+        "message_id": "m2",
+        "body": "sent",
+        "timestamp": 1_700_000_000,
+        "from_me": True,
+        "key": {"id": "m2"},
+    }
+
+    await collector._upsert_message(event, "111@s.whatsapp.net", "user-uuid")
+
+    args = collector._test_conn.execute.await_args.args
+    assert args[4] is True
 
 
 # ── link discovery ───────────────────────────────────────────────────────
@@ -670,6 +759,21 @@ async def test_discover_links_restricts_group_invites_from_disallowed_session(co
     args = collector._test_conn.execute.await_args.args
     assert args[2] == "https://chat.whatsapp.com/InviteCode123"
     assert args[4] == "group_invite_restricted"
+
+
+@pytest.mark.asyncio
+async def test_discover_links_repairs_swapped_extractor_tuple(collector, monkeypatch):
+    monkeypatch.setattr(
+        wa_mod,
+        "extract_all_links",
+        lambda _text: [("url", "https://example.com/photo.jpg")],
+    )
+
+    await collector._discover_links("x", "111@g.us")
+
+    args = collector._test_conn.execute.await_args.args
+    assert args[2] == "https://example.com/photo.jpg"
+    assert args[4] == "url"
 
 
 # ── backfill_chat ─────────────────────────────────────────────────────────
