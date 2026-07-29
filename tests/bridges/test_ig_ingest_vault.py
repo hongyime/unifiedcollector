@@ -231,6 +231,65 @@ def test_extension_ingest_accepts_browser_uploaded_media(monkeypatch, tmp_path):
     assert metadata["vault_artifact"]["sha256"] == digest
 
 
+def test_threads_synthetic_media_ids_include_sha_suffix(monkeypatch, tmp_path):
+    pool = _FakePool()
+    vault_root = tmp_path / "vault"
+    media_root = tmp_path / "media"
+    vault_root.mkdir()
+    monkeypatch.setattr(ig_ingest, "VAULT_ROOT", vault_root)
+    monkeypatch.setattr(ig_ingest, "MEDIA_ROOT", str(media_root))
+    monkeypatch.setattr(ig_ingest, "assert_media_write_allowed", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        ig_ingest,
+        "write_media_sidecar",
+        lambda **kwargs: SimpleNamespace(enabled=True, ok=True, relative_path="sidecars/media.json", error=None),
+    )
+
+    async def fake_verify_media_item_db_consistency(conn, **kwargs):
+        return SimpleNamespace(ok=True, errors=())
+
+    monkeypatch.setattr(
+        ig_ingest,
+        "verify_media_item_db_consistency",
+        fake_verify_media_item_db_consistency,
+    )
+    first = b"\xff\xd8\xff" + (b"a" * 22000)
+    second = b"\xff\xd8\xff" + (b"b" * 23000)
+    first_sha = hashlib.sha256(first).hexdigest()
+    second_sha = hashlib.sha256(second).hexdigest()
+
+    saved_first = asyncio.run(
+        ig_ingest._download_and_save(
+            pool,
+            _DownloadSession(first),
+            "threads",
+            "foryou",
+            {"content_id": "img_same", "url": "https://cdn.example.test/first.jpg"},
+        )
+    )
+    saved_second = asyncio.run(
+        ig_ingest._download_and_save(
+            pool,
+            _DownloadSession(second),
+            "threads",
+            "foryou",
+            {"content_id": "img_same", "url": "https://cdn.example.test/second.jpg"},
+        )
+    )
+
+    assert saved_first is True
+    assert saved_second is True
+    media_args = [args for query, args in pool.conn.executes if "INSERT INTO media_items" in query]
+    content_ids = [args[4] for args in media_args]
+    assert content_ids == [f"img_same_{first_sha[:12]}", f"img_same_{second_sha[:12]}"]
+    assert content_ids[0] != content_ids[1]
+    assert not any(
+        "vault artifact db consistency failed" in str(args)
+        for query, args in pool.conn.executes
+        if "dead_letter_queue" in query
+    )
+
+
 def test_archive_browser_capture_writes_profile_raw_payload(monkeypatch):
     pool = _FakePool()
     calls = []

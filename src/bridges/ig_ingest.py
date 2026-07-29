@@ -93,6 +93,7 @@ DL_CONCURRENCY = int(os.getenv("SOCIAL_INGEST_CONCURRENCY", "4"))
 SOCIAL_INGEST_CLIENT_MAX_MB = int(os.getenv("SOCIAL_INGEST_CLIENT_MAX_MB", "512"))
 STRAVA_BROWSER_429_COOLDOWN_SECONDS = int(os.getenv("STRAVA_BROWSER_429_COOLDOWN_SECONDS", "1800"))
 _SAFE = re.compile(r"[^A-Za-z0-9._-]")
+_THREADS_SYNTHETIC_MEDIA_ID = re.compile(r"^(?:img|vid)_[a-z0-9]+$", re.IGNORECASE)
 
 # Platforms the bridge may push. Each may carry its own famous-cap / hop config.
 # Only instagram currently spiders (followers/following graph); the others scrape
@@ -549,6 +550,26 @@ def _download_headers(platform: str, url: str, item: dict | None = None) -> dict
     return headers
 
 
+def _threads_media_content_base_id(platform: str, content_id: str, sha256: str | None = None) -> str:
+    """Stabilize extension-generated Threads media IDs with the stored bytes.
+
+    The browser bridge sometimes sends short synthetic IDs like ``img_abc123``
+    for DOM media candidates. Threads can reuse those IDs for separate carousel
+    or feed blobs, so using the raw value as ``media_items.content_id`` lets
+    distinct files overwrite each other before the vault consistency check runs.
+    Real platform IDs are left untouched.
+    """
+    base = str(content_id or "")
+    digest = str(sha256 or "").strip().lower()
+    if platform == "threads" and digest and _THREADS_SYNTHETIC_MEDIA_ID.match(base):
+        return f"{base}_{digest[:12]}"
+    return base
+
+
+def _media_store_content_id(media_kind: str, content_base_id: str) -> str:
+    return content_base_id if media_kind == "post" else f"{media_kind}_{content_base_id}"
+
+
 async def _download_and_save(pool, session, platform, username, item, reject_stats: dict | None = None) -> bool:
     def _reject(reason: str, detail: str | None = None) -> bool:
         if reject_stats is not None:
@@ -569,10 +590,11 @@ async def _download_and_save(pool, session, platform, username, item, reject_sta
     media_kind = (item.get("kind") or "post").lower()
     if media_kind not in ("post", "story", "highlight", "tagged", "profile"):
         media_kind = "post"
+    content_base_id = _threads_media_content_base_id(platform, cid)
+    needs_content_sha = content_base_id == cid and platform == "threads" and _THREADS_SYNTHETIC_MEDIA_ID.match(cid)
     # DB dedup id stays namespaced so a story/highlight/tagged/profile can't collide.
-    store_cid = cid if media_kind == "post" else f"{media_kind}_{cid}"
+    store_cid = _media_store_content_id(media_kind, content_base_id)
     safe_user = _SAFE.sub("_", username)[:80] or "unknown"
-    raw_cid = _SAFE.sub("_", cid)[:100]
     # filename kind label (no subfolders anymore — kind is encoded in the name)
     kindtag = {"story": "story_", "highlight": "hl_", "tagged": "tagged_", "profile": "profile_"}.get(media_kind, "")
     datestr = _date_prefix(item, platform)
@@ -606,12 +628,13 @@ async def _download_and_save(pool, session, platform, username, item, reject_sta
 
     try:
         # dedup authority is media_items (source, content_id)
-        async with pool.acquire() as conn:
-            seen = await conn.fetchval(
-                "SELECT 1 FROM media_items WHERE source=$1 AND content_id=$2", platform, store_cid
-            )
-        if seen:
-            return _reject("duplicate_content_id")
+        if not needs_content_sha:
+            async with pool.acquire() as conn:
+                seen = await conn.fetchval(
+                    "SELECT 1 FROM media_items WHERE source=$1 AND content_id=$2", platform, store_cid
+                )
+            if seen:
+                return _reject("duplicate_content_id")
 
         try:
             assert_media_write_allowed(
@@ -647,6 +670,15 @@ async def _download_and_save(pool, session, platform, username, item, reject_sta
             logger.debug("reject %s %s: %s", platform, store_cid, reason)
             return _reject("invalid_media", reason)
         sha = hashlib.sha256(data).hexdigest()
+        if needs_content_sha:
+            content_base_id = _threads_media_content_base_id(platform, cid, sha)
+            store_cid = _media_store_content_id(media_kind, content_base_id)
+            async with pool.acquire() as conn:
+                seen = await conn.fetchval(
+                    "SELECT 1 FROM media_items WHERE source=$1 AND content_id=$2", platform, store_cid
+                )
+            if seen:
+                return _reject("duplicate_content_id")
         # CONTENT DEDUP: if these exact bytes are already stored for this source
         # (e.g. the same For-You image re-scraped under a different DOM content_id),
         # skip — no duplicate file or row. This is what kills the lemon8/tiktok
@@ -658,6 +690,7 @@ async def _download_and_save(pool, session, platform, username, item, reject_sta
         # Flat layout: /<platform>/account_<user>/<ctype>/  — kind + date live in the
         # filename: <YYYYMMDD>_<platform>_<user>_<kindtag><cid>.<ext> (sortable by date).
         dest_dir = Path(MEDIA_ROOT) / platform / f"account_{safe_user}" / ctype
+        raw_cid = _SAFE.sub("_", content_base_id)[:100]
         dest = dest_dir / f"{datestr}_{platform}_{safe_user}_{kindtag}{raw_cid}.{ext}"
         try:
             assert_media_write_allowed(dest, media_root=MEDIA_ROOT)

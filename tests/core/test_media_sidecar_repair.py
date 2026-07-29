@@ -18,23 +18,35 @@ from src.core.media_sidecar_repair import (
 
 
 class FakeConn:
-    def __init__(self, rows):
+    def __init__(self, rows, fetchrow_result=None):
         self.rows = rows
+        self.fetchrow_result = fetchrow_result
         self.fetch_query = None
         self.fetch_args = None
         self.updates = []
         self.dlq = []
+        self.targets = []
+        self.deleted_dlq = 0
 
     async def fetch(self, query, *args, **kwargs):
         self.fetch_query = query
         self.fetch_args = args
         return self.rows
 
+    async def fetchrow(self, query, *args, **kwargs):
+        return self.fetchrow_result
+
     async def execute(self, query, *args):
         if "UPDATE media_items" in query:
             self.updates.append(args)
         elif "INSERT INTO dead_letter_queue" in query:
             self.dlq.append(args)
+        elif "INSERT INTO collection_targets" in query:
+            self.targets.append(args)
+            return "INSERT 0 1"
+        elif "DELETE FROM dead_letter_queue" in query:
+            self.deleted_dlq += 2
+            return "DELETE 2"
         return "OK"
 
 
@@ -300,6 +312,25 @@ async def test_repair_media_file_paths_from_blobs_skips_existing_good_path(tmp_p
     assert conn.updates == []
 
 
+@pytest.mark.asyncio
+async def test_repair_media_file_paths_from_blobs_clears_stale_consistency_dlq(tmp_path):
+    row = _row(tmp_path)
+    row["sha256"] = hashlib.sha256((tmp_path / "media" / "telegram" / "photo.jpg").read_bytes()).hexdigest()
+    conn = FakeConn([row])
+
+    report = await repair_media_file_paths_from_blobs(
+        conn,
+        source="telegram",
+        vault_root=tmp_path,
+    )
+
+    assert report.already_ok == 1
+    assert report.dlq_cleared == 2
+    assert report.sources["telegram"]["dlq_cleared"] == 2
+    assert conn.deleted_dlq == 2
+    assert conn.updates == []
+
+
 def _httpx_client_factory(handler):
     transport = httpx.MockTransport(handler)
 
@@ -307,6 +338,22 @@ def _httpx_client_factory(handler):
         return httpx.AsyncClient(transport=transport, **kwargs)
 
     return factory
+
+
+def _beeper_client_factory(data: bytes, seen: list[str]):
+    class FakeBeeperClient:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.closed = False
+
+        async def serve_asset(self, src_url, *, timeout=120.0):
+            seen.append(src_url)
+            return data
+
+        async def close(self):
+            self.closed = True
+
+    return FakeBeeperClient
 
 
 @pytest.mark.asyncio
@@ -431,11 +478,115 @@ async def test_recover_missing_media_files_writes_validated_direct_image(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_recover_missing_media_files_reports_tiktok_platform_backfill(tmp_path):
+async def test_recover_missing_media_files_repairs_beeper_asset_serve_image(tmp_path, monkeypatch):
+    monkeypatch.setattr(vault, "SIDECARS_ENABLED", True)
+    data = b"\xff\xd8\xff\xe0" + (b"\x00" * 21000)
+    digest = hashlib.sha256(data).hexdigest()
+    src_url = "mxc://beeper.local/abc123"
+    row = _row(tmp_path)
+    row.update(
+        {
+            "source": "beeper",
+            "entity_id": "discord_!room:beeper.local",
+            "entity_name": "discord",
+            "content_type": "image",
+            "content_id": "msg1_abc123",
+            "filename": "old-name.jpeg",
+            "file_path": str(tmp_path / "media" / "beeper" / "missing.jpg"),
+            "file_size": len(data),
+            "sha256": digest,
+            "source_url": src_url,
+            "metadata": {
+                "network": "discord",
+                "chat_id": "!room:beeper.local",
+                "message_id": "msg1",
+                "mime_type": "image/jpeg",
+                "raw": {
+                    "src_url": src_url,
+                    "content_type": "image",
+                    "mime_type": "image/jpeg",
+                },
+            },
+            "ingest_path": "messaging",
+        }
+    )
+
+    seen = []
+    conn = FakeConn([row])
+    report = await recover_missing_media_files(
+        conn,
+        source="beeper",
+        vault_root=tmp_path,
+        delay_seconds=0,
+        beeper_client_factory=_beeper_client_factory(data, seen),
+    )
+
+    assert seen == [src_url]
+    assert report.scanned == 1
+    assert report.repaired == 1
+    assert report.redownloaded == 1
+    assert report.failed == 0
+    assert len(conn.updates) == 1
+    media_id, filename, file_path, file_size, width, height, sha256, metadata_json = conn.updates[0]
+    assert media_id == "media-1"
+    assert filename == "old-name.jpg"
+    assert Path(file_path).read_bytes() == data
+    assert file_size == len(data)
+    assert sha256 == digest
+    metadata = json.loads(metadata_json)
+    assert metadata["missing_media_recovery"]["request_url"] == src_url
+    assert metadata["vault_sidecar"]["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_recover_missing_media_files_rejects_beeper_html_asset(tmp_path, monkeypatch):
+    monkeypatch.setattr(vault, "SIDECARS_ENABLED", True)
+    src_url = "mxc://beeper.local/html"
+    row = _row(tmp_path)
+    row.update(
+        {
+            "source": "beeper",
+            "content_type": "image",
+            "content_id": "msg1_html",
+            "filename": "photo.jpg",
+            "file_path": str(tmp_path / "media" / "beeper" / "missing.jpg"),
+            "file_size": 123,
+            "sha256": "",
+            "source_url": src_url,
+            "metadata": {
+                "mime_type": "image/jpeg",
+                "raw": {"src_url": src_url, "content_type": "image"},
+            },
+        }
+    )
+
+    seen = []
+    conn = FakeConn([row])
+    report = await recover_missing_media_files(
+        conn,
+        source="beeper",
+        vault_root=tmp_path,
+        delay_seconds=0,
+        beeper_client_factory=_beeper_client_factory(b"<html>login</html>", seen),
+    )
+
+    assert seen == [src_url]
+    assert report.scanned == 1
+    assert report.repaired == 0
+    assert report.unsafe_response == 1
+    assert report.skipped == 1
+    assert "html/error page" in report.failures[0]["error"]
+    assert conn.updates == []
+
+
+@pytest.mark.asyncio
+async def test_recover_missing_media_files_enqueues_tiktok_precise_target(tmp_path):
     row = _row(tmp_path)
     row.update(
         {
             "source": "tiktok",
+            "entity_id": "creator_name",
+            "entity_name": "@creator_name",
             "content_type": "video",
             "content_id": "video-1",
             "filename": "video.mp4",
@@ -453,6 +604,8 @@ async def test_recover_missing_media_files_reports_tiktok_platform_backfill(tmp_
     report = await recover_missing_media_files(
         conn,
         source="tiktok",
+        limit=7,
+        cursor_after="video-0",
         vault_root=tmp_path,
         delay_seconds=0,
         client_factory=fail_if_called,
@@ -462,5 +615,88 @@ async def test_recover_missing_media_files_reports_tiktok_platform_backfill(tmp_
     assert report.repaired == 0
     assert report.platform_backfill_required == 1
     assert report.skipped == 1
-    assert "signed/ephemeral" in report.failures[0]["error"]
+    assert report.target_enqueued == 1
+    assert conn.targets
+    assert conn.targets[0][0] == "creator_name"
+    assert conn.updates == []
+    assert "ORDER BY content_id" in conn.fetch_query
+    assert conn.fetch_args == ("tiktok", "video-0", 7)
+
+
+@pytest.mark.asyncio
+async def test_recover_missing_media_files_repairs_tiktok_existing_blob_before_target(tmp_path, monkeypatch):
+    monkeypatch.setattr(vault, "SIDECARS_ENABLED", True)
+    data = b"\x00\x00\x00\x18ftypmp42" + (b"\x00" * 120000)
+    digest = hashlib.sha256(data).hexdigest()
+    blob = tmp_path / "media" / "blobs" / digest[:2] / digest[2:4] / f"{digest}.mp4"
+    blob.parent.mkdir(parents=True)
+    blob.write_bytes(data)
+    row = _row(tmp_path)
+    row.update(
+        {
+            "source": "tiktok",
+            "entity_name": "creator_local",
+            "content_type": "video",
+            "content_id": "video-local",
+            "filename": "video.mp4",
+            "file_path": str(tmp_path / "media" / "tiktok" / "missing.mp4"),
+            "file_size": len(data),
+            "sha256": digest,
+            "source_url": "https://www.tiktok.com/@creator_local/video/123",
+        }
+    )
+
+    conn = FakeConn([row])
+    report = await recover_missing_media_files(
+        conn,
+        source="tiktok",
+        vault_root=tmp_path,
+        delay_seconds=0,
+    )
+
+    assert report.scanned == 1
+    assert report.canonical_blob_available == 1
+    assert report.repaired == 1
+    assert report.target_enqueued == 0
+    assert conn.targets == []
+    media_id, file_path, file_size, metadata_json = conn.updates[0]
+    assert media_id == "media-1"
+    assert file_path == str(blob)
+    assert file_size == len(data)
+    metadata = json.loads(metadata_json)
+    assert metadata["vault_sidecar"]["ok"] is True
+    assert metadata["file_path_repair"]["blob_path"].endswith(f"{digest}.mp4")
+
+
+@pytest.mark.asyncio
+async def test_recover_missing_media_files_tiktok_dry_run_does_not_enqueue_target(tmp_path):
+    row = _row(tmp_path)
+    row.update(
+        {
+            "source": "tiktok",
+            "entity_name": "creator_two",
+            "content_type": "video",
+            "content_id": "video-2",
+            "filename": "video.mp4",
+            "file_path": str(tmp_path / "media" / "tiktok" / "missing.mp4"),
+            "file_size": 1000,
+            "sha256": "",
+            "source_url": "https://www.tiktok.com/@creator_two/video/123",
+        }
+    )
+
+    conn = FakeConn([row])
+    report = await recover_missing_media_files(
+        conn,
+        source="tiktok",
+        vault_root=tmp_path,
+        delay_seconds=0,
+        dry_run=True,
+    )
+
+    assert report.scanned == 1
+    assert report.would_enqueue_target == 1
+    assert report.target_enqueued == 0
+    assert report.skipped == 1
+    assert conn.targets == []
     assert conn.updates == []

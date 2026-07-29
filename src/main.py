@@ -638,6 +638,8 @@ async def _cmd_recover_missing_media_files(args):
                 f"unsafe_response={report.unsafe_response} "
                 f"platform_backfill_required={report.platform_backfill_required} "
                 f"no_direct_url={report.no_direct_url} queued_backfill={report.queued_backfill} "
+                f"target_enqueued={report.target_enqueued} "
+                f"would_enqueue_target={report.would_enqueue_target} "
                 f"next_cursor={report.next_cursor}"
             )
             for source_name, stats in sorted(report.sources.items()):
