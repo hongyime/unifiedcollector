@@ -428,6 +428,9 @@ services:
       # 2,000-message recent window. Member collection is already full-list when
       # Telegram allows participant enumeration.
       TELEGRAM_DISCUSSION_MESSAGE_LIMIT: "0"
+      # Per-message identity enumeration caps for public reactions/polls.
+      TELEGRAM_REACTION_USER_CAP: "500"
+      TELEGRAM_POLL_VOTE_USER_CAP: "500"
       # More aggressive but below the old 250/30s/200 setting that saturated the
       # Z media drive. Live capture is unaffected by these backfill knobs.
       TELEGRAM_BACKFILL_MSG_PER_SEC: "120"

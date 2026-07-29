@@ -478,6 +478,7 @@ class TelegramCollector(BaseCollector):
 
         # Reaction-list per-message cap (Q2 decision: per-emoji per-message).
         self._reaction_user_cap = int(os.getenv("TELEGRAM_REACTION_USER_CAP", "500"))
+        self._poll_vote_user_cap = int(os.getenv("TELEGRAM_POLL_VOTE_USER_CAP", "500"))
 
         # Discussion-group dwell range — random jitter to look human (Q3 always-leave).
         self._discussion_dwell_min = int(os.getenv("TELEGRAM_DISCUSSION_DWELL_MIN", "60"))
@@ -1385,7 +1386,7 @@ class TelegramCollector(BaseCollector):
             if message.sender_id:
                 sender_uuid = await self._upsert_sender(worker, message.sender_id)
 
-            await self._upsert_message(message, chat_id, sender_uuid)
+            await self._upsert_message(message, chat_id, sender_uuid, worker=worker)
 
             # Forward extraction → spider queue (item 1.10).
             # When a message is forwarded from another chat or user, that source
@@ -1594,7 +1595,7 @@ class TelegramCollector(BaseCollector):
                 sender_uuid = None
                 if message.sender_id:
                     sender_uuid = await self._upsert_sender(worker, message.sender_id)
-                await self._upsert_message(message, discussion_platform_id, sender_uuid)
+                await self._upsert_message(message, discussion_platform_id, sender_uuid, worker=worker)
                 try:
                     await self._enqueue_forward_edges(message, discussion_platform_id)
                 except Exception:
@@ -1843,7 +1844,7 @@ class TelegramCollector(BaseCollector):
             fwd_msg = _s(getattr(fwd, "channel_post", None) or getattr(fwd, "saved_from_msg_id", None))
         return reply_to, fwd_chat, fwd_msg, via_bot
 
-    async def _upsert_message(self, message, chat_id, sender_uuid):
+    async def _upsert_message(self, message, chat_id, sender_uuid, worker: "TelegramWorker | None" = None):
         async with self.pool.acquire() as conn:
             chat_row = await conn.fetchrow("SELECT id FROM telegram_chats WHERE platform_chat_id = $1", str(chat_id))
             chat_uuid = chat_row['id'] if chat_row else None
@@ -1874,12 +1875,20 @@ class TelegramCollector(BaseCollector):
             bool(getattr(message, 'pinned', False) or False)
             )
 
+            message_uuid = row["id"] if row is not None else await conn.fetchval(
+                "SELECT id FROM telegram_messages WHERE platform_message_id = $1",
+                platform_msg_id,
+            )
             # Capture reaction counts at backfill time (item 1.11 — historical
             # messages already carry reactions in message.reactions).
-            if row is not None:
-                await self._capture_message_reaction_counts(conn, row["id"], message)
+            if message_uuid is not None:
+                await self._capture_message_reaction_counts(conn, message_uuid, message)
                 # Capture poll state if this message is a poll (item 1.12).
-                await self._capture_poll(conn, row["id"], message)
+                await self._capture_poll(conn, message_uuid, message)
+                if worker is not None:
+                    await self._enumerate_poll_votes_and_enqueue(
+                        worker, message, str(chat_id), message_uuid, conn=conn, chat_uuid=chat_uuid
+                    )
             # Tier 6: venue/event extraction (best effort — never breaks flow).
             await self._extract_message_event(message, chat_uuid, platform_msg_id, conn=conn)
             await self._record_message_membership_signals(
@@ -2095,6 +2104,163 @@ class TelegramCollector(BaseCollector):
                 total_discovered += 1
 
         return total_discovered
+
+    async def _enumerate_poll_votes_and_enqueue(
+        self,
+        worker: "TelegramWorker",
+        message,
+        chat_platform_id: str,
+        message_uuid,
+        *,
+        conn=None,
+        chat_uuid=None,
+    ) -> int:
+        """Fetch public/non-anonymous poll voters and store them as evidence."""
+        poll_media = getattr(message, "poll", None)
+        if poll_media is None or message_uuid is None:
+            return 0
+        poll = getattr(poll_media, "poll", None)
+        if poll is None:
+            return 0
+        # Anonymous polls do not expose voter identities through Telegram.
+        if not bool(getattr(poll, "public_voters", False)):
+            return 0
+
+        from telethon.tl.functions.messages import GetPollVotesRequest
+        from telethon.tl.types import (
+            MessagePeerVote,
+            MessagePeerVoteInputOption,
+            MessagePeerVoteMultiple,
+        )
+
+        option_hex_to_index: dict[str, int] = {}
+        for idx, ans in enumerate(getattr(poll, "answers", None) or []):
+            data = getattr(ans, "option", None)
+            if isinstance(data, (bytes, bytearray)):
+                option_hex_to_index[data.hex()] = idx
+
+        users_seen = 0
+        offset = ""
+        client = worker.client
+        owns_conn = conn is None
+        if owns_conn:
+            conn = await self.pool.acquire()
+        try:
+            while users_seen < self._poll_vote_user_cap:
+                limit = min(100, self._poll_vote_user_cap - users_seen)
+                try:
+                    resp = await client(GetPollVotesRequest(
+                        peer=message.peer_id,
+                        id=message.id,
+                        limit=limit,
+                        offset=offset or None,
+                    ))
+                except Exception as exc:
+                    logger.debug(
+                        "GetPollVotesRequest failed for msg=%s: %s",
+                        getattr(message, "id", "?"), exc,
+                    )
+                    break
+
+                votes = getattr(resp, "votes", None) or []
+                if not votes:
+                    break
+                user_entities = {
+                    str(getattr(user, "id", "")): user
+                    for user in (getattr(resp, "users", None) or [])
+                    if getattr(user, "id", None) is not None
+                }
+
+                for vote in votes:
+                    peer = getattr(vote, "peer", None)
+                    user_id = getattr(peer, "user_id", None)
+                    if user_id is None:
+                        continue
+                    user_platform_id = str(user_id)
+
+                    user_entity = user_entities.get(user_platform_id)
+                    if user_entity is not None:
+                        await self._upsert_user_full(user_entity)
+                    user_uuid = await self._ensure_telegram_user_stub(conn, user_platform_id)
+                    if user_uuid is None:
+                        continue
+
+                    option_hexes: list[str] = []
+                    if isinstance(vote, MessagePeerVoteMultiple):
+                        for option in getattr(vote, "options", None) or []:
+                            if isinstance(option, (bytes, bytearray)):
+                                option_hexes.append(option.hex())
+                    elif isinstance(vote, MessagePeerVote):
+                        option = getattr(vote, "option", None)
+                        if isinstance(option, (bytes, bytearray)):
+                            option_hexes.append(option.hex())
+                    elif isinstance(vote, MessagePeerVoteInputOption):
+                        option = getattr(vote, "option", None)
+                        if isinstance(option, (bytes, bytearray)):
+                            option_hexes.append(option.hex())
+
+                    option_indices = [
+                        option_hex_to_index[hex_value]
+                        for hex_value in option_hexes
+                        if hex_value in option_hex_to_index
+                    ]
+                    voted_at = getattr(vote, "date", None)
+                    await conn.execute(
+                        """
+                        INSERT INTO telegram_poll_votes
+                            (message_id, user_id, option_indices, option_data, voted_at, refreshed_at)
+                        VALUES ($1, $2, $3::jsonb, $4::jsonb, $5, NOW())
+                        ON CONFLICT (message_id, user_id) DO UPDATE SET
+                            option_indices = EXCLUDED.option_indices,
+                            option_data = EXCLUDED.option_data,
+                            voted_at = COALESCE(EXCLUDED.voted_at, telegram_poll_votes.voted_at),
+                            refreshed_at = NOW()
+                        """,
+                        message_uuid,
+                        user_uuid,
+                        _tg_jsonb(option_indices),
+                        _tg_jsonb(option_hexes),
+                        voted_at,
+                    )
+                    await conn.execute(
+                        """
+                        INSERT INTO telegram_spider_queue
+                            (platform_chat_id, title, source, priority, status, collected_at)
+                        VALUES ($1, $2, 'poll_voter', 7, 'pending', NOW())
+                        ON CONFLICT (platform_chat_id) DO NOTHING
+                        """,
+                        user_platform_id,
+                        None,
+                    )
+
+                    if chat_uuid is None:
+                        chat_row = await conn.fetchrow(
+                            "SELECT id FROM telegram_chats WHERE platform_chat_id = $1",
+                            str(chat_platform_id),
+                        )
+                        resolved_chat_uuid = chat_row["id"] if chat_row else None
+                    else:
+                        resolved_chat_uuid = chat_uuid
+                    if resolved_chat_uuid is not None:
+                        await self._upsert_chat_member_observation(
+                            conn,
+                            resolved_chat_uuid,
+                            user_uuid,
+                            role="member",
+                            last_seen_at=voted_at,
+                        )
+                    users_seen += 1
+                    if users_seen >= self._poll_vote_user_cap:
+                        break
+
+                next_offset = getattr(resp, "next_offset", None)
+                if not next_offset:
+                    break
+                offset = next_offset
+        finally:
+            if owns_conn:
+                await self.pool.release(conn)
+        return users_seen
 
     async def _capture_poll(self, conn, message_uuid, message) -> None:
         """Extract a Telegram poll into telegram_polls.
@@ -2822,12 +2988,18 @@ class TelegramCollector(BaseCollector):
             except Exception as exc:
                 logger.debug("user photo pass failed: %s", exc)
 
-    async def _write_realtime_message_with_retry(self, message, chat_id: int, is_edit: bool = False):
+    async def _write_realtime_message_with_retry(
+        self,
+        worker: "TelegramWorker",
+        message,
+        chat_id: int,
+        is_edit: bool = False,
+    ):
         attempts = max(1, int(getattr(self, "_realtime_write_attempts", 3) or 3))
         delay = max(0.0, float(getattr(self, "_realtime_write_retry_delay", 0.75) or 0.0))
         for attempt in range(1, attempts + 1):
             try:
-                await self._write_realtime_message(message, chat_id, is_edit=is_edit)
+                await self._write_realtime_message(worker, message, chat_id, is_edit=is_edit)
                 if attempt > 1:
                     logger.info(
                         "telegram realtime write recovered after %d attempt(s): chat=%s msg=%s edit=%s",
@@ -2850,7 +3022,7 @@ class TelegramCollector(BaseCollector):
             if self._hub_group_id is not None and chat_id == self._hub_group_id:
                 return  # discard hub-group messages
             message = event.message
-            await self._write_realtime_message_with_retry(message, chat_id)
+            await self._write_realtime_message_with_retry(worker, message, chat_id)
             # Sender resolution hits the network and can raise ChannelPrivateError
             # for private/restricted channels (or if we were removed). Isolate it so
             # it neither aborts persistence nor skips the media download below, and
@@ -2874,7 +3046,7 @@ class TelegramCollector(BaseCollector):
         try:
             chat_id = event.chat_id
             message = event.message
-            await self._write_realtime_message_with_retry(message, chat_id, is_edit=True)
+            await self._write_realtime_message_with_retry(worker, message, chat_id, is_edit=True)
         except Exception as exc:
             logger.error("_on_message_edited error: %s", exc, exc_info=True)
 
@@ -3055,7 +3227,13 @@ class TelegramCollector(BaseCollector):
         except Exception as exc:
             logger.debug("_on_raw_reactions failed: %s", exc)
 
-    async def _write_realtime_message(self, message, chat_id: int, is_edit: bool = False):
+    async def _write_realtime_message(
+        self,
+        worker: "TelegramWorker",
+        message,
+        chat_id: int,
+        is_edit: bool = False,
+    ):
         """INSERT (or UPDATE-on-edit) the message into telegram_messages."""
         # Resolve UUIDs via the existing chat upsert chain. We don't have the
         # entity here so just key off platform_chat_id.
@@ -3158,6 +3336,16 @@ class TelegramCollector(BaseCollector):
                 )
                 wrote_row = row is not None
 
+            message_uuid = await conn.fetchval(
+                "SELECT id FROM telegram_messages WHERE platform_message_id = $1",
+                platform_msg_id,
+            )
+            if message_uuid is not None:
+                await self._capture_message_reaction_counts(conn, message_uuid, message)
+                await self._capture_poll(conn, message_uuid, message)
+                await self._enumerate_poll_votes_and_enqueue(
+                    worker, message, str(chat_id), message_uuid, conn=conn, chat_uuid=chat_uuid
+                )
             # Tier 6: venue/event extraction (best effort — never breaks the
             # hot realtime path; helper swallows all exceptions internally).
             await self._extract_message_event(message, chat_uuid, platform_msg_id, conn=conn)
@@ -3579,7 +3767,7 @@ class TelegramCollector(BaseCollector):
                     sender_uuid = None
                     if getattr(message, "sender_id", None):
                         sender_uuid = await self._upsert_sender(worker, message.sender_id)
-                    await self._upsert_message(message, str(chat_id_int), sender_uuid)
+                    await self._upsert_message(message, str(chat_id_int), sender_uuid, worker=worker)
                     written += 1
                 except Exception as exc:
                     logger.warning(
