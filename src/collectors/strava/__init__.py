@@ -6,6 +6,7 @@ import os
 import random
 import re
 import time
+from html import unescape
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
@@ -34,6 +35,135 @@ STRAVA_WEB = "https://www.strava.com"
 # considered to have been clipped by a Strava privacy zone vs the GPS track.
 _PRIVACY_ZONE_THRESHOLD_M = 50.0
 _GPS_429_EVENT_DEDUPE_SECONDS = 120.0
+
+
+def _clean_strava_text(value) -> str | None:
+    if value is None:
+        return None
+    text = re.sub(r"\s+", " ", unescape(str(value))).strip()
+    return text or None
+
+
+def _compact_count_to_int(value) -> int | None:
+    text = _clean_strava_text(value)
+    if not text:
+        return None
+    text = text.replace(",", "")
+    m = re.match(r"^(\d+(?:\.\d+)?)([kKmM])?$", text)
+    if not m:
+        return None
+    number = float(m.group(1))
+    suffix = (m.group(2) or "").lower()
+    if suffix == "k":
+        number *= 1_000
+    elif suffix == "m":
+        number *= 1_000_000
+    return int(number)
+
+
+def _html_meta_content(html: str, name: str) -> str | None:
+    for m in re.finditer(r"<meta\b[^>]*>", html, re.IGNORECASE):
+        tag = m.group(0)
+        if not re.search(
+            rf"(?:property|name)\s*=\s*['\"]{re.escape(name)}['\"]",
+            tag,
+            re.IGNORECASE,
+        ):
+            continue
+        content = re.search(r"content\s*=\s*(['\"])(.*?)\1", tag, re.IGNORECASE | re.DOTALL)
+        if content:
+            return _clean_strava_text(content.group(2))
+    return None
+
+
+def _strip_strava_profile_title(value: str | None) -> str | None:
+    text = _clean_strava_text(value)
+    if not text:
+        return None
+    text = re.sub(r"\s*\|\s*Strava\b.*$", "", text, flags=re.IGNORECASE).strip()
+    return text or None
+
+
+def _split_display_name(value: str | None) -> tuple[str | None, str | None]:
+    text = _clean_strava_text(value)
+    if not text:
+        return None, None
+    parts = text.split(None, 1)
+    return parts[0], parts[1] if len(parts) > 1 else None
+
+
+def _extract_strava_profile_from_html(html: str, athlete_id: str | int) -> dict:
+    """Extract basic athlete profile fields from Strava's server-rendered page."""
+    profile: dict = {"id": athlete_id}
+    target_start = html.find("id='athlete-profile'")
+    if target_start < 0:
+        target_start = html.find('id="athlete-profile"')
+    target_html = html[target_start:target_start + 220000] if target_start >= 0 else html
+
+    name = None
+    m = re.search(
+        r"<h1\b[^>]*class=['\"][^'\"]*athlete-name[^'\"]*['\"][^>]*>(.*?)</h1>",
+        target_html,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if m:
+        name = _clean_strava_text(re.sub(r"<[^>]+>", "", m.group(1)))
+    if not name:
+        name = _strip_strava_profile_title(_html_meta_content(html, "og:title"))
+    if not name:
+        title = re.search(r"<title>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
+        name = _strip_strava_profile_title(title.group(1) if title else None)
+    if name:
+        first, last = _split_display_name(name)
+        profile.update({"username": name, "firstname": first, "lastname": last})
+
+    image = _html_meta_content(html, "og:image") or _html_meta_content(html, "twitter:image")
+    if not image:
+        avatar = re.search(
+            r"<img\b[^>]*class=['\"][^'\"]*avatar-img[^'\"]*['\"][^>]*src=['\"]([^'\"]+)",
+            target_html,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if avatar:
+            image = _clean_strava_text(avatar.group(1))
+    if not image:
+        props = re.search(
+            r"data-react-class=['\"]AvatarWrapper['\"][^>]*data-react-props=(['\"])(.*?)\1",
+            target_html,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if props:
+            try:
+                payload = json.loads(unescape(props.group(2)))
+                image = _clean_strava_text(payload.get("src"))
+            except Exception:
+                image = None
+    if image:
+        profile["profile"] = image
+
+    for label, key in (("Followers", "follower_count"), ("Following", "following_count")):
+        stat = re.search(
+            rf"<span\b[^>]*>\s*{label}\s*</span>\s*(?:<a\b[^>]*>|<strong\b[^>]*>)\s*([^<]+)",
+            target_html,
+            re.IGNORECASE,
+        )
+        count = _compact_count_to_int(stat.group(1) if stat else None)
+        if count is not None:
+            profile[key] = count
+
+    desc = _html_meta_content(html, "og:description") or _html_meta_content(html, "twitter:description")
+    if desc:
+        loc = re.search(r"\bis an? [^.]*? from ([^.]+?)\. Join Strava", desc, re.IGNORECASE)
+        if loc:
+            parts = [_clean_strava_text(p) for p in loc.group(1).split(",")]
+            parts = [p for p in parts if p]
+            if len(parts) >= 2:
+                profile["city"] = parts[0]
+                profile["country"] = parts[-1]
+            elif parts:
+                profile["country"] = parts[0]
+
+    return profile
 
 
 def _haversine_m(lat1, lon1, lat2, lon2) -> float:
@@ -309,9 +439,10 @@ class StravaCollector(BaseCollector):
                     SELECT created_at, cooldown_seconds, reason
                     FROM rate_limit_events
                     WHERE source = 'strava'
-                      AND scope = 'gps_streams'
+                      AND scope IN ('gps_streams', 'browser_strava_streams')
                       AND status_code = 429
                       AND cooldown_seconds IS NOT NULL
+                      AND created_at + (cooldown_seconds * INTERVAL '1 second') > now()
                     ORDER BY created_at DESC
                     LIMIT 1
                     """
@@ -634,7 +765,8 @@ class StravaCollector(BaseCollector):
 
         # Enrich stub athletes (numeric-only names) from profile pages
         try:
-            await self._enrich_athlete_names(batch_size=20)
+            profile_batch = int(os.getenv("STRAVA_PROFILE_ENRICH_BATCH", "50"))
+            await self._enrich_athlete_names(batch_size=profile_batch)
         except Exception as e:
             logger.warning("strava: athlete name enrichment failed: %s", e)
 
@@ -960,6 +1092,7 @@ class StravaCollector(BaseCollector):
                                                headers={"User-Agent": ua, "Accept": "text/html"}),
                                     timeout=15.0)
                                 if prof_resp.status_code == 200:
+                                    profile_data = _extract_strava_profile_from_html(prof_resp.text, athlete_id)
                                     import re as _re
                                     nd_m = _re.search(
                                         r'<script id="__NEXT_DATA__" type="application/json">(.+?)</script>',
@@ -973,13 +1106,13 @@ class StravaCollector(BaseCollector):
                                                 "username": ath.get("username") or ath.get("firstName", ""),
                                                 "firstname": ath.get("firstName"),
                                                 "lastname": ath.get("lastName"),
-                                                "profile": ath.get("profileImageUrl"),
+                                                "profile": ath.get("profileImageUrl") or profile_data.get("profile"),
                                                 "city": (ath.get("location") or {}).get("city"),
                                                 "state": (ath.get("location") or {}).get("state"),
                                                 "country": (ath.get("location") or {}).get("country"),
                                             }
                                     # Try extracting name from meta tags if __NEXT_DATA__ absent
-                                    if not profile_data:
+                                    if not any(profile_data.get(k) for k in ("username", "firstname", "profile")):
                                         name_m = _re.search(r'<title>([^<|]+)', prof_resp.text)
                                         display_name = name_m.group(1).strip() if name_m else None
                                         profile_data = {
@@ -1116,24 +1249,7 @@ class StravaCollector(BaseCollector):
                     )
                     if profile_page.status_code == 200:
                         html = profile_page.text
-                        # Extract name, location, profile photo from the page
-                        athlete_patch: dict = {"id": int(athlete_id)}
-                        name_m = re.search(r'<h1[^>]*class="[^"]*athlete-name[^"]*"[^>]*>([^<]+)<', html)
-                        if not name_m:
-                            name_m = re.search(r'"name"\s*:\s*"([^"]{2,60})"', html)
-                        if name_m:
-                            parts = name_m.group(1).strip().split(None, 1)
-                            athlete_patch["firstname"] = parts[0]
-                            if len(parts) > 1:
-                                athlete_patch["lastname"] = parts[1]
-                        loc_m = re.search(r'"location"\s*:\s*"([^"]{2,80})"', html)
-                        if loc_m:
-                            athlete_patch["city"] = loc_m.group(1)
-                        photo_m = re.search(r'"profile"\s*:\s*"(https?://[^"]+\.(jpg|png|jpeg)[^"]*)"', html)
-                        if not photo_m:
-                            photo_m = re.search(r'<img[^>]+class="[^"]*avatar[^"]*"[^>]+src="([^"]+)"', html)
-                        if photo_m:
-                            athlete_patch["profile"] = photo_m.group(1)
+                        athlete_patch = _extract_strava_profile_from_html(html, athlete_id)
                         if len(athlete_patch) > 1:
                             await self._upsert_athlete(athlete_patch)
                             logger.info("strava: enriched athlete %s profile from profile page", athlete_id)
@@ -1194,10 +1310,29 @@ class StravaCollector(BaseCollector):
         # name field as if it were real — store NULL so the UI shows an honest
         # "Unknown #id" instead of a fake name.
         _placeholders = {str(athlete_id_int), f"athlete_{athlete_id_int}"}
-        _clean = {k: (None if (athlete.get(k) is not None and str(athlete.get(k)) in _placeholders) else athlete.get(k))
-                  for k in ("username", "firstname", "lastname")}
-        if any(_clean[k] != athlete.get(k) for k in _clean):
-            athlete = {**athlete, **_clean}
+        cleaned = {}
+        for key in ("username", "firstname", "lastname", "profile", "city", "state", "country", "sex"):
+            value = _clean_strava_text(athlete.get(key))
+            if value in _placeholders:
+                value = None
+            cleaned[key] = value
+
+        def _count_from(*keys: str) -> int | None:
+            for key in keys:
+                if key in athlete:
+                    count = _compact_count_to_int(athlete.get(key))
+                    if count is not None:
+                        return count
+                    try:
+                        raw = athlete.get(key)
+                        if raw is not None and str(raw).strip() != "":
+                            return int(raw)
+                    except (TypeError, ValueError):
+                        pass
+            return None
+
+        follower_count = _count_from("follower_count", "followers")
+        following_count = _count_from("following_count", "friend_count", "friends")
         async with self.pool.acquire() as conn:
             await conn.execute("""
                 INSERT INTO strava_athletes (
@@ -1207,20 +1342,20 @@ class StravaCollector(BaseCollector):
                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
                 ON CONFLICT (platform_athlete_id) DO UPDATE SET
                     username       = COALESCE(EXCLUDED.username,        strava_athletes.username),
-                    firstname      = EXCLUDED.firstname,
-                    lastname       = EXCLUDED.lastname,
+                    firstname      = COALESCE(EXCLUDED.firstname,       strava_athletes.firstname),
+                    lastname       = COALESCE(EXCLUDED.lastname,        strava_athletes.lastname),
                     profile        = COALESCE(EXCLUDED.profile,         strava_athletes.profile),
                     city           = COALESCE(EXCLUDED.city,            strava_athletes.city),
                     state          = COALESCE(EXCLUDED.state,           strava_athletes.state),
                     country        = COALESCE(EXCLUDED.country,         strava_athletes.country),
+                    sex            = COALESCE(EXCLUDED.sex,             strava_athletes.sex),
                     follower_count = COALESCE(EXCLUDED.follower_count,  strava_athletes.follower_count),
                     following_count= COALESCE(EXCLUDED.following_count, strava_athletes.following_count),
                     updated_at     = NOW()
-            """, athlete_id_int, athlete.get("username"), athlete.get("firstname"),
-                athlete.get("lastname"), athlete.get("profile"), athlete.get("city"),
-                athlete.get("state"), athlete.get("country"), athlete.get("sex"),
-                athlete.get("follower_count", 0) or athlete.get("friends", 0) or 0,
-                athlete.get("friend_count", 0) or athlete.get("following_count", 0) or 0)
+            """, athlete_id_int, cleaned["username"], cleaned["firstname"],
+                cleaned["lastname"], cleaned["profile"], cleaned["city"],
+                cleaned["state"], cleaned["country"], cleaned["sex"],
+                follower_count, following_count)
 
     async def _upsert_activity(self, activity: dict, athlete_id: str):
         async with self.pool.acquire() as conn:
@@ -1348,17 +1483,7 @@ class StravaCollector(BaseCollector):
                 logger.warning("strava web fetch %s returned HTTP %d; cookie may be stale", athlete_id, resp.status_code)
                 return
             html = resp.text
-            name_match = re.search(r'<title>([^<]+)</title>', html)
-            athlete_name = name_match.group(1).strip() if name_match else athlete_id
-            athlete = {
-                "id": athlete_id,
-                "username": athlete_name,
-                "firstname": athlete_name.split()[0] if athlete_name else None,
-                "lastname": " ".join(athlete_name.split()[1:]) if len(athlete_name.split()) > 1 else None,
-                "profile": None,
-                "follower_count": 0,
-                "friend_count": 0,
-            }
+            athlete = _extract_strava_profile_from_html(html, athlete_id)
             try:
                 await self._upsert_athlete(athlete)
             except Exception as e:
@@ -3335,47 +3460,12 @@ class StravaCollector(BaseCollector):
                     resp = await client.get(f"{STRAVA_WEB}/athletes/{aid}")
                     if resp.status_code != 200:
                         continue
-                    html = resp.text
-                    # Extract name from <title>Name | Strava Runner Profile</title>
-                    title_m = re.search(r'<title>([^<|]+)', html)
-                    if not title_m:
+                    athlete_patch = _extract_strava_profile_from_html(resp.text, aid)
+                    if len(athlete_patch) <= 1:
                         continue
-                    display_name = title_m.group(1).strip()
-                    if not display_name or display_name.isdigit():
-                        continue
-                    parts = display_name.split(None, 1)
-                    firstname = parts[0]
-                    lastname = parts[1] if len(parts) > 1 else None
-
-                    # Also try to extract profile photo and location
-                    profile_url = None
-                    city = None
-                    photo_m = re.search(r'"profile"\s*:\s*"(https?://[^"]+)"', html)
-                    if not photo_m:  # og:image is the reliable avatar on Strava profile pages
-                        photo_m = re.search(r'<meta[^>]+property="og:image"[^>]+content="(https?://[^"]+)"', html)
-                    if not photo_m:
-                        photo_m = re.search(r'<img[^>]+class="[^"]*avatar[^"]*"[^>]+src="([^"]+)"', html)
-                    if photo_m:
-                        profile_url = photo_m.group(1)
-                    loc_m = re.search(r'"location"\s*:\s*"([^"]{2,80})"', html)
-                    if loc_m:
-                        city = loc_m.group(1)
-
-                    # Don't clobber good names on non-stub athletes — only fill names
-                    # that are missing/numeric; always backfill the profile photo.
-                    async with self.pool.acquire() as conn:
-                        await conn.execute(r"""
-                            UPDATE strava_athletes
-                            SET username  = CASE WHEN username IS NULL OR username = '' OR username ~ '^\d+$' THEN $1 ELSE username END,
-                                firstname = CASE WHEN firstname IS NULL OR firstname = '' OR firstname ~ '^\d+$' THEN $2 ELSE firstname END,
-                                lastname  = CASE WHEN lastname IS NULL OR lastname ~ '^\d+$' THEN $3 ELSE lastname END,
-                                profile = COALESCE($4, profile),
-                                city = COALESCE($5, city),
-                                updated_at = NOW()
-                            WHERE platform_athlete_id = $6
-                        """, display_name, firstname, lastname, profile_url, city, aid)
+                    await self._upsert_athlete(athlete_patch)
                     enriched += 1
-                    logger.debug("strava: enriched athlete %s -> %s", aid, display_name)
+                    logger.debug("strava: enriched athlete %s profile fields=%s", aid, sorted(athlete_patch.keys()))
                 except Exception as e:
                     logger.debug("strava: enrich athlete %s failed: %s", aid, e)
 

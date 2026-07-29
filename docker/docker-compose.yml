@@ -249,6 +249,8 @@ services:
       # ban-safe. Tune down if Strava starts returning 429s on stream XHRs.
       STRAVA_GPS_BACKFILL_BATCH: "250"
       STRAVA_GPS_BACKFILL_FIRST: "true"
+      STRAVA_ROUTE_STREAM_SHARED_COOLDOWN: "true"
+      STRAVA_PROFILE_ENRICH_BATCH: "75"
       # CPU hygiene (A#4): low-volume / API-ceiling sources idle longer between
       # cycles — fewer wakeups, lower steady-state CPU, zero data loss.
       GITHUB_API_TRANSPORT_RETRIES: "2"

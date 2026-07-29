@@ -38,6 +38,10 @@ async def fetch_strava_route_capture_queue(
         )
     if recent_visit_hours is None:
         recent_visit_hours = int(os.getenv("STRAVA_BROWSER_ROUTE_VISIT_TTL_HOURS", "6"))
+    shared_cooldown = (
+        os.getenv("STRAVA_ROUTE_STREAM_SHARED_COOLDOWN", "true").lower()
+        == "true"
+    )
     limit = max(1, min(int(limit or 5), 25))
     recent_visit_hours = max(1, min(int(recent_visit_hours or 6), 72))
     candidate_limit = max(
@@ -69,13 +73,15 @@ async def fetch_strava_route_capture_queue(
               AND rl.cooldown_seconds IS NOT NULL
               AND rl.created_at + (COALESCE(rl.cooldown_seconds, 0) * INTERVAL '1 second') > now()
               AND (
-                    NULLIF(rl.account, '') IS NULL
+                    $2::boolean
+                 OR NULLIF(rl.account, '') IS NULL
                  OR ($1::text IS NOT NULL AND rl.account = $1::text)
               )
             ORDER BY rl.created_at DESC
             LIMIT 20
             """,
             account,
+            shared_cooldown,
         )
         cooldown = None
         for row in cooldown_rows:
@@ -96,6 +102,7 @@ async def fetch_strava_route_capture_queue(
                 },
                 "account": account,
                 "recent_visit_ttl_hours": recent_visit_hours,
+                "shared_cooldown": shared_cooldown,
             }
 
         rows = await conn.fetch(
@@ -285,6 +292,7 @@ async def fetch_strava_route_capture_queue(
         "recent_visit_ttl_hours": recent_visit_hours,
         "recent_candidate_limit": candidate_limit,
         "important_candidate_limit": important_candidate_limit,
+        "shared_cooldown": shared_cooldown,
     }
 
 

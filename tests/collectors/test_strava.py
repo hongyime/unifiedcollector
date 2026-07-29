@@ -171,6 +171,45 @@ def test_strava_429_sleeps_use_jittered_helper():
     assert "await asyncio.sleep(_heavy)" not in source
 
 
+def test_extract_strava_profile_from_server_html():
+    html = """
+    <html>
+      <head>
+        <title>Wrong Nav User | Strava Runner Profile</title>
+        <meta content='https://dgalywyr863hv.cloudfront.net/pictures/athletes/42/avatar/full.jpg' property='og:image'>
+        <meta content='Alice Runner | Strava Runner Profile' property='og:title'>
+        <meta content='Alice Runner is a runner from Singapore, Singapore. Join Strava to track your activities.' property='og:description'>
+      </head>
+      <body>
+        <div class='page container'><div id='athlete-profile'>
+          <div class='row profile-heading'>
+            <img alt='' class='avatar-img' src='https://example.com/alice-large.jpg'>
+            <h1 class='text-title1 athlete-name'>Alice Runner</h1>
+          </div>
+          <div class='section connections'>
+            <ul class='inline-stats'>
+              <li><span class='label static-label'>Following</span> <a href='/x'>1,234</a></li>
+              <li><span class='label static-label'>Followers</span> <strong>56</strong></li>
+            </ul>
+          </div>
+        </div></div>
+      </body>
+    </html>
+    """
+
+    out = strava_mod._extract_strava_profile_from_html(html, "42")
+
+    assert out["id"] == "42"
+    assert out["username"] == "Alice Runner"
+    assert out["firstname"] == "Alice"
+    assert out["lastname"] == "Runner"
+    assert out["profile"] == "https://dgalywyr863hv.cloudfront.net/pictures/athletes/42/avatar/full.jpg"
+    assert out["following_count"] == 1234
+    assert out["follower_count"] == 56
+    assert out["city"] == "Singapore"
+    assert out["country"] == "Singapore"
+
+
 @pytest.mark.asyncio
 async def test_note_rate_limit_can_record_transient_without_cooldown(monkeypatch):
     _set_web_env(monkeypatch)
@@ -302,6 +341,7 @@ async def test_sync_persisted_gps_stream_cooldown_restores_after_restart(monkeyp
     assert restored is True
     assert coll._gps_stream_cooling_down() is True
     pool._conn.fetchrow.assert_awaited_once()
+    assert "browser_strava_streams" in pool._conn.fetchrow.await_args.args[0]
 
 
 def test_is_truncated_accepts_stored_latlng_strings():
@@ -495,6 +535,26 @@ async def test_upsert_athlete_writes_expected_columns(monkeypatch):
     assert args[1] == 42
     assert args[2] == "alice"
     assert args[5] == "https://e.com/p.jpg"
+    assert args[10] == 7
+    assert args[11] == 3
+
+
+@pytest.mark.asyncio
+async def test_upsert_athlete_does_not_write_fake_zero_counts_or_placeholders(monkeypatch):
+    _set_api_env(monkeypatch)
+    coll = StravaCollector()
+    pool = _make_pool()
+    coll.set_pool(pool)
+
+    await coll._upsert_athlete({"id": 42, "username": "athlete_42"})
+
+    args = pool._conn.execute.await_args.args
+    sql = args[0]
+    assert "firstname      = COALESCE(EXCLUDED.firstname" in sql
+    assert "following_count= COALESCE(EXCLUDED.following_count" in sql
+    assert args[2] is None
+    assert args[10] is None
+    assert args[11] is None
 
 
 @pytest.mark.asyncio
