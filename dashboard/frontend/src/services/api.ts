@@ -44,6 +44,7 @@ import type {
   YoutubeChannelDetail,
   GithubRepo,
   GithubRepoDetail,
+  GithubEdgeStats,
   GithubProfile,
   GithubProfileDetail,
   Lemon8Profile,
@@ -242,6 +243,7 @@ export const api = {
 
   githubProfiles: (limit = 100) =>
     get<GithubProfile[]>(`/github/profiles?limit=${limit}`),
+  githubEdgeStats: () => get<GithubEdgeStats>("/github/edge-stats"),
   githubProfile: (owner: string, limit = 200) =>
     get<GithubProfileDetail>(
       `/github/profile/${encodeURIComponent(owner)}?limit=${limit}`,

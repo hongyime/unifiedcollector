@@ -383,6 +383,34 @@ class Scheduler:
                     pass
 
                 try:
+                    if await conn.fetchval("SELECT to_regclass('account_quota_usage')", timeout=5) is not None:
+                        snap["quota_usage"] = [dict(r) for r in await conn.fetch(
+                            """
+                            SELECT platform,
+                                   account,
+                                   requests_hour::bigint AS requests_hour,
+                                   requests_today::bigint AS requests_today,
+                                   requests_week::bigint AS requests_week,
+                                   hour_bucket,
+                                   updated_at,
+                                   CASE
+                                     WHEN platform = 'github' THEN 5000
+                                     ELSE NULL
+                                   END::int AS hourly_limit
+                            FROM account_quota_usage
+                            WHERE day >= (NOW() AT TIME ZONE 'Asia/Singapore')::date
+                            ORDER BY
+                                CASE WHEN platform = 'github' THEN 0 ELSE 1 END,
+                                requests_hour DESC,
+                                updated_at DESC
+                            LIMIT 10
+                            """,
+                            timeout=10,
+                        )]
+                except Exception:
+                    pass
+
+                try:
                     if await conn.fetchval("SELECT to_regclass('dm_hook_heartbeat')", timeout=5) is not None:
                         expected_ext_version = _expected_extension_version()
                         probe_counts: dict[str, dict[str, int]] = {}

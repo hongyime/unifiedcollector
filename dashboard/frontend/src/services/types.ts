@@ -601,6 +601,21 @@ export interface GithubProfileDetail {
   commits: GithubCommit[];
 }
 
+export interface GithubEdgeTypeStat {
+  edge_type: string;
+  count: number;
+  last_seen: string | null;
+}
+
+export interface GithubEdgeStats {
+  total_edges: number;
+  edges_current_hour: number;
+  distinct_sources: number;
+  distinct_targets: number;
+  queued_profiles: number;
+  by_type: GithubEdgeTypeStat[];
+}
+
 export interface Lemon8Profile {
   platform_user_id: string;
   username: string | null;

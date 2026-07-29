@@ -3461,22 +3461,36 @@ async def social_graph(
     # into the (source_user, target_user, edge_type) shape the frontend expects.
     pool = await get_pool()
     async with pool.acquire() as conn:
-        edges = await conn.fetch(
-            "SELECT source_user, target_user, edge_type FROM graph_edges WHERE source = $1 LIMIT $2",
-            source, limit,
-        )
-        if not edges:
+        source_norm = (source or "").strip().lower()
+        if source_norm == "github" and await conn.fetchval("SELECT to_regclass('github_edges') IS NOT NULL"):
             edges = await conn.fetch(
                 """
-                SELECT owner_account AS source_user,
-                       COALESCE(target_username, target_uid) AS target_user,
-                       direction AS edge_type
-                FROM follow_edges
-                WHERE platform = $1
-                LIMIT $2
+                SELECT source_login AS source_user,
+                       target_login AS target_user,
+                       edge_type
+                FROM github_edges
+                ORDER BY last_seen DESC NULLS LAST
+                LIMIT $1
                 """,
-                source, limit,
+                limit,
             )
+        else:
+            edges = await conn.fetch(
+                "SELECT source_user, target_user, edge_type FROM graph_edges WHERE source = $1 LIMIT $2",
+                source_norm, limit,
+            )
+            if not edges:
+                edges = await conn.fetch(
+                    """
+                    SELECT owner_account AS source_user,
+                           COALESCE(target_username, target_uid) AS target_user,
+                           direction AS edge_type
+                    FROM follow_edges
+                    WHERE platform = $1
+                    LIMIT $2
+                    """,
+                    source_norm, limit,
+                )
     nodes = set()
     edge_list = []
     for e in edges:
@@ -6309,6 +6323,58 @@ async def list_github_profiles(limit: int = 100, _user: dict = Depends(require_r
             limit,
         )
     return [dict(r) for r in rows]
+
+
+@app.get("/github/edge-stats")
+async def github_edge_stats(_user: dict = Depends(require_role("viewer"))):
+    """Collected GitHub relationship evidence counts."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if await conn.fetchval("SELECT to_regclass('github_edges')") is None:
+            return {
+                "total_edges": 0,
+                "edges_current_hour": 0,
+                "distinct_sources": 0,
+                "distinct_targets": 0,
+                "queued_profiles": 0,
+                "by_type": [],
+            }
+        totals = await conn.fetchrow(
+            """
+            SELECT COUNT(*)::bigint AS total_edges,
+                   COUNT(*) FILTER (
+                       WHERE collected_at >= date_trunc('hour', now())
+                   )::bigint AS edges_current_hour,
+                   COUNT(DISTINCT source_login)::bigint AS distinct_sources,
+                   COUNT(DISTINCT target_login)::bigint AS distinct_targets
+            FROM github_edges
+            """
+        )
+        by_type = await conn.fetch(
+            """
+            SELECT edge_type,
+                   COUNT(*)::bigint AS count,
+                   MAX(last_seen) AS last_seen
+            FROM github_edges
+            GROUP BY edge_type
+            ORDER BY COUNT(*) DESC, edge_type ASC
+            LIMIT 20
+            """
+        )
+        queued = 0
+        if await conn.fetchval("SELECT to_regclass('github_spider_queue')") is not None:
+            queued = int(await conn.fetchval(
+                """
+                SELECT COUNT(*)::bigint
+                FROM github_spider_queue
+                WHERE status = 'pending'
+                """
+            ) or 0)
+    return {
+        **dict(totals or {}),
+        "queued_profiles": queued,
+        "by_type": [dict(r) for r in by_type],
+    }
 
 
 @app.get("/github/profile/{owner}")

@@ -210,6 +210,25 @@ def _format_access_event(row: dict) -> str:
     return f"• {subject}: {status_text}, {events} this hour{detail}."
 
 
+def _format_quota_usage(row: dict) -> str:
+    source = _display_source(row.get("platform", "?"))
+    account = str(row.get("account") or "").strip()
+    hour = int(row.get("requests_hour", 0) or 0)
+    today = int(row.get("requests_today", 0) or 0)
+    hourly_limit = row.get("hourly_limit")
+    subject = source
+    if account:
+        subject += f" for {_esc(account)}"
+    if hourly_limit:
+        limit = int(hourly_limit)
+        pct = (hour / limit * 100.0) if limit else 0.0
+        return (
+            f"• {subject}: {hour:,}/{limit:,} requests this hour "
+            f"({pct:.0f}% of hourly budget); {today:,} today."
+        )
+    return f"• {subject}: {hour:,} requests this hour; {today:,} today."
+
+
 def _format_extension_hook(row: dict) -> str:
     source = _display_source(row.get("platform", "?"))
     version = str(row.get("extension_version") or "").strip()
@@ -494,6 +513,7 @@ async def notify_status(snapshot: dict) -> bool:
     active_limits = snapshot.get("active_rate_limits") or []
     recent_limits = snapshot.get("rate_limit_events") or []
     access_events = snapshot.get("access_events") or []
+    quota_usage = snapshot.get("quota_usage") or []
     lines.append("")
     lines.append("<b>Rate limits, cooldowns, and sessions</b>")
     if active_limits:
@@ -503,7 +523,10 @@ async def notify_status(snapshot: dict) -> bool:
     if access_events:
         lines.append("Login/access or other HTTP errors this hour:")
         lines.extend(_format_access_event(r) for r in access_events[:5])
-    if not active_limits and not recent_limits and not access_events:
+    if quota_usage:
+        lines.append("Quota/request counters:")
+        lines.extend(_format_quota_usage(r) for r in quota_usage[:6])
+    if not active_limits and not recent_limits and not access_events and not quota_usage:
         lines.append("No recorded rate-limit events, active cooldowns, or login/session failures this hour.")
 
     operational_events = snapshot.get("operational_events") or []

@@ -6,7 +6,7 @@ import { Header } from "../../components/layout/Header";
 import { LoadingSpinner } from "../../components/ui/LoadingSpinner";
 import { ErrorState } from "../../components/ui/ErrorState";
 import { relativeTime, formatTimestamp, formatNumber } from "../../utils/formatters";
-import type { GithubProfile, GithubCommit, GithubRepo } from "../../services/types";
+import type { GithubProfile, GithubCommit, GithubRepo, GithubEdgeStats } from "../../services/types";
 
 // GitHub feed page — two-pane layout mirroring the Telegram/WhatsApp chat
 // pages, but with a grid of post cards on the right instead of a message
@@ -47,6 +47,11 @@ export function GithubFeedPage() {
     queryFn: () => api.githubProfiles(100),
   });
 
+  const edgeStats = useQuery({
+    queryKey: ["github-edge-stats"],
+    queryFn: () => api.githubEdgeStats(),
+  });
+
   const profile = useQuery({
     queryKey: ["github-profile", selected],
     queryFn: () => api.githubProfile(selected!),
@@ -63,9 +68,12 @@ export function GithubFeedPage() {
         subtitle="Profiles, repositories, and collected commits"
         onRefresh={() => {
           profiles.refetch();
+          edgeStats.refetch();
           if (selected) profile.refetch();
         }}
       />
+
+      {edgeStats.data && <EdgeStatsBar stats={edgeStats.data} />}
 
       <div className="grid grid-cols-1 md:grid-cols-[280px_1fr] gap-4">
         {/* Profile picker */}
@@ -150,6 +158,51 @@ export function GithubFeedPage() {
                 </div>
               )}
             </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EdgeStatsBar({ stats }: { stats: GithubEdgeStats }) {
+  const topTypes = stats.by_type.slice(0, 4);
+  return (
+    <div className="mb-4 grid grid-cols-2 lg:grid-cols-5 gap-3">
+      <div className="bg-surface rounded-lg border border-border p-3">
+        <div className="text-[11px] uppercase text-text-muted">Edges</div>
+        <div className="text-lg font-semibold text-text-primary tabular-nums">
+          {formatNumber(stats.total_edges)}
+        </div>
+      </div>
+      <div className="bg-surface rounded-lg border border-border p-3">
+        <div className="text-[11px] uppercase text-text-muted">This Hour</div>
+        <div className="text-lg font-semibold text-text-primary tabular-nums">
+          {formatNumber(stats.edges_current_hour)}
+        </div>
+      </div>
+      <div className="bg-surface rounded-lg border border-border p-3">
+        <div className="text-[11px] uppercase text-text-muted">Profiles</div>
+        <div className="text-lg font-semibold text-text-primary tabular-nums">
+          {formatNumber(stats.distinct_targets)}
+        </div>
+      </div>
+      <div className="bg-surface rounded-lg border border-border p-3">
+        <div className="text-[11px] uppercase text-text-muted">Queued</div>
+        <div className="text-lg font-semibold text-text-primary tabular-nums">
+          {formatNumber(stats.queued_profiles)}
+        </div>
+      </div>
+      <div className="bg-surface rounded-lg border border-border p-3 col-span-2 lg:col-span-1">
+        <div className="text-[11px] uppercase text-text-muted">Top Evidence</div>
+        <div className="mt-1 space-y-0.5">
+          {topTypes.length ? topTypes.map((t) => (
+            <div key={t.edge_type} className="flex items-center justify-between gap-2 text-[11px]">
+              <span className="truncate text-text-secondary">{t.edge_type.replace(/_/g, " ")}</span>
+              <span className="text-text-primary tabular-nums">{compactCount(t.count)}</span>
+            </div>
+          )) : (
+            <div className="text-[11px] text-text-muted">No edge evidence yet</div>
           )}
         </div>
       </div>
