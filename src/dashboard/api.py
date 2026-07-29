@@ -737,6 +737,27 @@ async def _source_matrix_section(
         return fallback
 
 
+def _source_matrix_fallback_liveness_rows(detail: str) -> list[dict]:
+    from src.core.source_freshness import FRESHNESS, FRESHNESS_BASIS, SOURCE_MODES
+
+    return [
+        {
+            "source": source,
+            "status": "unknown",
+            "age_seconds": None,
+            "stale_after_seconds": threshold,
+            "collection_mode": SOURCE_MODES.get(source, "unknown"),
+            "freshness_basis": FRESHNESS_BASIS.get(source),
+            "source_health_status": None,
+            "source_health_error": detail,
+            "source_health_last_success_at": None,
+            "source_health_updated_at": None,
+            "detail": detail,
+        }
+        for source, _query, threshold in FRESHNESS
+    ]
+
+
 async def _youtube_media_backlog(conn) -> dict:
     now = time.time()
     cached_row = _YOUTUBE_MEDIA_BACKLOG_CACHE.get("row")
@@ -2203,11 +2224,14 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
     pool = await get_pool()
     errors = []
     async with pool.acquire() as conn:
+        liveness_fallback = _source_matrix_fallback_liveness_rows(
+            "source liveness query timed out; showing known source skeleton until DB load drops"
+        )
         live_sources = await _source_matrix_section(
             section="source_liveness",
             label="source liveness",
             errors=errors,
-            fallback=[],
+            fallback=liveness_fallback,
             awaitable=compute_liveness(conn),
         )
         live_sources, whatsapp_bridge_health = await _source_matrix_section(
@@ -2217,91 +2241,104 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
             fallback=(live_sources, None),
             awaitable=_with_bridge_overrides(live_sources),
         )
-        beeper_subsources = await _source_matrix_section(
-            section="beeper_subsource_liveness",
-            label="beeper sub-source liveness",
-            errors=errors,
-            fallback=[],
-            awaitable=_beeper_subsource_liveness(conn),
-        )
-        current_content = await _source_matrix_section(
-            section="current_content",
-            label="current content summary",
-            errors=errors,
-            fallback={},
-            awaitable=_source_content_summary(conn, "date_trunc('hour', now())"),
-        )
-        current_rate = await _source_matrix_section(
-            section="current_rate",
-            label="current rate summary",
-            errors=errors,
-            fallback={},
-            awaitable=_source_rate_summary(conn, "date_trunc('hour', now())"),
-        )
-        previous_content = await _source_matrix_section(
-            section="previous_hour_content",
-            label="previous-hour content summary",
-            errors=errors,
-            fallback={},
-            awaitable=_source_content_summary(
-                conn,
-                "date_trunc('hour', now()) - interval '1 hour'",
-                "date_trunc('hour', now())",
-            ),
-        )
-        previous_rate = await _source_matrix_section(
-            section="previous_hour_rate",
-            label="previous-hour rate summary",
-            errors=errors,
-            fallback={},
-            awaitable=_source_rate_summary(
-                conn,
-                "date_trunc('hour', now()) - interval '1 hour'",
-                "date_trunc('hour', now())",
-            ),
-        )
-        day_content = await _source_matrix_section(
-            section="day_content",
-            label="24h content summary",
-            errors=errors,
-            fallback={},
-            awaitable=_source_content_summary(conn, "now() - interval '24 hours'"),
-        )
-        day_rate = await _source_matrix_section(
-            section="day_rate",
-            label="24h rate summary",
-            errors=errors,
-            fallback={},
-            awaitable=_source_rate_summary(conn, "now() - interval '24 hours'"),
-        )
-        media_totals = await _source_matrix_section(
-            section="media_totals",
-            label="media totals",
-            errors=errors,
-            fallback={},
-            awaitable=_source_media_totals(conn),
-        )
-        youtube_media_backlog = await _source_matrix_section(
-            section="youtube_media_backlog",
-            label="youtube media backlog",
-            errors=errors,
-            fallback={},
-            awaitable=_youtube_media_backlog(conn),
-        )
-        active_cursors = await _source_matrix_section(
-            section="active_cursors",
-            label="active cursor summary",
-            errors=errors,
-            fallback={},
-            awaitable=_active_rate_limit_cursor_summary(conn),
-        )
-        browser_extension = await _source_matrix_section(
-            section="browser_extension",
-            label="browser extension summary",
-            errors=errors,
-            fallback={"expected_version": _expected_extension_version(), "issues": []},
-            awaitable=_browser_extension_payload(conn),
-        )
+        if any(error["section"] == "source_liveness" for error in errors):
+            beeper_subsources = []
+            current_content = {}
+            current_rate = {}
+            previous_content = {}
+            previous_rate = {}
+            day_content = {}
+            day_rate = {}
+            media_totals = {}
+            youtube_media_backlog = {}
+            active_cursors = {}
+            browser_extension = {"expected_version": _expected_extension_version(), "issues": []}
+        else:
+            beeper_subsources = await _source_matrix_section(
+                section="beeper_subsource_liveness",
+                label="beeper sub-source liveness",
+                errors=errors,
+                fallback=[],
+                awaitable=_beeper_subsource_liveness(conn),
+            )
+            current_content = await _source_matrix_section(
+                section="current_content",
+                label="current content summary",
+                errors=errors,
+                fallback={},
+                awaitable=_source_content_summary(conn, "date_trunc('hour', now())"),
+            )
+            current_rate = await _source_matrix_section(
+                section="current_rate",
+                label="current rate summary",
+                errors=errors,
+                fallback={},
+                awaitable=_source_rate_summary(conn, "date_trunc('hour', now())"),
+            )
+            previous_content = await _source_matrix_section(
+                section="previous_hour_content",
+                label="previous-hour content summary",
+                errors=errors,
+                fallback={},
+                awaitable=_source_content_summary(
+                    conn,
+                    "date_trunc('hour', now()) - interval '1 hour'",
+                    "date_trunc('hour', now())",
+                ),
+            )
+            previous_rate = await _source_matrix_section(
+                section="previous_hour_rate",
+                label="previous-hour rate summary",
+                errors=errors,
+                fallback={},
+                awaitable=_source_rate_summary(
+                    conn,
+                    "date_trunc('hour', now()) - interval '1 hour'",
+                    "date_trunc('hour', now())",
+                ),
+            )
+            day_content = await _source_matrix_section(
+                section="day_content",
+                label="24h content summary",
+                errors=errors,
+                fallback={},
+                awaitable=_source_content_summary(conn, "now() - interval '24 hours'"),
+            )
+            day_rate = await _source_matrix_section(
+                section="day_rate",
+                label="24h rate summary",
+                errors=errors,
+                fallback={},
+                awaitable=_source_rate_summary(conn, "now() - interval '24 hours'"),
+            )
+            media_totals = await _source_matrix_section(
+                section="media_totals",
+                label="media totals",
+                errors=errors,
+                fallback={},
+                awaitable=_source_media_totals(conn),
+            )
+            youtube_media_backlog = await _source_matrix_section(
+                section="youtube_media_backlog",
+                label="youtube media backlog",
+                errors=errors,
+                fallback={},
+                awaitable=_youtube_media_backlog(conn),
+            )
+            active_cursors = await _source_matrix_section(
+                section="active_cursors",
+                label="active cursor summary",
+                errors=errors,
+                fallback={},
+                awaitable=_active_rate_limit_cursor_summary(conn),
+            )
+            browser_extension = await _source_matrix_section(
+                section="browser_extension",
+                label="browser extension summary",
+                errors=errors,
+                fallback={"expected_version": _expected_extension_version(), "issues": []},
+                awaitable=_browser_extension_payload(conn),
+            )
 
     generated_at = datetime.now(timezone.utc)
     live_sources = [*live_sources, *beeper_subsources]
