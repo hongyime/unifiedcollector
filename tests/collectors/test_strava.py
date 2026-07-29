@@ -210,6 +210,19 @@ def test_extract_strava_profile_from_server_html():
     assert out["country"] == "Singapore"
 
 
+def test_extract_strava_profile_rejects_signup_interstitial_title():
+    html = """
+    <html>
+      <head><title>Signup for free to see more about Justin | Strava</title></head>
+      <body><div id='athlete-profile'></div></body>
+    </html>
+    """
+
+    out = strava_mod._extract_strava_profile_from_html(html, "42")
+
+    assert out == {"id": "42"}
+
+
 @pytest.mark.asyncio
 async def test_note_rate_limit_can_record_transient_without_cooldown(monkeypatch):
     _set_web_env(monkeypatch)
@@ -672,6 +685,38 @@ async def test_collect_handles_per_target_exception_and_dlq(monkeypatch):
     coll.send_to_dlq.assert_awaited_once()
     args = coll.send_to_dlq.await_args.args
     assert args[0] == "12345" and "boom" in args[2]
+
+
+@pytest.mark.asyncio
+async def test_collect_athlete_web_uses_cookie_jar_not_raw_cookie_header(monkeypatch):
+    _set_web_env(monkeypatch)
+    coll = StravaCollector()
+    coll._upsert_athlete = AsyncMock()
+    captured_kwargs = {}
+
+    response = MagicMock(
+        status_code=200,
+        text="""
+        <html><body><div id='athlete-profile'>
+          <h1 class='athlete-name'>Alice Runner</h1>
+        </div></body></html>
+        """,
+    )
+    client = _stub_async_client(get_responses=response)
+
+    def fake_client_factory(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return client
+
+    monkeypatch.setattr(strava_mod.httpx, "AsyncClient", MagicMock(side_effect=fake_client_factory))
+
+    await coll._collect_athlete_web("42")
+
+    assert captured_kwargs.get("cookies") is not None
+    call_kwargs = client.get.await_args.kwargs
+    assert "Cookie" not in call_kwargs["headers"]
+    coll._upsert_athlete.assert_awaited_once()
+    assert coll._upsert_athlete.await_args.args[0]["username"] == "Alice Runner"
 
 
 # ── download_media ─────────────────────────────────────────────────────────

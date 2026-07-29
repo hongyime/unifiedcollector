@@ -81,6 +81,10 @@ def _strip_strava_profile_title(value: str | None) -> str | None:
     if not text:
         return None
     text = re.sub(r"\s*\|\s*Strava\b.*$", "", text, flags=re.IGNORECASE).strip()
+    if re.match(r"^sign\s*up for free\b", text, re.IGNORECASE):
+        return None
+    if re.match(r"^signup for free\b", text, re.IGNORECASE):
+        return None
     return text or None
 
 
@@ -1469,15 +1473,18 @@ class StravaCollector(BaseCollector):
         if athlete_id.lower() == "me":
             logger.warning("strava target 'me' requires API auth (STRAVA_CLIENT_ID/SECRET/REFRESH_TOKEN); web cookie alone cannot resolve self; skipping")
             return
+        jar = self._build_cookie_jar()
+        if jar is None:
+            logger.warning("strava web scrape requested for %s but no usable cookie jar; skipping", athlete_id)
+            return
         url = f"{STRAVA_WEB}/athletes/{athlete_id}"
         headers = {
-            "Cookie": self._session_cookie,
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml",
         }
         try:
             await self._delay(self._feed_delay_min, self._feed_delay_max)
-            async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            async with httpx.AsyncClient(timeout=30, cookies=jar, follow_redirects=True) as client:
                 resp = await client.get(url, headers=headers)
             if resp.status_code != 200:
                 logger.warning("strava web fetch %s returned HTTP %d; cookie may be stale", athlete_id, resp.status_code)
