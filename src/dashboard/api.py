@@ -38,6 +38,7 @@ _BEEPER_SUBSOURCE_CONTENT_CACHE: dict[tuple[str, str | None], dict[str, object]]
 _BEEPER_SUBSOURCE_CONTENT_TTL_SECONDS = int(os.getenv("BEEPER_SUBSOURCE_CONTENT_TTL_SECONDS", "45"))
 _BEEPER_SUBSOURCE_LIVENESS_CACHE: dict[str, object] = {"ts": 0.0, "rows": None}
 _BEEPER_SUBSOURCE_LIVENESS_TTL_SECONDS = int(os.getenv("BEEPER_SUBSOURCE_LIVENESS_TTL_SECONDS", "75"))
+_SOURCE_MATRIX_SECTION_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_SECTION_TIMEOUT_SECONDS", "4"))
 _TELEGRAM_STATS_CACHE: dict[str, object] = {"ts": 0.0, "payload": None}
 _TELEGRAM_STATS_TTL_SECONDS = int(os.getenv("TELEGRAM_STATS_TTL_SECONDS", "30"))
 _YOUTUBE_MEDIA_BACKLOG_CACHE: dict[str, object] = {"ts": 0.0, "row": None}
@@ -717,6 +718,23 @@ async def _source_media_totals(conn) -> dict[str, dict]:
         logger.warning("beeper sub-source media totals failed: %s", exc)
     _SOURCE_MEDIA_TOTALS_CACHE.update({"ts": time.time(), "rows": out})
     return out
+
+
+async def _source_matrix_section(
+    *,
+    section: str,
+    label: str,
+    errors: list[dict],
+    fallback,
+    awaitable,
+    timeout: float | None = None,
+):
+    try:
+        return await asyncio.wait_for(awaitable, timeout=timeout or _SOURCE_MATRIX_SECTION_TIMEOUT_SECONDS)
+    except Exception as exc:  # noqa: BLE001 - source matrix should return partial data under load
+        logger.warning("source matrix %s failed: %s", label, exc.__class__.__name__)
+        errors.append({"section": section, "error": exc.__class__.__name__})
+        return fallback
 
 
 async def _youtube_media_backlog(conn) -> dict:
@@ -2187,80 +2205,91 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
     async with pool.acquire() as conn:
         live_sources = await compute_liveness(conn)
         live_sources, whatsapp_bridge_health = await _with_bridge_overrides(live_sources)
-        try:
-            beeper_subsources = await _beeper_subsource_liveness(conn)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("source matrix beeper sub-source liveness failed: %s", exc)
-            errors.append({"section": "beeper_subsource_liveness", "error": exc.__class__.__name__})
-            beeper_subsources = []
-        try:
-            current_content = await _source_content_summary(conn, "date_trunc('hour', now())")
-        except Exception as exc:  # noqa: BLE001 - dashboard matrix should degrade, not 500
-            logger.warning("source matrix current content summary failed: %s", exc)
-            errors.append({"section": "current_content", "error": exc.__class__.__name__})
-            current_content = {}
-        try:
-            current_rate = await _source_rate_summary(conn, "date_trunc('hour', now())")
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("source matrix current rate summary failed: %s", exc)
-            errors.append({"section": "current_rate", "error": exc.__class__.__name__})
-            current_rate = {}
-        try:
-            previous_content = await _source_content_summary(
+        beeper_subsources = await _source_matrix_section(
+            section="beeper_subsource_liveness",
+            label="beeper sub-source liveness",
+            errors=errors,
+            fallback=[],
+            awaitable=_beeper_subsource_liveness(conn),
+        )
+        current_content = await _source_matrix_section(
+            section="current_content",
+            label="current content summary",
+            errors=errors,
+            fallback={},
+            awaitable=_source_content_summary(conn, "date_trunc('hour', now())"),
+        )
+        current_rate = await _source_matrix_section(
+            section="current_rate",
+            label="current rate summary",
+            errors=errors,
+            fallback={},
+            awaitable=_source_rate_summary(conn, "date_trunc('hour', now())"),
+        )
+        previous_content = await _source_matrix_section(
+            section="previous_hour_content",
+            label="previous-hour content summary",
+            errors=errors,
+            fallback={},
+            awaitable=_source_content_summary(
                 conn,
                 "date_trunc('hour', now()) - interval '1 hour'",
                 "date_trunc('hour', now())",
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("source matrix previous-hour content summary failed: %s", exc)
-            errors.append({"section": "previous_hour_content", "error": exc.__class__.__name__})
-            previous_content = {}
-        try:
-            previous_rate = await _source_rate_summary(
+            ),
+        )
+        previous_rate = await _source_matrix_section(
+            section="previous_hour_rate",
+            label="previous-hour rate summary",
+            errors=errors,
+            fallback={},
+            awaitable=_source_rate_summary(
                 conn,
                 "date_trunc('hour', now()) - interval '1 hour'",
                 "date_trunc('hour', now())",
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("source matrix previous-hour rate summary failed: %s", exc)
-            errors.append({"section": "previous_hour_rate", "error": exc.__class__.__name__})
-            previous_rate = {}
-        try:
-            day_content = await _source_content_summary(conn, "now() - interval '24 hours'")
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("source matrix 24h content summary failed: %s", exc)
-            errors.append({"section": "day_content", "error": exc.__class__.__name__})
-            day_content = {}
-        try:
-            day_rate = await _source_rate_summary(conn, "now() - interval '24 hours'")
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("source matrix 24h rate summary failed: %s", exc)
-            errors.append({"section": "day_rate", "error": exc.__class__.__name__})
-            day_rate = {}
-        try:
-            media_totals = await _source_media_totals(conn)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("source matrix media totals failed: %s", exc)
-            errors.append({"section": "media_totals", "error": exc.__class__.__name__})
-            media_totals = {}
-        try:
-            youtube_media_backlog = await _youtube_media_backlog(conn)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("source matrix youtube media backlog failed: %s", exc)
-            errors.append({"section": "youtube_media_backlog", "error": exc.__class__.__name__})
-            youtube_media_backlog = {}
-        try:
-            active_cursors = await _active_rate_limit_cursor_summary(conn)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("source matrix active cursor summary failed: %s", exc)
-            errors.append({"section": "active_cursors", "error": exc.__class__.__name__})
-            active_cursors = {}
-        try:
-            browser_extension = await _browser_extension_payload(conn)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("source matrix browser extension summary failed: %s", exc)
-            errors.append({"section": "browser_extension", "error": exc.__class__.__name__})
-            browser_extension = {"expected_version": _expected_extension_version(), "issues": []}
+            ),
+        )
+        day_content = await _source_matrix_section(
+            section="day_content",
+            label="24h content summary",
+            errors=errors,
+            fallback={},
+            awaitable=_source_content_summary(conn, "now() - interval '24 hours'"),
+        )
+        day_rate = await _source_matrix_section(
+            section="day_rate",
+            label="24h rate summary",
+            errors=errors,
+            fallback={},
+            awaitable=_source_rate_summary(conn, "now() - interval '24 hours'"),
+        )
+        media_totals = await _source_matrix_section(
+            section="media_totals",
+            label="media totals",
+            errors=errors,
+            fallback={},
+            awaitable=_source_media_totals(conn),
+        )
+        youtube_media_backlog = await _source_matrix_section(
+            section="youtube_media_backlog",
+            label="youtube media backlog",
+            errors=errors,
+            fallback={},
+            awaitable=_youtube_media_backlog(conn),
+        )
+        active_cursors = await _source_matrix_section(
+            section="active_cursors",
+            label="active cursor summary",
+            errors=errors,
+            fallback={},
+            awaitable=_active_rate_limit_cursor_summary(conn),
+        )
+        browser_extension = await _source_matrix_section(
+            section="browser_extension",
+            label="browser extension summary",
+            errors=errors,
+            fallback={"expected_version": _expected_extension_version(), "issues": []},
+            awaitable=_browser_extension_payload(conn),
+        )
 
     generated_at = datetime.now(timezone.utc)
     live_sources = [*live_sources, *beeper_subsources]
