@@ -37,6 +37,7 @@ from src.collectors.telegram import (
     TelegramWorker,
     _ext_from_mime,
     _is_flood_wait,
+    _telegram_message_content_id,
     _tg_json,
 )
 
@@ -254,6 +255,33 @@ async def test_upsert_message_records_mentions(monkeypatch):
     assert {c.args[2] for c in edge_calls} == {"alicedemo", "bobdemo"}
 
 
+def test_extract_message_mentions_from_dict_entities(monkeypatch):
+    coll = _make_collector(monkeypatch)
+    message = SimpleNamespace(
+        message="read this",
+        caption=None,
+        entities=[
+            {
+                "_": "MessageEntityTextUrl",
+                "offset": 0,
+                "length": 4,
+                "url": "https://t.me/HiddenDemo",
+            },
+            {
+                "_": "MessageEntityMentionName",
+                "offset": 5,
+                "length": 4,
+                "user_id": 123456,
+            },
+        ],
+        caption_entities=[],
+    )
+
+    mentions = coll._extract_message_mentions(message)
+    assert any(m["username"] == "hiddendemo" for m in mentions)
+    assert any(m["user_id"] == "123456" for m in mentions)
+
+
 def test_session_state_enum_complete():
     # The enum is the worker FSM contract — nail down its members so
     # downstream callers (state == CONNECTED checks) don't silently break.
@@ -298,6 +326,46 @@ def test_constructor_picks_up_env(monkeypatch):
     assert coll._workers == []
     assert coll._primary_client is None
     assert coll._realtime_running is False
+
+
+def test_telegram_message_content_id_is_chat_scoped():
+    assert _telegram_message_content_id("12345", 99) == "12345_99"
+
+
+def test_parse_telegram_link_target():
+    assert TelegramCollector._parse_telegram_link_target(
+        "https://t.me/+AbCdEf123"
+    ) == {"kind": "invite", "invite_hash": "AbCdEf123"}
+    assert TelegramCollector._parse_telegram_link_target(
+        "https://t.me/joinchat/InviteHash"
+    ) == {"kind": "invite", "invite_hash": "InviteHash"}
+    assert TelegramCollector._parse_telegram_link_target(
+        "https://t.me/s/SomeChannel/123"
+    ) == {"kind": "public", "username": "somechannel"}
+    assert TelegramCollector._parse_telegram_link_target(
+        "https://t.me/c/123/456"
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_process_join_queue_times_out_hanging_link(monkeypatch, caplog):
+    coll = _make_collector(monkeypatch)
+    coll._workers = [_make_worker(coll)]
+    coll._join_links_max_per_cycle = 1
+    coll._join_link_timeout = 0.01
+    coll.pool.conn.fetch = AsyncMock(
+        return_value=[{"id": 1, "url": "https://t.me/+InviteHash"}]
+    )
+
+    async def _hang(*_args, **_kwargs):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(coll, "_visit_telegram_link", _hang)
+    with caplog.at_level("WARNING", logger="src.collectors.telegram"):
+        processed = await coll._process_join_queue()
+
+    assert processed == 1
+    assert any("telegram link visit timed out" in r.getMessage() for r in caplog.records)
 
 
 def test_spider_allowlist_matches_worker_account(monkeypatch):

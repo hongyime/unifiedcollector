@@ -33,6 +33,8 @@ from collections import deque
 from datetime import datetime, date, timezone
 from enum import Enum
 from pathlib import Path
+from types import SimpleNamespace
+from urllib.parse import urlparse
 
 from src.core.base_collector import BaseCollector
 from src.collectors.telegram.parse import (
@@ -119,11 +121,21 @@ def _message_text_for_mentions(message) -> str:
     return " ".join(
         str(v)
         for v in (
-            getattr(message, "message", None),
-            getattr(message, "caption", None),
+            _obj_get(message, "message"),
+            _obj_get(message, "caption"),
         )
         if v
     )
+
+
+def _obj_get(obj, key: str, default=None):
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def _telegram_message_content_id(chat_id, message_id) -> str:
+    return f"{chat_id}_{message_id}"
 
 
 def _tier1_raw_archives_enabled() -> bool:
@@ -483,8 +495,24 @@ class TelegramCollector(BaseCollector):
         self._join_timestamps: deque = deque()
         self._max_joins_per_hour = int(os.getenv("TELEGRAM_MAX_JOINS_PER_HOUR", "5"))
         self._join_min_delay = int(os.getenv("TELEGRAM_JOIN_MIN_DELAY", "30"))
-        self._admin_log_enabled = os.getenv("TELEGRAM_POLL_ADMIN_LOGS", "true").lower() == "true"
+        self._admin_log_enabled = (
+            os.getenv(
+                "TELEGRAM_ADMIN_LOG_ENABLED",
+                os.getenv("TELEGRAM_POLL_ADMIN_LOGS", "true"),
+            ).lower() == "true"
+        )
+        self._admin_log_limit = int(os.getenv("TELEGRAM_ADMIN_LOG_LIMIT", "1000"))
         self._group_join_enabled = os.getenv("TELEGRAM_GROUP_JOIN_ENABLED", "true").lower() == "true"
+        self._join_links_max_per_cycle = int(os.getenv("TELEGRAM_JOIN_LINKS_MAX_PER_CYCLE", "10"))
+        self._join_link_timeout = float(os.getenv("TELEGRAM_JOIN_LINK_TIMEOUT", "120"))
+        raw_join_limit = os.getenv("TELEGRAM_JOIN_MESSAGE_LIMIT", "0").strip()
+        try:
+            parsed_join_limit = int(raw_join_limit)
+        except ValueError:
+            parsed_join_limit = 0
+        self._join_message_limit: int | None = (
+            None if parsed_join_limit <= 0 else parsed_join_limit
+        )
         _spider_accts = os.getenv("TELEGRAM_SPIDER_ACCOUNTS", "")
         self._spider_accounts: set[str] = (
             {a.strip().lower() for a in _spider_accts.split(",") if a.strip()}
@@ -517,6 +545,9 @@ class TelegramCollector(BaseCollector):
         # Reaction-list per-message cap (Q2 decision: per-emoji per-message).
         self._reaction_user_cap = int(os.getenv("TELEGRAM_REACTION_USER_CAP", "500"))
         self._poll_vote_user_cap = int(os.getenv("TELEGRAM_POLL_VOTE_USER_CAP", "500"))
+        self._mention_backfill_batch = int(os.getenv("TELEGRAM_MENTION_BACKFILL_BATCH", "2000"))
+        self._mention_backfill_interval = float(os.getenv("TELEGRAM_MENTION_BACKFILL_INTERVAL", "60"))
+        self._mention_backfill_task: asyncio.Task | None = None
 
         # Discussion-group dwell range — random jitter to look human (Q3 always-leave).
         self._discussion_dwell_min = int(os.getenv("TELEGRAM_DISCUSSION_DWELL_MIN", "60"))
@@ -934,6 +965,9 @@ class TelegramCollector(BaseCollector):
         self._hot_reload_task = asyncio.create_task(self._listen_for_new_accounts())
         logger.info("[telegram.collect] hot_reload_task started")
 
+        if not getattr(self, "_mention_backfill_task", None):
+            self._mention_backfill_task = asyncio.create_task(self._mention_backfill_loop())
+
         self._hub_notifier.notify(
             NotifyCategory.COLLECTION_START,
             f"Starting collection of {len(targets)} targets across {len(self._workers)} accounts",
@@ -963,6 +997,12 @@ class TelegramCollector(BaseCollector):
         # chats get reclassified promptly instead of waiting for a worker to free up.
         if self._workers and not getattr(self, "_sweep_task", None):
             self._sweep_task = asyncio.create_task(self._resolve_sweep_loop())
+
+        if self._group_join_enabled:
+            try:
+                await self._process_join_queue()
+            except Exception as e:
+                logger.error("Join queue failed: %s", e)
 
         # Spider queue: fan out across allowed workers for parallelism.
         # TELEGRAM_SPIDER_ACCOUNTS restricts which accounts can spider.
@@ -1006,12 +1046,6 @@ class TelegramCollector(BaseCollector):
                     int(os.getenv("TELEGRAM_LOCATION_BACKFILL_BATCH", "500")))
             except Exception as e:
                 logger.debug("location backfill failed: %s", e)
-
-        if self._group_join_enabled:
-            try:
-                await self._process_join_queue()
-            except Exception as e:
-                logger.error("Join queue failed: %s", e)
 
         # ── REALTIME LISTENER (the missing wire) ────────────────────────────
         # collect_realtime() was defined but NEVER called, so telegram only ever
@@ -1365,6 +1399,44 @@ class TelegramCollector(BaseCollector):
             raise last_exc or asyncio.TimeoutError(f"transient resolve failure for {target!r}")
         raise EntityUnresolvable(f"no connected account owns entity {target!r}")
 
+    async def _download_any_message_media(
+        self,
+        worker: "TelegramWorker",
+        message,
+        chat_id: str,
+        chat_name: str,
+        chat_username: str | None,
+    ) -> bool:
+        """Download any file-backed Telegram message media we can safely fetch."""
+        if not getattr(message, "media", None):
+            return False
+
+        from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
+
+        if isinstance(message.media, MessageMediaPhoto):
+            await self._handle_photo(worker, message, chat_id, chat_name, chat_username)
+            return True
+
+        if isinstance(message.media, MessageMediaDocument):
+            doc = message.media.document
+            size = getattr(doc, "size", 0) or 0
+            if doc and size <= self._max_media_size:
+                mime = getattr(doc, "mime_type", "") or ""
+                return await self._handle_document(
+                    worker, message, chat_id, chat_name, mime, chat_username
+                )
+            if size > self._max_media_size:
+                logger.debug(
+                    "Telegram document skipped over size cap: chat=%s msg=%s size=%s cap=%s",
+                    chat_id, getattr(message, "id", None), size, self._max_media_size,
+                )
+            return False
+
+        # Realtime already used this generic path. Use it for historical sweeps too
+        # so web previews/contacts/future Telethon media types get a best-effort
+        # download instead of being silently ignored.
+        return bool(await self.download_message_media(message, worker=worker, chat_id=chat_id))
+
     async def _resolves_on_any_worker(self, target: str) -> str:
         """Fast, LOCAL resolvability check for the resolve sweep.
 
@@ -1394,8 +1466,6 @@ class TelegramCollector(BaseCollector):
         return "transient" if transient else "dead"
 
     async def _collect_chat(self, worker: "TelegramWorker", target: str):
-        from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
-
         # Use whichever account is actually in this chat (cross-account routing).
         worker, entity = await self._resolve_entity_any_worker(worker, target)
         client = worker.client
@@ -1443,20 +1513,10 @@ class TelegramCollector(BaseCollector):
                 except Exception as exc:
                     logger.debug("_enumerate_reactors_and_enqueue failed: %s", exc)
 
-            if message.media:
-                if isinstance(message.media, MessageMediaPhoto):
-                    await self._handle_photo(worker, message, chat_id, chat_name, chat_username)
-                    count += 1
-                elif isinstance(message.media, MessageMediaDocument):
-                    doc = message.media.document
-                    if doc and (getattr(doc, "size", 0) or 0) <= self._max_media_size:
-                        mime = getattr(doc, "mime_type", "") or ""
-                        # Tier 3: route ALL documents through the classifier
-                        # (was image/video-only, which dropped PDFs/office/audio).
-                        # The classifier whitelists safe docs + audio + static
-                        # stickers and skips executables/code/animated stickers.
-                        if await self._handle_document(worker, message, chat_id, chat_name, mime, chat_username):
-                            count += 1
+            if await self._download_any_message_media(
+                worker, message, chat_id, chat_name, chat_username
+            ):
+                count += 1
 
             if count % self._batch_size == 0 and count > 0:
                 await self.checkpoint.save_progress(str(message.id))
@@ -1490,6 +1550,15 @@ class TelegramCollector(BaseCollector):
                     "collect_chat_members deferred-call failed for chat=%s: %s",
                     chat_id, exc,
                 )
+
+        if self._admin_log_enabled and (
+            getattr(entity, "megagroup", False)
+            or getattr(entity, "broadcast", False)
+        ):
+            try:
+                await self._poll_admin_logs(worker, entity)
+            except Exception as exc:
+                logger.debug("admin log pass failed for chat=%s: %s", chat_id, exc)
 
         # Discussion group spider (item 2.1) — channels may have a linked
         # discussion group. If so, we join, scrape members+messages, leave.
@@ -1604,6 +1673,9 @@ class TelegramCollector(BaseCollector):
 
         try:
             if not already_member:
+                if not await self._consume_join_budget():
+                    abort_reason = "join_budget"
+                    return
                 logger.info(
                     "[worker=%d] Joining discussion group %s (%s) for channel %s",
                     worker.worker_id, discussion_title, discussion_platform_id, channel_platform_id,
@@ -1620,6 +1692,11 @@ class TelegramCollector(BaseCollector):
             members_collected = await self.collect_chat_members(
                 discussion_entity.id, worker=worker
             )
+            if self._admin_log_enabled:
+                try:
+                    await self._poll_admin_logs(worker, discussion_entity)
+                except Exception as exc:
+                    logger.debug("discussion admin log pass failed: %s", exc)
 
             # Scrape discussion messages. None means all available history.
             msg_count = 0
@@ -1638,6 +1715,16 @@ class TelegramCollector(BaseCollector):
                     await self._enqueue_forward_edges(message, discussion_platform_id)
                 except Exception:
                     pass
+                try:
+                    await self._download_any_message_media(
+                        worker,
+                        message,
+                        discussion_platform_id,
+                        discussion_title,
+                        getattr(discussion_entity, "username", None),
+                    )
+                except Exception as exc:
+                    logger.debug("discussion media download failed: %s", exc)
                 msg_count += 1
             messages_collected = msg_count
 
@@ -2585,7 +2672,7 @@ class TelegramCollector(BaseCollector):
             "entity_id": chat_id,
             "entity_name": chat_name,
             "content_type": "photo",
-            "content_id": str(message.id),
+            "content_id": _telegram_message_content_id(chat_id, message.id),
             "media": message.media.photo,
             "raw": message.to_dict(),
             # Deep-link URL population (media_items.source_url) — see
@@ -2648,7 +2735,7 @@ class TelegramCollector(BaseCollector):
             "entity_id": chat_id,
             "entity_name": chat_name,
             "content_type": decision.content_type,
-            "content_id": str(message.id),
+            "content_id": _telegram_message_content_id(chat_id, message.id),
             "media": message.media.document,
             "extension": ext,
             "raw": message.to_dict(),
@@ -2771,6 +2858,166 @@ class TelegramCollector(BaseCollector):
             logger.debug("_backfill_message_locations failed: %s", e)
             return 0
 
+    async def _backfill_message_mentions(self, batch: int | None = None) -> dict:
+        """Normalize historical Telegram mentions in bounded cursor batches."""
+        if not self.pool:
+            return {"scanned": 0, "mentions": 0, "has_more": False}
+        limit = max(1, int(batch or self._mention_backfill_batch))
+        service = "telegram_message_mentions_backfill"
+        scanned = 0
+        mentions = 0
+        has_more = False
+        last_id = None
+        last_at = None
+        try:
+            async with self.pool.acquire() as conn:
+                cursor = await conn.fetchrow(
+                    """
+                    INSERT INTO service_cursors
+                        (service, last_processed_id, last_processed_at, status)
+                    VALUES ($1, NULL, NULL, 'running')
+                    ON CONFLICT (service) DO UPDATE SET status = 'running'
+                    RETURNING last_processed_id, last_processed_at
+                    """,
+                    service,
+                )
+                last_id = cursor["last_processed_id"] if cursor else None
+                last_at = cursor["last_processed_at"] if cursor else None
+                rows = await conn.fetch(
+                    """
+                    SELECT
+                        m.id,
+                        m.platform_message_id,
+                        m.text,
+                        m.caption,
+                        m.metadata,
+                        m.collected_at,
+                        COALESCE(c.platform_chat_id, split_part(m.platform_message_id, ':', 1)) AS platform_chat_id,
+                        u.platform_user_id AS platform_sender_id
+                    FROM telegram_messages m
+                    LEFT JOIN telegram_chats c ON c.id = m.chat_id
+                    LEFT JOIN telegram_users u ON u.id = m.sender_id
+                    WHERE (
+                            $1::timestamptz IS NULL
+                            OR (m.collected_at, m.platform_message_id) >
+                               ($1::timestamptz, COALESCE($2, ''))
+                          )
+                    ORDER BY m.collected_at ASC, m.platform_message_id ASC
+                    LIMIT $3
+                    """,
+                    last_at,
+                    last_id,
+                    limit,
+                    timeout=30,
+                )
+                scanned = len(rows)
+                has_more = scanned >= limit
+                for idx, row in enumerate(rows, start=1):
+                    metadata = row["metadata"] or {}
+                    if isinstance(metadata, str):
+                        try:
+                            metadata = json.loads(metadata)
+                        except json.JSONDecodeError:
+                            metadata = {}
+                    message_id = str(row["platform_message_id"]).split(":")[-1]
+                    try:
+                        message_id_value = int(message_id)
+                    except ValueError:
+                        message_id_value = message_id
+                    msg = SimpleNamespace(
+                        id=message_id_value,
+                        sender_id=row["platform_sender_id"],
+                        message=row["text"],
+                        caption=row["caption"],
+                        entities=(metadata or {}).get("entities") or [],
+                        caption_entities=(metadata or {}).get("caption_entities") or [],
+                    )
+                    mentions += await self._record_message_mentions(
+                        conn,
+                        msg,
+                        row["id"],
+                        chat_platform_id=str(row["platform_chat_id"] or ""),
+                        sender_platform_id=row["platform_sender_id"],
+                    )
+                    last_id = row["platform_message_id"]
+                    last_at = row["collected_at"]
+                    if idx % 100 == 0:
+                        await conn.execute(
+                            """
+                            UPDATE service_cursors
+                            SET last_processed_id = $2,
+                                last_processed_at = $3,
+                                status = 'running'
+                            WHERE service = $1
+                            """,
+                            service,
+                            last_id,
+                            last_at,
+                        )
+                await conn.execute(
+                    """
+                    UPDATE service_cursors
+                    SET last_processed_id = $2,
+                        last_processed_at = $3,
+                        status = 'idle'
+                    WHERE service = $1
+                    """,
+                    service,
+                    last_id,
+                    last_at,
+                )
+        except asyncio.CancelledError:
+            try:
+                async with self.pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        UPDATE service_cursors
+                        SET last_processed_id = COALESCE($2::text, last_processed_id),
+                            last_processed_at = COALESCE($3::timestamptz, last_processed_at),
+                            status = 'cancelled'
+                        WHERE service = $1
+                        """,
+                        service,
+                        last_id,
+                        last_at,
+                    )
+            except Exception:
+                pass
+            raise
+        except Exception as exc:
+            logger.debug("_backfill_message_mentions failed: %s", exc)
+            try:
+                async with self.pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE service_cursors SET status = 'error' WHERE service = $1",
+                        service,
+                    )
+            except Exception:
+                pass
+        if scanned or mentions:
+            logger.info(
+                "telegram mention backfill: scanned=%d mentions=%d has_more=%s",
+                scanned, mentions, has_more,
+            )
+        return {"scanned": scanned, "mentions": mentions, "has_more": has_more}
+
+    async def _mention_backfill_loop(self) -> None:
+        if os.getenv("TELEGRAM_MENTION_BACKFILL_ENABLED", "true").lower() != "true":
+            return
+        logger.info(
+            "telegram mention backfill loop started (batch=%d interval=%.0fs)",
+            self._mention_backfill_batch,
+            self._mention_backfill_interval,
+        )
+        while not self._stop.is_set():
+            try:
+                result = await self._backfill_message_mentions(self._mention_backfill_batch)
+                sleep_for = self._mention_backfill_interval if result.get("has_more") else self._mention_backfill_interval * 5
+            except Exception as exc:
+                logger.debug("telegram mention backfill loop error: %s", exc)
+                sleep_for = self._mention_backfill_interval * 5
+            await asyncio.sleep(max(5.0, sleep_for))
+
     async def _scan_stories(self, worker: "TelegramWorker", targets: list[str]):
         try:
             from telethon.tl.functions.stories import GetPeerStoriesRequest
@@ -2846,15 +3093,440 @@ class TelegramCollector(BaseCollector):
             except Exception as e:
                 logger.debug("Story fetch failed for %s: %s", ent_name, e)
 
-    async def _poll_admin_logs(self, entity):
-        # Placeholder — telegramcollector/services/collector/admin_log_poller.py
-        # is not yet ported. Tracked in deferred plan.
-        pass
+    async def _poll_admin_logs(self, worker: "TelegramWorker", entity) -> int:
+        """Persist Telegram admin-log events when this account has access."""
+        if not self.pool or not self._admin_log_enabled:
+            return 0
+        client = worker.client
+        chat_platform_id = str(getattr(entity, "id", ""))
+        if not chat_platform_id:
+            return 0
 
-    async def _process_join_queue(self):
-        # Placeholder — telegramcollector/services/collector/group_manager.py
-        # join queue is not yet ported. Tracked in deferred plan.
-        pass
+        async with self.pool.acquire() as conn:
+            chat_uuid = await conn.fetchval(
+                "SELECT id FROM telegram_chats WHERE platform_chat_id = $1",
+                chat_platform_id,
+            )
+        if chat_uuid is None:
+            return 0
+
+        written = 0
+        try:
+            async for event in client.iter_admin_log(entity, limit=self._admin_log_limit):
+                if self._stop.is_set():
+                    break
+                action = getattr(event, "action", None)
+                action_type = type(action).__name__ if action is not None else type(event).__name__
+                event_at = getattr(event, "date", None)
+                actor_platform_id = getattr(event, "user_id", None)
+
+                target_ids: list[int] = []
+                for attr in ("user_id", "participant", "prev_participant", "new_participant"):
+                    target_ids.extend(self._coerce_telegram_user_ids(_obj_get(action, attr)))
+                admin_message = _obj_get(action, "message")
+                target_ids.extend(self._coerce_telegram_user_ids(_obj_get(admin_message, "sender_id")))
+                target_ids = list(dict.fromkeys(target_ids))
+                target_platform_id = str(target_ids[0]) if target_ids else None
+
+                message_platform_id = None
+                admin_message_id = _obj_get(admin_message, "id")
+                if admin_message_id is not None:
+                    message_platform_id = f"{chat_platform_id}:{admin_message_id}"
+
+                async with self.pool.acquire() as conn:
+                    actor_uuid = await self._ensure_telegram_user_stub(conn, actor_platform_id)
+                    target_uuid = await self._ensure_telegram_user_stub(conn, target_platform_id)
+                    platform_event_id = str(
+                        getattr(event, "id", None)
+                        or f"{chat_platform_id}:{event_at}:{action_type}:{actor_platform_id}:{target_platform_id}"
+                    )
+                    await conn.execute(
+                        """
+                        INSERT INTO telegram_admin_events (
+                            chat_id, platform_event_id, actor_user_id, target_user_id,
+                            action_type, event_at, message_platform_id, metadata, collected_at
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, NOW())
+                        ON CONFLICT (chat_id, platform_event_id) DO UPDATE SET
+                            actor_user_id = COALESCE(EXCLUDED.actor_user_id, telegram_admin_events.actor_user_id),
+                            target_user_id = COALESCE(EXCLUDED.target_user_id, telegram_admin_events.target_user_id),
+                            action_type = EXCLUDED.action_type,
+                            event_at = COALESCE(EXCLUDED.event_at, telegram_admin_events.event_at),
+                            message_platform_id = COALESCE(EXCLUDED.message_platform_id, telegram_admin_events.message_platform_id),
+                            metadata = EXCLUDED.metadata,
+                            collected_at = NOW()
+                        """,
+                        chat_uuid,
+                        platform_event_id,
+                        actor_uuid,
+                        target_uuid,
+                        action_type,
+                        event_at,
+                        message_platform_id,
+                        _tg_jsonb(_telethon_payload(event)),
+                    )
+
+                    role = None
+                    joined_at = None
+                    if "ParticipantJoin" in action_type or "ParticipantInvite" in action_type:
+                        role = "member"
+                        joined_at = event_at
+                    elif "ParticipantLeave" in action_type:
+                        role = "left"
+                    elif "ParticipantToggleBan" in action_type:
+                        new_participant = _obj_get(action, "new_participant")
+                        participant_type = _obj_get(new_participant, "_") or type(new_participant).__name__
+                        role = "banned" if "Banned" in participant_type else "member"
+                    elif "ParticipantToggleAdmin" in action_type:
+                        new_participant = _obj_get(action, "new_participant")
+                        participant_type = _obj_get(new_participant, "_") or type(new_participant).__name__
+                        role = "admin" if "Admin" in participant_type else "member"
+
+                    if target_uuid is not None and role is not None:
+                        await self._upsert_chat_member_observation(
+                            conn,
+                            chat_uuid,
+                            target_uuid,
+                            role=role,
+                            joined_at=joined_at,
+                            last_seen_at=event_at,
+                        )
+                written += 1
+        except Exception as exc:
+            if _is_flood_wait(exc):
+                await self._handle_flood_wait(worker, exc)
+            else:
+                logger.debug(
+                    "admin log unavailable for chat=%s account=%s: %s",
+                    chat_platform_id,
+                    getattr(worker.account, "name", "?"),
+                    exc,
+                )
+        if written:
+            logger.info(
+                "telegram admin log: chat=%s account=%s events=%d",
+                chat_platform_id,
+                getattr(worker.account, "name", "?"),
+                written,
+            )
+        return written
+
+    @staticmethod
+    def _parse_telegram_link_target(url: str) -> dict | None:
+        try:
+            parsed = urlparse(url)
+        except Exception:
+            return None
+        host = (parsed.netloc or "").lower()
+        if host.startswith("www."):
+            host = host[4:]
+        if host not in {"t.me", "telegram.me", "telegram.dog"}:
+            return None
+        parts = [p for p in parsed.path.strip("/").split("/") if p]
+        if not parts:
+            return None
+        first = parts[0].strip()
+        first_lower = first.lower()
+        if first_lower == "joinchat" and len(parts) > 1:
+            return {"kind": "invite", "invite_hash": parts[1].strip()}
+        if first.startswith("+") and len(first) > 1:
+            return {"kind": "invite", "invite_hash": first[1:].strip()}
+        if first_lower == "s" and len(parts) > 1:
+            username = _normalize_telegram_username(parts[1])
+            return {"kind": "public", "username": username} if username else None
+        if first_lower in {"c", "addstickers", "addlist", "share"}:
+            return None
+        username = _normalize_telegram_username(first)
+        if username:
+            return {"kind": "public", "username": username}
+        return None
+
+    async def _consume_join_budget(self) -> bool:
+        now_ts = datetime.now(timezone.utc).timestamp()
+        while self._join_timestamps and now_ts - self._join_timestamps[0] > 3600:
+            self._join_timestamps.popleft()
+        if len(self._join_timestamps) >= self._max_joins_per_hour:
+            logger.warning(
+                "telegram join budget exhausted: %d/%d joins in the last hour",
+                len(self._join_timestamps),
+                self._max_joins_per_hour,
+            )
+            return False
+        if self._join_timestamps:
+            wait_for = self._join_min_delay - (now_ts - self._join_timestamps[-1])
+            if wait_for > 0:
+                await asyncio.sleep(wait_for)
+        self._join_timestamps.append(datetime.now(timezone.utc).timestamp())
+        return True
+
+    async def _record_invite_visit(
+        self,
+        *,
+        source_link_id,
+        url: str,
+        parsed: dict | None,
+        account_name: str | None,
+        resolved_chat_uuid=None,
+        joined_this_pass: bool = False,
+        joined_at=None,
+        left_at=None,
+        members_collected: int = 0,
+        messages_collected: int = 0,
+        status: str,
+        error: str | None = None,
+    ) -> None:
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO telegram_invite_visits (
+                        source_link_id, url, invite_hash, username, resolved_chat_id,
+                        account_name, joined_this_pass, joined_at, left_at,
+                        members_collected, messages_collected, status, error, collected_at
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW())
+                    """,
+                    source_link_id,
+                    url,
+                    (parsed or {}).get("invite_hash"),
+                    (parsed or {}).get("username"),
+                    resolved_chat_uuid,
+                    account_name,
+                    joined_this_pass,
+                    joined_at,
+                    left_at,
+                    members_collected,
+                    messages_collected,
+                    status,
+                    (error or "")[:500] if error else None,
+                )
+        except Exception as exc:
+            logger.debug("telegram invite visit audit insert failed: %s", exc)
+
+    @staticmethod
+    def _joined_chat_from_result(result):
+        chats = getattr(result, "chats", None) or []
+        if chats:
+            return chats[0]
+        chat = getattr(result, "chat", None)
+        if chat is not None:
+            return chat
+        return None
+
+    async def _is_member_of_chat(self, worker: "TelegramWorker", entity) -> bool:
+        try:
+            me = await worker.client.get_me()
+            permissions = await worker.client.get_permissions(entity, me)
+            return not bool(getattr(permissions, "left", False))
+        except Exception:
+            return False
+
+    async def _scrape_joined_entity(
+        self,
+        worker: "TelegramWorker",
+        entity,
+        *,
+        message_limit: int | None,
+    ) -> tuple[object | None, int, int]:
+        await self._upsert_chat(entity)
+        chat_platform_id = str(getattr(entity, "id", ""))
+        chat_name = (
+            getattr(entity, "title", None)
+            or getattr(entity, "username", None)
+            or chat_platform_id
+        )
+        chat_username = getattr(entity, "username", None)
+        async with self.pool.acquire() as conn:
+            chat_uuid = await conn.fetchval(
+                "SELECT id FROM telegram_chats WHERE platform_chat_id = $1",
+                chat_platform_id,
+            )
+
+        members_collected = await self.collect_chat_members(
+            getattr(entity, "id"), worker=worker
+        )
+        if self._admin_log_enabled:
+            try:
+                await self._poll_admin_logs(worker, entity)
+            except Exception as exc:
+                logger.debug("joined entity admin log pass failed: %s", exc)
+
+        messages_collected = 0
+        async for message in worker.client.iter_messages(entity, limit=message_limit):
+            if self._stop.is_set():
+                break
+            sender_uuid = None
+            if getattr(message, "sender_id", None):
+                sender_uuid = await self._upsert_sender(worker, message.sender_id)
+            await self._upsert_message(
+                message, chat_platform_id, sender_uuid, worker=worker
+            )
+            try:
+                await self._enqueue_forward_edges(message, chat_platform_id)
+            except Exception:
+                pass
+            try:
+                await self._download_any_message_media(
+                    worker, message, chat_platform_id, chat_name, chat_username
+                )
+            except Exception as exc:
+                logger.debug("joined entity media download failed: %s", exc)
+            messages_collected += 1
+        return chat_uuid, members_collected, messages_collected
+
+    async def _visit_telegram_link(self, worker: "TelegramWorker", row, parsed: dict) -> None:
+        from telethon.tl.functions.channels import JoinChannelRequest, LeaveChannelRequest
+        from telethon.tl.functions.messages import CheckChatInviteRequest, ImportChatInviteRequest
+
+        url = row["url"]
+        source_link_id = row["id"]
+        account_name = getattr(worker.account, "name", None)
+        entity = None
+        joined_this_pass = False
+        joined_at = None
+        left_at = None
+        resolved_chat_uuid = None
+        members_collected = 0
+        messages_collected = 0
+        status = "failed"
+        error = None
+
+        try:
+            if parsed.get("kind") == "invite":
+                invite_hash = parsed.get("invite_hash")
+                try:
+                    checked = await worker.client(CheckChatInviteRequest(invite_hash))
+                    entity = self._joined_chat_from_result(checked)
+                except Exception:
+                    entity = None
+                if entity is None:
+                    if not await self._consume_join_budget():
+                        status = "join_budget"
+                        return
+                    result = await worker.client(ImportChatInviteRequest(invite_hash))
+                    entity = self._joined_chat_from_result(result)
+                    joined_this_pass = True
+                    joined_at = datetime.now(timezone.utc)
+            else:
+                username = parsed.get("username")
+                entity = await worker.client.get_entity(username)
+                if type(entity).__name__ == "User":
+                    await self._upsert_user_full(entity)
+                    status = "user_profile"
+                    return
+                already_member = await self._is_member_of_chat(worker, entity)
+                if not already_member:
+                    if not await self._consume_join_budget():
+                        status = "join_budget"
+                        return
+                    await worker.client(JoinChannelRequest(entity))
+                    joined_this_pass = True
+                    joined_at = datetime.now(timezone.utc)
+
+            if entity is None:
+                status = "unresolved"
+                return
+
+            resolved_chat_uuid, members_collected, messages_collected = await self._scrape_joined_entity(
+                worker,
+                entity,
+                message_limit=self._join_message_limit,
+            )
+            status = "completed"
+        except asyncio.CancelledError:
+            status = "cancelled" if self._stop.is_set() else "timeout"
+            error = "telegram link visit timed out or was cancelled"
+            raise
+        except Exception as exc:
+            if _is_flood_wait(exc):
+                await self._handle_flood_wait(worker, exc)
+                status = "flood_wait"
+            else:
+                error = f"{type(exc).__name__}: {exc}"
+                logger.debug("telegram link visit failed for %s: %s", url, error)
+        finally:
+            if joined_this_pass and entity is not None:
+                try:
+                    await worker.client(LeaveChannelRequest(entity))
+                    left_at = datetime.now(timezone.utc)
+                except Exception as leave_exc:
+                    logger.debug("telegram link leave failed for %s: %s", url, leave_exc)
+                    error = error or f"leave_failed: {leave_exc}"
+            await self._record_invite_visit(
+                source_link_id=source_link_id,
+                url=url,
+                parsed=parsed,
+                account_name=account_name,
+                resolved_chat_uuid=resolved_chat_uuid,
+                joined_this_pass=joined_this_pass,
+                joined_at=joined_at,
+                left_at=left_at,
+                members_collected=members_collected,
+                messages_collected=messages_collected,
+                status=status,
+                error=error,
+            )
+
+    async def _process_join_queue(self) -> int:
+        """Join/scrape/leave Telegram links discovered in message text."""
+        if not self.pool or not self._group_join_enabled or self._join_links_max_per_cycle <= 0:
+            return 0
+        workers = [w for w in self._workers if self._is_spider_allowed(w)]
+        if not workers:
+            if self._spider_accounts:
+                logger.debug("telegram join queue skipped: no allowed spider workers connected")
+            return 0
+
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT dl.id, dl.url
+                FROM discovered_links dl
+                WHERE dl.source = 'telegram'
+                  AND dl.domain IN ('t.me', 'telegram.me', 'telegram.dog')
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM telegram_invite_visits v
+                      WHERE v.source_link_id = dl.id
+                        AND v.collected_at > NOW() - INTERVAL '7 days'
+                  )
+                ORDER BY dl.discovered_at DESC
+                LIMIT $1
+                """,
+                self._join_links_max_per_cycle * 4,
+            )
+        processed = 0
+        for row in rows:
+            if self._stop.is_set() or processed >= self._join_links_max_per_cycle:
+                break
+            parsed = self._parse_telegram_link_target(row["url"])
+            if parsed is None:
+                await self._record_invite_visit(
+                    source_link_id=row["id"],
+                    url=row["url"],
+                    parsed=None,
+                    account_name=None,
+                    status="skipped",
+                    error="unsupported telegram link shape",
+                )
+                continue
+            worker = workers[processed % len(workers)]
+            try:
+                await asyncio.wait_for(
+                    self._visit_telegram_link(worker, row, parsed),
+                    timeout=self._join_link_timeout,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "telegram link visit timed out after %.0fs: %s",
+                    self._join_link_timeout,
+                    row["url"],
+                )
+            except Exception as exc:
+                logger.debug("telegram link visit task failed for %s: %s", row["url"], exc)
+            finally:
+                processed += 1
+        if processed:
+            logger.info("telegram join queue processed %d link(s)", processed)
+        return processed
 
     # ==================================================================
     # Realtime ingestion — ported from
@@ -3534,8 +4206,8 @@ class TelegramCollector(BaseCollector):
     @staticmethod
     def _entity_text_slice(text: str, entity) -> str:
         try:
-            offset = int(getattr(entity, "offset", 0) or 0)
-            length = int(getattr(entity, "length", 0) or 0)
+            offset = int(_obj_get(entity, "offset", 0) or 0)
+            length = int(_obj_get(entity, "length", 0) or 0)
         except (TypeError, ValueError):
             return ""
         if offset < 0 or length <= 0:
@@ -3588,9 +4260,9 @@ class TelegramCollector(BaseCollector):
         )
         for attr, entity_text in entity_sources:
             for ent in (getattr(message, attr, None) or []):
-                ent_name = type(ent).__name__
-                offset = getattr(ent, "offset", None)
-                length = getattr(ent, "length", None)
+                ent_name = _obj_get(ent, "_") or type(ent).__name__
+                offset = _obj_get(ent, "offset")
+                length = _obj_get(ent, "length")
                 raw_text = self._entity_text_slice(entity_text, ent)
                 if ent_name == "MessageEntityMention":
                     add_mention(
@@ -3602,12 +4274,22 @@ class TelegramCollector(BaseCollector):
                     )
                 elif ent_name in {"MessageEntityMentionName", "InputMessageEntityMentionName"}:
                     add_mention(
-                        user_id=getattr(ent, "user_id", None),
+                        user_id=_obj_get(ent, "user_id"),
                         source=f"{attr}:entity_mention_name",
                         offset_start=offset,
                         length=length,
                         raw_text=raw_text,
                     )
+                elif ent_name == "MessageEntityTextUrl":
+                    linked = self._parse_telegram_link_target(str(_obj_get(ent, "url", "") or ""))
+                    if linked and linked.get("username"):
+                        add_mention(
+                            username=linked["username"],
+                            source=f"{attr}:entity_text_url",
+                            offset_start=offset,
+                            length=length,
+                            raw_text=raw_text,
+                        )
 
         for match in _TELEGRAM_USERNAME_RE.finditer(text):
             add_mention(
@@ -4495,7 +5177,7 @@ class TelegramCollector(BaseCollector):
                 "entity_id": chat_id_str,
                 "entity_name": chat_name,
                 "content_type": "media",
-                "content_id": str(message.id),
+                "content_id": _telegram_message_content_id(chat_id_str, message.id),
                 "data": data,
                 "extension": ext or "bin",
                 "raw": message.to_dict(),
@@ -4521,6 +5203,24 @@ class TelegramCollector(BaseCollector):
             await self._bot_pool.stop_health_monitor()
         except Exception:
             pass
+        if self._mention_backfill_task is not None:
+            self._mention_backfill_task.cancel()
+            try:
+                await self._mention_backfill_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+            self._mention_backfill_task = None
+        if self._hot_reload_task is not None:
+            self._hot_reload_task.cancel()
+            try:
+                await self._hot_reload_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+            self._hot_reload_task = None
         for w in self._workers:
             await w.disconnect()
         self._workers = []

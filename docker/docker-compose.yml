@@ -431,6 +431,13 @@ services:
       # Per-message identity enumeration caps for public reactions/polls.
       TELEGRAM_REACTION_USER_CAP: "500"
       TELEGRAM_POLL_VOTE_USER_CAP: "500"
+      TELEGRAM_ADMIN_LOG_ENABLED: "true"
+      TELEGRAM_ADMIN_LOG_LIMIT: "1000"
+      TELEGRAM_JOIN_LINKS_MAX_PER_CYCLE: "10"
+      TELEGRAM_JOIN_LINK_TIMEOUT: "120"
+      TELEGRAM_JOIN_MESSAGE_LIMIT: "0"
+      TELEGRAM_MENTION_BACKFILL_BATCH: "2000"
+      TELEGRAM_MENTION_BACKFILL_INTERVAL: "60"
       # More aggressive but below the old 250/30s/200 setting that saturated the
       # Z media drive. Live capture is unaffected by these backfill knobs.
       TELEGRAM_BACKFILL_MSG_PER_SEC: "120"
