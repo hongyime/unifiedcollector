@@ -103,6 +103,8 @@ def main():
     msr.add_argument("--source", default=None, help="Optional source filter")
     msr.add_argument("--limit", type=int, default=500, help="Maximum rows to scan")
     msr.add_argument("--since-hours", type=int, default=None, help="Only inspect rows collected in this window")
+    msr.add_argument("--cursor-after", default="", help="Start after this content_id when --source is set")
+    msr.add_argument("--timeout", type=float, default=10.0, help="DB timeout for the repair scan in seconds")
     msr.add_argument("--vault-root", default=None, help="Vault root (default: COLLECTOR_VAULT_ROOT)")
     msr.add_argument("--dry-run", action="store_true", help="Report repairable rows without writing sidecars")
     msr.add_argument(
@@ -111,6 +113,19 @@ def main():
         help="Repair media rows whose canonical vault artifact sidecar previously failed",
     )
     msr.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+
+    # repair-media-file-paths
+    mfpr = sub.add_parser(
+        "repair-media-file-paths",
+        help="Repair missing/stale media file_path rows by pointing them at existing sha256 vault blobs",
+    )
+    mfpr.add_argument("--source", required=True, help="Source to repair")
+    mfpr.add_argument("--limit", type=int, default=100, help="Maximum rows to scan")
+    mfpr.add_argument("--cursor-after", default="", help="Start after this content_id for keyset paging")
+    mfpr.add_argument("--timeout", type=float, default=10.0, help="DB timeout for the repair scan in seconds")
+    mfpr.add_argument("--vault-root", default=None, help="Vault root (default: COLLECTOR_VAULT_ROOT)")
+    mfpr.add_argument("--dry-run", action="store_true", help="Report repairable rows without updating DB")
+    mfpr.add_argument("--json", action="store_true", help="Print machine-readable JSON")
 
     # media-artifact-audit
     maa = sub.add_parser(
@@ -205,6 +220,8 @@ def main():
         _cmd_vault_inspect(args.vault_root, args.source, args.limit, args.json)
     elif args.command == "repair-media-sidecars":
         asyncio.run(_cmd_repair_media_sidecars(args))
+    elif args.command == "repair-media-file-paths":
+        asyncio.run(_cmd_repair_media_file_paths(args))
     elif args.command == "media-artifact-audit":
         asyncio.run(_cmd_media_artifact_audit(args))
     elif args.command == "backfill-discovered-links":
@@ -446,6 +463,8 @@ async def _cmd_repair_media_sidecars(args):
                     conn,
                     source=args.source,
                     limit=args.limit,
+                    cursor_after=args.cursor_after,
+                    timeout=args.timeout,
                     vault_root=args.vault_root,
                     dry_run=args.dry_run,
                 )
@@ -455,6 +474,8 @@ async def _cmd_repair_media_sidecars(args):
                     source=args.source,
                     limit=args.limit,
                     since_hours=args.since_hours,
+                    cursor_after=args.cursor_after,
+                    timeout=args.timeout,
                     vault_root=args.vault_root,
                     dry_run=args.dry_run,
                 )
@@ -464,7 +485,10 @@ async def _cmd_repair_media_sidecars(args):
             print(
                 "Media sidecar repair: "
                 f"scanned={report.scanned} repaired={report.repaired} "
-                f"failed={report.failed} skipped={report.skipped}"
+                f"failed={report.failed} skipped={report.skipped} "
+                f"would_repair={report.would_repair} already_ok={report.already_ok} "
+                f"file_missing={report.file_missing} size_mismatch={report.size_mismatch} "
+                f"next_cursor={report.next_cursor}"
             )
             for failure in report.failures[:10]:
                 print(f"  failed {failure.get('source')}/{failure.get('content_id')}: {failure.get('error')}")
@@ -518,6 +542,40 @@ async def _cmd_media_artifact_audit(args):
                         f"{failure.get('kind')} {failure.get('content_id')}: "
                         f"{failure.get('detail') or failure.get('path')}"
                     )
+    finally:
+        await close_pool()
+
+
+async def _cmd_repair_media_file_paths(args):
+    import json
+
+    from src.core.media_sidecar_repair import repair_media_file_paths_from_blobs
+
+    pool = await get_pool()
+    try:
+        async with pool.acquire() as conn:
+            report = await repair_media_file_paths_from_blobs(
+                conn,
+                source=args.source,
+                limit=args.limit,
+                cursor_after=args.cursor_after,
+                timeout=args.timeout,
+                vault_root=args.vault_root,
+                dry_run=args.dry_run,
+            )
+        if args.json:
+            print(json.dumps(report.to_dict(), indent=2, sort_keys=True, default=str))
+        else:
+            print(
+                "Media file path repair: "
+                f"source={args.source} scanned={report.scanned} repaired={report.repaired} "
+                f"failed={report.failed} skipped={report.skipped} "
+                f"would_repair={report.would_repair} already_ok={report.already_ok} "
+                f"file_missing={report.file_missing} size_mismatch={report.size_mismatch} "
+                f"next_cursor={report.next_cursor}"
+            )
+            for failure in report.failures[:10]:
+                print(f"  failed {failure.get('source')}/{failure.get('content_id')}: {failure.get('error')}")
     finally:
         await close_pool()
 

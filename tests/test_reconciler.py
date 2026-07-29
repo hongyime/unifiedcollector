@@ -222,12 +222,25 @@ async def test_redownload_writes_repair_as_vault_artifact(monkeypatch, tmp_path)
 async def test_update_repaired_media_item_points_row_at_canonical_blob():
     r = _make("website")
     seen: dict[str, object] = {}
+    executes = []
 
     class _Conn:
         async def execute(self, sql, *args):
-            seen["sql"] = sql
-            seen["args"] = args
+            executes.append((sql, args))
             return "UPDATE 1"
+
+        async def fetchrow(self, *_args, **_kwargs):
+            return {
+                "file_path": "/vault/media/blobs/aa/blob.jpg",
+                "file_size": 2048,
+                "sha256": "a" * 64,
+                "metadata": {
+                    "vault_artifact": {
+                        "ok": True,
+                        "sidecar_path": "sidecars/website/blob.json",
+                    }
+                },
+            }
 
     class _Acquire:
         async def __aenter__(self):
@@ -255,13 +268,13 @@ async def test_update_repaired_media_item_points_row_at_canonical_blob():
     updated = await r._update_repaired_media_item("image-1", repair)
 
     assert updated is True
-    assert "UPDATE media_items" in seen["sql"]
-    assert seen["args"][:5] == (
+    assert "UPDATE media_items" in executes[0][0]
+    assert executes[0][1][:5] == (
         "website",
         "image-1",
         "/vault/media/blobs/aa/blob.jpg",
         2048,
         "a" * 64,
     )
-    metadata = json.loads(seen["args"][5])
+    metadata = json.loads(executes[0][1][5])
     assert metadata["vault_artifact"]["repaired_by"] == "reconciler"
