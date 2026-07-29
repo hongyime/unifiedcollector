@@ -2834,6 +2834,28 @@ async def media_stats(_user: dict = Depends(require_role("viewer"))):
     return out
 
 
+@app.get("/media/artifact-audit")
+async def media_artifact_audit(
+    source: str | None = None,
+    sample_per_source: int = Query(100, ge=1, le=500),
+    cursor_after: str = "",
+    timeout_seconds: float = Query(5.0, alias="timeout", ge=0.5, le=20.0),
+    _user: dict = Depends(require_role("viewer")),
+):
+    from src.core.media_artifact_audit import audit_media_artifacts
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        report = await audit_media_artifacts(
+            conn,
+            source=source,
+            sample_per_source=sample_per_source,
+            cursor_after=cursor_after,
+            timeout=timeout_seconds,
+        )
+    return report.to_dict()
+
+
 @app.get("/ingestion/hourly")
 async def hourly_ingestion(hours: int = 12, _user: dict = Depends(require_role("viewer"))):
     """Hour-by-hour real ingestion from source tables, not collection_runs.

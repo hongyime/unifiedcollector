@@ -112,6 +112,18 @@ def main():
     )
     msr.add_argument("--json", action="store_true", help="Print machine-readable JSON")
 
+    # media-artifact-audit
+    maa = sub.add_parser(
+        "media-artifact-audit",
+        help="Read-only bounded audit of DB media rows, local files, and sidecar files",
+    )
+    maa.add_argument("--source", default=None, help="Optional source filter")
+    maa.add_argument("--sample-per-source", type=int, default=100, help="Rows to sample per source")
+    maa.add_argument("--cursor-after", default="", help="Start after this content_id for keyset paging")
+    maa.add_argument("--timeout", type=float, default=5.0, help="DB timeout per source query in seconds")
+    maa.add_argument("--vault-root", default=None, help="Vault root (default: COLLECTOR_VAULT_ROOT)")
+    maa.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+
     # backfill-discovered-links
     dlb = sub.add_parser(
         "backfill-discovered-links",
@@ -193,6 +205,8 @@ def main():
         _cmd_vault_inspect(args.vault_root, args.source, args.limit, args.json)
     elif args.command == "repair-media-sidecars":
         asyncio.run(_cmd_repair_media_sidecars(args))
+    elif args.command == "media-artifact-audit":
+        asyncio.run(_cmd_media_artifact_audit(args))
     elif args.command == "backfill-discovered-links":
         asyncio.run(_cmd_backfill_discovered_links(args))
     elif args.command == "restore-drill":
@@ -454,6 +468,56 @@ async def _cmd_repair_media_sidecars(args):
             )
             for failure in report.failures[:10]:
                 print(f"  failed {failure.get('source')}/{failure.get('content_id')}: {failure.get('error')}")
+    finally:
+        await close_pool()
+
+
+async def _cmd_media_artifact_audit(args):
+    import json
+
+    from src.core.media_artifact_audit import audit_media_artifacts
+
+    pool = await get_pool()
+    try:
+        async with pool.acquire() as conn:
+            report = await audit_media_artifacts(
+                conn,
+                source=args.source,
+                sample_per_source=args.sample_per_source,
+                cursor_after=args.cursor_after,
+                timeout=args.timeout,
+                vault_root=args.vault_root,
+            )
+        if args.json:
+            print(json.dumps(report.to_dict(), indent=2, sort_keys=True, default=str))
+        else:
+            print(
+                "Media artifact audit: "
+                f"mode={report.mode} sampled={report.total_sampled} "
+                f"issues={report.total_issues} vault={report.vault_root}"
+            )
+            if report.source_error:
+                print(f"  source listing failed: {report.source_error}")
+            for source_report in report.sources:
+                parts = [
+                    f"{source_report.source}: sampled={source_report.sampled}",
+                    f"total={source_report.total_media_items}",
+                    f"issues={source_report.issue_count}",
+                    f"file_missing={source_report.files_missing}",
+                    f"size_mismatch={source_report.size_mismatches}",
+                    f"sidecar_meta_missing={source_report.sidecar_metadata_missing}",
+                    f"sidecar_file_missing={source_report.sidecar_files_missing}",
+                    f"next_cursor={source_report.next_cursor}",
+                ]
+                if source_report.query_error:
+                    parts.append(f"query_error={source_report.query_error}")
+                print("  " + " ".join(parts))
+                for failure in source_report.failures[:5]:
+                    print(
+                        "    "
+                        f"{failure.get('kind')} {failure.get('content_id')}: "
+                        f"{failure.get('detail') or failure.get('path')}"
+                    )
     finally:
         await close_pool()
 
