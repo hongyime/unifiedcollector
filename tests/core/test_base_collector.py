@@ -79,6 +79,32 @@ class _InsertPool:
         yield self.conn
 
 
+class _SeedConn:
+    def __init__(self, rows, *, fail_after=None):
+        self.rows = sorted(rows, key=lambda r: r["content_id"])
+        self.fail_after = fail_after
+        self.fetch_calls = []
+
+    async def fetch(self, sql, source, last_content_id, limit, **kwargs):
+        self.fetch_calls.append((sql, source, last_content_id, limit, kwargs))
+        if self.fail_after is not None and len(self.fetch_calls) > self.fail_after:
+            raise TimeoutError("seed page timed out")
+        return [
+            row
+            for row in self.rows
+            if row["content_id"] > last_content_id
+        ][:limit]
+
+
+class _SeedPool:
+    def __init__(self, rows, *, fail_after=None):
+        self.conn = _SeedConn(rows, fail_after=fail_after)
+
+    @asynccontextmanager
+    async def acquire(self):
+        yield self.conn
+
+
 @pytest.mark.asyncio
 async def test_run_queues_pause_when_drive_missing(monkeypatch):
     monkeypatch.setattr(base_collector, "check_drive", lambda: False)
@@ -143,6 +169,51 @@ def test_save_file_writes_canonical_vault_blob(tmp_path, monkeypatch):
     assert payload["metadata"]["filename"] == filename
     assert payload["metadata"]["raw"] == {"id": "post123"}
     assert payload["metadata"]["legacy_path"].endswith(filename)
+
+
+@pytest.mark.asyncio
+async def test_seed_known_ids_pages_by_content_id(monkeypatch):
+    monkeypatch.delenv("COLLECTOR_RECOVER_MISSING", raising=False)
+    monkeypatch.setenv("COLLECTOR_KNOWN_ID_SEED_BATCH", "2")
+    monkeypatch.setenv("COLLECTOR_KNOWN_ID_SEED_QUERY_TIMEOUT", "9")
+    coll = _Collector()
+    coll.pool = _SeedPool(
+        [
+            {"content_id": "c"},
+            {"content_id": "a"},
+            {"content_id": "b"},
+        ]
+    )
+    coll.reconciler.set_pool(coll.pool)
+
+    await coll._seed_known_ids()
+
+    assert coll._known_ids == {"a", "b", "c"}
+    assert [call[2] for call in coll.pool.conn.fetch_calls] == ["", "b"]
+    assert all("ORDER BY content_id" in call[0] for call in coll.pool.conn.fetch_calls)
+    assert all(call[4]["timeout"] == 9 for call in coll.pool.conn.fetch_calls)
+
+
+@pytest.mark.asyncio
+async def test_seed_known_ids_keeps_partial_page_on_timeout(monkeypatch, caplog):
+    monkeypatch.delenv("COLLECTOR_RECOVER_MISSING", raising=False)
+    monkeypatch.setenv("COLLECTOR_KNOWN_ID_SEED_BATCH", "2")
+    coll = _Collector()
+    coll.pool = _SeedPool(
+        [
+            {"content_id": "a"},
+            {"content_id": "b"},
+            {"content_id": "c"},
+        ],
+        fail_after=1,
+    )
+    coll.reconciler.set_pool(coll.pool)
+
+    with caplog.at_level("WARNING", logger="src.core.base_collector"):
+        await coll._seed_known_ids()
+
+    assert coll._known_ids == {"a", "b"}
+    assert any("DB known-id seed stopped after 2 rows" in r.getMessage() for r in caplog.records)
 
 
 @pytest.mark.asyncio

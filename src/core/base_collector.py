@@ -277,8 +277,8 @@ class BaseCollector(ABC):
         """DB-first dedup seed (P3-3). Replaces the per-instance O(files) disk
         scan of media_dir, which slowed over time and raced across telegram's
         multi-workers sharing one media_dir. media_items UNIQUE(source,content_id)
-        is the dedup authority; we seed the in-memory cache from it with a single
-        indexed query. save_media_item still relies on ON CONFLICT, so a missed
+        is the dedup authority; we seed the in-memory cache from it with bounded
+        indexed pages. save_media_item still relies on ON CONFLICT, so a missed
         cache entry only costs one harmless insert attempt, never a duplicate.
         """
         if self.pool is None:
@@ -287,34 +287,82 @@ class BaseCollector(ABC):
         # already completed its refill, reconciler.active goes False (fast path).
         await self.reconciler.load_state()
         recover = self.reconciler.active
+        batch_size = max(1, int(os.getenv("COLLECTOR_KNOWN_ID_SEED_BATCH", "5000")))
+        query_timeout = max(
+            1.0, float(os.getenv("COLLECTOR_KNOWN_ID_SEED_QUERY_TIMEOUT", "30"))
+        )
+        total = 0
+        last_content_id = ""
+        seed_recovery_paths = recover and os.getenv(
+            "COLLECTOR_KNOWN_ID_SEED_FILE_PATHS", ""
+        ).strip().lower() in {"1", "true", "yes", "on"}
         try:
             async with self.pool.acquire() as conn:
-                # Recovery needs file_path to stat the backing file; normal ops
-                # only need the id set (cheaper, no extra column materialized).
-                if recover:
-                    rows = await conn.fetch(
-                        "SELECT content_id, file_path FROM media_items "
-                        "WHERE source = $1",
-                        self.SOURCE_NAME,
-                    )
-                else:
-                    rows = await conn.fetch(
-                        "SELECT content_id FROM media_items WHERE source = $1",
-                        self.SOURCE_NAME,
-                    )
-            for r in rows:
-                cid = r["content_id"]
-                if cid:
-                    self._known_ids.add(cid)
-                    if recover:
-                        self.reconciler.note_known(cid, r["file_path"])
-            if rows:
-                logger.info("Seeded %d known %s content_ids from DB%s",
-                            len(rows), self.SOURCE_NAME,
-                            " [reconciler ON]" if recover else "")
+                # Seed content IDs through the existing (source, content_id)
+                # index. Full file_path hydration is opt-in because it turns the
+                # Telegram startup seed into a large heap read when recovery is
+                # enabled.
+                while True:
+                    if seed_recovery_paths:
+                        rows = await conn.fetch(
+                            """
+                            SELECT content_id, file_path
+                            FROM media_items
+                            WHERE source = $1
+                              AND content_id > $2
+                            ORDER BY content_id
+                            LIMIT $3
+                            """,
+                            self.SOURCE_NAME,
+                            last_content_id,
+                            batch_size,
+                            timeout=query_timeout,
+                        )
+                    else:
+                        rows = await conn.fetch(
+                            """
+                            SELECT content_id
+                            FROM media_items
+                            WHERE source = $1
+                              AND content_id > $2
+                            ORDER BY content_id
+                            LIMIT $3
+                            """,
+                            self.SOURCE_NAME,
+                            last_content_id,
+                            batch_size,
+                            timeout=query_timeout,
+                        )
+                    if not rows:
+                        break
+                    for r in rows:
+                        cid = r["content_id"]
+                        if cid:
+                            self._known_ids.add(cid)
+                            if seed_recovery_paths:
+                                self.reconciler.note_known(cid, r["file_path"])
+                    total += len(rows)
+                    last_content_id = rows[-1]["content_id"] or last_content_id
+                    if len(rows) < batch_size:
+                        break
+                    await asyncio.sleep(0)
+            if total:
+                logger.info(
+                    "Seeded %d known %s content_ids from DB in pages of %d%s",
+                    total,
+                    self.SOURCE_NAME,
+                    batch_size,
+                    " [reconciler paths ON]"
+                    if seed_recovery_paths
+                    else (" [reconciler path seed skipped]" if recover else ""),
+                )
         except Exception:
-            logger.warning("%s: DB known-id seed failed; relying on ON CONFLICT",
-                           self.SOURCE_NAME, exc_info=True)
+            logger.warning(
+                "%s: DB known-id seed stopped after %d rows; relying on ON CONFLICT",
+                self.SOURCE_NAME,
+                total,
+                exc_info=True,
+            )
 
     def _scan_existing_media(self):
         """DEPRECATED (P3-3): legacy disk scan, kept as a fallback only. Use
