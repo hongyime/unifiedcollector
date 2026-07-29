@@ -484,7 +484,7 @@ services:
       COLLECTOR_VAULT_ROOT: /vault
       BEEPER_DESKTOP_API_URL: http://host.docker.internal:23373
       # Larger pages = fewer Beeper Desktop Local API round-trips per sync.
-      BEEPER_PAGE_SIZE: "200"
+      BEEPER_PAGE_SIZE: "150"
       # Stability (2026-06-21, Bryan reported recurring "beeper disconnected"):
       # the Beeper Desktop Local API (host:23373) is intermittently unresponsive,
       # so a single blip used to end the cycle -> error -> retry -> alert. Ride
@@ -495,9 +495,9 @@ services:
       BEEPER_TRANSIENT_BACKOFF: "2.0"
       COLLECTOR_HANG_TIMEOUT_SECONDS: "5400"
       # Wider room coverage + deeper history per cycle. The live Beeper room
-      # count is now >700, so 300 rooms covers the tail in about three 5-minute
+      # count is now >700, so 200 rooms covers the tail in about four 5-minute
       # passes while avoiding the older 600x20 setting that melted the host.
-      BEEPER_MAX_CHATS_PER_CYCLE: "300"
+      BEEPER_MAX_CHATS_PER_CYCLE: "200"
       BEEPER_BACKFILL_PAGES_PER_CYCLE: "8"
       BEEPER_BACKFILL_CANDIDATE_MESSAGES: "1000"
       BEEPER_BACKFILL_QUERY_TIMEOUT: "30"
