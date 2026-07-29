@@ -704,6 +704,8 @@ async def test_upsert_message_inserts_with_chat_uuid(collector):
     collector._test_conn.execute.assert_awaited_once()
     sql, *args = collector._test_conn.execute.await_args.args
     assert "quoted_message_id" in sql
+    assert "DO UPDATE SET" in sql
+    assert "metadata = COALESCE(whatsapp_messages.metadata" in sql
     assert args[3] is True
     assert args[6:9] == ["quoted-1", "earlier text", "News"]
     metadata = json.loads(args[10])
@@ -726,6 +728,32 @@ async def test_upsert_message_accepts_snake_case_from_me(collector):
 
     args = collector._test_conn.execute.await_args.args
     assert args[4] is True
+
+
+@pytest.mark.asyncio
+async def test_upsert_message_enriches_existing_rows_on_replay(collector):
+    collector._test_conn.fetchrow = AsyncMock(return_value={"id": "chat-uuid"})
+    event = {
+        "message_id": "old-msg",
+        "body": "historical replay",
+        "timestamp": 1_700_000_000,
+        "from_me": False,
+        "quoted_message_id": "quoted-old",
+        "quoted_text": "old context",
+        "forward_from_name": "Forwarded Channel",
+        "mimetype": "image/jpeg",
+    }
+
+    await collector._upsert_message(event, "111@s.whatsapp.net", "sender-uuid")
+
+    sql, *args = collector._test_conn.execute.await_args.args
+    assert "ON CONFLICT (platform_message_id) DO UPDATE SET" in sql
+    assert "quoted_text = COALESCE" in sql
+    assert args[0] == "old-msg"
+    assert args[2] == "sender-uuid"
+    assert args[3] is False
+    assert args[5] == "image/jpeg"
+    assert args[6:9] == ["quoted-old", "old context", "Forwarded Channel"]
 
 
 # ── link discovery ───────────────────────────────────────────────────────

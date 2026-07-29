@@ -746,7 +746,17 @@ class WhatsappCollector(BaseCollector):
                     text, media_mime_type, quoted_message_id, quoted_text,
                     forward_from_name, timestamp, metadata
                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-                ON CONFLICT (platform_message_id) DO NOTHING
+                ON CONFLICT (platform_message_id) DO UPDATE SET
+                    chat_id = COALESCE(whatsapp_messages.chat_id, EXCLUDED.chat_id),
+                    sender_id = COALESCE(EXCLUDED.sender_id, whatsapp_messages.sender_id),
+                    from_me = COALESCE(EXCLUDED.from_me, whatsapp_messages.from_me),
+                    text = COALESCE(NULLIF(EXCLUDED.text, ''), whatsapp_messages.text),
+                    media_mime_type = COALESCE(NULLIF(EXCLUDED.media_mime_type, ''), whatsapp_messages.media_mime_type),
+                    quoted_message_id = COALESCE(NULLIF(EXCLUDED.quoted_message_id, ''), whatsapp_messages.quoted_message_id),
+                    quoted_text = COALESCE(NULLIF(EXCLUDED.quoted_text, ''), whatsapp_messages.quoted_text),
+                    forward_from_name = COALESCE(NULLIF(EXCLUDED.forward_from_name, ''), whatsapp_messages.forward_from_name),
+                    timestamp = COALESCE(EXCLUDED.timestamp, whatsapp_messages.timestamp),
+                    metadata = COALESCE(whatsapp_messages.metadata, '{}'::jsonb) || COALESCE(EXCLUDED.metadata, '{}'::jsonb)
             """,
             msg_id, chat_uuid, sender_uuid, from_me,
             text, event.get("mimetype"), quoted_message_id, quoted_text,

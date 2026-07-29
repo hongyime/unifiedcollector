@@ -537,10 +537,10 @@ services:
       WHATSAPP_SPIDER_SESSIONS: "session_2"
       # Backfill ALL history, not just 90 days (user: "whatsapp backfill all").
       WHATSAPP_MAX_BACKFILL_AGE_DAYS: "36500"
-      # Throughput push (2026-06-13): backfill 5->12 req/min (history requests are
-      # ban-sensitive, so moderate). Larger media batch. Monitor session-risk; tune
-      # down if WhatsApp flags the session.
-      WHATSAPP_BACKFILL_REQ_PER_MIN: "12"
+      # Throughput push (2026-07-29): 24 req/min with 100-message batches.
+      # Monitor session-risk/history progress; tune down if WhatsApp throttles.
+      WHATSAPP_BACKFILL_REQ_PER_MIN: "24"
+      WHATSAPP_BACKFILL_BATCH_SIZE: "100"
       WHATSAPP_MEDIA_ARCHIVAL_BATCH_SIZE: "100"
       # WhatsApp is event-driven: collector.run() blocks in the RabbitMQ
       # consumer loop until messages arrive. The default 1800s watchdog kills
@@ -924,7 +924,8 @@ services:
       # On-demand deep history: actively pull older messages per chat (was stuck
       # ~9 days). Paced; 36500d = effectively all the phone still holds.
       WHATSAPP_DEEP_BACKFILL: "true"
-      WHATSAPP_BACKFILL_REQ_PER_MIN: "12"
+      WHATSAPP_BACKFILL_REQ_PER_MIN: "24"
+      WHATSAPP_FETCH_COUNT: "100"
       WHATSAPP_MAX_BACKFILL_AGE_DAYS: "36500"
       LOG_LEVEL: info
     ports:
@@ -958,7 +959,8 @@ services:
       SYNC_FULL_HISTORY: "true"
       # On-demand deep history (see wa-bridge-1).
       WHATSAPP_DEEP_BACKFILL: "true"
-      WHATSAPP_BACKFILL_REQ_PER_MIN: "12"
+      WHATSAPP_BACKFILL_REQ_PER_MIN: "24"
+      WHATSAPP_FETCH_COUNT: "100"
       WHATSAPP_MAX_BACKFILL_AGE_DAYS: "36500"
       LOG_LEVEL: info
     ports:
