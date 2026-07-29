@@ -235,7 +235,7 @@ _SOURCE_METHODS = {
 }
 
 _BEEPER_SUBSOURCE_STALE_SECONDS = int(os.getenv("BEEPER_SUBSOURCE_STALE_SECONDS", str(24 * 3600)))
-_BEEPER_SUBSOURCE_PREFIX = "beeper:"
+_BEEPER_SUBSOURCE_PREFIX = "beeper_"
 
 
 def _beeper_network_label(message_network: str | None, chat_network: str | None = None) -> str:

@@ -11,6 +11,7 @@ os.environ.setdefault("DASHBOARD_ADMIN_PASSWORD", "x")
 
 from src.dashboard.api import (
     _SOURCE_MEDIA_TOTALS_CACHE,
+    _beeper_source_key,
     _messaging_policy,
     _normalize_beeper_network,
     _rate_limit_cursor_payload,
@@ -62,6 +63,8 @@ def test_messaging_coverage_normalizes_unknown_beeper_messages_from_chat_network
     assert _normalize_beeper_network("unknown", "Discord") == "Discord"
     assert _normalize_beeper_network("", "WhatsApp") == "WhatsApp"
     assert _normalize_beeper_network(None, None) == "Unmapped Beeper"
+    assert _beeper_source_key("Discord") == ("beeper_discord", "Beeper / Discord")
+    assert _beeper_source_key("Slack") == ("beeper_slack", "Beeper / Slack")
     assert _messaging_policy("telegram").startswith("telegram native is canonical")
     assert "native collector" in _messaging_policy(None)
 
