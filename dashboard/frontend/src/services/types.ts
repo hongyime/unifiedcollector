@@ -866,6 +866,23 @@ export interface StravaFeedStats {
   total_elevation_gain: number;
   earliest: string | null;
   latest: string | null;
+  profile_completeness?: {
+    total_athletes: number;
+    enriched_profiles: number;
+    profile_backfill_remaining: number;
+    id_only_athletes: number;
+    with_name: number;
+    with_profile_photo: number;
+    with_social_counts: number;
+    with_location: number;
+    athletes_with_activity: number;
+    athletes_with_route: number;
+    activity_rows: number;
+    profile_completion_pct: number;
+    activity_coverage_pct: number;
+    route_athlete_pct: number;
+    latest_profile_update_at: string | null;
+  };
   route_coverage?: {
     total: number;
     mapped: number;

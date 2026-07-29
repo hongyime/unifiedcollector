@@ -4821,9 +4821,63 @@ async def strava_feed_stats(
         "       COUNT(*) FILTER (WHERE NOT is_mapped AND stream_status IS NULL AND start_latlng IS NULL)::int AS queued "
         "FROM base"
     )
+    profile_sql = """
+        WITH activity_by_athlete AS (
+            SELECT athlete_id,
+                   COUNT(*)::int AS activity_count,
+                   BOOL_OR(
+                       COALESCE(
+                           (summary_polyline IS NOT NULL AND summary_polyline <> '')
+                           OR stream_status = 'ok',
+                           FALSE
+                       )
+                   ) AS has_route
+            FROM strava_activities
+            GROUP BY athlete_id
+        )
+        SELECT COUNT(*)::int AS total_athletes,
+               COUNT(*) FILTER (
+                   WHERE profile IS NOT NULL
+                      OR follower_count IS NOT NULL
+                      OR following_count IS NOT NULL
+                      OR city IS NOT NULL
+                      OR state IS NOT NULL
+                      OR country IS NOT NULL
+                      OR sex IS NOT NULL
+                      OR weight IS NOT NULL
+                      OR height IS NOT NULL
+               )::int AS enriched_profiles,
+               COUNT(*) FILTER (
+                   WHERE username IS NOT NULL OR firstname IS NOT NULL OR lastname IS NOT NULL
+               )::int AS with_name,
+               COUNT(*) FILTER (WHERE profile IS NOT NULL)::int AS with_profile_photo,
+               COUNT(*) FILTER (
+                   WHERE follower_count IS NOT NULL OR following_count IS NOT NULL
+               )::int AS with_social_counts,
+               COUNT(*) FILTER (
+                   WHERE city IS NOT NULL OR state IS NOT NULL OR country IS NOT NULL
+               )::int AS with_location,
+               COUNT(ab.athlete_id)::int AS athletes_with_activity,
+               COUNT(*) FILTER (WHERE COALESCE(ab.has_route, FALSE))::int AS athletes_with_route,
+               COALESCE(SUM(ab.activity_count), 0)::int AS activity_rows,
+               MAX(a.updated_at) FILTER (
+                   WHERE profile IS NOT NULL
+                      OR follower_count IS NOT NULL
+                      OR following_count IS NOT NULL
+                      OR city IS NOT NULL
+                      OR state IS NOT NULL
+                      OR country IS NOT NULL
+                      OR sex IS NOT NULL
+                      OR weight IS NOT NULL
+                      OR height IS NOT NULL
+               ) AS latest_profile_update_at
+        FROM strava_athletes a
+        LEFT JOIN activity_by_athlete ab ON ab.athlete_id = a.id
+    """
     async with pool.acquire() as conn:
         row = await conn.fetchrow(sql, *args)
         coverage = await conn.fetchrow(coverage_sql, *args)
+        profile_completeness = await conn.fetchrow(profile_sql)
         recent_429_events = int(await conn.fetchval(
             """
             SELECT COUNT(*)::int
@@ -4881,6 +4935,30 @@ async def strava_feed_stats(
         ),
         "active_gps_cooldown_reason": active_cooldown["reason"] if active_cooldown else None,
         "latest_browser_capture_at": latest_browser_capture_at.isoformat() if latest_browser_capture_at else None,
+    }
+    pc = dict(profile_completeness) if profile_completeness else {}
+    total_athletes = int(pc.get("total_athletes") or 0)
+    enriched_profiles = int(pc.get("enriched_profiles") or 0)
+    with_name = int(pc.get("with_name") or 0)
+    athletes_with_activity = int(pc.get("athletes_with_activity") or 0)
+    athletes_with_route = int(pc.get("athletes_with_route") or 0)
+    latest_profile_update_at = pc.get("latest_profile_update_at")
+    d["profile_completeness"] = {
+        "total_athletes": total_athletes,
+        "enriched_profiles": enriched_profiles,
+        "profile_backfill_remaining": max(total_athletes - enriched_profiles, 0),
+        "id_only_athletes": max(total_athletes - with_name, 0),
+        "with_name": with_name,
+        "with_profile_photo": int(pc.get("with_profile_photo") or 0),
+        "with_social_counts": int(pc.get("with_social_counts") or 0),
+        "with_location": int(pc.get("with_location") or 0),
+        "athletes_with_activity": athletes_with_activity,
+        "athletes_with_route": athletes_with_route,
+        "activity_rows": int(pc.get("activity_rows") or 0),
+        "profile_completion_pct": round((enriched_profiles / total_athletes) * 100, 1) if total_athletes else 0.0,
+        "activity_coverage_pct": round((athletes_with_activity / total_athletes) * 100, 1) if total_athletes else 0.0,
+        "route_athlete_pct": round((athletes_with_route / total_athletes) * 100, 1) if total_athletes else 0.0,
+        "latest_profile_update_at": latest_profile_update_at.isoformat() if latest_profile_update_at else None,
     }
     return d
 

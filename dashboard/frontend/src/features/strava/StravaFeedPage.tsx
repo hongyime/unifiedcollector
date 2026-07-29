@@ -30,6 +30,12 @@ function formatCount(n: number | null | undefined): string {
   return Number(n ?? 0).toLocaleString();
 }
 
+function formatPercent(n: number | null | undefined): string {
+  const value = Number(n ?? 0);
+  if (value > 0 && value < 0.1) return "<0.1%";
+  return `${value.toFixed(1)}%`;
+}
+
 function formatCaptureAge(iso: string | null | undefined): string {
   if (!iso) return "none yet";
   const ms = Date.now() - new Date(iso).getTime();
@@ -200,6 +206,7 @@ export function StravaFeedPage() {
 
   const dateOptions = useMemo(() => dates.data ?? [], [dates.data]);
   const coverage = stats.data?.route_coverage;
+  const profileCompleteness = stats.data?.profile_completeness;
   const queueItems = routeQueue.data?.items ?? [];
 
   if (athletes.error) return <ErrorState message={String(athletes.error)} onRetry={refresh} />;
@@ -239,6 +246,59 @@ export function StravaFeedPage() {
           </div>
         </div>
       </div>
+
+      {profileCompleteness ? (
+        <div className="bg-surface border border-border rounded-lg p-4 mb-4">
+          <div className="flex flex-wrap items-start justify-between gap-3 mb-3">
+            <div>
+              <div className="text-sm font-semibold">Athlete completeness</div>
+              <div className="text-xs text-text-muted mt-1">
+                {formatCount(profileCompleteness.profile_backfill_remaining)} athletes still need profile-page enrichment; {formatCount(profileCompleteness.id_only_athletes)} are ID-only.
+              </div>
+            </div>
+            <div className="text-xs text-text-muted">
+              Profile update: {formatCaptureAge(profileCompleteness.latest_profile_update_at)}
+            </div>
+          </div>
+          <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
+            <div className="rounded border border-border/70 p-3">
+              <div className="text-[10px] uppercase text-text-muted mb-1">Athlete IDs</div>
+              <div className="text-xl font-semibold">{formatCount(profileCompleteness.total_athletes)}</div>
+              <div className="text-[11px] text-text-muted">{formatCount(profileCompleteness.with_name)} with names</div>
+            </div>
+            <div className="rounded border border-border/70 p-3">
+              <div className="flex items-center gap-2 text-[10px] uppercase text-text-muted mb-1">
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                Enriched
+              </div>
+              <div className="text-xl font-semibold">{formatCount(profileCompleteness.enriched_profiles)}</div>
+              <div className="text-[11px] text-text-muted">
+                {formatPercent(profileCompleteness.profile_completion_pct)} · {formatCount(profileCompleteness.with_social_counts)} with counts
+              </div>
+            </div>
+            <div className="rounded border border-border/70 p-3">
+              <div className="flex items-center gap-2 text-[10px] uppercase text-text-muted mb-1">
+                <Clock3 className="w-3.5 h-3.5 text-amber-300" />
+                With Activity
+              </div>
+              <div className="text-xl font-semibold">{formatCount(profileCompleteness.athletes_with_activity)}</div>
+              <div className="text-[11px] text-text-muted">
+                {formatPercent(profileCompleteness.activity_coverage_pct)} · {formatCount(profileCompleteness.activity_rows)} activities
+              </div>
+            </div>
+            <div className="rounded border border-border/70 p-3">
+              <div className="flex items-center gap-2 text-[10px] uppercase text-text-muted mb-1">
+                <MapIcon className="w-3.5 h-3.5 text-orange-400" />
+                With Route
+              </div>
+              <div className="text-xl font-semibold">{formatCount(profileCompleteness.athletes_with_route)}</div>
+              <div className="text-[11px] text-text-muted">
+                {formatPercent(profileCompleteness.route_athlete_pct)} of athlete IDs
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {coverage ? (
         <div className="grid grid-cols-2 xl:grid-cols-6 gap-3 mb-4">
