@@ -1882,6 +1882,9 @@ class TelegramCollector(BaseCollector):
                 await self._capture_poll(conn, row["id"], message)
             # Tier 6: venue/event extraction (best effort — never breaks flow).
             await self._extract_message_event(message, chat_uuid, platform_msg_id, conn=conn)
+            await self._record_message_membership_signals(
+                conn, message, chat_uuid, sender_uuid
+            )
             await persist_discovered_links(
                 conn,
                 source="telegram",
@@ -2924,11 +2927,11 @@ class TelegramCollector(BaseCollector):
             elif getattr(event, "user_left", False):
                 role = "left"
             user_ids: list[int] = []
-            try:
-                if getattr(event, "user_id", None):
-                    user_ids.append(event.user_id)
-            except Exception:
-                pass
+            user_ids.extend(self._coerce_telegram_user_ids(getattr(event, "user_id", None)))
+            user_ids.extend(self._coerce_telegram_user_ids(getattr(event, "user_ids", None)))
+            user_ids.extend(self._coerce_telegram_user_ids(getattr(event, "user", None)))
+            user_ids.extend(self._coerce_telegram_user_ids(getattr(event, "users", None)))
+            user_ids = list(dict.fromkeys(user_ids))
             if not user_ids:
                 return
             async with self.pool.acquire() as conn:
@@ -2939,21 +2942,19 @@ class TelegramCollector(BaseCollector):
                     str(chat_id))
                 if chat_uuid is None:
                     return
+                observed_at = datetime.now(timezone.utc)
                 for user_id in user_ids:
-                    user_uuid = await conn.fetchval(
-                        "SELECT id FROM telegram_users WHERE platform_user_id = $1",
-                        str(user_id))
+                    user_uuid = await self._ensure_telegram_user_stub(conn, user_id)
                     if user_uuid is None:
                         continue
-                    await conn.execute("""
-                        INSERT INTO telegram_chat_members
-                            (chat_id, user_id, role, joined_at, last_seen_at, refreshed_at)
-                        VALUES ($1, $2, $3, NOW(), NOW(), NOW())
-                        ON CONFLICT (chat_id, user_id) DO UPDATE SET
-                            role = EXCLUDED.role,
-                            last_seen_at = NOW(),
-                            refreshed_at = NOW()
-                    """, chat_uuid, user_uuid, role)
+                    await self._upsert_chat_member_observation(
+                        conn,
+                        chat_uuid,
+                        user_uuid,
+                        role=role,
+                        joined_at=observed_at if role == "member" else None,
+                        last_seen_at=observed_at,
+                    )
         except Exception as exc:
             logger.error("_on_chat_action error: %s", exc, exc_info=True)
 
@@ -3160,6 +3161,9 @@ class TelegramCollector(BaseCollector):
             # Tier 6: venue/event extraction (best effort — never breaks the
             # hot realtime path; helper swallows all exceptions internally).
             await self._extract_message_event(message, chat_uuid, platform_msg_id, conn=conn)
+            await self._record_message_membership_signals(
+                conn, message, chat_uuid, sender_uuid
+            )
             await persist_discovered_links(
                 conn,
                 source="telegram",
@@ -3244,6 +3248,170 @@ class TelegramCollector(BaseCollector):
                     await _conn.execute(sql, *args)
         except Exception as exc:
             logger.debug("_extract_message_event failed for %s: %s", platform_msg_id, exc)
+
+    @staticmethod
+    def _coerce_telegram_user_ids(value) -> list[int]:
+        if value is None:
+            return []
+        if isinstance(value, (list, tuple, set)):
+            values = value
+        else:
+            values = [value]
+        out: list[int] = []
+        for item in values:
+            user_id = (
+                getattr(item, "user_id", None)
+                or getattr(item, "id", None)
+                or item
+            )
+            try:
+                out.append(int(user_id))
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    async def _ensure_telegram_user_stub(self, conn, platform_user_id) -> str | None:
+        if platform_user_id is None:
+            return None
+        try:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO telegram_users (platform_user_id, updated_at)
+                VALUES ($1, NOW())
+                ON CONFLICT (platform_user_id) DO NOTHING
+                RETURNING id
+                """,
+                str(platform_user_id),
+            )
+            if row is not None:
+                return row["id"]
+            return await conn.fetchval(
+                "SELECT id FROM telegram_users WHERE platform_user_id = $1",
+                str(platform_user_id),
+            )
+        except Exception as exc:
+            logger.debug("telegram user stub upsert failed for %s: %s", platform_user_id, exc)
+            return None
+
+    async def _upsert_chat_member_observation(
+        self,
+        conn,
+        chat_uuid,
+        user_uuid,
+        *,
+        role: str = "member",
+        joined_at=None,
+        last_seen_at=None,
+    ) -> None:
+        if chat_uuid is None or user_uuid is None:
+            return
+        await conn.execute(
+            """
+            INSERT INTO telegram_chat_members
+                (chat_id, user_id, role, joined_at, last_seen_at, refreshed_at)
+            VALUES ($1, $2, $3, $4, COALESCE($5, NOW()), NOW())
+            ON CONFLICT (chat_id, user_id) DO UPDATE SET
+                role = CASE
+                    WHEN COALESCE(EXCLUDED.last_seen_at, NOW())
+                       < COALESCE(telegram_chat_members.last_seen_at, '-infinity'::timestamptz)
+                        THEN telegram_chat_members.role
+                    WHEN EXCLUDED.role = 'member'
+                     AND telegram_chat_members.role IN ('creator', 'admin')
+                        THEN telegram_chat_members.role
+                    ELSE EXCLUDED.role
+                END,
+                joined_at = COALESCE(telegram_chat_members.joined_at, EXCLUDED.joined_at),
+                last_seen_at = GREATEST(
+                    COALESCE(telegram_chat_members.last_seen_at, '-infinity'::timestamptz),
+                    COALESCE(EXCLUDED.last_seen_at, NOW())
+                ),
+                refreshed_at = NOW()
+            """,
+            chat_uuid,
+            user_uuid,
+            role,
+            joined_at,
+            last_seen_at,
+        )
+
+    async def _record_message_membership_signals(
+        self,
+        conn,
+        message,
+        chat_uuid,
+        sender_uuid,
+    ) -> None:
+        """Normalize weak member evidence from messages and service actions."""
+        if chat_uuid is None:
+            return
+        try:
+            message_at = getattr(message, "date", None)
+            sender_id = getattr(message, "sender_id", None)
+            if sender_uuid is None and sender_id is not None:
+                sender_uuid = await self._ensure_telegram_user_stub(conn, sender_id)
+            if sender_uuid is not None:
+                await self._upsert_chat_member_observation(
+                    conn,
+                    chat_uuid,
+                    sender_uuid,
+                    role="member",
+                    last_seen_at=message_at,
+                )
+
+            action = getattr(message, "action", None)
+            if action is None:
+                return
+
+            action_name = type(action).__name__
+            member_ids: list[int] = []
+            left_ids: list[int] = []
+            member_ids.extend(self._coerce_telegram_user_ids(getattr(action, "users", None)))
+            member_ids.extend(self._coerce_telegram_user_ids(getattr(action, "user_id", None)))
+
+            if action_name == "MessageActionChatDeleteUser":
+                left_ids.extend(member_ids)
+                member_ids = []
+            elif action_name in {
+                "MessageActionChatJoinedByLink",
+                "MessageActionChatJoinedByRequest",
+            }:
+                member_ids.extend(self._coerce_telegram_user_ids(sender_id))
+            elif action_name == "MessageActionChatCreate":
+                member_ids.extend(self._coerce_telegram_user_ids(sender_id))
+
+            actor_ids = self._coerce_telegram_user_ids(getattr(action, "inviter_id", None))
+            actor_ids.extend(self._coerce_telegram_user_ids(getattr(action, "from_id", None)))
+
+            for user_id in dict.fromkeys(member_ids):
+                user_uuid = await self._ensure_telegram_user_stub(conn, user_id)
+                await self._upsert_chat_member_observation(
+                    conn,
+                    chat_uuid,
+                    user_uuid,
+                    role="member",
+                    joined_at=message_at,
+                    last_seen_at=message_at,
+                )
+            for user_id in dict.fromkeys(actor_ids):
+                user_uuid = await self._ensure_telegram_user_stub(conn, user_id)
+                await self._upsert_chat_member_observation(
+                    conn,
+                    chat_uuid,
+                    user_uuid,
+                    role="member",
+                    last_seen_at=message_at,
+                )
+            for user_id in dict.fromkeys(left_ids):
+                user_uuid = await self._ensure_telegram_user_stub(conn, user_id)
+                await self._upsert_chat_member_observation(
+                    conn,
+                    chat_uuid,
+                    user_uuid,
+                    role="left",
+                    last_seen_at=message_at,
+                )
+        except Exception as exc:
+            logger.debug("_record_message_membership_signals failed: %s", exc)
 
     async def _upsert_user_full(self, user):
         """Upsert with full Telethon user attributes (bot/verified/premium/etc).
