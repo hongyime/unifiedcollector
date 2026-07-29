@@ -2203,8 +2203,20 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
     pool = await get_pool()
     errors = []
     async with pool.acquire() as conn:
-        live_sources = await compute_liveness(conn)
-        live_sources, whatsapp_bridge_health = await _with_bridge_overrides(live_sources)
+        live_sources = await _source_matrix_section(
+            section="source_liveness",
+            label="source liveness",
+            errors=errors,
+            fallback=[],
+            awaitable=compute_liveness(conn),
+        )
+        live_sources, whatsapp_bridge_health = await _source_matrix_section(
+            section="bridge_overrides",
+            label="bridge overrides",
+            errors=errors,
+            fallback=(live_sources, None),
+            awaitable=_with_bridge_overrides(live_sources),
+        )
         beeper_subsources = await _source_matrix_section(
             section="beeper_subsource_liveness",
             label="beeper sub-source liveness",
