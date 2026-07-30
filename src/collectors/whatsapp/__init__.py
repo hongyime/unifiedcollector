@@ -311,7 +311,14 @@ class WhatsappCollector(BaseCollector):
                     "WhatsApp broker consumer dropped; reconnecting in %ss: %s",
                     backoff, e,
                 )
+                old_conn = self._broker_conn
                 self._broker_channel = None  # force re-init on next loop
+                self._broker_conn = None
+                if old_conn is not None:
+                    try:
+                        await old_conn.close()
+                    except Exception:
+                        pass
                 await _aio.sleep(backoff)
                 backoff = min(backoff * 2, 60)
 
@@ -364,33 +371,57 @@ class WhatsappCollector(BaseCollector):
                         except Exception as e:
                             logger.debug("Group event processing failed: %s", e)
 
-        import asyncio as _asyncio
-        _asyncio.create_task(_consume_contacts())
-        _asyncio.create_task(_consume_groups())
+        async def _consume_messages():
+            async with msg_queue.iterator() as qi:
+                async for message in qi:
+                    if self._stop.is_set():
+                        break
+                    async with message.process():
+                        try:
+                            body = json.loads(message.body.decode())
+                            # Two payload shapes arrive on this queue:
+                            #  - single live message (flat: message_id/chat_jid/...)
+                            #  - history-sync batch: {sync_type, session_name, messages:[...]}
+                            # Unpack the batch so each historical message is ingested.
+                            if isinstance(body, dict) and isinstance(body.get("messages"), list):
+                                batch_session = body.get("session_name")
+                                for m in body["messages"]:
+                                    if self._stop.is_set():
+                                        break
+                                    if batch_session and "session_name" not in m:
+                                        m["session_name"] = batch_session
+                                    await self._handle_message_event(m, targets)
+                            else:
+                                await self._handle_message_event(body, targets)
+                        except Exception as e:
+                            logger.error("Broker message processing failed: %s", e)
 
-        async with msg_queue.iterator() as qi:
-            async for message in qi:
-                if self._stop.is_set():
+        tasks = [
+            asyncio.create_task(_consume_messages()),
+            asyncio.create_task(_consume_contacts()),
+            asyncio.create_task(_consume_groups()),
+        ]
+        try:
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+            first_error: BaseException | None = None
+            for task in done:
+                try:
+                    exc = task.exception()
+                except asyncio.CancelledError as exc:
+                    first_error = exc
                     break
-                async with message.process():
-                    try:
-                        body = json.loads(message.body.decode())
-                        # Two payload shapes arrive on this queue:
-                        #  - single live message (flat: message_id/chat_jid/...)
-                        #  - history-sync batch: {sync_type, session_name, messages:[...]}
-                        # Unpack the batch so each historical message is ingested.
-                        if isinstance(body, dict) and isinstance(body.get("messages"), list):
-                            batch_session = body.get("session_name")
-                            for m in body["messages"]:
-                                if self._stop.is_set():
-                                    break
-                                if batch_session and "session_name" not in m:
-                                    m["session_name"] = batch_session
-                                await self._handle_message_event(m, targets)
-                        else:
-                            await self._handle_message_event(body, targets)
-                    except Exception as e:
-                        logger.error("Broker message processing failed: %s", e)
+                if exc is not None:
+                    first_error = exc
+                    break
+            if first_error is not None:
+                raise first_error
+            if not self._stop.is_set() and pending:
+                raise RuntimeError("WhatsApp broker consumer exited unexpectedly")
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _handle_contact_event(self, event: dict):
         """Maintain whatsapp_users and whatsapp_lid_map from contacts.update events.

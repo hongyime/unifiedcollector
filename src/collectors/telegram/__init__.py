@@ -29,6 +29,7 @@ import json
 import logging
 import os
 import re
+import time
 from collections import deque
 from datetime import datetime, date, timezone
 from enum import Enum
@@ -207,6 +208,10 @@ class EntityUnresolvable(Exception):
     a later cycle should retry — those are re-raised as their original exception so
     _process_spider_queue treats them as retryable, not permanently 'unresolvable'.
     """
+
+
+class EntityResolveDeferred(Exception):
+    """Resolve should be retried later without penalizing the current account."""
 
 
 def _as_int(x):
@@ -417,6 +422,14 @@ class TelegramWorker:
         for target in targets:
             if self.parent._stop.is_set():
                 break
+            unresolvable_until = self.parent._target_unresolvable_until(target)
+            if unresolvable_until:
+                remaining = max(0, int(unresolvable_until - time.monotonic()))
+                logger.info(
+                    "[worker=%d account=%s] skipping telegram/%s: unresolvable target cache active for %ds",
+                    self.worker_id, self.account.name, target, remaining,
+                )
+                continue
             logger.info(
                 "[worker=%d account=%s] Collecting telegram/%s",
                 self.worker_id, self.account.name, target,
@@ -436,6 +449,31 @@ class TelegramWorker:
                     await self.parent.send_to_dlq(target, target, f"circuit_open: {e}")
                 except Exception:
                     pass
+            except EntityUnresolvable as e:
+                self.parent._remember_unresolvable_target(target)
+                await self.parent._mark_collection_target_error(
+                    target,
+                    "unresolvable",
+                    str(e),
+                )
+                logger.info(
+                    "[worker=%d account=%s] telegram/%s is unresolvable by connected accounts: %s",
+                    self.worker_id, self.account.name, target, e,
+                )
+                try:
+                    await self.parent.send_to_dlq(target, target, f"unresolvable: {e}")
+                except Exception:
+                    pass
+            except EntityResolveDeferred as e:
+                logger.info(
+                    "[worker=%d account=%s] deferred telegram/%s without account penalty: %s",
+                    self.worker_id, self.account.name, target, e,
+                )
+                await self.parent._mark_collection_target_error(
+                    target,
+                    "pending",
+                    str(e),
+                )
             except Exception as e:
                 if _is_flood_wait(e):
                     await self.parent._handle_flood_wait(self, e)
@@ -517,6 +555,11 @@ class TelegramCollector(BaseCollector):
         self._spider_accounts: set[str] = (
             {a.strip().lower() for a in _spider_accts.split(",") if a.strip()}
             if _spider_accts else set()
+        )
+        self._unresolvable_target_ttl = float(os.getenv("TELEGRAM_UNRESOLVABLE_TARGET_TTL_SECONDS", "86400"))
+        self._unresolvable_targets: dict[str, float] = {}
+        self._allow_account_name_targets = (
+            os.getenv("TELEGRAM_ALLOW_ACCOUNT_NAME_TARGETS", "false").lower() == "true"
         )
 
         # Realtime listener state — populated by collect_realtime()
@@ -872,6 +915,44 @@ class TelegramCollector(BaseCollector):
         except Exception as exc:
             logger.error("Failed to hot-connect account %s: %s", account_name, exc)
 
+    def _target_unresolvable_until(self, target: str) -> float:
+        until = self._unresolvable_targets.get(str(target), 0.0)
+        if until and until <= time.monotonic():
+            self._unresolvable_targets.pop(str(target), None)
+            return 0.0
+        return until
+
+    def _remember_unresolvable_target(self, target: str) -> None:
+        if self._unresolvable_target_ttl <= 0:
+            return
+        self._unresolvable_targets[str(target)] = time.monotonic() + self._unresolvable_target_ttl
+
+    async def _mark_collection_target_error(self, target_id: str, status: str, error: str) -> None:
+        if self.pool is None:
+            return
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE collection_targets
+                    SET status = $3,
+                        error_message = $4,
+                        last_collection_at = NOW()
+                    WHERE source = $1 AND target_id = $2
+                    """,
+                    self.SOURCE_NAME,
+                    target_id,
+                    status,
+                    (error or "")[:500],
+                )
+        except Exception as exc:
+            logger.debug(
+                "Failed to mark telegram target %s as %s: %s",
+                target_id,
+                status,
+                exc,
+            )
+
     def _dispatch(self, targets: list[str], num_workers: int) -> list[list[str]]:
         """Hash-bucket targets so each chat is owned by exactly one worker.
 
@@ -1193,6 +1274,12 @@ class TelegramCollector(BaseCollector):
                         chat_id,
                     )
                 await self._handle_flood_wait(worker, e)
+            except EntityResolveDeferred as exc:
+                logger.info(
+                    "[spider w=%d] chat %s resolve deferred without attempt penalty: %s",
+                    worker.worker_id, chat_id, exc,
+                )
+                await self._mark_spider_status(chat_id, "pending", f"resolve deferred: {exc}")
             except EntityUnresolvable as exc:
                 # Every account was asked and none owns this chat (left / deleted /
                 # private). Terminal — mark 'unresolvable' so it stops churning the
@@ -1319,13 +1406,19 @@ class TelegramCollector(BaseCollector):
                 logger.debug("[resolve-sweep] loop error: %s", exc)
             await asyncio.sleep(interval)
 
-    async def _handle_flood_wait(self, worker: "TelegramWorker", error):
+    async def _handle_flood_wait(self, worker: "TelegramWorker", error, *, sleep: bool = True):
         wait_seconds = getattr(error, "seconds", 60)
         worker.state = SessionState.FLOOD_WAIT
-        logger.warning(
-            "[worker=%d account=%s] FloodWait: sleeping %ds",
-            worker.worker_id, worker.account.name, wait_seconds,
-        )
+        if sleep:
+            logger.warning(
+                "[worker=%d account=%s] FloodWait: sleeping %ds",
+                worker.worker_id, worker.account.name, wait_seconds,
+            )
+        else:
+            logger.warning(
+                "[worker=%d account=%s] FloodWait: pinned account for %ds",
+                worker.worker_id, worker.account.name, wait_seconds,
+            )
         # record_flood_wait classifies the error AND sets cooldown.
         # Use the actual flood-wait seconds so the pool doesn't release the
         # account until Telegram lets us back in.
@@ -1344,11 +1437,39 @@ class TelegramCollector(BaseCollector):
                 "wait_seconds": wait_seconds,
             },
         )
-        # Sleep at least until the flood-wait elapses (capped to 5min so we
-        # don't block the worker on truly long bans — those are surfaced by
-        # is_available() and the next cycle skips this acct).
-        await asyncio.sleep(min(wait_seconds, 300))
-        worker.state = SessionState.CONNECTED
+        if sleep:
+            # Sleep at least until the flood-wait elapses (capped to 5min so we
+            # don't block the worker on truly long bans — those are surfaced by
+            # is_available() and the next cycle skips this acct).
+            await asyncio.sleep(min(wait_seconds, 300))
+            worker.state = SessionState.CONNECTED
+
+    def _worker_can_resolve(self, worker: "TelegramWorker") -> bool:
+        account_name = worker.account.name
+        accounts = getattr(self.account_pool, "_accounts", [])
+        known_to_pool = any(getattr(acct, "name", None) == account_name for acct in accounts)
+        pool_available = self.account_pool.is_available(account_name) if known_to_pool else True
+        if (
+            getattr(worker, "state", None) == SessionState.FLOOD_WAIT
+            and pool_available
+        ):
+            worker.state = SessionState.CONNECTED
+        return (
+            getattr(worker, "state", None) in (None, SessionState.CONNECTED)
+            and pool_available
+        )
+
+    def _target_matches_connected_account_name(self, target: str) -> bool:
+        normalized = str(target or "").strip().lstrip("@").lower()
+        if not normalized:
+            return False
+        for worker in self._workers:
+            if str(getattr(worker.account, "name", "")).strip().lstrip("@").lower() == normalized:
+                return True
+        for account in getattr(self.account_pool, "_accounts", []):
+            if str(getattr(account, "name", "")).strip().lstrip("@").lower() == normalized:
+                return True
+        return False
 
     # ------------------------------------------------------------------
     # Per-chat collection (now takes a worker arg)
@@ -1364,6 +1485,15 @@ class TelegramCollector(BaseCollector):
         preferred worker first, then the others, and return (worker, entity) for the
         one that owns the chat so the backfill runs on the right account.
         """
+        if (
+            not self._allow_account_name_targets
+            and self._target_matches_connected_account_name(target)
+        ):
+            raise EntityUnresolvable(
+                f"target {target!r} matches a connected Telegram account name; "
+                "dialogs for that account are auto-collected, so this is not "
+                "treated as a chat/channel target"
+            )
         order = [preferred] + [w for w in self._workers if w is not preferred]
         last_exc = None
         transient = False  # True if ANY account failed for a retryable reason
@@ -1374,7 +1504,7 @@ class TelegramCollector(BaseCollector):
         for w in order:
             # A disconnected account can't answer now but MIGHT own the chat — treat
             # its unavailability as transient so we retry, not mark unresolvable.
-            if getattr(w, "state", None) not in (None, SessionState.CONNECTED):
+            if not self._worker_can_resolve(w):
                 transient = True
                 continue
             # Try the id numerically then as a raw string; get_entity raises
@@ -1389,6 +1519,10 @@ class TelegramCollector(BaseCollector):
                     continue
                 except Exception as exc:
                     last_exc = exc
+                    if _is_flood_wait(exc):
+                        transient = True
+                        await self._handle_flood_wait(w, exc, sleep=False)
+                        break
                     if _is_transient(exc):
                         transient = True
                     break  # move to the next account
@@ -1396,7 +1530,9 @@ class TelegramCollector(BaseCollector):
         # caller retries; only when ALL accounts cleanly said "not found" is the
         # chat genuinely unresolvable (left/deleted/private).
         if transient:
-            raise last_exc or asyncio.TimeoutError(f"transient resolve failure for {target!r}")
+            raise EntityResolveDeferred(
+                f"resolve deferred for {target!r}: {last_exc or 'account unavailable or in cooldown'}"
+            )
         raise EntityUnresolvable(f"no connected account owns entity {target!r}")
 
     async def _download_any_message_media(
@@ -1449,7 +1585,7 @@ class TelegramCollector(BaseCollector):
         cid = _as_int(target)
         transient = False
         for w in self._workers:
-            if getattr(w, "state", None) not in (None, SessionState.CONNECTED):
+            if not self._worker_can_resolve(w):
                 transient = True  # a disconnected account might own it — retry later
                 continue
             try:
@@ -1462,6 +1598,7 @@ class TelegramCollector(BaseCollector):
                 if _is_flood_wait(exc):
                     # Shouldn't happen for a cache lookup, but be safe.
                     logger.debug("[resolve-sweep] FloodWait on get_input_entity")
+                    await self._handle_flood_wait(w, exc, sleep=False)
                 continue
         return "transient" if transient else "dead"
 
@@ -3037,7 +3174,7 @@ class TelegramCollector(BaseCollector):
         for w in (self._workers if GetAllStoriesRequest is not None else []):
             if self._stop.is_set():
                 break
-            if getattr(w, "state", None) not in (None, SessionState.CONNECTED):
+            if not self._worker_can_resolve(w):
                 continue
             try:
                 res = await w.client(GetAllStoriesRequest())

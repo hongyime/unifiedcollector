@@ -32,6 +32,8 @@ import pytest
 
 from src.collectors import telegram as tg_mod
 from src.collectors.telegram import (
+    EntityResolveDeferred,
+    EntityUnresolvable,
     SessionState,
     TelegramCollector,
     TelegramWorker,
@@ -491,6 +493,82 @@ async def test_handle_flood_wait_caps_sleep_at_300(monkeypatch):
     coll.account_pool.record_flood_wait.assert_called_once_with(worker.account.name, 9999.0)
     event_call = coll.pool.conn.execute.await_args
     assert event_call.args[5] == 9999
+
+
+@pytest.mark.asyncio
+async def test_handle_flood_wait_can_pin_without_sleep(monkeypatch):
+    coll = _make_collector(monkeypatch)
+    worker = _make_worker(coll)
+    coll.account_pool.record_flood_wait = MagicMock()
+    sleeps: list[float] = []
+
+    async def _fake_sleep(s):
+        sleeps.append(s)
+
+    monkeypatch.setattr(tg_mod.asyncio, "sleep", _fake_sleep)
+    await coll._handle_flood_wait(worker, _FakeFloodWait(seconds=77), sleep=False)
+
+    assert sleeps == []
+    assert worker.state == SessionState.FLOOD_WAIT
+    coll.account_pool.record_flood_wait.assert_called_once_with(worker.account.name, 77.0)
+    event_call = coll.pool.conn.execute.await_args
+    assert event_call.args[5] == 77
+
+
+@pytest.mark.asyncio
+async def test_worker_unresolvable_target_does_not_penalize_account(monkeypatch):
+    coll = _make_collector(monkeypatch)
+    worker = _make_worker(coll)
+    coll._collect_chat = AsyncMock(side_effect=EntityUnresolvable("no connected account owns entity 'bad'"))
+    coll._mark_collection_target_error = AsyncMock()
+    coll.send_to_dlq = AsyncMock()
+    coll.account_pool.record_error_classified = MagicMock()
+    coll.account_pool.record_success = MagicMock()
+
+    await worker.run_targets(["bad"])
+
+    coll.account_pool.record_error_classified.assert_not_called()
+    coll.account_pool.record_success.assert_not_called()
+    coll._mark_collection_target_error.assert_awaited_once()
+    args = coll._mark_collection_target_error.await_args.args
+    assert args[0] == "bad"
+    assert args[1] == "unresolvable"
+    coll.send_to_dlq.assert_awaited_once()
+    assert coll._target_unresolvable_until("bad") > 0
+
+
+@pytest.mark.asyncio
+async def test_resolve_rejects_account_name_target_without_network(monkeypatch):
+    coll = _make_collector(monkeypatch)
+    worker = _make_worker(coll, name="shotsbyseah234")
+    worker.client.get_entity = AsyncMock()
+    coll._workers = [worker]
+
+    with pytest.raises(EntityUnresolvable, match="connected Telegram account name"):
+        await coll._resolve_entity_any_worker(worker, "shotsbyseah234")
+
+    worker.client.get_entity.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_worker_deferred_target_does_not_penalize_account(monkeypatch):
+    coll = _make_collector(monkeypatch)
+    worker = _make_worker(coll)
+    coll._collect_chat = AsyncMock(side_effect=EntityResolveDeferred("account unavailable or in cooldown"))
+    coll._mark_collection_target_error = AsyncMock()
+    coll.send_to_dlq = AsyncMock()
+    coll.account_pool.record_error_classified = MagicMock()
+    coll.account_pool.record_success = MagicMock()
+
+    await worker.run_targets(["chat"])
+
+    coll.account_pool.record_error_classified.assert_not_called()
+    coll.account_pool.record_success.assert_not_called()
+    coll.send_to_dlq.assert_not_called()
+    coll._mark_collection_target_error.assert_awaited_once()
+    args = coll._mark_collection_target_error.await_args.args
+    assert args[0] == "chat"
+    assert args[1] == "pending"
 
 
 # ── _process_spider_queue ─────────────────────────────────────────────────
