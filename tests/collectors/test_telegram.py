@@ -23,7 +23,7 @@ import asyncio
 import hashlib
 import json
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -370,6 +370,18 @@ async def test_process_join_queue_times_out_hanging_link(monkeypatch, caplog):
     assert any("telegram link visit timed out" in r.getMessage() for r in caplog.records)
 
 
+@pytest.mark.asyncio
+async def test_process_join_queue_skips_cooling_spider_accounts(monkeypatch):
+    coll = _make_collector(monkeypatch)
+    coll._workers = [_make_worker(coll)]
+    coll._worker_can_resolve = MagicMock(return_value=False)
+
+    processed = await coll._process_join_queue()
+
+    assert processed == 0
+    coll.pool.conn.fetch.assert_not_awaited()
+
+
 def test_spider_allowlist_matches_worker_account(monkeypatch):
     monkeypatch.setenv("TELEGRAM_SPIDER_ACCOUNTS", "acct2, acct3")
     coll = _make_collector(monkeypatch)
@@ -569,6 +581,76 @@ async def test_worker_deferred_target_does_not_penalize_account(monkeypatch):
     args = coll._mark_collection_target_error.await_args.args
     assert args[0] == "chat"
     assert args[1] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_resolve_sweep_uses_local_session_cache_only_by_default(monkeypatch):
+    coll = _make_collector(monkeypatch)
+    worker = _make_worker(coll)
+    worker.client.session = SimpleNamespace(get_input_entity=MagicMock(side_effect=ValueError("cold cache")))
+    worker.client.get_input_entity = AsyncMock()
+    coll._workers = [worker]
+
+    verdict = await coll._resolves_on_any_worker("123")
+
+    assert verdict == "transient"
+    worker.client.get_input_entity.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_resolve_sweep_network_flood_aborts_without_sleep(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_RESOLVE_SWEEP_ALLOW_NETWORK", "true")
+    coll = _make_collector(monkeypatch)
+    worker = _make_worker(coll)
+    worker.client.session = SimpleNamespace(get_input_entity=MagicMock(side_effect=ValueError("cold cache")))
+    worker.client.get_input_entity = AsyncMock(side_effect=_FakeFloodWait(seconds=44))
+    coll._handle_flood_wait = AsyncMock()
+    coll._workers = [worker]
+
+    verdict = await coll._resolves_on_any_worker("123")
+
+    assert verdict == "rate_limited"
+    coll._handle_flood_wait.assert_awaited_once()
+    assert coll._handle_flood_wait.await_args.kwargs == {"sleep": False}
+
+
+@pytest.mark.asyncio
+async def test_sweep_resolve_pending_pauses_after_rate_limit(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_RESOLVE_SWEEP_ENABLED", "1")
+    coll = _make_collector(monkeypatch)
+    worker = _make_worker(coll)
+    coll._workers = [worker]
+    coll.pool.conn.fetch = AsyncMock(
+        return_value=[
+            {"platform_chat_id": "1"},
+            {"platform_chat_id": "2"},
+        ]
+    )
+    coll._resolves_on_any_worker = AsyncMock(return_value="rate_limited")
+
+    out = await coll._sweep_resolve_pending()
+
+    assert out == {"checked": 1, "resolvable": 0, "unresolvable": 0, "transient": 1}
+    coll._resolves_on_any_worker.assert_awaited_once_with("1")
+
+
+@pytest.mark.asyncio
+async def test_restore_flood_waits_from_events_locks_known_account(monkeypatch):
+    coll = _make_collector(monkeypatch)
+    coll.account_pool.add_account("acct1", credentials={})
+    coll.pool.conn.fetch = AsyncMock(
+        return_value=[
+            {
+                "account": "acct1",
+                "cooldown_until": datetime.now(timezone.utc) + timedelta(seconds=60),
+            }
+        ]
+    )
+
+    restored = await coll._restore_flood_waits_from_events()
+
+    assert restored == 1
+    assert coll.account_pool.is_available("acct1") is False
 
 
 # ── _process_spider_queue ─────────────────────────────────────────────────

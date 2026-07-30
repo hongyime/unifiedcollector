@@ -45,6 +45,7 @@ from src.collectors.telegram.parse import (
     _MIME_EXT_MAP as _parse_MIME_EXT_MAP,
 )
 from src.core.account_pool import AccountPool
+from src.core.account_state_repository import AccountStateRepository
 from src.core.bot_pool import BotPool
 from src.core.hub_notifier import HubNotifier, NotifyCategory
 from src.core.discovered_links import persist_discovered_links
@@ -514,6 +515,7 @@ class TelegramCollector(BaseCollector):
         self._session_name = os.getenv("TELEGRAM_SESSION", "collector")
         self._workers: list[TelegramWorker] = []
         self._primary_client = None  # for HubNotifier/BotPool/etc that expect a single client
+        self._account_state_repo: AccountStateRepository | None = None
         self._sem = asyncio.Semaphore(3)
         self._batch_size = int(os.getenv("TELEGRAM_BATCH_SIZE", "100"))
         self._max_media_size = int(os.getenv("TELEGRAM_MAX_MEDIA_SIZE_MB", "50")) * 1024 * 1024
@@ -560,6 +562,12 @@ class TelegramCollector(BaseCollector):
         self._unresolvable_targets: dict[str, float] = {}
         self._allow_account_name_targets = (
             os.getenv("TELEGRAM_ALLOW_ACCOUNT_NAME_TARGETS", "false").lower() == "true"
+        )
+        self._resolve_sweep_enabled = os.getenv("TELEGRAM_RESOLVE_SWEEP_ENABLED", "0").lower() == "1"
+        self._resolve_sweep_batch = max(1, int(os.getenv("TELEGRAM_RESOLVE_SWEEP_BATCH", "25")))
+        self._resolve_sweep_interval = float(os.getenv("TELEGRAM_RESOLVE_SWEEP_INTERVAL", "300"))
+        self._resolve_sweep_allow_network = (
+            os.getenv("TELEGRAM_RESOLVE_SWEEP_ALLOW_NETWORK", "false").lower() == "true"
         )
 
         # Realtime listener state — populated by collect_realtime()
@@ -661,6 +669,81 @@ class TelegramCollector(BaseCollector):
         super().set_pool(pool)
         # Tracker is generic — needs the asyncpg pool to write to telegram_user_changes.
         self._user_change_tracker = UserChangeTracker(pool)
+        self._account_state_repo = AccountStateRepository(pool)
+
+    async def _restore_account_pool_state(self) -> None:
+        """Restore durable Telegram account cooldowns before heavy API work."""
+        if self.pool is None:
+            return
+        try:
+            repo = getattr(self, "_account_state_repo", None) or AccountStateRepository(self.pool)
+            await repo.clear_expired_cooldowns()
+            loaded = await repo.load_into_pool(self.account_pool)
+            restored = await self._restore_flood_waits_from_events()
+            if loaded or restored:
+                logger.info(
+                    "Telegram account state restored: account_state=%d active_floodwait=%d",
+                    loaded,
+                    restored,
+                )
+        except Exception as exc:
+            logger.warning("Telegram account state restore failed: %s", exc)
+
+    async def _flush_account_pool_state(self) -> None:
+        """Persist AccountPool cooldowns/quotas across collector restarts."""
+        if self.pool is None:
+            return
+        try:
+            repo = getattr(self, "_account_state_repo", None) or AccountStateRepository(self.pool)
+            await repo.flush_pool(self.account_pool)
+        except Exception as exc:
+            logger.debug("Telegram account state flush failed: %s", exc)
+
+    async def _restore_flood_waits_from_events(self) -> int:
+        """Hydrate active Telegram FloodWait cooldowns recorded before restart."""
+        if self.pool is None:
+            return 0
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT account,
+                       MAX(created_at + (COALESCE(cooldown_seconds, 0) * INTERVAL '1 second'))
+                           AS cooldown_until
+                FROM rate_limit_events
+                WHERE source = 'telegram'
+                  AND scope = 'flood_wait'
+                  AND account IS NOT NULL
+                  AND COALESCE(cooldown_seconds, 0) > 0
+                  AND created_at + (COALESCE(cooldown_seconds, 0) * INTERVAL '1 second') > NOW()
+                GROUP BY account
+                """
+            )
+        if not rows:
+            return 0
+        now_wall = datetime.now(timezone.utc)
+        restored = 0
+        with self.account_pool._lock:  # noqa: SLF001 - AccountStateRepository uses the same boundary.
+            by_name = {a.name: a for a in self.account_pool._accounts}
+            for row in rows:
+                account_name = row["account"]
+                acct = by_name.get(account_name)
+                if acct is None:
+                    continue
+                deadline = row["cooldown_until"]
+                if deadline is None:
+                    continue
+                if deadline.tzinfo is None:
+                    deadline = deadline.replace(tzinfo=timezone.utc)
+                seconds_left = (deadline - now_wall).total_seconds()
+                if seconds_left <= 0:
+                    continue
+                locked_until = time.monotonic() + seconds_left
+                if locked_until > acct.locked_until:
+                    acct.locked_until = locked_until
+                    acct.cooldown_reason = "flood_wait"
+                    acct.last_error_kind = "flood_wait"
+                    restored += 1
+        return restored
 
     async def _mark_runtime_healthy(self, detail: str) -> None:
         """Clear stale source_health failures after a clean Telegram reconnect."""
@@ -999,6 +1082,7 @@ class TelegramCollector(BaseCollector):
         # Load accounts from DB (supplements env-based accounts) — item 4.5
         logger.info("[telegram.collect] calling _load_accounts_from_db")
         await self._load_accounts_from_db()
+        await self._restore_account_pool_state()
 
         logger.info("[telegram.collect] calling _spawn_workers")
         self._workers = await self._spawn_workers()
@@ -1089,14 +1173,22 @@ class TelegramCollector(BaseCollector):
         # TELEGRAM_SPIDER_ACCOUNTS restricts which accounts can spider.
         if os.getenv("TELEGRAM_SPIDER_ENABLED", "true").lower() == "true":
             try:
-                spider_workers = [
+                configured_spider_workers = [
                     w for w in self._workers
                     if self._is_spider_allowed(w)
                 ]
-                if self._spider_accounts and not spider_workers:
+                spider_workers = [
+                    w for w in configured_spider_workers
+                    if self._worker_can_resolve(w)
+                ]
+                if self._spider_accounts and not configured_spider_workers:
                     logger.warning(
                         "Spider enabled but no connected workers match TELEGRAM_SPIDER_ACCOUNTS=%s; skipping spider queue",
                         ",".join(sorted(self._spider_accounts)),
+                    )
+                elif configured_spider_workers and not spider_workers:
+                    logger.warning(
+                        "Spider enabled but allowed Telegram accounts are cooling down; skipping spider queue"
                     )
                 elif self._spider_accounts and len(spider_workers) < len(self._workers):
                     logger.info("Spider restricted to accounts: %s (%d/%d workers)",
@@ -1342,16 +1434,18 @@ class TelegramCollector(BaseCollector):
         'pending' (marked resolve_checked_at) for the drain to backfill. Transient
         failures are left unchecked so the next sweep retries them.
         """
-        batch = int(os.getenv("TELEGRAM_RESOLVE_SWEEP_BATCH", "400"))
         out = {"checked": 0, "resolvable": 0, "unresolvable": 0, "transient": 0}
         if not self._workers:
+            return out
+        if not any(self._worker_can_resolve(w) for w in self._workers):
+            logger.debug("[resolve-sweep] skipped: no account is currently available")
             return out
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
                 "SELECT platform_chat_id FROM telegram_spider_queue "
                 "WHERE status = 'pending' AND resolve_checked_at IS NULL "
                 "ORDER BY priority ASC, collected_at ASC LIMIT $1",
-                batch,
+                self._resolve_sweep_batch,
             )
         if not rows:
             return out
@@ -1381,6 +1475,13 @@ class TelegramCollector(BaseCollector):
                 out["unresolvable"] += 1
             else:  # transient — leave unchecked, retried next sweep
                 out["transient"] += 1
+                if verdict == "rate_limited":
+                    out["checked"] += 1
+                    logger.warning(
+                        "[resolve-sweep] paused after Telegram rate limit while checking %s",
+                        chat_id,
+                    )
+                    break
             out["checked"] += 1
         logger.info(
             "[resolve-sweep] checked=%d resolvable=%d unresolvable=%d transient=%d",
@@ -1391,10 +1492,16 @@ class TelegramCollector(BaseCollector):
     async def _resolve_sweep_loop(self):
         """Run the resolve sweep on its own cadence, independent of the drain gather
         (which can be blocked for hours deep-backfilling a large channel)."""
-        if os.getenv("TELEGRAM_RESOLVE_SWEEP_ENABLED", "1").lower() != "1":
+        if not self._resolve_sweep_enabled:
+            logger.info("[resolve-sweep] disabled; pending chats will resolve during backfill")
             return
-        interval = float(os.getenv("TELEGRAM_RESOLVE_SWEEP_INTERVAL", "120"))
-        logger.info("[resolve-sweep] loop started (interval=%.0fs)", interval)
+        interval = self._resolve_sweep_interval
+        logger.info(
+            "[resolve-sweep] loop started (interval=%.0fs batch=%d network=%s)",
+            interval,
+            self._resolve_sweep_batch,
+            self._resolve_sweep_allow_network,
+        )
         while not self._stop.is_set():
             try:
                 res = await self._sweep_resolve_pending()
@@ -1423,6 +1530,7 @@ class TelegramCollector(BaseCollector):
         # Use the actual flood-wait seconds so the pool doesn't release the
         # account until Telegram lets us back in.
         self.account_pool.record_flood_wait(worker.account.name, float(wait_seconds))
+        await self._flush_account_pool_state()
         await record_rate_limit_event(
             self.pool,
             source="telegram",
@@ -1574,13 +1682,13 @@ class TelegramCollector(BaseCollector):
         return bool(await self.download_message_media(message, worker=worker, chat_id=chat_id))
 
     async def _resolves_on_any_worker(self, target: str) -> str:
-        """Fast, LOCAL resolvability check for the resolve sweep.
+        """Fast, cooldown-safe resolvability check for the resolve sweep.
 
-        Uses get_input_entity (session-cache lookup, populated by dialog discovery)
-        instead of get_entity (a network call that queues behind each busy worker's
-        backfill iter_messages). For a chat an account is in this hits the cache and
-        returns instantly; for one it isn't in, get_input_entity raises ValueError
-        LOCALLY (no network, no FloodWait risk). Returns 'ok' | 'dead' | 'transient'.
+        By default this consults Telethon's local session cache only. Calling the
+        client-level get_input_entity can still perform network resolution when the
+        cache is cold, which can burn all Telegram accounts with FloodWaits. Network
+        fallback is therefore opt-in via TELEGRAM_RESOLVE_SWEEP_ALLOW_NETWORK=true.
+        Returns 'ok' | 'dead' | 'transient' | 'rate_limited'.
         """
         cid = _as_int(target)
         transient = False
@@ -1588,19 +1696,42 @@ class TelegramCollector(BaseCollector):
             if not self._worker_can_resolve(w):
                 transient = True  # a disconnected account might own it — retry later
                 continue
+            key = cid if cid is not None else target
             try:
-                await w.client.get_input_entity(cid if cid is not None else target)
+                session = getattr(w.client, "session", None)
+                cached_lookup = getattr(session, "get_input_entity", None)
+                if not callable(cached_lookup):
+                    transient = True
+                    continue
+                cached_lookup(key)
+                return "ok"
+            except (ValueError, TypeError, KeyError):
+                if not self._resolve_sweep_allow_network:
+                    continue
+            except Exception as exc:
+                transient = True
+                logger.debug("[resolve-sweep] local session lookup failed for %s: %s", target, exc)
+                continue
+            if not self._resolve_sweep_allow_network:
+                continue  # this account doesn't know the chat — try the next
+            try:
+                await asyncio.wait_for(
+                    w.client.get_input_entity(key),
+                    float(os.getenv("TELEGRAM_RESOLVE_TIMEOUT", "25")),
+                )
                 return "ok"
             except (ValueError, TypeError):
-                continue  # this account doesn't know the chat — try the next
+                continue
             except Exception as exc:
                 transient = True
                 if _is_flood_wait(exc):
-                    # Shouldn't happen for a cache lookup, but be safe.
-                    logger.debug("[resolve-sweep] FloodWait on get_input_entity")
+                    logger.debug("[resolve-sweep] FloodWait on network get_input_entity")
                     await self._handle_flood_wait(w, exc, sleep=False)
+                    return "rate_limited"
                 continue
-        return "transient" if transient else "dead"
+        if transient or not self._resolve_sweep_allow_network:
+            return "transient"
+        return "dead"
 
     async def _collect_chat(self, worker: "TelegramWorker", target: str):
         # Use whichever account is actually in this chat (cross-account routing).
@@ -3606,9 +3737,18 @@ class TelegramCollector(BaseCollector):
         """Join/scrape/leave Telegram links discovered in message text."""
         if not self.pool or not self._group_join_enabled or self._join_links_max_per_cycle <= 0:
             return 0
-        workers = [w for w in self._workers if self._is_spider_allowed(w)]
+        configured_workers = [
+            w for w in self._workers
+            if self._is_spider_allowed(w)
+        ]
+        workers = [
+            w for w in configured_workers
+            if self._worker_can_resolve(w)
+        ]
         if not workers:
-            if self._spider_accounts:
+            if configured_workers:
+                logger.debug("telegram join queue skipped: allowed spider accounts are cooling down")
+            elif self._spider_accounts:
                 logger.debug("telegram join queue skipped: no allowed spider workers connected")
             return 0
 
@@ -3820,12 +3960,19 @@ class TelegramCollector(BaseCollector):
                 continue
             last_drain = now
             try:
-                spider_workers = [
+                configured_spider_workers = [
                     w for w in self._workers
                     if self._is_spider_allowed(w)
                 ]
+                spider_workers = [
+                    w for w in configured_spider_workers
+                    if self._worker_can_resolve(w)
+                ]
                 if not spider_workers:
-                    logger.debug("realtime backfill drain skipped: no worker matches TELEGRAM_SPIDER_ACCOUNTS")
+                    if configured_spider_workers:
+                        logger.debug("realtime backfill drain skipped: allowed Telegram accounts are cooling down")
+                    else:
+                        logger.debug("realtime backfill drain skipped: no worker matches TELEGRAM_SPIDER_ACCOUNTS")
                     continue
                 await asyncio.gather(
                     *(self._process_spider_queue(w) for w in spider_workers),
@@ -5332,6 +5479,7 @@ class TelegramCollector(BaseCollector):
 
     async def cleanup(self):
         self._realtime_running = False
+        await self._flush_account_pool_state()
         try:
             await self._hub_notifier.stop()
         except Exception:
