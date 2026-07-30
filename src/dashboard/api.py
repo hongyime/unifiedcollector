@@ -3084,6 +3084,7 @@ async def recent_rate_limits(hours: int = 24, limit: int = 100,
         else:
             events = []
             recent_summary = []
+        active_event_summary = [row for row in recent_summary if row.get("active_now")]
         active = []
         cursor_history = []
         try:
@@ -3108,6 +3109,7 @@ async def recent_rate_limits(hours: int = 24, limit: int = 100,
     return {
         "events": events,
         "active": active,
+        "active_event_summary": active_event_summary,
         "cursor_history": cursor_history,
         "recent_summary": recent_summary,
     }
