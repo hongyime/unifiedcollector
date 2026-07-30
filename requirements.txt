@@ -20,7 +20,7 @@ ddgs>=9.0.0
 
 # Video downloading (YouTube, TikTok)
 yt-dlp>=2024.1.0
-curl_cffi>=0.10,<0.15
+curl_cffi>=0.15,<0.16
 
 # Image/video downloading (TikTok primary tier)
 gallery-dl>=1.27.0
