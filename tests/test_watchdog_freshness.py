@@ -143,3 +143,32 @@ async def test_watchdog_does_not_restart_whatsapp_waiting_for_qr(monkeypatch):
 
     assert restarted == []
     assert degraded == [("whatsapp", 20, False, "waiting for QR pairing; not restarted")]
+
+
+@pytest.mark.asyncio
+async def test_watchdog_clears_dlq_marker_after_queue_drains(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgres://collector:collector@localhost/unifiedcollector")
+    import src.watchdog.freshness as freshness
+
+    freshness = importlib.reload(freshness)
+
+    executed: list[tuple[str, tuple]] = []
+
+    class FakeDB:
+        async def fetch(self, query: str):
+            if "FROM dead_letter_queue WHERE status='pending' GROUP BY source" in query:
+                return []
+            if "FROM source_health" in query and "dlq backlog:%watchdog%" in query.lower():
+                return [{"source": "threads"}]
+            raise AssertionError(query)
+
+        async def execute(self, query: str, *args):
+            executed.append((query, args))
+
+    await freshness._dlq_tick(FakeDB())
+
+    assert len(executed) == 1
+    query, args = executed[0]
+    assert "UPDATE source_health" in query
+    assert "LIKE 'dlq backlog:%watchdog%'" in query
+    assert args == ("threads",)

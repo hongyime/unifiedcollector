@@ -224,6 +224,27 @@ async def _mark_running_if_stale_watchdog(db: asyncpg.Connection, source: str) -
         log.error("source_health recovery update failed for %s: %s", source, e)
 
 
+async def _mark_running_if_dlq_watchdog(db: asyncpg.Connection, source: str) -> None:
+    """Clear DLQ-watchdog source_health rows once the pending queue drains."""
+    try:
+        await db.execute(
+            """
+            UPDATE source_health
+            SET status='running',
+                last_error=NULL,
+                crash_count=0,
+                last_success_at=COALESCE(last_success_at, NOW()),
+                updated_at=NOW()
+            WHERE source=$1
+              AND status='degraded'
+              AND lower(coalesce(last_error, '')) LIKE 'dlq backlog:%watchdog%'
+            """,
+            source,
+        )
+    except Exception as e:
+        log.error("source_health DLQ recovery update failed for %s: %s", source, e)
+
+
 async def _restart(container: str) -> None:
     try:
         connector = aiohttp.UnixConnector(path=DOCKER_SOCK)
@@ -445,7 +466,31 @@ async def _dlq_tick(db: asyncpg.Connection) -> None:
                     f"{n} pending, oldest {oldest / 3600:.1f}h — media/ingest failing, not draining"
                 )
         else:
+            await _mark_running_if_dlq_watchdog(db, src)
             log.info("%s DLQ ok (%d pending, oldest %.0fs)", src, n, oldest)
+
+    # Also clear sources that previously had a DLQ-watchdog degradation but now
+    # have zero pending rows, so source_health cannot stay degraded forever after
+    # the queue is fully drained.
+    try:
+        stale_sources = await db.fetch(
+            """
+            SELECT source
+            FROM source_health
+            WHERE status='degraded'
+              AND lower(coalesce(last_error, '')) LIKE 'dlq backlog:%watchdog%'
+              AND source NOT IN (
+                  SELECT DISTINCT source
+                  FROM dead_letter_queue
+                  WHERE status='pending'
+              )
+            """
+        )
+        for row in stale_sources:
+            await _mark_running_if_dlq_watchdog(db, row["source"])
+            log.info("%s DLQ recovered (0 pending)", row["source"])
+    except Exception as e:
+        log.error("DLQ recovery query failed: %s", e)
 
 
 async def _mark_degraded_dlq(db: asyncpg.Connection, source: str, n: int, oldest: float) -> None:
