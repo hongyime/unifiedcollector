@@ -43,6 +43,8 @@ _TELEGRAM_STATS_CACHE: dict[str, object] = {"ts": 0.0, "payload": None}
 _TELEGRAM_STATS_TTL_SECONDS = int(os.getenv("TELEGRAM_STATS_TTL_SECONDS", "30"))
 _YOUTUBE_MEDIA_BACKLOG_CACHE: dict[str, object] = {"ts": 0.0, "row": None}
 _YOUTUBE_MEDIA_BACKLOG_TTL_SECONDS = int(os.getenv("YOUTUBE_MEDIA_BACKLOG_TTL_SECONDS", "600"))
+_YOUTUBE_COMPLETENESS_CACHE: dict[str, object] = {"ts": 0.0, "payload": None}
+_YOUTUBE_COMPLETENESS_TTL_SECONDS = int(os.getenv("YOUTUBE_COMPLETENESS_TTL_SECONDS", "60"))
 _WA_FRESH_QR_LAST_REQUEST: dict[str, float] = {}
 _WA_FRESH_QR_MIN_INTERVAL_SECONDS = int(os.getenv("WA_FRESH_QR_MIN_INTERVAL_SECONDS", "45"))
 
@@ -868,6 +870,34 @@ async def _youtube_media_backlog(conn) -> dict:
 
 
 async def _youtube_completeness(conn) -> dict:
+    now = time.time()
+    cached_payload = _YOUTUBE_COMPLETENESS_CACHE.get("payload")
+    if (
+        cached_payload is not None
+        and now - float(_YOUTUBE_COMPLETENESS_CACHE.get("ts") or 0.0) < _YOUTUBE_COMPLETENESS_TTL_SECONDS
+    ):
+        out = dict(cached_payload)  # type: ignore[arg-type]
+        out["stats_cached"] = True
+        return out
+    try:
+        out = await _youtube_completeness_uncached(conn)
+    except Exception as exc:  # noqa: BLE001 - dashboard must not 500 under DB load
+        if cached_payload is not None:
+            out = dict(cached_payload)  # type: ignore[arg-type]
+            out["stats_stale"] = True
+            out["stats_error"] = str(exc)[:300] or exc.__class__.__name__
+            return out
+        return {
+            "schema_ready": False,
+            "stats_error": str(exc)[:300] or exc.__class__.__name__,
+            "videos": {},
+            "media_backlog": {},
+        }
+    _YOUTUBE_COMPLETENESS_CACHE.update({"ts": now, "payload": out})
+    return out
+
+
+async def _youtube_completeness_uncached(conn) -> dict:
     required = [
         "youtube_channels",
         "youtube_videos",
