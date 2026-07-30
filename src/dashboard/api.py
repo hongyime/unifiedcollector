@@ -5674,7 +5674,25 @@ async def whatsapp_reconnect(bridge: str, _user: dict = Depends(require_role("vi
 
 @app.post("/whatsapp/{bridge}/fresh-qr")
 async def whatsapp_fresh_qr(bridge: str, _user: dict = Depends(require_role("viewer"))):
-    """Clear local bridge auth and restart into QR-pairing mode."""
+    """Request a new QR only for an unregistered bridge slot.
+
+    This endpoint used to proxy straight through to the bridge, whose fresh-QR
+    route clears local auth. That is correct only for unpaired slots. For a
+    registered slot, a stale dashboard click can otherwise unlink a live phone.
+    """
+    health = await _wa_bridge_get(bridge, "health", timeout=8)
+    if health.get("ok") and (
+        health.get("whatsapp_ready") or health.get("connected") or health.get("registered")
+    ):
+        return {
+            "bridge": bridge,
+            "ok": True,
+            "status": "registered_session",
+            "ready": bool(health.get("whatsapp_ready") or health.get("connected")),
+            "registered": health.get("registered"),
+            "connected": health.get("connected"),
+            "note": "Bridge is already registered; use Reconnect to recover or Disconnect to unpair.",
+        }
     return await _wa_bridge_post(bridge, "fresh-qr")
 
 

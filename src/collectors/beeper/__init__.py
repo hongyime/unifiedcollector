@@ -29,7 +29,8 @@ import logging
 import mimetypes
 import os
 import re
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncIterator, Optional
 from urllib.parse import quote
 
@@ -915,6 +916,8 @@ class BeeperCollector(BaseCollector):
         self._client_owned = client is None
         self.client = client or BeeperClient()
         self._writer_override = writer
+        self._api_cooldown_until = 0.0
+        self._api_cooldown_restored = False
 
     @property
     def writer(self) -> Optional[BeeperWriter]:
@@ -964,7 +967,58 @@ class BeeperCollector(BaseCollector):
                 "error": str(error)[:500],
             },
         )
+        if status == 429:
+            self._api_cooldown_until = max(
+                self._api_cooldown_until,
+                time.time() + _BEEPER_429_COOLDOWN_SECONDS,
+            )
         return True
+
+    def _api_cooling_down(self) -> bool:
+        return time.time() < self._api_cooldown_until
+
+    async def _restore_api_cooldown(self) -> None:
+        if self._api_cooldown_restored or self.pool is None:
+            return
+        self._api_cooldown_restored = True
+        try:
+            async with self.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """
+                    SELECT created_at, cooldown_seconds, reason
+                    FROM rate_limit_events
+                    WHERE source = $1
+                      AND account = 'desktop_api'
+                      AND status_code = 429
+                      AND cooldown_seconds IS NOT NULL
+                      AND created_at + (cooldown_seconds * INTERVAL '1 second') > NOW()
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    self.SOURCE_NAME,
+                )
+        except Exception as exc:
+            logger.debug("Beeper cooldown restore failed: %s", exc)
+            return
+        if not row:
+            return
+        try:
+            created_at = row["created_at"]
+            cooldown_seconds = int(row["cooldown_seconds"] or 0)
+            reason = row["reason"] or "HTTP 429"
+        except (KeyError, TypeError, ValueError):
+            return
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        remaining = (
+            created_at.astimezone(timezone.utc)
+            + timedelta(seconds=cooldown_seconds)
+            - datetime.now(timezone.utc)
+        ).total_seconds()
+        if remaining <= 0:
+            return
+        self._api_cooldown_until = max(self._api_cooldown_until, time.time() + remaining)
+        logger.info("Beeper restored API cooldown for %ds (%s)", int(remaining), reason)
 
     # ── BaseCollector hooks ───────────────────────────────────────────
 
@@ -978,6 +1032,12 @@ class BeeperCollector(BaseCollector):
 
         stats = {"accounts": 0, "chats": 0, "messages_inserted": 0,
                  "networks_repaired": 0, "errors": 0, "transient": 0}
+        await self._restore_api_cooldown()
+        if self._api_cooling_down():
+            remaining = int(self._api_cooldown_until - time.time())
+            self._intentional_idle_reason = f"Beeper desktop_api cooldown active ({remaining}s remaining)"
+            logger.info("Beeper: %s", self._intentional_idle_reason)
+            return stats
         try:
             stats["accounts"] = await self._sync_accounts()
             stats["chats"] = await self._sync_chats()

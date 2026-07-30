@@ -23,13 +23,57 @@ const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} };
 const lsNum = (k) => { const n = parseInt(lsGet(k, "0"), 10); return Number.isFinite(n) ? n : 0; };
 const lsBump = (k) => { const n = lsNum(k) + 1; lsSet(k, String(n)); return n; };
 
-// PERSISTENT throttle wall (anti-ban). When Instagram throttles/challenges us, the
-// per-loop 45m sleep used to die on every tab refresh / SW wake / reload — so a fresh
-// loop immediately re-hit a *flagged* account every ~1-2 min (the worst thing for a
-// ban). Persist the wall expiry in localStorage so ANY respawned loop honours it and
-// leaves IG completely alone until it clears. Each new wall extends the rest.
-function wallLeftMs(platform) { return Math.max(0, lsNum("uc_wall_" + platform) - Date.now()); }
-function setWall(platform, mins) { lsSet("uc_wall_" + platform, String(Date.now() + mins * 60000)); }
+// PERSISTENT throttle wall (anti-ban). Store by platform + visible owner where
+// possible, with the old platform-only key as a legacy fallback.
+function instagramLoggedInOwner() {
+  try {
+    const username =
+      window._sharedData &&
+      window._sharedData.config &&
+      window._sharedData.config.viewer &&
+      window._sharedData.config.viewer.username;
+    if (username) return String(username).trim().replace(/^@/, "");
+  } catch (e) {}
+  const m = document.cookie.match(/ds_user_id=(\d+)/);
+  return m ? m[1] : "";
+}
+function facebookLoggedInOwner() {
+  try {
+    const m = document.cookie.match(/c_user=(\d+)/);
+    if (m) return m[1];
+  } catch (e) {}
+  return "";
+}
+function cooldownIdentity(platform) {
+  if (platform === "instagram") return instagramLoggedInOwner();
+  if (platform === "tiktok") {
+    return ownerFromStoredOrDom("tiktok", () => {
+      const m = location.pathname.match(/^\/@([^/?#]+)/);
+      return m && m[1] ? m[1] : "";
+    });
+  }
+  if (platform === "x") return ownerFromStoredOrDom("x", xLoggedInOwner);
+  if (platform === "threads") return ownerFromStoredOrDom("threads", threadsLoggedInOwner);
+  if (platform === "facebook") return ownerFromStoredOrDom("facebook", facebookLoggedInOwner);
+  if (platform === "strava") return stravaLoggedInOwner();
+  return "";
+}
+function wallKey(platform, identity) {
+  const ident = String(identity || cooldownIdentity(platform) || "global")
+    .trim()
+    .replace(/^@/, "")
+    .replace(/[^A-Za-z0-9_.-]/g, "_")
+    .slice(0, 80) || "global";
+  return "uc_wall_" + platform + "_" + ident;
+}
+function wallLeftMs(platform, identity) {
+  const keyed = lsNum(wallKey(platform, identity));
+  const legacy = lsNum("uc_wall_" + platform);
+  return Math.max(0, Math.max(keyed, legacy) - Date.now());
+}
+function setWall(platform, mins, identity) {
+  lsSet(wallKey(platform, identity), String(Date.now() + mins * 60000));
+}
 
 // Config-driven throttle walls. Override from DevTools/options with:
 //   chrome.storage.local.set({ ucThrottleBackoffMins: { x: 12, threads: 12 } })
@@ -56,8 +100,9 @@ async function throttleBackoffMins(platform, fallback = DEFAULT_THROTTLE_BACKOFF
 async function applyThrottleWall(platform, reason) {
   const mins = await throttleBackoffMins(platform);
   const wallMins = Math.max(1, Math.round(mins * (0.85 + Math.random() * 0.45)));
-  setWall(platform, wallMins);
-  await send({ type: "wall", platform, mins: wallMins }).catch(() => {});
+  const identity = cooldownIdentity(platform);
+  setWall(platform, wallMins, identity);
+  await send({ type: "wall", platform, mins: wallMins, account: identity || null, reason }).catch(() => {});
   return wallMins;
 }
 
@@ -807,16 +852,18 @@ const instagram = {
     // ANTI-BAN (cooperative): the HEADLESS collector shares this IG account. If it's
     // in a 429 cooldown, the extension must rest too — adopt its remaining time as
     // our own wall so we don't probe a flagged account from the other side.
+    const igOwner = instagramLoggedInOwner();
     try {
-      const cd = await send({ type: "igCooldown" });
+      const cd = await send({ type: "igCooldown", account: igOwner });
       if (cd && cd.cooling && cd.secs_left > 0) {
-        setWall("instagram", Math.ceil(cd.secs_left / 60));
-        clog("warn", `IG: headless in 429 cooldown (streak ${cd.streak}, ${Math.ceil(cd.secs_left / 60)}m) — extension resting in sync`, "instagram");
+        setWall("instagram", Math.ceil(cd.secs_left / 60), igOwner);
+        const who = cd.account ? ` for ${cd.account}` : "";
+        clog("warn", `IG: headless in 429 cooldown${who} (streak ${cd.streak}, ${Math.ceil(cd.secs_left / 60)}m) — extension resting in sync`, "instagram");
       }
     } catch (e) {}
     // if IG threw a throttle/challenge wall recently (either path), do NOT touch IG
     // at all until it clears — rest in chunks (survives loop respawns via localStorage).
-    const left = wallLeftMs("instagram");
+    const left = wallLeftMs("instagram", igOwner);
     if (left > 0) {
       clog("warn", `IG throttled — resting, ${Math.ceil(left / 60000)}m left (not touching IG)`, "instagram");
       await sleep(Math.min(left, human(600000))); // re-check roughly every 8-22m

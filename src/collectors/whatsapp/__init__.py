@@ -155,6 +155,7 @@ class WhatsappCollector(BaseCollector):
         self._broker_conn = None
         self._broker_channel = None
         self._session_health: dict[str, dict] = {}
+        self._session_cooldowns_restored = False
         self._use_realtime = bool(self._session_bridges and self._bridge_secret)
         self._use_export = bool(self._export_dir and os.path.isdir(self._export_dir))
 
@@ -194,6 +195,15 @@ class WhatsappCollector(BaseCollector):
             reason=reason,
             metadata=metadata or {},
         )
+        if status_code == 429:
+            h = self._session_health.setdefault(
+                session_name or "bridge",
+                {"errors": 0, "risk": 0.0, "cooldown_until": 0},
+            )
+            h["cooldown_until"] = max(
+                float(h.get("cooldown_until") or 0),
+                time.time() + self._session_cooldown,
+            )
         return True
 
     async def _record_http_exception(
@@ -244,6 +254,7 @@ class WhatsappCollector(BaseCollector):
     async def _collect_realtime(self, targets: list[str]):
         await self._init_redis()
         await self._init_broker()
+        await self._restore_session_cooldowns()
 
         tasks = []
         if self._broker_channel:
@@ -259,6 +270,50 @@ class WhatsappCollector(BaseCollector):
             pass
         finally:
             await self._cleanup_connections()
+
+    async def _restore_session_cooldowns(self):
+        if self._session_cooldowns_restored or self.pool is None:
+            return
+        self._session_cooldowns_restored = True
+        try:
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT account,
+                           MAX(created_at + (COALESCE(cooldown_seconds, 0) * INTERVAL '1 second')) AS cooldown_until
+                    FROM rate_limit_events
+                    WHERE source = $1
+                      AND status_code = 429
+                      AND account IS NOT NULL
+                      AND COALESCE(cooldown_seconds, 0) > 0
+                      AND created_at + (COALESCE(cooldown_seconds, 0) * INTERVAL '1 second') > NOW()
+                    GROUP BY account
+                    """,
+                    self.SOURCE_NAME,
+                )
+        except Exception as exc:
+            logger.debug("WhatsApp session cooldown restore failed: %s", exc)
+            return
+        now_utc = datetime.now(timezone.utc)
+        restored = 0
+        for row in rows:
+            account = str(row["account"] or "").strip()
+            if not account or not row["cooldown_until"]:
+                continue
+            cooldown_until = row["cooldown_until"]
+            if cooldown_until.tzinfo is None:
+                cooldown_until = cooldown_until.replace(tzinfo=timezone.utc)
+            remaining = (cooldown_until - now_utc).total_seconds()
+            if remaining <= 0:
+                continue
+            h = self._session_health.setdefault(
+                account,
+                {"errors": 0, "risk": 0.0, "cooldown_until": 0},
+            )
+            h["cooldown_until"] = max(float(h.get("cooldown_until") or 0), time.time() + remaining)
+            restored += 1
+        if restored:
+            logger.info("WhatsApp restored %d active per-session cooldown(s)", restored)
 
     async def _init_redis(self):
         if not self._redis_url:

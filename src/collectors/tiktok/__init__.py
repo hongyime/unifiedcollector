@@ -57,7 +57,7 @@ import re
 import subprocess
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import AsyncIterator, Optional
@@ -386,6 +386,9 @@ class TiktokCollector(BaseCollector):
         self._timeout = int(os.getenv("TIKTOK_TIMEOUT_SECONDS", "300"))
         self._browser_fallback = os.getenv("TIKTOK_BROWSER_FALLBACK_ENABLED", "true").lower() == "true"
         self._ytdlp_fallback = os.getenv("TIKTOK_YTDLP_FALLBACK_ENABLED", "true").lower() == "true"
+        self._local_tool_cooldown_until = 0.0
+        self._local_tool_cooldown_seconds = int(os.getenv("TIKTOK_LOCAL_TOOL_429_COOLDOWN_SECONDS", "1800"))
+        self._local_tool_cooldown_restored = False
         self._gallery_dl_archive_enabled = (
             os.getenv("TIKTOK_GALLERY_DL_ARCHIVE_ENABLED", "true").lower() == "true"
         )
@@ -493,6 +496,54 @@ class TiktokCollector(BaseCollector):
     def _account_name(self) -> str:
         return Path(self._cookies_file).stem if self._cookies_file else "tiktok_default"
 
+    def _local_tool_cooling_down(self) -> bool:
+        return time.time() < self._local_tool_cooldown_until
+
+    async def _sync_persisted_local_tool_cooldown(self) -> None:
+        if self._local_tool_cooldown_restored or self.pool is None:
+            return
+        self._local_tool_cooldown_restored = True
+        try:
+            async with self.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """
+                    SELECT created_at, cooldown_seconds, reason
+                    FROM rate_limit_events
+                    WHERE source = 'tiktok'
+                      AND account = $1
+                      AND (status_code = 429 OR status_code IS NULL)
+                      AND cooldown_seconds IS NOT NULL
+                      AND created_at + (cooldown_seconds * INTERVAL '1 second') > NOW()
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    self._account_name(),
+                )
+        except Exception as exc:
+            logger.debug("tiktok: persisted local-tool cooldown check failed: %s", exc)
+            return
+        if not row:
+            return
+        created_at = row["created_at"]
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        remaining = (
+            created_at.astimezone(timezone.utc)
+            + timedelta(seconds=int(row["cooldown_seconds"] or 0))
+            - datetime.now(timezone.utc)
+        ).total_seconds()
+        if remaining <= 0:
+            return
+        self._local_tool_cooldown_until = max(
+            self._local_tool_cooldown_until,
+            time.time() + remaining,
+        )
+        logger.info(
+            "tiktok: restored local tool cooldown for %ds (%s)",
+            int(remaining),
+            row["reason"] or "rate-limit",
+        )
+
     async def _record_local_rate_limit_event(
         self,
         *,
@@ -506,13 +557,17 @@ class TiktokCollector(BaseCollector):
         if not validation.is_rate_limited:
             return
 
-        cooldown_seconds = None
+        cooldown_seconds = self._local_tool_cooldown_seconds
         remaining = getattr(self.rate_limiter, "get_cooldown_remaining", None)
         if callable(remaining):
             try:
-                cooldown_seconds = int(remaining("tiktok.com") or 0) or None
+                cooldown_seconds = int(remaining("tiktok.com") or 0) or cooldown_seconds
             except Exception:
-                cooldown_seconds = None
+                cooldown_seconds = self._local_tool_cooldown_seconds
+        self._local_tool_cooldown_until = max(
+            self._local_tool_cooldown_until,
+            time.time() + cooldown_seconds,
+        )
 
         await record_rate_limit_event(
             self.pool,
@@ -535,8 +590,17 @@ class TiktokCollector(BaseCollector):
 
     async def collect(self, targets: list[str]):
         await self._load_tracker_state()
+        await self._sync_persisted_local_tool_cooldown()
         for username in targets:
             if self._stop.is_set(): break
+            if self._local_tool_cooling_down():
+                remaining = int(self._local_tool_cooldown_until - time.time())
+                self._intentional_idle_reason = (
+                    f"TikTok local downloader cooldown active for {self._account_name()} "
+                    f"({remaining}s remaining)"
+                )
+                logger.info("tiktok: %s", self._intentional_idle_reason)
+                break
             username = username.lstrip("@")
             if self._is_invalid_username(username): continue
 
@@ -681,6 +745,13 @@ class TiktokCollector(BaseCollector):
                 # upserted by _ingest_tmpdir), so is_public stays unchanged.
                 await self._record_profile_access(username, True)
                 return
+            if self._local_tool_cooling_down():
+                logger.info(
+                    "tiktok: local downloader cooldown started for %s; skipping remaining fallbacks for %s",
+                    self._account_name(),
+                    username,
+                )
+                return
 
         if self._use_yt_dlp and self._ytdlp_fallback:
             try:
@@ -691,6 +762,13 @@ class TiktokCollector(BaseCollector):
             if ok:
                 # Success (see gallery-dl note above): record can_access=True.
                 await self._record_profile_access(username, True)
+                return
+            if self._local_tool_cooling_down():
+                logger.info(
+                    "tiktok: local downloader cooldown started for %s; skipping remaining fallbacks for %s",
+                    self._account_name(),
+                    username,
+                )
                 return
 
         if self._browser_fallback:

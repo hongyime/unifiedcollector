@@ -305,7 +305,17 @@ export const api = {
     ),
   waDisconnect: (bridge: 1 | 2) => post<{ bridge: string; ok: boolean; status?: string; error?: string }>(`/whatsapp/${bridge}/disconnect`, {}),
   waReconnect: (bridge: 1 | 2) => post<{ bridge: string; ok: boolean; status?: string; error?: string }>(`/whatsapp/${bridge}/reconnect`, {}),
-  waFreshQr: (bridge: 1 | 2) => post<{ bridge: string; ok: boolean; status?: string; warning?: string; error?: string }>(`/whatsapp/${bridge}/fresh-qr`, {}),
+  waFreshQr: (bridge: 1 | 2) => post<{
+    bridge: string;
+    ok: boolean;
+    status?: string;
+    ready?: boolean;
+    registered?: boolean | null;
+    connected?: boolean | null;
+    warning?: string;
+    note?: string;
+    error?: string;
+  }>(`/whatsapp/${bridge}/fresh-qr`, {}),
 
   // Per-bridge session identity (phone number, push name, connected state).
   // Populated after a QR scan so the Link page can show WHICH account is on

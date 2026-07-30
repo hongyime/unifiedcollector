@@ -233,6 +233,9 @@ class InstagramCollector(BaseCollector):
 
         self._loader = None
         self._current_account = None
+        self._consecutive_429s = 0
+        self._consecutive_429s_by_account: dict[str, int] = {}
+        self._restored_cooldown_accounts: set[str] = set()
         # Follow-aware access tracker (lazy — needs self.pool, created on first use).
         # Records every profile fetch outcome into profile_access_{summary,attempts}
         # so SmartAccountSelector can later route a private target to a cookie
@@ -337,6 +340,105 @@ class InstagramCollector(BaseCollector):
     def set_pool(self, pool):
         super().set_pool(pool)
         self._photo_tracker.set_pool(pool)
+
+    @staticmethod
+    def _rate_limit_cursor_service(account: str | None) -> str:
+        account = (account or "").strip()
+        return f"instagram_rate_limit:{account}" if account else "instagram_rate_limit"
+
+    @staticmethod
+    def _parse_rate_limit_cursor(raw: str | None) -> tuple[float, int]:
+        if not raw:
+            return 0.0, 0
+        try:
+            parts = str(raw).split(":", 1)
+            expiry = float(parts[0])
+            streak = int(float(parts[1])) if len(parts) == 2 and parts[1] else 0
+            if expiry <= time.time():
+                return 0.0, 0
+            return expiry, max(0, streak)
+        except (TypeError, ValueError):
+            return 0.0, 0
+
+    async def _restore_account_rate_limit_state(self, accounts: list[str] | None = None) -> None:
+        """Hydrate active per-Instagram-account cooldowns from durable events/cursors."""
+        if self.pool is None or not isinstance(self.rate_limiter, HumanLikeRateLimiter):
+            return
+        account_set = {str(a).strip() for a in (accounts or []) if str(a).strip()}
+        if account_set and account_set.issubset(self._restored_cooldown_accounts):
+            return
+        where_accounts = list(account_set) if account_set else None
+        try:
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """
+                    WITH active_events AS (
+                        SELECT account,
+                               MAX(created_at + (COALESCE(cooldown_seconds, 0) * INTERVAL '1 second')) AS cooldown_until,
+                               MAX(
+                                   CASE
+                                     WHEN metadata->>'streak' ~ '^[0-9]+$' THEN (metadata->>'streak')::int
+                                     ELSE NULL
+                                   END
+                               ) AS streak
+                        FROM rate_limit_events
+                        WHERE source = 'instagram'
+                          AND status_code = 429
+                          AND account IS NOT NULL
+                          AND COALESCE(cooldown_seconds, 0) > 0
+                          AND created_at + (COALESCE(cooldown_seconds, 0) * INTERVAL '1 second') > NOW()
+                          AND ($1::text[] IS NULL OR account = ANY($1::text[]))
+                        GROUP BY account
+                    ),
+                    active_cursors AS (
+                        SELECT regexp_replace(service, '^instagram_rate_limit:', '') AS account,
+                               last_processed_id
+                        FROM service_cursors
+                        WHERE service LIKE 'instagram_rate_limit:%'
+                          AND ($1::text[] IS NULL OR regexp_replace(service, '^instagram_rate_limit:', '') = ANY($1::text[]))
+                    )
+                    SELECT COALESCE(e.account, c.account) AS account,
+                           e.cooldown_until,
+                           e.streak,
+                           c.last_processed_id
+                    FROM active_events e
+                    FULL OUTER JOIN active_cursors c ON c.account = e.account
+                    """,
+                    where_accounts,
+                )
+        except Exception as exc:
+            logger.debug("instagram: failed restoring per-account cooldowns: %s", exc)
+            return
+
+        restored = 0
+        now_utc = datetime.now(timezone.utc)
+        for row in rows:
+            account = str(row["account"] or "").strip()
+            if not account:
+                continue
+            event_until = row["cooldown_until"]
+            event_remaining = 0.0
+            if event_until is not None:
+                if event_until.tzinfo is None:
+                    event_until = event_until.replace(tzinfo=timezone.utc)
+                event_remaining = max(0.0, (event_until - now_utc).total_seconds())
+            cursor_expiry, cursor_streak = self._parse_rate_limit_cursor(row["last_processed_id"])
+            cursor_remaining = max(0.0, cursor_expiry - time.time()) if cursor_expiry else 0.0
+            remaining = max(event_remaining, cursor_remaining)
+            if remaining <= 0:
+                continue
+            self.rate_limiter.set_cooldown_remaining(
+                "instagram.com",
+                remaining,
+                account=account,
+            )
+            streak = max(int(row["streak"] or 0), cursor_streak)
+            if streak:
+                self._consecutive_429s_by_account[account] = streak
+            restored += 1
+            self._restored_cooldown_accounts.add(account)
+        if restored:
+            logger.info("instagram: restored %d active per-account cooldown(s)", restored)
 
     def _init_loader(self):
         try:
@@ -789,7 +891,24 @@ class InstagramCollector(BaseCollector):
             logger.warning("instagram: no cookie accounts available — skipping cycle")
             return
 
+        await self._restore_account_rate_limit_state(cookie_accounts)
+
         _healthy = [a for a in cookie_accounts if a not in self._dead_cookie_accounts]
+        if isinstance(self.rate_limiter, HumanLikeRateLimiter):
+            cooling = {
+                a: self.rate_limiter.cooldown_remaining_seconds("instagram.com", account=a)
+                for a in _healthy
+            }
+            _healthy = [a for a in _healthy if cooling.get(a, 0.0) <= 30.0]
+            if not _healthy and cooling:
+                min_remaining = min(cooling.values())
+                logger.info(
+                    "instagram: all %d healthy cookie account(s) are cooling down; "
+                    "skipping cycle for %.0fs instead of probing a flagged account",
+                    len(cooling),
+                    min_remaining,
+                )
+                return
         if not _healthy:
             logger.warning(
                 "instagram: all %d cookie accounts have dead (401) sessions — "
@@ -827,7 +946,10 @@ class InstagramCollector(BaseCollector):
             logger.warning("instagram: failed to load cookies for %s — skipping cycle", acct_name)
             return
 
-        _streak_before = getattr(self, "_consecutive_429s", 0)
+        _streak_before = self._consecutive_429s_by_account.get(
+            acct_name,
+            getattr(self, "_consecutive_429s", 0),
+        )
         # Build the full mobile-API header set tied to this account's fingerprint.
         # csrftoken lives in the browser cookie jar (instaloader loader is None in
         # cookie-only mode), so populate X-CSRFToken from the loaded cookies.
@@ -881,11 +1003,22 @@ class InstagramCollector(BaseCollector):
         # persisted rate-limit entry so the next cycle starts clean.
         if self._consecutive_429s == 0 and self.pool is not None:
             if _streak_before > 0:
-                logger.info("instagram: clean cycle after streak=%d — clearing DB rate-limit entry", _streak_before)
+                logger.info(
+                    "instagram: clean cycle after streak=%d — clearing DB rate-limit entry for %s",
+                    _streak_before,
+                    acct_name,
+                )
             try:
                 async with self.pool.acquire() as _conn:
                     await _conn.execute(
-                        "DELETE FROM service_cursors WHERE service = 'instagram_rate_limit'",
+                        "DELETE FROM service_cursors WHERE service = ANY($1::text[])",
+                        [
+                            self._rate_limit_cursor_service(acct_name),
+                            # Legacy global cursor from older builds. Clear only
+                            # after a clean cycle so stale global walls do not
+                            # keep pausing every IG account.
+                            "instagram_rate_limit",
+                        ],
                     )
             except Exception as _e:
                 logger.warning("instagram: failed to clear rate-limit from DB: %s", _e)
@@ -972,6 +1105,7 @@ class InstagramCollector(BaseCollector):
             await self.checkpoint.save_progress(username)
             self._consecutive_429s = 0  # reset backoff on success
             if self._current_account:
+                self._consecutive_429s_by_account[self._current_account.name] = 0
                 self.account_pool.record_success(self._current_account.name)
                 self._record_daily_action(self._current_account.name, views=1)
             await self._micro_pause()
@@ -1068,24 +1202,65 @@ class InstagramCollector(BaseCollector):
         _now = _time.time()
         _existing_expiry = 0.0
         _existing_streak = 0
+        _cursor_service = self._rate_limit_cursor_service(acct_name)
         if self.pool is not None:
             try:
                 async with self.pool.acquire() as _conn:
-                    _raw = await _conn.fetchval(
-                        "SELECT last_processed_id FROM service_cursors "
-                        "WHERE service = 'instagram_rate_limit'",
+                    _row = await _conn.fetchrow(
+                        """
+                        WITH cursor_state AS (
+                            SELECT last_processed_id
+                            FROM service_cursors
+                            WHERE service = $1
+                        ),
+                        event_state AS (
+                            SELECT
+                                MAX(created_at + (COALESCE(cooldown_seconds, 0) * INTERVAL '1 second')) AS cooldown_until,
+                                MAX(
+                                    CASE
+                                      WHEN metadata->>'streak' ~ '^[0-9]+$' THEN (metadata->>'streak')::int
+                                      ELSE NULL
+                                    END
+                                ) AS streak
+                            FROM rate_limit_events
+                            WHERE source = 'instagram'
+                              AND status_code = 429
+                              AND account IS NOT DISTINCT FROM $2
+                              AND COALESCE(cooldown_seconds, 0) > 0
+                              AND created_at + (COALESCE(cooldown_seconds, 0) * INTERVAL '1 second') > NOW()
+                        )
+                        SELECT cursor_state.last_processed_id,
+                               event_state.cooldown_until,
+                               event_state.streak
+                        FROM cursor_state
+                        FULL OUTER JOIN event_state ON TRUE
+                        """,
+                        _cursor_service,
+                        acct_name,
                     )
-                if _raw:
-                    _parts = str(_raw).split(":", 1)
-                    _existing_expiry = float(_parts[0])
-                    if len(_parts) == 2:
-                        _existing_streak = int(_parts[1])
-                    if _existing_expiry <= _now:
-                        _existing_expiry = 0.0
-                        _existing_streak = 0
+                if _row:
+                    _cursor_expiry, _cursor_streak = self._parse_rate_limit_cursor(
+                        _row["last_processed_id"]
+                    )
+                    _existing_expiry = max(_existing_expiry, _cursor_expiry)
+                    _existing_streak = max(_existing_streak, _cursor_streak)
+                    _event_until = _row["cooldown_until"]
+                    if _event_until is not None:
+                        if _event_until.tzinfo is None:
+                            _event_until = _event_until.replace(tzinfo=timezone.utc)
+                        _event_expiry = _event_until.timestamp()
+                        if _event_expiry > _now:
+                            _existing_expiry = max(_existing_expiry, _event_expiry)
+                    _existing_streak = max(_existing_streak, int(_row["streak"] or 0))
             except Exception as _e:
-                logger.debug("instagram: failed reading existing rate-limit cursor: %s", _e)
-        self._consecutive_429s = max(getattr(self, "_consecutive_429s", 0), _existing_streak) + 1
+                logger.debug("instagram: failed reading existing per-account rate-limit state: %s", _e)
+        previous_account_streak = self._consecutive_429s_by_account.get(acct_name or "", 0)
+        self._consecutive_429s = max(
+            previous_account_streak,
+            _existing_streak,
+        ) + 1
+        if acct_name:
+            self._consecutive_429s_by_account[acct_name] = self._consecutive_429s
         base_cooldown = 900.0
         cooldown = min(base_cooldown * (2 ** (self._consecutive_429s - 1)), 14400.0)
         _proposed_expiry = _now + cooldown
@@ -1114,12 +1289,19 @@ class InstagramCollector(BaseCollector):
                     await _conn.execute(
                         "INSERT INTO service_cursors "
                         "  (service, last_processed_id, last_processed_at, status) "
-                        "VALUES ('instagram_rate_limit', $1, NOW(), 'blocked') "
+                        "VALUES ($2, $1, NOW(), 'blocked') "
                         "ON CONFLICT (service) DO UPDATE "
                         "SET last_processed_id = $1, last_processed_at = NOW(), status = 'blocked'",
                         _streak_val,
+                        _cursor_service,
                     )
-                logger.info("instagram: persisted rate-limit to DB (expiry=%.0f streak=%d)", _expiry, self._consecutive_429s)
+                logger.info(
+                    "instagram: persisted per-account rate-limit to DB "
+                    "(account=%s expiry=%.0f streak=%d)",
+                    acct_name or "unknown",
+                    _expiry,
+                    self._consecutive_429s,
+                )
             except Exception as _e:
                 logger.warning("instagram: failed to persist rate-limit to DB: %s", _e)
             event_metadata = dict(metadata or {})
@@ -2075,16 +2257,23 @@ class InstagramCollector(BaseCollector):
                     is_auth_failure = status in (401, 403)
                     if is_auth_failure:
                         self._session_auth_dead = True
-                    await self._record_rate_limit_event(
-                        scope="profile_fetch_playwright",
-                        status_code=status,
-                        reason=(
-                            "Playwright profile auth response"
-                            if is_auth_failure
-                            else "Playwright profile rate-limit response"
-                        ),
-                        metadata={"username": username, "endpoint": "web_profile_info"},
-                    )
+                    if status == 429:
+                        await self._handle_rate_limit(
+                            Exception("429"),
+                            scope="profile_fetch_playwright",
+                            metadata={
+                                "username": username,
+                                "endpoint": "web_profile_info",
+                                "ingest_path": "playwright_profile_fetch",
+                            },
+                        )
+                    else:
+                        await self._record_rate_limit_event(
+                            scope="profile_fetch_playwright",
+                            status_code=status,
+                            reason="Playwright profile auth response",
+                            metadata={"username": username, "endpoint": "web_profile_info"},
+                        )
                     if is_auth_failure:
                         logger.warning(
                             "Playwright Mode-β: %s returned %s for %s — session expired/unauthorized",

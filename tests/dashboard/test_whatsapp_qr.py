@@ -172,3 +172,31 @@ def test_whatsapp_qr_proxy_throttles_repeated_fresh_qr_kicks(monkeypatch):
     assert out["last_disconnect_reason"] is None
 
     dashboard_api._WA_FRESH_QR_LAST_REQUEST.clear()
+
+
+def test_whatsapp_fresh_qr_refuses_registered_bridge(monkeypatch):
+    async def fake_get(bridge: str, path: str, timeout: int = 0):
+        assert bridge == "1"
+        assert path == "health"
+        assert timeout == 8
+        return {
+            "bridge": bridge,
+            "ok": True,
+            "status": "ready",
+            "whatsapp_ready": True,
+            "connected": True,
+            "registered": True,
+        }
+
+    async def fail_post(_bridge: str, _path: str):
+        raise AssertionError("fresh-qr must not be proxied for a registered bridge")
+
+    monkeypatch.setattr(dashboard_api, "_wa_bridge_get", fake_get)
+    monkeypatch.setattr(dashboard_api, "_wa_bridge_post", fail_post)
+
+    out = asyncio.run(dashboard_api.whatsapp_fresh_qr("1", _user={}))
+
+    assert out["ok"] is True
+    assert out["status"] == "registered_session"
+    assert out["ready"] is True
+    assert out["registered"] is True

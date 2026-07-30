@@ -7,16 +7,6 @@ function BridgeCard({ bridge }: { bridge: 1 | 2 }) {
   const qc = useQueryClient();
   const [msg, setMsg] = useState<string | null>(null);
 
-  // Poll every 3s. Once a bridge reports ready we keep polling (slower) so a
-  // stale/phantom "connected" can never freeze the panel -- it always reflects
-  // the bridge's live /health state.
-  const { data } = useQuery({
-    queryKey: ["wa-qr", bridge],
-    queryFn: () => api.waQr(bridge),
-    refetchInterval: (q) => (q.state.data?.ready ? 10_000 : 3_000),
-    refetchOnWindowFocus: true,
-  });
-
   // Session identity (phone_number + push_name) — only meaningful when the
   // bridge is paired. Poll every 15s while connected; every 5s while trying
   // to connect (a fresh QR scan flips identity into place within one tick).
@@ -30,8 +20,23 @@ function BridgeCard({ bridge }: { bridge: 1 | 2 }) {
     refetchOnWindowFocus: true,
   });
   const identity = sessions?.sessions.find((s) => s.bridge === String(bridge));
+  const sessionReady = Boolean(identity?.connected || identity?.status === "ready");
+  const sessionRegistered = Boolean(sessionReady || identity?.registered);
 
-  const refresh = () => qc.invalidateQueries({ queryKey: ["wa-qr", bridge] });
+  // Poll every 3s while unpaired. Once session state says a bridge is paired,
+  // slow the QR poll down and let /whatsapp/sessions drive the panel, so a
+  // stale QR state can never invite a destructive fresh-QR action.
+  const { data } = useQuery({
+    queryKey: ["wa-qr", bridge],
+    queryFn: () => api.waQr(bridge),
+    refetchInterval: sessionReady ? 30_000 : 3_000,
+    refetchOnWindowFocus: true,
+  });
+
+  const refresh = () => {
+    qc.invalidateQueries({ queryKey: ["wa-qr", bridge] });
+    qc.invalidateQueries({ queryKey: ["wa-sessions"] });
+  };
   const disconnect = useMutation({
     mutationFn: () => api.waDisconnect(bridge),
     onSuccess: (r) => { setMsg(r.ok ? "Unpaired — scan the new QR to re-link." : `Failed: ${r.error}`); refresh(); },
@@ -43,14 +48,20 @@ function BridgeCard({ bridge }: { bridge: 1 | 2 }) {
   const freshQr = useMutation({
     mutationFn: () => api.waFreshQr(bridge),
     onSuccess: (r) => {
-      setMsg(r.ok ? "Fresh QR requested. Leave this panel open for the next code." : `Failed: ${r.error}`);
+      if (!r.ok) {
+        setMsg(`Failed: ${r.error}`);
+      } else if (r.status === "registered_session") {
+        setMsg("Already paired. Use Reconnect to recover, or Disconnect to unpair first.");
+      } else {
+        setMsg("Fresh QR requested. Leave this panel open for the next code.");
+      }
       refresh();
     },
   });
 
-  const ready = data?.ready;
-  const status = data?.status ?? "loading";
-  const qrSrc = data?.qr
+  const ready = Boolean(sessionReady || data?.ready || data?.connected);
+  const status = ready ? "connected" : data?.status ?? identity?.status ?? "loading";
+  const qrSrc = !ready && data?.qr
     ? data.qr.startsWith("data:")
       ? data.qr
       : `data:image/png;base64,${data.qr}`
@@ -140,9 +151,9 @@ function BridgeCard({ bridge }: { bridge: 1 | 2 }) {
         >{reconnect.isPending ? "…" : "Reconnect"}</button>
         <button
           onClick={() => freshQr.mutate()}
-          disabled={freshQr.isPending}
+          disabled={freshQr.isPending || sessionRegistered}
           className="text-xs px-2.5 py-1 rounded-md border border-border text-text-secondary hover:bg-white/5 disabled:opacity-50"
-          title="Clear local auth and request a fresh QR"
+          title={sessionRegistered ? "Already paired — use Reconnect, or Disconnect before requesting a new QR" : "Request a fresh QR for an unpaired bridge slot"}
         >{freshQr.isPending ? "…" : "Fresh QR"}</button>
         <button
           onClick={() => { if (confirm(`Unpair Bridge ${bridge}? You'll need to scan a new QR to re-link.`)) disconnect.mutate(); }}

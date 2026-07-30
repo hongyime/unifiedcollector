@@ -408,22 +408,64 @@ async def get_targets_ig(request):  # /ig/targets alias
 # ---------------------------------------------------------------------------
 async def ig_cooldown(request):
     pool = request.app["pool"]
+    account = str(request.query.get("account") or request.query.get("owner") or "").strip() or None
     cooling, secs_left, streak = False, 0, 0
     try:
         async with pool.acquire() as conn:
-            row = await conn.fetchval(
-                "SELECT last_processed_id FROM service_cursors WHERE service='instagram_rate_limit'"
+            if account:
+                event = await conn.fetchrow(
+                    """
+                    SELECT created_at + (COALESCE(cooldown_seconds, 0) * INTERVAL '1 second') AS active_until,
+                           CASE
+                             WHEN metadata->>'streak' ~ '^[0-9]+$' THEN (metadata->>'streak')::int
+                             ELSE NULL
+                           END AS streak,
+                           account
+                    FROM rate_limit_events
+                    WHERE source = 'instagram'
+                      AND status_code = 429
+                      AND account = $1
+                      AND COALESCE(cooldown_seconds, 0) > 0
+                      AND created_at + (COALESCE(cooldown_seconds, 0) * INTERVAL '1 second') > NOW()
+                    ORDER BY active_until DESC
+                    LIMIT 1
+                    """,
+                    account,
+                )
+                if event and event["active_until"]:
+                    active_until = event["active_until"]
+                    if active_until.tzinfo is None:
+                        active_until = active_until.replace(tzinfo=timezone.utc)
+                    left = (active_until - datetime.now(timezone.utc)).total_seconds()
+                    if left > 0:
+                        cooling, secs_left = True, int(left)
+                        streak = int(event["streak"] or 0)
+            cursor_service = (
+                f"instagram_rate_limit:{account}"
+                if account
+                else "instagram_rate_limit"
             )
-        if row and ":" in str(row):
-            exp_s, streak_s = str(row).split(":", 1)
-            expiry = float(exp_s)
-            streak = int(float(streak_s))
-            left = expiry - time.time()
-            if left > 0:
-                cooling, secs_left = True, int(left)
+            if not cooling:
+                row = await conn.fetchval(
+                    "SELECT last_processed_id FROM service_cursors WHERE service=$1",
+                    cursor_service,
+                )
+                if row and ":" in str(row):
+                    exp_s, streak_s = str(row).split(":", 1)
+                    expiry = float(exp_s)
+                    streak = int(float(streak_s))
+                    left = expiry - time.time()
+                    if left > 0:
+                        cooling, secs_left = True, int(left)
     except Exception:
         logger.debug("ig_cooldown read failed", exc_info=True)
-    return _cors(web.json_response({"cooling": cooling, "secs_left": secs_left, "streak": streak}))
+    return _cors(web.json_response({
+        "cooling": cooling,
+        "secs_left": secs_left,
+        "streak": streak,
+        "account": account,
+        "scope": "account" if account else "legacy_global",
+    }))
 
 
 # ---------------------------------------------------------------------------

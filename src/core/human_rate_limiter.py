@@ -194,6 +194,22 @@ class HumanLikeRateLimiter(AdaptiveRateLimiter):
         )
         self.record_failure(domain)
 
+    def set_cooldown_remaining(
+        self,
+        domain: str,
+        seconds: float,
+        account: str | None = None,
+    ):
+        """Restore a known cooldown deadline without applying another penalty."""
+        key = _cooldown_key(domain, account)
+        if seconds <= 0:
+            self._in_emergency.pop(key, None)
+            return
+        self._in_emergency[key] = max(
+            self._in_emergency.get(key, 0.0),
+            time.monotonic() + float(seconds),
+        )
+
     def record_rate_limit(self, domain: str, account: str | None = None):
         self.trigger_emergency_cooldown(domain, account=account)
 

@@ -151,11 +151,20 @@ app.post('/reconnect', (_req, res) => {
     }
 });
 
-// POST /fresh-qr — force a new pairable QR. This is intentionally stronger
-// than /reconnect: reconnect keeps creds, while fresh-qr clears local auth and
-// restarts into QR-pairing mode. Use this when a panel is stuck at connecting
-// or the phone reports the previous QR as expired.
+// POST /fresh-qr — force a new pairable QR for an UNREGISTERED slot.
+// This must never clear a registered/paired session. The dashboard exposes a
+// separate Disconnect control for explicit unpairing; Fresh QR is only a nudge
+// for bridge slots that are already in QR-pairing mode.
 app.post('/fresh-qr', async (_req, res) => {
+    const registered = Boolean(serviceHealthy || socketRegistered || activeSock?.authState?.creds?.registered);
+    if (registered) {
+        res.status(200).json({
+            ...bridgeState(),
+            status: 'registered_session',
+            note: 'bridge is already registered; use reconnect to recover or disconnect to unpair',
+        });
+        return;
+    }
     if (!serviceHealthy && latestQr) {
         res.status(200).json({ ...bridgeState(), status: 'awaiting_scan', note: 'active QR already available' });
         return;
@@ -174,13 +183,9 @@ app.post('/fresh-qr', async (_req, res) => {
     lastDisconnectStatusCode = null;
     lastDisconnectReason = null;
     try {
-        if (activeSock?.authState?.creds?.registered) {
-            await activeSock.logout();
-        } else {
-            clearAuthState();
-            activeSock?.end?.(new Error('manual fresh QR'));
-            scheduleReconnect('manual_fresh_qr', 1000);
-        }
+        clearAuthState();
+        activeSock?.end?.(new Error('manual fresh QR'));
+        scheduleReconnect('manual_fresh_qr', 1000);
         res.status(200).json({ status: 'fresh_qr_requested' });
     } catch (err: any) {
         clearAuthState();
@@ -521,10 +526,16 @@ async function connectToWhatsApp(): Promise<void> {
                 stream515.push(now);
                 stream515 = stream515.filter((t) => now - t < WINDOW_515_MS);
                 if (stream515.length >= MAX_RAPID_515) {
-                    logger.error(`${stream515.length} stream errors in window -- auth likely corrupt, clearing`);
                     stream515 = [];
-                    clearAuthState();
-                    scheduleReconnect('rapid_515', 5000);
+                    if (socketRegistered || sock.authState.creds.registered) {
+                        logger.error(`${MAX_RAPID_515} stream errors in window -- preserving registered auth and backing off`);
+                        connectionState = 'rapid_515_backoff';
+                        scheduleReconnect('rapid_515_registered', 15000);
+                    } else {
+                        logger.error(`${MAX_RAPID_515} stream errors in window before registration -- clearing unpaired auth`);
+                        clearAuthState();
+                        scheduleReconnect('rapid_515_unregistered', 5000);
+                    }
                 } else {
                     if (socketRegistered && qrWasRecent) {
                         connectionState = 'pairing_restart';

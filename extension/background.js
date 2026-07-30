@@ -584,7 +584,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         // Ask the bridge whether the HEADLESS collector is in a 429 cooldown so the
         // extension can rest in sync (shared IG account → cooperative anti-ban).
         try {
-          const r = await fetch(base + "/social/ig_cooldown");
+          const account = String(msg.account || msg.owner || "").trim();
+          const qs = account ? `?account=${encodeURIComponent(account)}` : "";
+          const r = await fetch(base + "/social/ig_cooldown" + qs);
           sendResponse(await r.json());
         } catch (e) {
           sendResponse({ cooling: false, secs_left: 0, streak: 0 });
@@ -884,7 +886,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       case "wall": {  // the in-tab loop hit a throttle/login wall and is sleeping
         const mins = msg.mins || 45;
         await setStatus({ cooldownUntil: Date.now() + mins * 60000 });
-        await log("warn", `⚠️ ${msg.platform || "?"} throttle wall — loop sleeping ${mins}m`);
+        const account = String(msg.account || msg.owner || "").trim();
+        const who = account ? `/${account}` : "";
+        const reason = msg.reason ? ` (${msg.reason})` : "";
+        await log("warn", `⚠️ ${msg.platform || "?"}${who} throttle wall${reason} — loop sleeping ${mins}m`);
         sendResponse({ ok: true });
         break;
       }
