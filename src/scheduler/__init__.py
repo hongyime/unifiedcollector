@@ -501,6 +501,77 @@ class Scheduler:
                     pass
 
                 try:
+                    if await conn.fetchval("SELECT to_regclass('x_profile_targets')", timeout=5) is not None:
+                        target_row = await conn.fetchrow(
+                            """
+                            SELECT count(*)::int AS targets,
+                                   count(*) FILTER (
+                                     WHERE status IN ('pending', 'failed', 'completed')
+                                       AND next_visit_at <= now()
+                                   )::int AS due_targets,
+                                   count(*) FILTER (WHERE status = 'claimed')::int AS claimed_targets,
+                                   count(*) FILTER (WHERE status = 'failed')::int AS failed_targets,
+                                   count(*) FILTER (WHERE status = 'unavailable')::int AS unavailable_targets,
+                                   max(last_success_at) AS last_success_at
+                            FROM x_profile_targets
+                            """,
+                            timeout=10,
+                        )
+                        edge_count = 0
+                        if await conn.fetchval("SELECT to_regclass('x_edges')", timeout=5) is not None:
+                            edge_count = int(await conn.fetchval("SELECT count(*) FROM x_edges", timeout=10) or 0)
+                        profile_hour = 0
+                        if await conn.fetchval("SELECT to_regclass('x_profiles')", timeout=5) is not None:
+                            profile_hour = int(await conn.fetchval(
+                                "SELECT count(*) FROM x_profiles WHERE updated_at >= date_trunc('hour', now())",
+                                timeout=10,
+                            ) or 0)
+                        posts_hour = int(await conn.fetchval(
+                            "SELECT count(*) FROM x_posts WHERE collected_at >= date_trunc('hour', now())",
+                            timeout=10,
+                        ) or 0)
+                        media_hour = int(await conn.fetchval(
+                            "SELECT count(*) FROM media_items WHERE source='x' AND collected_at >= date_trunc('hour', now())",
+                            timeout=10,
+                        ) or 0)
+                        browser_row = None
+                        if await conn.fetchval("SELECT to_regclass('browser_ingest_events')", timeout=5) is not None:
+                            browser_row = await conn.fetchrow(
+                                """
+                                SELECT coalesce(sum(observed_count), 0)::int AS observed,
+                                       coalesce(sum(stored_count), 0)::int AS stored,
+                                       count(*)::int AS requests,
+                                       max(created_at) AS last_seen_at
+                                FROM browser_ingest_events
+                                WHERE platform = 'x'
+                                  AND created_at >= date_trunc('hour', now())
+                                """,
+                                timeout=10,
+                            )
+                        target = dict(target_row) if target_row else {}
+                        browser = dict(browser_row) if browser_row else {}
+                        last_success = target.get("last_success_at")
+                        snap["x_collection_health"] = {
+                            "targets": int(target.get("targets") or 0),
+                            "due_targets": int(target.get("due_targets") or 0),
+                            "claimed_targets": int(target.get("claimed_targets") or 0),
+                            "failed_targets": int(target.get("failed_targets") or 0),
+                            "unavailable_targets": int(target.get("unavailable_targets") or 0),
+                            "edge_count": edge_count,
+                            "profiles_hour": profile_hour,
+                            "posts_hour": posts_hour,
+                            "media_hour": media_hour,
+                            "browser_observed_hour": int(browser.get("observed") or 0),
+                            "browser_stored_hour": int(browser.get("stored") or 0),
+                            "browser_requests_hour": int(browser.get("requests") or 0),
+                            "last_profile_success_age_seconds": int(
+                                (datetime.now(timezone.utc) - last_success).total_seconds()
+                            ) if last_success else None,
+                        }
+                except Exception:
+                    pass
+
+                try:
                     active_limits = []
                     active_sources = set()
                     now_ts = datetime.now(timezone.utc).timestamp()

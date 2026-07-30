@@ -606,6 +606,37 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
         break;
       }
+      case "getXProfileTarget": {
+        try {
+          const owner = String(msg.owner || "").trim();
+          const qs = owner ? `?owner=${encodeURIComponent(owner)}` : "";
+          const r = await fetch(base + "/social/x-profile-target" + qs);
+          const j = await r.json().catch(() => ({}));
+          sendResponse({ ok: r.ok, ...j });
+        } catch (e) {
+          sendResponse({ ok: false, target: null, error: String(e.message || e) });
+        }
+        break;
+      }
+      case "xProfileTargetResult": {
+        try {
+          const r = await fetch(base + "/social/x-profile-target-result", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(withExtensionVersion({
+              username: msg.username,
+              status: msg.status || "success",
+              reason: msg.reason || null,
+              owner: msg.owner || null,
+            })),
+          });
+          const j = await r.json().catch(() => ({}));
+          sendResponse({ ok: r.ok, ...j });
+        } catch (e) {
+          sendResponse({ ok: false, error: String(e.message || e) });
+        }
+        break;
+      }
       case "ingest": {
         try {
           const allItems = Array.isArray(msg.items) ? msg.items : [];
@@ -703,7 +734,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         try {
           const r = await fetch(base + "/social/profile", {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(withExtensionVersion({ platform: msg.platform || "instagram", profile: msg.profile })),
+            body: JSON.stringify(withExtensionVersion({
+              platform: msg.platform || "instagram",
+              profile: msg.profile,
+              owner: msg.owner || null,
+            })),
           });
           sendResponse({ ok: r.ok });
         } catch (e) { sendResponse({ ok: false }); }

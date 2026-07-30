@@ -29,6 +29,11 @@
       window.postMessage({ __uc: true, type: "users", platform, context: context || "seen", owner: owner || null, users }, "*");
     }
   }
+  function emitMedia(username, items) {
+    if (items && items.length) {
+      window.postMessage({ __uc: true, type: "ingest", platform, username: username || "timeline", items }, "*");
+    }
+  }
   function followContextFromPath() {
     try {
       let owner = null, side = null;
@@ -155,13 +160,85 @@
     };
   }
 
-  function scan(obj, out, users, depth) {
+  function _ucHash(s) {
+    s = String(s || "");
+    let h = 5381;
+    for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
+    return h.toString(36);
+  }
+
+  function xMediaFromTweet(obj, tweet) {
+    const items = [];
+    if (platform !== "x" || !obj || !tweet || !tweet.platform_post_id) return items;
+    const lg = obj.legacy || {};
+    const media = []
+      .concat((lg.extended_entities && lg.extended_entities.media) || [])
+      .concat((lg.entities && lg.entities.media) || []);
+    const seen = new Set();
+    media.forEach((m, idx) => {
+      const photo = m && (m.media_url_https || m.media_url);
+      if (photo && /^https?:\/\/pbs\.twimg\.com\//i.test(photo) && !seen.has(photo)) {
+        seen.add(photo);
+        const url = (() => {
+          try {
+            const u = new URL(photo);
+            if (/\/media\//i.test(u.pathname)) u.searchParams.set("name", "orig");
+            return u.toString();
+          } catch (e) { return photo; }
+        })();
+        items.push({
+          content_id: `gql_img_${tweet.platform_post_id}_${idx}_${_ucHash(url)}`,
+          content_type: "photo",
+          url,
+          entity_name: tweet.author_username || "timeline",
+          kind: "post",
+          meta: {
+            x_asset_role: "graphql_image",
+            post_id: tweet.platform_post_id,
+            author_username: tweet.author_username || null,
+            post_url: tweet.author_username ? `https://x.com/${tweet.author_username}/status/${tweet.platform_post_id}` : null,
+          },
+        });
+      }
+      const variants = ((m && m.video_info && m.video_info.variants) || [])
+        .filter((v) => v && v.url && /video\/mp4/i.test(v.content_type || "") && /\.mp4(?:$|\?)/i.test(v.url))
+        .sort((a, b) => Number(b.bitrate || 0) - Number(a.bitrate || 0));
+      if (variants.length) {
+        const v = variants[0];
+        if (!seen.has(v.url)) {
+          seen.add(v.url);
+          items.push({
+            content_id: `gql_vid_${tweet.platform_post_id}_${idx}_${Number(v.bitrate || 0)}_${_ucHash(v.url)}`,
+            content_type: "video",
+            url: v.url,
+            entity_name: tweet.author_username || "timeline",
+            kind: "post",
+            browser_upload: true,
+            browser_upload_only: true,
+            meta: {
+              x_asset_role: "graphql_video_mp4",
+              post_id: tweet.platform_post_id,
+              author_username: tweet.author_username || null,
+              bitrate: v.bitrate || null,
+              post_url: tweet.author_username ? `https://x.com/${tweet.author_username}/status/${tweet.platform_post_id}` : null,
+            },
+          });
+        }
+      }
+    });
+    return items;
+  }
+
+  function scan(obj, out, users, media, depth) {
     if (!obj || depth > 9 || (out.length > 400 && users.length > 1500)) return;
-    if (Array.isArray(obj)) { for (const v of obj) scan(v, out, users, depth + 1); return; }
+    if (Array.isArray(obj)) { for (const v of obj) scan(v, out, users, media, depth + 1); return; }
     if (typeof obj !== "object") return;
     if (platform === "x" && obj.legacy && obj.legacy.favorite_count !== undefined) {
       const t = tweetFrom(obj);
-      if (t) out.push(t);
+      if (t) {
+        out.push(t);
+        xMediaFromTweet(obj, t).forEach((item) => media.push(item));
+      }
     } else if (platform === "facebook" && obj.reaction_count && typeof obj.reaction_count.count === "number") {
       // FB feedback node carries engagement; id from the story it belongs to.
       const pid = obj.subscription_target_id || obj.associated_group_id || obj.share_fbid || obj.id;
@@ -183,22 +260,26 @@
       const u = userFrom(obj);
       if (u) users.push(u);
     }
-    for (const k in obj) { const v = obj[k]; if (v && typeof v === "object") scan(v, out, users, depth + 1); }
+    for (const k in obj) { const v = obj[k]; if (v && typeof v === "object") scan(v, out, users, media, depth + 1); }
   }
 
   // Session-level dedup so the SAME post/user isn't re-emitted on every GraphQL
   // response (the feed re-fetches constantly -> was spamming "posts[threads] saved 4").
-  const _emittedP = new Set(), _emittedU = new Set();
+  const _emittedP = new Set(), _emittedU = new Set(), _emittedM = new Set();
   const _cap = (s) => { if (s.size > 5000) s.clear(); };
 
   function harvestText(text) {
     if (!text || text.length > 6_000_000) return;
     let json;
     try { json = JSON.parse(text); } catch (e) { return; }
-    const out = [], users = [];
-    scan(json, out, users, 0);
-    _cap(_emittedP); _cap(_emittedU);
+    const out = [], users = [], media = [];
+    scan(json, out, users, media, 0);
+    _cap(_emittedP); _cap(_emittedU); _cap(_emittedM);
     emit(out.filter((p) => (_emittedP.has(p.platform_post_id) ? false : _emittedP.add(p.platform_post_id))));
+    emitMedia("timeline", media.filter((item) => {
+      const k = item.content_id || item.url;
+      return _emittedM.has(k) ? false : _emittedM.add(k);
+    }));
     const rel = followContextFromPath();
     emitUsers(users.filter((u) => { const k = u.user_id || u.username; return _emittedU.has(k) ? false : _emittedU.add(k); }),
       rel && rel.context, rel && rel.owner);

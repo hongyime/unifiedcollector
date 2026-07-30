@@ -283,6 +283,39 @@ def _format_browser_ingest_event(row: dict) -> str:
     )
 
 
+def _format_x_collection_health(row: dict) -> list[str]:
+    targets = int(row.get("targets", 0) or 0)
+    due = int(row.get("due_targets", 0) or 0)
+    claimed = int(row.get("claimed_targets", 0) or 0)
+    failed = int(row.get("failed_targets", 0) or 0)
+    unavailable = int(row.get("unavailable_targets", 0) or 0)
+    edges = int(row.get("edge_count", 0) or 0)
+    profiles = int(row.get("profiles_hour", 0) or 0)
+    posts = int(row.get("posts_hour", 0) or 0)
+    media = int(row.get("media_hour", 0) or 0)
+    observed = int(row.get("browser_observed_hour", 0) or 0)
+    stored = int(row.get("browser_stored_hour", 0) or 0)
+    requests = int(row.get("browser_requests_hour", 0) or 0)
+    age = row.get("last_profile_success_age_seconds")
+    lines = [
+        (
+            f"Queue: {targets:,} profile {_plural(targets, 'target')}; "
+            f"{due:,} due now, {claimed:,} claimed, {failed:,} failed, "
+            f"{unavailable:,} unavailable."
+        ),
+        (
+            f"This hour: {profiles:,} profile refreshes, {posts:,} posts, "
+            f"{media:,} media files. Browser saw {observed:,} media "
+            f"{_plural(observed, 'item')} and stored {stored:,} across "
+            f"{requests:,} {_plural(requests, 'POST')}."
+        ),
+        f"Edges: {edges:,} mention/reply/quote/repost/seen-author records.",
+    ]
+    if age is not None:
+        lines.append(f"Last successful queued profile/media pass {_humanize_age(int(age or 0))} ago.")
+    return lines
+
+
 def _format_degraded_source(row: dict) -> str:
     source = _display_source(row.get("source", "?"))
     status = str(row.get("status") or "degraded").replace("_", " ")
@@ -616,6 +649,12 @@ async def notify_status(snapshot: dict) -> bool:
         lines.append("")
         lines.append("<b>Browser extension ingest</b>")
         lines.extend(_format_browser_ingest_event(row) for row in browser_ingest[:6])
+
+    x_health = snapshot.get("x_collection_health") or {}
+    if x_health:
+        lines.append("")
+        lines.append("<b>Twitter / X profile and media queue</b>")
+        lines.extend(_format_x_collection_health(x_health))
 
     # Headless coverage: how many are fresh, and name any that are stale.
     headless = [s for s in ages if s not in _REALTIME]

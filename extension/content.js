@@ -1087,6 +1087,22 @@ function harvestXPosts(entity, feed) {
       const num = (re) => { const x = al.match(re); return x ? parseInt(x[1].replace(/[,.\s]/g, ""), 10) : null; };
       const timeEl = art.querySelector("time[datetime]");
       const takenAtMs = timeEl ? Date.parse(timeEl.getAttribute("datetime") || "") : NaN;
+      const allText = (art.innerText || "").trim();
+      const replyTo = ((allText.match(/Replying to\s+@([A-Za-z0-9_]{1,20})/i) || [])[1]) || null;
+      const quote = (() => {
+        const links = [...art.querySelectorAll('a[href*="/status/"]')]
+          .map((a) => (a.getAttribute("href") || "")
+            .replace(/^https?:\/\/(?:www\.)?(?:x\.com|twitter\.com)/i, "")
+            .split("?")[0])
+          .map((h) => h.match(/^\/([A-Za-z0-9_]{1,20})\/status\/(\d+)/))
+          .filter(Boolean)
+          .map((mm) => ({ author: mm[1], id: mm[2], href: `/${mm[1]}/status/${mm[2]}` }));
+        return links.find((item) => item.id !== pid) || null;
+      })();
+      const reposted = (() => {
+        const m = allText.match(/@([A-Za-z0-9_]{1,20})\s+reposted/i);
+        return m ? m[1] : null;
+      })();
       posts.push({
         platform_post_id: pid, author_username: author, caption: caption || null,
         comments_count: num(/([\d,.]+)\s+repl/i), reposts_count: num(/([\d,.]+)\s+repost/i),
@@ -1095,7 +1111,18 @@ function harvestXPosts(entity, feed) {
         taken_at: Number.isFinite(takenAtMs) ? Math.floor(takenAtMs / 1000) : null,
         hashtags: caption ? (caption.match(/#[\w]+/g) || []).map((s) => s.slice(1)) : [],
         mentions: caption ? (caption.match(/@[\w]+/g) || []).map((s) => s.slice(1)) : [],
-        metadata: { source: "x_dom_tweet", feed, url: "https://x.com" + href },
+        in_reply_to_screen_name: replyTo,
+        quoted_author_username: quote && quote.author,
+        retweeted_author_username: reposted,
+        metadata: {
+          source: "x_dom_tweet",
+          feed,
+          url: "https://x.com" + href,
+          in_reply_to_screen_name: replyTo,
+          quoted_author_username: quote && quote.author,
+          quoted_post_id: quote && quote.id,
+          retweeted_author_username: reposted,
+        },
       });
     } catch (e) {}
   });
@@ -1184,6 +1211,18 @@ function normalizeXMediaUrl(raw) {
   }
 }
 
+function normalizeXVideoUrl(raw) {
+  if (!raw || !/^https?:/i.test(raw)) return "";
+  try {
+    const u = new URL(raw);
+    if (!/(^|\.)twimg\.com$/i.test(u.hostname) && !/(^|\.)video\.twitter\.com$/i.test(u.hostname)) return "";
+    if (!/\.mp4(?:$|\?)/i.test(u.toString())) return "";
+    return u.toString();
+  } catch (e) {
+    return "";
+  }
+}
+
 function addXMediaCandidate(sink, u, entity, role, context = {}) {
   const url = normalizeXMediaUrl(u);
   if (!url) return;
@@ -1194,6 +1233,27 @@ function addXMediaCandidate(sink, u, entity, role, context = {}) {
     url,
     entity_name: context.author || entity,
     kind: "post",
+    meta: {
+      x_asset_role: role,
+      post_id: context.post_id || null,
+      author_username: context.author || null,
+      post_url: context.href ? "https://x.com" + context.href : null,
+    },
+  });
+}
+
+function addXVideoCandidate(sink, u, entity, role, context = {}) {
+  const url = normalizeXVideoUrl(u);
+  if (!url) return;
+  const idBase = context.post_id ? `${context.post_id}_${urlId(url)}` : urlId(url);
+  sink.add({
+    content_id: `${role}_${idBase}`,
+    content_type: "video",
+    url,
+    entity_name: context.author || entity,
+    kind: "post",
+    browser_upload: true,
+    browser_upload_only: true,
     meta: {
       x_asset_role: role,
       post_id: context.post_id || null,
@@ -1236,12 +1296,65 @@ function scrapeXProfile(handle) {
   return Object.values(profile).some((v) => v !== null && v !== "" && v !== false) ? profile : null;
 }
 
+function xIsStatusPage() {
+  return /^\/[A-Za-z0-9_]{1,20}\/status\/\d+/.test(location.pathname);
+}
+
+function xIsMediaTab() {
+  return /^\/[A-Za-z0-9_]{1,20}\/media\/?$/.test(location.pathname);
+}
+
+function xProfileUnavailable() {
+  try {
+    const body = document.body ? (document.body.innerText || "") : "";
+    return /account doesn['’]t exist|profile not found|page doesn['’]t exist/i.test(body);
+  } catch (e) {
+    return false;
+  }
+}
+
+async function xReportProfileTarget(username, status, reason, owner) {
+  if (!username || username === "timeline") return;
+  await send({
+    type: "xProfileTargetResult",
+    username,
+    status: status || "success",
+    reason: reason || null,
+    owner: owner || null,
+  }).catch(() => {});
+}
+
+async function xMaybeVisitQueuedProfile(owner, cycle) {
+  if (cycle % 3 !== 0) return false;
+  const resp = await send({ type: "getXProfileTarget", owner: owner || "" }).catch(() => null);
+  const target = resp && resp.target && resp.target.username;
+  if (!target) return false;
+  const handle = String(target).replace(/^@/, "");
+  if (!/^[A-Za-z0-9_]{1,20}$/.test(handle)) return false;
+  clog("info", `X → visiting queued @${handle} profile/media`, "x");
+  await sleep(jitter(2500));
+  location.href = "https://x.com/" + encodeURIComponent(handle);
+  return true;
+}
+
+async function xMaybeVisitTweetDetail(posts, cycle) {
+  if (cycle % 5 !== 0 || !Array.isArray(posts) || !posts.length) return false;
+  const post = posts.find((p) => p && p.metadata && p.metadata.url) || posts[0];
+  const url = post && post.metadata && post.metadata.url;
+  if (!url || !/^https:\/\/(?:x|twitter)\.com\/[A-Za-z0-9_]{1,20}\/status\/\d+/i.test(url)) return false;
+  clog("info", "X → opening tweet detail for full media pass", "x");
+  await sleep(jitter(2500));
+  location.href = url;
+  return true;
+}
+
 const x = {
   id: "x", host: "x.com", label: "Twitter / X",
   entity() { const m = location.pathname.match(/^\/([^/?#]+)/); return m && !/^(home|explore|notifications|messages|i|search)$/.test(m[1]) ? m[1] : "timeline"; },
   async runCycle() {
     const entity = this.entity();
     const owner = ownerFromStoredOrDom("x", xLoggedInOwner);
+    const cycle = lsBump("uc_x_cyc");
     if (await maybeSweepFollowGraph({
       platform: "x",
       owner,
@@ -1253,12 +1366,18 @@ const x = {
       },
       homeUrl: "https://x.com/home",
     })) return { targets: 1, saved: 0, discovered: 0 };
+    if (entity !== "timeline" && !xIsStatusPage() && xProfileUnavailable()) {
+      await xReportProfileTarget(entity, "unavailable", "profile_missing", owner);
+      clog("info", `X @${entity}: unavailable profile`, "x");
+      await sleep(jitter(2500));
+      location.href = "https://x.com/home";
+      return { targets: 1, saved: 0, discovered: 0 };
+    }
     // following-PRIMARY, for-you SECONDARY: most cycles read Following; every 4th
     // cycle take a For-You pass so we still capture trending/outside-graph tweets.
     let feed = entity;
     if (/^\/home/.test(location.pathname)) {
-      const c = lsBump("uc_x_cyc");
-      if (c % 4 === 0) feed = (await xSelectTab("For you")) ? "home/foryou" : "home";
+      if (cycle % 4 === 0) feed = (await xSelectTab("For you")) ? "home/foryou" : "home";
       else feed = (await xSelectTab("Following")) ? "home/following" : "home";
     }
     clog("info", `X cycle on ${feed} — scrolling for tweets`, "x");
@@ -1267,7 +1386,7 @@ const x = {
     if (entity !== "timeline") {
       const profile = scrapeXProfile(entity);
       if (profile) {
-        await send({ type: "profile", platform: "x", profile });
+        await send({ type: "profile", platform: "x", profile, owner: { username: owner } });
         clog("info", `X @${profile.username}: profile captured`, "x");
       }
     }
@@ -1285,19 +1404,8 @@ const x = {
       });
       art.querySelectorAll("video").forEach((v) => {
         addXMediaCandidate(sink, v.poster, entity, "poster", ctx);
-        const u = v.src || (v.querySelector("source") && v.querySelector("source").src);
-        if (u && /^https?:/.test(u) && !u.startsWith("blob:")) {
-          sink.add({
-            content_id: "vid_" + (ctx.post_id ? `${ctx.post_id}_` : "") + urlId(u),
-            content_type: "video",
-            url: u,
-            entity_name: ctx.author || entity,
-            kind: "post",
-            browser_upload: true,
-            browser_upload_only: true,
-            meta: { x_asset_role: "video", post_id: ctx.post_id || null, author_username: ctx.author || null },
-          });
-        }
+        const u = v.currentSrc || v.src || (v.querySelector("source") && v.querySelector("source").src);
+        addXVideoCandidate(sink, u, entity, "video", ctx);
       });
     });
     // Fallback for media lightboxes/profile media tabs where images may sit
@@ -1305,6 +1413,11 @@ const x = {
     document.querySelectorAll('img[src*="pbs.twimg.com"], img[srcset*="pbs.twimg.com"]').forEach((im) => {
       if (imageLooksTooSmall(im, 120)) return;
       imageUrlsFromElement(im).forEach((u) => addXMediaCandidate(sink, u, entity, "img"));
+    });
+    document.querySelectorAll("video").forEach((v) => {
+      addXMediaCandidate(sink, v.poster, entity, "poster");
+      const u = v.currentSrc || v.src || (v.querySelector("source") && v.querySelector("source").src);
+      addXVideoCandidate(sink, u, entity, "video");
     });
     const xu = collectPermalinkAuthors(/^\/([A-Za-z0-9_]{1,20})\/status\//, /^(home|explore|search|messages|notifications|i|settings)$/);
     if (xu.length) await send({ type: "users", platform: "x", context: "seen", users: xu });
@@ -1317,6 +1430,30 @@ const x = {
       probe_reason: sink.items.length ? "media_candidates_found" : "no_dom_media_candidates",
       probe_meta: { feed, posts: xposts.length },
     });
+    if (entity !== "timeline" && !xIsStatusPage()) {
+      if (!xIsMediaTab()) {
+        clog("info", `X @${entity}: opening Media tab`, "x");
+        await sleep(jitter(3000));
+        location.href = "https://x.com/" + encodeURIComponent(entity) + "/media";
+      } else {
+        await xReportProfileTarget(entity, "success", null, owner);
+        clog("info", `X @${entity}: media/profile pass complete`, "x");
+        await sleep(jitter(3000));
+        location.href = "https://x.com/home";
+      }
+      return { targets: 1, saved: sink.items.length, posts: xposts.length, discovered: xu.length };
+    }
+    if (xIsStatusPage()) {
+      await sleep(jitter(3000));
+      location.href = "https://x.com/home";
+      return { targets: 1, saved: sink.items.length, posts: xposts.length, discovered: xu.length };
+    }
+    if (await xMaybeVisitQueuedProfile(owner, cycle)) {
+      return { targets: 1, saved: sink.items.length, posts: xposts.length, discovered: xu.length };
+    }
+    if (await xMaybeVisitTweetDetail(xposts, cycle)) {
+      return { targets: 1, saved: sink.items.length, posts: xposts.length, discovered: xu.length };
+    }
     return { targets: 1, saved: sink.items.length, posts: xposts.length, discovered: xu.length };
   },
 };
@@ -2015,6 +2152,13 @@ window.addEventListener("message", (ev) => {
   const where = (() => { try { return (location.pathname.match(/^\/@?([^/?#]+)/) || [, "feed"])[1].slice(0, 30); } catch (e) { return "feed"; } })();
   if (m.type === "posts" && Array.isArray(m.posts) && m.posts.length) {
     send({ type: "posts", platform: m.platform, username: where, posts: m.posts }).catch(() => {});
+  } else if (m.type === "ingest" && Array.isArray(m.items) && m.items.length) {
+    send({
+      type: "ingest",
+      platform: m.platform,
+      username: m.username || where,
+      items: m.items,
+    }).catch(() => {});
   } else if (m.type === "users" && Array.isArray(m.users) && m.users.length) {
     send({ type: "users", platform: m.platform, context: m.context || "seen", owner: m.owner || null, users: m.users }).catch(() => {});
   } else if (m.type === "dms" && Array.isArray(m.threads) && m.threads.length) {

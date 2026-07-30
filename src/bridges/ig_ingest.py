@@ -141,6 +141,8 @@ _BROWSER_CAPTURE_COMPRESSED_ENDPOINTS = {"profile", "posts", "comments"}
 IG_SPIDER_MAX_HOP = int(os.getenv("INSTA_SPIDER_HOPS", "2"))
 IG_SPIDER_FAMOUS_CAP = int(os.getenv("INSTA_SPIDER_FAMOUS_CAP", "100000"))
 IG_SPIDER_TARGETS_LIMIT = int(os.getenv("IG_SPIDER_TARGETS_LIMIT", "250"))
+X_PROFILE_TARGET_REVISIT_SECONDS = int(os.getenv("X_PROFILE_TARGET_REVISIT_SECONDS", str(12 * 60 * 60)))
+X_PROFILE_TARGET_RETRY_SECONDS = int(os.getenv("X_PROFILE_TARGET_RETRY_SECONDS", str(45 * 60)))
 
 _SPIDER_DDL = """
 CREATE TABLE IF NOT EXISTS instagram_spider_targets (
@@ -153,6 +155,58 @@ CREATE TABLE IF NOT EXISTS instagram_spider_targets (
   last_scraped_at TIMESTAMPTZ
 )
 """
+
+_X_TARGETS_DDL = """
+CREATE TABLE IF NOT EXISTS x_profile_targets (
+  username text PRIMARY KEY,
+  source text NOT NULL DEFAULT 'seen',
+  priority integer NOT NULL DEFAULT 50,
+  status text NOT NULL DEFAULT 'pending',
+  next_visit_at timestamptz NOT NULL DEFAULT now(),
+  last_attempt_at timestamptz,
+  last_success_at timestamptz,
+  attempts integer NOT NULL DEFAULT 0,
+  last_error text,
+  metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_x_profile_targets_due
+  ON x_profile_targets (status, next_visit_at, priority DESC);
+CREATE INDEX IF NOT EXISTS idx_x_profile_targets_updated
+  ON x_profile_targets (updated_at DESC);
+CREATE TABLE IF NOT EXISTS x_edges (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  source_username text,
+  target_username text NOT NULL,
+  post_id text,
+  edge_type text NOT NULL,
+  strength integer NOT NULL DEFAULT 50,
+  evidence_url text,
+  first_seen timestamptz NOT NULL DEFAULT now(),
+  last_seen timestamptz NOT NULL DEFAULT now(),
+  metadata jsonb NOT NULL DEFAULT '{}'::jsonb
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_x_edges_natural
+  ON x_edges (
+    lower(coalesce(source_username, '')),
+    lower(target_username),
+    coalesce(post_id, ''),
+    edge_type
+  );
+CREATE INDEX IF NOT EXISTS idx_x_edges_source
+  ON x_edges (lower(source_username), edge_type, last_seen DESC);
+CREATE INDEX IF NOT EXISTS idx_x_edges_target
+  ON x_edges (lower(target_username), edge_type, last_seen DESC);
+CREATE INDEX IF NOT EXISTS idx_x_edges_post
+  ON x_edges (post_id);
+"""
+
+
+async def _execute_ddl_script(conn, script: str) -> None:
+    for statement in (s.strip() for s in str(script or "").split(";")):
+        if statement:
+            await conn.execute(statement)
 
 
 _IG_EPOCH = 1314220021721  # Instagram media-id custom epoch (ms)
@@ -257,6 +311,48 @@ async def _targets_for(pool, platform):
     """seed targets (collection_targets) UNION instagram spider targets (IG only)."""
     seen = set()
     out = []
+    if platform == "x":
+        try:
+            async with pool.acquire() as conn:
+                seeds = await conn.fetch(
+                    """
+                    SELECT target_id AS username, priority
+                    FROM collection_targets
+                    WHERE source = 'x'
+                    ORDER BY priority DESC, created_at ASC
+                    LIMIT $1
+                    """,
+                    IG_SPIDER_TARGETS_LIMIT,
+                )
+                queued = await conn.fetch(
+                    """
+                    SELECT username, source, priority, status, next_visit_at
+                    FROM x_profile_targets
+                    WHERE status IN ('pending', 'completed', 'failed')
+                    ORDER BY
+                        CASE status WHEN 'pending' THEN 0 WHEN 'failed' THEN 1 ELSE 2 END,
+                        priority DESC,
+                        next_visit_at ASC
+                    LIMIT $1
+                    """,
+                    IG_SPIDER_TARGETS_LIMIT,
+                )
+                for row in list(seeds) + list(queued):
+                    r = dict(row)
+                    u = (r.get("username") or "").strip().lstrip("@")
+                    if u and u not in seen:
+                        seen.add(u)
+                        out.append({
+                            "username": u,
+                            "hop": 0,
+                            "source": r.get("source") or "collection_targets",
+                            "priority": int(r.get("priority") or 0),
+                            "status": r.get("status") or "pending",
+                            "next_visit_at": r["next_visit_at"].isoformat() if r.get("next_visit_at") else None,
+                        })
+        except Exception:
+            logger.exception("targets query failed (%s)", platform)
+        return out
     try:
         await refresh_account_proximity_cache(pool)
         await refresh_collector_priority_hints(pool)
@@ -367,6 +463,32 @@ async def _targets_for(pool, platform):
                     if u and u not in seen:
                         seen.add(u)
                         out.append({"username": u, "hop": 1})
+            elif platform == "x":
+                queued = await conn.fetch(
+                    """
+                    SELECT username, source, priority, status, next_visit_at
+                    FROM x_profile_targets
+                    WHERE status IN ('pending', 'completed', 'failed')
+                    ORDER BY
+                        CASE status WHEN 'pending' THEN 0 WHEN 'failed' THEN 1 ELSE 2 END,
+                        priority DESC,
+                        next_visit_at ASC
+                    LIMIT $1
+                    """,
+                    IG_SPIDER_TARGETS_LIMIT,
+                )
+                for r in queued:
+                    u = (r["username"] or "").strip().lstrip("@")
+                    if u and u not in seen:
+                        seen.add(u)
+                        out.append({
+                            "username": u,
+                            "hop": 0,
+                            "source": r["source"],
+                            "priority": int(r["priority"] or 0),
+                            "status": r["status"],
+                            "next_visit_at": r["next_visit_at"].isoformat() if r["next_visit_at"] else None,
+                        })
     except Exception:
         logger.exception("targets query failed (%s)", platform)
     return out
@@ -391,6 +513,105 @@ async def get_targets_ig(request):  # /ig/targets alias
         "usernames": [t["username"] for t in out],
         "max_hop": IG_SPIDER_MAX_HOP,
     }))
+
+
+async def x_profile_target_next(request):
+    owner = (request.query.get("owner") or "").strip().lstrip("@")
+    try:
+        async with request.app["pool"].acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                WITH candidate AS (
+                    SELECT username
+                    FROM x_profile_targets
+                    WHERE status IN ('pending', 'completed', 'failed', 'claimed')
+                      AND next_visit_at <= now()
+                    ORDER BY
+                        CASE status
+                          WHEN 'pending' THEN 0
+                          WHEN 'failed' THEN 1
+                          WHEN 'completed' THEN 2
+                          ELSE 3
+                        END,
+                        priority DESC,
+                        last_success_at ASC NULLS FIRST,
+                        updated_at ASC
+                    LIMIT 1
+                    FOR UPDATE SKIP LOCKED
+                )
+                UPDATE x_profile_targets t
+                SET status = 'claimed',
+                    attempts = attempts + 1,
+                    last_attempt_at = now(),
+                    next_visit_at = now() + ($1::int * interval '1 second'),
+                    metadata = metadata || $2::jsonb,
+                    updated_at = now()
+                FROM candidate
+                WHERE t.username = candidate.username
+                RETURNING t.username, t.source, t.priority, t.status,
+                          t.attempts, t.last_success_at, t.next_visit_at
+                """,
+                X_PROFILE_TARGET_RETRY_SECONDS,
+                json.dumps({"claimed_by": owner or None}),
+            )
+        target = None
+        if row:
+            target = {
+                k: (v.isoformat() if hasattr(v, "isoformat") else v)
+                for k, v in dict(row).items()
+            }
+        return _cors(web.json_response({
+            "ok": True,
+            "target": target,
+            "revisit_seconds": X_PROFILE_TARGET_REVISIT_SECONDS,
+        }))
+    except Exception as e:
+        logger.warning("x profile target next failed: %s", e)
+        return _cors(web.json_response({"ok": False, "target": None, "error": str(e)}, status=500))
+
+
+async def x_profile_target_result(request):
+    body = await _safe_json(request)
+    username = _x_handle(body.get("username"))
+    status = str(body.get("status") or "").strip().lower()
+    reason = str(body.get("reason") or body.get("error") or "").strip()[:500] or None
+    owner = str(body.get("owner") or "").strip().lstrip("@") or None
+    if not username:
+        return _cors(web.json_response({"ok": False, "error": "missing_username"}, status=400))
+    if status in ("success", "completed", "ok"):
+        next_seconds = X_PROFILE_TARGET_REVISIT_SECONDS
+        db_status = "completed"
+    elif status in ("unavailable", "missing", "not_found", "protected"):
+        next_seconds = 7 * 24 * 60 * 60
+        db_status = "unavailable"
+    else:
+        next_seconds = X_PROFILE_TARGET_RETRY_SECONDS
+        db_status = "failed"
+    try:
+        async with request.app["pool"].acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO x_profile_targets
+                    (username, source, priority, status, next_visit_at, last_error, metadata)
+                VALUES ($1, 'result', 50, $2, now() + ($3::int * interval '1 second'), $4, $5::jsonb)
+                ON CONFLICT (username) DO UPDATE SET
+                    status = EXCLUDED.status,
+                    last_success_at = CASE WHEN EXCLUDED.status = 'completed' THEN now() ELSE x_profile_targets.last_success_at END,
+                    next_visit_at = EXCLUDED.next_visit_at,
+                    last_error = EXCLUDED.last_error,
+                    metadata = x_profile_targets.metadata || EXCLUDED.metadata,
+                    updated_at = now()
+                """,
+                username,
+                db_status,
+                next_seconds,
+                reason,
+                json.dumps({"result_owner": owner, "result_status": status or db_status}),
+            )
+        return _cors(web.json_response({"ok": True, "username": username, "status": db_status}))
+    except Exception as e:
+        logger.warning("x profile target result failed: %s", e)
+        return _cors(web.json_response({"ok": False, "error": str(e)}, status=500))
 
 
 # ---------------------------------------------------------------------------
@@ -1097,6 +1318,7 @@ def _num(v):
 
 
 _HANDLE_RE = re.compile(r"^[A-Za-z0-9._]{2,30}$")
+_X_HANDLE_RE = re.compile(r"^[A-Za-z0-9_]{1,20}$")
 
 
 def _derive_handle_from_caption(caption):
@@ -1121,6 +1343,161 @@ def _ig_author_uid(ppid: str) -> str | None:
         return None
     uid = ppid.rsplit("_", 1)[-1] if "_" in ppid else ""
     return uid if uid.isdigit() else None
+
+
+def _x_handle(value) -> str | None:
+    handle = str(value or "").strip().lstrip("@").lower()
+    return handle if _X_HANDLE_RE.match(handle) else None
+
+
+def _x_post_url(author: str | None, post_id: str | None, metadata: dict | None = None) -> str | None:
+    metadata = metadata if isinstance(metadata, dict) else {}
+    for key in ("verify_url", "url", "post_url"):
+        url = metadata.get(key)
+        if isinstance(url, str) and url.startswith(("https://x.com/", "https://twitter.com/")):
+            return url
+    author_h = _x_handle(author)
+    if author_h and post_id:
+        return f"https://x.com/{author_h}/status/{post_id}"
+    return None
+
+
+async def _enqueue_x_profile_targets(conn, handles, source: str, priority: int, metadata: dict | None = None) -> int:
+    if not handles:
+        return 0
+    added = 0
+    meta_json = json.dumps(metadata or {})
+    for raw in handles:
+        handle = _x_handle(raw)
+        if not handle:
+            continue
+        try:
+            res = await conn.execute(
+                """
+                INSERT INTO x_profile_targets (username, source, priority, status, metadata)
+                VALUES ($1, $2, $3, 'pending', $4::jsonb)
+                ON CONFLICT (username) DO UPDATE SET
+                    priority = GREATEST(x_profile_targets.priority, EXCLUDED.priority),
+                    source = CASE
+                        WHEN x_profile_targets.source = 'manual' THEN x_profile_targets.source
+                        ELSE EXCLUDED.source
+                    END,
+                    status = CASE
+                        WHEN x_profile_targets.status IN ('unavailable', 'failed') THEN 'pending'
+                        ELSE x_profile_targets.status
+                    END,
+                    next_visit_at = LEAST(x_profile_targets.next_visit_at, now()),
+                    metadata = x_profile_targets.metadata || EXCLUDED.metadata,
+                    updated_at = now()
+                """,
+                handle, source[:64], int(priority), meta_json,
+            )
+            if res.endswith("1"):
+                added += 1
+        except Exception:
+            logger.debug("enqueue x profile target failed %s", handle, exc_info=True)
+    return added
+
+
+async def _record_x_edge(
+    conn,
+    *,
+    source_username: str | None,
+    target_username: str,
+    post_id: str | None,
+    edge_type: str,
+    strength: int,
+    evidence_url: str | None,
+    metadata: dict | None = None,
+) -> None:
+    target = _x_handle(target_username)
+    if not target:
+        return
+    source = _x_handle(source_username) if source_username else None
+    try:
+        await conn.execute(
+            """
+            INSERT INTO x_edges
+                (source_username, target_username, post_id, edge_type, strength, evidence_url, metadata)
+            VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+            ON CONFLICT DO NOTHING
+            """,
+            source,
+            target,
+            str(post_id) if post_id else None,
+            str(edge_type or "seen")[:64],
+            int(strength),
+            evidence_url,
+            json.dumps(metadata or {}),
+        )
+    except Exception:
+        logger.debug("record x edge failed %s -> %s", source, target, exc_info=True)
+
+
+async def _record_x_post_graph(conn, post_id: str, post: dict) -> None:
+    author = _x_handle(post.get("author_username"))
+    mentions = [_x_handle(m) for m in (post.get("mentions") or [])]
+    mentions = [m for m in mentions if m and m != author]
+    metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
+    evidence_url = _x_post_url(author, post_id, metadata)
+    enqueue = []
+    if author:
+        enqueue.append(author)
+        await _record_x_edge(
+            conn,
+            source_username=None,
+            target_username=author,
+            post_id=post_id,
+            edge_type="seen_author",
+            strength=20,
+            evidence_url=evidence_url,
+            metadata={"source": "x_post_ingest"},
+        )
+    enqueue.extend(mentions)
+    if enqueue:
+        await _enqueue_x_profile_targets(
+            conn,
+            enqueue,
+            "x_post",
+            75,
+            {"source": "x_posts_ingest", "post_id": post_id},
+        )
+    for mention in mentions:
+        await _record_x_edge(
+            conn,
+            source_username=author,
+            target_username=mention,
+            post_id=post_id,
+            edge_type="mention",
+            strength=70,
+            evidence_url=evidence_url,
+            metadata={"source": "x_post_mentions"},
+        )
+    relation_specs = (
+        ("reply", post.get("in_reply_to_screen_name") or metadata.get("in_reply_to_screen_name"), 80),
+        ("quote", post.get("quoted_author_username") or metadata.get("quoted_author_username"), 75),
+        ("repost", post.get("retweeted_author_username") or metadata.get("retweeted_author_username"), 60),
+    )
+    for edge_type, target, strength in relation_specs:
+        target_h = _x_handle(target)
+        if target_h:
+            await _enqueue_x_profile_targets(
+                conn,
+                [target_h],
+                f"x_{edge_type}",
+                max(70, strength),
+                {"source": "x_posts_relation", "post_id": post_id, "edge_type": edge_type},
+            )
+            await _record_x_edge(
+                conn,
+                source_username=author,
+                target_username=target_h,
+                post_id=post_id,
+                edge_type=edge_type,
+                strength=strength,
+                evidence_url=evidence_url,
+                metadata={"source": "x_post_relation"},
+            )
 
 
 async def _ensure_ig_profile(conn, ppid: str, p: dict) -> str | None:
@@ -1235,7 +1612,10 @@ async def _save_posts(pool, platform, posts) -> int:
                            caption=EXCLUDED.caption, likes_count=EXCLUDED.likes_count,
                            comments_count=EXCLUDED.comments_count, reposts_count=EXCLUDED.reposts_count,
                            quote_count=EXCLUDED.quote_count, views_count=EXCLUDED.views_count,
-                           collected_at=now(), metadata=EXCLUDED.metadata
+                           hashtags=EXCLUDED.hashtags, mentions=EXCLUDED.mentions,
+                           media_type=COALESCE(EXCLUDED.media_type, x_posts.media_type),
+                           platform_created_at=COALESCE(EXCLUDED.platform_created_at, x_posts.platform_created_at),
+                           collected_at=now(), metadata=x_posts.metadata || EXCLUDED.metadata
                         """,
                         ppid, p.get("author_username"), p.get("caption"),
                         p.get("hashtags") or [], p.get("mentions") or [],
@@ -1243,6 +1623,7 @@ async def _save_posts(pool, platform, posts) -> int:
                         _int(p.get("quote_count")), _int(p.get("views_count")), p.get("media_type"),
                         _num(p.get("taken_at")), json.dumps(p.get("metadata") or {}),
                     )
+                    await _record_x_post_graph(conn, ppid, p)
                 else:  # threads / facebook
                     table = "threads_posts" if platform == "threads" else "facebook_posts"
                     extra_col = "reposts_count" if platform == "threads" else "shares_count"
@@ -1398,6 +1779,27 @@ async def _record_users(pool, platform, users, context, owner=None) -> int:
                             target_username = COALESCE(EXCLUDED.target_username, follow_edges.target_username)
                         """,
                         platform, str(owner_account), uid, direction, username,
+                    )
+                if platform == "x" and username:
+                    ctx = (context or "seen").lower()
+                    if ctx == "follow":
+                        source, priority = "following", 95
+                    elif ctx == "follower":
+                        source, priority = "follower", 85
+                    elif ctx == "author":
+                        source, priority = "author", 75
+                    else:
+                        source, priority = ctx[:64], 60
+                    await _enqueue_x_profile_targets(
+                        conn,
+                        [username],
+                        source,
+                        priority,
+                        {
+                            "source": "social_users",
+                            "context": context,
+                            "owner_account": owner_account,
+                        },
                     )
                 if platform == "threads" and username and (context or "").lower() != "foryou":
                     _cross.append(username)
@@ -2876,8 +3278,9 @@ async def _on_startup(app):
     try:
         async with app["pool"].acquire() as conn:
             await conn.execute(_SPIDER_DDL)
+            await _execute_ddl_script(conn, _X_TARGETS_DDL)
     except Exception:
-        logger.exception("spider table DDL failed")
+        logger.exception("startup DDL failed")
     app["session"] = aiohttp.ClientSession(
         headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"}
@@ -2913,6 +3316,8 @@ def make_app():
     app.router.add_post("/social/dm-probe", dm_probe_handler)
     app.router.add_post("/social/dm-heartbeat", dm_hook_heartbeat_handler)
     app.router.add_post("/social/dm-decoded", dm_decoded_handler)
+    app.router.add_get("/social/x-profile-target", x_profile_target_next)
+    app.router.add_post("/social/x-profile-target-result", x_profile_target_result)
     app.router.add_get("/social/strava-route-queue", strava_route_queue_handler)
     app.router.add_post("/social/strava-route-visit", strava_route_visit_handler)
     app.router.add_post("/social/strava-streams", strava_streams_handler)
