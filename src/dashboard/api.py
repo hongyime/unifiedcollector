@@ -5485,14 +5485,8 @@ async def whatsapp_qr(bridge: str):
     re-renders, so a QR never goes stale on screen. Unauthenticated like the
     bridge's own /qr route (link page is behind the dashboard already).
     """
-    import urllib.request
-
     if bridge not in ("1", "2"):
         raise HTTPException(400, "bridge must be 1 or 2")
-    base = os.getenv(
-        f"WA_BRIDGE_{bridge}_URL",
-        f"http://wa-bridge-{bridge}:3001",
-    )
     out = {
         "bridge": bridge,
         "status": "unknown",
@@ -5508,8 +5502,9 @@ async def whatsapp_qr(bridge: str):
     }
     try:
         # /health tells us if already paired; /qr gives the code when waiting
-        with urllib.request.urlopen(f"{base}/health", timeout=8) as r:
-            health = __import__("json").loads(r.read().decode())
+        health = await _wa_bridge_get(bridge, "health", timeout=8)
+        if not health.get("ok"):
+            raise RuntimeError(str(health.get("error") or "bridge health unavailable"))
         out["ready"] = bool(health.get("whatsapp_ready"))
         out["status"] = health.get("status", "unknown")
         out["registered"] = health.get("registered")
@@ -5519,8 +5514,9 @@ async def whatsapp_qr(bridge: str):
         if out["ready"]:
             out["status"] = "connected"
             return out
-        with urllib.request.urlopen(f"{base}/qr", timeout=8) as r:
-            qrd = __import__("json").loads(r.read().decode())
+        qrd = await _wa_bridge_get(bridge, "qr", timeout=8)
+        if not qrd.get("ok"):
+            raise RuntimeError(str(qrd.get("error") or "bridge QR unavailable"))
         out["status"] = qrd.get("status", out["status"])
         out["qr_available"] = bool(qrd.get("qr_available") or qrd.get("qr"))
         out["last_qr_at"] = qrd.get("last_qr_at") or health.get("last_qr_at")
@@ -5729,15 +5725,31 @@ async def whatsapp_link_page():
   The panel turns <span class="connected">green</span> automatically once linked. No need to refresh the page.
  </div>
 <script>
+async function fetchJsonWithRetry(url, tries){
+  let lastErr=null;
+  for(let i=0;i<(tries||2);i++){
+    const ctrl=new AbortController();
+    const timer=setTimeout(()=>ctrl.abort(),12000);
+    try{
+      const r=await fetch(url,{cache:'no-store',credentials:'same-origin',signal:ctrl.signal});
+      clearTimeout(timer);
+      if(!r.ok) throw new Error('HTTP '+r.status);
+      return await r.json();
+    }catch(e){
+      clearTimeout(timer);
+      lastErr=e;
+      await new Promise(resolve=>setTimeout(resolve,700*(i+1)));
+    }
+  }
+  throw lastErr;
+}
 async function pollSession(b){
   // Fetch the paired-account identity (phone, push name) for this bridge and
   // paint it under the QR box. Called on each poll tick so a new pairing
   // shows up within one poll cycle. Uses /whatsapp/sessions which fans out
   // to both bridges — cheap, and matches what the bridge itself reports.
   try{
-    const r=await fetch('/whatsapp/sessions',{cache:'no-store'});
-    if(!r.ok) return;
-    const d=await r.json();
+    const d=await fetchJsonWithRetry('/whatsapp/sessions',2);
     const iEl=document.getElementById('i'+b);
     if(!iEl) return;
     const idx = b === '1' ? 0 : 1;
@@ -5756,7 +5768,7 @@ async function pollSession(b){
 async function poll(b){
   const sEl=document.getElementById('s'+b), qEl=document.getElementById('q'+b), tEl=document.getElementById('t'+b);
   try{
-    const r=await fetch('/whatsapp/qr/'+b,{cache:'no-store'}); const d=await r.json();
+    const d=await fetchJsonWithRetry('/whatsapp/qr/'+b,2);
     if(d.ready||d.status==='connected'){
       qEl.innerHTML='&#10003;'; qEl.style.background='#0b3d24'; qEl.style.color='#22c55e'; qEl.style.fontSize='90px';
       sEl.innerHTML='<span class="dot ok"></span> <span class="connected">Connected</span>';
@@ -5781,7 +5793,10 @@ async function poll(b){
     } else {
       sEl.innerHTML='<span class="dot wait"></span> '+(d.status||'starting')+'&hellip;';
     }
-  }catch(e){ sEl.textContent='poll error: '+e; }
+  }catch(e){
+    sEl.innerHTML='<span class="dot wait"></span> Dashboard poll missed; retrying automatically ('+(e&&e.message?e.message:e)+')';
+    tEl.innerHTML='<span class="dot wait"></span>';
+  }
   setTimeout(()=>poll(b),3000);
 }
 poll('1'); poll('2');

@@ -306,14 +306,34 @@ class GithubCollector(BaseCollector):
         return f"token_{self._pat_idx + 1}"
 
     def _headers(self) -> dict[str, str]:
+        return self._headers_for_pat(self._current_pat())
+
+    def _headers_for_pat(self, pat: str | None) -> dict[str, str]:
         h = {
             "Accept": "application/vnd.github.v3+json",
             "User-Agent": self.user_agents.get_for_domain("github.com"),
         }
-        pat = self._current_pat()
         if pat:
             h["Authorization"] = f"token {pat}"
         return h
+
+    def _select_pat_for_request(self) -> tuple[str | None, str]:
+        """Pick the PAT for one request and return its safe account label.
+
+        Previously the collector stayed on token_1 until it was nearly empty,
+        so a 3-PAT setup only used one quota bucket most of the hour. Rotating
+        per request spreads load while the captured account label keeps quota
+        accounting and rate-limit events tied to the token that actually made
+        the request.
+        """
+        if not self._pats:
+            return None, "anonymous"
+        idx = self._pat_idx
+        pat = self._pats[idx]
+        account = f"token_{idx + 1}"
+        if len(self._pats) > 1:
+            self._pat_idx = (idx + 1) % len(self._pats)
+        return pat, account
 
     def _rotate_pat(self) -> bool:
         """Rotate to the next PAT. Returns True if a different one is selected."""
@@ -343,11 +363,12 @@ class GithubCollector(BaseCollector):
         resp: httpx.Response,
         cooldown_seconds: int,
         reason: str,
+        account: str | None = None,
     ) -> None:
         await record_rate_limit_event(
             self.pool,
             source="github",
-            account=self._pat_account_name(),
+            account=account or self._pat_account_name(),
             scope=self._rate_limit_scope(url),
             # GitHub API quota exhaustion is reported as HTTP 403. Store it as
             # a rate-limit event for dashboard grouping, with the real status in
@@ -425,8 +446,9 @@ class GithubCollector(BaseCollector):
             transport_retries = max(0, min(transport_retries, 5))
             attempts = transport_retries + 1
             for attempt in range(1, attempts + 1):
+                pat, pat_account = self._select_pat_for_request()
                 try:
-                    resp = await client.get(url, headers=self._headers())
+                    resp = await client.get(url, headers=self._headers_for_pat(pat))
                     break
                 except httpx.TransportError as exc:
                     if attempt >= attempts:
@@ -451,7 +473,7 @@ class GithubCollector(BaseCollector):
             self._update_rate_limit(resp.headers)
             # Best-effort quota bookkeeping (no-op when no PAT registered).
             try:
-                await self._quota.consume("github", self._pat_account_name(), 1)
+                await self._quota.consume("github", pat_account, 1)
             except Exception:  # noqa: BLE001
                 logger.debug("quota.consume swallowed", exc_info=True)
 
@@ -483,8 +505,16 @@ class GithubCollector(BaseCollector):
                     resp=resp,
                     cooldown_seconds=int(wait),
                     reason="github_api_rate_limit",
+                    account=pat_account,
                 )
-                rotated = self._rotate_pat()
+                if len(self._pats) > 1:
+                    # _select_pat_for_request already advanced to the next
+                    # token before this response was processed. Do not rotate a
+                    # second time or a 2-token setup lands back on the limited
+                    # PAT.
+                    rotated = True
+                else:
+                    rotated = self._rotate_pat()
                 if not rotated:
                     max_sleep = int(os.getenv("GITHUB_RATE_LIMIT_MAX_SLEEP_SECONDS", "300"))
                     sleep_for = min(wait, max(0, max_sleep))

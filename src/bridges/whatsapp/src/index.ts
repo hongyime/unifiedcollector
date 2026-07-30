@@ -51,6 +51,11 @@ let terminalQrPrinted = false;
 let lastFreshQrRequestAt = 0;
 const FRESH_QR_MIN_INTERVAL_MS = Number(process.env.WHATSAPP_FRESH_QR_MIN_INTERVAL_MS || 30_000);
 const UNPAIRED_QR_RECONNECT_MS = Number(process.env.WHATSAPP_UNPAIRED_QR_RECONNECT_MS || 5_000);
+let reconnectTimer: NodeJS.Timeout | null = null;
+let socketEpoch = 0;
+let saveCredsTimer: NodeJS.Timeout | null = null;
+let saveCredsPending: (() => Promise<void>) | null = null;
+const POST_PAIR_515_GRACE_MS = Number(process.env.WHATSAPP_POST_PAIR_515_GRACE_MS || 90_000);
 
 let stream515: number[] = [];
 const MAX_RAPID_515 = 3;
@@ -174,13 +179,13 @@ app.post('/fresh-qr', async (_req, res) => {
         } else {
             clearAuthState();
             activeSock?.end?.(new Error('manual fresh QR'));
-            setTimeout(() => connectToWhatsApp().catch((e) => logger.error({ err: e }, 'Fresh QR reconnect failed')), 1000);
+            scheduleReconnect('manual_fresh_qr', 1000);
         }
         res.status(200).json({ status: 'fresh_qr_requested' });
     } catch (err: any) {
         clearAuthState();
         activeSock?.end?.(new Error('manual fresh QR after logout failure'));
-        setTimeout(() => connectToWhatsApp().catch((e) => logger.error({ err: e }, 'Fresh QR reconnect failed')), 1000);
+        scheduleReconnect('manual_fresh_qr_after_logout_failure', 1000);
         res.status(200).json({ status: 'fresh_qr_requested', warning: err?.message || 'logout failed; local auth cleared' });
     }
 });
@@ -194,9 +199,13 @@ app.post('/media/decrypt', async (req, res) => {
     if (bridgeSecret) {
         const timestamp = req.headers['x-timestamp'] as string || '';
         const signature = req.headers['x-signature'] as string || '';
-        const payload = JSON.stringify(req.body) + timestamp;
-        const expected = crypto.createHmac('sha256', bridgeSecret).update(payload).digest('hex');
-        if (signature !== expected) {
+        const bodyPayload = JSON.stringify(req.body) + timestamp;
+        const expectedBody = crypto.createHmac('sha256', bridgeSecret).update(bodyPayload).digest('hex');
+        const expectedLegacy = crypto
+            .createHmac('sha256', bridgeSecret)
+            .update(`${req.body?.messageId || ''}:${timestamp}`)
+            .digest('hex');
+        if (signature !== expectedBody && signature !== expectedLegacy) {
             res.status(401).json({ error: 'invalid signature' });
             return;
         }
@@ -243,7 +252,9 @@ app.post('/media/decrypt', async (req, res) => {
     }
 });
 
-app.listen(port, () => logger.info(`Health server on :${port}`));
+const healthServer = app.listen(port, () => logger.info(`Health server on :${port}`));
+healthServer.keepAliveTimeout = 1000;
+healthServer.headersTimeout = 3000;
 
 const getEnv = (key: string, dflt = ''): string => (process.env[key] || dflt).split('#')[0].trim();
 
@@ -259,6 +270,57 @@ function clearAuthState(): void {
         logger.info({ authPath }, 'Auth state cleared');
     } catch (e) {
         logger.error({ err: e }, 'Failed to clear auth state');
+    }
+}
+
+function scheduleReconnect(reason: string, delayMs: number): void {
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        connectToWhatsApp().catch((e) => logger.error({ err: e, reason }, 'Reconnect failed'));
+    }, delayMs);
+}
+
+function scheduleReconnectIfStillUnready(reason: string, delayMs: number, expectedSock: any, expectedEpoch: number): void {
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        if (activeSock !== expectedSock || socketEpoch !== expectedEpoch || serviceHealthy) {
+            logger.debug({ reason, expectedEpoch, current_epoch: socketEpoch }, 'Skipping stale conditional reconnect');
+            return;
+        }
+        connectToWhatsApp().catch((e) => logger.error({ err: e, reason }, 'Conditional reconnect failed'));
+    }, delayMs);
+}
+
+function scheduleCredsSave(saveCreds: () => Promise<void>): void {
+    saveCredsPending = saveCreds;
+    if (saveCredsTimer) return;
+    saveCredsTimer = setTimeout(async () => {
+        saveCredsTimer = null;
+        const pending = saveCredsPending;
+        saveCredsPending = null;
+        if (!pending) return;
+        try {
+            await pending();
+        } catch (err) {
+            logger.warn({ err }, 'Debounced credential save failed');
+        }
+    }, 750);
+}
+
+async function flushCredsSave(): Promise<void> {
+    if (saveCredsTimer) {
+        clearTimeout(saveCredsTimer);
+        saveCredsTimer = null;
+    }
+    const pending = saveCredsPending;
+    saveCredsPending = null;
+    if (!pending) return;
+    try {
+        await pending();
+    } catch (err) {
+        logger.warn({ err }, 'Credential save flush failed');
     }
 }
 
@@ -300,6 +362,7 @@ async function emitStoredLidMappings(sessionName: string): Promise<void> {
 
 async function connectToWhatsApp(): Promise<void> {
     const sessionName = getEnv('SESSION_NAME', 'default');
+    const epoch = ++socketEpoch;
 
     if (isFirstConnect) {
         await producer.connect();
@@ -359,6 +422,10 @@ async function connectToWhatsApp(): Promise<void> {
     let phoneNumber = '';
 
     sock.ev.on('connection.update', async (update: any) => {
+        if (activeSock !== sock || epoch !== socketEpoch) {
+            logger.debug({ epoch, current_epoch: socketEpoch }, 'Ignoring stale WhatsApp socket update');
+            return;
+        }
         const { connection, lastDisconnect, qr } = update;
 
         if (qr) {
@@ -421,6 +488,8 @@ async function connectToWhatsApp(): Promise<void> {
         } else if (connection === 'close') {
             if (heartbeat) clearInterval(heartbeat);
             serviceHealthy = false;
+            const qrWasRecent = Boolean(latestQrAt && Date.now() - latestQrAt < 120_000);
+            await flushCredsSave();
             socketRegistered = Boolean(sock.authState.creds.registered);
             // Clear the stale QR — a new one will be emitted by the next
             // connection.update tick if reauth is needed.
@@ -442,11 +511,11 @@ async function connectToWhatsApp(): Promise<void> {
             if (statusCode === DisconnectReason.loggedOut) {
                 logger.error('Logged out -- clearing auth, awaiting QR re-pair');
                 clearAuthState();
-                setTimeout(() => connectToWhatsApp().catch((e) => logger.error({ err: e }, 'Reconnect failed')), 5000);
+                scheduleReconnect('logged_out', 5000);
             } else if (statusCode === DisconnectReason.badSession) {
                 logger.error('Bad session -- clearing auth, reconnecting');
                 clearAuthState();
-                setTimeout(() => connectToWhatsApp().catch((e) => logger.error({ err: e }, 'Reconnect failed')), 5000);
+                scheduleReconnect('bad_session', 5000);
             } else if (statusCode === DisconnectReason.restartRequired || statusCode === 515) {
                 const now = Date.now();
                 stream515.push(now);
@@ -455,10 +524,19 @@ async function connectToWhatsApp(): Promise<void> {
                     logger.error(`${stream515.length} stream errors in window -- auth likely corrupt, clearing`);
                     stream515 = [];
                     clearAuthState();
-                    setTimeout(() => connectToWhatsApp().catch((e) => logger.error({ err: e }, 'Reconnect failed')), 5000);
+                    scheduleReconnect('rapid_515', 5000);
                 } else {
-                    logger.info(`Status ${statusCode}: restart required, reconnecting`);
-                    setTimeout(() => connectToWhatsApp().catch((e) => logger.error({ err: e }, 'Reconnect failed')), 500);
+                    if (socketRegistered && qrWasRecent) {
+                        connectionState = 'pairing_restart';
+                        logger.info(
+                            `Status ${statusCode}: post-pair restart required; waiting ` +
+                            `${Math.round(POST_PAIR_515_GRACE_MS / 1000)}s for the paired socket to finish initial sync`
+                        );
+                        scheduleReconnectIfStillUnready('post_pair_restart_required', POST_PAIR_515_GRACE_MS, sock, epoch);
+                    } else {
+                        logger.info(`Status ${statusCode}: restart required, reconnecting`);
+                        scheduleReconnect('restart_required', 500);
+                    }
                 }
             } else if (statusCode === DisconnectReason.connectionReplaced) {
                 logger.error('Connection replaced by another session -- stopping');
@@ -468,17 +546,17 @@ async function connectToWhatsApp(): Promise<void> {
                 connectionState = 'refreshing_qr';
                 const delay = Math.max(1000, UNPAIRED_QR_RECONNECT_MS);
                 logger.warn(`QR expired before scan; refreshing QR in ${Math.round(delay / 1000)}s`);
-                setTimeout(() => connectToWhatsApp().catch((e) => logger.error({ err: e }, 'Reconnect failed')), delay);
+                scheduleReconnect('qr_refs_expired', delay);
             } else {
                 retryCount++;
                 const delay = Math.min(2000 * Math.pow(1.5, retryCount), 60000);
                 logger.warn(`Closed (status ${statusCode}); retry ${retryCount} in ${Math.round(delay / 1000)}s`);
-                setTimeout(() => connectToWhatsApp().catch((e) => logger.error({ err: e }, 'Reconnect failed')), delay);
+                scheduleReconnect('connection_closed', delay);
             }
         }
     });
 
-    sock.ev.on('creds.update', saveCreds);
+    sock.ev.on('creds.update', () => scheduleCredsSave(saveCreds));
 }
 
 async function shutdown(sessionName: string): Promise<void> {

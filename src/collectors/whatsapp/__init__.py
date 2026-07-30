@@ -1210,6 +1210,8 @@ class WhatsappCollector(BaseCollector):
                             WHERE media_url IS NULL
                               AND metadata ? 'mediaKey'
                               AND metadata ? 'directPath'
+                              AND NULLIF(metadata->>'mediaKey', '') IS NOT NULL
+                              AND NULLIF(metadata->>'directPath', '') IS NOT NULL
                             ORDER BY collected_at DESC
                             LIMIT $1
                             """,

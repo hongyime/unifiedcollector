@@ -24,6 +24,7 @@ import path from 'path';
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 const WATERMARK_FILE = path.join(process.env.AUTH_STORAGE_PATH || path.join(process.cwd(), 'auth_info'), 'history_watermarks.json');
+const yieldToEventLoop = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 
 type Watermark = {
     oldestTimestamp: number;       // seconds; oldest message we hold for this chat
@@ -243,6 +244,7 @@ export function registerHistoryHandler(sock: WASocket, canFetchHistory?: () => b
                             messages: canonical,
                         });
                     }
+                    await yieldToEventLoop();
                 }
 
                 // Track the oldest RAW message key so we can request older history
@@ -265,6 +267,7 @@ export function registerHistoryHandler(sock: WASocket, canFetchHistory?: () => b
                 // "no older history exists" — so we do NOT mark complete here. The
                 // deep-backfill driver decides completeness (target depth or exhausted).
                 logger.info(`[HistorySync] ${chatJid}: ${watermarks[chatJid].messageCount} msgs (${syncType})`);
+                await yieldToEventLoop();
             }
 
             saveWatermarks();
