@@ -72,3 +72,12 @@ def test_fatal_spin_watcher_infers_telegram_from_telethon_logger(monkeypatch):
     record = _record("Too many messages had to be ignored consecutively")
 
     assert watcher._infer_source(record, record.getMessage().lower()) == "telegram"
+
+
+def test_recoverable_telethon_warning_filter_only_drops_wrong_session_id():
+    from src.worker import _RecoverableTelethonWarningFilter
+
+    filt = _RecoverableTelethonWarningFilter()
+
+    assert filt.filter(_record("Security error while unpacking a received message: Server replied with a wrong session ID")) is False
+    assert filt.filter(_record("Attempt 1 at connecting failed: TimeoutError")) is True

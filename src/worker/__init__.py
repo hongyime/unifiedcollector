@@ -188,6 +188,32 @@ class _FatalSpinLogWatcher(logging.Handler):
             os._exit(42)
 
 
+class _RecoverableTelethonWarningFilter(logging.Filter):
+    """Drop known-noisy Telethon warnings that are recoverable by design."""
+
+    RECOVERABLE_PATTERNS = _FatalSpinLogWatcher.RECOVERABLE_PATTERNS
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            msg = record.getMessage().lower()
+        except Exception:
+            return True
+        return not any(p in msg for p in self.RECOVERABLE_PATTERNS)
+
+
+def _install_recoverable_telethon_warning_filter() -> bool:
+    if os.getenv("COLLECTOR_SUPPRESS_RECOVERABLE_TELETHON_WARNINGS", "true").lower() != "true":
+        return False
+    installed = False
+    for logger_name in ("telethon.network.mtprotosender",):
+        target = logging.getLogger(logger_name)
+        if any(isinstance(f, _RecoverableTelethonWarningFilter) for f in target.filters):
+            continue
+        target.addFilter(_RecoverableTelethonWarningFilter())
+        installed = True
+    return installed
+
+
 class WorkerService:
     """Runs collectors as supervised background tasks with watchdog restart."""
 
@@ -273,6 +299,11 @@ class WorkerService:
             logger.info("worker: fatal-spin log watcher installed (self-heal on error flood)")
         except Exception:
             logger.warning("worker: could not install fatal-spin log watcher", exc_info=True)
+        try:
+            if _install_recoverable_telethon_warning_filter():
+                logger.info("worker: recoverable Telethon warning filter installed")
+        except Exception:
+            logger.warning("worker: could not install recoverable Telethon warning filter", exc_info=True)
 
         if not check_drive():
             logger.warning("Drive not available, waiting...")
