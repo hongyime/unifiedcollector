@@ -155,6 +155,8 @@ class WhatsappCollector(BaseCollector):
         self._broker_conn = None
         self._broker_channel = None
         self._session_health: dict[str, dict] = {}
+        self._bridge_ready_cache: dict[str, dict] = {}
+        self._bridge_ready_ttl = int(os.getenv("WHATSAPP_BRIDGE_READY_CACHE_SECONDS", "30"))
         self._session_cooldowns_restored = False
         self._use_realtime = bool(self._session_bridges and self._bridge_secret)
         self._use_export = bool(self._export_dir and os.path.isdir(self._export_dir))
@@ -1287,6 +1289,10 @@ class WhatsappCollector(BaseCollector):
         decrypt via bridge, persist."""
         while not self._stop.is_set():
             try:
+                if self._session_bridges and not await self._any_media_bridge_ready():
+                    logger.debug("WhatsApp media archival deferred; no paired bridge is ready")
+                    await asyncio.sleep(max(self._media_poll, self._bridge_ready_ttl))
+                    continue
                 if self.pool:
                     async with self.pool.acquire() as conn:
                         rows = await conn.fetch(
@@ -1317,11 +1323,44 @@ class WhatsappCollector(BaseCollector):
                 logger.debug("media archival loop iteration failed: %s", e)
             await asyncio.sleep(self._media_poll)
 
+    async def _any_media_bridge_ready(self) -> bool:
+        for session, bridge_url in self._session_bridges.items():
+            if await self._bridge_ready_for_media(session, bridge_url):
+                return True
+        return False
+
+    async def _bridge_ready_for_media(self, session: str, bridge_url: str) -> bool:
+        now = time.time()
+        cached = self._bridge_ready_cache.get(session)
+        if cached and now - float(cached.get("ts") or 0.0) < self._bridge_ready_ttl:
+            return bool(cached.get("ready"))
+        # Only defer when the bridge explicitly reports "not ready". If the
+        # health probe itself is inconclusive, keep the old decrypt-attempt path.
+        ready = True
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                resp = await client.get(f"{bridge_url}/health")
+                if resp.status_code == 200:
+                    health = resp.json()
+                    ready = bool(
+                        health.get("whatsapp_ready")
+                        or health.get("connected")
+                        or health.get("registered")
+                        or health.get("status") == "connected"
+                    )
+        except Exception as exc:
+            logger.debug("WhatsApp bridge health check failed for %s: %s", session, exc)
+        self._bridge_ready_cache[session] = {"ts": now, "ready": ready}
+        return ready
+
     async def _download_via_bridge(self, session: str, msg_id: str,
                                     media_key: str, direct_path: str,
                                     mimetype: str | None = None) -> bytes | None:
         bridge_url = self._session_bridges.get(session)
         if not bridge_url:
+            return None
+        if not await self._bridge_ready_for_media(session, bridge_url):
+            logger.debug("WhatsApp bridge %s not ready; deferring media decrypt %s", session, msg_id)
             return None
 
         timestamp = str(int(time.time()))

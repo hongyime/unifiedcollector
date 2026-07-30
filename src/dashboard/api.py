@@ -39,6 +39,7 @@ _BEEPER_SUBSOURCE_CONTENT_TTL_SECONDS = int(os.getenv("BEEPER_SUBSOURCE_CONTENT_
 _BEEPER_SUBSOURCE_LIVENESS_CACHE: dict[str, object] = {"ts": 0.0, "rows": None}
 _BEEPER_SUBSOURCE_LIVENESS_TTL_SECONDS = int(os.getenv("BEEPER_SUBSOURCE_LIVENESS_TTL_SECONDS", "75"))
 _SOURCE_MATRIX_SECTION_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_SECTION_TIMEOUT_SECONDS", "2"))
+_INGESTION_HOURLY_CACHE: dict[int, dict[str, object]] = {}
 _TELEGRAM_STATS_CACHE: dict[str, object] = {"ts": 0.0, "payload": None}
 _TELEGRAM_STATS_TTL_SECONDS = int(os.getenv("TELEGRAM_STATS_TTL_SECONDS", "30"))
 _YOUTUBE_MEDIA_BACKLOG_CACHE: dict[str, object] = {"ts": 0.0, "row": None}
@@ -751,6 +752,10 @@ async def _source_matrix_section(
 ):
     try:
         return await asyncio.wait_for(awaitable, timeout=timeout or _SOURCE_MATRIX_SECTION_TIMEOUT_SECONDS)
+    except asyncio.CancelledError as exc:
+        logger.warning("source matrix %s cancelled under load", label)
+        errors.append({"section": section, "error": exc.__class__.__name__})
+        return fallback
     except Exception as exc:  # noqa: BLE001 - source matrix should return partial data under load
         logger.warning("source matrix %s failed: %s", label, exc.__class__.__name__)
         errors.append({"section": section, "error": exc.__class__.__name__})
@@ -3229,21 +3234,37 @@ async def hourly_ingestion(hours: int = 12, _user: dict = Depends(require_role("
     files, and rate-limit events.
     """
     hours = max(1, min(hours, 72))
+
+    def _fallback_rows(exc: BaseException) -> list[dict]:
+        cached = _INGESTION_HOURLY_CACHE.get(hours)
+        logger.warning("hourly ingestion failed: %s", exc.__class__.__name__)
+        if cached and isinstance(cached.get("rows"), list):
+            return [
+                {**dict(row), "stats_stale": True, "stats_error": exc.__class__.__name__}
+                for row in cached["rows"]  # type: ignore[index]
+            ]
+        return []
+
     pool = await get_pool()
     content_parts = _INGESTION_CONTENT_PARTS
     required_tables = [table for _source, table, _column, _label in content_parts]
     required_tables.extend(["media_items", "rate_limit_events"])
     async with pool.acquire() as conn:
-        existing_tables = set(await conn.fetchval(
-            """
-            SELECT COALESCE(array_agg(table_name), ARRAY[]::text[])
-            FROM information_schema.tables
-            WHERE table_schema = 'public'
-              AND table_name = ANY($1::text[])
-            """,
-            required_tables,
-            timeout=8,
-        ))
+        try:
+            existing_tables = set(await conn.fetchval(
+                """
+                SELECT COALESCE(array_agg(table_name), ARRAY[]::text[])
+                FROM information_schema.tables
+                WHERE table_schema = 'public'
+                  AND table_name = ANY($1::text[])
+                """,
+                required_tables,
+                timeout=8,
+            ))
+        except asyncio.CancelledError as exc:
+            return _fallback_rows(exc)
+        except Exception as exc:  # noqa: BLE001 - dashboard should degrade under DB load
+            return _fallback_rows(exc)
     raw_parts = [
         f"""
         SELECT '{source}'::text AS source,
@@ -3308,12 +3329,18 @@ async def hourly_ingestion(hours: int = 12, _user: dict = Depends(require_role("
     """
     labels = {source: label for source, _table, _column, label in content_parts}
     async with pool.acquire() as conn:
-        rows = await conn.fetch(sql, str(hours), timeout=30)
+        try:
+            rows = await conn.fetch(sql, str(hours), timeout=30)
+        except asyncio.CancelledError as exc:
+            return _fallback_rows(exc)
+        except Exception as exc:  # noqa: BLE001 - dashboard should degrade under DB load
+            return _fallback_rows(exc)
     out = []
     for row in rows:
         d = dict(row)
         d["record_label"] = labels.get(d["source"], "records")
         out.append(d)
+    _INGESTION_HOURLY_CACHE[hours] = {"ts": time.time(), "rows": [dict(row) for row in out]}
     return out
 
 
