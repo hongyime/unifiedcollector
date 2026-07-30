@@ -42,6 +42,7 @@ import type {
   ThreadsProfileDetail,
   YoutubeChannel,
   YoutubeChannelDetail,
+  YoutubeCompleteness,
   GithubRepo,
   GithubRepoDetail,
   GithubEdgeStats,
@@ -236,6 +237,7 @@ export const api = {
 
   youtubeChannels: (limit = 100) =>
     get<YoutubeChannel[]>(`/youtube/channels?limit=${limit}`),
+  youtubeCompleteness: () => get<YoutubeCompleteness>("/youtube/completeness"),
   youtubeChannel: (channelId: string, limit = 200) =>
     get<YoutubeChannelDetail>(
       `/youtube/channel/${encodeURIComponent(channelId)}?limit=${limit}`,

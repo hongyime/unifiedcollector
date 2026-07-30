@@ -528,6 +528,12 @@ export interface YoutubeChannel {
   video_count: number | null;
   view_count: number | null;
   updated_at: string | null;
+  profile_photo_media_id?: string | null;
+  external_links?: Array<{ url: string; type?: string; domain?: string | null }>;
+  last_video_scan_at?: string | null;
+  last_community_scan_at?: string | null;
+  last_skip_reason?: string | null;
+  last_error?: string | null;
   videos_collected?: number;
   last_video_at?: string | null;
 }
@@ -542,6 +548,10 @@ export interface YoutubeVideo {
   duration: string | null;
   platform_published_at: string | null;
   collected_at: string | null;
+  media_status?: string | null;
+  media_skip_reason?: string | null;
+  transcript_status?: string | null;
+  comments_status?: string | null;
   media_item_id: string | null;
   media_content_type: string | null;
   video_url: string;
@@ -550,6 +560,30 @@ export interface YoutubeVideo {
 export interface YoutubeChannelDetail {
   channel: YoutubeChannel | null;
   videos: YoutubeVideo[];
+}
+
+export interface YoutubeCompleteness {
+  schema_ready: boolean;
+  reason?: string;
+  videos?: Record<string, number | string | boolean | null>;
+  channels?: Record<string, number | string | boolean | null>;
+  transcripts?: Record<string, number | string | boolean | null>;
+  comments?: Record<string, number | string | boolean | null>;
+  community?: Record<string, number | string | boolean | null>;
+  edges?: {
+    total_edges?: number;
+    by_type?: Array<{ edge_type: string; edges: number }>;
+  };
+  profile_queue?: {
+    total_profiles?: number;
+    by_status?: Array<{ status: string; profiles: number }>;
+  };
+  spider_queue?: {
+    total_channels?: number;
+    by_status?: Array<{ status: string; channels: number }>;
+  };
+  targets?: Record<string, number | string | boolean | null>;
+  media_backlog?: Record<string, number | string | boolean | null>;
 }
 
 export interface GithubRepo {

@@ -1,13 +1,13 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ExternalLink, Heart, MessageCircle, Play, Share2, BadgeCheck } from "lucide-react";
+import { ExternalLink, Heart, MessageCircle, Play } from "lucide-react";
 import { api } from "../../services/api";
 import { Header } from "../../components/layout/Header";
 import { LoadingSpinner } from "../../components/ui/LoadingSpinner";
 import { ErrorState } from "../../components/ui/ErrorState";
 import { AuthImage } from "../../components/ui/AuthImage";
-import { relativeTime, formatTimestamp, formatNumber } from "../../utils/formatters";
-import type { YoutubeChannel, YoutubeVideo } from "../../services/types";
+import { relativeTime, formatNumber } from "../../utils/formatters";
+import type { YoutubeChannel, YoutubeCompleteness, YoutubeVideo } from "../../services/types";
 
 // YouTube feed page — two-pane layout mirroring the Telegram/WhatsApp chat
 // pages, but with a grid of post cards on the right instead of a message
@@ -27,11 +27,39 @@ function compactCount(n: number | null | undefined): string {
   return `${(n / 1_000_000_000).toFixed(1)}B`;
 }
 
-// YouTube clip durations are seconds-int; 3m30s reads better than 210s.
-function formatDuration(seconds: number | null | undefined): string {
+function numberFromRecord(
+  record: Record<string, number | string | boolean | null> | undefined,
+  key: string,
+): number {
+  const value = record?.[key];
+  if (typeof value === "number") return value;
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  return 0;
+}
+
+function formatDuration(value: string | number | null | undefined): string {
+  if (value == null || value === "") return "";
+  let seconds: number;
+  if (typeof value === "number") {
+    seconds = value;
+  } else {
+    const upper = value.toUpperCase();
+    if (upper === "P0D" || upper === "PT0S") return "live";
+    const match = upper.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
+    if (!match) return value;
+    seconds =
+      Number(match[1] || 0) * 3600 +
+      Number(match[2] || 0) * 60 +
+      Number(match[3] || 0);
+  }
   if (!seconds || seconds < 0) return "";
+  const h = Math.floor(seconds / 3600);
   const m = Math.floor(seconds / 60);
   const s = seconds % 60;
+  if (h > 0) return `${h}:${String(m % 60).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
   if (m === 0) return `${s}s`;
   return `${m}:${String(s).padStart(2, "0")}`;
 }
@@ -46,6 +74,12 @@ export function YoutubeFeedPage() {
   const profiles = useQuery({
     queryKey: ["youtube-channels"],
     queryFn: () => api.youtubeChannels(100),
+  });
+
+  const completeness = useQuery({
+    queryKey: ["youtube-completeness"],
+    queryFn: () => api.youtubeCompleteness(),
+    refetchInterval: 60_000,
   });
 
   const profile = useQuery({
@@ -64,9 +98,12 @@ export function YoutubeFeedPage() {
         subtitle="Channels and their collected videos"
         onRefresh={() => {
           profiles.refetch();
+          completeness.refetch();
           if (selected) profile.refetch();
         }}
       />
+
+      <CompletenessStrip data={completeness.data} />
 
       <div className="grid grid-cols-1 md:grid-cols-[280px_1fr] gap-4">
         {/* Profile picker */}
@@ -161,6 +198,70 @@ export function YoutubeFeedPage() {
   );
 }
 
+function CompletenessStrip({ data }: { data?: YoutubeCompleteness }) {
+  if (!data) {
+    return null;
+  }
+  const videos = data.videos;
+  const channels = data.channels;
+  const targets = data.targets;
+  const backlog = data.media_backlog;
+  const archivedVideos = numberFromRecord(videos, "archived_video_files");
+  const totalVideos = numberFromRecord(videos, "total_videos");
+  const missingEligible = numberFromRecord(backlog, "eligible_missing_videos");
+  const pendingProfiles =
+    data.profile_queue?.by_status?.find((row) => row.status === "pending")?.profiles ?? 0;
+  const pendingSpider =
+    data.spider_queue?.by_status?.find((row) => row.status === "pending")?.channels ?? 0;
+
+  const items = [
+    {
+      label: "Channels",
+      value: formatNumber(numberFromRecord(channels, "total_channels")),
+      sub: `${formatNumber(numberFromRecord(channels, "channels_with_profile_photo_media"))} profile photos`,
+    },
+    {
+      label: "Videos",
+      value: `${formatNumber(archivedVideos)} / ${formatNumber(totalVideos)}`,
+      sub: `${formatNumber(missingEligible)} eligible files missing`,
+    },
+    {
+      label: "Transcripts",
+      value: formatNumber(numberFromRecord(videos, "transcript_status_stored")),
+      sub: `${formatNumber(numberFromRecord(videos, "transcript_status_pending"))} pending`,
+    },
+    {
+      label: "Comments",
+      value: formatNumber(numberFromRecord(data.comments, "comments")),
+      sub: `${formatNumber(numberFromRecord(data.comments, "comments_with_author_channel"))} with author IDs`,
+    },
+    {
+      label: "Edges",
+      value: formatNumber(data.edges?.total_edges ?? 0),
+      sub: `${formatNumber(pendingProfiles + pendingSpider)} discovery queued`,
+    },
+    {
+      label: "Targets",
+      value: formatNumber(numberFromRecord(targets, "youtube_targets")),
+      sub: `${formatNumber(numberFromRecord(targets, "auto_discovered_targets"))} auto-discovered`,
+    },
+  ];
+
+  return (
+    <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-2 mb-4">
+      {items.map((item) => (
+        <div key={item.label} className="bg-surface rounded-lg border border-border px-3 py-2">
+          <div className="text-[11px] uppercase tracking-wide text-text-muted">{item.label}</div>
+          <div className="text-sm font-semibold text-text-primary tabular-nums">{item.value}</div>
+          <div className="text-[11px] text-text-muted truncate" title={item.sub}>
+            {item.sub}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function ProfileCard({ p, postCount }: { p: YoutubeChannel; postCount: number }) {
   return (
     <div className="bg-surface rounded-lg border border-border p-4">
@@ -207,13 +308,7 @@ function ProfileCard({ p, postCount }: { p: YoutubeChannel; postCount: number })
   );
 }
 
-// Photo carousels come back with content_type='photo'; everything else
-// (video posts + the generic 'post' fallback) uses the video icon. Keeps
-// the visual distinct enough to eyeball a mixed feed.
-const PHOTO_CONTENT_TYPES = new Set(["photo", "image"]);
-
 function PostCard({ post }: { post: YoutubeVideo }) {
-  const isPhoto = false;
   const desc = post.title || "";
 
   return (
@@ -240,7 +335,7 @@ function PostCard({ post }: { post: YoutubeVideo }) {
         {/* corner badges: content kind */}
         {post.duration && (
           <div className="absolute bottom-1.5 right-1.5 bg-black/60 text-white text-[10px] px-1.5 py-0.5 rounded tabular-nums">
-            {formatDuration(post.duration as any)}
+            {formatDuration(post.duration)}
           </div>
         )}
         

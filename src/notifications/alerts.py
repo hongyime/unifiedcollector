@@ -216,6 +216,7 @@ def _format_quota_usage(row: dict) -> str:
     hour = int(row.get("requests_hour", 0) or 0)
     today = int(row.get("requests_today", 0) or 0)
     hourly_limit = row.get("hourly_limit")
+    daily_limit = row.get("daily_limit")
     subject = source
     if account:
         subject += f" for {_esc(account)}"
@@ -225,6 +226,13 @@ def _format_quota_usage(row: dict) -> str:
         return (
             f"• {subject}: {hour:,}/{limit:,} requests this hour "
             f"({pct:.0f}% of hourly budget); {today:,} today."
+        )
+    if daily_limit:
+        limit = int(daily_limit)
+        pct = (today / limit * 100.0) if limit else 0.0
+        return (
+            f"• {subject}: {hour:,} requests this hour; "
+            f"{today:,}/{limit:,} today ({pct:.0f}% of daily budget)."
         )
     return f"• {subject}: {hour:,} requests this hour; {today:,} today."
 

@@ -43,7 +43,8 @@ EXPECTED_TABLES = {
     "tiktok_download_tracker",
     # youtube
     "youtube_channels", "youtube_videos", "youtube_comments", "youtube_transcripts",
-    "youtube_spider_queue",
+    "youtube_spider_queue", "youtube_community_posts", "youtube_edges",
+    "youtube_profile_queue",
     # github
     "github_users", "github_repos", "github_commits", "github_issues",
     "github_readmes", "github_spider_queue", "github_issue_comments",

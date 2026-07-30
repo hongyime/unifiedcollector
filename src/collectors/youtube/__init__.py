@@ -59,6 +59,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlparse
 
 import httpx
 
@@ -68,12 +69,14 @@ from src.collectors.youtube.parse import (
     parse_relative_timestamp as _parse_rel_ts,
 )
 from src.core.discovered_links import persist_discovered_links
+from src.core.link_extractor import extract_all_links
 from src.core.file_naming import sanitize_name
 from src.core.vault import VAULT_ROOT, write_atomic_artifact
 from src.core.user_change_tracker import (
     UserChangeTracker,
     YOUTUBE_TRACKED_FIELDS,
 )
+from src.core.rate_limit_events import record_rate_limit_event
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +84,15 @@ YT_API_BASE = "https://www.googleapis.com/youtube/v3"
 LIKED_VIDEOS_PLAYLIST_ID = "LL"
 _SECRET_QUERY_PARAM_RE = re.compile(
     r"([?&](?:key|api_key|access_token|token|client_secret|oauth_token)=)[^&\s'\"<>]+",
+    re.IGNORECASE,
+)
+_YOUTUBE_HANDLE_RE = re.compile(r"(?<![\w@])@([A-Za-z0-9._-]{2,80})")
+_YOUTUBE_CHANNEL_URL_RE = re.compile(
+    r"https?://(?:www\.)?(?:m\.)?youtube\.com/(?:channel/)?(UC[\w-]{20,})",
+    re.IGNORECASE,
+)
+_YOUTUBE_HANDLE_URL_RE = re.compile(
+    r"https?://(?:www\.)?(?:m\.)?youtube\.com/@([A-Za-z0-9._-]{2,80})",
     re.IGNORECASE,
 )
 
@@ -149,6 +161,15 @@ class YoutubeCollector(BaseCollector):
         )
         self._video_backfill_scan_limit = int(os.getenv("YOUTUBE_VIDEO_BACKFILL_SCAN_LIMIT", "5000"))
         self._prefill_media_backlog = os.getenv("YOUTUBE_PREFILL_MEDIA_BACKLOG", "true").lower() == "true"
+        self._profile_queue_enabled = os.getenv("YOUTUBE_PROFILE_QUEUE_ENABLED", "true").lower() == "true"
+        self._spider_autotarget = os.getenv("YOUTUBE_SPIDER_AUTOTARGET", "true").lower() == "true"
+        self._profile_queue_batch = int(os.getenv("YOUTUBE_PROFILE_QUEUE_BATCH", "20"))
+        self._profile_queue_max_attempts = int(os.getenv("YOUTUBE_PROFILE_QUEUE_MAX_ATTEMPTS", "5"))
+        self._mention_backfill_batch = int(os.getenv("YOUTUBE_MENTION_BACKFILL_BATCH", "200"))
+        self._max_refs_per_record = int(os.getenv("YOUTUBE_MAX_REFS_PER_RECORD", "8"))
+        self._max_comment_author_enqueues = int(os.getenv("YOUTUBE_MAX_COMMENT_AUTHOR_ENQUEUES", "25"))
+        self._spider_queue_batch = int(os.getenv("YOUTUBE_SPIDER_QUEUE_BATCH", "5"))
+        self._discovered_target_priority = int(os.getenv("YOUTUBE_DISCOVERED_TARGET_PRIORITY", "1"))
         # FAMOUS-FILTER (Bryan): skip channels at or above this subscriber count,
         # even if subscribed. 0 disables. Overrides the subscription seed.
         self._famous_sub_cap = int(os.getenv("YOUTUBE_FAMOUS_SUB_CAP", "0") or "0")
@@ -280,11 +301,26 @@ class YoutubeCollector(BaseCollector):
             if self._stop.is_set(): break
             logger.info("Collecting youtube/%s", target)
             try:
-                await self._collect_channel(target)
+                result = await self._collect_channel(target) or {}
+                status = "completed"
+                reason = result.get("reason") or "collected"
+                await self._mark_youtube_target(
+                    target,
+                    status=status,
+                    reason=reason,
+                    metadata={"youtube_result": result},
+                )
                 await self.checkpoint.save_progress(target)
             except Exception as e:
                 safe_error = _safe_log_text(e)
                 logger.error("Failed youtube/%s: %s", target, safe_error)
+                await self._mark_youtube_target(
+                    target,
+                    status="error",
+                    reason=safe_error[:1000],
+                    metadata={"error_type": type(e).__name__},
+                )
+                await self._record_channel_error(target, safe_error)
                 await self.send_to_dlq(target, target, safe_error)
 
         # Rich enrichment runs after explicit channel targets so the source obeys
@@ -304,12 +340,21 @@ class YoutubeCollector(BaseCollector):
             except Exception as e:
                 logger.debug("youtube community pass failed: %s", e)
 
+        if self._profile_queue_enabled and not self._stop.is_set():
+            try:
+                await self._backfill_youtube_mentions(limit=self._mention_backfill_batch)
+                await self._process_profile_queue(limit=self._profile_queue_batch)
+            except Exception as e:
+                logger.debug("youtube profile queue pass failed: %s", e)
+
         # Spider queue processing
         if os.getenv("YOUTUBE_SPIDER_ENABLED", "true").lower() == "true":
-            await self._process_spider_queue()
+            await self._process_spider_queue(limit=self._spider_queue_batch)
 
-    async def _process_spider_queue(self):
-        while not self._stop.is_set():
+    async def _process_spider_queue(self, limit: int | None = None):
+        processed = 0
+        max_items = max(1, int(limit if limit is not None else self._spider_queue_batch))
+        while not self._stop.is_set() and processed < max_items:
             async with self.pool.acquire() as conn:
                 row = await conn.fetchrow("""
                     UPDATE youtube_spider_queue
@@ -319,23 +364,41 @@ class YoutubeCollector(BaseCollector):
                         WHERE status = 'pending'
                         ORDER BY priority ASC, collected_at ASC
                         LIMIT 1
+                        FOR UPDATE SKIP LOCKED
                     )
                     RETURNING platform_channel_id
                 """)
             if not row: break
+            processed += 1
             try:
                 await self._collect_channel(row['platform_channel_id'])
                 async with self.pool.acquire() as conn:
-                    await conn.execute("UPDATE youtube_spider_queue SET status = 'completed' WHERE platform_channel_id = $1", row['platform_channel_id'])
-            except Exception:
+                    await conn.execute(
+                        """
+                        UPDATE youtube_spider_queue
+                        SET status = 'completed', collected_at = NOW()
+                        WHERE platform_channel_id = $1
+                        """,
+                        row['platform_channel_id'],
+                    )
+            except Exception as exc:
                 async with self.pool.acquire() as conn:
-                    await conn.execute("UPDATE youtube_spider_queue SET status = 'failed' WHERE platform_channel_id = $1", row['platform_channel_id'])
+                    await conn.execute(
+                        """
+                        UPDATE youtube_spider_queue
+                        SET status = 'failed', collected_at = NOW()
+                        WHERE platform_channel_id = $1
+                        """,
+                        row['platform_channel_id'],
+                    )
+                logger.debug("youtube spider queue failed for %s: %s", row["platform_channel_id"], exc)
+        return processed
 
     async def _collect_channel(self, channel_input: str):
         channel_id, channel_name = await self._resolve_channel(channel_input)
         if not channel_id:
             logger.warning("Could not resolve channel: %s", channel_input)
-            return
+            return {"status": "error", "reason": "resolve_failed", "input": channel_input}
 
         # 1. Upsert Channel Info (returns uploads playlist ID + subscriber count)
         uploads_playlist, sub_count = await self._upsert_channel(channel_id, channel_name)
@@ -348,7 +411,14 @@ class YoutubeCollector(BaseCollector):
                 "youtube: skipping famous channel %s (%s subs >= cap %d)",
                 channel_name or channel_id, sub_count, self._famous_sub_cap,
             )
-            return
+            await self._mark_channel_skip(channel_id, "subscriber_cap", {"subscriber_count": sub_count})
+            return {
+                "status": "completed",
+                "reason": "subscriber_cap",
+                "channel_id": channel_id,
+                "subscriber_count": sub_count,
+                "subscriber_cap": self._famous_sub_cap,
+            }
 
         # When we have API auth and the channels.list lookup returned no item,
         # the channel is confirmed-missing — skip the expensive yt-dlp download
@@ -356,7 +426,8 @@ class YoutubeCollector(BaseCollector):
         # full download timeout per cycle for nothing).
         if self._has_auth and uploads_playlist is None:
             logger.info("youtube: skipping yt-dlp for confirmed-missing channel %s", channel_id)
-            return
+            await self._mark_channel_skip(channel_id, "no_uploads_playlist", {"has_auth": True})
+            return {"status": "completed", "reason": "no_uploads_playlist", "channel_id": channel_id}
 
         if self._has_auth and uploads_playlist:
             video_ids = await self._collect_video_list_via_api(channel_id, channel_name, uploads_playlist)
@@ -377,6 +448,13 @@ class YoutubeCollector(BaseCollector):
                 await self._download_videos_via_yt_dlp(channel_id, channel_name, download_video_ids)
             else:
                 await self._collect_thumbnails_via_yt_dlp(channel_id, channel_name)
+        return {
+            "status": "completed",
+            "reason": "collected",
+            "channel_id": channel_id,
+            "video_ids": len(video_ids),
+            "subscriber_count": sub_count,
+        }
 
     def _yt_auth(self, params: dict | None = None) -> tuple[dict, dict]:
         """Return (headers, params) populated with whichever auth is available."""
@@ -388,6 +466,687 @@ class YoutubeCollector(BaseCollector):
             params["key"] = self._api_key
         return headers, params
 
+    def _youtube_quota_account(self) -> str:
+        if self._api_key:
+            return f"api_key:{sanitize_name(self._api_key[:8])}"
+        if self._oauth_credentials:
+            return "oauth"
+        return "anonymous"
+
+    async def _record_api_request(
+        self,
+        endpoint: str,
+        *,
+        status_code: int | None = None,
+        weight: int = 1,
+        metadata: dict | None = None,
+    ) -> None:
+        if self.pool is None:
+            return
+        account = self._youtube_quota_account()
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO account_quota_usage
+                        (platform, account, day, requests_today, week_iso,
+                         requests_week, hour_bucket, requests_hour)
+                    VALUES (
+                        'youtube',
+                        $1,
+                        (NOW() AT TIME ZONE 'Asia/Singapore')::date,
+                        $2,
+                        to_char((NOW() AT TIME ZONE 'Asia/Singapore')::date, 'IYYY-"W"IW'),
+                        $2,
+                        to_char(NOW() AT TIME ZONE 'Asia/Singapore', 'YYYY-MM-DD HH24:00'),
+                        $2
+                    )
+                    ON CONFLICT (platform, account, day) DO UPDATE SET
+                        requests_today = account_quota_usage.requests_today + EXCLUDED.requests_today,
+                        week_iso = EXCLUDED.week_iso,
+                        requests_week = account_quota_usage.requests_week + EXCLUDED.requests_today,
+                        requests_hour = CASE
+                            WHEN account_quota_usage.hour_bucket = EXCLUDED.hour_bucket
+                                THEN account_quota_usage.requests_hour + EXCLUDED.requests_hour
+                            ELSE EXCLUDED.requests_hour
+                        END,
+                        hour_bucket = EXCLUDED.hour_bucket,
+                        updated_at = NOW()
+                    """,
+                    account,
+                    int(max(weight, 1)),
+                )
+        except Exception:
+            logger.debug("youtube quota usage update failed", exc_info=True)
+
+        if status_code in (403, 429):
+            await record_rate_limit_event(
+                self.pool,
+                source="youtube",
+                account=account,
+                scope=endpoint,
+                status_code=status_code,
+                cooldown_seconds=3600 if status_code == 403 else 900,
+                reason="youtube_api_quota_or_access",
+                metadata=metadata or {},
+            )
+
+    async def _mark_youtube_target(self, target: str, *, status: str, reason: str | None = None,
+                                   metadata: dict | None = None) -> None:
+        if self.pool is None:
+            return
+        payload = json.dumps(metadata or {}, default=str)
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE collection_targets
+                    SET collection_count = collection_count + 1,
+                        last_collection_at = NOW(),
+                        status = $3,
+                        error_message = $4,
+                        metadata = COALESCE(metadata, '{}'::jsonb)
+                                   || jsonb_build_object(
+                                        'youtube_last_status', $3::text,
+                                        'youtube_last_reason', $4::text,
+                                        'youtube_last_result_at', NOW()
+                                      )
+                                   || $5::jsonb
+                    WHERE source = 'youtube' AND target_id = $1
+                    """,
+                    target,
+                    self.SOURCE_NAME,
+                    status,
+                    reason,
+                    payload,
+                )
+        except Exception:
+            logger.debug("youtube target status update failed for %s", target, exc_info=True)
+
+    @staticmethod
+    def _normalize_handle(handle: str | None) -> str | None:
+        if not handle:
+            return None
+        value = str(handle).strip().lstrip("@").strip("/")
+        if not value or len(value) > 100:
+            return None
+        if not re.match(r"^[A-Za-z0-9._-]+$", value):
+            return None
+        return value
+
+    @staticmethod
+    def _extract_youtube_refs(text: str | None) -> list[dict]:
+        if not text:
+            return []
+        refs: list[dict] = []
+        seen: set[tuple[str, str]] = set()
+        for m in _YOUTUBE_CHANNEL_URL_RE.finditer(text):
+            cid = m.group(1)
+            key = ("channel", cid)
+            if key not in seen:
+                seen.add(key)
+                refs.append({"key_type": "channel", "platform_channel_id": cid, "profile_key": cid})
+        for m in _YOUTUBE_HANDLE_URL_RE.finditer(text):
+            handle = YoutubeCollector._normalize_handle(m.group(1))
+            if not handle:
+                continue
+            key = ("handle", handle.lower())
+            if key not in seen:
+                seen.add(key)
+                refs.append({"key_type": "handle", "handle": handle, "profile_key": f"@{handle.lower()}"})
+        for m in _YOUTUBE_HANDLE_RE.finditer(text):
+            handle = YoutubeCollector._normalize_handle(m.group(1))
+            if not handle:
+                continue
+            key = ("handle", handle.lower())
+            if key not in seen:
+                seen.add(key)
+                refs.append({"key_type": "handle", "handle": handle, "profile_key": f"@{handle.lower()}"})
+        return refs
+
+    async def _queue_youtube_profile(
+        self,
+        conn,
+        ref: dict,
+        *,
+        source: str,
+        priority: int,
+        discovered_from: str,
+        metadata: dict | None = None,
+    ) -> None:
+        if not self._profile_queue_enabled:
+            return
+        profile_key = ref.get("profile_key")
+        if not profile_key:
+            return
+        key_type = ref.get("key_type") or ("channel" if ref.get("platform_channel_id") else "handle")
+        channel_id = ref.get("platform_channel_id")
+        handle = ref.get("handle")
+        meta = json.dumps(metadata or {}, default=str)
+        await conn.execute(
+            """
+            INSERT INTO youtube_profile_queue
+                (profile_key, key_type, platform_channel_id, handle, source,
+                 priority, status, evidence_count, discovered_from, metadata)
+            VALUES ($1,$2,$3,$4,$5,$6,'pending',1,$7,$8::jsonb)
+            ON CONFLICT (profile_key) DO UPDATE SET
+                platform_channel_id = COALESCE(youtube_profile_queue.platform_channel_id, EXCLUDED.platform_channel_id),
+                handle = COALESCE(youtube_profile_queue.handle, EXCLUDED.handle),
+                priority = LEAST(youtube_profile_queue.priority, EXCLUDED.priority),
+                evidence_count = youtube_profile_queue.evidence_count + 1,
+                status = CASE
+                    WHEN youtube_profile_queue.status IN ('failed', 'resolved') THEN 'pending'
+                    ELSE youtube_profile_queue.status
+                END,
+                last_seen = NOW(),
+                metadata = COALESCE(youtube_profile_queue.metadata, '{}'::jsonb) || EXCLUDED.metadata
+            """,
+            profile_key,
+            key_type,
+            channel_id,
+            handle,
+            source,
+            priority,
+            discovered_from,
+            meta,
+        )
+        if self._spider_autotarget and channel_id:
+            await self._enqueue_discovered_channel(
+                conn,
+                channel_id,
+                source=source,
+                priority=priority,
+                discovered_from=discovered_from,
+                metadata=metadata,
+            )
+
+    async def _enqueue_discovered_channel(
+        self,
+        conn,
+        channel_id: str,
+        *,
+        source: str,
+        priority: int,
+        discovered_from: str,
+        metadata: dict | None = None,
+    ) -> None:
+        if not channel_id or not channel_id.startswith("UC"):
+            return
+        meta = json.dumps(
+            {
+                "source": source,
+                "discovered_from": discovered_from,
+                "auto_discovered": True,
+                "preserve_on_source_config_sync": True,
+                **(metadata or {}),
+            },
+            default=str,
+        )
+        await conn.execute(
+            """
+            INSERT INTO collection_targets (source, target_id, target_type, status, priority, metadata)
+            VALUES ('youtube', $1, 'user', 'pending', $2, $3::jsonb)
+            ON CONFLICT (source, target_id) DO UPDATE SET
+                priority = GREATEST(collection_targets.priority, EXCLUDED.priority),
+                metadata = COALESCE(collection_targets.metadata, '{}'::jsonb) || EXCLUDED.metadata
+            """,
+            channel_id,
+            priority,
+            meta,
+        )
+        await conn.execute(
+            """
+            INSERT INTO youtube_spider_queue (platform_channel_id, source, priority, status)
+            VALUES ($1, $2, $3, 'pending')
+            ON CONFLICT (platform_channel_id) DO UPDATE SET
+                priority = LEAST(youtube_spider_queue.priority, EXCLUDED.priority),
+                status = CASE
+                    WHEN youtube_spider_queue.status = 'failed'
+                         AND youtube_spider_queue.collected_at < NOW() - make_interval(hours => $4::int)
+                        THEN 'pending'
+                    WHEN youtube_spider_queue.status = 'completed'
+                         AND youtube_spider_queue.collected_at < NOW() - make_interval(hours => $5::int)
+                        THEN 'pending'
+                    ELSE youtube_spider_queue.status
+                END,
+                collected_at = NOW()
+            """,
+            channel_id,
+            source,
+            priority,
+            int(os.getenv("YOUTUBE_SPIDER_RETRY_FAILED_AFTER_HOURS", "24")),
+            int(os.getenv("YOUTUBE_SPIDER_REFRESH_AFTER_HOURS", "168")),
+        )
+
+    async def _record_youtube_edge(
+        self,
+        conn,
+        *,
+        edge_type: str,
+        source_record_id: str,
+        source_table: str,
+        source_channel_id: str | None = None,
+        target_channel_id: str | None = None,
+        target_handle: str | None = None,
+        source_video_id: str | None = None,
+        source_comment_id: str | None = None,
+        source_post_id: str | None = None,
+        strength: int = 50,
+        evidence_text: str | None = None,
+        evidence_url: str | None = None,
+        metadata: dict | None = None,
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO youtube_edges (
+                source_channel_id, target_channel_id, target_handle,
+                source_video_id, source_comment_id, source_post_id, edge_type,
+                strength, evidence_text, evidence_url, source_table,
+                source_record_id, metadata
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb)
+            ON CONFLICT DO NOTHING
+            """,
+            source_channel_id,
+            target_channel_id,
+            target_handle,
+            source_video_id,
+            source_comment_id,
+            source_post_id,
+            edge_type,
+            int(strength),
+            evidence_text,
+            evidence_url,
+            source_table,
+            source_record_id,
+            json.dumps(metadata or {}, default=str),
+        )
+
+    async def _record_refs_from_text(
+        self,
+        conn,
+        text: str | None,
+        *,
+        source_table: str,
+        source_record_id: str,
+        source_channel_id: str | None = None,
+        source_video_id: str | None = None,
+        source_comment_id: str | None = None,
+        source_post_id: str | None = None,
+        evidence_url: str | None = None,
+        priority: int | None = None,
+    ) -> int:
+        refs = self._extract_youtube_refs(text)
+        if not refs:
+            return 0
+        if self._max_refs_per_record > 0 and len(refs) > self._max_refs_per_record:
+            refs = refs[: self._max_refs_per_record]
+        written = 0
+        for ref in refs:
+            target_channel_id = ref.get("platform_channel_id")
+            target_handle = ref.get("handle")
+            await self._queue_youtube_profile(
+                conn,
+                ref,
+                source="mention",
+                priority=priority if priority is not None else self._discovered_target_priority,
+                discovered_from=f"{source_table}:{source_record_id}",
+                metadata={
+                    "source_table": source_table,
+                    "source_record_id": source_record_id,
+                    "source_channel_id": source_channel_id,
+                    "source_video_id": source_video_id,
+                },
+            )
+            await self._record_youtube_edge(
+                conn,
+                edge_type="mentioned",
+                source_table=source_table,
+                source_record_id=source_record_id,
+                source_channel_id=source_channel_id,
+                target_channel_id=target_channel_id,
+                target_handle=target_handle,
+                source_video_id=source_video_id,
+                source_comment_id=source_comment_id,
+                source_post_id=source_post_id,
+                strength=55,
+                evidence_text=(text or "")[:1000],
+                evidence_url=evidence_url,
+                metadata=ref,
+            )
+            written += 1
+        return written
+
+    async def _process_profile_queue(self, limit: int = 20) -> int:
+        """Resolve discovered YouTube handles/channels and enqueue real UC IDs.
+
+        Mentions often arrive as @handles from comments/descriptions. We keep
+        them in youtube_profile_queue first, then resolve a bounded batch to
+        channel IDs before spidering. This keeps discovery auditable and avoids
+        turning every bare handle into a blind channel scrape.
+        """
+        if not self.pool or not self._profile_queue_enabled or limit <= 0:
+            return 0
+        await self._ensure_auth()
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                UPDATE youtube_profile_queue
+                SET status = 'processing',
+                    attempts = attempts + 1,
+                    last_attempt_at = NOW()
+                WHERE profile_key IN (
+                    SELECT profile_key
+                    FROM youtube_profile_queue
+                    WHERE status = 'pending'
+                      AND (next_attempt_at IS NULL OR next_attempt_at <= NOW())
+                      AND attempts < $1
+                    ORDER BY priority ASC, evidence_count DESC, last_seen DESC
+                    LIMIT $2
+                    FOR UPDATE SKIP LOCKED
+                )
+                RETURNING profile_key, key_type, platform_channel_id, handle,
+                          source, priority, evidence_count, discovered_from,
+                          attempts, metadata
+                """,
+                self._profile_queue_max_attempts,
+                limit,
+            )
+        resolved = 0
+        for raw in rows:
+            if self._stop.is_set():
+                break
+            row = dict(raw)
+            profile_key = str(row.get("profile_key") or "")
+            channel_id = str(row.get("platform_channel_id") or "")
+            handle = self._normalize_handle(row.get("handle") or profile_key)
+            resolved_id = channel_id if channel_id.startswith("UC") else None
+            resolved_name = resolved_id or handle or profile_key
+
+            if resolved_id is None and handle and await self._ensure_auth():
+                candidate, name = await self._resolve_channel(f"@{handle}")
+                if candidate and candidate.startswith("UC"):
+                    resolved_id = candidate
+                    resolved_name = name or candidate
+
+            try:
+                async with self.pool.acquire() as conn:
+                    if resolved_id:
+                        await conn.execute(
+                            """
+                            UPDATE youtube_profile_queue
+                            SET status = 'resolved',
+                                platform_channel_id = $2,
+                                handle = COALESCE(handle, $3),
+                                resolved_at = NOW(),
+                                last_error = NULL,
+                                next_attempt_at = NULL,
+                                last_seen = NOW()
+                            WHERE profile_key = $1
+                            """,
+                            profile_key,
+                            resolved_id,
+                            handle,
+                        )
+                        await self._enqueue_discovered_channel(
+                            conn,
+                            resolved_id,
+                            source=row.get("source") or "profile_queue",
+                            priority=int(row.get("priority") or self._discovered_target_priority),
+                            discovered_from=row.get("discovered_from") or f"profile_queue:{profile_key}",
+                            metadata={
+                                "profile_key": profile_key,
+                                "handle": handle,
+                                "resolved_name": resolved_name,
+                                "evidence_count": int(row.get("evidence_count") or 0),
+                            },
+                        )
+                        resolved += 1
+                    else:
+                        attempts = int(row.get("attempts") or 0)
+                        terminal = attempts >= self._profile_queue_max_attempts
+                        await conn.execute(
+                            """
+                            UPDATE youtube_profile_queue
+                            SET status = CASE WHEN $2 THEN 'failed' ELSE 'pending' END,
+                                next_attempt_at = CASE
+                                    WHEN $2 THEN NULL
+                                    ELSE NOW() + make_interval(mins => $3::int)
+                                END,
+                                last_error = $4,
+                                last_seen = NOW()
+                            WHERE profile_key = $1
+                            """,
+                            profile_key,
+                            terminal,
+                            min(1440, max(15, attempts * 15)),
+                            "unresolved_handle_or_channel",
+                        )
+            except Exception as exc:
+                logger.debug("youtube profile queue update failed for %s: %s", profile_key, exc, exc_info=True)
+        if rows:
+            logger.info("youtube profile queue: resolved %d/%d discovered profile(s)", resolved, len(rows))
+        return resolved
+
+    async def _backfill_youtube_mentions(self, limit: int = 200) -> int:
+        """Bounded historical pass for @handle/channel mentions in old rows."""
+        if not self.pool or limit <= 0:
+            return 0
+        processed = 0
+        processed += await self._backfill_video_mentions(limit=max(1, limit // 2))
+        if processed < limit:
+            processed += await self._backfill_comment_mentions(limit=limit - processed)
+        return processed
+
+    async def _backfill_video_mentions(self, limit: int) -> int:
+        service = "youtube_mentions_videos"
+        async with self.pool.acquire() as conn:
+            cursor = await conn.fetchrow(
+                "SELECT last_processed_at FROM service_cursors WHERE service=$1",
+                service,
+            )
+            since = cursor["last_processed_at"] if cursor else None
+            rows = await conn.fetch(
+                """
+                SELECT v.platform_video_id,
+                       COALESCE(c.platform_channel_id, '') AS source_channel_id,
+                       concat_ws(' ', v.title, v.description) AS text,
+                       v.collected_at
+                FROM youtube_videos v
+                LEFT JOIN youtube_channels c ON c.id = v.channel_id
+                WHERE ($1::timestamp IS NULL OR v.collected_at > $1::timestamp)
+                  AND (v.title ILIKE '%@%' OR v.description ILIKE '%@%'
+                       OR v.title ILIKE '%youtube.com/%' OR v.description ILIKE '%youtube.com/%')
+                ORDER BY v.collected_at ASC, v.platform_video_id ASC
+                LIMIT $2
+                """,
+                since,
+                limit,
+            )
+            newest = None
+            for row in rows:
+                newest = row["collected_at"] or newest
+                await self._record_refs_from_text(
+                    conn,
+                    row["text"],
+                    source_table="youtube_videos",
+                    source_record_id=row["platform_video_id"],
+                    source_channel_id=row["source_channel_id"] or None,
+                    source_video_id=row["platform_video_id"],
+                    evidence_url=f"https://www.youtube.com/watch?v={row['platform_video_id']}",
+                    priority=self._discovered_target_priority,
+                )
+            if newest:
+                await conn.execute(
+                    """
+                    INSERT INTO service_cursors (service, last_processed_id, last_processed_at, status)
+                    VALUES ($1, $2, $3, 'idle')
+                    ON CONFLICT (service) DO UPDATE SET
+                        last_processed_id = EXCLUDED.last_processed_id,
+                        last_processed_at = EXCLUDED.last_processed_at,
+                        status = 'idle'
+                    """,
+                    service,
+                    str(rows[-1]["platform_video_id"]),
+                    newest,
+                )
+        return len(rows)
+
+    async def _backfill_comment_mentions(self, limit: int) -> int:
+        service = "youtube_mentions_comments"
+        async with self.pool.acquire() as conn:
+            cursor = await conn.fetchrow(
+                "SELECT last_processed_at FROM service_cursors WHERE service=$1",
+                service,
+            )
+            since = cursor["last_processed_at"] if cursor else None
+            rows = await conn.fetch(
+                """
+                SELECT yc.platform_comment_id,
+                       yc.author_channel_id,
+                       yc.text_original,
+                       yc.collected_at,
+                       v.platform_video_id,
+                       COALESCE(ch.platform_channel_id, '') AS owner_channel_id
+                FROM youtube_comments yc
+                LEFT JOIN youtube_videos v ON v.id = yc.video_id
+                LEFT JOIN youtube_channels ch ON ch.id = v.channel_id
+                WHERE ($1::timestamp IS NULL OR yc.collected_at > $1::timestamp)
+                  AND (yc.text_original ILIKE '%@%' OR yc.text_original ILIKE '%youtube.com/%')
+                ORDER BY yc.collected_at ASC, yc.platform_comment_id ASC
+                LIMIT $2
+                """,
+                since,
+                limit,
+            )
+            newest = None
+            for row in rows:
+                newest = row["collected_at"] or newest
+                source_channel = row["author_channel_id"] or row["owner_channel_id"] or None
+                await self._record_refs_from_text(
+                    conn,
+                    row["text_original"],
+                    source_table="youtube_comments",
+                    source_record_id=row["platform_comment_id"],
+                    source_channel_id=source_channel,
+                    source_video_id=row["platform_video_id"],
+                    source_comment_id=row["platform_comment_id"],
+                    evidence_url=f"https://www.youtube.com/watch?v={row['platform_video_id']}" if row["platform_video_id"] else None,
+                    priority=self._discovered_target_priority,
+                )
+            if newest:
+                await conn.execute(
+                    """
+                    INSERT INTO service_cursors (service, last_processed_id, last_processed_at, status)
+                    VALUES ($1, $2, $3, 'idle')
+                    ON CONFLICT (service) DO UPDATE SET
+                        last_processed_id = EXCLUDED.last_processed_id,
+                        last_processed_at = EXCLUDED.last_processed_at,
+                        status = 'idle'
+                    """,
+                    service,
+                    str(rows[-1]["platform_comment_id"]),
+                    newest,
+                )
+        return len(rows)
+
+    async def _record_channel_error(self, channel_id: str, error: str) -> None:
+        if not self.pool:
+            return
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE youtube_channels
+                    SET last_error = $2, last_error_at = NOW()
+                    WHERE platform_channel_id = $1
+                    """,
+                    channel_id,
+                    error[:1000],
+                )
+        except Exception:
+            logger.debug("youtube channel error update failed for %s", channel_id, exc_info=True)
+
+    async def _mark_channel_skip(self, channel_id: str, reason: str, metadata: dict | None = None) -> None:
+        if not self.pool:
+            return
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE youtube_channels
+                    SET last_skip_reason = $2,
+                        last_skip_at = NOW()
+                    WHERE platform_channel_id = $1
+                    """,
+                    channel_id,
+                    reason,
+                )
+        except Exception:
+            logger.debug("youtube channel skip update failed for %s", channel_id, exc_info=True)
+
+    async def _mark_video_media_attempt(self, platform_video_id: str, *, status: str,
+                                        reason: str | None = None) -> None:
+        if not self.pool or not platform_video_id:
+            return
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE youtube_videos
+                    SET media_status=$2,
+                        media_skip_reason=$3,
+                        last_media_attempt_at=NOW()
+                    WHERE platform_video_id=$1
+                    """,
+                    platform_video_id,
+                    status,
+                    reason[:1000] if reason else None,
+                )
+        except Exception:
+            logger.debug("youtube video media status update failed for %s", platform_video_id, exc_info=True)
+
+    async def _mark_transcript_attempt(self, video_uuid, *, status: str,
+                                       error: str | None = None) -> None:
+        if not self.pool:
+            return
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE youtube_videos
+                    SET transcript_status=$2,
+                        transcript_error=$3,
+                        last_transcript_attempt_at=NOW()
+                    WHERE id=$1
+                    """,
+                    video_uuid,
+                    status,
+                    error[:1000] if error else None,
+                )
+        except Exception:
+            logger.debug("youtube transcript status update failed", exc_info=True)
+
+    async def _mark_comments_attempt(self, video_uuid, *, status: str,
+                                     error: str | None = None) -> None:
+        if not self.pool:
+            return
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE youtube_videos
+                    SET comments_status=$2,
+                        comments_error=$3,
+                        last_comments_attempt_at=NOW()
+                    WHERE id=$1
+                    """,
+                    video_uuid,
+                    status,
+                    error[:1000] if error else None,
+                )
+        except Exception:
+            logger.debug("youtube comments status update failed", exc_info=True)
+
     async def _upsert_channel(self, channel_id: str, channel_name: str) -> tuple[str | None, int]:
         """Upsert channel row. Returns (uploads playlist ID or None, subscriber_count)."""
         snippet = {}
@@ -398,6 +1157,11 @@ class YoutubeCollector(BaseCollector):
                 headers, params = self._yt_auth({"part": "snippet,statistics,contentDetails", "id": channel_id})
                 async with httpx.AsyncClient(timeout=30, headers=headers) as client:
                     resp = await client.get(f"{YT_API_BASE}/channels", params=params)
+                    await self._record_api_request(
+                        "channels.list",
+                        status_code=resp.status_code,
+                        metadata={"channel_id": channel_id, "part": "snippet,statistics,contentDetails"},
+                    )
                     if resp.status_code == 200:
                         items = resp.json().get("items", [])
                         if not items:
@@ -426,28 +1190,89 @@ class YoutubeCollector(BaseCollector):
         except Exception as exc:
             logger.debug("user_change_tracker[youtube]: prev-row fetch failed: %s", exc)
 
+        thumbnail_url = snippet.get("thumbnails", {}).get("high", {}).get("url")
+        try:
+            external_links = [
+                {"url": url, "type": link_type, "domain": urlparse(url).netloc.lower() or None}
+                for url, link_type in extract_all_links(snippet.get("description") or "")
+            ]
+        except Exception:
+            external_links = []
+
         async with self.pool.acquire() as conn:
             await conn.execute("""
                 INSERT INTO youtube_channels (
                     platform_channel_id, title, description, custom_url,
                     published_at, thumbnail_url, view_count, subscriber_count,
-                    video_count, updated_at
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+                    video_count, external_links, updated_at
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, NOW())
                 ON CONFLICT (platform_channel_id) DO UPDATE SET
                     title = EXCLUDED.title,
                     description = EXCLUDED.description,
+                    custom_url = EXCLUDED.custom_url,
+                    thumbnail_url = EXCLUDED.thumbnail_url,
                     view_count = EXCLUDED.view_count,
                     subscriber_count = EXCLUDED.subscriber_count,
                     video_count = EXCLUDED.video_count,
+                    external_links = EXCLUDED.external_links,
+                    last_error = NULL,
+                    last_error_at = NULL,
                     updated_at = NOW()
             """,
             channel_id, channel_name, snippet.get("description"), snippet.get("customUrl"),
             datetime.fromisoformat(snippet.get("publishedAt").replace("Z", "")) if snippet.get("publishedAt") else None,
-            snippet.get("thumbnails", {}).get("high", {}).get("url"),
+            thumbnail_url,
             int(statistics.get("viewCount", 0) or 0),
             int(statistics.get("subscriberCount", 0) or 0),
-            int(statistics.get("videoCount", 0) or 0)
+            int(statistics.get("videoCount", 0) or 0),
+            json.dumps(external_links, default=str),
             )
+            await persist_discovered_links(
+                conn,
+                source="youtube",
+                source_table="youtube_channels",
+                source_record_id=channel_id,
+                context_id=channel_id,
+                entity_id=channel_id,
+                text=snippet.get("description"),
+                metadata={"platform_channel_id": channel_id, "title": channel_name},
+            )
+            await self._record_refs_from_text(
+                conn,
+                snippet.get("description"),
+                source_table="youtube_channels",
+                source_record_id=channel_id,
+                source_channel_id=channel_id,
+                evidence_url=f"https://www.youtube.com/channel/{channel_id}",
+                priority=max(self._discovered_target_priority, 2),
+            )
+
+        if thumbnail_url and not self.is_known(f"profile_{channel_id}"):
+            try:
+                inserted = await self.download_media({
+                    "entity_id": channel_id,
+                    "entity_name": channel_name or channel_id,
+                    "content_type": "profile_photo",
+                    "content_id": f"profile_{channel_id}",
+                    "url": thumbnail_url,
+                    "extension": "jpg",
+                    "source_url": f"https://www.youtube.com/channel/{channel_id}",
+                    "raw": {"platform_channel_id": channel_id, "thumbnail_url": thumbnail_url},
+                })
+                if inserted:
+                    async with self.pool.acquire() as conn:
+                        media_id = await conn.fetchval(
+                            "SELECT id FROM media_items WHERE source='youtube' AND content_id=$1 ORDER BY collected_at DESC LIMIT 1",
+                            f"profile_{channel_id}",
+                        )
+                        if media_id:
+                            await conn.execute(
+                                "UPDATE youtube_channels SET profile_photo_media_id=$2 WHERE platform_channel_id=$1",
+                                channel_id,
+                                media_id,
+                            )
+            except Exception:
+                logger.debug("youtube profile photo archive failed for %s", channel_id, exc_info=True)
 
         # ── Change-log write (non-fatal). Field names match youtube_channels
         # column names, so prev_row passes through unmodified. Count fields
@@ -544,18 +1369,70 @@ class YoutubeCollector(BaseCollector):
                     await conn.execute(
                         """
                         INSERT INTO youtube_community_posts
-                          (platform_post_id, channel_id, text, likes_count, comments_count, has_image, image_url, collected_at)
-                        VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())
+                          (platform_post_id, channel_id, text, likes_count, comments_count,
+                           has_image, image_url, collected_at, raw)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7,NOW(),$8::jsonb)
                         ON CONFLICT (platform_post_id) DO UPDATE SET
                           text=EXCLUDED.text, likes_count=EXCLUDED.likes_count,
                           comments_count=EXCLUDED.comments_count,
-                          has_image=EXCLUDED.has_image, image_url=EXCLUDED.image_url
+                          has_image=EXCLUDED.has_image, image_url=EXCLUDED.image_url,
+                          raw=EXCLUDED.raw
                         """,
-                        pid, channel_id, text or None, votes, comments, bool(image_url), image_url,
+                        pid, channel_id, text or None, votes, comments, bool(image_url), image_url, pj,
+                    )
+                    await self._record_refs_from_text(
+                        conn,
+                        text,
+                        source_table="youtube_community_posts",
+                        source_record_id=pid,
+                        source_channel_id=channel_id,
+                        source_post_id=pid,
+                        evidence_url=f"https://www.youtube.com/channel/{channel_id}/community",
                     )
                     saved += 1
                 except Exception:
                     logger.debug("community upsert failed %s", pid, exc_info=True)
+                if image_url and not self.is_known(f"community_{pid}"):
+                    try:
+                        inserted = await self.download_media({
+                            "entity_id": channel_id,
+                            "entity_name": channel_id,
+                            "content_type": "community_image",
+                            "content_id": f"community_{pid}",
+                            "url": image_url,
+                            "extension": "jpg",
+                            "source_url": f"https://www.youtube.com/channel/{channel_id}/community",
+                            "raw": {"platform_post_id": pid, "image_url": image_url},
+                        })
+                        if inserted:
+                            media_row = await conn.fetchrow(
+                                "SELECT id FROM media_items WHERE source='youtube' AND content_id=$1 ORDER BY collected_at DESC LIMIT 1",
+                                f"community_{pid}",
+                            )
+                            await conn.execute(
+                                """
+                                UPDATE youtube_community_posts
+                                SET media_status='stored',
+                                    media_item_id=$2,
+                                    last_media_attempt_at=NOW(),
+                                    media_error=NULL
+                                WHERE platform_post_id=$1
+                                """,
+                                pid,
+                                media_row["id"] if media_row else None,
+                            )
+                    except Exception as exc:
+                        await conn.execute(
+                            """
+                            UPDATE youtube_community_posts
+                            SET media_status='failed',
+                                media_error=$2,
+                                last_media_attempt_at=NOW()
+                            WHERE platform_post_id=$1
+                            """,
+                            pid,
+                            _safe_log_text(exc)[:1000],
+                        )
         if saved:
             logger.info("youtube: +%d community post(s) for channel %s", saved, channel_id)
         return saved
@@ -573,7 +1450,16 @@ class YoutubeCollector(BaseCollector):
         for r in rows:
             if self._stop.is_set():
                 break
-            total += await self._collect_community_posts(r["platform_channel_id"])
+            cid = r["platform_channel_id"]
+            total += await self._collect_community_posts(cid)
+            try:
+                async with self.pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE youtube_channels SET last_community_scan_at=NOW() WHERE platform_channel_id=$1",
+                        cid,
+                    )
+            except Exception:
+                logger.debug("youtube: community scan timestamp update failed", exc_info=True)
         return total
 
     async def _upsert_video(self, channel_id: str, video_data: dict):
@@ -629,6 +1515,16 @@ class YoutubeCollector(BaseCollector):
                     "title": snippet.get("title"),
                 },
             )
+            await self._record_refs_from_text(
+                conn,
+                " ".join(v for v in (snippet.get("title"), snippet.get("description")) if v),
+                source_table="youtube_videos",
+                source_record_id=video_id,
+                source_channel_id=channel_id,
+                source_video_id=video_id,
+                evidence_url=f"https://www.youtube.com/watch?v={video_id}",
+                priority=self._discovered_target_priority,
+            )
 
     async def _resolve_channel(self, channel_input: str) -> tuple[str, str]:
         if not self._has_auth:
@@ -638,12 +1534,15 @@ class YoutubeCollector(BaseCollector):
             if channel_input.startswith("UC"):
                 headers, params = self._yt_auth({"part": "snippet", "id": channel_input})
                 resp = await client.get(f"{YT_API_BASE}/channels", params=params, headers=headers)
+                await self._record_api_request("channels.list", status_code=resp.status_code, metadata={"resolve": channel_input})
             elif channel_input.startswith("@"):
                 headers, params = self._yt_auth({"part": "snippet", "forHandle": channel_input})
                 resp = await client.get(f"{YT_API_BASE}/channels", params=params, headers=headers)
+                await self._record_api_request("channels.list", status_code=resp.status_code, metadata={"resolve": channel_input})
             else:
                 headers, params = self._yt_auth({"part": "snippet", "q": channel_input, "type": "channel", "maxResults": 1})
                 resp = await client.get(f"{YT_API_BASE}/search", params=params, headers=headers)
+                await self._record_api_request("search.list", status_code=resp.status_code, metadata={"resolve": channel_input})
 
             if resp.status_code != 200: return channel_input, channel_input
             data = resp.json()
@@ -667,8 +1566,17 @@ class YoutubeCollector(BaseCollector):
                 headers, params = self._yt_auth(base_params)
                 async with self._sem:
                     resp = await client.get(f"{YT_API_BASE}/playlistItems", params=params, headers=headers)
+                await self._record_api_request(
+                    "playlistItems.list",
+                    status_code=resp.status_code,
+                    metadata={"channel_id": channel_id, "playlist_id": uploads_playlist},
+                )
                 if resp.status_code == 403:
                     logger.warning("YouTube playlistItems 403 (quota or permission) for channel %s", channel_id)
+                    break
+                if resp.status_code == 404:
+                    logger.warning("YouTube uploads playlist 404 for channel %s (%s)", channel_id, uploads_playlist)
+                    await self._mark_channel_skip(channel_id, "uploads_playlist_404", {"playlist_id": uploads_playlist})
                     break
                 resp.raise_for_status()
                 data = resp.json()
@@ -705,6 +1613,14 @@ class YoutubeCollector(BaseCollector):
                 page_token = data.get("nextPageToken", "")
                 if not page_token: break
         logger.info("YouTube collected %d video IDs for channel %s", len(video_ids), channel_id)
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE youtube_channels SET last_video_scan_at=NOW() WHERE platform_channel_id=$1",
+                    channel_id,
+                )
+        except Exception:
+            logger.debug("youtube: video scan timestamp update failed", exc_info=True)
         if video_ids:
             try:
                 await self._enrich_video_stats(video_ids)
@@ -723,6 +1639,11 @@ class YoutubeCollector(BaseCollector):
                     headers, params = self._yt_auth({"part": "statistics,contentDetails", "id": ",".join(chunk)})
                     async with self._sem:
                         resp = await client.get(f"{YT_API_BASE}/videos", params=params, headers=headers)
+                    await self._record_api_request(
+                        "videos.list",
+                        status_code=resp.status_code,
+                        metadata={"ids": len(chunk), "first_id": chunk[0] if chunk else None},
+                    )
                     if resp.status_code == 403:
                         logger.warning("YouTube videos.list 403 (quota or permission); skipping enrichment for %d ids", len(chunk))
                         break
@@ -864,6 +1785,13 @@ class YoutubeCollector(BaseCollector):
                         "youtube yt-dlp video download failed for %s: rc=%s timed_out=%s stderr_tail=%s",
                         url, result.returncode, result.timed_out, result.err_summary(400),
                     )
+                    m = re.search(r"watch\?v=([\w-]+)", url)
+                    if m:
+                        await self._mark_video_media_attempt(
+                            m.group(1),
+                            status="failed",
+                            reason=result.err_summary(400) or f"yt-dlp rc={result.returncode}",
+                        )
                     self._progress_count += 1  # tick watchdog so metadata-only runs don't look hung
                 eligible_files = 0
                 stored_files = 0
@@ -886,6 +1814,8 @@ class YoutubeCollector(BaseCollector):
                     if inserted:
                         stored_files += 1
                         stored_total += 1
+                        if is_video:
+                            await self._mark_video_media_attempt(f.stem, status="stored")
                 logger.info(
                     "youtube yt-dlp media ingest for %s: result_files=%d eligible=%d stored=%d skipped_known=%d skipped_ext=%d",
                     url,
@@ -987,6 +1917,7 @@ class YoutubeCollector(BaseCollector):
                 try:
                     await self._fetch_transcript(row["id"], row["platform_video_id"])
                 except Exception as e:
+                    await self._mark_transcript_attempt(row["id"], status="failed", error=_safe_log_text(e))
                     logger.warning("YouTube transcript fetch failed for %s: %s", row["platform_video_id"], e)
                 await asyncio.sleep(self._download_delay)
 
@@ -1012,6 +1943,7 @@ class YoutubeCollector(BaseCollector):
                 try:
                     await self._fetch_comments(row["id"], row["platform_video_id"])
                 except Exception as e:
+                    await self._mark_comments_attempt(row["id"], status="failed", error=_safe_log_text(e))
                     logger.warning("YouTube comments fetch failed for %s: %s", row["platform_video_id"], e)
                 await asyncio.sleep(self._download_delay)
 
@@ -1024,6 +1956,7 @@ class YoutubeCollector(BaseCollector):
     async def _fetch_transcript(self, video_uuid, platform_video_id: str):
         """Run yt-dlp --write-subs/--write-auto-subs to grab a VTT subtitle file, parse to text,
         and INSERT into youtube_transcripts."""
+        await self._mark_transcript_attempt(video_uuid, status="processing")
         url = f"https://www.youtube.com/watch?v={platform_video_id}"
         with tempfile.TemporaryDirectory() as tmpdir:
             output_tmpl = os.path.join(tmpdir, "%(id)s.%(ext)s")
@@ -1052,6 +1985,11 @@ class YoutubeCollector(BaseCollector):
             vtt_files = sorted(Path(tmpdir).rglob("*.vtt"))
             if not vtt_files:
                 logger.info("YouTube transcript: no VTT for %s (skipping)", platform_video_id)
+                await self._mark_transcript_attempt(
+                    video_uuid,
+                    status="unavailable" if proc.returncode == 0 else "failed",
+                    error="no_vtt_returned",
+                )
                 return
             vtt_path = vtt_files[0]
             # Heuristic: filenames look like <id>.<lang>.vtt or <id>.<lang>-orig.vtt
@@ -1069,10 +2007,12 @@ class YoutubeCollector(BaseCollector):
                 vtt_text = vtt_path.read_text(encoding="utf-8", errors="replace")
             except Exception as e:
                 logger.warning("YouTube transcript: cannot read %s: %s", vtt_path, e)
+                await self._mark_transcript_attempt(video_uuid, status="failed", error=_safe_log_text(e))
                 return
             content = self._vtt_to_text(vtt_text)
             if not content:
                 logger.info("YouTube transcript: empty after parse for %s", platform_video_id)
+                await self._mark_transcript_attempt(video_uuid, status="empty", error="empty_after_parse")
                 return
             is_generated = "auto" in vtt_path.name.lower() or "-orig" in vtt_path.name.lower()
             async with self.pool.acquire() as conn:
@@ -1083,6 +2023,7 @@ class YoutubeCollector(BaseCollector):
                     """,
                     video_uuid, lang[:10], is_generated, content, datetime.now(timezone.utc),
                 )
+            await self._mark_transcript_attempt(video_uuid, status="stored")
             logger.info("YouTube transcript saved for %s (%s, %d chars, generated=%s)", platform_video_id, lang, len(content), is_generated)
 
     @staticmethod
@@ -1093,6 +2034,24 @@ class YoutubeCollector(BaseCollector):
     async def _fetch_comments(self, video_uuid, platform_video_id: str):
         """Run yt-dlp --write-comments to dump comments into the .info.json,
         then parse and bulk-INSERT into youtube_comments."""
+        await self._mark_comments_attempt(video_uuid, status="processing")
+        owner_channel_id = None
+        try:
+            async with self.pool.acquire() as conn:
+                owner_row = await conn.fetchrow(
+                    """
+                    SELECT c.platform_channel_id
+                    FROM youtube_videos v
+                    LEFT JOIN youtube_channels c ON c.id = v.channel_id
+                    WHERE v.id = $1
+                    """,
+                    video_uuid,
+                )
+                if owner_row:
+                    owner_channel_id = owner_row["platform_channel_id"]
+        except Exception:
+            logger.debug("YouTube comments: owner channel lookup failed for %s", platform_video_id, exc_info=True)
+
         url = f"https://www.youtube.com/watch?v={platform_video_id}"
         with tempfile.TemporaryDirectory() as tmpdir:
             output_tmpl = os.path.join(tmpdir, "%(id)s.%(ext)s")
@@ -1119,17 +2078,25 @@ class YoutubeCollector(BaseCollector):
             info_files = sorted(Path(tmpdir).rglob("*.info.json"))
             if not info_files:
                 logger.info("YouTube comments: no info.json for %s (skipping)", platform_video_id)
+                await self._mark_comments_attempt(
+                    video_uuid,
+                    status="unavailable" if proc.returncode == 0 else "failed",
+                    error="no_info_json_returned",
+                )
                 return
             try:
                 info = json.loads(info_files[0].read_text(encoding="utf-8", errors="replace"))
             except Exception as e:
                 logger.warning("YouTube comments: bad info.json for %s: %s", platform_video_id, e)
+                await self._mark_comments_attempt(video_uuid, status="failed", error=_safe_log_text(e))
                 return
             comments = info.get("comments") or []
             if not comments:
                 logger.info("YouTube comments: 0 comments returned for %s", platform_video_id)
+                await self._mark_comments_attempt(video_uuid, status="empty")
                 return
             inserted = 0
+            author_enqueues = 0
             async with self.pool.acquire() as conn:
                 for c in comments:
                     try:
@@ -1146,6 +2113,7 @@ class YoutubeCollector(BaseCollector):
                                 published_at = None
                         else:
                             published_at = self._parse_relative_timestamp(c.get("_time_text") or c.get("time_text") or "")
+                        author_channel_id = c.get("author_id") or c.get("channel_id")
                         await conn.execute(
                             """
                             INSERT INTO youtube_comments (
@@ -1160,7 +2128,7 @@ class YoutubeCollector(BaseCollector):
                             cid,
                             video_uuid,
                             c.get("author"),
-                            c.get("author_id") or c.get("channel_id"),
+                            author_channel_id,
                             c.get("author_thumbnail"),
                             c.get("text"),
                             int(c.get("like_count") or 0),
@@ -1169,9 +2137,54 @@ class YoutubeCollector(BaseCollector):
                             published_at,
                             datetime.now(timezone.utc),
                         )
+                        if author_channel_id and str(author_channel_id).startswith("UC"):
+                            if author_enqueues < self._max_comment_author_enqueues:
+                                await self._queue_youtube_profile(
+                                    conn,
+                                    {
+                                        "key_type": "channel",
+                                        "platform_channel_id": author_channel_id,
+                                        "profile_key": author_channel_id,
+                                    },
+                                    source="comment_author",
+                                    priority=self._discovered_target_priority,
+                                    discovered_from=f"youtube_comments:{cid}",
+                                    metadata={
+                                        "platform_video_id": platform_video_id,
+                                        "owner_channel_id": owner_channel_id,
+                                        "author_name": c.get("author"),
+                                    },
+                                )
+                                author_enqueues += 1
+                            await self._record_youtube_edge(
+                                conn,
+                                edge_type="commented_on_video",
+                                source_table="youtube_comments",
+                                source_record_id=cid,
+                                source_channel_id=author_channel_id,
+                                target_channel_id=owner_channel_id,
+                                source_video_id=platform_video_id,
+                                source_comment_id=cid,
+                                strength=70,
+                                evidence_text=(c.get("text") or "")[:1000],
+                                evidence_url=url,
+                                metadata={"author_name": c.get("author")},
+                            )
+                        await self._record_refs_from_text(
+                            conn,
+                            c.get("text"),
+                            source_table="youtube_comments",
+                            source_record_id=cid,
+                            source_channel_id=author_channel_id or owner_channel_id,
+                            source_video_id=platform_video_id,
+                            source_comment_id=cid,
+                            evidence_url=url,
+                            priority=self._discovered_target_priority,
+                        )
                         inserted += 1
                     except Exception as e:
                         logger.debug("YouTube comment insert failed (%s): %s", c.get("id"), e)
+            await self._mark_comments_attempt(video_uuid, status="stored" if inserted else "empty")
             logger.info("YouTube comments saved for %s: %d / %d", platform_video_id, inserted, len(comments))
 
     async def get_backfill_items(self, batch_size: int) -> list[dict]:
@@ -1227,16 +2240,20 @@ class YoutubeCollector(BaseCollector):
         selected = 0
         skipped_duration = 0
         skipped_live_placeholder = 0
+        skipped_duration_ids: list[str] = []
+        skipped_live_ids: list[str] = []
         for row in rows:
             if selected >= batch_size:
                 break
             duration = row["duration"] or ""
             if duration.upper() in {"P0D", "PT0S"}:
                 skipped_live_placeholder += 1
+                skipped_live_ids.append(row["platform_video_id"])
                 continue
             duration_seconds = parse_iso8601_duration(duration)
             if limit_seconds and duration_seconds and duration_seconds > limit_seconds:
                 skipped_duration += 1
+                skipped_duration_ids.append(row["platform_video_id"])
                 continue
             key = (row["platform_channel_id"], row["channel_name"])
             groups.setdefault(key, []).append(row["platform_video_id"])
@@ -1253,6 +2270,33 @@ class YoutubeCollector(BaseCollector):
                 selected,
                 scan_limit,
             )
+        if skipped_live_ids or skipped_duration_ids:
+            try:
+                async with self.pool.acquire() as conn:
+                    if skipped_live_ids:
+                        await conn.execute(
+                            """
+                            UPDATE youtube_videos
+                            SET media_status = 'skipped',
+                                media_skip_reason = 'live_or_scheduled_placeholder',
+                                last_media_attempt_at = NOW()
+                            WHERE platform_video_id = ANY($1::text[])
+                            """,
+                            skipped_live_ids,
+                        )
+                    if skipped_duration_ids:
+                        await conn.execute(
+                            """
+                            UPDATE youtube_videos
+                            SET media_status = 'skipped',
+                                media_skip_reason = 'over_duration_cap',
+                                last_media_attempt_at = NOW()
+                            WHERE platform_video_id = ANY($1::text[])
+                            """,
+                            skipped_duration_ids,
+                        )
+            except Exception:
+                logger.debug("youtube: media skip status update failed", exc_info=True)
         return groups
 
     async def run_backfill(self):
@@ -1299,6 +2343,11 @@ class YoutubeCollector(BaseCollector):
             if channel:
                 return f"https://www.youtube.com/channel/{channel}"
             return None
+        if ctype == "community_image":
+            channel = item.get("entity_id")
+            if channel:
+                return f"https://www.youtube.com/channel/{channel}/community"
+            return None
         if ctype == "video":
             vid = cid[len("video_"):] if cid.startswith("video_") else cid
         elif ctype == "thumbnail":
@@ -1341,7 +2390,7 @@ class YoutubeCollector(BaseCollector):
                     resp.raise_for_status()
                     data = resp.content
             else: return False
-            source_url = self._build_youtube_source_url(item)
+            source_url = item.get("source_url") or self._build_youtube_source_url(item)
             metadata = {
                 "entity_id": item["entity_id"],
                 "entity_name": item["entity_name"],
@@ -1424,6 +2473,7 @@ class YoutubeCollector(BaseCollector):
             client = httpx.AsyncClient(timeout=30, headers=headers)
         try:
             resp = await client.get(f"{YT_API_BASE}/{path}", params=qparams, headers=headers if not own_client else None)
+            await self._record_api_request(path, status_code=resp.status_code, metadata={"path": path})
             if resp.status_code != 200:
                 logger.warning("YouTube API %s status=%s body=%s", path, resp.status_code, resp.text[:200])
                 return {}

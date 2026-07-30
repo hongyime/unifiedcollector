@@ -311,6 +311,24 @@ async def _existing_public_tables(conn, tables: list[str]) -> set[str]:
     return set(rows or [])
 
 
+async def _existing_public_columns(conn, table: str, columns: list[str]) -> set[str]:
+    if not table or not columns:
+        return set()
+    rows = await conn.fetchval(
+        """
+        SELECT COALESCE(array_agg(column_name), ARRAY[]::text[])
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = $1
+          AND column_name = ANY($2::text[])
+        """,
+        table,
+        columns,
+        timeout=8,
+    )
+    return set(rows or [])
+
+
 async def _beeper_subsource_content_summary(conn, since_sql: str, before_sql: str | None = None) -> dict[str, dict]:
     cache_key = (since_sql, before_sql)
     cached = _BEEPER_SUBSOURCE_CONTENT_CACHE.get(cache_key)
@@ -846,6 +864,244 @@ async def _youtube_media_backlog(conn) -> dict:
     out = dict(row) if row else {}
     out["duration_cap_seconds"] = duration_cap_seconds
     _YOUTUBE_MEDIA_BACKLOG_CACHE.update({"ts": time.time(), "row": out})
+    return out
+
+
+async def _youtube_completeness(conn) -> dict:
+    required = [
+        "youtube_channels",
+        "youtube_videos",
+        "media_items",
+        "youtube_transcripts",
+        "youtube_comments",
+        "youtube_community_posts",
+        "youtube_edges",
+        "youtube_profile_queue",
+        "youtube_spider_queue",
+        "collection_targets",
+    ]
+    existing = await _existing_public_tables(conn, required)
+    if "youtube_videos" not in existing:
+        return {"schema_ready": False, "reason": "youtube_videos_missing"}
+
+    video_cols = await _existing_public_columns(
+        conn,
+        "youtube_videos",
+        [
+            "media_status",
+            "media_skip_reason",
+            "transcript_status",
+            "comments_status",
+            "last_media_attempt_at",
+        ],
+    )
+    channel_cols = await _existing_public_columns(
+        conn,
+        "youtube_channels",
+        [
+            "profile_photo_media_id",
+            "external_links",
+            "last_video_scan_at",
+            "last_community_scan_at",
+            "last_skip_reason",
+            "last_error",
+        ],
+    )
+    community_cols = await _existing_public_columns(
+        conn,
+        "youtube_community_posts",
+        ["media_status", "media_item_id"],
+    ) if "youtube_community_posts" in existing else set()
+
+    video_status_ready = {"media_status", "transcript_status", "comments_status"}.issubset(video_cols)
+    channel_profile_ready = {"profile_photo_media_id", "external_links"}.issubset(channel_cols)
+    community_ready = {"media_status", "media_item_id"}.issubset(community_cols)
+    try:
+        duration_cap_seconds = max(0, int(os.getenv("YOUTUBE_MAX_VIDEO_DURATION_MINUTES", "0")) * 60)
+    except (TypeError, ValueError):
+        duration_cap_seconds = 0
+
+    video_select = """
+        WITH video_state AS (
+            SELECT v.*,
+                   video_mi.id IS NOT NULL AS archived_video_file,
+                   thumb_mi.id IS NOT NULL AS archived_thumbnail_file,
+                   upper(coalesce(v.duration, '')) AS duration_text,
+                   (
+                       coalesce((substring(v.duration from 'PT([0-9]+)H'))::int, 0) * 3600
+                       + coalesce((substring(v.duration from '([0-9]+)M'))::int, 0) * 60
+                       + coalesce((substring(v.duration from '([0-9]+)S'))::int, 0)
+                   ) AS duration_seconds
+            FROM youtube_videos v
+            LEFT JOIN media_items video_mi
+                   ON video_mi.source = 'youtube'
+                  AND video_mi.content_id = 'video_' || v.platform_video_id
+            LEFT JOIN media_items thumb_mi
+                   ON thumb_mi.source = 'youtube'
+                  AND thumb_mi.content_id = v.platform_video_id
+                  AND thumb_mi.content_type = 'thumbnail'
+        )
+        SELECT COUNT(*)::bigint AS total_videos,
+               COUNT(*) FILTER (WHERE archived_video_file)::bigint AS archived_video_files,
+               COUNT(*) FILTER (WHERE archived_thumbnail_file)::bigint AS archived_thumbnails,
+               COUNT(*) FILTER (WHERE duration_text IN ('P0D', 'PT0S'))::bigint AS live_or_scheduled_placeholders,
+               COUNT(*) FILTER (WHERE NOT archived_video_file)::bigint AS missing_videos,
+               COUNT(*) FILTER (
+                   WHERE NOT archived_video_file
+                     AND duration_text IN ('P0D', 'PT0S')
+               )::bigint AS placeholder_missing_videos,
+               COUNT(*) FILTER (
+                   WHERE NOT archived_video_file
+                     AND duration_text NOT IN ('P0D', 'PT0S')
+                     AND ($1::int <= 0 OR duration_seconds <= $1::int OR duration_text = '')
+               )::bigint AS eligible_missing_videos,
+               COUNT(*) FILTER (
+                   WHERE NOT archived_video_file
+                     AND duration_text NOT IN ('P0D', 'PT0S', '')
+                     AND $1::int > 0
+                     AND duration_seconds > $1::int
+               )::bigint AS over_duration_missing_videos
+    """
+    if video_status_ready:
+        video_select += """
+               ,COUNT(*) FILTER (WHERE v.media_status='stored')::bigint AS media_status_stored,
+               COUNT(*) FILTER (WHERE v.media_status='failed')::bigint AS media_status_failed,
+               COUNT(*) FILTER (WHERE v.media_status='skipped')::bigint AS media_status_skipped,
+               COUNT(*) FILTER (WHERE v.media_status='pending')::bigint AS media_status_pending,
+               COUNT(*) FILTER (WHERE v.transcript_status='stored')::bigint AS transcript_status_stored,
+               COUNT(*) FILTER (WHERE v.transcript_status='failed')::bigint AS transcript_status_failed,
+               COUNT(*) FILTER (WHERE v.transcript_status='unavailable')::bigint AS transcript_status_unavailable,
+               COUNT(*) FILTER (WHERE v.transcript_status='pending')::bigint AS transcript_status_pending,
+               COUNT(*) FILTER (WHERE v.comments_status='stored')::bigint AS comments_status_stored,
+               COUNT(*) FILTER (WHERE v.comments_status='failed')::bigint AS comments_status_failed,
+               COUNT(*) FILTER (WHERE v.comments_status='unavailable')::bigint AS comments_status_unavailable,
+               COUNT(*) FILTER (WHERE v.comments_status='pending')::bigint AS comments_status_pending
+        """
+    video_row = await conn.fetchrow(video_select + " FROM video_state v", duration_cap_seconds, timeout=15)
+    video_stats = dict(video_row) if video_row else {}
+
+    out: dict = {
+        "schema_ready": video_status_ready and channel_profile_ready,
+        "tables": sorted(existing),
+        "video_status_columns_ready": video_status_ready,
+        "channel_profile_columns_ready": channel_profile_ready,
+        "community_columns_ready": community_ready,
+        "videos": video_stats,
+        "media_backlog": {
+            "duration_cap_seconds": duration_cap_seconds,
+            "missing_videos": video_stats.get("missing_videos", 0),
+            "eligible_missing_videos": video_stats.get("eligible_missing_videos", 0),
+            "placeholder_missing_videos": video_stats.get("placeholder_missing_videos", 0),
+            "over_duration_missing_videos": video_stats.get("over_duration_missing_videos", 0),
+        },
+    }
+
+    if "youtube_channels" in existing:
+        channel_select = """
+            SELECT COUNT(*)::bigint AS total_channels,
+                   COUNT(*) FILTER (WHERE subscriber_count IS NOT NULL)::bigint AS channels_with_subscriber_count,
+                   COUNT(*) FILTER (WHERE video_count IS NOT NULL)::bigint AS channels_with_video_count
+        """
+        if channel_profile_ready:
+            channel_select += """
+                   ,COUNT(*) FILTER (WHERE profile_photo_media_id IS NOT NULL)::bigint AS channels_with_profile_photo_media,
+                   COUNT(*) FILTER (WHERE jsonb_array_length(COALESCE(external_links, '[]'::jsonb)) > 0)::bigint AS channels_with_external_links,
+                   COUNT(*) FILTER (WHERE last_video_scan_at IS NOT NULL)::bigint AS channels_video_scanned,
+                   COUNT(*) FILTER (WHERE last_community_scan_at IS NOT NULL)::bigint AS channels_community_scanned,
+                   COUNT(*) FILTER (WHERE last_skip_reason IS NOT NULL)::bigint AS channels_skipped,
+                   COUNT(*) FILTER (WHERE last_error IS NOT NULL)::bigint AS channels_with_error
+            """
+        channel_row = await conn.fetchrow(channel_select + " FROM youtube_channels", timeout=12)
+        out["channels"] = dict(channel_row) if channel_row else {}
+
+    if "youtube_transcripts" in existing:
+        row = await conn.fetchrow("SELECT COUNT(*)::bigint AS transcripts FROM youtube_transcripts", timeout=8)
+        out["transcripts"] = dict(row) if row else {}
+    if "youtube_comments" in existing:
+        row = await conn.fetchrow(
+            """
+            SELECT COUNT(*)::bigint AS comments,
+                   COUNT(*) FILTER (WHERE author_channel_id IS NOT NULL)::bigint AS comments_with_author_channel
+            FROM youtube_comments
+            """,
+            timeout=12,
+        )
+        out["comments"] = dict(row) if row else {}
+    if "youtube_community_posts" in existing:
+        if community_ready:
+            row = await conn.fetchrow(
+                """
+                SELECT COUNT(*)::bigint AS community_posts,
+                       COUNT(*) FILTER (WHERE has_image)::bigint AS community_posts_with_image,
+                       COUNT(*) FILTER (WHERE media_status='stored')::bigint AS community_media_stored,
+                       COUNT(*) FILTER (WHERE media_status='failed')::bigint AS community_media_failed,
+                       COUNT(*) FILTER (WHERE media_status='pending')::bigint AS community_media_pending
+                FROM youtube_community_posts
+                """,
+                timeout=12,
+            )
+        else:
+            row = await conn.fetchrow("SELECT COUNT(*)::bigint AS community_posts FROM youtube_community_posts", timeout=8)
+        out["community"] = dict(row) if row else {}
+    if "youtube_edges" in existing:
+        rows = await conn.fetch(
+            """
+            SELECT edge_type, COUNT(*)::bigint AS edges
+            FROM youtube_edges
+            GROUP BY edge_type
+            ORDER BY edges DESC
+            LIMIT 20
+            """,
+            timeout=12,
+        )
+        out["edges"] = {
+            "total_edges": sum(int(r["edges"] or 0) for r in rows),
+            "by_type": [dict(r) for r in rows],
+        }
+    if "youtube_profile_queue" in existing:
+        rows = await conn.fetch(
+            """
+            SELECT status, COUNT(*)::bigint AS profiles
+            FROM youtube_profile_queue
+            GROUP BY status
+            ORDER BY profiles DESC
+            """,
+            timeout=12,
+        )
+        out["profile_queue"] = {
+            "total_profiles": sum(int(r["profiles"] or 0) for r in rows),
+            "by_status": [dict(r) for r in rows],
+        }
+    if "youtube_spider_queue" in existing:
+        rows = await conn.fetch(
+            """
+            SELECT status, COUNT(*)::bigint AS channels
+            FROM youtube_spider_queue
+            GROUP BY status
+            ORDER BY channels DESC
+            """,
+            timeout=12,
+        )
+        out["spider_queue"] = {
+            "total_channels": sum(int(r["channels"] or 0) for r in rows),
+            "by_status": [dict(r) for r in rows],
+        }
+    if "collection_targets" in existing:
+        row = await conn.fetchrow(
+            """
+            SELECT COUNT(*) FILTER (WHERE source='youtube')::bigint AS youtube_targets,
+                   COUNT(*) FILTER (
+                       WHERE source='youtube'
+                         AND COALESCE(metadata->>'preserve_on_source_config_sync', 'false')='true'
+                   )::bigint AS auto_discovered_targets,
+                   COUNT(*) FILTER (WHERE source='youtube' AND status='pending')::bigint AS pending_targets,
+                   COUNT(*) FILTER (WHERE source='youtube' AND status='completed')::bigint AS completed_targets,
+                   COUNT(*) FILTER (WHERE source='youtube' AND status='error')::bigint AS error_targets
+            FROM collection_targets
+            """,
+            timeout=12,
+        )
+        out["targets"] = dict(row) if row else {}
     return out
 
 
@@ -6214,6 +6470,14 @@ async def threads_profile_detail(username: str, limit: int = 200, _user: dict = 
 # YouTube feed (channels + videos)
 # ---------------------------------------------------------------------------
 
+@app.get("/youtube/completeness")
+async def youtube_completeness(_user: dict = Depends(require_role("viewer"))):
+    """YouTube collection completeness and discovery graph health."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        return await _youtube_completeness(conn)
+
+
 @app.get("/youtube/channels")
 async def list_youtube_channels(limit: int = 100, _user: dict = Depends(require_role("viewer"))):
     """YouTube channels and collection stats."""
@@ -6234,6 +6498,12 @@ async def list_youtube_channels(limit: int = 100, _user: dict = Depends(require_
                    c.video_count,
                    c.view_count,
                    c.updated_at,
+                   c.profile_photo_media_id,
+                   c.external_links,
+                   c.last_video_scan_at,
+                   c.last_community_scan_at,
+                   c.last_skip_reason,
+                   c.last_error,
                    (SELECT COUNT(*) FROM youtube_videos WHERE channel_id = c.id) AS videos_collected,
                    (SELECT MAX(platform_published_at) FROM youtube_videos WHERE channel_id = c.id) AS last_video_at
             FROM youtube_channels c
@@ -6241,6 +6511,7 @@ async def list_youtube_channels(limit: int = 100, _user: dict = Depends(require_
             LIMIT $1
             """,
             limit,
+            timeout=12,
         )
     return [dict(r) for r in rows]
 
@@ -6264,11 +6535,18 @@ async def youtube_channel_detail(channel_id: str, limit: int = 200, _user: dict 
                    c.subscriber_count,
                    c.video_count,
                    c.view_count,
+                   c.profile_photo_media_id,
+                   c.external_links,
+                   c.last_video_scan_at,
+                   c.last_community_scan_at,
+                   c.last_skip_reason,
+                   c.last_error,
                    c.updated_at
             FROM youtube_channels c
             WHERE c.platform_channel_id = $1
             """,
-            channel_id
+            channel_id,
+            timeout=10,
         )
         if not channel_row:
             return {"channel": None, "videos": []}
@@ -6287,6 +6565,10 @@ async def youtube_channel_detail(channel_id: str, limit: int = 200, _user: dict 
                    v.duration,
                    v.platform_published_at,
                    v.collected_at,
+                   v.media_status,
+                   v.media_skip_reason,
+                   v.transcript_status,
+                   v.comments_status,
                    COALESCE(thumb.id, video_mi.id) AS media_item_id,
                    COALESCE(thumb.content_type, video_mi.content_type) AS media_content_type,
                    thumb.id AS thumbnail_media_item_id,
@@ -6304,6 +6586,7 @@ async def youtube_channel_detail(channel_id: str, limit: int = 200, _user: dict 
             LIMIT $2
             """,
             channel_uuid, limit,
+            timeout=15,
         )
         
     out_videos = []

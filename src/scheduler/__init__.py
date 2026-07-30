@@ -384,6 +384,7 @@ class Scheduler:
 
                 try:
                     if await conn.fetchval("SELECT to_regclass('account_quota_usage')", timeout=5) is not None:
+                        youtube_daily_limit = int(os.getenv("YOUTUBE_API_DAILY_QUOTA", "10000") or "10000")
                         snap["quota_usage"] = [dict(r) for r in await conn.fetch(
                             """
                             SELECT platform,
@@ -396,7 +397,11 @@ class Scheduler:
                                    CASE
                                      WHEN platform = 'github' THEN 5000
                                      ELSE NULL
-                                   END::int AS hourly_limit
+                                   END::int AS hourly_limit,
+                                   CASE
+                                     WHEN platform = 'youtube' THEN $1::int
+                                     ELSE NULL
+                                   END::int AS daily_limit
                             FROM account_quota_usage
                             WHERE day >= (NOW() AT TIME ZONE 'Asia/Singapore')::date
                             ORDER BY
@@ -405,6 +410,7 @@ class Scheduler:
                                 updated_at DESC
                             LIMIT 10
                             """,
+                            youtube_daily_limit,
                             timeout=10,
                         )]
                 except Exception:

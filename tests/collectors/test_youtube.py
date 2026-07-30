@@ -45,6 +45,7 @@ def _make_pool() -> MagicMock:
     conn.execute = AsyncMock()
     conn.fetch = AsyncMock(return_value=[])
     conn.fetchrow = AsyncMock(return_value=None)
+    conn.fetchval = AsyncMock(return_value=None)
 
     @asynccontextmanager
     async def _acquire():
@@ -139,6 +140,18 @@ def test_parse_iso8601_duration_empty_or_garbage():
     assert parse_iso8601_duration(None) == 0  # type: ignore[arg-type]
     # No PT prefix → regex finds nothing matchable → 0
     assert parse_iso8601_duration("garbage") == 0
+
+
+def test_extract_youtube_refs_dedupes_handles_and_channel_urls():
+    refs = YoutubeCollector._extract_youtube_refs(
+        "See @friend, https://youtube.com/@friend and "
+        "https://www.youtube.com/channel/UCabcdefghijklmnopqrstuv"
+    )
+
+    assert refs == [
+        {"key_type": "channel", "platform_channel_id": "UCabcdefghijklmnopqrstuv", "profile_key": "UCabcdefghijklmnopqrstuv"},
+        {"key_type": "handle", "handle": "friend", "profile_key": "@friend"},
+    ]
 
 
 def test_module_constants():
@@ -365,8 +378,9 @@ async def test_upsert_channel_with_auth_returns_none_when_not_found(monkeypatch)
     )
     out = await coll._upsert_channel("UC_missing", "x")
     assert out == (None, 0)
-    # Important: no DB write when channel not found
-    coll.pool._conn.execute.assert_not_awaited()
+    # Important: no youtube_channels row when channels.list confirms not found.
+    calls = coll.pool._conn.execute.await_args_list
+    assert not any("INSERT INTO youtube_channels" in c.args[0] for c in calls)
 
 
 # ── _upsert_video ────────────────────────────────────────────────────────
@@ -546,6 +560,96 @@ async def test_download_media_falls_back_to_mq_thumbnail(monkeypatch, tmp_path):
         "https://i.ytimg.com/vi/abc123xyz90/mqdefault.jpg",
     ]
     assert coll.insert_media_item.await_args.kwargs["metadata"]["vault_artifact"]["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_download_media_preserves_community_source_url(monkeypatch, tmp_path):
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    monkeypatch.setattr(youtube_mod, "VAULT_ROOT", vault_root)
+    coll = _new_collector(monkeypatch)
+    coll.insert_media_item = AsyncMock(return_value=True)
+    coll.send_to_dlq = AsyncMock()
+
+    inserted = await coll.download_media({
+        "entity_id": "UC123",
+        "entity_name": "Example Channel",
+        "content_type": "community_image",
+        "content_id": "community_post1",
+        "extension": "jpg",
+        "source_url": "https://www.youtube.com/channel/UC123/community",
+        "data": b"community bytes",
+    })
+
+    assert inserted is True
+    assert coll.insert_media_item.await_args.kwargs["source_url"] == "https://www.youtube.com/channel/UC123/community"
+
+
+@pytest.mark.asyncio
+async def test_process_profile_queue_resolves_handles_and_queues_channel(monkeypatch):
+    coll = _new_collector(monkeypatch, YOUTUBE_API_KEY="AIzaK")
+    coll._has_auth = True
+    coll.pool._conn.fetch = AsyncMock(return_value=[{
+        "profile_key": "@friend",
+        "key_type": "handle",
+        "platform_channel_id": None,
+        "handle": "friend",
+        "source": "mention",
+        "priority": 1,
+        "evidence_count": 3,
+        "discovered_from": "youtube_comments:c1",
+        "attempts": 1,
+        "metadata": {},
+    }])
+    coll._resolve_channel = AsyncMock(return_value=("UCresolved12345678901234", "Friend Channel"))
+
+    resolved = await coll._process_profile_queue(limit=1)
+
+    assert resolved == 1
+    calls = coll.pool._conn.execute.await_args_list
+    assert any("UPDATE youtube_profile_queue" in c.args[0] and "resolved_at" in c.args[0] for c in calls)
+    assert any("INSERT INTO youtube_spider_queue" in c.args[0] for c in calls)
+
+
+@pytest.mark.asyncio
+async def test_fetch_comments_records_author_edges_and_mentions(monkeypatch, tmp_path):
+    coll = _new_collector(monkeypatch)
+    coll.pool._conn.fetchrow = AsyncMock(return_value={"platform_channel_id": "UCowner1234567890123456"})
+
+    def _fake_run(cmd, *args, **kwargs):
+        output_template = Path(cmd[cmd.index("-o") + 1])
+        out_dir = output_template.parent
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "VID123.info.json").write_text(
+            json.dumps({
+                "comments": [{
+                    "id": "comment1",
+                    "author": "Alice",
+                    "author_id": "UCauthor123456789012345",
+                    "author_thumbnail": "https://example.test/a.jpg",
+                    "text": "nice @friend https://www.youtube.com/channel/UCtarget123456789012345",
+                    "like_count": 2,
+                    "parent": "root",
+                    "timestamp": 1_700_000_000,
+                }]
+            }),
+            encoding="utf-8",
+        )
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.stderr = ""
+        return proc
+
+    monkeypatch.setattr(youtube_mod.subprocess, "run", _fake_run)
+
+    await coll._fetch_comments("video-uuid", "VID123")
+
+    calls = coll.pool._conn.execute.await_args_list
+    assert any("INSERT INTO youtube_comments" in c.args[0] for c in calls)
+    edge_types = [c.args[7] for c in calls if "INSERT INTO youtube_edges" in c.args[0]]
+    assert "commented_on_video" in edge_types
+    assert "mentioned" in edge_types
+    assert any("INSERT INTO youtube_profile_queue" in c.args[0] for c in calls)
 
 
 # ── collect() error path ─────────────────────────────────────────────────

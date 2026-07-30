@@ -187,12 +187,16 @@ async def _sync_targets_to_db(pool, source: str, targets: list[dict]) -> int:
                 rows = await conn.fetch(
                     "DELETE FROM collection_targets "
                     "WHERE source = $1 AND target_id <> ALL($2::text[]) "
+                    "  AND COALESCE(metadata->>'preserve_on_source_config_sync', 'false') <> 'true' "
                     "RETURNING target_id",
                     source, file_ids,
                 )
             else:
                 rows = await conn.fetch(
-                    "DELETE FROM collection_targets WHERE source = $1 RETURNING target_id",
+                    "DELETE FROM collection_targets "
+                    "WHERE source = $1 "
+                    "  AND COALESCE(metadata->>'preserve_on_source_config_sync', 'false') <> 'true' "
+                    "RETURNING target_id",
                     source,
                 )
     return len(rows)
