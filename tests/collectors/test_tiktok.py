@@ -189,6 +189,7 @@ def test_check_tool_returns_false_for_missing():
 
 def test_gallery_dl_archive_args_are_per_profile(tmp_path, monkeypatch):
     monkeypatch.setenv("TIKTOK_GALLERY_DL_ARCHIVE_DIR", str(tmp_path / "archives"))
+    monkeypatch.setenv("TIKTOK_GALLERY_DL_RANGE_DIR", str(tmp_path / "ranges"))
     monkeypatch.setenv("TIKTOK_GALLERY_DL_ARCHIVE_ENABLED", "true")
     with patch.object(TiktokCollector, "_check_tool", staticmethod(lambda *_: False)), \
          patch.object(TiktokCollector, "_discover_cookie_file", staticmethod(lambda: "")):
@@ -202,6 +203,20 @@ def test_gallery_dl_archive_args_are_per_profile(tmp_path, monkeypatch):
     assert "/" not in Path(args[1]).name
     assert Path(args[1]).parent.exists()
     assert args[-2:] == ["--range", "1-60"]
+
+
+def test_gallery_dl_range_cursor_advances_between_cycles(tmp_path, monkeypatch):
+    monkeypatch.setenv("TIKTOK_GALLERY_DL_ARCHIVE_DIR", str(tmp_path / "archives"))
+    monkeypatch.setenv("TIKTOK_GALLERY_DL_RANGE_DIR", str(tmp_path / "ranges"))
+    monkeypatch.setenv("TIKTOK_GALLERY_DL_MAX_ITEMS", "30")
+    with patch.object(TiktokCollector, "_check_tool", staticmethod(lambda *_: False)), \
+         patch.object(TiktokCollector, "_discover_cookie_file", staticmethod(lambda: "")):
+        c = TiktokCollector()
+
+    assert c._gallery_dl_archive_args("alice")[-2:] == ["--range", "1-30"]
+    c._advance_gallery_dl_range_cursor("alice", file_count=4, ok=True)
+
+    assert c._gallery_dl_archive_args("alice")[-2:] == ["--range", "31-60"]
 
 
 def test_gallery_dl_archive_args_can_be_disabled(tmp_path, monkeypatch):
@@ -461,6 +476,35 @@ async def test_collect_user_profile_only_when_over_follower_cap(monkeypatch):
     c._collect_via_gallery_dl.assert_not_awaited()
     c._collect_via_yt_dlp.assert_not_awaited()
     c._collect_via_api.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_collect_user_skips_ytdlp_after_clean_empty_gallery(monkeypatch):
+    with patch.object(TiktokCollector, "_check_tool", staticmethod(lambda *_: False)):
+        c = TiktokCollector()
+    c._quota = None
+    c._browser_fallback = False
+    c._use_gallery_dl = True
+    c._use_yt_dlp = True
+    monkeypatch.setattr(c, "_stored_followers_count", AsyncMock(return_value=1))
+    monkeypatch.setattr(
+        c,
+        "_scrape_profile_metadata",
+        AsyncMock(return_value={"status": "ok", "followers_count": 1, "is_private": False}),
+    )
+    async def _empty_gallery(_username, _profile_url):
+        c._last_gallery_dl_empty_user = "bryan"
+        return False
+
+    monkeypatch.setattr(c, "_collect_via_gallery_dl", AsyncMock(side_effect=_empty_gallery))
+    monkeypatch.setattr(c, "_collect_via_yt_dlp", AsyncMock(return_value=True))
+    monkeypatch.setattr(c, "_collect_via_api", AsyncMock(return_value=False))
+    monkeypatch.setattr(c, "_record_profile_access", AsyncMock())
+
+    out = await c._collect_user("bryan")
+
+    assert out == "empty"
+    c._collect_via_yt_dlp.assert_not_awaited()
 
 
 @pytest.mark.asyncio

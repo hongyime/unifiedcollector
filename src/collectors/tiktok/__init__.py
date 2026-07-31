@@ -399,6 +399,23 @@ class TiktokCollector(BaseCollector):
                 str(VAULT_ROOT / "state" / "tiktok" / "gallery_dl_archives"),
             )
         )
+        self._gallery_dl_range_cursor_enabled = (
+            os.getenv("TIKTOK_GALLERY_DL_RANGE_CURSOR_ENABLED", "true").lower() == "true"
+        )
+        self._gallery_dl_range_dir = Path(
+            os.getenv(
+                "TIKTOK_GALLERY_DL_RANGE_DIR",
+                str(VAULT_ROOT / "state" / "tiktok" / "gallery_dl_ranges"),
+            )
+        )
+        self._gallery_dl_empty_ranges_before_reset = max(
+            1,
+            int(os.getenv("TIKTOK_GALLERY_DL_EMPTY_RANGES_BEFORE_RESET", "2") or "2"),
+        )
+        self._gallery_dl_range_max_start = max(
+            0,
+            int(os.getenv("TIKTOK_GALLERY_DL_RANGE_MAX_START", "3000") or "0"),
+        )
         self._use_gallery_dl = (
             self._check_tool("gallery-dl")
             and os.getenv("TIKTOK_GALLERY_DL_ENABLED", "true").lower() == "true"
@@ -434,6 +451,11 @@ class TiktokCollector(BaseCollector):
             0,
             int(os.getenv("TIKTOK_YTDLP_MAX_DOWNLOADS", str(self._profile_chunk_items)) or "0"),
         )
+        self._yt_dlp_after_empty_gallery = (
+            os.getenv("TIKTOK_YTDLP_AFTER_EMPTY_GALLERY", "false").lower() == "true"
+        )
+        self._last_gallery_dl_empty_user: str | None = None
+        self._last_gallery_dl_range_by_user: dict[str, tuple[int, int]] = {}
         self._target_limit_per_cycle = max(0, int(os.getenv("TIKTOK_TARGETS_PER_CYCLE", "60")))
         self._spider_queue_per_cycle = max(0, int(os.getenv("TIKTOK_SPIDER_QUEUE_PER_CYCLE", "80")))
         self._spider_first = os.getenv("TIKTOK_SPIDER_QUEUE_FIRST", "true").lower() == "true"
@@ -483,6 +505,76 @@ class TiktokCollector(BaseCollector):
         except (FileNotFoundError, subprocess.CalledProcessError):
             return False
 
+    def _safe_tiktok_state_user(self, username: str) -> str:
+        return sanitize_name(username or "unknown")[:120] or "unknown"
+
+    def _gallery_dl_range_state_path(self, username: str) -> Path:
+        return self._gallery_dl_range_dir / f"{self._safe_tiktok_state_user(username)}.json"
+
+    def _read_gallery_dl_range_state(self, username: str) -> dict:
+        path = self._gallery_dl_range_state_path(username)
+        try:
+            if not path.exists():
+                return {}
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            logger.debug("tiktok: gallery-dl range state unreadable for %s", username, exc_info=True)
+            return {}
+
+    def _write_gallery_dl_range_state(self, username: str, state: dict) -> None:
+        try:
+            self._gallery_dl_range_dir.mkdir(parents=True, exist_ok=True)
+            path = self._gallery_dl_range_state_path(username)
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+            tmp.replace(path)
+        except Exception:
+            logger.debug("tiktok: gallery-dl range state write failed for %s", username, exc_info=True)
+
+    def _gallery_dl_range_window(self, username: str) -> tuple[int, int] | None:
+        if not self._gallery_dl_range_cursor_enabled or not self._gallery_dl_max_items:
+            return None
+        state = self._read_gallery_dl_range_state(username)
+        start = self._safe_int(state.get("next_start"), 1)
+        if start < 1 or (self._gallery_dl_range_max_start and start > self._gallery_dl_range_max_start):
+            start = 1
+        end = start + self._gallery_dl_max_items - 1
+        self._last_gallery_dl_range_by_user[username] = (start, end)
+        return start, end
+
+    def _advance_gallery_dl_range_cursor(self, username: str, *, file_count: int, ok: bool) -> None:
+        window = self._last_gallery_dl_range_by_user.get(username)
+        if not window or not self._gallery_dl_range_cursor_enabled:
+            return
+        start, end = window
+        state = self._read_gallery_dl_range_state(username)
+        empty_ranges = self._safe_int(state.get("empty_ranges"), 0)
+        if file_count > 0:
+            next_start = end + 1
+            empty_ranges = 0
+        elif ok:
+            empty_ranges += 1
+            next_start = end + 1 if empty_ranges < self._gallery_dl_empty_ranges_before_reset else 1
+            if next_start == 1:
+                empty_ranges = 0
+        else:
+            return
+        if self._gallery_dl_range_max_start and next_start > self._gallery_dl_range_max_start:
+            next_start = 1
+            empty_ranges = 0
+        self._write_gallery_dl_range_state(
+            username,
+            {
+                "next_start": next_start,
+                "empty_ranges": empty_ranges,
+                "last_start": start,
+                "last_end": end,
+                "last_file_count": int(file_count),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+
     def _gallery_dl_archive_args(self, username: str) -> list[str]:
         """Use gallery-dl's archive to avoid re-downloading known profile media.
 
@@ -493,7 +585,7 @@ class TiktokCollector(BaseCollector):
         """
         if not self._gallery_dl_archive_enabled:
             return []
-        safe_user = sanitize_name(username or "unknown")[:120] or "unknown"
+        safe_user = self._safe_tiktok_state_user(username)
         try:
             self._gallery_dl_archive_dir.mkdir(parents=True, exist_ok=True)
         except Exception:
@@ -505,7 +597,10 @@ class TiktokCollector(BaseCollector):
             return []
         archive = self._gallery_dl_archive_dir / f"{safe_user}.txt"
         args = ["--download-archive", str(archive)]
-        if self._gallery_dl_max_items:
+        range_window = self._gallery_dl_range_window(username)
+        if range_window:
+            args.extend(["--range", f"{range_window[0]}-{range_window[1]}"])
+        elif self._gallery_dl_max_items:
             args.extend(["--range", f"1-{self._gallery_dl_max_items}"])
         return args
 
@@ -822,6 +917,7 @@ class TiktokCollector(BaseCollector):
 
     async def _collect_user(self, username: str) -> str:
         profile_url = f"https://www.tiktok.com/@{username}"
+        self._last_gallery_dl_empty_user = None
         known_followers = await self._stored_followers_count(username)
         metadata = await self._scrape_profile_metadata(username)
         status = str(metadata.get("status") or "")
@@ -874,22 +970,28 @@ class TiktokCollector(BaseCollector):
                 return "cooldown"
 
         if self._use_yt_dlp and self._ytdlp_fallback:
-            try:
-                ok = await self._collect_via_yt_dlp(username, profile_url)
-            except asyncio.TimeoutError:
-                logger.warning("tiktok: yt-dlp coroutine timed out for %s", username)
-                ok = False
-            if ok:
-                # Success (see gallery-dl note above): record can_access=True.
-                await self._record_profile_access(username, True)
-                return "collected"
-            if self._local_tool_cooling_down():
+            if self._last_gallery_dl_empty_user == username and not self._yt_dlp_after_empty_gallery:
                 logger.info(
-                    "tiktok: local downloader cooldown started for %s; skipping remaining fallbacks for %s",
-                    self._account_name(),
+                    "tiktok: gallery-dl returned a clean empty range for %s; skipping yt-dlp fallback",
                     username,
                 )
-                return "cooldown"
+            else:
+                try:
+                    ok = await self._collect_via_yt_dlp(username, profile_url)
+                except asyncio.TimeoutError:
+                    logger.warning("tiktok: yt-dlp coroutine timed out for %s", username)
+                    ok = False
+                if ok:
+                    # Success (see gallery-dl note above): record can_access=True.
+                    await self._record_profile_access(username, True)
+                    return "collected"
+                if self._local_tool_cooling_down():
+                    logger.info(
+                        "tiktok: local downloader cooldown started for %s; skipping remaining fallbacks for %s",
+                        self._account_name(),
+                        username,
+                    )
+                    return "cooldown"
 
         if self._browser_fallback:
             if await self._collect_via_playwright(username):
@@ -1375,6 +1477,7 @@ class TiktokCollector(BaseCollector):
                     # gallery-dl/yt-dlp write incrementally, so a partial download is
                     # still real data worth keeping rather than discarding.
                     if result.file_count > 0:
+                        self._advance_gallery_dl_range_cursor(username, file_count=result.file_count, ok=True)
                         await self._ingest_tmpdir(tmpdir, username)
                         return True
                     return False
@@ -1384,12 +1487,14 @@ class TiktokCollector(BaseCollector):
                     username, result.file_count, result.err_summary(300),
                 )
                 if result.file_count == 0:
-                    await self._record_local_rate_limit_event(
-                        username=username,
-                        tool="gallery-dl",
-                        result=result,
+                    self._last_gallery_dl_empty_user = username
+                    self._advance_gallery_dl_range_cursor(username, file_count=0, ok=True)
+                    logger.info(
+                        "tiktok fallback gallery-dl: %s returned 0 files for current range",
+                        username,
                     )
                     return False
+                self._advance_gallery_dl_range_cursor(username, file_count=result.file_count, ok=True)
                 await self._ingest_tmpdir(tmpdir, username)
                 return True
         except Exception as e:

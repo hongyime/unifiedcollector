@@ -156,9 +156,13 @@ services:
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
       COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
-      # Big profiles (100s of videos) didn't finish in 300s and got killed mid-
-      # download. Raise to 900s; partial-ingest still saves whatever was pulled.
-      TIKTOK_TIMEOUT_SECONDS: "900"
+      # Keep TikTok moving: each profile is chunked and cursored, so a bad page
+      # should not occupy the isolated worker for a full 15 minutes.
+      TIKTOK_TIMEOUT_SECONDS: "420"
+      TIKTOK_PROFILE_CHUNK_ITEMS: "30"
+      TIKTOK_GALLERY_DL_MAX_ITEMS: "30"
+      TIKTOK_YTDLP_MAX_DOWNLOADS: "30"
+      TIKTOK_YTDLP_AFTER_EMPTY_GALLERY: "false"
       # Subprocess download tiers enabled ONLY in this isolated container.
       TIKTOK_YTDLP_FALLBACK_ENABLED: "true"
       TIKTOK_GALLERY_DL_ENABLED: "true"
