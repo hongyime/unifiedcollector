@@ -115,7 +115,13 @@ async def test_watchdog_does_not_restart_whatsapp_waiting_for_qr(monkeypatch):
     monkeypatch.setattr(
         freshness,
         "CHECKS",
-        {"whatsapp": ("SELECT 20", 10, ["unifiedcollector_wa_bridge_1", "unifiedcollector_wa_bridge_2"])},
+        {
+            "whatsapp": (
+                "SELECT 20",
+                10,
+                ["unifiedcollector_wa_bridge_1", "unifiedcollector_wa_bridge_2"],
+            )
+        },
     )
 
     restarted: list[str] = []
@@ -143,6 +149,67 @@ async def test_watchdog_does_not_restart_whatsapp_waiting_for_qr(monkeypatch):
 
     assert restarted == []
     assert degraded == [("whatsapp", 20, False, "waiting for QR pairing; not restarted")]
+
+
+@pytest.mark.asyncio
+async def test_watchdog_defers_whatsapp_restart_when_bridge_health_unavailable(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgres://collector:collector@localhost/unifiedcollector")
+    import src.watchdog.freshness as freshness
+
+    freshness = importlib.reload(freshness)
+    monkeypatch.setattr(
+        freshness,
+        "CHECKS",
+        {"whatsapp": ("SELECT 20", 10, ["unifiedcollector_wa_bridge_1", "unifiedcollector_wa_bridge_2"])},
+    )
+
+    restarted: list[str] = []
+    degraded: list[tuple[str, float, bool, str | None]] = []
+
+    async def fake_restart(container: str) -> None:
+        restarted.append(container)
+
+    async def fake_mark_degraded(db, source: str, age: float, restarted_any: bool, detail: str | None = None) -> None:
+        degraded.append((source, age, restarted_any, detail))
+
+    async def fake_whatsapp_pairing_needed() -> str:
+        return "bridge health unavailable; restart deferred to avoid QR pairing churn"
+
+    monkeypatch.setattr(freshness, "_restart", fake_restart)
+    monkeypatch.setattr(freshness, "_mark_degraded", fake_mark_degraded)
+    monkeypatch.setattr(freshness, "_whatsapp_pairing_needed", fake_whatsapp_pairing_needed)
+
+    class FakeDB:
+        async def fetchval(self, query: str):
+            assert query == "SELECT 20"
+            return 20
+
+    await freshness._tick(FakeDB())
+
+    assert restarted == []
+    assert degraded == [
+        ("whatsapp", 20, False, "bridge health unavailable; restart deferred to avoid QR pairing churn")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_whatsapp_pairing_needed_defers_unreachable_health(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgres://collector:collector@localhost/unifiedcollector")
+    import src.watchdog.freshness as freshness
+
+    freshness = importlib.reload(freshness)
+
+    async def fake_fetch_whatsapp_bridge_health(timeout: int = 0):
+        return [{"bridge": "1", "ok": False}, {"bridge": "2", "ok": False}]
+
+    monkeypatch.setattr(
+        "src.core.whatsapp_bridge_health.fetch_whatsapp_bridge_health",
+        fake_fetch_whatsapp_bridge_health,
+    )
+
+    detail = await freshness._whatsapp_pairing_needed()
+
+    assert detail == "bridge health unavailable; restart deferred to avoid QR pairing churn"
 
 
 @pytest.mark.asyncio

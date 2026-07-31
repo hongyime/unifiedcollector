@@ -351,10 +351,17 @@ async def _whatsapp_pairing_needed() -> str | None:
         summary = summarize_whatsapp_bridge_health(await fetch_whatsapp_bridge_health(timeout=4))
     except Exception as e:
         log.debug("whatsapp bridge health check failed: %s", e)
-        return None
+        if os.getenv("WATCHDOG_WHATSAPP_RESTART_ON_HEALTH_UNAVAILABLE", "0") == "1":
+            return None
+        return "bridge health unavailable; restart deferred to avoid QR pairing churn"
 
     if summary.get("status") == "unpaired":
         return "waiting for QR pairing; not restarted"
+    if (
+        summary.get("status") == "unreachable"
+        and os.getenv("WATCHDOG_WHATSAPP_RESTART_ON_HEALTH_UNAVAILABLE", "0") != "1"
+    ):
+        return "bridge health unavailable; restart deferred to avoid QR pairing churn"
     return None
 
 
