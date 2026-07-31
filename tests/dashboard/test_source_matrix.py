@@ -588,6 +588,7 @@ async def test_source_media_totals_keeps_rollups_when_beeper_split_times_out():
 
     assert out["x"]["total_media_items"] == 23
     assert "__stats_unavailable__" not in out
+    assert out["__beeper_subsource_stats_unavailable__"] is True
 
 
 @pytest.mark.asyncio

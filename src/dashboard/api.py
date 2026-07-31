@@ -41,6 +41,7 @@ _BEEPER_SUBSOURCE_TOTAL_TIMEOUT_SECONDS = float(os.getenv("BEEPER_SUBSOURCE_TOTA
 _BEEPER_SUBSOURCE_LIVENESS_CACHE: dict[str, object] = {"ts": 0.0, "rows": None}
 _BEEPER_SUBSOURCE_LIVENESS_TTL_SECONDS = int(os.getenv("BEEPER_SUBSOURCE_LIVENESS_TTL_SECONDS", "75"))
 _SOURCE_MATRIX_SECTION_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_SECTION_TIMEOUT_SECONDS", "2"))
+_SOURCE_MATRIX_LIVENESS_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_LIVENESS_TIMEOUT_SECONDS", "20"))
 _SOURCE_MATRIX_SECTION_CACHE: dict[str, dict[str, object]] = {}
 _SOURCE_MATRIX_SECTION_CACHE_TTL_SECONDS = int(os.getenv("SOURCE_MATRIX_SECTION_CACHE_TTL_SECONDS", "30"))
 _SOURCE_MATRIX_SECTION_STALE_SECONDS = int(os.getenv("SOURCE_MATRIX_SECTION_STALE_SECONDS", "900"))
@@ -766,6 +767,7 @@ async def _source_media_totals(conn) -> dict[str, dict]:
             ))
         except Exception as exc:  # noqa: BLE001
             logger.warning("beeper sub-source media totals failed: %s", exc)
+            out["__beeper_subsource_stats_unavailable__"] = True
         _SOURCE_MEDIA_TOTALS_CACHE.update({"ts": time.time(), "rows": out})
         return out
     if "media_items" not in existing:
@@ -797,6 +799,7 @@ async def _source_media_totals(conn) -> dict[str, dict]:
         ))
     except Exception as exc:  # noqa: BLE001
         logger.warning("beeper sub-source media totals failed: %s", exc)
+        out["__beeper_subsource_stats_unavailable__"] = True
     _SOURCE_MEDIA_TOTALS_CACHE.update({"ts": time.time(), "rows": out})
     return out
 
@@ -2901,7 +2904,7 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
             fallback=liveness_fallback,
             awaitable=compute_liveness(conn),
             cache_key="source_liveness",
-            timeout=5,
+            timeout=_SOURCE_MATRIX_LIVENESS_TIMEOUT_SECONDS,
         )
         live_sources, whatsapp_bridge_health = await _source_matrix_section(
             section="bridge_overrides",
@@ -3068,8 +3071,18 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
             current_rate.get(source_row["source"]),
             day_content.get(source_row["source"]),
             day_rate.get(source_row["source"]),
-            media_totals.get(source_row["source"]) or (
-                media_total_unavailable_row if media_totals_unavailable else None
+            (
+                media_totals.get(source_row["source"])
+                or (
+                    {
+                        "stats_unavailable": True,
+                        "stats_error": "beeper_subsource_timeout",
+                    }
+                    if source_row.get("parent_source") == "beeper"
+                    and media_totals.get("__beeper_subsource_stats_unavailable__")
+                    else None
+                )
+                or (media_total_unavailable_row if media_totals_unavailable else None)
             ),
             active_cursors.get(source_row["source"]),
             extension_by_source.get(source_row["source"], []),
