@@ -101,10 +101,14 @@ export interface BrowserExtensionIssue {
   age_seconds?: number;
   extension_version?: string | null;
   expected_version?: string | null;
+  extension_id?: string | null;
+  reload_url?: string | null;
 }
 
 export interface BrowserExtensionHealth {
   expected_version: string | null;
+  extension_id?: string | null;
+  reload_url?: string | null;
   hooks: BrowserExtensionHook[];
   ingest: BrowserExtensionIngest[];
   media_candidates?: BrowserMediaCandidateOutcome[];
@@ -210,6 +214,8 @@ export interface SourceCollectionMatrix {
   whatsapp_bridge_health?: Record<string, unknown> | null;
   browser_extension?: {
     expected_version: string | null;
+    extension_id?: string | null;
+    reload_url?: string | null;
     issues: BrowserExtensionIssue[];
   } | null;
   errors?: Array<{ section: string; error: string }>;

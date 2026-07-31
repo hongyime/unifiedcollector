@@ -211,6 +211,14 @@ def _extension_versions_match(current: str | None, expected: str | None) -> bool
     return current.lstrip("vV") == expected.lstrip("vV")
 
 
+def _extension_reload_target_from_url(url: object) -> tuple[str | None, str | None]:
+    match = re.match(r"^chrome-extension://([a-p]{32})/", str(url or ""))
+    if not match:
+        return None, None
+    extension_id = match.group(1)
+    return extension_id, f"chrome-extension://{extension_id}/tabs.html?reload=1"
+
+
 _EXTENSION_RECENT_MISMATCH_SECONDS = 15 * 60
 
 
@@ -1437,6 +1445,7 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
         version = issue.get("extension_version") or "unknown"
         expected = issue.get("expected_version") or "current"
         detail = issue.get("detail") or "Chrome extension issue detected."
+        reload_url = issue.get("reload_url")
         if issue.get("kind") == "extension_version_mismatch":
             scope = f"on {endpoint}" if endpoint else "from hook"
             detail = f"{detail} Saw v{version} {scope}; expected v{expected}."
@@ -1447,19 +1456,31 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
                 )
         if age_text:
             detail = f"{detail} Last seen {age_text} ago."
+        if reload_url:
+            tab_action = (
+                "refresh or reopen the platform tab so it emits one fresh signal"
+                if issue.get("needs_new_event")
+                else "refresh or reopen every tab for this platform"
+            )
+            next_action = (
+                f"Open {reload_url} to reload the extension, then {tab_action}. "
+                "If it still reports the old version, close duplicate platform tabs/windows and check Chrome's unpacked extension path."
+            )
+        elif issue.get("needs_new_event"):
+            next_action = (
+                "Refresh or reopen the platform tab so the current extension emits one fresh signal. "
+                "If it still reports the old version, reload the unpacked extension and close duplicate platform tabs/windows."
+            )
+        else:
+            next_action = (
+                "Reload the unpacked Chrome extension, then refresh or reopen every tab for this platform. "
+                "If it still reports the old version, close duplicate platform tabs/windows."
+            )
         return {
             "kind": issue.get("kind") or "extension_issue",
             "severity": "warning",
             "summary": detail,
-            "next_action": (
-                "Refresh or reopen the platform tab so the current extension emits one fresh signal. "
-                "If it still reports the old version, reload the unpacked extension and close duplicate platform tabs/windows."
-                if issue.get("needs_new_event")
-                else (
-                    "Reload the unpacked Chrome extension, then refresh or reopen every tab for this platform. "
-                    "If it still reports the old version, close duplicate platform tabs/windows."
-                )
-            ),
+            "next_action": next_action,
         }
     if source_row.get("source_health_status") in {"dead", "auth_paused", "degraded"}:
         return {
@@ -1844,6 +1865,8 @@ async def _browser_extension_payload(conn) -> dict:
     expected = _expected_extension_version()
     payload = {
         "expected_version": expected,
+        "extension_id": None,
+        "reload_url": None,
         "hooks": [],
         "ingest": [],
         "media_candidates": [],
@@ -1907,6 +1930,21 @@ async def _browser_extension_payload(conn) -> dict:
                 })
 
     if await conn.fetchval("SELECT to_regclass('browser_ingest_events')", timeout=5) is not None:
+        extension_id, reload_url = _extension_reload_target_from_url(await conn.fetchval(
+            """
+            SELECT metadata->>'url'
+            FROM browser_ingest_events
+            WHERE platform = 'bridge'
+              AND endpoint = 'browser_heartbeat'
+              AND metadata->>'url' LIKE 'chrome-extension://%/background.js'
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            timeout=5,
+        ))
+        payload["extension_id"] = extension_id
+        payload["reload_url"] = reload_url
+
         rows = await conn.fetch(
             """
             SELECT platform,
@@ -1960,6 +1998,11 @@ async def _browser_extension_payload(conn) -> dict:
                     "stored_count": item["stored_count"],
                     "needs_new_event": not recent,
                 })
+
+    if payload.get("reload_url"):
+        for issue in payload["issues"]:
+            issue["extension_id"] = payload.get("extension_id")
+            issue["reload_url"] = payload.get("reload_url")
 
     if await conn.fetchval("SELECT to_regclass('browser_media_candidates')", timeout=5) is not None:
         rows = await conn.fetch(
@@ -2864,7 +2907,8 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
                 awaitable=_browser_extension_payload(conn),
                 cache_key="browser_extension",
                 cache_ttl=15,
-                timeout=8,
+                stale_ttl=3600,
+                timeout=20,
             )
 
     generated_at = datetime.now(timezone.utc)
@@ -2937,6 +2981,8 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
         "whatsapp_bridge_health": whatsapp_bridge_health,
         "browser_extension": {
             "expected_version": browser_extension.get("expected_version"),
+            "extension_id": browser_extension.get("extension_id"),
+            "reload_url": browser_extension.get("reload_url"),
             "issues": browser_extension.get("issues", []),
         },
         "errors": errors,

@@ -14,6 +14,7 @@ from src.dashboard.api import (
     _SOURCE_MEDIA_TOTALS_CACHE,
     _SOURCE_MATRIX_SECTION_CACHE,
     _beeper_source_key,
+    _extension_reload_target_from_url,
     _messaging_policy,
     _normalize_beeper_network,
     _rate_limit_cursor_payload,
@@ -155,6 +156,33 @@ def test_source_matrix_blocker_reports_extension_waiting_for_new_event():
     assert "No newer signal has arrived" in blocker["summary"]
     assert "21m ago" in blocker["summary"]
     assert "one fresh signal" in blocker["next_action"]
+
+
+def test_source_matrix_blocker_uses_extension_reload_url_when_available():
+    extension_id, reload_url = _extension_reload_target_from_url(
+        "chrome-extension://pkmdmcklnjdeocoeigmlakhomhhcpafb/background.js"
+    )
+
+    blocker = _source_matrix_blocker(
+        _source(),
+        rate_row=None,
+        cursor_row=None,
+        extension_issues=[
+            {
+                "kind": "extension_version_mismatch",
+                "endpoint": "browser_heartbeat",
+                "extension_version": "1.21.45",
+                "expected_version": "1.21.46",
+                "needs_new_event": True,
+                "reload_url": reload_url,
+            }
+        ],
+    )
+
+    assert extension_id == "pkmdmcklnjdeocoeigmlakhomhhcpafb"
+    assert reload_url == "chrome-extension://pkmdmcklnjdeocoeigmlakhomhhcpafb/tabs.html?reload=1"
+    assert reload_url in blocker["next_action"]
+    assert "unpacked extension path" in blocker["next_action"]
 
 
 def test_source_matrix_blocker_treats_quiet_beeper_subsource_as_coverage_gap():

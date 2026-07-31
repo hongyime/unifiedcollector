@@ -731,10 +731,21 @@ export function DashboardPage() {
                 Expected {formatVersion(extension.expected_version)}. Active hooks and browser-ingest events are compared against that build.
               </p>
             </div>
-            <StatusBadge
-              status={extensionIssues.length ? "warning" : "online"}
-              label={extensionIssues.length ? `${formatNumber(extensionIssues.length)} needs reload` : "current"}
-            />
+            <div className="flex items-center gap-2">
+              {extension.reload_url && (
+                <a
+                  className="rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-text-primary hover:border-accent"
+                  href={extension.reload_url}
+                  rel="noreferrer"
+                >
+                  Reload extension
+                </a>
+              )}
+              <StatusBadge
+                status={extensionIssues.length ? "warning" : "online"}
+                label={extensionIssues.length ? `${formatNumber(extensionIssues.length)} needs reload` : "current"}
+              />
+            </div>
           </div>
 
           {extensionIssues.length > 0 && (
@@ -753,6 +764,15 @@ export function DashboardPage() {
                       {issue.expected_version && `expected ${formatVersion(issue.expected_version)}`}
                       {issue.age_seconds != null && ` · last heartbeat ${formatDuration(issue.age_seconds)} ago`}
                     </div>
+                  )}
+                  {issue.reload_url && (
+                    <a
+                      className="mt-2 inline-flex rounded border border-warning/40 px-2 py-1 font-medium text-warning hover:border-warning"
+                      href={issue.reload_url}
+                      rel="noreferrer"
+                    >
+                      Open reload page
+                    </a>
                   )}
                 </div>
               ))}
