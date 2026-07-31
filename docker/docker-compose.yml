@@ -109,6 +109,9 @@ services:
       YOUTUBE_VIDEO_BACKFILL_SCAN_LIMIT: "10000"
       YOUTUBE_VIDEO_DOWNLOADS_PER_TARGET: "10"
       YOUTUBE_DOWNLOAD_DELAY: "3.0"
+      # Media-first policy: do not permanently exclude longer videos. Backfill
+      # remains bounded by batch size, failed-retry delay, and yt-dlp timeout.
+      YOUTUBE_MAX_VIDEO_DURATION_MINUTES: "0"
       YOUTUBE_COOKIE_FILE: /app/credentials/youtube/cookies.txt
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -824,6 +827,7 @@ services:
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
       UC_EXTENSION_EXPECTED_VERSION: "1.21.54"
+      YOUTUBE_MAX_VIDEO_DURATION_MINUTES: "0"
       STRAVA_ROUTE_STREAM_SHARED_COOLDOWN: "true"
       STRAVA_BROWSER_ROUTE_QUEUE_CANDIDATE_LIMIT: "50"
       STRAVA_BROWSER_ROUTE_QUEUE_IMPORTANT_CANDIDATE_LIMIT: "100"

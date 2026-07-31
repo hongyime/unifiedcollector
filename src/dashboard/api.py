@@ -1030,17 +1030,29 @@ async def _youtube_media_backlog(conn) -> dict:
                    )::bigint AS placeholder_missing_videos,
                    COUNT(*) FILTER (
                        WHERE duration_text NOT IN ('P0D', 'PT0S')
-                         AND NOT (media_status = 'skipped' AND media_skip_reason = 'over_duration_cap')
+                         AND NOT (
+                             $1::int > 0
+                             AND media_status = 'skipped'
+                             AND media_skip_reason = 'over_duration_cap'
+                         )
                          AND ($1::int <= 0 OR duration_seconds <= $1::int OR duration_text = '')
                    )::bigint AS eligible_missing_videos,
                    COUNT(*) FILTER (
                        WHERE duration_text NOT IN ('P0D', 'PT0S')
-                         AND NOT (media_status = 'skipped' AND media_skip_reason = 'over_duration_cap')
+                         AND NOT (
+                             $1::int > 0
+                             AND media_status = 'skipped'
+                             AND media_skip_reason = 'over_duration_cap'
+                         )
                          AND ($1::int <= 0 OR duration_seconds <= $1::int OR duration_text = '')
                          AND last_media_attempt_at IS NULL
                    )::bigint AS eligible_missing_videos_never_attempted,
                    COUNT(*) FILTER (
-                       WHERE (media_status = 'skipped' AND media_skip_reason = 'over_duration_cap')
+                       WHERE (
+                              $1::int > 0
+                              AND media_status = 'skipped'
+                              AND media_skip_reason = 'over_duration_cap'
+                             )
                           OR (
                               duration_text NOT IN ('P0D', 'PT0S', '')
                               AND $1::int > 0
@@ -1052,7 +1064,11 @@ async def _youtube_media_backlog(conn) -> dict:
                    )::bigint AS unknown_duration_missing_videos,
                    COUNT(*) FILTER (
                        WHERE duration_text NOT IN ('P0D', 'PT0S')
-                         AND NOT (media_status = 'skipped' AND media_skip_reason = 'over_duration_cap')
+                         AND NOT (
+                             $1::int > 0
+                             AND media_status = 'skipped'
+                             AND media_skip_reason = 'over_duration_cap'
+                         )
                          AND ($1::int <= 0 OR duration_seconds <= $1::int OR duration_text = '')
                          AND collected_at >= now() - interval '24 hours'
                    )::bigint AS eligible_missing_videos_touched_24h,

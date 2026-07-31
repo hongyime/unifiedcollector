@@ -2485,10 +2485,56 @@ class YoutubeCollector(BaseCollector):
                 logger.debug("youtube: media skip status update failed", exc_info=True)
         return groups
 
+    async def _restore_over_duration_candidates(self) -> int:
+        """Re-queue old rows skipped only because a duration cap used to exist.
+
+        With ``YOUTUBE_MAX_VIDEO_DURATION_MINUTES=0`` the operator intent is
+        "archive all videos". Historical rows can still carry
+        ``media_skip_reason='over_duration_cap'`` from earlier capped runs; clear
+        that soft skip so normal media backfill can pick them up again.
+        """
+        if self._max_duration or not self.pool:
+            return 0
+        try:
+            async with self.pool.acquire() as conn:
+                restored = await conn.fetchval(
+                    """
+                    WITH selected AS (
+                        SELECT platform_video_id
+                        FROM youtube_videos
+                        WHERE media_status = 'skipped'
+                          AND media_skip_reason = 'over_duration_cap'
+                        ORDER BY last_media_attempt_at ASC NULLS FIRST,
+                                 collected_at ASC NULLS LAST,
+                                 platform_video_id ASC
+                        LIMIT $1
+                    ),
+                    updated AS (
+                        UPDATE youtube_videos v
+                        SET media_status = 'pending',
+                            media_skip_reason = NULL,
+                            last_media_attempt_at = NULL
+                        FROM selected
+                        WHERE v.platform_video_id = selected.platform_video_id
+                        RETURNING 1
+                    )
+                    SELECT count(*)::int FROM updated
+                    """,
+                    max(1, self._video_backfill_scan_limit),
+                    timeout=20,
+                )
+            return int(restored or 0)
+        except Exception:
+            logger.debug("youtube: restore over-duration candidates failed", exc_info=True)
+            return 0
+
     async def run_backfill(self):
         thumbnail_count = await super().run_backfill()
         if not self._download_videos or not self._use_yt_dlp or self._video_backfill_batch_size <= 0:
             return thumbnail_count
+        restored = await self._restore_over_duration_candidates()
+        if restored:
+            logger.info("youtube: restored %d old over-duration video candidate(s)", restored)
         stored = 0
         attempted_total = 0
         group_total = 0

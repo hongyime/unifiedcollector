@@ -1186,6 +1186,34 @@ async def test_run_backfill_can_drain_multiple_video_batches(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_restore_over_duration_candidates_when_cap_disabled(monkeypatch):
+    coll = _new_collector(
+        monkeypatch,
+        YOUTUBE_MAX_VIDEO_DURATION_MINUTES="0",
+        YOUTUBE_VIDEO_BACKFILL_SCAN_LIMIT="123",
+    )
+    coll.pool._conn.fetchval.return_value = 7
+
+    restored = await coll._restore_over_duration_candidates()
+
+    assert restored == 7
+    sql, limit = coll.pool._conn.fetchval.await_args.args
+    assert "media_skip_reason = 'over_duration_cap'" in sql
+    assert "media_status = 'pending'" in sql
+    assert limit == 123
+
+
+@pytest.mark.asyncio
+async def test_restore_over_duration_candidates_skips_when_cap_enabled(monkeypatch):
+    coll = _new_collector(monkeypatch, YOUTUBE_MAX_VIDEO_DURATION_MINUTES="18")
+
+    restored = await coll._restore_over_duration_candidates()
+
+    assert restored == 0
+    coll.pool._conn.fetchval.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_base_backfill_does_not_count_false_download_result(monkeypatch):
     coll = _new_collector(monkeypatch)
     coll.get_backfill_items = AsyncMock(
