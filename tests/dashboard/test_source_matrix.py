@@ -461,6 +461,7 @@ def test_source_matrix_reports_youtube_video_backlog_as_blocker():
             "missing_videos": 10591,
             "missing_videos_touched_24h": 85,
             "eligible_missing_videos": 8327,
+            "eligible_missing_videos_never_attempted": 7900,
             "eligible_missing_videos_touched_24h": 44,
             "over_duration_missing_videos": 2188,
             "placeholder_missing_videos": 8,
@@ -474,6 +475,7 @@ def test_source_matrix_reports_youtube_video_backlog_as_blocker():
     assert "out of 10,591" in row["blocker"]["summary"]
     assert "2,188 >18m" in row["blocker"]["summary"]
     assert "8 live/scheduled" in row["blocker"]["summary"]
+    assert "7,900 have never had a video download attempt" in row["blocker"]["summary"]
     assert row["media_backlog"]["eligible_missing_videos_touched_24h"] == 44
 
 

@@ -1094,6 +1094,9 @@ async def test_video_backfill_groups_are_bounded_and_duration_filtered(monkeypat
         ("UC_a", "Channel A"): ["short_1"],
         ("UC_b", "Channel B"): ["short_2"],
     }
+    sql = coll.pool._conn.fetch.await_args.args[0]
+    assert "(v.last_media_attempt_at IS NULL) DESC" in sql
+    assert "COALESCE(v.platform_published_at, v.collected_at) ASC" in sql
 
 
 @pytest.mark.asyncio

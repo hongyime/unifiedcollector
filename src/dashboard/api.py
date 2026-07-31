@@ -891,6 +891,7 @@ async def _youtube_media_backlog(conn) -> dict:
             WITH missing AS (
                 SELECT v.duration,
                        v.collected_at,
+                       v.last_media_attempt_at,
                        upper(coalesce(v.duration, '')) AS duration_text,
                        (
                            coalesce((substring(v.duration from 'PT([0-9]+)H'))::int, 0) * 3600
@@ -924,6 +925,11 @@ async def _youtube_media_backlog(conn) -> dict:
                        WHERE duration_text NOT IN ('P0D', 'PT0S')
                          AND ($1::int <= 0 OR duration_seconds <= $1::int OR duration_text = '')
                    )::bigint AS eligible_missing_videos,
+                   COUNT(*) FILTER (
+                       WHERE duration_text NOT IN ('P0D', 'PT0S')
+                         AND ($1::int <= 0 OR duration_seconds <= $1::int OR duration_text = '')
+                         AND last_media_attempt_at IS NULL
+                   )::bigint AS eligible_missing_videos_never_attempted,
                    COUNT(*) FILTER (
                        WHERE duration_text NOT IN ('P0D', 'PT0S', '')
                          AND $1::int > 0
@@ -1076,6 +1082,12 @@ async def _youtube_completeness_uncached(conn) -> dict:
                )::bigint AS eligible_missing_videos,
                COUNT(*) FILTER (
                    WHERE NOT archived_video_file
+                     AND duration_text NOT IN ('P0D', 'PT0S')
+                     AND ($1::int <= 0 OR duration_seconds <= $1::int OR duration_text = '')
+                     AND v.last_media_attempt_at IS NULL
+               )::bigint AS eligible_missing_videos_never_attempted,
+               COUNT(*) FILTER (
+                   WHERE NOT archived_video_file
                      AND duration_text NOT IN ('P0D', 'PT0S', '')
                      AND $1::int > 0
                      AND duration_seconds > $1::int
@@ -1110,6 +1122,10 @@ async def _youtube_completeness_uncached(conn) -> dict:
             "duration_cap_seconds": duration_cap_seconds,
             "missing_videos": video_stats.get("missing_videos", 0),
             "eligible_missing_videos": video_stats.get("eligible_missing_videos", 0),
+            "eligible_missing_videos_never_attempted": video_stats.get(
+                "eligible_missing_videos_never_attempted",
+                0,
+            ),
             "placeholder_missing_videos": video_stats.get("placeholder_missing_videos", 0),
             "over_duration_missing_videos": video_stats.get("over_duration_missing_videos", 0),
         },
@@ -1690,6 +1706,7 @@ def _source_matrix_row(source_row: dict, current_content: dict | None, current_r
         missing = int(backlog.get("eligible_missing_videos", backlog.get("missing_videos") or 0) or 0)
         total_missing = int(backlog.get("missing_videos") or 0)
         recent = int(backlog.get("eligible_missing_videos_touched_24h", backlog.get("missing_videos_touched_24h") or 0) or 0)
+        never_attempted = int(backlog.get("eligible_missing_videos_never_attempted") or 0)
         over_cap = int(backlog.get("over_duration_missing_videos") or 0)
         placeholders = int(backlog.get("placeholder_missing_videos") or 0)
         duration_cap_seconds = int(backlog.get("duration_cap_seconds") or 0)
@@ -1708,6 +1725,7 @@ def _source_matrix_row(source_row: dict, current_content: dict | None, current_r
                 f"{missing:,} eligible YouTube video row(s) still have no archived video file"
                 + total_note
                 + excluded
+                + (f"; {never_attempted:,} have never had a video download attempt" if never_attempted else "")
                 + (f"; {recent:,} eligible rows were touched in the last 24h." if recent else ".")
             ),
             "next_action": (
@@ -2906,7 +2924,7 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
                 awaitable=_source_content_summary(conn, "now() - interval '24 hours'"),
                 cache_key="day_content",
                 cache_ttl=120,
-                timeout=12,
+                timeout=35,
             )
             day_rate = await _source_matrix_section(
                 section="day_rate",
@@ -2936,7 +2954,7 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
                 awaitable=_youtube_media_backlog(conn),
                 cache_key="youtube_media_backlog",
                 cache_ttl=300,
-                timeout=12,
+                timeout=25,
             )
             active_cursors = await _source_matrix_section(
                 section="active_cursors",

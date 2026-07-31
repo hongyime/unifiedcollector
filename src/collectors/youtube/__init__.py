@@ -2329,10 +2329,11 @@ class YoutubeCollector(BaseCollector):
             rows = await conn.fetch(
                 """
                 SELECT v.platform_video_id, v.duration,
-                       COALESCE(c.platform_channel_id, 'unknown') AS platform_channel_id,
-                       COALESCE(c.title, 'unknown') AS channel_name
+                       v.channel_id,
+                       v.last_media_attempt_at,
+                       v.platform_published_at,
+                       v.collected_at
                 FROM youtube_videos v
-                LEFT JOIN youtube_channels c ON v.channel_id = c.id
                 LEFT JOIN media_items mi
                   ON mi.source = 'youtube'
                  AND mi.content_id = 'video_' || v.platform_video_id
@@ -2351,7 +2352,12 @@ class YoutubeCollector(BaseCollector):
                     AND v.media_skip_reason = 'over_duration_cap'
                     AND $3::int > 0
                   )
-                ORDER BY v.collected_at DESC NULLS LAST
+                ORDER BY
+                  (v.last_media_attempt_at IS NULL) DESC,
+                  CASE WHEN v.media_status = 'failed' THEN 1 ELSE 0 END,
+                  COALESCE(v.last_media_attempt_at, TIMESTAMPTZ 'epoch') ASC,
+                  COALESCE(v.platform_published_at, v.collected_at) ASC NULLS LAST,
+                  v.platform_video_id ASC
                 LIMIT $1
                 """,
                 scan_limit,
@@ -2360,8 +2366,14 @@ class YoutubeCollector(BaseCollector):
                 timeout=20,
             )
 
-        groups: dict[tuple[str, str], list[str]] = {}
+        def row_value(row, key: str, default=None):
+            try:
+                return row[key]
+            except Exception:
+                return default
+
         limit_seconds = self._max_duration * 60 if self._max_duration else 0
+        selected_rows: list = []
         selected = 0
         skipped_duration = 0
         skipped_live_placeholder = 0
@@ -2380,9 +2392,49 @@ class YoutubeCollector(BaseCollector):
                 skipped_duration += 1
                 skipped_duration_ids.append(row["platform_video_id"])
                 continue
-            key = (row["platform_channel_id"], row["channel_name"])
-            groups.setdefault(key, []).append(row["platform_video_id"])
+            selected_rows.append(row)
             selected += 1
+
+        channel_ids = sorted(
+            {
+                str(channel_id)
+                for channel_id in (row_value(row, "channel_id") for row in selected_rows)
+                if channel_id
+            }
+        )
+        channel_by_id: dict[str, dict] = {}
+        if channel_ids:
+            try:
+                async with self.pool.acquire() as conn:
+                    channel_rows = await conn.fetch(
+                        """
+                        SELECT id, platform_channel_id, title
+                        FROM youtube_channels
+                        WHERE id = ANY($1::uuid[])
+                        """,
+                        channel_ids,
+                        timeout=10,
+                    )
+                channel_by_id = {str(row["id"]): dict(row) for row in channel_rows}
+            except Exception:
+                logger.debug("youtube: channel lookup for video backfill failed", exc_info=True)
+
+        groups: dict[tuple[str, str], list[str]] = {}
+        for row in selected_rows:
+            channel_id = row_value(row, "channel_id")
+            channel = channel_by_id.get(str(channel_id)) if channel_id else None
+            platform_channel_id = (
+                row_value(row, "platform_channel_id")
+                or (channel or {}).get("platform_channel_id")
+                or "unknown"
+            )
+            channel_name = (
+                row_value(row, "channel_name")
+                or (channel or {}).get("title")
+                or "unknown"
+            )
+            key = (platform_channel_id, channel_name)
+            groups.setdefault(key, []).append(row["platform_video_id"])
         if skipped_live_placeholder:
             logger.info(
                 "youtube: video backfill skipped %d live/scheduled placeholder candidate(s)",
