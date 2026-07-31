@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -234,8 +235,17 @@ async def test_record_http_status_event_persists_429(monkeypatch, collector):
     async def record_event(pool, **kwargs):
         events.append((pool, kwargs))
 
+    async def record_cooldown(*args, **kwargs):
+        return SimpleNamespace(
+            seconds_remaining=123,
+            service="rate_limit:lemon8:profile:lemon8_default",
+            streak=1,
+            scope="profile",
+        )
+
     sleep = AsyncMock()
     monkeypatch.setattr(lemon8_mod, "record_rate_limit_event", record_event)
+    monkeypatch.setattr(lemon8_mod, "record_dynamic_cooldown", record_cooldown)
     monkeypatch.setattr(lemon8_mod, "sleep_rate_limit", sleep)
     collector._rate_limit_cooldown_seconds = 123
 
@@ -576,6 +586,21 @@ async def test_collect_user_posts_returns_list(collector, monkeypatch):
     out = await collector.collect_user_posts("alice")
     assert out == []
     collector._record_profile_access.assert_awaited_once_with("alice", True)
+
+
+@pytest.mark.asyncio
+async def test_get_backfill_items_skips_avatar_backfill_during_cooldown(
+    collector, monkeypatch,
+):
+    collector._profile_photos = True
+    monkeypatch.setattr(
+        collector,
+        "_cooldown_active_for_scope",
+        AsyncMock(return_value=True),
+    )
+
+    assert await collector.get_backfill_items(10) == []
+    collector._test_conn.fetch.assert_not_called()
 
 
 @pytest.mark.asyncio

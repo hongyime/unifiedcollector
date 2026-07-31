@@ -2100,6 +2100,8 @@ class Lemon8Collector(BaseCollector):
         """Find profiles missing avatars and resolve URLs by scraping."""
         if not self.pool or not self._profile_photos:
             return []
+        if await self._cooldown_active_for_scope("avatar_profile_fetch"):
+            return []
         async with self.pool.acquire() as conn:
             rows = await conn.fetch("""
                 SELECT p.platform_user_id, p.username

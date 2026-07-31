@@ -593,6 +593,19 @@ def test_record_strava_stream_http_429_writes_rate_limit_event(monkeypatch):
     pool = _FakePool()
     monkeypatch.setattr(ig_ingest, "STRAVA_BROWSER_429_COOLDOWN_SECONDS", 1234)
 
+    async def fake_record_dynamic_cooldown(*args, **kwargs):
+        return SimpleNamespace(
+            seconds_remaining=1234,
+            service="rate_limit:strava:gps_streams:bryanseah234",
+            streak=1,
+        )
+
+    monkeypatch.setattr(
+        ig_ingest,
+        "record_dynamic_cooldown",
+        fake_record_dynamic_cooldown,
+    )
+
     recorded = asyncio.run(
         ig_ingest._record_strava_stream_http_event(
             pool,
