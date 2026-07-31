@@ -162,6 +162,7 @@ let _tabsOpInProgress = false; // guard against overlapping open/refresh runs (n
 // gap so we never spam tabs or spike CPU. Robust dedup by host+path-prefix means a
 // tab is never duplicated.
 const _tpath = (u) => { try { return new URL(u).pathname.split("?")[0].replace(/\/$/, "") || "/"; } catch (e) { return "/"; } };
+const _mainWorldHookHostRe = /(^|\.)((instagram|tiktok|strava)\.com|threads\.com|x\.com|twitter\.com|facebook\.com)$/i;
 
 // Keep exactly ONE tab per single-feed platform (instagram/threads/lemon8/x/facebook)
 // and one per target path for multi-url platforms (tiktok = foryou + following).
@@ -442,6 +443,18 @@ async function ensureLoops(reason) {
     return false;
   }
   for (const t of tabs) {
+    try {
+      const host = new URL(t.url || "").hostname;
+      if (_mainWorldHookHostRe.test(host) && chrome.scripting && chrome.scripting.executeScript) {
+        await chrome.scripting.executeScript({
+          target: { tabId: t.id, allFrames: false },
+          files: ["inject.js"],
+          world: "MAIN",
+        });
+      }
+    } catch (e) {
+      await log("warn", `page hook inject failed for tab ${t.id}: ${e && e.message ? e.message : e}`);
+    }
     try { await chrome.tabs.sendMessage(t.id, { type: "ensureLoop" }); } catch (e) {}
   }
   return true;

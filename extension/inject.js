@@ -7,8 +7,9 @@
 // It does NOT issue any extra requests; it only observes responses the page makes.
 // Harvested post records are handed to the content script via window.postMessage.
 (function () {
-  if (window.__UC_HOOKED__) return;
-  window.__UC_HOOKED__ = true;
+  const UC_INJECT_VERSION = "1.21.53";
+  const existingHook = window.__UC_HOOKED__;
+  if (existingHook && existingHook.version === UC_INJECT_VERSION) return;
 
   const HOST = location.hostname;
   const platform = /threads\.com$/.test(HOST) ? "threads"
@@ -18,6 +19,7 @@
     : /tiktok\.com$/.test(HOST) ? "tiktok"
     : /strava\.com$/.test(HOST) ? "strava" : null;
   if (!platform) return;
+  window.__UC_HOOKED__ = { version: UC_INJECT_VERSION, platform, installed_at: Date.now() };
 
   function emit(posts) {
     if (posts && posts.length) {
