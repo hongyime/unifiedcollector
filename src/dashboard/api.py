@@ -36,6 +36,8 @@ _SOURCE_MEDIA_TOTALS_CACHE: dict[str, object] = {"ts": 0.0, "rows": None}
 _SOURCE_MEDIA_TOTALS_TTL_SECONDS = int(os.getenv("SOURCE_MEDIA_TOTALS_TTL_SECONDS", "300"))
 _BEEPER_SUBSOURCE_CONTENT_CACHE: dict[tuple[str, str | None], dict[str, object]] = {}
 _BEEPER_SUBSOURCE_CONTENT_TTL_SECONDS = int(os.getenv("BEEPER_SUBSOURCE_CONTENT_TTL_SECONDS", "45"))
+_BEEPER_SUBSOURCE_QUERY_TIMEOUT_SECONDS = float(os.getenv("BEEPER_SUBSOURCE_QUERY_TIMEOUT_SECONDS", "2"))
+_BEEPER_SUBSOURCE_TOTAL_TIMEOUT_SECONDS = float(os.getenv("BEEPER_SUBSOURCE_TOTAL_TIMEOUT_SECONDS", "4"))
 _BEEPER_SUBSOURCE_LIVENESS_CACHE: dict[str, object] = {"ts": 0.0, "rows": None}
 _BEEPER_SUBSOURCE_LIVENESS_TTL_SECONDS = int(os.getenv("BEEPER_SUBSOURCE_LIVENESS_TTL_SECONDS", "75"))
 _SOURCE_MATRIX_SECTION_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_SECTION_TIMEOUT_SECONDS", "2"))
@@ -326,7 +328,7 @@ def _normalize_rate_limit_source(service: str | None) -> str:
     return "".join(ch if ch.isalnum() else " " for ch in value).strip()
 
 
-async def _existing_public_tables(conn, tables: list[str]) -> set[str]:
+async def _existing_public_tables(conn, tables: list[str], *, timeout: float = 8) -> set[str]:
     if not tables:
         return set()
     rows = await conn.fetchval(
@@ -337,7 +339,7 @@ async def _existing_public_tables(conn, tables: list[str]) -> set[str]:
           AND table_name = ANY($1::text[])
         """,
         tables,
-        timeout=8,
+        timeout=timeout,
     )
     return set(rows or [])
 
@@ -360,7 +362,13 @@ async def _existing_public_columns(conn, table: str, columns: list[str]) -> set[
     return set(rows or [])
 
 
-async def _beeper_subsource_content_summary(conn, since_sql: str, before_sql: str | None = None) -> dict[str, dict]:
+async def _beeper_subsource_content_summary(
+    conn,
+    since_sql: str,
+    before_sql: str | None = None,
+    *,
+    timeout: float = _BEEPER_SUBSOURCE_QUERY_TIMEOUT_SECONDS,
+) -> dict[str, dict]:
     cache_key = (since_sql, before_sql)
     cached = _BEEPER_SUBSOURCE_CONTENT_CACHE.get(cache_key)
     now_ts = time.time()
@@ -371,7 +379,11 @@ async def _beeper_subsource_content_summary(conn, since_sql: str, before_sql: st
     ):
         return _copy_row_map(cached["rows"])  # type: ignore[arg-type]
 
-    existing_tables = await _existing_public_tables(conn, ["beeper_shadow_messages", "media_items"])
+    existing_tables = await _existing_public_tables(
+        conn,
+        ["beeper_shadow_messages", "media_items"],
+        timeout=timeout,
+    )
     before_messages = f" AND ingested_at < {before_sql}" if before_sql else ""
     before_media = f" AND collected_at < {before_sql}" if before_sql else ""
     out: dict[str, dict] = {}
@@ -409,7 +421,7 @@ async def _beeper_subsource_content_summary(conn, since_sql: str, before_sql: st
               {before_messages}
             GROUP BY 1
             """,
-            timeout=20,
+            timeout=timeout,
         )
         for row in rows:
             source, display_name = _beeper_source_key(row["network"])
@@ -434,7 +446,7 @@ async def _beeper_subsource_content_summary(conn, since_sql: str, before_sql: st
               {before_media}
             GROUP BY 1
             """,
-            timeout=20,
+            timeout=timeout,
         )
         for row in rows:
             source, display_name = _beeper_source_key(row["network"])
@@ -504,14 +516,21 @@ async def _source_content_summary(conn, since_sql: str, before_sql: str | None =
     )
     out = {row["source"]: dict(row) for row in rows}
     try:
-        out.update(await _beeper_subsource_content_summary(conn, since_sql, before_sql))
+        out.update(await asyncio.wait_for(
+            _beeper_subsource_content_summary(conn, since_sql, before_sql),
+            timeout=_BEEPER_SUBSOURCE_TOTAL_TIMEOUT_SECONDS,
+        ))
     except Exception as exc:  # noqa: BLE001 - dashboard should degrade, not 500
         logger.warning("beeper sub-source content summary failed: %s", exc)
     return out
 
 
-async def _beeper_subsource_media_totals(conn) -> dict[str, dict]:
-    existing = await _existing_public_tables(conn, ["media_items"])
+async def _beeper_subsource_media_totals(
+    conn,
+    *,
+    timeout: float = _BEEPER_SUBSOURCE_QUERY_TIMEOUT_SECONDS,
+) -> dict[str, dict]:
+    existing = await _existing_public_tables(conn, ["media_items"], timeout=timeout)
     if "media_items" not in existing:
         return {}
     rows = await conn.fetch(
@@ -528,7 +547,7 @@ async def _beeper_subsource_media_totals(conn) -> dict[str, dict]:
         WHERE source = 'beeper'
         GROUP BY 1
         """,
-        timeout=20,
+        timeout=timeout,
     )
     out: dict[str, dict] = {}
     for row in rows:
@@ -741,7 +760,10 @@ async def _source_media_totals(conn) -> dict[str, dict]:
         )
         out = {row["source"]: dict(row) for row in rows}
         try:
-            out.update(await _beeper_subsource_media_totals(conn))
+            out.update(await asyncio.wait_for(
+                _beeper_subsource_media_totals(conn),
+                timeout=_BEEPER_SUBSOURCE_TOTAL_TIMEOUT_SECONDS,
+            ))
         except Exception as exc:  # noqa: BLE001
             logger.warning("beeper sub-source media totals failed: %s", exc)
         _SOURCE_MEDIA_TOTALS_CACHE.update({"ts": time.time(), "rows": out})
@@ -769,7 +791,10 @@ async def _source_media_totals(conn) -> dict[str, dict]:
         raise
     out = {row["source"]: dict(row) for row in rows}
     try:
-        out.update(await _beeper_subsource_media_totals(conn))
+        out.update(await asyncio.wait_for(
+            _beeper_subsource_media_totals(conn),
+            timeout=_BEEPER_SUBSOURCE_TOTAL_TIMEOUT_SECONDS,
+        ))
     except Exception as exc:  # noqa: BLE001
         logger.warning("beeper sub-source media totals failed: %s", exc)
     _SOURCE_MEDIA_TOTALS_CACHE.update({"ts": time.time(), "rows": out})

@@ -552,6 +552,25 @@ class _MediaTotalsConn:
         ]
 
 
+class _MediaTotalsSlowBeeperConn:
+    async def fetchval(self, *_args, **_kwargs):
+        return ["media_source_rollups", "media_items"]
+
+    async def fetch(self, query, *_args, **_kwargs):
+        if "media_source_rollups" in query:
+            return [
+                {
+                    "source": "x",
+                    "total_media_items": 23,
+                    "total_media_bytes": 66_439_203,
+                    "latest_media_at": datetime(2026, 7, 28, tzinfo=timezone.utc),
+                }
+            ]
+        if "FROM media_items" in query:
+            raise TimeoutError("slow optional beeper split")
+        raise AssertionError(query)
+
+
 @pytest.mark.asyncio
 async def test_source_media_totals_prefers_rollup_table():
     _SOURCE_MEDIA_TOTALS_CACHE.clear()
@@ -559,6 +578,16 @@ async def test_source_media_totals_prefers_rollup_table():
     out = await _source_media_totals(_MediaTotalsConn())
 
     assert out["instagram"]["total_media_items"] == 12
+
+
+@pytest.mark.asyncio
+async def test_source_media_totals_keeps_rollups_when_beeper_split_times_out():
+    _SOURCE_MEDIA_TOTALS_CACHE.clear()
+
+    out = await _source_media_totals(_MediaTotalsSlowBeeperConn())
+
+    assert out["x"]["total_media_items"] == 23
+    assert "__stats_unavailable__" not in out
 
 
 @pytest.mark.asyncio
