@@ -179,6 +179,17 @@ def _is_flood_wait(exc):
     return hasattr(exc, "seconds") and "flood" in name.lower()
 
 
+def _format_exception(exc) -> str:
+    """Stable exception text for Telegram alerts/DLQ rows.
+
+    Several async timeout classes stringify to an empty string. Include the
+    type name so operational logs still explain what happened.
+    """
+    detail = str(exc).strip()
+    name = type(exc).__name__
+    return f"{name}: {detail}" if detail else name
+
+
 def _is_transient_realtime_write_error(exc) -> bool:
     """Return True for DB/network blips worth retrying on the hot realtime path."""
     if isinstance(exc, (asyncio.TimeoutError, TimeoutError, ConnectionError, OSError)):
@@ -229,9 +240,9 @@ def _is_transient(exc):
     Connection drops, timeouts, and 'server closed'/'disconnected' blips are
     transient — the account may resolve the chat fine on the next cycle.
     """
-    if isinstance(exc, (asyncio.TimeoutError, ConnectionError, OSError)):
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError, ConnectionError, OSError)):
         return True
-    blob = f"{type(exc).__name__}: {exc}".lower()
+    blob = _format_exception(exc).lower()
     return any(s in blob for s in (
         "disconnect", "server closed", "timeout", "connection", "not connected",
     ))
@@ -2931,8 +2942,9 @@ class TelegramCollector(BaseCollector):
         except Exception as e:
             if _is_flood_wait(e):
                 raise
-            logger.error("Download failed %s: %s", cid, e)
-            await self.send_to_dlq(item["entity_id"], cid, str(e))
+            error_text = _format_exception(e)
+            logger.error("Download failed %s: %s", cid, error_text)
+            await self.send_to_dlq(item["entity_id"], cid, error_text)
 
     async def _handle_photo(self, worker: "TelegramWorker", message, chat_id: str,
                             chat_name: str, chat_username: str | None = None):
@@ -4012,7 +4024,8 @@ class TelegramCollector(BaseCollector):
                     raise
                 logger.warning(
                     "telegram realtime write transient failure; retrying %d/%d: chat=%s msg=%s edit=%s error=%s",
-                    attempt + 1, attempts, chat_id, getattr(message, "id", None), is_edit, exc,
+                    attempt + 1, attempts, chat_id, getattr(message, "id", None), is_edit,
+                    _format_exception(exc),
                 )
                 if delay:
                     await asyncio.sleep(delay * attempt)
@@ -4033,15 +4046,15 @@ class TelegramCollector(BaseCollector):
                 if sender is not None:
                     await self._upsert_user_full(sender)
             except Exception as exc:
-                logger.debug("get_sender failed (private/restricted channel?): %s", exc)
+                logger.debug("get_sender failed (private/restricted channel?): %s", _format_exception(exc))
             if getattr(message, "media", None) is not None:
                 # Download inline rather than queueing.
                 try:
                     await self.download_message_media(message, worker=worker, chat_id=chat_id)
                 except Exception as exc:
-                    logger.debug("realtime media download failed: %s", exc)
+                    logger.debug("realtime media download failed: %s", _format_exception(exc))
         except Exception as exc:
-            logger.error("_on_new_message error: %s", exc, exc_info=True)
+            logger.error("_on_new_message error: %s", _format_exception(exc), exc_info=True)
 
     async def _on_message_edited(self, worker: "TelegramWorker", event):
         try:
@@ -4049,7 +4062,7 @@ class TelegramCollector(BaseCollector):
             message = event.message
             await self._write_realtime_message_with_retry(worker, message, chat_id, is_edit=True)
         except Exception as exc:
-            logger.error("_on_message_edited error: %s", exc, exc_info=True)
+            logger.error("_on_message_edited error: %s", _format_exception(exc), exc_info=True)
 
     async def _on_message_deleted(self, worker: "TelegramWorker", event):
         try:
@@ -4075,17 +4088,32 @@ class TelegramCollector(BaseCollector):
             # exact delete time; observation time is the best available).
             deleted_at_iso = datetime.now(tz=timezone.utc).isoformat()
             patch = json.dumps({"deleted": True, "deleted_at": deleted_at_iso})
-            for msg_id in (event.deleted_ids or []):
-                async with self.pool.acquire() as conn:
-                    # Merge a {deleted, deleted_at} patch into metadata; no-op if the
-                    # row doesn't exist (deletion of a message we never saw).
-                    await conn.execute("""
-                        UPDATE telegram_messages
-                        SET metadata = COALESCE(metadata,'{}'::jsonb) || $2::jsonb
-                        WHERE platform_message_id = $1
-                    """, f"{chat_id}:{msg_id}", patch)
+            deleted_ids = list(event.deleted_ids or [])
+            attempts = max(1, int(getattr(self, "_realtime_write_attempts", 3) or 3))
+            delay = max(0.0, float(getattr(self, "_realtime_write_retry_delay", 0.75) or 0.0))
+            for attempt in range(1, attempts + 1):
+                try:
+                    async with self.pool.acquire() as conn:
+                        for msg_id in deleted_ids:
+                            # Merge a {deleted, deleted_at} patch into metadata; no-op if the
+                            # row doesn't exist (deletion of a message we never saw).
+                            await conn.execute("""
+                                UPDATE telegram_messages
+                                SET metadata = COALESCE(metadata,'{}'::jsonb) || $2::jsonb
+                                WHERE platform_message_id = $1
+                            """, f"{chat_id}:{msg_id}", patch)
+                    return
+                except Exception as exc:
+                    if attempt >= attempts or not _is_transient_realtime_write_error(exc):
+                        raise
+                    logger.warning(
+                        "telegram delete event transient DB failure; retrying %d/%d: chat=%s deleted=%d error=%s",
+                        attempt + 1, attempts, chat_id, len(deleted_ids), _format_exception(exc),
+                    )
+                    if delay:
+                        await asyncio.sleep(delay * attempt)
         except Exception as exc:
-            logger.error("_on_message_deleted error: %s", exc, exc_info=True)
+            logger.error("_on_message_deleted error: %s", _format_exception(exc), exc_info=True)
 
     async def _on_chat_action(self, worker: "TelegramWorker", event):
         """Translate Telethon chat actions into telegram_chat_members upserts."""
@@ -4127,7 +4155,7 @@ class TelegramCollector(BaseCollector):
                         last_seen_at=observed_at,
                     )
         except Exception as exc:
-            logger.error("_on_chat_action error: %s", exc, exc_info=True)
+            logger.error("_on_chat_action error: %s", _format_exception(exc), exc_info=True)
 
     async def _on_user_update(self, worker: "TelegramWorker", event):
         try:
@@ -4135,7 +4163,7 @@ class TelegramCollector(BaseCollector):
             if user is not None:
                 await self._upsert_user_full(user)
         except Exception as exc:
-            logger.error("_on_user_update error: %s", exc, exc_info=True)
+            logger.error("_on_user_update error: %s", _format_exception(exc), exc_info=True)
 
     async def _on_raw_reactions(self, worker: "TelegramWorker", update):
         """Handle UpdateMessageReactions / UpdateBotMessageReactions raw events.
@@ -5202,7 +5230,7 @@ class TelegramCollector(BaseCollector):
             else:
                 logger.error(
                     "collect_chat_members chat=%s failed: %s",
-                    chat_platform_id, exc,
+                    chat_platform_id, _format_exception(exc),
                 )
 
         logger.info(

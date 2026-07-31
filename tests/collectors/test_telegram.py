@@ -38,6 +38,7 @@ from src.collectors.telegram import (
     TelegramCollector,
     TelegramWorker,
     _ext_from_mime,
+    _format_exception,
     _is_flood_wait,
     _telegram_message_content_id,
     _tg_json,
@@ -178,6 +179,11 @@ def test_is_flood_wait_detection():
     # the class name *contains* flood — guard against false positives.
     assert _is_flood_wait(_Other()) is False
     assert _is_flood_wait(RuntimeError("boom")) is False
+
+
+def test_format_exception_keeps_blank_timeouts_readable():
+    assert _format_exception(TimeoutError()) == "TimeoutError"
+    assert _format_exception(RuntimeError("boom")) == "RuntimeError: boom"
 
 
 @pytest.mark.asyncio
@@ -1011,6 +1017,42 @@ async def test_download_media_writes_vault_blob(monkeypatch, tmp_path):
     assert kwargs["metadata"]["vault_artifact"]["partial"] is False
     assert kwargs["metadata"]["vault_artifact"]["blob_path"].startswith("media/blobs/")
     coll.send_to_dlq.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_download_media_dlq_records_exception_type_for_blank_timeout(monkeypatch):
+    coll = _make_collector(monkeypatch)
+    coll.insert_media_item = AsyncMock()
+    coll.send_to_dlq = AsyncMock()
+    worker = _make_worker(coll)
+    worker.client.download_media = AsyncMock(side_effect=TimeoutError())
+
+    await coll.download_media({
+        "entity_id": "12345",
+        "entity_name": "Test Chat",
+        "content_type": "photo",
+        "content_id": "blank-timeout",
+        "media": object(),
+        "extension": "jpg",
+    }, worker=worker)
+
+    coll.insert_media_item.assert_not_awaited()
+    coll.send_to_dlq.assert_awaited_once()
+    assert coll.send_to_dlq.await_args.args == ("12345", "blank-timeout", "TimeoutError")
+
+
+@pytest.mark.asyncio
+async def test_on_message_deleted_retries_transient_db_timeout(monkeypatch):
+    coll = _make_collector(monkeypatch)
+    coll._realtime_write_retry_delay = 0
+    worker = _make_worker(coll)
+    coll.pool.conn.execute.side_effect = [TimeoutError(), "UPDATE 1"]
+    event = SimpleNamespace(chat_id=12345, deleted_ids=[99])
+
+    await coll._on_message_deleted(worker, event)
+
+    assert coll.pool.conn.execute.await_count == 2
+    assert coll.pool.conn.execute.await_args.args[1] == "12345:99"
 
 
 @pytest.mark.asyncio
