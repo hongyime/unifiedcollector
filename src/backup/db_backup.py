@@ -28,6 +28,9 @@ DEFAULT_WEEKLY = 4
 DEFAULT_MONTHLY = 3
 TIMESTAMP_FORMAT = "%Y%m%d_%H%M%S"
 DEFAULT_STALE_TEMP_MAX_AGE_MINUTES = 60
+DEFAULT_COMMAND_TIMEOUT_SECONDS = 2 * 60 * 60
+DEFAULT_STALL_TIMEOUT_SECONDS = 15 * 60
+DEFAULT_VALIDATE_TIMEOUT_SECONDS = 10 * 60
 
 _BACKUP_RE = re.compile(r"^(?P<prefix>.+)_(?P<stamp>\d{8}_\d{6})\.dump$")
 
@@ -94,6 +97,11 @@ def _env_int(name: str, default: int) -> int:
     if value < 0:
         raise ValueError(f"env var {name}={value} cannot be negative")
     return value
+
+
+def _env_seconds(name: str, default: int) -> int | None:
+    value = _env_int(name, default)
+    return value if value > 0 else None
 
 
 def parse_backup_file(path: Path, *, prefix: str = DEFAULT_PREFIX) -> BackupFile | None:
@@ -425,12 +433,22 @@ def _run_pg_dump(tmp: Path, *, pg_dump_exe: str, database: str) -> None:
     # In Docker, ../.env may still contain a host-facing DATABASE_URL such as
     # localhost:5500. If PGHOST is explicitly set, trust libpq env instead.
     cmd.append(dsn if dsn and not os.getenv("PGHOST") else database)
-    _run(cmd, "pg_dump failed")
+    _run(
+        cmd,
+        "pg_dump failed",
+        timeout=_env_seconds("COLLECTOR_DB_BACKUP_TIMEOUT_SECONDS", DEFAULT_COMMAND_TIMEOUT_SECONDS),
+        progress_path=tmp,
+        stall_timeout=_env_seconds("COLLECTOR_DB_BACKUP_STALL_TIMEOUT_SECONDS", DEFAULT_STALL_TIMEOUT_SECONDS),
+    )
     _ensure_nonempty(tmp)
 
 
 def _validate_dump(tmp: Path, *, pg_restore_exe: str) -> None:
-    _run([pg_restore_exe, "--list", str(tmp)], "pg_restore validation failed")
+    _run(
+        [pg_restore_exe, "--list", str(tmp)],
+        "pg_restore validation failed",
+        timeout=_env_seconds("COLLECTOR_DB_BACKUP_VALIDATE_TIMEOUT_SECONDS", DEFAULT_VALIDATE_TIMEOUT_SECONDS),
+    )
 
 
 def _run_docker_pg_dump(
@@ -450,6 +468,9 @@ def _run_docker_pg_dump(
             [docker_exe, "exec", docker_container, "sh", "-c", shell],
             "docker pg_dump failed",
             stdout=fh,
+            timeout=_env_seconds("COLLECTOR_DB_BACKUP_TIMEOUT_SECONDS", DEFAULT_COMMAND_TIMEOUT_SECONDS),
+            progress_path=tmp,
+            stall_timeout=_env_seconds("COLLECTOR_DB_BACKUP_STALL_TIMEOUT_SECONDS", DEFAULT_STALL_TIMEOUT_SECONDS),
         )
     _ensure_nonempty(tmp)
 
@@ -460,6 +481,7 @@ def _validate_docker_dump(tmp: Path, *, docker_container: str, docker_exe: str) 
             [docker_exe, "exec", "-i", docker_container, "pg_restore", "--list"],
             "docker pg_restore validation failed",
             stdin=fh,
+            timeout=_env_seconds("COLLECTOR_DB_BACKUP_VALIDATE_TIMEOUT_SECONDS", DEFAULT_VALIDATE_TIMEOUT_SECONDS),
         )
 
 
@@ -474,17 +496,89 @@ def _run(
     *,
     stdin=None,
     stdout=None,
+    timeout: int | float | None = None,
+    progress_path: Path | None = None,
+    stall_timeout: int | float | None = None,
 ) -> None:
-    result = subprocess.run(
+    started = time.monotonic()
+    last_progress_at = started
+    last_progress_size = _file_size(progress_path)
+    process = subprocess.Popen(
         list(cmd),
         stdin=stdin,
         stdout=stdout if stdout is not None else subprocess.DEVNULL,
         stderr=subprocess.PIPE,
-        check=False,
     )
-    if result.returncode != 0:
-        err = result.stderr.decode("utf-8", errors="replace").strip()
-        raise RuntimeError(f"{message}: {err or 'exit code ' + str(result.returncode)}")
+    poll_interval = _poll_interval(timeout=timeout, stall_timeout=stall_timeout)
+    stderr = b""
+    try:
+        while True:
+            try:
+                returncode = process.wait(timeout=poll_interval)
+                if process.stderr is not None:
+                    stderr = process.stderr.read() or b""
+                break
+            except subprocess.TimeoutExpired:
+                now = time.monotonic()
+                if timeout and now - started > timeout:
+                    stderr = _terminate_process(process)
+                    err = stderr.decode("utf-8", errors="replace").strip()
+                    detail = f"timed out after {timeout:g}s"
+                    if err:
+                        detail += f"; stderr: {err}"
+                    raise RuntimeError(f"{message}: {detail}") from None
+                if progress_path is not None and stall_timeout:
+                    size = _file_size(progress_path)
+                    if size != last_progress_size:
+                        last_progress_size = size
+                        last_progress_at = now
+                    elif now - last_progress_at > stall_timeout:
+                        stderr = _terminate_process(process)
+                        err = stderr.decode("utf-8", errors="replace").strip()
+                        detail = f"no dump progress for {stall_timeout:g}s"
+                        if err:
+                            detail += f"; stderr: {err}"
+                        raise RuntimeError(f"{message}: {detail}") from None
+        if returncode != 0:
+            err = stderr.decode("utf-8", errors="replace").strip()
+            raise RuntimeError(f"{message}: {err or 'exit code ' + str(returncode)}")
+    finally:
+        if process.poll() is None:
+            _terminate_process(process)
+
+
+def _file_size(path: Path | None) -> int | None:
+    if path is None:
+        return None
+    try:
+        return path.stat().st_size
+    except OSError:
+        return None
+
+
+def _poll_interval(*, timeout: int | float | None, stall_timeout: int | float | None) -> float:
+    candidates = [1.0]
+    if timeout:
+        candidates.append(max(0.05, float(timeout) / 20))
+    if stall_timeout:
+        candidates.append(max(0.05, float(stall_timeout) / 4))
+    return min(candidates)
+
+
+def _terminate_process(process: subprocess.Popen) -> bytes:
+    try:
+        process.terminate()
+        try:
+            return process.communicate(timeout=5)[1] or b""
+        except subprocess.TimeoutExpired:
+            process.kill()
+            return process.communicate(timeout=5)[1] or b""
+    except Exception:
+        try:
+            process.kill()
+        except Exception:
+            pass
+        return b""
 
 
 def _sh_quote(value: str) -> str:

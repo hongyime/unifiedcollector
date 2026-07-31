@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -258,6 +259,25 @@ def test_pg_dump_prefers_pg_env_over_host_database_url(monkeypatch, tmp_path):
 
     assert commands
     assert commands[0][-1] == "unifiedcollector"
+
+
+def test_run_kills_dump_when_progress_file_stalls(tmp_path):
+    from src.backup import db_backup
+
+    progress = tmp_path / ".inprogress_20260720_090000.dump"
+    progress.write_bytes(b"")
+    started = time.monotonic()
+
+    with pytest.raises(RuntimeError, match="no dump progress"):
+        db_backup._run(
+            [sys.executable, "-c", "import time; time.sleep(10)"],
+            "pg_dump failed",
+            timeout=5,
+            progress_path=progress,
+            stall_timeout=0.1,
+        )
+
+    assert time.monotonic() - started < 3
 
 
 def test_backup_mount_ready_accepts_vault_mirrored_dir(monkeypatch, tmp_path):
