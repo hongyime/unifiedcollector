@@ -148,6 +148,18 @@ async def test_notify_status_splits_rate_limit_from_auth_events(monkeypatch):
                 "stored_count": 1,
             },
         ],
+        "tiktok_browser_media_diagnostics": [
+            {"outcome": "short_lived_url", "candidates": 3, "needs_revisit": 3},
+            {"outcome": "tiny_thumbnail", "candidates": 8, "needs_revisit": 0},
+        ],
+        "tiktok_browser_revisit_queue": {
+            "due": 2,
+            "claimed": 1,
+            "pending": 4,
+            "failed": 1,
+            "unavailable": 0,
+            "completed": 7,
+        },
         "degraded_sources": ["instagram"],
         "degraded_details": [
             {
@@ -215,6 +227,9 @@ async def test_notify_status_splits_rate_limit_from_auth_events(monkeypatch):
     assert "<b>Browser extension ingest</b>" in msg
     assert "Threads media files: browser saw 12 items; stored 3; 2 POSTs this hour." in msg
     assert "Instagram profiles: browser saw 1 item; stored 1; 1 POST this hour." in msg
+    assert "<b>TikTok media follow-up</b>" in msg
+    assert "short-lived video URL queued for browser revisit: 3" in msg
+    assert "TikTok detail revisit queue: 2 due now, 1 claimed by browser" in msg
     assert "Degraded sources: Instagram" in msg
     assert "Why degraded:" in msg
     assert "newest row 4.0d ago; expected within 2.0d" in msg

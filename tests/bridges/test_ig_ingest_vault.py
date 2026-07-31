@@ -91,6 +91,70 @@ def test_download_headers_include_platform_referers():
     assert ig_ingest._download_headers("x", "https://pbs.twimg.com/media/x.jpg", {})["Referer"] == "https://x.com/"
 
 
+def test_tiktok_browser_classifier_queues_short_lived_video_revisit():
+    item = {
+        "content_type": "video",
+        "url": "https://v16m.tiktokcdn.com/video.mp4",
+        "meta": {"tiktok_asset_role": "dom_video"},
+    }
+
+    outcome, reason, needs_revisit = ig_ingest._classify_tiktok_candidate_result(
+        item,
+        saved=False,
+        browser_result={"reason": "http_403"},
+        ingest_mode="browser_upload",
+    )
+
+    assert outcome == "short_lived_url"
+    assert reason == "http_403"
+    assert needs_revisit is True
+
+
+def test_tiktok_browser_classifier_suppresses_tiny_thumbnails():
+    item = {
+        "content_type": "photo",
+        "url": "https://p16-sign.tiktokcdn.com/avatar.jpg",
+        "meta": {"tiktok_asset_role": "dom_image", "width": 80, "height": 80},
+    }
+
+    outcome, reason, needs_revisit = ig_ingest._classify_tiktok_candidate_result(
+        item,
+        saved=False,
+        reject_stats={"invalid_media": 1, "examples": {"invalid_media": "too small image"}},
+        ingest_mode="url",
+    )
+
+    assert outcome == "tiny_thumbnail"
+    assert "too small" in reason
+    assert needs_revisit is False
+
+
+def test_tiktok_browser_classifier_marks_duplicates_terminal():
+    outcome, reason, needs_revisit = ig_ingest._classify_tiktok_candidate_result(
+        {"content_type": "photo", "url": "https://p16-sign.tiktokcdn.com/p.jpg"},
+        saved=False,
+        reject_stats={"duplicate_sha256": 1},
+        ingest_mode="browser_upload",
+    )
+
+    assert outcome == "duplicate"
+    assert reason == "duplicate_sha256"
+    assert needs_revisit is False
+
+
+def test_tiktok_browser_classifier_marks_saved_terminal():
+    outcome, reason, needs_revisit = ig_ingest._classify_tiktok_candidate_result(
+        {"content_type": "video", "url": "https://v16m.tiktokcdn.com/video.mp4"},
+        saved=True,
+        reject_stats={},
+        ingest_mode="url",
+    )
+
+    assert outcome == "stored"
+    assert reason is None
+    assert needs_revisit is False
+
+
 def test_extension_ingest_pauses_media_download_when_vault_unavailable(monkeypatch, tmp_path):
     pool = _FakePool()
     monkeypatch.setattr(

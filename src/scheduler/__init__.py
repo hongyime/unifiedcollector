@@ -501,6 +501,44 @@ class Scheduler:
                     pass
 
                 try:
+                    if await conn.fetchval("SELECT to_regclass('tiktok_browser_media_candidates')", timeout=5) is not None:
+                        snap["tiktok_browser_media_diagnostics"] = [dict(r) for r in await conn.fetch(
+                            """
+                            SELECT outcome,
+                                   count(*)::int AS candidates,
+                                   count(*) FILTER (WHERE needs_revisit)::int AS needs_revisit,
+                                   max(last_seen) AS last_seen_at
+                            FROM tiktok_browser_media_candidates
+                            WHERE last_seen >= date_trunc('hour', now())
+                            GROUP BY outcome
+                            ORDER BY candidates DESC, last_seen_at DESC
+                            LIMIT 8
+                            """,
+                            timeout=10,
+                        )]
+                    if await conn.fetchval("SELECT to_regclass('tiktok_browser_revisit_queue')", timeout=5) is not None:
+                        row = await conn.fetchrow(
+                            """
+                            SELECT count(*) FILTER (
+                                     WHERE status IN ('pending', 'failed')
+                                       AND next_visit_at <= now()
+                                   )::int AS due,
+                                   count(*) FILTER (WHERE status = 'claimed')::int AS claimed,
+                                   count(*) FILTER (WHERE status = 'pending')::int AS pending,
+                                   count(*) FILTER (WHERE status = 'failed')::int AS failed,
+                                   count(*) FILTER (WHERE status = 'unavailable')::int AS unavailable,
+                                   count(*) FILTER (WHERE status = 'completed')::int AS completed,
+                                   max(updated_at) AS last_seen_at
+                            FROM tiktok_browser_revisit_queue
+                            """,
+                            timeout=10,
+                        )
+                        if row:
+                            snap["tiktok_browser_revisit_queue"] = dict(row)
+                except Exception:
+                    pass
+
+                try:
                     if await conn.fetchval("SELECT to_regclass('x_profile_targets')", timeout=5) is not None:
                         target_row = await conn.fetchrow(
                             """

@@ -61,6 +61,28 @@ export interface BrowserExtensionIngest {
   version_ok: boolean;
 }
 
+export interface TikTokBrowserMediaOutcome {
+  outcome: string;
+  candidates: number;
+  needs_revisit: number;
+  last_seen_at: string | null;
+}
+
+export interface TikTokBrowserRevisitQueue {
+  due: number;
+  claimed: number;
+  pending: number;
+  failed: number;
+  unavailable: number;
+  completed: number;
+  last_seen_at: string | null;
+}
+
+export interface TikTokBrowserMediaHealth {
+  outcomes: TikTokBrowserMediaOutcome[];
+  queue: TikTokBrowserRevisitQueue | null;
+}
+
 export interface BrowserExtensionIssue {
   platform: string;
   endpoint?: string | null;
@@ -75,6 +97,7 @@ export interface BrowserExtensionHealth {
   expected_version: string | null;
   hooks: BrowserExtensionHook[];
   ingest: BrowserExtensionIngest[];
+  tiktok_media?: TikTokBrowserMediaHealth | null;
   issues: BrowserExtensionIssue[];
 }
 

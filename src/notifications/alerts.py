@@ -283,6 +283,49 @@ def _format_browser_ingest_event(row: dict) -> str:
     )
 
 
+def _format_tiktok_media_diagnostics(rows: list[dict], queue: dict | None = None) -> list[str]:
+    if not rows and not queue:
+        return []
+    labels = {
+        "stored": "stored as media",
+        "duplicate": "already had the file",
+        "tiny_thumbnail": "tiny thumbnail/avatar rejected",
+        "short_lived_url": "short-lived video URL queued for browser revisit",
+        "browser_fetch_failed": "browser fetch failed",
+        "http_error": "server fetch HTTP error",
+        "invalid_media": "invalid media/error page",
+        "vault_unavailable": "vault unavailable",
+    }
+    parts = []
+    revisit = 0
+    for row in rows[:6]:
+        count = int(row.get("candidates", 0) or 0)
+        revisit += int(row.get("needs_revisit", 0) or 0)
+        outcome = str(row.get("outcome") or "unknown")
+        parts.append(f"{labels.get(outcome, outcome.replace('_', ' '))}: {count:,}")
+    lines = []
+    if parts:
+        lines.append(
+            "• TikTok media diagnosis this hour: "
+            + "; ".join(parts)
+            + (f". {revisit:,} {_plural(revisit, 'candidate')} need browser detail revisit." if revisit else ".")
+        )
+    if queue:
+        due = int(queue.get("due", 0) or 0)
+        claimed = int(queue.get("claimed", 0) or 0)
+        pending = int(queue.get("pending", 0) or 0)
+        failed = int(queue.get("failed", 0) or 0)
+        unavailable = int(queue.get("unavailable", 0) or 0)
+        completed = int(queue.get("completed", 0) or 0)
+        lines.append(
+            f"• TikTok detail revisit queue: {due:,} due now, "
+            f"{claimed:,} claimed by browser, {pending:,} pending, "
+            f"{failed:,} failed/retry, {unavailable:,} unavailable, "
+            f"{completed:,} completed."
+        )
+    return lines
+
+
 def _format_x_collection_health(row: dict) -> list[str]:
     targets = int(row.get("targets", 0) or 0)
     due = int(row.get("due_targets", 0) or 0)
@@ -649,6 +692,13 @@ async def notify_status(snapshot: dict) -> bool:
         lines.append("")
         lines.append("<b>Browser extension ingest</b>")
         lines.extend(_format_browser_ingest_event(row) for row in browser_ingest[:6])
+
+    tiktok_diagnostics = snapshot.get("tiktok_browser_media_diagnostics") or []
+    tiktok_revisit = snapshot.get("tiktok_browser_revisit_queue") or {}
+    if tiktok_diagnostics or tiktok_revisit:
+        lines.append("")
+        lines.append("<b>TikTok media follow-up</b>")
+        lines.extend(_format_tiktok_media_diagnostics(tiktok_diagnostics, tiktok_revisit))
 
     x_health = snapshot.get("x_collection_health") or {}
     if x_health:

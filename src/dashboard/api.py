@@ -1732,6 +1732,7 @@ async def _browser_extension_payload(conn) -> dict:
         "expected_version": expected,
         "hooks": [],
         "ingest": [],
+        "tiktok_media": None,
         "issues": [],
     }
 
@@ -1844,6 +1845,52 @@ async def _browser_extension_payload(conn) -> dict:
                     "stored_count": item["stored_count"],
                     "needs_new_event": not recent,
                 })
+
+    if await conn.fetchval("SELECT to_regclass('tiktok_browser_media_candidates')", timeout=5) is not None:
+        rows = await conn.fetch(
+            """
+            SELECT outcome,
+                   count(*)::int AS candidates,
+                   count(*) FILTER (WHERE needs_revisit)::int AS needs_revisit,
+                   max(last_seen) AS last_seen_at
+            FROM tiktok_browser_media_candidates
+            WHERE last_seen >= now() - interval '24 hours'
+            GROUP BY outcome
+            ORDER BY candidates DESC, last_seen_at DESC
+            LIMIT 12
+            """,
+            timeout=10,
+        )
+        queue = None
+        if await conn.fetchval("SELECT to_regclass('tiktok_browser_revisit_queue')", timeout=5) is not None:
+            queue = await conn.fetchrow(
+                """
+                SELECT count(*) FILTER (
+                         WHERE status IN ('pending', 'failed')
+                           AND next_visit_at <= now()
+                       )::int AS due,
+                       count(*) FILTER (WHERE status = 'claimed')::int AS claimed,
+                       count(*) FILTER (WHERE status = 'pending')::int AS pending,
+                       count(*) FILTER (WHERE status = 'failed')::int AS failed,
+                       count(*) FILTER (WHERE status = 'unavailable')::int AS unavailable,
+                       count(*) FILTER (WHERE status = 'completed')::int AS completed,
+                       max(updated_at) AS last_seen_at
+                FROM tiktok_browser_revisit_queue
+                """,
+                timeout=10,
+            )
+        payload["tiktok_media"] = {
+            "outcomes": [
+                {
+                    "outcome": row["outcome"],
+                    "candidates": int(row["candidates"] or 0),
+                    "needs_revisit": int(row["needs_revisit"] or 0),
+                    "last_seen_at": row["last_seen_at"],
+                }
+                for row in rows
+            ],
+            "queue": dict(queue) if queue else None,
+        }
 
     _suppress_shadowed_extension_mismatches(payload)
     return payload

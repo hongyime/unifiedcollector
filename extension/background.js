@@ -539,6 +539,7 @@ async function uploadBrowserMediaCandidates(base, msg, items) {
   let deduped = 0;
   let attempted = 0;
   const failures = {};
+  const failedCandidates = [];
   for (const item of candidates) {
     attempted++;
     const result = await uploadMediaViaBrowser(base, msg, item);
@@ -547,7 +548,10 @@ async function uploadBrowserMediaCandidates(base, msg, items) {
       saved += Number(result.saved || 0);
       deduped += Number(result.deduped || 0);
     }
-    else failures[result.reason || "failed"] = (failures[result.reason || "failed"] || 0) + 1;
+    else {
+      failures[result.reason || "failed"] = (failures[result.reason || "failed"] || 0) + 1;
+      failedCandidates.push({ item, result, ingest_mode: "browser_upload" });
+    }
   }
   if (attempted) {
     const detail = ` (${saved} new${deduped ? `, ${deduped} duplicate` : ""})`;
@@ -557,7 +561,25 @@ async function uploadBrowserMediaCandidates(base, msg, items) {
     );
     if (Object.keys(failures).length) await log("warn", `browser-upload misses: ${JSON.stringify(failures)}`);
   }
+  if (failedCandidates.length) await recordBrowserMediaCandidateResults(base, msg, failedCandidates);
   return { attempted, stored: accepted, accepted, saved, deduped, failures };
+}
+
+async function recordBrowserMediaCandidateResults(base, msg, items) {
+  try {
+    const r = await fetch(base + "/social/browser-media-candidates", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(withExtensionVersion({
+        platform: msg.platform || "instagram",
+        username: msg.username || "unknown",
+        items,
+      })),
+    });
+    if (!r.ok) await log("warn", `browser media candidate ledger failed: HTTP ${r.status}`);
+  } catch (e) {
+    await log("warn", `browser media candidate ledger failed: ${e.message || e}`);
+  }
 }
 // Returns {opened|focused, tabId}. `active` brings the tab to the foreground so
 // the user actually SEES it (the old version opened pinned+inactive, which made
@@ -628,6 +650,39 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               status: msg.status || "success",
               reason: msg.reason || null,
               owner: msg.owner || null,
+            })),
+          });
+          const j = await r.json().catch(() => ({}));
+          sendResponse({ ok: r.ok, ...j });
+        } catch (e) {
+          sendResponse({ ok: false, error: String(e.message || e) });
+        }
+        break;
+      }
+      case "getTikTokRevisitTarget": {
+        try {
+          const owner = String(msg.owner || "").trim();
+          const qs = owner ? `?owner=${encodeURIComponent(owner)}` : "";
+          const r = await fetch(base + "/social/tiktok-revisit-target" + qs);
+          const j = await r.json().catch(() => ({}));
+          sendResponse({ ok: r.ok, ...j });
+        } catch (e) {
+          sendResponse({ ok: false, target: null, error: String(e.message || e) });
+        }
+        break;
+      }
+      case "tiktokRevisitResult": {
+        try {
+          const r = await fetch(base + "/social/tiktok-revisit-result", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(withExtensionVersion({
+              content_id: msg.content_id,
+              status: msg.status || "success",
+              reason: msg.reason || null,
+              observed: msg.observed ?? null,
+              stored: msg.stored ?? null,
+              username: msg.username || null,
             })),
           });
           const j = await r.json().catch(() => ({}));

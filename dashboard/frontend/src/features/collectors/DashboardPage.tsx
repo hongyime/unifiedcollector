@@ -524,6 +524,10 @@ export function DashboardPage() {
   const extensionIssues = extension?.issues ?? [];
   const extensionHooks = extension?.hooks ?? [];
   const extensionIngest = extension?.ingest ?? [];
+  const tiktokMedia = extension?.tiktok_media ?? null;
+  const tiktokMediaOutcomes = tiktokMedia?.outcomes ?? [];
+  const tiktokMediaTotal = tiktokMediaOutcomes.reduce((sum, row) => sum + (row.candidates || 0), 0);
+  const tiktokMediaNeedsRevisit = tiktokMediaOutcomes.reduce((sum, row) => sum + (row.needs_revisit || 0), 0);
   const backupStatus = backups?.status ?? "missing";
   const backupValue =
     backupStatus === "ok" ? "Fresh" :
@@ -801,6 +805,30 @@ export function DashboardPage() {
               </div>
             </div>
           </div>
+
+          {tiktokMedia && (
+            <div className="mt-4 bg-background border border-border rounded-md px-3 py-2 text-xs">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-medium text-text-primary">TikTok media diagnosis</span>
+                <StatusBadge
+                  status={tiktokMediaNeedsRevisit ? "warning" : "online"}
+                  label={`${formatNumber(tiktokMediaTotal)} candidates`}
+                />
+              </div>
+              <div className="text-text-muted mt-1">
+                {tiktokMediaOutcomes.length
+                  ? tiktokMediaOutcomes.slice(0, 5).map((row) =>
+                      `${row.outcome.replace(/_/g, " ")} ${formatNumber(row.candidates)}`
+                    ).join(" · ")
+                  : "No TikTok media candidates recorded in the last 24h."}
+              </div>
+              {tiktokMedia.queue && (
+                <div className="text-text-muted mt-1">
+                  revisit queue {formatNumber(tiktokMedia.queue.due)} due · {formatNumber(tiktokMedia.queue.claimed)} claimed · {formatNumber(tiktokMedia.queue.pending)} pending · {formatNumber(tiktokMedia.queue.completed)} completed
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 

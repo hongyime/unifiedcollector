@@ -956,6 +956,69 @@ const instagram = {
 // NOTE: video CDN URLs are short-lived/cookie-bound; covers + photo-posts are the
 // reliable wins. Open a profile or your "Following" feed and leave it.
 // ===========================================================================
+function tiktokRevisitKey() { return "uc_tiktok_revisit_active"; }
+function currentTikTokRevisit() {
+  try {
+    const active = JSON.parse(localStorage.getItem(tiktokRevisitKey()) || "null");
+    if (!active || !active.content_id) return null;
+    if (active.claimed_at && Date.now() - active.claimed_at > 30 * 60000) {
+      localStorage.removeItem(tiktokRevisitKey());
+      return null;
+    }
+    return active;
+  } catch (e) {
+    localStorage.removeItem(tiktokRevisitKey());
+    return null;
+  }
+}
+async function maybeStartTikTokRevisit(owner) {
+  const active = currentTikTokRevisit();
+  if (active) return active;
+  let reply = null;
+  try {
+    reply = await send({ type: "getTikTokRevisitTarget", owner: owner || null }).catch(() => null);
+  } catch (e) {
+    return null;
+  }
+  const target = reply && reply.target;
+  if (!target || !target.content_id) return null;
+  const url = target.post_url || target.source_url;
+  if (!url || !/^https?:\/\//i.test(url)) {
+    await send({
+      type: "tiktokRevisitResult",
+      content_id: target.content_id,
+      status: "failed",
+      reason: "missing_revisit_url",
+      username: target.username || null,
+    }).catch(() => {});
+    return null;
+  }
+  const state = { ...target, url, claimed_at: Date.now() };
+  localStorage.setItem(tiktokRevisitKey(), JSON.stringify(state));
+  if (location.href !== url) {
+    clog("info", `TikTok detail revisit queued for ${target.content_id}`, "tiktok");
+    await sleep(jitter(900));
+    location.href = url;
+    return { ...state, navigating: true };
+  }
+  return state;
+}
+async function finishTikTokRevisit(active, response, observed, username) {
+  if (!active || !active.content_id) return;
+  const stored = Number(response && response.upload && response.upload.stored || 0);
+  const status = observed > 0 ? "success" : "no_media";
+  const reason = observed > 0 ? "detail_page_harvested" : "detail_page_no_media";
+  await send({
+    type: "tiktokRevisitResult",
+    content_id: active.content_id,
+    status,
+    reason,
+    observed,
+    stored,
+    username: username || active.username || null,
+  }).catch(() => {});
+  localStorage.removeItem(tiktokRevisitKey());
+}
 const tiktok = {
   id: "tiktok", host: "www.tiktok.com", label: "TikTok",
   entity() { const m = location.pathname.match(/^\/@([^/?#]+)/); return m ? m[1] : "feed"; },
@@ -979,6 +1042,8 @@ const tiktok = {
       },
       homeUrl: "https://www.tiktok.com/following",
     })) return { targets: 1, saved: 0, discovered: 0 };
+    const revisit = await maybeStartTikTokRevisit(owner);
+    if (revisit && revisit.navigating) return { targets: 1, saved: 0, discovered: 0 };
     clog("info", `cycle start on @${entity}`, "tiktok");
     const sink = makeSink();
     await autoScroll(10);
@@ -998,7 +1063,7 @@ const tiktok = {
           kind: "post",
           browser_upload: true,
           browser_upload_only: true,
-          meta: { tiktok_asset_role: "dom_video" },
+          meta: { tiktok_asset_role: "dom_video", page_url: location.href },
         });
       }
       const poster = v.getAttribute("poster") || v.poster;
@@ -1009,7 +1074,7 @@ const tiktok = {
           url: poster,
           entity_name: entity,
           kind: "post",
-          meta: { tiktok_asset_role: "poster" },
+          meta: { tiktok_asset_role: "poster", page_url: location.href },
         });
       }
     });
@@ -1027,10 +1092,21 @@ const tiktok = {
         url: u,
         entity_name: entity,
         kind: "post",
-        meta: { tiktok_asset_role: "dom_image", width: w || null, height: h || null },
+        meta: { tiktok_asset_role: "dom_image", width: w || null, height: h || null, page_url: location.href },
       });
     });
-    if (sink.items.length) await send({ type: "ingest", platform: "tiktok", username: entity, items: sink.items });
+    const activeRevisit = currentTikTokRevisit();
+    sink.items.forEach((it) => {
+      it.meta = { ...(it.meta || {}), page_url: location.href };
+      if (activeRevisit && activeRevisit.content_id) {
+        it.meta.revisit_content_id = activeRevisit.content_id;
+        it.meta.revisit_reason = activeRevisit.reason || null;
+      }
+    });
+    const response = sink.items.length
+      ? await send({ type: "ingest", platform: "tiktok", username: entity, items: sink.items })
+      : null;
+    if (activeRevisit) await finishTikTokRevisit(activeRevisit, response, sink.items.length, entity);
     return { targets: 1, saved: sink.items.length, discovered: 0 };
   },
 };

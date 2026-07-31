@@ -27,6 +27,10 @@ async def test_browser_extension_payload_flags_stale_and_old_versions(monkeypatc
                 return "dm_hook_heartbeat"
             if "browser_ingest_events" in query:
                 return "browser_ingest_events"
+            if "tiktok_browser_media_candidates" in query:
+                return None
+            if "tiktok_browser_revisit_queue" in query:
+                return None
             raise AssertionError(query)
 
         async def fetch(self, query: str, timeout: int | None = None):
@@ -83,6 +87,10 @@ async def test_browser_extension_payload_suppresses_old_endpoint_after_newer_cur
                 return None
             if "browser_ingest_events" in query:
                 return "browser_ingest_events"
+            if "tiktok_browser_media_candidates" in query:
+                return None
+            if "tiktok_browser_revisit_queue" in query:
+                return None
             raise AssertionError(query)
 
         async def fetch(self, query: str, timeout: int | None = None):
