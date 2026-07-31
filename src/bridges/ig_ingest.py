@@ -1358,6 +1358,69 @@ def _x_handle(value) -> str | None:
     return handle if _X_HANDLE_RE.match(handle) else None
 
 
+_LEMON8_HANDLE_RE = re.compile(r"^[A-Za-z0-9_.-]{2,64}$")
+
+
+def _lemon8_handle(value) -> str | None:
+    handle = str(value or "").strip().lstrip("@")
+    if not handle or "/" in handle or "?" in handle or "#" in handle:
+        return None
+    lowered = handle.lower()
+    if lowered in {"feed", "foryou", "fashion", "beauty", "food", "travel", "home", "topic", "search"}:
+        return None
+    return handle if _LEMON8_HANDLE_RE.match(handle) else None
+
+
+async def _enqueue_lemon8_profile_targets(
+    conn,
+    handles,
+    source: str,
+    priority: int,
+    metadata: dict | None = None,
+) -> int:
+    if not handles:
+        return 0
+    added = 0
+    for raw in handles:
+        handle = _lemon8_handle(raw)
+        if not handle:
+            continue
+        try:
+            res = await conn.execute(
+                """
+                INSERT INTO lemon8_spider_queue
+                    (platform_user_id, source, priority, status, collected_at)
+                VALUES ($1, $2, $3, 'pending', now())
+                ON CONFLICT (platform_user_id) DO UPDATE SET
+                    source = CASE
+                        WHEN lemon8_spider_queue.source = 'manual'
+                            THEN lemon8_spider_queue.source
+                        ELSE EXCLUDED.source
+                    END,
+                    priority = LEAST(
+                        COALESCE(lemon8_spider_queue.priority, EXCLUDED.priority),
+                        EXCLUDED.priority
+                    ),
+                    status = CASE
+                        WHEN lemon8_spider_queue.status IN ('completed', 'failed')
+                            THEN 'pending'
+                        ELSE lemon8_spider_queue.status
+                    END,
+                    collected_at = now()
+                """,
+                handle, source[:50], int(priority),
+            )
+            if res.endswith("1"):
+                added += 1
+        except Exception:
+            logger.debug(
+                "enqueue lemon8 profile target failed %s metadata=%s",
+                handle, metadata,
+                exc_info=True,
+            )
+    return added
+
+
 def _x_post_url(author: str | None, post_id: str | None, metadata: dict | None = None) -> str | None:
     metadata = metadata if isinstance(metadata, dict) else {}
     for key in ("verify_url", "url", "post_url"):
@@ -1799,6 +1862,27 @@ async def _record_users(pool, platform, users, context, owner=None) -> int:
                     else:
                         source, priority = ctx[:64], 60
                     await _enqueue_x_profile_targets(
+                        conn,
+                        [username],
+                        source,
+                        priority,
+                        {
+                            "source": "social_users",
+                            "context": context,
+                            "owner_account": owner_account,
+                        },
+                    )
+                if platform == "lemon8" and username:
+                    ctx = (context or "seen").lower()
+                    if ctx in {"author", "profile", "post"}:
+                        source, priority = ctx, 2
+                    elif ctx in {"follow", "following"}:
+                        source, priority = "following", 2
+                    elif ctx == "follower":
+                        source, priority = "follower", 3
+                    else:
+                        source, priority = ctx[:50], 4
+                    await _enqueue_lemon8_profile_targets(
                         conn,
                         [username],
                         source,

@@ -1039,23 +1039,171 @@ const tiktok = {
 // Lemon8 — Next.js app: data lives in __NEXT_DATA__ + lazy-loaded into DOM.
 // Photo-first platform, so image URLs download cleanly server-side.
 // ===========================================================================
+function lemon8HandleFromHref(href) {
+  try {
+    const u = new URL(href || "", location.href);
+    const parts = u.pathname.split("/").filter(Boolean);
+    const reserved = new Set(["feed", "foryou", "fashion", "beauty", "food", "travel", "home", "topic", "search"]);
+    for (const part of parts) {
+      if (part.startsWith("@") && /^[A-Za-z0-9_.-]{2,64}$/.test(part.slice(1))) return part.slice(1);
+    }
+    if (parts[0] && !reserved.has(parts[0].toLowerCase()) && /^[A-Za-z0-9_.-]{2,64}$/.test(parts[0])) return parts[0];
+  } catch (e) {}
+  return "";
+}
+
+function lemon8NoteIdFromHref(href) {
+  try {
+    const u = new URL(href || "", location.href);
+    const m = u.pathname.match(/\/(\d{6,})(?:$|[/?#])/);
+    return m ? m[1] : "";
+  } catch (e) {
+    return "";
+  }
+}
+
+function lemon8MediaUrl(u) {
+  if (!u || !/^https?:/i.test(u)) return false;
+  if (!/lemon8|byteimg|ibytedtos|muscdn|p16|p19|tos-/i.test(u)) return false;
+  if (/emoji|icon|logo|sprite|placeholder/i.test(u)) return false;
+  return true;
+}
+
+function lemon8CollectDomUsers() {
+  const byUser = new Map();
+  const add = (username, data = {}) => {
+    username = String(username || "").trim().replace(/^@/, "");
+    if (!/^[A-Za-z0-9_.-]{2,64}$/.test(username)) return;
+    const prev = byUser.get(username) || { username };
+    byUser.set(username, {
+      ...prev,
+      display_name: prev.display_name || data.display_name || null,
+      profile_pic_url: prev.profile_pic_url || data.profile_pic_url || null,
+    });
+  };
+  document.querySelectorAll('a[href*="/@"]').forEach((a) => {
+    try {
+      const username = lemon8HandleFromHref(a.getAttribute("href") || a.href || "");
+      if (!username) return;
+      const text = (a.innerText || a.textContent || "").trim().split(/\n+/)
+        .map((s) => s.trim())
+        .find((s) => s && !s.startsWith("@") && s.length < 80);
+      const avatar = [...a.querySelectorAll("img")]
+        .map((im) => ({
+          im,
+          urls: imageUrlsFromElement(im).filter((u) => lemon8MediaUrl(u)),
+        }))
+        .find(({ im, urls }) => {
+          if (!urls.length) return false;
+          if (urls.some((u) => /avatar|profile/i.test(u))) return true;
+          try {
+            const w = im.naturalWidth || im.width || 0;
+            const h = im.naturalHeight || im.height || 0;
+            const r = im.getBoundingClientRect && im.getBoundingClientRect();
+            return (w && h && w <= 180 && h <= 180) ||
+              (r && r.width && r.height && r.width <= 96 && r.height <= 96);
+          } catch (e) {
+            return false;
+          }
+        });
+      const avatarUrl = avatar ? avatar.urls[0] : null;
+      add(username, { display_name: text || null, profile_pic_url: avatarUrl });
+    } catch (e) {}
+  });
+  return [...byUser.values()];
+}
+
+function lemon8CardForElement(el) {
+  try {
+    return el.closest('a[href*="/@"], article, [role="article"], [data-e2e], [data-testid]') || el.parentElement;
+  } catch (e) {
+    return el.parentElement;
+  }
+}
+
+function lemon8CollectDomMedia(sink, pageEntity) {
+  const addCandidate = (url, el, role = "dom_image", contentType = "photo") => {
+    if (!lemon8MediaUrl(url)) return;
+    if (contentType === "photo" && el && imageLooksTooSmall(el, 160)) return;
+    if (/avatar/i.test(url) && role !== "video_poster") return;
+    const card = lemon8CardForElement(el || document.body);
+    const link = card && (card.matches && card.matches("a[href]") ? card : card.querySelector && card.querySelector('a[href*="/@"]'));
+    const href = link ? (link.getAttribute("href") || link.href || "") : "";
+    const author = lemon8HandleFromHref(href) || (/^(feed|foryou|fashion)$/i.test(pageEntity) ? "" : pageEntity);
+    const noteId = lemon8NoteIdFromHref(href);
+    let postUrl = null;
+    try { postUrl = href ? new URL(href, location.href).href : null; } catch (e) {}
+    let width = null, height = null;
+    try {
+      width = el.naturalWidth || el.videoWidth || el.clientWidth || null;
+      height = el.naturalHeight || el.videoHeight || el.clientHeight || null;
+    } catch (e) {}
+    sink.add({
+      content_id: ["lemon8", noteId || author || pageEntity || "feed", role, urlId(url)].filter(Boolean).join("_"),
+      content_type: contentType,
+      url,
+      entity_name: author || pageEntity || "feed",
+      kind: "post",
+      meta: {
+        source: "lemon8_dom",
+        lemon8_asset_role: role,
+        author_username: author || null,
+        note_id: noteId || null,
+        post_url: postUrl,
+        width,
+        height,
+      },
+    });
+  };
+
+  document.querySelectorAll("img").forEach((im) => {
+    imageUrlsFromElement(im).forEach((u) => addCandidate(u, im, "dom_image", "photo"));
+  });
+  document.querySelectorAll('[style*="background"]').forEach((el) => {
+    urlsFromCssValue(el.getAttribute("style") || "").forEach((u) => addCandidate(u, el, "css_background", "photo"));
+  });
+  document.querySelectorAll("video").forEach((v) => {
+    try { if (v.poster) addCandidate(v.poster, v, "video_poster", "photo"); } catch (e) {}
+    try {
+      const src = v.currentSrc || v.src;
+      if (src) addCandidate(src, v, "video", "video");
+    } catch (e) {}
+  });
+}
+
 const lemon8 = {
   id: "lemon8", host: "www.lemon8-app.com", label: "Lemon8",
-  entity() { const m = location.pathname.match(/\/@?([^/?#]+)/); return m ? m[1] : "feed"; },
+  entity() {
+    const handle = lemon8HandleFromHref(location.href);
+    if (handle) return handle;
+    const m = location.pathname.match(/\/([^/?#]+)/);
+    return m ? m[1] : "feed";
+  },
   async runCycle() {
     const entity = this.entity();
     clog("info", `cycle start on ${entity}`, "lemon8");
     const sink = makeSink();
-    await autoScroll(10);
+    await autoScroll(18);
     const state = parseEmbeddedState(["__NEXT_DATA__"]);
-    if (state) { deepCollectMedia(state, sink, entity); const us = []; deepCollectUsers(state, us); if (us.length) await send({ type: "users", platform: "lemon8", context: "seen", users: us }); }
-    document.querySelectorAll("img").forEach((im, i) => {
-      const u = im.currentSrc || im.src;
-      if (u && /\.(jpe?g|png|webp)/i.test(u) && /https?:/.test(u) && !/icon|avatar|emoji/i.test(u))
-        sink.add({ content_id: "img_" + urlId(u), content_type: "photo", url: u, entity_name: entity });
-    });
+    const users = [];
+    if (state) {
+      deepCollectMedia(state, sink, entity);
+      deepCollectUsers(state, users);
+    }
+    lemon8CollectDomMedia(sink, entity);
+    lemon8CollectDomUsers().forEach((u) => users.push(u));
+    if (users.length) {
+      const seen = new Set();
+      const uniqueUsers = users.filter((u) => {
+        const key = (u.username || u.user_id || "").toString().toLowerCase();
+        if (!key || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+      if (uniqueUsers.length) await send({ type: "users", platform: "lemon8", context: "author", users: uniqueUsers });
+    }
     if (sink.items.length) await send({ type: "ingest", platform: "lemon8", username: entity, items: sink.items });
-    return { targets: 1, saved: sink.items.length, discovered: 0 };
+    return { targets: 1, saved: sink.items.length, discovered: users.length };
   },
 };
 
@@ -2069,8 +2217,8 @@ let LOOP_RUNNING = false;
 const PASS_REST_MS = 180000; // fallback: ~2.4m-6.6m + occasional longer breaks via human()
 const PASS_REST_MS_BY_PLATFORM = {
   instagram: 180000,
-  tiktok: 90000,
-  lemon8: 90000,
+  tiktok: 180000,
+  lemon8: 60000,
   threads: 120000,
   x: 120000,
   facebook: 120000,

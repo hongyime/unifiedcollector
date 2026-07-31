@@ -225,6 +225,10 @@ class WorkerService:
     # escalation: a realtime source with no messages arriving is legitimately
     # idle, not wedged.
     REALTIME_SOURCES = frozenset({"whatsapp", "beeper", "telegram"})
+    SOURCE_MUTEX_GROUPS = {
+        "lemon8": "bytedance",
+        "tiktok": "bytedance",
+    }
 
     def __init__(self):
         self.pool = None
@@ -660,6 +664,31 @@ class WorkerService:
         raw = os.getenv("COLLECTOR_REFRESH_REALTIME_TARGET_PRIORITIES", "false")
         return raw.strip().lower() in {"1", "true", "yes", "on"}
 
+    async def _try_acquire_source_mutex(self, source: str):
+        group = self.SOURCE_MUTEX_GROUPS.get(source)
+        if not group:
+            return None
+        conn = await self.pool.acquire()
+        key = f"collector_mutex:{group}"
+        try:
+            locked = await conn.fetchval("SELECT pg_try_advisory_lock(hashtext($1))", key)
+        except Exception:
+            await self.pool.release(conn)
+            raise
+        if not locked:
+            await self.pool.release(conn)
+            return False
+        return conn, key
+
+    async def _release_source_mutex(self, handle) -> None:
+        if handle is None or handle is False:
+            return
+        conn, key = handle
+        try:
+            await conn.execute("SELECT pg_advisory_unlock(hashtext($1))", key)
+        finally:
+            await self.pool.release(conn)
+
     async def _run_source(self, source: str, startup_delay: float = 0.0):
         if startup_delay > 0:
             logger.info("worker/%s: staggered startup, waiting %.0fs", source, startup_delay)
@@ -710,7 +739,23 @@ class WorkerService:
                     logger.info("Running %s with %d targets", source, len(targets))
                 self._heartbeat[source] = time.monotonic()
                 before = collector.progress_count
-                await collector.run(targets)
+                mutex_handle = await self._try_acquire_source_mutex(source)
+                if mutex_handle is False:
+                    logger.info(
+                        "worker/%s: %s mutex is busy; waiting for sibling collector",
+                        source,
+                        self.SOURCE_MUTEX_GROUPS.get(source),
+                    )
+                    self._zero_progress_streak[source] = 0
+                    try:
+                        await asyncio.wait_for(self._stop.wait(), timeout=60)
+                    except asyncio.TimeoutError:
+                        pass
+                    continue
+                try:
+                    await collector.run(targets)
+                finally:
+                    await self._release_source_mutex(mutex_handle)
                 self._heartbeat[source] = time.monotonic()
                 self._crash_counts[source] = 0
                 self._hang_counts[source] = 0  # successful cycle clears hang budget
