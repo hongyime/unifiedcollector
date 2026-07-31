@@ -12,6 +12,7 @@ import makeWASocket, { DisconnectReason, fetchLatestBaileysVersion, downloadMedi
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
 import fs from 'fs';
+import path from 'path';
 import express from 'express';
 import crypto from 'crypto';
 import * as qrcode from 'qrcode-terminal';
@@ -233,7 +234,12 @@ app.post('/reconnect', (_req, res) => {
 // separate Disconnect control for explicit unpairing; Fresh QR is only a nudge
 // for bridge slots that are already in QR-pairing mode.
 app.post('/fresh-qr', async (_req, res) => {
-    const registered = Boolean(serviceHealthy || socketRegistered || activeSock?.authState?.creds?.registered);
+    const registered = Boolean(
+        serviceHealthy
+        || socketRegistered
+        || activeSock?.authState?.creds?.registered
+        || authPathHasRegisteredCreds()
+    );
     if (registered) {
         res.status(200).json({
             ...bridgeState(),
@@ -262,12 +268,12 @@ app.post('/fresh-qr', async (_req, res) => {
     lastDisconnectAt = null;
     pairingRecoveryUntil = null;
     try {
-        clearAuthState();
+        clearAuthState('fresh_qr');
         activeSock?.end?.(new Error('manual fresh QR'));
         scheduleReconnect('manual_fresh_qr', 1000);
         res.status(200).json({ status: 'fresh_qr_requested' });
     } catch (err: any) {
-        clearAuthState();
+        clearAuthState('fresh_qr_after_logout_failure');
         activeSock?.end?.(new Error('manual fresh QR after logout failure'));
         scheduleReconnect('manual_fresh_qr_after_logout_failure', 1000);
         res.status(200).json({ status: 'fresh_qr_requested', warning: err?.message || 'logout failed; local auth cleared' });
@@ -296,6 +302,14 @@ app.post('/media/decrypt', async (req, res) => {
     }
     if (!activeSock) {
         res.status(503).json({ error: 'bridge not connected' });
+        return;
+    }
+    if (!serviceHealthy || !activeSock?.authState?.creds?.registered) {
+        res.status(503).json({
+            error: 'bridge is not paired; scan a WhatsApp QR before decrypting media',
+            code: 'bridge_unpaired',
+            retryable: true,
+        });
         return;
     }
     const { messageId, mediaKey, directPath, mimetype } = req.body;
@@ -356,16 +370,77 @@ healthServer.headersTimeout = 3000;
 
 const getEnv = (key: string, dflt = ''): string => (process.env[key] || dflt).split('#')[0].trim();
 
-function clearAuthState(): void {
-    const authPath = process.env.AUTH_STORAGE_PATH || `./auth_info/${getEnv('SESSION_NAME', 'default')}`;
+function currentAuthPath(): string {
+    return process.env.AUTH_STORAGE_PATH || `./auth_info/${getEnv('SESSION_NAME', 'default')}`;
+}
+
+function authPathHasRegisteredCreds(authPath = currentAuthPath()): boolean {
+    const credsPath = path.join(authPath, 'creds.json');
+    if (!fs.existsSync(credsPath)) return false;
     try {
-        fs.rmSync(authPath, { recursive: true, force: true });
+        const raw = fs.readFileSync(credsPath, 'utf8');
+        const parsed = JSON.parse(raw);
+        return Boolean(parsed?.registered || parsed?.me || parsed?.account);
+    } catch {
+        // A creds.json that exists but cannot be parsed is still operator evidence.
+        // Preserve it rather than deleting the only local session copy.
+        return true;
+    }
+}
+
+function authPathHasRecoverableState(authPath = currentAuthPath()): boolean {
+    if (!fs.existsSync(authPath)) return false;
+    if (authPathHasRegisteredCreds(authPath)) return true;
+    try {
+        const credsPath = path.join(authPath, 'creds.json');
+        if (fs.existsSync(credsPath) && fs.statSync(credsPath).size > 0) {
+            return true;
+        }
+    } catch {
+        return true;
+    }
+    try {
+        const entries = fs.readdirSync(authPath);
+        return entries.some((entry) => entry !== 'history_watermarks.json');
+    } catch {
+        return false;
+    }
+}
+
+function archiveAuthState(authPath: string, reason: string): string | null {
+    if (!fs.existsSync(authPath)) return null;
+    const stamp = new Date().toISOString().replace(/[-:TZ.]/g, '').slice(0, 14);
+    const parent = path.dirname(authPath);
+    const base = path.basename(authPath);
+    let archivePath = path.join(parent, `${base}.cleared_${stamp}_${reason}`);
+    let suffix = 0;
+    while (fs.existsSync(archivePath)) {
+        suffix += 1;
+        archivePath = path.join(parent, `${base}.cleared_${stamp}_${reason}_${suffix}`);
+    }
+    fs.renameSync(authPath, archivePath);
+    fs.mkdirSync(authPath, { recursive: true });
+    return archivePath;
+}
+
+function clearAuthState(reason = 'manual'): void {
+    const authPath = currentAuthPath();
+    try {
+        const hadRecoverableState = authPathHasRecoverableState(authPath);
+        const archivePath = hadRecoverableState ? archiveAuthState(authPath, reason) : null;
+        if (!hadRecoverableState) {
+            fs.rmSync(authPath, { recursive: true, force: true });
+            fs.mkdirSync(authPath, { recursive: true });
+        }
         socketRegistered = false;
         serviceHealthy = false;
         latestQr = null;
         latestQrAt = null;
         connectionState = 'auth_cleared';
-        logger.info({ authPath }, 'Auth state cleared');
+        logger.info(
+            { authPath, archived: Boolean(archivePath), archivePath: archivePath ? path.basename(archivePath) : null },
+            'Auth state cleared'
+        );
     } catch (e) {
         logger.error({ err: e }, 'Failed to clear auth state');
     }
@@ -628,11 +703,11 @@ async function connectToWhatsApp(): Promise<void> {
 
             if (statusCode === DisconnectReason.loggedOut) {
                 logger.error('Logged out -- clearing auth, awaiting QR re-pair');
-                clearAuthState();
+                clearAuthState('logged_out');
                 scheduleReconnect('logged_out', 5000);
             } else if (statusCode === DisconnectReason.badSession) {
                 logger.error('Bad session -- clearing auth, reconnecting');
-                clearAuthState();
+                clearAuthState('bad_session');
                 scheduleReconnect('bad_session', 5000);
             } else if (statusCode === DisconnectReason.restartRequired || statusCode === 515) {
                 const now = Date.now();
@@ -654,7 +729,7 @@ async function connectToWhatsApp(): Promise<void> {
                         );
                     } else {
                         logger.error(`${MAX_RAPID_515} stream errors in window before registration -- clearing unpaired auth`);
-                        clearAuthState();
+                        clearAuthState('rapid_515_unregistered');
                         scheduleReconnect('rapid_515_unregistered', 5000);
                     }
                 } else {
