@@ -46,6 +46,8 @@ _SOURCE_MATRIX_DAY_CONTENT_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_DAY_
 _SOURCE_MATRIX_MEDIA_TOTALS_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_MEDIA_TOTALS_TIMEOUT_SECONDS", "8"))
 _SOURCE_MATRIX_YOUTUBE_BACKLOG_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_YOUTUBE_BACKLOG_TIMEOUT_SECONDS", "8"))
 _SOURCE_MATRIX_BROWSER_EXTENSION_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_BROWSER_EXTENSION_TIMEOUT_SECONDS", "6"))
+_BROWSER_EXTENSION_QUERY_TIMEOUT_SECONDS = float(os.getenv("BROWSER_EXTENSION_QUERY_TIMEOUT_SECONDS", "1.5"))
+_BROWSER_EXTENSION_PAYLOAD_BUDGET_SECONDS = float(os.getenv("BROWSER_EXTENSION_PAYLOAD_BUDGET_SECONDS", "5.0"))
 _SOURCE_CONTENT_PART_TIMEOUT_SECONDS = float(os.getenv("SOURCE_CONTENT_PART_TIMEOUT_SECONDS", "2"))
 _SOURCE_CONTENT_MEDIA_TIMEOUT_SECONDS = float(os.getenv("SOURCE_CONTENT_MEDIA_TIMEOUT_SECONDS", "4"))
 _SOURCE_CONTENT_SUMMARY_BUDGET_SECONDS = float(os.getenv("SOURCE_CONTENT_SUMMARY_BUDGET_SECONDS", "4.5"))
@@ -2070,10 +2072,67 @@ async def _browser_extension_payload(conn) -> dict:
         "media_revisit_queue": [],
         "tiktok_media": None,
         "issues": [],
+        "diagnostic_errors": [],
     }
 
-    if await conn.fetchval("SELECT to_regclass('dm_hook_heartbeat')", timeout=5) is not None:
-        rows = await conn.fetch(
+    deadline = time.monotonic() + max(0.5, _BROWSER_EXTENSION_PAYLOAD_BUDGET_SECONDS)
+
+    def _remaining_timeout() -> float | None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.1:
+            return None
+        return max(0.1, min(_BROWSER_EXTENSION_QUERY_TIMEOUT_SECONDS, remaining))
+
+    def _record_diagnostic_error(label: str, exc: BaseException | None = None) -> None:
+        payload["diagnostic_errors"].append({
+            "section": label,
+            "error": exc.__class__.__name__ if exc else "SkippedBudget",
+        })
+        if exc:
+            logger.warning("browser extension diagnostic %s failed: %s", label, exc.__class__.__name__)
+
+    async def _fetchval_or_none(label: str, query: str, *args):
+        timeout = _remaining_timeout()
+        if timeout is None:
+            _record_diagnostic_error(label)
+            return None
+        try:
+            return await conn.fetchval(query, *args, timeout=timeout)
+        except AssertionError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - dashboard diagnostics are best-effort
+            _record_diagnostic_error(label, exc)
+            return None
+
+    async def _fetch_or_empty(label: str, query: str, *args):
+        timeout = _remaining_timeout()
+        if timeout is None:
+            _record_diagnostic_error(label)
+            return []
+        try:
+            return await conn.fetch(query, *args, timeout=timeout)
+        except AssertionError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - dashboard diagnostics are best-effort
+            _record_diagnostic_error(label, exc)
+            return []
+
+    async def _fetchrow_or_none(label: str, query: str, *args):
+        timeout = _remaining_timeout()
+        if timeout is None:
+            _record_diagnostic_error(label)
+            return None
+        try:
+            return await conn.fetchrow(query, *args, timeout=timeout)
+        except AssertionError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - dashboard diagnostics are best-effort
+            _record_diagnostic_error(label, exc)
+            return None
+
+    if await _fetchval_or_none("dm_hook_table", "SELECT to_regclass('dm_hook_heartbeat')") is not None:
+        rows = await _fetch_or_empty(
+            "dm_hook_heartbeat",
             """
             SELECT platform,
                    max(last_seen) AS last_seen_at,
@@ -2086,7 +2145,6 @@ async def _browser_extension_payload(conn) -> dict:
             GROUP BY platform
             ORDER BY last_seen_at DESC
             """,
-            timeout=10,
         )
         for row in rows:
             current = row["extension_version"]
@@ -2127,8 +2185,9 @@ async def _browser_extension_payload(conn) -> dict:
                     "needs_new_event": not recent,
                 })
 
-    if await conn.fetchval("SELECT to_regclass('browser_ingest_events')", timeout=5) is not None:
-        extension_id, reload_url = _extension_reload_target_from_url(await conn.fetchval(
+    if await _fetchval_or_none("browser_ingest_events_table", "SELECT to_regclass('browser_ingest_events')") is not None:
+        extension_id, reload_url = _extension_reload_target_from_url(await _fetchval_or_none(
+            "browser_extension_reload_target",
             """
             SELECT metadata->>'url'
             FROM browser_ingest_events
@@ -2138,12 +2197,12 @@ async def _browser_extension_payload(conn) -> dict:
             ORDER BY created_at DESC
             LIMIT 1
             """,
-            timeout=5,
         ))
         payload["extension_id"] = extension_id
         payload["reload_url"] = reload_url
 
-        rows = await conn.fetch(
+        rows = await _fetch_or_empty(
+            "browser_ingest_events",
             """
             SELECT platform,
                    endpoint,
@@ -2160,7 +2219,6 @@ async def _browser_extension_payload(conn) -> dict:
             ORDER BY last_seen_at DESC
             LIMIT 30
             """,
-            timeout=10,
         )
         for row in rows:
             current = row["extension_version"]
@@ -2201,52 +2259,49 @@ async def _browser_extension_payload(conn) -> dict:
             stale_seconds = int(os.getenv("BROWSER_CONTENT_STALE_WARN_SECONDS", "3600") or "3600")
         except Exception:
             stale_seconds = 3600
-        try:
-            content_gap_rows = await conn.fetch(
-                """
-                WITH heartbeat AS (
-                    SELECT DISTINCT ON (platform)
-                           platform,
-                           created_at AS heartbeat_at,
-                           metadata
-                    FROM browser_ingest_events
-                    WHERE endpoint = 'browser_heartbeat'
-                      AND platform = ANY($2::text[])
-                    ORDER BY platform, created_at DESC
-                ),
-                content AS (
-                    SELECT DISTINCT ON (platform)
-                           platform,
-                           created_at AS last_content_at
-                    FROM browser_ingest_events
-                    WHERE endpoint <> 'browser_heartbeat'
-                      AND (observed_count > 0 OR stored_count > 0)
-                      AND platform = ANY($2::text[])
-                    ORDER BY platform, created_at DESC
-                )
-                SELECT heartbeat.platform,
-                       heartbeat.heartbeat_at,
-                       extract(epoch FROM now() - heartbeat.heartbeat_at)::int AS heartbeat_age_seconds,
-                       content.last_content_at,
-                       extract(epoch FROM now() - content.last_content_at)::int AS content_age_seconds,
-                       heartbeat.metadata->>'url' AS url,
-                       heartbeat.metadata->>'health_status' AS health_status,
-                       heartbeat.metadata->'content_counts' AS content_counts
-                FROM heartbeat
-                LEFT JOIN content ON content.platform = heartbeat.platform
-                WHERE heartbeat.heartbeat_at >= now() - ($1::int * interval '1 second')
-                  AND (
-                    content.last_content_at IS NULL
-                    OR content.last_content_at < now() - ($1::int * interval '1 second')
-                  )
-                ORDER BY heartbeat.heartbeat_at DESC
-                """,
-                max(300, stale_seconds),
-                ["instagram", "tiktok", "lemon8", "threads", "facebook", "x", "strava"],
-                timeout=10,
+        content_gap_rows = await _fetch_or_empty(
+            "browser_content_gap",
+            """
+            WITH heartbeat AS (
+                SELECT DISTINCT ON (platform)
+                       platform,
+                       created_at AS heartbeat_at,
+                       metadata
+                FROM browser_ingest_events
+                WHERE endpoint = 'browser_heartbeat'
+                  AND platform = ANY($2::text[])
+                ORDER BY platform, created_at DESC
+            ),
+            content AS (
+                SELECT DISTINCT ON (platform)
+                       platform,
+                       created_at AS last_content_at
+                FROM browser_ingest_events
+                WHERE endpoint <> 'browser_heartbeat'
+                  AND (observed_count > 0 OR stored_count > 0)
+                  AND platform = ANY($2::text[])
+                ORDER BY platform, created_at DESC
             )
-        except Exception:
-            content_gap_rows = []
+            SELECT heartbeat.platform,
+                   heartbeat.heartbeat_at,
+                   extract(epoch FROM now() - heartbeat.heartbeat_at)::int AS heartbeat_age_seconds,
+                   content.last_content_at,
+                   extract(epoch FROM now() - content.last_content_at)::int AS content_age_seconds,
+                   heartbeat.metadata->>'url' AS url,
+                   heartbeat.metadata->>'health_status' AS health_status,
+                   heartbeat.metadata->'content_counts' AS content_counts
+            FROM heartbeat
+            LEFT JOIN content ON content.platform = heartbeat.platform
+            WHERE heartbeat.heartbeat_at >= now() - ($1::int * interval '1 second')
+              AND (
+                content.last_content_at IS NULL
+                OR content.last_content_at < now() - ($1::int * interval '1 second')
+              )
+            ORDER BY heartbeat.heartbeat_at DESC
+            """,
+            max(300, stale_seconds),
+            ["instagram", "tiktok", "lemon8", "threads", "facebook", "x", "strava"],
+        )
         for row in content_gap_rows:
             raw = dict(row)
             if "heartbeat_age_seconds" not in raw:
@@ -2272,8 +2327,9 @@ async def _browser_extension_payload(conn) -> dict:
             issue["extension_id"] = payload.get("extension_id")
             issue["reload_url"] = payload.get("reload_url")
 
-    if await conn.fetchval("SELECT to_regclass('browser_media_candidates')", timeout=5) is not None:
-        rows = await conn.fetch(
+    if await _fetchval_or_none("browser_media_candidates_table", "SELECT to_regclass('browser_media_candidates')") is not None:
+        rows = await _fetch_or_empty(
+            "browser_media_candidates",
             """
             SELECT platform,
                    outcome,
@@ -2287,7 +2343,6 @@ async def _browser_extension_payload(conn) -> dict:
             ORDER BY platform, candidates DESC, last_seen_at DESC
             LIMIT 60
             """,
-            timeout=10,
         )
         payload["media_candidates"] = [
             {
@@ -2301,9 +2356,10 @@ async def _browser_extension_payload(conn) -> dict:
             for row in rows
         ]
 
-    if await conn.fetchval("SELECT to_regclass('browser_media_revisit_queue')", timeout=5) is not None:
+    if await _fetchval_or_none("browser_media_revisit_queue_table", "SELECT to_regclass('browser_media_revisit_queue')") is not None:
         claim_timeout = _tiktok_revisit_claim_timeout_seconds()
-        rows = await conn.fetch(
+        rows = await _fetch_or_empty(
+            "browser_media_revisit_queue",
             """
             SELECT platform,
                    count(*) FILTER (
@@ -2327,7 +2383,6 @@ async def _browser_extension_payload(conn) -> dict:
             LIMIT 12
             """,
             claim_timeout,
-            timeout=10,
         )
         payload["media_revisit_queue"] = [
             {
@@ -2344,8 +2399,9 @@ async def _browser_extension_payload(conn) -> dict:
             for row in rows
         ]
 
-    if await conn.fetchval("SELECT to_regclass('tiktok_browser_media_candidates')", timeout=5) is not None:
-        rows = await conn.fetch(
+    if await _fetchval_or_none("tiktok_browser_media_candidates_table", "SELECT to_regclass('tiktok_browser_media_candidates')") is not None:
+        rows = await _fetch_or_empty(
+            "tiktok_browser_media_candidates",
             """
             SELECT outcome,
                    count(*)::int AS candidates,
@@ -2357,12 +2413,12 @@ async def _browser_extension_payload(conn) -> dict:
             ORDER BY candidates DESC, last_seen_at DESC
             LIMIT 12
             """,
-            timeout=10,
         )
         queue = None
-        if await conn.fetchval("SELECT to_regclass('tiktok_browser_revisit_queue')", timeout=5) is not None:
+        if await _fetchval_or_none("tiktok_browser_revisit_queue_table", "SELECT to_regclass('tiktok_browser_revisit_queue')") is not None:
             claim_timeout = _tiktok_revisit_claim_timeout_seconds()
-            queue = await conn.fetchrow(
+            queue = await _fetchrow_or_none(
+                "tiktok_browser_revisit_queue",
                 """
                 SELECT count(*) FILTER (
                          WHERE status IN ('pending', 'failed')
@@ -2382,7 +2438,6 @@ async def _browser_extension_payload(conn) -> dict:
                 FROM tiktok_browser_revisit_queue
                 """,
                 claim_timeout,
-                timeout=10,
             )
         payload["tiktok_media"] = {
             "outcomes": [
