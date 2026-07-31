@@ -127,7 +127,10 @@ const sourceMatrixColumns: ColumnDef<SourceCollectionMatrixRow, unknown>[] = [
       const row = info.row.original;
       return (
         <div className="flex items-center gap-2">
-          <StatusBadge status={liveBadgeStatus(row.status)} label={row.status} />
+          <StatusBadge
+            status={row.status_severity ? blockerBadgeStatus(row.status_severity) : liveBadgeStatus(row.status)}
+            label={row.status_label ?? row.status}
+          />
           <div>
             <div className="uppercase font-medium text-text-primary">{row.display_name ?? (info.getValue() as string)}</div>
             <div className="text-[10px] uppercase tracking-wide text-text-muted">

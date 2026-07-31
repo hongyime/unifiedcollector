@@ -1624,6 +1624,25 @@ def _source_media_freshness(source: str | None, current_window: dict, day_window
     }
 
 
+def _source_operator_status(source_row: dict, blocker: dict) -> dict:
+    """Human-facing status for the matrix.
+
+    ``status`` remains the raw freshness state for API compatibility. This
+    display status prevents quiet Beeper networks from looking broken simply
+    because no messages arrived recently.
+    """
+    status = source_row.get("status") or "unknown"
+    if blocker.get("kind") == "quiet_beeper_subsource":
+        return {"status_label": "quiet", "status_severity": "ok"}
+    if status == "live":
+        severity = "ok"
+    elif status in {"dead", "unpaired", "unreachable"}:
+        severity = "error"
+    else:
+        severity = "warning"
+    return {"status_label": status, "status_severity": severity}
+
+
 def _source_matrix_row(source_row: dict, current_content: dict | None, current_rate: dict | None,
                        day_content: dict | None, day_rate: dict | None, media_total: dict | None,
                        cursor_row: dict | None, extension_issues: list[dict],
@@ -1634,6 +1653,17 @@ def _source_matrix_row(source_row: dict, current_content: dict | None, current_r
     current_window = _merge_source_window(current_content, current_rate)
     day_window = _merge_source_window(day_content, day_rate)
     media_freshness = _source_media_freshness(source, current_window, day_window, total_media, now)
+    if (
+        blocker.get("kind") == "quiet_beeper_subsource"
+        and media_freshness.get("severity") != "ok"
+    ):
+        media_freshness = {
+            **media_freshness,
+            "status": "quiet",
+            "severity": "ok",
+            "summary": "No recent messages in this Beeper network; media silence is expected.",
+            "next_action": "No media action unless you expected this network to receive files.",
+        }
     backlog = dict(media_backlog or {})
     if (
         blocker.get("kind") == "none"
@@ -1674,6 +1704,7 @@ def _source_matrix_row(source_row: dict, current_content: dict | None, current_r
         "parent_source": source_row.get("parent_source"),
         "rollup_exclude": bool(source_row.get("rollup_exclude")),
         "status": source_row.get("status"),
+        **_source_operator_status(source_row, blocker),
         "collection_mode": source_row.get("collection_mode"),
         "collection_methods": _source_collection_methods(source),
         "freshness_basis": source_row.get("freshness_basis"),

@@ -221,6 +221,35 @@ def test_source_matrix_blocker_still_warns_for_stale_parent_beeper_collector():
     assert blocker["severity"] == "warning"
 
 
+def test_source_matrix_row_labels_quiet_beeper_subsource_without_media_warning():
+    row = _source_matrix_row(
+        _source(
+            source="beeper_linkedin",
+            parent_source="beeper",
+            status="stale",
+            collection_mode="messaging bridge",
+            detail="Beeper / LinkedIn via Beeper: 2 chats, 3 people.",
+        ),
+        current_content=None,
+        current_rate=None,
+        day_content=None,
+        day_rate=None,
+        media_total={"total_media_items": 0, "total_media_bytes": 0, "latest_media_at": None},
+        cursor_row=None,
+        extension_issues=[],
+        now=datetime(2026, 7, 28, 1, 30, tzinfo=timezone.utc),
+    )
+
+    assert row["status"] == "stale"
+    assert row["status_label"] == "quiet"
+    assert row["status_severity"] == "ok"
+    assert row["blocker"]["kind"] == "quiet_beeper_subsource"
+    assert row["blocker"]["severity"] == "ok"
+    assert row["media_freshness"]["status"] == "quiet"
+    assert row["media_freshness"]["severity"] == "ok"
+    assert "media silence is expected" in row["media_freshness"]["summary"]
+
+
 def test_rate_limit_cursor_payload_marks_expired_cursor_inactive():
     now = datetime(2026, 7, 28, 0, 0, tzinfo=timezone.utc)
     payload = _rate_limit_cursor_payload(

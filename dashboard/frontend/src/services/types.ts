@@ -175,6 +175,8 @@ export interface SourceCollectionMatrixRow {
   parent_source?: string | null;
   rollup_exclude?: boolean;
   status: CollectorLiveSource["status"];
+  status_label?: string;
+  status_severity?: "ok" | "warning" | "error" | string;
   collection_mode: string | null;
   collection_methods: string[];
   freshness_basis: string | null;
