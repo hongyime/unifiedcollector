@@ -5,7 +5,7 @@
 // platform is scrapeable without logging in (e.g. Lemon8 For-You), so the
 // launcher shows "no login needed" instead of a red "not logged in".
 globalThis.UC_PLATFORMS = [
-  { id: "instagram", label: "Instagram",   url: "https://www.instagram.com/",   host: "www.instagram.com",   cookieUrl: "https://www.instagram.com",   cookie: "sessionid",  scraper: true  },
+  { id: "instagram", label: "Instagram",   url: "https://www.instagram.com/",   host: "www.instagram.com",   cookieUrl: "https://www.instagram.com",   cookie: "sessionid",  scraper: true, extraUrls: ["https://www.instagram.com/direct/inbox/"] },
   // Threads moved threads.net -> threads.com in Apr 2025 (.net just redirects).
   { id: "threads",   label: "Threads",     url: "https://www.threads.com/",     host: "www.threads.com",     cookieUrl: "https://www.threads.com",     cookie: "sessionid",  scraper: true  },
   { id: "tiktok",    label: "TikTok",      url: "https://www.tiktok.com/following", host: "www.tiktok.com",  cookieUrl: "https://www.tiktok.com",      cookie: "sessionid",  scraper: true, extraUrls: ["https://www.tiktok.com/foryou"] },

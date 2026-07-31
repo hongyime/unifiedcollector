@@ -849,6 +849,9 @@ const instagram = {
   },
 
   async runCycle() {
+    if (/^\/direct(?:\/|$)/.test(location.pathname || "")) {
+      return { targets: 0, saved: 0, discovered: 0, dm_tab: true };
+    }
     // ANTI-BAN (cooperative): the HEADLESS collector shares this IG account. If it's
     // in a 429 cooldown, the extension must rest too — adopt its remaining time as
     // our own wall so we don't probe a flagged account from the other side.

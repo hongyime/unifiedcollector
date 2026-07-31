@@ -15,7 +15,7 @@
 // background worker owns its platform registry directly. Popup/tabs pages still
 // load platforms.js for browser UI.
 globalThis.UC_PLATFORMS = [
-  { id: "instagram", label: "Instagram",   url: "https://www.instagram.com/",       host: "www.instagram.com",  cookieUrl: "https://www.instagram.com",      cookie: "sessionid",  scraper: true },
+  { id: "instagram", label: "Instagram",   url: "https://www.instagram.com/",       host: "www.instagram.com",  cookieUrl: "https://www.instagram.com",      cookie: "sessionid",  scraper: true, extraUrls: ["https://www.instagram.com/direct/inbox/"] },
   { id: "threads",   label: "Threads",     url: "https://www.threads.com/",         host: "www.threads.com",    cookieUrl: "https://www.threads.com",        cookie: "sessionid",  scraper: true },
   { id: "tiktok",    label: "TikTok",      url: "https://www.tiktok.com/following", host: "www.tiktok.com",     cookieUrl: "https://www.tiktok.com",         cookie: "sessionid",  scraper: true, extraUrls: ["https://www.tiktok.com/foryou"] },
   { id: "lemon8",    label: "Lemon8",      url: "https://www.lemon8-app.com/",      host: "www.lemon8-app.com", cookieUrl: "https://www.lemon8-app.com",     cookie: "sessionid",  scraper: true, noLogin: true },
@@ -92,6 +92,35 @@ async function reportBridgeHeartbeat(reason) {
         health_reason: reason || "startup",
       })),
     });
+  } catch (e) {}
+}
+function platformForTabUrl(url) {
+  let host = "";
+  try { host = new URL(url || "").host; } catch (e) { return null; }
+  return scraperPlatforms().find((p) => host === p.host) || null;
+}
+async function reportScraperTabHeartbeats(reason) {
+  try {
+    const base = await ingestBase();
+    const tabs = await chrome.tabs.query({ url: scraperUrlPatterns() });
+    for (const tab of tabs || []) {
+      const platform = platformForTabUrl(tab.url);
+      if (!platform) continue;
+      await fetch(base + "/social/browser-heartbeat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(withExtensionVersion({
+          platform: platform.id,
+          label: platform.label,
+          running: true,
+          tab_id: tab.id,
+          url: tab.url || null,
+          health_status: "background_tab_seen",
+          health_reason: reason || "background_watchdog",
+          page_title: tab.title || null,
+        })),
+      });
+    }
   } catch (e) {}
 }
 async function fetchJsonWithTimeout(url, timeoutMs = 12000) {
@@ -194,13 +223,16 @@ async function syncCookies() {
   } catch (e) { /* cookies perm / ingest down */ }
 }
 
-async function refreshScraperTabs() {
+async function refreshScraperTabs(options = {}) {
   if (!(await autoTabsEnabled()) || _tabsOpInProgress) return;
   _tabsOpInProgress = true;
+  const bypassCache = !!options.bypassCache;
+  const reason = options.reason || "refresh";
   try {
     const tabs = await chrome.tabs.query({ url: scraperUrlPatterns() });
-    for (const t of tabs || []) { try { await chrome.tabs.reload(t.id, { bypassCache: false }); await _sleep(_humanGap(8000)); } catch (e) {} }
-    await log("info", `auto-refreshed ${tabs ? tabs.length : 0} scraper tab(s), staggered → loop respawns fresh`);
+    for (const t of tabs || []) { try { await chrome.tabs.reload(t.id, { bypassCache }); await _sleep(_humanGap(8000)); } catch (e) {} }
+    const mode = bypassCache ? "hard-refreshed" : "auto-refreshed";
+    await log("info", `${mode} ${tabs ? tabs.length : 0} scraper tab(s), staggered → loop respawns fresh (${reason})`);
   } finally { _tabsOpInProgress = false; }
 }
 
@@ -211,6 +243,7 @@ async function scheduleAlarm() {
   const ver = (chrome.runtime.getManifest && chrome.runtime.getManifest().version) || "?";
   await log("info", `worker started v${ver} - jittered tabs + ${WATCHDOG_MIN}-min watchdog + ${REFRESH_MIN}-min refresh`);
   await reportBridgeHeartbeat("schedule_alarm");
+  await reportScraperTabHeartbeats("schedule_alarm");
 }
 // onInstalled fires on every extension reload/update — the exact moment content
 // scripts in already-open tabs get SEVERED ("Extension context invalidated") and go
@@ -221,15 +254,32 @@ async function scheduleAlarm() {
 chrome.runtime.onInstalled.addListener(() => {
   scheduleAlarm(); syncCookies();
   ensureScraperTabsOpen("installed")
-    .then(() => refreshScraperTabs())   // revive orphaned tabs from the reload
+    .then(() => reportScraperTabHeartbeats("installed"))
+    .then(() => refreshScraperTabs({ bypassCache: true, reason: "installed" }))   // revive orphaned tabs from the reload
+    .then(() => reportScraperTabHeartbeats("installed_refresh"))
     .then(() => ensureLoops("installed"));
 });
-chrome.runtime.onStartup.addListener(() => { scheduleAlarm(); syncCookies(); ensureScraperTabsOpen("startup").then(() => ensureLoops("startup")); });
+chrome.runtime.onStartup.addListener(() => {
+  scheduleAlarm(); syncCookies();
+  ensureScraperTabsOpen("startup")
+    .then(() => reportScraperTabHeartbeats("startup"))
+    .then(() => ensureLoops("startup"));
+});
 
 chrome.alarms.onAlarm.addListener(async (a) => {
   if (a.name && a.name.startsWith(PAGE_RECOVERY_PREFIX)) { await runPageRecovery(a.name.slice(PAGE_RECOVERY_PREFIX.length)); }
-  else if (a.name === ALARM) { await _alarmJitter(); await ensureScraperTabsOpen("watchdog"); await ensureLoops("watchdog"); }
-  else if (a.name === ALARM_REFRESH) { await _alarmJitter(); await refreshScraperTabs(); await syncCookies(); }
+  else if (a.name === ALARM) {
+    await _alarmJitter();
+    await ensureScraperTabsOpen("watchdog");
+    await reportScraperTabHeartbeats("watchdog");
+    await ensureLoops("watchdog");
+  }
+  else if (a.name === ALARM_REFRESH) {
+    await _alarmJitter();
+    await refreshScraperTabs({ reason: "scheduled" });
+    await reportScraperTabHeartbeats("refresh");
+    await syncCookies();
+  }
 });
 
 // scraper hosts that have a content-script scraper
@@ -1058,3 +1108,4 @@ async function scrapeNow() {
 setStatus({ swStartedAt: Date.now() });
 log("info", "service worker active");
 reportBridgeHeartbeat("warm_start").catch(() => {});
+reportScraperTabHeartbeats("warm_start").catch(() => {});
