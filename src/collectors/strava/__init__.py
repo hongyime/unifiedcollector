@@ -38,6 +38,12 @@ _PRIVACY_ZONE_THRESHOLD_M = 50.0
 _GPS_429_EVENT_DEDUPE_SECONDS = 120.0
 
 
+def _format_exception(exc) -> str:
+    detail = str(exc).strip()
+    name = type(exc).__name__
+    return f"{name}: {detail}" if detail else name
+
+
 def _clean_strava_text(value) -> str | None:
     if value is None:
         return None
@@ -780,8 +786,9 @@ class StravaCollector(BaseCollector):
                     logger.warning("strava/%s: no auth available (no API creds, no session cookie); skipping", target)
                 await self.checkpoint.save_progress(target)
             except Exception as e:
-                logger.error("Failed strava/%s: %s", target, e)
-                await self.send_to_dlq(target, target, str(e))
+                error_text = _format_exception(e)
+                logger.error("Failed strava/%s: %s", target, error_text)
+                await self.send_to_dlq(target, target, error_text)
 
         # Scrape the authenticated user's following feed (recent activities from
         # people the logged-in athlete follows). Runs only when cookie auth
@@ -1539,8 +1546,9 @@ class StravaCollector(BaseCollector):
                 logger.warning("strava web upsert failed for %s: %s", athlete_id, e)
             logger.info("strava web scrape captured profile for %s (activities require API)", athlete_id)
         except Exception as e:
-            logger.error("strava web scrape failed for %s: %s", athlete_id, e)
-            await self.send_to_dlq(athlete_id, athlete_id, f"web_scrape:{e}")
+            error_text = _format_exception(e)
+            logger.error("strava web scrape failed for %s: %s", athlete_id, error_text)
+            await self.send_to_dlq(athlete_id, athlete_id, f"web_scrape:{error_text}")
 
     async def _collect_activities_api(self, client: httpx.AsyncClient, aid: str, aname: str):
         page, per_page = 1, 50
@@ -2235,8 +2243,9 @@ class StravaCollector(BaseCollector):
                 self._known_ids.add(cid)
             return inserted
         except Exception as e:
-            logger.error("Download failed %s: %s", cid, e)
-            await self.send_to_dlq(item["entity_id"], cid, str(e))
+            error_text = _format_exception(e)
+            logger.error("Download failed %s: %s", cid, error_text)
+            await self.send_to_dlq(item["entity_id"], cid, error_text)
             return False
 
     # ------------------------------------------------------------------ #

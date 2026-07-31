@@ -28,13 +28,14 @@ import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 
 from src.collectors import strava as strava_mod
-from src.collectors.strava import StravaCollector
+from src.collectors.strava import StravaCollector, _format_exception
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
@@ -123,6 +124,11 @@ def test_constructor_no_creds_disables_both_modes(monkeypatch):
     assert coll.SOURCE_NAME == "strava"
 
 
+def test_format_exception_keeps_blank_timeouts_readable():
+    assert _format_exception(TimeoutError()) == "TimeoutError"
+    assert _format_exception(RuntimeError("boom")) == "RuntimeError: boom"
+
+
 def test_constructor_api_mode(monkeypatch):
     _set_api_env(monkeypatch)
     coll = StravaCollector()
@@ -150,16 +156,28 @@ def test_set_pool_propagates_to_photo_tracker(monkeypatch):
     coll._photo_tracker.set_pool.assert_called_once_with(pool)
 
 
-def test_gps_stream_429_event_dedupes_same_activity(monkeypatch):
+@pytest.mark.asyncio
+async def test_gps_stream_429_event_dedupes_same_activity(monkeypatch):
     _set_web_env(monkeypatch)
     monkeypatch.setattr(strava_mod, "_GPS_429_EVENT_DEDUPE_SECONDS", 9999.0)
+    monkeypatch.setattr(
+        strava_mod,
+        "record_dynamic_cooldown",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                seconds_remaining=1800,
+                streak=1,
+                service="strava:gps_streams",
+            )
+        ),
+    )
     coll = StravaCollector()
     coll._note_rate_limit = MagicMock()
 
-    coll._set_gps_stream_cooldown("123", "page")
-    coll._set_gps_stream_cooldown("123", "page-fallback")
+    await coll._set_gps_stream_cooldown("123", "page")
+    await coll._set_gps_stream_cooldown("123", "page-fallback")
     coll._recent_gps_429s["123"] -= 10000.0
-    coll._set_gps_stream_cooldown("123", "page")
+    await coll._set_gps_stream_cooldown("123", "page")
 
     assert coll._note_rate_limit.call_count == 2
 
@@ -334,7 +352,8 @@ async def test_fetch_streams_sets_gps_cooldown_after_retry_still_429(monkeypatch
     assert fake_client.get.await_count == 2
     assert coll._gps_stream_cooling_down() is True
     coll._note_rate_limit.assert_called_once()
-    assert coll._note_rate_limit.call_args.kwargs["cooldown_seconds"] == coll._gps_stream_cooldown_seconds
+    cooldown = coll._note_rate_limit.call_args.kwargs["cooldown_seconds"]
+    assert coll._gps_stream_cooldown_seconds <= cooldown <= coll._gps_stream_cooldown_max_seconds
 
 
 @pytest.mark.asyncio
@@ -821,6 +840,42 @@ async def test_download_media_error_routes_to_dlq(monkeypatch, tmp_path):
         })
 
     coll.send_to_dlq.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_download_media_dlq_records_exception_type_for_blank_timeout(monkeypatch, tmp_path):
+    _set_api_env(monkeypatch)
+    monkeypatch.setenv("COLLECTOR_DRIVE_PATH", str(tmp_path))
+    monkeypatch.setenv("COLLECTOR_VAULT_ROOT", str(tmp_path))
+    import importlib
+    import src.core.drive_check as dc
+    importlib.reload(dc)
+    import src.core.base_collector as bc
+    importlib.reload(bc)
+    import src.core.vault as vault_mod
+    importlib.reload(vault_mod)
+    importlib.reload(strava_mod)
+
+    coll = strava_mod.StravaCollector()
+    pool = _make_pool()
+    coll.set_pool(pool)
+    coll.send_to_dlq = AsyncMock()
+    coll.insert_media_item = AsyncMock()
+    client = _stub_async_client()
+    client.get = AsyncMock(side_effect=TimeoutError())
+
+    with patch.object(strava_mod.httpx, "AsyncClient", return_value=client), patch.dict(
+        coll.download_media.__func__.__globals__,
+        {"assert_media_write_allowed": lambda *args, **kwargs: None},
+    ):
+        await coll.download_media({
+            "entity_id": "42", "entity_name": "alice",
+            "content_type": "activity", "content_id": "ACT_TIMEOUT",
+            "url": "https://example.com/p.jpg",
+        })
+
+    coll.insert_media_item.assert_not_awaited()
+    coll.send_to_dlq.assert_awaited_once_with("42", "ACT_TIMEOUT", "TimeoutError")
 
 
 # ── download_route_maps ────────────────────────────────────────────────────
