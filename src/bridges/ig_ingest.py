@@ -100,6 +100,20 @@ try:
     )
 except (TypeError, ValueError):
     STRAVA_BROWSER_429_MAX_COOLDOWN_SECONDS = max(STRAVA_BROWSER_429_COOLDOWN_SECONDS, 21600)
+try:
+    TIKTOK_BROWSER_REVISIT_CLAIM_TIMEOUT_SECONDS = max(
+        60,
+        int(os.getenv("TIKTOK_BROWSER_REVISIT_CLAIM_TIMEOUT_SECONDS", "1800")),
+    )
+except (TypeError, ValueError):
+    TIKTOK_BROWSER_REVISIT_CLAIM_TIMEOUT_SECONDS = 1800
+try:
+    TIKTOK_BROWSER_REVISIT_CLAIM_HOLD_SECONDS = max(
+        60,
+        int(os.getenv("TIKTOK_BROWSER_REVISIT_CLAIM_HOLD_SECONDS", "900")),
+    )
+except (TypeError, ValueError):
+    TIKTOK_BROWSER_REVISIT_CLAIM_HOLD_SECONDS = 900
 _SAFE = re.compile(r"[^A-Za-z0-9._-]")
 _THREADS_SYNTHETIC_MEDIA_ID = re.compile(r"^(?:img|vid)_[a-z0-9]+$", re.IGNORECASE)
 
@@ -1716,17 +1730,29 @@ async def tiktok_revisit_target(request):
         max_attempts = max(1, int(os.getenv("TIKTOK_BROWSER_REVISIT_MAX_ATTEMPTS", "5")))
     except (TypeError, ValueError):
         max_attempts = 5
+    claim_timeout = TIKTOK_BROWSER_REVISIT_CLAIM_TIMEOUT_SECONDS
+    claim_hold = TIKTOK_BROWSER_REVISIT_CLAIM_HOLD_SECONDS
     try:
         async with request.app["pool"].acquire() as conn:
             row = await conn.fetchrow(
                 """
                 WITH picked AS (
-                  SELECT id
+                  SELECT id, status AS previous_status
                   FROM tiktok_browser_revisit_queue
-                  WHERE status IN ('pending', 'failed')
-                    AND next_visit_at <= now()
+                  WHERE (
+                      (status IN ('pending', 'failed') AND next_visit_at <= now())
+                      OR (
+                        status = 'claimed'
+                        AND COALESCE(last_attempt_at, updated_at, created_at)
+                            <= now() - ($2::int * interval '1 second')
+                      )
+                    )
                     AND attempts < $1
-                  ORDER BY priority DESC, next_visit_at ASC, created_at ASC
+                  ORDER BY
+                    CASE WHEN status = 'claimed' THEN 0 ELSE 1 END,
+                    priority DESC,
+                    next_visit_at ASC,
+                    created_at ASC
                   FOR UPDATE SKIP LOCKED
                   LIMIT 1
                 )
@@ -1734,18 +1760,30 @@ async def tiktok_revisit_target(request):
                 SET status = 'claimed',
                     attempts = q.attempts + 1,
                     last_attempt_at = now(),
-                    next_visit_at = now() + interval '15 minutes',
+                    next_visit_at = now() + ($3::int * interval '1 second'),
+                    metadata = q.metadata || jsonb_build_object(
+                      'last_claim_previous_status', picked.previous_status,
+                      'last_claimed_at', now()
+                    ),
                     updated_at = now()
                 FROM picked
                 WHERE q.id = picked.id
                 RETURNING q.content_id, q.username, q.post_url, q.source_url,
-                          q.reason, q.priority, q.attempts, q.metadata
+                          q.reason, q.priority, q.attempts, picked.previous_status,
+                          q.metadata
                 """,
                 max_attempts,
+                claim_timeout,
+                claim_hold,
             )
         if not row:
             return _cors(web.json_response({"ok": True, "target": None}))
         target = dict(row)
+        if isinstance(target.get("metadata"), str):
+            try:
+                target["metadata"] = json.loads(target["metadata"])
+            except Exception:
+                target["metadata"] = {"raw": target["metadata"]}
         if target.get("metadata") is None:
             target["metadata"] = {}
         return _cors(web.json_response({"ok": True, "target": target}, dumps=lambda v: json.dumps(v, default=str)))

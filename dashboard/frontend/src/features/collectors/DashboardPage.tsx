@@ -824,7 +824,7 @@ export function DashboardPage() {
               </div>
               {tiktokMedia.queue && (
                 <div className="text-text-muted mt-1">
-                  revisit queue {formatNumber(tiktokMedia.queue.due)} due · {formatNumber(tiktokMedia.queue.claimed)} claimed · {formatNumber(tiktokMedia.queue.pending)} pending · {formatNumber(tiktokMedia.queue.completed)} completed
+                  revisit queue {formatNumber(tiktokMedia.queue.due)} due · {formatNumber(tiktokMedia.queue.claimed)} claimed · {formatNumber(tiktokMedia.queue.stale_claimed ?? 0)} stale · {formatNumber(tiktokMedia.queue.pending)} pending · {formatNumber(tiktokMedia.queue.completed)} completed
                 </div>
               )}
             </div>

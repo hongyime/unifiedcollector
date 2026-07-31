@@ -43,6 +43,13 @@ _INGESTION_HOURLY_CACHE: dict[int, dict[str, object]] = {}
 _TELEGRAM_STATS_CACHE: dict[str, object] = {"ts": 0.0, "payload": None}
 _TELEGRAM_STATS_TTL_SECONDS = int(os.getenv("TELEGRAM_STATS_TTL_SECONDS", "30"))
 _YOUTUBE_MEDIA_BACKLOG_CACHE: dict[str, object] = {"ts": 0.0, "row": None}
+
+
+def _tiktok_revisit_claim_timeout_seconds() -> int:
+    try:
+        return max(60, int(os.getenv("TIKTOK_BROWSER_REVISIT_CLAIM_TIMEOUT_SECONDS", "1800")))
+    except (TypeError, ValueError):
+        return 1800
 _YOUTUBE_MEDIA_BACKLOG_TTL_SECONDS = int(os.getenv("YOUTUBE_MEDIA_BACKLOG_TTL_SECONDS", "600"))
 _YOUTUBE_COMPLETENESS_CACHE: dict[str, object] = {"ts": 0.0, "payload": None}
 _YOUTUBE_COMPLETENESS_TTL_SECONDS = int(os.getenv("YOUTUBE_COMPLETENESS_TTL_SECONDS", "60"))
@@ -1863,6 +1870,7 @@ async def _browser_extension_payload(conn) -> dict:
         )
         queue = None
         if await conn.fetchval("SELECT to_regclass('tiktok_browser_revisit_queue')", timeout=5) is not None:
+            claim_timeout = _tiktok_revisit_claim_timeout_seconds()
             queue = await conn.fetchrow(
                 """
                 SELECT count(*) FILTER (
@@ -1870,6 +1878,11 @@ async def _browser_extension_payload(conn) -> dict:
                            AND next_visit_at <= now()
                        )::int AS due,
                        count(*) FILTER (WHERE status = 'claimed')::int AS claimed,
+                       count(*) FILTER (
+                         WHERE status = 'claimed'
+                           AND COALESCE(last_attempt_at, updated_at, created_at)
+                               <= now() - ($1::int * interval '1 second')
+                       )::int AS stale_claimed,
                        count(*) FILTER (WHERE status = 'pending')::int AS pending,
                        count(*) FILTER (WHERE status = 'failed')::int AS failed,
                        count(*) FILTER (WHERE status = 'unavailable')::int AS unavailable,
@@ -1877,6 +1890,7 @@ async def _browser_extension_payload(conn) -> dict:
                        max(updated_at) AS last_seen_at
                 FROM tiktok_browser_revisit_queue
                 """,
+                claim_timeout,
                 timeout=10,
             )
         payload["tiktok_media"] = {

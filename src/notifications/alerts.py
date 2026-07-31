@@ -313,13 +313,15 @@ def _format_tiktok_media_diagnostics(rows: list[dict], queue: dict | None = None
     if queue:
         due = int(queue.get("due", 0) or 0)
         claimed = int(queue.get("claimed", 0) or 0)
+        stale_claimed = int(queue.get("stale_claimed", 0) or 0)
         pending = int(queue.get("pending", 0) or 0)
         failed = int(queue.get("failed", 0) or 0)
         unavailable = int(queue.get("unavailable", 0) or 0)
         completed = int(queue.get("completed", 0) or 0)
+        stale_text = f", {stale_claimed:,} stale claimed ready to reclaim" if stale_claimed else ""
         lines.append(
             f"• TikTok detail revisit queue: {due:,} due now, "
-            f"{claimed:,} claimed by browser, {pending:,} pending, "
+            f"{claimed:,} claimed by browser{stale_text}, {pending:,} pending, "
             f"{failed:,} failed/retry, {unavailable:,} unavailable, "
             f"{completed:,} completed."
         )

@@ -155,6 +155,7 @@ async def test_notify_status_splits_rate_limit_from_auth_events(monkeypatch):
         "tiktok_browser_revisit_queue": {
             "due": 2,
             "claimed": 1,
+            "stale_claimed": 1,
             "pending": 4,
             "failed": 1,
             "unavailable": 0,
@@ -230,6 +231,7 @@ async def test_notify_status_splits_rate_limit_from_auth_events(monkeypatch):
     assert "<b>TikTok media follow-up</b>" in msg
     assert "short-lived video URL queued for browser revisit: 3" in msg
     assert "TikTok detail revisit queue: 2 due now, 1 claimed by browser" in msg
+    assert "1 stale claimed ready to reclaim" in msg
     assert "Degraded sources: Instagram" in msg
     assert "Why degraded:" in msg
     assert "newest row 4.0d ago; expected within 2.0d" in msg

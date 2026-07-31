@@ -28,6 +28,13 @@ def _expected_extension_version() -> str | None:
         return None
 
 
+def _tiktok_revisit_claim_timeout_seconds() -> int:
+    try:
+        return env_int("TIKTOK_BROWSER_REVISIT_CLAIM_TIMEOUT_SECONDS", 1800, min_value=60)
+    except Exception:
+        return 1800
+
+
 _STATUS_CONTENT_PARTS = (
     ("telegram", "telegram_messages", "collected_at", "messages"),
     ("whatsapp", "whatsapp_messages", "collected_at", "messages"),
@@ -517,6 +524,7 @@ class Scheduler:
                             timeout=10,
                         )]
                     if await conn.fetchval("SELECT to_regclass('tiktok_browser_revisit_queue')", timeout=5) is not None:
+                        claim_timeout = _tiktok_revisit_claim_timeout_seconds()
                         row = await conn.fetchrow(
                             """
                             SELECT count(*) FILTER (
@@ -524,6 +532,11 @@ class Scheduler:
                                        AND next_visit_at <= now()
                                    )::int AS due,
                                    count(*) FILTER (WHERE status = 'claimed')::int AS claimed,
+                                   count(*) FILTER (
+                                     WHERE status = 'claimed'
+                                       AND COALESCE(last_attempt_at, updated_at, created_at)
+                                           <= now() - ($1::int * interval '1 second')
+                                   )::int AS stale_claimed,
                                    count(*) FILTER (WHERE status = 'pending')::int AS pending,
                                    count(*) FILTER (WHERE status = 'failed')::int AS failed,
                                    count(*) FILTER (WHERE status = 'unavailable')::int AS unavailable,
@@ -531,6 +544,7 @@ class Scheduler:
                                    max(updated_at) AS last_seen_at
                             FROM tiktok_browser_revisit_queue
                             """,
+                            claim_timeout,
                             timeout=10,
                         )
                         if row:

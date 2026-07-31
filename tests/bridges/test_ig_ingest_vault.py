@@ -12,6 +12,7 @@ class _FakeConn:
     def __init__(self):
         self.executes = []
         self.fetchvals = []
+        self.fetchrows = []
         self.fetchrow_result = None
         self.fetchval_result = None
 
@@ -20,6 +21,7 @@ class _FakeConn:
         return self.fetchval_result
 
     async def fetchrow(self, query, *args):
+        self.fetchrows.append((query, args))
         return self.fetchrow_result
 
     async def execute(self, query, *args):
@@ -153,6 +155,36 @@ def test_tiktok_browser_classifier_marks_saved_terminal():
     assert outcome == "stored"
     assert reason is None
     assert needs_revisit is False
+
+
+def test_tiktok_revisit_target_reclaims_stale_claimed(monkeypatch):
+    pool = _FakePool()
+    pool.conn.fetchrow_result = {
+        "content_id": "video_1",
+        "username": "alice",
+        "post_url": "https://www.tiktok.com/@alice/video/1",
+        "source_url": "https://v16m.tiktokcdn.com/video.mp4",
+        "reason": "http_403",
+        "priority": 95,
+        "attempts": 2,
+        "previous_status": "claimed",
+        "metadata": '{"last_claim_previous_status":"claimed"}',
+    }
+    monkeypatch.setenv("TIKTOK_BROWSER_REVISIT_MAX_ATTEMPTS", "7")
+    monkeypatch.setattr(ig_ingest, "TIKTOK_BROWSER_REVISIT_CLAIM_TIMEOUT_SECONDS", 120)
+    monkeypatch.setattr(ig_ingest, "TIKTOK_BROWSER_REVISIT_CLAIM_HOLD_SECONDS", 60)
+
+    response = asyncio.run(ig_ingest.tiktok_revisit_target(_FakeRequest({"pool": pool}, {})))
+    payload = json.loads(response.text)
+
+    assert payload["ok"] is True
+    assert payload["target"]["content_id"] == "video_1"
+    assert payload["target"]["metadata"]["last_claim_previous_status"] == "claimed"
+    query, args = pool.conn.fetchrows[0]
+    assert "status = 'claimed'" in query
+    assert "previous_status" in query
+    assert "COALESCE(last_attempt_at, updated_at, created_at)" in query
+    assert args == (7, 120, 60)
 
 
 def test_extension_ingest_pauses_media_download_when_vault_unavailable(monkeypatch, tmp_path):

@@ -71,6 +71,7 @@ export interface TikTokBrowserMediaOutcome {
 export interface TikTokBrowserRevisitQueue {
   due: number;
   claimed: number;
+  stale_claimed: number;
   pending: number;
   failed: number;
   unavailable: number;
