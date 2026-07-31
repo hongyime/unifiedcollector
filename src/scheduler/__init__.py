@@ -118,9 +118,25 @@ async def _fetch_ingestion_window(conn, start_sql: str, end_sql: str | None = No
         for row in await conn.fetch(
             f"""
             SELECT source,
-                   count(*) FILTER (WHERE status_code = 429 OR status_code IS NULL)::int AS rate_limits,
                    count(*) FILTER (
-                     WHERE status_code IS NOT NULL AND status_code <> 429
+                     WHERE status_code = 429
+                        OR status_code IS NULL
+                        OR (
+                            source = 'youtube'
+                            AND status_code = 403
+                            AND reason = 'youtube_api_quota_or_access'
+                        )
+                   )::int AS rate_limits,
+                   count(*) FILTER (
+                     WHERE status_code IS NOT NULL
+                       AND NOT (
+                           status_code = 429
+                           OR (
+                               source = 'youtube'
+                               AND status_code = 403
+                               AND reason = 'youtube_api_quota_or_access'
+                           )
+                       )
                    )::int AS access_errors
             FROM rate_limit_events
             WHERE created_at >= {start_sql}
@@ -359,7 +375,15 @@ class Scheduler:
                                max(created_at) AS last_seen_at
                         FROM rate_limit_events
                         WHERE created_at >= date_trunc('hour', now())
-                          AND status_code = 429
+                          AND (
+                              status_code = 429
+                              OR status_code IS NULL
+                              OR (
+                                  source = 'youtube'
+                                  AND status_code = 403
+                                  AND reason = 'youtube_api_quota_or_access'
+                              )
+                          )
                         GROUP BY source, account, scope
                         ORDER BY last_seen_at DESC
                         LIMIT 5
@@ -379,7 +403,15 @@ class Scheduler:
                                max(created_at) AS last_seen_at
                         FROM rate_limit_events
                         WHERE created_at >= date_trunc('hour', now())
-                          AND status_code IS DISTINCT FROM 429
+                          AND status_code IS NOT NULL
+                          AND NOT (
+                              status_code = 429
+                              OR (
+                                  source = 'youtube'
+                                  AND status_code = 403
+                                  AND reason = 'youtube_api_quota_or_access'
+                              )
+                          )
                         GROUP BY source, account, scope
                         ORDER BY last_seen_at DESC
                         LIMIT 5
@@ -768,8 +800,16 @@ class Scheduler:
                                count(*)::int AS events,
                                max(reason) AS reason
                         FROM rate_limit_events
-                        WHERE status_code = 429
-                          AND cooldown_seconds IS NOT NULL
+                        WHERE cooldown_seconds IS NOT NULL
+                          AND (
+                              status_code = 429
+                              OR status_code IS NULL
+                              OR (
+                                  source = 'youtube'
+                                  AND status_code = 403
+                                  AND reason = 'youtube_api_quota_or_access'
+                              )
+                          )
                           AND created_at + cooldown_seconds * interval '1 second' > now()
                         GROUP BY source, account, scope
                         ORDER BY expiry_ts DESC

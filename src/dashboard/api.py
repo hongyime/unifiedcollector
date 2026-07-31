@@ -48,6 +48,7 @@ _SOURCE_MATRIX_YOUTUBE_BACKLOG_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_
 _SOURCE_MATRIX_BROWSER_EXTENSION_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_BROWSER_EXTENSION_TIMEOUT_SECONDS", "6"))
 _SOURCE_CONTENT_PART_TIMEOUT_SECONDS = float(os.getenv("SOURCE_CONTENT_PART_TIMEOUT_SECONDS", "2"))
 _SOURCE_CONTENT_MEDIA_TIMEOUT_SECONDS = float(os.getenv("SOURCE_CONTENT_MEDIA_TIMEOUT_SECONDS", "4"))
+_SOURCE_CONTENT_SUMMARY_BUDGET_SECONDS = float(os.getenv("SOURCE_CONTENT_SUMMARY_BUDGET_SECONDS", "4.5"))
 _SOURCE_MATRIX_SECTION_CACHE: dict[str, dict[str, object]] = {}
 _SOURCE_MATRIX_SECTION_CACHE_TTL_SECONDS = int(os.getenv("SOURCE_MATRIX_SECTION_CACHE_TTL_SECONDS", "30"))
 _SOURCE_MATRIX_SECTION_STALE_SECONDS = int(os.getenv("SOURCE_MATRIX_SECTION_STALE_SECONDS", "900"))
@@ -473,6 +474,13 @@ async def _source_content_summary(conn, since_sql: str, before_sql: str | None =
     required_tables.append("media_items")
     existing_tables = await _existing_public_tables(conn, required_tables)
     out: dict[str, dict] = {}
+    deadline = time.monotonic() + max(1.0, _SOURCE_CONTENT_SUMMARY_BUDGET_SECONDS)
+
+    def remaining_timeout(default: float) -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return 0.0
+        return min(default, max(0.1, remaining))
 
     def merge(source: str, row: dict | None) -> None:
         if not row:
@@ -499,9 +507,37 @@ async def _source_content_summary(conn, since_sql: str, before_sql: str | None =
         ):
             target["latest_media_at"] = latest_media
 
+    if "media_items" in existing_tables:
+        timeout = remaining_timeout(_SOURCE_CONTENT_MEDIA_TIMEOUT_SECONDS)
+        if timeout > 0:
+            try:
+                rows = await conn.fetch(
+                    f"""
+                    SELECT source,
+                           0::bigint AS records,
+                           0::bigint AS messages,
+                           count(*)::bigint AS media_items,
+                           NULL::timestamptz AS latest_record_at,
+                           max(collected_at) AS latest_media_at
+                    FROM media_items
+                    WHERE collected_at >= {since_sql}
+                      {f"AND collected_at < {before_sql}" if before_sql else ""}
+                    GROUP BY source
+                    """,
+                    timeout=timeout,
+                )
+                for row in rows:
+                    merge(row["source"], dict(row))
+            except Exception as exc:  # noqa: BLE001 - source matrix should keep row counts if media stats lag
+                logger.warning("source content media summary failed: %s", exc.__class__.__name__)
+
     for source, table, column, label in _INGESTION_CONTENT_PARTS:
         if table not in existing_tables:
             continue
+        timeout = remaining_timeout(_SOURCE_CONTENT_PART_TIMEOUT_SECONDS)
+        if timeout <= 0:
+            logger.warning("source content summary budget exhausted before %s/%s", source, table)
+            break
         try:
             row = await conn.fetchrow(
                 f"""
@@ -514,7 +550,7 @@ async def _source_content_summary(conn, since_sql: str, before_sql: str | None =
                 WHERE {column} >= {since_sql}
                   {f"AND {column} < {before_sql}" if before_sql else ""}
                 """,
-                timeout=_SOURCE_CONTENT_PART_TIMEOUT_SECONDS,
+                timeout=timeout,
             )
             merge(source, dict(row) if row else None)
         except Exception as exc:  # noqa: BLE001 - source matrix should keep other sources truthful
@@ -524,34 +560,15 @@ async def _source_content_summary(conn, since_sql: str, before_sql: str | None =
                 table,
                 exc.__class__.__name__,
             )
-    if "media_items" in existing_tables:
+    beeper_timeout = remaining_timeout(_BEEPER_SUBSOURCE_TOTAL_TIMEOUT_SECONDS)
+    if beeper_timeout > 0:
         try:
-            rows = await conn.fetch(
-                f"""
-                SELECT source,
-                       0::bigint AS records,
-                       0::bigint AS messages,
-                       count(*)::bigint AS media_items,
-                       NULL::timestamptz AS latest_record_at,
-                       max(collected_at) AS latest_media_at
-                FROM media_items
-                WHERE collected_at >= {since_sql}
-                  {f"AND collected_at < {before_sql}" if before_sql else ""}
-                GROUP BY source
-                """,
-                timeout=_SOURCE_CONTENT_MEDIA_TIMEOUT_SECONDS,
-            )
-            for row in rows:
-                merge(row["source"], dict(row))
-        except Exception as exc:  # noqa: BLE001 - source matrix should keep row counts if media stats lag
-            logger.warning("source content media summary failed: %s", exc.__class__.__name__)
-    try:
-        out.update(await asyncio.wait_for(
-            _beeper_subsource_content_summary(conn, since_sql, before_sql),
-            timeout=_BEEPER_SUBSOURCE_TOTAL_TIMEOUT_SECONDS,
-        ))
-    except Exception as exc:  # noqa: BLE001 - dashboard should degrade, not 500
-        logger.warning("beeper sub-source content summary failed: %s", exc)
+            out.update(await asyncio.wait_for(
+                _beeper_subsource_content_summary(conn, since_sql, before_sql),
+                timeout=beeper_timeout,
+            ))
+        except Exception as exc:  # noqa: BLE001 - dashboard should degrade, not 500
+            logger.warning("beeper sub-source content summary failed: %s", exc)
     return out
 
 
@@ -741,8 +758,26 @@ async def _source_rate_summary(conn, since_sql: str, before_sql: str | None = No
               {before_clause}
         )
         SELECT source,
-               count(*) FILTER (WHERE status_code = 429 OR status_code IS NULL)::int AS rate_limits,
-               count(*) FILTER (WHERE status_code IS NOT NULL AND status_code <> 429)::int AS access_errors,
+               count(*) FILTER (
+                   WHERE status_code = 429
+                      OR status_code IS NULL
+                      OR (
+                          source = 'youtube'
+                          AND status_code = 403
+                          AND reason = 'youtube_api_quota_or_access'
+                      )
+               )::int AS rate_limits,
+               count(*) FILTER (
+                   WHERE status_code IS NOT NULL
+                     AND NOT (
+                         status_code = 429
+                         OR (
+                             source = 'youtube'
+                             AND status_code = 403
+                             AND reason = 'youtube_api_quota_or_access'
+                         )
+                     )
+               )::int AS access_errors,
                (array_agg(account ORDER BY created_at DESC))[1] AS latest_account,
                (array_agg(scope ORDER BY created_at DESC))[1] AS latest_scope,
                (array_agg(status_code ORDER BY created_at DESC))[1]::int AS latest_status_code,
@@ -1937,8 +1972,26 @@ async def _enrich_runs_with_ingestion(conn, runs: list[dict]) -> list[dict]:
                    0::bigint AS records,
                    0::bigint AS messages,
                    0::bigint AS media_items,
-                   count(rl.*) FILTER (WHERE rl.status_code = 429 OR rl.status_code IS NULL)::bigint AS rate_limits,
-                   count(rl.*) FILTER (WHERE rl.status_code IS NOT NULL AND rl.status_code <> 429)::bigint AS access_errors,
+                   count(rl.*) FILTER (
+                       WHERE rl.status_code = 429
+                          OR rl.status_code IS NULL
+                          OR (
+                              rl.source = 'youtube'
+                              AND rl.status_code = 403
+                              AND rl.reason = 'youtube_api_quota_or_access'
+                          )
+                   )::bigint AS rate_limits,
+                   count(rl.*) FILTER (
+                       WHERE rl.status_code IS NOT NULL
+                         AND NOT (
+                             rl.status_code = 429
+                             OR (
+                                 rl.source = 'youtube'
+                                 AND rl.status_code = 403
+                                 AND rl.reason = 'youtube_api_quota_or_access'
+                             )
+                         )
+                   )::bigint AS access_errors,
                    max(rl.created_at) AS latest_at
             FROM rate_limit_events rl
             WHERE rl.created_at >= $1
@@ -3868,8 +3921,26 @@ async def hourly_ingestion(hours: int = 12, _user: dict = Depends(require_role("
                    0::bigint AS records,
                    0::bigint AS media_items,
                    0::bigint AS messages,
-                   count(*) FILTER (WHERE status_code = 429 OR status_code IS NULL)::bigint AS rate_limits,
-                   count(*) FILTER (WHERE status_code IS NOT NULL AND status_code <> 429)::bigint AS access_errors
+                   count(*) FILTER (
+                       WHERE status_code = 429
+                          OR status_code IS NULL
+                          OR (
+                              source = 'youtube'
+                              AND status_code = 403
+                              AND reason = 'youtube_api_quota_or_access'
+                          )
+                   )::bigint AS rate_limits,
+                   count(*) FILTER (
+                       WHERE status_code IS NOT NULL
+                         AND NOT (
+                             status_code = 429
+                             OR (
+                                 source = 'youtube'
+                                 AND status_code = 403
+                                 AND reason = 'youtube_api_quota_or_access'
+                             )
+                         )
+                   )::bigint AS access_errors
             FROM rate_limit_events
             WHERE created_at >= now() - ($1 || ' hours')::interval
             GROUP BY source, date_trunc('hour', created_at)
