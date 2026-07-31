@@ -557,13 +557,13 @@ async def _beeper_subsource_liveness(conn) -> list[dict]:
             "display_name": display_name,
             "parent_source": "beeper",
             "rollup_exclude": True,
-            "recent_messages": 0,
+            "recent_messages": None,
             "chats": 0,
             "people": 0,
             "latest_at": None,
         })
 
-    if "beeper_shadow_messages" in existing:
+    if "beeper_shadow_messages" in existing and "beeper_shadow_chats" not in existing:
         for row in await conn.fetch(
             """
             SELECT COALESCE(NULLIF(trim(network), ''), 'unknown') AS network,
@@ -573,10 +573,10 @@ async def _beeper_subsource_liveness(conn) -> list[dict]:
             WHERE ingested_at >= now() - interval '7 days'
             GROUP BY 1
             """,
-            timeout=15,
+            timeout=4,
         ):
             cur = ensure(row["network"])
-            cur["recent_messages"] += int(row["recent_messages"] or 0)
+            cur["recent_messages"] = int(row["recent_messages"] or 0)
             if row["latest_at"] and (cur["latest_at"] is None or row["latest_at"] > cur["latest_at"]):
                 cur["latest_at"] = row["latest_at"]
 
@@ -621,6 +621,12 @@ async def _beeper_subsource_liveness(conn) -> list[dict]:
         status = "dead"
         if age_seconds is not None:
             status = "live" if age_seconds <= _BEEPER_SUBSOURCE_STALE_SECONDS else "stale"
+        recent_messages = row.get("recent_messages")
+        message_detail = (
+            f"{int(recent_messages):,} messages in the last 7 days, "
+            if recent_messages is not None
+            else ""
+        )
         out.append({
             "source": row["source"],
             "display_name": row["display_name"],
@@ -633,9 +639,10 @@ async def _beeper_subsource_liveness(conn) -> list[dict]:
             "stale_after_seconds": _BEEPER_SUBSOURCE_STALE_SECONDS,
             "detail": (
                 f"{row['display_name']} via Beeper: "
-                f"{int(row['recent_messages'] or 0):,} messages in the last 7 days, "
+                f"{message_detail}"
                 f"{int(row['chats'] or 0):,} chats, "
-                f"{int(row['people'] or 0):,} people."
+                f"{int(row['people'] or 0):,} people. "
+                "Message volume is reported in the current-hour and 24-hour columns."
             ),
         })
     _BEEPER_SUBSOURCE_LIVENESS_CACHE.update({"ts": time.time(), "rows": _copy_row_list(out)})
@@ -1321,6 +1328,11 @@ def _short_age(seconds: object) -> str | None:
     return f"{hours // 24}d"
 
 
+def _is_beeper_subsource_row(source_row: dict) -> bool:
+    source = str(source_row.get("source") or "")
+    return source.startswith(_BEEPER_SUBSOURCE_PREFIX) or source_row.get("parent_source") == "beeper"
+
+
 def _empty_source_counts() -> dict:
     return {
         "records": 0,
@@ -1455,6 +1467,13 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
             "severity": "error" if source_row.get("source_health_status") == "dead" else "warning",
             "summary": source_row.get("source_health_error") or source_row.get("detail") or "source_health reports trouble.",
             "next_action": "Check the source-specific Docker logs and account/session state.",
+        }
+    if _is_beeper_subsource_row(source_row) and status in {"stale", "dead", "unknown", None}:
+        return {
+            "kind": "quiet_beeper_subsource",
+            "severity": "ok",
+            "summary": source_row.get("detail") or "This Beeper network has no recent messages.",
+            "next_action": "No action unless you expected new messages in this Beeper network.",
         }
     if status not in {"live"}:
         return {

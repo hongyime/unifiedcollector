@@ -157,6 +157,42 @@ def test_source_matrix_blocker_reports_extension_waiting_for_new_event():
     assert "one fresh signal" in blocker["next_action"]
 
 
+def test_source_matrix_blocker_treats_quiet_beeper_subsource_as_coverage_gap():
+    blocker = _source_matrix_blocker(
+        _source(
+            source="beeper_linkedin",
+            parent_source="beeper",
+            status="stale",
+            collection_mode="messaging bridge",
+            detail="Beeper / LinkedIn via Beeper: 0 messages in the last 7 days, 12 chats, 8 people.",
+        ),
+        rate_row=None,
+        cursor_row=None,
+        extension_issues=[],
+    )
+
+    assert blocker["kind"] == "quiet_beeper_subsource"
+    assert blocker["severity"] == "ok"
+    assert "LinkedIn" in blocker["summary"]
+    assert "expected new messages" in blocker["next_action"]
+
+
+def test_source_matrix_blocker_still_warns_for_stale_parent_beeper_collector():
+    blocker = _source_matrix_blocker(
+        _source(
+            source="beeper",
+            status="stale",
+            detail="Beeper has no recent source rows.",
+        ),
+        rate_row=None,
+        cursor_row=None,
+        extension_issues=[],
+    )
+
+    assert blocker["kind"] == "stale"
+    assert blocker["severity"] == "warning"
+
+
 def test_rate_limit_cursor_payload_marks_expired_cursor_inactive():
     now = datetime(2026, 7, 28, 0, 0, tzinfo=timezone.utc)
     payload = _rate_limit_cursor_payload(
