@@ -33,9 +33,11 @@ async def test_browser_extension_payload_flags_stale_and_old_versions(monkeypatc
                 return None
             if "browser_media_candidates" in query:
                 return None
+            if "browser_media_revisit_queue" in query:
+                return None
             raise AssertionError(query)
 
-        async def fetch(self, query: str, timeout: int | None = None):
+        async def fetch(self, query: str, *args, timeout: int | None = None):
             if "FROM dm_hook_heartbeat" in query:
                 return [
                     {
@@ -95,9 +97,11 @@ async def test_browser_extension_payload_suppresses_old_endpoint_after_newer_cur
                 return None
             if "browser_media_candidates" in query:
                 return None
+            if "browser_media_revisit_queue" in query:
+                return None
             raise AssertionError(query)
 
-        async def fetch(self, query: str, timeout: int | None = None):
+        async def fetch(self, query: str, *args, timeout: int | None = None):
             if "FROM browser_ingest_events" in query:
                 return [
                     {
@@ -149,9 +153,11 @@ async def test_browser_extension_payload_includes_media_candidate_diagnostics(mo
                 return None
             if "browser_media_candidates" in query:
                 return "browser_media_candidates"
+            if "browser_media_revisit_queue" in query:
+                return "browser_media_revisit_queue"
             raise AssertionError(query)
 
-        async def fetch(self, query: str, timeout: int | None = None):
+        async def fetch(self, query: str, *args, timeout: int | None = None):
             if "FROM browser_media_candidates" in query:
                 return [
                     {
@@ -170,6 +176,20 @@ async def test_browser_extension_payload_includes_media_candidate_diagnostics(mo
                         "last_seen_at": datetime(2026, 7, 31, tzinfo=timezone.utc),
                         "age_seconds": 120,
                     },
+                ]
+            if "FROM browser_media_revisit_queue" in query:
+                return [
+                    {
+                        "platform": "x",
+                        "due": 2,
+                        "claimed": 1,
+                        "stale_claimed": 0,
+                        "pending": 3,
+                        "failed": 1,
+                        "unavailable": 0,
+                        "completed": 4,
+                        "last_seen_at": datetime(2026, 7, 31, tzinfo=timezone.utc),
+                    }
                 ]
             raise AssertionError(query)
 
@@ -192,4 +212,17 @@ async def test_browser_extension_payload_includes_media_candidate_diagnostics(mo
             "last_seen_at": datetime(2026, 7, 31, tzinfo=timezone.utc),
             "age_seconds": 120,
         },
+    ]
+    assert payload["media_revisit_queue"] == [
+        {
+            "platform": "x",
+            "due": 2,
+            "claimed": 1,
+            "stale_claimed": 0,
+            "pending": 3,
+            "failed": 1,
+            "unavailable": 0,
+            "completed": 4,
+            "last_seen_at": datetime(2026, 7, 31, tzinfo=timezone.utc),
+        }
     ]

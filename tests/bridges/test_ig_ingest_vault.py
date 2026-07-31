@@ -49,10 +49,11 @@ class _FakePool:
 
 
 class _FakeRequest(dict):
-    def __init__(self, app, body):
+    def __init__(self, app, body, query=None):
         super().__init__()
         self.app = app
         self._body = body
+        self.query = query or {}
 
     async def json(self):
         return self._body
@@ -228,6 +229,115 @@ def test_browser_media_candidates_records_non_tiktok_platform():
     assert payload == {"ok": True, "recorded": 1, "platform": "facebook"}
     assert any("browser_media_candidates" in query for query, _args in pool.conn.executes)
     assert not any("tiktok_browser_media_candidates" in query for query, _args in pool.conn.executes)
+
+
+def test_browser_media_candidates_queues_x_video_revisit():
+    pool = _FakePool()
+    response = asyncio.run(
+        ig_ingest.browser_media_candidates(
+            _FakeRequest(
+                {"pool": pool},
+                {
+                    "platform": "x",
+                    "username": "timeline",
+                    "extension_version": "1.21.50",
+                    "items": [
+                        {
+                            "ingest_mode": "browser_upload",
+                            "item": {
+                                "content_id": "x_video_1",
+                                "content_type": "video",
+                                "url": "https://video.twimg.com/ext_tw_video/123/pu/vid/720x720/a.mp4",
+                                "meta": {
+                                    "x_asset_role": "video",
+                                    "author_username": "alice",
+                                    "post_id": "123",
+                                    "post_url": "https://x.com/alice/status/123",
+                                },
+                            },
+                            "result": {"reason": "timeout", "reject_stats": {"timeout": 1}},
+                        }
+                    ],
+                },
+            )
+        )
+    )
+    payload = json.loads(response.text)
+
+    assert payload == {"ok": True, "recorded": 1, "platform": "x"}
+    queries = [query for query, _args in pool.conn.executes]
+    assert any("browser_media_candidates" in query for query in queries)
+    assert any("browser_media_revisit_queue" in query for query in queries)
+    queue_args = next(args for query, args in pool.conn.executes if "browser_media_revisit_queue" in query)
+    assert queue_args[:7] == (
+        "x",
+        "x_video_1",
+        "timeline",
+        "https://x.com/alice/status/123",
+        "https://video.twimg.com/ext_tw_video/123/pu/vid/720x720/a.mp4",
+        "timeout",
+        90,
+    )
+
+
+def test_browser_revisit_target_reclaims_stale_claimed(monkeypatch):
+    pool = _FakePool()
+    pool.conn.fetchrow_result = {
+        "platform": "x",
+        "content_id": "x_video_1",
+        "username": "timeline",
+        "post_url": "https://x.com/alice/status/123",
+        "source_url": "https://video.twimg.com/ext_tw_video/123/pu/vid/720x720/a.mp4",
+        "reason": "timeout",
+        "priority": 90,
+        "attempts": 2,
+        "previous_status": "claimed",
+        "metadata": '{"last_claim_previous_status":"claimed"}',
+    }
+    monkeypatch.setenv("BROWSER_MEDIA_REVISIT_MAX_ATTEMPTS", "7")
+    monkeypatch.setattr(ig_ingest, "TIKTOK_BROWSER_REVISIT_CLAIM_TIMEOUT_SECONDS", 120)
+    monkeypatch.setattr(ig_ingest, "TIKTOK_BROWSER_REVISIT_CLAIM_HOLD_SECONDS", 60)
+
+    response = asyncio.run(
+        ig_ingest.browser_revisit_target(_FakeRequest({"pool": pool}, {}, query={"platform": "x"}))
+    )
+    payload = json.loads(response.text)
+
+    assert payload["ok"] is True
+    assert payload["target"]["platform"] == "x"
+    assert payload["target"]["content_id"] == "x_video_1"
+    query, args = pool.conn.fetchrows[0]
+    assert "browser_media_revisit_queue" in query
+    assert "platform = $1" in query
+    assert "previous_status" in query
+    assert args == ("x", 7, 120, 60)
+
+
+def test_browser_revisit_result_scopes_update_by_platform():
+    pool = _FakePool()
+    response = asyncio.run(
+        ig_ingest.browser_revisit_result(
+            _FakeRequest(
+                {"pool": pool},
+                {
+                    "platform": "x",
+                    "content_id": "x_video_1",
+                    "status": "success",
+                    "reason": "detail_page_harvested",
+                    "observed": 2,
+                    "stored": 1,
+                    "extension_version": "1.21.50",
+                },
+            )
+        )
+    )
+    payload = json.loads(response.text)
+
+    assert payload == {"ok": True, "status": "completed"}
+    query, args = pool.conn.executes[0]
+    assert "browser_media_revisit_queue" in query
+    assert "WHERE platform = $1 AND content_id = $2" in query
+    assert args[:4] == ("x", "x_video_1", "completed", "detail_page_harvested")
 
 
 def test_tiktok_revisit_target_reclaims_stale_claimed(monkeypatch):

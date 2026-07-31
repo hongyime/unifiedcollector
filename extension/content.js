@@ -1022,6 +1022,80 @@ async function finishTikTokRevisit(active, response, observed, username) {
   }).catch(() => {});
   localStorage.removeItem(tiktokRevisitKey());
 }
+
+const BROWSER_MEDIA_REVISIT_PLATFORMS = new Set(["x"]);
+function browserMediaRevisitKey(platform) { return "uc_browser_media_revisit_active_" + platform; }
+function currentBrowserMediaRevisit(platform) {
+  try {
+    const active = JSON.parse(localStorage.getItem(browserMediaRevisitKey(platform)) || "null");
+    if (!active || !active.content_id || active.platform !== platform) return null;
+    if (active.claimed_at && Date.now() - active.claimed_at > 30 * 60000) {
+      localStorage.removeItem(browserMediaRevisitKey(platform));
+      return null;
+    }
+    return active;
+  } catch (e) {
+    localStorage.removeItem(browserMediaRevisitKey(platform));
+    return null;
+  }
+}
+function browserMediaRevisitUrlOk(platform, url) {
+  if (!url || !/^https?:\/\//i.test(url)) return false;
+  try {
+    const u = new URL(url);
+    if (platform === "x") {
+      return /^(x|twitter)\.com$/i.test(u.hostname.replace(/^www\./, "")) &&
+        /^\/[A-Za-z0-9_]{1,20}\/status\/\d+/.test(u.pathname);
+    }
+  } catch (e) {}
+  return false;
+}
+async function maybeStartBrowserMediaRevisit(platform, owner) {
+  if (!BROWSER_MEDIA_REVISIT_PLATFORMS.has(platform)) return null;
+  const active = currentBrowserMediaRevisit(platform);
+  if (active) return active;
+  const reply = await send({ type: "getBrowserMediaRevisitTarget", platform, owner: owner || null }).catch(() => null);
+  const target = reply && reply.target;
+  if (!target || !target.content_id) return null;
+  const url = target.post_url || target.source_url;
+  if (!browserMediaRevisitUrlOk(platform, url)) {
+    await send({
+      type: "browserMediaRevisitResult",
+      platform,
+      content_id: target.content_id,
+      status: "failed",
+      reason: "missing_revisit_url",
+      username: target.username || null,
+    }).catch(() => {});
+    return null;
+  }
+  const state = { ...target, platform, url, claimed_at: Date.now() };
+  localStorage.setItem(browserMediaRevisitKey(platform), JSON.stringify(state));
+  if (location.href !== url) {
+    clog("info", `${platform.toUpperCase()} detail revisit queued for ${target.content_id}`, platform);
+    await sleep(jitter(900));
+    location.href = url;
+    return { ...state, navigating: true };
+  }
+  return state;
+}
+async function finishBrowserMediaRevisit(platform, active, response, observed, username) {
+  if (!active || !active.content_id) return;
+  const stored = Number(response && response.upload && response.upload.stored || 0);
+  const status = observed > 0 ? "success" : "no_media";
+  const reason = observed > 0 ? "detail_page_harvested" : "detail_page_no_media";
+  await send({
+    type: "browserMediaRevisitResult",
+    platform,
+    content_id: active.content_id,
+    status,
+    reason,
+    observed,
+    stored,
+    username: username || active.username || null,
+  }).catch(() => {});
+  localStorage.removeItem(browserMediaRevisitKey(platform));
+}
 const tiktok = {
   id: "tiktok", host: "www.tiktok.com", label: "TikTok",
   entity() { const m = location.pathname.match(/^\/@([^/?#]+)/); return m ? m[1] : "feed"; },
@@ -1593,6 +1667,8 @@ const x = {
       },
       homeUrl: "https://x.com/home",
     })) return { targets: 1, saved: 0, discovered: 0 };
+    const mediaRevisit = await maybeStartBrowserMediaRevisit("x", owner);
+    if (mediaRevisit && mediaRevisit.navigating) return { targets: 1, saved: 0, discovered: 0 };
     if (entity !== "timeline" && !xIsStatusPage() && xProfileUnavailable()) {
       await xReportProfileTarget(entity, "unavailable", "profile_missing", owner);
       clog("info", `X @${entity}: unavailable profile`, "x");
@@ -1646,9 +1722,19 @@ const x = {
       const u = v.currentSrc || v.src || (v.querySelector("source") && v.querySelector("source").src);
       addXVideoCandidate(sink, u, entity, "video");
     });
+    const activeMediaRevisit = currentBrowserMediaRevisit("x");
+    if (activeMediaRevisit && activeMediaRevisit.content_id) {
+      sink.items.forEach((it) => {
+        it.meta = {
+          ...(it.meta || {}),
+          revisit_content_id: activeMediaRevisit.content_id,
+          revisit_reason: activeMediaRevisit.reason || null,
+        };
+      });
+    }
     const xu = collectPermalinkAuthors(/^\/([A-Za-z0-9_]{1,20})\/status\//, /^(home|explore|search|messages|notifications|i|settings)$/);
     if (xu.length) await send({ type: "users", platform: "x", context: "seen", users: xu });
-    await send({
+    const ingestResponse = await send({
       type: "ingest",
       platform: "x",
       username: entity,
@@ -1657,6 +1743,9 @@ const x = {
       probe_reason: sink.items.length ? "media_candidates_found" : "no_dom_media_candidates",
       probe_meta: { feed, posts: xposts.length },
     });
+    if (activeMediaRevisit) {
+      await finishBrowserMediaRevisit("x", activeMediaRevisit, ingestResponse, sink.items.length, entity);
+    }
     if (entity !== "timeline" && !xIsStatusPage()) {
       if (!xIsMediaTab()) {
         clog("info", `X @${entity}: opening Media tab`, "x");

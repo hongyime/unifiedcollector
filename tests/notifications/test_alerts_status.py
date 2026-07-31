@@ -152,6 +152,18 @@ async def test_notify_status_splits_rate_limit_from_auth_events(monkeypatch):
             {"platform": "facebook", "outcome": "tiny_thumbnail", "candidates": 12, "needs_revisit": 0},
             {"platform": "x", "outcome": "browser_fetch_failed", "candidates": 2, "needs_revisit": 2},
         ],
+        "browser_media_revisit_queue": [
+            {
+                "platform": "x",
+                "due": 2,
+                "claimed": 1,
+                "stale_claimed": 0,
+                "pending": 3,
+                "failed": 1,
+                "unavailable": 0,
+                "completed": 4,
+            }
+        ],
         "tiktok_browser_media_diagnostics": [
             {"outcome": "short_lived_url", "candidates": 3, "needs_revisit": 3},
             {"outcome": "tiny_thumbnail", "candidates": 8, "needs_revisit": 0},
@@ -235,6 +247,8 @@ async def test_notify_status_splits_rate_limit_from_auth_events(monkeypatch):
     assert "<b>Browser media diagnosis</b>" in msg
     assert "Facebook: tiny thumbnail/avatar rejected: 12." in msg
     assert "Twitter / X: browser fetch failed: 2; 2 candidates need detail revisit." in msg
+    assert "<b>Browser media detail follow-up</b>" in msg
+    assert "Twitter / X detail revisit queue: 2 due now, 1 claimed by browser" in msg
     assert "<b>TikTok media follow-up</b>" in msg
     assert "short-lived video URL queued for browser revisit: 3" in msg
     assert "TikTok detail revisit queue: 2 due now, 1 claimed by browser" in msg

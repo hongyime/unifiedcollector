@@ -315,6 +315,28 @@ CREATE INDEX IF NOT EXISTS idx_browser_media_candidates_platform_outcome
 CREATE INDEX IF NOT EXISTS idx_browser_media_candidates_revisit
   ON browser_media_candidates (platform, needs_revisit, last_seen DESC)
   WHERE needs_revisit;
+CREATE TABLE IF NOT EXISTS browser_media_revisit_queue (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  platform text NOT NULL,
+  content_id text NOT NULL,
+  username text,
+  post_url text,
+  source_url text,
+  reason text,
+  status text NOT NULL DEFAULT 'pending',
+  priority integer NOT NULL DEFAULT 50,
+  attempts integer NOT NULL DEFAULT 0,
+  next_visit_at timestamptz NOT NULL DEFAULT now(),
+  last_attempt_at timestamptz,
+  last_success_at timestamptz,
+  metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_browser_media_revisit_platform_content
+  ON browser_media_revisit_queue (platform, content_id);
+CREATE INDEX IF NOT EXISTS idx_browser_media_revisit_due
+  ON browser_media_revisit_queue (platform, status, next_visit_at, priority DESC);
 """
 
 
@@ -1179,6 +1201,51 @@ def _tiktok_candidate_post_url(item: dict | None, username: str | None) -> str |
     return f"https://www.tiktok.com/@{handle}" if handle else None
 
 
+def _browser_candidate_post_url(platform: str, item: dict | None, username: str | None) -> str | None:
+    meta = _item_meta(item)
+    for key in ("page_url", "post_url", "canonical_url", "verify_url", "url"):
+        value = str(meta.get(key) or (item or {}).get(key) or "").strip()
+        if not value.startswith("http"):
+            continue
+        try:
+            parsed = urlparse(value)
+        except Exception:
+            continue
+        host = parsed.netloc.lower()
+        path = parsed.path or ""
+        if platform == "x" and host in {"x.com", "www.x.com", "twitter.com", "www.twitter.com"}:
+            if re.match(r"^/[A-Za-z0-9_]{1,20}/status/\d+", path):
+                return value
+        elif platform == "threads" and host in {"www.threads.com", "threads.com", "www.threads.net", "threads.net"}:
+            if re.match(r"^/@[^/]+/post/", path):
+                return value
+        elif platform == "lemon8" and ("lemon8" in host or "lemon8-app.com" in host):
+            if re.search(r"/(?:@[^/]+/)?\d{6,}", path) or "/@" in path:
+                return value
+        elif platform == "facebook" and host.endswith("facebook.com"):
+            if (
+                any(token in path for token in ("/posts/", "/photos/", "/videos/"))
+                or path.startswith("/photo")
+                or path.startswith("/permalink.php")
+                or path.startswith("/story.php")
+            ):
+                return value
+    if platform == "x":
+        meta_post_id = str(meta.get("post_id") or (item or {}).get("post_id") or "").strip()
+        author = str(meta.get("author_username") or username or "").strip().lstrip("@")
+        if author and meta_post_id:
+            return f"https://x.com/{author}/status/{meta_post_id}"
+    return None
+
+
+def _browser_revisit_priority(platform: str, item: dict | None, outcome: str) -> int:
+    if _candidate_is_video(item, platform):
+        return 90
+    if outcome in {"browser_fetch_failed", "http_error", "short_lived_url"}:
+        return 75
+    return 60
+
+
 async def _record_tiktok_browser_candidate(
     pool,
     username: str | None,
@@ -1399,6 +1466,53 @@ async def _record_browser_media_candidate(
             ingest_mode,
             exc_info=True,
         )
+
+    if needs_revisit and platform != "tiktok":
+        post_url = _browser_candidate_post_url(platform, item, username)
+        priority = _browser_revisit_priority(platform, item, outcome)
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO browser_media_revisit_queue
+                      (platform, content_id, username, post_url, source_url, reason,
+                       priority, metadata)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb)
+                    ON CONFLICT (platform, content_id) DO UPDATE SET
+                      username = COALESCE(EXCLUDED.username, browser_media_revisit_queue.username),
+                      post_url = COALESCE(EXCLUDED.post_url, browser_media_revisit_queue.post_url),
+                      source_url = COALESCE(EXCLUDED.source_url, browser_media_revisit_queue.source_url),
+                      reason = EXCLUDED.reason,
+                      priority = GREATEST(browser_media_revisit_queue.priority, EXCLUDED.priority),
+                      status = CASE
+                        WHEN browser_media_revisit_queue.status = 'completed'
+                          THEN browser_media_revisit_queue.status
+                        ELSE 'pending'
+                      END,
+                      next_visit_at = CASE
+                        WHEN browser_media_revisit_queue.status = 'completed'
+                          THEN browser_media_revisit_queue.next_visit_at
+                        ELSE LEAST(browser_media_revisit_queue.next_visit_at, now())
+                      END,
+                      metadata = browser_media_revisit_queue.metadata || EXCLUDED.metadata,
+                      updated_at = now()
+                    """,
+                    platform,
+                    content_id,
+                    username,
+                    post_url,
+                    url[:2000],
+                    reason or outcome,
+                    priority,
+                    json.dumps(metadata, default=str),
+                )
+        except Exception:
+            logger.debug(
+                "browser media revisit queue insert failed platform=%s content_id=%s",
+                platform,
+                content_id,
+                exc_info=True,
+            )
 
     if platform == "tiktok":
         await _record_tiktok_browser_candidate(
@@ -2067,6 +2181,144 @@ async def tiktok_revisit_result(request):
         return _cors(web.json_response({"ok": True, "status": status}))
     except Exception as exc:
         logger.debug("tiktok revisit result update failed content_id=%s", content_id, exc_info=True)
+        return _cors(web.json_response({"ok": False, "error": str(exc)[:300]}, status=500))
+
+
+def _browser_revisit_platform(value: str | None) -> str | None:
+    platform = _norm_platform(value)
+    if platform in {"x", "facebook", "threads", "lemon8"}:
+        return platform
+    return None
+
+
+async def browser_revisit_target(request):
+    platform = _browser_revisit_platform(request.query.get("platform"))
+    if not platform:
+        return _cors(web.json_response({"ok": False, "target": None, "error": "unsupported platform"}, status=400))
+    try:
+        max_attempts = max(1, int(os.getenv("BROWSER_MEDIA_REVISIT_MAX_ATTEMPTS", "5")))
+    except (TypeError, ValueError):
+        max_attempts = 5
+    claim_timeout = TIKTOK_BROWSER_REVISIT_CLAIM_TIMEOUT_SECONDS
+    claim_hold = TIKTOK_BROWSER_REVISIT_CLAIM_HOLD_SECONDS
+    try:
+        async with request.app["pool"].acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                WITH picked AS (
+                  SELECT id, status AS previous_status
+                  FROM browser_media_revisit_queue
+                  WHERE platform = $1
+                    AND (
+                      (status IN ('pending', 'failed') AND next_visit_at <= now())
+                      OR (
+                        status = 'claimed'
+                        AND COALESCE(last_attempt_at, updated_at, created_at)
+                            <= now() - ($3::int * interval '1 second')
+                      )
+                    )
+                    AND attempts < $2
+                  ORDER BY
+                    CASE WHEN status = 'claimed' THEN 0 ELSE 1 END,
+                    priority DESC,
+                    next_visit_at ASC,
+                    created_at ASC
+                  FOR UPDATE SKIP LOCKED
+                  LIMIT 1
+                )
+                UPDATE browser_media_revisit_queue q
+                SET status = 'claimed',
+                    attempts = q.attempts + 1,
+                    last_attempt_at = now(),
+                    next_visit_at = now() + ($4::int * interval '1 second'),
+                    metadata = q.metadata || jsonb_build_object(
+                      'last_claim_previous_status', picked.previous_status,
+                      'last_claimed_at', now()
+                    ),
+                    updated_at = now()
+                FROM picked
+                WHERE q.id = picked.id
+                RETURNING q.platform, q.content_id, q.username, q.post_url, q.source_url,
+                          q.reason, q.priority, q.attempts, picked.previous_status,
+                          q.metadata
+                """,
+                platform,
+                max_attempts,
+                claim_timeout,
+                claim_hold,
+            )
+        if not row:
+            return _cors(web.json_response({"ok": True, "target": None}))
+        target = dict(row)
+        if isinstance(target.get("metadata"), str):
+            try:
+                target["metadata"] = json.loads(target["metadata"])
+            except Exception:
+                target["metadata"] = {"raw": target["metadata"]}
+        if target.get("metadata") is None:
+            target["metadata"] = {}
+        return _cors(web.json_response({"ok": True, "target": target}, dumps=lambda v: json.dumps(v, default=str)))
+    except Exception as exc:
+        logger.debug("browser media revisit target claim failed platform=%s", platform, exc_info=True)
+        return _cors(web.json_response({"ok": False, "target": None, "error": str(exc)[:300]}, status=500))
+
+
+async def browser_revisit_result(request):
+    body = await _safe_json(request)
+    platform = _browser_revisit_platform(body.get("platform"))
+    content_id = str(body.get("content_id") or "").strip()
+    if not platform:
+        return _cors(web.json_response({"ok": False, "error": "unsupported platform"}, status=400))
+    if not content_id:
+        return _cors(web.json_response({"ok": False, "error": "missing content_id"}, status=400))
+    raw_status = str(body.get("status") or "").strip().lower()
+    reason = str(body.get("reason") or raw_status or "unknown")[:300]
+    success = raw_status in {"success", "ok", "stored", "completed"}
+    unavailable = raw_status in {"unavailable", "private", "deleted", "no_media", "missing_revisit_url"}
+    status = "completed" if success else ("unavailable" if unavailable else "failed")
+    try:
+        async with request.app["pool"].acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE browser_media_revisit_queue
+                SET status = $3,
+                    reason = COALESCE($4, reason),
+                    last_success_at = CASE WHEN $3 = 'completed' THEN now() ELSE last_success_at END,
+                    next_visit_at = CASE
+                      WHEN $3 = 'completed' THEN next_visit_at
+                      WHEN $3 = 'unavailable' THEN now() + interval '7 days'
+                      ELSE now() + (LEAST(3600, GREATEST(120, attempts * 300)) * interval '1 second')
+                    END,
+                    metadata = metadata || $5::jsonb,
+                    updated_at = now()
+                WHERE platform = $1 AND content_id = $2
+                """,
+                platform,
+                content_id,
+                status,
+                reason,
+                json.dumps(
+                    {
+                        "last_result": {
+                            "status": raw_status or status,
+                            "reason": body.get("reason"),
+                            "stored": body.get("stored"),
+                            "observed": body.get("observed"),
+                            "extension_version": body.get("extension_version"),
+                            "reported_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                    },
+                    default=str,
+                ),
+            )
+        return _cors(web.json_response({"ok": True, "status": status}))
+    except Exception as exc:
+        logger.debug(
+            "browser media revisit result update failed platform=%s content_id=%s",
+            platform,
+            content_id,
+            exc_info=True,
+        )
         return _cors(web.json_response({"ok": False, "error": str(exc)[:300]}, status=500))
 
 
@@ -4288,6 +4540,8 @@ def make_app():
     app.router.add_post("/social/dm-decoded", dm_decoded_handler)
     app.router.add_get("/social/x-profile-target", x_profile_target_next)
     app.router.add_post("/social/x-profile-target-result", x_profile_target_result)
+    app.router.add_get("/social/browser-revisit-target", browser_revisit_target)
+    app.router.add_post("/social/browser-revisit-result", browser_revisit_result)
     app.router.add_get("/social/tiktok-revisit-target", tiktok_revisit_target)
     app.router.add_post("/social/tiktok-revisit-result", tiktok_revisit_result)
     app.router.add_get("/social/strava-route-queue", strava_route_queue_handler)

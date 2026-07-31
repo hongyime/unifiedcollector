@@ -524,6 +524,34 @@ class Scheduler:
                             """,
                             timeout=10,
                         )]
+                    if await conn.fetchval("SELECT to_regclass('browser_media_revisit_queue')", timeout=5) is not None:
+                        claim_timeout = _tiktok_revisit_claim_timeout_seconds()
+                        snap["browser_media_revisit_queue"] = [dict(r) for r in await conn.fetch(
+                            """
+                            SELECT platform,
+                                   count(*) FILTER (
+                                     WHERE status IN ('pending', 'failed')
+                                       AND next_visit_at <= now()
+                                   )::int AS due,
+                                   count(*) FILTER (WHERE status = 'claimed')::int AS claimed,
+                                   count(*) FILTER (
+                                     WHERE status = 'claimed'
+                                       AND COALESCE(last_attempt_at, updated_at, created_at)
+                                           <= now() - ($1::int * interval '1 second')
+                                   )::int AS stale_claimed,
+                                   count(*) FILTER (WHERE status = 'pending')::int AS pending,
+                                   count(*) FILTER (WHERE status = 'failed')::int AS failed,
+                                   count(*) FILTER (WHERE status = 'unavailable')::int AS unavailable,
+                                   count(*) FILTER (WHERE status = 'completed')::int AS completed,
+                                   max(updated_at) AS last_seen_at
+                            FROM browser_media_revisit_queue
+                            GROUP BY platform
+                            ORDER BY due DESC, pending DESC, failed DESC, platform
+                            LIMIT 8
+                            """,
+                            claim_timeout,
+                            timeout=10,
+                        )]
                 except Exception:
                     pass
 

@@ -366,6 +366,30 @@ def _format_browser_media_diagnostics(rows: list[dict]) -> list[str]:
     return lines
 
 
+def _format_browser_media_revisit_queue(rows: list[dict]) -> list[str]:
+    if not rows:
+        return []
+    lines = []
+    for row in rows[:6]:
+        platform = str(row.get("platform") or "").strip().lower()
+        if not platform:
+            continue
+        due = int(row.get("due", 0) or 0)
+        claimed = int(row.get("claimed", 0) or 0)
+        stale_claimed = int(row.get("stale_claimed", 0) or 0)
+        pending = int(row.get("pending", 0) or 0)
+        failed = int(row.get("failed", 0) or 0)
+        unavailable = int(row.get("unavailable", 0) or 0)
+        completed = int(row.get("completed", 0) or 0)
+        stale_text = f", {stale_claimed:,} stale claimed ready to reclaim" if stale_claimed else ""
+        lines.append(
+            f"• {_display_source(platform)} detail revisit queue: {due:,} due now, "
+            f"{claimed:,} claimed by browser{stale_text}, {pending:,} pending, "
+            f"{failed:,} failed/retry, {unavailable:,} unavailable, {completed:,} completed."
+        )
+    return lines
+
+
 def _format_x_collection_health(row: dict) -> list[str]:
     targets = int(row.get("targets", 0) or 0)
     due = int(row.get("due_targets", 0) or 0)
@@ -739,6 +763,12 @@ async def notify_status(snapshot: dict) -> bool:
         lines.append("")
         lines.append("<b>Browser media diagnosis</b>")
         lines.extend(browser_media_lines)
+
+    browser_revisit_lines = _format_browser_media_revisit_queue(snapshot.get("browser_media_revisit_queue") or [])
+    if browser_revisit_lines:
+        lines.append("")
+        lines.append("<b>Browser media detail follow-up</b>")
+        lines.extend(browser_revisit_lines)
 
     tiktok_diagnostics = snapshot.get("tiktok_browser_media_diagnostics") or []
     tiktok_revisit = snapshot.get("tiktok_browser_revisit_queue") or {}

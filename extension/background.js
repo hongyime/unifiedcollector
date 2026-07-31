@@ -721,6 +721,44 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
         break;
       }
+      case "getBrowserMediaRevisitTarget": {
+        try {
+          const platform = String(msg.platform || "").trim();
+          const owner = String(msg.owner || "").trim();
+          const params = new URLSearchParams();
+          if (platform) params.set("platform", platform);
+          if (owner) params.set("owner", owner);
+          const qs = params.toString() ? "?" + params.toString() : "";
+          const r = await fetch(base + "/social/browser-revisit-target" + qs);
+          const j = await r.json().catch(() => ({}));
+          sendResponse({ ok: r.ok, ...j });
+        } catch (e) {
+          sendResponse({ ok: false, target: null, error: String(e.message || e) });
+        }
+        break;
+      }
+      case "browserMediaRevisitResult": {
+        try {
+          const r = await fetch(base + "/social/browser-revisit-result", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(withExtensionVersion({
+              platform: msg.platform,
+              content_id: msg.content_id,
+              status: msg.status || "success",
+              reason: msg.reason || null,
+              observed: msg.observed ?? null,
+              stored: msg.stored ?? null,
+              username: msg.username || null,
+            })),
+          });
+          const j = await r.json().catch(() => ({}));
+          sendResponse({ ok: r.ok, ...j });
+        } catch (e) {
+          sendResponse({ ok: false, error: String(e.message || e) });
+        }
+        break;
+      }
       case "tiktokRevisitResult": {
         try {
           const r = await fetch(base + "/social/tiktok-revisit-result", {

@@ -93,6 +93,18 @@ export interface BrowserMediaCandidateOutcome {
   age_seconds: number;
 }
 
+export interface BrowserMediaRevisitQueue {
+  platform: string;
+  due: number;
+  claimed: number;
+  stale_claimed: number;
+  pending: number;
+  failed: number;
+  unavailable: number;
+  completed: number;
+  last_seen_at: string | null;
+}
+
 export interface BrowserExtensionIssue {
   platform: string;
   endpoint?: string | null;
@@ -112,6 +124,7 @@ export interface BrowserExtensionHealth {
   hooks: BrowserExtensionHook[];
   ingest: BrowserExtensionIngest[];
   media_candidates?: BrowserMediaCandidateOutcome[];
+  media_revisit_queue?: BrowserMediaRevisitQueue[];
   tiktok_media?: TikTokBrowserMediaHealth | null;
   issues: BrowserExtensionIssue[];
 }
