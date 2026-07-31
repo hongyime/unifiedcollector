@@ -917,6 +917,7 @@ async def test_collect_channel_limits_live_video_downloads(monkeypatch):
     coll._resolve_channel = AsyncMock(return_value=("UC_a", "Channel A"))
     coll._upsert_channel = AsyncMock(return_value=("UUA", 0))
     coll._collect_video_list_via_api = AsyncMock(return_value=["v1", "v2", "v3"])
+    coll._select_live_download_video_ids = AsyncMock(return_value=(["v1", "v2"], 0, 0))
     coll._download_videos_via_yt_dlp = AsyncMock(return_value=0)
 
     await coll._collect_channel("UC_a")
@@ -926,6 +927,24 @@ async def test_collect_channel_limits_live_video_downloads(monkeypatch):
         "Channel A",
         ["v1", "v2"],
     )
+
+
+@pytest.mark.asyncio
+async def test_select_live_download_video_ids_filters_before_limit(monkeypatch):
+    coll = _new_collector(monkeypatch, YOUTUBE_VIDEO_DOWNLOADS_PER_TARGET="2")
+    coll._filter_video_ids_for_download = AsyncMock(return_value=(["v1", "v2", "v3", "v4"], 1))
+    coll._filter_video_ids_already_archived = AsyncMock(return_value=(["v3", "v4"], 2))
+
+    selected, skipped_duration, skipped_db = await coll._select_live_download_video_ids(
+        ["v1", "v2", "v3", "v4", "v5"],
+        2,
+    )
+
+    assert selected == ["v3", "v4"]
+    assert skipped_duration == 1
+    assert skipped_db == 2
+    coll._filter_video_ids_for_download.assert_awaited_once_with(["v1", "v2", "v3", "v4", "v5"])
+    coll._filter_video_ids_already_archived.assert_awaited_once_with(["v1", "v2", "v3", "v4"])
 
 
 @pytest.mark.asyncio

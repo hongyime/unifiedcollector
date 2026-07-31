@@ -438,14 +438,25 @@ class YoutubeCollector(BaseCollector):
             if self._download_videos:
                 download_video_ids = video_ids
                 if self._video_downloads_per_target > 0 and len(download_video_ids) > self._video_downloads_per_target:
-                    logger.info(
-                        "youtube: limiting live video downloads for %s to %d/%d this cycle",
-                        channel_id,
+                    original_count = len(download_video_ids)
+                    download_video_ids, skipped_duration, skipped_db = await self._select_live_download_video_ids(
+                        download_video_ids,
                         self._video_downloads_per_target,
-                        len(download_video_ids),
                     )
-                    download_video_ids = download_video_ids[: self._video_downloads_per_target]
-                await self._download_videos_via_yt_dlp(channel_id, channel_name, download_video_ids)
+                    logger.info(
+                        "youtube: limiting live video downloads for %s to %d/%d selected from %d this cycle "
+                        "(skipped_archived=%d skipped_duration=%d)",
+                        channel_id,
+                        len(download_video_ids),
+                        self._video_downloads_per_target,
+                        original_count,
+                        skipped_db,
+                        skipped_duration,
+                    )
+                if download_video_ids or not video_ids:
+                    await self._download_videos_via_yt_dlp(channel_id, channel_name, download_video_ids)
+                else:
+                    logger.info("youtube: no live video download candidates remain for %s after archive/duration filtering", channel_id)
             else:
                 await self._collect_thumbnails_via_yt_dlp(channel_id, channel_name)
         return {
@@ -1862,6 +1873,14 @@ class YoutubeCollector(BaseCollector):
         self._known_ids.update(archived)
         kept = [vid for vid in video_ids if f"video_{vid}" not in archived]
         return kept, len(video_ids) - len(kept)
+
+    async def _select_live_download_video_ids(self, video_ids: list[str], limit: int) -> tuple[list[str], int, int]:
+        """Choose the first missing downloadable IDs, then apply the live-cycle cap."""
+        if limit <= 0:
+            return list(video_ids or []), 0, 0
+        candidates, skipped_duration = await self._filter_video_ids_for_download(list(video_ids or []))
+        candidates, skipped_db = await self._filter_video_ids_already_archived(candidates)
+        return candidates[:limit], skipped_duration, skipped_db
 
     async def _collect_thumbnails_via_yt_dlp(self, channel_id: str, channel_name: str):
         from src.core.subprocess_downloader import yt_dlp_download, managed_tempdir
