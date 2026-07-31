@@ -301,6 +301,13 @@ class WorkerService:
         logger.info("Worker service starting with sources: %s", sources)
         self._started_at = time.monotonic()
 
+        if not sources:
+            logger.warning("worker: no enabled sources; parking idle until stopped")
+            self._install_signal_handlers()
+            await self._stop.wait()
+            logger.info("Worker service stopped")
+            return
+
         # Self-heal trigger for in-process error floods (e.g. Telethon MTProto
         # desync) that don't crash/hang/zero-progress. Attached to root so it
         # sees telethon's own logger too.
