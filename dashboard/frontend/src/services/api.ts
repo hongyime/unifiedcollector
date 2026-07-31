@@ -302,6 +302,9 @@ export const api = {
       connected?: boolean | null;
       last_disconnect_status_code?: number | null;
       last_disconnect_reason?: string | null;
+      last_disconnect_at?: string | null;
+      pairing_recovery_until?: string | null;
+      pairing_recovery_active?: boolean;
     }>(
       `/whatsapp/qr/${bridge}`
     ),

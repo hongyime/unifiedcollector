@@ -47,6 +47,8 @@ let connectionState = 'starting';
 let socketRegistered = false;
 let lastDisconnectStatusCode: number | null = null;
 let lastDisconnectReason: string | null = null;
+let lastDisconnectAt: number | null = null;
+let pairingRecoveryUntil: number | null = null;
 let terminalQrPrinted = false;
 let lastFreshQrRequestAt = 0;
 const FRESH_QR_MIN_INTERVAL_MS = Number(process.env.WHATSAPP_FRESH_QR_MIN_INTERVAL_MS || 30_000);
@@ -82,6 +84,9 @@ function bridgeState() {
         push_name: user?.name || user?.notify || null,
         last_disconnect_status_code: lastDisconnectStatusCode,
         last_disconnect_reason: lastDisconnectReason,
+        last_disconnect_at: lastDisconnectAt ? new Date(lastDisconnectAt).toISOString() : null,
+        pairing_recovery_until: pairingRecoveryUntil ? new Date(pairingRecoveryUntil).toISOString() : null,
+        pairing_recovery_active: Boolean(pairingRecoveryUntil && Date.now() < pairingRecoveryUntil),
     };
 }
 
@@ -182,6 +187,8 @@ app.post('/fresh-qr', async (_req, res) => {
     latestQrAt = null;
     lastDisconnectStatusCode = null;
     lastDisconnectReason = null;
+    lastDisconnectAt = null;
+    pairingRecoveryUntil = null;
     try {
         clearAuthState();
         activeSock?.end?.(new Error('manual fresh QR'));
@@ -296,6 +303,16 @@ function scheduleReconnectIfStillUnready(reason: string, delayMs: number, expect
         }
         connectToWhatsApp().catch((e) => logger.error({ err: e, reason }, 'Conditional reconnect failed'));
     }, delayMs);
+}
+
+function schedulePairingRecovery(reason: string, delayMs: number, expectedSock: any, expectedEpoch: number): void {
+    pairingRecoveryUntil = Date.now() + delayMs;
+    connectionState = 'pairing_restart';
+    logger.info(
+        { reason, delay_ms: delayMs },
+        'WhatsApp pairing restart required; preserving partial auth and retrying'
+    );
+    scheduleReconnectIfStillUnready(reason, delayMs, expectedSock, expectedEpoch);
 }
 
 function scheduleCredsSave(saveCreds: () => Promise<void>): void {
@@ -440,6 +457,8 @@ async function connectToWhatsApp(): Promise<void> {
             connectionState = 'awaiting_scan';
             lastDisconnectStatusCode = null;
             lastDisconnectReason = null;
+            lastDisconnectAt = null;
+            pairingRecoveryUntil = null;
             logger.info({ qr_available: true }, 'QR code refreshed; scan it from the dashboard link page');
             if (getEnv('WHATSAPP_PRINT_TERMINAL_QR', 'false') === 'true') {
                 terminalQrPrinted = true;
@@ -461,6 +480,8 @@ async function connectToWhatsApp(): Promise<void> {
             connectionState = 'open';
             lastDisconnectStatusCode = null;
             lastDisconnectReason = null;
+            lastDisconnectAt = null;
+            pairingRecoveryUntil = null;
             retryCount = 0;
             if (sock.user?.id) phoneNumber = sock.user.id.split(':')[0];
             await producer.publish('session.status', {
@@ -506,6 +527,7 @@ async function connectToWhatsApp(): Promise<void> {
             const statusCode = error?.output?.statusCode;
             lastDisconnectStatusCode = typeof statusCode === 'number' ? statusCode : null;
             lastDisconnectReason = error?.message || null;
+            lastDisconnectAt = Date.now();
             connectionState = 'disconnected';
             logger.error({ statusCode, reason: error?.message }, 'Connection closed');
             await producer.publish('session.status', {
@@ -525,25 +547,40 @@ async function connectToWhatsApp(): Promise<void> {
                 const now = Date.now();
                 stream515.push(now);
                 stream515 = stream515.filter((t) => now - t < WINDOW_515_MS);
+                const hasRegisteredAuth = Boolean(socketRegistered || sock.authState.creds.registered);
+                const isLikelyPairingRestart = qrWasRecent && !serviceHealthy;
                 if (stream515.length >= MAX_RAPID_515) {
                     stream515 = [];
-                    if (socketRegistered || sock.authState.creds.registered) {
-                        logger.error(`${MAX_RAPID_515} stream errors in window -- preserving registered auth and backing off`);
-                        connectionState = 'rapid_515_backoff';
-                        scheduleReconnect('rapid_515_registered', 15000);
+                    if (hasRegisteredAuth || isLikelyPairingRestart) {
+                        logger.error(
+                            `${MAX_RAPID_515} stream errors in window -- preserving WhatsApp auth and backing off`
+                        );
+                        connectionState = isLikelyPairingRestart ? 'pairing_restart_backoff' : 'rapid_515_backoff';
+                        pairingRecoveryUntil = Date.now() + 15000;
+                        scheduleReconnect(
+                            isLikelyPairingRestart ? 'rapid_515_pairing' : 'rapid_515_registered',
+                            15000
+                        );
                     } else {
                         logger.error(`${MAX_RAPID_515} stream errors in window before registration -- clearing unpaired auth`);
                         clearAuthState();
                         scheduleReconnect('rapid_515_unregistered', 5000);
                     }
                 } else {
-                    if (socketRegistered && qrWasRecent) {
-                        connectionState = 'pairing_restart';
-                        logger.info(
-                            `Status ${statusCode}: post-pair restart required; waiting ` +
-                            `${Math.round(POST_PAIR_515_GRACE_MS / 1000)}s for the paired socket to finish initial sync`
+                    if (hasRegisteredAuth && qrWasRecent) {
+                        schedulePairingRecovery(
+                            'post_pair_restart_required',
+                            POST_PAIR_515_GRACE_MS,
+                            sock,
+                            epoch
                         );
-                        scheduleReconnectIfStillUnready('post_pair_restart_required', POST_PAIR_515_GRACE_MS, sock, epoch);
+                    } else if (isLikelyPairingRestart) {
+                        schedulePairingRecovery(
+                            'post_qr_restart_required',
+                            Math.max(5000, UNPAIRED_QR_RECONNECT_MS),
+                            sock,
+                            epoch
+                        );
                     } else {
                         logger.info(`Status ${statusCode}: restart required, reconnecting`);
                         scheduleReconnect('restart_required', 500);

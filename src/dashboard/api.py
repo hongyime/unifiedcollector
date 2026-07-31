@@ -6141,6 +6141,9 @@ async def whatsapp_qr(bridge: str):
         "connected": None,
         "last_disconnect_status_code": None,
         "last_disconnect_reason": None,
+        "last_disconnect_at": None,
+        "pairing_recovery_until": None,
+        "pairing_recovery_active": False,
     }
     try:
         # /health tells us if already paired; /qr gives the code when waiting
@@ -6153,6 +6156,9 @@ async def whatsapp_qr(bridge: str):
         out["connected"] = health.get("connected")
         out["last_disconnect_status_code"] = health.get("last_disconnect_status_code")
         out["last_disconnect_reason"] = health.get("last_disconnect_reason")
+        out["last_disconnect_at"] = health.get("last_disconnect_at")
+        out["pairing_recovery_until"] = health.get("pairing_recovery_until")
+        out["pairing_recovery_active"] = bool(health.get("pairing_recovery_active"))
         if out["ready"]:
             out["status"] = "connected"
             return out
@@ -6171,6 +6177,14 @@ async def whatsapp_qr(bridge: str):
         out["last_disconnect_reason"] = qrd.get(
             "last_disconnect_reason",
             out["last_disconnect_reason"],
+        )
+        out["last_disconnect_at"] = qrd.get("last_disconnect_at", out["last_disconnect_at"])
+        out["pairing_recovery_until"] = qrd.get(
+            "pairing_recovery_until",
+            out["pairing_recovery_until"],
+        )
+        out["pairing_recovery_active"] = bool(
+            qrd.get("pairing_recovery_active", out["pairing_recovery_active"])
         )
         raw_qr = qrd.get("qr", "")
         if not raw_qr and _should_request_fresh_wa_qr(health, qrd):

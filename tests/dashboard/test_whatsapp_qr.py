@@ -66,6 +66,9 @@ def test_whatsapp_qr_proxy_forwards_bridge_metadata(monkeypatch):
                     "connected": False,
                     "last_disconnect_status_code": None,
                     "last_disconnect_reason": None,
+                    "last_disconnect_at": None,
+                    "pairing_recovery_until": None,
+                    "pairing_recovery_active": False,
                 },
             )
         if url.endswith("/qr"):
@@ -77,6 +80,9 @@ def test_whatsapp_qr_proxy_forwards_bridge_metadata(monkeypatch):
                     "last_qr_at": "2026-07-28T00:00:00.000Z",
                     "registered": False,
                     "connected": False,
+                    "last_disconnect_at": "2026-07-28T00:00:01.000Z",
+                    "pairing_recovery_until": "2026-07-28T00:01:31.000Z",
+                    "pairing_recovery_active": True,
                 },
             )
         raise AssertionError(f"unexpected URL: {url}")
@@ -91,6 +97,9 @@ def test_whatsapp_qr_proxy_forwards_bridge_metadata(monkeypatch):
     assert out["last_qr_at"] == "2026-07-28T00:00:00.000Z"
     assert out["registered"] is False
     assert out["connected"] is False
+    assert out["last_disconnect_at"] == "2026-07-28T00:00:01.000Z"
+    assert out["pairing_recovery_until"] == "2026-07-28T00:01:31.000Z"
+    assert out["pairing_recovery_active"] is True
     assert out["qr"].startswith("data:image/png;base64,")
 
 

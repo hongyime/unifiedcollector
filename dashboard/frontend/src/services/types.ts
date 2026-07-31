@@ -796,6 +796,11 @@ export interface WaBridgeSession {
   wid?: string | null;          // full JID e.g. 6591234567:12@s.whatsapp.net
   phone_number?: string | null; // just the digits
   push_name?: string | null;    // WhatsApp display name, if set
+  last_disconnect_at?: string | null;
+  last_disconnect_status_code?: number | null;
+  last_disconnect_reason?: string | null;
+  pairing_recovery_until?: string | null;
+  pairing_recovery_active?: boolean;
 }
 export interface WaSessionsResponse {
   sessions: WaBridgeSession[];
