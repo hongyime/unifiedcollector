@@ -1420,6 +1420,7 @@ def _source_media_freshness(source: str | None, current_window: dict, day_window
     current_items = int((current_window or {}).get("media_items") or 0)
     day_items = int((day_window or {}).get("media_items") or 0)
     total = media_total or {}
+    stats_unavailable = bool(total.get("stats_unavailable"))
     total_items = int(total.get("total_media_items") or 0)
     latest = total.get("latest_media_at")
     expected = source in _MEDIA_PRIMARY_SOURCES or bool(source and source.startswith(_BEEPER_SUBSOURCE_PREFIX))
@@ -1464,6 +1465,17 @@ def _source_media_freshness(source: str | None, current_window: dict, day_window
             "summary": f"Stored {day_items:,} media file(s) in the last 24h; none this hour.",
             "next_action": "No action unless this source should be media-heavy right now.",
         }
+    if stats_unavailable:
+        return {
+            "status": "unknown",
+            "severity": "warning",
+            "expected": True,
+            "current_hour_items": current_items,
+            "last_24h_items": day_items,
+            "latest_age_seconds": latest_age_seconds,
+            "summary": "Media totals are temporarily unavailable under DB load; not claiming this source has zero media.",
+            "next_action": "Refresh after DB load drops or inspect media rollups directly before treating this as a collection gap.",
+        }
     if total_items <= 0:
         return {
             "status": "none_yet",
@@ -1477,6 +1489,18 @@ def _source_media_freshness(source: str | None, current_window: dict, day_window
         }
 
     age_text = _short_age(latest_age_seconds)
+    if latest_age_seconds is not None and latest_age_seconds < 86_400:
+        return {
+            "status": "recent",
+            "severity": "ok",
+            "expected": True,
+            "current_hour_items": current_items,
+            "last_24h_items": day_items,
+            "latest_age_seconds": latest_age_seconds,
+            "summary": f"Latest media was {age_text} ago; hourly/24h counters may be partial under DB load.",
+            "next_action": "No media action unless recent browser ingest keeps seeing candidates without stored files.",
+        }
+
     quiet = latest_age_seconds is None or latest_age_seconds >= _MEDIA_QUIET_WARN_SECONDS
     return {
         "status": "quiet" if quiet else "idle",
@@ -1565,6 +1589,8 @@ def _source_matrix_row(source_row: dict, current_content: dict | None, current_r
         "total_media_items": int(total_media.get("total_media_items") or 0),
         "total_media_bytes": int(total_media.get("total_media_bytes") or 0),
         "latest_media_at": total_media.get("latest_media_at"),
+        "media_stats_unavailable": bool(total_media.get("stats_unavailable")),
+        "media_stats_error": total_media.get("stats_error"),
         "media_freshness": media_freshness,
         "media_backlog": backlog,
         "rate_limit": {
@@ -2631,7 +2657,7 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
             previous_rate = {}
             day_content = {}
             day_rate = {}
-            media_totals = {}
+            media_totals = {"__stats_unavailable__": True}
             youtube_media_backlog = {}
             active_cursors = {}
             browser_extension = {"expected_version": _expected_extension_version(), "issues": []}
@@ -2697,7 +2723,7 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
                 section="media_totals",
                 label="media totals",
                 errors=errors,
-                fallback={},
+                fallback={"__stats_unavailable__": True},
                 awaitable=_source_media_totals(conn),
             )
             youtube_media_backlog = await _source_matrix_section(
@@ -2724,6 +2750,18 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
 
     generated_at = datetime.now(timezone.utc)
     live_sources = [*live_sources, *beeper_subsources]
+    media_totals_unavailable = bool(media_totals.get("__stats_unavailable__"))
+    media_total_unavailable_row = {
+        "stats_unavailable": True,
+        "stats_error": next(
+            (
+                error.get("error")
+                for error in errors
+                if error.get("section") in {"media_totals", "source_liveness"}
+            ),
+            "unavailable",
+        ),
+    }
     extension_by_source = _extension_issues_by_source(browser_extension)
     rows = [
         _source_matrix_row(
@@ -2732,7 +2770,9 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
             current_rate.get(source_row["source"]),
             day_content.get(source_row["source"]),
             day_rate.get(source_row["source"]),
-            media_totals.get(source_row["source"]),
+            media_totals.get(source_row["source"]) or (
+                media_total_unavailable_row if media_totals_unavailable else None
+            ),
             active_cursors.get(source_row["source"]),
             extension_by_source.get(source_row["source"], []),
             generated_at,

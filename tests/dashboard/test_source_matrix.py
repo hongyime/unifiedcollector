@@ -263,6 +263,56 @@ def test_source_matrix_reports_media_quiet_without_blocking_live_rows():
     assert "No media files in the last 24h" in row["media_freshness"]["summary"]
 
 
+def test_source_matrix_reports_media_totals_unknown_without_false_zero_gap():
+    now = datetime(2026, 7, 28, 1, 30, tzinfo=timezone.utc)
+    row = _source_matrix_row(
+        _source(source="facebook", freshness_basis="facebook_posts.collected_at"),
+        current_content={"records": 12, "messages": 0, "media_items": 0},
+        current_rate=None,
+        day_content={"records": 30, "messages": 0, "media_items": 0},
+        day_rate=None,
+        media_total={
+            "stats_unavailable": True,
+            "stats_error": "TimeoutError",
+        },
+        cursor_row=None,
+        extension_issues=[],
+        now=now,
+    )
+
+    assert row["media_stats_unavailable"] is True
+    assert row["media_stats_error"] == "TimeoutError"
+    assert row["total_media_items"] == 0
+    assert row["media_freshness"]["status"] == "unknown"
+    assert row["media_freshness"]["severity"] == "warning"
+    assert "not claiming this source has zero media" in row["media_freshness"]["summary"]
+    assert "Refresh after DB load drops" in row["media_freshness"]["next_action"]
+
+
+def test_source_matrix_uses_latest_media_when_window_counts_timeout():
+    now = datetime(2026, 7, 28, 1, 30, tzinfo=timezone.utc)
+    row = _source_matrix_row(
+        _source(source="tiktok", freshness_basis="media_items.collected_at where source=tiktok"),
+        current_content=None,
+        current_rate=None,
+        day_content=None,
+        day_rate=None,
+        media_total={
+            "total_media_items": 24027,
+            "total_media_bytes": 50_000_000_000,
+            "latest_media_at": now - timedelta(minutes=26),
+        },
+        cursor_row=None,
+        extension_issues=[],
+        now=now,
+    )
+
+    assert row["media_freshness"]["status"] == "recent"
+    assert row["media_freshness"]["severity"] == "ok"
+    assert "Latest media was 26m ago" in row["media_freshness"]["summary"]
+    assert "No media files in the last 24h" not in row["media_freshness"]["summary"]
+
+
 def test_source_matrix_reports_youtube_video_backlog_as_blocker():
     now = datetime(2026, 7, 28, 1, 30, tzinfo=timezone.utc)
     row = _source_matrix_row(

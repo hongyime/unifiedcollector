@@ -182,9 +182,11 @@ const sourceMatrixColumns: ColumnDef<SourceCollectionMatrixRow, unknown>[] = [
       const media = row.media_freshness;
       return (
         <div>
-          <div>{formatNumber(info.getValue() as number)} files</div>
+          <div>{row.media_stats_unavailable ? "Unknown" : `${formatNumber(info.getValue() as number)} files`}</div>
           <div className="text-[10px] uppercase tracking-wide text-text-muted">
-            {formatBytes(row.total_media_bytes)} · {relativeTime(row.latest_media_at)}
+            {row.media_stats_unavailable
+              ? `media totals timed out${row.media_stats_error ? ` · ${row.media_stats_error}` : ""}`
+              : `${formatBytes(row.total_media_bytes)} · ${relativeTime(row.latest_media_at)}`}
           </div>
           {media ? (
             <div className="mt-1 flex max-w-[260px] items-center gap-2 text-[10px]">

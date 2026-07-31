@@ -189,6 +189,8 @@ export interface SourceCollectionMatrixRow {
   total_media_items: number;
   total_media_bytes: number;
   latest_media_at: string | null;
+  media_stats_unavailable?: boolean;
+  media_stats_error?: string | null;
   media_freshness: SourceMediaFreshness;
   rate_limit: SourceRateLimitState;
   extension_issues: BrowserExtensionIssue[];
