@@ -236,6 +236,13 @@ class InstagramCollector(BaseCollector):
         self._consecutive_429s = 0
         self._consecutive_429s_by_account: dict[str, int] = {}
         self._restored_cooldown_accounts: set[str] = set()
+        self._graphql_posts_disabled_until = 0.0
+        self._graphql_posts_disable_seconds = int(
+            os.getenv("INSTA_GRAPHQL_POSTS_DISABLE_SECONDS", "21600")
+        )
+        self._graphql_posts_disable_on_400 = (
+            os.getenv("INSTA_GRAPHQL_POSTS_DISABLE_ON_400", "true").lower() == "true"
+        )
         # Follow-aware access tracker (lazy — needs self.pool, created on first use).
         # Records every profile fetch outcome into profile_access_{summary,attempts}
         # so SmartAccountSelector can later route a private target to a cookie
@@ -1778,6 +1785,18 @@ class InstagramCollector(BaseCollector):
         the endpoint signals auth/rate failure (401/429) or returns empty —
         signal to caller to invoke the Playwright fallback.
         """
+        if os.getenv("INSTA_GRAPHQL_POSTS_ENABLED", "true").lower() != "true":
+            return False
+        disabled_until = float(getattr(self, "_graphql_posts_disabled_until", 0.0) or 0.0)
+        now = time.time()
+        if disabled_until > now:
+            logger.info(
+                "instagram/%s: GraphQL posts disabled for %.0fs after prior HTTP 400",
+                entity_name,
+                disabled_until - now,
+            )
+            return False
+
         end_cursor = ""
         has_next = True
         page_depth = 0
@@ -1829,6 +1848,15 @@ class InstagramCollector(BaseCollector):
                                 "uid": uid,
                                 "endpoint": "graphql/query",
                             },
+                        )
+                        return False
+                    if resp.status_code == 400 and getattr(self, "_graphql_posts_disable_on_400", True):
+                        disable_seconds = int(getattr(self, "_graphql_posts_disable_seconds", 21600) or 21600)
+                        self._graphql_posts_disabled_until = time.time() + disable_seconds
+                        logger.warning(
+                            "instagram/%s: GraphQL posts returned HTTP 400; disabling legacy GraphQL path for %ds",
+                            entity_name,
+                            disable_seconds,
                         )
                         return False
                     resp.raise_for_status()

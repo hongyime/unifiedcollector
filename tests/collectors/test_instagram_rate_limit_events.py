@@ -254,6 +254,35 @@ async def test_collect_posts_archives_graphql_page(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_collect_posts_disables_legacy_graphql_after_http_400(monkeypatch):
+    coll = _bare_collector()
+    coll._sem = asyncio.Semaphore(1)
+    coll._stop = SimpleNamespace(is_set=lambda: False)
+    coll._graphql_posts_disabled_until = 0.0
+    coll._graphql_posts_disable_seconds = 600
+    coll._graphql_posts_disable_on_400 = True
+    coll.rate_limiter = SimpleNamespace(
+        async_wait=AsyncMock(),
+        record_success=MagicMock(),
+        record_failure=MagicMock(),
+    )
+    coll.circuit_breaker = SimpleNamespace(record_success=MagicMock(), record_failure=MagicMock())
+
+    response = MagicMock(status_code=400)
+    response.raise_for_status = MagicMock(side_effect=AssertionError("must not raise"))
+    client = SimpleNamespace(get=AsyncMock(return_value=response))
+
+    ok = await coll._collect_posts(client, "123", "alice")
+    assert ok is False
+    assert coll._graphql_posts_disabled_until > time.time()
+    coll.circuit_breaker.record_failure.assert_not_called()
+
+    ok = await coll._collect_posts(client, "123", "alice")
+    assert ok is False
+    assert client.get.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_handle_rate_limit_records_scoped_event_metadata(monkeypatch):
     coll = _bare_collector()
     record_event = AsyncMock()
