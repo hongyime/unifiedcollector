@@ -19,6 +19,12 @@ from src.db.connection import get_pool, close_pool
 logger = logging.getLogger(__name__)
 
 
+def _format_exception(exc: BaseException) -> str:
+    detail = str(exc).strip()
+    name = exc.__class__.__name__
+    return f"{name}: {detail}" if detail else name
+
+
 class _FatalSpinLogWatcher(logging.Handler):
     """Self-healing trigger for unrecoverable in-process error FLOODS.
 
@@ -810,7 +816,7 @@ class WorkerService:
                         logger.warning(
                             "%s: %s while internet is UP — transient/local, "
                             "retrying (no network alert): %s",
-                            source, type(e).__name__, e)
+                            source, type(e).__name__, _format_exception(e))
                         try:
                             await asyncio.wait_for(
                                 self._stop.wait(), timeout=self._cycle_sleep(source))
@@ -818,7 +824,7 @@ class WorkerService:
                             pass
                         continue
                     logger.warning("%s: network error — waiting for internet: %s",
-                                   source, e)
+                                   source, _format_exception(e))
                     now = time.monotonic()
                     notified = now - self._last_net_notify > 300
                     if notified:
@@ -826,7 +832,7 @@ class WorkerService:
                         await self._notify_telegram(
                             f"🌐 <b>NETWORK DOWN</b>\n"
                             f"Internet lost ({source}). Waiting to recover.\n"
-                            f"<code>{str(e)[:200]}</code>"
+                            f"<code>{_format_exception(e)[:200]}</code>"
                         )
                     await self._wait_for_internet(f"{source}/recovery")
                     if notified:
@@ -836,9 +842,9 @@ class WorkerService:
                     logger.warning(
                         "AUTH FAILURE: %s — credentials/session broken. "
                         "Paused (retrying every %.0fs). Error: %s",
-                        source, self.auth_retry_interval, e,
+                        source, self.auth_retry_interval, _format_exception(e),
                     )
-                    await self._mark_source_auth_paused(source, repr(e))
+                    await self._mark_source_auth_paused(source, _format_exception(e))
                     try:
                         await asyncio.wait_for(
                             self._stop.wait(), timeout=self.auth_retry_interval
@@ -848,15 +854,15 @@ class WorkerService:
                     continue
                 self._crash_counts[source] += 1
                 count = self._crash_counts[source]
-                logger.error("%s crashed (%d/%d): %r", source, count, self.max_restarts, e,
+                logger.error("%s crashed (%d/%d): %s", source, count, self.max_restarts, _format_exception(e),
                              exc_info=True)
                 if count >= self.max_restarts:
                     logger.error("%s exceeded max restarts, giving up", source)
-                    await self._mark_source_dead(source, repr(e), count)
+                    await self._mark_source_dead(source, _format_exception(e), count)
                     await self._notify_telegram(
                         f"💀 <b>SOURCE DEAD: {source}</b>\n"
                         f"Crashed {count}x, permanently stopped.\n"
-                        f"<code>{repr(e)[:300]}</code>\n"
+                        f"<code>{_format_exception(e)[:300]}</code>\n"
                         f"Fix: docker compose restart collector_{source}"
                     )
                     break

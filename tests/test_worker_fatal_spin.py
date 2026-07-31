@@ -18,6 +18,13 @@ def _record(message: str, *, logger_name: str = "telethon.network.mtprotosender"
     )
 
 
+def test_worker_format_exception_keeps_blank_timeout_readable():
+    from src.worker import _format_exception
+
+    assert _format_exception(TimeoutError()) == "TimeoutError"
+    assert _format_exception(RuntimeError("boom")) == "RuntimeError: boom"
+
+
 def test_fatal_spin_watcher_persists_and_notifies_before_exit(monkeypatch):
     from src.worker import _FatalSpinLogWatcher
 
