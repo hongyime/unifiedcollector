@@ -219,6 +219,19 @@ def test_gallery_dl_range_cursor_advances_between_cycles(tmp_path, monkeypatch):
     assert c._gallery_dl_archive_args("alice")[-2:] == ["--range", "31-60"]
 
 
+def test_profile_backoff_state_round_trip(tmp_path, monkeypatch):
+    monkeypatch.setenv("TIKTOK_PROFILE_BACKOFF_DIR", str(tmp_path / "backoff"))
+    with patch.object(TiktokCollector, "_check_tool", staticmethod(lambda *_: False)), \
+         patch.object(TiktokCollector, "_discover_cookie_file", staticmethod(lambda: "")):
+        c = TiktokCollector()
+
+    c._record_profile_backoff("bad/name user", reason="timeout", seconds=60)
+
+    remaining = c._profile_backoff_remaining("bad/name user")
+    assert 0 < remaining <= 60
+    assert c._profile_backoff_state_path("bad/name user").exists()
+
+
 def test_gallery_dl_archive_args_can_be_disabled(tmp_path, monkeypatch):
     monkeypatch.setenv("TIKTOK_GALLERY_DL_ARCHIVE_DIR", str(tmp_path / "archives"))
     monkeypatch.setenv("TIKTOK_GALLERY_DL_ARCHIVE_ENABLED", "false")
@@ -505,6 +518,65 @@ async def test_collect_user_skips_ytdlp_after_clean_empty_gallery(monkeypatch):
 
     assert out == "empty"
     c._collect_via_yt_dlp.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_collect_user_respects_profile_backoff(monkeypatch):
+    with patch.object(TiktokCollector, "_check_tool", staticmethod(lambda *_: False)):
+        c = TiktokCollector()
+    c._quota = None
+    c._browser_fallback = False
+    c._use_gallery_dl = True
+    c._use_yt_dlp = True
+    monkeypatch.setattr(c, "_stored_followers_count", AsyncMock(return_value=1))
+    monkeypatch.setattr(
+        c,
+        "_scrape_profile_metadata",
+        AsyncMock(return_value={"status": "ok", "followers_count": 1, "is_private": False}),
+    )
+    monkeypatch.setattr(c, "_profile_backoff_remaining", MagicMock(return_value=123))
+    monkeypatch.setattr(c, "_collect_via_gallery_dl", AsyncMock(return_value=True))
+    monkeypatch.setattr(c, "_collect_via_yt_dlp", AsyncMock(return_value=True))
+    monkeypatch.setattr(c, "_collect_via_api", AsyncMock(return_value=True))
+
+    out = await c._collect_user("bryan")
+
+    assert out == "delayed"
+    c._collect_via_gallery_dl.assert_not_awaited()
+    c._collect_via_yt_dlp.assert_not_awaited()
+    c._collect_via_api.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_collect_user_skips_ytdlp_after_zero_file_gallery_timeout(monkeypatch):
+    with patch.object(TiktokCollector, "_check_tool", staticmethod(lambda *_: False)):
+        c = TiktokCollector()
+    c._quota = None
+    c._browser_fallback = False
+    c._use_gallery_dl = True
+    c._use_yt_dlp = True
+    monkeypatch.setattr(c, "_stored_followers_count", AsyncMock(return_value=1))
+    monkeypatch.setattr(
+        c,
+        "_scrape_profile_metadata",
+        AsyncMock(return_value={"status": "ok", "followers_count": 1, "is_private": False}),
+    )
+    monkeypatch.setattr(c, "_profile_backoff_remaining", MagicMock(return_value=0))
+
+    async def _timeout_gallery(_username, _profile_url):
+        c._last_gallery_dl_timeout_user = "bryan"
+        return False
+
+    monkeypatch.setattr(c, "_collect_via_gallery_dl", AsyncMock(side_effect=_timeout_gallery))
+    monkeypatch.setattr(c, "_collect_via_yt_dlp", AsyncMock(return_value=True))
+    monkeypatch.setattr(c, "_collect_via_api", AsyncMock(return_value=False))
+    monkeypatch.setattr(c, "_record_profile_access", AsyncMock())
+
+    out = await c._collect_user("bryan")
+
+    assert out == "delayed"
+    c._collect_via_yt_dlp.assert_not_awaited()
+    c._collect_via_api.assert_awaited_once()
 
 
 @pytest.mark.asyncio

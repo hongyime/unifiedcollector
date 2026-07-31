@@ -390,6 +390,25 @@ class TiktokCollector(BaseCollector):
         self._local_tool_cooldown_until = 0.0
         self._local_tool_cooldown_seconds = int(os.getenv("TIKTOK_LOCAL_TOOL_429_COOLDOWN_SECONDS", "1800"))
         self._local_tool_cooldown_restored = False
+        self._profile_backoff_enabled = os.getenv("TIKTOK_PROFILE_BACKOFF_ENABLED", "true").lower() == "true"
+        self._profile_backoff_dir = Path(
+            os.getenv(
+                "TIKTOK_PROFILE_BACKOFF_DIR",
+                str(VAULT_ROOT / "state" / "tiktok" / "profile_backoff"),
+            )
+        )
+        self._profile_empty_backoff_seconds = max(
+            0,
+            int(os.getenv("TIKTOK_PROFILE_EMPTY_BACKOFF_SECONDS", "7200") or "0"),
+        )
+        self._profile_failure_backoff_seconds = max(
+            0,
+            int(os.getenv("TIKTOK_PROFILE_FAILURE_BACKOFF_SECONDS", "21600") or "0"),
+        )
+        self._profile_timeout_backoff_seconds = max(
+            0,
+            int(os.getenv("TIKTOK_PROFILE_TIMEOUT_BACKOFF_SECONDS", "14400") or "0"),
+        )
         self._gallery_dl_archive_enabled = (
             os.getenv("TIKTOK_GALLERY_DL_ARCHIVE_ENABLED", "true").lower() == "true"
         )
@@ -454,7 +473,11 @@ class TiktokCollector(BaseCollector):
         self._yt_dlp_after_empty_gallery = (
             os.getenv("TIKTOK_YTDLP_AFTER_EMPTY_GALLERY", "false").lower() == "true"
         )
+        self._yt_dlp_after_gallery_timeout = (
+            os.getenv("TIKTOK_YTDLP_AFTER_GALLERY_TIMEOUT", "false").lower() == "true"
+        )
         self._last_gallery_dl_empty_user: str | None = None
+        self._last_gallery_dl_timeout_user: str | None = None
         self._last_gallery_dl_range_by_user: dict[str, tuple[int, int]] = {}
         self._target_limit_per_cycle = max(0, int(os.getenv("TIKTOK_TARGETS_PER_CYCLE", "60")))
         self._spider_queue_per_cycle = max(0, int(os.getenv("TIKTOK_SPIDER_QUEUE_PER_CYCLE", "80")))
@@ -531,6 +554,67 @@ class TiktokCollector(BaseCollector):
             tmp.replace(path)
         except Exception:
             logger.debug("tiktok: gallery-dl range state write failed for %s", username, exc_info=True)
+
+    def _profile_backoff_state_path(self, username: str) -> Path:
+        return self._profile_backoff_dir / f"{self._safe_tiktok_state_user(username)}.json"
+
+    def _read_profile_backoff_state(self, username: str) -> dict:
+        if not self._profile_backoff_enabled:
+            return {}
+        path = self._profile_backoff_state_path(username)
+        try:
+            if not path.exists():
+                return {}
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            logger.debug("tiktok: profile backoff state unreadable for %s", username, exc_info=True)
+            return {}
+
+    def _profile_backoff_remaining(self, username: str) -> int:
+        state = self._read_profile_backoff_state(username)
+        until = state.get("cooldown_until")
+        if not until:
+            return 0
+        try:
+            if isinstance(until, (int, float)):
+                until_dt = datetime.fromtimestamp(float(until), tz=timezone.utc)
+            else:
+                until_dt = datetime.fromisoformat(str(until).replace("Z", "+00:00"))
+                if until_dt.tzinfo is None:
+                    until_dt = until_dt.replace(tzinfo=timezone.utc)
+            remaining = (until_dt.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds()
+            return max(0, int(remaining))
+        except Exception:
+            logger.debug("tiktok: profile backoff timestamp invalid for %s", username, exc_info=True)
+            return 0
+
+    def _record_profile_backoff(self, username: str, *, reason: str, seconds: int) -> None:
+        if not self._profile_backoff_enabled or seconds <= 0:
+            return
+        try:
+            self._profile_backoff_dir.mkdir(parents=True, exist_ok=True)
+            existing = self._read_profile_backoff_state(username)
+            failures = int(existing.get("failures") or 0) + 1
+            until = datetime.now(timezone.utc) + timedelta(seconds=seconds)
+            state = {
+                "cooldown_until": until.isoformat(),
+                "failures": failures,
+                "last_reason": reason,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            path = self._profile_backoff_state_path(username)
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+            tmp.replace(path)
+            logger.info(
+                "tiktok: delayed local fallback for %s for %ds after %s",
+                username,
+                seconds,
+                reason,
+            )
+        except Exception:
+            logger.debug("tiktok: profile backoff state write failed for %s", username, exc_info=True)
 
     def _gallery_dl_range_window(self, username: str) -> tuple[int, int] | None:
         if not self._gallery_dl_range_cursor_enabled or not self._gallery_dl_max_items:
@@ -918,6 +1002,7 @@ class TiktokCollector(BaseCollector):
     async def _collect_user(self, username: str) -> str:
         profile_url = f"https://www.tiktok.com/@{username}"
         self._last_gallery_dl_empty_user = None
+        self._last_gallery_dl_timeout_user = None
         known_followers = await self._stored_followers_count(username)
         metadata = await self._scrape_profile_metadata(username)
         status = str(metadata.get("status") or "")
@@ -948,6 +1033,15 @@ class TiktokCollector(BaseCollector):
             await self._record_profile_access(username, True, is_private=False)
             return "profile_only"
 
+        backoff_remaining = self._profile_backoff_remaining(username)
+        if backoff_remaining > 0:
+            logger.info(
+                "tiktok: profile local fallback backoff active for %s (%ds remaining)",
+                username,
+                backoff_remaining,
+            )
+            return "delayed"
+
         if self._use_gallery_dl:
             try:
                 ok = await self._collect_via_gallery_dl(username, profile_url)
@@ -973,6 +1067,11 @@ class TiktokCollector(BaseCollector):
             if self._last_gallery_dl_empty_user == username and not self._yt_dlp_after_empty_gallery:
                 logger.info(
                     "tiktok: gallery-dl returned a clean empty range for %s; skipping yt-dlp fallback",
+                    username,
+                )
+            elif self._last_gallery_dl_timeout_user == username and not self._yt_dlp_after_gallery_timeout:
+                logger.info(
+                    "tiktok: gallery-dl timed out with no files for %s; skipping yt-dlp this cycle",
                     username,
                 )
             else:
@@ -1005,6 +1104,8 @@ class TiktokCollector(BaseCollector):
         if await self._collect_via_api(username):
             await self._record_profile_access(username, True)
             return "collected"
+        if self._last_gallery_dl_timeout_user == username:
+            return "delayed"
         if status == "ok":
             return "empty"
         return "delayed"
@@ -1480,6 +1581,19 @@ class TiktokCollector(BaseCollector):
                         self._advance_gallery_dl_range_cursor(username, file_count=result.file_count, ok=True)
                         await self._ingest_tmpdir(tmpdir, username)
                         return True
+                    if result.timed_out:
+                        self._last_gallery_dl_timeout_user = username
+                        self._record_profile_backoff(
+                            username,
+                            reason="gallery-dl_timeout_no_files",
+                            seconds=self._profile_timeout_backoff_seconds,
+                        )
+                    else:
+                        self._record_profile_backoff(
+                            username,
+                            reason=f"gallery-dl_rc_{result.returncode}_no_files",
+                            seconds=self._profile_failure_backoff_seconds,
+                        )
                     return False
 
                 logger.info(
@@ -1492,6 +1606,11 @@ class TiktokCollector(BaseCollector):
                     logger.info(
                         "tiktok fallback gallery-dl: %s returned 0 files for current range",
                         username,
+                    )
+                    self._record_profile_backoff(
+                        username,
+                        reason="gallery-dl_empty_range",
+                        seconds=self._profile_empty_backoff_seconds,
                     )
                     return False
                 self._advance_gallery_dl_range_cursor(username, file_count=result.file_count, ok=True)
@@ -1532,6 +1651,19 @@ class TiktokCollector(BaseCollector):
                     if result.file_count > 0:
                         await self._ingest_tmpdir(tmpdir, username)
                         return True
+                    self._record_profile_backoff(
+                        username,
+                        reason=(
+                            "yt-dlp_timeout_no_files"
+                            if result.timed_out
+                            else f"yt-dlp_rc_{result.returncode}_no_files"
+                        ),
+                        seconds=(
+                            self._profile_timeout_backoff_seconds
+                            if result.timed_out
+                            else self._profile_failure_backoff_seconds
+                        ),
+                    )
                     return False
 
                 logger.info(
@@ -1543,6 +1675,11 @@ class TiktokCollector(BaseCollector):
                         username=username,
                         tool="yt-dlp",
                         result=result,
+                    )
+                    self._record_profile_backoff(
+                        username,
+                        reason="yt-dlp_empty",
+                        seconds=self._profile_empty_backoff_seconds,
                     )
                     return False
                 await self._ingest_tmpdir(tmpdir, username)
