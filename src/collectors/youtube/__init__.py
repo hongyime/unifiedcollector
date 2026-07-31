@@ -159,6 +159,11 @@ class YoutubeCollector(BaseCollector):
         self._video_backfill_batch_size = int(
             os.getenv("YOUTUBE_VIDEO_BACKFILL_BATCH_SIZE", os.getenv("BACKFILL_BATCH_SIZE", "100"))
         )
+        self._video_backfill_max_passes = max(1, int(os.getenv("YOUTUBE_VIDEO_BACKFILL_MAX_PASSES", "1")))
+        self._video_backfill_failed_retry_hours = max(
+            1,
+            int(os.getenv("YOUTUBE_VIDEO_BACKFILL_FAILED_RETRY_HOURS", "24")),
+        )
         self._video_backfill_scan_limit = int(os.getenv("YOUTUBE_VIDEO_BACKFILL_SCAN_LIMIT", "5000"))
         self._prefill_media_backlog = os.getenv("YOUTUBE_PREFILL_MEDIA_BACKLOG", "true").lower() == "true"
         self._profile_queue_enabled = os.getenv("YOUTUBE_PROFILE_QUEUE_ENABLED", "true").lower() == "true"
@@ -2247,10 +2252,26 @@ class YoutubeCollector(BaseCollector):
                   ON mi.source = 'youtube'
                  AND mi.content_id = 'video_' || v.platform_video_id
                 WHERE mi.id IS NULL
+                  AND NOT (
+                    v.media_status = 'failed'
+                    AND v.last_media_attempt_at IS NOT NULL
+                    AND v.last_media_attempt_at > NOW() - ($2::int * INTERVAL '1 hour')
+                  )
+                  AND NOT (
+                    v.media_status = 'skipped'
+                    AND v.media_skip_reason = 'live_or_scheduled_placeholder'
+                  )
+                  AND NOT (
+                    v.media_status = 'skipped'
+                    AND v.media_skip_reason = 'over_duration_cap'
+                    AND $3::int > 0
+                  )
                 ORDER BY v.collected_at DESC NULLS LAST
                 LIMIT $1
                 """,
                 scan_limit,
+                self._video_backfill_failed_retry_hours,
+                self._max_duration,
                 timeout=20,
             )
 
@@ -2322,25 +2343,44 @@ class YoutubeCollector(BaseCollector):
         thumbnail_count = await super().run_backfill()
         if not self._download_videos or not self._use_yt_dlp or self._video_backfill_batch_size <= 0:
             return thumbnail_count
-        groups = await self._get_video_backfill_groups(self._video_backfill_batch_size)
-        if not groups:
-            return thumbnail_count
-
-        attempted = sum(len(v) for v in groups.values())
         stored = 0
-        for (channel_id, channel_name), video_ids in groups.items():
+        attempted_total = 0
+        group_total = 0
+        for pass_no in range(1, self._video_backfill_max_passes + 1):
             if self._stop.is_set():
                 break
-            stored += await self._download_videos_via_yt_dlp(
-                channel_id,
-                channel_name,
-                video_ids,
-                allow_channel_fallback=False,
+            groups = await self._get_video_backfill_groups(self._video_backfill_batch_size)
+            if not groups:
+                break
+
+            attempted = sum(len(v) for v in groups.values())
+            attempted_total += attempted
+            group_total += len(groups)
+            pass_stored = 0
+            for (channel_id, channel_name), video_ids in groups.items():
+                if self._stop.is_set():
+                    break
+                pass_stored += await self._download_videos_via_yt_dlp(
+                    channel_id,
+                    channel_name,
+                    video_ids,
+                    allow_channel_fallback=False,
+                )
+            stored += pass_stored
+            logger.info(
+                "youtube: video backfill pass %d/%d attempted %d candidate(s) across %d channel(s), stored %d media item(s)",
+                pass_no,
+                self._video_backfill_max_passes,
+                attempted,
+                len(groups),
+                pass_stored,
             )
+            if pass_stored <= 0:
+                break
         logger.info(
-            "youtube: video backfill attempted %d candidate(s) across %d channel(s), stored %d media item(s)",
-            attempted,
-            len(groups),
+            "youtube: video backfill attempted %d candidate(s) across %d group-pass(es), stored %d media item(s)",
+            attempted_total,
+            group_total,
             stored,
         )
         return thumbnail_count + stored

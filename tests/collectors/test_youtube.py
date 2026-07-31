@@ -1064,6 +1064,31 @@ async def test_run_backfill_uses_actual_video_insert_count(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_backfill_can_drain_multiple_video_batches(monkeypatch):
+    coll = _new_collector(
+        monkeypatch,
+        YOUTUBE_VIDEO_BACKFILL_BATCH_SIZE="10",
+        YOUTUBE_VIDEO_BACKFILL_MAX_PASSES="3",
+    )
+    coll._download_videos = True
+    coll._use_yt_dlp = True
+    coll._get_video_backfill_groups = AsyncMock(
+        side_effect=[
+            {("UC_a", "Channel A"): ["v1", "v2"]},
+            {("UC_b", "Channel B"): ["v3"]},
+            {},
+        ]
+    )
+    coll._download_videos_via_yt_dlp = AsyncMock(side_effect=[2, 1])
+
+    out = await coll.run_backfill()
+
+    assert out == 3
+    assert coll._get_video_backfill_groups.await_count == 3
+    assert coll._download_videos_via_yt_dlp.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_base_backfill_does_not_count_false_download_result(monkeypatch):
     coll = _new_collector(monkeypatch)
     coll.get_backfill_items = AsyncMock(
