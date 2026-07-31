@@ -418,6 +418,9 @@ class TiktokCollector(BaseCollector):
         # is only known after a download), so the cap applies from the 2nd
         # encounter onward. 0 disables.
         self._famous_follower_cap = int(os.getenv("TIKTOK_FAMOUS_FOLLOWER_CAP", "0") or "0")
+        self._target_limit_per_cycle = max(0, int(os.getenv("TIKTOK_TARGETS_PER_CYCLE", "60")))
+        self._spider_queue_per_cycle = max(0, int(os.getenv("TIKTOK_SPIDER_QUEUE_PER_CYCLE", "80")))
+        self._spider_first = os.getenv("TIKTOK_SPIDER_QUEUE_FIRST", "true").lower() == "true"
 
         # Follow-aware access tracker (Phase 0, lazy — needs self.pool, created
         # on first use in _record_profile_access). Records every profile fetch
@@ -591,7 +594,18 @@ class TiktokCollector(BaseCollector):
     async def collect(self, targets: list[str]):
         await self._load_tracker_state()
         await self._sync_persisted_local_tool_cooldown()
-        for username in targets:
+        spider_enabled = os.getenv("TIKTOK_SPIDER_ENABLED", "true").lower() == "true"
+        if spider_enabled and self._spider_first:
+            await self._process_spider_queue(max_items=self._spider_queue_per_cycle)
+        cycle_targets = targets
+        if self._target_limit_per_cycle:
+            cycle_targets = targets[:self._target_limit_per_cycle]
+            if len(targets) > len(cycle_targets):
+                logger.info(
+                    "tiktok: processing %d/%d configured targets this cycle",
+                    len(cycle_targets), len(targets),
+                )
+        for username in cycle_targets:
             if self._stop.is_set(): break
             if self._local_tool_cooling_down():
                 remaining = int(self._local_tool_cooldown_until - time.time())
@@ -613,12 +627,24 @@ class TiktokCollector(BaseCollector):
                 await self.send_to_dlq(username, username, str(e))
 
         # Spider queue processing
-        if os.getenv("TIKTOK_SPIDER_ENABLED", "true").lower() == "true":
-            await self._process_spider_queue()
+        if spider_enabled and not self._spider_first:
+            await self._process_spider_queue(max_items=self._spider_queue_per_cycle)
 
-    async def _process_spider_queue(self):
+    async def _process_spider_queue(self, max_items: int | None = None):
         await refresh_account_proximity_cache(self.pool)
+        processed = 0
         while not self._stop.is_set():
+            if max_items is not None and max_items > 0 and processed >= max_items:
+                logger.info("tiktok spider queue: processed %d queued target(s) this cycle", processed)
+                break
+            if self._local_tool_cooling_down():
+                remaining = int(self._local_tool_cooldown_until - time.time())
+                self._intentional_idle_reason = (
+                    f"TikTok local downloader cooldown active for {self._account_name()} "
+                    f"({remaining}s remaining)"
+                )
+                logger.info("tiktok spider queue: %s", self._intentional_idle_reason)
+                break
             async with self.pool.acquire() as conn:
                 row = await conn.fetchrow("""
                     UPDATE tiktok_spider_queue
@@ -652,6 +678,7 @@ class TiktokCollector(BaseCollector):
             target = row['username'] or row['platform_user_id']
             try:
                 await self._collect_user(target)
+                processed += 1
                 async with self.pool.acquire() as conn:
                     await conn.execute("UPDATE tiktok_spider_queue SET status = 'completed' WHERE platform_user_id = $1", row['platform_user_id'])
             except Exception:
