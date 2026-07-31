@@ -180,6 +180,7 @@ class YoutubeCollector(BaseCollector):
         self._max_comment_author_enqueues = int(os.getenv("YOUTUBE_MAX_COMMENT_AUTHOR_ENQUEUES", "25"))
         self._spider_queue_batch = int(os.getenv("YOUTUBE_SPIDER_QUEUE_BATCH", "5"))
         self._discovered_target_priority = int(os.getenv("YOUTUBE_DISCOVERED_TARGET_PRIORITY", "1"))
+        self._skip_channel_fallback_after_api_empty: set[str] = set()
         # FAMOUS-FILTER (Bryan): skip channels at or above this subscriber count,
         # even if subscribed. 0 disables. Overrides the subscription seed.
         self._famous_sub_cap = int(os.getenv("YOUTUBE_FAMOUS_SUB_CAP", "0") or "0")
@@ -472,7 +473,13 @@ class YoutubeCollector(BaseCollector):
                         skipped_duration,
                     )
                 if download_video_ids or not video_ids:
-                    await self._download_videos_via_yt_dlp(channel_id, channel_name, download_video_ids)
+                    if not download_video_ids and channel_id in self._skip_channel_fallback_after_api_empty:
+                        logger.info(
+                            "youtube: skipping yt-dlp channel fallback for %s; API uploads playlist returned no public videos",
+                            channel_id,
+                        )
+                    else:
+                        await self._download_videos_via_yt_dlp(channel_id, channel_name, download_video_ids)
                 else:
                     logger.info("youtube: no live video download candidates remain for %s after archive/duration filtering", channel_id)
             else:
@@ -1676,12 +1683,14 @@ class YoutubeCollector(BaseCollector):
                 if resp.status_code == 404:
                     logger.warning("YouTube uploads playlist 404 for channel %s (%s)", channel_id, uploads_playlist)
                     await self._mark_channel_skip(channel_id, "uploads_playlist_404", {"playlist_id": uploads_playlist})
+                    self._skip_channel_fallback_after_api_empty.add(channel_id)
                     break
                 resp.raise_for_status()
                 data = resp.json()
                 items = data.get("items", [])
                 if not items:
                     logger.info("YouTube uploads playlist %s returned 0 items (channel may have no public videos)", uploads_playlist)
+                    self._skip_channel_fallback_after_api_empty.add(channel_id)
                     break
                 logger.info("YouTube fetched %d videos from playlist %s (page_token=%s)", len(items), uploads_playlist, page_token or "first")
                 for item in items:

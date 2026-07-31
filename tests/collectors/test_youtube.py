@@ -435,6 +435,48 @@ async def test_collect_channel_cooldown_does_not_confirm_missing_channel(monkeyp
     coll._download_videos_via_yt_dlp.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_collect_channel_skips_fallback_when_uploads_playlist_is_empty(monkeypatch):
+    coll = _new_collector(monkeypatch, YOUTUBE_API_KEY="AIzaK")
+    coll._has_auth = True
+    coll._use_yt_dlp = True
+    coll._download_videos = True
+    coll._resolve_channel = AsyncMock(return_value=("UC_empty", "Empty Channel"))
+    coll._upsert_channel = AsyncMock(return_value=("UUempty", 0))
+
+    async def _empty_uploads(*args, **kwargs):
+        coll._skip_channel_fallback_after_api_empty.add("UC_empty")
+        return []
+
+    coll._collect_video_list_via_api = AsyncMock(side_effect=_empty_uploads)
+    coll._download_videos_via_yt_dlp = AsyncMock()
+
+    result = await coll._collect_channel("UC_empty")
+
+    assert result["reason"] == "collected"
+    assert result["video_ids"] == 0
+    coll._download_videos_via_yt_dlp.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_collect_video_list_404_marks_channel_fallback_skip(monkeypatch):
+    coll = _new_collector(monkeypatch, YOUTUBE_API_KEY="AIzaK")
+    coll._has_auth = True
+    coll._record_api_request = AsyncMock()
+    coll._mark_channel_skip = AsyncMock()
+    _patch_httpx_async_client(monkeypatch, _make_response(status=404))
+
+    out = await coll._collect_video_list_via_api("UC404", "Gone Channel", "UU404")
+
+    assert out == []
+    assert "UC404" in coll._skip_channel_fallback_after_api_empty
+    coll._mark_channel_skip.assert_awaited_once_with(
+        "UC404",
+        "uploads_playlist_404",
+        {"playlist_id": "UU404"},
+    )
+
+
 # ── _upsert_video ────────────────────────────────────────────────────────
 
 
