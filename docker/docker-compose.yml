@@ -158,7 +158,7 @@ services:
       COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
       # Keep TikTok moving: each profile is chunked and cursored, so a bad page
       # should not occupy the isolated worker for a full 15 minutes.
-      TIKTOK_TIMEOUT_SECONDS: "420"
+      TIKTOK_TIMEOUT_SECONDS: "240"
       TIKTOK_PROFILE_CHUNK_ITEMS: "30"
       TIKTOK_GALLERY_DL_MAX_ITEMS: "30"
       TIKTOK_YTDLP_MAX_DOWNLOADS: "30"
