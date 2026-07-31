@@ -7,7 +7,7 @@
 // It does NOT issue any extra requests; it only observes responses the page makes.
 // Harvested post records are handed to the content script via window.postMessage.
 (function () {
-  const UC_INJECT_VERSION = "1.21.53";
+  const UC_INJECT_VERSION = "1.21.54";
   const existingHook = window.__UC_HOOKED__;
   if (existingHook && existingHook.version === UC_INJECT_VERSION) return;
 

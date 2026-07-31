@@ -149,7 +149,7 @@ const PAGE_HEALTH_REPORT_GAP_MS = 60000;
 const WALL_LOG_GAP_MS = 10 * 60000;
 const LAST_PAGE_HEALTH_REPORT = {};
 const LAST_WALL_LOG_AT = {};
-const PAGE_RECOVERY_ENABLED = new Set(["tiktok"]);
+const PAGE_RECOVERY_ENABLED = new Set(["tiktok", "x"]);
 const RECOVERABLE_PAGE_SHELL_PATTERNS = {
   tiktok: [
     { reason: "sorry_could_not_show_page", re: /sorry,?\s*we\s+couldn(?:'|\u2019)?t\s+show\s+that\s+page/i },
@@ -1653,6 +1653,46 @@ function xProfileUnavailable() {
   }
 }
 
+function xProgressKey() {
+  return "uc_x_zero_progress_" + location.pathname.replace(/[^A-Za-z0-9_/-]/g, "_").slice(0, 180);
+}
+
+function xProgressSample() {
+  try {
+    return compactSample(visiblePageText());
+  } catch (e) {
+    return document.title || "";
+  }
+}
+
+function xBumpZeroProgress() {
+  const key = xProgressKey();
+  const value = lsNum(key) + 1;
+  lsSet(key, String(value));
+  return value;
+}
+
+function xClearZeroProgress() {
+  lsSet(xProgressKey(), "0");
+}
+
+async function xReportPageHealth(status, reason, counts) {
+  return send({
+    type: "pageHealth",
+    platform: "x",
+    label: "Twitter / X",
+    status,
+    reason,
+    url: location.href,
+    title: document.title || "",
+    sample: status === "healthy" ? null : xProgressSample(),
+    content_counts: {
+      ...pageContentCounts(),
+      ...(counts || {}),
+    },
+  }).catch(() => null);
+}
+
 async function xReportProfileTarget(username, status, reason, owner) {
   if (!username || username === "timeline") return;
   await send({
@@ -1782,6 +1822,44 @@ const x = {
       probe_reason: sink.items.length ? "media_candidates_found" : "no_dom_media_candidates",
       probe_meta: { feed, posts: xposts.length },
     });
+    const profileSeen = entity !== "timeline" && !xIsStatusPage() && !!scrapeXProfile(entity);
+    const progressCounts = {
+      feed,
+      entity,
+      posts: xposts.length,
+      media_candidates: sink.items.length,
+      users: xu.length,
+      profile: profileSeen ? 1 : 0,
+    };
+    const hasProgress = (
+      xposts.length > 0
+      || sink.items.length > 0
+      || xu.length > 0
+      || profileSeen
+    );
+    if (hasProgress) {
+      xClearZeroProgress();
+      await xReportPageHealth("healthy", "x_content_progress", progressCounts);
+    } else {
+      const zeroStreak = xBumpZeroProgress();
+      progressCounts.zero_progress_streak = zeroStreak;
+      if (entity !== "timeline" && !xIsStatusPage()) {
+        await xReportPageHealth("zero_content", "x_profile_zero_progress", progressCounts);
+        if (zeroStreak >= 2) {
+          await xReportProfileTarget(entity, "failed", "zero_content", owner);
+          clog("warn", `X @${entity}: no profile/media progress after ${zeroStreak} passes; returning home`, "x");
+          await sleep(jitter(2500));
+          location.href = "https://x.com/home";
+          return { targets: 1, saved: 0, posts: 0, discovered: 0 };
+        }
+      } else if (!xIsStatusPage() && zeroStreak >= 2) {
+        await xReportPageHealth("recoverable_error_shell", "x_timeline_zero_progress", progressCounts);
+        clog("warn", `X ${feed}: no posts/media after ${zeroStreak} passes; scheduled tab reload`, "x");
+        return { targets: 1, saved: 0, posts: 0, discovered: 0, skip_cycle_report: true };
+      } else {
+        await xReportPageHealth("zero_content", "x_content_zero_progress", progressCounts);
+      }
+    }
     if (activeMediaRevisit) {
       await finishBrowserMediaRevisit("x", activeMediaRevisit, ingestResponse, sink.items.length, entity);
     }
@@ -1791,8 +1869,13 @@ const x = {
         await sleep(jitter(3000));
         location.href = "https://x.com/" + encodeURIComponent(entity) + "/media";
       } else {
-        await xReportProfileTarget(entity, "success", null, owner);
-        clog("info", `X @${entity}: media/profile pass complete`, "x");
+        if (hasProgress) {
+          await xReportProfileTarget(entity, "success", null, owner);
+          clog("info", `X @${entity}: media/profile pass complete`, "x");
+        } else {
+          await xReportProfileTarget(entity, "failed", "zero_content", owner);
+          clog("warn", `X @${entity}: media tab produced no profile/media content; returning home`, "x");
+        }
         await sleep(jitter(3000));
         location.href = "https://x.com/home";
       }
@@ -2534,7 +2617,9 @@ async function mainLoop() {
           continue;
         }
         const stats = await p.runCycle();  // one pass: IG = a few profiles; others = scrape current page
-        await send({ type: "cycleReport", platform: p.label, ...stats }).catch(() => {});
+        if (!stats || !stats.skip_cycle_report) {
+          await send({ type: "cycleReport", platform: p.label, ...stats }).catch(() => {});
+        }
       } catch (e) {
         if (e instanceof WallError) {
           const mins = await applyThrottleWall(p.id, "generic-wall");

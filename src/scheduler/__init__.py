@@ -504,6 +504,53 @@ class Scheduler:
                             """,
                             timeout=10,
                         )]
+                        content_stale_seconds = env_int(
+                            "BROWSER_CONTENT_STALE_WARN_SECONDS",
+                            3600,
+                            min_value=300,
+                        )
+                        snap["browser_content_gaps"] = [dict(r) for r in await conn.fetch(
+                            """
+                            WITH heartbeat AS (
+                                SELECT DISTINCT ON (platform)
+                                       platform,
+                                       created_at AS heartbeat_at,
+                                       metadata
+                                FROM browser_ingest_events
+                                WHERE endpoint = 'browser_heartbeat'
+                                  AND platform = ANY($2::text[])
+                                ORDER BY platform, created_at DESC
+                            ),
+                            content AS (
+                                SELECT platform, max(created_at) AS last_content_at
+                                FROM browser_ingest_events
+                                WHERE endpoint <> 'browser_heartbeat'
+                                  AND (observed_count > 0 OR stored_count > 0)
+                                GROUP BY platform
+                            )
+                            SELECT heartbeat.platform,
+                                   heartbeat.heartbeat_at,
+                                   extract(epoch FROM now() - heartbeat.heartbeat_at)::int AS heartbeat_age_seconds,
+                                   content.last_content_at,
+                                   extract(epoch FROM now() - content.last_content_at)::int AS content_age_seconds,
+                                   heartbeat.metadata->>'url' AS url,
+                                   heartbeat.metadata->>'health_status' AS health_status,
+                                   heartbeat.metadata->'content_counts' AS content_counts,
+                                   $1::int AS stale_after_seconds
+                            FROM heartbeat
+                            LEFT JOIN content ON content.platform = heartbeat.platform
+                            WHERE heartbeat.heartbeat_at >= now() - ($1::int * interval '1 second')
+                              AND (
+                                content.last_content_at IS NULL
+                                OR content.last_content_at < now() - ($1::int * interval '1 second')
+                              )
+                            ORDER BY heartbeat.heartbeat_at DESC
+                            LIMIT 8
+                            """,
+                            content_stale_seconds,
+                            ["instagram", "tiktok", "lemon8", "threads", "facebook", "x", "strava"],
+                            timeout=10,
+                        )]
                 except Exception:
                     pass
 

@@ -2098,6 +2098,73 @@ async def _browser_extension_payload(conn) -> dict:
                     "needs_new_event": not recent,
                 })
 
+        try:
+            stale_seconds = int(os.getenv("BROWSER_CONTENT_STALE_WARN_SECONDS", "3600") or "3600")
+        except Exception:
+            stale_seconds = 3600
+        try:
+            content_gap_rows = await conn.fetch(
+                """
+                WITH heartbeat AS (
+                    SELECT DISTINCT ON (platform)
+                           platform,
+                           created_at AS heartbeat_at,
+                           metadata
+                    FROM browser_ingest_events
+                    WHERE endpoint = 'browser_heartbeat'
+                      AND platform = ANY($2::text[])
+                    ORDER BY platform, created_at DESC
+                ),
+                content AS (
+                    SELECT platform, max(created_at) AS last_content_at
+                    FROM browser_ingest_events
+                    WHERE endpoint <> 'browser_heartbeat'
+                      AND (observed_count > 0 OR stored_count > 0)
+                    GROUP BY platform
+                )
+                SELECT heartbeat.platform,
+                       heartbeat.heartbeat_at,
+                       extract(epoch FROM now() - heartbeat.heartbeat_at)::int AS heartbeat_age_seconds,
+                       content.last_content_at,
+                       extract(epoch FROM now() - content.last_content_at)::int AS content_age_seconds,
+                       heartbeat.metadata->>'url' AS url,
+                       heartbeat.metadata->>'health_status' AS health_status,
+                       heartbeat.metadata->'content_counts' AS content_counts
+                FROM heartbeat
+                LEFT JOIN content ON content.platform = heartbeat.platform
+                WHERE heartbeat.heartbeat_at >= now() - ($1::int * interval '1 second')
+                  AND (
+                    content.last_content_at IS NULL
+                    OR content.last_content_at < now() - ($1::int * interval '1 second')
+                  )
+                ORDER BY heartbeat.heartbeat_at DESC
+                """,
+                max(300, stale_seconds),
+                ["instagram", "tiktok", "lemon8", "threads", "facebook", "x", "strava"],
+                timeout=10,
+            )
+        except Exception:
+            content_gap_rows = []
+        for row in content_gap_rows:
+            raw = dict(row)
+            if "heartbeat_age_seconds" not in raw:
+                continue
+            payload["issues"].append({
+                "platform": raw.get("platform"),
+                "kind": "browser_content_stale",
+                "detail": (
+                    "Browser tab heartbeat is fresh, but no useful posts/profile/media/route "
+                    "ingest has arrived within the expected window."
+                ),
+                "heartbeat_age_seconds": int(raw.get("heartbeat_age_seconds") or 0),
+                "last_content_at": raw.get("last_content_at"),
+                "content_age_seconds": int(raw["content_age_seconds"]) if raw.get("content_age_seconds") is not None else None,
+                "url": raw.get("url"),
+                "health_status": raw.get("health_status"),
+                "content_counts": raw.get("content_counts"),
+                "stale_after_seconds": max(300, stale_seconds),
+            })
+
     if payload.get("reload_url"):
         for issue in payload["issues"]:
             issue["extension_id"] = payload.get("extension_id")
