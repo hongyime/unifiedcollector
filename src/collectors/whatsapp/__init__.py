@@ -1304,6 +1304,7 @@ class WhatsappCollector(BaseCollector):
                               AND metadata ? 'directPath'
                               AND NULLIF(metadata->>'mediaKey', '') IS NOT NULL
                               AND NULLIF(metadata->>'directPath', '') IS NOT NULL
+                              AND COALESCE(metadata->>'media_archival_status', '') NOT IN ('unavailable', 'unsupported')
                             ORDER BY collected_at DESC
                             LIMIT $1
                             """,
@@ -1390,13 +1391,42 @@ class WhatsappCollector(BaseCollector):
                     )
                     if resp.status_code == 200:
                         return resp.content
+                    error_payload = self._bridge_error_payload(resp)
+                    error_code = str(error_payload.get("code") or "")
+                    retryable = error_payload.get("retryable")
+                    error_text = str(error_payload.get("error") or "").strip()
+                    if (
+                        retryable is False
+                        or resp.status_code in {410, 422}
+                        or error_code in {"media_unavailable", "media_decrypt_failed"}
+                    ):
+                        await self._mark_media_unavailable(
+                            msg_id=msg_id,
+                            session=session,
+                            status_code=resp.status_code,
+                            code=error_code or f"http_{resp.status_code}",
+                            reason=error_text or f"WhatsApp media decrypt HTTP {resp.status_code}",
+                        )
+                        logger.info(
+                            "Bridge media unavailable %s: HTTP %d %s",
+                            msg_id,
+                            resp.status_code,
+                            error_code or "",
+                        )
+                        return None
                     logger.warning("Bridge decrypt failed %s: %d", msg_id, resp.status_code)
                     await self._record_http_event(
                         session_name=session,
                         scope="media_decrypt",
                         status_code=resp.status_code,
                         reason=f"WhatsApp media decrypt HTTP {resp.status_code}",
-                        metadata={"message_id": msg_id, "bridge_url": bridge_url},
+                        metadata={
+                            "message_id": msg_id,
+                            "bridge_url": bridge_url,
+                            "error_code": error_code or None,
+                            "retryable": retryable,
+                            "error": error_text or None,
+                        },
                     )
         except Exception as e:
             logger.error("Bridge download failed %s: %s", msg_id, e)
@@ -1408,6 +1438,50 @@ class WhatsappCollector(BaseCollector):
                 metadata={"message_id": msg_id, "bridge_url": bridge_url},
             )
         return None
+
+    @staticmethod
+    def _bridge_error_payload(resp: httpx.Response) -> dict:
+        try:
+            payload = resp.json()
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    async def _mark_media_unavailable(
+        self,
+        *,
+        msg_id: str,
+        session: str | None,
+        status_code: int,
+        code: str,
+        reason: str,
+    ) -> None:
+        if not self.pool or not msg_id:
+            return
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE whatsapp_messages
+                    SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+                        'media_archival_status', 'unavailable',
+                        'media_archival_retryable', false,
+                        'media_unavailable_at', NOW(),
+                        'media_unavailable_code', $2,
+                        'media_unavailable_reason', $3,
+                        'media_unavailable_status_code', $4,
+                        'media_unavailable_session', $5
+                    )
+                    WHERE platform_message_id = $1
+                    """,
+                    msg_id,
+                    code[:120],
+                    reason[:500],
+                    int(status_code),
+                    session,
+                )
+        except Exception:
+            logger.debug("wa media-unavailable marker failed for %s", msg_id, exc_info=True)
 
     async def _download_direct(self, url: str) -> bytes | None:
         try:

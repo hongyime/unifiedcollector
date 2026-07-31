@@ -935,6 +935,44 @@ async def test_download_via_bridge_returns_none_on_non_200(
 
 
 @pytest.mark.asyncio
+async def test_download_via_bridge_marks_non_retryable_media_unavailable(
+    configured_collector, monkeypatch,
+):
+    health = MagicMock(status_code=200, content=b"", raise_for_status=MagicMock())
+    health.json = MagicMock(return_value={"status": "ok", "whatsapp_ready": True})
+    resp = MagicMock(status_code=410, content=b"", raise_for_status=MagicMock())
+    resp.json = MagicMock(return_value={
+        "code": "media_unavailable",
+        "retryable": False,
+        "error": "Failed to fetch stream from [media-url]",
+    })
+    _patch_async_client(monkeypatch, response=health, post_response=resp)
+
+    out = await configured_collector._download_via_bridge(
+        "sess1", "m-expired", "key", "/path",
+    )
+
+    assert out is None
+    calls = _rate_limit_calls(configured_collector._test_conn)
+    assert calls == []
+    sql_calls = [
+        call.args
+        for call in configured_collector._test_conn.execute.await_args_list
+        if call.args and "UPDATE whatsapp_messages" in call.args[0]
+    ]
+    assert len(sql_calls) == 1
+    sql, *args = sql_calls[0]
+    assert "media_archival_status" in sql
+    assert args == [
+        "m-expired",
+        "media_unavailable",
+        "Failed to fetch stream from [media-url]",
+        410,
+        "sess1",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_download_direct_returns_bytes(collector, monkeypatch):
     resp = MagicMock(status_code=200, content=b"hello",
                        raise_for_status=MagicMock())

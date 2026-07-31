@@ -67,6 +67,54 @@ function isQrRefsExpired(reason: string | null | undefined): boolean {
     return String(reason || '').toLowerCase().includes('qr refs attempts ended');
 }
 
+type MediaDecryptErrorInfo = {
+    status: number;
+    code: string;
+    retryable: boolean;
+    message: string;
+};
+
+function redactMediaError(message: string): string {
+    return String(message || 'decrypt failed')
+        .replace(/https:\/\/\S+/gi, '[media-url]')
+        .slice(0, 500);
+}
+
+function classifyMediaDecryptError(err: any): MediaDecryptErrorInfo {
+    const rawMessage = String(err?.message || err || 'decrypt failed');
+    const message = redactMediaError(rawMessage);
+    const lower = rawMessage.toLowerCase();
+
+    if (
+        lower.includes('failed to fetch stream')
+        || lower.includes('media not found')
+        || lower.includes('not found')
+        || lower.includes('gone')
+        || lower.includes('404')
+        || lower.includes('410')
+    ) {
+        return { status: 410, code: 'media_unavailable', retryable: false, message };
+    }
+    if (
+        lower.includes('bad mac')
+        || lower.includes('invalid media key')
+        || lower.includes('decrypt')
+        || lower.includes('hkdf')
+    ) {
+        return { status: 422, code: 'media_decrypt_failed', retryable: false, message };
+    }
+    if (
+        lower.includes('timeout')
+        || lower.includes('timed out')
+        || lower.includes('econnreset')
+        || lower.includes('network')
+        || lower.includes('fetch')
+    ) {
+        return { status: 503, code: 'media_fetch_transient', retryable: true, message };
+    }
+    return { status: 500, code: 'media_decrypt_error', retryable: true, message };
+}
+
 function bridgeState() {
     const user = activeSock?.user || null;
     const wid: string | null = user?.id || null;
@@ -259,8 +307,22 @@ app.post('/media/decrypt', async (req, res) => {
            .set('Content-Type', mimetype || 'application/octet-stream')
            .send(buffer);
     } catch (err: any) {
-        logger.warn({ messageId, err: err?.message }, 'media decrypt failed');
-        res.status(500).json({ error: err?.message || 'decrypt failed' });
+        const classified = classifyMediaDecryptError(err);
+        logger.warn(
+            {
+                messageId,
+                statusCode: classified.status,
+                code: classified.code,
+                retryable: classified.retryable,
+                err: classified.message,
+            },
+            'media decrypt failed'
+        );
+        res.status(classified.status).json({
+            error: classified.message,
+            code: classified.code,
+            retryable: classified.retryable,
+        });
     }
 });
 
@@ -529,7 +591,12 @@ async function connectToWhatsApp(): Promise<void> {
             lastDisconnectReason = error?.message || null;
             lastDisconnectAt = Date.now();
             connectionState = 'disconnected';
-            logger.error({ statusCode, reason: error?.message }, 'Connection closed');
+            const qrExpiredBeforeScan = !sock.authState.creds.registered && isQrRefsExpired(error?.message);
+            if (qrExpiredBeforeScan) {
+                logger.info({ statusCode, reason: error?.message }, 'Connection closed while waiting for QR scan');
+            } else {
+                logger.error({ statusCode, reason: error?.message }, 'Connection closed');
+            }
             await producer.publish('session.status', {
                 session_name: sessionName, phone_number: phoneNumber, status: 'disconnected',
                 details: { statusCode },
@@ -589,11 +656,11 @@ async function connectToWhatsApp(): Promise<void> {
             } else if (statusCode === DisconnectReason.connectionReplaced) {
                 logger.error('Connection replaced by another session -- stopping');
                 process.exit(1);
-            } else if (!sock.authState.creds.registered && isQrRefsExpired(error?.message)) {
+            } else if (qrExpiredBeforeScan) {
                 retryCount = 0;
                 connectionState = 'refreshing_qr';
                 const delay = Math.max(1000, UNPAIRED_QR_RECONNECT_MS);
-                logger.warn(`QR expired before scan; refreshing QR in ${Math.round(delay / 1000)}s`);
+                logger.info(`QR expired before scan; refreshing QR in ${Math.round(delay / 1000)}s`);
                 scheduleReconnect('qr_refs_expired', delay);
             } else {
                 retryCount++;
