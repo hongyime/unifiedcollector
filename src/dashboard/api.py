@@ -42,6 +42,10 @@ _BEEPER_SUBSOURCE_LIVENESS_CACHE: dict[str, object] = {"ts": 0.0, "rows": None}
 _BEEPER_SUBSOURCE_LIVENESS_TTL_SECONDS = int(os.getenv("BEEPER_SUBSOURCE_LIVENESS_TTL_SECONDS", "75"))
 _SOURCE_MATRIX_SECTION_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_SECTION_TIMEOUT_SECONDS", "2"))
 _SOURCE_MATRIX_LIVENESS_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_LIVENESS_TIMEOUT_SECONDS", "20"))
+_SOURCE_MATRIX_DAY_CONTENT_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_DAY_CONTENT_TIMEOUT_SECONDS", "8"))
+_SOURCE_MATRIX_MEDIA_TOTALS_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_MEDIA_TOTALS_TIMEOUT_SECONDS", "8"))
+_SOURCE_MATRIX_YOUTUBE_BACKLOG_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_YOUTUBE_BACKLOG_TIMEOUT_SECONDS", "8"))
+_SOURCE_MATRIX_BROWSER_EXTENSION_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_BROWSER_EXTENSION_TIMEOUT_SECONDS", "6"))
 _SOURCE_MATRIX_SECTION_CACHE: dict[str, dict[str, object]] = {}
 _SOURCE_MATRIX_SECTION_CACHE_TTL_SECONDS = int(os.getenv("SOURCE_MATRIX_SECTION_CACHE_TTL_SECONDS", "30"))
 _SOURCE_MATRIX_SECTION_STALE_SECONDS = int(os.getenv("SOURCE_MATRIX_SECTION_STALE_SECONDS", "900"))
@@ -2996,7 +3000,7 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
                 awaitable=_source_content_summary(conn, "now() - interval '24 hours'"),
                 cache_key="day_content",
                 cache_ttl=120,
-                timeout=35,
+                timeout=_SOURCE_MATRIX_DAY_CONTENT_TIMEOUT_SECONDS,
             )
             day_rate = await _source_matrix_section(
                 section="day_rate",
@@ -3016,7 +3020,7 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
                 awaitable=_source_media_totals(conn),
                 cache_key="media_totals",
                 cache_ttl=120,
-                timeout=10,
+                timeout=_SOURCE_MATRIX_MEDIA_TOTALS_TIMEOUT_SECONDS,
             )
             youtube_media_backlog = await _source_matrix_section(
                 section="youtube_media_backlog",
@@ -3026,7 +3030,7 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
                 awaitable=_youtube_media_backlog(conn),
                 cache_key="youtube_media_backlog",
                 cache_ttl=300,
-                timeout=25,
+                timeout=_SOURCE_MATRIX_YOUTUBE_BACKLOG_TIMEOUT_SECONDS,
             )
             active_cursors = await _source_matrix_section(
                 section="active_cursors",
@@ -3046,7 +3050,7 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
                 cache_key="browser_extension",
                 cache_ttl=15,
                 stale_ttl=3600,
-                timeout=20,
+                timeout=_SOURCE_MATRIX_BROWSER_EXTENSION_TIMEOUT_SECONDS,
             )
 
     generated_at = datetime.now(timezone.utc)

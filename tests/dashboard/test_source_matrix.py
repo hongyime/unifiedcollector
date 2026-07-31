@@ -11,8 +11,12 @@ os.environ.setdefault("DASHBOARD_JWT_SECRET", "test-secret-only-for-pytest-do-no
 os.environ.setdefault("DASHBOARD_ADMIN_PASSWORD", "x")
 
 from src.dashboard.api import (
+    _SOURCE_MATRIX_BROWSER_EXTENSION_TIMEOUT_SECONDS,
+    _SOURCE_MATRIX_DAY_CONTENT_TIMEOUT_SECONDS,
+    _SOURCE_MATRIX_MEDIA_TOTALS_TIMEOUT_SECONDS,
     _SOURCE_MEDIA_TOTALS_CACHE,
     _SOURCE_MATRIX_SECTION_CACHE,
+    _SOURCE_MATRIX_YOUTUBE_BACKLOG_TIMEOUT_SECONDS,
     _beeper_source_key,
     _extension_reload_target_from_url,
     _messaging_policy,
@@ -61,6 +65,13 @@ def test_source_matrix_blocker_prioritizes_whatsapp_pairing():
     assert blocker["kind"] == "whatsapp_pairing"
     assert blocker["severity"] == "warning"
     assert "QR" in blocker["next_action"]
+
+
+def test_source_matrix_expensive_sections_have_bounded_default_timeouts():
+    assert _SOURCE_MATRIX_DAY_CONTENT_TIMEOUT_SECONDS <= 8
+    assert _SOURCE_MATRIX_MEDIA_TOTALS_TIMEOUT_SECONDS <= 8
+    assert _SOURCE_MATRIX_YOUTUBE_BACKLOG_TIMEOUT_SECONDS <= 8
+    assert _SOURCE_MATRIX_BROWSER_EXTENSION_TIMEOUT_SECONDS <= 6
 
 
 def test_messaging_coverage_normalizes_unknown_beeper_messages_from_chat_network():
