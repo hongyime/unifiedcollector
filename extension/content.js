@@ -1094,9 +1094,14 @@ async function maybeStartBrowserMediaRevisit(platform, owner) {
 }
 async function finishBrowserMediaRevisit(platform, active, response, observed, username) {
   if (!active || !active.content_id) return;
-  const stored = Number(response && response.upload && response.upload.stored || 0);
-  const status = observed > 0 ? "success" : "no_media";
-  const reason = observed > 0 ? "detail_page_harvested" : "detail_page_no_media";
+  const upload = response && response.upload ? response.upload : {};
+  const attempted = Number(upload.attempted || 0);
+  const accepted = Number(upload.accepted ?? upload.stored ?? 0);
+  const stored = Number(upload.stored ?? accepted ?? 0);
+  const status = observed > 0 && (!attempted || accepted > 0) ? "success" : (observed > 0 ? "failed" : "no_media");
+  const reason = observed > 0
+    ? (attempted && accepted <= 0 ? "detail_page_upload_failed" : "detail_page_harvested")
+    : "detail_page_no_media";
   await send({
     type: "browserMediaRevisitResult",
     platform,
@@ -1112,6 +1117,7 @@ async function finishBrowserMediaRevisit(platform, active, response, observed, u
 function markBrowserMediaRevisitItems(platform, sink, active) {
   if (!active || !active.content_id || !sink || !Array.isArray(sink.items)) return;
   sink.items.forEach((it) => {
+    it.browser_upload = true;
     it.meta = {
       ...(it.meta || {}),
       revisit_content_id: active.content_id,
