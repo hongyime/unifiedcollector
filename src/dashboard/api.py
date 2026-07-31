@@ -46,6 +46,8 @@ _SOURCE_MATRIX_DAY_CONTENT_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_DAY_
 _SOURCE_MATRIX_MEDIA_TOTALS_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_MEDIA_TOTALS_TIMEOUT_SECONDS", "8"))
 _SOURCE_MATRIX_YOUTUBE_BACKLOG_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_YOUTUBE_BACKLOG_TIMEOUT_SECONDS", "8"))
 _SOURCE_MATRIX_BROWSER_EXTENSION_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_BROWSER_EXTENSION_TIMEOUT_SECONDS", "6"))
+_SOURCE_CONTENT_PART_TIMEOUT_SECONDS = float(os.getenv("SOURCE_CONTENT_PART_TIMEOUT_SECONDS", "2"))
+_SOURCE_CONTENT_MEDIA_TIMEOUT_SECONDS = float(os.getenv("SOURCE_CONTENT_MEDIA_TIMEOUT_SECONDS", "4"))
 _SOURCE_MATRIX_SECTION_CACHE: dict[str, dict[str, object]] = {}
 _SOURCE_MATRIX_SECTION_CACHE_TTL_SECONDS = int(os.getenv("SOURCE_MATRIX_SECTION_CACHE_TTL_SECONDS", "30"))
 _SOURCE_MATRIX_SECTION_STALE_SECONDS = int(os.getenv("SOURCE_MATRIX_SECTION_STALE_SECONDS", "900"))
@@ -470,56 +472,79 @@ async def _source_content_summary(conn, since_sql: str, before_sql: str | None =
     required_tables = [table for _source, table, _column, _label in _INGESTION_CONTENT_PARTS]
     required_tables.append("media_items")
     existing_tables = await _existing_public_tables(conn, required_tables)
-    media_before = f" AND collected_at < {before_sql}" if before_sql else ""
-    raw_parts = [
-        f"""
-        SELECT '{source}'::text AS source,
-               count(*)::bigint AS records,
-               {("count(*)" if label == "messages" else "0")}::bigint AS messages,
-               0::bigint AS media_items,
-               max({column}) AS latest_record_at,
-               NULL::timestamptz AS latest_media_at
-        FROM {table}
-        WHERE {column} >= {since_sql}
-          {f"AND {column} < {before_sql}" if before_sql else ""}
-        """
-        for source, table, column, label in _INGESTION_CONTENT_PARTS
-        if table in existing_tables
-    ]
+    out: dict[str, dict] = {}
+
+    def merge(source: str, row: dict | None) -> None:
+        if not row:
+            return
+        target = out.setdefault(source, {
+            "source": source,
+            "records": 0,
+            "messages": 0,
+            "media_items": 0,
+            "latest_record_at": None,
+            "latest_media_at": None,
+        })
+        target["records"] = int(target.get("records") or 0) + int(row.get("records") or 0)
+        target["messages"] = int(target.get("messages") or 0) + int(row.get("messages") or 0)
+        target["media_items"] = int(target.get("media_items") or 0) + int(row.get("media_items") or 0)
+        latest_record = row.get("latest_record_at")
+        latest_media = row.get("latest_media_at")
+        if latest_record and (
+            not target.get("latest_record_at") or latest_record > target["latest_record_at"]
+        ):
+            target["latest_record_at"] = latest_record
+        if latest_media and (
+            not target.get("latest_media_at") or latest_media > target["latest_media_at"]
+        ):
+            target["latest_media_at"] = latest_media
+
+    for source, table, column, label in _INGESTION_CONTENT_PARTS:
+        if table not in existing_tables:
+            continue
+        try:
+            row = await conn.fetchrow(
+                f"""
+                SELECT count(*)::bigint AS records,
+                       {("count(*)" if label == "messages" else "0")}::bigint AS messages,
+                       0::bigint AS media_items,
+                       max({column}) AS latest_record_at,
+                       NULL::timestamptz AS latest_media_at
+                FROM {table}
+                WHERE {column} >= {since_sql}
+                  {f"AND {column} < {before_sql}" if before_sql else ""}
+                """,
+                timeout=_SOURCE_CONTENT_PART_TIMEOUT_SECONDS,
+            )
+            merge(source, dict(row) if row else None)
+        except Exception as exc:  # noqa: BLE001 - source matrix should keep other sources truthful
+            logger.warning(
+                "source content summary part failed for %s/%s: %s",
+                source,
+                table,
+                exc.__class__.__name__,
+            )
     if "media_items" in existing_tables:
-        raw_parts.append(
-            f"""
-            SELECT source,
-                   0::bigint AS records,
-                   0::bigint AS messages,
-                   count(*)::bigint AS media_items,
-                   NULL::timestamptz AS latest_record_at,
-                   max(collected_at) AS latest_media_at
-            FROM media_items
-            WHERE collected_at >= {since_sql}
-              {media_before}
-            GROUP BY source
-            """
-        )
-    if not raw_parts:
-        return {}
-    rows = await conn.fetch(
-        f"""
-        WITH raw AS (
-            {" UNION ALL ".join(raw_parts)}
-        )
-        SELECT source,
-               sum(records)::bigint AS records,
-               sum(messages)::bigint AS messages,
-               sum(media_items)::bigint AS media_items,
-               max(latest_record_at) AS latest_record_at,
-               max(latest_media_at) AS latest_media_at
-        FROM raw
-        GROUP BY source
-        """,
-        timeout=30,
-    )
-    out = {row["source"]: dict(row) for row in rows}
+        try:
+            rows = await conn.fetch(
+                f"""
+                SELECT source,
+                       0::bigint AS records,
+                       0::bigint AS messages,
+                       count(*)::bigint AS media_items,
+                       NULL::timestamptz AS latest_record_at,
+                       max(collected_at) AS latest_media_at
+                FROM media_items
+                WHERE collected_at >= {since_sql}
+                  {f"AND collected_at < {before_sql}" if before_sql else ""}
+                GROUP BY source
+                """,
+                timeout=_SOURCE_CONTENT_MEDIA_TIMEOUT_SECONDS,
+            )
+            for row in rows:
+                merge(row["source"], dict(row))
+        except Exception as exc:  # noqa: BLE001 - source matrix should keep row counts if media stats lag
+            logger.warning("source content media summary failed: %s", exc.__class__.__name__)
     try:
         out.update(await asyncio.wait_for(
             _beeper_subsource_content_summary(conn, since_sql, before_sql),
@@ -910,68 +935,87 @@ async def _youtube_media_backlog(conn) -> dict:
         out["stats_stale"] = True
         return out
 
-    existing = await _existing_public_tables(conn, ["youtube_videos", "media_items"])
-    if "youtube_videos" not in existing or "media_items" not in existing:
+    existing = await _existing_public_tables(conn, ["youtube_videos"])
+    if "youtube_videos" not in existing:
         return {}
+    video_cols = await _existing_public_columns(
+        conn,
+        "youtube_videos",
+        ["media_status", "media_skip_reason", "last_media_attempt_at", "duration", "collected_at"],
+    )
+    media_status_expr = (
+        "coalesce(nullif(v.media_status, ''), 'pending')"
+        if "media_status" in video_cols
+        else "'pending'"
+    )
+    media_skip_reason_expr = (
+        "coalesce(v.media_skip_reason, '')"
+        if "media_skip_reason" in video_cols
+        else "''"
+    )
+    last_media_attempt_expr = (
+        "v.last_media_attempt_at"
+        if "last_media_attempt_at" in video_cols
+        else "NULL::timestamptz"
+    )
+    duration_expr = "upper(coalesce(v.duration, ''))" if "duration" in video_cols else "''"
+    collected_at_expr = "v.collected_at" if "collected_at" in video_cols else "NULL::timestamptz"
     try:
         duration_cap_seconds = max(0, int(os.getenv("YOUTUBE_MAX_VIDEO_DURATION_MINUTES", "0")) * 60)
     except (TypeError, ValueError):
         duration_cap_seconds = 0
     try:
         row = await conn.fetchrow(
-            """
-            WITH missing AS (
-                SELECT v.duration,
-                       v.collected_at,
-                       v.last_media_attempt_at,
-                       upper(coalesce(v.duration, '')) AS duration_text,
+            f"""
+            WITH classified AS (
+                SELECT {media_status_expr} AS media_status,
+                       {media_skip_reason_expr} AS media_skip_reason,
+                       {last_media_attempt_expr} AS last_media_attempt_at,
+                       {collected_at_expr} AS collected_at,
+                       {duration_expr} AS duration_text,
                        (
-                           coalesce((substring(v.duration from 'PT([0-9]+)H'))::int, 0) * 3600
-                           + coalesce((substring(v.duration from '([0-9]+)M'))::int, 0) * 60
-                           + coalesce((substring(v.duration from '([0-9]+)S'))::int, 0)
+                           coalesce((substring({duration_expr} from 'PT([0-9]+)H'))::int, 0) * 3600
+                           + coalesce((substring({duration_expr} from '([0-9]+)M'))::int, 0) * 60
+                           + coalesce((substring({duration_expr} from '([0-9]+)S'))::int, 0)
                        ) AS duration_seconds
                 FROM youtube_videos v
-                WHERE NOT EXISTS (
-                    SELECT 1
-                    FROM media_items video
-                    WHERE video.source = 'youtube'
-                      AND video.content_id = 'video_' || v.platform_video_id
-                )
+            ),
+            missing AS (
+                SELECT *
+                FROM classified
+                WHERE media_status <> 'stored'
             )
-            SELECT (SELECT COUNT(*) FROM youtube_videos)::bigint AS total_videos,
-                   (
-                       SELECT COUNT(*)
-                       FROM youtube_videos v
-                       WHERE NOT EXISTS (
-                           SELECT 1
-                           FROM media_items thumb
-                           WHERE thumb.source = 'youtube'
-                             AND thumb.content_id = v.platform_video_id
-                       )
-                   )::bigint AS missing_thumbnails,
+            SELECT (SELECT COUNT(*) FROM classified)::bigint AS total_videos,
+                   NULL::bigint AS missing_thumbnails,
                    COUNT(*)::bigint AS missing_videos,
                    COUNT(*) FILTER (
                        WHERE duration_text IN ('P0D', 'PT0S')
                    )::bigint AS placeholder_missing_videos,
                    COUNT(*) FILTER (
                        WHERE duration_text NOT IN ('P0D', 'PT0S')
+                         AND NOT (media_status = 'skipped' AND media_skip_reason = 'over_duration_cap')
                          AND ($1::int <= 0 OR duration_seconds <= $1::int OR duration_text = '')
                    )::bigint AS eligible_missing_videos,
                    COUNT(*) FILTER (
                        WHERE duration_text NOT IN ('P0D', 'PT0S')
+                         AND NOT (media_status = 'skipped' AND media_skip_reason = 'over_duration_cap')
                          AND ($1::int <= 0 OR duration_seconds <= $1::int OR duration_text = '')
                          AND last_media_attempt_at IS NULL
                    )::bigint AS eligible_missing_videos_never_attempted,
                    COUNT(*) FILTER (
-                       WHERE duration_text NOT IN ('P0D', 'PT0S', '')
-                         AND $1::int > 0
-                         AND duration_seconds > $1::int
+                       WHERE (media_status = 'skipped' AND media_skip_reason = 'over_duration_cap')
+                          OR (
+                              duration_text NOT IN ('P0D', 'PT0S', '')
+                              AND $1::int > 0
+                              AND duration_seconds > $1::int
+                          )
                    )::bigint AS over_duration_missing_videos,
                    COUNT(*) FILTER (
                        WHERE duration_text = ''
                    )::bigint AS unknown_duration_missing_videos,
                    COUNT(*) FILTER (
                        WHERE duration_text NOT IN ('P0D', 'PT0S')
+                         AND NOT (media_status = 'skipped' AND media_skip_reason = 'over_duration_cap')
                          AND ($1::int <= 0 OR duration_seconds <= $1::int OR duration_text = '')
                          AND collected_at >= now() - interval '24 hours'
                    )::bigint AS eligible_missing_videos_touched_24h,
@@ -992,6 +1036,8 @@ async def _youtube_media_backlog(conn) -> dict:
         raise
     out = dict(row) if row else {}
     out["duration_cap_seconds"] = duration_cap_seconds
+    out["backlog_basis"] = "youtube_videos.media_status"
+    out["thumbnail_stats_unavailable"] = True
     _YOUTUBE_MEDIA_BACKLOG_CACHE.update({"ts": time.time(), "row": out})
     return out
 
@@ -2116,11 +2162,14 @@ async def _browser_extension_payload(conn) -> dict:
                     ORDER BY platform, created_at DESC
                 ),
                 content AS (
-                    SELECT platform, max(created_at) AS last_content_at
+                    SELECT DISTINCT ON (platform)
+                           platform,
+                           created_at AS last_content_at
                     FROM browser_ingest_events
                     WHERE endpoint <> 'browser_heartbeat'
                       AND (observed_count > 0 OR stored_count > 0)
-                    GROUP BY platform
+                      AND platform = ANY($2::text[])
+                    ORDER BY platform, created_at DESC
                 )
                 SELECT heartbeat.platform,
                        heartbeat.heartbeat_at,

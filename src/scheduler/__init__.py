@@ -522,11 +522,14 @@ class Scheduler:
                                 ORDER BY platform, created_at DESC
                             ),
                             content AS (
-                                SELECT platform, max(created_at) AS last_content_at
+                                SELECT DISTINCT ON (platform)
+                                       platform,
+                                       created_at AS last_content_at
                                 FROM browser_ingest_events
                                 WHERE endpoint <> 'browser_heartbeat'
                                   AND (observed_count > 0 OR stored_count > 0)
-                                GROUP BY platform
+                                  AND platform = ANY($2::text[])
+                                ORDER BY platform, created_at DESC
                             )
                             SELECT heartbeat.platform,
                                    heartbeat.heartbeat_at,
