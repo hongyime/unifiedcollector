@@ -66,6 +66,9 @@ GITHUB_SPIDER_USER_DELAY     between-user politeness delay (default 2.0s).
 GITHUB_SPIDER_CONCURRENCY    spider drain workers (default 4).
 GITHUB_SPIDER_ENABLED        master-switch for queue draining (default true).
 GITHUB_API_DELAY             between-API-call polite delay (default 0.1s).
+GITHUB_API_TRANSPORT_RETRIES retries for transient API disconnects (default 4).
+GITHUB_API_TRANSPORT_RETRY_MAX_DELAY_SECONDS max retry backoff (default 30s).
+GITHUB_API_TRANSPORT_EVENT_MIN_INTERVAL_SECONDS min duplicate event gap (default 900s).
 GITHUB_DOWNLOAD_DELAY        between-asset-download delay (default 0.5s).
 GITHUB_AVATAR_SIZE           ?s= query param value (default 460).
 GITHUB_MAX_COMMITS_PER_REPO  cap commit pull; 0/none/unlimited means all.
@@ -191,6 +194,16 @@ class GithubCollector(BaseCollector):
         self._spider_batch_size = int(os.getenv("GITHUB_SPIDER_BATCH_SIZE", "20"))
         self._spider_user_delay = float(os.getenv("GITHUB_SPIDER_USER_DELAY", "2.0"))
         self._api_delay = float(os.getenv("GITHUB_API_DELAY", "0.1"))
+        self._api_transport_retries = self._env_int_range(
+            "GITHUB_API_TRANSPORT_RETRIES", "4", lower=0, upper=8
+        )
+        self._api_transport_retry_max_delay = self._env_float_min(
+            "GITHUB_API_TRANSPORT_RETRY_MAX_DELAY_SECONDS", "30", lower=0.0
+        )
+        self._api_transport_event_min_interval = self._env_float_min(
+            "GITHUB_API_TRANSPORT_EVENT_MIN_INTERVAL_SECONDS", "900", lower=0.0
+        )
+        self._transport_event_last: dict[str, float] = {}
         self._download_delay = float(os.getenv("GITHUB_DOWNLOAD_DELAY", "0.5"))
         # FAMOUS-FILTER (Bryan): skip repos at/above this star count and (optionally)
         # users at/above it (by follower count). 0 disables. Overrides the seed.
@@ -239,6 +252,31 @@ class GithubCollector(BaseCollector):
         if not raw:
             raw = os.getenv("GITHUB_SPIDER_SEED", "bryanseah234")
         return {p.strip().lstrip("@").lower() for p in raw.split(",") if p.strip()}
+
+    @staticmethod
+    def _env_int_range(
+        name: str,
+        default: str,
+        *,
+        lower: int = 0,
+        upper: int | None = None,
+    ) -> int:
+        try:
+            value = int(os.getenv(name, default))
+        except (TypeError, ValueError):
+            value = int(default)
+        value = max(lower, value)
+        if upper is not None:
+            value = min(upper, value)
+        return value
+
+    @staticmethod
+    def _env_float_min(name: str, default: str, *, lower: float = 0.0) -> float:
+        try:
+            value = float(os.getenv(name, default))
+        except (TypeError, ValueError):
+            value = float(default)
+        return max(lower, value)
 
     @staticmethod
     def _env_limit(name: str, default: str = "0") -> int | None:
@@ -390,6 +428,51 @@ class GithubCollector(BaseCollector):
             },
         )
 
+    async def _record_transport_failure(
+        self,
+        *,
+        url: str,
+        error: BaseException,
+        attempts: int,
+    ) -> None:
+        """Persist a throttled operational event for skipped GitHub endpoints.
+
+        Transport disconnects are not quota failures, but once all retries are
+        exhausted they do mean a comments/reviews/profile page was skipped for
+        this pass. Putting them in operational events makes the hourly status
+        useful without polluting the 429 counters.
+        """
+        interval = self._api_transport_event_min_interval
+        scope = self._rate_limit_scope(url)
+        key = f"{scope}:{type(error).__name__}"
+        now = time.time()
+        if interval > 0 and now - self._transport_event_last.get(key, 0.0) < interval:
+            return
+        self._transport_event_last[key] = now
+        summary = (
+            f"github API transport error exhausted after {attempts} attempts "
+            f"for {scope}: {type(error).__name__}"
+        )
+        metadata = {
+            "url": url,
+            "scope": scope,
+            "attempts": attempts,
+            "error_type": type(error).__name__,
+            "error": str(error)[:500],
+        }
+        try:
+            await self.pool.execute(
+                """
+                INSERT INTO collector_operational_events
+                  (source, event_type, severity, summary, metadata)
+                VALUES ('github', 'api_transport_exhausted', 'warning', $1, $2::jsonb)
+                """,
+                summary[:2000],
+                json.dumps(metadata),
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("github: failed to record transport operational event", exc_info=True)
+
     @staticmethod
     def get_pat_display(pat: str) -> str:
         """Mask a PAT for safe display: ``ghp_xxxx****...****yyyy``."""
@@ -443,11 +526,7 @@ class GithubCollector(BaseCollector):
         """
         async with self._sem:
             await asyncio.sleep(self._api_delay)
-            try:
-                transport_retries = int(os.getenv("GITHUB_API_TRANSPORT_RETRIES", "2"))
-            except ValueError:
-                transport_retries = 2
-            transport_retries = max(0, min(transport_retries, 5))
+            transport_retries = self._api_transport_retries
             attempts = transport_retries + 1
             for attempt in range(1, attempts + 1):
                 pat, pat_account = self._select_pat_for_request()
@@ -462,9 +541,17 @@ class GithubCollector(BaseCollector):
                             type(exc).__name__,
                             attempts,
                         )
+                        await self._record_transport_failure(
+                            url=url,
+                            error=exc,
+                            attempts=attempts,
+                        )
                         self._tick_progress()
                         return None
-                    delay = min(10.0, float(2 ** (attempt - 1)))
+                    delay = min(
+                        self._api_transport_retry_max_delay,
+                        float(2 ** (attempt - 1)),
+                    )
                     logger.warning(
                         "GitHub API transport error on %s (%s); retry %d/%d after %.1fs",
                         url,

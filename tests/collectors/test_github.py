@@ -342,9 +342,11 @@ async def test_api_get_retries_transient_transport_disconnect(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_api_get_returns_none_after_exhausted_transport_retries(monkeypatch):
+    monkeypatch.setenv("GITHUB_API_TRANSPORT_RETRIES", "2")
     coll = _new_collector()
     coll._api_delay = 0
     coll._quota.consume = AsyncMock()
+    coll.pool.execute = AsyncMock(return_value="INSERT 0 1")
     sleeps = []
 
     async def sleep_event(seconds):
@@ -365,6 +367,12 @@ async def test_api_get_returns_none_after_exhausted_transport_retries(monkeypatc
     assert sleeps == [1.0, 2.0]
     assert coll.requests_made == 0
     assert coll.progress_count == 1
+    sql, summary, metadata = coll.pool.execute.await_args.args
+    assert "collector_operational_events" in sql
+    assert "API transport error exhausted after 3 attempts" in summary
+    payload = json.loads(metadata)
+    assert payload["scope"] == "repos/a/b/releases"
+    assert payload["attempts"] == 3
 
 
 @pytest.mark.asyncio
