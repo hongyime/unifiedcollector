@@ -437,6 +437,10 @@ class TiktokCollector(BaseCollector):
         self._target_limit_per_cycle = max(0, int(os.getenv("TIKTOK_TARGETS_PER_CYCLE", "60")))
         self._spider_queue_per_cycle = max(0, int(os.getenv("TIKTOK_SPIDER_QUEUE_PER_CYCLE", "80")))
         self._spider_first = os.getenv("TIKTOK_SPIDER_QUEUE_FIRST", "true").lower() == "true"
+        self._spider_processing_stale_minutes = max(
+            5,
+            int(os.getenv("TIKTOK_SPIDER_PROCESSING_STALE_MINUTES", "45") or "45"),
+        )
 
         # Follow-aware access tracker (Phase 0, lazy — needs self.pool, created
         # on first use in _record_profile_access). Records every profile fetch
@@ -651,6 +655,7 @@ class TiktokCollector(BaseCollector):
 
     async def _process_spider_queue(self, max_items: int | None = None):
         await refresh_account_proximity_cache(self.pool)
+        await self._reclaim_stale_spider_queue()
         processed = 0
         while not self._stop.is_set():
             if max_items is not None and max_items > 0 and processed >= max_items:
@@ -667,7 +672,7 @@ class TiktokCollector(BaseCollector):
             async with self.pool.acquire() as conn:
                 row = await conn.fetchrow("""
                     UPDATE tiktok_spider_queue
-                    SET status = 'processing'
+                    SET status = 'processing', collected_at = NOW()
                     WHERE id = (
                         SELECT q.id
                         FROM tiktok_spider_queue q
@@ -720,6 +725,26 @@ class TiktokCollector(BaseCollector):
                         "UPDATE tiktok_spider_queue SET status = 'failed', collected_at = NOW() WHERE id = $1",
                         row["id"],
                     )
+
+    async def _reclaim_stale_spider_queue(self) -> None:
+        if self.pool is None:
+            return
+        try:
+            async with self.pool.acquire() as conn:
+                result = await conn.execute(
+                    """
+                    UPDATE tiktok_spider_queue
+                    SET status = 'pending'
+                    WHERE status = 'processing'
+                      AND COALESCE(collected_at, NOW() - INTERVAL '100 years')
+                          < NOW() - ($1::int * INTERVAL '1 minute')
+                    """,
+                    self._spider_processing_stale_minutes,
+                )
+            if not result.endswith(" 0"):
+                logger.info("tiktok spider queue: reclaimed stale processing rows (%s)", result)
+        except Exception:
+            logger.debug("tiktok spider queue: stale processing reclaim failed", exc_info=True)
 
     @staticmethod
     def _is_invalid_username(username: str) -> bool:
