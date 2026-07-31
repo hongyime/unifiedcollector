@@ -60,13 +60,20 @@ def parse_cooldown_cursor(raw: str | None, *, now: float | None = None) -> tuple
     if not raw:
         return 0.0, 0
     now = time.time() if now is None else now
+    expiry, streak = parse_raw_cooldown_cursor(raw)
+    if expiry <= now:
+        return 0.0, 0
+    return expiry, streak
+
+
+def parse_raw_cooldown_cursor(raw: str | None) -> tuple[float, int]:
+    if not raw:
+        return 0.0, 0
     try:
         left, _, right = str(raw).partition(":")
         expiry = float(left)
         streak = int(float(right)) if right else 0
     except (TypeError, ValueError):
-        return 0.0, 0
-    if expiry <= now:
         return 0.0, 0
     return expiry, max(0, streak)
 
@@ -131,13 +138,17 @@ async def record_dynamic_cooldown(
     multiplier: float = 2.0,
     jitter_ratio: float = 0.15,
     write_source_cursor: bool = False,
+    memory_seconds: int = 0,
 ) -> CooldownState:
     now = time.time()
     base_seconds = max(1, int(base_seconds or 1))
     max_seconds = max(base_seconds, int(max_seconds or base_seconds))
+    memory_seconds = max(0, int(memory_seconds or 0))
     service = dynamic_cooldown_service(source, scope, account)
     prior_expiry = 0.0
     prior_streak = 0
+    prior_raw_expiry = 0.0
+    prior_raw_streak = 0
     if pool is not None:
         try:
             async with pool.acquire() as conn:
@@ -145,13 +156,17 @@ async def record_dynamic_cooldown(
                     "SELECT last_processed_id FROM service_cursors WHERE service = $1",
                     service,
                 )
-                prior_expiry, prior_streak = parse_cooldown_cursor(
-                    row["last_processed_id"] if row else None,
-                    now=now,
-                )
+                raw_cursor = row["last_processed_id"] if row else None
+                prior_raw_expiry, prior_raw_streak = parse_raw_cooldown_cursor(raw_cursor)
+                prior_expiry, prior_streak = parse_cooldown_cursor(raw_cursor, now=now)
         except Exception:
             logger.debug("dynamic cooldown prior read failed for %s", service, exc_info=True)
-    streak = (prior_streak + 1) if prior_expiry > now else 1
+    if prior_expiry > now:
+        streak = prior_streak + 1
+    elif memory_seconds and prior_raw_expiry > 0 and now - prior_raw_expiry <= memory_seconds:
+        streak = prior_raw_streak + 1
+    else:
+        streak = 1
     raw_seconds = float(base_seconds) * (float(multiplier) ** max(0, streak - 1))
     if jitter_ratio > 0:
         raw_seconds *= random.uniform(1.0 - jitter_ratio, 1.0 + jitter_ratio)

@@ -101,6 +101,13 @@ try:
 except (TypeError, ValueError):
     STRAVA_BROWSER_429_MAX_COOLDOWN_SECONDS = max(STRAVA_BROWSER_429_COOLDOWN_SECONDS, 21600)
 try:
+    STRAVA_BROWSER_429_MEMORY_SECONDS = max(
+        0,
+        int(os.getenv("STRAVA_BROWSER_429_MEMORY_SECONDS", "21600")),
+    )
+except (TypeError, ValueError):
+    STRAVA_BROWSER_429_MEMORY_SECONDS = 21600
+try:
     TIKTOK_BROWSER_REVISIT_CLAIM_TIMEOUT_SECONDS = max(
         60,
         int(os.getenv("TIKTOK_BROWSER_REVISIT_CLAIM_TIMEOUT_SECONDS", "1800")),
@@ -4137,6 +4144,7 @@ async def _record_strava_stream_http_event(pool, body: dict) -> bool:
             account=account,
             base_seconds=STRAVA_BROWSER_429_COOLDOWN_SECONDS,
             max_seconds=STRAVA_BROWSER_429_MAX_COOLDOWN_SECONDS,
+            memory_seconds=STRAVA_BROWSER_429_MEMORY_SECONDS,
             write_source_cursor=True,
         )
         cooldown = state.seconds_remaining

@@ -391,6 +391,13 @@ class StravaCollector(BaseCollector):
             )
         except (TypeError, ValueError):
             self._gps_stream_cooldown_max_seconds = max(self._gps_stream_cooldown_seconds, 21600)
+        try:
+            self._gps_stream_cooldown_memory_seconds = max(
+                0,
+                int(os.getenv("STRAVA_STREAM_RATELIMIT_MEMORY_SECONDS", "21600")),
+            )
+        except (TypeError, ValueError):
+            self._gps_stream_cooldown_memory_seconds = 21600
         self._recent_gps_429s: dict[str, float] = {}
 
         self._use_api = bool(self._client_id and self._client_secret and self._refresh_token)
@@ -517,6 +524,7 @@ class StravaCollector(BaseCollector):
             account=account,
             base_seconds=self._gps_stream_cooldown_seconds,
             max_seconds=self._gps_stream_cooldown_max_seconds,
+            memory_seconds=self._gps_stream_cooldown_memory_seconds,
             write_source_cursor=True,
         )
         cooldown_seconds = max(1, int(state.seconds_remaining))
