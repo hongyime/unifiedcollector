@@ -1454,7 +1454,7 @@ def _fresh_current_extension_seen(payload: dict, platform: str, since: datetime 
 def _suppress_shadowed_extension_mismatches(payload: dict) -> None:
     kept = []
     for issue in payload.get("issues", []):
-        if issue.get("kind") != "extension_version_mismatch" or not issue.get("needs_new_event"):
+        if issue.get("kind") != "extension_version_mismatch":
             kept.append(issue)
             continue
         platform = str(issue.get("platform") or "").lower()

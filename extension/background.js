@@ -35,6 +35,7 @@ const BROWSER_UPLOAD_MAX_BYTES = 256 * 1024 * 1024;
 const PAGE_RECOVERY_PREFIX = "uc-page-recovery:";
 const PAGE_RECOVERY_STATE_KEY = "ucPageRecovery";
 const PAGE_RECOVERY_MAX_ATTEMPTS = 3;
+const RELOAD_INTENT_KEY = "ucReloadIntent";
 const PAGE_RECOVERY_DELAY_WINDOWS_MS = [
   [45000, 150000],
   [240000, 480000],
@@ -163,6 +164,13 @@ let _tabsOpInProgress = false; // guard against overlapping open/refresh runs (n
 // tab is never duplicated.
 const _tpath = (u) => { try { return new URL(u).pathname.split("?")[0].replace(/\/$/, "") || "/"; } catch (e) { return "/"; } };
 const _mainWorldHookHostRe = /(^|\.)((instagram|tiktok|strava)\.com|threads\.com|x\.com|twitter\.com|facebook\.com)$/i;
+function shouldNormalizeSingleFeedTab(p, tab, reason) {
+  if (!p || p.id !== "x" || !tab || !tab.url) return false;
+  const path = _tpath(tab.url);
+  const homePath = _tpath(p.url);
+  if (path === homePath || path.startsWith(homePath + "/")) return false;
+  return /^(manual_extension_reload|startup|installed|watchdog)$/.test(String(reason || ""));
+}
 
 // Keep exactly ONE tab per single-feed platform (instagram/threads/lemon8/x/facebook)
 // and one per target path for multi-url platforms (tiktok = foryou + following).
@@ -171,7 +179,7 @@ const _mainWorldHookHostRe = /(^|\.)((instagram|tiktok|strava)\.com|threads\.com
 async function ensureScraperTabsOpen(reason) {
   if (!(await autoTabsEnabled()) || _tabsOpInProgress) return;
   _tabsOpInProgress = true;
-  let opened = 0, closed = 0;
+  let opened = 0, closed = 0, navigated = 0;
   try {
     for (const p of scraperPlatforms()) {
       const tabs = (await chrome.tabs.query({ url: `*://${p.host}/*` })) || [];
@@ -180,6 +188,9 @@ async function ensureScraperTabsOpen(reason) {
         if (tabs.length === 0) {
           try { await chrome.tabs.create({ url: p.url, pinned: true, active: false }); opened++; await _sleep(_humanGap(3000)); } catch (e) {}
         } else {
+          if (shouldNormalizeSingleFeedTab(p, tabs[0], reason)) {
+            try { await chrome.tabs.update(tabs[0].id, { url: p.url }); navigated++; await _sleep(_humanGap(3000)); } catch (e) {}
+          }
           for (let i = 1; i < tabs.length; i++) { try { await chrome.tabs.remove(tabs[i].id); closed++; } catch (e) {} }
         }
       } else {
@@ -197,7 +208,7 @@ async function ensureScraperTabsOpen(reason) {
         }
       }
     }
-    if (opened || closed) await log("info", `tabs: +${opened} opened, ${closed} dup(s) closed (${reason})`);
+    if (opened || closed || navigated) await log("info", `tabs: +${opened} opened, ${closed} dup(s) closed, ${navigated} canonicalized (${reason})`);
   } finally { _tabsOpInProgress = false; }
 }
 
@@ -340,9 +351,16 @@ async function recordPageHealth(base, msg, sender, extra = {}) {
     });
   } catch (e) {}
 }
-function recoveryDelayMs(attempt) {
-  const idx = Math.min(PAGE_RECOVERY_DELAY_WINDOWS_MS.length - 1, Math.max(0, attempt - 1));
-  const win = PAGE_RECOVERY_DELAY_WINDOWS_MS[idx];
+function recoveryDelayMs(attempt, platformId) {
+  const windows = platformId === "x"
+    ? [
+        [8000, 20000],
+        [45000, 90000],
+        [120000, 240000],
+      ]
+    : PAGE_RECOVERY_DELAY_WINDOWS_MS;
+  const idx = Math.min(windows.length - 1, Math.max(0, attempt - 1));
+  const win = windows[idx];
   return _randBetween(win[0], win[1]);
 }
 async function schedulePageRecovery(base, msg, sender) {
@@ -385,7 +403,7 @@ async function schedulePageRecovery(base, msg, sender) {
   }
 
   attempts += 1;
-  const delay = recoveryDelayMs(attempts);
+  const delay = recoveryDelayMs(attempts, platform.id);
   state[key] = {
     url: current,
     platform: platform.id,
@@ -455,7 +473,22 @@ async function ensureLoops(reason) {
     } catch (e) {
       await log("warn", `page hook inject failed for tab ${t.id}: ${e && e.message ? e.message : e}`);
     }
-    try { await chrome.tabs.sendMessage(t.id, { type: "ensureLoop" }); } catch (e) {}
+    try {
+      await chrome.tabs.sendMessage(t.id, { type: "ensureLoop" });
+    } catch (firstErr) {
+      try {
+        if (!chrome.scripting || !chrome.scripting.executeScript) throw firstErr;
+        await chrome.scripting.executeScript({
+          target: { tabId: t.id, allFrames: false },
+          files: ["content.js"],
+        });
+        await _sleep(500);
+        await chrome.tabs.sendMessage(t.id, { type: "ensureLoop" });
+        await log("info", `revived content scraper in tab ${t.id} (${reason})`);
+      } catch (e) {
+        await log("warn", `content scraper revive failed for tab ${t.id}: ${e && e.message ? e.message : e}`);
+      }
+    }
   }
   return true;
 }
@@ -1155,8 +1188,37 @@ async function scrapeNow() {
   return { ok: await ensureLoops("manual") };
 }
 
-// Warm start (worker waking from sleep)
-setStatus({ swStartedAt: Date.now() });
-log("info", "service worker active");
-reportBridgeHeartbeat("warm_start").catch(() => {});
-reportScraperTabHeartbeats("warm_start").catch(() => {});
+async function consumeReloadIntent() {
+  let intent = null;
+  try {
+    const found = await chrome.storage.local.get(RELOAD_INTENT_KEY);
+    intent = found && found[RELOAD_INTENT_KEY];
+  } catch (e) {}
+  if (!intent || !intent.requested_at) return false;
+
+  const ageMs = Date.now() - Number(intent.requested_at || 0);
+  try { await chrome.storage.local.remove(RELOAD_INTENT_KEY); } catch (e) {}
+  if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > 10 * 60 * 1000) {
+    await log("warn", "ignored stale extension reload intent");
+    return false;
+  }
+
+  await log("info", "extension reload intent consumed; hard-refreshing scraper tabs");
+  await scheduleAlarm();
+  await syncCookies();
+  await ensureScraperTabsOpen("manual_extension_reload");
+  await reportScraperTabHeartbeats("manual_extension_reload");
+  await refreshScraperTabs({ bypassCache: true, reason: "manual_extension_reload" });
+  await reportScraperTabHeartbeats("manual_extension_reload_refresh");
+  await ensureLoops("manual_extension_reload");
+  return true;
+}
+
+// Warm start (worker waking from sleep or after chrome.runtime.reload()).
+(async () => {
+  await setStatus({ swStartedAt: Date.now() });
+  await log("info", "service worker active");
+  await reportBridgeHeartbeat("warm_start").catch(() => {});
+  await reportScraperTabHeartbeats("warm_start").catch(() => {});
+  await consumeReloadIntent().catch((e) => log("warn", `reload intent handling failed: ${e && e.message ? e.message : e}`));
+})();

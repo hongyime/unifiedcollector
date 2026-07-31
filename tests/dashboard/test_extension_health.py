@@ -138,6 +138,61 @@ async def test_browser_extension_payload_suppresses_old_endpoint_after_newer_cur
 
 
 @pytest.mark.asyncio
+async def test_browser_extension_payload_suppresses_recent_old_endpoint_after_newer_current_signal(monkeypatch):
+    monkeypatch.setenv("UC_EXTENSION_EXPECTED_VERSION", "1.21.55")
+
+    class FakeConn:
+        async def fetchval(self, query: str, timeout: int | None = None):
+            if "dm_hook_heartbeat" in query:
+                return None
+            if "browser_ingest_events" in query:
+                return "browser_ingest_events"
+            if "tiktok_browser_media_candidates" in query:
+                return None
+            if "tiktok_browser_revisit_queue" in query:
+                return None
+            if "browser_media_candidates" in query:
+                return None
+            if "browser_media_revisit_queue" in query:
+                return None
+            raise AssertionError(query)
+
+        async def fetch(self, query: str, *args, timeout: int | None = None):
+            if "FROM browser_ingest_events" in query:
+                return [
+                    {
+                        "platform": "instagram",
+                        "endpoint": "media",
+                        "requests": 100,
+                        "observed_count": 200,
+                        "stored_count": 80,
+                        "last_seen_at": datetime(2026, 7, 31, 22, 34, tzinfo=timezone.utc),
+                        "age_seconds": 45,
+                        "extension_version": "1.21.53",
+                    },
+                    {
+                        "platform": "instagram",
+                        "endpoint": "browser_heartbeat",
+                        "requests": 2,
+                        "observed_count": 2,
+                        "stored_count": 0,
+                        "last_seen_at": datetime(2026, 7, 31, 22, 35, tzinfo=timezone.utc),
+                        "age_seconds": 5,
+                        "extension_version": "1.21.55",
+                    },
+                ]
+            raise AssertionError(query)
+
+    payload = await _browser_extension_payload(FakeConn())
+
+    assert {item["endpoint"]: item["version_ok"] for item in payload["ingest"]} == {
+        "media": False,
+        "browser_heartbeat": True,
+    }
+    assert payload["issues"] == []
+
+
+@pytest.mark.asyncio
 async def test_browser_extension_payload_includes_media_candidate_diagnostics(monkeypatch):
     monkeypatch.setenv("UC_EXTENSION_EXPECTED_VERSION", "1.21.46")
 
