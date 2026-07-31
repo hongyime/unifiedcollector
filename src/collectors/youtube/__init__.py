@@ -2692,6 +2692,20 @@ class YoutubeCollector(BaseCollector):
                 await self.send_to_dlq(item["entity_id"], cid, f"vault artifact partial: {artifact.error}")
             self._known_ids.add(cid)
             return inserted
+        except httpx.HTTPStatusError as e:
+            safe_error = _safe_log_text(e)
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            if status == 404 and item.get("content_type") == "thumbnail":
+                logger.warning(
+                    "YouTube thumbnail unavailable %s: %s",
+                    cid,
+                    request_url or safe_error,
+                )
+                await self.send_to_dlq(item["entity_id"], cid, f"thumbnail_not_found: {safe_error}")
+                return False
+            logger.error("Download failed %s: %s", cid, safe_error)
+            await self.send_to_dlq(item["entity_id"], cid, safe_error)
+            return False
         except Exception as e:
             safe_error = _safe_log_text(e)
             logger.error("Download failed %s: %s", cid, safe_error)

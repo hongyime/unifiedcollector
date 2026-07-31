@@ -657,6 +657,51 @@ async def test_download_media_falls_back_to_mq_thumbnail(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_download_media_thumbnail_404_is_audited_warning(monkeypatch, tmp_path, caplog):
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    monkeypatch.setattr(youtube_mod, "VAULT_ROOT", vault_root)
+    coll = _new_collector(monkeypatch)
+    coll.insert_media_item = AsyncMock(return_value=True)
+    coll.send_to_dlq = AsyncMock()
+
+    class _StubAsyncClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def get(self, url, *a, **kw):
+            return youtube_mod.httpx.Response(
+                404,
+                request=youtube_mod.httpx.Request("GET", url),
+            )
+
+    monkeypatch.setattr(youtube_mod.httpx, "AsyncClient", _StubAsyncClient)
+
+    with caplog.at_level("WARNING"):
+        inserted = await coll.download_media({
+            "entity_id": "UC123",
+            "entity_name": "Example Channel",
+            "content_type": "thumbnail",
+            "content_id": "abc123xyz90",
+            "extension": "jpg",
+            "url": "https://i.ytimg.com/vi/abc123xyz90/default.jpg",
+        })
+
+    assert inserted is False
+    coll.insert_media_item.assert_not_awaited()
+    coll.send_to_dlq.assert_awaited_once()
+    assert "thumbnail_not_found" in coll.send_to_dlq.await_args.args[2]
+    assert "YouTube thumbnail unavailable abc123xyz90" in caplog.text
+    assert "Download failed abc123xyz90" not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_download_media_preserves_community_source_url(monkeypatch, tmp_path):
     vault_root = tmp_path / "vault"
     vault_root.mkdir()
