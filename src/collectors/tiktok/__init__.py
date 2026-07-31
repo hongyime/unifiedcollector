@@ -49,6 +49,7 @@ DEFERRED (left as TODO for a later wave; non-blocking):
 from __future__ import annotations
 
 import asyncio
+import html as html_lib
 import json
 import logging
 import os
@@ -413,11 +414,26 @@ class TiktokCollector(BaseCollector):
         self._cookies_valid = False
         self._tracker_file = Path(os.getenv("TIKTOK_TRACKER_FILE", "data/tiktok_tracker.json"))
         self._tracked_ids: set[str] = set()
-        # FAMOUS-FILTER (Bryan): skip users at/above this follower count. Checked
-        # against the DB-stored follower count from a prior cycle (TikTok's count
-        # is only known after a download), so the cap applies from the 2nd
-        # encounter onward. 0 disables.
+        # FAMOUS-FILTER (Bryan): older hard skip knob kept for compatibility.
+        # New default behavior is profile-first/profile-only via
+        # TIKTOK_VIDEO_FOLLOWER_CAP below.
         self._famous_follower_cap = int(os.getenv("TIKTOK_FAMOUS_FOLLOWER_CAP", "0") or "0")
+        self._video_follower_cap = int(
+            os.getenv(
+                "TIKTOK_VIDEO_FOLLOWER_CAP",
+                os.getenv("TIKTOK_PROFILE_VIDEO_FOLLOWER_CAP", "300"),
+            )
+            or "0"
+        )
+        self._profile_chunk_items = max(0, int(os.getenv("TIKTOK_PROFILE_CHUNK_ITEMS", "60") or "0"))
+        self._gallery_dl_max_items = max(
+            0,
+            int(os.getenv("TIKTOK_GALLERY_DL_MAX_ITEMS", str(self._profile_chunk_items)) or "0"),
+        )
+        self._yt_dlp_max_downloads = max(
+            0,
+            int(os.getenv("TIKTOK_YTDLP_MAX_DOWNLOADS", str(self._profile_chunk_items)) or "0"),
+        )
         self._target_limit_per_cycle = max(0, int(os.getenv("TIKTOK_TARGETS_PER_CYCLE", "60")))
         self._spider_queue_per_cycle = max(0, int(os.getenv("TIKTOK_SPIDER_QUEUE_PER_CYCLE", "80")))
         self._spider_first = os.getenv("TIKTOK_SPIDER_QUEUE_FIRST", "true").lower() == "true"
@@ -484,7 +500,10 @@ class TiktokCollector(BaseCollector):
             )
             return []
         archive = self._gallery_dl_archive_dir / f"{safe_user}.txt"
-        return ["--download-archive", str(archive)]
+        args = ["--download-archive", str(archive)]
+        if self._gallery_dl_max_items:
+            args.extend(["--range", f"1-{self._gallery_dl_max_items}"])
+        return args
 
     @property
     def account_media_dir(self) -> Path:
@@ -672,18 +691,35 @@ class TiktokCollector(BaseCollector):
                             q.collected_at ASC
                         LIMIT 1
                     )
-                    RETURNING platform_user_id, username
+                    RETURNING id, platform_user_id, username
                 """)
             if not row: break
             target = row['username'] or row['platform_user_id']
             try:
-                await self._collect_user(target)
+                result = await self._collect_user(target)
                 processed += 1
+                if result in {"unavailable", "private"}:
+                    status = "unavailable"
+                elif result in {"delayed", "cooldown", "empty"}:
+                    status = "delayed"
+                else:
+                    status = "completed"
                 async with self.pool.acquire() as conn:
-                    await conn.execute("UPDATE tiktok_spider_queue SET status = 'completed' WHERE platform_user_id = $1", row['platform_user_id'])
+                    await conn.execute(
+                        """
+                        UPDATE tiktok_spider_queue
+                        SET status = $2, collected_at = NOW()
+                        WHERE id = $1
+                        """,
+                        row["id"],
+                        status,
+                    )
             except Exception:
                 async with self.pool.acquire() as conn:
-                    await conn.execute("UPDATE tiktok_spider_queue SET status = 'failed' WHERE platform_user_id = $1", row['platform_user_id'])
+                    await conn.execute(
+                        "UPDATE tiktok_spider_queue SET status = 'failed', collected_at = NOW() WHERE id = $1",
+                        row["id"],
+                    )
 
     @staticmethod
     def _is_invalid_username(username: str) -> bool:
@@ -739,25 +775,57 @@ class TiktokCollector(BaseCollector):
         except Exception as e:
             logger.debug("tiktok: access-tracking record failed for %s: %s", username, e)
 
-    async def _collect_user(self, username: str):
+    async def _stored_followers_count(self, username: str) -> int | None:
+        if self.pool is None:
+            return None
+        try:
+            async with self.pool.acquire() as conn:
+                fc = await conn.fetchval(
+                    """
+                    SELECT followers_count
+                    FROM tiktok_profiles
+                    WHERE LOWER(username) = LOWER($1)
+                    ORDER BY updated_at DESC NULLS LAST
+                    LIMIT 1
+                    """,
+                    username,
+                )
+            return int(fc) if fc is not None else None
+        except Exception:
+            logger.debug("tiktok follower-cap check failed for %s", username, exc_info=True)
+            return None
+
+    async def _collect_user(self, username: str) -> str:
         profile_url = f"https://www.tiktok.com/@{username}"
-        # FAMOUS-FILTER: if a prior cycle recorded this user's follower count and
-        # it's at/above the cap, skip re-downloading. (TikTok's count is only known
-        # post-download, so first encounter still downloads; cap bites from cycle 2.)
-        if self._famous_follower_cap and self.pool is not None:
-            try:
-                async with self.pool.acquire() as conn:
-                    fc = await conn.fetchval(
-                        "SELECT followers_count FROM tiktok_profiles WHERE username = $1", username
-                    )
-                if fc is not None and int(fc) >= self._famous_follower_cap:
-                    logger.info("tiktok: skipping famous user %s (%d followers >= cap %d)",
-                                username, int(fc), self._famous_follower_cap)
-                    return
-            except Exception:
-                logger.debug("tiktok famous-cap check failed for %s; proceeding", username, exc_info=True)
-        # For V2, we try to get metadata first (placeholder for now)
-        await self._scrape_profile_metadata(username)
+        known_followers = await self._stored_followers_count(username)
+        metadata = await self._scrape_profile_metadata(username)
+        status = str(metadata.get("status") or "")
+        if status in {"unavailable", "not_found", "deleted", "account_deleted", "username_changed"}:
+            await self._record_profile_access(username, False, error=status)
+            return "unavailable"
+        if status == "private" or metadata.get("is_private") is True:
+            await self._record_profile_access(username, False, is_private=True, error="private")
+            logger.info("tiktok: profile-only private/unavailable target %s", username)
+            return "private"
+
+        followers_count = metadata.get("followers_count")
+        if followers_count is None:
+            followers_count = known_followers
+        try:
+            followers_count = int(followers_count) if followers_count is not None else None
+        except Exception:
+            followers_count = None
+
+        cap = self._video_follower_cap or self._famous_follower_cap
+        if cap and followers_count is not None and followers_count > cap:
+            logger.info(
+                "tiktok: profile-only skip videos for %s (%d followers > cap %d)",
+                username,
+                followers_count,
+                cap,
+            )
+            await self._record_profile_access(username, True, is_private=False)
+            return "profile_only"
 
         if self._use_gallery_dl:
             try:
@@ -771,14 +839,14 @@ class TiktokCollector(BaseCollector):
                 # this boundary (it lives in the per-post sidecars already
                 # upserted by _ingest_tmpdir), so is_public stays unchanged.
                 await self._record_profile_access(username, True)
-                return
+                return "collected"
             if self._local_tool_cooling_down():
                 logger.info(
                     "tiktok: local downloader cooldown started for %s; skipping remaining fallbacks for %s",
                     self._account_name(),
                     username,
                 )
-                return
+                return "cooldown"
 
         if self._use_yt_dlp and self._ytdlp_fallback:
             try:
@@ -789,30 +857,160 @@ class TiktokCollector(BaseCollector):
             if ok:
                 # Success (see gallery-dl note above): record can_access=True.
                 await self._record_profile_access(username, True)
-                return
+                return "collected"
             if self._local_tool_cooling_down():
                 logger.info(
                     "tiktok: local downloader cooldown started for %s; skipping remaining fallbacks for %s",
                     self._account_name(),
                     username,
                 )
-                return
+                return "cooldown"
 
         if self._browser_fallback:
             if await self._collect_via_playwright(username):
                 # Success via browser fallback: record can_access=True.
                 await self._record_profile_access(username, True)
-                return
+                return "collected"
         # NOTE (Phase 0): no can_access=False call site is wired here on
         # purpose. At this boundary a failed gallery-dl/yt-dlp/playwright chain
         # cannot be distinguished from "account has zero public posts" or a
         # transient tool failure. Only unambiguous successes are recorded.
         if await self._collect_via_api(username):
             await self._record_profile_access(username, True)
+            return "collected"
+        if status == "ok":
+            return "empty"
+        return "delayed"
 
-    async def _scrape_profile_metadata(self, username: str):
+    async def _scrape_profile_metadata(self, username: str) -> dict:
         """Try to fetch and save profile metadata to DB."""
-        pass
+        try:
+            username = validate_username(username)
+        except ValueError as exc:
+            return {"status": "unavailable", "error": str(exc)}
+
+        await self.wait_rate_limit("tiktok.com")
+        cookies = {"sessionid": self._session_id} if self._session_id else {}
+        headers = {
+            "User-Agent": self.user_agents.get_for_domain("tiktok.com"),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Referer": "https://www.tiktok.com/",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=30, cookies=cookies, follow_redirects=True) as client:
+                resp = await client.get(f"https://www.tiktok.com/@{username}", headers=headers)
+            validation = classify_invalid_username(resp.text, http_status=resp.status_code)
+            if not validation.is_valid:
+                reason = validation.invalid_reason.value if validation.invalid_reason else "unavailable"
+                return {
+                    "status": "private" if validation.invalid_reason == InvalidReason.PRIVATE_BANNED else reason,
+                    "error": validation.error_message,
+                }
+            if validation.is_rate_limited:
+                await record_rate_limit_event(
+                    self.pool,
+                    source="tiktok",
+                    account=self._account_name(),
+                    scope="profile_metadata",
+                    status_code=resp.status_code,
+                    cooldown_seconds=self._local_tool_cooldown_seconds,
+                    reason="TikTok profile metadata HTTP rate-limit",
+                    metadata={"username": username},
+                )
+                return {"status": "delayed", "http_status": resp.status_code}
+            resp.raise_for_status()
+        except Exception as exc:
+            logger.debug("tiktok: metadata fetch failed for %s: %s", username, exc)
+            return {"status": "delayed", "error": str(exc)}
+
+        author, stats = self._extract_profile_from_html(resp.text, username)
+        if not author:
+            validation = classify_invalid_username(resp.text, http_status=resp.status_code)
+            if not validation.is_valid:
+                reason = validation.invalid_reason.value if validation.invalid_reason else "unavailable"
+                return {
+                    "status": "private" if validation.invalid_reason == InvalidReason.PRIVATE_BANNED else reason,
+                    "error": validation.error_message,
+                }
+            return {"status": "missing"}
+
+        profile_uuid = await self._upsert_profile(author, stats) if self.pool is not None else None
+        followers = None
+        if isinstance(stats, dict):
+            followers = stats.get("followerCount")
+        if followers is None:
+            followers = author.get("followerCount") or author.get("followers")
+        followers = self._safe_int(followers, default=-1)
+        is_private = self._safe_bool(author.get("privateAccount", False))
+        return {
+            "status": "private" if is_private else "ok",
+            "profile_uuid": profile_uuid,
+            "followers_count": None if followers < 0 else followers,
+            "is_private": is_private,
+        }
+
+    @staticmethod
+    def _iter_embedded_json(page_html: str):
+        for match in re.finditer(
+            r"<script[^>]+id=[\"'](?:SIGI_STATE|__UNIVERSAL_DATA_FOR_REHYDRATION__|__NEXT_DATA__)[\"'][^>]*>(.*?)</script>",
+            page_html,
+            flags=re.IGNORECASE | re.DOTALL,
+        ):
+            body = html_lib.unescape(match.group(1).strip())
+            if not body:
+                continue
+            try:
+                yield json.loads(body)
+            except Exception:
+                continue
+
+    @classmethod
+    def _extract_profile_from_html(cls, page_html: str, username: str) -> tuple[dict | None, dict | None]:
+        for state in cls._iter_embedded_json(page_html):
+            author, stats = cls._extract_profile_from_state(state, username)
+            if author:
+                return author, stats
+        return None, None
+
+    @classmethod
+    def _extract_profile_from_state(cls, state, username: str) -> tuple[dict | None, dict | None]:
+        target = (username or "").strip().lstrip("@").lower()
+        stack = [state]
+        while stack:
+            node = stack.pop()
+            if isinstance(node, dict):
+                user_info = node.get("userInfo")
+                if isinstance(user_info, dict):
+                    user = user_info.get("user")
+                    stats = user_info.get("stats")
+                    if cls._state_user_matches(user, target):
+                        return user, stats if isinstance(stats, dict) else None
+
+                user_module = node.get("UserModule")
+                if isinstance(user_module, dict):
+                    users = user_module.get("users")
+                    stats_map = user_module.get("stats")
+                    if isinstance(users, dict):
+                        for user_id, user in users.items():
+                            if cls._state_user_matches(user, target):
+                                stats = stats_map.get(user_id) if isinstance(stats_map, dict) else None
+                                return user, stats if isinstance(stats, dict) else None
+
+                if cls._state_user_matches(node, target):
+                    stats = node.get("stats") if isinstance(node.get("stats"), dict) else None
+                    return node, stats
+
+                stack.extend(node.values())
+            elif isinstance(node, list):
+                stack.extend(node)
+        return None, None
+
+    @staticmethod
+    def _state_user_matches(user, target: str) -> bool:
+        if not isinstance(user, dict):
+            return False
+        unique_id = user.get("uniqueId") or user.get("unique_id") or user.get("username")
+        return str(unique_id or "").strip().lstrip("@").lower() == target
 
     @staticmethod
     def _safe_int(value, default: int = 0) -> int:
@@ -1182,6 +1380,7 @@ class TiktokCollector(BaseCollector):
                 result = await yt_dlp_download(
                     profile_url,
                     cookies_file=self._cookies_file,
+                    max_downloads=(self._yt_dlp_max_downloads or None),
                     timeout=self._timeout,
                     retries=self._retries,
                     tempdir=tmpdir,
@@ -1380,7 +1579,7 @@ class TiktokCollector(BaseCollector):
             if self._cookies_file
             else Path(os.getenv("TIKTOK_COOKIES_FILE", "/data/cookies/tiktok.txt"))
         )
-        max_videos = int(os.getenv("TIKTOK_BROWSER_MAX_VIDEOS", "50"))
+        max_videos = int(os.getenv("TIKTOK_BROWSER_MAX_VIDEOS", str(self._profile_chunk_items or 50)))
         browser_output_dir = Path(
             os.getenv("TIKTOK_BROWSER_TEMP_DIR", str(VAULT_ROOT / "tmp" / "tiktok_browser"))
         )
@@ -1626,12 +1825,12 @@ class TiktokCollector(BaseCollector):
             except Exception:
                 logger.debug("quota check failed; proceeding", exc_info=True)
         await self.wait_rate_limit("tiktok.com")
-        # Reuse the API path — it parses ItemModule which embeds author block
-        # so we get profile data alongside posts.
         try:
-            await self._collect_via_api(username)
+            metadata = await self._scrape_profile_metadata(username)
         except Exception as e:
             logger.warning("collect_user_profile %s: %s", username, e)
+            return None
+        if str(metadata.get("status") or "") not in {"ok", "private"}:
             return None
         # Look up the profile we just upserted.
         if self.pool is None:

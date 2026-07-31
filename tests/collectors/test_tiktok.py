@@ -149,7 +149,9 @@ def test_validate_cookies_expired_required(tmp_path):
 
 def test_constructor_defaults(monkeypatch):
     for var in ("TIKTOK_COOKIES_FILE", "TIKTOK_SESSION_ID",
-                "TIKTOK_BROWSER_FALLBACK_ENABLED", "TIKTOK_YTDLP_FALLBACK_ENABLED"):
+                "TIKTOK_BROWSER_FALLBACK_ENABLED", "TIKTOK_YTDLP_FALLBACK_ENABLED",
+                "TIKTOK_VIDEO_FOLLOWER_CAP", "TIKTOK_PROFILE_CHUNK_ITEMS",
+                "TIKTOK_GALLERY_DL_MAX_ITEMS", "TIKTOK_YTDLP_MAX_DOWNLOADS"):
         monkeypatch.delenv(var, raising=False)
     # Force the tool-availability probe to "no tools" for deterministic boot,
     # and disable cookie auto-discovery so on-disk credentials don't leak in.
@@ -163,6 +165,8 @@ def test_constructor_defaults(monkeypatch):
     assert c._use_yt_dlp is False
     assert c._browser_fallback is True
     assert c._ytdlp_fallback is True
+    assert c._video_follower_cap == 300
+    assert c._profile_chunk_items == 60
 
 
 def test_constructor_with_invalid_cookies_logs_warnings(tmp_path, monkeypatch, caplog):
@@ -197,6 +201,7 @@ def test_gallery_dl_archive_args_are_per_profile(tmp_path, monkeypatch):
     assert Path(args[1]).name.endswith(".txt")
     assert "/" not in Path(args[1]).name
     assert Path(args[1]).parent.exists()
+    assert args[-2:] == ["--range", "1-60"]
 
 
 def test_gallery_dl_archive_args_can_be_disabled(tmp_path, monkeypatch):
@@ -360,7 +365,7 @@ async def test_collect_user_profile_happy_path(monkeypatch):
     with patch.object(TiktokCollector, "_check_tool", staticmethod(lambda *_: False)):
         c = TiktokCollector()
     c.pool = _make_pool(fetchrow_returns={"id": "profile-uuid"})
-    monkeypatch.setattr(c, "_collect_via_api", AsyncMock())
+    monkeypatch.setattr(c, "_scrape_profile_metadata", AsyncMock(return_value={"status": "ok"}))
     monkeypatch.setattr(c, "_record_profile_access", AsyncMock())
     monkeypatch.setattr(c, "wait_rate_limit", AsyncMock())
     # Skip quota gating.
@@ -368,7 +373,7 @@ async def test_collect_user_profile_happy_path(monkeypatch):
 
     out = await c.collect_user_profile("bryan")
     assert out == "profile-uuid"
-    c._collect_via_api.assert_awaited_once_with("bryan")
+    c._scrape_profile_metadata.assert_awaited_once_with("bryan")
     c._record_profile_access.assert_awaited_once_with("bryan", True)
 
 
@@ -378,12 +383,13 @@ async def test_collect_user_records_api_fallback_success(monkeypatch):
         c = TiktokCollector()
     c._quota = None
     c._browser_fallback = False
-    monkeypatch.setattr(c, "_scrape_profile_metadata", AsyncMock())
+    monkeypatch.setattr(c, "_scrape_profile_metadata", AsyncMock(return_value={"status": "missing"}))
     monkeypatch.setattr(c, "_collect_via_api", AsyncMock(return_value=True))
     monkeypatch.setattr(c, "_record_profile_access", AsyncMock())
 
-    await c._collect_user("bryan")
+    out = await c._collect_user("bryan")
 
+    assert out == "collected"
     c._record_profile_access.assert_awaited_once_with("bryan", True)
 
 
@@ -392,7 +398,7 @@ async def test_collect_user_profile_quota_exhausted(monkeypatch):
     with patch.object(TiktokCollector, "_check_tool", staticmethod(lambda *_: False)):
         c = TiktokCollector()
     c.pool = _make_pool(fetchrow_returns={"id": "x"})
-    monkeypatch.setattr(c, "_collect_via_api", AsyncMock())
+    monkeypatch.setattr(c, "_scrape_profile_metadata", AsyncMock())
     monkeypatch.setattr(c, "wait_rate_limit", AsyncMock())
     quota = MagicMock()
     quota.has_quota = AsyncMock(return_value=False)
@@ -400,6 +406,60 @@ async def test_collect_user_profile_quota_exhausted(monkeypatch):
 
     out = await c.collect_user_profile("bryan")
     assert out is None
+    c._scrape_profile_metadata.assert_not_awaited()
+
+
+def test_extract_profile_from_universal_state():
+    state = {
+        "__DEFAULT_SCOPE__": {
+            "webapp.user-detail": {
+                "userInfo": {
+                    "user": {
+                        "id": "123",
+                        "uniqueId": "bryan",
+                        "nickname": "Bryan",
+                        "privateAccount": False,
+                    },
+                    "stats": {"followerCount": 42},
+                }
+            }
+        }
+    }
+    html = (
+        '<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">'
+        + tiktok_mod.json.dumps(state)
+        + "</script>"
+    )
+    author, stats = TiktokCollector._extract_profile_from_html(html, "bryan")
+    assert author["id"] == "123"
+    assert stats["followerCount"] == 42
+
+
+@pytest.mark.asyncio
+async def test_collect_user_profile_only_when_over_follower_cap(monkeypatch):
+    monkeypatch.setenv("TIKTOK_VIDEO_FOLLOWER_CAP", "300")
+    with patch.object(TiktokCollector, "_check_tool", staticmethod(lambda *_: False)):
+        c = TiktokCollector()
+    c._quota = None
+    c._browser_fallback = False
+    c._use_gallery_dl = True
+    c._use_yt_dlp = True
+    monkeypatch.setattr(c, "_stored_followers_count", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        c,
+        "_scrape_profile_metadata",
+        AsyncMock(return_value={"status": "ok", "followers_count": 301, "is_private": False}),
+    )
+    monkeypatch.setattr(c, "_collect_via_gallery_dl", AsyncMock())
+    monkeypatch.setattr(c, "_collect_via_yt_dlp", AsyncMock())
+    monkeypatch.setattr(c, "_collect_via_api", AsyncMock())
+    monkeypatch.setattr(c, "_record_profile_access", AsyncMock())
+
+    out = await c._collect_user("bryan")
+
+    assert out == "profile_only"
+    c._collect_via_gallery_dl.assert_not_awaited()
+    c._collect_via_yt_dlp.assert_not_awaited()
     c._collect_via_api.assert_not_awaited()
 
 
@@ -655,7 +715,7 @@ async def test_browser_fallback_triggered_on_gallery_dl_failure(monkeypatch, tmp
 
     ok = await c._collect_via_playwright("alice")
     assert ok is True
-    assert calls["download_user"] == [("alice", 50)]
+    assert calls["download_user"] == [("alice", 60)]
     assert calls["close"] == [True]
     c.download_media.assert_awaited()  # at least one ingest happened
     assert fp.exists() is False
