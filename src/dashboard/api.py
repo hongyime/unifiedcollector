@@ -39,6 +39,9 @@ _BEEPER_SUBSOURCE_CONTENT_TTL_SECONDS = int(os.getenv("BEEPER_SUBSOURCE_CONTENT_
 _BEEPER_SUBSOURCE_LIVENESS_CACHE: dict[str, object] = {"ts": 0.0, "rows": None}
 _BEEPER_SUBSOURCE_LIVENESS_TTL_SECONDS = int(os.getenv("BEEPER_SUBSOURCE_LIVENESS_TTL_SECONDS", "75"))
 _SOURCE_MATRIX_SECTION_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_SECTION_TIMEOUT_SECONDS", "2"))
+_SOURCE_MATRIX_SECTION_CACHE: dict[str, dict[str, object]] = {}
+_SOURCE_MATRIX_SECTION_CACHE_TTL_SECONDS = int(os.getenv("SOURCE_MATRIX_SECTION_CACHE_TTL_SECONDS", "30"))
+_SOURCE_MATRIX_SECTION_STALE_SECONDS = int(os.getenv("SOURCE_MATRIX_SECTION_STALE_SECONDS", "900"))
 _INGESTION_HOURLY_CACHE: dict[int, dict[str, object]] = {}
 _TELEGRAM_STATS_CACHE: dict[str, object] = {"ts": 0.0, "payload": None}
 _TELEGRAM_STATS_TTL_SECONDS = int(os.getenv("TELEGRAM_STATS_TTL_SECONDS", "30"))
@@ -278,6 +281,16 @@ def _copy_row_map(rows: dict[str, dict]) -> dict[str, dict]:
 
 def _copy_row_list(rows: list[dict]) -> list[dict]:
     return [dict(row) for row in rows]
+
+
+def _copy_cache_value(value):
+    if isinstance(value, dict):
+        return {key: _copy_cache_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_copy_cache_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_copy_cache_value(item) for item in value)
+    return value
 
 
 _MEDIA_PRIMARY_SOURCES = {
@@ -756,15 +769,64 @@ async def _source_matrix_section(
     fallback,
     awaitable,
     timeout: float | None = None,
+    cache_key: str | None = None,
+    cache_ttl: int | None = None,
+    stale_ttl: int | None = None,
 ):
+    now_ts = time.time()
+    cached = _SOURCE_MATRIX_SECTION_CACHE.get(cache_key or "") if cache_key else None
+    if cached is not None:
+        cache_age = now_ts - float(cached.get("ts") or 0.0)
+        max_fresh = _SOURCE_MATRIX_SECTION_CACHE_TTL_SECONDS if cache_ttl is None else cache_ttl
+        if cache_age < max_fresh:
+            close = getattr(awaitable, "close", None)
+            if callable(close):
+                close()
+            return _copy_cache_value(cached.get("value"))
     try:
-        return await asyncio.wait_for(awaitable, timeout=timeout or _SOURCE_MATRIX_SECTION_TIMEOUT_SECONDS)
+        value = await asyncio.wait_for(awaitable, timeout=timeout or _SOURCE_MATRIX_SECTION_TIMEOUT_SECONDS)
+        if cache_key:
+            _SOURCE_MATRIX_SECTION_CACHE[cache_key] = {
+                "ts": time.time(),
+                "value": _copy_cache_value(value),
+            }
+        return value
     except asyncio.CancelledError as exc:
         logger.warning("source matrix %s cancelled under load", label)
+        cached_value = None
+        cache_age = None
+        if cached is not None:
+            cache_age = now_ts - float(cached.get("ts") or 0.0)
+            max_stale = _SOURCE_MATRIX_SECTION_STALE_SECONDS if stale_ttl is None else stale_ttl
+            if cache_age < max_stale:
+                cached_value = _copy_cache_value(cached.get("value"))
+        if cached_value is not None:
+            errors.append({
+                "section": section,
+                "error": exc.__class__.__name__,
+                "stale_cache": True,
+                "cache_age_seconds": int(cache_age or 0),
+            })
+            return cached_value
         errors.append({"section": section, "error": exc.__class__.__name__})
         return fallback
     except Exception as exc:  # noqa: BLE001 - source matrix should return partial data under load
         logger.warning("source matrix %s failed: %s", label, exc.__class__.__name__)
+        cached_value = None
+        cache_age = None
+        if cached is not None:
+            cache_age = now_ts - float(cached.get("ts") or 0.0)
+            max_stale = _SOURCE_MATRIX_SECTION_STALE_SECONDS if stale_ttl is None else stale_ttl
+            if cache_age < max_stale:
+                cached_value = _copy_cache_value(cached.get("value"))
+        if cached_value is not None:
+            errors.append({
+                "section": section,
+                "error": exc.__class__.__name__,
+                "stale_cache": True,
+                "cache_age_seconds": int(cache_age or 0),
+            })
+            return cached_value
         errors.append({"section": section, "error": exc.__class__.__name__})
         return fallback
 
@@ -2641,6 +2703,8 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
             errors=errors,
             fallback=liveness_fallback,
             awaitable=compute_liveness(conn),
+            cache_key="source_liveness",
+            timeout=5,
         )
         live_sources, whatsapp_bridge_health = await _source_matrix_section(
             section="bridge_overrides",
@@ -2648,8 +2712,13 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
             errors=errors,
             fallback=(live_sources, None),
             awaitable=_with_bridge_overrides(live_sources),
+            cache_key="bridge_overrides",
+            cache_ttl=15,
         )
-        if any(error["section"] == "source_liveness" for error in errors):
+        if any(
+            error["section"] == "source_liveness" and not error.get("stale_cache")
+            for error in errors
+        ):
             beeper_subsources = []
             current_content = {}
             current_rate = {}
@@ -2668,6 +2737,8 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
                 errors=errors,
                 fallback=[],
                 awaitable=_beeper_subsource_liveness(conn),
+                cache_key="beeper_subsource_liveness",
+                timeout=8,
             )
             current_content = await _source_matrix_section(
                 section="current_content",
@@ -2675,6 +2746,9 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
                 errors=errors,
                 fallback={},
                 awaitable=_source_content_summary(conn, "date_trunc('hour', now())"),
+                cache_key="current_content",
+                cache_ttl=15,
+                timeout=5,
             )
             current_rate = await _source_matrix_section(
                 section="current_rate",
@@ -2682,6 +2756,9 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
                 errors=errors,
                 fallback={},
                 awaitable=_source_rate_summary(conn, "date_trunc('hour', now())"),
+                cache_key="current_rate",
+                cache_ttl=15,
+                timeout=5,
             )
             previous_content = await _source_matrix_section(
                 section="previous_hour_content",
@@ -2693,6 +2770,9 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
                     "date_trunc('hour', now()) - interval '1 hour'",
                     "date_trunc('hour', now())",
                 ),
+                cache_key="previous_hour_content",
+                cache_ttl=60,
+                timeout=5,
             )
             previous_rate = await _source_matrix_section(
                 section="previous_hour_rate",
@@ -2704,6 +2784,9 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
                     "date_trunc('hour', now()) - interval '1 hour'",
                     "date_trunc('hour', now())",
                 ),
+                cache_key="previous_hour_rate",
+                cache_ttl=60,
+                timeout=5,
             )
             day_content = await _source_matrix_section(
                 section="day_content",
@@ -2711,6 +2794,9 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
                 errors=errors,
                 fallback={},
                 awaitable=_source_content_summary(conn, "now() - interval '24 hours'"),
+                cache_key="day_content",
+                cache_ttl=120,
+                timeout=12,
             )
             day_rate = await _source_matrix_section(
                 section="day_rate",
@@ -2718,6 +2804,9 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
                 errors=errors,
                 fallback={},
                 awaitable=_source_rate_summary(conn, "now() - interval '24 hours'"),
+                cache_key="day_rate",
+                cache_ttl=120,
+                timeout=8,
             )
             media_totals = await _source_matrix_section(
                 section="media_totals",
@@ -2725,6 +2814,9 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
                 errors=errors,
                 fallback={"__stats_unavailable__": True},
                 awaitable=_source_media_totals(conn),
+                cache_key="media_totals",
+                cache_ttl=120,
+                timeout=10,
             )
             youtube_media_backlog = await _source_matrix_section(
                 section="youtube_media_backlog",
@@ -2732,6 +2824,9 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
                 errors=errors,
                 fallback={},
                 awaitable=_youtube_media_backlog(conn),
+                cache_key="youtube_media_backlog",
+                cache_ttl=300,
+                timeout=12,
             )
             active_cursors = await _source_matrix_section(
                 section="active_cursors",
@@ -2739,6 +2834,8 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
                 errors=errors,
                 fallback={},
                 awaitable=_active_rate_limit_cursor_summary(conn),
+                cache_key="active_cursors",
+                cache_ttl=30,
             )
             browser_extension = await _source_matrix_section(
                 section="browser_extension",
@@ -2746,6 +2843,9 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
                 errors=errors,
                 fallback={"expected_version": _expected_extension_version(), "issues": []},
                 awaitable=_browser_extension_payload(conn),
+                cache_key="browser_extension",
+                cache_ttl=15,
+                timeout=8,
             )
 
     generated_at = datetime.now(timezone.utc)

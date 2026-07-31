@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 import os
@@ -11,11 +12,13 @@ os.environ.setdefault("DASHBOARD_ADMIN_PASSWORD", "x")
 
 from src.dashboard.api import (
     _SOURCE_MEDIA_TOTALS_CACHE,
+    _SOURCE_MATRIX_SECTION_CACHE,
     _beeper_source_key,
     _messaging_policy,
     _normalize_beeper_network,
     _rate_limit_cursor_payload,
     _source_matrix_blocker,
+    _source_matrix_section,
     _source_media_freshness,
     _source_matrix_row,
     _source_window_totals,
@@ -431,3 +434,85 @@ async def test_source_media_totals_prefers_rollup_table():
     out = await _source_media_totals(_MediaTotalsConn())
 
     assert out["instagram"]["total_media_items"] == 12
+
+
+@pytest.mark.asyncio
+async def test_source_matrix_section_uses_fresh_cache_without_awaiting():
+    _SOURCE_MATRIX_SECTION_CACHE.clear()
+    errors: list[dict] = []
+    started = False
+
+    async def returns(value):
+        return value
+
+    async def should_not_run():
+        nonlocal started
+        started = True
+        raise AssertionError("cached section should not await fresh query")
+
+    first = await _source_matrix_section(
+        section="current_content",
+        label="current content",
+        errors=errors,
+        fallback={},
+        awaitable=returns({"instagram": {"records": 1}}),
+        timeout=1,
+        cache_key="test_current_content",
+        cache_ttl=60,
+    )
+    second = await _source_matrix_section(
+        section="current_content",
+        label="current content",
+        errors=errors,
+        fallback={},
+        awaitable=should_not_run(),
+        timeout=1,
+        cache_key="test_current_content",
+        cache_ttl=60,
+    )
+
+    assert first == {"instagram": {"records": 1}}
+    assert second == first
+    assert errors == []
+    assert started is False
+
+
+@pytest.mark.asyncio
+async def test_source_matrix_section_returns_stale_cache_on_timeout():
+    _SOURCE_MATRIX_SECTION_CACHE.clear()
+    errors: list[dict] = []
+
+    async def returns(value):
+        return value
+
+    async def slow():
+        await asyncio.sleep(0.05)
+        return {"instagram": {"records": 99}}
+
+    await _source_matrix_section(
+        section="day_content",
+        label="24h content",
+        errors=errors,
+        fallback={},
+        awaitable=returns({"instagram": {"records": 12}}),
+        timeout=1,
+        cache_key="test_day_content",
+        cache_ttl=0,
+    )
+    out = await _source_matrix_section(
+        section="day_content",
+        label="24h content",
+        errors=errors,
+        fallback={},
+        awaitable=slow(),
+        timeout=0.001,
+        cache_key="test_day_content",
+        cache_ttl=0,
+        stale_ttl=60,
+    )
+
+    assert out == {"instagram": {"records": 12}}
+    assert errors[-1]["section"] == "day_content"
+    assert errors[-1]["error"] == "TimeoutError"
+    assert errors[-1]["stale_cache"] is True
+    assert errors[-1]["cache_age_seconds"] >= 0
