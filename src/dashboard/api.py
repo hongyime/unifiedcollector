@@ -46,8 +46,8 @@ _SOURCE_MATRIX_DAY_CONTENT_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_DAY_
 _SOURCE_MATRIX_MEDIA_TOTALS_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_MEDIA_TOTALS_TIMEOUT_SECONDS", "8"))
 _SOURCE_MATRIX_YOUTUBE_BACKLOG_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_YOUTUBE_BACKLOG_TIMEOUT_SECONDS", "8"))
 _SOURCE_MATRIX_BROWSER_EXTENSION_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_BROWSER_EXTENSION_TIMEOUT_SECONDS", "6"))
-_BROWSER_EXTENSION_QUERY_TIMEOUT_SECONDS = float(os.getenv("BROWSER_EXTENSION_QUERY_TIMEOUT_SECONDS", "1.5"))
-_BROWSER_EXTENSION_PAYLOAD_BUDGET_SECONDS = float(os.getenv("BROWSER_EXTENSION_PAYLOAD_BUDGET_SECONDS", "5.0"))
+_BROWSER_EXTENSION_QUERY_TIMEOUT_SECONDS = float(os.getenv("BROWSER_EXTENSION_QUERY_TIMEOUT_SECONDS", "2.5"))
+_BROWSER_EXTENSION_PAYLOAD_BUDGET_SECONDS = float(os.getenv("BROWSER_EXTENSION_PAYLOAD_BUDGET_SECONDS", "5.5"))
 _SOURCE_CONTENT_PART_TIMEOUT_SECONDS = float(os.getenv("SOURCE_CONTENT_PART_TIMEOUT_SECONDS", "2"))
 _SOURCE_CONTENT_MEDIA_TIMEOUT_SECONDS = float(os.getenv("SOURCE_CONTENT_MEDIA_TIMEOUT_SECONDS", "4"))
 _SOURCE_CONTENT_SUMMARY_BUDGET_SECONDS = float(os.getenv("SOURCE_CONTENT_SUMMARY_BUDGET_SECONDS", "4.5"))
@@ -2089,7 +2089,7 @@ async def _browser_extension_payload(conn) -> dict:
             "error": exc.__class__.__name__ if exc else "SkippedBudget",
         })
         if exc:
-            logger.warning("browser extension diagnostic %s failed: %s", label, exc.__class__.__name__)
+            logger.debug("browser extension diagnostic %s failed: %s", label, exc.__class__.__name__)
 
     async def _fetchval_or_none(label: str, query: str, *args):
         timeout = _remaining_timeout()
