@@ -22,6 +22,7 @@ from src.core.file_naming import sanitize_name
 from src.core.proximity import refresh_account_proximity_cache
 from src.core.raw_archive import report_raw_archive_result
 from src.core.rate_limit_events import record_rate_limit_event
+from src.core.dynamic_cooldown import get_dynamic_cooldown, record_dynamic_cooldown
 from src.core.scrape_pacing import sleep_before_pre_cooldown_retry, sleep_rate_limit
 from src.core.vault import VAULT_ROOT, write_atomic_artifact, write_raw_payload
 
@@ -377,6 +378,13 @@ class StravaCollector(BaseCollector):
         self._gps_stream_cooldown_seconds = int(
             os.getenv("STRAVA_STREAM_RATELIMIT_SLEEP", str(max(self._ratelimit_sleep, 1800)))
         )
+        try:
+            self._gps_stream_cooldown_max_seconds = max(
+                self._gps_stream_cooldown_seconds,
+                int(os.getenv("STRAVA_STREAM_RATELIMIT_MAX_SLEEP", "21600")),
+            )
+        except (TypeError, ValueError):
+            self._gps_stream_cooldown_max_seconds = max(self._gps_stream_cooldown_seconds, 21600)
         self._recent_gps_429s: dict[str, float] = {}
 
         self._use_api = bool(self._client_id and self._client_secret and self._refresh_token)
@@ -436,6 +444,23 @@ class StravaCollector(BaseCollector):
         """Hydrate GPS cooldown from durable rate_limit_events after restarts."""
         if not self.pool:
             return False
+        state = await get_dynamic_cooldown(
+            self.pool,
+            source="strava",
+            scope="gps_streams",
+            include_source_cursor=True,
+        )
+        if state and state.active:
+            self._gps_stream_cooldown_until = max(
+                self._gps_stream_cooldown_until,
+                time.time() + state.seconds_remaining,
+            )
+            logger.info(
+                "strava: GPS stream cooldown restored from service_cursors for %ds (streak=%d)",
+                state.seconds_remaining,
+                state.streak,
+            )
+            return True
         try:
             async with self.pool.acquire() as conn:
                 row = await conn.fetchrow(
@@ -476,21 +501,33 @@ class StravaCollector(BaseCollector):
         )
         return True
 
-    def _set_gps_stream_cooldown(self, activity_id: str | int, context: str) -> None:
+    async def _set_gps_stream_cooldown(self, activity_id: str | int, context: str) -> None:
         now = time.time()
+        account = context.split("web:", 1)[1] if context.startswith("web:") else None
+        state = await record_dynamic_cooldown(
+            self.pool,
+            source="strava",
+            scope="gps_streams",
+            account=account,
+            base_seconds=self._gps_stream_cooldown_seconds,
+            max_seconds=self._gps_stream_cooldown_max_seconds,
+            write_source_cursor=True,
+        )
+        cooldown_seconds = max(1, int(state.seconds_remaining))
         self._gps_stream_cooldown_until = max(
             self._gps_stream_cooldown_until,
-            now + self._gps_stream_cooldown_seconds,
+            now + cooldown_seconds,
         )
         activity_key = str(activity_id)
         recent_at = self._recent_gps_429s.get(activity_key)
         is_duplicate = recent_at is not None and now - recent_at < _GPS_429_EVENT_DEDUPE_SECONDS
         log = logger.info if is_duplicate else logger.warning
         log(
-            "strava: streams 429 for %s via %s; cooling GPS backfill for %ds%s",
+            "strava: streams 429 for %s via %s; cooling GPS backfill for %ds (streak=%d)%s",
             activity_id,
             context,
-            self._gps_stream_cooldown_seconds,
+            cooldown_seconds,
+            state.streak,
             " (duplicate suppressed)" if is_duplicate else "",
         )
         if is_duplicate:
@@ -501,10 +538,15 @@ class StravaCollector(BaseCollector):
                 self._recent_gps_429s.pop(key, None)
         self._note_rate_limit(
             scope="gps_streams",
-            account=context.split("web:", 1)[1] if context.startswith("web:") else None,
-            cooldown_seconds=self._gps_stream_cooldown_seconds,
+            account=account,
+            cooldown_seconds=cooldown_seconds,
             reason=f"streams 429 for {activity_id} via {context}",
-            metadata={"activity_id": str(activity_id), "context": context},
+            metadata={
+                "activity_id": str(activity_id),
+                "context": context,
+                "dynamic_cooldown_service": state.service,
+                "dynamic_cooldown_streak": state.streak,
+            },
         )
 
     async def _retry_gps_stream_after_429(
@@ -1945,7 +1987,7 @@ class StravaCollector(BaseCollector):
                             return (latlng, d.get("time") or [], d.get("altitude") or [])
                         saw_200_empty = True
                     elif resp.status_code == 429:
-                        self._set_gps_stream_cooldown(activity_id, f"web:{name}")
+                        await self._set_gps_stream_cooldown(activity_id, f"web:{name}")
                         return None, None, None
                     else:
                         logger.debug("web streams %s (%s) -> HTTP %s", activity_id, name, resp.status_code)
@@ -1988,7 +2030,7 @@ class StravaCollector(BaseCollector):
                             s.get("time", {}).get("data", []),
                             s.get("altitude", {}).get("data", []))
                 if resp.status_code == 429:
-                    self._set_gps_stream_cooldown(activity_id, "api")
+                    await self._set_gps_stream_cooldown(activity_id, "api")
                     return None, None, None
             except Exception as e:
                 logger.debug("api streams fetch failed for %s: %s", activity_id, e)
@@ -3054,7 +3096,7 @@ class StravaCollector(BaseCollector):
                         logger.info("strava scrape: activity %s streams %d points, start=%s sl=%r el=%r",
                                     activity_id, len(latlng), latlng[0], sl, el)
                 elif streams_resp.status_code == 429:
-                    self._set_gps_stream_cooldown(activity_id, "page")
+                    await self._set_gps_stream_cooldown(activity_id, "page")
                     logger.info("strava scrape: streams 429 for %s — skipping GPS", activity_id)
             except Exception as e:
                 logger.warning("strava scrape: streams fetch %s failed: %s", activity_id, e)
@@ -3325,7 +3367,7 @@ class StravaCollector(BaseCollector):
                         result["polyline"] = True
                         logger.info("strava scrape: web streams %s -> %d points", activity_id, len(latlng))
                 elif sresp.status_code == 429:
-                    self._set_gps_stream_cooldown(activity_id, "page-fallback")
+                    await self._set_gps_stream_cooldown(activity_id, "page-fallback")
             except Exception as e:
                 logger.debug("strava scrape: web streams %s failed: %s", activity_id, e)
 

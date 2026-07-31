@@ -89,6 +89,7 @@ from src.collectors.lemon8.parse import (
 from src.core.human_rate_limiter import OperationType
 from src.core.file_naming import sanitize_name
 from src.core.rate_limit_events import record_rate_limit_event
+from src.core.dynamic_cooldown import get_dynamic_cooldown, record_dynamic_cooldown
 from src.core.scrape_pacing import sleep_rate_limit
 from src.core.vault import VAULT_ROOT, write_atomic_artifact
 from src.core.user_change_tracker import (
@@ -291,6 +292,33 @@ class Lemon8Collector(BaseCollector):
             )
         except (TypeError, ValueError):
             self._rate_limit_cooldown_seconds = 900
+        try:
+            self._rate_limit_cooldown_max_seconds = max(
+                self._rate_limit_cooldown_seconds or 1,
+                int(os.getenv("LEMON8_RATE_LIMIT_MAX_COOLDOWN_SECONDS", "21600")),
+            )
+        except (TypeError, ValueError):
+            self._rate_limit_cooldown_max_seconds = max(
+                self._rate_limit_cooldown_seconds or 1,
+                21600,
+            )
+        try:
+            self._optional_rate_limit_sleep_cap_seconds = max(
+                0,
+                int(os.getenv("LEMON8_OPTIONAL_RATE_LIMIT_SLEEP_CAP_SECONDS", "30")),
+            )
+        except (TypeError, ValueError):
+            self._optional_rate_limit_sleep_cap_seconds = 30
+        try:
+            self._source_rate_limit_sleep_cap_seconds = max(
+                0,
+                int(os.getenv(
+                    "LEMON8_SOURCE_RATE_LIMIT_SLEEP_CAP_SECONDS",
+                    str(self._rate_limit_cooldown_seconds or 300),
+                )),
+            )
+        except (TypeError, ValueError):
+            self._source_rate_limit_sleep_cap_seconds = self._rate_limit_cooldown_seconds or 300
         self._discovered_users: set[str] = set()
         self._discovered_tags: set[str] = set()
         # FAMOUS-FILTER (Bryan): skip Lemon8 accounts at/above this follower count.
@@ -747,6 +775,45 @@ class Lemon8Collector(BaseCollector):
         return "lemon8_default"
 
     @staticmethod
+    def _rate_limit_scope_alias(scope: str, metadata: dict[str, Any] | None = None) -> str:
+        if scope == "note_detail_fetch":
+            return "detail"
+        if scope == "avatar_profile_fetch":
+            return "avatar"
+        if scope == "media_download" and (metadata or {}).get("content_type") == "profile_photo":
+            return "avatar_media"
+        if scope in {"profile_fetch", "spider_profile_fetch", "collect_profile_fetch"}:
+            return "profile"
+        return scope[:32]
+
+    @staticmethod
+    def _is_optional_rate_limit_scope(scope: str, metadata: dict[str, Any] | None = None) -> bool:
+        alias = Lemon8Collector._rate_limit_scope_alias(scope, metadata)
+        return alias in {"detail", "avatar", "avatar_media"}
+
+    async def _cooldown_active_for_scope(
+        self,
+        scope: str,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        state = await get_dynamic_cooldown(
+            self.pool,
+            source="lemon8",
+            scope=self._rate_limit_scope_alias(scope, metadata),
+            account=self._access_account_label(),
+        )
+        if not state or not state.active:
+            return False
+        logger.info(
+            "lemon8: skipping %s while dynamic cooldown is active for %ds (streak=%d)",
+            scope,
+            state.seconds_remaining,
+            state.streak,
+        )
+        return True
+
+    @staticmethod
     def _http_status_from_error(error: Exception) -> int | None:
         response = getattr(error, "response", None)
         status = getattr(response, "status_code", None)
@@ -791,8 +858,21 @@ class Lemon8Collector(BaseCollector):
         status_code = self._http_status_from_error(error)
         if status_code is None:
             return False
+        dynamic_state = None
         if status_code == 429:
-            cooldown_seconds = self._rate_limit_cooldown_seconds or None
+            if self._rate_limit_cooldown_seconds:
+                dynamic_state = await record_dynamic_cooldown(
+                    self.pool,
+                    source="lemon8",
+                    scope=self._rate_limit_scope_alias(scope, metadata),
+                    account=self._access_account_label(),
+                    base_seconds=self._rate_limit_cooldown_seconds,
+                    max_seconds=self._rate_limit_cooldown_max_seconds,
+                    write_source_cursor=not self._is_optional_rate_limit_scope(scope, metadata),
+                )
+                cooldown_seconds = dynamic_state.seconds_remaining
+            else:
+                cooldown_seconds = None
         elif record_access_errors and status_code in (401, 403):
             cooldown_seconds = None
         else:
@@ -805,6 +885,12 @@ class Lemon8Collector(BaseCollector):
         event_metadata.update(self._rate_limit_url_metadata(url))
         if metadata:
             event_metadata.update(metadata)
+        if dynamic_state is not None:
+            event_metadata.update({
+                "dynamic_cooldown_service": dynamic_state.service,
+                "dynamic_cooldown_streak": dynamic_state.streak,
+                "dynamic_cooldown_scope": dynamic_state.scope,
+            })
 
         await record_rate_limit_event(
             self.pool,
@@ -829,7 +915,12 @@ class Lemon8Collector(BaseCollector):
                 finally:
                     if previous is not None:
                         self.rate_limiter.emergency_cooldown = previous
-            await sleep_rate_limit(cooldown_seconds)
+            if self._is_optional_rate_limit_scope(scope, metadata):
+                sleep_seconds = min(cooldown_seconds, max(0, self._optional_rate_limit_sleep_cap_seconds))
+            else:
+                sleep_seconds = min(cooldown_seconds, max(0, self._source_rate_limit_sleep_cap_seconds))
+            if sleep_seconds:
+                await sleep_rate_limit(sleep_seconds)
         return True
 
     async def _record_profile_access(self, username, can_access, is_private=None,
@@ -943,6 +1034,8 @@ class Lemon8Collector(BaseCollector):
         data from embedded JSON. Returns a dict suitable for _upsert_post(), or
         None if extraction fails.
         """
+        if await self._cooldown_active_for_scope("note_detail_fetch"):
+            return None
         url = f"https://www.lemon8-app.com/@{username}/{note_id}"
         await self.rate_limiter.async_wait("lemon8-app.com", OperationType.PROFILE_VIEW)
         try:
@@ -2053,6 +2146,8 @@ class Lemon8Collector(BaseCollector):
     async def _resolve_avatar_url(self, username: str) -> str | None:
         """Fetch profile page and extract avatar URL using multi-fallback."""
         username = username.lstrip("@")
+        if await self._cooldown_active_for_scope("avatar_profile_fetch"):
+            return None
         try:
             await self.rate_limiter.async_wait("lemon8-app.com", OperationType.PROFILE_VIEW)
         except Exception:
@@ -2134,6 +2229,12 @@ class Lemon8Collector(BaseCollector):
     async def download_media(self, item: dict):
         cid = item["content_id"]
         if self.is_known(cid): return
+        content_type = item.get("content_type")
+        if content_type == "profile_photo" and await self._cooldown_active_for_scope(
+            "media_download",
+            metadata={"content_type": content_type},
+        ):
+            return
         filename = self.build_filename(item["entity_id"], item["entity_name"], item["content_type"], cid, extension=item.get("extension", "jpg"))
         try:
             await self.rate_limiter.async_wait("lemon8-app.com", OperationType.MEDIA_DOWNLOAD)

@@ -45,6 +45,7 @@ from src.core.media_filter import inspect as inspect_media
 from src.core.priority_hints import refresh_collector_priority_hints
 from src.core.proximity import refresh_account_proximity_cache
 from src.core.rate_limit_events import record_rate_limit_event
+from src.core.dynamic_cooldown import record_dynamic_cooldown
 from src.core.strava_route_queue import fetch_strava_route_capture_queue
 from src.core.vault import (
     VAULT_ROOT,
@@ -92,6 +93,13 @@ MIN_BYTES = int(os.getenv("IG_INGEST_MIN_BYTES", "1024"))
 DL_CONCURRENCY = int(os.getenv("SOCIAL_INGEST_CONCURRENCY", "4"))
 SOCIAL_INGEST_CLIENT_MAX_MB = int(os.getenv("SOCIAL_INGEST_CLIENT_MAX_MB", "512"))
 STRAVA_BROWSER_429_COOLDOWN_SECONDS = int(os.getenv("STRAVA_BROWSER_429_COOLDOWN_SECONDS", "1800"))
+try:
+    STRAVA_BROWSER_429_MAX_COOLDOWN_SECONDS = max(
+        STRAVA_BROWSER_429_COOLDOWN_SECONDS,
+        int(os.getenv("STRAVA_BROWSER_429_MAX_COOLDOWN_SECONDS", "21600")),
+    )
+except (TypeError, ValueError):
+    STRAVA_BROWSER_429_MAX_COOLDOWN_SECONDS = max(STRAVA_BROWSER_429_COOLDOWN_SECONDS, 21600)
 _SAFE = re.compile(r"[^A-Za-z0-9._-]")
 _THREADS_SYNTHETIC_MEDIA_ID = re.compile(r"^(?:img|vid)_[a-z0-9]+$", re.IGNORECASE)
 
@@ -2898,7 +2906,23 @@ async def _record_strava_stream_http_event(pool, body: dict) -> bool:
     account = _browser_account_label(body)
     if await _touch_recent_strava_stream_http_event(pool, account, activity_id, status, body):
         return False
-    cooldown = STRAVA_BROWSER_429_COOLDOWN_SECONDS if status == 429 else None
+    cooldown = None
+    dynamic_metadata = {}
+    if status == 429:
+        state = await record_dynamic_cooldown(
+            pool,
+            source="strava",
+            scope="gps_streams",
+            account=account,
+            base_seconds=STRAVA_BROWSER_429_COOLDOWN_SECONDS,
+            max_seconds=STRAVA_BROWSER_429_MAX_COOLDOWN_SECONDS,
+            write_source_cursor=True,
+        )
+        cooldown = state.seconds_remaining
+        dynamic_metadata = {
+            "dynamic_cooldown_service": state.service,
+            "dynamic_cooldown_streak": state.streak,
+        }
     await record_rate_limit_event(
         pool,
         source="strava",
@@ -2913,6 +2937,7 @@ async def _record_strava_stream_http_event(pool, body: dict) -> bool:
             "extension_version": body.get("extension_version"),
             "point_count": body.get("point_count"),
             "browser_capture": True,
+            **dynamic_metadata,
         },
     )
     return True
