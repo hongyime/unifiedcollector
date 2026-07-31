@@ -211,6 +211,8 @@ class InstagramCollector(BaseCollector):
         self._session_auth_dead = False
         self._daily_views: dict[str, int] = {}
         self._daily_actions: dict[str, int] = {}
+        self._daily_quota_exhausted_keys: set[str] = set()
+        self._daily_quota_warned_keys: set[str] = set()
 
         proxy_url = os.getenv("PROXY_URL", "")
         from src.core.env import env_bool
@@ -700,22 +702,76 @@ class InstagramCollector(BaseCollector):
             return 1.5
         return 1.0
 
-    def _check_daily_quota(self, account_name: str) -> bool:
+    def _daily_quota_key(self, account_name: str) -> str:
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        key = f"{account_name}:{today}"
+        return f"{account_name}:{today}"
+
+    def _daily_quota_exhausted(self, account_name: str) -> bool:
+        exhausted = getattr(self, "_daily_quota_exhausted_keys", set())
+        return self._daily_quota_key(account_name) in exhausted
+
+    def _seconds_until_next_utc_day(self) -> float:
+        now = datetime.now(timezone.utc)
+        elapsed = (
+            now.hour * 3600
+            + now.minute * 60
+            + now.second
+            + (now.microsecond / 1_000_000)
+        )
+        return max(60.0, 86400.0 - elapsed)
+
+    def _mark_daily_quota_exhausted(
+        self,
+        account_name: str,
+        *,
+        quota_name: str,
+        quota_limit: int,
+    ) -> None:
+        key = self._daily_quota_key(account_name)
+        exhausted = getattr(self, "_daily_quota_exhausted_keys", set())
+        exhausted.add(key)
+        self._daily_quota_exhausted_keys = exhausted
+
+        remaining = self._seconds_until_next_utc_day()
+        set_cooldown = getattr(self.rate_limiter, "set_cooldown_remaining", None)
+        if callable(set_cooldown):
+            set_cooldown("instagram.com", remaining, account=account_name)
+
+        warned = getattr(self, "_daily_quota_warned_keys", set())
+        warn_key = f"{key}:{quota_name}"
+        if warn_key not in warned:
+            warned.add(warn_key)
+            self._daily_quota_warned_keys = warned
+            logger.warning(
+                "Daily %s quota (%d) hit for %s; cooling account for %.1fh",
+                quota_name.replace("_", " "),
+                quota_limit,
+                account_name,
+                remaining / 3600,
+            )
+
+    def _check_daily_quota(self, account_name: str) -> bool:
+        key = self._daily_quota_key(account_name)
         views = self._daily_views.get(key, 0)
         actions = self._daily_actions.get(key, 0)
         if DAILY_QUOTA_PROFILE_VIEWS and views >= DAILY_QUOTA_PROFILE_VIEWS:
-            logger.warning("Daily profile view quota (%d) hit for %s", DAILY_QUOTA_PROFILE_VIEWS, account_name)
+            self._mark_daily_quota_exhausted(
+                account_name,
+                quota_name="profile_view",
+                quota_limit=DAILY_QUOTA_PROFILE_VIEWS,
+            )
             return False
         if DAILY_QUOTA_ACTIONS and actions >= DAILY_QUOTA_ACTIONS:
-            logger.warning("Daily action quota (%d) hit for %s", DAILY_QUOTA_ACTIONS, account_name)
+            self._mark_daily_quota_exhausted(
+                account_name,
+                quota_name="action",
+                quota_limit=DAILY_QUOTA_ACTIONS,
+            )
             return False
         return True
 
     def _record_daily_action(self, account_name: str, views: int = 0, actions: int = 1):
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        key = f"{account_name}:{today}"
+        key = self._daily_quota_key(account_name)
         self._daily_views[key] = self._daily_views.get(key, 0) + views
         self._daily_actions[key] = self._daily_actions.get(key, 0) + actions
 
@@ -946,6 +1002,15 @@ class InstagramCollector(BaseCollector):
                 "cycle will likely fail until a session is refreshed", len(cookie_accounts),
             )
             _healthy = cookie_accounts  # try anyway
+        _quota_healthy = [a for a in _healthy if not self._daily_quota_exhausted(a)]
+        if not _quota_healthy:
+            logger.info(
+                "instagram: all %d healthy cookie account(s) hit local daily quota; "
+                "skipping cycle until the quota window resets",
+                len(_healthy),
+            )
+            return
+        _healthy = _quota_healthy
         # Follow-aware routing (Phase 0 step 2): among the healthy accounts, use
         # the one known to access the MOST of this cycle's targets (from the
         # profile_access data). Single-account-per-cycle model, so this picks the
@@ -1028,6 +1093,13 @@ class InstagramCollector(BaseCollector):
                         "rotating to another account next cycle. Healthy remaining: %s",
                         acct_name,
                         [a for a in cookie_accounts if a not in self._dead_cookie_accounts] or "NONE",
+                    )
+                    break
+                if self._daily_quota_exhausted(acct_name):
+                    logger.info(
+                        "instagram: account %s daily quota exhausted; ending cycle "
+                        "so the next cycle can route around it",
+                        acct_name,
                     )
                     break
                 # Survived a target without a 401 -> the cookie is healthy. Cheap

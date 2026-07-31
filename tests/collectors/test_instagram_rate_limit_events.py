@@ -49,6 +49,8 @@ def _bare_collector():
     coll._consecutive_429s = 0
     coll._daily_views = {}
     coll._daily_actions = {}
+    coll._daily_quota_exhausted_keys = set()
+    coll._daily_quota_warned_keys = set()
     coll.rate_limiter = object()
     coll.account_pool = MagicMock()
     coll.account_pool._accounts = []
@@ -323,6 +325,24 @@ async def test_process_target_respects_cooldown_with_playwright_primary(monkeypa
     await coll._process_target(MagicMock(), "target_user")
 
     coll._collect_user.assert_not_awaited()
+
+
+def test_daily_profile_quota_sets_account_cooldown_once(monkeypatch, caplog):
+    coll = _bare_collector()
+    limiter = instagram_mod.HumanLikeRateLimiter()
+    coll.rate_limiter = limiter
+    monkeypatch.setattr(instagram_mod, "DAILY_QUOTA_PROFILE_VIEWS", 1)
+
+    today_key = coll._daily_quota_key("acct1")
+    coll._daily_views[today_key] = 1
+
+    with caplog.at_level("WARNING"):
+        assert coll._check_daily_quota("acct1") is False
+        assert coll._check_daily_quota("acct1") is False
+
+    assert coll._daily_quota_exhausted("acct1") is True
+    assert limiter.cooldown_remaining_seconds("instagram.com", account="acct1") > 60
+    assert caplog.text.count("Daily profile view quota") == 1
 
 
 @pytest.mark.asyncio
