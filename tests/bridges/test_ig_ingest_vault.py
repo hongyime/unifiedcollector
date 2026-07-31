@@ -607,8 +607,11 @@ def test_record_strava_stream_http_429_writes_rate_limit_event(monkeypatch):
     )
 
     assert recorded is True
-    assert len(pool.conn.executes) == 1
-    query, args = pool.conn.executes[0]
+    query, args = next(
+        (query, args)
+        for query, args in pool.conn.executes
+        if "rate_limit_events" in query
+    )
     assert "rate_limit_events" in query
     assert args[:6] == (
         "strava",
@@ -808,6 +811,29 @@ def test_strava_stream_response_status_treats_empty_stream_as_processed():
     assert ig_ingest._strava_stream_response_status(
         {"stored": 0, "reason": "other"}
     ) == 422
+
+
+def test_owner_account_for_follow_accepts_dict_and_string_owner():
+    assert ig_ingest._owner_account_for_follow(
+        "tiktok", "follow", {"username": "@bryanseah234"}
+    ) == ("bryanseah234", "following")
+    assert ig_ingest._owner_account_for_follow(
+        "x", "follower", "oopspwned"
+    ) == ("oopspwned", "follower")
+
+
+def test_owner_account_for_follow_uses_tiktok_fallback(monkeypatch):
+    monkeypatch.setattr(ig_ingest, "TIKTOK_FOLLOW_OWNER_FALLBACK", "bryanseah234")
+
+    assert ig_ingest._owner_account_for_follow(
+        "tiktok", "follow", None
+    ) == ("bryanseah234", "following")
+    assert ig_ingest._owner_account_for_follow(
+        "instagram", "follow", None
+    ) == (None, "following")
+    assert ig_ingest._owner_account_for_follow(
+        "tiktok", "seen", None
+    ) == (None, None)
 
 
 def test_archive_browser_capture_failure_records_dlq(monkeypatch):

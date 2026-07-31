@@ -151,6 +151,9 @@ IG_SPIDER_FAMOUS_CAP = int(os.getenv("INSTA_SPIDER_FAMOUS_CAP", "100000"))
 IG_SPIDER_TARGETS_LIMIT = int(os.getenv("IG_SPIDER_TARGETS_LIMIT", "250"))
 X_PROFILE_TARGET_REVISIT_SECONDS = int(os.getenv("X_PROFILE_TARGET_REVISIT_SECONDS", str(12 * 60 * 60)))
 X_PROFILE_TARGET_RETRY_SECONDS = int(os.getenv("X_PROFILE_TARGET_RETRY_SECONDS", str(45 * 60)))
+TIKTOK_FOLLOW_OWNER_FALLBACK = (
+    os.getenv("TIKTOK_FOLLOW_OWNER_FALLBACK", "").strip().lstrip("@") or None
+)
 
 _SPIDER_DDL = """
 CREATE TABLE IF NOT EXISTS instagram_spider_targets (
@@ -1375,6 +1378,23 @@ def _tiktok_handle(value) -> str | None:
     return handle if _TIKTOK_HANDLE_RE.match(handle) else None
 
 
+def _owner_account_for_follow(platform, context, owner):
+    ctx_l = (context or "").lower()
+    if ctx_l not in ("follow", "follower"):
+        return None, None
+    owner_account = None
+    if isinstance(owner, dict):
+        owner_account = (owner.get("username") or owner.get("id") or "") or None
+    elif isinstance(owner, str):
+        owner_account = owner.strip().lstrip("@") or None
+    if owner_account:
+        owner_account = str(owner_account).strip().lstrip("@") or None
+    if not owner_account and platform == "tiktok":
+        owner_account = TIKTOK_FOLLOW_OWNER_FALLBACK
+    direction = "follower" if ctx_l == "follower" else "following"
+    return owner_account, direction
+
+
 async def _enqueue_tiktok_profile_targets(
     conn,
     handles,
@@ -1869,11 +1889,7 @@ async def _record_users(pool, platform, users, context, owner=None) -> int:
     # PER-ACCOUNT follow graph: when the extension sends an owner (the logged-in
     # account) with a follow/follower context, also record a directional edge in
     # follow_edges so each of your accounts' graphs is distinct (multi-account).
-    owner_account = None
-    direction = None
-    if isinstance(owner, dict) and (context or "").lower() in ("follow", "follower"):
-        owner_account = (owner.get("username") or owner.get("id") or "") or None
-        direction = "follower" if context.lower() == "follower" else "following"
+    owner_account, direction = _owner_account_for_follow(platform, context, owner)
     async with pool.acquire() as conn:
         for u in users:
             if isinstance(u, str):
