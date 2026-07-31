@@ -621,11 +621,36 @@ def test_record_browser_ingest_event_writes_observed_and_stored_counts():
         )
     )
 
-    assert len(pool.conn.executes) == 1
+    assert len(pool.conn.executes) == 2
     query, args = pool.conn.executes[0]
     assert "browser_ingest_events" in query
     assert args[:5] == ("threads", "media", "feed", 12, 3)
     assert "extension_version" in args[5]
+    health_query, health_args = pool.conn.executes[1]
+    assert "source_health" in health_query
+    assert health_args == ("threads",)
+
+
+def test_record_browser_ingest_event_does_not_mark_heartbeat_success():
+    pool = _FakePool()
+
+    asyncio.run(
+        ig_ingest._record_browser_ingest_event(
+            pool,
+            "threads",
+            "browser_heartbeat",
+            "tab-1",
+            observed_count=1,
+            stored_count=0,
+            metadata={"extension_version": "1.21.52"},
+        )
+    )
+
+    assert len(pool.conn.executes) == 1
+    query, args = pool.conn.executes[0]
+    assert "browser_ingest_events" in query
+    assert "source_health" not in query
+    assert args[:5] == ("threads", "browser_heartbeat", "tab-1", 1, 0)
 
 
 def test_browser_upload_duplicate_counts_as_accepted(monkeypatch):

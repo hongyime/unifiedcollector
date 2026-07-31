@@ -1899,6 +1899,8 @@ async def _record_browser_ingest_event(
     metadata: dict | None = None,
 ) -> None:
     try:
+        observed = max(0, int(observed_count or 0))
+        stored = max(0, int(stored_count or 0))
         async with pool.acquire() as conn:
             await conn.execute(
                 """
@@ -1909,10 +1911,24 @@ async def _record_browser_ingest_event(
                 platform,
                 endpoint,
                 subject,
-                max(0, int(observed_count or 0)),
-                max(0, int(stored_count or 0)),
+                observed,
+                stored,
                 json.dumps(metadata or {}),
             )
+            if _browser_event_marks_source_success(platform, endpoint, observed, stored):
+                await conn.execute(
+                    """
+                    INSERT INTO source_health
+                      (source, status, last_success_at, last_error, updated_at)
+                    VALUES ($1, 'running', NOW(), NULL, NOW())
+                    ON CONFLICT (source) DO UPDATE SET
+                      status = 'running',
+                      last_success_at = NOW(),
+                      last_error = NULL,
+                      updated_at = NOW()
+                    """,
+                    platform,
+                )
     except Exception:
         logger.debug(
             "browser ingest telemetry insert failed platform=%s endpoint=%s subject=%s",
@@ -1921,6 +1937,17 @@ async def _record_browser_ingest_event(
             subject,
             exc_info=True,
         )
+
+
+def _browser_event_marks_source_success(
+    platform: str,
+    endpoint: str,
+    observed_count: int,
+    stored_count: int,
+) -> bool:
+    if not platform or platform == "bridge" or endpoint == "browser_heartbeat":
+        return False
+    return observed_count > 0 or stored_count > 0
 
 
 async def _ingest(app, platform, body):
