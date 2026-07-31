@@ -55,6 +55,24 @@ def _bare_collector():
     return coll
 
 
+def test_instagram_target_timeout_scales_with_current_limiter_delay(monkeypatch):
+    coll = _bare_collector()
+    coll.rate_limiter = SimpleNamespace(get_delay=MagicMock(return_value=80.0))
+    monkeypatch.delenv("INSTA_TARGET_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.delenv("INSTA_TARGET_TIMEOUT_MAX_SECONDS", raising=False)
+
+    assert coll._target_timeout_seconds() == 290.0
+
+
+def test_instagram_target_timeout_respects_max_cap(monkeypatch):
+    coll = _bare_collector()
+    coll.rate_limiter = SimpleNamespace(get_delay=MagicMock(return_value=200.0))
+    monkeypatch.setenv("INSTA_TARGET_TIMEOUT_SECONDS", "120")
+    monkeypatch.setenv("INSTA_TARGET_TIMEOUT_MAX_SECONDS", "240")
+
+    assert coll._target_timeout_seconds() == 240.0
+
+
 class _MediaResponse:
     def __init__(self, data: bytes):
         self.content = data
@@ -387,12 +405,16 @@ async def test_fetch_profile_playwright_records_429_without_marking_session_dead
     assert result is None
     assert coll._session_auth_dead is False
     assert page.evaluate.await_count == 2
-    coll._record_rate_limit_event.assert_awaited_once_with(
-        scope="profile_fetch_playwright",
-        status_code=429,
-        reason="Playwright profile rate-limit response",
-        metadata={"username": "target_user", "endpoint": "web_profile_info"},
-    )
+    coll._record_rate_limit_event.assert_awaited_once()
+    kwargs = coll._record_rate_limit_event.await_args.kwargs
+    assert kwargs["scope"] == "profile_fetch_playwright"
+    assert kwargs["status_code"] == 429
+    assert kwargs["cooldown_seconds"] == 900
+    assert kwargs["reason"] == "429 streak 1"
+    assert kwargs["metadata"]["username"] == "target_user"
+    assert kwargs["metadata"]["endpoint"] == "web_profile_info"
+    assert kwargs["metadata"]["ingest_path"] == "playwright_profile_fetch"
+    assert kwargs["metadata"]["streak"] == 1
 
 
 @pytest.mark.asyncio

@@ -738,12 +738,36 @@ class InstagramCollector(BaseCollector):
         path.mkdir(parents=True, exist_ok=True)
         return path
 
+    def _instagram_domain_delay_seconds(self) -> float:
+        try:
+            getter = getattr(self.rate_limiter, "get_delay", None)
+            if getter is None:
+                return 0.0
+            return max(0.0, float(getter("instagram.com")))
+        except Exception:
+            return 0.0
+
+    def _target_timeout_seconds(self) -> float:
+        """Outer per-target watchdog sized to the current pacing delay.
+
+        The rate limiter may intentionally stretch Instagram waits after 400/429
+        pressure. A fixed 120s watchdog then kills targets after a successful
+        Playwright profile fetch, because the intentional wait consumed most of
+        the budget. Keep the watchdog bounded, but include the current domain
+        delay so slow mode remains productive instead of noisy.
+        """
+        base = float(os.getenv("INSTA_TARGET_TIMEOUT_SECONDS", "180"))
+        cap = float(os.getenv("INSTA_TARGET_TIMEOUT_MAX_SECONDS", "360"))
+        domain_delay = self._instagram_domain_delay_seconds()
+        adaptive = 90.0 + (domain_delay * 2.5)
+        return max(30.0, min(cap, max(base, adaptive)))
+
 
     async def collect(self, targets: list[str]):
         """Collect Instagram profiles and posts.
 
         Runs the httpx-based collection logic with per-target timeouts so a
-        rate-limited account never blocks the event loop for > 120s.
+        rate-limited account never blocks the event loop forever.
         """
         import asyncio
         import time as _time
@@ -971,13 +995,19 @@ class InstagramCollector(BaseCollector):
             except Exception as _e:
                 logger.debug("instagram: warmup skipped (non-fatal): %s", _e)
             for target in targets:
+                target_timeout = self._target_timeout_seconds()
                 try:
                     await asyncio.wait_for(
                         self._process_target(client, target),
-                        timeout=120.0,
+                        timeout=target_timeout,
                     )
                 except asyncio.TimeoutError:
-                    logger.warning("instagram: _process_target timed out for %s (120s)", target)
+                    logger.warning(
+                        "instagram: _process_target timed out for %s (%.0fs; limiter delay %.1fs)",
+                        target,
+                        target_timeout,
+                        self._instagram_domain_delay_seconds(),
+                    )
                 except Exception as e:
                     logger.error("instagram: unexpected error for %s: %s", target, e, exc_info=True)
                 # If this account's session is dead (401), stop wasting the cycle on
@@ -1254,6 +1284,8 @@ class InstagramCollector(BaseCollector):
                     _existing_streak = max(_existing_streak, int(_row["streak"] or 0))
             except Exception as _e:
                 logger.debug("instagram: failed reading existing per-account rate-limit state: %s", _e)
+        if not hasattr(self, "_consecutive_429s_by_account"):
+            self._consecutive_429s_by_account = {}
         previous_account_streak = self._consecutive_429s_by_account.get(acct_name or "", 0)
         self._consecutive_429s = max(
             previous_account_streak,
