@@ -1023,7 +1023,7 @@ async function finishTikTokRevisit(active, response, observed, username) {
   localStorage.removeItem(tiktokRevisitKey());
 }
 
-const BROWSER_MEDIA_REVISIT_PLATFORMS = new Set(["x"]);
+const BROWSER_MEDIA_REVISIT_PLATFORMS = new Set(["x", "threads", "facebook", "lemon8"]);
 function browserMediaRevisitKey(platform) { return "uc_browser_media_revisit_active_" + platform; }
 function currentBrowserMediaRevisit(platform) {
   try {
@@ -1046,6 +1046,19 @@ function browserMediaRevisitUrlOk(platform, url) {
     if (platform === "x") {
       return /^(x|twitter)\.com$/i.test(u.hostname.replace(/^www\./, "")) &&
         /^\/[A-Za-z0-9_]{1,20}\/status\/\d+/.test(u.pathname);
+    }
+    if (platform === "threads") {
+      return /^(threads\.com|threads\.net)$/i.test(u.hostname.replace(/^www\./, "")) &&
+        /^\/@[^/]+\/post\//.test(u.pathname);
+    }
+    if (platform === "facebook") {
+      return /(^|\.)facebook\.com$/i.test(u.hostname) &&
+        (/\/(posts|photos|videos)\//.test(u.pathname) ||
+          /^\/(?:photo|permalink|story)\.php/i.test(u.pathname));
+    }
+    if (platform === "lemon8") {
+      return /lemon8/i.test(u.hostname) &&
+        (/\/@[^/]+/.test(u.pathname) || /\/\d{6,}/.test(u.pathname));
     }
   } catch (e) {}
   return false;
@@ -1095,6 +1108,17 @@ async function finishBrowserMediaRevisit(platform, active, response, observed, u
     username: username || active.username || null,
   }).catch(() => {});
   localStorage.removeItem(browserMediaRevisitKey(platform));
+}
+function markBrowserMediaRevisitItems(platform, sink, active) {
+  if (!active || !active.content_id || !sink || !Array.isArray(sink.items)) return;
+  sink.items.forEach((it) => {
+    it.meta = {
+      ...(it.meta || {}),
+      revisit_content_id: active.content_id,
+      revisit_reason: active.reason || null,
+      revisit_platform: platform,
+    };
+  });
 }
 const tiktok = {
   id: "tiktok", host: "www.tiktok.com", label: "TikTok",
@@ -1334,6 +1358,8 @@ const lemon8 = {
   },
   async runCycle() {
     const entity = this.entity();
+    const mediaRevisit = await maybeStartBrowserMediaRevisit("lemon8", entity);
+    if (mediaRevisit && mediaRevisit.navigating) return { targets: 1, saved: 0, discovered: 0 };
     clog("info", `cycle start on ${entity}`, "lemon8");
     const sink = makeSink();
     await autoScroll(18);
@@ -1355,7 +1381,14 @@ const lemon8 = {
       });
       if (uniqueUsers.length) await send({ type: "users", platform: "lemon8", context: "author", users: uniqueUsers });
     }
-    if (sink.items.length) await send({ type: "ingest", platform: "lemon8", username: entity, items: sink.items });
+    const activeMediaRevisit = currentBrowserMediaRevisit("lemon8");
+    markBrowserMediaRevisitItems("lemon8", sink, activeMediaRevisit);
+    const ingestResponse = sink.items.length
+      ? await send({ type: "ingest", platform: "lemon8", username: entity, items: sink.items })
+      : null;
+    if (activeMediaRevisit) {
+      await finishBrowserMediaRevisit("lemon8", activeMediaRevisit, ingestResponse, sink.items.length, entity);
+    }
     return { targets: 1, saved: sink.items.length, discovered: users.length };
   },
 };
@@ -1775,17 +1808,48 @@ const x = {
 };
 
 // ===========================================================================
+function domPostUrlForElement(el, platform) {
+  try {
+    const root = el && (el.closest('[role="article"], article, [data-pressable-container], [data-testid]') || el.parentElement);
+    const links = root ? [...root.querySelectorAll("a[href]")] : [];
+    let href = "";
+    if (platform === "threads") {
+      const link = links.find((a) => /\/@[^/]+\/post\//.test(a.getAttribute("href") || ""));
+      href = link && (link.getAttribute("href") || link.href || "");
+    } else if (platform === "facebook") {
+      const link = links.find((a) => {
+        const h = a.getAttribute("href") || "";
+        return /\/(posts|photos|videos)\//.test(h) || /^\/(?:photo|permalink|story)\.php/i.test(h);
+      });
+      href = link && (link.getAttribute("href") || link.href || "");
+    }
+    return href ? new URL(href, location.href).href : null;
+  } catch (e) {
+    return null;
+  }
+}
+
 // Shared DOM media harvester (Threads / Facebook) — read rendered CDN images +
 // video posters/sources. Pure DOM reads (no API calls) = very low ban profile.
 // The server-side file gate drops avatars/thumbnails/UI chrome by size.
 // ===========================================================================
-function harvestDom(entity, { imgRe, junkRe }) {
+function harvestDom(entity, { imgRe, junkRe, platform }) {
   const sink = makeSink();
   document.querySelectorAll("img").forEach((im) => {
     if (imageLooksTooSmall(im, 120)) return;
     imageUrlsFromElement(im).forEach((u) => {
       if (u && imgRe.test(u) && !junkRe.test(u))
-        sink.add({ content_id: "img_" + urlId(u), content_type: "photo", url: u, entity_name: entity });
+        sink.add({
+          content_id: "img_" + urlId(u),
+          content_type: "photo",
+          url: u,
+          entity_name: entity,
+          kind: "post",
+          meta: {
+            dom_asset_role: "image",
+            post_url: domPostUrlForElement(im, platform),
+          },
+        });
     });
   });
   document.querySelectorAll('[style*="url("]').forEach((el) => {
@@ -1802,14 +1866,21 @@ function harvestDom(entity, { imgRe, junkRe }) {
           url: u,
           entity_name: entity,
           kind: "post",
-          meta: { dom_asset_role: "background_image" },
+          meta: { dom_asset_role: "background_image", post_url: domPostUrlForElement(el, platform) },
         });
       }
     });
   });
   document.querySelectorAll("video").forEach((v) => {
     if (v.poster && /https?:/.test(v.poster) && !junkRe.test(v.poster))
-      sink.add({ content_id: "poster_" + urlId(v.poster), content_type: "photo", url: v.poster, entity_name: entity });
+      sink.add({
+        content_id: "poster_" + urlId(v.poster),
+        content_type: "photo",
+        url: v.poster,
+        entity_name: entity,
+        kind: "post",
+        meta: { dom_asset_role: "video_poster", post_url: domPostUrlForElement(v, platform) },
+      });
     const u = v.src || (v.querySelector("source") && v.querySelector("source").src);
     if (u && /^https?:/.test(u) && !u.startsWith("blob:"))
       sink.add({
@@ -1820,7 +1891,7 @@ function harvestDom(entity, { imgRe, junkRe }) {
         kind: "post",
         browser_upload: true,
         browser_upload_only: true,
-        meta: { dom_asset_role: "video" },
+        meta: { dom_asset_role: "video", post_url: domPostUrlForElement(v, platform) },
       });
   });
   return sink;
@@ -1939,8 +2010,15 @@ const threads = {
   async _scrapeProfile(user) {
     clog("info", `Threads profile @${user} — scraping (IG-known real account)`, "threads");
     await autoScroll(8);
-    const sink = harvestDom(user, THREADS_IMG);
-    if (sink.items.length) await send({ type: "ingest", platform: "threads", username: user, items: sink.items });
+    const sink = harvestDom(user, { ...THREADS_IMG, platform: "threads" });
+    const activeMediaRevisit = currentBrowserMediaRevisit("threads");
+    markBrowserMediaRevisitItems("threads", sink, activeMediaRevisit);
+    const ingestResponse = sink.items.length
+      ? await send({ type: "ingest", platform: "threads", username: user, items: sink.items })
+      : null;
+    if (activeMediaRevisit) {
+      await finishBrowserMediaRevisit("threads", activeMediaRevisit, ingestResponse, sink.items.length, user);
+    }
     const posts = harvestPermalinkPosts(/\/@([^/]+)\/post\/([^/?#]+)/, (m) => m[2]);
     if (posts.length) {
       await send({ type: "posts", platform: "threads", username: user, posts });
@@ -1962,6 +2040,8 @@ const threads = {
       },
       homeUrl: "https://www.threads.com/",
     })) return { targets: 1, saved: 0, posts: 0, discovered: 0 };
+    const mediaRevisit = await maybeStartBrowserMediaRevisit("threads", owner);
+    if (mediaRevisit && mediaRevisit.navigating) return { targets: 1, saved: 0, posts: 0, discovered: 0 };
 
     // REVERSE direction: if we navigated to a target profile, scrape it then return
     // to the feed so the rotation continues.
@@ -1970,6 +2050,10 @@ const threads = {
       // this IG handle may not have a Threads account — detect + blacklist so the
       // rotation never wastes another navigation on it.
       if (threadsProfileMissing()) {
+        const activeMediaRevisit = currentBrowserMediaRevisit("threads");
+        if (activeMediaRevisit) {
+          await finishBrowserMediaRevisit("threads", activeMediaRevisit, null, 0, user);
+        }
         thMarkNoAcct(user);
         clog("info", `Threads @${user}: no Threads account — blacklisted from reverse rotation`, "threads");
       } else {
@@ -1994,8 +2078,15 @@ const threads = {
       : ((await threadsSelectFeed("Following")) ? "following" : "feed");
     clog("info", `Threads cycle on ${feed} — scrolling`, "threads");
     await autoScroll(10);
-    const sink = harvestDom(feed, THREADS_IMG);
-    if (sink.items.length) await send({ type: "ingest", platform: "threads", username: feed, items: sink.items });
+    const sink = harvestDom(feed, { ...THREADS_IMG, platform: "threads" });
+    const activeMediaRevisit = currentBrowserMediaRevisit("threads");
+    markBrowserMediaRevisitItems("threads", sink, activeMediaRevisit);
+    const ingestResponse = sink.items.length
+      ? await send({ type: "ingest", platform: "threads", username: feed, items: sink.items })
+      : null;
+    if (activeMediaRevisit) {
+      await finishBrowserMediaRevisit("threads", activeMediaRevisit, ingestResponse, sink.items.length, feed);
+    }
     const posts = harvestPermalinkPosts(/\/@([^/]+)\/post\/([^/?#]+)/, (m) => m[2]);
     if (posts.length) {
       await send({ type: "posts", platform: "threads", username: feed, posts });
@@ -2085,6 +2176,8 @@ const facebook = {
   async runCycle() {
     const entity = this.entity();
     const person = this._isPerson();
+    const mediaRevisit = await maybeStartBrowserMediaRevisit("facebook", facebookLoggedInOwner());
+    if (mediaRevisit && mediaRevisit.navigating) return { targets: 1, saved: 0, discovered: 0 };
     clog("info", `cycle start on ${entity} (person profile: ${person})`, "facebook");
     await autoScroll(12);
     let saved = 0;
@@ -2096,8 +2189,16 @@ const facebook = {
     // MEDIA — capture rendered feed/profile media broadly. The bridge/file gate
     // drops UI chrome and tiny avatars; collector policy now favors completeness
     // over the older person-profile-only restriction.
-    const sink = harvestDom(entity, { imgRe: /fbcdn\.net/, junkRe: /rsrc\.php|emoji|static|\/s\d+x\d+\/|profile|sprite/ });
-    if (sink.items.length) { await send({ type: "ingest", platform: "facebook", username: entity, items: sink.items }); saved = sink.items.length; }
+    const sink = harvestDom(entity, { imgRe: /fbcdn\.net/, junkRe: /rsrc\.php|emoji|static|\/s\d+x\d+\/|profile|sprite/, platform: "facebook" });
+    const activeMediaRevisit = currentBrowserMediaRevisit("facebook");
+    markBrowserMediaRevisitItems("facebook", sink, activeMediaRevisit);
+    const ingestResponse = sink.items.length
+      ? await send({ type: "ingest", platform: "facebook", username: entity, items: sink.items })
+      : null;
+    if (sink.items.length) saved = sink.items.length;
+    if (activeMediaRevisit) {
+      await finishBrowserMediaRevisit("facebook", activeMediaRevisit, ingestResponse, sink.items.length, entity);
+    }
     // POSTS (captions) + USERS — captured EVERYWHERE incl. pages/groups, for the
     // user registry + spidering (user: "when spider we can use either").
     const posts = harvestPermalinkPosts(/\/(?:posts\/|permalink\.php\?story_fbid=|[^/]+\/posts\/)?(pfbid[\w]+|\d{6,})/, (m) => m[1]);
