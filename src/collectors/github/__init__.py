@@ -230,6 +230,10 @@ class GithubCollector(BaseCollector):
         self._spider_visited: set[str] = set()
         self._db_avatar_ids: set[int] = set()
 
+    def _tick_progress(self, amount: int = 1) -> None:
+        """Advance worker liveness for long API/metadata-only crawls."""
+        self._progress_count += max(1, int(amount))
+
     def _owner_accounts(self) -> set[str]:
         raw = os.getenv("GITHUB_OWNER_ACCOUNTS", "").strip()
         if not raw:
@@ -458,6 +462,7 @@ class GithubCollector(BaseCollector):
                             type(exc).__name__,
                             attempts,
                         )
+                        self._tick_progress()
                         return None
                     delay = min(10.0, float(2 ** (attempt - 1)))
                     logger.warning(
@@ -470,6 +475,7 @@ class GithubCollector(BaseCollector):
                     )
                     await sleep_rate_limit(delay)
             self.requests_made += 1
+            self._tick_progress()
             self._update_rate_limit(resp.headers)
             # Best-effort quota bookkeeping (no-op when no PAT registered).
             try:
@@ -1370,6 +1376,7 @@ class GithubCollector(BaseCollector):
         edge_prefix: str = "commit",
     ) -> None:
         await self._upsert_commit(repo_uuid, commit)
+        self._tick_progress()
         commit_block = commit.get("commit") or {}
         commit_author = (commit.get("author") or {}).get("login")
         committer = (commit.get("committer") or {}).get("login")
@@ -1645,6 +1652,7 @@ class GithubCollector(BaseCollector):
         count = 0
         for comment in comments:
             await self._upsert_issue_comment(repo_uuid, issue_uuid, issue_number, comment)
+            self._tick_progress()
             author = (comment.get("user") or {}).get("login")
             if self._is_human_login(author, comment.get("user")):
                 await self._upsert_edge(
@@ -1687,6 +1695,7 @@ class GithubCollector(BaseCollector):
         count = 0
         for review in reviews:
             await self._upsert_pr_review(repo_uuid, pr_number, review)
+            self._tick_progress()
             reviewer = (review.get("user") or {}).get("login")
             if self._is_human_login(reviewer, review.get("user")):
                 await self._upsert_edge(
@@ -1729,6 +1738,7 @@ class GithubCollector(BaseCollector):
         count = 0
         for comment in comments:
             await self._upsert_pr_review_comment(repo_uuid, pr_number, comment)
+            self._tick_progress()
             commenter = (comment.get("user") or {}).get("login")
             if self._is_human_login(commenter, comment.get("user")):
                 await self._upsert_edge(
@@ -1796,6 +1806,7 @@ class GithubCollector(BaseCollector):
                     raw_payload=row,
                     queue_priority=3,
                 )
+                self._tick_progress()
                 counts[edge_type] += 1
         return counts
 

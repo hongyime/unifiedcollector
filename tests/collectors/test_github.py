@@ -337,6 +337,7 @@ async def test_api_get_retries_transient_transport_disconnect(monkeypatch):
     assert http.get.await_count == 2
     assert sleeps == [1.0]
     assert coll.requests_made == 1
+    assert coll.progress_count == 1
 
 
 @pytest.mark.asyncio
@@ -363,6 +364,7 @@ async def test_api_get_returns_none_after_exhausted_transport_retries(monkeypatc
     assert http.get.await_count == 3
     assert sleeps == [1.0, 2.0]
     assert coll.requests_made == 0
+    assert coll.progress_count == 1
 
 
 @pytest.mark.asyncio
