@@ -9,16 +9,18 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
 import urllib.parse
 import urllib.request
 from collections import defaultdict
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Iterable, Sequence
+from typing import Callable, Iterable, Iterator, Sequence
 
 
 DEFAULT_BACKUP_DIR = r"Z:\unifiedcollector\backups\db"
@@ -31,12 +33,17 @@ DEFAULT_STALE_TEMP_MAX_AGE_MINUTES = 60
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 2 * 60 * 60
 DEFAULT_STALL_TIMEOUT_SECONDS = 5 * 60
 DEFAULT_VALIDATE_TIMEOUT_SECONDS = 10 * 60
+DEFAULT_LOCK_STALE_SECONDS = 6 * 60 * 60
 
 _BACKUP_RE = re.compile(r"^(?P<prefix>.+)_(?P<stamp>\d{8}_\d{6})\.dump$")
 
 
 class BackupError(RuntimeError):
     """Raised when a backup cannot be created or validated safely."""
+
+
+class BackupAlreadyRunning(BackupError):
+    """Raised when another host/container backup already owns the shared lock."""
 
 
 @dataclass(frozen=True)
@@ -142,8 +149,13 @@ def backup_status(
             30,
         )
         active_temp_minutes = _env_int("COLLECTOR_DB_BACKUP_IN_PROGRESS_ACTIVE_MINUTES", 15)
+        lock_stale_seconds = _env_int(
+            "COLLECTOR_DB_BACKUP_LOCK_STALE_SECONDS",
+            DEFAULT_LOCK_STALE_SECONDS,
+        )
         backups = list_backup_files(root, prefix=prefix)
         temp_files = sorted(root.glob(".inprogress_*.dump")) if root.exists() else []
+        lock_dir = root / ".backup.lock"
     except Exception as exc:
         return {
             "status": "error",
@@ -158,6 +170,8 @@ def backup_status(
             "stale_in_progress_count": 0,
             "stale_in_progress_oldest_age_seconds": None,
             "in_progress_recent_max_age_seconds": None,
+            "lock_active": False,
+            "lock_age_seconds": None,
             "max_age_hours": max_age_hours,
             "error": str(exc),
         }
@@ -170,22 +184,33 @@ def backup_status(
             temp_ages.append(max(0, int(now.timestamp() - path.stat().st_mtime)))
         except OSError:
             continue
+    lock_age_seconds = None
+    lock_active = False
+    if lock_dir.exists():
+        try:
+            lock_age_seconds = max(0, int(now.timestamp() - lock_dir.stat().st_mtime))
+            lock_active = lock_stale_seconds <= 0 or lock_age_seconds <= lock_stale_seconds
+        except OSError:
+            lock_age_seconds = None
+            lock_active = False
     active_temp_count = sum(
         1
         for age in temp_ages
-        if active_temp_max_age_seconds <= 0 or age <= active_temp_max_age_seconds
+        if lock_active and (active_temp_max_age_seconds <= 0 or age <= active_temp_max_age_seconds)
     )
     stale_temp_ages = [
         age
         for age in temp_ages
-        if active_temp_max_age_seconds > 0 and age > active_temp_max_age_seconds
+        if not lock_active or (active_temp_max_age_seconds > 0 and age > active_temp_max_age_seconds)
     ]
     temp_payload = {
-        "in_progress": active_temp_count > 0,
+        "in_progress": lock_active or active_temp_count > 0,
         "in_progress_count": active_temp_count,
         "stale_in_progress_count": len(stale_temp_ages),
         "stale_in_progress_oldest_age_seconds": max(stale_temp_ages) if stale_temp_ages else None,
         "in_progress_recent_max_age_seconds": active_temp_max_age_seconds,
+        "lock_active": lock_active,
+        "lock_age_seconds": lock_age_seconds,
     }
     latest = backups[0] if backups else None
     if latest is None:
@@ -317,6 +342,56 @@ def cleanup_stale_temp_dumps(
             path.unlink()
         deleted.append(path)
     return deleted
+
+
+@contextmanager
+def backup_run_lock(
+    backup_dir: Path,
+    *,
+    stale_seconds: int = DEFAULT_LOCK_STALE_SECONDS,
+    dry_run: bool = False,
+    now_ts: float | None = None,
+) -> Iterator[Path | None]:
+    """Cross-process backup lock shared by Docker and Windows task runners."""
+    if dry_run:
+        yield None
+        return
+
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    lock_dir = backup_dir / ".backup.lock"
+    now_ts = time.time() if now_ts is None else now_ts
+    try:
+        os.mkdir(lock_dir)
+    except FileExistsError as exc:
+        try:
+            age_seconds = max(0, now_ts - lock_dir.stat().st_mtime)
+        except OSError:
+            age_seconds = 0
+        if stale_seconds > 0 and age_seconds > stale_seconds:
+            shutil.rmtree(lock_dir, ignore_errors=True)
+            os.mkdir(lock_dir)
+        else:
+            raise BackupAlreadyRunning(
+                f"another backup is already running (lock {lock_dir}, age {int(age_seconds)}s)"
+            ) from exc
+
+    owner = lock_dir / "owner.json"
+    try:
+        owner.write_text(
+            json.dumps(
+                {
+                    "pid": os.getpid(),
+                    "started_at": datetime.now().isoformat(),
+                    "cwd": os.getcwd(),
+                    "argv": sys.argv,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        yield lock_dir
+    finally:
+        shutil.rmtree(lock_dir, ignore_errors=True)
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -644,32 +719,46 @@ def run_once(args: argparse.Namespace) -> int:
         return 0
 
     if args.command == "run":
-        stale_temp_minutes = _env_int(
-            "COLLECTOR_DB_BACKUP_STALE_TEMP_MAX_AGE_MINUTES",
-            DEFAULT_STALE_TEMP_MAX_AGE_MINUTES,
+        assert_backup_mount_ready(backup_dir)
+        lock_stale_seconds = _env_int(
+            "COLLECTOR_DB_BACKUP_LOCK_STALE_SECONDS",
+            DEFAULT_LOCK_STALE_SECONDS,
         )
-        removed_temp = cleanup_stale_temp_dumps(
-            backup_dir,
-            max_age_minutes=stale_temp_minutes,
-            dry_run=args.dry_run,
-        )
-        if removed_temp:
-            action = "would remove" if args.dry_run else "removed"
-            print(f"[backup] {action} {len(removed_temp)} stale temp dump(s)")
-        if args.dry_run:
-            planned = create_dump(backup_dir, prefix=prefix, now=datetime.now(), dry_run=True)
-            print(f"DRY RUN: would create {planned}")
-        else:
-            created = create_dump(
+        try:
+            with backup_run_lock(
                 backup_dir,
-                prefix=prefix,
-                database=args.database,
-                pg_dump_exe=args.pg_dump,
-                pg_restore_exe=args.pg_restore,
-                docker_container=args.docker_container,
-                docker_exe=args.docker_exe,
-            )
-            print(f"[backup] created {created} ({created.stat().st_size} bytes)")
+                stale_seconds=lock_stale_seconds,
+                dry_run=args.dry_run,
+            ):
+                stale_temp_minutes = _env_int(
+                    "COLLECTOR_DB_BACKUP_STALE_TEMP_MAX_AGE_MINUTES",
+                    DEFAULT_STALE_TEMP_MAX_AGE_MINUTES,
+                )
+                removed_temp = cleanup_stale_temp_dumps(
+                    backup_dir,
+                    max_age_minutes=stale_temp_minutes,
+                    dry_run=args.dry_run,
+                )
+                if removed_temp:
+                    action = "would remove" if args.dry_run else "removed"
+                    print(f"[backup] {action} {len(removed_temp)} stale temp dump(s)")
+                if args.dry_run:
+                    planned = create_dump(backup_dir, prefix=prefix, now=datetime.now(), dry_run=True)
+                    print(f"DRY RUN: would create {planned}")
+                else:
+                    created = create_dump(
+                        backup_dir,
+                        prefix=prefix,
+                        database=args.database,
+                        pg_dump_exe=args.pg_dump,
+                        pg_restore_exe=args.pg_restore,
+                        docker_container=args.docker_container,
+                        docker_exe=args.docker_exe,
+                    )
+                    print(f"[backup] created {created} ({created.stat().st_size} bytes)")
+        except BackupAlreadyRunning as exc:
+            print(f"[backup] skipped: {exc}")
+            return 0
 
     plan = build_retention_plan(list_backup_files(backup_dir, prefix=prefix), policy)
     print(plan_to_json(plan) if args.json else format_plan(plan))

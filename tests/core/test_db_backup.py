@@ -8,11 +8,13 @@ from pathlib import Path
 import pytest
 
 from src.backup.db_backup import (
+    BackupAlreadyRunning,
     BackupFile,
     BackupError,
     RetentionPolicy,
     apply_retention_plan,
     assert_backup_mount_ready,
+    backup_run_lock,
     backup_status,
     build_retention_plan,
     cleanup_stale_temp_dumps,
@@ -26,6 +28,13 @@ def _dump(tmp_path: Path, stamp: str, *, size: int = 1) -> Path:
     path = tmp_path / f"unifiedcollector_{stamp}.dump"
     path.write_bytes(b"x" * size)
     return path
+
+
+def _active_lock(tmp_path: Path) -> Path:
+    lock = tmp_path / ".backup.lock"
+    lock.mkdir()
+    (lock / "owner.json").write_text("{}", encoding="utf-8")
+    return lock
 
 
 def test_parse_backup_file_accepts_expected_name(tmp_path):
@@ -66,6 +75,7 @@ def test_backup_status_reports_latest_dump_and_in_progress(tmp_path):
     old = _dump(tmp_path, "20260719_033012", size=2)
     latest = _dump(tmp_path, "20260720_033012", size=5)
     (tmp_path / ".inprogress_20260721_033012.dump").write_bytes(b"x")
+    _active_lock(tmp_path)
 
     status = backup_status(tmp_path, max_age_hours=999999)
 
@@ -77,6 +87,7 @@ def test_backup_status_reports_latest_dump_and_in_progress(tmp_path):
     assert status["in_progress_count"] == 1
     assert status["stale_in_progress_count"] == 0
     assert status["in_progress_recent_max_age_seconds"] == 15 * 60
+    assert status["lock_active"] is True
     assert str(old) != status["latest_path"]
 
 
@@ -124,6 +135,7 @@ def test_backup_status_marks_old_dump_stale(tmp_path):
 def test_backup_status_marks_stale_dump_refreshing_when_new_dump_active(tmp_path):
     _dump(tmp_path, "20200101_000000")
     (tmp_path / ".inprogress_20260721_033012.dump").write_bytes(b"x")
+    _active_lock(tmp_path)
 
     status = backup_status(tmp_path, max_age_hours=1)
 
@@ -143,6 +155,7 @@ def test_backup_status_marks_empty_dir_missing(tmp_path):
 
 def test_backup_status_marks_empty_dir_refreshing_when_new_dump_active(tmp_path):
     (tmp_path / ".inprogress_20260721_033012.dump").write_bytes(b"x")
+    _active_lock(tmp_path)
 
     status = backup_status(tmp_path, max_age_hours=1)
 
@@ -240,6 +253,26 @@ def test_cleanup_stale_temp_dumps_dry_run_does_not_delete(tmp_path):
 
     assert deleted == [stale]
     assert stale.exists()
+
+
+def test_backup_run_lock_blocks_parallel_backup(tmp_path):
+    with backup_run_lock(tmp_path, stale_seconds=3600):
+        with pytest.raises(BackupAlreadyRunning):
+            with backup_run_lock(tmp_path, stale_seconds=3600):
+                pass
+
+
+def test_backup_run_lock_recovers_stale_lock(tmp_path):
+    lock_dir = tmp_path / ".backup.lock"
+    lock_dir.mkdir()
+    now = time.time()
+    os.utime(lock_dir, (now - 7200, now - 7200))
+
+    with backup_run_lock(tmp_path, stale_seconds=60, now_ts=now) as acquired:
+        assert acquired == lock_dir
+        assert (lock_dir / "owner.json").exists()
+
+    assert not lock_dir.exists()
 
 
 def test_pg_dump_prefers_pg_env_over_host_database_url(monkeypatch, tmp_path):
