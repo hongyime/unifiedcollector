@@ -203,6 +203,90 @@ async def test_collect_runs_explicit_targets_before_feed(monkeypatch, collector)
 
 
 @pytest.mark.asyncio
+async def test_collect_limits_configured_targets_per_cycle(monkeypatch, collector):
+    monkeypatch.setenv("LEMON8_SPIDER_ENABLED", "false")
+    collector._feed_enabled = False
+    collector._target_limit_per_cycle = 1
+    seen = []
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+    monkeypatch.setattr(lemon8_mod.httpx, "AsyncClient", lambda *args, **kwargs: _Client())
+
+    async def _collect_user(_client, username):
+        seen.append(username)
+
+    monkeypatch.setattr(collector, "_collect_user", _collect_user)
+
+    await collector.collect(["alice", "bob", "carol"])
+
+    assert seen == ["alice"]
+
+
+@pytest.mark.asyncio
+async def test_process_spider_queue_respects_cycle_limit(monkeypatch, collector):
+    conn = collector._test_conn  # type: ignore[attr-defined]
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            {"platform_user_id": "alice"},
+            {"platform_user_id": "bob"},
+            {"platform_user_id": "carol"},
+        ]
+    )
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+    monkeypatch.setattr(lemon8_mod.httpx, "AsyncClient", lambda *args, **kwargs: _Client())
+    collector._collect_user = AsyncMock()
+
+    await collector._process_spider_queue(max_items=2)
+
+    assert collector._collect_user.await_count == 2
+    assert conn.fetchrow.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_collect_feed_dedupes_and_caps_detail_fetches(monkeypatch, collector):
+    monkeypatch.setenv("LEMON8_FYP_DETAIL_FETCH", "true")
+    monkeypatch.setattr(lemon8_mod, "PYLEMON8_AVAILABLE", False)
+    collector._feed_media_per_cycle = 10
+    collector._fyp_detail_per_cycle = 1
+    collector.is_known = MagicMock(return_value=True)
+    collector._link_lemon8_media = AsyncMock()
+    collector._fetch_note_detail = AsyncMock(return_value={"platform_post_id": "111", "media": []})
+    collector._upsert_post = AsyncMock(return_value=True)
+    collector.download_media = AsyncMock()
+
+    async def _scrape_feed_with_web(_client, _pages):
+        return {
+            "media_items": [
+                {"url": "https://cdn.lemon8.test/1.jpg", "username": "alice", "note_id": "111"},
+                {"url": "https://cdn.lemon8.test/2.jpg", "username": "alice", "note_id": "111"},
+                {"url": "https://cdn.lemon8.test/3.jpg", "username": "bob", "note_id": "222"},
+            ],
+            "discovered_users": [],
+            "discovered_tags": [],
+        }
+
+    monkeypatch.setattr(collector, "_scrape_feed_with_web", _scrape_feed_with_web)
+
+    await collector._collect_feed(object())
+
+    collector._fetch_note_detail.assert_awaited_once()
+    collector._upsert_post.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_collect_skips_unavailable_profile_without_dlq(monkeypatch, collector):
     monkeypatch.setenv("LEMON8_SPIDER_ENABLED", "false")
     collector.send_to_dlq = AsyncMock()

@@ -397,6 +397,11 @@ services:
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
       LEMON8_FYP_DETAIL_FETCH: "true"
+      LEMON8_TARGETS_PER_CYCLE: "6"
+      LEMON8_SPIDER_QUEUE_PER_CYCLE: "8"
+      LEMON8_FEED_PAGES_PER_CYCLE: "2"
+      LEMON8_FEED_MEDIA_PER_CYCLE: "40"
+      LEMON8_FYP_DETAIL_PER_CYCLE: "2"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     cap_add:

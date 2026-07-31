@@ -285,6 +285,26 @@ class Lemon8Collector(BaseCollector):
         self._profile_photos = os.getenv("LEMON8_PROFILE_PHOTO_ENABLED", "true").lower() == "true"
         self._feed_enabled = os.getenv("LEMON8_FEED_ENABLED", "true").lower() == "true"
         self._tag_pages = int(os.getenv("LEMON8_TAG_PAGES", "10"))
+        self._target_limit_per_cycle = max(
+            0,
+            int(os.getenv("LEMON8_TARGETS_PER_CYCLE", "6") or "0"),
+        )
+        self._spider_queue_per_cycle = max(
+            0,
+            int(os.getenv("LEMON8_SPIDER_QUEUE_PER_CYCLE", "8") or "0"),
+        )
+        self._feed_pages_per_cycle = max(
+            1,
+            int(os.getenv("LEMON8_FEED_PAGES_PER_CYCLE", "2") or "1"),
+        )
+        self._feed_media_per_cycle = max(
+            0,
+            int(os.getenv("LEMON8_FEED_MEDIA_PER_CYCLE", "40") or "0"),
+        )
+        self._fyp_detail_per_cycle = max(
+            0,
+            int(os.getenv("LEMON8_FYP_DETAIL_PER_CYCLE", "2") or "0"),
+        )
         try:
             self._rate_limit_cooldown_seconds = max(
                 0,
@@ -372,7 +392,16 @@ class Lemon8Collector(BaseCollector):
 
     async def collect(self, targets: list[str]):
         async with httpx.AsyncClient(timeout=30, cookies=self._cookies, headers=self._headers(), follow_redirects=True) as client:
-            for username in targets:
+            cycle_targets = targets
+            if self._target_limit_per_cycle:
+                cycle_targets = targets[: self._target_limit_per_cycle]
+                if len(targets) > len(cycle_targets):
+                    logger.info(
+                        "lemon8: processing %d/%d configured targets this cycle",
+                        len(cycle_targets),
+                        len(targets),
+                    )
+            for username in cycle_targets:
                 if self._stop.is_set(): break
                 if username.startswith("#"):
                     try: await self._collect_tag(client, username.lstrip("#"))
@@ -419,11 +448,15 @@ class Lemon8Collector(BaseCollector):
                     logger.error("Feed collection failed: %s", safe_error)
 
         if os.getenv("LEMON8_SPIDER_ENABLED", "true").lower() == "true":
-            await self._process_spider_queue()
+            await self._process_spider_queue(max_items=self._spider_queue_per_cycle)
 
-    async def _process_spider_queue(self):
+    async def _process_spider_queue(self, max_items: int | None = None):
         async with httpx.AsyncClient(timeout=30, cookies=self._cookies, headers=self._headers(), follow_redirects=True) as client:
+            processed = 0
             while not self._stop.is_set():
+                if max_items is not None and max_items > 0 and processed >= max_items:
+                    logger.info("lemon8 spider queue: processed %d queued target(s) this cycle", processed)
+                    break
                 async with self.pool.acquire() as conn:
                     row = await conn.fetchrow("""
                         UPDATE lemon8_spider_queue
@@ -439,6 +472,7 @@ class Lemon8Collector(BaseCollector):
                 if not row: break
                 try:
                     await self._collect_user(client, row['platform_user_id'])
+                    processed += 1
                     async with self.pool.acquire() as conn:
                         await conn.execute("UPDATE lemon8_spider_queue SET status = 'completed' WHERE platform_user_id = $1", row['platform_user_id'])
                 except Exception as e:
@@ -1126,7 +1160,7 @@ class Lemon8Collector(BaseCollector):
 
     async def _collect_feed(self, client: httpx.AsyncClient):
         """For-You-Page (FYP) feed scraping. Tries pylemon8 if available, falls back to web."""
-        pages = max(1, self._tag_pages)
+        pages = max(1, self._feed_pages_per_cycle)
         result: dict[str, Any] = {}
 
         # 1) Optional pylemon8 path
@@ -1161,7 +1195,11 @@ class Lemon8Collector(BaseCollector):
         # Download media discovered from FYP. Skip profile photos unless enabled.
         # Also upsert a structured row into lemon8_posts so FYP-derived data is
         # queryable (synthesised id falls back to a hash when absent).
-        for item in media_items[: max(50, pages * 30)]:
+        max_media = self._feed_media_per_cycle or max(50, pages * 30)
+        detail_enabled = os.getenv("LEMON8_FYP_DETAIL_FETCH", "false").lower() == "true"
+        detail_seen: set[str] = set()
+        detail_fetches = 0
+        for item in media_items[: max_media]:
             if self._stop.is_set(): break
             url = item.get("url")
             if not url:
@@ -1195,8 +1233,18 @@ class Lemon8Collector(BaseCollector):
                 except Exception as e:
                     logger.debug("lemon8 media-link failed for note %s: %s", note_id, e)
 
-                # Optional deep detail fetch (title/desc/stats) — off by default.
-                if os.getenv("LEMON8_FYP_DETAIL_FETCH", "false").lower() == "true":
+                # Optional deep detail fetch (title/desc/stats). Bound and dedupe
+                # this lane so one Lemon8 FYP pass cannot monopolize ByteDance IO.
+                if (
+                    detail_enabled
+                    and note_id not in detail_seen
+                    and (
+                        self._fyp_detail_per_cycle <= 0
+                        or detail_fetches < self._fyp_detail_per_cycle
+                    )
+                ):
+                    detail_seen.add(note_id)
+                    detail_fetches += 1
                     try:
                         detail = await self._fetch_note_detail(client, uname, note_id)
                         if detail:

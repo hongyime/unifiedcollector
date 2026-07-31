@@ -94,6 +94,10 @@ class BaseCollector(ABC):
         # Set by a collector when a no-write cycle is intentional, for example
         # when a safer browser/extension path is already fresh.
         self._intentional_idle_reason: str | None = None
+        # WorkerService may inject these to serialize risky active scrape phases
+        # for sources that share platform anti-bot infrastructure.
+        self._collect_mutex_acquire = None
+        self._collect_mutex_release = None
 
     @property
     def progress_count(self) -> int:
@@ -183,6 +187,7 @@ class BaseCollector(ABC):
 
     async def run(self, targets: list[str]):
         """Entry point with all safety checks."""
+        self._intentional_idle_reason = None
         self.drive_ok = check_drive()
         if not self.drive_ok:
             message = f"Drive not mounted. Pausing {self.SOURCE_NAME}."
@@ -216,8 +221,27 @@ class BaseCollector(ABC):
         progress_before = self._progress_count
 
         logger.info("Starting %s collector (%d known items)", self.SOURCE_NAME, len(self._known_ids))
+        mutex_handle = None
         try:
-            await self.collect(targets)
+            acquire_mutex = self._collect_mutex_acquire
+            release_mutex = self._collect_mutex_release
+            if callable(acquire_mutex):
+                mutex_handle = await acquire_mutex(self.SOURCE_NAME)
+                if mutex_handle is False:
+                    self._intentional_idle_reason = (
+                        f"{self.SOURCE_NAME} shared scrape mutex is busy"
+                    )
+                    logger.info(
+                        "%s: shared scrape mutex is busy; skipping active collect slice",
+                        self.SOURCE_NAME,
+                    )
+                    return
+            try:
+                await self.collect(targets)
+            finally:
+                if callable(release_mutex) and mutex_handle not in (None, False):
+                    await release_mutex(mutex_handle)
+                    mutex_handle = None
             self.circuit_breaker.record_success()
             await self.run_backfill()
         except Exception as e:

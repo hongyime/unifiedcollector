@@ -2,6 +2,7 @@ import hashlib
 import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -48,6 +49,19 @@ class _TelegramCollector(BaseCollector):
 
     async def download_media(self, item):
         return None
+
+
+def _prepare_run(coll):
+    coll._seed_known_ids = AsyncMock()
+    coll.checkpoint.load_progress = AsyncMock()
+    coll.checkpoint.reset_if_stale = AsyncMock()
+    coll.checkpoint.mark_running = AsyncMock()
+    coll.checkpoint.mark_idle = AsyncMock()
+    coll.run_backfill = AsyncMock()
+    coll.reconciler.sweep = AsyncMock()
+    coll.reconciler.maybe_alert = AsyncMock()
+    coll.reconciler.finalize_cycle = AsyncMock()
+    coll.reconciler.advance_shard = lambda: None
 
 
 def _collector(monkeypatch):
@@ -144,6 +158,53 @@ async def test_run_queues_pause_when_vault_write_check_fails(monkeypatch):
     assert "dead_letter_queue" in args[0]
     assert args[1:4] == ("github", "github", "__vault_unavailable__")
     assert "file-heavy collection paused: Vault/media path not writable. Pausing github: media mirror missing" == args[4]
+
+
+@pytest.mark.asyncio
+async def test_run_releases_shared_scrape_mutex_before_reconciler(monkeypatch, tmp_path):
+    monkeypatch.setattr(base_collector, "check_drive", lambda: True)
+    monkeypatch.setattr(base_collector, "assert_media_write_allowed", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(base_collector, "DRIVE_PATH", str(tmp_path))
+    events = []
+    coll = _Collector()
+    coll.pool = _Pool()
+    _prepare_run(coll)
+    coll.collect = AsyncMock(side_effect=lambda _targets: events.append("collect"))
+    coll.run_backfill = AsyncMock(side_effect=lambda: events.append("backfill"))
+    coll.reconciler.sweep = AsyncMock(side_effect=lambda: events.append("sweep"))
+    coll._collect_mutex_acquire = AsyncMock(
+        side_effect=lambda _source: events.append("acquire") or "handle"
+    )
+    coll._collect_mutex_release = AsyncMock(
+        side_effect=lambda _handle: events.append("release")
+    )
+
+    await coll.run(["target"])
+
+    assert events[:4] == ["acquire", "collect", "release", "backfill"]
+    assert events[4] == "sweep"
+
+
+@pytest.mark.asyncio
+async def test_run_skips_collect_when_shared_scrape_mutex_busy(monkeypatch, tmp_path):
+    monkeypatch.setattr(base_collector, "check_drive", lambda: True)
+    monkeypatch.setattr(base_collector, "assert_media_write_allowed", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(base_collector, "DRIVE_PATH", str(tmp_path))
+    coll = _Collector()
+    coll.pool = _Pool()
+    _prepare_run(coll)
+    coll.collect = AsyncMock()
+    coll.run_backfill = AsyncMock()
+    coll._collect_mutex_acquire = AsyncMock(return_value=False)
+    coll._collect_mutex_release = AsyncMock()
+
+    await coll.run(["target"])
+
+    coll.collect.assert_not_awaited()
+    coll.run_backfill.assert_not_awaited()
+    coll._collect_mutex_release.assert_not_awaited()
+    assert coll.intentional_idle_reason == "github shared scrape mutex is busy"
+    coll.checkpoint.mark_idle.assert_awaited_once()
 
 
 def test_save_file_writes_canonical_vault_blob(tmp_path, monkeypatch):

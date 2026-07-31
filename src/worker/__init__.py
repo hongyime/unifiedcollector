@@ -705,6 +705,8 @@ class WorkerService:
         # Telethon session / broker handle the old instance was stuck on.
         collector = get_collector(source)
         collector.set_pool(self.pool)
+        setattr(collector, "_collect_mutex_acquire", self._try_acquire_source_mutex)
+        setattr(collector, "_collect_mutex_release", self._release_source_mutex)
         self._collectors[source] = collector
         # Reset the progress baseline to THIS collector's counter (a fresh
         # instance starts at 0) so a relaunch doesn't inherit a stale streak.
@@ -745,23 +747,7 @@ class WorkerService:
                     logger.info("Running %s with %d targets", source, len(targets))
                 self._heartbeat[source] = time.monotonic()
                 before = collector.progress_count
-                mutex_handle = await self._try_acquire_source_mutex(source)
-                if mutex_handle is False:
-                    logger.info(
-                        "worker/%s: %s mutex is busy; waiting for sibling collector",
-                        source,
-                        self.SOURCE_MUTEX_GROUPS.get(source),
-                    )
-                    self._zero_progress_streak[source] = 0
-                    try:
-                        await asyncio.wait_for(self._stop.wait(), timeout=60)
-                    except asyncio.TimeoutError:
-                        pass
-                    continue
-                try:
-                    await collector.run(targets)
-                finally:
-                    await self._release_source_mutex(mutex_handle)
+                await collector.run(targets)
                 self._heartbeat[source] = time.monotonic()
                 self._crash_counts[source] = 0
                 self._hang_counts[source] = 0  # successful cycle clears hang budget
@@ -794,10 +780,17 @@ class WorkerService:
                         len(targets),
                     )
 
+                sleep_for = self._cycle_sleep(source)
+                if idle_reason and "shared scrape mutex is busy" in str(idle_reason):
+                    try:
+                        sleep_for = max(
+                            5.0,
+                            float(os.getenv("COLLECTOR_MUTEX_BUSY_RETRY_SECONDS", "60")),
+                        )
+                    except ValueError:
+                        sleep_for = 60.0
                 try:
-                    await asyncio.wait_for(
-                        self._stop.wait(), timeout=self._cycle_sleep(source)
-                    )
+                    await asyncio.wait_for(self._stop.wait(), timeout=sleep_for)
                 except asyncio.TimeoutError:
                     pass
 
