@@ -32,7 +32,31 @@ process.on('unhandledRejection', (reason) => {
     console.error('[FATAL] Unhandled rejection:', reason);
 });
 
-const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
+function bridgeLogArgText(arg: any): string {
+    if (arg == null) return '';
+    if (typeof arg === 'string') return arg;
+    if (arg instanceof Error) return `${arg.message}\n${arg.stack || ''}`;
+    try {
+        return JSON.stringify(arg);
+    } catch {
+        return String(arg);
+    }
+}
+
+function shouldSuppressExpectedPairingLog(args: any[]): boolean {
+    const text = args.map(bridgeLogArgText).join(' ');
+    return text.includes('QR refs attempts ended') && text.includes('connection errored');
+}
+
+const logger = pino({
+    level: process.env.LOG_LEVEL || 'info',
+    hooks: {
+        logMethod(this: any, args: any[], method: any) {
+            if (shouldSuppressExpectedPairingLog(args)) return;
+            return method.apply(this, args);
+        },
+    },
+});
 const app = express();
 const port = 3001;
 
