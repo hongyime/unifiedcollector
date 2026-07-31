@@ -524,6 +524,8 @@ export function DashboardPage() {
   const extensionIssues = extension?.issues ?? [];
   const extensionHooks = extension?.hooks ?? [];
   const extensionIngest = extension?.ingest ?? [];
+  const extensionMediaCandidates = extension?.media_candidates ?? [];
+  const nonTiktokMediaCandidates = extensionMediaCandidates.filter((row) => row.platform !== "tiktok");
   const tiktokMedia = extension?.tiktok_media ?? null;
   const tiktokMediaOutcomes = tiktokMedia?.outcomes ?? [];
   const tiktokMediaTotal = tiktokMediaOutcomes.reduce((sum, row) => sum + (row.candidates || 0), 0);
@@ -805,6 +807,35 @@ export function DashboardPage() {
               </div>
             </div>
           </div>
+
+          {nonTiktokMediaCandidates.length > 0 && (
+            <div className="mt-4 bg-background border border-border rounded-md px-3 py-2 text-xs">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-medium text-text-primary">Browser media diagnosis</span>
+                <StatusBadge
+                  status={nonTiktokMediaCandidates.some((row) => row.needs_revisit > 0) ? "warning" : "online"}
+                  label={`${formatNumber(nonTiktokMediaCandidates.reduce((sum, row) => sum + row.candidates, 0))} candidates`}
+                />
+              </div>
+              <div className="mt-2 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2">
+                {nonTiktokMediaCandidates.slice(0, 9).map((row) => (
+                  <div key={`${row.platform}-${row.outcome}`} className="border border-border rounded-md px-2 py-1.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-medium text-text-primary capitalize">
+                        {row.platform} · {row.outcome.replace(/_/g, " ")}
+                      </span>
+                      <span className={row.needs_revisit ? "text-warning" : "text-text-muted"}>
+                        {formatNumber(row.candidates)}
+                      </span>
+                    </div>
+                    <div className="text-text-muted mt-0.5">
+                      {formatNumber(row.needs_revisit)} need revisit · last {formatDuration(row.age_seconds)} ago
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {tiktokMedia && (
             <div className="mt-4 bg-background border border-border rounded-md px-3 py-2 text-xs">

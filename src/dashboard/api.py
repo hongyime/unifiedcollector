@@ -1739,6 +1739,7 @@ async def _browser_extension_payload(conn) -> dict:
         "expected_version": expected,
         "hooks": [],
         "ingest": [],
+        "media_candidates": [],
         "tiktok_media": None,
         "issues": [],
     }
@@ -1852,6 +1853,35 @@ async def _browser_extension_payload(conn) -> dict:
                     "stored_count": item["stored_count"],
                     "needs_new_event": not recent,
                 })
+
+    if await conn.fetchval("SELECT to_regclass('browser_media_candidates')", timeout=5) is not None:
+        rows = await conn.fetch(
+            """
+            SELECT platform,
+                   outcome,
+                   count(*)::int AS candidates,
+                   count(*) FILTER (WHERE needs_revisit)::int AS needs_revisit,
+                   max(last_seen) AS last_seen_at,
+                   extract(epoch FROM now() - max(last_seen))::int AS age_seconds
+            FROM browser_media_candidates
+            WHERE last_seen >= now() - interval '24 hours'
+            GROUP BY platform, outcome
+            ORDER BY platform, candidates DESC, last_seen_at DESC
+            LIMIT 60
+            """,
+            timeout=10,
+        )
+        payload["media_candidates"] = [
+            {
+                "platform": row["platform"],
+                "outcome": row["outcome"],
+                "candidates": int(row["candidates"] or 0),
+                "needs_revisit": int(row["needs_revisit"] or 0),
+                "last_seen_at": row["last_seen_at"],
+                "age_seconds": int(row["age_seconds"] or 0),
+            }
+            for row in rows
+        ]
 
     if await conn.fetchval("SELECT to_regclass('tiktok_browser_media_candidates')", timeout=5) is not None:
         rows = await conn.fetch(

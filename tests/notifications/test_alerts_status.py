@@ -148,6 +148,10 @@ async def test_notify_status_splits_rate_limit_from_auth_events(monkeypatch):
                 "stored_count": 1,
             },
         ],
+        "browser_media_diagnostics": [
+            {"platform": "facebook", "outcome": "tiny_thumbnail", "candidates": 12, "needs_revisit": 0},
+            {"platform": "x", "outcome": "browser_fetch_failed", "candidates": 2, "needs_revisit": 2},
+        ],
         "tiktok_browser_media_diagnostics": [
             {"outcome": "short_lived_url", "candidates": 3, "needs_revisit": 3},
             {"outcome": "tiny_thumbnail", "candidates": 8, "needs_revisit": 0},
@@ -228,6 +232,9 @@ async def test_notify_status_splits_rate_limit_from_auth_events(monkeypatch):
     assert "<b>Browser extension ingest</b>" in msg
     assert "Threads media files: browser saw 12 items; stored 3; 2 POSTs this hour." in msg
     assert "Instagram profiles: browser saw 1 item; stored 1; 1 POST this hour." in msg
+    assert "<b>Browser media diagnosis</b>" in msg
+    assert "Facebook: tiny thumbnail/avatar rejected: 12." in msg
+    assert "Twitter / X: browser fetch failed: 2; 2 candidates need detail revisit." in msg
     assert "<b>TikTok media follow-up</b>" in msg
     assert "short-lived video URL queued for browser revisit: 3" in msg
     assert "TikTok detail revisit queue: 2 due now, 1 claimed by browser" in msg

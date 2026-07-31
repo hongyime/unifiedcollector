@@ -31,6 +31,8 @@ async def test_browser_extension_payload_flags_stale_and_old_versions(monkeypatc
                 return None
             if "tiktok_browser_revisit_queue" in query:
                 return None
+            if "browser_media_candidates" in query:
+                return None
             raise AssertionError(query)
 
         async def fetch(self, query: str, timeout: int | None = None):
@@ -91,6 +93,8 @@ async def test_browser_extension_payload_suppresses_old_endpoint_after_newer_cur
                 return None
             if "tiktok_browser_revisit_queue" in query:
                 return None
+            if "browser_media_candidates" in query:
+                return None
             raise AssertionError(query)
 
         async def fetch(self, query: str, timeout: int | None = None):
@@ -127,3 +131,65 @@ async def test_browser_extension_payload_suppresses_old_endpoint_after_newer_cur
         "browser_heartbeat": True,
     }
     assert payload["issues"] == []
+
+
+@pytest.mark.asyncio
+async def test_browser_extension_payload_includes_media_candidate_diagnostics(monkeypatch):
+    monkeypatch.setenv("UC_EXTENSION_EXPECTED_VERSION", "1.21.46")
+
+    class FakeConn:
+        async def fetchval(self, query: str, timeout: int | None = None):
+            if "dm_hook_heartbeat" in query:
+                return None
+            if "browser_ingest_events" in query:
+                return None
+            if "tiktok_browser_media_candidates" in query:
+                return None
+            if "tiktok_browser_revisit_queue" in query:
+                return None
+            if "browser_media_candidates" in query:
+                return "browser_media_candidates"
+            raise AssertionError(query)
+
+        async def fetch(self, query: str, timeout: int | None = None):
+            if "FROM browser_media_candidates" in query:
+                return [
+                    {
+                        "platform": "facebook",
+                        "outcome": "tiny_thumbnail",
+                        "candidates": 12,
+                        "needs_revisit": 0,
+                        "last_seen_at": datetime(2026, 7, 31, tzinfo=timezone.utc),
+                        "age_seconds": 60,
+                    },
+                    {
+                        "platform": "x",
+                        "outcome": "browser_fetch_failed",
+                        "candidates": 2,
+                        "needs_revisit": 2,
+                        "last_seen_at": datetime(2026, 7, 31, tzinfo=timezone.utc),
+                        "age_seconds": 120,
+                    },
+                ]
+            raise AssertionError(query)
+
+    payload = await _browser_extension_payload(FakeConn())
+
+    assert payload["media_candidates"] == [
+        {
+            "platform": "facebook",
+            "outcome": "tiny_thumbnail",
+            "candidates": 12,
+            "needs_revisit": 0,
+            "last_seen_at": datetime(2026, 7, 31, tzinfo=timezone.utc),
+            "age_seconds": 60,
+        },
+        {
+            "platform": "x",
+            "outcome": "browser_fetch_failed",
+            "candidates": 2,
+            "needs_revisit": 2,
+            "last_seen_at": datetime(2026, 7, 31, tzinfo=timezone.utc),
+            "age_seconds": 120,
+        },
+    ]

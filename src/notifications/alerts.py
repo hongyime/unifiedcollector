@@ -328,6 +328,44 @@ def _format_tiktok_media_diagnostics(rows: list[dict], queue: dict | None = None
     return lines
 
 
+def _format_browser_media_diagnostics(rows: list[dict]) -> list[str]:
+    if not rows:
+        return []
+    labels = {
+        "stored": "stored as media",
+        "duplicate": "already had the file",
+        "tiny_thumbnail": "tiny thumbnail/avatar rejected",
+        "short_lived_url": "short-lived URL",
+        "browser_fetch_failed": "browser fetch failed",
+        "http_error": "server fetch HTTP error",
+        "invalid_media": "invalid media/error page",
+        "vault_unavailable": "vault unavailable",
+        "browser_upload_failed": "browser upload failed",
+    }
+    grouped: dict[str, list[dict]] = {}
+    for row in rows:
+        platform = str(row.get("platform") or "").strip().lower()
+        if not platform or platform == "tiktok":
+            continue
+        grouped.setdefault(platform, []).append(row)
+    lines = []
+    for platform, platform_rows in sorted(grouped.items()):
+        parts = []
+        revisit = 0
+        for row in platform_rows[:4]:
+            count = int(row.get("candidates", 0) or 0)
+            revisit += int(row.get("needs_revisit", 0) or 0)
+            outcome = str(row.get("outcome") or "unknown")
+            parts.append(f"{labels.get(outcome, outcome.replace('_', ' '))}: {count:,}")
+        if parts:
+            revisit_text = (
+                f"; {revisit:,} {_plural(revisit, 'candidate')} need detail revisit"
+                if revisit else ""
+            )
+            lines.append(f"• {_display_source(platform)}: " + "; ".join(parts) + revisit_text + ".")
+    return lines
+
+
 def _format_x_collection_health(row: dict) -> list[str]:
     targets = int(row.get("targets", 0) or 0)
     due = int(row.get("due_targets", 0) or 0)
@@ -694,6 +732,13 @@ async def notify_status(snapshot: dict) -> bool:
         lines.append("")
         lines.append("<b>Browser extension ingest</b>")
         lines.extend(_format_browser_ingest_event(row) for row in browser_ingest[:6])
+
+    browser_media_diagnostics = snapshot.get("browser_media_diagnostics") or []
+    browser_media_lines = _format_browser_media_diagnostics(browser_media_diagnostics)
+    if browser_media_lines:
+        lines.append("")
+        lines.append("<b>Browser media diagnosis</b>")
+        lines.extend(browser_media_lines)
 
     tiktok_diagnostics = snapshot.get("tiktok_browser_media_diagnostics") or []
     tiktok_revisit = snapshot.get("tiktok_browser_revisit_queue") or {}

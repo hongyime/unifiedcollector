@@ -508,6 +508,26 @@ class Scheduler:
                     pass
 
                 try:
+                    if await conn.fetchval("SELECT to_regclass('browser_media_candidates')", timeout=5) is not None:
+                        snap["browser_media_diagnostics"] = [dict(r) for r in await conn.fetch(
+                            """
+                            SELECT platform,
+                                   outcome,
+                                   count(*)::int AS candidates,
+                                   count(*) FILTER (WHERE needs_revisit)::int AS needs_revisit,
+                                   max(last_seen) AS last_seen_at
+                            FROM browser_media_candidates
+                            WHERE last_seen >= date_trunc('hour', now())
+                            GROUP BY platform, outcome
+                            ORDER BY platform, candidates DESC, last_seen_at DESC
+                            LIMIT 30
+                            """,
+                            timeout=10,
+                        )]
+                except Exception:
+                    pass
+
+                try:
                     if await conn.fetchval("SELECT to_regclass('tiktok_browser_media_candidates')", timeout=5) is not None:
                         snap["tiktok_browser_media_diagnostics"] = [dict(r) for r in await conn.fetch(
                             """

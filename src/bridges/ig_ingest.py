@@ -282,6 +282,41 @@ CREATE INDEX IF NOT EXISTS idx_tiktok_browser_revisit_due
   ON tiktok_browser_revisit_queue (status, next_visit_at, priority DESC);
 """
 
+_BROWSER_MEDIA_CANDIDATES_DDL = """
+CREATE TABLE IF NOT EXISTS browser_media_candidates (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  platform text NOT NULL,
+  content_id text NOT NULL,
+  username text,
+  source_url text,
+  url_hash text NOT NULL,
+  asset_role text,
+  content_type text,
+  width integer,
+  height integer,
+  file_size bigint,
+  mime_type text,
+  extension_version text,
+  ingest_mode text NOT NULL DEFAULT 'url',
+  outcome text NOT NULL DEFAULT 'observed',
+  reason text,
+  needs_revisit boolean NOT NULL DEFAULT false,
+  metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+  first_seen timestamptz NOT NULL DEFAULT now(),
+  last_seen timestamptz NOT NULL DEFAULT now(),
+  attempts integer NOT NULL DEFAULT 1
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_browser_media_candidate
+  ON browser_media_candidates (platform, content_id, url_hash, ingest_mode);
+CREATE INDEX IF NOT EXISTS idx_browser_media_candidates_platform_seen
+  ON browser_media_candidates (platform, last_seen DESC);
+CREATE INDEX IF NOT EXISTS idx_browser_media_candidates_platform_outcome
+  ON browser_media_candidates (platform, outcome, last_seen DESC);
+CREATE INDEX IF NOT EXISTS idx_browser_media_candidates_revisit
+  ON browser_media_candidates (platform, needs_revisit, last_seen DESC)
+  WHERE needs_revisit;
+"""
+
 
 async def _execute_ddl_script(conn, script: str) -> None:
     for statement in (s.strip() for s in str(script or "").split(";")):
@@ -944,11 +979,33 @@ def _top_reject_reason(reject_stats: dict | None) -> tuple[str | None, str | Non
     return best_reason, str(detail) if detail is not None else None
 
 
-def _tiktok_asset_role(item: dict | None) -> str | None:
+def _candidate_asset_role(item: dict | None, platform: str | None = None) -> str | None:
     meta = _item_meta(item)
-    role = meta.get("tiktok_asset_role") or (item or {}).get("asset_role")
+    keys = []
+    if platform:
+        keys.append(f"{platform}_asset_role")
+    keys.extend([
+        "asset_role",
+        "tiktok_asset_role",
+        "x_asset_role",
+        "facebook_asset_role",
+        "threads_asset_role",
+        "instagram_asset_role",
+        "lemon8_asset_role",
+    ])
+    role = None
+    for key in keys:
+        role = meta.get(key)
+        if role is None and isinstance(item, dict):
+            role = item.get(key)
+        if role:
+            break
     role_s = str(role or "").strip().lower()
     return role_s or None
+
+
+def _tiktok_asset_role(item: dict | None) -> str | None:
+    return _candidate_asset_role(item, "tiktok")
 
 
 def _candidate_dimensions(item: dict | None) -> tuple[int | None, int | None]:
@@ -958,21 +1015,29 @@ def _candidate_dimensions(item: dict | None) -> tuple[int | None, int | None]:
     return width, height
 
 
-def _tiktok_candidate_is_video(item: dict | None) -> bool:
-    role = _tiktok_asset_role(item) or ""
+def _candidate_is_video(item: dict | None, platform: str | None = None) -> bool:
+    role = _candidate_asset_role(item, platform) or ""
     ctype = str((item or {}).get("content_type") or "").lower()
+    mime = str((item or {}).get("mime_type") or _item_meta(item).get("browser_upload_mime_type") or "").lower()
     url = str((item or {}).get("url") or "").lower()
     return (
         ctype == "video"
+        or ctype.startswith("video/")
+        or mime.startswith("video/")
         or "video" in role
         or "playaddr" in role
         or "/video/" in url
         or url.endswith(".mp4")
+        or "video.twimg.com" in url
     )
 
 
+def _tiktok_candidate_is_video(item: dict | None) -> bool:
+    return _candidate_is_video(item, "tiktok")
+
+
 def _looks_like_tiny_thumbnail(item: dict | None, detail: str | None = None) -> bool:
-    role = _tiktok_asset_role(item) or ""
+    role = _candidate_asset_role(item) or ""
     url = str((item or {}).get("url") or "").lower()
     detail_l = str(detail or "").lower()
     width, height = _candidate_dimensions(item)
@@ -1039,6 +1104,63 @@ def _classify_tiktok_candidate_result(
         return "http_error", detail or reason, False
     if reason in {"bad_uploaded_media", "exception", "timeout", "artifact_write_failed"}:
         return reason, detail or reason, _tiktok_candidate_is_video(item)
+    if reason == "vault_unavailable":
+        return "vault_unavailable", detail or reason, False
+    return reason, detail or reason, False
+
+
+def _classify_browser_candidate_result(
+    platform: str,
+    item: dict | None,
+    *,
+    saved: bool = False,
+    reject_stats: dict | None = None,
+    ingest_mode: str = "url",
+    browser_result: dict | None = None,
+) -> tuple[str, str | None, bool]:
+    if platform == "tiktok":
+        return _classify_tiktok_candidate_result(
+            item,
+            saved=saved,
+            reject_stats=reject_stats,
+            ingest_mode=ingest_mode,
+            browser_result=browser_result,
+        )
+
+    is_video = _candidate_is_video(item, platform)
+    if saved:
+        return "stored", None, False
+
+    result = browser_result if isinstance(browser_result, dict) else {}
+    if result:
+        if result.get("deduped") is True or int(result.get("deduped") or 0) > 0:
+            return "duplicate", "duplicate_sha256", False
+        if int(result.get("saved") or 0) > 0 or int(result.get("stored") or 0) > 0:
+            return "stored", None, False
+        reason = str(result.get("reason") or "browser_upload_failed")
+        if reason in {"duplicate_content_id", "duplicate_sha256"}:
+            return "duplicate", reason, False
+        if reason.startswith("http_") or reason in {"timeout", "failed", "browser_upload_failed"}:
+            return "browser_fetch_failed", reason, is_video
+        if reason in {"too_large", "too_large_header", "disallowed_host"}:
+            return reason, reason, False
+        if reason == "invalid_media" and _looks_like_tiny_thumbnail(item):
+            return "tiny_thumbnail", reason, False
+        return "browser_upload_failed", reason, is_video
+
+    reason, detail = _top_reject_reason(reject_stats)
+    if not reason:
+        return "failed", None, is_video and ingest_mode == "browser_upload"
+    if reason in {"duplicate_content_id", "duplicate_sha256"}:
+        return "duplicate", reason, False
+    if reason == "invalid_media":
+        if _looks_like_tiny_thumbnail(item, detail):
+            return "tiny_thumbnail", detail or reason, False
+        return "invalid_media", detail or reason, is_video
+    if reason == "http_status":
+        return "http_error", detail or reason, is_video
+    if reason in {"bad_uploaded_media", "exception", "timeout", "artifact_write_failed"}:
+        return reason, detail or reason, is_video
     if reason == "vault_unavailable":
         return "vault_unavailable", detail or reason, False
     return reason, detail or reason, False
@@ -1181,6 +1303,113 @@ async def _record_tiktok_browser_candidate(
             content_id,
             ingest_mode,
             exc_info=True,
+        )
+
+
+async def _record_browser_media_candidate(
+    pool,
+    platform: str,
+    username: str | None,
+    item: dict | None,
+    *,
+    ingest_mode: str,
+    saved: bool = False,
+    reject_stats: dict | None = None,
+    extension_version: str | None = None,
+    browser_result: dict | None = None,
+) -> None:
+    if platform not in KNOWN_PLATFORMS or not isinstance(item, dict):
+        return
+    url = str(item.get("url") or "").strip()
+    if not url:
+        return
+    content_id = str(item.get("content_id") or _url_hash(url)[:32])[:300]
+    meta = _item_meta(item)
+    ext_version = extension_version or str(meta.get("extension_version") or "") or None
+    width, height = _candidate_dimensions(item)
+    file_size = _int(item.get("file_size") or meta.get("browser_upload_size"))
+    mime_type = item.get("mime_type") or item.get("content_type_header") or meta.get("browser_upload_mime_type")
+    outcome, reason, needs_revisit = _classify_browser_candidate_result(
+        platform,
+        item,
+        saved=saved,
+        reject_stats=reject_stats,
+        ingest_mode=ingest_mode,
+        browser_result=browser_result,
+    )
+    metadata = {
+        "raw_meta": meta,
+        "browser_upload": bool(item.get("browser_upload")),
+        "browser_upload_only": bool(item.get("browser_upload_only")),
+    }
+    if reject_stats:
+        metadata["reject_stats"] = reject_stats
+    if browser_result:
+        metadata["browser_result"] = browser_result
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO browser_media_candidates
+                  (platform, content_id, username, source_url, url_hash, asset_role,
+                   content_type, width, height, file_size, mime_type,
+                   extension_version, ingest_mode, outcome, reason,
+                   needs_revisit, metadata)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb)
+                ON CONFLICT (platform, content_id, url_hash, ingest_mode) DO UPDATE SET
+                  username = COALESCE(EXCLUDED.username, browser_media_candidates.username),
+                  source_url = EXCLUDED.source_url,
+                  asset_role = COALESCE(EXCLUDED.asset_role, browser_media_candidates.asset_role),
+                  content_type = COALESCE(EXCLUDED.content_type, browser_media_candidates.content_type),
+                  width = COALESCE(EXCLUDED.width, browser_media_candidates.width),
+                  height = COALESCE(EXCLUDED.height, browser_media_candidates.height),
+                  file_size = COALESCE(EXCLUDED.file_size, browser_media_candidates.file_size),
+                  mime_type = COALESCE(EXCLUDED.mime_type, browser_media_candidates.mime_type),
+                  extension_version = COALESCE(EXCLUDED.extension_version, browser_media_candidates.extension_version),
+                  outcome = EXCLUDED.outcome,
+                  reason = EXCLUDED.reason,
+                  needs_revisit = EXCLUDED.needs_revisit,
+                  metadata = browser_media_candidates.metadata || EXCLUDED.metadata,
+                  last_seen = now(),
+                  attempts = browser_media_candidates.attempts + 1
+                """,
+                platform,
+                content_id,
+                username,
+                url[:2000],
+                _url_hash(url),
+                _candidate_asset_role(item, platform),
+                str(item.get("content_type") or "")[:40] or None,
+                width,
+                height,
+                file_size,
+                str(mime_type)[:120] if mime_type else None,
+                ext_version,
+                ingest_mode,
+                outcome,
+                reason,
+                needs_revisit,
+                json.dumps(metadata, default=str),
+            )
+    except Exception:
+        logger.debug(
+            "browser media candidate record failed platform=%s content_id=%s mode=%s",
+            platform,
+            content_id,
+            ingest_mode,
+            exc_info=True,
+        )
+
+    if platform == "tiktok":
+        await _record_tiktok_browser_candidate(
+            pool,
+            username,
+            item,
+            ingest_mode=ingest_mode,
+            saved=saved,
+            reject_stats=reject_stats,
+            extension_version=extension_version,
+            browser_result=browser_result,
         )
 
 
@@ -1507,16 +1736,16 @@ async def _drain(app, platform, username, items, extension_version: str | None =
             _merge_reject_stats(reject_stats, item_stats)
             if item_saved:
                 saved += 1
-            if platform == "tiktok":
-                await _record_tiktok_browser_candidate(
-                    pool,
-                    username,
-                    payload if isinstance(payload, dict) else {},
-                    ingest_mode="url",
-                    saved=item_saved,
-                    reject_stats=item_stats,
-                    extension_version=extension_version,
-                )
+            await _record_browser_media_candidate(
+                pool,
+                platform,
+                username,
+                payload if isinstance(payload, dict) else {},
+                ingest_mode="url",
+                saved=item_saved,
+                reject_stats=item_stats,
+                extension_version=extension_version,
+            )
 
     await asyncio.gather(*(one(it) for it in items), return_exceptions=True)
     event_meta = {}
@@ -1631,16 +1860,16 @@ async def _ingest_uploaded_media(app, platform, body):
     reject_stats: dict = {}
     async with app["sem"]:
         saved = await _download_and_save(app["pool"], app["session"], platform, username, item, reject_stats)
-    if platform == "tiktok":
-        await _record_tiktok_browser_candidate(
-            app["pool"],
-            username,
-            item,
-            ingest_mode="browser_upload",
-            saved=bool(saved),
-            reject_stats=reject_stats,
-            extension_version=extension_version,
-        )
+    await _record_browser_media_candidate(
+        app["pool"],
+        platform,
+        username,
+        item,
+        ingest_mode="browser_upload",
+        saved=bool(saved),
+        reject_stats=reject_stats,
+        extension_version=extension_version,
+    )
     dedupe_reasons = {"duplicate_content_id", "duplicate_sha256"}
     deduped = any(int(reject_stats.get(reason) or 0) > 0 for reason in dedupe_reasons)
     accepted = bool(saved or deduped)
@@ -1696,8 +1925,6 @@ async def _ingest_uploaded_media(app, platform, body):
 async def browser_media_candidates(request):
     body = await _safe_json(request)
     platform = _norm_platform(body.get("platform"))
-    if platform != "tiktok":
-        return _cors(web.json_response({"ok": True, "recorded": 0, "platform": platform}))
     username = body.get("username") or "unknown"
     extension_version = body.get("extension_version")
     raw_items = body.get("items") or []
@@ -1711,8 +1938,9 @@ async def browser_media_candidates(request):
         result = entry.get("result") if isinstance(entry.get("result"), dict) else {}
         if not isinstance(item, dict):
             continue
-        await _record_tiktok_browser_candidate(
+        await _record_browser_media_candidate(
             request.app["pool"],
+            platform,
             username,
             item,
             ingest_mode=str(entry.get("ingest_mode") or "browser_upload")[:40],
@@ -4019,6 +4247,7 @@ async def _on_startup(app):
             await conn.execute(_SPIDER_DDL)
             await _execute_ddl_script(conn, _X_TARGETS_DDL)
             await _execute_ddl_script(conn, _TIKTOK_BROWSER_MEDIA_DDL)
+            await _execute_ddl_script(conn, _BROWSER_MEDIA_CANDIDATES_DDL)
     except Exception:
         logger.exception("startup DDL failed")
     app["session"] = aiohttp.ClientSession(

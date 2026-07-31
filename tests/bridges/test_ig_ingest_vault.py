@@ -157,6 +157,79 @@ def test_tiktok_browser_classifier_marks_saved_terminal():
     assert needs_revisit is False
 
 
+def test_browser_classifier_suppresses_facebook_tiny_thumbnails():
+    item = {
+        "content_type": "photo",
+        "url": "https://static.xx.fbcdn.net/rsrc.php/v4/icon.png",
+        "meta": {"facebook_asset_role": "icon", "width": 64, "height": 64},
+    }
+
+    outcome, reason, needs_revisit = ig_ingest._classify_browser_candidate_result(
+        "facebook",
+        item,
+        saved=False,
+        reject_stats={"invalid_media": 1, "examples": {"invalid_media": "too small image"}},
+        ingest_mode="url",
+    )
+
+    assert outcome == "tiny_thumbnail"
+    assert "too small" in reason
+    assert needs_revisit is False
+
+
+def test_browser_classifier_marks_x_video_fetch_failure_revisitable():
+    item = {
+        "content_type": "video",
+        "url": "https://video.twimg.com/ext_tw_video/123/pu/vid/720x720/a.mp4",
+        "meta": {"x_asset_role": "video"},
+    }
+
+    outcome, reason, needs_revisit = ig_ingest._classify_browser_candidate_result(
+        "x",
+        item,
+        saved=False,
+        browser_result={"reason": "timeout"},
+        ingest_mode="browser_upload",
+    )
+
+    assert outcome == "browser_fetch_failed"
+    assert reason == "timeout"
+    assert needs_revisit is True
+
+
+def test_browser_media_candidates_records_non_tiktok_platform():
+    pool = _FakePool()
+    response = asyncio.run(
+        ig_ingest.browser_media_candidates(
+            _FakeRequest(
+                {"pool": pool},
+                {
+                    "platform": "facebook",
+                    "username": "feed",
+                    "extension_version": "1.21.46",
+                    "items": [
+                        {
+                            "ingest_mode": "browser_upload",
+                            "item": {
+                                "content_id": "fb_1",
+                                "content_type": "photo",
+                                "url": "https://scontent.xx.fbcdn.net/v/t39.30808-6/fb.jpg",
+                                "meta": {"facebook_asset_role": "background_image"},
+                            },
+                            "result": {"reason": "http_403", "reject_stats": {"http_status": 1}},
+                        }
+                    ],
+                },
+            )
+        )
+    )
+    payload = json.loads(response.text)
+
+    assert payload == {"ok": True, "recorded": 1, "platform": "facebook"}
+    assert any("browser_media_candidates" in query for query, _args in pool.conn.executes)
+    assert not any("tiktok_browser_media_candidates" in query for query, _args in pool.conn.executes)
+
+
 def test_tiktok_revisit_target_reclaims_stale_claimed(monkeypatch):
     pool = _FakePool()
     pool.conn.fetchrow_result = {

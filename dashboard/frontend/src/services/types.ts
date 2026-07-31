@@ -84,6 +84,15 @@ export interface TikTokBrowserMediaHealth {
   queue: TikTokBrowserRevisitQueue | null;
 }
 
+export interface BrowserMediaCandidateOutcome {
+  platform: string;
+  outcome: string;
+  candidates: number;
+  needs_revisit: number;
+  last_seen_at: string | null;
+  age_seconds: number;
+}
+
 export interface BrowserExtensionIssue {
   platform: string;
   endpoint?: string | null;
@@ -98,6 +107,7 @@ export interface BrowserExtensionHealth {
   expected_version: string | null;
   hooks: BrowserExtensionHook[];
   ingest: BrowserExtensionIngest[];
+  media_candidates?: BrowserMediaCandidateOutcome[];
   tiktok_media?: TikTokBrowserMediaHealth | null;
   issues: BrowserExtensionIssue[];
 }
