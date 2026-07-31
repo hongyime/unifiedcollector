@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -329,6 +331,41 @@ async def test_api_get_returns_empty_on_non_200(monkeypatch, caplog):
     assert any("status=403" in r.getMessage() for r in caplog.records)
 
 
+@pytest.mark.asyncio
+async def test_api_get_skips_when_persisted_api_cooldown_is_active(monkeypatch):
+    coll = _new_collector(monkeypatch, YOUTUBE_API_KEY="AIzaK")
+    coll.pool._conn.fetchrow = AsyncMock(return_value={
+        "cooldown_until": datetime.now(timezone.utc) + timedelta(seconds=90),
+    })
+
+    class _NoClient:
+        def __init__(self, *args, **kwargs):  # pragma: no cover - should not be reached
+            raise AssertionError("Data API should not be called during cooldown")
+
+    monkeypatch.setattr(youtube_mod.httpx, "AsyncClient", _NoClient)
+
+    out = await coll._api_get("channels", {"id": "UC123"})
+
+    assert out == {}
+    assert coll._youtube_api_cooldown_remaining() > 0
+
+
+@pytest.mark.asyncio
+async def test_record_api_request_sets_local_cooldown_on_403(monkeypatch):
+    coll = _new_collector(monkeypatch, YOUTUBE_API_KEY="AIzaK")
+    coll._api_403_cooldown_seconds = 123
+
+    await coll._record_api_request("channels.list", status_code=403)
+
+    assert coll._youtube_api_cooldown_remaining() > 100
+    calls = coll.pool._conn.execute.await_args_list
+    assert any(
+        "INSERT INTO rate_limit_events" in call.args[0]
+        and call.args[5] == 123
+        for call in calls
+    )
+
+
 # ── _upsert_channel ──────────────────────────────────────────────────────
 
 
@@ -381,6 +418,21 @@ async def test_upsert_channel_with_auth_returns_none_when_not_found(monkeypatch)
     # Important: no youtube_channels row when channels.list confirms not found.
     calls = coll.pool._conn.execute.await_args_list
     assert not any("INSERT INTO youtube_channels" in c.args[0] for c in calls)
+
+
+@pytest.mark.asyncio
+async def test_collect_channel_cooldown_does_not_confirm_missing_channel(monkeypatch):
+    coll = _new_collector(monkeypatch, YOUTUBE_API_KEY="AIzaK")
+    coll._has_auth = True
+    coll._api_cooldown_until = time.time() + 90
+    coll._download_videos_via_yt_dlp = AsyncMock()
+    coll._mark_channel_skip = AsyncMock()
+
+    result = await coll._collect_channel("UC123")
+
+    assert result["reason"] == "collected"
+    coll._mark_channel_skip.assert_not_awaited()
+    coll._download_videos_via_yt_dlp.assert_awaited_once()
 
 
 # ── _upsert_video ────────────────────────────────────────────────────────

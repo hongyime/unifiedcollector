@@ -57,6 +57,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
@@ -134,6 +135,10 @@ class YoutubeCollector(BaseCollector):
         self._merge_format = os.getenv("YOUTUBE_MERGE_FORMAT", "mp4")
         self._download_delay = float(os.getenv("YOUTUBE_DOWNLOAD_DELAY", "5.0"))
         self._api_delay = float(os.getenv("YOUTUBE_API_DELAY", "3.0"))
+        self._api_403_cooldown_seconds = int(os.getenv("YOUTUBE_API_403_COOLDOWN_SECONDS", "21600"))
+        self._api_429_cooldown_seconds = int(os.getenv("YOUTUBE_API_429_COOLDOWN_SECONDS", "1800"))
+        self._api_cooldown_until = 0.0
+        self._api_cooldown_restored = False
         self._max_concurrent = int(os.getenv("YOUTUBE_MAX_CONCURRENT_DOWNLOADS", "3"))
         self._use_yt_dlp = self._check_yt_dlp()
         self._sem = asyncio.Semaphore(self._max_concurrent)
@@ -400,13 +405,21 @@ class YoutubeCollector(BaseCollector):
         return processed
 
     async def _collect_channel(self, channel_input: str):
-        channel_id, channel_name = await self._resolve_channel(channel_input)
+        api_cooldown_active = await self._youtube_api_cooldown_active("collect_channel", channel_input)
+        if api_cooldown_active:
+            channel_id, channel_name = channel_input, channel_input
+        else:
+            channel_id, channel_name = await self._resolve_channel(channel_input)
         if not channel_id:
             logger.warning("Could not resolve channel: %s", channel_input)
             return {"status": "error", "reason": "resolve_failed", "input": channel_input}
 
         # 1. Upsert Channel Info (returns uploads playlist ID + subscriber count)
-        uploads_playlist, sub_count = await self._upsert_channel(channel_id, channel_name)
+        uploads_playlist, sub_count = await self._upsert_channel(
+            channel_id,
+            channel_name,
+            allow_api=not api_cooldown_active,
+        )
 
         # FAMOUS-FILTER (Bryan): skip channels at/above the subscriber cap, even if
         # subscribed. The channel row is still upserted above (so we know it + its
@@ -429,12 +442,12 @@ class YoutubeCollector(BaseCollector):
         # the channel is confirmed-missing — skip the expensive yt-dlp download
         # (running yt-dlp on a dead /channel/<id>/videos URL otherwise burns the
         # full download timeout per cycle for nothing).
-        if self._has_auth and uploads_playlist is None:
+        if self._has_auth and uploads_playlist is None and not api_cooldown_active:
             logger.info("youtube: skipping yt-dlp for confirmed-missing channel %s", channel_id)
             await self._mark_channel_skip(channel_id, "no_uploads_playlist", {"has_auth": True})
             return {"status": "completed", "reason": "no_uploads_playlist", "channel_id": channel_id}
 
-        if self._has_auth and uploads_playlist:
+        if self._has_auth and uploads_playlist and not api_cooldown_active:
             video_ids = await self._collect_video_list_via_api(channel_id, channel_name, uploads_playlist)
         else:
             video_ids = []
@@ -489,6 +502,61 @@ class YoutubeCollector(BaseCollector):
             return "oauth"
         return "anonymous"
 
+    def _youtube_api_cooldown_remaining(self) -> float:
+        return max(0.0, self._api_cooldown_until - time.time())
+
+    async def _restore_youtube_api_cooldown(self) -> None:
+        if self._api_cooldown_restored or self.pool is None:
+            return
+        self._api_cooldown_restored = True
+        account = self._youtube_quota_account()
+        try:
+            async with self.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """
+                    SELECT MAX(created_at + (COALESCE(cooldown_seconds, 0) * INTERVAL '1 second')) AS cooldown_until
+                    FROM rate_limit_events
+                    WHERE source = 'youtube'
+                      AND account = $1
+                      AND status_code IN (403, 429)
+                      AND COALESCE(cooldown_seconds, 0) > 0
+                      AND created_at + (COALESCE(cooldown_seconds, 0) * INTERVAL '1 second') > NOW()
+                    """,
+                    account,
+                )
+        except Exception:
+            logger.debug("youtube api cooldown restore failed", exc_info=True)
+            return
+        cooldown_until = row["cooldown_until"] if row else None
+        if not cooldown_until:
+            return
+        if cooldown_until.tzinfo is None:
+            cooldown_until = cooldown_until.replace(tzinfo=timezone.utc)
+        remaining = (cooldown_until - datetime.now(timezone.utc)).total_seconds()
+        if remaining > 0:
+            self._api_cooldown_until = max(self._api_cooldown_until, time.time() + remaining)
+            logger.info("youtube: restored Data API cooldown for %ds on %s", int(remaining), account)
+
+    async def _youtube_api_cooldown_active(self, scope: str, target: str | None = None) -> bool:
+        await self._restore_youtube_api_cooldown()
+        remaining = self._youtube_api_cooldown_remaining()
+        if remaining <= 0:
+            return False
+        detail = f" for {target}" if target else ""
+        logger.info(
+            "youtube: skipping Data API %s%s while %s is cooling down for %ds",
+            scope,
+            detail,
+            self._youtube_quota_account(),
+            int(remaining),
+        )
+        return True
+
+    def _set_youtube_api_cooldown(self, seconds: int | None) -> None:
+        if not seconds or seconds <= 0:
+            return
+        self._api_cooldown_until = max(self._api_cooldown_until, time.time() + int(seconds))
+
     async def _record_api_request(
         self,
         endpoint: str,
@@ -536,13 +604,18 @@ class YoutubeCollector(BaseCollector):
             logger.debug("youtube quota usage update failed", exc_info=True)
 
         if status_code in (403, 429):
+            cooldown_seconds = (
+                self._api_403_cooldown_seconds if status_code == 403
+                else self._api_429_cooldown_seconds
+            )
+            self._set_youtube_api_cooldown(cooldown_seconds)
             await record_rate_limit_event(
                 self.pool,
                 source="youtube",
                 account=account,
                 scope=endpoint,
                 status_code=status_code,
-                cooldown_seconds=3600 if status_code == 403 else 900,
+                cooldown_seconds=cooldown_seconds,
                 reason="youtube_api_quota_or_access",
                 metadata=metadata or {},
             )
@@ -1163,12 +1236,18 @@ class YoutubeCollector(BaseCollector):
         except Exception:
             logger.debug("youtube comments status update failed", exc_info=True)
 
-    async def _upsert_channel(self, channel_id: str, channel_name: str) -> tuple[str | None, int]:
+    async def _upsert_channel(
+        self,
+        channel_id: str,
+        channel_name: str,
+        *,
+        allow_api: bool = True,
+    ) -> tuple[str | None, int]:
         """Upsert channel row. Returns (uploads playlist ID or None, subscriber_count)."""
         snippet = {}
         statistics = {}
         uploads_playlist = None
-        if self._has_auth:
+        if self._has_auth and allow_api and not await self._youtube_api_cooldown_active("channels.list", channel_id):
             try:
                 headers, params = self._yt_auth({"part": "snippet,statistics,contentDetails", "id": channel_id})
                 async with httpx.AsyncClient(timeout=30, headers=headers) as client:
@@ -1545,6 +1624,8 @@ class YoutubeCollector(BaseCollector):
     async def _resolve_channel(self, channel_input: str) -> tuple[str, str]:
         if not self._has_auth:
             return channel_input, channel_input
+        if await self._youtube_api_cooldown_active("resolve", channel_input):
+            return channel_input, channel_input
 
         async with httpx.AsyncClient(timeout=30) as client:
             if channel_input.startswith("UC"):
@@ -1572,6 +1653,8 @@ class YoutubeCollector(BaseCollector):
 
     async def _collect_video_list_via_api(self, channel_id: str, channel_name: str, uploads_playlist: str) -> list[str]:
         """List videos via the channel's uploads playlist (1 quota unit/page vs search.list's 100, and reliably returns all uploads)."""
+        if await self._youtube_api_cooldown_active("playlistItems.list", channel_id):
+            return []
         video_ids = []
         page_token = ""
         async with httpx.AsyncClient(timeout=30) as client:
@@ -1646,6 +1729,8 @@ class YoutubeCollector(BaseCollector):
 
     async def _enrich_video_stats(self, video_ids: list[str]):
         """Batch-fetch statistics+contentDetails via videos.list (50 IDs/req) and UPDATE youtube_videos."""
+        if await self._youtube_api_cooldown_active("videos.list"):
+            return
         async with httpx.AsyncClient(timeout=30) as client:
             for i in range(0, len(video_ids), 50):
                 if self._stop.is_set(): break
@@ -2526,6 +2611,8 @@ class YoutubeCollector(BaseCollector):
         Returns parsed JSON dict on 200, or {} on non-200 / quota / error.
         Wraps existing _yt_auth() to keep auth logic uniform across new verbs.
         """
+        if await self._youtube_api_cooldown_active(path, params.get("id") or params.get("playlistId")):
+            return {}
         headers, qparams = self._yt_auth(params)
         own_client = client is None
         if own_client:
