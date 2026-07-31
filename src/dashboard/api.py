@@ -1526,6 +1526,12 @@ def _source_media_freshness(source: str | None, current_window: dict, day_window
     total_items = int(total.get("total_media_items") or 0)
     latest = total.get("latest_media_at")
     expected = source in _MEDIA_PRIMARY_SOURCES or bool(source and source.startswith(_BEEPER_SUBSOURCE_PREFIX))
+    beeper_subsource = bool(source and source.startswith(_BEEPER_SUBSOURCE_PREFIX))
+    beeper_message_activity = beeper_subsource and any(
+        int((window or {}).get(key) or 0) > 0
+        for window in (current_window, day_window)
+        for key in ("records", "messages")
+    )
     now = now or datetime.now(timezone.utc)
 
     latest_age_seconds = None
@@ -1577,6 +1583,17 @@ def _source_media_freshness(source: str | None, current_window: dict, day_window
             "latest_age_seconds": latest_age_seconds,
             "summary": "Media totals are temporarily unavailable under DB load; not claiming this source has zero media.",
             "next_action": "Refresh after DB load drops or inspect media rollups directly before treating this as a collection gap.",
+        }
+    if beeper_message_activity:
+        return {
+            "status": "quiet",
+            "severity": "ok",
+            "expected": True,
+            "current_hour_items": current_items,
+            "last_24h_items": day_items,
+            "latest_age_seconds": latest_age_seconds,
+            "summary": "Messages are flowing in this Beeper network; no recent media files is not a collection failure.",
+            "next_action": "No media action unless you expected attachments in this specific network.",
         }
     if total_items <= 0:
         return {

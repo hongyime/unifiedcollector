@@ -250,6 +250,36 @@ def test_source_matrix_row_labels_quiet_beeper_subsource_without_media_warning()
     assert "media silence is expected" in row["media_freshness"]["summary"]
 
 
+def test_source_matrix_row_does_not_warn_for_live_beeper_subsource_without_media():
+    row = _source_matrix_row(
+        _source(
+            source="beeper_slack",
+            parent_source="beeper",
+            status="live",
+            collection_mode="messaging bridge",
+            detail="Beeper / Slack via Beeper: recent messages.",
+        ),
+        current_content={"records": 7, "messages": 7, "media_items": 0},
+        current_rate=None,
+        day_content={"records": 20, "messages": 20, "media_items": 0},
+        day_rate=None,
+        media_total={
+            "total_media_items": 12,
+            "total_media_bytes": 1200,
+            "latest_media_at": datetime(2026, 7, 26, 1, 30, tzinfo=timezone.utc),
+        },
+        cursor_row=None,
+        extension_issues=[],
+        now=datetime(2026, 7, 28, 1, 30, tzinfo=timezone.utc),
+    )
+
+    assert row["status"] == "live"
+    assert row["status_label"] == "live"
+    assert row["media_freshness"]["status"] == "quiet"
+    assert row["media_freshness"]["severity"] == "ok"
+    assert "Messages are flowing" in row["media_freshness"]["summary"]
+
+
 def test_rate_limit_cursor_payload_marks_expired_cursor_inactive():
     now = datetime(2026, 7, 28, 0, 0, tzinfo=timezone.utc)
     payload = _rate_limit_cursor_payload(
