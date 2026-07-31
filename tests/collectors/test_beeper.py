@@ -28,6 +28,7 @@ from src.collectors.beeper import (
     BeeperTransientError,
     BeeperWriter,
     _command_count,
+    _format_exception,
     _is_transient_network_error,
     _opt,
     _parse_ts,
@@ -822,6 +823,11 @@ def test_is_transient_network_error_classifies():
     assert not _is_transient_network_error(None)
 
 
+def test_format_exception_keeps_blank_timeouts_readable():
+    assert _format_exception(TimeoutError()) == "TimeoutError"
+    assert _format_exception(RuntimeError("boom")) == "RuntimeError: boom"
+
+
 def test_transient_error_is_api_error_subclass():
     # Existing handlers that catch BeeperAPIError must still catch transient ones.
     assert issubclass(BeeperTransientError, BeeperAPIError)
@@ -907,6 +913,53 @@ async def test_collect_swallows_transient_without_error_count(monkeypatch, tmp_p
     stats = await coll.collect([])
     assert stats["transient"] == 1
     assert stats["errors"] == 0
+
+
+@pytest.mark.asyncio
+async def test_collect_treats_cycle_timeout_as_transient(monkeypatch, tmp_path):
+    monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
+    monkeypatch.setenv("COLLECTOR_DRIVE_PATH", str(tmp_path))
+
+    pool, _conn = _mock_pool()
+    fake_client = MagicMock(spec=BeeperClient)
+    fake_client.accounts = AsyncMock(side_effect=TimeoutError())
+
+    coll = BeeperCollector(client=fake_client)
+    coll.set_pool(pool)
+    stats = await coll.collect([])
+
+    assert stats["transient"] == 1
+    assert stats["errors"] == 0
+
+
+@pytest.mark.asyncio
+async def test_sync_one_chat_timeout_does_not_abort_cycle(monkeypatch, tmp_path):
+    monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
+    monkeypatch.setenv("COLLECTOR_DRIVE_PATH", str(tmp_path))
+
+    async def _messages(*_args, **_kwargs):
+        raise TimeoutError()
+        yield  # pragma: no cover
+
+    fake_client = MagicMock(spec=BeeperClient)
+    fake_client.iter_messages = _messages
+    writer = MagicMock(spec=BeeperWriter)
+    writer.update_sync_state = AsyncMock()
+
+    coll = BeeperCollector(client=fake_client, writer=writer)
+    inserted = await coll._sync_one_chat(
+        chat_id="!room:beeper.local",
+        network="Discord",
+        oldest_cursor=None,
+        newest_cursor="cursor",
+        backfill_complete=True,
+        max_pages=1,
+        w=writer,
+    )
+
+    assert inserted == 0
+    writer.update_sync_state.assert_awaited_once()
+    assert writer.update_sync_state.await_args.kwargs["error"] == "TimeoutError"
 
 
 @pytest.mark.asyncio

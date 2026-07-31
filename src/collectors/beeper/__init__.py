@@ -71,6 +71,12 @@ _BEEPER_429_COOLDOWN_SECONDS = int(os.getenv("BEEPER_429_COOLDOWN_SECONDS", "900
 _BEEPER_HTTP_STATUS_RE = re.compile(r"->\s*(\d{3})")
 
 
+def _format_exception(exc: BaseException) -> str:
+    detail = str(exc).strip()
+    name = exc.__class__.__name__
+    return f"{name}: {detail}" if detail else name
+
+
 def _beeper_backfill_candidate_limit(batch_size: int) -> int:
     raw = os.getenv("BEEPER_BACKFILL_CANDIDATE_MESSAGES")
     if raw:
@@ -1032,6 +1038,7 @@ class BeeperCollector(BaseCollector):
 
         stats = {"accounts": 0, "chats": 0, "messages_inserted": 0,
                  "networks_repaired": 0, "errors": 0, "transient": 0}
+        phase = "restore_api_cooldown"
         await self._restore_api_cooldown()
         if self._api_cooling_down():
             remaining = int(self._api_cooldown_until - time.time())
@@ -1039,20 +1046,31 @@ class BeeperCollector(BaseCollector):
             logger.info("Beeper: %s", self._intentional_idle_reason)
             return stats
         try:
+            phase = "accounts"
             stats["accounts"] = await self._sync_accounts()
+            phase = "chats"
             stats["chats"] = await self._sync_chats()
             w = self.writer
             if w is not None:
+                phase = "network_repair"
                 stats["networks_repaired"] = await w.repair_unknown_message_networks()
+            phase = "messages"
             stats["messages_inserted"] = await self._sync_messages()
+        except TimeoutError as exc:
+            logger.warning(
+                "Beeper sync timed out during %s; partial cycle will retry next run: %s",
+                phase,
+                _format_exception(exc),
+            )
+            stats["transient"] += 1
         except BeeperTransientError as exc:
             # Transient DNS/connect blip (e.g. resolver restart). The next cycle
             # resumes from the persisted cursors, so this is not a real failure
             # — log quietly at INFO and do NOT inflate the hard error count.
-            logger.info("Beeper transient network blip (retry next cycle): %s", exc)
+            logger.info("Beeper transient network blip (retry next cycle): %s", _format_exception(exc))
             stats["transient"] += 1
         except BeeperAPIError as exc:
-            logger.error("Beeper sync failed: %s", exc)
+            logger.error("Beeper sync failed: %s", _format_exception(exc))
             await self._record_api_http_event(exc, scope="desktop_api")
             stats["errors"] += 1
 
@@ -1161,7 +1179,8 @@ class BeeperCollector(BaseCollector):
             self._known_ids.add(cid)
             logger.debug("Beeper media saved: %s (%d bytes)", cid, len(data))
         except Exception as e:
-            logger.warning("Beeper media download failed %s: %s", cid, e)
+            error_text = _format_exception(e)
+            logger.warning("Beeper media download failed %s: %s", cid, error_text)
             if isinstance(e, BeeperAPIError):
                 await self._record_api_http_event(
                     e,
@@ -1178,7 +1197,7 @@ class BeeperCollector(BaseCollector):
             # backfill stops re-selecting them forever (see _record_media_failure).
             await self._record_media_failure(cid)
             try:
-                await self.send_to_dlq(entity_id, cid, str(e)[:500])
+                await self.send_to_dlq(entity_id, cid, error_text[:500])
             except Exception:
                 pass
 
@@ -1633,14 +1652,24 @@ class BeeperCollector(BaseCollector):
         except BeeperTransientError as exc:
             # Transient DNS/connect blip mid-chat — leave sync_state untouched
             # (no error_count bump) so the chat is retried cleanly next cycle.
-            logger.debug("chat %s transient blip (retry next cycle): %s", chat_id, exc)
+            logger.debug("chat %s transient blip (retry next cycle): %s", chat_id, _format_exception(exc))
+        except TimeoutError as exc:
+            logger.warning(
+                "chat %s sync timed out; retrying this chat next cycle: %s",
+                chat_id,
+                _format_exception(exc),
+            )
+            try:
+                await w.update_sync_state(chat_id, error=_format_exception(exc)[:500])
+            except Exception:
+                logger.debug("chat %s timeout state update failed", chat_id, exc_info=True)
         except BeeperAPIError as exc:
-            logger.warning("chat %s sync error: %s", chat_id, exc)
+            logger.warning("chat %s sync error: %s", chat_id, _format_exception(exc))
             await self._record_api_http_event(
                 exc,
                 scope="desktop_api",
                 account=f"{network}:{chat_id}",
                 metadata={"network": network, "chat_id": chat_id},
             )
-            await w.update_sync_state(chat_id, error=str(exc)[:500])
+            await w.update_sync_state(chat_id, error=_format_exception(exc)[:500])
         return inserted
