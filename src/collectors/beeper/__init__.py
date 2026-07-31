@@ -96,6 +96,18 @@ def _beeper_backfill_query_timeout() -> float:
         return 20.0
 
 
+def _beeper_chat_sync_timeout() -> float:
+    raw = os.getenv("BEEPER_CHAT_SYNC_TIMEOUT_SECONDS", "120")
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("Invalid BEEPER_CHAT_SYNC_TIMEOUT_SECONDS=%r; using 120s", raw)
+        return 120.0
+    if value <= 0:
+        return 0.0
+    return max(5.0, value)
+
+
 def _beeper_tombstone_retry_limit() -> int:
     marker = os.getenv("BEEPER_TOMBSTONE_RETRY_MARKER", "").strip()
     if not marker:
@@ -1357,6 +1369,7 @@ class BeeperCollector(BaseCollector):
 
         max_pages = int(os.environ.get("BEEPER_BACKFILL_PAGES_PER_CYCLE", "3"))
         max_chats = int(os.environ.get("BEEPER_MAX_CHATS_PER_CYCLE", "50"))
+        chat_timeout = _beeper_chat_sync_timeout()
 
         async with self.pool.acquire() as conn:
             chat_rows = await conn.fetch(
@@ -1392,15 +1405,32 @@ class BeeperCollector(BaseCollector):
         for row in chat_rows:
             if self._stop.is_set():
                 break
-            inserted = await self._sync_one_chat(
-                chat_id=row["chat_id"],
-                network=row["network"] or "unknown",
-                oldest_cursor=row["oldest_cursor"],
-                newest_cursor=row["newest_cursor"],
-                backfill_complete=row["backfill_complete"],
-                max_pages=max_pages,
-                w=w,
-            )
+            try:
+                sync_one = self._sync_one_chat(
+                    chat_id=row["chat_id"],
+                    network=row["network"] or "unknown",
+                    oldest_cursor=row["oldest_cursor"],
+                    newest_cursor=row["newest_cursor"],
+                    backfill_complete=row["backfill_complete"],
+                    max_pages=max_pages,
+                    w=w,
+                )
+                if chat_timeout > 0:
+                    inserted = await asyncio.wait_for(sync_one, timeout=chat_timeout)
+                else:
+                    inserted = await sync_one
+            except TimeoutError as exc:
+                logger.warning(
+                    "chat %s sync exceeded %.0fs; retrying this chat next cycle: %s",
+                    row["chat_id"],
+                    chat_timeout,
+                    _format_exception(exc),
+                )
+                try:
+                    await w.update_sync_state(row["chat_id"], error=_format_exception(exc)[:500])
+                except Exception:
+                    logger.debug("chat %s timeout state update failed", row["chat_id"], exc_info=True)
+                inserted = 0
             inserted_total += inserted
         return inserted_total
 

@@ -12,6 +12,7 @@ No network calls; no docker; no live Beeper Desktop required.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from datetime import timezone
 from pathlib import Path
@@ -959,6 +960,43 @@ async def test_sync_one_chat_timeout_does_not_abort_cycle(monkeypatch, tmp_path)
 
     assert inserted == 0
     writer.update_sync_state.assert_awaited_once()
+    assert writer.update_sync_state.await_args.kwargs["error"] == "TimeoutError"
+
+
+@pytest.mark.asyncio
+async def test_sync_messages_bounds_each_chat_timeout(monkeypatch, tmp_path):
+    monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
+    monkeypatch.setenv("COLLECTOR_DRIVE_PATH", str(tmp_path))
+    monkeypatch.setattr(beeper_mod, "_beeper_chat_sync_timeout", lambda: 0.01)
+
+    pool, conn = _mock_pool()
+    conn.fetch = AsyncMock(return_value=[
+        {
+            "chat_id": "!slow:beeper.local",
+            "network": "Discord",
+            "oldest_cursor": None,
+            "newest_cursor": "cursor",
+            "backfill_complete": True,
+            "last_message_ts": None,
+        }
+    ])
+    writer = MagicMock(spec=BeeperWriter)
+    writer.update_sync_state = AsyncMock()
+
+    coll = BeeperCollector(client=MagicMock(spec=BeeperClient), writer=writer)
+    coll.set_pool(pool)
+
+    async def slow_chat(**_kwargs):
+        await asyncio.sleep(10)
+        return 1
+
+    monkeypatch.setattr(coll, "_sync_one_chat", slow_chat)
+
+    inserted = await coll._sync_messages()
+
+    assert inserted == 0
+    writer.update_sync_state.assert_awaited_once()
+    assert writer.update_sync_state.await_args.args[0] == "!slow:beeper.local"
     assert writer.update_sync_state.await_args.kwargs["error"] == "TimeoutError"
 
 
