@@ -195,6 +195,37 @@ async function reloadExtension() {
   chrome.runtime.reload();
 }
 
+async function handleUrlActions() {
+  let params;
+  try {
+    params = new URL(location.href).searchParams;
+  } catch (e) {
+    return;
+  }
+  const shouldOpenAll = params.get("openAll") === "1";
+  const shouldScrape = params.get("scrape") === "1";
+  const shouldTest = params.get("test") === "1";
+  if (!shouldOpenAll && !shouldScrape && !shouldTest) return;
+  try {
+    history.replaceState(null, "", location.pathname);
+  } catch (e) {}
+  try {
+    if (shouldOpenAll) {
+      await sendMessage({ type: "openAll" });
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+    }
+    if (shouldScrape) {
+      await sendMessage({ type: "scrapeNow" });
+    }
+    if (shouldTest) {
+      lastProbe = { ...((await sendMessage({ type: "testIngest" })) || {}), auto: false, t: Date.now() };
+    }
+  } catch (e) {
+    lastProbe = { ok: false, error: runtimeErrorText(e), auto: false, t: Date.now() };
+  }
+  setTimeout(render, 1000);
+}
+
 try {
   if (new URL(location.href).searchParams.get("reload") === "1") {
     setTimeout(reloadExtension, 600);
@@ -202,4 +233,5 @@ try {
 } catch (e) {}
 
 render();
+handleUrlActions();
 setInterval(render, 3000);
