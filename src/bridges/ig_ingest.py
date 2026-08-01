@@ -99,6 +99,13 @@ try:
     )
 except (TypeError, ValueError):
     BROWSER_TELEMETRY_WRITE_TIMEOUT_SECONDS = 2.0
+try:
+    SOCIAL_INGEST_REQUEST_TIMEOUT_SECONDS = max(
+        1.0,
+        float(os.getenv("SOCIAL_INGEST_REQUEST_TIMEOUT_SECONDS", "8.0")),
+    )
+except (TypeError, ValueError):
+    SOCIAL_INGEST_REQUEST_TIMEOUT_SECONDS = 8.0
 STRAVA_BROWSER_429_COOLDOWN_SECONDS = int(os.getenv("STRAVA_BROWSER_429_COOLDOWN_SECONDS", "1800"))
 try:
     STRAVA_BROWSER_429_MAX_COOLDOWN_SECONDS = max(
@@ -453,6 +460,28 @@ def _cors(resp: web.Response) -> web.Response:
 
 async def handle_options(request):
     return _cors(web.Response(status=204))
+
+
+@web.middleware
+async def request_timeout_middleware(request, handler):
+    try:
+        async with asyncio.timeout(SOCIAL_INGEST_REQUEST_TIMEOUT_SECONDS):
+            return await handler(request)
+    except TimeoutError:
+        logger.warning(
+            "social ingest request timed out after %.2fs method=%s path=%s",
+            SOCIAL_INGEST_REQUEST_TIMEOUT_SECONDS,
+            request.method,
+            request.path,
+        )
+        return _cors(web.json_response(
+            {
+                "ok": False,
+                "error": "handler_timeout",
+                "path": request.path,
+            },
+            status=503,
+        ))
 
 
 # ---------------------------------------------------------------------------
@@ -4615,7 +4644,10 @@ async def _on_cleanup(app):
 
 
 def make_app():
-    app = web.Application(client_max_size=SOCIAL_INGEST_CLIENT_MAX_MB * 1024 * 1024)
+    app = web.Application(
+        client_max_size=SOCIAL_INGEST_CLIENT_MAX_MB * 1024 * 1024,
+        middlewares=[request_timeout_middleware],
+    )
     app.router.add_route("OPTIONS", "/{tail:.*}", handle_options)
     # generic multi-platform
     app.router.add_get("/social/targets", get_targets)
