@@ -180,7 +180,7 @@ async function reportScraperTabHeartbeats(reason) {
           health_reason: reason || "background_watchdog",
           page_title: tab.title || null,
         }), SCRAPER_HEARTBEAT_TIMEOUT_MS);
-        await maybeForceScrapeCycle(tab, platform, result && result.body, reason || "background_watchdog");
+        await maybeForceScrapeCycle(tab, platform, result && result.body, reason || "background_watchdog", base);
         sent++;
       } catch (e) {
         failed++;
@@ -205,7 +205,39 @@ async function reportScraperTabHeartbeats(reason) {
 }
 
 const lastForcedCycleByTab = {};
+const lastForcedReloadByTab = {};
 const FORCED_CYCLE_DEBOUNCE_MS = 5 * 60 * 1000;
+const FORCED_CYCLE_HARD_RELOAD_MS_BY_PLATFORM = {
+  x: 3 * 60 * 1000,
+  facebook: 3 * 60 * 1000,
+  tiktok: 4 * 60 * 1000,
+  lemon8: 4 * 60 * 1000,
+  threads: 4 * 60 * 1000,
+  instagram: 11 * 60 * 1000,
+};
+const FORCED_CYCLE_RELOAD_DEBOUNCE_MS = 10 * 60 * 1000;
+
+function forcedCycleHardReloadMs(platformId) {
+  return FORCED_CYCLE_HARD_RELOAD_MS_BY_PLATFORM[platformId] || 5 * 60 * 1000;
+}
+
+async function recordServiceWorkerRecovery(base, tab, platform, status, reason, extra = {}) {
+  if (!base || !platform || !platform.id) return;
+  try {
+    await postJsonWithTimeout(base + "/social/browser-heartbeat", withExtensionVersion({
+      platform: platform.id,
+      label: platform.label || platform.id,
+      running: true,
+      tab_id: tab && tab.id != null ? tab.id : null,
+      url: tab && tab.url ? tab.url : null,
+      page_title: tab && tab.title ? tab.title : null,
+      health_status: status,
+      health_reason: reason || null,
+      service_worker_recovery: true,
+      ...extra,
+    }), SCRAPER_HEARTBEAT_TIMEOUT_MS);
+  } catch (e) {}
+}
 
 function parseHeartbeatResponseBody(responseBody) {
   if (!responseBody) return null;
@@ -213,12 +245,34 @@ function parseHeartbeatResponseBody(responseBody) {
   try { return JSON.parse(String(responseBody)); } catch (e) { return null; }
 }
 
-async function maybeForceScrapeCycle(tab, platform, responseBody, reason) {
+async function maybeForceScrapeCycle(tab, platform, responseBody, reason, base = null) {
   const body = parseHeartbeatResponseBody(responseBody);
   if (!body || body.force_cycle !== true || !tab || !tab.id) return;
   const now = Date.now();
   const key = String(tab.id);
-  if (lastForcedCycleByTab[key] && now - lastForcedCycleByTab[key] < FORCED_CYCLE_DEBOUNCE_MS) return;
+  const lastForcedAt = Number(lastForcedCycleByTab[key] || 0);
+  const forcedAgeMs = lastForcedAt ? now - lastForcedAt : 0;
+  const hardReloadMs = forcedCycleHardReloadMs(platform && platform.id);
+  if (lastForcedAt && forcedAgeMs > hardReloadMs) {
+    const lastReloadAt = Number(lastForcedReloadByTab[key] || 0);
+    if (!lastReloadAt || now - lastReloadAt > FORCED_CYCLE_RELOAD_DEBOUNCE_MS) {
+      try {
+        await recordServiceWorkerRecovery(base, tab, platform, "forced_cycle_hard_refresh", "stale_forced_cycle", {
+          forced_age_ms: forcedAgeMs,
+          hard_reload_ms: hardReloadMs,
+          content_age_seconds: body.content_age_seconds || null,
+        });
+        await chrome.tabs.reload(tab.id, { bypassCache: true });
+        lastForcedReloadByTab[key] = now;
+        lastForcedCycleByTab[key] = 0;
+        await log("warn", `${platform.label}: stale forced scrape did not finish after ${Math.round(forcedAgeMs / 1000)}s; hard-refreshed tab`);
+      } catch (e) {
+        await log("warn", `${platform.label}: stale forced scrape hard-refresh failed: ${e && e.message ? e.message : e}`);
+      }
+      return;
+    }
+  }
+  if (lastForcedAt && forcedAgeMs < FORCED_CYCLE_DEBOUNCE_MS) return;
   try {
     await chrome.tabs.sendMessage(tab.id, {
       type: "scrapeCycle",
@@ -226,6 +280,9 @@ async function maybeForceScrapeCycle(tab, platform, responseBody, reason) {
       content_age_seconds: body.content_age_seconds || null,
     });
     lastForcedCycleByTab[key] = now;
+    await recordServiceWorkerRecovery(base, tab, platform, "forced_cycle_request_sent", body.force_reason || "browser_content_stale", {
+      content_age_seconds: body.content_age_seconds || null,
+    });
     await log("warn", `${platform.label}: forced one scrape pass because browser content is stale`);
   } catch (firstErr) {
     try {
@@ -241,8 +298,16 @@ async function maybeForceScrapeCycle(tab, platform, responseBody, reason) {
         content_age_seconds: body.content_age_seconds || null,
       });
       lastForcedCycleByTab[key] = now;
+      await recordServiceWorkerRecovery(base, tab, platform, "forced_cycle_request_sent", body.force_reason || "browser_content_stale", {
+        content_age_seconds: body.content_age_seconds || null,
+        revived_content_script: true,
+      });
       await log("warn", `${platform.label}: revived content script and forced one stale-content scrape pass`);
     } catch (e) {
+      await recordServiceWorkerRecovery(base, tab, platform, "forced_cycle_request_failed", body.force_reason || "browser_content_stale", {
+        content_age_seconds: body.content_age_seconds || null,
+        cycle_error: e && e.message ? e.message : String(e),
+      });
       await log("warn", `${platform.label}: stale-content forced scrape failed: ${e && e.message ? e.message : e}`);
     }
   }
@@ -521,7 +586,7 @@ async function clearPageRecoveryForTab(tabId, reason) {
 }
 async function recordPageHealth(base, msg, sender, extra = {}) {
   try {
-    await postJsonWithTimeout(base + "/social/browser-heartbeat", withExtensionVersion({
+    const result = await postJsonWithTimeout(base + "/social/browser-heartbeat", withExtensionVersion({
       platform: msg.platform,
       label: msg.label || msg.platform,
       running: true,
@@ -546,6 +611,9 @@ async function recordPageHealth(base, msg, sender, extra = {}) {
       timeout_ms: msg.timeout_ms ?? null,
       ...extra,
     }), SCRAPER_HEARTBEAT_TIMEOUT_MS);
+    const tab = sender && sender.tab ? sender.tab : null;
+    const platform = platformById(msg.platform) || { id: msg.platform, label: msg.label || msg.platform };
+    await maybeForceScrapeCycle(tab, platform, result && result.body, msg.reason || msg.status || "page_health", base);
   } catch (e) {}
 }
 function recoveryDelayMs(attempt, platformId) {
@@ -1375,7 +1443,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             url: msg.url || (tab && tab.url) || null,
             tab_id: tab ? tab.id : null,
           }), SCRAPER_HEARTBEAT_TIMEOUT_MS);
-          await maybeForceScrapeCycle(tab, platform, result && result.body, "loop_status");
+          await maybeForceScrapeCycle(tab, platform, result && result.body, "loop_status", base);
         } catch (e) {}
         sendResponse({ ok: true });
         break;

@@ -163,10 +163,10 @@ except (TypeError, ValueError):
 try:
     BROWSER_CONTENT_HINT_RESPONSE_TIMEOUT_SECONDS = max(
         0.05,
-        float(os.getenv("BROWSER_CONTENT_HINT_RESPONSE_TIMEOUT_SECONDS", "0.35")),
+        float(os.getenv("BROWSER_CONTENT_HINT_RESPONSE_TIMEOUT_SECONDS", "0.75")),
     )
 except (TypeError, ValueError):
-    BROWSER_CONTENT_HINT_RESPONSE_TIMEOUT_SECONDS = 0.35
+    BROWSER_CONTENT_HINT_RESPONSE_TIMEOUT_SECONDS = 0.75
 try:
     SOCIAL_INGEST_STARTUP_DDL_TIMEOUT_SECONDS = max(
         15.0,
@@ -4752,6 +4752,11 @@ async def browser_heartbeat_handler(request):
                 "stale_after_ms": body.get("stale_after_ms"),
                 "one_shot_timeout": body.get("one_shot_timeout"),
                 "timeout_ms": body.get("timeout_ms"),
+                "service_worker_recovery": body.get("service_worker_recovery"),
+                "content_age_seconds": body.get("content_age_seconds"),
+                "forced_age_ms": body.get("forced_age_ms"),
+                "hard_reload_ms": body.get("hard_reload_ms"),
+                "revived_content_script": body.get("revived_content_script"),
                 "recovery_scheduled": body.get("recovery_scheduled"),
                 "recovery_pending": body.get("recovery_pending"),
                 "recovery_attempt": body.get("recovery_attempt"),
