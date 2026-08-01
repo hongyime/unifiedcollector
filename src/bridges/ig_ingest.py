@@ -107,6 +107,13 @@ try:
 except (TypeError, ValueError):
     SOCIAL_INGEST_REQUEST_TIMEOUT_SECONDS = 8.0
 try:
+    SOCIAL_INGEST_UPLOAD_REQUEST_TIMEOUT_SECONDS = max(
+        SOCIAL_INGEST_REQUEST_TIMEOUT_SECONDS,
+        float(os.getenv("SOCIAL_INGEST_UPLOAD_REQUEST_TIMEOUT_SECONDS", "60.0")),
+    )
+except (TypeError, ValueError):
+    SOCIAL_INGEST_UPLOAD_REQUEST_TIMEOUT_SECONDS = 60.0
+try:
     SOCIAL_INGEST_DB_INIT_TIMEOUT_SECONDS = max(
         1.0,
         float(os.getenv("SOCIAL_INGEST_DB_INIT_TIMEOUT_SECONDS", "4.0")),
@@ -498,13 +505,18 @@ async def handle_options(request):
 
 @web.middleware
 async def request_timeout_middleware(request, handler):
+    timeout_seconds = (
+        SOCIAL_INGEST_UPLOAD_REQUEST_TIMEOUT_SECONDS
+        if request.path == "/social/ingest-upload"
+        else SOCIAL_INGEST_REQUEST_TIMEOUT_SECONDS
+    )
     try:
-        async with asyncio.timeout(SOCIAL_INGEST_REQUEST_TIMEOUT_SECONDS):
+        async with asyncio.timeout(timeout_seconds):
             return await handler(request)
     except TimeoutError:
         logger.warning(
             "social ingest request timed out after %.2fs method=%s path=%s",
-            SOCIAL_INGEST_REQUEST_TIMEOUT_SECONDS,
+            timeout_seconds,
             request.method,
             request.path,
         )
@@ -525,6 +537,21 @@ async def _ensure_app_pool(app):
         app["pool"] = await get_pool()
     app["startup_error"] = None
     return app["pool"]
+
+
+def _schedule_app_task(app, coro, label: str) -> None:
+    """Run best-effort bridge work without holding the browser request open."""
+    async def _runner():
+        try:
+            await coro
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug("%s background task failed", label, exc_info=True)
+
+    task = asyncio.create_task(_runner())
+    app.setdefault("tasks", set()).add(task)
+    task.add_done_callback(app["tasks"].discard)
 
 
 @web.middleware
@@ -1122,6 +1149,19 @@ def _top_reject_reason(reject_stats: dict | None) -> tuple[str | None, str | Non
     return best_reason, str(detail) if detail is not None else None
 
 
+def _reject_count(value) -> int:
+    if isinstance(value, bool):
+        return 1 if value else 0
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(float(value))
+        except ValueError:
+            return 0
+    return 0
+
+
 def _candidate_asset_role(item: dict | None, platform: str | None = None) -> str | None:
     meta = _item_meta(item)
     keys = []
@@ -1215,9 +1255,9 @@ def _classify_tiktok_candidate_result(
 
     result = browser_result if isinstance(browser_result, dict) else {}
     if result:
-        if result.get("deduped") is True or int(result.get("deduped") or 0) > 0:
+        if result.get("deduped") is True or _reject_count(result.get("deduped")) > 0:
             return "duplicate", "duplicate_sha256", False
-        if int(result.get("saved") or 0) > 0 or int(result.get("stored") or 0) > 0:
+        if _reject_count(result.get("saved")) > 0 or _reject_count(result.get("stored")) > 0:
             return "stored", None, False
         reason = str(result.get("reason") or "browser_upload_failed")
         if reason in {"duplicate_content_id", "duplicate_sha256"}:
@@ -1276,9 +1316,9 @@ def _classify_browser_candidate_result(
 
     result = browser_result if isinstance(browser_result, dict) else {}
     if result:
-        if result.get("deduped") is True or int(result.get("deduped") or 0) > 0:
+        if result.get("deduped") is True or _reject_count(result.get("deduped")) > 0:
             return "duplicate", "duplicate_sha256", False
-        if int(result.get("saved") or 0) > 0 or int(result.get("stored") or 0) > 0:
+        if _reject_count(result.get("saved")) > 0 or _reject_count(result.get("stored")) > 0:
             return "stored", None, False
         reason = str(result.get("reason") or "browser_upload_failed")
         if reason in {"duplicate_content_id", "duplicate_sha256"}:
@@ -2163,11 +2203,11 @@ async def _ingest_uploaded_media(app, platform, body):
         extension_version=extension_version,
     )
     dedupe_reasons = {"duplicate_content_id", "duplicate_sha256"}
-    deduped = any(int(reject_stats.get(reason) or 0) > 0 for reason in dedupe_reasons)
+    deduped = any(_reject_count(reject_stats.get(reason)) > 0 for reason in dedupe_reasons)
     accepted = bool(saved or deduped)
     reason = None
     if not accepted and reject_stats:
-        reason = max(reject_stats.items(), key=lambda kv: int(kv[1] or 0))[0]
+        reason = max(reject_stats.items(), key=lambda kv: _reject_count(kv[1]))[0]
     event_meta = {
         "extension_version": extension_version,
         "ingest_mode": "browser_upload",
@@ -2214,14 +2254,20 @@ async def _ingest_uploaded_media(app, platform, body):
     }
 
 
-async def browser_media_candidates(request):
-    body = await _safe_json(request)
-    platform = _norm_platform(body.get("platform"))
-    username = body.get("username") or "unknown"
-    extension_version = body.get("extension_version")
-    raw_items = body.get("items") or []
-    if not isinstance(raw_items, list):
-        raw_items = []
+def _queued_browser_upload_response(platform: str, body: dict) -> dict:
+    item = body.get("item") if isinstance(body.get("item"), dict) else {}
+    return {
+        "accepted": 1,
+        "stored": 0,
+        "saved": 0,
+        "deduped": False,
+        "queued": True,
+        "platform": platform,
+        "content_id": str(item.get("content_id") or "")[:200] if item else None,
+    }
+
+
+async def _record_browser_media_candidate_batch(app, platform, username, raw_items, extension_version):
     recorded = 0
     for entry in raw_items[:500]:
         if not isinstance(entry, dict):
@@ -2231,7 +2277,7 @@ async def browser_media_candidates(request):
         if not isinstance(item, dict):
             continue
         await _record_browser_media_candidate(
-            request.app["pool"],
+            app["pool"],
             platform,
             username,
             item,
@@ -2242,7 +2288,32 @@ async def browser_media_candidates(request):
             browser_result=result,
         )
         recorded += 1
-    return _cors(web.json_response({"ok": True, "recorded": recorded, "platform": platform}))
+    if recorded:
+        logger.info("browser media candidate ledger[%s] %s: recorded=%d", platform, username, recorded)
+
+
+async def browser_media_candidates(request):
+    body = await _safe_json(request)
+    platform = _norm_platform(body.get("platform"))
+    username = body.get("username") or "unknown"
+    extension_version = body.get("extension_version")
+    raw_items = body.get("items") or []
+    if not isinstance(raw_items, list):
+        raw_items = []
+    queued = min(len(raw_items), 500)
+    if queued:
+        _schedule_app_task(
+            request.app,
+            _record_browser_media_candidate_batch(
+                request.app,
+                platform,
+                username,
+                raw_items,
+                extension_version,
+            ),
+            "browser_media_candidate_batch",
+        )
+    return _cors(web.json_response({"ok": True, "queued": queued, "platform": platform}))
 
 
 async def tiktok_revisit_target(request):
@@ -3376,11 +3447,17 @@ async def dm_probe_handler(request):
         body.get("platform"), body.get("transport"), body.get("frame_kind"),
         body.get("frame_size"), body.get("url"),
     )
-    await _dm_probe_log_write(
-        request.app.get("pool"), body.get("platform") or "unknown", "probe", body,
+    pool = request.app.get("pool")
+    platform = body.get("platform") or "unknown"
+    _schedule_app_task(
+        request.app,
+        _dm_probe_log_write(pool, platform, "probe", body),
+        "dm_probe_log",
     )
-    await _archive_browser_capture(
-        request.app.get("pool"), body.get("platform") or "unknown", "dm_probe", body,
+    _schedule_app_task(
+        request.app,
+        _archive_browser_capture(pool, platform, "dm_probe", body),
+        "dm_probe_archive",
     )
     return _cors(web.json_response({"ok": True}))
 
@@ -4514,30 +4591,34 @@ async def browser_heartbeat_handler(request):
     pool = request.app.get("pool")
     telemetry_degraded = pool is None
     recovery_hint = await _browser_content_recovery_hint(pool, platform)
-    await _record_browser_ingest_event(
-        pool,
-        platform,
-        "browser_heartbeat",
-        subject,
-        observed_count=1,
-        stored_count=0,
-        metadata={
-            "running": running,
-            "url": url,
-            "label": label,
-            "tab_id": body.get("tab_id"),
-            "extension_version": body.get("extension_version"),
-            "health_status": body.get("health_status"),
-            "health_reason": body.get("health_reason"),
-            "page_title": body.get("page_title"),
-            "text_sample": body.get("text_sample"),
-            "content_counts": body.get("content_counts"),
-            "recovery_scheduled": body.get("recovery_scheduled"),
-            "recovery_pending": body.get("recovery_pending"),
-            "recovery_attempt": body.get("recovery_attempt"),
-            "recovery_delay_ms": body.get("recovery_delay_ms"),
-            "recovery_limit": body.get("recovery_limit"),
-        },
+    _schedule_app_task(
+        request.app,
+        _record_browser_ingest_event(
+            pool,
+            platform,
+            "browser_heartbeat",
+            subject,
+            observed_count=1,
+            stored_count=0,
+            metadata={
+                "running": running,
+                "url": url,
+                "label": label,
+                "tab_id": body.get("tab_id"),
+                "extension_version": body.get("extension_version"),
+                "health_status": body.get("health_status"),
+                "health_reason": body.get("health_reason"),
+                "page_title": body.get("page_title"),
+                "text_sample": body.get("text_sample"),
+                "content_counts": body.get("content_counts"),
+                "recovery_scheduled": body.get("recovery_scheduled"),
+                "recovery_pending": body.get("recovery_pending"),
+                "recovery_attempt": body.get("recovery_attempt"),
+                "recovery_delay_ms": body.get("recovery_delay_ms"),
+                "recovery_limit": body.get("recovery_limit"),
+            },
+        ),
+        "browser_heartbeat_telemetry",
     )
     return _cors(web.json_response({
         "ok": True,
@@ -4695,7 +4776,12 @@ async def ingest(request):
 async def ingest_upload(request):
     body = await _safe_json(request)
     platform = _norm_platform(body.get("platform"))
-    return _cors(web.json_response(await _ingest_uploaded_media(request.app, platform, body)))
+    _schedule_app_task(
+        request.app,
+        _ingest_uploaded_media(request.app, platform, body),
+        "browser_upload_ingest",
+    )
+    return _cors(web.json_response(_queued_browser_upload_response(platform, body)))
 
 
 async def ingest_ig(request):  # /ig/ingest alias
