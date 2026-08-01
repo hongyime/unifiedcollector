@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 
 _DAY = 86400
 _BROWSER_HEARTBEAT_SOURCES = ("instagram", "tiktok", "lemon8", "threads", "facebook", "x", "strava")
+_BROWSER_CONTENT_PROGRESS_SOURCES = ("instagram", "tiktok", "lemon8", "threads", "facebook", "x")
 
 STRAVA_PROGRESS_QUERY = """
 SELECT extract(epoch FROM now()-max(ts))
@@ -191,6 +192,7 @@ async def compute_liveness(conn) -> list[dict]:
         _env_int("BROWSER_CONTENT_STALE_WARN_SECONDS", 3600, min_value=300),
         min_value=300,
     )
+    browser_content_stale_after = _env_int("BROWSER_CONTENT_STALE_WARN_SECONDS", 3600, min_value=300)
     out: list[dict] = []
     for name, query, thresh in FRESHNESS:
         remaining = deadline - time.monotonic()
@@ -201,6 +203,7 @@ async def compute_liveness(conn) -> list[dict]:
                 age = await conn.fetchval(query, timeout=min(per_query_timeout, remaining))
             except Exception:
                 age = None
+        data_age = age
         h = health.get(name) or {}
         hs = h.get("status")
         h_error = h.get("last_error")
@@ -256,6 +259,22 @@ async def compute_liveness(conn) -> list[dict]:
                 detail = browser_detail
             else:
                 detail = f"{detail}; {browser_detail}"
+        browser_content_stale = (
+            browser_heartbeats is not None
+            and name in _BROWSER_CONTENT_PROGRESS_SOURCES
+            and (data_age is None or data_age > browser_content_stale_after)
+        )
+        if browser_content_stale:
+            content_detail = (
+                "browser content progress is missing"
+                if data_age is None
+                else f"browser content progress is {int(data_age)}s old (> {browser_content_stale_after}s)"
+            )
+            if status == "live":
+                status = "degraded"
+                detail = content_detail
+            else:
+                detail = f"{detail}; {content_detail}"
         out.append({
             "source": name,
             "status": status,
@@ -272,6 +291,10 @@ async def compute_liveness(conn) -> list[dict]:
             "browser_heartbeat_stale_after_seconds": (
                 browser_stale_after if name in _BROWSER_HEARTBEAT_SOURCES else None
             ),
+            "browser_content_stale_after_seconds": (
+                browser_content_stale_after if name in _BROWSER_CONTENT_PROGRESS_SOURCES else None
+            ),
+            "browser_content_stale": browser_content_stale,
             "browser_extension_version": (
                 browser_heartbeat.get("extension_version") if browser_heartbeat else None
             ),
