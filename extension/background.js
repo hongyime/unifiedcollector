@@ -32,6 +32,7 @@ const LOG_MAX = 200;
 const WATCHDOG_MIN = 13;         // re-nudge any open scraper tab whose loop died
 const KICK_DEBOUNCE_MS = 30000;  // don't re-nudge the same tab more often than this
 const BROWSER_UPLOAD_MAX_BYTES = 256 * 1024 * 1024;
+let browserUploadChain = Promise.resolve();
 const PAGE_RECOVERY_PREFIX = "uc-page-recovery:";
 const PAGE_RECOVERY_STATE_KEY = "ucPageRecovery";
 const PAGE_RECOVERY_MAX_ATTEMPTS = 3;
@@ -687,6 +688,51 @@ function arrayBufferToBase64(buffer) {
 }
 
 async function uploadMediaViaBrowser(base, msg, item) {
+  const next = browserUploadChain.catch(() => null).then(() => uploadMediaViaBrowserNow(base, msg, item));
+  browserUploadChain = next.catch(() => null);
+  return next;
+}
+
+function safeUploadFilename(item, blob) {
+  const rawKind = String(item && item.content_type ? item.content_type : "media").toLowerCase();
+  const rawId = String(item && item.content_id ? item.content_id : "browser_upload");
+  const kind = rawKind.replace(/[^a-z0-9_.-]+/g, "_").slice(0, 24) || "media";
+  const id = rawId.replace(/[^a-zA-Z0-9_.-]+/g, "_").slice(0, 96) || "browser_upload";
+  const mime = String(blob && blob.type ? blob.type : "").toLowerCase();
+  const ext = mime.includes("png") ? ".png"
+    : mime.includes("webp") ? ".webp"
+    : mime.includes("gif") ? ".gif"
+    : mime.includes("mp4") ? ".mp4"
+    : mime.includes("jpeg") || mime.includes("jpg") ? ".jpg"
+    : "";
+  return `${kind}_${id}${ext}`;
+}
+
+async function postBrowserUpload(base, payload, blob) {
+  const form = new FormData();
+  form.append("metadata", JSON.stringify(payload));
+  form.append("file", blob, safeUploadFilename(payload.item || {}, blob));
+  let r = await fetch(base + "/social/ingest-upload-binary", {
+    method: "POST",
+    body: form,
+  });
+  if (r.status !== 404 && r.status !== 405) return r;
+
+  const b64 = arrayBufferToBase64(await blob.arrayBuffer());
+  return fetch(base + "/social/ingest-upload", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      ...payload,
+      item: {
+        ...(payload.item || {}),
+        data_b64: b64,
+      },
+    }),
+  });
+}
+
+async function uploadMediaViaBrowserNow(base, msg, item) {
   const platform = msg.platform || "instagram";
   if (!browserUploadAllowed(platform, item.url)) return { ok: false, reason: "disallowed_host" };
   const ctrl = new AbortController();
@@ -702,24 +748,18 @@ async function uploadMediaViaBrowser(base, msg, item) {
     if (headerSize && headerSize > BROWSER_UPLOAD_MAX_BYTES) return { ok: false, reason: "too_large_header", bytes: headerSize };
     const blob = await response.blob();
     if (blob.size > BROWSER_UPLOAD_MAX_BYTES) return { ok: false, reason: "too_large", bytes: blob.size };
-    const b64 = arrayBufferToBase64(await blob.arrayBuffer());
     const payload = withExtensionVersion({
       platform,
       username: msg.username,
       item: {
         ...item,
-        data_b64: b64,
         mime_type: blob.type || response.headers.get("content-type") || null,
-        meta: { ...(item.meta || {}), browser_upload: true },
+        meta: { ...(item.meta || {}), browser_upload: true, browser_upload_transport: "multipart" },
       },
       file_size: blob.size,
       mime_type: blob.type || response.headers.get("content-type") || null,
     });
-    const r = await fetch(base + "/social/ingest-upload", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
+    const r = await postBrowserUpload(base, payload, blob);
     const j = await r.json().catch(() => ({}));
     const accepted = Number(j.accepted ?? j.stored ?? 0);
     const saved = Number(j.saved ?? (j.deduped ? 0 : j.stored || 0));

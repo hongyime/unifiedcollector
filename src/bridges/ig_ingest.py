@@ -91,6 +91,13 @@ DM_SAMPLE_DIR = "/tmp/dm_samples"
 DM_SAMPLE_CAP_PER_PLATFORM = int(os.getenv("DM_SAMPLE_CAP", "200"))
 MIN_BYTES = int(os.getenv("IG_INGEST_MIN_BYTES", "1024"))
 DL_CONCURRENCY = int(os.getenv("SOCIAL_INGEST_CONCURRENCY", "4"))
+try:
+    SOCIAL_INGEST_UPLOAD_CONCURRENCY = max(
+        1,
+        int(os.getenv("SOCIAL_INGEST_UPLOAD_CONCURRENCY", "1")),
+    )
+except (TypeError, ValueError):
+    SOCIAL_INGEST_UPLOAD_CONCURRENCY = 1
 SOCIAL_INGEST_CLIENT_MAX_MB = int(os.getenv("SOCIAL_INGEST_CLIENT_MAX_MB", "512"))
 try:
     BROWSER_TELEMETRY_WRITE_TIMEOUT_SECONDS = max(
@@ -507,7 +514,7 @@ async def handle_options(request):
 async def request_timeout_middleware(request, handler):
     timeout_seconds = (
         SOCIAL_INGEST_UPLOAD_REQUEST_TIMEOUT_SECONDS
-        if request.path == "/social/ingest-upload"
+        if request.path in {"/social/ingest-upload", "/social/ingest-upload-binary"}
         else SOCIAL_INGEST_REQUEST_TIMEOUT_SECONDS
     )
     try:
@@ -1763,8 +1770,18 @@ async def _download_and_save(pool, session, platform, username, item, reject_sta
             await _record_vault_pause(str(exc))
             return _reject("vault_unavailable", str(exc))
 
+        data_bytes = item.get("data_bytes")
         data_b64 = item.get("data_b64")
-        if data_b64:
+        if isinstance(data_bytes, memoryview):
+            data = data_bytes.tobytes()
+            ct_header = item.get("mime_type") or item.get("content_type_header")
+        elif isinstance(data_bytes, bytearray):
+            data = bytes(data_bytes)
+            ct_header = item.get("mime_type") or item.get("content_type_header")
+        elif isinstance(data_bytes, bytes):
+            data = data_bytes
+            ct_header = item.get("mime_type") or item.get("content_type_header")
+        elif data_b64:
             try:
                 data = base64.b64decode(str(data_b64), validate=True)
             except Exception as exc:
@@ -2190,7 +2207,7 @@ async def _ingest_uploaded_media(app, platform, body):
         "browser_upload_mime_type": body.get("mime_type"),
     }
     reject_stats: dict = {}
-    async with app["sem"]:
+    async with app["upload_sem"]:
         saved = await _download_and_save(app["pool"], app["session"], platform, username, item, reject_stats)
     await _record_browser_media_candidate(
         app["pool"],
@@ -4784,6 +4801,59 @@ async def ingest_upload(request):
     return _cors(web.json_response(_queued_browser_upload_response(platform, body)))
 
 
+async def ingest_upload_binary(request):
+    body: dict = {}
+    file_bytes: bytes | None = None
+    file_mime: str | None = None
+    file_name: str | None = None
+    try:
+        reader = await request.multipart()
+        async for part in reader:
+            if part.name == "metadata":
+                try:
+                    parsed = json.loads(await part.text())
+                except Exception:
+                    parsed = {}
+                if isinstance(parsed, dict):
+                    body = parsed
+            elif part.name == "file":
+                file_name = part.filename
+                file_mime = part.headers.get("Content-Type")
+                file_bytes = await part.read(decode=False)
+    except Exception as exc:
+        logger.warning("browser multipart upload parse failed: %s", exc.__class__.__name__)
+        return _cors(web.json_response({"ok": False, "error": "bad_multipart"}, status=400))
+
+    if not isinstance(body, dict):
+        body = {}
+    platform = _norm_platform(body.get("platform"))
+    item = body.get("item") if isinstance(body.get("item"), dict) else {}
+    item = dict(item)
+    if not file_bytes:
+        return _cors(web.json_response({"ok": False, "error": "missing_file", "platform": platform}, status=400))
+
+    item["data_bytes"] = file_bytes
+    if file_mime and not item.get("mime_type"):
+        item["mime_type"] = file_mime
+    meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
+    item["meta"] = {
+        **meta,
+        "browser_upload_transport": "multipart",
+        "browser_upload_filename": file_name,
+    }
+    body["item"] = item
+    body["file_size"] = len(file_bytes)
+    if file_mime and not body.get("mime_type"):
+        body["mime_type"] = file_mime
+
+    _schedule_app_task(
+        request.app,
+        _ingest_uploaded_media(request.app, platform, body),
+        "browser_upload_binary_ingest",
+    )
+    return _cors(web.json_response(_queued_browser_upload_response(platform, body)))
+
+
 async def ingest_ig(request):  # /ig/ingest alias
     body = await _safe_json(request)
     return _cors(web.json_response(await _ingest(request.app, "instagram", body)))
@@ -4844,6 +4914,7 @@ async def _on_startup(app):
     app["startup_pending"] = True
     app["tasks"] = set()
     app["sem"] = asyncio.Semaphore(DL_CONCURRENCY)
+    app["upload_sem"] = asyncio.Semaphore(SOCIAL_INGEST_UPLOAD_CONCURRENCY)
     app["session"] = aiohttp.ClientSession(
         headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"}
@@ -4875,6 +4946,7 @@ def make_app():
     app.router.add_get("/social/ig_cooldown", ig_cooldown)
     app.router.add_post("/social/ingest", ingest)
     app.router.add_post("/social/ingest-upload", ingest_upload)
+    app.router.add_post("/social/ingest-upload-binary", ingest_upload_binary)
     app.router.add_post("/social/browser-media-candidates", browser_media_candidates)
     app.router.add_post("/social/discover", discover)
     app.router.add_post("/social/target-status", target_status_handler)
