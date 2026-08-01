@@ -897,6 +897,10 @@ def test_browser_heartbeat_handler_records_forced_cycle_metadata():
             "cycle_discovered": 3,
             "loop_running": True,
             "one_shot_running": True,
+            "one_shot_age_ms": 1234,
+            "stale_after_ms": 480000,
+            "one_shot_timeout": True,
+            "timeout_ms": 180000,
         },
     )
 
@@ -914,6 +918,10 @@ def test_browser_heartbeat_handler_records_forced_cycle_metadata():
     assert metadata["cycle_discovered"] == 3
     assert metadata["loop_running"] is True
     assert metadata["one_shot_running"] is True
+    assert metadata["one_shot_age_ms"] == 1234
+    assert metadata["stale_after_ms"] == 480000
+    assert metadata["one_shot_timeout"] is True
+    assert metadata["timeout_ms"] == 180000
 
 
 def test_browser_heartbeat_handler_records_bridge_diagnostic_platform():
