@@ -219,16 +219,24 @@ async function handleUrlActions() {
     return;
   }
   const shouldOpenAll = params.get("openAll") === "1";
+  const openIds = (params.get("open") || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
   const shouldRefreshTabs = params.get("refreshTabs") === "1";
   const shouldScrape = params.get("scrape") === "1";
   const shouldTest = params.get("test") === "1";
-  if (!shouldOpenAll && !shouldRefreshTabs && !shouldScrape && !shouldTest) return;
+  if (!shouldOpenAll && !openIds.length && !shouldRefreshTabs && !shouldScrape && !shouldTest) return;
   try {
     history.replaceState(null, "", location.pathname);
   } catch (e) {}
   try {
     if (shouldOpenAll) {
       await sendMessage({ type: "openAll" });
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+    }
+    for (const id of openIds) {
+      await sendMessage({ type: "openPlatform", id });
       await new Promise((resolve) => setTimeout(resolve, 1200));
     }
     if (shouldRefreshTabs) {
