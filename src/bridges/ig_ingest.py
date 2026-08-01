@@ -102,10 +102,10 @@ SOCIAL_INGEST_CLIENT_MAX_MB = int(os.getenv("SOCIAL_INGEST_CLIENT_MAX_MB", "512"
 try:
     BROWSER_TELEMETRY_WRITE_TIMEOUT_SECONDS = max(
         0.25,
-        float(os.getenv("BROWSER_TELEMETRY_WRITE_TIMEOUT_SECONDS", "2.0")),
+        float(os.getenv("BROWSER_TELEMETRY_WRITE_TIMEOUT_SECONDS", "8.0")),
     )
 except (TypeError, ValueError):
-    BROWSER_TELEMETRY_WRITE_TIMEOUT_SECONDS = 2.0
+    BROWSER_TELEMETRY_WRITE_TIMEOUT_SECONDS = 8.0
 try:
     SOCIAL_INGEST_REQUEST_TIMEOUT_SECONDS = max(
         1.0,
@@ -2132,7 +2132,8 @@ async def _record_browser_ingest_event(
                 metadata=metadata,
             )
     except TimeoutError:
-        logger.warning(
+        log = logger.debug if endpoint == "browser_heartbeat" else logger.warning
+        log(
             "browser ingest telemetry timed out after %.2fs platform=%s endpoint=%s subject=%s",
             BROWSER_TELEMETRY_WRITE_TIMEOUT_SECONDS,
             platform,
@@ -2251,7 +2252,11 @@ async def _ingest_uploaded_media(app, platform, body):
         "browser_upload_mime_type": body.get("mime_type"),
     }
     reject_stats: dict = {}
-    async with app["upload_sem"]:
+    upload_sem = app.get("upload_sem") or app.get("sem")
+    if upload_sem is None:
+        upload_sem = asyncio.Semaphore(SOCIAL_INGEST_UPLOAD_CONCURRENCY)
+        app["upload_sem"] = upload_sem
+    async with upload_sem:
         saved = await _download_and_save(app["pool"], app["session"], platform, username, item, reject_stats)
     await _record_browser_media_candidate(
         app["pool"],

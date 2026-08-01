@@ -239,7 +239,7 @@ def test_browser_media_candidates_records_non_tiktok_platform():
     )
     payload = json.loads(response.text)
 
-    assert payload == {"ok": True, "recorded": 1, "platform": "facebook"}
+    assert payload == {"ok": True, "queued": 1, "platform": "facebook"}
     assert any("browser_media_candidates" in query for query, _args in pool.conn.executes)
     assert not any("tiktok_browser_media_candidates" in query for query, _args in pool.conn.executes)
 
@@ -277,7 +277,7 @@ def test_browser_media_candidates_queues_x_video_revisit():
     )
     payload = json.loads(response.text)
 
-    assert payload == {"ok": True, "recorded": 1, "platform": "x"}
+    assert payload == {"ok": True, "queued": 1, "platform": "x"}
     queries = [query for query, _args in pool.conn.executes]
     assert any("browser_media_candidates" in query for query in queries)
     assert any("browser_media_revisit_queue" in query for query in queries)
@@ -949,6 +949,7 @@ def test_browser_heartbeat_handler_reports_degraded_when_pool_missing():
 
 def test_browser_heartbeat_handler_requests_forced_cycle_when_content_stale(monkeypatch):
     monkeypatch.setattr(ig_ingest, "BROWSER_CONTENT_STALE_SECONDS", 3600)
+    ig_ingest._BROWSER_CONTENT_HINT_CACHE.clear()
     pool = _FakePool()
     pool.conn.fetchrow_result = {"age_seconds": 7200}
     req = _FakeRequest(

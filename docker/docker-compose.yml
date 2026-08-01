@@ -755,6 +755,7 @@ services:
       - z:/unifiedcollector/media:/media
       - z:/unifiedcollector:/vault
       - ../credentials:/app/credentials   # so /social/cookies can write live sessions
+      - ../src:/app/src
     depends_on:
       postgres:
         condition: service_healthy
