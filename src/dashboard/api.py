@@ -234,6 +234,13 @@ def _extension_reload_target_from_url(url: object) -> tuple[str | None, str | No
     return extension_id, f"chrome-extension://{extension_id}/tabs.html?reload=1"
 
 
+def _extension_management_url(extension_id: object) -> str | None:
+    extension_id = str(extension_id or "").strip()
+    if not re.fullmatch(r"[a-p]{32}", extension_id):
+        return None
+    return f"chrome://extensions/?id={extension_id}"
+
+
 _EXTENSION_RECENT_MISMATCH_SECONDS = 15 * 60
 
 
@@ -1637,6 +1644,7 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
         expected = issue.get("expected_version") or "current"
         detail = issue.get("detail") or "Chrome extension issue detected."
         reload_url = issue.get("reload_url")
+        manage_url = _extension_management_url(issue.get("extension_id"))
         if issue.get("kind") == "extension_version_mismatch":
             scope = f"on {endpoint}" if endpoint else "from hook"
             detail = f"{detail} Saw v{version} {scope}; expected v{expected}."
@@ -1655,7 +1663,15 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
                 hook_target = "the TikTok Messages tab"
             else:
                 hook_target = "the platform messaging tab"
-            if reload_url:
+            if manage_url:
+                next_action = (
+                    f"Open or focus {hook_target}, then check for a fresh DM hook heartbeat. "
+                    f"If normal browser heartbeats are stale too, open {manage_url}, press Reload on UnifiedCollector Bridge, "
+                    "then hard-refresh the scraper tabs."
+                )
+                if reload_url:
+                    next_action += f" The in-extension reload shortcut is {reload_url}, but use Chrome's Reload button if the worker is stale."
+            elif reload_url:
                 next_action = (
                     f"Open or focus {hook_target}, then check for a fresh DM hook heartbeat. "
                     f"If normal browser heartbeats are stale too, open {reload_url} to reload the extension "
@@ -1666,6 +1682,19 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
                     f"Open or focus {hook_target}, then check for a fresh DM hook heartbeat. "
                     "Reload the unpacked extension only if normal browser heartbeats are stale too."
                 )
+        elif manage_url:
+            tab_action = (
+                "refresh or reopen the platform tab so it emits one fresh signal"
+                if issue.get("needs_new_event")
+                else "refresh or reopen every tab for this platform"
+            )
+            next_action = (
+                f"Open {manage_url}, press Reload on UnifiedCollector Bridge, then open the extension Social Tabs page "
+                f"and press Test ingest. After that, {tab_action}. "
+                "If it still reports the old version, fully close Chrome and check the unpacked extension path."
+            )
+            if reload_url:
+                next_action += f" The in-extension reload shortcut is {reload_url}, but use Chrome's Reload button if the worker is stale."
         elif reload_url:
             tab_action = (
                 "refresh or reopen the platform tab so it emits one fresh signal"
@@ -1674,7 +1703,7 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
             )
             next_action = (
                 f"Open {reload_url} to reload the extension, then {tab_action}. "
-                "If it still reports the old version, close duplicate platform tabs/windows and check Chrome's unpacked extension path."
+                "If it still reports the old version, use chrome://extensions to reload the unpacked extension."
             )
         elif issue.get("needs_new_event"):
             next_action = (
