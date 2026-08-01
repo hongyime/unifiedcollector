@@ -1496,7 +1496,10 @@ async function rememberExtensionVersion() {
     if (versionState.changed) {
       const from = versionState.previous || "unknown";
       await log("info", `extension version changed ${from} -> ${versionState.version}; hard-refreshing scraper tabs`);
-      await runStartupRecovery("version_changed", { force: true, refreshTabs: true, retries: 3 });
+      setTimeout(() => {
+        runStartupRecovery("version_changed", { force: true, refreshTabs: true, retries: 3 })
+          .catch((e) => log("warn", `version-change recovery failed: ${e && e.message ? e.message : e}`));
+      }, 500);
     } else {
       await runStartupRecovery("warm_start", { force: false, refreshTabs: false, retries: 2 });
     }
