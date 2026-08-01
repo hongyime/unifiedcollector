@@ -1128,6 +1128,7 @@ function browserMediaRevisitUrlOk(platform, url) {
 }
 async function maybeStartBrowserMediaRevisit(platform, owner) {
   if (!BROWSER_MEDIA_REVISIT_PLATFORMS.has(platform)) return null;
+  if (deferBrowserMediaRevisitForForcedRecovery(platform)) return null;
   const active = currentBrowserMediaRevisit(platform);
   if (active) return active;
   const reply = await send({ type: "getBrowserMediaRevisitTarget", platform, owner: owner || null }).catch(() => null);
@@ -2633,7 +2634,16 @@ function currentPlatform() {
 let LOOP_RUNNING = false;
 let ONE_SHOT_RUNNING = false;
 let ONE_SHOT_STARTED_AT = 0;
+let ONE_SHOT_REASON = "";
 const ONE_SHOT_STALE_MS = 8 * 60 * 1000;
+const ONE_SHOT_STALE_MS_BY_PLATFORM = {
+  x: 3 * 60 * 1000,
+  facebook: 3 * 60 * 1000,
+  tiktok: 4 * 60 * 1000,
+  lemon8: 4 * 60 * 1000,
+  threads: 4 * 60 * 1000,
+  strava: 5 * 60 * 1000,
+};
 const ONE_SHOT_TIMEOUT_MS_BY_PLATFORM = {
   instagram: 10 * 60 * 1000,
   strava: 5 * 60 * 1000,
@@ -2646,6 +2656,16 @@ const ONE_SHOT_TIMEOUT_MS_BY_PLATFORM = {
 
 function oneShotTimeoutMs(platformId) {
   return ONE_SHOT_TIMEOUT_MS_BY_PLATFORM[platformId] || 4 * 60 * 1000;
+}
+
+function oneShotStaleMs(platformId) {
+  return ONE_SHOT_STALE_MS_BY_PLATFORM[platformId] || ONE_SHOT_STALE_MS;
+}
+
+function deferBrowserMediaRevisitForForcedRecovery(platform) {
+  if (!ONE_SHOT_RUNNING) return false;
+  if (platform !== "x" && platform !== "facebook") return false;
+  return /browser_content_stale|manual|stale/i.test(ONE_SHOT_REASON || "");
 }
 
 function scheduleOneShotReload(p, reason) {
@@ -2757,27 +2777,30 @@ async function runOneShotCycle(reason) {
   const p = currentPlatform();
   if (!p) return;
   if (ONE_SHOT_RUNNING) {
-    const ageMs = ONE_SHOT_STARTED_AT ? Date.now() - ONE_SHOT_STARTED_AT : ONE_SHOT_STALE_MS + 1;
-    if (ageMs > ONE_SHOT_STALE_MS) {
+    const staleMs = oneShotStaleMs(p.id);
+    const ageMs = ONE_SHOT_STARTED_AT ? Date.now() - ONE_SHOT_STARTED_AT : staleMs + 1;
+    if (ageMs > staleMs) {
       clog("warn", `${p.label} forced pass appears stuck for ${Math.ceil(ageMs / 60000)}m; reloading tab`, p.label);
       await reportForcedCycleHealth(p, "forced_cycle_stale_reloading", "stale_one_shot", {
         one_shot_age_ms: ageMs,
-        stale_after_ms: ONE_SHOT_STALE_MS,
+        stale_after_ms: staleMs,
       });
       ONE_SHOT_RUNNING = false;
       ONE_SHOT_STARTED_AT = 0;
+      ONE_SHOT_REASON = "";
       scheduleOneShotReload(p, "appears stuck");
       return;
     }
     clog("warn", `${p.label} forced pass skipped; another forced pass is already running`, p.label);
     await reportForcedCycleHealth(p, "forced_cycle_skipped", "already_running", {
       one_shot_age_ms: ageMs,
-      stale_after_ms: ONE_SHOT_STALE_MS,
+      stale_after_ms: staleMs,
     });
     return;
   }
   ONE_SHOT_RUNNING = true;
   ONE_SHOT_STARTED_AT = Date.now();
+  ONE_SHOT_REASON = reason || "manual";
   clog("warn", `${p.label} forced one scrape pass (${reason || "manual"})`, p.label);
   await reportForcedCycleHealth(p, "forced_cycle_started", reason || "manual");
   await send({ type: "loopStatus", platform: p.id, label: p.label, running: true, url: location.href }).catch(() => {});
@@ -2824,6 +2847,7 @@ async function runOneShotCycle(reason) {
   } finally {
     ONE_SHOT_RUNNING = false;
     ONE_SHOT_STARTED_AT = 0;
+    ONE_SHOT_REASON = "";
     await send({ type: "loopStatus", platform: p.id, label: p.label, running: LOOP_RUNNING, url: location.href }).catch(() => {});
   }
 }
