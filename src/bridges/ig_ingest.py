@@ -125,6 +125,20 @@ try:
     )
 except (TypeError, ValueError):
     BROWSER_CONTENT_STALE_SECONDS = 3600
+try:
+    BROWSER_CONTENT_HINT_TTL_SECONDS = max(
+        30,
+        int(os.getenv("BROWSER_CONTENT_HINT_TTL_SECONDS", "300")),
+    )
+except (TypeError, ValueError):
+    BROWSER_CONTENT_HINT_TTL_SECONDS = 300
+try:
+    SOCIAL_INGEST_STARTUP_DDL_TIMEOUT_SECONDS = max(
+        15.0,
+        float(os.getenv("SOCIAL_INGEST_STARTUP_DDL_TIMEOUT_SECONDS", "60.0")),
+    )
+except (TypeError, ValueError):
+    SOCIAL_INGEST_STARTUP_DDL_TIMEOUT_SECONDS = 60.0
 STRAVA_BROWSER_429_COOLDOWN_SECONDS = int(os.getenv("STRAVA_BROWSER_429_COOLDOWN_SECONDS", "1800"))
 try:
     STRAVA_BROWSER_429_MAX_COOLDOWN_SECONDS = max(
@@ -154,6 +168,7 @@ try:
     )
 except (TypeError, ValueError):
     TIKTOK_BROWSER_REVISIT_CLAIM_HOLD_SECONDS = 900
+_BROWSER_CONTENT_HINT_CACHE: dict[str, tuple[float, dict]] = {}
 _SAFE = re.compile(r"[^A-Za-z0-9._-]")
 _THREADS_SYNTHETIC_MEDIA_ID = re.compile(r"^(?:img|vid)_[a-z0-9]+$", re.IGNORECASE)
 
@@ -4448,6 +4463,10 @@ async def strava_route_visit_handler(request):
 async def _browser_content_recovery_hint(pool, platform: str) -> dict:
     if not pool or not platform or platform == "bridge":
         return {}
+    now = time.monotonic()
+    cached = _BROWSER_CONTENT_HINT_CACHE.get(platform)
+    if cached and now - cached[0] < BROWSER_CONTENT_HINT_TTL_SECONDS:
+        return dict(cached[1])
     try:
         async with asyncio.timeout(1.0):
             async with pool.acquire() as conn:
@@ -4466,12 +4485,15 @@ async def _browser_content_recovery_hint(pool, platform: str) -> dict:
                 )
         age = row["age_seconds"] if row else None
         if age is None or int(age) > BROWSER_CONTENT_STALE_SECONDS:
-            return {
+            hint = {
                 "force_cycle": True,
                 "force_reason": "browser_content_stale",
                 "content_age_seconds": int(age) if age is not None else None,
                 "stale_after_seconds": BROWSER_CONTENT_STALE_SECONDS,
             }
+            _BROWSER_CONTENT_HINT_CACHE[platform] = (now, hint)
+            return dict(hint)
+        _BROWSER_CONTENT_HINT_CACHE[platform] = (now, {})
     except TimeoutError:
         return {"force_cycle": False, "force_reason": "content_age_check_timeout"}
     except Exception:
@@ -4714,12 +4736,13 @@ async def _prepare_db_pool_and_schema(app):
         logger.exception("startup DB pool failed")
     if app.get("pool") is not None:
         try:
-            async with asyncio.timeout(15):
+            async with asyncio.timeout(SOCIAL_INGEST_STARTUP_DDL_TIMEOUT_SECONDS):
                 async with app["pool"].acquire() as conn:
                     await conn.execute(_SPIDER_DDL)
                     await _execute_ddl_script(conn, _X_TARGETS_DDL)
                     await _execute_ddl_script(conn, _TIKTOK_BROWSER_MEDIA_DDL)
                     await _execute_ddl_script(conn, _BROWSER_MEDIA_CANDIDATES_DDL)
+            app["startup_error"] = None
         except TimeoutError:
             app["startup_error"] = "startup_ddl_timeout"
             logger.exception("startup DDL timed out")
