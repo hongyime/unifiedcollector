@@ -183,6 +183,7 @@ try:
 except (TypeError, ValueError):
     TIKTOK_BROWSER_REVISIT_CLAIM_HOLD_SECONDS = 900
 _BROWSER_CONTENT_HINT_CACHE: dict[str, tuple[float, dict]] = {}
+_BROWSER_CONTENT_HINT_INFLIGHT: set[str] = set()
 _SAFE = re.compile(r"[^A-Za-z0-9._-]")
 _THREADS_SYNTHETIC_MEDIA_ID = re.compile(r"^(?:img|vid)_[a-z0-9]+$", re.IGNORECASE)
 
@@ -4610,6 +4611,9 @@ async def _browser_content_recovery_hint(pool, platform: str) -> dict:
     cached = _BROWSER_CONTENT_HINT_CACHE.get(platform)
     if cached and now - cached[0] < BROWSER_CONTENT_HINT_TTL_SECONDS:
         return dict(cached[1])
+    if platform in _BROWSER_CONTENT_HINT_INFLIGHT:
+        return {"force_cycle": False, "force_reason": "content_age_check_pending"}
+    _BROWSER_CONTENT_HINT_INFLIGHT.add(platform)
     try:
         async with asyncio.timeout(1.0):
             async with pool.acquire() as conn:
@@ -4641,6 +4645,8 @@ async def _browser_content_recovery_hint(pool, platform: str) -> dict:
         return {"force_cycle": False, "force_reason": "content_age_check_timeout"}
     except Exception:
         logger.debug("browser content recovery hint failed platform=%s", platform, exc_info=True)
+    finally:
+        _BROWSER_CONTENT_HINT_INFLIGHT.discard(platform)
     return {}
 
 
@@ -4677,6 +4683,14 @@ async def browser_heartbeat_handler(request):
                 "page_title": body.get("page_title"),
                 "text_sample": body.get("text_sample"),
                 "content_counts": body.get("content_counts"),
+                "cycle_reason": body.get("cycle_reason"),
+                "cycle_targets": body.get("cycle_targets"),
+                "cycle_saved": body.get("cycle_saved"),
+                "cycle_discovered": body.get("cycle_discovered"),
+                "cycle_error": body.get("cycle_error"),
+                "cooldown_left_ms": body.get("cooldown_left_ms"),
+                "loop_running": body.get("loop_running"),
+                "one_shot_running": body.get("one_shot_running"),
                 "recovery_scheduled": body.get("recovery_scheduled"),
                 "recovery_pending": body.get("recovery_pending"),
                 "recovery_attempt": body.get("recovery_attempt"),
@@ -4958,6 +4972,21 @@ async def _prepare_db_pool_and_schema(app):
 
 
 async def _on_startup(app):
+    loop = asyncio.get_running_loop()
+    previous_exception_handler = loop.get_exception_handler()
+    app["previous_loop_exception_handler"] = previous_exception_handler
+
+    def _connection_lost_exception_handler(loop, context):
+        exc = context.get("exception")
+        if isinstance(exc, ConnectionError) and "unexpected connection_lost()" in str(exc):
+            logger.debug("suppressed browser client disconnect noise: %s", exc)
+            return
+        if previous_exception_handler is not None:
+            previous_exception_handler(loop, context)
+        else:
+            loop.default_exception_handler(context)
+
+    loop.set_exception_handler(_connection_lost_exception_handler)
     app["pool"] = None
     app["startup_error"] = None
     app["startup_pending"] = True
@@ -4982,6 +5011,10 @@ async def _on_cleanup(app):
         t.cancel()
     await app["session"].close()
     await close_pool()
+    try:
+        asyncio.get_running_loop().set_exception_handler(app.get("previous_loop_exception_handler"))
+    except Exception:
+        pass
 
 
 def make_app():

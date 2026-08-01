@@ -2641,29 +2641,72 @@ async function mainLoop() {
   }
 }
 
+function asCycleNumber(value) {
+  const n = Number(value || 0);
+  return Number.isFinite(n) ? n : 0;
+}
+
+async function reportForcedCycleHealth(p, status, reason, extra = {}) {
+  if (!p) return null;
+  return send({
+    type: "pageHealth",
+    platform: p.id,
+    label: p.label,
+    status,
+    reason: reason || null,
+    cycle_reason: reason || null,
+    url: location.href,
+    title: document.title || "",
+    content_counts: pageContentCounts(),
+    loop_running: LOOP_RUNNING,
+    one_shot_running: ONE_SHOT_RUNNING,
+    ...extra,
+  }).catch(() => null);
+}
+
 async function runOneShotCycle(reason) {
   const p = currentPlatform();
-  if (!p || ONE_SHOT_RUNNING) return;
+  if (!p) return;
+  if (ONE_SHOT_RUNNING) {
+    clog("warn", `${p.label} forced pass skipped; another forced pass is already running`, p.label);
+    await reportForcedCycleHealth(p, "forced_cycle_skipped", "already_running");
+    return;
+  }
   ONE_SHOT_RUNNING = true;
   clog("warn", `${p.label} forced one scrape pass (${reason || "manual"})`, p.label);
+  await reportForcedCycleHealth(p, "forced_cycle_started", reason || "manual");
   await send({ type: "loopStatus", platform: p.id, label: p.label, running: true, url: location.href }).catch(() => {});
   try {
     const leftMs = wallLeftMs(p.id);
     if (leftMs > 0) {
       clog("warn", `${p.label} forced pass skipped; cooldown active for ${Math.ceil(leftMs / 60000)}m`, p.label);
+      await reportForcedCycleHealth(p, "forced_cycle_skipped", "cooldown", {
+        cooldown_left_ms: Math.round(leftMs),
+      });
       return;
     }
     const shell = detectRecoverablePageShell(p.id);
     if (shell) {
       await reportRecoverablePageShell(p, shell);
+      await reportForcedCycleHealth(p, "forced_cycle_skipped", shell.reason || "recoverable_error_shell", {
+        content_counts: shell.content_counts || pageContentCounts(),
+      });
       return;
     }
     const stats = await p.runCycle();
+    await reportForcedCycleHealth(p, "forced_cycle_finished", reason || "manual", {
+      cycle_targets: asCycleNumber(stats && stats.targets),
+      cycle_saved: asCycleNumber(stats && stats.saved),
+      cycle_discovered: asCycleNumber(stats && stats.discovered),
+    });
     if (!stats || !stats.skip_cycle_report) {
       await send({ type: "cycleReport", platform: p.label, ...stats }).catch(() => {});
     }
   } catch (e) {
     clog("error", `${p.label} forced scrape pass error: ${e.message}`, p.label);
+    await reportForcedCycleHealth(p, "forced_cycle_error", reason || "manual", {
+      cycle_error: e && e.message ? e.message : String(e),
+    });
   } finally {
     ONE_SHOT_RUNNING = false;
     await send({ type: "loopStatus", platform: p.id, label: p.label, running: LOOP_RUNNING, url: location.href }).catch(() => {});

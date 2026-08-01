@@ -878,6 +878,44 @@ def test_browser_heartbeat_handler_records_page_recovery_metadata():
     assert metadata["extension_version"] == "1.21.36"
 
 
+def test_browser_heartbeat_handler_records_forced_cycle_metadata():
+    pool = _FakePool()
+    req = _FakeRequest(
+        {"pool": pool},
+        {
+            "platform": "threads",
+            "label": "Threads",
+            "running": True,
+            "url": "https://www.threads.com/",
+            "tab_id": 456,
+            "extension_version": "1.21.72",
+            "health_status": "forced_cycle_finished",
+            "health_reason": "browser_content_stale",
+            "cycle_reason": "browser_content_stale",
+            "cycle_targets": 1,
+            "cycle_saved": 7,
+            "cycle_discovered": 3,
+            "loop_running": True,
+            "one_shot_running": True,
+        },
+    )
+
+    resp = asyncio.run(ig_ingest.browser_heartbeat_handler(req))
+
+    assert resp.status == 200
+    query, args = pool.conn.executes[0]
+    assert "browser_ingest_events" in query
+    assert args[:5] == ("threads", "browser_heartbeat", "456", 1, 0)
+    metadata = json.loads(args[5])
+    assert metadata["health_status"] == "forced_cycle_finished"
+    assert metadata["cycle_reason"] == "browser_content_stale"
+    assert metadata["cycle_targets"] == 1
+    assert metadata["cycle_saved"] == 7
+    assert metadata["cycle_discovered"] == 3
+    assert metadata["loop_running"] is True
+    assert metadata["one_shot_running"] is True
+
+
 def test_browser_heartbeat_handler_records_bridge_diagnostic_platform():
     pool = _FakePool()
     req = _FakeRequest(
@@ -971,6 +1009,19 @@ def test_browser_heartbeat_handler_requests_forced_cycle_when_content_stale(monk
     assert payload["force_cycle"] is True
     assert payload["force_reason"] == "browser_content_stale"
     assert payload["content_age_seconds"] == 7200
+
+
+def test_browser_content_hint_returns_pending_during_inflight_check():
+    ig_ingest._BROWSER_CONTENT_HINT_CACHE.clear()
+    ig_ingest._BROWSER_CONTENT_HINT_INFLIGHT.add("x")
+    pool = _FakePool()
+    try:
+        hint = asyncio.run(ig_ingest._browser_content_recovery_hint(pool, "x"))
+    finally:
+        ig_ingest._BROWSER_CONTENT_HINT_INFLIGHT.discard("x")
+
+    assert hint == {"force_cycle": False, "force_reason": "content_age_check_pending"}
+    assert pool.conn.fetchrows == []
 
 
 def test_record_strava_stream_http_429_writes_rate_limit_event(monkeypatch):

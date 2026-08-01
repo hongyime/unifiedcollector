@@ -37,6 +37,7 @@ const PAGE_RECOVERY_PREFIX = "uc-page-recovery:";
 const PAGE_RECOVERY_STATE_KEY = "ucPageRecovery";
 const PAGE_RECOVERY_MAX_ATTEMPTS = 3;
 const RELOAD_INTENT_KEY = "ucReloadIntent";
+const LOADED_VERSION_KEY = "ucLoadedExtensionVersion";
 const SCRAPER_HEARTBEAT_TIMEOUT_MS = 12000;
 const SCRAPER_HEARTBEAT_CONCURRENCY = 3;
 const PAGE_RECOVERY_DELAY_WINDOWS_MS = [
@@ -204,20 +205,27 @@ async function reportScraperTabHeartbeats(reason) {
 }
 
 const lastForcedCycleByTab = {};
+const FORCED_CYCLE_DEBOUNCE_MS = 5 * 60 * 1000;
+
+function parseHeartbeatResponseBody(responseBody) {
+  if (!responseBody) return null;
+  if (typeof responseBody === "object") return responseBody;
+  try { return JSON.parse(String(responseBody)); } catch (e) { return null; }
+}
+
 async function maybeForceScrapeCycle(tab, platform, responseBody, reason) {
-  let body = null;
-  try { body = responseBody ? JSON.parse(responseBody) : null; } catch (e) { return; }
+  const body = parseHeartbeatResponseBody(responseBody);
   if (!body || body.force_cycle !== true || !tab || !tab.id) return;
   const now = Date.now();
   const key = String(tab.id);
-  if (lastForcedCycleByTab[key] && now - lastForcedCycleByTab[key] < 20 * 60 * 1000) return;
-  lastForcedCycleByTab[key] = now;
+  if (lastForcedCycleByTab[key] && now - lastForcedCycleByTab[key] < FORCED_CYCLE_DEBOUNCE_MS) return;
   try {
     await chrome.tabs.sendMessage(tab.id, {
       type: "scrapeCycle",
       reason: body.force_reason || "browser_content_stale",
       content_age_seconds: body.content_age_seconds || null,
     });
+    lastForcedCycleByTab[key] = now;
     await log("warn", `${platform.label}: forced one scrape pass because browser content is stale`);
   } catch (firstErr) {
     try {
@@ -232,6 +240,7 @@ async function maybeForceScrapeCycle(tab, platform, responseBody, reason) {
         reason: body.force_reason || "browser_content_stale",
         content_age_seconds: body.content_age_seconds || null,
       });
+      lastForcedCycleByTab[key] = now;
       await log("warn", `${platform.label}: revived content script and forced one stale-content scrape pass`);
     } catch (e) {
       await log("warn", `${platform.label}: stale-content forced scrape failed: ${e && e.message ? e.message : e}`);
@@ -500,22 +509,27 @@ async function clearPageRecoveryForTab(tabId, reason) {
 }
 async function recordPageHealth(base, msg, sender, extra = {}) {
   try {
-    await fetch(base + "/social/browser-heartbeat", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(withExtensionVersion({
-        platform: msg.platform,
-        label: msg.label || msg.platform,
-        running: true,
-        url: msg.url || (sender && sender.tab && sender.tab.url) || null,
-        tab_id: sender && sender.tab ? sender.tab.id : null,
-        health_status: msg.status || "unknown",
-        health_reason: msg.reason || null,
-        page_title: msg.title || null,
-        text_sample: msg.sample || null,
-        content_counts: msg.content_counts || null,
-        ...extra,
-      })),
-    });
+    await postJsonWithTimeout(base + "/social/browser-heartbeat", withExtensionVersion({
+      platform: msg.platform,
+      label: msg.label || msg.platform,
+      running: true,
+      url: msg.url || (sender && sender.tab && sender.tab.url) || null,
+      tab_id: sender && sender.tab ? sender.tab.id : null,
+      health_status: msg.status || "unknown",
+      health_reason: msg.reason || null,
+      page_title: msg.title || null,
+      text_sample: msg.sample || null,
+      content_counts: msg.content_counts || null,
+      cycle_reason: msg.cycle_reason || null,
+      cycle_targets: msg.cycle_targets ?? null,
+      cycle_saved: msg.cycle_saved ?? null,
+      cycle_discovered: msg.cycle_discovered ?? null,
+      cycle_error: msg.cycle_error || null,
+      cooldown_left_ms: msg.cooldown_left_ms ?? null,
+      loop_running: msg.loop_running ?? null,
+      one_shot_running: msg.one_shot_running ?? null,
+      ...extra,
+    }), SCRAPER_HEARTBEAT_TIMEOUT_MS);
   } catch (e) {}
 }
 function recoveryDelayMs(attempt, platformId) {
@@ -1333,16 +1347,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           lastLoopPing: Date.now(),
         });
         try {
-          await fetch(base + "/social/browser-heartbeat", {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(withExtensionVersion({
-              platform: msg.platform,
-              label: msg.label || null,
-              running: !!msg.running,
-              url: msg.url || (sender && sender.tab && sender.tab.url) || null,
-              tab_id: sender && sender.tab ? sender.tab.id : null,
-            })),
-          });
+          const tab = sender && sender.tab ? sender.tab : null;
+          const platform = (globalThis.UC_PLATFORMS || []).find((p) => p.id === msg.platform) || {
+            id: msg.platform,
+            label: msg.label || msg.platform,
+          };
+          const result = await postJsonWithTimeout(base + "/social/browser-heartbeat", withExtensionVersion({
+            platform: msg.platform,
+            label: msg.label || null,
+            running: !!msg.running,
+            url: msg.url || (tab && tab.url) || null,
+            tab_id: tab ? tab.id : null,
+          }), SCRAPER_HEARTBEAT_TIMEOUT_MS);
+          await maybeForceScrapeCycle(tab, platform, result && result.body, "loop_status");
         } catch (e) {}
         sendResponse({ ok: true });
         break;
@@ -1450,16 +1467,38 @@ async function consumeReloadIntent() {
   return true;
 }
 
+async function rememberExtensionVersion() {
+  const version = extensionVersion() || "?";
+  try {
+    const found = await chrome.storage.local.get(LOADED_VERSION_KEY);
+    const previous = found && found[LOADED_VERSION_KEY] ? String(found[LOADED_VERSION_KEY]) : null;
+    if (previous !== version) {
+      await chrome.storage.local.set({ [LOADED_VERSION_KEY]: version });
+      return { changed: true, previous, version };
+    }
+    return { changed: false, previous, version };
+  } catch (e) {
+    return { changed: false, previous: null, version };
+  }
+}
+
 // Warm start (worker waking from sleep or after chrome.runtime.reload()).
 (async () => {
   await setStatus({ swStartedAt: Date.now() });
   await log("info", "service worker active");
+  const versionState = await rememberExtensionVersion();
   const consumed = await consumeReloadIntent()
     .catch((e) => {
       log("warn", `reload intent handling failed: ${e && e.message ? e.message : e}`);
       return false;
     });
   if (!consumed) {
-    await runStartupRecovery("warm_start", { force: false, refreshTabs: false, retries: 2 });
+    if (versionState.changed) {
+      const from = versionState.previous || "unknown";
+      await log("info", `extension version changed ${from} -> ${versionState.version}; hard-refreshing scraper tabs`);
+      await runStartupRecovery("version_changed", { force: true, refreshTabs: true, retries: 3 });
+    } else {
+      await runStartupRecovery("warm_start", { force: false, refreshTabs: false, retries: 2 });
+    }
   }
 })();
