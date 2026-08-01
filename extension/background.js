@@ -824,8 +824,9 @@ async function openOrFocus(p, { active = false } = {}) {
 // ---- message router ------------------------------------------------------
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
-    const base = await ingestBase();
-    switch (msg.type) {
+    try {
+      const base = await ingestBase();
+      switch (msg.type) {
       case "igCooldown": {
         // Ask the bridge whether the HEADLESS collector is in a 429 cooldown so the
         // extension can rest in sync (shared IG account → cooperative anti-ban).
@@ -1323,6 +1324,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return;
       default:
         sendResponse({ ok: false, error: "unknown message" });
+      }
+    } catch (e) {
+      const err = String(e && e.message ? e.message : e);
+      await log("error", `message ${msg && msg.type ? msg.type : "unknown"} failed: ${err}`);
+      sendResponse({ ok: false, error: err });
     }
   })();
   return true; // async
