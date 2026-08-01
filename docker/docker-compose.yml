@@ -750,6 +750,7 @@ services:
       STRAVA_BROWSER_ROUTE_QUEUE_CANDIDATE_LIMIT: "50"
       STRAVA_BROWSER_ROUTE_QUEUE_IMPORTANT_CANDIDATE_LIMIT: "100"
       TIKTOK_FOLLOW_OWNER_FALLBACK: ${TIKTOK_FOLLOW_OWNER_FALLBACK:-bryanseah234}
+      SOCIAL_INGEST_PREP_DB_ON_STARTUP: "true"
     volumes:
       - z:/unifiedcollector/media:/media
       - z:/unifiedcollector:/vault
