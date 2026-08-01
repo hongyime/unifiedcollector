@@ -28,9 +28,17 @@ function runtimeErrorText(e) {
     : String(e && e.message ? e.message : e);
 }
 
+function messageTimeoutMs(msg) {
+  const type = msg && msg.type;
+  if (type === "openAll" || type === "scrapeNow") return 60000;
+  if (type === "testIngest") return 45000;
+  if (type === "getPlatforms" || type === "diagnostics") return 15000;
+  return 10000;
+}
+
 function sendMessage(msg) {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("background worker response timed out")), 5000);
+    const timer = setTimeout(() => reject(new Error(`background worker response timed out after ${messageTimeoutMs(msg)}ms`)), messageTimeoutMs(msg));
     try {
       chrome.runtime.sendMessage(msg, (response) => {
         clearTimeout(timer);

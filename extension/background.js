@@ -37,7 +37,7 @@ const PAGE_RECOVERY_PREFIX = "uc-page-recovery:";
 const PAGE_RECOVERY_STATE_KEY = "ucPageRecovery";
 const PAGE_RECOVERY_MAX_ATTEMPTS = 3;
 const RELOAD_INTENT_KEY = "ucReloadIntent";
-const SCRAPER_HEARTBEAT_TIMEOUT_MS = 5000;
+const SCRAPER_HEARTBEAT_TIMEOUT_MS = 12000;
 const SCRAPER_HEARTBEAT_CONCURRENCY = 3;
 const PAGE_RECOVERY_DELAY_WINDOWS_MS = [
   [45000, 150000],
@@ -1378,7 +1378,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
       case "testIngest": {
         sendManualIngestProbe()
-          .then((result) => reportScraperTabHeartbeats("manual_ingest_probe").then(() => result).catch(() => result))
+          .then((result) => {
+            reportScraperTabHeartbeats("manual_ingest_probe")
+              .catch((e) => log("warn", `manual scraper heartbeat fan-out failed: ${e && e.message ? e.message : e}`));
+            return result;
+          })
           .then(sendResponse);
         return;
       }
