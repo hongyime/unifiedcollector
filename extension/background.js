@@ -272,6 +272,7 @@ const _humanGap = (base) => {
 const _randBetween = (min, max) => Math.round(min + Math.random() * (max - min));
 const _alarmJitter = () => _sleep(15000 + Math.random() * 120000);
 let _tabsOpInProgress = false; // guard against overlapping open/refresh runs (no spam)
+let _startupRecoveryChain = Promise.resolve();
 
 async function mapLimit(items, limit, worker) {
   const out = [];
@@ -385,6 +386,52 @@ async function scheduleAlarm() {
   await reportBridgeHeartbeat("schedule_alarm");
   await reportScraperTabHeartbeats("schedule_alarm");
 }
+
+function runStartupRecovery(reason, options = {}) {
+  const attempt = Number(options.attempt || 0);
+  _startupRecoveryChain = _startupRecoveryChain
+    .catch(() => null)
+    .then(() => performStartupRecovery(reason, { ...options, attempt }))
+    .catch((e) => log("warn", `${reason} recovery failed: ${e && e.message ? e.message : e}`));
+  return _startupRecoveryChain;
+}
+
+async function performStartupRecovery(reason, options = {}) {
+  const attempt = Number(options.attempt || 0);
+  const retries = Math.max(0, Number(options.retries || 0));
+  const force = !!options.force;
+  const refreshTabs = !!options.refreshTabs;
+  await setStatus({
+    swStartedAt: Date.now(),
+    lastStartupRecoveryAt: Date.now(),
+    lastStartupRecoveryReason: reason,
+    lastStartupRecoveryAttempt: attempt,
+  });
+  await log("info", `startup recovery ${reason}${attempt ? " retry " + attempt : ""}`);
+  await scheduleAlarm().catch((e) => log("warn", `${reason} schedule failed: ${e && e.message ? e.message : e}`));
+  await syncCookies().catch(() => {});
+  await ensureScraperTabsOpen(reason, { force })
+    .catch((e) => log("warn", `${reason} tab audit failed: ${e && e.message ? e.message : e}`));
+  await reportBridgeHeartbeat(reason)
+    .catch((e) => log("warn", `${reason} bridge heartbeat failed: ${e && e.message ? e.message : e}`));
+  await reportScraperTabHeartbeats(reason)
+    .catch((e) => log("warn", `${reason} scraper heartbeat failed: ${e && e.message ? e.message : e}`));
+  if (refreshTabs) {
+    await refreshScraperTabs({ bypassCache: true, reason })
+      .catch((e) => log("warn", `${reason} tab refresh failed: ${e && e.message ? e.message : e}`));
+    await reportScraperTabHeartbeats(reason + "_refresh")
+      .catch((e) => log("warn", `${reason} refresh heartbeat failed: ${e && e.message ? e.message : e}`));
+  }
+  await ensureLoops(reason)
+    .catch((e) => log("warn", `${reason} loop nudge failed: ${e && e.message ? e.message : e}`));
+
+  if (attempt < retries) {
+    const delay = [45000, 150000, 360000][Math.min(attempt, 2)];
+    setTimeout(() => {
+      runStartupRecovery(reason, { ...options, attempt: attempt + 1, retries });
+    }, delay);
+  }
+}
 // onInstalled fires on every extension reload/update — the exact moment content
 // scripts in already-open tabs get SEVERED ("Extension context invalidated") and go
 // silent. Messaging them (ensureLoops) can't revive a severed script, so we RELOAD
@@ -392,18 +439,10 @@ async function scheduleAlarm() {
 // them dead until the 75-min auto-refresh. This is the "I reloaded the extension and
 // scraping stopped" fix.
 chrome.runtime.onInstalled.addListener(() => {
-  scheduleAlarm(); syncCookies();
-  ensureScraperTabsOpen("installed")
-    .then(() => reportScraperTabHeartbeats("installed"))
-    .then(() => refreshScraperTabs({ bypassCache: true, reason: "installed" }))   // revive orphaned tabs from the reload
-    .then(() => reportScraperTabHeartbeats("installed_refresh"))
-    .then(() => ensureLoops("installed"));
+  runStartupRecovery("installed", { force: true, refreshTabs: true, retries: 2 });
 });
 chrome.runtime.onStartup.addListener(() => {
-  scheduleAlarm(); syncCookies();
-  ensureScraperTabsOpen("startup")
-    .then(() => reportScraperTabHeartbeats("startup"))
-    .then(() => ensureLoops("startup"));
+  runStartupRecovery("startup", { force: false, refreshTabs: false, retries: 2 });
 });
 
 chrome.alarms.onAlarm.addListener(async (a) => {
@@ -1396,28 +1435,15 @@ async function consumeReloadIntent() {
   }
 
   await log("info", "extension reload intent consumed; hard-refreshing scraper tabs");
-  scheduleAlarm().catch((e) => log("warn", `reload-intent schedule failed: ${e && e.message ? e.message : e}`));
   setTimeout(() => {
-    performReloadIntentRecovery(intent)
+    runStartupRecovery("manual_extension_reload", {
+      force: intent && intent.force_open_all !== false,
+      refreshTabs: true,
+      retries: 3,
+    })
       .catch((e) => log("warn", `reload-intent recovery failed: ${e && e.message ? e.message : e}`));
   }, 500);
   return true;
-}
-
-async function performReloadIntentRecovery(intent) {
-  await syncCookies().catch(() => {});
-  if (intent && intent.force_open_all !== false) {
-    await ensureScraperTabsOpen("manual_extension_reload", { force: true })
-      .catch((e) => log("warn", `reload-intent tab audit failed: ${e && e.message ? e.message : e}`));
-  }
-  await reportScraperTabHeartbeats("manual_extension_reload")
-    .catch((e) => log("warn", `reload-intent heartbeat failed: ${e && e.message ? e.message : e}`));
-  await refreshScraperTabs({ bypassCache: true, reason: "manual_extension_reload" })
-    .catch((e) => log("warn", `reload-intent tab refresh failed: ${e && e.message ? e.message : e}`));
-  await reportScraperTabHeartbeats("manual_extension_reload_refresh")
-    .catch((e) => log("warn", `reload-intent refresh heartbeat failed: ${e && e.message ? e.message : e}`));
-  await ensureLoops("manual_extension_reload")
-    .catch((e) => log("warn", `reload-intent loop nudge failed: ${e && e.message ? e.message : e}`));
 }
 
 // Warm start (worker waking from sleep or after chrome.runtime.reload()).
@@ -1430,10 +1456,6 @@ async function performReloadIntentRecovery(intent) {
       return false;
     });
   if (!consumed) {
-    await scheduleAlarm().catch((e) => log("warn", `warm-start schedule failed: ${e && e.message ? e.message : e}`));
-    await syncCookies().catch(() => {});
-    await ensureScraperTabsOpen("warm_start").catch((e) => log("warn", `warm-start tab audit failed: ${e && e.message ? e.message : e}`));
-    await reportScraperTabHeartbeats("warm_start_post_open").catch(() => {});
-    await ensureLoops("warm_start").catch((e) => log("warn", `warm-start loop nudge failed: ${e && e.message ? e.message : e}`));
+    await runStartupRecovery("warm_start", { force: false, refreshTabs: false, retries: 2 });
   }
 })();
