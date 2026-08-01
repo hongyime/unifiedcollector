@@ -123,16 +123,79 @@ function shuffle(a) { for (let i = a.length - 1; i > 0; i--) { const j = (Math.r
 
 // ---------------------------------------------------------------------------
 // messaging helper — retries once if the ephemeral SW tore down the channel
-// (the classic MV3 "message channel closed before a response" race).
+// (the classic MV3 "message channel closed before a response" race). Also
+// bounds requests so a stuck service-worker fetch cannot pin a scraper forever.
 // ---------------------------------------------------------------------------
-async function send(msg, { retries = 1 } = {}) {
+const DEFAULT_SEND_TIMEOUT_MS = 45000;
+const SEND_TIMEOUT_MS_BY_TYPE = {
+  ingest: 120000,
+  posts: 60000,
+  comments: 60000,
+  profile: 60000,
+  users: 60000,
+  seed: 60000,
+  dms: 60000,
+  strava_streams: 60000,
+  stravaRouteVisit: 60000,
+  pageHealth: 20000,
+  loopStatus: 15000,
+  cycleReport: 20000,
+  log: 10000,
+  wall: 15000,
+  tabReady: 15000,
+};
+const RETRYABLE_SEND_TIMEOUT_TYPES = new Set([
+  "getTargets",
+  "getXProfileTarget",
+  "getTikTokRevisitTarget",
+  "getBrowserMediaRevisitTarget",
+  "getStravaRouteQueue",
+  "igCooldown",
+]);
+
+function deadlineError(name, message) {
+  const err = new Error(message);
+  err.name = name;
+  return err;
+}
+
+async function withDeadline(promise, timeoutMs, message, name = "UCDeadlineTimeout") {
+  let timer = null;
+  try {
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(deadlineError(name, message)), timeoutMs);
+    });
+    return await Promise.race([promise, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function sendTimeoutMs(msg, explicitTimeoutMs) {
+  if (Number.isFinite(Number(explicitTimeoutMs)) && Number(explicitTimeoutMs) > 0) {
+    return Number(explicitTimeoutMs);
+  }
+  const type = String((msg && msg.type) || "");
+  return SEND_TIMEOUT_MS_BY_TYPE[type] || DEFAULT_SEND_TIMEOUT_MS;
+}
+
+async function send(msg, { retries = 1, timeoutMs = null } = {}) {
   for (let i = 0; ; i++) {
     try {
-      return await chrome.runtime.sendMessage(msg);
+      const ms = sendTimeoutMs(msg, timeoutMs);
+      const type = (msg && msg.type) || "message";
+      return await withDeadline(
+        chrome.runtime.sendMessage(msg),
+        ms,
+        `${type} message timed out after ${Math.ceil(ms / 1000)}s`,
+        "UCSendTimeout"
+      );
     } catch (e) {
-      const transient = /message channel closed|Could not establish|Receiving end does not exist|Extension context invalidated/i.test(
+      const channelTransient = /message channel closed|Could not establish|Receiving end does not exist|Extension context invalidated/i.test(
         e.message || ""
       );
+      const retryableTimeout = e.name === "UCSendTimeout" && RETRYABLE_SEND_TIMEOUT_TYPES.has(String((msg && msg.type) || ""));
+      const transient = channelTransient || retryableTimeout;
       if (!transient || i >= retries) {
         if (/Extension context invalidated/i.test(e.message || "")) return null; // page outlived extension
         throw e;
@@ -2571,6 +2634,29 @@ let LOOP_RUNNING = false;
 let ONE_SHOT_RUNNING = false;
 let ONE_SHOT_STARTED_AT = 0;
 const ONE_SHOT_STALE_MS = 8 * 60 * 1000;
+const ONE_SHOT_TIMEOUT_MS_BY_PLATFORM = {
+  instagram: 10 * 60 * 1000,
+  strava: 5 * 60 * 1000,
+  tiktok: 4 * 60 * 1000,
+  lemon8: 4 * 60 * 1000,
+  threads: 4 * 60 * 1000,
+  x: 3 * 60 * 1000,
+  facebook: 3 * 60 * 1000,
+};
+
+function oneShotTimeoutMs(platformId) {
+  return ONE_SHOT_TIMEOUT_MS_BY_PLATFORM[platformId] || 4 * 60 * 1000;
+}
+
+function scheduleOneShotReload(p, reason) {
+  if (!p) return;
+  setTimeout(() => {
+    try {
+      clog("warn", `${p.label} forced pass ${reason}; reloading tab`, p.label);
+      location.reload();
+    } catch (e) {}
+  }, 800 + Math.random() * 1600);
+}
 
 // Rest between passes — a person doesn't scrape non-stop. Instagram stays slower
 // because it is the account most likely to hit 429; lower-risk platforms can loop
@@ -2680,9 +2766,7 @@ async function runOneShotCycle(reason) {
       });
       ONE_SHOT_RUNNING = false;
       ONE_SHOT_STARTED_AT = 0;
-      setTimeout(() => {
-        try { location.reload(); } catch (e) {}
-      }, 800 + Math.random() * 1600);
+      scheduleOneShotReload(p, "appears stuck");
       return;
     }
     clog("warn", `${p.label} forced pass skipped; another forced pass is already running`, p.label);
@@ -2714,7 +2798,13 @@ async function runOneShotCycle(reason) {
       });
       return;
     }
-    const stats = await p.runCycle();
+    const timeoutMs = oneShotTimeoutMs(p.id);
+    const stats = await withDeadline(
+      p.runCycle(),
+      timeoutMs,
+      `${p.label} forced scrape pass timed out after ${Math.ceil(timeoutMs / 60000)}m`,
+      "UCOneShotTimeout"
+    );
     await reportForcedCycleHealth(p, "forced_cycle_finished", reason || "manual", {
       cycle_targets: asCycleNumber(stats && stats.targets),
       cycle_saved: asCycleNumber(stats && stats.saved),
@@ -2727,7 +2817,10 @@ async function runOneShotCycle(reason) {
     clog("error", `${p.label} forced scrape pass error: ${e.message}`, p.label);
     await reportForcedCycleHealth(p, "forced_cycle_error", reason || "manual", {
       cycle_error: e && e.message ? e.message : String(e),
+      one_shot_timeout: e && e.name === "UCOneShotTimeout" ? true : null,
+      timeout_ms: e && e.name === "UCOneShotTimeout" ? oneShotTimeoutMs(p.id) : null,
     });
+    if (e && e.name === "UCOneShotTimeout") scheduleOneShotReload(p, "timed out");
   } finally {
     ONE_SHOT_RUNNING = false;
     ONE_SHOT_STARTED_AT = 0;

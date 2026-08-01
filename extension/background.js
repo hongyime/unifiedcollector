@@ -528,6 +528,10 @@ async function recordPageHealth(base, msg, sender, extra = {}) {
       cooldown_left_ms: msg.cooldown_left_ms ?? null,
       loop_running: msg.loop_running ?? null,
       one_shot_running: msg.one_shot_running ?? null,
+      one_shot_age_ms: msg.one_shot_age_ms ?? null,
+      stale_after_ms: msg.stale_after_ms ?? null,
+      one_shot_timeout: msg.one_shot_timeout ?? null,
+      timeout_ms: msg.timeout_ms ?? null,
       ...extra,
     }), SCRAPER_HEARTBEAT_TIMEOUT_MS);
   } catch (e) {}
