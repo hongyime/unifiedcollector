@@ -846,7 +846,6 @@ services:
       - z:/unifiedcollector/media:/media
       - z:/unifiedcollector:/vault
       - ../credentials:/app/credentials
-      - ../src:/app/src
       - ../extension:/app/extension:ro
       # live-mount the built SPA so frontend changes apply on recreate (rebuild
       # on host with `npm run build` in dashboard/frontend) — no image rebuild.
