@@ -103,6 +103,19 @@ def test_playwright_posts_zero_breaker_resets_on_edges():
     assert coll._playwright_posts_fallback_available("alice") is True
 
 
+def test_owned_instagram_usernames_include_cookie_alias_and_real_handle(monkeypatch):
+    coll = _bare_collector()
+    monkeypatch.setenv("INSTA_ACCOUNT_1_NAME", "local_cookie_label")
+    monkeypatch.setenv("INSTA_ACCOUNT_1_USER", "bryanseah234")
+    coll._account_username_aliases = coll._load_account_username_aliases()
+    coll._account_browser_cookies = {"local_cookie_label": "cookies/bryan.txt"}
+
+    assert coll._is_owned_instagram_username("local_cookie_label") is True
+    assert coll._is_owned_instagram_username("bryanseah234") is True
+    assert coll._is_owned_instagram_username("@bryanseah234") is True
+    assert coll._is_owned_instagram_username("not_my_account") is False
+
+
 class _MediaResponse:
     def __init__(self, data: bytes):
         self.content = data

@@ -391,6 +391,26 @@ class InstagramCollector(BaseCollector):
             return ""
         return self._account_username_aliases.get(username.lower(), username)
 
+    def _owned_instagram_usernames(self) -> set[str]:
+        owners: set[str] = set()
+        for name in (self._account_browser_cookies or {}).keys():
+            canonical = self._canonical_instagram_username(name)
+            if canonical:
+                owners.add(canonical.lower())
+        for username in (self._account_username_aliases or {}).values():
+            canonical = self._canonical_instagram_username(username)
+            if canonical:
+                owners.add(canonical.lower())
+        for i in range(1, 20):
+            canonical = self._canonical_instagram_username(os.getenv(f"INSTA_ACCOUNT_{i}_USER", ""))
+            if canonical:
+                owners.add(canonical.lower())
+        return owners
+
+    def _is_owned_instagram_username(self, value: str | None) -> bool:
+        canonical = self._canonical_instagram_username(value)
+        return bool(canonical and canonical.lower() in self._owned_instagram_usernames())
+
     def _normalize_instagram_targets(self, targets: list[str] | None) -> list[str]:
         normalized: list[str] = []
         seen: set[str] = set()
@@ -1755,9 +1775,20 @@ class InstagramCollector(BaseCollector):
         await self._upsert_profile(user_data)
 
         follower_count = user_data.get("edge_followed_by", {}).get("count", 0)
-        if self._max_followers and follower_count > self._max_followers:
+        is_owned_profile = (
+            self._is_owned_instagram_username(username)
+            or self._is_owned_instagram_username(entity_name)
+        )
+        if self._max_followers and follower_count > self._max_followers and not is_owned_profile:
             logger.info("Skipping %s: %d followers > max %d", username, follower_count, self._max_followers)
             return
+        if self._max_followers and follower_count > self._max_followers and is_owned_profile:
+            logger.info(
+                "instagram/%s: bypassing follower cap for owned/root account (%d followers > max %d)",
+                username,
+                follower_count,
+                self._max_followers,
+            )
 
         self.rate_limiter.record_success("instagram.com")
 
@@ -1795,13 +1826,8 @@ class InstagramCollector(BaseCollector):
         # captured when the collector processes its own profile. Bounded + paced;
         # gated separately from the disabled discovery spider because scraping your
         # own graph is a normal user action, not novel-profile probing.
-        _owner_set = {
-            self._canonical_instagram_username(n).lower()
-            for n in (self._account_browser_cookies or {}).keys()
-            if self._canonical_instagram_username(n)
-        }
         if (os.getenv("INSTA_OWN_GRAPH_ENABLED", "true").lower() == "true"
-                and username and username.lower() in _owner_set):
+                and self._is_owned_instagram_username(username)):
             import time as _t
             interval = float(os.getenv("INSTA_OWN_GRAPH_INTERVAL_HOURS", "24")) * 3600
             key = username.lower()
