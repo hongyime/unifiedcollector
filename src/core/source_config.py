@@ -1,4 +1,4 @@
-"""File-based per-source configuration loader (Option A: files authoritative).
+"""File-based per-source configuration loader.
 
 On worker startup this module reads, for each known source:
 
@@ -9,11 +9,12 @@ and SYNCS them into the database / process environment so an operator can edit a
 plain text file, `docker restart`, and have the new config take effect -- without
 touching the dashboard, the DB, or the compose env blocks.
 
-Authoritative semantics (Option A, chosen by Bryan):
-  * If `<source>.targets` EXISTS, it is the single source of truth for that
-    source's collection_targets: targets in the file are upserted, and any DB
-    target for that source NOT in the file is removed. Edit the file -> restart ->
-    DB matches the file exactly.
+Default semantics:
+  * If `<source>.targets` EXISTS, file targets are upserted as seed targets.
+    Discovered/spidered DB targets are preserved by default; deleting them on
+    worker startup loses backfill frontier. Set
+    COLLECTOR_SOURCE_CONFIG_AUTHORITATIVE=true only for a deliberately
+    file-owned source where missing DB targets should be removed.
   * If the file does NOT exist for a source, the DB is left untouched (so sources
     you haven't migrated to files keep their dashboard/DB-managed targets).
   * `<source>.env` lines are injected into os.environ (not overwriting values that
@@ -170,13 +171,19 @@ async def sync_source_configs(pool, sources: list[str] | tuple[str, ...] | set[s
 
 
 async def _sync_targets_to_db(pool, source: str, targets: list[dict]) -> int:
-    """Make collection_targets for `source` exactly match `targets` (Option A).
+    """Sync configured seed targets for `source`.
 
     Upserts every file target (resetting status to 'pending' so re-added targets
-    get re-collected) and deletes any DB target for this source whose id is not in
-    the file. Returns count removed. Runs in one transaction.
+    get re-collected). By default this does not delete existing DB targets,
+    because GitHub/Strava/Search/YouTube/website discovery queues live in the
+    same table. Returns count removed when authoritative mode is explicitly on.
+    Runs in one transaction.
     """
     file_ids = [t["target_id"] for t in targets]
+    authoritative = os.getenv("COLLECTOR_SOURCE_CONFIG_AUTHORITATIVE", "").lower() in {
+        "1", "true", "yes", "on"
+    }
+    rows = []
     async with pool.acquire() as conn:
         async with conn.transaction():
             for t in targets:
@@ -188,21 +195,22 @@ async def _sync_targets_to_db(pool, source: str, targets: list[dict]) -> int:
                     "    priority = $4",
                     source, t["target_id"], t["name"], t["priority"],
                 )
-            # remove DB targets no longer present in the file
-            if file_ids:
-                rows = await conn.fetch(
-                    "DELETE FROM collection_targets "
-                    "WHERE source = $1 AND target_id <> ALL($2::text[]) "
-                    "  AND COALESCE(metadata->>'preserve_on_source_config_sync', 'false') <> 'true' "
-                    "RETURNING target_id",
-                    source, file_ids,
-                )
-            else:
-                rows = await conn.fetch(
-                    "DELETE FROM collection_targets "
-                    "WHERE source = $1 "
-                    "  AND COALESCE(metadata->>'preserve_on_source_config_sync', 'false') <> 'true' "
-                    "RETURNING target_id",
-                    source,
-                )
+            if authoritative:
+                # remove DB targets no longer present in the file
+                if file_ids:
+                    rows = await conn.fetch(
+                        "DELETE FROM collection_targets "
+                        "WHERE source = $1 AND target_id <> ALL($2::text[]) "
+                        "  AND COALESCE(metadata->>'preserve_on_source_config_sync', 'false') <> 'true' "
+                        "RETURNING target_id",
+                        source, file_ids,
+                    )
+                else:
+                    rows = await conn.fetch(
+                        "DELETE FROM collection_targets "
+                        "WHERE source = $1 "
+                        "  AND COALESCE(metadata->>'preserve_on_source_config_sync', 'false') <> 'true' "
+                        "RETURNING target_id",
+                        source,
+                    )
     return len(rows)
