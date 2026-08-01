@@ -926,6 +926,27 @@ def test_browser_heartbeat_handler_returns_when_telemetry_db_is_stuck(monkeypatc
     assert resp.status == 200
 
 
+def test_browser_heartbeat_handler_reports_degraded_when_pool_missing():
+    req = _FakeRequest(
+        {"pool": None},
+        {
+            "platform": "bridge",
+            "label": "UnifiedCollector Bridge",
+            "running": True,
+            "url": "chrome-extension://abc/background.js",
+            "tab_id": "service_worker",
+            "extension_version": "1.21.63",
+            "health_status": "manual_ingest_probe",
+        },
+    )
+
+    resp = asyncio.run(ig_ingest.browser_heartbeat_handler(req))
+
+    assert resp.status == 200
+    payload = json.loads(resp.text)
+    assert payload["telemetry_degraded"] is True
+
+
 def test_record_strava_stream_http_429_writes_rate_limit_event(monkeypatch):
     pool = _FakePool()
     monkeypatch.setattr(ig_ingest, "STRAVA_BROWSER_429_COOLDOWN_SECONDS", 1234)

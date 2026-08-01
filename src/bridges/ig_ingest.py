@@ -4363,8 +4363,10 @@ async def browser_heartbeat_handler(request):
         str(body.get("owner") or body.get("account") or body.get("tab_id") or platform)
         .strip()[:128]
     )
+    pool = request.app.get("pool")
+    telemetry_degraded = pool is None
     await _record_browser_ingest_event(
-        request.app["pool"],
+        pool,
         platform,
         "browser_heartbeat",
         subject,
@@ -4388,7 +4390,12 @@ async def browser_heartbeat_handler(request):
             "recovery_limit": body.get("recovery_limit"),
         },
     )
-    return _cors(web.json_response({"ok": True, "platform": platform, "running": running}))
+    return _cors(web.json_response({
+        "ok": True,
+        "platform": platform,
+        "running": running,
+        "telemetry_degraded": telemetry_degraded,
+    }))
 
 
 CREDENTIALS_ROOT = os.getenv("CREDENTIALS_ROOT", "/app/credentials")
@@ -4559,21 +4566,41 @@ async def _safe_json(request):
 
 
 async def health(request):
-    return _cors(web.json_response({"ok": True}))
+    return _cors(web.json_response({
+        "ok": True,
+        "db_pool": request.app.get("pool") is not None,
+        "startup_error": request.app.get("startup_error"),
+    }))
 
 
 async def _on_startup(app):
-    app["pool"] = await get_pool()
+    app["pool"] = None
+    app["startup_error"] = None
     app["tasks"] = set()
     app["sem"] = asyncio.Semaphore(DL_CONCURRENCY)
     try:
-        async with app["pool"].acquire() as conn:
-            await conn.execute(_SPIDER_DDL)
-            await _execute_ddl_script(conn, _X_TARGETS_DDL)
-            await _execute_ddl_script(conn, _TIKTOK_BROWSER_MEDIA_DDL)
-            await _execute_ddl_script(conn, _BROWSER_MEDIA_CANDIDATES_DDL)
-    except Exception:
-        logger.exception("startup DDL failed")
+        async with asyncio.timeout(10):
+            app["pool"] = await get_pool()
+    except TimeoutError:
+        app["startup_error"] = "db_pool_timeout"
+        logger.exception("startup DB pool timed out")
+    except Exception as exc:
+        app["startup_error"] = f"db_pool_error:{exc.__class__.__name__}"
+        logger.exception("startup DB pool failed")
+    if app.get("pool") is not None:
+        try:
+            async with asyncio.timeout(15):
+                async with app["pool"].acquire() as conn:
+                    await conn.execute(_SPIDER_DDL)
+                    await _execute_ddl_script(conn, _X_TARGETS_DDL)
+                    await _execute_ddl_script(conn, _TIKTOK_BROWSER_MEDIA_DDL)
+                    await _execute_ddl_script(conn, _BROWSER_MEDIA_CANDIDATES_DDL)
+        except TimeoutError:
+            app["startup_error"] = "startup_ddl_timeout"
+            logger.exception("startup DDL timed out")
+        except Exception as exc:
+            app["startup_error"] = f"startup_ddl_error:{exc.__class__.__name__}"
+            logger.exception("startup DDL failed")
     app["session"] = aiohttp.ClientSession(
         headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"}
