@@ -758,7 +758,10 @@ class WorkerService:
                 self._heartbeat[source] = time.monotonic()
                 self._crash_counts[source] = 0
                 self._hang_counts[source] = 0  # successful cycle clears hang budget
-                await self._mark_source_healthy(source)  # writes last_success_at
+                advanced = collector.progress_count - before
+                idle_reason = getattr(collector, "intentional_idle_reason", None)
+                if not is_realtime or advanced > 0 or idle_reason:
+                    await self._mark_source_healthy(source)  # writes last_success_at
                 if self._auth_paused.get(source):
                     await self._clear_auth_pause(source)
 
@@ -766,8 +769,6 @@ class WorkerService:
                 # actually persist anything new? Realtime sources are EXEMPT --
                 # a quiet broker (no messages arriving) is legitimate idle, and
                 # collector.run() blocks for them anyway so this rarely runs.
-                advanced = collector.progress_count - before
-                idle_reason = getattr(collector, "intentional_idle_reason", None)
                 if is_realtime or advanced > 0 or idle_reason:
                     if idle_reason and not is_realtime and advanced <= 0:
                         logger.info(
