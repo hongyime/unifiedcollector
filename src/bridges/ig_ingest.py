@@ -4599,14 +4599,11 @@ async def health(request):
         "ok": True,
         "db_pool": request.app.get("pool") is not None,
         "startup_error": request.app.get("startup_error"),
+        "startup_pending": bool(request.app.get("startup_pending")),
     }))
 
 
-async def _on_startup(app):
-    app["pool"] = None
-    app["startup_error"] = None
-    app["tasks"] = set()
-    app["sem"] = asyncio.Semaphore(DL_CONCURRENCY)
+async def _prepare_db_pool_and_schema(app):
     try:
         async with asyncio.timeout(10):
             app["pool"] = await get_pool()
@@ -4630,10 +4627,22 @@ async def _on_startup(app):
         except Exception as exc:
             app["startup_error"] = f"startup_ddl_error:{exc.__class__.__name__}"
             logger.exception("startup DDL failed")
+    app["startup_pending"] = False
+
+
+async def _on_startup(app):
+    app["pool"] = None
+    app["startup_error"] = None
+    app["startup_pending"] = True
+    app["tasks"] = set()
+    app["sem"] = asyncio.Semaphore(DL_CONCURRENCY)
     app["session"] = aiohttp.ClientSession(
         headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"}
     )
+    task = asyncio.create_task(_prepare_db_pool_and_schema(app))
+    app["tasks"].add(task)
+    task.add_done_callback(app["tasks"].discard)
 
 
 async def _on_cleanup(app):
