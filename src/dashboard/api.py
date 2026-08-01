@@ -2397,15 +2397,19 @@ async def _browser_extension_payload(conn) -> dict:
                    extract(epoch FROM now() - content.last_content_at)::int AS content_age_seconds,
                    heartbeat.metadata->>'url' AS url,
                    heartbeat.metadata->>'health_status' AS health_status,
+                   heartbeat.metadata->>'extension_version' AS extension_version,
                    heartbeat.metadata->'content_counts' AS content_counts
             FROM heartbeat
             LEFT JOIN content ON content.platform = heartbeat.platform
-            WHERE heartbeat.heartbeat_at >= now() - ($1::int * interval '1 second')
-              AND (
-                content.last_content_at IS NULL
-                OR content.last_content_at < now() - ($1::int * interval '1 second')
-              )
-            ORDER BY heartbeat.heartbeat_at DESC
+            WHERE heartbeat.heartbeat_at < now() - ($1::int * interval '1 second')
+               OR content.last_content_at IS NULL
+               OR content.last_content_at < now() - ($1::int * interval '1 second')
+            ORDER BY
+              CASE
+                WHEN heartbeat.heartbeat_at < now() - ($1::int * interval '1 second') THEN 0
+                ELSE 1
+              END,
+              heartbeat.heartbeat_at DESC
             """,
             max(300, stale_seconds),
             ["instagram", "tiktok", "lemon8", "threads", "facebook", "x", "strava"],
@@ -2414,18 +2418,23 @@ async def _browser_extension_payload(conn) -> dict:
             raw = dict(row)
             if "heartbeat_age_seconds" not in raw:
                 continue
+            heartbeat_age = int(raw.get("heartbeat_age_seconds") or 0)
+            heartbeat_stale = heartbeat_age > max(300, stale_seconds)
             payload["issues"].append({
                 "platform": raw.get("platform"),
-                "kind": "browser_content_stale",
+                "kind": "browser_heartbeat_stale" if heartbeat_stale else "browser_content_stale",
                 "detail": (
+                    "Browser extension heartbeat is stale; browser-driven scraping is not currently active."
+                    if heartbeat_stale else
                     "Browser tab heartbeat is fresh, but no useful posts/profile/media/route "
                     "ingest has arrived within the expected window."
                 ),
-                "heartbeat_age_seconds": int(raw.get("heartbeat_age_seconds") or 0),
+                "heartbeat_age_seconds": heartbeat_age,
                 "last_content_at": raw.get("last_content_at"),
                 "content_age_seconds": int(raw["content_age_seconds"]) if raw.get("content_age_seconds") is not None else None,
                 "url": raw.get("url"),
                 "health_status": raw.get("health_status"),
+                "extension_version": raw.get("extension_version"),
                 "content_counts": raw.get("content_counts"),
                 "stale_after_seconds": max(300, stale_seconds),
             })

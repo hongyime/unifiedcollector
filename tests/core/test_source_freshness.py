@@ -139,3 +139,47 @@ async def test_strava_liveness_counts_route_and_media_progress(monkeypatch):
     assert rows[0]["status"] == "live"
     assert rows[0]["age_seconds"] == 30
     assert rows[0]["freshness_basis"] == "newest Strava activity, GPS stream, or media row"
+
+
+@pytest.mark.asyncio
+async def test_browser_source_degrades_when_extension_heartbeat_is_stale(monkeypatch):
+    from src.core import source_freshness
+
+    class BrowserStaleConn:
+        async def fetch(self, query: str, *args, timeout: int = 8):
+            if "FROM source_health" in query:
+                return []
+            if "FROM browser_ingest_events" in query and "browser_heartbeat" in query:
+                return [
+                    {
+                        "platform": "instagram",
+                        "last_seen_at": datetime.now(timezone.utc) - timedelta(hours=2),
+                        "age_seconds": 7200,
+                        "extension_version": "1.21.58",
+                        "url": "chrome-extension://id/background.js",
+                        "health_status": "service_worker_active",
+                    }
+                ]
+            raise AssertionError(query)
+
+        async def fetchval(self, query: str, *args, timeout: int = 8):
+            if "to_regclass('browser_ingest_events')" in query:
+                return "browser_ingest_events"
+            if "media_items WHERE source='instagram'" in query:
+                return 60
+            return None
+
+    monkeypatch.setenv("BROWSER_HEARTBEAT_STALE_WARN_SECONDS", "3600")
+    monkeypatch.setattr(
+        source_freshness,
+        "FRESHNESS",
+        [("instagram", "SELECT extract(epoch FROM now()-max(collected_at)) FROM media_items WHERE source='instagram'", 172800)],
+    )
+
+    rows = await source_freshness.compute_liveness(BrowserStaleConn())
+
+    assert rows[0]["status"] == "degraded"
+    assert rows[0]["age_seconds"] == 60
+    assert rows[0]["browser_heartbeat_age_seconds"] == 7200
+    assert rows[0]["browser_extension_version"] == "1.21.58"
+    assert "Chrome extension heartbeat is 7200s old" in rows[0]["detail"]

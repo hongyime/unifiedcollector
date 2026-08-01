@@ -285,7 +285,8 @@ def _format_browser_ingest_event(row: dict) -> str:
 
 def _format_browser_content_gap(row: dict) -> str:
     source = _display_source(row.get("platform", "?"))
-    heartbeat_age = _humanize_age(int(row.get("heartbeat_age_seconds", 0) or 0))
+    heartbeat_age_raw = int(row.get("heartbeat_age_seconds", 0) or 0)
+    heartbeat_age = _humanize_age(heartbeat_age_raw)
     content_age_raw = row.get("content_age_seconds")
     if content_age_raw is None:
         content_age = "never"
@@ -294,6 +295,14 @@ def _format_browser_content_gap(row: dict) -> str:
     stale_after = _humanize_age(int(row.get("stale_after_seconds", 3600) or 3600))
     url = str(row.get("url") or "").strip()
     where = f" Current tab: <code>{_esc(url[:180])}</code>." if url else ""
+    if heartbeat_age_raw > int(row.get("stale_after_seconds", 3600) or 3600):
+        version = str(row.get("extension_version") or "").strip()
+        version_text = f" running v{_esc(version)}." if version else "."
+        return (
+            f"• {source}: browser heartbeat is stale ({heartbeat_age} ago; expected within {stale_after}); "
+            f"use Chrome's extension Reload button or reopen the browser bridge{version_text}"
+            f"{where}"
+        )
     return (
         f"• {source}: browser heartbeat is fresh ({heartbeat_age} ago), "
         f"but useful content ingest is {content_age}; expected within {stale_after}."

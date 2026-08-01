@@ -18,6 +18,7 @@ import time
 from datetime import datetime, timezone
 
 _DAY = 86400
+_BROWSER_HEARTBEAT_SOURCES = ("instagram", "tiktok", "lemon8", "threads", "facebook", "x", "strava")
 
 STRAVA_PROGRESS_QUERY = """
 SELECT extract(epoch FROM now()-max(ts))
@@ -85,6 +86,16 @@ FRESHNESS_BASIS = {
 REALTIME = ("telegram", "whatsapp", "beeper")
 
 
+def _env_int(name: str, default: int, *, min_value: int | None = None) -> int:
+    try:
+        value = int(os.getenv(name, str(default)) or default)
+    except (TypeError, ValueError):
+        value = default
+    if min_value is not None:
+        value = max(min_value, value)
+    return value
+
+
 def _stale_watchdog_marker(error: str | None) -> bool:
     if not error:
         return False
@@ -105,6 +116,37 @@ def _age_seconds(value, now: datetime) -> float | None:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return max(0.0, (now - value.astimezone(timezone.utc)).total_seconds())
+
+
+async def _latest_browser_heartbeats(conn, timeout: float) -> dict[str, dict] | None:
+    """Return newest Chrome-extension heartbeat per browser-assisted platform."""
+    try:
+        exists = await conn.fetchval(
+            "SELECT to_regclass('browser_ingest_events')",
+            timeout=max(0.25, timeout),
+        )
+        if exists is None:
+            return None
+        rows = await conn.fetch(
+            """
+            SELECT DISTINCT ON (platform)
+                   platform,
+                   created_at AS last_seen_at,
+                   extract(epoch FROM now() - created_at)::int AS age_seconds,
+                   metadata->>'extension_version' AS extension_version,
+                   metadata->>'url' AS url,
+                   metadata->>'health_status' AS health_status
+            FROM browser_ingest_events
+            WHERE endpoint = 'browser_heartbeat'
+              AND platform = ANY($1::text[])
+            ORDER BY platform, created_at DESC
+            """,
+            list(_BROWSER_HEARTBEAT_SOURCES),
+            timeout=max(0.25, timeout),
+        )
+        return {str(row["platform"]): dict(row) for row in rows}
+    except Exception:
+        return None
 
 
 async def compute_liveness(conn) -> list[dict]:
@@ -142,6 +184,13 @@ async def compute_liveness(conn) -> list[dict]:
         per_query_timeout = 1.5
     deadline = time.monotonic() + total_budget
     now_utc = datetime.now(timezone.utc)
+    browser_heartbeat_timeout = min(per_query_timeout, max(0.25, deadline - time.monotonic()))
+    browser_heartbeats = await _latest_browser_heartbeats(conn, browser_heartbeat_timeout)
+    browser_stale_after = _env_int(
+        "BROWSER_HEARTBEAT_STALE_WARN_SECONDS",
+        _env_int("BROWSER_CONTENT_STALE_WARN_SECONDS", 3600, min_value=300),
+        min_value=300,
+    )
     out: list[dict] = []
     for name, query, thresh in FRESHNESS:
         remaining = deadline - time.monotonic()
@@ -187,6 +236,26 @@ async def compute_liveness(conn) -> list[dict]:
                 detail = "newest row is inside the freshness window; stale watchdog marker ignored"
             else:
                 detail = "newest row is inside the freshness window"
+        browser_heartbeat = browser_heartbeats.get(name) if browser_heartbeats is not None else None
+        browser_age = (
+            int(browser_heartbeat["age_seconds"])
+            if browser_heartbeat and browser_heartbeat.get("age_seconds") is not None
+            else None
+        )
+        browser_stale = browser_heartbeats is not None and name in _BROWSER_HEARTBEAT_SOURCES and (
+            browser_age is None or browser_age > browser_stale_after
+        )
+        if browser_stale:
+            browser_detail = (
+                "Chrome extension heartbeat is missing"
+                if browser_age is None
+                else f"Chrome extension heartbeat is {browser_age}s old (> {browser_stale_after}s)"
+            )
+            if status == "live":
+                status = "degraded"
+                detail = browser_detail
+            else:
+                detail = f"{detail}; {browser_detail}"
         out.append({
             "source": name,
             "status": status,
@@ -198,6 +267,17 @@ async def compute_liveness(conn) -> list[dict]:
             "source_health_error": h_error,
             "source_health_last_success_at": h.get("last_success_at"),
             "source_health_updated_at": h.get("updated_at"),
+            "browser_heartbeat_at": browser_heartbeat.get("last_seen_at") if browser_heartbeat else None,
+            "browser_heartbeat_age_seconds": browser_age,
+            "browser_heartbeat_stale_after_seconds": (
+                browser_stale_after if name in _BROWSER_HEARTBEAT_SOURCES else None
+            ),
+            "browser_extension_version": (
+                browser_heartbeat.get("extension_version") if browser_heartbeat else None
+            ),
+            "browser_health_status": (
+                browser_heartbeat.get("health_status") if browser_heartbeat else None
+            ),
             "detail": detail,
         })
     return out

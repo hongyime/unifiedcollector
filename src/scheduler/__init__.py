@@ -570,16 +570,20 @@ class Scheduler:
                                    extract(epoch FROM now() - content.last_content_at)::int AS content_age_seconds,
                                    heartbeat.metadata->>'url' AS url,
                                    heartbeat.metadata->>'health_status' AS health_status,
+                                   heartbeat.metadata->>'extension_version' AS extension_version,
                                    heartbeat.metadata->'content_counts' AS content_counts,
                                    $1::int AS stale_after_seconds
                             FROM heartbeat
                             LEFT JOIN content ON content.platform = heartbeat.platform
-                            WHERE heartbeat.heartbeat_at >= now() - ($1::int * interval '1 second')
-                              AND (
-                                content.last_content_at IS NULL
-                                OR content.last_content_at < now() - ($1::int * interval '1 second')
-                              )
-                            ORDER BY heartbeat.heartbeat_at DESC
+                            WHERE heartbeat.heartbeat_at < now() - ($1::int * interval '1 second')
+                               OR content.last_content_at IS NULL
+                               OR content.last_content_at < now() - ($1::int * interval '1 second')
+                            ORDER BY
+                              CASE
+                                WHEN heartbeat.heartbeat_at < now() - ($1::int * interval '1 second') THEN 0
+                                ELSE 1
+                              END,
+                              heartbeat.heartbeat_at DESC
                             LIMIT 8
                             """,
                             content_stale_seconds,
