@@ -92,6 +92,13 @@ DM_SAMPLE_CAP_PER_PLATFORM = int(os.getenv("DM_SAMPLE_CAP", "200"))
 MIN_BYTES = int(os.getenv("IG_INGEST_MIN_BYTES", "1024"))
 DL_CONCURRENCY = int(os.getenv("SOCIAL_INGEST_CONCURRENCY", "4"))
 SOCIAL_INGEST_CLIENT_MAX_MB = int(os.getenv("SOCIAL_INGEST_CLIENT_MAX_MB", "512"))
+try:
+    BROWSER_TELEMETRY_WRITE_TIMEOUT_SECONDS = max(
+        0.25,
+        float(os.getenv("BROWSER_TELEMETRY_WRITE_TIMEOUT_SECONDS", "2.0")),
+    )
+except (TypeError, ValueError):
+    BROWSER_TELEMETRY_WRITE_TIMEOUT_SECONDS = 2.0
 STRAVA_BROWSER_429_COOLDOWN_SECONDS = int(os.getenv("STRAVA_BROWSER_429_COOLDOWN_SECONDS", "1800"))
 try:
     STRAVA_BROWSER_429_MAX_COOLDOWN_SECONDS = max(
@@ -1906,36 +1913,24 @@ async def _record_browser_ingest_event(
     metadata: dict | None = None,
 ) -> None:
     try:
-        observed = max(0, int(observed_count or 0))
-        stored = max(0, int(stored_count or 0))
-        async with pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO browser_ingest_events
-                  (platform, endpoint, subject, observed_count, stored_count, metadata)
-                VALUES ($1, $2, $3, $4, $5, $6::jsonb)
-                """,
+        async with asyncio.timeout(BROWSER_TELEMETRY_WRITE_TIMEOUT_SECONDS):
+            await _write_browser_ingest_event(
+                pool,
                 platform,
                 endpoint,
                 subject,
-                observed,
-                stored,
-                json.dumps(metadata or {}),
+                observed_count=observed_count,
+                stored_count=stored_count,
+                metadata=metadata,
             )
-            if _browser_event_marks_source_success(platform, endpoint, observed, stored):
-                await conn.execute(
-                    """
-                    INSERT INTO source_health
-                      (source, status, last_success_at, last_error, updated_at)
-                    VALUES ($1, 'running', NOW(), NULL, NOW())
-                    ON CONFLICT (source) DO UPDATE SET
-                      status = 'running',
-                      last_success_at = NOW(),
-                      last_error = NULL,
-                      updated_at = NOW()
-                    """,
-                    platform,
-                )
+    except TimeoutError:
+        logger.warning(
+            "browser ingest telemetry timed out after %.2fs platform=%s endpoint=%s subject=%s",
+            BROWSER_TELEMETRY_WRITE_TIMEOUT_SECONDS,
+            platform,
+            endpoint,
+            subject,
+        )
     except Exception:
         logger.debug(
             "browser ingest telemetry insert failed platform=%s endpoint=%s subject=%s",
@@ -1944,6 +1939,48 @@ async def _record_browser_ingest_event(
             subject,
             exc_info=True,
         )
+
+
+async def _write_browser_ingest_event(
+    pool,
+    platform: str,
+    endpoint: str,
+    subject: str | None = None,
+    *,
+    observed_count: int = 0,
+    stored_count: int = 0,
+    metadata: dict | None = None,
+) -> None:
+    observed = max(0, int(observed_count or 0))
+    stored = max(0, int(stored_count or 0))
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO browser_ingest_events
+              (platform, endpoint, subject, observed_count, stored_count, metadata)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+            """,
+            platform,
+            endpoint,
+            subject,
+            observed,
+            stored,
+            json.dumps(metadata or {}),
+        )
+        if _browser_event_marks_source_success(platform, endpoint, observed, stored):
+            await conn.execute(
+                """
+                INSERT INTO source_health
+                  (source, status, last_success_at, last_error, updated_at)
+                VALUES ($1, 'running', NOW(), NULL, NOW())
+                ON CONFLICT (source) DO UPDATE SET
+                  status = 'running',
+                  last_success_at = NOW(),
+                  last_error = NULL,
+                  updated_at = NOW()
+                """,
+                platform,
+            )
 
 
 def _browser_event_marks_source_success(

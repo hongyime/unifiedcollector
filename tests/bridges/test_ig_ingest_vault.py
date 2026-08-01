@@ -48,6 +48,19 @@ class _FakePool:
         return _AcquireContext(self.conn)
 
 
+class _StuckAcquireContext:
+    async def __aenter__(self):
+        await asyncio.sleep(10)
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class _StuckPool:
+    def acquire(self):
+        return _StuckAcquireContext()
+
+
 class _FakeRequest(dict):
     def __init__(self, app, body, query=None):
         super().__init__()
@@ -891,6 +904,26 @@ def test_browser_heartbeat_handler_records_bridge_diagnostic_platform():
     assert metadata["health_status"] == "service_worker_active"
     assert metadata["health_reason"] == "warm_start"
     assert metadata["extension_version"] == "1.21.37"
+
+
+def test_browser_heartbeat_handler_returns_when_telemetry_db_is_stuck(monkeypatch):
+    monkeypatch.setattr(ig_ingest, "BROWSER_TELEMETRY_WRITE_TIMEOUT_SECONDS", 0.01)
+    req = _FakeRequest(
+        {"pool": _StuckPool()},
+        {
+            "platform": "bridge",
+            "label": "UnifiedCollector Bridge",
+            "running": True,
+            "url": "chrome-extension://abc/background.js",
+            "tab_id": "service_worker",
+            "extension_version": "1.21.63",
+            "health_status": "manual_ingest_probe",
+        },
+    )
+
+    resp = asyncio.run(ig_ingest.browser_heartbeat_handler(req))
+
+    assert resp.status == 200
 
 
 def test_record_strava_stream_http_429_writes_rate_limit_event(monkeypatch):
