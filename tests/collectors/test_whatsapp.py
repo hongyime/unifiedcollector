@@ -6,6 +6,7 @@ pool replaced with AsyncMock. aio_pika / redis are never imported live.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from pathlib import Path
@@ -155,6 +156,65 @@ def test_set_pool_propagates_to_checkpoint(collector):
     new_pool = MagicMock()
     collector.set_pool(new_pool)
     assert collector.pool is new_pool
+
+
+def test_pairing_health_state_is_throttled_and_refreshes(collector, monkeypatch):
+    now = [1000.0]
+    monkeypatch.setattr(wa_mod.time, "time", lambda: now[0])
+
+    asyncio.run(collector._mark_source_waiting_for_pairing("waiting for QR"))
+    asyncio.run(collector._mark_source_waiting_for_pairing("waiting for QR"))
+    assert collector._test_conn.execute.await_count == 1
+
+    now[0] += 301
+    asyncio.run(collector._mark_source_waiting_for_pairing("waiting for QR"))
+    assert collector._test_conn.execute.await_count == 2
+
+    asyncio.run(collector._mark_source_bridge_ready())
+    assert collector._test_conn.execute.await_count == 3
+    assert "status='running'" in collector._test_conn.execute.await_args.args[0]
+
+
+def test_bridge_pairing_health_marks_all_unpaired_sessions(collector, monkeypatch):
+    collector._session_bridges = {
+        "session_1": "http://bridge-1",
+        "session_2": "http://bridge-2",
+    }
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {
+                "status": "awaiting_scan",
+                "whatsapp_ready": False,
+                "qr_available": True,
+            }
+
+    class FakeClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def get(self, url):
+            return FakeResponse()
+
+    monkeypatch.setattr(wa_mod.httpx, "AsyncClient", FakeClient)
+
+    asyncio.run(collector._update_bridge_pairing_health())
+
+    assert collector._test_conn.execute.await_count == 1
+    args = collector._test_conn.execute.await_args.args
+    assert args[1] == "whatsapp"
+    assert args[2] == (
+        "WhatsApp bridge waiting for QR pairing: session_1, session_2. "
+        "Open Link WhatsApp and scan a fresh QR."
+    )
 
 
 # ── collect (entry-point routing) ─────────────────────────────────────────

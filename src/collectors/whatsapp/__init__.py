@@ -139,6 +139,7 @@ class WhatsappCollector(BaseCollector):
 
         self._backfill_batch = int(os.getenv("WHATSAPP_BACKFILL_BATCH_SIZE", "") or os.getenv("COLLECTOR_BACKFILL_BATCH_SIZE", "50"))
         self._backfill_poll = int(os.getenv("WHATSAPP_BACKFILL_POLL_SECONDS", "") or os.getenv("COLLECTOR_BACKFILL_POLL_SECONDS", "30"))
+        self._pairing_health_interval = int(os.getenv("WHATSAPP_PAIRING_HEALTH_INTERVAL_SECONDS", "60"))
         self._backfill_rpm = int(os.getenv("WHATSAPP_BACKFILL_REQ_PER_MIN", "") or os.getenv("COLLECTOR_BACKFILL_REQ_PER_MIN", "5"))
         self._max_backfill_days = int(os.getenv("WHATSAPP_MAX_BACKFILL_AGE_DAYS", "") or os.getenv("COLLECTOR_MAX_BACKFILL_AGE_DAYS", "90"))
 
@@ -168,6 +169,9 @@ class WhatsappCollector(BaseCollector):
             {s.strip().lower() for s in _spider_sessions.split(",") if s.strip()}
             if _spider_sessions else set()
         )
+        self._last_pairing_wait_log = 0.0
+        self._last_source_health_status: tuple[str, str] | None = None
+        self._last_source_health_write = 0.0
         # Send-side intentionally dropped: no bulk_send_enabled / hourly cap /
         # daily cap / membership gating. This collector is RECEIVE-ONLY.
 
@@ -264,6 +268,8 @@ class WhatsappCollector(BaseCollector):
         else:
             tasks.append(asyncio.create_task(self._poll_sessions(targets)))
 
+        if self._session_bridges:
+            tasks.append(asyncio.create_task(self._bridge_pairing_health_loop()))
         tasks.append(asyncio.create_task(self._media_archival_loop()))
 
         try:
@@ -1071,6 +1077,8 @@ class WhatsappCollector(BaseCollector):
 
     async def _poll_sessions(self, targets: list[str]):
         while not self._stop.is_set():
+            saw_ready_bridge = False
+            waiting_sessions: list[str] = []
             for session_name, bridge_url in self._session_bridges.items():
                 if self._stop.is_set():
                     break
@@ -1098,9 +1106,13 @@ class WhatsappCollector(BaseCollector):
                         # a connected/ok status so the HTTP-poll fallback isn't skipped
                         # forever on a correctly-running bridge.
                         if not health.get("whatsapp_ready") and health.get("status") not in ("connected", "ok"):
+                            status = str(health.get("status") or "not_ready").lower()
+                            if status in {"awaiting_scan", "refreshing_qr", "requesting_fresh_qr", "waiting_for_fresh_qr"} or health.get("qr_available"):
+                                waiting_sessions.append(session_name)
                             logger.debug("Session %s not ready: %s", session_name, health.get("status"))
                             continue
 
+                        saw_ready_bridge = True
                         resp = await client.get(
                             f"{bridge_url}/messages/recent",
                             params={"limit": self._backfill_batch},
@@ -1129,7 +1141,68 @@ class WhatsappCollector(BaseCollector):
                     logger.error("Session %s poll failed: %s", session_name, e)
                     self._record_session_failure(session_name)
 
+            if saw_ready_bridge:
+                await self._mark_source_bridge_ready()
+            elif waiting_sessions:
+                now = time.time()
+                detail = (
+                    "WhatsApp bridge waiting for QR pairing: "
+                    + ", ".join(sorted(set(waiting_sessions)))
+                    + ". Open Link WhatsApp and scan a fresh QR."
+                )
+                await self._mark_source_waiting_for_pairing(detail)
+                if now - self._last_pairing_wait_log > 300:
+                    self._last_pairing_wait_log = now
+                    logger.warning(detail)
+
             await asyncio.sleep(self._backfill_poll)
+
+    async def _bridge_pairing_health_loop(self):
+        while not self._stop.is_set():
+            try:
+                await self._update_bridge_pairing_health()
+            except Exception:
+                logger.debug("WhatsApp bridge pairing health check failed", exc_info=True)
+            await asyncio.sleep(max(15, self._pairing_health_interval))
+
+    async def _update_bridge_pairing_health(self):
+        saw_ready_bridge = False
+        waiting_sessions: list[str] = []
+        async with httpx.AsyncClient(timeout=15) as client:
+            for session_name, bridge_url in self._session_bridges.items():
+                try:
+                    resp = await client.get(f"{bridge_url}/health")
+                except Exception:
+                    logger.debug("WhatsApp bridge health probe failed for %s", session_name, exc_info=True)
+                    continue
+                if resp.status_code != 200:
+                    logger.debug(
+                        "WhatsApp bridge health probe for %s returned HTTP %s",
+                        session_name,
+                        resp.status_code,
+                    )
+                    continue
+                health = resp.json()
+                status = str(health.get("status") or "not_ready").lower()
+                if health.get("whatsapp_ready") or status in {"connected", "ok"}:
+                    saw_ready_bridge = True
+                    continue
+                if status in {"awaiting_scan", "refreshing_qr", "requesting_fresh_qr", "waiting_for_fresh_qr"} or health.get("qr_available"):
+                    waiting_sessions.append(session_name)
+
+        if saw_ready_bridge:
+            await self._mark_source_bridge_ready()
+        elif waiting_sessions:
+            now = time.time()
+            detail = (
+                "WhatsApp bridge waiting for QR pairing: "
+                + ", ".join(sorted(set(waiting_sessions)))
+                + ". Open Link WhatsApp and scan a fresh QR."
+            )
+            await self._mark_source_waiting_for_pairing(detail)
+            if now - self._last_pairing_wait_log > 300:
+                self._last_pairing_wait_log = now
+                logger.warning(detail)
 
     async def process_bridge_event(self, event: dict, targets: list[str] | None = None):
         """Public entry point: process a single bridge event payload.
@@ -1329,6 +1402,54 @@ class WhatsappCollector(BaseCollector):
             if await self._bridge_ready_for_media(session, bridge_url):
                 return True
         return False
+
+    async def _mark_source_waiting_for_pairing(self, detail: str):
+        """Record an operator-actionable WhatsApp state without treating it as a crash."""
+        state = ("degraded", detail)
+        now = time.time()
+        if self._last_source_health_status == state and now - self._last_source_health_write < 300:
+            return
+        self._last_source_health_status = state
+        self._last_source_health_write = now
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO source_health (source, status, last_error, updated_at)
+                    VALUES ($1, 'degraded', $2, NOW())
+                    ON CONFLICT (source) DO UPDATE SET
+                      status='degraded',
+                      last_error=EXCLUDED.last_error,
+                      updated_at=NOW()
+                    """,
+                    self.SOURCE_NAME,
+                    detail,
+                )
+        except Exception:
+            logger.debug("WhatsApp source_health pairing-state update failed", exc_info=True)
+
+    async def _mark_source_bridge_ready(self):
+        state = ("running", "")
+        if self._last_source_health_status == state:
+            return
+        self._last_source_health_status = state
+        self._last_source_health_write = time.time()
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO source_health (source, status, last_success_at, last_error, updated_at)
+                    VALUES ($1, 'running', NOW(), NULL, NOW())
+                    ON CONFLICT (source) DO UPDATE SET
+                      status='running',
+                      last_success_at=NOW(),
+                      last_error=NULL,
+                      updated_at=NOW()
+                    """,
+                    self.SOURCE_NAME,
+                )
+        except Exception:
+            logger.debug("WhatsApp source_health ready update failed", exc_info=True)
 
     async def _bridge_ready_for_media(self, session: str, bridge_url: str) -> bool:
         now = time.time()
