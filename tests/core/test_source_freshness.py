@@ -228,3 +228,35 @@ async def test_browser_source_degrades_when_content_progress_is_stale(monkeypatc
     assert rows[0]["browser_content_stale"] is True
     assert rows[0]["browser_content_stale_after_seconds"] == 3600
     assert "browser content progress is 7200s old" in rows[0]["detail"]
+
+
+@pytest.mark.asyncio
+async def test_browser_content_stale_does_not_depend_on_heartbeat_query(monkeypatch):
+    from src.core import source_freshness
+
+    class BrowserHeartbeatTimeoutConn:
+        async def fetch(self, query: str, *args, timeout: int = 8):
+            if "FROM source_health" in query:
+                return []
+            raise AssertionError(query)
+
+        async def fetchval(self, query: str, *args, timeout: int = 8):
+            if "to_regclass('browser_ingest_events')" in query:
+                raise TimeoutError()
+            if "x_posts" in query:
+                return 9000
+            return None
+
+    monkeypatch.setenv("BROWSER_CONTENT_STALE_WARN_SECONDS", "3600")
+    monkeypatch.setattr(
+        source_freshness,
+        "FRESHNESS",
+        [("x", "SELECT extract(epoch FROM now()-max(collected_at)) FROM x_posts", 172800)],
+    )
+
+    rows = await source_freshness.compute_liveness(BrowserHeartbeatTimeoutConn())
+
+    assert rows[0]["status"] == "degraded"
+    assert rows[0]["browser_heartbeat_age_seconds"] is None
+    assert rows[0]["browser_content_stale"] is True
+    assert "browser content progress is 9000s old" in rows[0]["detail"]

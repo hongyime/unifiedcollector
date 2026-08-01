@@ -260,8 +260,7 @@ async def compute_liveness(conn) -> list[dict]:
             else:
                 detail = f"{detail}; {browser_detail}"
         browser_content_stale = (
-            browser_heartbeats is not None
-            and name in _BROWSER_CONTENT_PROGRESS_SOURCES
+            name in _BROWSER_CONTENT_PROGRESS_SOURCES
             and (data_age is None or data_age > browser_content_stale_after)
         )
         if browser_content_stale:
