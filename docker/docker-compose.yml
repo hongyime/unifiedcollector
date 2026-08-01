@@ -103,12 +103,14 @@ services:
       COLLECTOR_VAULT_ROOT: /vault
       COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
       YOUTUBE_ENRICH_BATCH_LIMIT: "5"
-      YOUTUBE_VIDEO_BACKFILL_BATCH_SIZE: "25"
+      YOUTUBE_MAX_CONCURRENT_DOWNLOADS: "1"
+      YOUTUBE_VIDEO_BACKFILL_BATCH_SIZE: "12"
       YOUTUBE_VIDEO_BACKFILL_MAX_PASSES: "2"
       YOUTUBE_VIDEO_BACKFILL_FAILED_RETRY_HOURS: "24"
       YOUTUBE_VIDEO_BACKFILL_SCAN_LIMIT: "10000"
-      YOUTUBE_VIDEO_DOWNLOADS_PER_TARGET: "10"
-      YOUTUBE_DOWNLOAD_DELAY: "3.0"
+      YOUTUBE_VIDEO_DOWNLOADS_PER_TARGET: "3"
+      YOUTUBE_VIDEO_DOWNLOAD_TIMEOUT: "180"
+      YOUTUBE_DOWNLOAD_DELAY: "6.0"
       # Media-first policy: do not permanently exclude longer videos. Backfill
       # remains bounded by batch size, failed-retry delay, and yt-dlp timeout.
       YOUTUBE_MAX_VIDEO_DURATION_MINUTES: "0"
@@ -232,11 +234,10 @@ services:
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
       COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
-      # EDIT 2026-07-13 (GPS backlog convergence): page scrape 200 -> 100. The
-      # 200-batch phase took ~40min/cycle ahead of the GPS backfill and its
-      # stream XHRs were the source of the observed 429 bursts. Halving it
-      # shortens cycles (more GPS drain runs/day) without changing request rate.
-      STRAVA_PAGE_SCRAPE_BATCH: "100"
+      # EDIT 2026-08-01 (DB pressure): page scrape 100 -> 20. The old low-risk
+      # lane was saturating Postgres while realtime/media collectors were healthy.
+      # Keep history moving, but cap per-cycle DB churn.
+      STRAVA_PAGE_SCRAPE_BATCH: "20"
       SEARCH_SPIDER_PAGES: "1"
       # Strava athlete spider (kudos/comments/followers/clubs) — paced for I/O.
       STRAVA_SPIDER_ENABLED: "true"
@@ -248,26 +249,20 @@ services:
       # (unbounded), so discovery loses nothing by going slower; raise back once
       # strava_activities.stream_status NULL count converges.
       STRAVA_SPIDER_MAX_PER_CYCLE: "3"
-      # GPS-route backfill: ~34k activities with stream_status=NULL. 500 -> 250
-      # (2026-07-13): the 500-batch at the REAL observed pace (~10-16s/activity:
-      # 3-6s delay x up to 2 cookie accounts) ran >2h, never finished (worker
-      # restarts + the old missing progress-tick got it watchdog-killed at 7200s).
-      # collect() now drains a batch FIRST each cycle (STRAVA_GPS_BACKFILL_FIRST)
-      # and again at the tail = up to 500 attempts/cycle, each durably persisted
-      # per-activity. Per-request pacing (STRAVA_API_DELAY 3-6s) is unchanged —
-      # ban-safe. Tune down if Strava starts returning 429s on stream XHRs.
-      STRAVA_GPS_BACKFILL_BATCH: "250"
+      # GPS-route backfill: bounded to protect DB/API pressure while Strava is
+      # already returning stream 429s. Re-raise after stream cooldowns stabilize.
+      STRAVA_GPS_BACKFILL_BATCH: "40"
       STRAVA_GPS_BACKFILL_FIRST: "true"
       STRAVA_ROUTE_STREAM_SHARED_COOLDOWN: "true"
-      STRAVA_PROFILE_ENRICH_BATCH: "75"
+      STRAVA_PROFILE_ENRICH_BATCH: "15"
       # GitHub graph expansion: no hard caps on high-signal repo history.
       # Keep weak repo fanout bounded; stargazers/watchers are weaker evidence
       # and can explode far faster than commits/issues/contributors.
-      GITHUB_API_DELAY: "0.35"
-      GITHUB_MAX_CONCURRENT: "6"
-      GITHUB_TARGET_CONCURRENCY: "2"
-      GITHUB_SPIDER_CONCURRENCY: "3"
-      GITHUB_SPIDER_BATCH_SIZE: "120"
+      GITHUB_API_DELAY: "1.0"
+      GITHUB_MAX_CONCURRENT: "1"
+      GITHUB_TARGET_CONCURRENCY: "1"
+      GITHUB_SPIDER_CONCURRENCY: "1"
+      GITHUB_SPIDER_BATCH_SIZE: "25"
       GITHUB_MAX_COMMITS_PER_REPO: "0"
       GITHUB_MAX_ISSUES_PER_REPO: "0"
       GITHUB_MAX_CONTRIBUTORS_PER_REPO: "0"
@@ -524,13 +519,21 @@ services:
       BEEPER_TRANSIENT_RETRIES: "6"
       BEEPER_TRANSIENT_BACKOFF: "2.0"
       COLLECTOR_HANG_TIMEOUT_SECONDS: "5400"
-      # Wider room coverage + deeper history per cycle. The live Beeper room
-      # count is now >700, so 200 rooms covers the tail in about four 5-minute
-      # passes while avoiding the older 600x20 setting that melted the host.
-      BEEPER_MAX_CHATS_PER_CYCLE: "200"
-      BEEPER_BACKFILL_PAGES_PER_CYCLE: "8"
+      # Wider room coverage + bounded history per cycle. Keep cycles completing
+      # frequently so live message freshness wins over historical drain.
+      BEEPER_MAX_CHATS_PER_CYCLE: "75"
+      BEEPER_BACKFILL_PAGES_PER_CYCLE: "4"
       BEEPER_BACKFILL_CANDIDATE_MESSAGES: "1000"
       BEEPER_BACKFILL_QUERY_TIMEOUT: "30"
+      BEEPER_ACCOUNTS_TIMEOUT: "20"
+      BEEPER_CHATS_TIMEOUT: "90"
+      BEEPER_MESSAGES_TIMEOUT: "600"
+      BEEPER_CHAT_SYNC_TIMEOUT_SECONDS: "45"
+      # Keep live message sync ahead of historical network cleanup. The repair
+      # runs after message sync and is intentionally bounded so a DB-heavy pass
+      # cannot make Beeper look stale.
+      BEEPER_NETWORK_REPAIR_LIMIT: "2000"
+      BEEPER_NETWORK_REPAIR_TIMEOUT: "20"
       # One-shot, bounded probe of old failed Beeper assets after cache/session
       # changes. Bump the marker to retry another tiny sample; same marker is
       # remembered in service_cursors and will not run every cycle.
@@ -975,6 +978,8 @@ services:
       WHATSAPP_BACKFILL_REQ_PER_MIN: "24"
       WHATSAPP_FETCH_COUNT: "100"
       WHATSAPP_MAX_BACKFILL_AGE_DAYS: "36500"
+      WHATSAPP_UNPAIRED_QR_RECONNECT_MS: "30000"
+      WHATSAPP_QR_STABILITY_MS: "45000"
       WHATSAPP_MEDIA_BRIDGE_SECRET: ${WHATSAPP_MEDIA_BRIDGE_SECRET:-localdevmediabridgesecretkey12345678}
       LOG_LEVEL: info
     ports:
@@ -1011,6 +1016,8 @@ services:
       WHATSAPP_BACKFILL_REQ_PER_MIN: "24"
       WHATSAPP_FETCH_COUNT: "100"
       WHATSAPP_MAX_BACKFILL_AGE_DAYS: "36500"
+      WHATSAPP_UNPAIRED_QR_RECONNECT_MS: "30000"
+      WHATSAPP_QR_STABILITY_MS: "45000"
       WHATSAPP_MEDIA_BRIDGE_SECRET: ${WHATSAPP_MEDIA_BRIDGE_SECRET:-localdevmediabridgesecretkey12345678}
       LOG_LEVEL: info
     ports:

@@ -77,7 +77,8 @@ let pairingRecoveryUntil: number | null = null;
 let terminalQrPrinted = false;
 let lastFreshQrRequestAt = 0;
 const FRESH_QR_MIN_INTERVAL_MS = Number(process.env.WHATSAPP_FRESH_QR_MIN_INTERVAL_MS || 30_000);
-const UNPAIRED_QR_RECONNECT_MS = Number(process.env.WHATSAPP_UNPAIRED_QR_RECONNECT_MS || 5_000);
+const UNPAIRED_QR_RECONNECT_MS = Number(process.env.WHATSAPP_UNPAIRED_QR_RECONNECT_MS || 30_000);
+const QR_STABILITY_MS = Number(process.env.WHATSAPP_QR_STABILITY_MS || 45_000);
 let reconnectTimer: NodeJS.Timeout | null = null;
 let socketEpoch = 0;
 let saveCredsTimer: NodeJS.Timeout | null = null;
@@ -87,6 +88,7 @@ const POST_PAIR_515_GRACE_MS = Number(process.env.WHATSAPP_POST_PAIR_515_GRACE_M
 let stream515: number[] = [];
 const MAX_RAPID_515 = 3;
 const WINDOW_515_MS = 60_000;
+let lastQrLogAt = 0;
 
 function isQrRefsExpired(reason: string | null | undefined): boolean {
     return String(reason || '').toLowerCase().includes('qr refs attempts ended');
@@ -612,15 +614,29 @@ async function connectToWhatsApp(): Promise<void> {
         const { connection, lastDisconnect, qr } = update;
 
         if (qr) {
+            const now = Date.now();
+            if (latestQr && latestQrAt && now - latestQrAt < QR_STABILITY_MS) {
+                logger.debug(
+                    { qr_age_ms: now - latestQrAt, stable_for_ms: QR_STABILITY_MS },
+                    'Keeping existing QR stable for easier scanning'
+                );
+                return;
+            }
             latestQr = qr;
-            latestQrAt = Date.now();
+            latestQrAt = now;
             socketRegistered = false;
             connectionState = 'awaiting_scan';
             lastDisconnectStatusCode = null;
             lastDisconnectReason = null;
             lastDisconnectAt = null;
             pairingRecoveryUntil = null;
-            logger.info({ qr_available: true }, 'QR code refreshed; scan it from the dashboard link page');
+            const shouldLogQr = now - lastQrLogAt > 30_000;
+            lastQrLogAt = shouldLogQr ? now : lastQrLogAt;
+            if (shouldLogQr) {
+                logger.info({ qr_available: true }, 'QR code refreshed; scan it from the dashboard link page');
+            } else {
+                logger.debug({ qr_available: true }, 'QR code refreshed');
+            }
             if (getEnv('WHATSAPP_PRINT_TERMINAL_QR', 'false') === 'true') {
                 terminalQrPrinted = true;
                 qrcode.generate(qr, { small: true });

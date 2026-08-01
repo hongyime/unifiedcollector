@@ -354,7 +354,7 @@ class WorkerService:
         # source without a config file. Never fatal -- a bad file logs + is skipped.
         try:
             from src.core.source_config import sync_source_configs
-            await sync_source_configs(self.pool)
+            await sync_source_configs(self.pool, sources=sources)
         except Exception:
             logger.warning("source_config sync failed (non-fatal)", exc_info=True)
 

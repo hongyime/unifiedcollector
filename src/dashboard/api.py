@@ -38,6 +38,9 @@ _BEEPER_SUBSOURCE_CONTENT_CACHE: dict[tuple[str, str | None], dict[str, object]]
 _BEEPER_SUBSOURCE_CONTENT_TTL_SECONDS = int(os.getenv("BEEPER_SUBSOURCE_CONTENT_TTL_SECONDS", "45"))
 _BEEPER_SUBSOURCE_QUERY_TIMEOUT_SECONDS = float(os.getenv("BEEPER_SUBSOURCE_QUERY_TIMEOUT_SECONDS", "2"))
 _BEEPER_SUBSOURCE_TOTAL_TIMEOUT_SECONDS = float(os.getenv("BEEPER_SUBSOURCE_TOTAL_TIMEOUT_SECONDS", "4"))
+_BEEPER_SUBSOURCE_MEDIA_TOTALS_CACHE: dict[str, object] = {"ts": 0.0, "rows": None, "failed": False}
+_BEEPER_SUBSOURCE_MEDIA_TOTALS_TTL_SECONDS = int(os.getenv("BEEPER_SUBSOURCE_MEDIA_TOTALS_TTL_SECONDS", "300"))
+_BEEPER_SUBSOURCE_MEDIA_TOTALS_FAILURE_TTL_SECONDS = int(os.getenv("BEEPER_SUBSOURCE_MEDIA_TOTALS_FAILURE_TTL_SECONDS", "60"))
 _BEEPER_SUBSOURCE_LIVENESS_CACHE: dict[str, object] = {"ts": 0.0, "rows": None}
 _BEEPER_SUBSOURCE_LIVENESS_TTL_SECONDS = int(os.getenv("BEEPER_SUBSOURCE_LIVENESS_TTL_SECONDS", "75"))
 _SOURCE_MATRIX_SECTION_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_SECTION_TIMEOUT_SECONDS", "2"))
@@ -578,26 +581,45 @@ async def _beeper_subsource_media_totals(
     conn,
     *,
     timeout: float = _BEEPER_SUBSOURCE_QUERY_TIMEOUT_SECONDS,
-) -> dict[str, dict]:
+) -> dict[str, object]:
+    cached_rows = _BEEPER_SUBSOURCE_MEDIA_TOTALS_CACHE.get("rows")
+    cache_age = time.time() - float(_BEEPER_SUBSOURCE_MEDIA_TOTALS_CACHE.get("ts") or 0.0)
+    if isinstance(cached_rows, dict):
+        ttl = (
+            _BEEPER_SUBSOURCE_MEDIA_TOTALS_FAILURE_TTL_SECONDS
+            if _BEEPER_SUBSOURCE_MEDIA_TOTALS_CACHE.get("failed")
+            else _BEEPER_SUBSOURCE_MEDIA_TOTALS_TTL_SECONDS
+        )
+        if cache_age < ttl:
+            return _copy_cache_value(cached_rows)
+
     existing = await _existing_public_tables(conn, ["media_items"], timeout=timeout)
     if "media_items" not in existing:
         return {}
-    rows = await conn.fetch(
-        """
-        SELECT COALESCE(
-                   NULLIF(trim(metadata->>'network'), ''),
-                   NULLIF(split_part(entity_id, '_', 1), ''),
-                   'unknown'
-               ) AS network,
-               count(*)::bigint AS total_media_items,
-               COALESCE(sum(file_size), 0)::bigint AS total_media_bytes,
-               max(collected_at) AS latest_media_at
-        FROM media_items
-        WHERE source = 'beeper'
-        GROUP BY 1
-        """,
-        timeout=timeout,
-    )
+    try:
+        rows = await conn.fetch(
+            """
+            SELECT COALESCE(
+                       NULLIF(trim(metadata->>'network'), ''),
+                       NULLIF(split_part(entity_id, '_', 1), ''),
+                       'unknown'
+                   ) AS network,
+                   count(*)::bigint AS total_media_items,
+                   COALESCE(sum(file_size), 0)::bigint AS total_media_bytes,
+                   max(collected_at) AS latest_media_at
+            FROM media_items
+            WHERE source = 'beeper'
+            GROUP BY 1
+            """,
+            timeout=timeout,
+        )
+    except Exception:
+        _BEEPER_SUBSOURCE_MEDIA_TOTALS_CACHE.update({
+            "ts": time.time(),
+            "rows": {"__beeper_subsource_stats_unavailable__": True},
+            "failed": True,
+        })
+        raise
     out: dict[str, dict] = {}
     for row in rows:
         source, display_name = _beeper_source_key(row["network"])
@@ -608,6 +630,11 @@ async def _beeper_subsource_media_totals(
             "parent_source": "beeper",
             "rollup_exclude": True,
         }
+    _BEEPER_SUBSOURCE_MEDIA_TOTALS_CACHE.update({
+        "ts": time.time(),
+        "rows": _copy_cache_value(out),
+        "failed": False,
+    })
     return out
 
 
@@ -750,6 +777,10 @@ async def _source_rate_summary(conn, since_sql: str, before_sql: str | None = No
         """
     else:
         cleared_by_success_sql = "FALSE"
+    try:
+        query_timeout = max(1.0, float(os.getenv("SOURCE_RATE_SUMMARY_QUERY_TIMEOUT_SECONDS", "4")))
+    except (TypeError, ValueError):
+        query_timeout = 4.0
     rows = await conn.fetch(
         f"""
         WITH events AS (
@@ -795,7 +826,7 @@ async def _source_rate_summary(conn, since_sql: str, before_sql: str | None = No
         FROM events
         GROUP BY source
         """,
-        timeout=15,
+        timeout=query_timeout,
     )
     now_utc = datetime.now(timezone.utc)
     out = {}
@@ -1002,6 +1033,10 @@ async def _youtube_media_backlog(conn) -> dict:
     except (TypeError, ValueError):
         duration_cap_seconds = 0
     try:
+        try:
+            query_timeout = max(1.0, float(os.getenv("YOUTUBE_MEDIA_BACKLOG_QUERY_TIMEOUT_SECONDS", "6")))
+        except (TypeError, ValueError):
+            query_timeout = 6.0
         row = await conn.fetchrow(
             f"""
             WITH classified AS (
@@ -1078,15 +1113,24 @@ async def _youtube_media_backlog(conn) -> dict:
             FROM missing
             """,
             duration_cap_seconds,
-            timeout=20,
+            timeout=query_timeout,
         )
-    except Exception:
+    except Exception as exc:
         cached_row = _YOUTUBE_MEDIA_BACKLOG_CACHE.get("row")
         if cached_row is not None:
             out = dict(cached_row)  # type: ignore[arg-type]
             out["stats_stale"] = True
             return out
-        raise
+        logger.warning("youtube media backlog stats unavailable: %s", exc.__class__.__name__)
+        out = {
+            "stats_unavailable": True,
+            "stats_error": exc.__class__.__name__,
+            "duration_cap_seconds": duration_cap_seconds,
+            "backlog_basis": "youtube_videos.media_status",
+            "thumbnail_stats_unavailable": True,
+        }
+        _YOUTUBE_MEDIA_BACKLOG_CACHE.update({"ts": time.time(), "row": out})
+        return out
     out = dict(row) if row else {}
     out["duration_cap_seconds"] = duration_cap_seconds
     out["backlog_basis"] = "youtube_videos.media_status"
@@ -2480,7 +2524,11 @@ async def _with_bridge_overrides(sources: list[dict]) -> tuple[list[dict], dict 
     """
     bridge_summary = None
     try:
-        states = await fetch_whatsapp_bridge_health(timeout=4)
+        try:
+            bridge_timeout = max(0.25, float(os.getenv("WA_BRIDGE_HEALTH_TIMEOUT_SECONDS", "1.5")))
+        except (TypeError, ValueError):
+            bridge_timeout = 1.5
+        states = await fetch_whatsapp_bridge_health(timeout=bridge_timeout)
         bridge_summary = {
             "summary": summarize_whatsapp_bridge_health(states),
             "bridges": states,
@@ -3158,6 +3206,7 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
             awaitable=_with_bridge_overrides(live_sources),
             cache_key="bridge_overrides",
             cache_ttl=15,
+            timeout=3,
         )
         if any(
             error["section"] == "source_liveness" and not error.get("stale_cache")

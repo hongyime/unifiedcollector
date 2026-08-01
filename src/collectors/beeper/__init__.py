@@ -995,6 +995,37 @@ class BeeperCollector(BaseCollector):
     def _api_cooling_down(self) -> bool:
         return time.time() < self._api_cooldown_until
 
+    def _network_repair_limit(self) -> int:
+        try:
+            return max(0, int(os.getenv("BEEPER_NETWORK_REPAIR_LIMIT", "2000")))
+        except (TypeError, ValueError):
+            return 2000
+
+    def _network_repair_timeout(self) -> float:
+        try:
+            return max(1.0, float(os.getenv("BEEPER_NETWORK_REPAIR_TIMEOUT", "20")))
+        except (TypeError, ValueError):
+            return 20.0
+
+    def _phase_timeout(self, phase: str, default: float) -> float:
+        try:
+            return max(0.0, float(os.getenv(f"BEEPER_{phase.upper()}_TIMEOUT", str(default))))
+        except (TypeError, ValueError):
+            return default
+
+    async def _run_optional_phase(self, phase: str, awaitable, timeout: float) -> tuple[int, BaseException | None]:
+        try:
+            if timeout > 0:
+                return int(await asyncio.wait_for(awaitable, timeout=timeout) or 0), None
+            return int(await awaitable or 0), None
+        except (TimeoutError, BeeperTransientError, httpx.TransportError, OSError) as exc:
+            logger.warning(
+                "Beeper %s phase skipped after transient failure; continuing: %s",
+                phase,
+                _format_exception(exc),
+            )
+            return 0, exc
+
     async def _restore_api_cooldown(self) -> None:
         if self._api_cooldown_restored or self.pool is None:
             return
@@ -1059,15 +1090,44 @@ class BeeperCollector(BaseCollector):
             return stats
         try:
             phase = "accounts"
-            stats["accounts"] = await self._sync_accounts()
+            stats["accounts"], phase_error = await self._run_optional_phase(
+                phase,
+                self._sync_accounts(),
+                self._phase_timeout("accounts", 30.0),
+            )
+            if phase_error:
+                stats["transient"] += 1
             phase = "chats"
-            stats["chats"] = await self._sync_chats()
-            w = self.writer
-            if w is not None:
-                phase = "network_repair"
-                stats["networks_repaired"] = await w.repair_unknown_message_networks()
+            stats["chats"], phase_error = await self._run_optional_phase(
+                phase,
+                self._sync_chats(),
+                self._phase_timeout("chats", 120.0),
+            )
+            if phase_error:
+                stats["transient"] += 1
             phase = "messages"
-            stats["messages_inserted"] = await self._sync_messages()
+            stats["messages_inserted"], phase_error = await self._run_optional_phase(
+                phase,
+                self._sync_messages(),
+                self._phase_timeout("messages", 900.0),
+            )
+            if phase_error:
+                stats["transient"] += 1
+            w = self.writer
+            repair_limit = self._network_repair_limit()
+            if w is not None and repair_limit > 0 and not phase_error:
+                phase = "network_repair"
+                try:
+                    stats["networks_repaired"] = await asyncio.wait_for(
+                        w.repair_unknown_message_networks(limit=repair_limit),
+                        timeout=self._network_repair_timeout(),
+                    )
+                except Exception as exc:  # noqa: BLE001 - repair is non-critical
+                    logger.warning(
+                        "Beeper network repair skipped after live sync: %s",
+                        _format_exception(exc),
+                    )
+                    stats["transient"] += 1
         except TimeoutError as exc:
             logger.warning(
                 "Beeper sync timed out during %s; partial cycle will retry next run: %s",

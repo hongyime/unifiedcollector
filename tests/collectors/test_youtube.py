@@ -1048,6 +1048,22 @@ async def test_download_videos_skips_channel_fallback_when_api_videos_are_known(
 
 
 @pytest.mark.asyncio
+async def test_download_videos_uses_configured_hard_timeout(monkeypatch):
+    coll = _new_collector(monkeypatch, YOUTUBE_VIDEO_DOWNLOAD_TIMEOUT="123")
+    coll._filter_video_ids_for_download = AsyncMock(return_value=(["v1"], 0))
+    coll._filter_video_ids_already_archived = AsyncMock(return_value=(["v1"], 0))
+
+    from src.core import subprocess_downloader
+
+    ytdlp = AsyncMock(return_value=MagicMock(ok=True, cancelled=False, files=[]))
+    monkeypatch.setattr(subprocess_downloader, "yt_dlp_download", ytdlp)
+
+    await coll._download_videos_via_yt_dlp("UC_a", "Channel A", ["v1"])
+
+    assert ytdlp.await_args.kwargs["timeout"] == 123
+
+
+@pytest.mark.asyncio
 async def test_collect_channel_limits_live_video_downloads(monkeypatch):
     coll = _new_collector(monkeypatch, YOUTUBE_VIDEO_DOWNLOADS_PER_TARGET="2")
     coll._has_auth = True

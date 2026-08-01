@@ -1,4 +1,5 @@
 import pytest
+from datetime import datetime, timedelta, timezone
 
 
 class FakeConn:
@@ -74,6 +75,42 @@ async def test_compute_liveness_ignores_stale_watchdog_marker_when_data_is_fresh
     assert rows[0]["status"] == "live"
     assert "stale watchdog marker ignored" in rows[0]["detail"]
     assert rows[0]["source_health_status"] == "degraded"
+
+
+@pytest.mark.asyncio
+async def test_compute_liveness_uses_fresh_source_health_when_query_times_out(monkeypatch):
+    from src.core import source_freshness
+
+    class TimeoutConn:
+        async def fetch(self, query: str):
+            if "FROM source_health" in query:
+                return [
+                    {
+                        "source": "telegram",
+                        "status": "running",
+                        "last_error": None,
+                        "last_success_at": datetime.now(timezone.utc) - timedelta(seconds=30),
+                        "updated_at": datetime.now(timezone.utc),
+                    }
+                ]
+            raise AssertionError(query)
+
+        async def fetchval(self, query: str, timeout: int = 8):
+            raise TimeoutError()
+
+    monkeypatch.setattr(
+        source_freshness,
+        "FRESHNESS",
+        [
+            ("telegram", "SELECT extract(epoch FROM now()-max(collected_at)) FROM telegram_messages", 7200),
+        ],
+    )
+
+    rows = await source_freshness.compute_liveness(TimeoutConn())
+
+    assert rows[0]["status"] == "live"
+    assert rows[0]["age_seconds"] <= 60
+    assert "source_health heartbeat is fresh" in rows[0]["detail"]
 
 
 @pytest.mark.asyncio

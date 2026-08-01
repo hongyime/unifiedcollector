@@ -16,7 +16,7 @@ def _bridge_base(bridge: str) -> str:
     return os.getenv(f"WA_BRIDGE_{bridge}_URL", f"http://wa-bridge-{bridge}:3001")
 
 
-def _fetch_bridge_health(bridge: str, timeout: int) -> dict[str, Any]:
+def _fetch_bridge_health(bridge: str, timeout: float) -> dict[str, Any]:
     base = _bridge_base(bridge)
     try:
         with urllib.request.urlopen(f"{base}/health", timeout=timeout) as response:
@@ -26,7 +26,7 @@ def _fetch_bridge_health(bridge: str, timeout: int) -> dict[str, Any]:
         return {"bridge": bridge, "ok": False, "status": "unreachable", "error": str(exc)}
 
 
-async def fetch_whatsapp_bridge_health(timeout: int = 5) -> list[dict[str, Any]]:
+async def fetch_whatsapp_bridge_health(timeout: float = 5) -> list[dict[str, Any]]:
     """Return bridge health for both WhatsApp slots without raising."""
     return list(await asyncio.gather(
         asyncio.to_thread(_fetch_bridge_health, "1", timeout),

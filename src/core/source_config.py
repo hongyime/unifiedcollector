@@ -118,8 +118,8 @@ def _load_env_file(path: Path) -> int:
     return applied
 
 
-async def sync_source_configs(pool) -> dict:
-    """Read every config/sources/<source>.{targets,env} and sync to DB + env.
+async def sync_source_configs(pool, sources: list[str] | tuple[str, ...] | set[str] | None = None) -> dict:
+    """Read config/sources/<source>.{targets,env} and sync to DB + env.
 
     Returns a summary dict {source: {"targets": n, "removed": m, "env": k}} for
     logging. Safe to call once at startup. Never raises -- a malformed file logs
@@ -131,7 +131,13 @@ async def sync_source_configs(pool) -> dict:
         logger.info("source_config: no config dir at %s (file-based config inactive)", root)
         return summary
 
-    for source in KNOWN_SOURCES:
+    if sources is None:
+        selected_sources = KNOWN_SOURCES
+    else:
+        requested = {str(source).strip().lower() for source in sources if str(source).strip()}
+        selected_sources = tuple(source for source in KNOWN_SOURCES if source in requested)
+
+    for source in selected_sources:
         src_summary = {"targets": 0, "removed": 0, "env": 0}
 
         # 1. env file (apply BEFORE targets so any tunables are live)

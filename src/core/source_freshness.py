@@ -13,6 +13,10 @@ the window, and headless sources idle for long stretches by design.
 """
 from __future__ import annotations
 
+import os
+import time
+from datetime import datetime, timezone
+
 _DAY = 86400
 
 STRAVA_PROGRESS_QUERY = """
@@ -88,6 +92,21 @@ def _stale_watchdog_marker(error: str | None) -> bool:
     return lowered.startswith("stale ") and "watchdog" in lowered
 
 
+def _age_seconds(value, now: datetime) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return max(0.0, (now - value.astimezone(timezone.utc)).total_seconds())
+
+
 async def compute_liveness(conn) -> list[dict]:
     """Return per-source liveness using an open asyncpg connection.
 
@@ -113,21 +132,46 @@ async def compute_liveness(conn) -> list[dict]:
     except Exception:
         pass
 
+    try:
+        total_budget = max(2.0, float(os.getenv("SOURCE_LIVENESS_TOTAL_BUDGET_SECONDS", "12")))
+    except (TypeError, ValueError):
+        total_budget = 12.0
+    try:
+        per_query_timeout = max(0.25, float(os.getenv("SOURCE_LIVENESS_QUERY_TIMEOUT_SECONDS", "1.5")))
+    except (TypeError, ValueError):
+        per_query_timeout = 1.5
+    deadline = time.monotonic() + total_budget
+    now_utc = datetime.now(timezone.utc)
     out: list[dict] = []
     for name, query, thresh in FRESHNESS:
-        try:
-            age = await conn.fetchval(query, timeout=8)
-        except Exception:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
             age = None
+        else:
+            try:
+                age = await conn.fetchval(query, timeout=min(per_query_timeout, remaining))
+            except Exception:
+                age = None
         h = health.get(name) or {}
         hs = h.get("status")
         h_error = h.get("last_error")
+        health_age = _age_seconds(h.get("last_success_at"), now_utc)
         if hs == "dead":
             status = "dead"
             detail = h_error or "source_health reports the source as dead"
         elif age is None:
-            status = "unknown"
-            detail = "no freshness row could be read"
+            if (
+                health_age is not None
+                and health_age <= thresh
+                and hs not in {"auth_paused", "dead"}
+                and not (hs == "degraded" and not _stale_watchdog_marker(h_error))
+            ):
+                age = health_age
+                status = "live"
+                detail = "freshness query timed out; source_health heartbeat is fresh"
+            else:
+                status = "unknown"
+                detail = "no freshness row could be read"
         elif age > thresh:
             status = "stale"
             detail = f"newest row is older than {thresh} seconds"

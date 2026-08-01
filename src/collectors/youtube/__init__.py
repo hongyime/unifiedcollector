@@ -170,6 +170,10 @@ class YoutubeCollector(BaseCollector):
             int(os.getenv("YOUTUBE_VIDEO_BACKFILL_FAILED_RETRY_HOURS", "24")),
         )
         self._video_backfill_scan_limit = int(os.getenv("YOUTUBE_VIDEO_BACKFILL_SCAN_LIMIT", "5000"))
+        self._video_download_timeout = max(
+            30,
+            int(os.getenv("YOUTUBE_VIDEO_DOWNLOAD_TIMEOUT", "600")),
+        )
         self._prefill_media_backlog = os.getenv("YOUTUBE_PREFILL_MEDIA_BACKLOG", "true").lower() == "true"
         self._profile_queue_enabled = os.getenv("YOUTUBE_PROFILE_QUEUE_ENABLED", "true").lower() == "true"
         self._spider_autotarget = os.getenv("YOUTUBE_SPIDER_AUTOTARGET", "true").lower() == "true"
@@ -1886,7 +1890,7 @@ class YoutubeCollector(BaseCollector):
                     write_thumbnail=True,
                     no_overwrites=True,
                     extra_args=extra,
-                    timeout=600,
+                    timeout=self._video_download_timeout,
                     tempdir=tmpdir,
                     stop_event=self._stop if hasattr(self._stop, "wait") else None,
                 )

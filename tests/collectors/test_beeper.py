@@ -498,6 +498,79 @@ async def test_collector_full_cycle_smoke(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_collect_prioritizes_messages_before_network_repair(monkeypatch, tmp_path):
+    monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
+    monkeypatch.setenv("COLLECTOR_DRIVE_PATH", str(tmp_path))
+    monkeypatch.setenv("BEEPER_NETWORK_REPAIR_LIMIT", "100")
+
+    pool, _conn = _mock_pool()
+    writer = MagicMock(spec=BeeperWriter)
+    events = []
+
+    async def _sync_messages():
+        events.append("messages")
+        return 3
+
+    async def _repair_unknown_message_networks(*, limit):
+        events.append(("repair", limit))
+        raise TimeoutError()
+
+    writer.repair_unknown_message_networks = AsyncMock(
+        side_effect=_repair_unknown_message_networks
+    )
+    coll = BeeperCollector(client=MagicMock(spec=BeeperClient), writer=writer)
+    coll.set_pool(pool)
+    coll._api_cooldown_restored = True
+    coll._sync_accounts = AsyncMock(return_value=1)
+    coll._sync_chats = AsyncMock(return_value=2)
+    coll._sync_messages = AsyncMock(side_effect=_sync_messages)
+
+    stats = await coll.collect([])
+
+    assert stats["messages_inserted"] == 3
+    assert stats["networks_repaired"] == 0
+    assert stats["transient"] == 1
+    assert stats["errors"] == 0
+    assert events == ["messages", ("repair", 100)]
+
+
+@pytest.mark.asyncio
+async def test_collect_continues_messages_when_chat_enumeration_times_out(monkeypatch, tmp_path):
+    monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
+    monkeypatch.setenv("COLLECTOR_DRIVE_PATH", str(tmp_path))
+    monkeypatch.setenv("BEEPER_CHATS_TIMEOUT", "0.01")
+    monkeypatch.setenv("BEEPER_NETWORK_REPAIR_LIMIT", "0")
+
+    pool, _conn = _mock_pool()
+    events = []
+    coll = BeeperCollector(client=MagicMock(spec=BeeperClient))
+    coll.set_pool(pool)
+    coll._api_cooldown_restored = True
+    coll._sync_accounts = AsyncMock(return_value=1)
+
+    async def _slow_chats():
+        events.append("chats")
+        await asyncio.sleep(10)
+        return 99
+
+    async def _sync_messages():
+        events.append("messages")
+        return 4
+
+    coll._sync_chats = AsyncMock(side_effect=_slow_chats)
+    coll._sync_messages = AsyncMock(side_effect=_sync_messages)
+
+    stats = await coll.collect([])
+
+    assert stats["accounts"] == 1
+    assert stats["chats"] == 0
+    assert stats["messages_inserted"] == 4
+    assert stats["transient"] == 1
+    assert stats["errors"] == 0
+    assert events == ["chats", "messages"]
+
+
+@pytest.mark.asyncio
 async def test_sync_one_chat_tails_fresh_messages_before_backfill(monkeypatch):
     monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
     directions = []

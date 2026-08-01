@@ -74,6 +74,29 @@ async def ensure_account_proximity_cache(pool) -> None:
     _DDL_READY = True
 
 
+async def _collector_cache_recent(pool, interval_seconds: int) -> bool:
+    try:
+        await ensure_account_proximity_cache(pool)
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT count(*)::int AS rows,
+                       max(synced_at) AS latest_synced_at
+                FROM account_proximity_cache
+                """,
+                timeout=5,
+            )
+    except Exception:
+        return False
+    if not row or int(row["rows"] or 0) <= 0:
+        return False
+    latest = row["latest_synced_at"]
+    if latest is None:
+        return False
+    age_seconds = max(0.0, time.time() - latest.timestamp())
+    return age_seconds < interval_seconds
+
+
 async def refresh_account_proximity_cache(pool, *, force: bool = False) -> dict:
     """Best-effort sync from analyzer.account_proximity into collector cache."""
     if os.getenv("PROXIMITY_CACHE_ENABLED", "true").lower() != "true":
@@ -92,6 +115,10 @@ async def refresh_account_proximity_cache(pool, *, force: bool = False) -> dict:
             return {"skipped": "fresh"}
 
         await ensure_account_proximity_cache(pool)
+        if not force and await _collector_cache_recent(pool, interval):
+            _LAST_REFRESH = time.monotonic()
+            return {"skipped": "collector_cache_fresh"}
+
         dsn = analyzer_database_url()
         if not dsn:
             return {"skipped": "no_analyzer_dsn"}
