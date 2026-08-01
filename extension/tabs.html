@@ -41,6 +41,18 @@
       .pill.active { color: var(--ok); border-color: var(--ok); }
       .note { color: var(--muted); font-size: 12px; margin-top: 18px; line-height: 1.6; }
       .open { padding: 7px 14px; }
+      .diag {
+        background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+        padding: 12px 14px; margin-bottom: 16px; color: var(--muted); font-size: 12px;
+      }
+      .diag strong { color: var(--fg); }
+      .diag .bad { color: var(--err); }
+      .diag .ok { color: var(--ok); }
+      .diag .warn { color: var(--warn); }
+      .diag pre {
+        margin: 8px 0 0; max-height: 140px; overflow: auto; white-space: pre-wrap;
+        color: var(--muted); font: 11px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace;
+      }
     </style>
   </head>
   <body>
@@ -56,9 +68,11 @@
         <button id="openAll" class="primary">Open all tabs</button>
         <button id="refresh">Refresh status</button>
         <button id="reloadExtension">Reload extension</button>
+        <button id="testIngest">Test ingest</button>
         <div class="spacer"></div>
         <button id="scrape">Scrape now</button>
       </div>
+      <div class="diag" id="diag">Checking extension worker...</div>
       <div id="list"></div>
       <p class="note" id="note"></p>
     </div>

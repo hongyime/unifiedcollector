@@ -95,6 +95,40 @@ async function reportBridgeHeartbeat(reason) {
     });
   } catch (e) {}
 }
+async function sendManualIngestProbe() {
+  const base = await ingestBase();
+  const payload = withExtensionVersion({
+    platform: "bridge",
+    label: "UnifiedCollector Bridge",
+    running: true,
+    tab_id: "manual_test",
+    url: "chrome-extension://" + chrome.runtime.id + "/tabs.html",
+    health_status: "manual_ingest_probe",
+    health_reason: "tabs_page_test",
+  });
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 6000);
+  try {
+    const r = await fetch(base + "/social/browser-heartbeat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: ctrl.signal,
+    });
+    const body = await r.text().catch(() => "");
+    if (!r.ok) throw new Error(`HTTP ${r.status}${body ? ": " + body.slice(0, 180) : ""}`);
+    await setStatus({ lastManualIngestProbeAt: Date.now(), lastManualIngestProbeOk: true, lastManualIngestProbeError: null });
+    await log("info", `manual ingest probe ok (${base})`);
+    return { ok: true, status: r.status, base };
+  } catch (e) {
+    const err = String(e && e.message ? e.message : e);
+    await setStatus({ lastManualIngestProbeAt: Date.now(), lastManualIngestProbeOk: false, lastManualIngestProbeError: err });
+    await log("error", `manual ingest probe failed: ${err}`);
+    return { ok: false, error: err, base };
+  } finally {
+    clearTimeout(timer);
+  }
+}
 function platformForTabUrl(url) {
   let host = "";
   try { host = new URL(url || "").host; } catch (e) { return null; }
@@ -1156,6 +1190,24 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       case "getPlatforms":
         sendResponse(await platformStatuses());
         break;
+      case "diagnostics": {
+        const stored = await chrome.storage.local.get(["ucStatus", LOG_KEY, "ingestBase"]);
+        sendResponse({
+          ok: true,
+          id: chrome.runtime.id,
+          version: extensionVersion(),
+          ingestBase: stored.ingestBase || DEFAULT_INGEST,
+          status: stored.ucStatus || {},
+          log: (stored[LOG_KEY] || []).slice(-20),
+        });
+        break;
+      }
+      case "testIngest": {
+        sendManualIngestProbe()
+          .then((result) => reportScraperTabHeartbeats("manual_ingest_probe").then(() => result).catch(() => result))
+          .then(sendResponse);
+        return;
+      }
       case "openPlatform": {
         const p = (globalThis.UC_PLATFORMS || []).find((x) => x.id === msg.id);
         sendResponse(p ? await openOrFocus(p, { active: true }) : { error: "unknown platform" });
