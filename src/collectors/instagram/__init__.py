@@ -824,9 +824,24 @@ class InstagramCollector(BaseCollector):
         self._daily_quota_exhausted_keys = exhausted
 
         remaining = self._seconds_until_next_utc_day()
+        cooldown_seconds = int(remaining)
         set_cooldown = getattr(self.rate_limiter, "set_cooldown_remaining", None)
         if callable(set_cooldown):
             set_cooldown("instagram.com", remaining, account=account_name)
+
+        if self.pool is not None:
+            try:
+                asyncio.get_running_loop()
+                asyncio.create_task(
+                    self._persist_daily_quota_cooldown(
+                        account_name=account_name,
+                        quota_name=quota_name,
+                        quota_limit=quota_limit,
+                        cooldown_seconds=cooldown_seconds,
+                    )
+                )
+            except RuntimeError:
+                logger.debug("instagram: no running loop to persist daily quota cooldown")
 
         warned = getattr(self, "_daily_quota_warned_keys", set())
         warn_key = f"{key}:{quota_name}"
@@ -840,6 +855,45 @@ class InstagramCollector(BaseCollector):
                 account_name,
                 remaining / 3600,
             )
+
+    async def _persist_daily_quota_cooldown(
+        self,
+        *,
+        account_name: str,
+        quota_name: str,
+        quota_limit: int,
+        cooldown_seconds: int,
+    ) -> None:
+        if self.pool is None:
+            return
+        expires_at = time.time() + max(0, cooldown_seconds)
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO service_cursors (service, last_processed_id, last_processed_at, status)
+                    VALUES ($1, $2, now(), 'blocked')
+                    ON CONFLICT (service) DO UPDATE SET
+                        last_processed_id = EXCLUDED.last_processed_id,
+                        last_processed_at = EXCLUDED.last_processed_at,
+                        status = EXCLUDED.status
+                    """,
+                    self._rate_limit_cursor_service(account_name),
+                    f"{expires_at}:{quota_limit}",
+                )
+        except Exception:
+            logger.debug("instagram: failed to persist daily quota cooldown cursor", exc_info=True)
+        await self._record_rate_limit_event(
+            scope=f"daily_{quota_name}_quota",
+            status_code=None,
+            cooldown_seconds=max(0, cooldown_seconds),
+            reason=f"daily {quota_name} quota hit ({quota_limit})",
+            metadata={
+                "quota_name": quota_name,
+                "quota_limit": quota_limit,
+                "cooldown_kind": "local_daily_quota",
+            },
+        )
 
     def _check_daily_quota(self, account_name: str) -> bool:
         key = self._daily_quota_key(account_name)

@@ -387,6 +387,45 @@ def test_daily_profile_quota_sets_account_cooldown_once(monkeypatch, caplog):
 
 
 @pytest.mark.asyncio
+async def test_daily_profile_quota_persists_dashboard_cooldown(monkeypatch):
+    coll = _bare_collector()
+    limiter = instagram_mod.HumanLikeRateLimiter()
+    coll.rate_limiter = limiter
+    conn = MagicMock()
+    conn.execute = AsyncMock(return_value=None)
+    coll.pool = _make_pool_with_conn(conn)
+    coll._record_rate_limit_event = AsyncMock()
+    scheduled = []
+
+    def fake_create_task(coro):
+        scheduled.append(coro)
+        return MagicMock()
+
+    monkeypatch.setattr(instagram_mod.asyncio, "create_task", fake_create_task)
+    monkeypatch.setattr(instagram_mod, "DAILY_QUOTA_PROFILE_VIEWS", 1)
+    monkeypatch.setattr(coll, "_seconds_until_next_utc_day", lambda: 3600.0)
+
+    today_key = coll._daily_quota_key("acct1")
+    coll._daily_views[today_key] = 1
+
+    assert coll._check_daily_quota("acct1") is False
+    assert len(scheduled) == 1
+    await scheduled[0]
+
+    conn.execute.assert_awaited_once()
+    assert "INSERT INTO service_cursors" in conn.execute.await_args.args[0]
+    assert conn.execute.await_args.args[1] == "instagram_rate_limit:acct1"
+    assert str(conn.execute.await_args.args[2]).endswith(":1")
+    coll._record_rate_limit_event.assert_awaited_once()
+    kwargs = coll._record_rate_limit_event.await_args.kwargs
+    assert kwargs["scope"] == "daily_profile_view_quota"
+    assert kwargs["status_code"] is None
+    assert kwargs["cooldown_seconds"] == 3600
+    assert kwargs["reason"] == "daily profile_view quota hit (1)"
+    assert kwargs["metadata"]["cooldown_kind"] == "local_daily_quota"
+
+
+@pytest.mark.asyncio
 async def test_collect_user_skips_raw_profile_fallback_when_disabled(monkeypatch):
     coll = _bare_collector()
     monkeypatch.setenv("INSTA_PLAYWRIGHT_PRIMARY", "true")
