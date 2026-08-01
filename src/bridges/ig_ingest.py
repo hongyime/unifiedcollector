@@ -1169,6 +1169,94 @@ def _reject_count(value) -> int:
     return 0
 
 
+def _inspect_media_payload(data: bytes, ct_header: str | None) -> tuple[bool, str | None, str | None, str | None, str | None]:
+    ok, ext, mtype, reason = inspect_media(data, ct_header)
+    if not ok:
+        return False, ext, mtype, reason, None
+    return True, ext, mtype, reason, hashlib.sha256(data).hexdigest()
+
+
+def _write_extension_media_artifacts_sync(
+    *,
+    platform: str,
+    safe_user: str,
+    username: str,
+    item: dict,
+    data: bytes,
+    ext: str,
+    sha: str,
+    ctype: str,
+    media_kind: str,
+    store_cid: str,
+    dest: Path,
+    url: str,
+):
+    meta = item.get("meta") or {}
+    meta_obj = dict(meta) if isinstance(meta, dict) else {}
+    artifact = write_atomic_artifact(
+        source=platform,
+        artifact_id=f"extension/{media_kind}/{store_cid}",
+        artifact_kind="media_blob",
+        data=data,
+        extension=ext,
+        expected_sha256=sha,
+        metadata={
+            **meta_obj,
+            "entity_id": safe_user,
+            "entity_name": item.get("entity_name") or username,
+            "content_type": ctype,
+            "content_id": store_cid,
+            "kind": media_kind,
+            "filename": dest.name,
+            "source_url": url,
+            "request_url": url,
+            "ingest_path": "extension",
+            "legacy_path": str(dest),
+            "rebuild_target_tables": ["media_items"],
+        },
+        root=VAULT_ROOT,
+    )
+    if artifact.path is None:
+        return artifact, None, None, None
+    stored_path = artifact.path
+    meta_obj["vault_artifact"] = {
+        "ok": artifact.ok,
+        "partial": artifact.partial,
+        "path": artifact.relative_path,
+        "blob_path": artifact.blob_relative_path,
+        "sha256": artifact.sha256,
+        "file_size": artifact.file_size,
+        "sidecar_ok": artifact.sidecar.ok if artifact.sidecar else None,
+        "sidecar_path": artifact.sidecar.relative_path if artifact.sidecar else None,
+        "duplicate_blob": artifact.duplicate_blob,
+        "error": artifact.error,
+    }
+    sidecar = write_media_sidecar(
+        source=platform,
+        entity_id=safe_user,
+        entity_name=item.get("entity_name") or username,
+        content_type=ctype,
+        content_id=store_cid,
+        filename=dest.name,
+        file_path=str(stored_path),
+        file_size=len(data),
+        width=None,
+        height=None,
+        sha256=sha,
+        source_url=url,
+        metadata=meta_obj,
+        ingest_path="extension",
+        kind=media_kind,
+    )
+    meta_obj["vault_sidecar"] = {
+        "enabled": sidecar.enabled,
+        "ok": sidecar.ok,
+        "path": sidecar.relative_path,
+        "error": sidecar.error,
+    }
+    return artifact, sidecar, json.dumps(meta_obj), stored_path
+
+
 def _candidate_asset_role(item: dict | None, platform: str | None = None) -> str | None:
     meta = _item_meta(item)
     keys = []
@@ -1783,7 +1871,7 @@ async def _download_and_save(pool, session, platform, username, item, reject_sta
             ct_header = item.get("mime_type") or item.get("content_type_header")
         elif data_b64:
             try:
-                data = base64.b64decode(str(data_b64), validate=True)
+                data = await asyncio.to_thread(base64.b64decode, str(data_b64), validate=True)
             except Exception as exc:
                 return _reject("bad_uploaded_media", exc.__class__.__name__)
             ct_header = item.get("mime_type") or item.get("content_type_header")
@@ -1800,11 +1888,12 @@ async def _download_and_save(pool, session, platform, username, item, reject_sta
 
         # GATE: keep only real PDF/image/video/audio above min size — drop
         # favicons, thumbnails, tracking pixels, sprite sheets, HTML error pages.
-        ok, ext, mtype, reason = inspect_media(data, ct_header)
+        ok, ext, mtype, reason, sha = await asyncio.to_thread(_inspect_media_payload, data, ct_header)
         if not ok:
             logger.debug("reject %s %s: %s", platform, store_cid, reason)
             return _reject("invalid_media", reason)
-        sha = hashlib.sha256(data).hexdigest()
+        if not sha:
+            return _reject("invalid_media", "missing_sha256")
         if needs_content_sha:
             content_base_id = _threads_media_content_base_id(platform, cid, sha)
             store_cid = _media_store_content_id(media_kind, content_base_id)
@@ -1833,72 +1922,27 @@ async def _download_and_save(pool, session, platform, username, item, reject_sta
             await _record_vault_pause(str(exc))
             return _reject("vault_unavailable", str(exc))
 
-        # caption + likes/comments/views/location come along free from the scrape
-        meta = item.get("meta") or {}
-        meta_obj = dict(meta) if isinstance(meta, dict) else {}
-        artifact = write_atomic_artifact(
-            source=platform,
-            artifact_id=f"extension/{media_kind}/{store_cid}",
-            artifact_kind="media_blob",
+        artifact, sidecar, meta_json, stored_path = await asyncio.to_thread(
+            _write_extension_media_artifacts_sync,
+            platform=platform,
+            safe_user=safe_user,
+            username=username,
+            item=item,
             data=data,
-            extension=ext,
-            expected_sha256=sha,
-            metadata={
-                **meta_obj,
-                "entity_id": safe_user,
-                "entity_name": item.get("entity_name") or username,
-                "content_type": ctype,
-                "content_id": store_cid,
-                "kind": media_kind,
-                "filename": dest.name,
-                "source_url": url,
-                "request_url": url,
-                "ingest_path": "extension",
-                "legacy_path": str(dest),
-                "rebuild_target_tables": ["media_items"],
-            },
-            root=VAULT_ROOT,
+            ext=ext,
+            sha=sha,
+            ctype=ctype,
+            media_kind=media_kind,
+            store_cid=store_cid,
+            dest=dest,
+            url=url,
         )
         if artifact.path is None:
             await _record_vault_pause(artifact.error or "artifact write failed")
             return _reject("artifact_write_failed", artifact.error or "artifact write failed")
-        stored_path = artifact.path
-        meta_obj["vault_artifact"] = {
-            "ok": artifact.ok,
-            "partial": artifact.partial,
-            "path": artifact.relative_path,
-            "blob_path": artifact.blob_relative_path,
-            "sha256": artifact.sha256,
-            "file_size": artifact.file_size,
-            "sidecar_ok": artifact.sidecar.ok if artifact.sidecar else None,
-            "sidecar_path": artifact.sidecar.relative_path if artifact.sidecar else None,
-            "duplicate_blob": artifact.duplicate_blob,
-            "error": artifact.error,
-        }
-        sidecar = write_media_sidecar(
-            source=platform,
-            entity_id=safe_user,
-            entity_name=item.get("entity_name") or username,
-            content_type=ctype,
-            content_id=store_cid,
-            filename=dest.name,
-            file_path=str(stored_path),
-            file_size=len(data),
-            width=None,
-            height=None,
-            sha256=sha,
-            source_url=url,
-            metadata=meta_obj,
-            ingest_path="extension",
-            kind=media_kind,
-        )
-        meta_obj["vault_sidecar"] = {
-            "enabled": sidecar.enabled,
-            "ok": sidecar.ok,
-            "path": sidecar.relative_path,
-            "error": sidecar.error,
-        }
-        meta_json = json.dumps(meta_obj)
+        if sidecar is None or meta_json is None or stored_path is None:
+            await _record_vault_pause("artifact sidecar state incomplete")
+            return _reject("artifact_write_failed", "artifact sidecar state incomplete")
         async with pool.acquire() as conn:
             await conn.execute(
                 """
