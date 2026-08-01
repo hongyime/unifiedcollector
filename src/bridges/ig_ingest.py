@@ -106,6 +106,18 @@ try:
     )
 except (TypeError, ValueError):
     SOCIAL_INGEST_REQUEST_TIMEOUT_SECONDS = 8.0
+try:
+    SOCIAL_INGEST_DB_INIT_TIMEOUT_SECONDS = max(
+        1.0,
+        float(os.getenv("SOCIAL_INGEST_DB_INIT_TIMEOUT_SECONDS", "4.0")),
+    )
+except (TypeError, ValueError):
+    SOCIAL_INGEST_DB_INIT_TIMEOUT_SECONDS = 4.0
+SOCIAL_INGEST_PREP_DB_ON_STARTUP = os.getenv("SOCIAL_INGEST_PREP_DB_ON_STARTUP", "0").lower() in {
+    "1",
+    "true",
+    "yes",
+}
 STRAVA_BROWSER_429_COOLDOWN_SECONDS = int(os.getenv("STRAVA_BROWSER_429_COOLDOWN_SECONDS", "1800"))
 try:
     STRAVA_BROWSER_429_MAX_COOLDOWN_SECONDS = max(
@@ -482,6 +494,50 @@ async def request_timeout_middleware(request, handler):
             },
             status=503,
         ))
+
+
+async def _ensure_app_pool(app):
+    if app.get("pool") is not None:
+        return app["pool"]
+    async with asyncio.timeout(SOCIAL_INGEST_DB_INIT_TIMEOUT_SECONDS):
+        app["pool"] = await get_pool()
+    app["startup_error"] = None
+    return app["pool"]
+
+
+@web.middleware
+async def db_pool_middleware(request, handler):
+    if request.method == "OPTIONS" or request.path in {"/health", "/social/browser-heartbeat"}:
+        return await handler(request)
+    try:
+        await _ensure_app_pool(request.app)
+    except TimeoutError:
+        request.app["startup_error"] = "db_pool_lazy_timeout"
+        logger.warning(
+            "social ingest lazy DB pool init timed out after %.2fs path=%s",
+            SOCIAL_INGEST_DB_INIT_TIMEOUT_SECONDS,
+            request.path,
+        )
+        return _cors(web.json_response(
+            {
+                "ok": False,
+                "error": "db_pool_timeout",
+                "path": request.path,
+            },
+            status=503,
+        ))
+    except Exception as exc:
+        request.app["startup_error"] = f"db_pool_lazy_error:{exc.__class__.__name__}"
+        logger.exception("social ingest lazy DB pool init failed path=%s", request.path)
+        return _cors(web.json_response(
+            {
+                "ok": False,
+                "error": "db_pool_error",
+                "path": request.path,
+            },
+            status=503,
+        ))
+    return await handler(request)
 
 
 # ---------------------------------------------------------------------------
@@ -4640,9 +4696,13 @@ async def _on_startup(app):
         headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"}
     )
-    task = asyncio.create_task(_prepare_db_pool_and_schema(app))
-    app["tasks"].add(task)
-    task.add_done_callback(app["tasks"].discard)
+    if SOCIAL_INGEST_PREP_DB_ON_STARTUP:
+        task = asyncio.create_task(_prepare_db_pool_and_schema(app))
+        app["tasks"].add(task)
+        task.add_done_callback(app["tasks"].discard)
+    else:
+        app["startup_pending"] = False
+        app["startup_error"] = "db_lazy_init"
 
 
 async def _on_cleanup(app):
@@ -4655,7 +4715,7 @@ async def _on_cleanup(app):
 def make_app():
     app = web.Application(
         client_max_size=SOCIAL_INGEST_CLIENT_MAX_MB * 1024 * 1024,
-        middlewares=[request_timeout_middleware],
+        middlewares=[request_timeout_middleware, db_pool_middleware],
     )
     app.router.add_route("OPTIONS", "/{tail:.*}", handle_options)
     # generic multi-platform
