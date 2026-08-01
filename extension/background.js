@@ -36,6 +36,8 @@ const PAGE_RECOVERY_PREFIX = "uc-page-recovery:";
 const PAGE_RECOVERY_STATE_KEY = "ucPageRecovery";
 const PAGE_RECOVERY_MAX_ATTEMPTS = 3;
 const RELOAD_INTENT_KEY = "ucReloadIntent";
+const SCRAPER_HEARTBEAT_TIMEOUT_MS = 5000;
+const SCRAPER_HEARTBEAT_CONCURRENCY = 3;
 const PAGE_RECOVERY_DELAY_WINDOWS_MS = [
   [45000, 150000],
   [240000, 480000],
@@ -159,11 +161,12 @@ async function reportScraperTabHeartbeats(reason) {
   let failed = 0;
   let lastError = null;
   try {
-    const tabs = await chrome.tabs.query({ url: scraperUrlPatterns() });
-    for (const tab of tabs || []) {
-      const platform = platformForTabUrl(tab.url);
-      if (!platform) continue;
-      seen++;
+    const allTabs = await chrome.tabs.query({ url: scraperUrlPatterns() });
+    const tabs = (allTabs || [])
+      .map((tab) => ({ tab, platform: platformForTabUrl(tab.url) }))
+      .filter((row) => row.platform);
+    seen = tabs.length;
+    await mapLimit(tabs, SCRAPER_HEARTBEAT_CONCURRENCY, async ({ tab, platform }) => {
       try {
         const result = await postJsonWithTimeout(base + "/social/browser-heartbeat", withExtensionVersion({
           platform: platform.id,
@@ -174,14 +177,14 @@ async function reportScraperTabHeartbeats(reason) {
           health_status: "background_tab_seen",
           health_reason: reason || "background_watchdog",
           page_title: tab.title || null,
-        }));
+        }), SCRAPER_HEARTBEAT_TIMEOUT_MS);
         await maybeForceScrapeCycle(tab, platform, result && result.body, reason || "background_watchdog");
         sent++;
       } catch (e) {
         failed++;
         lastError = String(e && e.message ? e.message : e);
       }
-    }
+    });
   } catch (e) {
     lastError = String(e && e.message ? e.message : e);
   }
@@ -268,6 +271,19 @@ const _humanGap = (base) => {
 const _randBetween = (min, max) => Math.round(min + Math.random() * (max - min));
 const _alarmJitter = () => _sleep(15000 + Math.random() * 120000);
 let _tabsOpInProgress = false; // guard against overlapping open/refresh runs (no spam)
+
+async function mapLimit(items, limit, worker) {
+  const out = [];
+  let next = 0;
+  const runners = Array.from({ length: Math.max(1, Math.min(limit, items.length || 1)) }, async () => {
+    while (next < items.length) {
+      const index = next++;
+      out[index] = await worker(items[index], index);
+    }
+  });
+  await Promise.all(runners);
+  return out;
+}
 
 // Open exactly the missing scraper tabs — pinned, background, ONE at a time with a
 // gap so we never spam tabs or spike CPU. Robust dedup by host+path-prefix means a
@@ -1334,14 +1350,28 @@ async function consumeReloadIntent() {
   }
 
   await log("info", "extension reload intent consumed; hard-refreshing scraper tabs");
-  await scheduleAlarm();
-  await syncCookies();
-  await ensureScraperTabsOpen("manual_extension_reload", { force: true });
-  await reportScraperTabHeartbeats("manual_extension_reload");
-  await refreshScraperTabs({ bypassCache: true, reason: "manual_extension_reload" });
-  await reportScraperTabHeartbeats("manual_extension_reload_refresh");
-  await ensureLoops("manual_extension_reload");
+  scheduleAlarm().catch((e) => log("warn", `reload-intent schedule failed: ${e && e.message ? e.message : e}`));
+  setTimeout(() => {
+    performReloadIntentRecovery(intent)
+      .catch((e) => log("warn", `reload-intent recovery failed: ${e && e.message ? e.message : e}`));
+  }, 500);
   return true;
+}
+
+async function performReloadIntentRecovery(intent) {
+  await syncCookies().catch(() => {});
+  if (intent && intent.force_open_all !== false) {
+    await ensureScraperTabsOpen("manual_extension_reload", { force: true })
+      .catch((e) => log("warn", `reload-intent tab audit failed: ${e && e.message ? e.message : e}`));
+  }
+  await reportScraperTabHeartbeats("manual_extension_reload")
+    .catch((e) => log("warn", `reload-intent heartbeat failed: ${e && e.message ? e.message : e}`));
+  await refreshScraperTabs({ bypassCache: true, reason: "manual_extension_reload" })
+    .catch((e) => log("warn", `reload-intent tab refresh failed: ${e && e.message ? e.message : e}`));
+  await reportScraperTabHeartbeats("manual_extension_reload_refresh")
+    .catch((e) => log("warn", `reload-intent refresh heartbeat failed: ${e && e.message ? e.message : e}`));
+  await ensureLoops("manual_extension_reload")
+    .catch((e) => log("warn", `reload-intent loop nudge failed: ${e && e.message ? e.message : e}`));
 }
 
 // Warm start (worker waking from sleep or after chrome.runtime.reload()).

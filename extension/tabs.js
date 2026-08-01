@@ -30,12 +30,15 @@ function runtimeErrorText(e) {
 
 function sendMessage(msg) {
   return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("background worker response timed out")), 5000);
     try {
       chrome.runtime.sendMessage(msg, (response) => {
+        clearTimeout(timer);
         if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
         else resolve(response);
       });
     } catch (e) {
+      clearTimeout(timer);
       reject(e);
     }
   });
