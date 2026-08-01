@@ -2729,20 +2729,34 @@ def require_role(min_role: str):
 
 
 @app.get("/health")
-async def health(include_sources: bool = False):
-    pool = await get_pool()
-    vault = _vault_payload()
-    backups = backup_status()
+async def health(include_sources: bool = False, include_storage: bool = False):
+    vault = {
+        "available": None,
+        "writable": None,
+        "mode": "skipped",
+    }
+    backups = {
+        "status": "skipped",
+        "mode": "skipped",
+    }
     sources = []
     whatsapp_bridge_health = None
     browser_extension = None
     try:
+        pool = await asyncio.wait_for(get_pool(), timeout=3)
         async with pool.acquire() as conn:
-            await conn.fetchval("SELECT 1")
-            try:
-                vault.update(await vault_artifact_counts(conn, timeout=5))
-            except Exception as exc:
-                vault["counts_error"] = exc.__class__.__name__
+            await asyncio.wait_for(conn.fetchval("SELECT 1"), timeout=3)
+            if include_storage:
+                try:
+                    vault = _vault_payload()
+                    vault.update(await vault_artifact_counts(conn, timeout=5))
+                except Exception as exc:
+                    vault = {
+                        "available": None,
+                        "writable": None,
+                        "mode": "error",
+                        "counts_error": exc.__class__.__name__,
+                    }
             if include_sources:
                 try:
                     from src.core.source_freshness import compute_liveness
@@ -2754,21 +2768,31 @@ async def health(include_sources: bool = False):
                 except Exception as exc:
                     logger.debug("browser extension health section failed: %s", exc)
         db_status = "healthy"
+    except TimeoutError:
+        db_status = "error: timeout"
     except Exception as e:
         db_status = f"error: {e}"
 
     if include_sources and sources:
         sources, whatsapp_bridge_health = await _with_bridge_overrides(sources)
 
-    from src.core.drive_check import check_drive
-    drive_ok = check_drive()
-    vault_ok = (
-        vault.get("available") is True
-        and vault.get("writable") is True
-        and int(vault.get("artifacts_queued") or 0) == 0
-        and int(vault.get("artifacts_partial") or 0) == 0
-    )
-    backups_ok = backups.get("status") in {"ok", "refreshing"}
+    drive_ok = True
+    vault_ok = True
+    backups_ok = True
+    if include_storage:
+        from src.core.drive_check import check_drive
+        drive_ok = check_drive()
+        try:
+            backups = backup_status()
+        except Exception as exc:
+            backups = {"status": "error", "error": exc.__class__.__name__}
+        vault_ok = (
+            vault.get("available") is True
+            and vault.get("writable") is True
+            and int(vault.get("artifacts_queued") or 0) == 0
+            and int(vault.get("artifacts_partial") or 0) == 0
+        )
+        backups_ok = backups.get("status") in {"ok", "refreshing"}
     source_issues = [s for s in sources if s.get("status") not in {"live"}] if include_sources else []
 
     payload = {
@@ -2776,7 +2800,7 @@ async def health(include_sources: bool = False):
             db_status == "healthy" and drive_ok and vault_ok and backups_ok and not source_issues
         ) else "degraded",
         "database": db_status,
-        "drive": "mounted" if drive_ok else "missing",
+        "drive": ("mounted" if drive_ok else "missing") if include_storage else "skipped",
         "vault": vault,
         "backups": backups,
     }
