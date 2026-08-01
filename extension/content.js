@@ -2569,6 +2569,8 @@ function currentPlatform() {
 // ===========================================================================
 let LOOP_RUNNING = false;
 let ONE_SHOT_RUNNING = false;
+let ONE_SHOT_STARTED_AT = 0;
+const ONE_SHOT_STALE_MS = 8 * 60 * 1000;
 
 // Rest between passes — a person doesn't scrape non-stop. Instagram stays slower
 // because it is the account most likely to hit 429; lower-risk platforms can loop
@@ -2660,6 +2662,7 @@ async function reportForcedCycleHealth(p, status, reason, extra = {}) {
     content_counts: pageContentCounts(),
     loop_running: LOOP_RUNNING,
     one_shot_running: ONE_SHOT_RUNNING,
+    one_shot_age_ms: ONE_SHOT_RUNNING && ONE_SHOT_STARTED_AT ? Date.now() - ONE_SHOT_STARTED_AT : 0,
     ...extra,
   }).catch(() => null);
 }
@@ -2668,11 +2671,29 @@ async function runOneShotCycle(reason) {
   const p = currentPlatform();
   if (!p) return;
   if (ONE_SHOT_RUNNING) {
+    const ageMs = ONE_SHOT_STARTED_AT ? Date.now() - ONE_SHOT_STARTED_AT : ONE_SHOT_STALE_MS + 1;
+    if (ageMs > ONE_SHOT_STALE_MS) {
+      clog("warn", `${p.label} forced pass appears stuck for ${Math.ceil(ageMs / 60000)}m; reloading tab`, p.label);
+      await reportForcedCycleHealth(p, "forced_cycle_stale_reloading", "stale_one_shot", {
+        one_shot_age_ms: ageMs,
+        stale_after_ms: ONE_SHOT_STALE_MS,
+      });
+      ONE_SHOT_RUNNING = false;
+      ONE_SHOT_STARTED_AT = 0;
+      setTimeout(() => {
+        try { location.reload(); } catch (e) {}
+      }, 800 + Math.random() * 1600);
+      return;
+    }
     clog("warn", `${p.label} forced pass skipped; another forced pass is already running`, p.label);
-    await reportForcedCycleHealth(p, "forced_cycle_skipped", "already_running");
+    await reportForcedCycleHealth(p, "forced_cycle_skipped", "already_running", {
+      one_shot_age_ms: ageMs,
+      stale_after_ms: ONE_SHOT_STALE_MS,
+    });
     return;
   }
   ONE_SHOT_RUNNING = true;
+  ONE_SHOT_STARTED_AT = Date.now();
   clog("warn", `${p.label} forced one scrape pass (${reason || "manual"})`, p.label);
   await reportForcedCycleHealth(p, "forced_cycle_started", reason || "manual");
   await send({ type: "loopStatus", platform: p.id, label: p.label, running: true, url: location.href }).catch(() => {});
@@ -2709,6 +2730,7 @@ async function runOneShotCycle(reason) {
     });
   } finally {
     ONE_SHOT_RUNNING = false;
+    ONE_SHOT_STARTED_AT = 0;
     await send({ type: "loopStatus", platform: p.id, label: p.label, running: LOOP_RUNNING, url: location.href }).catch(() => {});
   }
 }

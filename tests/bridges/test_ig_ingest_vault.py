@@ -964,6 +964,27 @@ def test_browser_heartbeat_handler_returns_when_telemetry_db_is_stuck(monkeypatc
     assert resp.status == 200
 
 
+def test_structured_browser_capture_paths_use_structured_timeout(monkeypatch):
+    monkeypatch.setattr(ig_ingest, "SOCIAL_INGEST_REQUEST_TIMEOUT_SECONDS", 8.0)
+    monkeypatch.setattr(ig_ingest, "SOCIAL_INGEST_STRUCTURED_REQUEST_TIMEOUT_SECONDS", 30.0)
+    monkeypatch.setattr(ig_ingest, "SOCIAL_INGEST_HEARTBEAT_REQUEST_TIMEOUT_SECONDS", 31.0)
+    monkeypatch.setattr(ig_ingest, "SOCIAL_INGEST_UPLOAD_REQUEST_TIMEOUT_SECONDS", 60.0)
+
+    for path in (
+        "/social/posts",
+        "/social/profile",
+        "/social/users",
+        "/social/seed",
+        "/social/strava-streams",
+        "/social/browser-media-candidates",
+    ):
+        assert ig_ingest._request_timeout_seconds(path) == 30.0
+
+    assert ig_ingest._request_timeout_seconds("/social/browser-heartbeat") == 31.0
+    assert ig_ingest._request_timeout_seconds("/social/ingest-upload") == 60.0
+    assert ig_ingest._request_timeout_seconds("/social/targets") == 8.0
+
+
 def test_browser_heartbeat_handler_reports_degraded_when_pool_missing():
     req = _FakeRequest(
         {"pool": None},
@@ -1009,6 +1030,10 @@ def test_browser_heartbeat_handler_requests_forced_cycle_when_content_stale(monk
     assert payload["force_cycle"] is True
     assert payload["force_reason"] == "browser_content_stale"
     assert payload["content_age_seconds"] == 7200
+    query, args = pool.conn.fetchrows[0]
+    assert "observed_count > 0 OR stored_count > 0" in query
+    assert "ORDER BY created_at DESC" in query
+    assert args == ("x",)
 
 
 def test_browser_heartbeat_handler_fails_open_when_content_hint_is_slow(monkeypatch):

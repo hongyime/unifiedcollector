@@ -128,6 +128,13 @@ try:
 except (TypeError, ValueError):
     SOCIAL_INGEST_UPLOAD_REQUEST_TIMEOUT_SECONDS = 60.0
 try:
+    SOCIAL_INGEST_STRUCTURED_REQUEST_TIMEOUT_SECONDS = max(
+        SOCIAL_INGEST_REQUEST_TIMEOUT_SECONDS,
+        float(os.getenv("SOCIAL_INGEST_STRUCTURED_REQUEST_TIMEOUT_SECONDS", "30.0")),
+    )
+except (TypeError, ValueError):
+    SOCIAL_INGEST_STRUCTURED_REQUEST_TIMEOUT_SECONDS = 30.0
+try:
     SOCIAL_INGEST_DB_INIT_TIMEOUT_SECONDS = max(
         1.0,
         float(os.getenv("SOCIAL_INGEST_DB_INIT_TIMEOUT_SECONDS", "4.0")),
@@ -521,19 +528,43 @@ def _cors(resp: web.Response) -> web.Response:
     return resp
 
 
+_STRUCTURED_CAPTURE_PATHS = {
+    "/social/browser-media-candidates",
+    "/social/comments",
+    "/social/discover",
+    "/social/dm-decoded",
+    "/social/dm-frame",
+    "/social/dm-probe",
+    "/social/dm-sample",
+    "/social/dms",
+    "/social/posts",
+    "/social/profile",
+    "/social/seed",
+    "/social/strava-route-visit",
+    "/social/strava-streams",
+    "/social/target-status",
+    "/social/users",
+    "/social/x-profile-target-result",
+}
+
+
+def _request_timeout_seconds(path: str) -> float:
+    if path in {"/social/ingest-upload", "/social/ingest-upload-binary"}:
+        return SOCIAL_INGEST_UPLOAD_REQUEST_TIMEOUT_SECONDS
+    if path == "/social/browser-heartbeat":
+        return SOCIAL_INGEST_HEARTBEAT_REQUEST_TIMEOUT_SECONDS
+    if path in _STRUCTURED_CAPTURE_PATHS:
+        return SOCIAL_INGEST_STRUCTURED_REQUEST_TIMEOUT_SECONDS
+    return SOCIAL_INGEST_REQUEST_TIMEOUT_SECONDS
+
+
 async def handle_options(request):
     return _cors(web.Response(status=204))
 
 
 @web.middleware
 async def request_timeout_middleware(request, handler):
-    timeout_seconds = (
-        SOCIAL_INGEST_UPLOAD_REQUEST_TIMEOUT_SECONDS
-        if request.path in {"/social/ingest-upload", "/social/ingest-upload-binary"}
-        else SOCIAL_INGEST_HEARTBEAT_REQUEST_TIMEOUT_SECONDS
-        if request.path == "/social/browser-heartbeat"
-        else SOCIAL_INGEST_REQUEST_TIMEOUT_SECONDS
-    )
+    timeout_seconds = _request_timeout_seconds(request.path)
     try:
         async with asyncio.timeout(timeout_seconds):
             return await handler(request)
@@ -4635,14 +4666,17 @@ async def _browser_content_recovery_hint(pool, platform: str) -> dict:
             async with pool.acquire() as conn:
                 row = await conn.fetchrow(
                     """
-                    SELECT EXTRACT(EPOCH FROM (NOW() - MAX(created_at)))::int AS age_seconds
+                    SELECT EXTRACT(EPOCH FROM (NOW() - created_at))::int AS age_seconds
                     FROM browser_ingest_events
                     WHERE platform = $1
                       AND endpoint <> 'browser_heartbeat'
+                      AND (observed_count > 0 OR stored_count > 0)
                       AND (
                         stored_count > 0
                         OR endpoint IN ('posts', 'profile', 'strava_route_visit', 'strava_streams')
                       )
+                    ORDER BY created_at DESC
+                    LIMIT 1
                     """,
                     platform,
                 )
