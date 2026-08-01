@@ -220,6 +220,7 @@ class InstagramCollector(BaseCollector):
         self._global_proxy = proxy_url.strip() if (proxy_url and not insta_proxy_disabled) else None
         self._account_proxies: dict[str, str] = {}
         self._account_browser_cookies: dict[str, str] = self._auto_discover_cookies()
+        self._account_username_aliases: dict[str, str] = self._load_account_username_aliases()
         self._account_priorities: dict[str, str] = {}
         for i in range(1, 20):
             name = os.getenv(f"INSTA_ACCOUNT_{i}_NAME", "")
@@ -355,6 +356,66 @@ class InstagramCollector(BaseCollector):
                 discovered[account_name] = full
                 logger.info("Auto-discovered cookie file for %s: %s", account_name, full)
         return discovered
+
+    @staticmethod
+    def _clean_instagram_username(value: str | None) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        raw = raw.split("?", 1)[0].rstrip("/")
+        if "instagram.com/" in raw.lower():
+            raw = re.split(r"instagram\.com/", raw, maxsplit=1, flags=re.IGNORECASE)[1].split("/", 1)[0]
+        raw = raw.lstrip("@").strip()
+        if not re.fullmatch(r"[A-Za-z0-9._]{1,30}", raw):
+            return ""
+        return raw
+
+    def _load_account_username_aliases(self) -> dict[str, str]:
+        """Map local account aliases to real Instagram usernames.
+
+        INSTA_ACCOUNT_N_NAME is allowed to be a short local cookie/session label.
+        INSTA_ACCOUNT_N_USER is the real handle. Keep the alias for session state,
+        but never scrape the alias as if it were a public profile.
+        """
+        aliases: dict[str, str] = {}
+        for i in range(1, 20):
+            alias = self._clean_instagram_username(os.getenv(f"INSTA_ACCOUNT_{i}_NAME", ""))
+            username = self._clean_instagram_username(os.getenv(f"INSTA_ACCOUNT_{i}_USER", ""))
+            if alias and username and alias.lower() != username.lower():
+                aliases[alias.lower()] = username
+        return aliases
+
+    def _canonical_instagram_username(self, value: str | None) -> str:
+        username = self._clean_instagram_username(value)
+        if not username:
+            return ""
+        return self._account_username_aliases.get(username.lower(), username)
+
+    def _normalize_instagram_targets(self, targets: list[str] | None) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        remapped = 0
+        dropped = 0
+        for target in targets or []:
+            raw = self._clean_instagram_username(target)
+            if not raw:
+                dropped += 1
+                continue
+            canonical = self._canonical_instagram_username(raw)
+            if canonical.lower() != raw.lower():
+                remapped += 1
+            key = canonical.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(canonical)
+        if remapped or dropped:
+            logger.info(
+                "instagram: normalized target list (%d alias remap(s), %d invalid target(s) dropped)",
+                remapped,
+                dropped,
+            )
+        return normalized
 
     def set_pool(self, pool):
         super().set_pool(pool)
@@ -858,6 +919,8 @@ class InstagramCollector(BaseCollector):
             logger.info("instagram: %s", self._intentional_idle_reason)
             return
 
+        targets = self._normalize_instagram_targets(targets)
+
         # OWN-GRAPH: ensure each logged-in account's OWN profile is in the target set
         # so _collect_own_follow_graph fires (who follows me / who I follow). The graph
         # scrape itself is throttled per-owner below, so this just makes the owner a
@@ -865,7 +928,11 @@ class InstagramCollector(BaseCollector):
         if os.getenv("INSTA_OWN_GRAPH_ENABLED", "true").lower() == "true":
             # Owners = the cookie accounts (this is a cookie/Playwright-auth collector;
             # account_pool._accounts is the env-password list, usually empty).
-            _owners = [n for n in (self._account_browser_cookies or {}).keys() if n]
+            _owners = [
+                self._canonical_instagram_username(n)
+                for n in (self._account_browser_cookies or {}).keys()
+                if self._canonical_instagram_username(n)
+            ]
             if _owners:
                 targets = list(dict.fromkeys(_owners + list(targets or [])))
 
@@ -962,6 +1029,7 @@ class InstagramCollector(BaseCollector):
         try:
             import hashlib as _hl
             self._account_browser_cookies = self._auto_discover_cookies()
+            self._account_username_aliases = self._load_account_username_aliases()
             _hashes = getattr(self, "_cookie_file_hashes", {})
             for _name, _path in self._account_browser_cookies.items():
                 try:
@@ -1727,7 +1795,11 @@ class InstagramCollector(BaseCollector):
         # captured when the collector processes its own profile. Bounded + paced;
         # gated separately from the disabled discovery spider because scraping your
         # own graph is a normal user action, not novel-profile probing.
-        _owner_set = {n.lower() for n in (self._account_browser_cookies or {}).keys()}
+        _owner_set = {
+            self._canonical_instagram_username(n).lower()
+            for n in (self._account_browser_cookies or {}).keys()
+            if self._canonical_instagram_username(n)
+        }
         if (os.getenv("INSTA_OWN_GRAPH_ENABLED", "true").lower() == "true"
                 and username and username.lower() in _owner_set):
             import time as _t
@@ -4076,6 +4148,7 @@ class InstagramCollector(BaseCollector):
         delay = (float(os.getenv("INSTA_MULTI_GRAPH_DELAY_MIN", "5")),
                  float(os.getenv("INSTA_MULTI_GRAPH_DELAY_MAX", "12")))
         for acct_name, cookie_path in list((self._account_browser_cookies or {}).items()):
+            owner_account = self._canonical_instagram_username(acct_name) or acct_name
             if self._stop.is_set():
                 break
             if acct_name in self._dead_cookie_accounts:
@@ -4099,9 +4172,9 @@ class InstagramCollector(BaseCollector):
                         if self._stop.is_set():
                             break
                         users = await self._fetch_follow_list_web(client, owner_uid, direction, cap, delay)
-                        await self._write_follow_edges(acct_name, users, direction)
+                        await self._write_follow_edges(owner_account, users, direction)
                         logger.info("instagram multi-graph: account %s %s -> %d edges",
-                                    acct_name, direction, len(users))
+                                    owner_account, direction, len(users))
                         await asyncio.sleep(random.uniform(*delay))
             except Exception as e:
                 logger.warning("instagram multi-graph: account %s failed: %s", acct_name, e)
