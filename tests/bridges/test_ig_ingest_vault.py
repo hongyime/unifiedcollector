@@ -1011,6 +1011,33 @@ def test_browser_heartbeat_handler_requests_forced_cycle_when_content_stale(monk
     assert payload["content_age_seconds"] == 7200
 
 
+def test_browser_heartbeat_handler_fails_open_when_content_hint_is_slow(monkeypatch):
+    async def slow_hint(pool, platform):
+        await asyncio.sleep(10)
+        return {"force_cycle": True}
+
+    monkeypatch.setattr(ig_ingest, "BROWSER_CONTENT_HINT_RESPONSE_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(ig_ingest, "_browser_content_recovery_hint", slow_hint)
+    req = _FakeRequest(
+        {"pool": _FakePool()},
+        {
+            "platform": "x",
+            "label": "Twitter / X",
+            "running": True,
+            "url": "https://x.com/home",
+            "tab_id": 123,
+            "extension_version": "1.21.75",
+        },
+    )
+
+    resp = asyncio.run(ig_ingest.browser_heartbeat_handler(req))
+
+    assert resp.status == 200
+    payload = json.loads(resp.text)
+    assert payload["force_cycle"] is False
+    assert payload["force_reason"] == "content_age_response_budget_exceeded"
+
+
 def test_browser_content_hint_returns_pending_during_inflight_check():
     ig_ingest._BROWSER_CONTENT_HINT_CACHE.clear()
     ig_ingest._BROWSER_CONTENT_HINT_INFLIGHT.add("x")

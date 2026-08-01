@@ -114,6 +114,13 @@ try:
 except (TypeError, ValueError):
     SOCIAL_INGEST_REQUEST_TIMEOUT_SECONDS = 8.0
 try:
+    SOCIAL_INGEST_HEARTBEAT_REQUEST_TIMEOUT_SECONDS = max(
+        SOCIAL_INGEST_REQUEST_TIMEOUT_SECONDS,
+        float(os.getenv("SOCIAL_INGEST_HEARTBEAT_REQUEST_TIMEOUT_SECONDS", "30.0")),
+    )
+except (TypeError, ValueError):
+    SOCIAL_INGEST_HEARTBEAT_REQUEST_TIMEOUT_SECONDS = 30.0
+try:
     SOCIAL_INGEST_UPLOAD_REQUEST_TIMEOUT_SECONDS = max(
         SOCIAL_INGEST_REQUEST_TIMEOUT_SECONDS,
         float(os.getenv("SOCIAL_INGEST_UPLOAD_REQUEST_TIMEOUT_SECONDS", "60.0")),
@@ -146,6 +153,13 @@ try:
     )
 except (TypeError, ValueError):
     BROWSER_CONTENT_HINT_TTL_SECONDS = 300
+try:
+    BROWSER_CONTENT_HINT_RESPONSE_TIMEOUT_SECONDS = max(
+        0.05,
+        float(os.getenv("BROWSER_CONTENT_HINT_RESPONSE_TIMEOUT_SECONDS", "0.35")),
+    )
+except (TypeError, ValueError):
+    BROWSER_CONTENT_HINT_RESPONSE_TIMEOUT_SECONDS = 0.35
 try:
     SOCIAL_INGEST_STARTUP_DDL_TIMEOUT_SECONDS = max(
         15.0,
@@ -516,6 +530,8 @@ async def request_timeout_middleware(request, handler):
     timeout_seconds = (
         SOCIAL_INGEST_UPLOAD_REQUEST_TIMEOUT_SECONDS
         if request.path in {"/social/ingest-upload", "/social/ingest-upload-binary"}
+        else SOCIAL_INGEST_HEARTBEAT_REQUEST_TIMEOUT_SECONDS
+        if request.path == "/social/browser-heartbeat"
         else SOCIAL_INGEST_REQUEST_TIMEOUT_SECONDS
     )
     try:
@@ -4662,7 +4678,14 @@ async def browser_heartbeat_handler(request):
     )
     pool = request.app.get("pool")
     telemetry_degraded = pool is None
-    recovery_hint = await _browser_content_recovery_hint(pool, platform)
+    try:
+        async with asyncio.timeout(BROWSER_CONTENT_HINT_RESPONSE_TIMEOUT_SECONDS):
+            recovery_hint = await _browser_content_recovery_hint(pool, platform)
+    except TimeoutError:
+        recovery_hint = {
+            "force_cycle": False,
+            "force_reason": "content_age_response_budget_exceeded",
+        }
     _schedule_app_task(
         request.app,
         _record_browser_ingest_event(
