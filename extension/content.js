@@ -2568,6 +2568,7 @@ function currentPlatform() {
 // service-worker watchdog re-nudges any open tab that isn't looping.
 // ===========================================================================
 let LOOP_RUNNING = false;
+let ONE_SHOT_RUNNING = false;
 
 // Rest between passes — a person doesn't scrape non-stop. Instagram stays slower
 // because it is the account most likely to hit 429; lower-risk platforms can loop
@@ -2640,12 +2641,42 @@ async function mainLoop() {
   }
 }
 
+async function runOneShotCycle(reason) {
+  const p = currentPlatform();
+  if (!p || ONE_SHOT_RUNNING) return;
+  ONE_SHOT_RUNNING = true;
+  clog("warn", `${p.label} forced one scrape pass (${reason || "manual"})`, p.label);
+  await send({ type: "loopStatus", platform: p.id, label: p.label, running: true, url: location.href }).catch(() => {});
+  try {
+    const leftMs = wallLeftMs(p.id);
+    if (leftMs > 0) {
+      clog("warn", `${p.label} forced pass skipped; cooldown active for ${Math.ceil(leftMs / 60000)}m`, p.label);
+      return;
+    }
+    const shell = detectRecoverablePageShell(p.id);
+    if (shell) {
+      await reportRecoverablePageShell(p, shell);
+      return;
+    }
+    const stats = await p.runCycle();
+    if (!stats || !stats.skip_cycle_report) {
+      await send({ type: "cycleReport", platform: p.label, ...stats }).catch(() => {});
+    }
+  } catch (e) {
+    clog("error", `${p.label} forced scrape pass error: ${e.message}`, p.label);
+  } finally {
+    ONE_SHOT_RUNNING = false;
+    await send({ type: "loopStatus", platform: p.id, label: p.label, running: LOOP_RUNNING, url: location.href }).catch(() => {});
+  }
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg) return;
   // "ensureLoop" (watchdog / manual Scrape-now): start the loop if it isn't running.
   if (msg.type === "ensureLoop" || msg.type === "scrapeCycle") {
-    sendResponse({ ok: true, running: LOOP_RUNNING });
-    if (!LOOP_RUNNING) mainLoop();
+    sendResponse({ ok: true, running: LOOP_RUNNING, forced: msg.type === "scrapeCycle" });
+    if (msg.type === "scrapeCycle") runOneShotCycle(msg.reason || "manual");
+    else if (!LOOP_RUNNING) mainLoop();
     return false;
   }
 });

@@ -169,6 +169,31 @@ def test_source_matrix_blocker_reports_extension_waiting_for_new_event():
     assert "one fresh signal" in blocker["next_action"]
 
 
+def test_source_matrix_blocker_reports_browser_content_stale_without_reload_first():
+    blocker = _source_matrix_blocker(
+        _source(source="x"),
+        rate_row=None,
+        cursor_row=None,
+        extension_issues=[
+            {
+                "platform": "x",
+                "kind": "browser_content_stale",
+                "detail": "Browser tab heartbeat is fresh, but no useful content has arrived.",
+                "heartbeat_age_seconds": 80,
+                "content_age_seconds": 7200,
+                "stale_after_seconds": 3600,
+                "url": "https://x.com/home",
+            }
+        ],
+    )
+
+    assert blocker["kind"] == "browser_content_stale"
+    assert "heartbeat is fresh" in blocker["summary"]
+    assert "content is stale" in blocker["summary"]
+    assert "do not reload it first" in blocker["next_action"]
+    assert "forced scrape pass" in blocker["next_action"]
+
+
 def test_source_matrix_blocker_uses_extension_reload_url_when_available():
     extension_id, reload_url = _extension_reload_target_from_url(
         "chrome-extension://pkmdmcklnjdeocoeigmlakhomhhcpafb/background.js"

@@ -118,6 +118,13 @@ SOCIAL_INGEST_PREP_DB_ON_STARTUP = os.getenv("SOCIAL_INGEST_PREP_DB_ON_STARTUP",
     "true",
     "yes",
 }
+try:
+    BROWSER_CONTENT_STALE_SECONDS = max(
+        300,
+        int(os.getenv("BROWSER_CONTENT_STALE_SECONDS", "3600")),
+    )
+except (TypeError, ValueError):
+    BROWSER_CONTENT_STALE_SECONDS = 3600
 STRAVA_BROWSER_429_COOLDOWN_SECONDS = int(os.getenv("STRAVA_BROWSER_429_COOLDOWN_SECONDS", "1800"))
 try:
     STRAVA_BROWSER_429_MAX_COOLDOWN_SECONDS = max(
@@ -4438,6 +4445,40 @@ async def strava_route_visit_handler(request):
     return _cors(web.json_response({"ok": True, "activity_id": activity_id}))
 
 
+async def _browser_content_recovery_hint(pool, platform: str) -> dict:
+    if not pool or not platform or platform == "bridge":
+        return {}
+    try:
+        async with asyncio.timeout(1.0):
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """
+                    SELECT EXTRACT(EPOCH FROM (NOW() - MAX(created_at)))::int AS age_seconds
+                    FROM browser_ingest_events
+                    WHERE platform = $1
+                      AND endpoint <> 'browser_heartbeat'
+                      AND (
+                        stored_count > 0
+                        OR endpoint IN ('posts', 'profile', 'strava_route_visit', 'strava_streams')
+                      )
+                    """,
+                    platform,
+                )
+        age = row["age_seconds"] if row else None
+        if age is None or int(age) > BROWSER_CONTENT_STALE_SECONDS:
+            return {
+                "force_cycle": True,
+                "force_reason": "browser_content_stale",
+                "content_age_seconds": int(age) if age is not None else None,
+                "stale_after_seconds": BROWSER_CONTENT_STALE_SECONDS,
+            }
+    except TimeoutError:
+        return {"force_cycle": False, "force_reason": "content_age_check_timeout"}
+    except Exception:
+        logger.debug("browser content recovery hint failed platform=%s", platform, exc_info=True)
+    return {}
+
+
 async def browser_heartbeat_handler(request):
     body = await _safe_json(request)
     platform = _norm_platform(body.get("platform"), allow_diagnostics=True)
@@ -4450,6 +4491,7 @@ async def browser_heartbeat_handler(request):
     )
     pool = request.app.get("pool")
     telemetry_degraded = pool is None
+    recovery_hint = await _browser_content_recovery_hint(pool, platform)
     await _record_browser_ingest_event(
         pool,
         platform,
@@ -4480,6 +4522,7 @@ async def browser_heartbeat_handler(request):
         "platform": platform,
         "running": running,
         "telemetry_degraded": telemetry_degraded,
+        **recovery_hint,
     }))
 
 

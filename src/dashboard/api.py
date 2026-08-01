@@ -1653,6 +1653,18 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
                     f"Last browser signal {scope} was from old v{version}; expected v{expected}. "
                     "No newer signal has arrived yet to prove the reload took."
                 )
+        elif issue.get("kind") == "browser_content_stale":
+            heartbeat_age = _short_age(issue.get("heartbeat_age_seconds"))
+            content_age = _short_age(issue.get("content_age_seconds"))
+            stale_after = _short_age(issue.get("stale_after_seconds"))
+            platform = str(issue.get("platform") or source or "this platform")
+            detail = (
+                f"{platform}: browser heartbeat is fresh"
+                f"{' (' + heartbeat_age + ' old)' if heartbeat_age else ''}, "
+                f"but useful content is stale"
+                f"{' (' + content_age + ' old)' if content_age else ''}."
+                f"{' Expected within ' + stale_after + '.' if stale_after else ''}"
+            )
         if age_text:
             detail = f"{detail} Last seen {age_text} ago."
         if issue.get("kind") == "hook_stale":
@@ -1682,6 +1694,14 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
                     f"Open or focus {hook_target}, then check for a fresh DM hook heartbeat. "
                     "Reload the unpacked extension only if normal browser heartbeats are stale too."
                 )
+        elif issue.get("kind") == "browser_content_stale":
+            platform = str(issue.get("platform") or source or "this platform")
+            target_url = issue.get("url")
+            next_action = (
+                f"The extension is alive, so do not reload it first. The ingest bridge will ask the {platform} tab "
+                "to run one forced scrape pass on the next heartbeat. If this row stays degraded after a few minutes, "
+                f"focus or refresh the tab{(' at ' + target_url) if target_url else ''}, then press Scrape now on Social Tabs."
+            )
         elif manage_url:
             tab_action = (
                 "refresh or reopen the platform tab so it emits one fresh signal"

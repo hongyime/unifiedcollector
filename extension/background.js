@@ -165,7 +165,7 @@ async function reportScraperTabHeartbeats(reason) {
       if (!platform) continue;
       seen++;
       try {
-        await postJsonWithTimeout(base + "/social/browser-heartbeat", withExtensionVersion({
+        const result = await postJsonWithTimeout(base + "/social/browser-heartbeat", withExtensionVersion({
           platform: platform.id,
           label: platform.label,
           running: true,
@@ -175,6 +175,7 @@ async function reportScraperTabHeartbeats(reason) {
           health_reason: reason || "background_watchdog",
           page_title: tab.title || null,
         }));
+        await maybeForceScrapeCycle(tab, platform, result && result.body, reason || "background_watchdog");
         sent++;
       } catch (e) {
         failed++;
@@ -195,6 +196,42 @@ async function reportScraperTabHeartbeats(reason) {
   });
   if (failed || lastError) {
     await log("warn", `scraper heartbeat delivery: ${sent}/${seen} sent to ${base}${lastError ? " (" + lastError + ")" : ""}`);
+  }
+}
+
+const lastForcedCycleByTab = {};
+async function maybeForceScrapeCycle(tab, platform, responseBody, reason) {
+  let body = null;
+  try { body = responseBody ? JSON.parse(responseBody) : null; } catch (e) { return; }
+  if (!body || body.force_cycle !== true || !tab || !tab.id) return;
+  const now = Date.now();
+  const key = String(tab.id);
+  if (lastForcedCycleByTab[key] && now - lastForcedCycleByTab[key] < 20 * 60 * 1000) return;
+  lastForcedCycleByTab[key] = now;
+  try {
+    await chrome.tabs.sendMessage(tab.id, {
+      type: "scrapeCycle",
+      reason: body.force_reason || "browser_content_stale",
+      content_age_seconds: body.content_age_seconds || null,
+    });
+    await log("warn", `${platform.label}: forced one scrape pass because browser content is stale`);
+  } catch (firstErr) {
+    try {
+      if (!chrome.scripting || !chrome.scripting.executeScript) throw firstErr;
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id, allFrames: false },
+        files: ["content.js"],
+      });
+      await _sleep(500);
+      await chrome.tabs.sendMessage(tab.id, {
+        type: "scrapeCycle",
+        reason: body.force_reason || "browser_content_stale",
+        content_age_seconds: body.content_age_seconds || null,
+      });
+      await log("warn", `${platform.label}: revived content script and forced one stale-content scrape pass`);
+    } catch (e) {
+      await log("warn", `${platform.label}: stale-content forced scrape failed: ${e && e.message ? e.message : e}`);
+    }
   }
 }
 async function fetchJsonWithTimeout(url, timeoutMs = 12000) {
@@ -528,6 +565,7 @@ async function runPageRecovery(tabId) {
 // crash) or the service worker had been asleep. No scrape cadence here — pacing
 // lives inside the loop (rate-limited + jittered).
 async function ensureLoops(reason) {
+  const forceCycle = /^(manual|browser_content_stale|stale_content)$/.test(String(reason || ""));
   const tabs = await chrome.tabs.query({ url: scraperUrlPatterns() });
   if (!tabs || !tabs.length) {
     await log("warn", `no scraper tab open — paused (${reason}). Open one via 🗂 Manage social tabs.`);
@@ -548,7 +586,7 @@ async function ensureLoops(reason) {
       await log("warn", `page hook inject failed for tab ${t.id}: ${e && e.message ? e.message : e}`);
     }
     try {
-      await chrome.tabs.sendMessage(t.id, { type: "ensureLoop" });
+      await chrome.tabs.sendMessage(t.id, { type: forceCycle ? "scrapeCycle" : "ensureLoop", reason });
     } catch (firstErr) {
       try {
         if (!chrome.scripting || !chrome.scripting.executeScript) throw firstErr;
@@ -557,7 +595,7 @@ async function ensureLoops(reason) {
           files: ["content.js"],
         });
         await _sleep(500);
-        await chrome.tabs.sendMessage(t.id, { type: "ensureLoop" });
+        await chrome.tabs.sendMessage(t.id, { type: forceCycle ? "scrapeCycle" : "ensureLoop", reason });
         await log("info", `revived content scraper in tab ${t.id} (${reason})`);
       } catch (e) {
         await log("warn", `content scraper revive failed for tab ${t.id}: ${e && e.message ? e.message : e}`);

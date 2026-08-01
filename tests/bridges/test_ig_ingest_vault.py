@@ -947,6 +947,31 @@ def test_browser_heartbeat_handler_reports_degraded_when_pool_missing():
     assert payload["telemetry_degraded"] is True
 
 
+def test_browser_heartbeat_handler_requests_forced_cycle_when_content_stale(monkeypatch):
+    monkeypatch.setattr(ig_ingest, "BROWSER_CONTENT_STALE_SECONDS", 3600)
+    pool = _FakePool()
+    pool.conn.fetchrow_result = {"age_seconds": 7200}
+    req = _FakeRequest(
+        {"pool": pool},
+        {
+            "platform": "x",
+            "label": "Twitter / X",
+            "running": True,
+            "url": "https://x.com/home",
+            "tab_id": 123,
+            "extension_version": "1.21.64",
+        },
+    )
+
+    resp = asyncio.run(ig_ingest.browser_heartbeat_handler(req))
+
+    assert resp.status == 200
+    payload = json.loads(resp.text)
+    assert payload["force_cycle"] is True
+    assert payload["force_reason"] == "browser_content_stale"
+    assert payload["content_age_seconds"] == 7200
+
+
 def test_record_strava_stream_http_429_writes_rate_limit_event(monkeypatch):
     pool = _FakePool()
     monkeypatch.setattr(ig_ingest, "STRAVA_BROWSER_429_COOLDOWN_SECONDS", 1234)
