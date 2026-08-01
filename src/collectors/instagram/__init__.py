@@ -245,6 +245,16 @@ class InstagramCollector(BaseCollector):
         self._graphql_posts_disable_on_400 = (
             os.getenv("INSTA_GRAPHQL_POSTS_DISABLE_ON_400", "true").lower() == "true"
         )
+        self._playwright_posts_zero_count = 0
+        self._playwright_posts_disabled_until = 0.0
+        self._playwright_posts_zero_threshold = max(
+            1,
+            int(os.getenv("INSTA_PLAYWRIGHT_POSTS_ZERO_THRESHOLD", "3")),
+        )
+        self._playwright_posts_zero_cooldown_seconds = max(
+            300,
+            int(os.getenv("INSTA_PLAYWRIGHT_POSTS_ZERO_COOLDOWN_SECONDS", "3600")),
+        )
         # Follow-aware access tracker (lazy — needs self.pool, created on first use).
         # Records every profile fetch outcome into profile_access_{summary,attempts}
         # so SmartAccountSelector can later route a private target to a cookie
@@ -2460,7 +2470,45 @@ class InstagramCollector(BaseCollector):
                 except Exception:
                     pass
 
-    async def _collect_posts_playwright(self, uid: str, entity_name: str):
+    def _playwright_posts_fallback_available(self, entity_name: str) -> bool:
+        disabled_until = float(getattr(self, "_playwright_posts_disabled_until", 0.0) or 0.0)
+        now = time.time()
+        if disabled_until <= now:
+            return True
+        logger.info(
+            "instagram/%s: skipping Playwright post fallback for %.0fs after repeated zero-edge parses",
+            entity_name,
+            disabled_until - now,
+        )
+        return False
+
+    def _record_playwright_posts_fallback_result(self, entity_name: str, edge_count: int) -> None:
+        if edge_count > 0:
+            if self._playwright_posts_zero_count:
+                logger.info(
+                    "instagram/%s: Playwright post fallback recovered with %d edge(s); clearing zero-edge breaker",
+                    entity_name,
+                    edge_count,
+                )
+            self._playwright_posts_zero_count = 0
+            self._playwright_posts_disabled_until = 0.0
+            return
+
+        self._playwright_posts_zero_count += 1
+        threshold = int(getattr(self, "_playwright_posts_zero_threshold", 3) or 3)
+        if self._playwright_posts_zero_count < threshold:
+            return
+
+        cooldown = int(getattr(self, "_playwright_posts_zero_cooldown_seconds", 3600) or 3600)
+        cooldown = max(300, cooldown)
+        self._playwright_posts_disabled_until = time.time() + cooldown
+        logger.warning(
+            "instagram: Playwright post fallback returned zero edges %d time(s); pausing post fallback for %ds",
+            self._playwright_posts_zero_count,
+            cooldown,
+        )
+
+    async def _collect_posts_playwright(self, uid: str, entity_name: str) -> bool:
         """Mode β: spin up a single-process headless Chromium, navigate to the
         profile, scrape ``window._sharedData`` / ``window.__additionalDataLoaded``,
         and upsert any post nodes we find.
@@ -2468,6 +2516,9 @@ class InstagramCollector(BaseCollector):
         Concurrency: STRICT 1-at-a-time via the module-level ``PLAYWRIGHT_SEMAPHORE``.
         Do NOT raise this without bumping host RAM (see comment near the semaphore).
         """
+        if not self._playwright_posts_fallback_available(entity_name):
+            return False
+
         try:
             from playwright.async_api import async_playwright  # type: ignore
         except ImportError:
@@ -2475,7 +2526,7 @@ class InstagramCollector(BaseCollector):
                 "Playwright not installed — cannot run Mode β fallback for %s",
                 entity_name,
             )
-            return
+            return False
 
         acct_name = self._current_account.name if self._current_account else None
         storage_state = self._build_playwright_storage_state(acct_name) if acct_name else None
@@ -2515,7 +2566,7 @@ class InstagramCollector(BaseCollector):
                     await headless_dwell("instagram posts evaluate")
                 except Exception as e:
                     logger.warning("Playwright goto failed for %s: %s", url, e)
-                    return
+                    return False
 
                 # IG layouts vary; try several extraction strategies.
                 payload = await page.evaluate(
@@ -2549,12 +2600,14 @@ class InstagramCollector(BaseCollector):
                     },
                 )
                 if not edges:
+                    self._record_playwright_posts_fallback_result(entity_name, 0)
                     logger.info(
                         "Playwright fallback: no post edges parsed for %s "
                         "(IG layout may have changed)", entity_name,
                     )
-                    return
+                    return False
 
+                self._record_playwright_posts_fallback_result(entity_name, len(edges))
                 logger.info(
                     "Playwright fallback: extracted %d post nodes for %s",
                     len(edges), entity_name,
@@ -2568,6 +2621,7 @@ class InstagramCollector(BaseCollector):
                             await self._process_post(node, uid, entity_name)
                         except Exception as e:
                             logger.debug("process_post failed: %s", e)
+                return True
             finally:
                 # ALWAYS close the browser — leaks here will OOM the WSL host.
                 try:
@@ -2579,6 +2633,7 @@ class InstagramCollector(BaseCollector):
                     await playwright_ctx.stop()
                 except Exception:
                     pass
+        return False
 
     @staticmethod
     def _extract_post_edges_from_payload(payload: dict) -> list:

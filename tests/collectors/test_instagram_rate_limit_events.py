@@ -75,6 +75,34 @@ def test_instagram_target_timeout_respects_max_cap(monkeypatch):
     assert coll._target_timeout_seconds() == 240.0
 
 
+def test_playwright_posts_zero_breaker_pauses_after_repeated_empty_parses():
+    coll = _bare_collector()
+    coll._playwright_posts_zero_count = 0
+    coll._playwright_posts_disabled_until = 0.0
+    coll._playwright_posts_zero_threshold = 2
+    coll._playwright_posts_zero_cooldown_seconds = 300
+
+    coll._record_playwright_posts_fallback_result("alice", 0)
+    assert coll._playwright_posts_fallback_available("alice") is True
+
+    coll._record_playwright_posts_fallback_result("bob", 0)
+    assert coll._playwright_posts_fallback_available("carol") is False
+
+
+def test_playwright_posts_zero_breaker_resets_on_edges():
+    coll = _bare_collector()
+    coll._playwright_posts_zero_count = 2
+    coll._playwright_posts_disabled_until = time.time() + 300
+    coll._playwright_posts_zero_threshold = 2
+    coll._playwright_posts_zero_cooldown_seconds = 300
+
+    coll._record_playwright_posts_fallback_result("alice", 3)
+
+    assert coll._playwright_posts_zero_count == 0
+    assert coll._playwright_posts_disabled_until == 0.0
+    assert coll._playwright_posts_fallback_available("alice") is True
+
+
 class _MediaResponse:
     def __init__(self, data: bytes):
         self.content = data

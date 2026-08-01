@@ -634,6 +634,8 @@ services:
       INSTA_HTTPX_PROFILE_FALLBACK: "false"
       INSTA_SPIDER_CONCURRENCY: "1"
       INSTA_SPIDER_HOPS: "1"
+      INSTA_PLAYWRIGHT_POSTS_ZERO_THRESHOLD: "3"
+      INSTA_PLAYWRIGHT_POSTS_ZERO_COOLDOWN_SECONDS: "3600"
       # ANTI-BAN (P2 review §4): the flagged IG account shares ONE cookie jar with
       # ig_ingest. Behavioural flags come from NOVEL profile-view/discovery patterns,
       # not from re-fetching known content. Disable follower-graph BFS discovery in
