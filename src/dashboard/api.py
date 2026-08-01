@@ -1647,7 +1647,26 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
                 )
         if age_text:
             detail = f"{detail} Last seen {age_text} ago."
-        if reload_url:
+        if issue.get("kind") == "hook_stale":
+            platform = str(issue.get("platform") or source or "this platform").lower()
+            if platform == "instagram":
+                hook_target = "the Instagram Direct inbox tab"
+            elif platform == "tiktok":
+                hook_target = "the TikTok Messages tab"
+            else:
+                hook_target = "the platform messaging tab"
+            if reload_url:
+                next_action = (
+                    f"Open or focus {hook_target}, then check for a fresh DM hook heartbeat. "
+                    f"If normal browser heartbeats are stale too, open {reload_url} to reload the extension "
+                    "and hard-refresh the scraper tabs."
+                )
+            else:
+                next_action = (
+                    f"Open or focus {hook_target}, then check for a fresh DM hook heartbeat. "
+                    "Reload the unpacked extension only if normal browser heartbeats are stale too."
+                )
+        elif reload_url:
             tab_action = (
                 "refresh or reopen the platform tab so it emits one fresh signal"
                 if issue.get("needs_new_event")
