@@ -87,6 +87,11 @@ export function registerHistoryHandler(sock: WASocket, canFetchHistory?: () => b
 
     if (!progressInterval) {
         progressInterval = setInterval(() => {
+            const sk = currentSock;
+            const readyForHistory =
+                Boolean(sk)
+                && (canFetchHistory ? canFetchHistory() : true)
+                && Boolean((sk as any)?.authState?.creds?.registered);
             let chats = 0;
             let msgs = 0;
             let complete = 0;
@@ -95,6 +100,7 @@ export function registerHistoryHandler(sock: WASocket, canFetchHistory?: () => b
                 msgs += wm.messageCount;
                 if (wm.isComplete) complete++;
             }
+            if (!readyForHistory && chats === 0 && msgs === 0) return;
             logger.info(`[HistorySync] Progress: ${complete}/${chats} chats complete, ${msgs} total messages`);
         }, 60000);
     }
