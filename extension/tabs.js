@@ -181,7 +181,13 @@ async function reloadExtension() {
     await sendMessage({ type: "log", level: "info", msg: "manual extension reload requested" });
   } catch (e) {}
   try {
-    await chrome.storage.local.set({ ucReloadIntent: { requested_at: Date.now(), source: "tabs_page" } });
+    await chrome.storage.local.set({
+      ucReloadIntent: {
+        requested_at: Date.now(),
+        source: "tabs_page",
+        force_open_all: true,
+      },
+    });
   } catch (e) {}
   try {
     history.replaceState(null, "", location.pathname);

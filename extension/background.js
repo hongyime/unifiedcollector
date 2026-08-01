@@ -249,8 +249,9 @@ function shouldNormalizeSingleFeedTab(p, tab, reason) {
 // and one per target path for multi-url platforms (tiktok = foryou + following).
 // Closes duplicates so the extension never piles up tabs (the old bug: when the
 // auto-opened tab navigated to a sub-path, the dedup missed it and opened another).
-async function ensureScraperTabsOpen(reason) {
-  if (!(await autoTabsEnabled()) || _tabsOpInProgress) return;
+async function ensureScraperTabsOpen(reason, options = {}) {
+  const force = !!options.force;
+  if ((!(await autoTabsEnabled()) && !force) || _tabsOpInProgress) return;
   _tabsOpInProgress = true;
   let opened = 0, closed = 0, navigated = 0;
   try {
@@ -1297,7 +1298,7 @@ async function consumeReloadIntent() {
   await log("info", "extension reload intent consumed; hard-refreshing scraper tabs");
   await scheduleAlarm();
   await syncCookies();
-  await ensureScraperTabsOpen("manual_extension_reload");
+  await ensureScraperTabsOpen("manual_extension_reload", { force: true });
   await reportScraperTabHeartbeats("manual_extension_reload");
   await refreshScraperTabs({ bypassCache: true, reason: "manual_extension_reload" });
   await reportScraperTabHeartbeats("manual_extension_reload_refresh");
@@ -1309,7 +1310,16 @@ async function consumeReloadIntent() {
 (async () => {
   await setStatus({ swStartedAt: Date.now() });
   await log("info", "service worker active");
-  await reportBridgeHeartbeat("warm_start").catch(() => {});
-  await reportScraperTabHeartbeats("warm_start").catch(() => {});
-  await consumeReloadIntent().catch((e) => log("warn", `reload intent handling failed: ${e && e.message ? e.message : e}`));
+  const consumed = await consumeReloadIntent()
+    .catch((e) => {
+      log("warn", `reload intent handling failed: ${e && e.message ? e.message : e}`);
+      return false;
+    });
+  if (!consumed) {
+    await scheduleAlarm().catch((e) => log("warn", `warm-start schedule failed: ${e && e.message ? e.message : e}`));
+    await syncCookies().catch(() => {});
+    await ensureScraperTabsOpen("warm_start").catch((e) => log("warn", `warm-start tab audit failed: ${e && e.message ? e.message : e}`));
+    await reportScraperTabHeartbeats("warm_start_post_open").catch(() => {});
+    await ensureLoops("warm_start").catch((e) => log("warn", `warm-start loop nudge failed: ${e && e.message ? e.message : e}`));
+  }
 })();
