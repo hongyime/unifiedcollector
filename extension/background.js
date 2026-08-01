@@ -77,23 +77,52 @@ function extensionVersion() {
 function withExtensionVersion(payload) {
   return { ...payload, extension_version: extensionVersion() };
 }
-async function reportBridgeHeartbeat(reason) {
+async function postJsonWithTimeout(url, payload, timeoutMs = 10000) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const base = await ingestBase();
-    await fetch(base + "/social/browser-heartbeat", {
+    const r = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(withExtensionVersion({
-        platform: "bridge",
-        label: "UnifiedCollector Bridge",
-        running: true,
-        tab_id: "service_worker",
-        url: "chrome-extension://" + chrome.runtime.id + "/background.js",
-        health_status: "service_worker_active",
-        health_reason: reason || "startup",
-      })),
+      body: JSON.stringify(payload),
+      signal: ctrl.signal,
     });
-  } catch (e) {}
+    const body = await r.text().catch(() => "");
+    if (!r.ok) throw new Error(`HTTP ${r.status}${body ? ": " + body.slice(0, 180) : ""}`);
+    return { response: r, body };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+async function reportBridgeHeartbeat(reason) {
+  const base = await ingestBase();
+  const payload = withExtensionVersion({
+    platform: "bridge",
+    label: "UnifiedCollector Bridge",
+    running: true,
+    tab_id: "service_worker",
+    url: "chrome-extension://" + chrome.runtime.id + "/background.js",
+    health_status: "service_worker_active",
+    health_reason: reason || "startup",
+  });
+  try {
+    await postJsonWithTimeout(base + "/social/browser-heartbeat", payload);
+    await setStatus({
+      lastBridgeHeartbeatOkAt: Date.now(),
+      lastBridgeHeartbeatError: null,
+      lastBridgeHeartbeatBase: base,
+      lastBridgeHeartbeatReason: reason || "startup",
+    });
+  } catch (e) {
+    const err = String(e && e.message ? e.message : e);
+    await setStatus({
+      lastBridgeHeartbeatFailAt: Date.now(),
+      lastBridgeHeartbeatError: err,
+      lastBridgeHeartbeatBase: base,
+      lastBridgeHeartbeatReason: reason || "startup",
+    });
+    await log("warn", `browser heartbeat failed to reach ${base}: ${err}`);
+  }
 }
 async function sendManualIngestProbe() {
   const base = await ingestBase();
@@ -106,17 +135,8 @@ async function sendManualIngestProbe() {
     health_status: "manual_ingest_probe",
     health_reason: "tabs_page_test",
   });
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 6000);
   try {
-    const r = await fetch(base + "/social/browser-heartbeat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-      signal: ctrl.signal,
-    });
-    const body = await r.text().catch(() => "");
-    if (!r.ok) throw new Error(`HTTP ${r.status}${body ? ": " + body.slice(0, 180) : ""}`);
+    const { response: r } = await postJsonWithTimeout(base + "/social/browser-heartbeat", payload, 6000);
     await setStatus({ lastManualIngestProbeAt: Date.now(), lastManualIngestProbeOk: true, lastManualIngestProbeError: null });
     await log("info", `manual ingest probe ok (${base})`);
     return { ok: true, status: r.status, base };
@@ -125,8 +145,6 @@ async function sendManualIngestProbe() {
     await setStatus({ lastManualIngestProbeAt: Date.now(), lastManualIngestProbeOk: false, lastManualIngestProbeError: err });
     await log("error", `manual ingest probe failed: ${err}`);
     return { ok: false, error: err, base };
-  } finally {
-    clearTimeout(timer);
   }
 }
 function platformForTabUrl(url) {
@@ -135,16 +153,19 @@ function platformForTabUrl(url) {
   return scraperPlatforms().find((p) => host === p.host) || null;
 }
 async function reportScraperTabHeartbeats(reason) {
+  const base = await ingestBase();
+  let seen = 0;
+  let sent = 0;
+  let failed = 0;
+  let lastError = null;
   try {
-    const base = await ingestBase();
     const tabs = await chrome.tabs.query({ url: scraperUrlPatterns() });
     for (const tab of tabs || []) {
       const platform = platformForTabUrl(tab.url);
       if (!platform) continue;
-      await fetch(base + "/social/browser-heartbeat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(withExtensionVersion({
+      seen++;
+      try {
+        await postJsonWithTimeout(base + "/social/browser-heartbeat", withExtensionVersion({
           platform: platform.id,
           label: platform.label,
           running: true,
@@ -153,10 +174,28 @@ async function reportScraperTabHeartbeats(reason) {
           health_status: "background_tab_seen",
           health_reason: reason || "background_watchdog",
           page_title: tab.title || null,
-        })),
-      });
+        }));
+        sent++;
+      } catch (e) {
+        failed++;
+        lastError = String(e && e.message ? e.message : e);
+      }
     }
-  } catch (e) {}
+  } catch (e) {
+    lastError = String(e && e.message ? e.message : e);
+  }
+  await setStatus({
+    lastScraperHeartbeatAt: Date.now(),
+    lastScraperHeartbeatSeen: seen,
+    lastScraperHeartbeatSent: sent,
+    lastScraperHeartbeatFailed: failed,
+    lastScraperHeartbeatError: lastError,
+    lastScraperHeartbeatBase: base,
+    lastScraperHeartbeatReason: reason || "background_watchdog",
+  });
+  if (failed || lastError) {
+    await log("warn", `scraper heartbeat delivery: ${sent}/${seen} sent to ${base}${lastError ? " (" + lastError + ")" : ""}`);
+  }
 }
 async function fetchJsonWithTimeout(url, timeoutMs = 12000) {
   const ctrl = new AbortController();

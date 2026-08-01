@@ -1,6 +1,8 @@
 const $ = (id) => document.getElementById(id);
 let lastDiag = null;
 let lastProbe = null;
+let lastAutoProbeAt = 0;
+let autoProbeInFlight = false;
 
 function escapeHtml(s) {
   return String(s == null ? "" : s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
@@ -92,6 +94,7 @@ async function render() {
     `<b>Scrapers active:</b> ${scrapers}. Other platforms open for login now and will scrape ` +
     `automatically once their scraper is added. Tabs open <b>pinned</b> so they persist; ` +
     `keep them logged in. The bridge runs a scrape cycle on a timer (see the popup).`;
+  maybeAutoProbe(backgroundError);
 }
 
 function renderDiagnostics(backgroundError) {
@@ -114,16 +117,43 @@ function renderDiagnostics(backgroundError) {
   const workerFresh = status.swStartedAt && Date.now() - Number(status.swStartedAt) < 10 * 60 * 1000;
   const probe = lastProbe
     ? lastProbe.ok
-      ? `<span class="ok">manual ingest ok</span> (${escapeHtml(lastProbe.base || "")})`
-      : `<span class="bad">manual ingest failed</span>: ${escapeHtml(lastProbe.error || "unknown")}`
+      ? `<span class="ok">${lastProbe.auto ? "auto" : "manual"} ingest ok</span> (${escapeHtml(lastProbe.base || "")})`
+      : `<span class="bad">${lastProbe.auto ? "auto" : "manual"} ingest failed</span>: ${escapeHtml(lastProbe.error || "unknown")}`
     : "manual ingest not tested from this page";
+  const bridgeHeartbeat = status.lastBridgeHeartbeatOkAt
+    ? `bridge heartbeat ok ${escapeHtml(ago(status.lastBridgeHeartbeatOkAt))}`
+    : "bridge heartbeat not confirmed";
+  const bridgeProblem = status.lastBridgeHeartbeatError
+    ? `<br><span class="bad">Bridge heartbeat error:</span> ${escapeHtml(status.lastBridgeHeartbeatError)}`
+    : "";
+  const scraperHeartbeat = status.lastScraperHeartbeatAt
+    ? `scraper heartbeat ${escapeHtml(ago(status.lastScraperHeartbeatAt))}: ${Number(status.lastScraperHeartbeatSent || 0)}/${Number(status.lastScraperHeartbeatSeen || 0)} sent`
+    : "scraper heartbeat not confirmed";
   el.innerHTML =
     `<strong>Extension ${escapeHtml((lastDiag && lastDiag.version) || pageVersion)}</strong> ` +
     `<span class="${workerFresh ? "ok" : "warn"}">worker ${workerFresh ? "fresh" : "not fresh"}</span><br>` +
     `Worker started ${escapeHtml(ago(status.swStartedAt))}; loop ping ${escapeHtml(ago(status.lastLoopPing))}; ` +
     `ingest ${escapeHtml((lastDiag && lastDiag.ingestBase) || "")}<br>` +
+    `${bridgeHeartbeat}; ${scraperHeartbeat}${bridgeProblem}<br>` +
     `Probe: ${probe}` +
     (logs ? `<pre>${escapeHtml(logs)}</pre>` : "");
+}
+
+async function maybeAutoProbe(backgroundError) {
+  if (backgroundError || autoProbeInFlight) return;
+  const now = Date.now();
+  if (now - lastAutoProbeAt < 120000) return;
+  lastAutoProbeAt = now;
+  autoProbeInFlight = true;
+  try {
+    const result = await sendMessage({ type: "testIngest" });
+    lastProbe = { ...(result || {}), auto: true, t: Date.now() };
+  } catch (e) {
+    lastProbe = { ok: false, error: runtimeErrorText(e), auto: true, t: Date.now() };
+  } finally {
+    autoProbeInFlight = false;
+    renderDiagnostics(null);
+  }
 }
 
 $("openAll").addEventListener("click", async () => {
@@ -139,9 +169,9 @@ $("testIngest").addEventListener("click", async () => {
   lastProbe = { ok: false, error: "running..." };
   renderDiagnostics(null);
   try {
-    lastProbe = await sendMessage({ type: "testIngest" });
+    lastProbe = { ...((await sendMessage({ type: "testIngest" })) || {}), auto: false, t: Date.now() };
   } catch (e) {
-    lastProbe = { ok: false, error: runtimeErrorText(e) };
+    lastProbe = { ok: false, error: runtimeErrorText(e), auto: false, t: Date.now() };
   }
   await render();
 });
