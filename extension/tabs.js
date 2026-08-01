@@ -30,6 +30,7 @@ function runtimeErrorText(e) {
 
 function messageTimeoutMs(msg) {
   const type = msg && msg.type;
+  if (type === "refreshScraperTabs") return 180000;
   if (type === "openAll" || type === "scrapeNow") return 60000;
   if (type === "testIngest") return 45000;
   if (type === "getPlatforms" || type === "diagnostics") return 15000;
@@ -172,6 +173,10 @@ $("openAll").addEventListener("click", async () => {
   setTimeout(render, 800);
 });
 $("refresh").addEventListener("click", render);
+$("refreshTabs").addEventListener("click", async () => {
+  await sendMessage({ type: "refreshScraperTabs", reason: "tabs_page_button" });
+  setTimeout(render, 1000);
+});
 $("scrape").addEventListener("click", async () => {
   await sendMessage({ type: "scrapeNow" });
 });
@@ -214,15 +219,20 @@ async function handleUrlActions() {
     return;
   }
   const shouldOpenAll = params.get("openAll") === "1";
+  const shouldRefreshTabs = params.get("refreshTabs") === "1";
   const shouldScrape = params.get("scrape") === "1";
   const shouldTest = params.get("test") === "1";
-  if (!shouldOpenAll && !shouldScrape && !shouldTest) return;
+  if (!shouldOpenAll && !shouldRefreshTabs && !shouldScrape && !shouldTest) return;
   try {
     history.replaceState(null, "", location.pathname);
   } catch (e) {}
   try {
     if (shouldOpenAll) {
       await sendMessage({ type: "openAll" });
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+    }
+    if (shouldRefreshTabs) {
+      await sendMessage({ type: "refreshScraperTabs", reason: "tabs_page_url" });
       await new Promise((resolve) => setTimeout(resolve, 1200));
     }
     if (shouldScrape) {

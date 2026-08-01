@@ -374,15 +374,27 @@ async function syncCookies() {
 }
 
 async function refreshScraperTabs(options = {}) {
-  if (!(await autoTabsEnabled()) || _tabsOpInProgress) return;
+  if (_tabsOpInProgress) return { ok: false, reason: "tabs_operation_in_progress", reloaded: 0, errors: 0 };
+  if (!options.force && !(await autoTabsEnabled())) return { ok: false, reason: "auto_tabs_disabled", reloaded: 0, errors: 0 };
   _tabsOpInProgress = true;
   const bypassCache = !!options.bypassCache;
   const reason = options.reason || "refresh";
+  let reloaded = 0;
+  let errors = 0;
   try {
     const tabs = await chrome.tabs.query({ url: scraperUrlPatterns() });
-    for (const t of tabs || []) { try { await chrome.tabs.reload(t.id, { bypassCache }); await _sleep(_humanGap(8000)); } catch (e) {} }
+    for (const t of tabs || []) {
+      try {
+        await chrome.tabs.reload(t.id, { bypassCache });
+        reloaded++;
+        await _sleep(_humanGap(8000));
+      } catch (e) {
+        errors++;
+      }
+    }
     const mode = bypassCache ? "hard-refreshed" : "auto-refreshed";
     await log("info", `${mode} ${tabs ? tabs.length : 0} scraper tab(s), staggered → loop respawns fresh (${reason})`);
+    return { ok: true, reloaded, errors, tabs: tabs ? tabs.length : 0 };
   } finally { _tabsOpInProgress = false; }
 }
 
@@ -426,7 +438,7 @@ async function performStartupRecovery(reason, options = {}) {
   await reportScraperTabHeartbeats(reason)
     .catch((e) => log("warn", `${reason} scraper heartbeat failed: ${e && e.message ? e.message : e}`));
   if (refreshTabs) {
-    await refreshScraperTabs({ bypassCache: true, reason })
+    await refreshScraperTabs({ bypassCache: true, force, reason })
       .catch((e) => log("warn", `${reason} tab refresh failed: ${e && e.message ? e.message : e}`));
     await reportScraperTabHeartbeats(reason + "_refresh")
       .catch((e) => log("warn", `${reason} refresh heartbeat failed: ${e && e.message ? e.message : e}`));
@@ -1421,6 +1433,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
         await log("info", `open-all: ${opened} opened, ${focused} already open${errors ? ", " + errors + " failed" : ""}`);
         sendResponse({ opened, focused, errors });
+        break;
+      }
+      case "refreshScraperTabs": {
+        const result = await refreshScraperTabs({
+          bypassCache: msg.bypassCache !== false,
+          force: true,
+          reason: msg.reason || "manual_tabs_page",
+        });
+        await reportScraperTabHeartbeats("manual_refresh_tabs")
+          .catch((e) => log("warn", `manual refresh heartbeat failed: ${e && e.message ? e.message : e}`));
+        sendResponse(result);
         break;
       }
       case "scrapeNow":
