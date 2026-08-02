@@ -913,6 +913,20 @@ def test_empty_media_probe_marks_browser_content_progress():
         "media",
         0,
         0,
+        {"probe_reason": "manual_backend_probe"},
+    )
+    assert not ig_ingest._browser_event_marks_source_success(
+        "facebook",
+        "media",
+        0,
+        0,
+        {"probe_reason": "forced_recovery_started"},
+    )
+    assert not ig_ingest._browser_event_marks_source_success(
+        "facebook",
+        "media",
+        0,
+        0,
         {},
     )
 
@@ -1293,6 +1307,8 @@ def test_browser_heartbeat_handler_requests_forced_cycle_when_content_stale(monk
     assert payload["content_age_seconds"] == 7200
     query, args = pool.conn.fetchrows[0]
     assert "metadata ? 'probe_reason'" in query
+    assert "manual_backend_probe" in query
+    assert "forced_recovery_started" in query
     assert "ORDER BY created_at DESC" in query
     assert args == ("x",)
 

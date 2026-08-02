@@ -1265,6 +1265,22 @@ function deferNavigationForForcedRecovery(platform) {
 function forcedRecoveryMode(platform) {
   return deferNavigationForForcedRecovery(platform);
 }
+async function reportBrowserRecoveryProbe(platform, username, meta = {}) {
+  if (!forcedRecoveryMode(platform)) return null;
+  return send({
+    type: "ingest",
+    platform,
+    username: username || "unknown",
+    items: [],
+    record_empty: true,
+    probe_reason: "forced_recovery_started",
+    probe_meta: {
+      url: location.href,
+      content_counts: pageContentCounts(),
+      ...meta,
+    },
+  }, { timeoutMs: 15000 }).catch(() => null);
+}
 function browserMediaRevisitUrlOk(platform, url) {
   if (!url || !/^https?:\/\//i.test(url)) return false;
   try {
@@ -1596,6 +1612,7 @@ const lemon8 = {
     if (mediaRevisit && mediaRevisit.navigating) return { targets: 1, saved: 0, discovered: 0 };
     clog("info", `cycle start on ${entity}`, "lemon8");
     const sink = makeSink();
+    await reportBrowserRecoveryProbe("lemon8", entity, { entity });
     await autoScroll(forcedRecovery ? 4 : 18, 1400, forcedRecovery ? 900 : 1800, {
       maxPauseMs: forcedRecovery ? 1500 : 3500,
     });
@@ -2004,6 +2021,7 @@ const x = {
     }
     clog("info", `X cycle on ${feed} — scrolling for tweets`, "x");
     const sink = makeSink();
+    await reportBrowserRecoveryProbe("x", entity, { entity, feed });
     await autoScroll(forcedRecovery ? 4 : 12, 1400, forcedRecovery ? 900 : 1800, {
       maxPauseMs: forcedRecovery ? 1500 : 3500,
     });
@@ -2523,6 +2541,7 @@ const facebook = {
     const mediaRevisit = await maybeStartBrowserMediaRevisit("facebook", facebookLoggedInOwner());
     if (mediaRevisit && mediaRevisit.navigating) return { targets: 1, saved: 0, discovered: 0 };
     clog("info", `cycle start on ${entity} (person profile: ${person})`, "facebook");
+    await reportBrowserRecoveryProbe("facebook", entity, { entity, person });
     await autoScroll(forcedRecovery ? 4 : 12, 1400, forcedRecovery ? 900 : 1800, {
       maxPauseMs: forcedRecovery ? 1500 : 3500,
     });

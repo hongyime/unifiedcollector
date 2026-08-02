@@ -2579,7 +2579,15 @@ async def _browser_extension_payload(conn) -> dict:
                        created_at AS last_content_at
                 FROM browser_ingest_events
                 WHERE endpoint <> 'browser_heartbeat'
-                  AND (observed_count > 0 OR stored_count > 0)
+                  AND (
+                    observed_count > 0
+                    OR stored_count > 0
+                    OR (
+                      metadata ? 'probe_reason'
+                      AND COALESCE(metadata->>'probe_reason', '')
+                          NOT IN ('manual_backend_probe', 'forced_recovery_started')
+                    )
+                  )
                   AND platform = ANY($2::text[])
                 ORDER BY platform, created_at DESC
             )

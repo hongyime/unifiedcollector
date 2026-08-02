@@ -2334,7 +2334,11 @@ def _browser_event_marks_source_success(
         return False
     if observed_count > 0 or stored_count > 0:
         return True
-    return bool(isinstance(metadata, dict) and metadata.get("probe_reason"))
+    if not isinstance(metadata, dict):
+        return False
+    probe_reason = str(metadata.get("probe_reason") or "").strip()
+    non_progress_probes = {"manual_backend_probe", "forced_recovery_started"}
+    return bool(probe_reason and probe_reason not in non_progress_probes)
 
 
 async def _ingest(app, platform, body):
@@ -4856,12 +4860,20 @@ async def _browser_content_recovery_hint(pool, platform: str) -> dict:
                       AND (
                         observed_count > 0
                         OR stored_count > 0
-                        OR metadata ? 'probe_reason'
+                        OR (
+                          metadata ? 'probe_reason'
+                          AND COALESCE(metadata->>'probe_reason', '')
+                              NOT IN ('manual_backend_probe', 'forced_recovery_started')
+                        )
                       )
                       AND (
                         stored_count > 0
                         OR endpoint IN ('posts', 'profile', 'strava_route_visit', 'strava_streams')
-                        OR metadata ? 'probe_reason'
+                        OR (
+                          metadata ? 'probe_reason'
+                          AND COALESCE(metadata->>'probe_reason', '')
+                              NOT IN ('manual_backend_probe', 'forced_recovery_started')
+                        )
                       )
                     ORDER BY created_at DESC
                     LIMIT 1

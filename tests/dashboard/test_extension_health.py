@@ -193,6 +193,43 @@ async def test_browser_extension_payload_suppresses_recent_old_endpoint_after_ne
 
 
 @pytest.mark.asyncio
+async def test_browser_extension_payload_content_gap_ignores_manual_backend_probe(monkeypatch):
+    monkeypatch.setenv("UC_EXTENSION_EXPECTED_VERSION", "1.22.7")
+    seen_content_gap_query = None
+
+    class FakeConn:
+        async def fetchval(self, query: str, timeout: int | None = None):
+            if "dm_hook_heartbeat" in query:
+                return None
+            if "browser_ingest_events" in query:
+                return "browser_ingest_events"
+            if "tiktok_browser_media_candidates" in query:
+                return None
+            if "tiktok_browser_revisit_queue" in query:
+                return None
+            if "browser_media_candidates" in query:
+                return None
+            if "browser_media_revisit_queue" in query:
+                return None
+            raise AssertionError(query)
+
+        async def fetch(self, query: str, *args, timeout: int | None = None):
+            nonlocal seen_content_gap_query
+            if "WITH heartbeat AS" in query:
+                seen_content_gap_query = query
+                return []
+            if "FROM browser_ingest_events" in query:
+                return []
+            raise AssertionError(query)
+
+    await _browser_extension_payload(FakeConn())
+
+    assert seen_content_gap_query is not None
+    assert "manual_backend_probe" in seen_content_gap_query
+    assert "forced_recovery_started" in seen_content_gap_query
+
+
+@pytest.mark.asyncio
 async def test_browser_extension_payload_includes_media_candidate_diagnostics(monkeypatch):
     monkeypatch.setenv("UC_EXTENSION_EXPECTED_VERSION", "1.21.46")
 
