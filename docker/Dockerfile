@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libnss3 libatk-bridge2.0-0 libdrm2 libxkbcommon0 libxcomposite1 \
     libxdamage1 libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 \
     libasound2 libatk1.0-0 libcups2 libxshmfence1 fonts-liberation \
-    ca-certificates wget curl ffmpeg \
+    ca-certificates wget curl \
  && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
  && apt-get install -y --no-install-recommends nodejs \
  && rm -rf /var/lib/apt/lists/*
@@ -26,7 +26,7 @@ RUN python -m playwright install chromium \
 # sqlite3 CLI for self-healing corrupt SQLite session files (session_repair.py).
 # Placed AFTER the heavy pip/playwright layers so those stay cached on rebuild
 # (keeps the image/vhdx growth minimal).
-RUN apt-get update && apt-get install -y --no-install-recommends sqlite3 \
+RUN apt-get update && apt-get install -y --no-install-recommends sqlite3 ffmpeg \
  && rm -rf /var/lib/apt/lists/*
 
 COPY src/ src/
