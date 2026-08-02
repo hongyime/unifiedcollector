@@ -79,6 +79,8 @@ let lastFreshQrRequestAt = 0;
 const FRESH_QR_MIN_INTERVAL_MS = Number(process.env.WHATSAPP_FRESH_QR_MIN_INTERVAL_MS || 30_000);
 const UNPAIRED_QR_RECONNECT_MS = Number(process.env.WHATSAPP_UNPAIRED_QR_RECONNECT_MS || 30_000);
 const QR_STABILITY_MS = Number(process.env.WHATSAPP_QR_STABILITY_MS || 45_000);
+const AUTH_SCAN_FILE_LIMIT = Number(process.env.WHATSAPP_AUTH_SCAN_FILE_LIMIT || 1000);
+const STALE_UNREGISTERED_AUTH_FILE_THRESHOLD = Number(process.env.WHATSAPP_STALE_UNREGISTERED_AUTH_FILE_THRESHOLD || 1000);
 let reconnectTimer: NodeJS.Timeout | null = null;
 let socketEpoch = 0;
 let saveCredsTimer: NodeJS.Timeout | null = null;
@@ -239,6 +241,7 @@ app.post('/reconnect', (_req, res) => {
 // separate Disconnect control for explicit unpairing; Fresh QR is only a nudge
 // for bridge slots that are already in QR-pairing mode.
 app.post('/fresh-qr', async (_req, res) => {
+    const auth_state = authStateSummary();
     const registered = Boolean(
         serviceHealthy
         || socketRegistered
@@ -253,7 +256,7 @@ app.post('/fresh-qr', async (_req, res) => {
         });
         return;
     }
-    if (!serviceHealthy && latestQr) {
+    if (!serviceHealthy && latestQr && !authStateNeedsCleanPairing(auth_state)) {
         res.status(200).json({ ...bridgeState(), status: 'awaiting_scan', note: 'active QR already available' });
         return;
     }
@@ -404,31 +407,68 @@ function authPathHasRecoverableState(authPath = currentAuthPath()): boolean {
     } catch {
         return true;
     }
+    return false;
+}
+
+function authDirStats(authPath = currentAuthPath()) {
+    const out = {
+        auth_path_exists: false,
+        auth_file_count: 0,
+        auth_file_count_capped: false,
+        auth_non_watermark_file_seen: false,
+    };
+    if (!fs.existsSync(authPath)) return out;
+    out.auth_path_exists = true;
+    let dir: fs.Dir | null = null;
     try {
-        const entries = fs.readdirSync(authPath);
-        return entries.some((entry) => entry !== 'history_watermarks.json');
+        dir = fs.opendirSync(authPath);
+        while (true) {
+            const entry = dir.readSync();
+            if (!entry) break;
+            if (entry.name === '.' || entry.name === '..') continue;
+            out.auth_file_count += 1;
+            if (entry.name !== 'history_watermarks.json') {
+                out.auth_non_watermark_file_seen = true;
+            }
+            if (out.auth_file_count >= AUTH_SCAN_FILE_LIMIT) {
+                out.auth_file_count_capped = true;
+                break;
+            }
+        }
     } catch {
-        return false;
+        throw new Error('auth_dir_unreadable');
+    } finally {
+        try { dir?.closeSync(); } catch {}
     }
+    return out;
 }
 
 function authStateSummary(authPath = currentAuthPath()) {
+    let dirStats = {
+        auth_path_exists: false,
+        auth_file_count: 0,
+        auth_file_count_capped: false,
+        auth_non_watermark_file_seen: false,
+    };
     const summary = {
         session_name: process.env.SESSION_NAME || 'default',
-        auth_path_exists: false,
+        auth_path_exists: dirStats.auth_path_exists,
         creds_json_exists: false,
         creds_json_size: 0,
         creds_json_mtime: null as string | null,
-        auth_file_count: 0,
+        auth_file_count: dirStats.auth_file_count,
+        auth_file_count_capped: dirStats.auth_file_count_capped,
+        auth_non_watermark_file_seen: dirStats.auth_non_watermark_file_seen,
         has_registered_creds: false,
         has_recoverable_state: false,
         note: 'auth_path_missing',
     };
     try {
-        summary.auth_path_exists = fs.existsSync(authPath);
-        if (summary.auth_path_exists) {
-            summary.auth_file_count = fs.readdirSync(authPath).length;
-        }
+        dirStats = authDirStats(authPath);
+        summary.auth_path_exists = dirStats.auth_path_exists;
+        summary.auth_file_count = dirStats.auth_file_count;
+        summary.auth_file_count_capped = dirStats.auth_file_count_capped;
+        summary.auth_non_watermark_file_seen = dirStats.auth_non_watermark_file_seen;
         const credsPath = path.join(authPath, 'creds.json');
         summary.creds_json_exists = fs.existsSync(credsPath);
         if (summary.creds_json_exists) {
@@ -442,6 +482,8 @@ function authStateSummary(authPath = currentAuthPath()) {
             summary.note = 'registered_credentials_present';
         } else if (summary.creds_json_exists) {
             summary.note = 'creds_json_present_but_unregistered';
+        } else if (authStateNeedsCleanPairing(summary)) {
+            summary.note = 'large_auth_cache_without_creds_json';
         } else if (summary.auth_file_count > 0) {
             summary.note = 'auth_files_present_without_creds_json';
         } else if (summary.auth_path_exists) {
@@ -451,6 +493,16 @@ function authStateSummary(authPath = currentAuthPath()) {
         summary.note = `auth_state_unreadable: ${err?.message || String(err)}`;
     }
     return summary;
+}
+
+function authStateNeedsCleanPairing(summary = authStateSummary()): boolean {
+    return Boolean(
+        summary.auth_path_exists
+        && !summary.has_registered_creds
+        && !summary.creds_json_exists
+        && summary.auth_non_watermark_file_seen
+        && summary.auth_file_count >= STALE_UNREGISTERED_AUTH_FILE_THRESHOLD
+    );
 }
 
 function archiveAuthState(authPath: string, reason: string): string | null {
@@ -472,9 +524,10 @@ function archiveAuthState(authPath: string, reason: string): string | null {
 function clearAuthState(reason = 'manual'): void {
     const authPath = currentAuthPath();
     try {
-        const hadRecoverableState = authPathHasRecoverableState(authPath);
-        const archivePath = hadRecoverableState ? archiveAuthState(authPath, reason) : null;
-        if (!hadRecoverableState) {
+        const stats = authDirStats(authPath);
+        const shouldArchive = stats.auth_path_exists && stats.auth_file_count > 0;
+        const archivePath = shouldArchive ? archiveAuthState(authPath, reason) : null;
+        if (!shouldArchive) {
             fs.rmSync(authPath, { recursive: true, force: true });
             fs.mkdirSync(authPath, { recursive: true });
         }
@@ -490,6 +543,21 @@ function clearAuthState(reason = 'manual'): void {
     } catch (e) {
         logger.error({ err: e }, 'Failed to clear auth state');
     }
+}
+
+function clearStaleUnregisteredAuthIfNeeded(reason: string): void {
+    const summary = authStateSummary();
+    if (!authStateNeedsCleanPairing(summary)) return;
+    logger.warn(
+        {
+            session_name: summary.session_name,
+            auth_file_count: summary.auth_file_count,
+            auth_file_count_capped: summary.auth_file_count_capped,
+            reason,
+        },
+        'Large unregistered auth cache without creds.json; archiving before QR pairing'
+    );
+    clearAuthState(reason);
 }
 
 function scheduleReconnect(reason: string, delayMs: number): void {
@@ -600,6 +668,7 @@ async function connectToWhatsApp(): Promise<void> {
         isFirstConnect = false;
     }
 
+    clearStaleUnregisteredAuthIfNeeded('startup_no_creds');
     const { state, saveCreds } = await getAuthState();
 
     let version: [number, number, number] = [2, 3000, 1017531287];
