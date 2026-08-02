@@ -10,7 +10,7 @@ import hashlib
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
@@ -613,6 +613,30 @@ async def test_collect_user_videos_quota_exhausted(monkeypatch):
     out = await c.collect_user_videos("bryan")
     assert out == 0
     c._collect_user.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_collect_refreshes_profiles_during_local_tool_cooldown(monkeypatch):
+    monkeypatch.setenv("TIKTOK_SPIDER_ENABLED", "false")
+    monkeypatch.setenv("TIKTOK_COOLDOWN_PROFILE_ONLY_PER_CYCLE", "2")
+    with patch.object(TiktokCollector, "_check_tool", staticmethod(lambda *_: False)), \
+         patch.object(TiktokCollector, "_discover_cookie_file", staticmethod(lambda: "")):
+        c = TiktokCollector()
+    c._quota = None
+    c._local_tool_cooldown_until = 9_999_999_999
+    c.checkpoint = MagicMock()
+    c.checkpoint.save_progress = AsyncMock()
+    monkeypatch.setattr(c, "_load_tracker_state", AsyncMock())
+    monkeypatch.setattr(c, "_sync_persisted_local_tool_cooldown", AsyncMock())
+    monkeypatch.setattr(c, "collect_user_profile", AsyncMock(side_effect=["p1", None, "p3"]))
+    monkeypatch.setattr(c, "_collect_user", AsyncMock())
+    monkeypatch.setattr(tiktok_mod.asyncio, "sleep", AsyncMock())
+
+    await c.collect(["alice", "bob", "carol"])
+
+    assert c.collect_user_profile.await_args_list == [call("alice"), call("bob")]
+    c._collect_user.assert_not_awaited()
+    c.checkpoint.save_progress.assert_awaited_once_with("alice")
 
 
 # ── collect_following / TiktokEdgeFetcher ─────────────────────────────────

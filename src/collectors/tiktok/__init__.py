@@ -480,6 +480,10 @@ class TiktokCollector(BaseCollector):
         self._last_gallery_dl_timeout_user: str | None = None
         self._last_gallery_dl_range_by_user: dict[str, tuple[int, int]] = {}
         self._target_limit_per_cycle = max(0, int(os.getenv("TIKTOK_TARGETS_PER_CYCLE", "60")))
+        self._cooldown_profile_only_per_cycle = max(
+            0,
+            int(os.getenv("TIKTOK_COOLDOWN_PROFILE_ONLY_PER_CYCLE", "25") or "0"),
+        )
         self._spider_queue_per_cycle = max(0, int(os.getenv("TIKTOK_SPIDER_QUEUE_PER_CYCLE", "80")))
         self._spider_first = os.getenv("TIKTOK_SPIDER_QUEUE_FIRST", "true").lower() == "true"
         self._spider_processing_stale_minutes = max(
@@ -807,6 +811,7 @@ class TiktokCollector(BaseCollector):
                     "tiktok: processing %d/%d configured targets this cycle",
                     len(cycle_targets), len(targets),
                 )
+        cooldown_profile_attempts = 0
         for username in cycle_targets:
             if self._stop.is_set(): break
             if self._local_tool_cooling_down():
@@ -815,8 +820,34 @@ class TiktokCollector(BaseCollector):
                     f"TikTok local downloader cooldown active for {self._account_name()} "
                     f"({remaining}s remaining)"
                 )
-                logger.info("tiktok: %s", self._intentional_idle_reason)
-                break
+                if cooldown_profile_attempts >= self._cooldown_profile_only_per_cycle:
+                    logger.info(
+                        "tiktok: %s; profile-only cooldown budget exhausted (%d)",
+                        self._intentional_idle_reason,
+                        self._cooldown_profile_only_per_cycle,
+                    )
+                    break
+                username = username.lstrip("@")
+                if self._is_invalid_username(username):
+                    continue
+                cooldown_profile_attempts += 1
+                logger.info(
+                    "tiktok: %s; refreshing profile-only for %s (%d/%d)",
+                    self._intentional_idle_reason,
+                    username,
+                    cooldown_profile_attempts,
+                    self._cooldown_profile_only_per_cycle,
+                )
+                try:
+                    profile_id = await self.collect_user_profile(username)
+                    if profile_id:
+                        self._progress_count += 1
+                        await self.checkpoint.save_progress(username)
+                except Exception as e:
+                    logger.warning("tiktok profile-only cooldown refresh failed for %s: %s", username, e)
+                    await self.send_to_dlq(username, username, str(e))
+                await asyncio.sleep(random.uniform(self._min_sleep, self._max_sleep))
+                continue
             username = username.lstrip("@")
             if self._is_invalid_username(username): continue
 
