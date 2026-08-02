@@ -896,6 +896,43 @@ def test_browser_heartbeat_handler_records_platform_loop():
     assert "1.21.29" in args[5]
 
 
+def test_browser_heartbeat_handler_records_scraper_tab_summary_metadata():
+    pool = _FakePool()
+    req = _FakeRequest(
+        {"pool": pool},
+        {
+            "platform": "bridge",
+            "label": "UnifiedCollector Bridge",
+            "running": True,
+            "tab_id": "scraper_tabs",
+            "extension_version": "1.21.99",
+            "health_status": "scraper_heartbeat_degraded",
+            "health_reason": "watchdog",
+            "scraper_tabs_seen": 7,
+            "scraper_tabs_sent": 2,
+            "scraper_tabs_failed": 5,
+            "scraper_tabs_canonical": 6,
+            "scraper_tabs_skipped": 1,
+            "scraper_heartbeat_error": "HTTP 500",
+        },
+    )
+
+    resp = asyncio.run(ig_ingest.browser_heartbeat_handler(req))
+
+    assert resp.status == 200
+    query, args = pool.conn.executes[0]
+    assert "browser_ingest_events" in query
+    assert args[:5] == ("bridge", "browser_heartbeat", "scraper_tabs", 1, 0)
+    metadata = json.loads(args[5])
+    assert metadata["health_status"] == "scraper_heartbeat_degraded"
+    assert metadata["scraper_tabs_seen"] == 7
+    assert metadata["scraper_tabs_sent"] == 2
+    assert metadata["scraper_tabs_failed"] == 5
+    assert metadata["scraper_tabs_canonical"] == 6
+    assert metadata["scraper_tabs_skipped"] == 1
+    assert metadata["scraper_heartbeat_error"] == "HTTP 500"
+
+
 def test_browser_heartbeat_handler_records_page_recovery_metadata():
     pool = _FakePool()
     req = _FakeRequest(

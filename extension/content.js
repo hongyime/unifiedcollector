@@ -204,6 +204,123 @@ function sendTimeoutMs(msg, explicitTimeoutMs) {
   return SEND_TIMEOUT_MS_BY_TYPE[type] || DEFAULT_SEND_TIMEOUT_MS;
 }
 
+const DIRECT_INGEST_BASE = "http://127.0.0.1:8765";
+
+function directPlatform(msg) {
+  const current = currentPlatform();
+  const raw = String((msg && msg.platform) || "").trim().toLowerCase();
+  if (current && current.id) {
+    if (!raw || raw === String(current.label || "").toLowerCase()) return current.id;
+    if (raw === current.id) return current.id;
+  }
+  return raw || (current && current.id) || "unknown";
+}
+
+function withDirectVersion(payload) {
+  return { ...payload, extension_version: UC_CONTENT_VERSION };
+}
+
+function directHeartbeatPayload(msg, error, status) {
+  const p = currentPlatform() || {};
+  return withDirectVersion({
+    platform: directPlatform(msg),
+    label: msg.label || p.label || msg.platform || null,
+    running: msg.running !== false,
+    url: msg.url || location.href,
+    tab_id: "content_direct",
+    health_status: status,
+    health_reason: String(error && error.message ? error.message : error || "service_worker_unavailable").slice(0, 240),
+    message_type: msg.type || null,
+    cycle_targets: msg.targets ?? null,
+    cycle_saved: msg.saved ?? null,
+    cycle_discovered: msg.discovered ?? null,
+    loop_running: msg.type === "loopStatus" ? !!msg.running : null,
+    text_sample: msg.msg ? String(msg.msg).slice(0, 260) : null,
+  });
+}
+
+function directFallbackRequest(msg, error) {
+  const type = String((msg && msg.type) || "");
+  const platform = directPlatform(msg);
+  if (type === "loopStatus") {
+    return { path: "/social/browser-heartbeat", payload: directHeartbeatPayload(msg, error, "content_direct_loop") };
+  }
+  if (type === "tabReady") {
+    return { path: "/social/browser-heartbeat", payload: directHeartbeatPayload(msg, error, "content_direct_tab_ready") };
+  }
+  if (type === "cycleReport") {
+    return { path: "/social/browser-heartbeat", payload: directHeartbeatPayload(msg, error, "content_direct_cycle_report") };
+  }
+  if (type === "pageHealth") {
+    return {
+      path: "/social/browser-heartbeat",
+      payload: withDirectVersion({
+        platform,
+        label: msg.label || platform,
+        running: true,
+        url: msg.url || location.href,
+        tab_id: "content_direct",
+        health_status: msg.status || "content_direct_page_health",
+        health_reason: msg.reason || String(error && error.message ? error.message : error || "service_worker_unavailable").slice(0, 240),
+        text_sample: msg.sample || null,
+        content_counts: msg.content_counts || null,
+      }),
+    };
+  }
+  if (type === "log") {
+    return { path: "/social/browser-heartbeat", payload: directHeartbeatPayload(msg, error, "content_direct_log") };
+  }
+  if (type === "ingest") {
+    const allItems = Array.isArray(msg.items) ? msg.items : [];
+    const urlItems = allItems.filter((it) => !(it && it.browser_upload_only === true));
+    if (!urlItems.length && !msg.record_empty) return null;
+    return {
+      path: "/social/ingest",
+      payload: withDirectVersion({
+        platform,
+        username: msg.username,
+        items: urlItems,
+        record_empty: !!msg.record_empty,
+        probe_reason: msg.probe_reason || "content_direct_fallback",
+        probe_meta: { ...(msg.probe_meta || {}), direct_fallback: true },
+      }),
+    };
+  }
+  const jsonRoutes = {
+    discover: ["/social/discover", { platform, source: msg.source, hop: msg.hop, discovered: msg.discovered }],
+    targetStatus: ["/social/target-status", { platform, username: msg.username, status: msg.status, reason: msg.reason || null }],
+    posts: ["/social/posts", { platform, username: msg.username, posts: msg.posts }],
+    comments: ["/social/comments", { platform, post_id: msg.post_id, comments: msg.comments }],
+    users: ["/social/users", { platform, context: msg.context || "seen", owner: msg.owner || null, users: msg.users }],
+    profile: ["/social/profile", { platform, profile: msg.profile, owner: msg.owner || null }],
+    seed: ["/social/seed", { platform, users: msg.users }],
+    dms: ["/social/dms", { platform, owner: msg.owner || null, threads: msg.threads }],
+    strava_streams: ["/social/strava-streams", {
+      platform: "strava",
+      activity_id: msg.activity_id,
+      request_url: msg.request_url || msg.url || null,
+      http_status: msg.http_status || null,
+      owner: msg.owner || msg.account || null,
+      streams: msg.streams || {},
+      point_count: msg.point_count || null,
+    }],
+  };
+  if (!jsonRoutes[type]) return null;
+  return { path: jsonRoutes[type][0], payload: withDirectVersion(jsonRoutes[type][1]) };
+}
+
+async function directSendFallback(msg, error) {
+  const request = directFallbackRequest(msg, error);
+  if (!request) return null;
+  const response = await fetch(DIRECT_INGEST_BASE + request.path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request.payload),
+  });
+  const body = await response.json().catch(() => ({}));
+  return { ok: response.ok, direct_fallback: true, status: response.status, ...body };
+}
+
 async function send(msg, { retries = 1, timeoutMs = null } = {}) {
   for (let i = 0; ; i++) {
     try {
@@ -222,6 +339,8 @@ async function send(msg, { retries = 1, timeoutMs = null } = {}) {
       const retryableTimeout = e.name === "UCSendTimeout" && RETRYABLE_SEND_TIMEOUT_TYPES.has(String((msg && msg.type) || ""));
       const transient = channelTransient || retryableTimeout;
       if (!transient || i >= retries) {
+        const fallback = await directSendFallback(msg, e).catch(() => null);
+        if (fallback) return fallback;
         if (/Extension context invalidated/i.test(e.message || "")) return null; // page outlived extension
         throw e;
       }

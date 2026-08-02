@@ -217,6 +217,35 @@ async function reportScraperTabHeartbeats(reason) {
   if (failed || lastError) {
     await log("warn", `scraper heartbeat delivery: ${sent}/${seen} sent to ${base}${lastError ? " (" + lastError + ")" : ""}`);
   }
+  await reportScraperHeartbeatSummary(base, reason, { seen, sent, failed, canonical, skipped, lastError })
+    .catch(() => {});
+}
+
+async function reportScraperHeartbeatSummary(base, reason, summary) {
+  const seen = Number(summary && summary.seen || 0);
+  const sent = Number(summary && summary.sent || 0);
+  const failed = Number(summary && summary.failed || 0);
+  const lastError = summary && summary.lastError ? String(summary.lastError).slice(0, 240) : null;
+  const healthStatus = seen <= 0
+    ? "scraper_tabs_missing"
+    : failed > 0 || sent <= 0
+      ? "scraper_heartbeat_degraded"
+      : "scraper_heartbeat_ok";
+  await postJsonWithTimeout(base + "/social/browser-heartbeat", withExtensionVersion({
+    platform: "bridge",
+    label: "UnifiedCollector Bridge",
+    running: true,
+    tab_id: "scraper_tabs",
+    url: "chrome-extension://" + chrome.runtime.id + "/background.js",
+    health_status: healthStatus,
+    health_reason: reason || "background_watchdog",
+    scraper_tabs_seen: seen,
+    scraper_tabs_sent: sent,
+    scraper_tabs_failed: failed,
+    scraper_tabs_canonical: Number(summary && summary.canonical || 0),
+    scraper_tabs_skipped: Number(summary && summary.skipped || 0),
+    scraper_heartbeat_error: lastError,
+  }), SCRAPER_HEARTBEAT_TIMEOUT_MS);
 }
 
 const lastForcedCycleByTab = {};
