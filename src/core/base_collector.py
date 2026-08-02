@@ -27,6 +27,13 @@ from .vault import (
 logger = logging.getLogger(__name__)
 
 
+try:
+    from asyncpg.exceptions import QueryCanceledError
+except Exception:  # pragma: no cover - asyncpg is present in production.
+    class QueryCanceledError(Exception):  # type: ignore[no-redef]
+        pass
+
+
 def _media_db_consistency_timeout_ms() -> int:
     try:
         seconds = float(os.getenv("COLLECTOR_MEDIA_DB_CONSISTENCY_TIMEOUT_SECONDS", "3"))
@@ -735,7 +742,7 @@ class BaseCollector(ABC):
                             self.SOURCE_NAME,
                             content_id,
                         )
-            except (asyncio.TimeoutError, TimeoutError):
+            except (asyncio.TimeoutError, TimeoutError, QueryCanceledError):
                 logger.warning(
                     "vault artifact db consistency check timed out for %s/%s; media row kept",
                     self.SOURCE_NAME,
