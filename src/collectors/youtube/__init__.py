@@ -72,7 +72,7 @@ from src.collectors.youtube.parse import (
 from src.core.discovered_links import persist_discovered_links
 from src.core.link_extractor import extract_all_links
 from src.core.file_naming import sanitize_name
-from src.core.vault import VAULT_ROOT, write_atomic_artifact
+from src.core.vault import VAULT_ROOT, write_atomic_artifact, write_atomic_artifact_from_path
 from src.core.subprocess_downloader import check_tool
 from src.core.user_change_tracker import (
     UserChangeTracker,
@@ -1950,7 +1950,7 @@ class YoutubeCollector(BaseCollector):
                         if self.is_known(cid):
                             skipped_known += 1
                             continue
-                        inserted = await self.download_media({"entity_id": channel_id, "entity_name": channel_name, "content_type": "video" if is_video else "thumbnail", "content_id": cid, "data": f.read_bytes(), "extension": ext if ext != "jpeg" else "jpg", "source_url": url if "watch?v=" in url else f"https://www.youtube.com/watch?v={f.stem}"})
+                        inserted = await self.download_media({"entity_id": channel_id, "entity_name": channel_name, "content_type": "video" if is_video else "thumbnail", "content_id": cid, "source_path": str(f), "extension": ext if ext != "jpeg" else "jpg", "source_url": url if "watch?v=" in url else f"https://www.youtube.com/watch?v={f.stem}"})
                         if inserted:
                             stored_files += 1
                             if is_video:
@@ -2109,7 +2109,7 @@ class YoutubeCollector(BaseCollector):
                 ext = f.suffix.lstrip(".").lower()
                 if ext not in ("jpg", "jpeg", "png", "webp"): continue
                 if self.is_known(f.stem): continue
-                await self.download_media({"entity_id": channel_id, "entity_name": channel_name, "content_type": "thumbnail", "content_id": f.stem, "data": f.read_bytes(), "extension": ext if ext != "jpeg" else "jpg", "source_url": f"https://www.youtube.com/watch?v={f.stem}"})
+                await self.download_media({"entity_id": channel_id, "entity_name": channel_name, "content_type": "thumbnail", "content_id": f.stem, "source_path": str(f), "extension": ext if ext != "jpeg" else "jpg", "source_url": f"https://www.youtube.com/watch?v={f.stem}"})
 
     async def _enrich_transcripts_and_comments(self, limit: int = 10):
         """Per-tick enrichment: pick up to `limit` videos missing a transcript and/or comments,
@@ -2719,7 +2719,12 @@ class YoutubeCollector(BaseCollector):
         filename = self.build_filename(item["entity_id"], item["entity_name"], item["content_type"], cid, extension=item.get("extension", "jpg"))
         request_url = item.get("url")
         try:
-            if "data" in item: data = item["data"]
+            source_path = item.get("source_path")
+            data = None
+            if "data" in item:
+                data = item["data"]
+            elif source_path:
+                request_url = item.get("url")
             elif "url" in item:
                 await self.wait_rate_limit("googleapis.com")
                 request_url = item["url"]
@@ -2755,20 +2760,33 @@ class YoutubeCollector(BaseCollector):
                 "raw": item.get("raw", {}),
                 "rebuild_target_tables": ["media_items", "youtube_videos", "youtube_channels"],
             }
-            artifact = write_atomic_artifact(
-                source=self.SOURCE_NAME,
-                artifact_id=cid,
-                artifact_kind="media_blob",
-                data=data,
-                extension=item.get("extension", "jpg"),
-                metadata={
-                    **metadata,
-                    "filename": filename,
-                    "source_url": source_url,
-                    "request_url": request_url if "url" in item else item.get("url"),
-                },
-                root=VAULT_ROOT,
-            )
+            artifact_metadata = {
+                **metadata,
+                "filename": filename,
+                "source_url": source_url,
+                "request_url": request_url if "url" in item else item.get("url"),
+            }
+            if source_path:
+                artifact = write_atomic_artifact_from_path(
+                    source=self.SOURCE_NAME,
+                    artifact_id=cid,
+                    artifact_kind="media_blob",
+                    source_path=source_path,
+                    extension=item.get("extension", "jpg"),
+                    metadata=artifact_metadata,
+                    root=VAULT_ROOT,
+                    delete_source=True,
+                )
+            else:
+                artifact = write_atomic_artifact(
+                    source=self.SOURCE_NAME,
+                    artifact_id=cid,
+                    artifact_kind="media_blob",
+                    data=data,
+                    extension=item.get("extension", "jpg"),
+                    metadata=artifact_metadata,
+                    root=VAULT_ROOT,
+                )
             if not artifact.path:
                 raise RuntimeError(f"vault artifact write failed: {artifact.error}")
             metadata["vault_artifact"] = {

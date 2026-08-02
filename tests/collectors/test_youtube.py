@@ -621,6 +621,48 @@ async def test_download_media_writes_vault_blob(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_download_media_streams_local_source_path(monkeypatch, tmp_path):
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    monkeypatch.setattr(youtube_mod, "VAULT_ROOT", vault_root)
+    coll = _new_collector(monkeypatch)
+    coll.insert_media_item = AsyncMock(return_value=True)
+    coll.send_to_dlq = AsyncMock()
+
+    def _fail_byte_writer(**_kwargs):
+        raise AssertionError("source_path should use write_atomic_artifact_from_path")
+
+    monkeypatch.setattr(youtube_mod, "write_atomic_artifact", _fail_byte_writer)
+
+    source = tmp_path / "downloaded.mp4"
+    data = b"youtube video bytes"
+    source.write_bytes(data)
+    digest = hashlib.sha256(data).hexdigest()
+
+    inserted = await coll.download_media({
+        "entity_id": "UC123",
+        "entity_name": "Example Channel",
+        "content_type": "video",
+        "content_id": "video_abc123xyz90",
+        "extension": "mp4",
+        "source_path": str(source),
+        "source_url": "https://www.youtube.com/watch?v=abc123xyz90",
+    })
+
+    assert inserted is True
+    assert not source.exists()
+    kwargs = coll.insert_media_item.await_args.kwargs
+    stored_path = Path(kwargs["file_path"])
+    assert stored_path == vault_root / "media" / "blobs" / digest[:2] / digest[2:4] / f"{digest}.mp4"
+    assert stored_path.read_bytes() == data
+    assert kwargs["sha256"] == digest
+    assert kwargs["file_size"] == len(data)
+    assert kwargs["source_url"] == "https://www.youtube.com/watch?v=abc123xyz90"
+    assert kwargs["metadata"]["vault_artifact"]["ok"] is True
+    coll.send_to_dlq.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_download_media_falls_back_to_mq_thumbnail(monkeypatch, tmp_path):
     vault_root = tmp_path / "vault"
     vault_root.mkdir()
