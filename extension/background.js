@@ -50,7 +50,7 @@ const PAGE_RECOVERY_STATE_TTL_MS = 60 * 60 * 1000;
 const RELOAD_INTENT_KEY = "ucReloadIntent";
 const LOADED_VERSION_KEY = "ucLoadedExtensionVersion";
 const SCRAPER_HEARTBEAT_TIMEOUT_MS = 12000;
-const SCRAPER_HEARTBEAT_CONCURRENCY = 1;
+const SCRAPER_HEARTBEAT_CONCURRENCY = 3;
 const PAGE_RECOVERY_DELAY_WINDOWS_MS = [
   [45000, 150000],
   [240000, 480000],
@@ -202,7 +202,7 @@ async function reportScraperTabHeartbeats(reason) {
           health_reason: reason || "background_watchdog",
           page_title: tab.title || null,
         }), SCRAPER_HEARTBEAT_TIMEOUT_MS);
-        await maybeForceScrapeCycle(tab, platform, result && result.body, reason || "background_watchdog", base);
+        scheduleMaybeForceScrapeCycle(tab, platform, result && result.body, reason || "background_watchdog", base);
         sent++;
       } catch (e) {
         failed++;
@@ -587,6 +587,13 @@ async function maybeForceScrapeCycle(tab, platform, responseBody, reason, base =
       await log("warn", `${platform.label}: stale-content forced scrape failed and hard-refresh failed: ${reloadErr && reloadErr.message ? reloadErr.message : reloadErr}`);
     }
   }
+}
+
+function scheduleMaybeForceScrapeCycle(tab, platform, responseBody, reason, base = null) {
+  setTimeout(() => {
+    maybeForceScrapeCycle(tab, platform, responseBody, reason, base)
+      .catch((e) => log("warn", `${platform && platform.label ? platform.label : "scraper"} recovery failed: ${e && e.message ? e.message : e}`));
+  }, 50);
 }
 async function fetchJsonWithTimeout(url, timeoutMs = 12000) {
   const ctrl = new AbortController();

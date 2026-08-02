@@ -53,3 +53,14 @@ def test_scraper_refresh_runs_before_dashboard_content_stale_window():
     assert refresh
     assert int(watchdog.group(1)) <= 10
     assert int(refresh.group(1)) < 60
+
+
+def test_scraper_heartbeat_summary_is_not_blocked_by_recovery():
+    background = _read("extension/background.js")
+    heartbeat_fn = background.split("async function reportScraperTabHeartbeats", 1)[1].split(
+        "async function reportScraperHeartbeatSummary", 1
+    )[0]
+
+    assert "function scheduleMaybeForceScrapeCycle" in background
+    assert "scheduleMaybeForceScrapeCycle(" in heartbeat_fn
+    assert "await maybeForceScrapeCycle(" not in heartbeat_fn
