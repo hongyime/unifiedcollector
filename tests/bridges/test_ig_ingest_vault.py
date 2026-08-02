@@ -1047,6 +1047,24 @@ def test_dm_hook_heartbeat_fails_open_when_db_is_stuck(monkeypatch):
     assert payload["reason"] == "db_write_timeout"
 
 
+def test_ig_cooldown_fails_open_when_db_is_stuck(monkeypatch):
+    monkeypatch.setattr(ig_ingest, "IG_COOLDOWN_READ_TIMEOUT_SECONDS", 0.01)
+    req = _FakeRequest(
+        {"pool": _StuckPool()},
+        {},
+        query={"account": "4495993191"},
+    )
+
+    resp = asyncio.run(ig_ingest.ig_cooldown(req))
+
+    assert resp.status == 200
+    payload = json.loads(resp.text)
+    assert payload["cooling"] is False
+    assert payload["secs_left"] == 0
+    assert payload["account"] == "4495993191"
+    assert payload["cooldown_degraded"] is True
+
+
 def test_structured_browser_capture_paths_use_structured_timeout(monkeypatch):
     monkeypatch.setattr(ig_ingest, "SOCIAL_INGEST_REQUEST_TIMEOUT_SECONDS", 8.0)
     monkeypatch.setattr(ig_ingest, "SOCIAL_INGEST_STRUCTURED_REQUEST_TIMEOUT_SECONDS", 30.0)
