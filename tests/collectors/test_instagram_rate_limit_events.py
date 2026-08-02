@@ -456,6 +456,8 @@ async def test_fresh_extension_activity_detects_recent_browser_ingest(monkeypatc
         "events": 4,
         "observed": 120,
         "stored": 12,
+        "recent_media_stored": 6,
+        "recent_media_latest_at": "2026-07-28T01:30:33Z",
     })
     coll.pool = _make_pool_with_conn(conn)
 
@@ -466,9 +468,31 @@ async def test_fresh_extension_activity_detects_recent_browser_ingest(monkeypatc
         "events": 4,
         "observed": 120,
         "stored": 12,
+        "recent_media_stored": 6,
+        "recent_media_latest_at": "2026-07-28T01:30:33Z",
     }
     conn.fetchrow.assert_awaited_once()
     assert "browser_ingest_events" in conn.fetchrow.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_fresh_extension_activity_requires_recent_stored_media(monkeypatch):
+    coll = _bare_collector()
+    conn = MagicMock()
+    conn.fetchval = AsyncMock(return_value=True)
+    conn.fetchrow = AsyncMock(return_value={
+        "latest_at": "2026-07-28T01:31:33Z",
+        "events": 4,
+        "observed": 120,
+        "stored": 0,
+        "recent_media_stored": 0,
+        "recent_media_latest_at": None,
+    })
+    coll.pool = _make_pool_with_conn(conn)
+
+    result = await coll._fresh_extension_activity()
+
+    assert result is None
 
 
 @pytest.mark.asyncio
@@ -479,6 +503,8 @@ async def test_collect_skips_headless_when_instagram_extension_is_fresh(monkeypa
         "events": 4,
         "observed": 120,
         "stored": 12,
+        "recent_media_stored": 6,
+        "recent_media_latest_at": "2026-07-28T01:30:33Z",
     })
     coll._auto_discover_cookies = MagicMock()
 

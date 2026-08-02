@@ -988,7 +988,10 @@ class InstagramCollector(BaseCollector):
                 f"({fresh_extension['events']} events, "
                 f"{fresh_extension['observed']} observed, "
                 f"{fresh_extension['stored']} stored, latest "
-                f"{fresh_extension['latest_at']}); skipped headless profile loop"
+                f"{fresh_extension['latest_at']}; "
+                f"{fresh_extension.get('recent_media_stored', 0)} recent media stored, "
+                f"recent media latest {fresh_extension.get('recent_media_latest_at')}); "
+                "skipped headless profile loop"
             )
             logger.info("instagram: %s", self._intentional_idle_reason)
             return
@@ -1300,6 +1303,17 @@ class InstagramCollector(BaseCollector):
             seconds = 7200
         seconds = max(300, min(seconds, 86400))
         try:
+            media_seconds = int(os.getenv("INSTA_EXTENSION_FRESH_MEDIA_SECONDS", "1800"))
+        except ValueError:
+            media_seconds = 1800
+        media_seconds = max(300, min(media_seconds, seconds))
+        require_media = os.getenv("INSTA_EXTENSION_FRESH_REQUIRE_STORED_MEDIA", "true").lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        try:
             async with self.pool.acquire() as conn:
                 exists = await conn.fetchval(
                     "SELECT to_regclass('public.browser_ingest_events') IS NOT NULL",
@@ -1312,7 +1326,16 @@ class InstagramCollector(BaseCollector):
                     SELECT max(created_at) AS latest_at,
                            count(*)::int AS events,
                            COALESCE(sum(observed_count), 0)::int AS observed,
-                           COALESCE(sum(stored_count), 0)::int AS stored
+                           COALESCE(sum(stored_count), 0)::int AS stored,
+                           COALESCE(sum(stored_count) FILTER (
+                               WHERE endpoint = 'media'
+                                 AND created_at >= now() - ($3::int * interval '1 second')
+                           ), 0)::int AS recent_media_stored,
+                           max(created_at) FILTER (
+                               WHERE endpoint = 'media'
+                                 AND stored_count > 0
+                                 AND created_at >= now() - ($3::int * interval '1 second')
+                           ) AS recent_media_latest_at
                     FROM browser_ingest_events
                     WHERE platform = 'instagram'
                       AND endpoint = ANY($2::text[])
@@ -1320,6 +1343,7 @@ class InstagramCollector(BaseCollector):
                     """,
                     seconds,
                     ["media", "posts", "profile", "comments"],
+                    media_seconds,
                     timeout=8,
                 )
         except Exception as exc:
@@ -1327,11 +1351,20 @@ class InstagramCollector(BaseCollector):
             return None
         if not row or not row.get("latest_at") or int(row.get("observed") or 0) <= 0:
             return None
+        if require_media and int(row.get("recent_media_stored") or 0) <= 0:
+            logger.info(
+                "instagram: browser extension had recent events but no stored media "
+                "inside %ss; allowing headless profile loop",
+                media_seconds,
+            )
+            return None
         return {
             "latest_at": row["latest_at"],
             "events": int(row.get("events") or 0),
             "observed": int(row.get("observed") or 0),
             "stored": int(row.get("stored") or 0),
+            "recent_media_stored": int(row.get("recent_media_stored") or 0),
+            "recent_media_latest_at": row.get("recent_media_latest_at"),
         }
 
 
