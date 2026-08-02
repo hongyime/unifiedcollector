@@ -1262,6 +1262,9 @@ function deferNavigationForForcedRecovery(platform) {
   if (!ONE_SHOT_RUNNING) return false;
   return /browser_content_stale|stale/i.test(ONE_SHOT_REASON || "");
 }
+function forcedRecoveryMode(platform) {
+  return deferNavigationForForcedRecovery(platform);
+}
 function browserMediaRevisitUrlOk(platform, url) {
   if (!url || !/^https?:\/\//i.test(url)) return false;
   try {
@@ -1588,11 +1591,14 @@ const lemon8 = {
   },
   async runCycle() {
     const entity = this.entity();
+    const forcedRecovery = forcedRecoveryMode("lemon8");
     const mediaRevisit = await maybeStartBrowserMediaRevisit("lemon8", entity);
     if (mediaRevisit && mediaRevisit.navigating) return { targets: 1, saved: 0, discovered: 0 };
     clog("info", `cycle start on ${entity}`, "lemon8");
     const sink = makeSink();
-    await autoScroll(18, 1400, 1800, { maxPauseMs: 3500 });
+    await autoScroll(forcedRecovery ? 4 : 18, 1400, forcedRecovery ? 900 : 1800, {
+      maxPauseMs: forcedRecovery ? 1500 : 3500,
+    });
     const state = parseEmbeddedState(["__NEXT_DATA__"]);
     const users = [];
     if (state) {
@@ -1968,6 +1974,7 @@ const x = {
     const entity = this.entity();
     const owner = ownerFromStoredOrDom("x", xLoggedInOwner);
     const cycle = lsBump("uc_x_cyc");
+    const forcedRecovery = forcedRecoveryMode("x");
     if (await maybeSweepFollowGraph({
       platform: "x",
       owner,
@@ -1997,7 +2004,9 @@ const x = {
     }
     clog("info", `X cycle on ${feed} — scrolling for tweets`, "x");
     const sink = makeSink();
-    await autoScroll(12, 1400, 1800, { maxPauseMs: 3500 });
+    await autoScroll(forcedRecovery ? 4 : 12, 1400, forcedRecovery ? 900 : 1800, {
+      maxPauseMs: forcedRecovery ? 1500 : 3500,
+    });
     if (entity !== "timeline") {
       const profile = scrapeXProfile(entity);
       if (profile) {
@@ -2096,7 +2105,7 @@ const x = {
     if (activeMediaRevisit) {
       await finishBrowserMediaRevisit("x", activeMediaRevisit, ingestResponse, sink.items.length, entity);
     }
-    if (entity !== "timeline" && !xIsStatusPage()) {
+    if (!forcedRecovery && entity !== "timeline" && !xIsStatusPage()) {
       if (!xIsMediaTab()) {
         clog("info", `X @${entity}: opening Media tab`, "x");
         await sleep(jitter(3000));
@@ -2114,15 +2123,15 @@ const x = {
       }
       return { targets: 1, saved: sink.items.length, posts: xposts.length, discovered: xu.length };
     }
-    if (xIsStatusPage()) {
+    if (!forcedRecovery && xIsStatusPage()) {
       await sleep(jitter(3000));
       location.href = "https://x.com/home";
       return { targets: 1, saved: sink.items.length, posts: xposts.length, discovered: xu.length };
     }
-    if (await xMaybeVisitQueuedProfile(owner, cycle)) {
+    if (!forcedRecovery && await xMaybeVisitQueuedProfile(owner, cycle)) {
       return { targets: 1, saved: sink.items.length, posts: xposts.length, discovered: xu.length };
     }
-    if (await xMaybeVisitTweetDetail(xposts, cycle)) {
+    if (!forcedRecovery && await xMaybeVisitTweetDetail(xposts, cycle)) {
       return { targets: 1, saved: sink.items.length, posts: xposts.length, discovered: xu.length };
     }
     return { targets: 1, saved: sink.items.length, posts: xposts.length, discovered: xu.length };
@@ -2510,10 +2519,13 @@ const facebook = {
   async runCycle() {
     const entity = this.entity();
     const person = this._isPerson();
+    const forcedRecovery = forcedRecoveryMode("facebook");
     const mediaRevisit = await maybeStartBrowserMediaRevisit("facebook", facebookLoggedInOwner());
     if (mediaRevisit && mediaRevisit.navigating) return { targets: 1, saved: 0, discovered: 0 };
     clog("info", `cycle start on ${entity} (person profile: ${person})`, "facebook");
-    await autoScroll(12, 1400, 1800, { maxPauseMs: 3500 });
+    await autoScroll(forcedRecovery ? 4 : 12, 1400, forcedRecovery ? 900 : 1800, {
+      maxPauseMs: forcedRecovery ? 1500 : 3500,
+    });
     let saved = 0;
     const profile = scrapeFacebookProfile(entity, person);
     // MEDIA — capture rendered feed/profile media broadly. The bridge/file gate
@@ -2826,6 +2838,10 @@ let ONE_SHOT_STARTED_AT = 0;
 let ONE_SHOT_REASON = "";
 let LOOP_TIMEOUT_STREAK = 0;
 let ONE_SHOT_TIMEOUT_STREAK = 0;
+let SCRAPE_PASS_RUNNING = false;
+let SCRAPE_PASS_STARTED_AT = 0;
+let SCRAPE_PASS_REASON = "";
+let SCRAPE_PASS_TOKEN = 0;
 const LOOP_STALE_MS = 8 * 60 * 1000;
 const LOOP_STALE_MS_BY_PLATFORM = {
   x: 4 * 60 * 1000,
@@ -2901,6 +2917,32 @@ function loopProgressAgeMs() {
   return anchor ? Date.now() - anchor : 0;
 }
 
+function scrapePassAgeMs() {
+  return SCRAPE_PASS_RUNNING && SCRAPE_PASS_STARTED_AT ? Date.now() - SCRAPE_PASS_STARTED_AT : 0;
+}
+
+function scrapePassStaleMs(platformId) {
+  return Math.max(loopCycleTimeoutMs(platformId), oneShotTimeoutMs(platformId)) + 60 * 1000;
+}
+
+function clearScrapePass(token) {
+  if (token !== SCRAPE_PASS_TOKEN) return;
+  SCRAPE_PASS_RUNNING = false;
+  SCRAPE_PASS_STARTED_AT = 0;
+  SCRAPE_PASS_REASON = "";
+}
+
+function startScrapePass(p, reason) {
+  if (!p || SCRAPE_PASS_RUNNING) return null;
+  SCRAPE_PASS_RUNNING = true;
+  SCRAPE_PASS_STARTED_AT = Date.now();
+  SCRAPE_PASS_REASON = reason || "loop";
+  const token = ++SCRAPE_PASS_TOKEN;
+  const promise = Promise.resolve().then(() => p.runCycle());
+  promise.then(() => clearScrapePass(token), () => clearScrapePass(token));
+  return promise;
+}
+
 function deferBrowserMediaRevisitForForcedRecovery(platform) {
   if (!ONE_SHOT_RUNNING) return false;
   if (!BROWSER_MEDIA_REVISIT_PLATFORMS.has(platform)) return false;
@@ -2969,9 +3011,30 @@ async function mainLoop() {
           continue;
         }
         markLoopProgress();
+        if (SCRAPE_PASS_RUNNING) {
+          const ageMs = scrapePassAgeMs();
+          const staleMs = scrapePassStaleMs(p.id);
+          if (ageMs > staleMs) {
+            await reportForcedCycleHealth(p, "scrape_pass_stale_reloading", SCRAPE_PASS_REASON || "loop", {
+              scrape_pass_age_ms: ageMs,
+              stale_after_ms: staleMs,
+            });
+            scheduleOneShotReload(p, `scrape pass stuck ${Math.ceil(ageMs / 60000)}m`);
+            await sleep(human(30000));
+          } else {
+            await reportForcedCycleHealth(p, "scrape_pass_already_running", SCRAPE_PASS_REASON || "loop", {
+              scrape_pass_age_ms: ageMs,
+              stale_after_ms: staleMs,
+            });
+            await sleep(human(45000));
+          }
+          continue;
+        }
         const timeoutMs = loopCycleTimeoutMs(p.id);
+        const cyclePromise = startScrapePass(p, "loop");
+        if (!cyclePromise) continue;
         const stats = await withDeadline(
-          p.runCycle(),  // one pass: IG = a few profiles; others = scrape current page
+          cyclePromise,  // one pass: IG = a few profiles; others = scrape current page
           timeoutMs,
           `${p.label} loop scrape pass timed out after ${Math.ceil(timeoutMs / 60000)}m`,
           "UCLoopCycleTimeout"
@@ -3041,6 +3104,9 @@ async function reportForcedCycleHealth(p, status, reason, extra = {}) {
     loop_progress_age_ms: loopProgressAgeMs(),
     one_shot_running: ONE_SHOT_RUNNING,
     one_shot_age_ms: ONE_SHOT_RUNNING && ONE_SHOT_STARTED_AT ? Date.now() - ONE_SHOT_STARTED_AT : 0,
+    scrape_pass_running: SCRAPE_PASS_RUNNING,
+    scrape_pass_age_ms: scrapePassAgeMs(),
+    scrape_pass_reason: SCRAPE_PASS_REASON || null,
     ...extra,
   }).catch(() => null);
 }
@@ -3070,6 +3136,24 @@ async function runOneShotCycle(reason) {
     });
     return;
   }
+  if (SCRAPE_PASS_RUNNING) {
+    const ageMs = scrapePassAgeMs();
+    const staleMs = scrapePassStaleMs(p.id);
+    if (ageMs > staleMs) {
+      clog("warn", `${p.label} forced pass found a stale scrape pass; reloading tab`, p.label);
+      await reportForcedCycleHealth(p, "forced_cycle_reloading_scrape_pass_stale", reason || "manual", {
+        scrape_pass_age_ms: ageMs,
+        stale_after_ms: staleMs,
+      });
+      scheduleOneShotReload(p, "stale scrape pass");
+      return;
+    }
+    await reportForcedCycleHealth(p, "forced_cycle_deferred", "scrape_pass_running", {
+      scrape_pass_age_ms: ageMs,
+      stale_after_ms: staleMs,
+    });
+    return;
+  }
   ONE_SHOT_RUNNING = true;
   ONE_SHOT_STARTED_AT = Date.now();
   ONE_SHOT_REASON = reason || "manual";
@@ -3094,8 +3178,13 @@ async function runOneShotCycle(reason) {
       return;
     }
     const timeoutMs = oneShotTimeoutMs(p.id);
+    const cyclePromise = startScrapePass(p, "one_shot:" + (reason || "manual"));
+    if (!cyclePromise) {
+      await reportForcedCycleHealth(p, "forced_cycle_deferred", "scrape_pass_running");
+      return;
+    }
     const stats = await withDeadline(
-      p.runCycle(),
+      cyclePromise,
       timeoutMs,
       `${p.label} forced scrape pass timed out after ${Math.ceil(timeoutMs / 60000)}m`,
       "UCOneShotTimeout"
