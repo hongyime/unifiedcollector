@@ -20,10 +20,13 @@ from datetime import datetime, timezone
 _DAY = 86400
 _BROWSER_HEARTBEAT_SOURCES = ("instagram", "tiktok", "lemon8", "threads", "facebook", "x", "strava")
 _BROWSER_CONTENT_PROGRESS_SOURCES = ("instagram", "tiktok", "lemon8", "threads", "facebook", "x")
+_BROWSER_REQUIRED_SOURCES = ("threads", "facebook", "x")
 
 STRAVA_PROGRESS_QUERY = """
 SELECT extract(epoch FROM now()-max(ts))
 FROM (
+    SELECT max(updated_at) AS ts FROM strava_athletes
+    UNION ALL
     SELECT max(collected_at) AS ts FROM strava_activities
     UNION ALL
     SELECT max(collected_at) AS ts FROM strava_gps_streams
@@ -53,9 +56,42 @@ FRESHNESS: list[tuple[str, str, int]] = [
     ("telegram",  "SELECT extract(epoch FROM now()-max(collected_at)) FROM telegram_messages", 7200),
     ("whatsapp",  "SELECT extract(epoch FROM now()-max(collected_at)) FROM whatsapp_messages", 14400),
     ("beeper",    "SELECT extract(epoch FROM now()-max(ingested_at)) FROM beeper_shadow_messages", 10800),
-    ("instagram", "SELECT extract(epoch FROM now()-max(collected_at)) FROM media_items WHERE source='instagram'", 2 * _DAY),
-    ("tiktok",    "SELECT extract(epoch FROM now()-max(collected_at)) FROM media_items WHERE source='tiktok'", 2 * _DAY),
-    ("lemon8",    "SELECT extract(epoch FROM now()-max(collected_at)) FROM media_items WHERE source='lemon8'", 2 * _DAY),
+    (
+        "instagram",
+        """
+        SELECT extract(epoch FROM now()-max(ts))
+        FROM (
+            SELECT max(updated_at) AS ts FROM instagram_profiles
+            UNION ALL
+            SELECT max(collected_at) AS ts FROM media_items WHERE source='instagram'
+        ) progress
+        """,
+        2 * _DAY,
+    ),
+    (
+        "tiktok",
+        """
+        SELECT extract(epoch FROM now()-max(ts))
+        FROM (
+            SELECT max(updated_at) AS ts FROM tiktok_profiles
+            UNION ALL
+            SELECT max(collected_at) AS ts FROM media_items WHERE source='tiktok'
+        ) progress
+        """,
+        2 * _DAY,
+    ),
+    (
+        "lemon8",
+        """
+        SELECT extract(epoch FROM now()-max(ts))
+        FROM (
+            SELECT max(updated_at) AS ts FROM lemon8_profiles
+            UNION ALL
+            SELECT max(collected_at) AS ts FROM media_items WHERE source='lemon8'
+        ) progress
+        """,
+        2 * _DAY,
+    ),
     ("threads",   "SELECT extract(epoch FROM now()-max(collected_at)) FROM threads_posts", 2 * _DAY),
     ("facebook",  "SELECT extract(epoch FROM now()-max(collected_at)) FROM facebook_posts", 2 * _DAY),
     ("x",         "SELECT extract(epoch FROM now()-max(collected_at)) FROM x_posts", 2 * _DAY),
@@ -70,16 +106,16 @@ FRESHNESS_BASIS = {
     "telegram": "telegram_messages.collected_at",
     "whatsapp": "whatsapp_messages.collected_at",
     "beeper": "beeper_shadow_messages.ingested_at",
-    "instagram": "media_items.collected_at where source=instagram",
-    "tiktok": "media_items.collected_at where source=tiktok",
-    "lemon8": "media_items.collected_at where source=lemon8",
+    "instagram": "newest Instagram profile update or media row",
+    "tiktok": "newest TikTok profile update or media row",
+    "lemon8": "newest Lemon8 profile update or media row",
     "threads": "threads_posts.collected_at",
     "facebook": "facebook_posts.collected_at",
     "x": "x_posts.collected_at",
     "youtube": "youtube_videos.collected_at",
     "website": "website_pages.collected_at",
     "github": "github_commits.collected_at",
-    "strava": "newest Strava activity, GPS stream, or media row",
+    "strava": "newest Strava athlete profile, activity, GPS stream, or media row",
     "search": "search_results.collected_at",
 }
 
@@ -263,8 +299,11 @@ async def compute_liveness(conn) -> list[dict]:
                 else f"Chrome extension heartbeat is {browser_age}s old (> {browser_stale_after}s)"
             )
             if status == "live":
-                status = "degraded"
-                detail = browser_detail
+                if name in _BROWSER_REQUIRED_SOURCES:
+                    status = "degraded"
+                    detail = browser_detail
+                else:
+                    detail = f"{detail}; browser capture warning: {browser_detail}"
             else:
                 detail = f"{detail}; {browser_detail}"
         browser_content_stale = (

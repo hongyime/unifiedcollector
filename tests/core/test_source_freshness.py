@@ -124,6 +124,7 @@ async def test_strava_liveness_counts_route_and_media_progress(monkeypatch):
             raise AssertionError(query)
 
         async def fetchval(self, query: str, timeout: int = 8):
+            assert "strava_athletes" in query
             assert "strava_gps_streams" in query
             assert "media_items WHERE source='strava'" in query
             return 30
@@ -138,11 +139,11 @@ async def test_strava_liveness_counts_route_and_media_progress(monkeypatch):
 
     assert rows[0]["status"] == "live"
     assert rows[0]["age_seconds"] == 30
-    assert rows[0]["freshness_basis"] == "newest Strava activity, GPS stream, or media row"
+    assert rows[0]["freshness_basis"] == "newest Strava athlete profile, activity, GPS stream, or media row"
 
 
 @pytest.mark.asyncio
-async def test_browser_source_degrades_when_extension_heartbeat_is_stale(monkeypatch):
+async def test_hybrid_browser_source_stays_live_when_extension_heartbeat_is_stale(monkeypatch):
     from src.core import source_freshness
 
     class BrowserStaleConn:
@@ -178,10 +179,52 @@ async def test_browser_source_degrades_when_extension_heartbeat_is_stale(monkeyp
 
     rows = await source_freshness.compute_liveness(BrowserStaleConn())
 
-    assert rows[0]["status"] == "degraded"
+    assert rows[0]["status"] == "live"
     assert rows[0]["age_seconds"] == 60
     assert rows[0]["browser_heartbeat_age_seconds"] == 7200
     assert rows[0]["browser_extension_version"] == "1.21.58"
+    assert "Chrome extension heartbeat is 7200s old" in rows[0]["detail"]
+    assert "browser capture warning" in rows[0]["detail"]
+
+
+@pytest.mark.asyncio
+async def test_browser_only_source_degrades_when_extension_heartbeat_is_stale(monkeypatch):
+    from src.core import source_freshness
+
+    class BrowserOnlyStaleConn:
+        async def fetch(self, query: str, *args, timeout: int = 8):
+            if "FROM source_health" in query:
+                return []
+            if "FROM browser_ingest_events" in query and "browser_heartbeat" in query:
+                return [
+                    {
+                        "platform": "facebook",
+                        "last_seen_at": datetime.now(timezone.utc) - timedelta(hours=2),
+                        "age_seconds": 7200,
+                        "extension_version": "1.21.58",
+                        "url": "https://www.facebook.com/",
+                        "health_status": "service_worker_active",
+                    }
+                ]
+            raise AssertionError(query)
+
+        async def fetchval(self, query: str, *args, timeout: int = 8):
+            if "facebook_posts" in query:
+                return 60
+            return None
+
+    monkeypatch.setenv("BROWSER_HEARTBEAT_STALE_WARN_SECONDS", "3600")
+    monkeypatch.setattr(
+        source_freshness,
+        "FRESHNESS",
+        [("facebook", "SELECT extract(epoch FROM now()-max(collected_at)) FROM facebook_posts", 172800)],
+    )
+
+    rows = await source_freshness.compute_liveness(BrowserOnlyStaleConn())
+
+    assert rows[0]["status"] == "degraded"
+    assert rows[0]["age_seconds"] == 60
+    assert rows[0]["browser_heartbeat_age_seconds"] == 7200
     assert "Chrome extension heartbeat is 7200s old" in rows[0]["detail"]
 
 
