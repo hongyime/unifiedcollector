@@ -1647,6 +1647,7 @@ def _empty_source_counts() -> dict:
         "latest_record_at": None,
         "latest_media_at": None,
         "latest_event_at": None,
+        "media_stats_unavailable": False,
     }
 
 
@@ -1681,6 +1682,8 @@ def _source_window_totals(rows: list[dict], window_key: str) -> dict:
             active_sources += 1
         for key in ("records", "messages", "media_items", "rate_limits", "access_errors"):
             out[key] += int(window.get(key) or 0)
+        if window.get("media_stats_unavailable"):
+            out["media_stats_unavailable"] = True
         for key in ("latest_record_at", "latest_media_at", "latest_event_at"):
             value = window.get(key)
             if value and (out.get(key) is None or value > out[key]):
