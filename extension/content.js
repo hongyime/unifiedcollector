@@ -2664,9 +2664,22 @@ const ONE_SHOT_TIMEOUT_MS_BY_PLATFORM = {
   x: 3 * 60 * 1000,
   facebook: 3 * 60 * 1000,
 };
+const LOOP_CYCLE_TIMEOUT_MS_BY_PLATFORM = {
+  instagram: 12 * 60 * 1000,
+  strava: 6 * 60 * 1000,
+  tiktok: 5 * 60 * 1000,
+  lemon8: 5 * 60 * 1000,
+  threads: 5 * 60 * 1000,
+  x: 4 * 60 * 1000,
+  facebook: 4 * 60 * 1000,
+};
 
 function oneShotTimeoutMs(platformId) {
   return ONE_SHOT_TIMEOUT_MS_BY_PLATFORM[platformId] || 4 * 60 * 1000;
+}
+
+function loopCycleTimeoutMs(platformId) {
+  return LOOP_CYCLE_TIMEOUT_MS_BY_PLATFORM[platformId] || 6 * 60 * 1000;
 }
 
 function oneShotStaleMs(platformId) {
@@ -2754,7 +2767,13 @@ async function mainLoop() {
           continue;
         }
         markLoopProgress();
-        const stats = await p.runCycle();  // one pass: IG = a few profiles; others = scrape current page
+        const timeoutMs = loopCycleTimeoutMs(p.id);
+        const stats = await withDeadline(
+          p.runCycle(),  // one pass: IG = a few profiles; others = scrape current page
+          timeoutMs,
+          `${p.label} loop scrape pass timed out after ${Math.ceil(timeoutMs / 60000)}m`,
+          "UCLoopCycleTimeout"
+        );
         markLoopProgress();
         if (!stats || !stats.skip_cycle_report) {
           await send({ type: "cycleReport", platform: p.label, ...stats }).catch(() => {});
@@ -2767,6 +2786,13 @@ async function mainLoop() {
           continue;
         }
         clog("error", `${p.label} loop error: ${e.message}`, p.label);
+        if (e && e.name === "UCLoopCycleTimeout") {
+          await reportForcedCycleHealth(p, "loop_cycle_timeout", "loop_cycle_timeout", {
+            cycle_error: e.message,
+            timeout_ms: loopCycleTimeoutMs(p.id),
+          });
+          scheduleOneShotReload(p, "loop scrape timed out");
+        }
         await sleep(human(60000));
       }
       // heartbeat so the popup shows the loop is alive between passes
