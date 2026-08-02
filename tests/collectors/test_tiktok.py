@@ -494,6 +494,8 @@ async def test_scrape_profile_metadata_records_challenge_wall(monkeypatch):
 
     assert out["status"] == "delayed"
     assert out["error"] == "profile_wall:security_check"
+    assert c._profile_metadata_cooling_down() is True
+    assert c._local_tool_cooling_down() is True
     assert events[0]["source"] == "tiktok"
     assert events[0]["scope"] == "profile_metadata"
 
@@ -698,6 +700,35 @@ async def test_collect_refreshes_profiles_during_local_tool_cooldown(monkeypatch
     assert c.collect_user_profile.await_args_list == [call("alice"), call("bob")]
     c._collect_user.assert_not_awaited()
     c.checkpoint.save_progress.assert_awaited_once_with("alice")
+
+
+@pytest.mark.asyncio
+async def test_collect_stops_profile_refresh_when_profile_metadata_cools_down(monkeypatch):
+    monkeypatch.setenv("TIKTOK_SPIDER_ENABLED", "false")
+    monkeypatch.setenv("TIKTOK_COOLDOWN_PROFILE_ONLY_PER_CYCLE", "5")
+    with patch.object(TiktokCollector, "_check_tool", staticmethod(lambda *_: False)), \
+         patch.object(TiktokCollector, "_discover_cookie_file", staticmethod(lambda: "")):
+        c = TiktokCollector()
+    c._quota = None
+    c._local_tool_cooldown_until = 9_999_999_999
+    c.checkpoint = MagicMock()
+    c.checkpoint.save_progress = AsyncMock()
+    monkeypatch.setattr(c, "_load_tracker_state", AsyncMock())
+    monkeypatch.setattr(c, "_sync_persisted_local_tool_cooldown", AsyncMock())
+    monkeypatch.setattr(c, "_collect_user", AsyncMock())
+    monkeypatch.setattr(tiktok_mod.asyncio, "sleep", AsyncMock())
+
+    async def _profile_once(username):
+        c._start_profile_metadata_cooldown("profile_wall:challenge", 1800)
+        return None
+
+    monkeypatch.setattr(c, "collect_user_profile", AsyncMock(side_effect=_profile_once))
+
+    await c.collect(["alice", "bob", "carol"])
+
+    c.collect_user_profile.assert_awaited_once_with("alice")
+    c._collect_user.assert_not_awaited()
+    c.checkpoint.save_progress.assert_not_awaited()
 
 
 # ── collect_following / TiktokEdgeFetcher ─────────────────────────────────

@@ -412,6 +412,8 @@ class TiktokCollector(BaseCollector):
         self._local_tool_cooldown_until = 0.0
         self._local_tool_cooldown_seconds = int(os.getenv("TIKTOK_LOCAL_TOOL_429_COOLDOWN_SECONDS", "1800"))
         self._local_tool_cooldown_restored = False
+        self._profile_metadata_cooldown_until = 0.0
+        self._profile_metadata_cooldown_reason = ""
         self._profile_backoff_enabled = os.getenv("TIKTOK_PROFILE_BACKOFF_ENABLED", "true").lower() == "true"
         self._profile_backoff_dir = Path(
             os.getenv(
@@ -730,6 +732,23 @@ class TiktokCollector(BaseCollector):
     def _local_tool_cooling_down(self) -> bool:
         return time.time() < self._local_tool_cooldown_until
 
+    def _profile_metadata_cooling_down(self) -> bool:
+        return time.time() < self._profile_metadata_cooldown_until
+
+    def _start_profile_metadata_cooldown(self, reason: str, cooldown_seconds: int | None = None) -> None:
+        seconds = int(cooldown_seconds or self._local_tool_cooldown_seconds or 0)
+        if seconds <= 0:
+            return
+        until = time.time() + seconds
+        self._profile_metadata_cooldown_until = max(
+            self._profile_metadata_cooldown_until,
+            until,
+        )
+        self._profile_metadata_cooldown_reason = reason
+        # A profile challenge usually means the same account/browser fingerprint
+        # is challenged for media too. Rest the heavy downloader as well.
+        self._local_tool_cooldown_until = max(self._local_tool_cooldown_until, until)
+
     async def _sync_persisted_local_tool_cooldown(self) -> None:
         if self._local_tool_cooldown_restored or self.pool is None:
             return
@@ -738,11 +757,11 @@ class TiktokCollector(BaseCollector):
             async with self.pool.acquire() as conn:
                 row = await conn.fetchrow(
                     """
-                    SELECT created_at, cooldown_seconds, reason
+                    SELECT created_at, cooldown_seconds, reason, scope
                     FROM rate_limit_events
                     WHERE source = 'tiktok'
                       AND account = $1
-                      AND (status_code = 429 OR status_code IS NULL)
+                      AND (status_code = 429 OR status_code IS NULL OR scope = 'profile_metadata')
                       AND cooldown_seconds IS NOT NULL
                       AND created_at + (cooldown_seconds * INTERVAL '1 second') > NOW()
                     ORDER BY created_at DESC
@@ -769,6 +788,12 @@ class TiktokCollector(BaseCollector):
             self._local_tool_cooldown_until,
             time.time() + remaining,
         )
+        if row["scope"] == "profile_metadata":
+            self._profile_metadata_cooldown_until = max(
+                self._profile_metadata_cooldown_until,
+                time.time() + remaining,
+            )
+            self._profile_metadata_cooldown_reason = row["reason"] or "profile_metadata"
         logger.info(
             "tiktok: restored local tool cooldown for %ds (%s)",
             int(remaining),
@@ -836,6 +861,15 @@ class TiktokCollector(BaseCollector):
         cooldown_profile_attempts = 0
         for username in cycle_targets:
             if self._stop.is_set(): break
+            if self._profile_metadata_cooling_down():
+                remaining = int(self._profile_metadata_cooldown_until - time.time())
+                reason = self._profile_metadata_cooldown_reason or "profile metadata cooldown"
+                self._intentional_idle_reason = (
+                    f"TikTok profile metadata cooldown active for {self._account_name()} "
+                    f"({remaining}s remaining; {reason})"
+                )
+                logger.info("tiktok: %s", self._intentional_idle_reason)
+                break
             if self._local_tool_cooling_down():
                 remaining = int(self._local_tool_cooldown_until - time.time())
                 self._intentional_idle_reason = (
@@ -1188,6 +1222,10 @@ class TiktokCollector(BaseCollector):
                     "error": validation.error_message,
                 }
             if validation.is_rate_limited:
+                self._start_profile_metadata_cooldown(
+                    "TikTok profile metadata HTTP rate-limit",
+                    self._local_tool_cooldown_seconds,
+                )
                 await record_rate_limit_event(
                     self.pool,
                     source="tiktok",
@@ -1215,6 +1253,8 @@ class TiktokCollector(BaseCollector):
                 }
             wall_reason = classify_profile_wall(resp.text)
             if wall_reason:
+                reason = f"TikTok profile metadata challenge wall: {wall_reason}"
+                self._start_profile_metadata_cooldown(reason, self._local_tool_cooldown_seconds)
                 await record_rate_limit_event(
                     self.pool,
                     source="tiktok",
@@ -1222,7 +1262,7 @@ class TiktokCollector(BaseCollector):
                     scope="profile_metadata",
                     status_code=resp.status_code,
                     cooldown_seconds=self._local_tool_cooldown_seconds,
-                    reason=f"TikTok profile metadata challenge wall: {wall_reason}",
+                    reason=reason,
                     metadata={"username": username, "wall_reason": wall_reason},
                 )
                 return {
