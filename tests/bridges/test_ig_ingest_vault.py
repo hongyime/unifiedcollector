@@ -77,6 +77,7 @@ class _FakeRequest(dict):
         self.app = app
         self._body = body
         self.query = query or {}
+        self.headers = {}
 
     async def json(self):
         return self._body
@@ -1021,6 +1022,29 @@ def test_browser_heartbeat_handler_returns_when_telemetry_db_is_stuck(monkeypatc
     resp = asyncio.run(ig_ingest.browser_heartbeat_handler(req))
 
     assert resp.status == 200
+
+
+def test_dm_hook_heartbeat_fails_open_when_db_is_stuck(monkeypatch):
+    monkeypatch.setattr(ig_ingest, "DM_HOOK_HEARTBEAT_WRITE_TIMEOUT_SECONDS", 0.01)
+    req = _FakeRequest(
+        {"pool": _StuckPool()},
+        {
+            "platform": "tiktok",
+            "owner": "bryanseah234",
+            "probes_sent": 1,
+            "samples_shipped": 0,
+            "extension_version": "1.21.92",
+        },
+    )
+
+    resp = asyncio.run(ig_ingest.dm_hook_heartbeat_handler(req))
+
+    assert resp.status == 200
+    payload = json.loads(resp.text)
+    assert payload["ok"] is True
+    assert payload["recorded"] is False
+    assert payload["telemetry_degraded"] is True
+    assert payload["reason"] == "db_write_timeout"
 
 
 def test_structured_browser_capture_paths_use_structured_timeout(monkeypatch):

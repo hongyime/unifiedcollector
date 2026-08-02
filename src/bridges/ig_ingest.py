@@ -107,6 +107,13 @@ try:
 except (TypeError, ValueError):
     BROWSER_TELEMETRY_WRITE_TIMEOUT_SECONDS = 8.0
 try:
+    DM_HOOK_HEARTBEAT_WRITE_TIMEOUT_SECONDS = max(
+        0.25,
+        float(os.getenv("DM_HOOK_HEARTBEAT_WRITE_TIMEOUT_SECONDS", "2.0")),
+    )
+except (TypeError, ValueError):
+    DM_HOOK_HEARTBEAT_WRITE_TIMEOUT_SECONDS = 2.0
+try:
     SOCIAL_INGEST_REQUEST_TIMEOUT_SECONDS = max(
         1.0,
         float(os.getenv("SOCIAL_INGEST_REQUEST_TIMEOUT_SECONDS", "8.0")),
@@ -617,7 +624,11 @@ def _schedule_app_task(app, coro, label: str) -> None:
 
 @web.middleware
 async def db_pool_middleware(request, handler):
-    if request.method == "OPTIONS" or request.path in {"/health", "/social/browser-heartbeat"}:
+    if request.method == "OPTIONS" or request.path in {
+        "/health",
+        "/social/browser-heartbeat",
+        "/social/dm-heartbeat",
+    }:
         return await handler(request)
     try:
         await _ensure_app_pool(request.app)
@@ -3627,30 +3638,49 @@ async def dm_hook_heartbeat_handler(request):
 
     pool = request.app.get("pool")
     if not pool:
-        return _cors(web.json_response({"ok": True, "recorded": False}))
+        return _cors(web.json_response({"ok": True, "recorded": False, "telemetry_degraded": True}))
     try:
-        async with pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO dm_hook_heartbeat
-                    (platform, owner_account, last_seen, probes_sent,
-                     samples_shipped, extension_version, user_agent)
-                VALUES ($1, $2, now(), $3, $4, $5, $6)
-                ON CONFLICT (platform, owner_account) DO UPDATE SET
-                    last_seen         = now(),
-                    probes_sent       = EXCLUDED.probes_sent,
-                    samples_shipped   = EXCLUDED.samples_shipped,
-                    extension_version = COALESCE(EXCLUDED.extension_version,
-                                                 dm_hook_heartbeat.extension_version),
-                    user_agent        = COALESCE(EXCLUDED.user_agent,
-                                                 dm_hook_heartbeat.user_agent)
-                """,
-                platform[:64], owner[:128], probes, samples, ext_version, ua,
-            )
+        async with asyncio.timeout(DM_HOOK_HEARTBEAT_WRITE_TIMEOUT_SECONDS):
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO dm_hook_heartbeat
+                        (platform, owner_account, last_seen, probes_sent,
+                         samples_shipped, extension_version, user_agent)
+                    VALUES ($1, $2, now(), $3, $4, $5, $6)
+                    ON CONFLICT (platform, owner_account) DO UPDATE SET
+                        last_seen         = now(),
+                        probes_sent       = EXCLUDED.probes_sent,
+                        samples_shipped   = EXCLUDED.samples_shipped,
+                        extension_version = COALESCE(EXCLUDED.extension_version,
+                                                     dm_hook_heartbeat.extension_version),
+                        user_agent        = COALESCE(EXCLUDED.user_agent,
+                                                     dm_hook_heartbeat.user_agent)
+                    """,
+                    platform[:64], owner[:128], probes, samples, ext_version, ua,
+                )
+    except TimeoutError:
+        logger.info(
+            "dm_hook_heartbeat write timed out after %.2fs platform=%s owner=%s",
+            DM_HOOK_HEARTBEAT_WRITE_TIMEOUT_SECONDS,
+            platform,
+            owner,
+        )
+        return _cors(web.json_response({
+            "ok": True,
+            "recorded": False,
+            "telemetry_degraded": True,
+            "reason": "db_write_timeout",
+        }))
     except Exception:
         logger.debug("dm_hook_heartbeat upsert failed", exc_info=True)
-        return _cors(web.json_response({"ok": False, "error": "db"}, status=500))
-    return _cors(web.json_response({"ok": True}))
+        return _cors(web.json_response({
+            "ok": True,
+            "recorded": False,
+            "telemetry_degraded": True,
+            "reason": "db_write_failed",
+        }))
+    return _cors(web.json_response({"ok": True, "recorded": True}))
 
 
 async def dm_probe_handler(request):
