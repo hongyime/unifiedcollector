@@ -157,6 +157,7 @@ class YoutubeCollector(BaseCollector):
             self._ffprobe_available,
         )
         self._sem = asyncio.Semaphore(self._max_concurrent)
+        self._download_sem = asyncio.Semaphore(self._max_concurrent)
         self._download_videos = os.getenv("YOUTUBE_DOWNLOAD_VIDEOS", "true").lower() == "true"
         self._oauth_pickle = Path(os.getenv("YOUTUBE_OAUTH_PICKLE", "data/youtube_oauth.pickle"))
         self._oauth_credentials = None
@@ -1882,80 +1883,87 @@ class YoutubeCollector(BaseCollector):
             skipped_duration,
             skipped_db,
         )
-        stored_total = 0
-        for url in urls:
-            if self._stop.is_set(): break
-            await asyncio.sleep(self._download_delay)
-            async with managed_tempdir("yt_") as tmpdir:
-                logger.info("youtube yt-dlp starting %s", url)
-                extra = self._yt_dlp_extra_args()
-                if self._max_duration:
-                    extra.extend(["--match-filter", f"duration<={self._max_duration * 60}"])
-                if self._cookie_browser:
-                    extra.extend(["--cookies-from-browser", self._cookie_browser])
-                if "watch?v=" not in url:
-                    extra.extend(["--playlist-end", "50"])
-                result = await yt_dlp_download(
-                    url,
-                    cookies_file=self._usable_cookie_file() or None,
-                    output_template=os.path.join(tmpdir, "%(id)s.%(ext)s"),
-                    max_downloads=None,  # respect playlist-end / per-video
-                    retries=3,
-                    impersonate="chrome",
-                    write_thumbnail=True,
-                    no_overwrites=True,
-                    extra_args=extra,
-                    timeout=self._video_download_timeout,
-                    tempdir=tmpdir,
-                    stop_event=self._stop if hasattr(self._stop, "wait") else None,
-                )
-                if not result.ok and not result.cancelled:
-                    reason = result.output_summary(400)
-                    logger.warning(
-                        "youtube yt-dlp video download failed for %s: rc=%s timed_out=%s output_tail=%s",
-                        url, result.returncode, result.timed_out, reason,
+        async def _download_one(url: str) -> int:
+            if self._stop.is_set():
+                return 0
+            async with self._download_sem:
+                if self._stop.is_set():
+                    return 0
+                await asyncio.sleep(self._download_delay)
+                async with managed_tempdir("yt_") as tmpdir:
+                    logger.info("youtube yt-dlp starting %s", url)
+                    extra = self._yt_dlp_extra_args()
+                    if self._max_duration:
+                        extra.extend(["--match-filter", f"duration<={self._max_duration * 60}"])
+                    if self._cookie_browser:
+                        extra.extend(["--cookies-from-browser", self._cookie_browser])
+                    if "watch?v=" not in url:
+                        extra.extend(["--playlist-end", "50"])
+                    result = await yt_dlp_download(
+                        url,
+                        cookies_file=self._usable_cookie_file() or None,
+                        output_template=os.path.join(tmpdir, "%(id)s.%(ext)s"),
+                        max_downloads=None,  # respect playlist-end / per-video
+                        retries=3,
+                        impersonate="chrome",
+                        write_thumbnail=True,
+                        no_overwrites=True,
+                        extra_args=extra,
+                        timeout=self._video_download_timeout,
+                        tempdir=tmpdir,
+                        stop_event=self._stop if hasattr(self._stop, "wait") else None,
                     )
-                    m = re.search(r"watch\?v=([\w-]+)", url)
-                    if m:
-                        await self._mark_video_media_attempt(
-                            m.group(1),
-                            status="failed",
-                            reason=reason or f"yt-dlp rc={result.returncode}",
+                    if not result.ok and not result.cancelled:
+                        reason = result.output_summary(400)
+                        logger.warning(
+                            "youtube yt-dlp video download failed for %s: rc=%s timed_out=%s output_tail=%s",
+                            url, result.returncode, result.timed_out, reason,
                         )
-                    self._progress_count += 1  # tick watchdog so metadata-only runs don't look hung
-                eligible_files = 0
-                stored_files = 0
-                skipped_known = 0
-                skipped_extension = 0
-                for f in result.files:
-                    if self._stop.is_set(): break
-                    ext = f.suffix.lstrip(".").lower()
-                    if ext not in ("jpg", "jpeg", "png", "webp", "mp4", "webm", "mkv"):
-                        skipped_extension += 1
-                        continue
-                    eligible_files += 1
-                    cid = f.stem
-                    is_video = ext in ("mp4", "webm", "mkv")
-                    if is_video: cid = f"video_{cid}"
-                    if self.is_known(cid):
-                        skipped_known += 1
-                        continue
-                    inserted = await self.download_media({"entity_id": channel_id, "entity_name": channel_name, "content_type": "video" if is_video else "thumbnail", "content_id": cid, "data": f.read_bytes(), "extension": ext if ext != "jpeg" else "jpg", "source_url": url if "watch?v=" in url else f"https://www.youtube.com/watch?v={f.stem}"})
-                    if inserted:
-                        stored_files += 1
-                        stored_total += 1
+                        m = re.search(r"watch\?v=([\w-]+)", url)
+                        if m:
+                            await self._mark_video_media_attempt(
+                                m.group(1),
+                                status="failed",
+                                reason=reason or f"yt-dlp rc={result.returncode}",
+                            )
+                        self._progress_count += 1  # tick watchdog so metadata-only runs don't look hung
+                    eligible_files = 0
+                    stored_files = 0
+                    skipped_known = 0
+                    skipped_extension = 0
+                    for f in result.files:
+                        if self._stop.is_set():
+                            break
+                        ext = f.suffix.lstrip(".").lower()
+                        if ext not in ("jpg", "jpeg", "png", "webp", "mp4", "webm", "mkv"):
+                            skipped_extension += 1
+                            continue
+                        eligible_files += 1
+                        cid = f.stem
+                        is_video = ext in ("mp4", "webm", "mkv")
                         if is_video:
-                            await self._mark_video_media_attempt(f.stem, status="stored")
-                logger.info(
-                    "youtube yt-dlp media ingest for %s: result_files=%d eligible=%d stored=%d skipped_known=%d skipped_ext=%d",
-                    url,
-                    len(result.files),
-                    eligible_files,
-                    stored_files,
-                    skipped_known,
-                    skipped_extension,
-                )
-        return stored_total
+                            cid = f"video_{cid}"
+                        if self.is_known(cid):
+                            skipped_known += 1
+                            continue
+                        inserted = await self.download_media({"entity_id": channel_id, "entity_name": channel_name, "content_type": "video" if is_video else "thumbnail", "content_id": cid, "data": f.read_bytes(), "extension": ext if ext != "jpeg" else "jpg", "source_url": url if "watch?v=" in url else f"https://www.youtube.com/watch?v={f.stem}"})
+                        if inserted:
+                            stored_files += 1
+                            if is_video:
+                                await self._mark_video_media_attempt(f.stem, status="stored")
+                    logger.info(
+                        "youtube yt-dlp media ingest for %s: result_files=%d eligible=%d stored=%d skipped_known=%d skipped_ext=%d",
+                        url,
+                        len(result.files),
+                        eligible_files,
+                        stored_files,
+                        skipped_known,
+                        skipped_extension,
+                    )
+                    return stored_files
+
+        results = await asyncio.gather(*(_download_one(url) for url in urls))
+        return sum(results)
 
     def _yt_dlp_extra_args(self) -> list[str]:
         """Build yt-dlp args.

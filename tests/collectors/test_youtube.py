@@ -5,6 +5,7 @@ Pure unit. yt-dlp / Google OAuth / httpx are mocked at boundaries.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import time
@@ -1066,6 +1067,39 @@ async def test_download_videos_uses_configured_hard_timeout(monkeypatch):
     await coll._download_videos_via_yt_dlp("UC_a", "Channel A", ["v1"])
 
     assert ytdlp.await_args.kwargs["timeout"] == 123
+
+
+@pytest.mark.asyncio
+async def test_download_videos_uses_bounded_parallel_workers(monkeypatch):
+    coll = _new_collector(
+        monkeypatch,
+        YOUTUBE_DOWNLOAD_DELAY="0",
+        YOUTUBE_MAX_CONCURRENT_DOWNLOADS="2",
+    )
+    coll._filter_video_ids_for_download = AsyncMock(return_value=(["v1", "v2", "v3"], 0))
+    coll._filter_video_ids_already_archived = AsyncMock(return_value=(["v1", "v2", "v3"], 0))
+
+    from src.core import subprocess_downloader
+
+    active = 0
+    max_active = 0
+    calls = 0
+
+    async def ytdlp(*args, **kwargs):
+        nonlocal active, max_active, calls
+        calls += 1
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.02)
+        active -= 1
+        return MagicMock(ok=True, cancelled=False, files=[])
+
+    monkeypatch.setattr(subprocess_downloader, "yt_dlp_download", ytdlp)
+
+    await coll._download_videos_via_yt_dlp("UC_a", "Channel A", ["v1", "v2", "v3"])
+
+    assert calls == 3
+    assert max_active == 2
 
 
 def test_ytdlp_extra_args_lets_best_use_default_selector(monkeypatch):

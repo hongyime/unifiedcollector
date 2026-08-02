@@ -103,7 +103,7 @@ services:
       COLLECTOR_VAULT_ROOT: /vault
       COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
       YOUTUBE_ENRICH_BATCH_LIMIT: "5"
-      YOUTUBE_MAX_CONCURRENT_DOWNLOADS: "1"
+      YOUTUBE_MAX_CONCURRENT_DOWNLOADS: "2"
       YOUTUBE_VIDEO_BACKFILL_BATCH_SIZE: "12"
       YOUTUBE_VIDEO_BACKFILL_MAX_PASSES: "2"
       YOUTUBE_VIDEO_BACKFILL_FAILED_RETRY_HOURS: "24"
@@ -783,7 +783,7 @@ services:
       DB_POOL_MAX_SIZE: "4"
       # Operator status compares live Chrome hook heartbeats against this repo
       # extension build. Update with extension/manifest.json version bumps.
-      UC_EXTENSION_EXPECTED_VERSION: "1.21.98"
+      UC_EXTENSION_EXPECTED_VERSION: "1.21.99"
     volumes:
       - z:/unifiedcollector/media:/media
       - z:/unifiedcollector:/vault
@@ -843,7 +843,7 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
-      UC_EXTENSION_EXPECTED_VERSION: "1.21.98"
+      UC_EXTENSION_EXPECTED_VERSION: "1.21.99"
       YOUTUBE_MAX_VIDEO_DURATION_MINUTES: "0"
       STRAVA_ROUTE_STREAM_SHARED_COOLDOWN: "true"
       STRAVA_BROWSER_ROUTE_QUEUE_CANDIDATE_LIMIT: "50"
