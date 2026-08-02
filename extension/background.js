@@ -60,6 +60,7 @@ const PAGE_RECOVERY_DELAY_WINDOWS_MS = [
   [240000, 480000],
   [720000, 1200000],
 ];
+const REFRESH_AFTER_PROGRAMMATIC_INJECT_PLATFORMS = new Set(["x"]);
 
 // ---- persistent logging --------------------------------------------------
 async function log(level, msg) {
@@ -500,7 +501,19 @@ async function refreshTabForMissingContentScript(base, tab, platform, reason, ex
     recovery: "receiver_missing_programmatic_inject",
     ...extra,
   });
-  if (injected) return true;
+  if (injected) {
+    if (REFRESH_AFTER_PROGRAMMATIC_INJECT_PLATFORMS.has(platform.id)) {
+      await recordServiceWorkerRecovery(base, tab, platform, "content_script_injected_refresh", reason || "content_script_receiver_missing", {
+        recovery: "receiver_missing_injected_then_refresh",
+        ...extra,
+      });
+      return hardRefreshForcedCycleTab(base, tab, platform, reason || "content_script_receiver_missing", {
+        recovery: "receiver_missing_injected_then_refresh",
+        ...extra,
+      });
+    }
+    return true;
+  }
   // If programmatic injection still cannot attach, reload the page so Chrome can
   // run the manifest content script in a clean page context.
   return hardRefreshForcedCycleTab(base, tab, platform, reason || "content_script_receiver_missing", {

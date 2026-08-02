@@ -1355,6 +1355,34 @@ async function finishTikTokRevisit(active, response, observed, username) {
   }).catch(() => {});
   localStorage.removeItem(tiktokRevisitKey());
 }
+function tiktokProgressKey() {
+  return "uc_tiktok_zero_progress_" + location.pathname.replace(/[^A-Za-z0-9_/-]/g, "_").slice(0, 180);
+}
+function tiktokBumpZeroProgress() {
+  const key = tiktokProgressKey();
+  const value = lsNum(key) + 1;
+  lsSet(key, String(value));
+  return value;
+}
+function tiktokClearZeroProgress() {
+  lsSet(tiktokProgressKey(), "0");
+}
+async function tiktokReportPageHealth(status, reason, counts) {
+  return send({
+    type: "pageHealth",
+    platform: "tiktok",
+    label: "TikTok",
+    status,
+    reason,
+    url: location.href,
+    title: document.title || "",
+    sample: status === "healthy" ? null : compactSample(visiblePageText()),
+    content_counts: {
+      ...pageContentCounts(),
+      ...(counts || {}),
+    },
+  }).catch(() => null);
+}
 
 const BROWSER_MEDIA_REVISIT_PLATFORMS = new Set(["x", "threads", "facebook", "lemon8"]);
 function browserMediaRevisitKey(platform) { return "uc_browser_media_revisit_active_" + platform; }
@@ -1511,9 +1539,16 @@ const tiktok = {
     if (revisit && revisit.navigating) return { targets: 1, saved: 0, discovered: 0 };
     clog("info", `cycle start on @${entity}`, "tiktok");
     const sink = makeSink();
+    let userCount = 0;
     await autoScroll(10, 1400, 1800, { maxPauseMs: 3500 });
     const state = parseEmbeddedState(["__UNIVERSAL_DATA_FOR_REHYDRATION__", "SIGI_STATE", "sigi-persisted-data"]);
-    if (state) { deepCollectMedia(state, sink, entity); const us = []; deepCollectUsers(state, us); if (us.length) await send({ type: "users", platform: "tiktok", context: "seen", users: us }); }
+    if (state) {
+      deepCollectMedia(state, sink, entity);
+      const us = [];
+      deepCollectUsers(state, us);
+      userCount = us.length;
+      if (us.length) await send({ type: "users", platform: "tiktok", context: "seen", users: us });
+    }
     // also harvest whatever the DOM rendered. TikTok playback URLs are
     // short-lived/cookie-bound, so videos go through browser_upload_only while
     // posters/covers can still use normal URL ingest.
@@ -1568,9 +1603,39 @@ const tiktok = {
         it.meta.revisit_reason = activeRevisit.reason || null;
       }
     });
+    const counts = pageContentCounts();
+    const usefulNodes = Number(counts.articles || 0) + Number(counts.videos || 0) + Number(counts.images || 0);
+    const progressCounts = {
+      entity,
+      media_candidates: sink.items.length,
+      users: userCount,
+      state_present: !!state,
+      useful_nodes: usefulNodes,
+    };
     const response = sink.items.length
       ? await send({ type: "ingest", platform: "tiktok", username: entity, items: sink.items })
-      : null;
+      : await send({
+          type: "ingest",
+          platform: "tiktok",
+          username: entity,
+          items: [],
+          record_empty: true,
+          probe_reason: "no_dom_media_candidates",
+          probe_meta: { ...progressCounts, content_counts: counts, page_url: location.href },
+        }, { timeoutMs: 12000 }).catch(() => null);
+    if (sink.items.length || userCount) {
+      tiktokClearZeroProgress();
+      await tiktokReportPageHealth("healthy", "tiktok_content_progress", progressCounts);
+    } else {
+      const zeroStreak = tiktokBumpZeroProgress();
+      progressCounts.zero_progress_streak = zeroStreak;
+      const blankShell = usefulNodes < 2 && Number(counts.links || 0) < 10;
+      await tiktokReportPageHealth(
+        blankShell || zeroStreak >= 2 ? "recoverable_error_shell" : "zero_content",
+        blankShell ? "tiktok_blank_page" : "tiktok_zero_progress",
+        progressCounts
+      );
+    }
     if (activeRevisit) await finishTikTokRevisit(activeRevisit, response, sink.items.length, entity);
     return { targets: 1, saved: sink.items.length, discovered: 0 };
   },

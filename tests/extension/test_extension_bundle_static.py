@@ -86,6 +86,7 @@ def test_content_script_recovery_bounds_tab_messages():
     assert "const TAB_MESSAGE_TIMEOUT_MS = 30000" in background
     assert "const FORCED_CYCLE_RELOAD_DEBOUNCE_MS = 4 * 60 * 1000" in background
     assert "const FORCED_CYCLE_FAILURE_DEBOUNCE_MS = 90 * 1000" in background
+    assert 'const REFRESH_AFTER_PROGRAMMATIC_INJECT_PLATFORMS = new Set(["x"])' in background
     assert "async function sendTabMessageWithTimeout" in background
     assert background.count("sendTabMessageWithTimeout(") >= 5
     assert "new Error(\"tab message timed out\")" in background
@@ -123,6 +124,8 @@ def test_tab_message_timeouts_do_not_trigger_receiver_missing_refresh():
     assert "reinject_attempted: true" in forced_catch
     assert "injectContentScriptAndNudge(base, t, platform, \"ensure_loop_message_timeout\"" in ensure_catch
     assert "refreshTabForMissingContentScript" not in ensure_catch
+    assert "content_script_injected_refresh" in background
+    assert "receiver_missing_injected_then_refresh" in background
 
 
 def test_recoverable_page_shells_try_native_retry_before_waiting():
@@ -131,6 +134,22 @@ def test_recoverable_page_shells_try_native_retry_before_waiting():
     assert "function findRecoverablePageActionButton" in content
     assert "async function attemptRecoverablePageInteraction" in content
     assert "await attemptRecoverablePageInteraction(p.id, shell)" in content
+
+
+def test_tiktok_zero_progress_reports_probe_and_page_recovery():
+    content = _read("extension/content.js")
+    tiktok_block = content.split("const tiktok = {", 1)[1].split(
+        "// ===========================================================================\n// Lemon8",
+        1,
+    )[0]
+
+    assert "function tiktokBumpZeroProgress()" in content
+    assert "async function tiktokReportPageHealth" in content
+    assert 'probe_reason: "no_dom_media_candidates"' in tiktok_block
+    assert '"recoverable_error_shell"' in tiktok_block
+    assert '"tiktok_blank_page"' in tiktok_block
+    assert '"tiktok_zero_progress"' in tiktok_block
+    assert "record_empty: true" in tiktok_block
 
 
 def test_facebook_scrape_pass_is_bounded_but_not_reload_happy():
