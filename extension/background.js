@@ -292,6 +292,36 @@ async function recordServiceWorkerRecovery(base, tab, platform, status, reason, 
   } catch (e) {}
 }
 
+function schedulePostReloadScrapeNudge(base, tab, platform, reason, extra = {}) {
+  if (!tab || tab.id == null || !platform || !platform.id) return;
+  const tabId = tab.id;
+  const delayMs = Number(extra.post_reload_delay_ms || 12000);
+  setTimeout(() => {
+    (async () => {
+      let freshTab = tab;
+      try {
+        freshTab = await chrome.tabs.get(tabId);
+      } catch (e) {}
+      try {
+        await chrome.tabs.sendMessage(tabId, {
+          type: "scrapeCycle",
+          reason: reason || "post_reload_recovery",
+        });
+        await recordServiceWorkerRecovery(base, freshTab, platform, "post_reload_scrape_nudge_sent", reason || "post_reload_recovery", {
+          ...extra,
+          post_reload_delay_ms: delayMs,
+        });
+      } catch (e) {
+        await recordServiceWorkerRecovery(base, freshTab, platform, "post_reload_scrape_nudge_failed", reason || "post_reload_recovery", {
+          ...extra,
+          cycle_error: e && e.message ? e.message : String(e),
+          post_reload_delay_ms: delayMs,
+        });
+      }
+    })().catch(() => {});
+  }, delayMs);
+}
+
 async function hardRefreshForcedCycleTab(base, tab, platform, reason, extra = {}) {
   if (!tab || tab.id == null || !platform || !platform.id) return false;
   const now = Date.now();
@@ -308,6 +338,7 @@ async function hardRefreshForcedCycleTab(base, tab, platform, reason, extra = {}
   await chrome.tabs.reload(tab.id, { bypassCache: true });
   lastForcedReloadByTab[key] = now;
   lastForcedCycleByTab[key] = 0;
+  schedulePostReloadScrapeNudge(base, tab, platform, reason || "forced_cycle_recovery", extra);
   return true;
 }
 
