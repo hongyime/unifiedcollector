@@ -353,6 +353,7 @@ services:
       COLLECTOR_VAULT_ROOT: /vault
       WEBSITE_TARGET_TIMEOUT_SECONDS: "45"
       WEBSITE_TARGET_RETRY_BACKOFF_SECONDS: "21600"
+      WEBSITE_TARGET_RETRY_BACKOFF_MAX_SECONDS: "604800"
       # Concurrency drives REAL RSS (each task holds a page + parse tree). After
       # the host OOM, dialled 10 -> 6 to lower website's memory peak — a real RSS
       # cut (unlike a mem_limit cap), minor throughput cost across 421 sites.

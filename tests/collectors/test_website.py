@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -138,7 +139,12 @@ async def test_collect_demotes_timed_out_target(monkeypatch):
     await c.collect(["https://example.com"])
 
     sql_calls = [call.args[0] for call in c.pool._conn.execute.await_args_list]
-    assert any("status = 'error'" in sql and "priority = LEAST" in sql for sql in sql_calls)
+    assert any(
+        "status = 'error'" in sql
+        and "collection_count = collection_count + 1" in sql
+        and "priority = LEAST" in sql
+        for sql in sql_calls
+    )
     c.checkpoint.save_progress.assert_awaited_once_with("https://example.com")
     c.send_to_dlq.assert_not_called()
 
@@ -147,7 +153,34 @@ async def test_collect_demotes_timed_out_target(monkeypatch):
 async def test_collect_skips_recent_timed_out_target(monkeypatch):
     c = WebsiteCollector()
     c.pool = _make_pool()
-    c.pool._conn.fetchval.return_value = 3600
+    c.pool._conn.fetchrow.return_value = {
+        "last_collection_at": datetime.now(timezone.utc),
+        "collection_count": 1,
+        "error_message": "target exceeded 45s wall-clock cap",
+    }
+    c.checkpoint.save_progress = AsyncMock()
+    spider = AsyncMock()
+
+    monkeypatch.setattr(c, "spider_domain", spider)
+    monkeypatch.setattr(c, "_promote_discovered_sg_domains", AsyncMock())
+
+    await c.collect(["https://example.com"])
+
+    spider.assert_not_awaited()
+    c.checkpoint.save_progress.assert_awaited_once_with("https://example.com")
+
+
+@pytest.mark.asyncio
+async def test_collect_uses_exponential_backoff_for_repeated_timeouts(monkeypatch):
+    monkeypatch.setenv("WEBSITE_TARGET_RETRY_BACKOFF_SECONDS", "10")
+    monkeypatch.setenv("WEBSITE_TARGET_RETRY_BACKOFF_MAX_SECONDS", "80")
+    c = WebsiteCollector()
+    c.pool = _make_pool()
+    c.pool._conn.fetchrow.return_value = {
+        "last_collection_at": datetime.now(timezone.utc) - timedelta(seconds=35),
+        "collection_count": 4,
+        "error_message": "target exceeded 45s wall-clock cap",
+    }
     c.checkpoint.save_progress = AsyncMock()
     spider = AsyncMock()
 

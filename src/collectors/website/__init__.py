@@ -107,6 +107,9 @@ WEBSITE_TARGET_TIMEOUT_SECONDS  Per-target wall-clock cap before deferring
 WEBSITE_TARGET_RETRY_BACKOFF_SECONDS
                                 How long to skip targets that hit the
                                 wall-clock cap (default 21600 = 6h).
+WEBSITE_TARGET_RETRY_BACKOFF_MAX_SECONDS
+                                Maximum exponential retry backoff for repeated
+                                wall-clock timeout targets (default 604800 = 7d).
 WEBSITE_RESPECT_ROBOTS          '0' to ignore robots.txt (default '1').
 WEBSITE_FOLLOW_EXTERNAL         '1' to follow links off the seed domain
                                 (default 0; same-host BFS).
@@ -465,6 +468,7 @@ class WebsiteCollector(BaseCollector):
         self._timeout = httpx.Timeout(float(os.getenv("WEBSITE_TIMEOUT", "30")), connect=10.0)
         self._target_timeout = float(os.getenv("WEBSITE_TARGET_TIMEOUT_SECONDS", "1500"))
         self._target_retry_backoff = float(os.getenv("WEBSITE_TARGET_RETRY_BACKOFF_SECONDS", "21600"))
+        self._target_retry_backoff_max = float(os.getenv("WEBSITE_TARGET_RETRY_BACKOFF_MAX_SECONDS", "604800"))
         # Behaviour toggles
         self._respect_robots = os.getenv("WEBSITE_RESPECT_ROBOTS", "1") == "1"
         self._follow_external = os.getenv("WEBSITE_FOLLOW_EXTERNAL", "0") == "1"
@@ -1540,29 +1544,36 @@ class WebsiteCollector(BaseCollector):
         target_ids = list({target_id, seed_url, seed_url.rstrip("/")})
         try:
             async with self.pool.acquire() as conn:
-                value = await conn.fetchval(
+                row = await conn.fetchrow(
                     """
-                    SELECT GREATEST(
-                               0,
-                               EXTRACT(EPOCH FROM (
-                                   ($2::double precision * INTERVAL '1 second')
-                                   - (NOW() - last_collection_at)
-                               ))
-                           )
+                    SELECT last_collection_at,
+                           COALESCE(collection_count, 0) AS collection_count,
+                           error_message
                       FROM collection_targets
                      WHERE source = 'website'
                        AND target_id = ANY($1::text[])
                        AND status = 'error'
                        AND last_collection_at IS NOT NULL
                        AND COALESCE(error_message, '') ILIKE 'target exceeded%'
-                       AND NOW() - last_collection_at < ($2::double precision * INTERVAL '1 second')
                      ORDER BY last_collection_at DESC
                      LIMIT 1
                     """,
                     target_ids,
-                    self._target_retry_backoff,
                 )
-                return float(value or 0.0)
+                if not row:
+                    return 0.0
+                last_collection_at = row.get("last_collection_at")
+                if not isinstance(last_collection_at, datetime):
+                    return 0.0
+                if last_collection_at.tzinfo is None:
+                    last_collection_at = last_collection_at.replace(tzinfo=timezone.utc)
+                attempts = max(1, int(row.get("collection_count") or 0))
+                multiplier = 2 ** min(attempts - 1, 8)
+                backoff = self._target_retry_backoff * multiplier
+                if self._target_retry_backoff_max > 0:
+                    backoff = min(backoff, self._target_retry_backoff_max)
+                elapsed = (datetime.now(timezone.utc) - last_collection_at).total_seconds()
+                return max(0.0, float(backoff) - max(0.0, elapsed))
         except Exception as e:
             logger.debug("website target backoff lookup failed for %s: %s", seed_url, e)
             return 0.0
@@ -1585,6 +1596,7 @@ class WebsiteCollector(BaseCollector):
                     """
                     UPDATE collection_targets
                        SET status = 'error',
+                           collection_count = collection_count + 1,
                            priority = LEAST(COALESCE(priority, 0), 0),
                            last_collection_at = NOW(),
                            error_message = $2
