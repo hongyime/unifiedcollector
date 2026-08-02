@@ -684,46 +684,51 @@ class BaseCollector(ABC):
             try:
                 async with self.pool.acquire() as conn:
                     timeout_ms = _media_db_consistency_timeout_ms()
-                    if timeout_ms > 0:
-                        async with conn.transaction():
-                            await conn.execute(f"SET LOCAL statement_timeout = {timeout_ms}")
-                            consistency = await verify_media_item_db_consistency(
-                                conn,
-                                source=self.SOURCE_NAME,
-                                content_id=content_id,
-                                file_path=file_path,
-                                file_size=file_size,
-                                sha256=sha256,
-                                sidecar_path=sidecar.relative_path if sidecar.enabled else None,
-                            )
-                            consistency_meta = {
-                                "vault_artifact_db_consistency": {
-                                    "ok": consistency.ok,
-                                    "errors": list(consistency.errors),
-                                }
+                    async def record_consistency() -> None:
+                        consistency = await verify_media_item_db_consistency(
+                            conn,
+                            source=self.SOURCE_NAME,
+                            content_id=content_id,
+                            file_path=file_path,
+                            file_size=file_size,
+                            sha256=sha256,
+                            sidecar_path=sidecar.relative_path if sidecar.enabled else None,
+                        )
+                        consistency_meta = {
+                            "vault_artifact_db_consistency": {
+                                "ok": consistency.ok,
+                                "errors": list(consistency.errors),
                             }
+                        }
+                        await conn.execute(
+                            """
+                            UPDATE media_items
+                            SET metadata = COALESCE(metadata, '{}'::jsonb) || $3::jsonb
+                            WHERE source = $1 AND content_id = $2
+                            """,
+                            self.SOURCE_NAME,
+                            content_id,
+                            json.dumps(consistency_meta, default=str),
+                        )
+                        if not consistency.ok:
                             await conn.execute(
                                 """
-                                UPDATE media_items
-                                SET metadata = COALESCE(metadata, '{}'::jsonb) || $3::jsonb
-                                WHERE source = $1 AND content_id = $2
+                                INSERT INTO dead_letter_queue (source, entity_id, content_id, error_message)
+                                VALUES ($1, $2, $3, $4)
                                 """,
                                 self.SOURCE_NAME,
+                                entity_id,
                                 content_id,
-                                json.dumps(consistency_meta, default=str),
+                                "vault artifact db consistency failed: "
+                                + "; ".join(consistency.errors),
                             )
-                            if not consistency.ok:
-                                await conn.execute(
-                                    """
-                                    INSERT INTO dead_letter_queue (source, entity_id, content_id, error_message)
-                                    VALUES ($1, $2, $3, $4)
-                                    """,
-                                    self.SOURCE_NAME,
-                                    entity_id,
-                                    content_id,
-                                    "vault artifact db consistency failed: "
-                                    + "; ".join(consistency.errors),
-                                )
+
+                    if timeout_ms > 0 and callable(getattr(conn, "transaction", None)):
+                        async with conn.transaction():
+                            await conn.execute(f"SET LOCAL statement_timeout = {timeout_ms}")
+                            await record_consistency()
+                    elif timeout_ms > 0:
+                        await record_consistency()
                     else:
                         logger.debug(
                             "vault artifact db consistency check disabled for %s/%s",

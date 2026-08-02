@@ -45,15 +45,15 @@ _BEEPER_SUBSOURCE_LIVENESS_CACHE: dict[str, object] = {"ts": 0.0, "rows": None}
 _BEEPER_SUBSOURCE_LIVENESS_TTL_SECONDS = int(os.getenv("BEEPER_SUBSOURCE_LIVENESS_TTL_SECONDS", "75"))
 _SOURCE_MATRIX_SECTION_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_SECTION_TIMEOUT_SECONDS", "2"))
 _SOURCE_MATRIX_LIVENESS_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_LIVENESS_TIMEOUT_SECONDS", "20"))
-_SOURCE_MATRIX_DAY_CONTENT_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_DAY_CONTENT_TIMEOUT_SECONDS", "8"))
-_SOURCE_MATRIX_MEDIA_TOTALS_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_MEDIA_TOTALS_TIMEOUT_SECONDS", "8"))
-_SOURCE_MATRIX_YOUTUBE_BACKLOG_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_YOUTUBE_BACKLOG_TIMEOUT_SECONDS", "8"))
+_SOURCE_MATRIX_DAY_CONTENT_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_DAY_CONTENT_TIMEOUT_SECONDS", "3"))
+_SOURCE_MATRIX_MEDIA_TOTALS_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_MEDIA_TOTALS_TIMEOUT_SECONDS", "3"))
+_SOURCE_MATRIX_YOUTUBE_BACKLOG_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_YOUTUBE_BACKLOG_TIMEOUT_SECONDS", "2"))
 _SOURCE_MATRIX_BROWSER_EXTENSION_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_BROWSER_EXTENSION_TIMEOUT_SECONDS", "6"))
 _BROWSER_EXTENSION_QUERY_TIMEOUT_SECONDS = float(os.getenv("BROWSER_EXTENSION_QUERY_TIMEOUT_SECONDS", "2.5"))
 _BROWSER_EXTENSION_PAYLOAD_BUDGET_SECONDS = float(os.getenv("BROWSER_EXTENSION_PAYLOAD_BUDGET_SECONDS", "5.5"))
-_SOURCE_CONTENT_PART_TIMEOUT_SECONDS = float(os.getenv("SOURCE_CONTENT_PART_TIMEOUT_SECONDS", "2"))
-_SOURCE_CONTENT_MEDIA_TIMEOUT_SECONDS = float(os.getenv("SOURCE_CONTENT_MEDIA_TIMEOUT_SECONDS", "4"))
-_SOURCE_CONTENT_SUMMARY_BUDGET_SECONDS = float(os.getenv("SOURCE_CONTENT_SUMMARY_BUDGET_SECONDS", "4.5"))
+_SOURCE_CONTENT_PART_TIMEOUT_SECONDS = float(os.getenv("SOURCE_CONTENT_PART_TIMEOUT_SECONDS", "0.75"))
+_SOURCE_CONTENT_MEDIA_TIMEOUT_SECONDS = float(os.getenv("SOURCE_CONTENT_MEDIA_TIMEOUT_SECONDS", "1.25"))
+_SOURCE_CONTENT_SUMMARY_BUDGET_SECONDS = float(os.getenv("SOURCE_CONTENT_SUMMARY_BUDGET_SECONDS", "2.5"))
 _SOURCE_MATRIX_SECTION_CACHE: dict[str, dict[str, object]] = {}
 _SOURCE_MATRIX_SECTION_CACHE_TTL_SECONDS = int(os.getenv("SOURCE_MATRIX_SECTION_CACHE_TTL_SECONDS", "30"))
 _SOURCE_MATRIX_SECTION_STALE_SECONDS = int(os.getenv("SOURCE_MATRIX_SECTION_STALE_SECONDS", "900"))
@@ -3379,7 +3379,28 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
     from src.core.source_freshness import compute_liveness
     pool = await get_pool()
     errors = []
-    async with pool.acquire() as conn:
+    conn = None
+    try:
+        conn = await _acquire_dashboard_conn(pool)
+    except Exception as exc:  # noqa: BLE001 - source matrix must stay usable during DB pressure
+        logger.warning("source matrix DB acquire failed: %s", exc.__class__.__name__)
+        errors.append({"section": "db_acquire", "error": exc.__class__.__name__})
+        live_sources = _source_matrix_fallback_liveness_rows(
+            "source matrix could not acquire a DB connection quickly; showing known source skeleton until load drops"
+        )
+        whatsapp_bridge_health = None
+        beeper_subsources = []
+        current_content = {}
+        current_rate = {}
+        previous_content = {}
+        previous_rate = {}
+        day_content = {}
+        day_rate = {}
+        media_totals = {"__stats_unavailable__": True}
+        youtube_media_backlog = {}
+        active_cursors = {}
+        browser_extension = {"expected_version": _expected_extension_version(), "issues": []}
+    else:
         liveness_fallback = _source_matrix_fallback_liveness_rows(
             "source liveness query timed out; showing known source skeleton until DB load drops"
         )
@@ -3425,7 +3446,7 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
                 fallback=[],
                 awaitable=_beeper_subsource_liveness(conn),
                 cache_key="beeper_subsource_liveness",
-                timeout=8,
+                timeout=3,
             )
             current_content = await _source_matrix_section(
                 section="current_content",
@@ -3435,7 +3456,7 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
                 awaitable=_source_content_summary(conn, "date_trunc('hour', now())"),
                 cache_key="current_content",
                 cache_ttl=15,
-                timeout=5,
+                timeout=3,
             )
             current_rate = await _source_matrix_section(
                 section="current_rate",
@@ -3445,7 +3466,7 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
                 awaitable=_source_rate_summary(conn, "date_trunc('hour', now())"),
                 cache_key="current_rate",
                 cache_ttl=15,
-                timeout=5,
+                timeout=3,
             )
             previous_content = await _source_matrix_section(
                 section="previous_hour_content",
@@ -3459,7 +3480,7 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
                 ),
                 cache_key="previous_hour_content",
                 cache_ttl=60,
-                timeout=5,
+                timeout=3,
             )
             previous_rate = await _source_matrix_section(
                 section="previous_hour_rate",
@@ -3473,7 +3494,7 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
                 ),
                 cache_key="previous_hour_rate",
                 cache_ttl=60,
-                timeout=5,
+                timeout=3,
             )
             day_content = await _source_matrix_section(
                 section="day_content",
@@ -3493,7 +3514,7 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
                 awaitable=_source_rate_summary(conn, "now() - interval '24 hours'"),
                 cache_key="day_rate",
                 cache_ttl=120,
-                timeout=8,
+                timeout=3,
             )
             media_totals = await _source_matrix_section(
                 section="media_totals",
@@ -3535,6 +3556,9 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
                 stale_ttl=3600,
                 timeout=_SOURCE_MATRIX_BROWSER_EXTENSION_TIMEOUT_SECONDS,
             )
+    finally:
+        if conn is not None:
+            await pool.release(conn)
 
     generated_at = datetime.now(timezone.utc)
     live_sources = [*live_sources, *beeper_subsources]
