@@ -23,6 +23,7 @@ function authNoteLabel(note?: string | null) {
 function BridgeCard({ bridge }: { bridge: 1 | 2 }) {
   const qc = useQueryClient();
   const [msg, setMsg] = useState<string | null>(null);
+  const [phone, setPhone] = useState("");
 
   // Session identity (phone_number + push_name) — only meaningful when the
   // bridge is paired. Poll every 15s while connected; every 5s while trying
@@ -71,6 +72,21 @@ function BridgeCard({ bridge }: { bridge: 1 | 2 }) {
         setMsg("Already paired. Use Reconnect to recover, or Disconnect to unpair first.");
       } else {
         setMsg("Fresh QR requested. Leave this panel open for the next code.");
+      }
+      refresh();
+    },
+  });
+  const pairingCode = useMutation({
+    mutationFn: () => api.waPairingCode(bridge, phone.trim()),
+    onSuccess: (r) => {
+      if (!r.ok) {
+        setMsg(`Pairing code failed: ${r.error}`);
+      } else if (r.status === "registered_session") {
+        setMsg("Already paired. Use Reconnect to recover, or Disconnect to unpair first.");
+      } else if (r.code) {
+        setMsg(`Pairing code: ${r.code}${r.phone_last4 ? ` · phone ending ${r.phone_last4}` : ""}`);
+      } else {
+        setMsg(r.note || "Pairing code requested.");
       }
       refresh();
     },
@@ -201,6 +217,24 @@ function BridgeCard({ bridge }: { bridge: 1 | 2 }) {
           title="Unpair this device (logout) — then scan the new QR"
         >{disconnect.isPending ? "…" : "Disconnect"}</button>
       </div>
+      {!sessionRegistered && (
+        <div className="mt-3 flex items-center gap-2">
+          <input
+            value={phone}
+            onChange={(e) => setPhone(e.target.value)}
+            type="tel"
+            inputMode="tel"
+            placeholder="+6592348112"
+            className="min-w-0 flex-1 bg-background border border-border rounded-md text-xs px-2.5 py-1.5 text-text-primary focus:outline-none focus:ring-2 focus:ring-white/20"
+          />
+          <button
+            onClick={() => pairingCode.mutate()}
+            disabled={pairingCode.isPending || !phone.trim()}
+            className="text-xs px-2.5 py-1.5 rounded-md border border-border text-text-secondary hover:bg-white/5 disabled:opacity-50"
+            title="Request a WhatsApp linked-device pairing code for this bridge"
+          >{pairingCode.isPending ? "…" : "Pairing code"}</button>
+        </div>
+      )}
       {msg && <p className="mt-2 text-center text-[11px] text-text-muted">{msg}</p>}
     </div>
   );
