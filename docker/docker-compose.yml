@@ -108,10 +108,10 @@ services:
       YOUTUBE_VIDEO_BACKFILL_MAX_PASSES: "2"
       YOUTUBE_VIDEO_BACKFILL_FAILED_RETRY_HOURS: "24"
       YOUTUBE_VIDEO_BACKFILL_SCAN_LIMIT: "10000"
-      YOUTUBE_VIDEO_DOWNLOADS_PER_TARGET: "3"
+      YOUTUBE_VIDEO_DOWNLOADS_PER_TARGET: "5"
       YOUTUBE_VIDEO_DOWNLOAD_TIMEOUT: "600"
       YOUTUBE_YTDLP_FORMAT: "auto"
-      YOUTUBE_DOWNLOAD_DELAY: "6.0"
+      YOUTUBE_DOWNLOAD_DELAY: "3.0"
       # Media-first policy: do not permanently exclude longer videos. Backfill
       # remains bounded by batch size, failed-retry delay, and yt-dlp timeout.
       YOUTUBE_MAX_VIDEO_DURATION_MINUTES: "0"
