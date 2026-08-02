@@ -823,6 +823,7 @@ async def _source_rate_summary(conn, since_sql: str, before_sql: str | None = No
                count(*) FILTER (
                    WHERE status_code = 429
                       OR status_code IS NULL
+                      OR cooldown_seconds IS NOT NULL
                       OR (
                           source = 'youtube'
                           AND status_code = 403
@@ -833,6 +834,7 @@ async def _source_rate_summary(conn, since_sql: str, before_sql: str | None = No
                    WHERE status_code IS NOT NULL
                      AND NOT (
                          status_code = 429
+                         OR cooldown_seconds IS NOT NULL
                          OR (
                              source = 'youtube'
                              AND status_code = 403
@@ -2213,6 +2215,7 @@ async def _enrich_runs_with_ingestion(conn, runs: list[dict]) -> list[dict]:
                    count(rl.*) FILTER (
                        WHERE rl.status_code = 429
                           OR rl.status_code IS NULL
+                          OR rl.cooldown_seconds IS NOT NULL
                           OR (
                               rl.source = 'youtube'
                               AND rl.status_code = 403
@@ -2223,6 +2226,7 @@ async def _enrich_runs_with_ingestion(conn, runs: list[dict]) -> list[dict]:
                        WHERE rl.status_code IS NOT NULL
                          AND NOT (
                              rl.status_code = 429
+                             OR rl.cooldown_seconds IS NOT NULL
                              OR (
                                  rl.source = 'youtube'
                                  AND rl.status_code = 403
@@ -4324,6 +4328,7 @@ async def hourly_ingestion(hours: int = 12, _user: dict = Depends(require_role("
                    count(*) FILTER (
                        WHERE status_code = 429
                           OR status_code IS NULL
+                          OR cooldown_seconds IS NOT NULL
                           OR (
                               source = 'youtube'
                               AND status_code = 403
@@ -4334,6 +4339,7 @@ async def hourly_ingestion(hours: int = 12, _user: dict = Depends(require_role("
                        WHERE status_code IS NOT NULL
                          AND NOT (
                              status_code = 429
+                             OR cooldown_seconds IS NOT NULL
                              OR (
                                  source = 'youtube'
                                  AND status_code = 403

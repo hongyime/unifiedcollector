@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock
 
 import os
 
@@ -10,6 +11,7 @@ import pytest
 os.environ.setdefault("DASHBOARD_JWT_SECRET", "test-secret-only-for-pytest-do-not-use")
 os.environ.setdefault("DASHBOARD_ADMIN_PASSWORD", "x")
 
+from src.dashboard import api as dashboard_api
 from src.dashboard.api import (
     _SOURCE_MATRIX_BROWSER_EXTENSION_TIMEOUT_SECONDS,
     _SOURCE_MATRIX_DAY_CONTENT_TIMEOUT_SECONDS,
@@ -83,6 +85,40 @@ async def test_release_dashboard_conn_swallows_cancelled_release():
             raise asyncio.CancelledError()
 
     await _release_dashboard_conn(Pool(), object(), "test source matrix")
+
+
+@pytest.mark.asyncio
+async def test_source_rate_summary_counts_cooldown_200_as_rate_limit(monkeypatch):
+    monkeypatch.setattr(
+        dashboard_api,
+        "_existing_public_tables",
+        AsyncMock(return_value={"rate_limit_events"}),
+    )
+
+    active_until = datetime.now(timezone.utc) + timedelta(minutes=20)
+
+    class Conn:
+        async def fetch(self, query, *args, **kwargs):
+            assert "cooldown_seconds IS NOT NULL" in query
+            return [
+                {
+                    "source": "tiktok",
+                    "rate_limits": 1,
+                    "access_errors": 0,
+                    "latest_account": "tiktok_bryanseah234",
+                    "latest_scope": "profile_metadata",
+                    "latest_status_code": 200,
+                    "latest_reason": "TikTok profile metadata challenge wall: challenge",
+                    "latest_event_at": datetime.now(timezone.utc),
+                    "active_until": active_until,
+                }
+            ]
+
+    out = await dashboard_api._source_rate_summary(Conn(), "date_trunc('hour', now())")
+
+    assert out["tiktok"]["rate_limits"] == 1
+    assert out["tiktok"]["access_errors"] == 0
+    assert out["tiktok"]["active_now"] is True
 
 
 def test_messaging_coverage_normalizes_unknown_beeper_messages_from_chat_network():
