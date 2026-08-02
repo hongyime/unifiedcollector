@@ -713,6 +713,7 @@ function collectFollowHandlesFromDom(platform, owner) {
 async function maybeSweepFollowGraph({ platform, owner, urls, homeUrl }) {
   owner = (owner || "").trim().replace(/^@/, "");
   if (!owner || !urls) return false;
+  if (deferNavigationForForcedRecovery(platform)) return false;
   const stateKey = "uc_" + platform + "_follow_sweep_state";
   const lastKey = "uc_" + platform + "_follow_sweep_last_" + owner.toLowerCase();
   const active = (() => { try { return JSON.parse(localStorage.getItem(stateKey) || "null"); } catch (e) { return null; } })();
@@ -1192,6 +1193,7 @@ function currentTikTokRevisit() {
   }
 }
 async function maybeStartTikTokRevisit(owner) {
+  if (deferNavigationForForcedRecovery("tiktok")) return null;
   const active = currentTikTokRevisit();
   if (active) return active;
   let reply = null;
@@ -1255,6 +1257,10 @@ function currentBrowserMediaRevisit(platform) {
     localStorage.removeItem(browserMediaRevisitKey(platform));
     return null;
   }
+}
+function deferNavigationForForcedRecovery(platform) {
+  if (!ONE_SHOT_RUNNING) return false;
+  return /browser_content_stale|stale/i.test(ONE_SHOT_REASON || "");
 }
 function browserMediaRevisitUrlOk(platform, url) {
   if (!url || !/^https?:\/\//i.test(url)) return false;
@@ -1596,16 +1602,16 @@ const lemon8 = {
     lemon8CollectDomMedia(sink, entity);
     lemon8CollectDomUsers().forEach((u) => users.push(u));
     let uniqueUserCount = 0;
+    let uniqueUsers = [];
     if (users.length) {
       const seen = new Set();
-      const uniqueUsers = users.filter((u) => {
+      uniqueUsers = users.filter((u) => {
         const key = (u.username || u.user_id || "").toString().toLowerCase();
         if (!key || seen.has(key)) return false;
         seen.add(key);
         return true;
       });
       uniqueUserCount = uniqueUsers.length;
-      if (uniqueUsers.length) await send({ type: "users", platform: "lemon8", context: "author", users: uniqueUsers });
     }
     const activeMediaRevisit = currentBrowserMediaRevisit("lemon8");
     markBrowserMediaRevisitItems("lemon8", sink, activeMediaRevisit);
@@ -1621,6 +1627,7 @@ const lemon8 = {
     if (activeMediaRevisit) {
       await finishBrowserMediaRevisit("lemon8", activeMediaRevisit, ingestResponse, sink.items.length, entity);
     }
+    if (uniqueUsers.length) await send({ type: "users", platform: "lemon8", context: "author", users: uniqueUsers });
     return { targets: 1, saved: sink.items.length, discovered: users.length };
   },
 };
@@ -2509,10 +2516,6 @@ const facebook = {
     await autoScroll(12, 1400, 1800, { maxPauseMs: 3500 });
     let saved = 0;
     const profile = scrapeFacebookProfile(entity, person);
-    if (profile) {
-      await send({ type: "profile", platform: "facebook", profile });
-      clog("info", `Facebook ${entity}: profile captured (person=${person})`, "facebook");
-    }
     // MEDIA — capture rendered feed/profile media broadly. The bridge/file gate
     // drops UI chrome and tiny avatars; collector policy now favors completeness
     // over the older person-profile-only restriction.
@@ -2539,6 +2542,10 @@ const facebook = {
     if (sink.items.length) saved = sink.items.length;
     if (activeMediaRevisit) {
       await finishBrowserMediaRevisit("facebook", activeMediaRevisit, ingestResponse, sink.items.length, entity);
+    }
+    if (profile) {
+      await send({ type: "profile", platform: "facebook", profile });
+      clog("info", `Facebook ${entity}: profile captured (person=${person})`, "facebook");
     }
     if (posts.length) await send({ type: "posts", platform: "facebook", username: entity, posts });
     if (fu.length) await send({ type: "users", platform: "facebook", context: "seen", users: fu });
@@ -2896,7 +2903,7 @@ function loopProgressAgeMs() {
 
 function deferBrowserMediaRevisitForForcedRecovery(platform) {
   if (!ONE_SHOT_RUNNING) return false;
-  if (platform !== "x" && platform !== "facebook") return false;
+  if (!BROWSER_MEDIA_REVISIT_PLATFORMS.has(platform)) return false;
   return /browser_content_stale|manual|stale/i.test(ONE_SHOT_REASON || "");
 }
 
