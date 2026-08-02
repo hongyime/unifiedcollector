@@ -108,10 +108,15 @@ function blockerBadgeStatus(severity: string) {
   return "warning";
 }
 
+function formatWindowFiles(row?: Pick<SourceCollectionMatrixRow["current_hour"], "media_items" | "media_stats_unavailable"> | null) {
+  if (row?.media_stats_unavailable) return "Unknown files";
+  return `${formatNumber(row?.media_items ?? 0)} files`;
+}
+
 function renderWindow(row: SourceCollectionMatrixRow["current_hour"]) {
   return (
     <div>
-      <div>{formatNumber(row.records)} rows · {formatNumber(row.media_items)} files</div>
+      <div>{formatNumber(row.records)} rows · {formatWindowFiles(row)}</div>
       <div className="text-[10px] uppercase tracking-wide text-text-muted">
         {formatNumber(row.messages)} msgs · {formatNumber(row.rate_limits)} 429 · {formatNumber(row.access_errors)} auth/other
       </div>
@@ -614,7 +619,7 @@ export function DashboardPage() {
         <MetricCard
           label="Previous Hour"
           value={formatNumber(previousSummary?.records ?? 0)}
-          sublabel={`${formatNumber(previousSummary?.messages ?? 0)} msgs · ${formatNumber(previousSummary?.media_items ?? 0)} files · ${formatNumber(previousSummary?.active_sources ?? 0)} active sources`}
+          sublabel={`${formatNumber(previousSummary?.messages ?? 0)} msgs · ${formatWindowFiles(previousSummary)} · ${formatNumber(previousSummary?.active_sources ?? 0)} active sources`}
           status={(previousSummary?.rate_limits ?? 0) || (previousSummary?.access_errors ?? 0) ? "warning" : "success"}
           icon={<Clock3 className="w-5 h-5" />}
         />

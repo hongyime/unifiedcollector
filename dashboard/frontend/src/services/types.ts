@@ -145,6 +145,7 @@ export interface SourceWindowCounts {
   latest_record_at: string | null;
   latest_media_at: string | null;
   latest_event_at: string | null;
+  media_stats_unavailable?: boolean;
 }
 
 export interface SourceWindowSummary extends SourceWindowCounts {

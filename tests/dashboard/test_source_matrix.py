@@ -803,6 +803,31 @@ def test_source_window_totals_sums_counts_and_active_sources():
     assert out["total_activity"] == 13
 
 
+def test_source_window_totals_preserves_media_unavailable_flag():
+    rows = [
+        {
+            "source": "telegram",
+            "last_24h": {
+                "records": 8,
+                "messages": 8,
+                "media_items": 0,
+                "rate_limits": 0,
+                "access_errors": 0,
+                "latest_record_at": datetime(2026, 7, 28, 1, 5, tzinfo=timezone.utc),
+                "latest_media_at": None,
+                "latest_event_at": None,
+                "media_stats_unavailable": True,
+            },
+        }
+    ]
+
+    out = _source_window_totals(rows, "last_24h")
+
+    assert out["records"] == 8
+    assert out["media_items"] == 0
+    assert out["media_stats_unavailable"] is True
+
+
 class _MediaTotalsConn:
     async def fetchval(self, *_args, **_kwargs):
         return ["media_source_rollups", "media_items"]
