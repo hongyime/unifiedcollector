@@ -290,6 +290,7 @@ const EXTENSION_AUTO_RELOAD_STATE_KEY = "ucExtensionAutoReloadState";
 const EXTENSION_AUTO_RELOAD_DEBOUNCE_MS = 2 * 60 * 1000;
 const EXTENSION_AUTO_RELOAD_DELAY_MS = 1200;
 const EXTENSION_AUTO_RELOAD_MAX_ATTEMPTS = 2;
+const EXTENSION_AUTO_RELOAD_ALARM = "uc-extension-auto-reload";
 
 function forcedCycleHardReloadMs(platformId) {
   return FORCED_CYCLE_HARD_RELOAD_MS_BY_PLATFORM[platformId] || 5 * 60 * 1000;
@@ -579,9 +580,10 @@ async function maybeAutoReloadExtension(base, tab, platform, body, reason) {
     reload_delay_ms: EXTENSION_AUTO_RELOAD_DELAY_MS,
   });
   await log("warn", `extension ${current} is older than expected ${expected}; reloading extension`);
-  setTimeout(() => {
-    try { chrome.runtime.reload(); } catch (e) {}
-  }, EXTENSION_AUTO_RELOAD_DELAY_MS);
+  try {
+    await chrome.alarms.create(EXTENSION_AUTO_RELOAD_ALARM, { when: Date.now() + EXTENSION_AUTO_RELOAD_DELAY_MS });
+  } catch (e) {}
+  try { chrome.runtime.reload(); } catch (e) {}
   return true;
 }
 
@@ -1053,6 +1055,9 @@ chrome.runtime.onStartup.addListener(() => {
 
 chrome.alarms.onAlarm.addListener(async (a) => {
   if (a.name && a.name.startsWith(PAGE_RECOVERY_PREFIX)) { await runPageRecovery(a.name.slice(PAGE_RECOVERY_PREFIX.length)); }
+  else if (a.name === EXTENSION_AUTO_RELOAD_ALARM) {
+    try { chrome.runtime.reload(); } catch (e) {}
+  }
   else if (a.name === ALARM) {
     await _alarmJitter();
     await ensureScraperTabsOpen("watchdog");

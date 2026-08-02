@@ -128,6 +128,25 @@ def test_tab_message_timeouts_do_not_trigger_receiver_missing_refresh():
     assert "receiver_missing_injected_then_refresh" in background
 
 
+def test_extension_auto_reload_is_immediate_with_alarm_backup():
+    background = _read("extension/background.js")
+
+    assert 'const EXTENSION_AUTO_RELOAD_ALARM = "uc-extension-auto-reload"' in background
+    assert "chrome.alarms.create(EXTENSION_AUTO_RELOAD_ALARM" in background
+    schedule_block = background.split('"extension_auto_reload_scheduled"', 1)[1].split(
+        "return true;",
+        1,
+    )[0]
+    assert "chrome.runtime.reload()" in schedule_block
+    assert "setTimeout(() =>" not in schedule_block
+    alarm_block = background.split("chrome.alarms.onAlarm.addListener", 1)[1].split(
+        "else if (a.name === ALARM)",
+        1,
+    )[0]
+    assert "a.name === EXTENSION_AUTO_RELOAD_ALARM" in alarm_block
+    assert "chrome.runtime.reload()" in alarm_block
+
+
 def test_recoverable_page_shells_try_native_retry_before_waiting():
     content = _read("extension/content.js")
 
