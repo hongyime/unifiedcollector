@@ -671,6 +671,8 @@ async function performStartupRecovery(reason, options = {}) {
   const retries = Math.max(0, Number(options.retries || 0));
   const force = !!options.force;
   const refreshTabs = !!options.refreshTabs;
+  const openTabs = options.openTabs !== false;
+  const refreshForce = options.refreshForce !== false;
   await setStatus({
     swStartedAt: Date.now(),
     lastStartupRecoveryAt: Date.now(),
@@ -683,15 +685,17 @@ async function performStartupRecovery(reason, options = {}) {
   }
   await scheduleAlarm().catch((e) => log("warn", `${reason} schedule failed: ${e && e.message ? e.message : e}`));
   await syncCookies().catch(() => {});
-  await ensureScraperTabsOpen(reason, { force })
-    .catch((e) => log("warn", `${reason} tab audit failed: ${e && e.message ? e.message : e}`));
+  if (openTabs) {
+    await ensureScraperTabsOpen(reason, { force })
+      .catch((e) => log("warn", `${reason} tab audit failed: ${e && e.message ? e.message : e}`));
+  }
   await reportBridgeHeartbeat(reason)
     .catch((e) => log("warn", `${reason} bridge heartbeat failed: ${e && e.message ? e.message : e}`));
   await reportScraperTabHeartbeats(reason)
     .catch((e) => log("warn", `${reason} scraper heartbeat failed: ${e && e.message ? e.message : e}`));
   if (refreshTabs) {
     const refreshGapMs = Number.isFinite(Number(options.refreshGapMs)) ? Number(options.refreshGapMs) : 1500;
-    await refreshScraperTabs({ bypassCache: true, force, reason, gapMs: refreshGapMs })
+    await refreshScraperTabs({ bypassCache: true, force: refreshForce || force, reason, gapMs: refreshGapMs })
       .catch((e) => log("warn", `${reason} tab refresh failed: ${e && e.message ? e.message : e}`));
     await reportScraperTabHeartbeats(reason + "_refresh")
       .catch((e) => log("warn", `${reason} refresh heartbeat failed: ${e && e.message ? e.message : e}`));
@@ -1814,13 +1818,34 @@ async function consumeReloadIntent() {
 
   await log("info", "extension reload intent consumed; hard-refreshing scraper tabs");
   setTimeout(() => {
-    runStartupRecovery("manual_extension_reload", {
-      force: intent && intent.force_open_all !== false,
-      refreshTabs: true,
-      refreshGapMs: 1500,
-      retries: 3,
-    })
-      .catch((e) => log("warn", `reload-intent recovery failed: ${e && e.message ? e.message : e}`));
+    (async () => {
+      const openIds = Array.isArray(intent.open_ids) ? intent.open_ids.slice(0, 20) : [];
+      for (const id of openIds) {
+        const p = (globalThis.UC_PLATFORMS || []).find((x) => x.id === id);
+        if (p) {
+          await openOrFocus(p, { active: false }).catch((e) => log("warn", `reload intent open ${id} failed: ${e && e.message ? e.message : e}`));
+          await _sleep(900);
+        }
+      }
+      await runStartupRecovery("manual_extension_reload", {
+        force: intent && intent.force_open_all === true,
+        openTabs: intent && intent.force_open_all === true,
+        refreshTabs: intent && intent.force_refresh_tabs !== false,
+        refreshForce: true,
+        refreshGapMs: 1500,
+        retries: 3,
+      });
+      if (intent && intent.force_scrape) {
+        await ensureLoops("manual_extension_reload_scrape")
+          .catch((e) => log("warn", `reload intent scrape nudge failed: ${e && e.message ? e.message : e}`));
+      }
+      if (intent && intent.force_test) {
+        await sendManualIngestProbe()
+          .catch((e) => log("warn", `reload intent ingest probe failed: ${e && e.message ? e.message : e}`));
+        await reportScraperTabHeartbeats("manual_extension_reload_probe")
+          .catch((e) => log("warn", `reload intent scraper heartbeat failed: ${e && e.message ? e.message : e}`));
+      }
+    })().catch((e) => log("warn", `reload-intent recovery failed: ${e && e.message ? e.message : e}`));
   }, 500);
   return true;
 }

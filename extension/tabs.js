@@ -192,7 +192,7 @@ $("testIngest").addEventListener("click", async () => {
   await render();
 });
 
-async function reloadExtension() {
+async function reloadExtension(options = {}) {
   try {
     await sendMessage({ type: "log", level: "info", msg: "manual extension reload requested" });
   } catch (e) {}
@@ -201,7 +201,11 @@ async function reloadExtension() {
       ucReloadIntent: {
         requested_at: Date.now(),
         source: "tabs_page",
-        force_open_all: true,
+        force_open_all: options.force_open_all === true,
+        force_refresh_tabs: options.force_refresh_tabs !== false,
+        force_scrape: !!options.force_scrape,
+        force_test: !!options.force_test,
+        open_ids: Array.isArray(options.open_ids) ? options.open_ids.slice(0, 20) : [],
       },
     });
   } catch (e) {}
@@ -219,6 +223,7 @@ async function handleUrlActions() {
     return;
   }
   const shouldOpenAll = params.get("openAll") === "1";
+  const shouldReload = params.get("reload") === "1";
   const openIds = (params.get("open") || "")
     .split(",")
     .map((s) => s.trim())
@@ -226,10 +231,20 @@ async function handleUrlActions() {
   const shouldRefreshTabs = params.get("refreshTabs") === "1";
   const shouldScrape = params.get("scrape") === "1";
   const shouldTest = params.get("test") === "1";
-  if (!shouldOpenAll && !openIds.length && !shouldRefreshTabs && !shouldScrape && !shouldTest) return;
+  if (!shouldReload && !shouldOpenAll && !openIds.length && !shouldRefreshTabs && !shouldScrape && !shouldTest) return;
   try {
     history.replaceState(null, "", location.pathname);
   } catch (e) {}
+  if (shouldReload) {
+    await reloadExtension({
+      force_open_all: shouldOpenAll,
+      force_refresh_tabs: shouldRefreshTabs || shouldOpenAll || !openIds.length || openIds.length > 0,
+      force_scrape: shouldScrape,
+      force_test: shouldTest,
+      open_ids: openIds,
+    });
+    return;
+  }
   try {
     if (shouldOpenAll) {
       await sendMessage({ type: "openAll" });
@@ -254,12 +269,6 @@ async function handleUrlActions() {
   }
   setTimeout(render, 1000);
 }
-
-try {
-  if (new URL(location.href).searchParams.get("reload") === "1") {
-    setTimeout(reloadExtension, 600);
-  }
-} catch (e) {}
 
 render();
 handleUrlActions();
