@@ -505,6 +505,21 @@ function findRecoverablePageActionButton() {
   }) || null;
 }
 
+function switchXHostForRecoverableShell(shell) {
+  if (!shell || !/try_again|something_went_wrong|no_internet|page_not_available|page_not_found/i.test(shell.reason || "")) {
+    return false;
+  }
+  const navKey = `uc_x_shell_nav_${shell.reason || "shell"}`;
+  const lastNav = lsNum(navKey);
+  if (lastNav && Date.now() - lastNav < 120000) return false;
+  lsSet(navKey, String(Date.now()));
+  const host = String(location.hostname || "").toLowerCase();
+  const target = host.includes("twitter.com") ? "https://x.com/home" : "https://twitter.com/home";
+  clog("warn", `x page shell still stuck (${shell.reason}); switching host to recover`, "x");
+  location.href = target;
+  return true;
+}
+
 async function attemptRecoverablePageInteraction(platformId, shell) {
   if (!PAGE_RECOVERY_ENABLED.has(platformId) || !shell) return false;
   if (platformId === "x" && shell.reason === "failed_script_url") {
@@ -517,21 +532,13 @@ async function attemptRecoverablePageInteraction(platformId, shell) {
   }
   const key = `uc_recover_click_${platformId}_${shell.reason || "shell"}`;
   const last = lsNum(key);
+  if (platformId === "x" && last && Date.now() - last < 10 * 60000) {
+    if (switchXHostForRecoverableShell(shell)) return true;
+  }
   if (last && Date.now() - last < 60000) return false;
   const button = findRecoverablePageActionButton();
   if (!button) {
-    if (platformId === "x" && /try_again|something_went_wrong|no_internet|page_not_available|page_not_found/i.test(shell.reason || "")) {
-      const navKey = `uc_x_shell_nav_${shell.reason || "shell"}`;
-      const lastNav = lsNum(navKey);
-      if (!lastNav || Date.now() - lastNav > 120000) {
-        lsSet(navKey, String(Date.now()));
-        const host = String(location.hostname || "").toLowerCase();
-        const target = host.includes("twitter.com") ? "https://x.com/home" : "https://twitter.com/home";
-        clog("warn", `x page shell has no retry button (${shell.reason}); switching host to recover`, "x");
-        location.href = target;
-        return true;
-      }
-    }
+    if (platformId === "x" && switchXHostForRecoverableShell(shell)) return true;
     return false;
   }
   lsSet(key, String(Date.now()));

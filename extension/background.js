@@ -262,12 +262,13 @@ const lastForcedReloadByTab = {};
 const lastForcedFailureByTab = {};
 const FORCED_CYCLE_DEBOUNCE_MS = 5 * 60 * 1000;
 const FORCED_CYCLE_HARD_RELOAD_MS_BY_PLATFORM = {
-  x: 3 * 60 * 1000,
-  facebook: 3 * 60 * 1000,
-  tiktok: 4 * 60 * 1000,
-  lemon8: 4 * 60 * 1000,
-  threads: 4 * 60 * 1000,
-  instagram: 11 * 60 * 1000,
+  x: 5 * 60 * 1000,
+  facebook: 7 * 60 * 1000,
+  tiktok: 6 * 60 * 1000,
+  lemon8: 6 * 60 * 1000,
+  threads: 6 * 60 * 1000,
+  strava: 7 * 60 * 1000,
+  instagram: 12 * 60 * 1000,
 };
 const FORCED_CYCLE_RELOAD_DEBOUNCE_MS = 4 * 60 * 1000;
 const FORCED_CYCLE_FAILURE_DEBOUNCE_MS = 90 * 1000;
@@ -578,12 +579,20 @@ async function maybeForceScrapeCycle(tab, platform, responseBody, reason, base =
     }
     lastForcedFailureByTab[failKey] = Date.now();
     if (messageTimedOut) {
+      const injected = await injectContentScriptAndNudge(base, tab, platform, "forced_cycle_message_timeout", {
+        content_age_seconds: body.content_age_seconds || null,
+        cycle_error: cycleError,
+        message_timeout: true,
+        recovery: "message_timeout_programmatic_inject",
+      });
       await recordServiceWorkerRecovery(base, tab, platform, "forced_cycle_request_timed_out", body.force_reason || "browser_content_stale", {
         content_age_seconds: body.content_age_seconds || null,
         cycle_error: cycleError,
         message_timeout: true,
+        reinject_attempted: true,
+        reinject_ok: injected || null,
       });
-      await log("warn", `${platform.label}: stale-content forced scrape message timed out; leaving the tab running and retrying later`);
+      await log("warn", `${platform.label}: stale-content forced scrape message timed out; ${injected ? "re-injected content script and left tab running" : "leaving the tab running and retrying later"}`);
       return;
     }
     await recordServiceWorkerRecovery(base, tab, platform, "forced_cycle_request_failed", body.force_reason || "browser_content_stale", {
@@ -1194,11 +1203,18 @@ async function ensureLoops(reason) {
         const cycleError = firstErr && firstErr.message ? firstErr.message : String(firstErr);
         if (platform && messageTimedOut) {
           const base = await ingestBase();
+          const injected = await injectContentScriptAndNudge(base, t, platform, "ensure_loop_message_timeout", {
+            cycle_error: cycleError,
+            message_timeout: true,
+            recovery: "message_timeout_programmatic_inject",
+          });
           await recordServiceWorkerRecovery(base, t, platform, "content_script_message_timeout", reason || "ensure_loop", {
             cycle_error: cycleError,
             message_timeout: true,
+            reinject_attempted: true,
+            reinject_ok: injected || null,
           });
-          await log("warn", `${platform.label}: scraper tab did not answer loop nudge within timeout; leaving it open to finish current work (${reason})`);
+          await log("warn", `${platform.label}: scraper tab did not answer loop nudge within timeout; ${injected ? "re-injected content script and left it open" : "leaving it open to finish current work"} (${reason})`);
         } else if (platform && receiverMissing) {
           const base = await ingestBase();
           await recordServiceWorkerRecovery(base, t, platform, "content_script_missing_refresh", reason || "ensure_loop", {

@@ -102,6 +102,7 @@ def test_tab_message_timeouts_do_not_trigger_receiver_missing_refresh():
     assert "content_script_programmatic_nudge_timed_out" in background
     assert "forced_cycle_request_timed_out" in background
     assert "content_script_message_timeout" in background
+    assert "message_timeout_programmatic_inject" in background
 
     forced_catch = background.split("const messageTimedOut = isTabMessageTimeout(firstErr);", 1)[1].split(
         "await recordServiceWorkerRecovery(base, tab, platform, \"forced_cycle_request_failed\"",
@@ -113,7 +114,10 @@ def test_tab_message_timeouts_do_not_trigger_receiver_missing_refresh():
     )[0]
 
     assert "return;" in forced_catch
+    assert "injectContentScriptAndNudge(base, tab, platform, \"forced_cycle_message_timeout\"" in forced_catch
+    assert "reinject_attempted: true" in forced_catch
     assert "hardRefreshForcedCycleTab" not in forced_catch
+    assert "injectContentScriptAndNudge(base, t, platform, \"ensure_loop_message_timeout\"" in ensure_catch
     assert "refreshTabForMissingContentScript" not in ensure_catch
 
 
@@ -141,6 +145,34 @@ def test_facebook_scrape_pass_is_bounded_but_not_reload_happy():
     assert re.search(r"facebook:\s*5\s*\*\s*60\s*\*\s*1000", one_shot_block)
     assert re.search(r"facebook:\s*7\s*\*\s*60\s*\*\s*1000", loop_block)
     assert "autoScroll(forcedRecovery ? 4 : 7" in facebook_block
+
+
+def test_background_forced_recovery_waits_longer_than_content_one_shot():
+    background = _read("extension/background.js")
+    content = _read("extension/content.js")
+
+    reload_block = background.split("const FORCED_CYCLE_HARD_RELOAD_MS_BY_PLATFORM = {", 1)[1].split(
+        "};", 1
+    )[0]
+    one_shot_block = content.split("const ONE_SHOT_TIMEOUT_MS_BY_PLATFORM = {", 1)[1].split(
+        "};", 1
+    )[0]
+    fallback = re.search(
+        r"return\s+FORCED_CYCLE_HARD_RELOAD_MS_BY_PLATFORM\[platformId\]\s*\|\|\s*(\d+)\s*\*\s*60\s*\*\s*1000",
+        background,
+    )
+    assert fallback
+
+    def minutes(block: str, platform: str, default: int | None = None) -> int:
+        match = re.search(rf"{platform}:\s*(\d+)\s*\*\s*60\s*\*\s*1000", block)
+        if match:
+            return int(match.group(1))
+        assert default is not None
+        return default
+
+    hard_reload_fallback_min = int(fallback.group(1))
+    for platform in ("instagram", "strava", "tiktok", "lemon8", "threads", "x", "facebook"):
+        assert minutes(reload_block, platform, hard_reload_fallback_min) > minutes(one_shot_block, platform)
 
 
 def test_facebook_has_post_text_fallback_when_permalink_ids_are_missing():
@@ -205,8 +237,13 @@ def test_x_error_shell_can_switch_host_when_native_retry_is_missing():
     recover_block = content.split("async function attemptRecoverablePageInteraction", 1)[1].split(
         "// Capture is ALWAYS ON", 1
     )[0]
+    switch_block = content.split("function switchXHostForRecoverableShell", 1)[1].split(
+        "async function attemptRecoverablePageInteraction", 1
+    )[0]
 
-    assert "uc_x_shell_nav_" in recover_block
-    assert '"https://twitter.com/home"' in recover_block
-    assert '"https://x.com/home"' in recover_block
-    assert "switching host to recover" in recover_block
+    assert "function switchXHostForRecoverableShell" in content
+    assert "uc_x_shell_nav_" in switch_block
+    assert '"https://twitter.com/home"' in switch_block
+    assert '"https://x.com/home"' in switch_block
+    assert "switching host to recover" in switch_block
+    assert "last && Date.now() - last < 10 * 60000" in recover_block
