@@ -763,13 +763,6 @@ class StravaCollector(BaseCollector):
         # Root cause fixed: all mounts now on WSL2 ext4 named volumes.
         if self._use_api: await self._ensure_token()
 
-        owner_ids_scraped: set[str] = set()
-        if self._follow_scrape_enabled and self._use_web and self._cookie_accounts:
-            try:
-                owner_ids_scraped = await self._collect_owner_rosters_for_cookie_accounts()
-            except Exception as e:
-                logger.warning("strava: owner roster capture failed: %s", e)
-
         # --- EDIT 2026-07-13 (GPS drain starvation fix, additive) ---
         # The tail-end GPS backfill (bottom of collect()) almost never ran:
         # worker restarts every ~0.5-2h + the 7200s no-progress watchdog chopped
@@ -797,6 +790,13 @@ class StravaCollector(BaseCollector):
             except Exception as e:
                 logger.warning("strava: early GPS backfill failed: %s", e)
         # --- END EDIT (GPS-first drain) ---
+
+        owner_ids_scraped: set[str] = set()
+        if self._follow_scrape_enabled and self._use_web and self._cookie_accounts:
+            try:
+                owner_ids_scraped = await self._collect_owner_rosters_for_cookie_accounts()
+            except Exception as e:
+                logger.warning("strava: owner roster capture failed: %s", e)
 
         # Strava photo metadata can be discovered during long page/history crawls,
         # while BaseCollector.run_backfill() only fires after collect() returns.

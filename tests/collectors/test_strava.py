@@ -740,6 +740,44 @@ async def test_collect_cookie_timeout_after_progress_checkpoints_not_dlq(monkeyp
     assert any("timed out after partial progress (420 item(s))" in r.getMessage() for r in caplog.records)
 
 
+@pytest.mark.asyncio
+async def test_collect_runs_gps_backfill_before_owner_rosters(monkeypatch):
+    _set_web_env(monkeypatch)
+    monkeypatch.setenv("STRAVA_SPIDER_ENABLED", "false")
+    monkeypatch.setenv("STRAVA_GPS_BACKFILL_FIRST", "true")
+    monkeypatch.setenv("STRAVA_PHOTO_BACKFILL_FIRST", "false")
+
+    coll = StravaCollector()
+    pool = _make_pool()
+    coll.set_pool(pool)
+    order = []
+
+    async def mark(name, result=None):
+        order.append(name)
+        return result
+
+    async def repair(*args, **kwargs):
+        return await mark("repair", 0)
+
+    async def gps(*args, **kwargs):
+        return await mark("gps", 0)
+
+    async def rosters(*args, **kwargs):
+        return await mark("rosters", set())
+
+    coll._repair_existing_gps_stream_routes = AsyncMock(side_effect=repair)
+    coll._backfill_missing_gps_streams = AsyncMock(side_effect=gps)
+    coll._collect_owner_rosters_for_cookie_accounts = AsyncMock(side_effect=rosters)
+    coll._enrich_athlete_names = AsyncMock(return_value=0)
+    coll._sync_persisted_gps_stream_cooldown = AsyncMock(return_value=False)
+    coll._scrape_activity_pages = AsyncMock(return_value={})
+    coll._backfill_missing_photo_media = AsyncMock(return_value=0)
+
+    await coll.collect([])
+
+    assert order[:3] == ["repair", "gps", "rosters"]
+
+
 def test_normalize_collection_target_accepts_special_numeric_and_urls(monkeypatch):
     _set_web_env(monkeypatch)
     coll = StravaCollector()
