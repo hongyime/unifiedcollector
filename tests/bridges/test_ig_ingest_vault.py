@@ -1313,7 +1313,7 @@ def test_browser_heartbeat_handler_requests_forced_cycle_when_content_stale(monk
     assert args == ("x",)
 
 
-def test_browser_heartbeat_handler_fails_open_when_content_hint_is_slow(monkeypatch):
+def test_browser_heartbeat_handler_fails_active_when_content_hint_is_slow(monkeypatch):
     async def slow_hint(pool, platform):
         await asyncio.sleep(10)
         return {"force_cycle": True}
@@ -1336,8 +1336,9 @@ def test_browser_heartbeat_handler_fails_open_when_content_hint_is_slow(monkeypa
 
     assert resp.status == 200
     payload = json.loads(resp.text)
-    assert payload["force_cycle"] is False
+    assert payload["force_cycle"] is True
     assert payload["force_reason"] == "content_age_response_budget_exceeded"
+    assert payload["stale_after_seconds"] == ig_ingest.BROWSER_CONTENT_STALE_SECONDS
 
 
 def test_browser_content_hint_returns_pending_during_inflight_check():

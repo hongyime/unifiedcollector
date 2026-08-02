@@ -219,6 +219,7 @@ except (TypeError, ValueError):
     TIKTOK_BROWSER_REVISIT_CLAIM_HOLD_SECONDS = 900
 _BROWSER_CONTENT_HINT_CACHE: dict[str, tuple[float, dict]] = {}
 _BROWSER_CONTENT_HINT_INFLIGHT: set[str] = set()
+_BROWSER_CONTENT_HINT_FAIL_ACTIVE_PLATFORMS = {"x", "facebook", "tiktok", "lemon8", "threads"}
 _SAFE = re.compile(r"[^A-Za-z0-9._-]")
 _THREADS_SYNTHETIC_MEDIA_ID = re.compile(r"^(?:img|vid)_[a-z0-9]+$", re.IGNORECASE)
 
@@ -4892,12 +4893,23 @@ async def _browser_content_recovery_hint(pool, platform: str) -> dict:
             return dict(hint)
         _BROWSER_CONTENT_HINT_CACHE[platform] = (now, {})
     except TimeoutError:
-        return {"force_cycle": False, "force_reason": "content_age_check_timeout"}
+        return _browser_content_timeout_hint(platform, "content_age_check_timeout")
     except Exception:
         logger.debug("browser content recovery hint failed platform=%s", platform, exc_info=True)
     finally:
         _BROWSER_CONTENT_HINT_INFLIGHT.discard(platform)
     return {}
+
+
+def _browser_content_timeout_hint(platform: str, reason: str) -> dict:
+    if platform in _BROWSER_CONTENT_HINT_FAIL_ACTIVE_PLATFORMS:
+        return {
+            "force_cycle": True,
+            "force_reason": reason,
+            "content_age_seconds": None,
+            "stale_after_seconds": BROWSER_CONTENT_STALE_SECONDS,
+        }
+    return {"force_cycle": False, "force_reason": reason}
 
 
 async def browser_heartbeat_handler(request):
@@ -4916,10 +4928,7 @@ async def browser_heartbeat_handler(request):
         async with asyncio.timeout(BROWSER_CONTENT_HINT_RESPONSE_TIMEOUT_SECONDS):
             recovery_hint = await _browser_content_recovery_hint(pool, platform)
     except TimeoutError:
-        recovery_hint = {
-            "force_cycle": False,
-            "force_reason": "content_age_response_budget_exceeded",
-        }
+        recovery_hint = _browser_content_timeout_hint(platform, "content_age_response_budget_exceeded")
     _schedule_app_task(
         request.app,
         _record_browser_ingest_event(
