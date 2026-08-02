@@ -27,6 +27,14 @@ from .vault import (
 logger = logging.getLogger(__name__)
 
 
+def _media_db_consistency_timeout_ms() -> int:
+    try:
+        seconds = float(os.getenv("COLLECTOR_MEDIA_DB_CONSISTENCY_TIMEOUT_SECONDS", "3"))
+    except (TypeError, ValueError):
+        seconds = 3.0
+    return max(0, int(seconds * 1000))
+
+
 def _is_canonical_vault_blob_path(file_path: str | os.PathLike[str] | None) -> bool:
     if not file_path:
         return False
@@ -675,43 +683,59 @@ class BaseCollector(ABC):
                 )
             try:
                 async with self.pool.acquire() as conn:
-                    consistency = await verify_media_item_db_consistency(
-                        conn,
-                        source=self.SOURCE_NAME,
-                        content_id=content_id,
-                        file_path=file_path,
-                        file_size=file_size,
-                        sha256=sha256,
-                        sidecar_path=sidecar.relative_path if sidecar.enabled else None,
-                    )
-                    consistency_meta = {
-                        "vault_artifact_db_consistency": {
-                            "ok": consistency.ok,
-                            "errors": list(consistency.errors),
-                        }
-                    }
-                    await conn.execute(
-                        """
-                        UPDATE media_items
-                        SET metadata = COALESCE(metadata, '{}'::jsonb) || $3::jsonb
-                        WHERE source = $1 AND content_id = $2
-                        """,
-                        self.SOURCE_NAME,
-                        content_id,
-                        json.dumps(consistency_meta, default=str),
-                    )
-                    if not consistency.ok:
-                        await conn.execute(
-                            """
-                            INSERT INTO dead_letter_queue (source, entity_id, content_id, error_message)
-                            VALUES ($1, $2, $3, $4)
-                            """,
+                    timeout_ms = _media_db_consistency_timeout_ms()
+                    if timeout_ms > 0:
+                        async with conn.transaction():
+                            await conn.execute(f"SET LOCAL statement_timeout = {timeout_ms}")
+                            consistency = await verify_media_item_db_consistency(
+                                conn,
+                                source=self.SOURCE_NAME,
+                                content_id=content_id,
+                                file_path=file_path,
+                                file_size=file_size,
+                                sha256=sha256,
+                                sidecar_path=sidecar.relative_path if sidecar.enabled else None,
+                            )
+                            consistency_meta = {
+                                "vault_artifact_db_consistency": {
+                                    "ok": consistency.ok,
+                                    "errors": list(consistency.errors),
+                                }
+                            }
+                            await conn.execute(
+                                """
+                                UPDATE media_items
+                                SET metadata = COALESCE(metadata, '{}'::jsonb) || $3::jsonb
+                                WHERE source = $1 AND content_id = $2
+                                """,
+                                self.SOURCE_NAME,
+                                content_id,
+                                json.dumps(consistency_meta, default=str),
+                            )
+                            if not consistency.ok:
+                                await conn.execute(
+                                    """
+                                    INSERT INTO dead_letter_queue (source, entity_id, content_id, error_message)
+                                    VALUES ($1, $2, $3, $4)
+                                    """,
+                                    self.SOURCE_NAME,
+                                    entity_id,
+                                    content_id,
+                                    "vault artifact db consistency failed: "
+                                    + "; ".join(consistency.errors),
+                                )
+                    else:
+                        logger.debug(
+                            "vault artifact db consistency check disabled for %s/%s",
                             self.SOURCE_NAME,
-                            entity_id,
                             content_id,
-                            "vault artifact db consistency failed: "
-                            + "; ".join(consistency.errors),
                         )
+            except (asyncio.TimeoutError, TimeoutError):
+                logger.warning(
+                    "vault artifact db consistency check timed out for %s/%s; media row kept",
+                    self.SOURCE_NAME,
+                    content_id,
+                )
             except Exception:
                 logger.warning(
                     "vault artifact db consistency check failed for %s/%s",
