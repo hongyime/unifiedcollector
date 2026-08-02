@@ -270,7 +270,8 @@ const FORCED_CYCLE_HARD_RELOAD_MS_BY_PLATFORM = {
   instagram: 11 * 60 * 1000,
 };
 const FORCED_CYCLE_RELOAD_DEBOUNCE_MS = 10 * 60 * 1000;
-const FORCED_CYCLE_FAILURE_DEBOUNCE_MS = 10 * 60 * 1000;
+const FORCED_CYCLE_FAILURE_DEBOUNCE_MS = 90 * 1000;
+const TAB_MESSAGE_TIMEOUT_MS = 10000;
 const EXTENSION_AUTO_RELOAD_STATE_KEY = "ucExtensionAutoReloadState";
 const EXTENSION_AUTO_RELOAD_DEBOUNCE_MS = 2 * 60 * 1000;
 const EXTENSION_AUTO_RELOAD_DELAY_MS = 1200;
@@ -284,6 +285,20 @@ function isNoReceiverError(err) {
   return /Could not establish connection|Receiving end does not exist|Extension context invalidated/i.test(
     String((err && err.message) || err || "")
   );
+}
+
+async function sendTabMessageWithTimeout(tabId, message, timeoutMs = TAB_MESSAGE_TIMEOUT_MS) {
+  let timer = null;
+  try {
+    return await Promise.race([
+      chrome.tabs.sendMessage(tabId, message),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("tab message timed out")), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 async function recordServiceWorkerRecovery(base, tab, platform, status, reason, extra = {}) {
@@ -325,7 +340,7 @@ async function injectContentScriptAndNudge(base, tab, platform, reason, extra = 
     return false;
   }
   try {
-    await chrome.tabs.sendMessage(tabId, {
+    await sendTabMessageWithTimeout(tabId, {
       type: "scrapeCycle",
       reason: reason || "content_script_receiver_missing",
     });
@@ -366,7 +381,7 @@ function schedulePostReloadScrapeNudge(base, tab, platform, reason, extra = {}) 
         freshTab = await chrome.tabs.get(tabId);
       } catch (e) {}
       try {
-        await chrome.tabs.sendMessage(tabId, {
+        await sendTabMessageWithTimeout(tabId, {
           type: "scrapeCycle",
           reason: reason || "post_reload_recovery",
         });
@@ -525,7 +540,7 @@ async function maybeForceScrapeCycle(tab, platform, responseBody, reason, base =
   };
   try {
     lastForcedCycleByTab[key] = now;
-    await chrome.tabs.sendMessage(tab.id, recoveryMessage);
+    await sendTabMessageWithTimeout(tab.id, recoveryMessage);
     await recordServiceWorkerRecovery(base, tab, platform, "forced_cycle_request_sent", body.force_reason || "browser_content_stale", {
       content_age_seconds: body.content_age_seconds || null,
       message_type: recoveryMessage.type,
@@ -719,6 +734,12 @@ function selectCanonicalScraperTabRows(tabs) {
 
 function shouldNormalizeSingleFeedTab(p, tab, reason) {
   if (!p || p.id !== "x" || !tab || !tab.url) return false;
+  try {
+    const u = new URL(tab.url);
+    if (u.searchParams.has("failedScript")) return true;
+  } catch (e) {
+    if (/[?&]failedScript(?:=|&|$)/i.test(String(tab.url || ""))) return true;
+  }
   const path = _tpath(tab.url);
   const homePath = _tpath(p.url);
   if (path === homePath || path.startsWith(homePath + "/")) return false;
@@ -1140,7 +1161,7 @@ async function ensureLoops(reason) {
       await log("warn", `page hook inject failed for tab ${t.id}: ${e && e.message ? e.message : e}`);
     }
     try {
-      await chrome.tabs.sendMessage(t.id, { type: forceCycle ? "scrapeCycle" : "ensureLoop", reason });
+      await sendTabMessageWithTimeout(t.id, { type: forceCycle ? "scrapeCycle" : "ensureLoop", reason });
     } catch (firstErr) {
       try {
         const platform = platformForTabUrl(t.url);

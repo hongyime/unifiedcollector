@@ -43,6 +43,15 @@ def test_x_twitter_alias_is_registered_for_tabs_and_background():
     assert "platformHosts(p).includes(host)" in background
 
 
+def test_x_failed_script_url_is_canonicalized():
+    background = _read("extension/background.js")
+    content = _read("extension/content.js")
+
+    assert 'u.searchParams.has("failedScript")' in background
+    assert 'reason: "failed_script_url"' in content
+    assert 'location.href = "https://x.com/home"' in content
+
+
 def test_scraper_refresh_runs_before_dashboard_content_stale_window():
     background = _read("extension/background.js")
 
@@ -69,6 +78,16 @@ def test_scraper_heartbeat_summary_is_not_blocked_by_recovery():
     assert "await maybeForceScrapeCycle(" not in heartbeat_fn
     assert "scheduleMaybeForceScrapeCycle(" in page_health_fn
     assert "await maybeForceScrapeCycle(" not in page_health_fn
+
+
+def test_content_script_recovery_bounds_tab_messages():
+    background = _read("extension/background.js")
+
+    assert "const TAB_MESSAGE_TIMEOUT_MS = 10000" in background
+    assert "const FORCED_CYCLE_FAILURE_DEBOUNCE_MS = 90 * 1000" in background
+    assert "async function sendTabMessageWithTimeout" in background
+    assert background.count("sendTabMessageWithTimeout(") >= 5
+    assert "new Error(\"tab message timed out\")" in background
 
 
 def test_recoverable_page_shells_try_native_retry_before_waiting():
@@ -109,3 +128,15 @@ def test_facebook_has_post_text_fallback_when_permalink_ids_are_missing():
     assert 'metadata: {' in facebook_block
     assert 'source: linkId ? "facebook_dom_article" : "facebook_dom_article_fallback"' in facebook_block
     assert "const posts = harvestFacebookPosts(entity)" in content
+
+
+def test_stalled_scrape_passes_are_force_cleared_on_timeout():
+    content = _read("extension/content.js")
+    timeout_table = content.split("const TIMEOUT_RELOAD_STREAK_BY_PLATFORM = {", 1)[1].split("};", 1)[0]
+
+    assert "function forceClearScrapePass()" in content
+    assert "forceClearScrapePass();" in content
+    assert "scrape_pass_forced_clear: true" in content
+    assert re.search(r"tiktok:\s*1", timeout_table)
+    assert re.search(r"x:\s*1", timeout_table)
+    assert re.search(r"facebook:\s*1", timeout_table)

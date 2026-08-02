@@ -412,8 +412,20 @@ function visiblePageText() {
 function compactSample(text) {
   return String(text || "").replace(/\s+/g, " ").trim().slice(0, 260);
 }
+function detectRecoverableUrlShell(platformId) {
+  if (platformId === "x" && /[?&]failedScript(?:=|&|$)/i.test(location.search || "")) {
+    return {
+      reason: "failed_script_url",
+      sample: compactSample(location.href),
+      content_counts: pageContentCounts(),
+    };
+  }
+  return null;
+}
 function detectRecoverablePageShell(platformId) {
   if (!PAGE_RECOVERY_ENABLED.has(platformId)) return null;
+  const urlShell = detectRecoverableUrlShell(platformId);
+  if (urlShell) return urlShell;
   const text = visiblePageText();
   if (!text) return null;
   const counts = pageContentCounts();
@@ -462,6 +474,14 @@ function findRecoverablePageActionButton() {
 
 async function attemptRecoverablePageInteraction(platformId, shell) {
   if (!PAGE_RECOVERY_ENABLED.has(platformId) || !shell) return false;
+  if (platformId === "x" && shell.reason === "failed_script_url") {
+    try {
+      history.replaceState(null, "", "https://x.com/home");
+    } catch (e) {}
+    clog("warn", "x failedScript URL detected; returning to clean home", "x");
+    location.href = "https://x.com/home";
+    return true;
+  }
   const key = `uc_recover_click_${platformId}_${shell.reason || "shell"}`;
   const last = lsNum(key);
   if (last && Date.now() - last < 60000) return false;
@@ -3013,11 +3033,11 @@ const LOOP_CYCLE_TIMEOUT_MS_BY_PLATFORM = {
 const TIMEOUT_RELOAD_STREAK_BY_PLATFORM = {
   instagram: 2,
   strava: 2,
-  tiktok: 2,
+  tiktok: 1,
   lemon8: 2,
   threads: 2,
-  x: 2,
-  facebook: 2,
+  x: 1,
+  facebook: 1,
 };
 
 function oneShotTimeoutMs(platformId) {
@@ -3059,6 +3079,13 @@ function scrapePassStaleMs(platformId) {
 
 function clearScrapePass(token) {
   if (token !== SCRAPE_PASS_TOKEN) return;
+  SCRAPE_PASS_RUNNING = false;
+  SCRAPE_PASS_STARTED_AT = 0;
+  SCRAPE_PASS_REASON = "";
+}
+
+function forceClearScrapePass() {
+  SCRAPE_PASS_TOKEN++;
   SCRAPE_PASS_RUNNING = false;
   SCRAPE_PASS_STARTED_AT = 0;
   SCRAPE_PASS_REASON = "";
@@ -3152,7 +3179,9 @@ async function mainLoop() {
             await reportForcedCycleHealth(p, "scrape_pass_stale_reloading", SCRAPE_PASS_REASON || "loop", {
               scrape_pass_age_ms: ageMs,
               stale_after_ms: staleMs,
+              scrape_pass_forced_clear: true,
             });
+            forceClearScrapePass();
             scheduleOneShotReload(p, `scrape pass stuck ${Math.ceil(ageMs / 60000)}m`);
             await sleep(human(30000));
           } else {
@@ -3189,11 +3218,15 @@ async function mainLoop() {
         if (e && e.name === "UCLoopCycleTimeout") {
           LOOP_TIMEOUT_STREAK += 1;
           const reloadAfter = timeoutReloadStreak(p.id);
+          const timedOutScrapePassAgeMs = scrapePassAgeMs();
+          forceClearScrapePass();
           await reportForcedCycleHealth(p, "loop_cycle_timeout", "loop_cycle_timeout", {
             cycle_error: e.message,
             timeout_ms: loopCycleTimeoutMs(p.id),
             timeout_streak: LOOP_TIMEOUT_STREAK,
             reload_after_streak: reloadAfter,
+            scrape_pass_age_ms: timedOutScrapePassAgeMs,
+            scrape_pass_forced_clear: true,
           });
           if (LOOP_TIMEOUT_STREAK >= reloadAfter) {
             scheduleOneShotReload(p, `loop scrape timed out ${LOOP_TIMEOUT_STREAK}x`);
@@ -3278,7 +3311,9 @@ async function runOneShotCycle(reason) {
       await reportForcedCycleHealth(p, "forced_cycle_reloading_scrape_pass_stale", reason || "manual", {
         scrape_pass_age_ms: ageMs,
         stale_after_ms: staleMs,
+        scrape_pass_forced_clear: true,
       });
+      forceClearScrapePass();
       scheduleOneShotReload(p, "stale scrape pass");
       return;
     }
@@ -3339,12 +3374,18 @@ async function runOneShotCycle(reason) {
     if (e && e.name === "UCOneShotTimeout") {
       ONE_SHOT_TIMEOUT_STREAK += 1;
     }
+    const timedOutScrapePassAgeMs = e && e.name === "UCOneShotTimeout" ? scrapePassAgeMs() : null;
+    if (e && e.name === "UCOneShotTimeout") {
+      forceClearScrapePass();
+    }
     await reportForcedCycleHealth(p, "forced_cycle_error", reason || "manual", {
       cycle_error: e && e.message ? e.message : String(e),
       one_shot_timeout: e && e.name === "UCOneShotTimeout" ? true : null,
       timeout_ms: e && e.name === "UCOneShotTimeout" ? oneShotTimeoutMs(p.id) : null,
       timeout_streak: e && e.name === "UCOneShotTimeout" ? ONE_SHOT_TIMEOUT_STREAK : null,
       reload_after_streak: e && e.name === "UCOneShotTimeout" ? timeoutReloadStreak(p.id) : null,
+      scrape_pass_age_ms: timedOutScrapePassAgeMs,
+      scrape_pass_forced_clear: e && e.name === "UCOneShotTimeout" ? true : null,
     });
     if (e && e.name === "UCOneShotTimeout" && ONE_SHOT_TIMEOUT_STREAK >= timeoutReloadStreak(p.id)) {
       scheduleOneShotReload(p, `timed out ${ONE_SHOT_TIMEOUT_STREAK}x`);
