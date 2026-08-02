@@ -192,6 +192,17 @@ _RATE_LIMIT_KEYWORDS = (
     "rate limit", "too many requests", "ratelimit", "rate_limit", "429",
 )
 
+_PROFILE_WALL_KEYWORDS = (
+    ("captcha", "captcha"),
+    ("security check", "security_check"),
+    ("verify to continue", "verify_to_continue"),
+    ("verify you are", "verify_human"),
+    ("challenge", "challenge"),
+    ("access denied", "access_denied"),
+    ("unusual traffic", "unusual_traffic"),
+    ("failed to solve javascript challenge", "javascript_challenge"),
+)
+
 
 def classify_invalid_username(
     err_text: str | None, http_status: Optional[int] = None
@@ -211,6 +222,17 @@ def classify_invalid_username(
     if http_status and http_status >= 500:
         return ValidationResult(is_valid=True, is_network_error=True, should_retry=True)
     return ValidationResult(is_valid=True, is_network_error=True, should_retry=True, error_message=err_text)
+
+
+def classify_profile_wall(page_html: str | None) -> str | None:
+    """Detect TikTok challenge/login shell pages that return HTTP 200."""
+    text = (page_html or "").lower()
+    if not text:
+        return None
+    for needle, reason in _PROFILE_WALL_KEYWORDS:
+        if needle in text:
+            return reason
+    return None
 
 
 def validate_cookies(cookies_file: str) -> dict:
@@ -1191,6 +1213,23 @@ class TiktokCollector(BaseCollector):
                     "status": "private" if validation.invalid_reason == InvalidReason.PRIVATE_BANNED else reason,
                     "error": validation.error_message,
                 }
+            wall_reason = classify_profile_wall(resp.text)
+            if wall_reason:
+                await record_rate_limit_event(
+                    self.pool,
+                    source="tiktok",
+                    account=self._account_name(),
+                    scope="profile_metadata",
+                    status_code=resp.status_code,
+                    cooldown_seconds=self._local_tool_cooldown_seconds,
+                    reason=f"TikTok profile metadata challenge wall: {wall_reason}",
+                    metadata={"username": username, "wall_reason": wall_reason},
+                )
+                return {
+                    "status": "delayed",
+                    "http_status": resp.status_code,
+                    "error": f"profile_wall:{wall_reason}",
+                }
             return {"status": "missing"}
 
         profile_uuid = await self._upsert_profile(author, stats) if self.pool is not None else None
@@ -2129,6 +2168,11 @@ class TiktokCollector(BaseCollector):
             logger.warning("collect_user_profile %s: %s", username, e)
             return None
         if str(metadata.get("status") or "") not in {"ok", "private"}:
+            await self._record_profile_access(
+                username,
+                False,
+                error=str(metadata.get("error") or metadata.get("status") or "profile_metadata_unavailable"),
+            )
             return None
         # Look up the profile we just upserted.
         if self.pool is None:

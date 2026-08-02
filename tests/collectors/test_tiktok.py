@@ -26,6 +26,7 @@ from src.collectors.tiktok import (  # noqa: E402
     TiktokCollector,
     TiktokEdgeFetcher,
     ValidationResult,
+    classify_profile_wall,
     classify_invalid_username,
     validate_cookies,
     validate_username,
@@ -111,6 +112,11 @@ def test_classify_5xx_is_network_retry():
     r = classify_invalid_username("upstream", http_status=503)
     assert r.is_valid is True
     assert r.is_network_error and r.should_retry
+
+
+def test_classify_profile_wall_detects_challenge_shell():
+    assert classify_profile_wall("<html>Security Check: verify to continue</html>") == "security_check"
+    assert classify_profile_wall("<html>normal profile content</html>") is None
 
 
 def test_validate_cookies_missing_file(tmp_path):
@@ -435,6 +441,61 @@ async def test_collect_user_profile_quota_exhausted(monkeypatch):
     out = await c.collect_user_profile("bryan")
     assert out is None
     c._scrape_profile_metadata.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_collect_user_profile_records_failed_access(monkeypatch):
+    with patch.object(TiktokCollector, "_check_tool", staticmethod(lambda *_: False)):
+        c = TiktokCollector()
+    c._quota = None
+    monkeypatch.setattr(
+        c,
+        "_scrape_profile_metadata",
+        AsyncMock(return_value={"status": "delayed", "error": "profile_wall:challenge"}),
+    )
+    monkeypatch.setattr(c, "_record_profile_access", AsyncMock())
+    monkeypatch.setattr(c, "wait_rate_limit", AsyncMock())
+
+    out = await c.collect_user_profile("bryan")
+
+    assert out is None
+    c._record_profile_access.assert_awaited_once_with(
+        "bryan",
+        False,
+        error="profile_wall:challenge",
+    )
+
+
+@pytest.mark.asyncio
+async def test_scrape_profile_metadata_records_challenge_wall(monkeypatch):
+    with patch.object(TiktokCollector, "_check_tool", staticmethod(lambda *_: False)):
+        c = TiktokCollector()
+    c.pool = _make_pool()
+    monkeypatch.setattr(c, "wait_rate_limit", AsyncMock())
+
+    resp = MagicMock(status_code=200, text="<html>Security Check: verify to continue</html>")
+    resp.raise_for_status = MagicMock()
+    fake_client = MagicMock()
+    fake_client.get = AsyncMock(return_value=resp)
+
+    @asynccontextmanager
+    async def _client_cm(*a, **kw):
+        yield fake_client
+
+    events = []
+
+    async def _record(*args, **kwargs):
+        events.append(kwargs)
+
+    monkeypatch.setattr(tiktok_mod.httpx, "AsyncClient", _client_cm)
+    monkeypatch.setattr(tiktok_mod, "record_rate_limit_event", _record)
+
+    out = await c._scrape_profile_metadata("bryan")
+
+    assert out["status"] == "delayed"
+    assert out["error"] == "profile_wall:security_check"
+    assert events[0]["source"] == "tiktok"
+    assert events[0]["scope"] == "profile_metadata"
 
 
 def test_extract_profile_from_universal_state():
