@@ -89,7 +89,32 @@ def test_content_script_recovery_bounds_tab_messages():
     assert "async function sendTabMessageWithTimeout" in background
     assert background.count("sendTabMessageWithTimeout(") >= 5
     assert "new Error(\"tab message timed out\")" in background
-    assert "tab message timed out/i.test" in background
+    assert "function isTabMessageTimeout" in background
+    no_receiver_block = background.split("function isNoReceiverError", 1)[1].split(
+        "function isTabMessageTimeout", 1
+    )[0]
+    assert "tab message timed out" not in no_receiver_block
+
+
+def test_tab_message_timeouts_do_not_trigger_receiver_missing_refresh():
+    background = _read("extension/background.js")
+
+    assert "content_script_programmatic_nudge_timed_out" in background
+    assert "forced_cycle_request_timed_out" in background
+    assert "content_script_message_timeout" in background
+
+    forced_catch = background.split("const messageTimedOut = isTabMessageTimeout(firstErr);", 1)[1].split(
+        "await recordServiceWorkerRecovery(base, tab, platform, \"forced_cycle_request_failed\"",
+        1,
+    )[0]
+    ensure_catch = background.split("if (platform && messageTimedOut)", 1)[1].split(
+        "else if (platform && receiverMissing)",
+        1,
+    )[0]
+
+    assert "return;" in forced_catch
+    assert "hardRefreshForcedCycleTab" not in forced_catch
+    assert "refreshTabForMissingContentScript" not in ensure_catch
 
 
 def test_recoverable_page_shells_try_native_retry_before_waiting():
@@ -142,3 +167,46 @@ def test_stalled_scrape_passes_are_force_cleared_on_timeout():
     assert re.search(r"tiktok:\s*1", timeout_table)
     assert re.search(r"x:\s*1", timeout_table)
     assert re.search(r"facebook:\s*1", timeout_table)
+
+
+def test_direct_fallback_fetches_are_bounded():
+    content = _read("extension/content.js")
+
+    direct_block = content.split("async function directSendFallback", 1)[1].split(
+        "async function send(", 1
+    )[0]
+
+    assert "const DEFAULT_DIRECT_SEND_TIMEOUT_MS = 20000" in content
+    assert "const DIRECT_SEND_TIMEOUT_MS_BY_TYPE" in content
+    assert "function directSendTimeoutMs(msg)" in content
+    assert "UCDirectSendTimeout" in direct_block
+    assert "withDeadline(" in direct_block
+    assert "fetch(DIRECT_INGEST_BASE + request.path" in direct_block
+
+
+def test_facebook_and_x_optional_writes_are_nonblocking():
+    content = _read("extension/content.js")
+    x_block = content.split("const x = {", 1)[1].split("function harvestFacebookPosts", 1)[0]
+    facebook_block = content.split("const facebook = {", 1)[1].split(
+        "const STRAVA_ROUTE_NAV_MIN_MS", 1
+    )[0]
+
+    assert "function sendSideEffect" in content
+    assert "X seen-user write" in x_block
+    assert "Facebook seen-user write" in facebook_block
+    assert 'send({ type: "posts", platform: "x"' not in x_block
+    assert 'await send({ type: "posts", platform: "facebook"' not in facebook_block
+    assert "{ timeoutMs: forcedRecovery ? 30000 : 45000 }" in x_block
+    assert "{ timeoutMs: forcedRecovery ? 30000 : 45000 }" in facebook_block
+
+
+def test_x_error_shell_can_switch_host_when_native_retry_is_missing():
+    content = _read("extension/content.js")
+    recover_block = content.split("async function attemptRecoverablePageInteraction", 1)[1].split(
+        "// Capture is ALWAYS ON", 1
+    )[0]
+
+    assert "uc_x_shell_nav_" in recover_block
+    assert '"https://twitter.com/home"' in recover_block
+    assert '"https://x.com/home"' in recover_block
+    assert "switching host to recover" in recover_block

@@ -282,9 +282,13 @@ function forcedCycleHardReloadMs(platformId) {
 }
 
 function isNoReceiverError(err) {
-  return /Could not establish connection|Receiving end does not exist|Extension context invalidated|tab message timed out/i.test(
+  return /Could not establish connection|Receiving end does not exist|Extension context invalidated/i.test(
     String((err && err.message) || err || "")
   );
+}
+
+function isTabMessageTimeout(err) {
+  return /tab message timed out/i.test(String((err && err.message) || err || ""));
 }
 
 async function sendTabMessageWithTimeout(tabId, message, timeoutMs = TAB_MESSAGE_TIMEOUT_MS) {
@@ -347,10 +351,20 @@ async function injectContentScriptAndNudge(base, tab, platform, reason, extra = 
     await recordServiceWorkerRecovery(base, freshTab, platform, "content_script_programmatic_nudge_sent", reason || "content_script_receiver_missing", extra);
     return true;
   } catch (e) {
+    const messageTimedOut = isTabMessageTimeout(e);
     await recordServiceWorkerRecovery(base, freshTab, platform, "content_script_programmatic_nudge_failed", reason || "content_script_receiver_missing", {
       ...extra,
       cycle_error: e && e.message ? e.message : String(e),
+      message_timeout: messageTimedOut || null,
     });
+    if (messageTimedOut) {
+      await recordServiceWorkerRecovery(base, freshTab, platform, "content_script_programmatic_nudge_timed_out", reason || "content_script_receiver_missing", {
+        ...extra,
+        cycle_error: e && e.message ? e.message : String(e),
+        message_timeout: true,
+      });
+      return true;
+    }
     return false;
   }
 }
@@ -552,6 +566,7 @@ async function maybeForceScrapeCycle(tab, platform, responseBody, reason, base =
     const lastFailureAt = Number(lastForcedFailureByTab[failKey] || 0);
     const failureAgeMs = lastFailureAt ? Date.now() - lastFailureAt : 0;
     const receiverMissing = isNoReceiverError(firstErr);
+    const messageTimedOut = isTabMessageTimeout(firstErr);
     if (receiverMissing && lastFailureAt && failureAgeMs < FORCED_CYCLE_FAILURE_DEBOUNCE_MS) {
       await recordServiceWorkerRecovery(base, tab, platform, "forced_cycle_request_debounced", body.force_reason || "browser_content_stale", {
         content_age_seconds: body.content_age_seconds || null,
@@ -562,6 +577,15 @@ async function maybeForceScrapeCycle(tab, platform, responseBody, reason, base =
       return;
     }
     lastForcedFailureByTab[failKey] = Date.now();
+    if (messageTimedOut) {
+      await recordServiceWorkerRecovery(base, tab, platform, "forced_cycle_request_timed_out", body.force_reason || "browser_content_stale", {
+        content_age_seconds: body.content_age_seconds || null,
+        cycle_error: cycleError,
+        message_timeout: true,
+      });
+      await log("warn", `${platform.label}: stale-content forced scrape message timed out; leaving the tab running and retrying later`);
+      return;
+    }
     await recordServiceWorkerRecovery(base, tab, platform, "forced_cycle_request_failed", body.force_reason || "browser_content_stale", {
       content_age_seconds: body.content_age_seconds || null,
       cycle_error: cycleError,
@@ -1166,14 +1190,23 @@ async function ensureLoops(reason) {
       try {
         const platform = platformForTabUrl(t.url);
         const receiverMissing = isNoReceiverError(firstErr);
-        if (platform && receiverMissing) {
+        const messageTimedOut = isTabMessageTimeout(firstErr);
+        const cycleError = firstErr && firstErr.message ? firstErr.message : String(firstErr);
+        if (platform && messageTimedOut) {
+          const base = await ingestBase();
+          await recordServiceWorkerRecovery(base, t, platform, "content_script_message_timeout", reason || "ensure_loop", {
+            cycle_error: cycleError,
+            message_timeout: true,
+          });
+          await log("warn", `${platform.label}: scraper tab did not answer loop nudge within timeout; leaving it open to finish current work (${reason})`);
+        } else if (platform && receiverMissing) {
           const base = await ingestBase();
           await recordServiceWorkerRecovery(base, t, platform, "content_script_missing_refresh", reason || "ensure_loop", {
-            cycle_error: firstErr && firstErr.message ? firstErr.message : String(firstErr),
+            cycle_error: cycleError,
             no_receiver: true,
           });
           const reloaded = await refreshTabForMissingContentScript(base, t, platform, "ensure_loop_receiver_missing", {
-            cycle_error: firstErr && firstErr.message ? firstErr.message : String(firstErr),
+            cycle_error: cycleError,
             no_receiver: true,
           });
           if (reloaded) {
