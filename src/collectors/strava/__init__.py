@@ -712,6 +712,40 @@ class StravaCollector(BaseCollector):
             if data.get("refresh_token"): self._refresh_token = data["refresh_token"]
             logger.info("Strava token refreshed")
 
+    def _normalize_collection_target(self, target: str) -> str | None:
+        raw = str(target or "").strip()
+        if not raw:
+            return None
+        lower = raw.lower()
+        if lower in {"me", "feed"}:
+            return lower
+        if re.fullmatch(r"\d+", raw):
+            return raw
+        m = re.search(r"(?:^|/)athletes/(\d+)(?:[/?#].*)?$", raw)
+        if m:
+            return m.group(1)
+        return None
+
+    async def _mark_invalid_collection_target(self, target: str, reason: str) -> None:
+        if not self.pool:
+            return
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE collection_targets
+                       SET status = 'invalid',
+                           last_collection_at = NOW(),
+                           error_message = $2
+                     WHERE source = 'strava'
+                       AND target_id = $1
+                    """,
+                    str(target),
+                    reason[:1000],
+                )
+        except Exception as e:
+            logger.debug("strava: failed to mark invalid target %s: %s", target, e)
+
     async def collect(self, targets: list[str]):
         from src.core.env import env_bool
         if not env_bool("STRAVA_COLLECTOR_ENABLED", default=True):
@@ -777,6 +811,13 @@ class StravaCollector(BaseCollector):
 
         for target in targets:
             if self._stop.is_set(): break
+            raw_target = target
+            target = self._normalize_collection_target(raw_target)
+            if target is None:
+                reason = "invalid Strava athlete target; expected numeric athlete ID, 'me', 'feed', or /athletes/<id> URL"
+                logger.warning("Skipping strava/%s: %s", raw_target, reason)
+                await self._mark_invalid_collection_target(raw_target, reason)
+                continue
             logger.info("Collecting strava/%s", target)
             progress_before_target = self._progress_count
             try:

@@ -740,6 +740,49 @@ async def test_collect_cookie_timeout_after_progress_checkpoints_not_dlq(monkeyp
     assert any("timed out after partial progress (420 item(s))" in r.getMessage() for r in caplog.records)
 
 
+def test_normalize_collection_target_accepts_special_numeric_and_urls(monkeypatch):
+    _set_web_env(monkeypatch)
+    coll = StravaCollector()
+
+    assert coll._normalize_collection_target("me") == "me"
+    assert coll._normalize_collection_target("feed") == "feed"
+    assert coll._normalize_collection_target("72101656") == "72101656"
+    assert coll._normalize_collection_target("https://www.strava.com/athletes/72101656?x=y") == "72101656"
+    assert coll._normalize_collection_target("Ben") is None
+
+
+@pytest.mark.asyncio
+async def test_collect_marks_invalid_strava_target_without_scrape_or_dlq(monkeypatch, caplog):
+    _set_web_env(monkeypatch)
+    monkeypatch.setenv("STRAVA_SPIDER_ENABLED", "false")
+    monkeypatch.setenv("STRAVA_FOLLOW_SCRAPE_ENABLED", "false")
+    monkeypatch.setenv("STRAVA_GPS_BACKFILL_FIRST", "false")
+    monkeypatch.setenv("STRAVA_PHOTO_BACKFILL_FIRST", "false")
+
+    coll = StravaCollector()
+    pool = _make_pool()
+    coll.set_pool(pool)
+    coll.checkpoint.save_progress = AsyncMock()
+    coll.send_to_dlq = AsyncMock()
+    coll._mark_invalid_collection_target = AsyncMock()
+    coll._collect_athlete_web = AsyncMock()
+    coll._repair_existing_gps_stream_routes = AsyncMock()
+    coll._sync_persisted_gps_stream_cooldown = AsyncMock()
+    coll._scrape_activity_pages = AsyncMock()
+    coll._backfill_missing_photo_media = AsyncMock()
+    coll._backfill_missing_gps_streams = AsyncMock()
+    coll._enrich_athlete_names = AsyncMock()
+
+    with caplog.at_level("WARNING", logger="src.collectors.strava"):
+        await coll.collect(["Ben"])
+
+    coll._collect_athlete_web.assert_not_awaited()
+    coll.checkpoint.save_progress.assert_not_awaited()
+    coll.send_to_dlq.assert_not_awaited()
+    coll._mark_invalid_collection_target.assert_awaited_once()
+    assert any("Skipping strava/Ben" in r.getMessage() for r in caplog.records)
+
+
 @pytest.mark.asyncio
 async def test_collect_athlete_web_uses_cookie_jar_not_raw_cookie_header(monkeypatch):
     _set_web_env(monkeypatch)
