@@ -40,6 +40,68 @@ def _ssl_context():
     return ctx
 
 
+def _env_float(name: str, default: float, *, min_value: float = 0.0) -> float:
+    try:
+        value = float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return max(min_value, value)
+
+
+def _is_retryable_connect_error(exc: BaseException) -> bool:
+    if isinstance(
+        exc,
+        (
+            OSError,
+            ConnectionError,
+            TimeoutError,
+            asyncio.TimeoutError,
+            asyncpg.InterfaceError,
+        ),
+    ):
+        return True
+    name = exc.__class__.__name__.lower()
+    return any(
+        token in name
+        for token in (
+            "cannotconnectnow",
+            "connectiondoesnotexist",
+            "connectionfailure",
+            "connectionrejected",
+            "connectionreset",
+            "connectionrefused",
+            "toomanyconnections",
+        )
+    )
+
+
+async def _create_pool_with_retry(kwargs: dict) -> asyncpg.Pool:
+    max_wait = _env_float("DB_CONNECT_RETRY_TIMEOUT_SECONDS", 180.0, min_value=0.0)
+    delay = _env_float("DB_CONNECT_RETRY_INITIAL_SECONDS", 5.0, min_value=0.1)
+    max_delay = _env_float("DB_CONNECT_RETRY_MAX_SECONDS", 30.0, min_value=0.1)
+    deadline = asyncio.get_running_loop().time() + max_wait
+    attempt = 0
+
+    while True:
+        try:
+            return await asyncpg.create_pool(_dsn(), **kwargs)
+        except Exception as exc:
+            if not _is_retryable_connect_error(exc):
+                raise
+            now = asyncio.get_running_loop().time()
+            if attempt > 0 and now >= deadline:
+                raise
+            sleep_for = min(delay, max(0.1, deadline - now))
+            logger.warning(
+                "Database pool connect failed (%s); retrying in %.0fs",
+                exc,
+                sleep_for,
+            )
+            await asyncio.sleep(sleep_for)
+            delay = min(delay * 1.5, max_delay)
+            attempt += 1
+
+
 async def get_pool() -> asyncpg.Pool:
     global _pool
     # Fast path without contention.
@@ -62,7 +124,7 @@ async def get_pool() -> asyncpg.Pool:
                           max_inactive_connection_lifetime=300)
             if ssl is not None:
                 kwargs["ssl"] = ssl
-            _pool = await asyncpg.create_pool(_dsn(), **kwargs)
+            _pool = await _create_pool_with_retry(kwargs)
             logger.info("Database pool created")
     return _pool
 
