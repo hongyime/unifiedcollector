@@ -414,8 +414,12 @@ app.post('/media/decrypt', async (req, res) => {
 });
 
 const healthServer = app.listen(port, () => logger.info(`Health server on :${port}`));
-healthServer.keepAliveTimeout = 1000;
-healthServer.headersTimeout = 3000;
+// The dashboard QR page polls /health and /qr repeatedly while the phone is
+// pairing. A very short keep-alive window makes Chromium occasionally reuse a
+// socket just as Node closes it, which surfaces as "Failed to fetch" even
+// though the bridge is alive.
+healthServer.keepAliveTimeout = 15000;
+healthServer.headersTimeout = 20000;
 
 const getEnv = (key: string, dflt = ''): string => (process.env[key] || dflt).split('#')[0].trim();
 
