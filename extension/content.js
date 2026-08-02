@@ -2645,6 +2645,8 @@ let LOOP_LAST_PROGRESS_AT = 0;
 let ONE_SHOT_RUNNING = false;
 let ONE_SHOT_STARTED_AT = 0;
 let ONE_SHOT_REASON = "";
+let LOOP_TIMEOUT_STREAK = 0;
+let ONE_SHOT_TIMEOUT_STREAK = 0;
 const LOOP_STALE_MS = 8 * 60 * 1000;
 const LOOP_STALE_MS_BY_PLATFORM = {
   x: 4 * 60 * 1000,
@@ -2681,6 +2683,15 @@ const LOOP_CYCLE_TIMEOUT_MS_BY_PLATFORM = {
   x: 4 * 60 * 1000,
   facebook: 4 * 60 * 1000,
 };
+const TIMEOUT_RELOAD_STREAK_BY_PLATFORM = {
+  instagram: 2,
+  strava: 2,
+  tiktok: 2,
+  lemon8: 2,
+  threads: 2,
+  x: 2,
+  facebook: 2,
+};
 
 function oneShotTimeoutMs(platformId) {
   return ONE_SHOT_TIMEOUT_MS_BY_PLATFORM[platformId] || 4 * 60 * 1000;
@@ -2688,6 +2699,10 @@ function oneShotTimeoutMs(platformId) {
 
 function loopCycleTimeoutMs(platformId) {
   return LOOP_CYCLE_TIMEOUT_MS_BY_PLATFORM[platformId] || 6 * 60 * 1000;
+}
+
+function timeoutReloadStreak(platformId) {
+  return TIMEOUT_RELOAD_STREAK_BY_PLATFORM[platformId] || 2;
 }
 
 function oneShotStaleMs(platformId) {
@@ -2782,6 +2797,7 @@ async function mainLoop() {
           `${p.label} loop scrape pass timed out after ${Math.ceil(timeoutMs / 60000)}m`,
           "UCLoopCycleTimeout"
         );
+        LOOP_TIMEOUT_STREAK = 0;
         markLoopProgress();
         if (!stats || !stats.skip_cycle_report) {
           await send({ type: "cycleReport", platform: p.label, ...stats }).catch(() => {});
@@ -2795,13 +2811,21 @@ async function mainLoop() {
         }
         clog("error", `${p.label} loop error: ${e.message}`, p.label);
         if (e && e.name === "UCLoopCycleTimeout") {
+          LOOP_TIMEOUT_STREAK += 1;
+          const reloadAfter = timeoutReloadStreak(p.id);
           await reportForcedCycleHealth(p, "loop_cycle_timeout", "loop_cycle_timeout", {
             cycle_error: e.message,
             timeout_ms: loopCycleTimeoutMs(p.id),
+            timeout_streak: LOOP_TIMEOUT_STREAK,
+            reload_after_streak: reloadAfter,
           });
-          scheduleOneShotReload(p, "loop scrape timed out");
+          if (LOOP_TIMEOUT_STREAK >= reloadAfter) {
+            scheduleOneShotReload(p, `loop scrape timed out ${LOOP_TIMEOUT_STREAK}x`);
+          } else {
+            clog("warn", `${p.label} loop timeout ${LOOP_TIMEOUT_STREAK}/${reloadAfter}; backing off without reload`, p.label);
+          }
         }
-        await sleep(human(60000));
+        await sleep(human(e && e.name === "UCLoopCycleTimeout" ? Math.min(passRestMs(p.id) * 2, 600000) : 60000));
       }
       // heartbeat so the popup shows the loop is alive between passes
       markLoopProgress();
@@ -2897,6 +2921,7 @@ async function runOneShotCycle(reason) {
       `${p.label} forced scrape pass timed out after ${Math.ceil(timeoutMs / 60000)}m`,
       "UCOneShotTimeout"
     );
+    ONE_SHOT_TIMEOUT_STREAK = 0;
     await reportForcedCycleHealth(p, "forced_cycle_finished", reason || "manual", {
       cycle_targets: asCycleNumber(stats && stats.targets),
       cycle_saved: asCycleNumber(stats && stats.saved),
@@ -2907,12 +2932,19 @@ async function runOneShotCycle(reason) {
     }
   } catch (e) {
     clog("error", `${p.label} forced scrape pass error: ${e.message}`, p.label);
+    if (e && e.name === "UCOneShotTimeout") {
+      ONE_SHOT_TIMEOUT_STREAK += 1;
+    }
     await reportForcedCycleHealth(p, "forced_cycle_error", reason || "manual", {
       cycle_error: e && e.message ? e.message : String(e),
       one_shot_timeout: e && e.name === "UCOneShotTimeout" ? true : null,
       timeout_ms: e && e.name === "UCOneShotTimeout" ? oneShotTimeoutMs(p.id) : null,
+      timeout_streak: e && e.name === "UCOneShotTimeout" ? ONE_SHOT_TIMEOUT_STREAK : null,
+      reload_after_streak: e && e.name === "UCOneShotTimeout" ? timeoutReloadStreak(p.id) : null,
     });
-    if (e && e.name === "UCOneShotTimeout") scheduleOneShotReload(p, "timed out");
+    if (e && e.name === "UCOneShotTimeout" && ONE_SHOT_TIMEOUT_STREAK >= timeoutReloadStreak(p.id)) {
+      scheduleOneShotReload(p, `timed out ${ONE_SHOT_TIMEOUT_STREAK}x`);
+    }
   } finally {
     ONE_SHOT_RUNNING = false;
     ONE_SHOT_STARTED_AT = 0;

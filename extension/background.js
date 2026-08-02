@@ -216,6 +216,7 @@ async function reportScraperTabHeartbeats(reason) {
 
 const lastForcedCycleByTab = {};
 const lastForcedReloadByTab = {};
+const lastForcedFailureByTab = {};
 const FORCED_CYCLE_DEBOUNCE_MS = 5 * 60 * 1000;
 const FORCED_CYCLE_HARD_RELOAD_MS_BY_PLATFORM = {
   x: 3 * 60 * 1000,
@@ -226,9 +227,16 @@ const FORCED_CYCLE_HARD_RELOAD_MS_BY_PLATFORM = {
   instagram: 11 * 60 * 1000,
 };
 const FORCED_CYCLE_RELOAD_DEBOUNCE_MS = 10 * 60 * 1000;
+const FORCED_CYCLE_FAILURE_DEBOUNCE_MS = 10 * 60 * 1000;
 
 function forcedCycleHardReloadMs(platformId) {
   return FORCED_CYCLE_HARD_RELOAD_MS_BY_PLATFORM[platformId] || 5 * 60 * 1000;
+}
+
+function isNoReceiverError(err) {
+  return /Could not establish connection|Receiving end does not exist|Extension context invalidated/i.test(
+    String((err && err.message) || err || "")
+  );
 }
 
 async function recordServiceWorkerRecovery(base, tab, platform, status, reason, extra = {}) {
@@ -329,9 +337,24 @@ async function maybeForceScrapeCycle(tab, platform, responseBody, reason, base =
       await log("warn", `${platform.label}: revived content script and nudged stale-content loop`);
     } catch (e) {
       const cycleError = e && e.message ? e.message : String(e);
+      const failKey = `${key}:${platform && platform.id ? platform.id : "unknown"}`;
+      const lastFailureAt = Number(lastForcedFailureByTab[failKey] || 0);
+      const failureAgeMs = lastFailureAt ? Date.now() - lastFailureAt : 0;
+      const receiverMissing = isNoReceiverError(e) || isNoReceiverError(firstErr);
+      if (receiverMissing && lastFailureAt && failureAgeMs < FORCED_CYCLE_FAILURE_DEBOUNCE_MS) {
+        await recordServiceWorkerRecovery(base, tab, platform, "forced_cycle_request_debounced", body.force_reason || "browser_content_stale", {
+          content_age_seconds: body.content_age_seconds || null,
+          cycle_error: cycleError,
+          failure_age_ms: failureAgeMs,
+          no_receiver: true,
+        });
+        return;
+      }
+      lastForcedFailureByTab[failKey] = Date.now();
       await recordServiceWorkerRecovery(base, tab, platform, "forced_cycle_request_failed", body.force_reason || "browser_content_stale", {
         content_age_seconds: body.content_age_seconds || null,
         cycle_error: cycleError,
+        no_receiver: receiverMissing || null,
       });
       try {
         const reloaded = await hardRefreshForcedCycleTab(base, tab, platform, "failed_force_message", {
