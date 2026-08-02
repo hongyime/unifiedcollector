@@ -171,6 +171,18 @@ def test_tiktok_zero_progress_reports_probe_and_page_recovery():
     assert "record_empty: true" in tiktok_block
 
 
+def test_tiktok_forced_recovery_uses_short_scroll_pass():
+    content = _read("extension/content.js")
+    tiktok_block = content.split("const tiktok = {", 1)[1].split(
+        "// ===========================================================================\n// Lemon8",
+        1,
+    )[0]
+
+    assert 'const forcedRecovery = forcedRecoveryMode("tiktok")' in tiktok_block
+    assert "autoScroll(forcedRecovery ? 3 : 10" in tiktok_block
+    assert "maxPauseMs: forcedRecovery ? 1500 : 3500" in tiktok_block
+
+
 def test_facebook_scrape_pass_is_bounded_but_not_reload_happy():
     content = _read("extension/content.js")
 

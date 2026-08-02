@@ -1537,10 +1537,13 @@ const tiktok = {
     })) return { targets: 1, saved: 0, discovered: 0 };
     const revisit = await maybeStartTikTokRevisit(owner);
     if (revisit && revisit.navigating) return { targets: 1, saved: 0, discovered: 0 };
+    const forcedRecovery = forcedRecoveryMode("tiktok");
     clog("info", `cycle start on @${entity}`, "tiktok");
     const sink = makeSink();
     let userCount = 0;
-    await autoScroll(10, 1400, 1800, { maxPauseMs: 3500 });
+    await autoScroll(forcedRecovery ? 3 : 10, 1400, forcedRecovery ? 800 : 1800, {
+      maxPauseMs: forcedRecovery ? 1500 : 3500,
+    });
     const state = parseEmbeddedState(["__UNIVERSAL_DATA_FOR_REHYDRATION__", "SIGI_STATE", "sigi-persisted-data"]);
     if (state) {
       deepCollectMedia(state, sink, entity);
