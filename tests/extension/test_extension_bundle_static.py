@@ -95,3 +95,17 @@ def test_facebook_scrape_pass_is_bounded_but_not_reload_happy():
     assert re.search(r"facebook:\s*5\s*\*\s*60\s*\*\s*1000", one_shot_block)
     assert re.search(r"facebook:\s*7\s*\*\s*60\s*\*\s*1000", loop_block)
     assert "autoScroll(forcedRecovery ? 4 : 7" in facebook_block
+
+
+def test_facebook_has_post_text_fallback_when_permalink_ids_are_missing():
+    content = _read("extension/content.js")
+    facebook_block = content.split("function harvestFacebookPosts(entity)", 1)[1].split(
+        "// Facebook", 1
+    )[0]
+
+    assert "function facebookPostIdFromHref" in content
+    assert "function facebookAuthorFromArticle" in content
+    assert "fbdom_" in facebook_block
+    assert 'metadata: {' in facebook_block
+    assert 'source: linkId ? "facebook_dom_article" : "facebook_dom_article_fallback"' in facebook_block
+    assert "const posts = harvestFacebookPosts(entity)" in content

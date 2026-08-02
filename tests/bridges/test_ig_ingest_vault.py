@@ -1181,6 +1181,74 @@ def test_structured_browser_capture_paths_use_structured_timeout(monkeypatch):
     assert ig_ingest._request_timeout_seconds("/social/targets") == 8.0
 
 
+def test_posts_handler_queues_structured_ingest_without_waiting(monkeypatch):
+    scheduled = []
+
+    def fake_schedule(app, coro, label):
+        scheduled.append((label, coro))
+        coro.close()
+
+    monkeypatch.setattr(ig_ingest, "_schedule_app_task", fake_schedule)
+    req = _FakeRequest(
+        {"pool": _FakePool(), "tasks": set()},
+        {
+            "platform": "threads",
+            "username": "following",
+            "posts": [{"platform_post_id": "p1", "author_username": "alice"}],
+        },
+    )
+
+    resp = asyncio.run(ig_ingest.posts_handler(req))
+
+    assert resp.status == 200
+    payload = json.loads(resp.text)
+    assert payload == {"ok": True, "queued": True, "observed": 1, "saved": 0}
+    assert scheduled[0][0] == "browser_posts_ingest"
+
+
+def test_posts_background_ingest_keeps_archive_save_event_and_author_writes(monkeypatch):
+    calls = []
+
+    async def fake_archive(pool, platform, kind, body):
+        calls.append(("archive", platform, kind, body["username"]))
+
+    async def fake_save(pool, platform, posts):
+        calls.append(("save", platform, [p["platform_post_id"] for p in posts]))
+        return len(posts)
+
+    async def fake_event(pool, platform, endpoint, username, observed_count, stored_count):
+        calls.append(("event", platform, endpoint, username, observed_count, stored_count))
+
+    async def fake_users(pool, platform, users, context, owner=None):
+        calls.append(("users", platform, users, context, owner))
+        return len(users)
+
+    monkeypatch.setattr(ig_ingest, "_archive_browser_capture", fake_archive)
+    monkeypatch.setattr(ig_ingest, "_save_posts", fake_save)
+    monkeypatch.setattr(ig_ingest, "_record_browser_ingest_event", fake_event)
+    monkeypatch.setattr(ig_ingest, "_record_users", fake_users)
+    app = {
+        "pool": _FakePool(),
+        "structured_sem": asyncio.Semaphore(1),
+    }
+    body = {
+        "username": "timeline",
+        "posts": [
+            {"platform_post_id": "p1", "author_username": "alice"},
+            {"platform_post_id": "p2"},
+        ],
+    }
+
+    asyncio.run(ig_ingest._posts_ingest_background(app, "x", body))
+
+    assert calls == [
+        ("archive", "x", "posts", "timeline"),
+        ("save", "x", ["p1", "p2"]),
+        ("event", "x", "posts", "timeline", 2, 2),
+        ("users", "x", [{"username": "alice"}], "author", None),
+    ]
+
+
 def test_record_users_batches_user_and_follow_edge_upserts():
     pool = _FakePool()
 
@@ -1282,7 +1350,7 @@ def test_browser_heartbeat_handler_reports_degraded_when_pool_missing():
 
 
 def test_browser_heartbeat_handler_requests_extension_reload_for_old_version(monkeypatch):
-    monkeypatch.setattr(ig_ingest, "UC_EXTENSION_EXPECTED_VERSION", "1.23.6")
+    monkeypatch.setattr(ig_ingest, "UC_EXTENSION_EXPECTED_VERSION", "1.23.7")
     req = _FakeRequest(
         {"pool": None},
         {
@@ -1290,7 +1358,7 @@ def test_browser_heartbeat_handler_requests_extension_reload_for_old_version(mon
             "label": "UnifiedCollector Bridge",
             "running": True,
             "tab_id": "service_worker",
-            "extension_version": "1.23.5",
+            "extension_version": "1.23.6",
         },
     )
 
@@ -1298,14 +1366,14 @@ def test_browser_heartbeat_handler_requests_extension_reload_for_old_version(mon
 
     assert resp.status == 200
     payload = json.loads(resp.text)
-    assert payload["expected_extension_version"] == "1.23.6"
-    assert payload["current_extension_version"] == "1.23.5"
+    assert payload["expected_extension_version"] == "1.23.7"
+    assert payload["current_extension_version"] == "1.23.6"
     assert payload["reload_extension"] is True
     assert payload["reload_reason"] == "extension_version_mismatch"
 
 
 def test_browser_heartbeat_handler_does_not_reload_current_extension(monkeypatch):
-    monkeypatch.setattr(ig_ingest, "UC_EXTENSION_EXPECTED_VERSION", "1.23.6")
+    monkeypatch.setattr(ig_ingest, "UC_EXTENSION_EXPECTED_VERSION", "1.23.7")
     req = _FakeRequest(
         {"pool": None},
         {
@@ -1313,7 +1381,7 @@ def test_browser_heartbeat_handler_does_not_reload_current_extension(monkeypatch
             "label": "UnifiedCollector Bridge",
             "running": True,
             "tab_id": "service_worker",
-            "extension_version": "v1.23.6",
+            "extension_version": "v1.23.7",
         },
     )
 
@@ -1321,7 +1389,7 @@ def test_browser_heartbeat_handler_does_not_reload_current_extension(monkeypatch
 
     assert resp.status == 200
     payload = json.loads(resp.text)
-    assert payload["expected_extension_version"] == "1.23.6"
+    assert payload["expected_extension_version"] == "1.23.7"
     assert "reload_extension" not in payload
     assert "current_extension_version" not in payload
 

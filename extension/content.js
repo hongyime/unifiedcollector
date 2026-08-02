@@ -2552,6 +2552,79 @@ function scrapeFacebookProfile(entity, person) {
   };
 }
 
+function facebookPostIdFromHref(href) {
+  const s = String(href || "")
+    .replace(/^https?:\/\/(?:www\.)?facebook\.com/i, "")
+    .split("#")[0];
+  const patterns = [
+    /\/posts\/(pfbid[\w]+|\d{6,})/i,
+    /\/photos\/(?:[^/?#]+\/)?(?:a\.\d+\/)?(?:\d+\/)?(pfbid[\w]+|\d{6,})/i,
+    /\/videos\/(pfbid[\w]+|\d{6,})/i,
+    /[?&]story_fbid=(pfbid[\w]+|\d{6,})/i,
+    /\/permalink\.php\?(?:[^#]*&)?story_fbid=(pfbid[\w]+|\d{6,})/i,
+    /\/share\/(?:p|v|r)\/([^/?#]+)/i,
+  ];
+  for (const re of patterns) {
+    const m = s.match(re);
+    if (m && m[1]) return m[1];
+  }
+  return "";
+}
+
+function facebookAuthorFromArticle(art, fallback) {
+  try {
+    const link = [...art.querySelectorAll("a[href]")]
+      .map((a) => a.getAttribute("href") || "")
+      .map((href) => href.replace(/^https?:\/\/(?:www\.)?facebook\.com/i, "").split(/[?#]/)[0])
+      .map((path) => (path.match(/^\/([A-Za-z0-9.]{5,40})(?:\/|$)/) || [])[1])
+      .find((name) => name && !/^(home|watch|marketplace|groups|friends|notifications|messages|reels|events|gaming|bookmarks|stories|pages|story|permalink|profile|sharer|login|policies)$/i.test(name));
+    return link || fallback || null;
+  } catch (e) {
+    return fallback || null;
+  }
+}
+
+function harvestFacebookPosts(entity) {
+  const byId = new Map();
+  harvestPermalinkPosts(
+    /\/(?:posts\/|permalink\.php\?story_fbid=|[^/]+\/posts\/)?(pfbid[\w]+|\d{6,})/,
+    (m) => m[1]
+  ).forEach((p) => byId.set(p.platform_post_id, {
+    ...p,
+    author_username: p.author_username || (entity !== "feed" ? entity : null),
+    metadata: { source: "facebook_dom_permalink" },
+  }));
+
+  document.querySelectorAll('[role="article"], [data-pagelet*="FeedUnit"]').forEach((art) => {
+    try {
+      const text = String(art.innerText || "")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (text.length < 50) return;
+      if (/^(what['’]?s on your mind|create story|add to your post)\b/i.test(text)) return;
+      const hrefs = [...art.querySelectorAll("a[href]")].map((a) => a.getAttribute("href") || "");
+      const linkId = hrefs.map(facebookPostIdFromHref).find(Boolean);
+      const pid = linkId || ("fbdom_" + urlId(`${entity}|${location.pathname}|${text.slice(0, 800)}`));
+      if (byId.has(pid)) return;
+      byId.set(pid, {
+        platform_post_id: pid,
+        author_username: facebookAuthorFromArticle(art, entity !== "feed" ? entity : null),
+        caption: text.slice(0, 2200),
+        media_type: "post",
+        hashtags: (text.match(/#[\w.]+/g) || []).map((s) => s.slice(1)),
+        mentions: (text.match(/@[\w.]+/g) || []).map((s) => s.slice(1)),
+        metadata: {
+          source: linkId ? "facebook_dom_article" : "facebook_dom_article_fallback",
+          url: hrefs.find((href) => facebookPostIdFromHref(href)) || location.href,
+          synthetic_id: !linkId,
+        },
+      });
+    } catch (e) {}
+  });
+
+  return [...byId.values()].slice(0, 50);
+}
+
 // Facebook — DOM media from fbcdn; noisy (lots of UI chrome), so the size gate
 // does the heavy lifting. Open your feed / a profile's Photos tab and scroll.
 const facebook = {
@@ -2595,7 +2668,7 @@ const facebook = {
     markBrowserMediaRevisitItems("facebook", sink, activeMediaRevisit);
     // POSTS (captions) + USERS — captured EVERYWHERE incl. pages/groups, for the
     // user registry + spidering (user: "when spider we can use either").
-    const posts = harvestPermalinkPosts(/\/(?:posts\/|permalink\.php\?story_fbid=|[^/]+\/posts\/)?(pfbid[\w]+|\d{6,})/, (m) => m[1]);
+    const posts = harvestFacebookPosts(entity);
     if (person) posts.forEach((p) => { if (!p.author_username) p.author_username = entity; });
     const fu = collectPermalinkAuthors(
       /^\/([A-Za-z0-9.]{5,40})(?:\/(posts|photos|videos))?(?:[/?]|$)/,

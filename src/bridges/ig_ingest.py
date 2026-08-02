@@ -98,6 +98,13 @@ try:
     )
 except (TypeError, ValueError):
     SOCIAL_INGEST_UPLOAD_CONCURRENCY = 1
+try:
+    SOCIAL_INGEST_STRUCTURED_BACKGROUND_CONCURRENCY = max(
+        1,
+        int(os.getenv("SOCIAL_INGEST_STRUCTURED_BACKGROUND_CONCURRENCY", "2")),
+    )
+except (TypeError, ValueError):
+    SOCIAL_INGEST_STRUCTURED_BACKGROUND_CONCURRENCY = 2
 SOCIAL_INGEST_CLIENT_MAX_MB = int(os.getenv("SOCIAL_INGEST_CLIENT_MAX_MB", "512"))
 try:
     BROWSER_TELEMETRY_WRITE_TIMEOUT_SECONDS = max(
@@ -5116,21 +5123,44 @@ async def profile_handler(request):
 async def posts_handler(request):
     body = await _safe_json(request)
     platform = _norm_platform(body.get("platform"))
-    await _archive_browser_capture(request.app["pool"], platform, "posts", body)
     posts = body.get("posts") or []
-    n = await _save_posts(request.app["pool"], platform, posts)
-    await _record_browser_ingest_event(
-        request.app["pool"],
-        platform,
-        "posts",
-        body.get("username") or body.get("owner"),
-        observed_count=len(posts),
-        stored_count=n,
+    if not isinstance(posts, list):
+        posts = []
+    _schedule_app_task(
+        request.app,
+        _posts_ingest_background(request.app, platform, body),
+        "browser_posts_ingest",
     )
-    # post authors (threads/facebook carry author_username) count as seen users
-    authors = [{"username": p.get("author_username")} for p in posts if p.get("author_username")]
-    await _record_users(request.app["pool"], platform, authors, "author")
-    return _cors(web.json_response({"saved": n}))
+    return _cors(web.json_response({
+        "ok": True,
+        "queued": True,
+        "observed": len(posts),
+        "saved": 0,
+    }))
+
+
+async def _posts_ingest_background(app, platform: str, body: dict) -> None:
+    posts = body.get("posts") or []
+    if not isinstance(posts, list):
+        posts = []
+    sem = app.get("structured_sem")
+    if sem is None:
+        sem = asyncio.Semaphore(SOCIAL_INGEST_STRUCTURED_BACKGROUND_CONCURRENCY)
+        app["structured_sem"] = sem
+    async with sem:
+        await _archive_browser_capture(app["pool"], platform, "posts", body)
+        n = await _save_posts(app["pool"], platform, posts)
+        await _record_browser_ingest_event(
+            app["pool"],
+            platform,
+            "posts",
+            body.get("username") or body.get("owner"),
+            observed_count=len(posts),
+            stored_count=n,
+        )
+        # post authors (threads/facebook carry author_username) count as seen users
+        authors = [{"username": p.get("author_username")} for p in posts if isinstance(p, dict) and p.get("author_username")]
+        await _record_users(app["pool"], platform, authors, "author")
 
 
 async def comments_handler(request):
@@ -5299,6 +5329,7 @@ async def _on_startup(app):
     app["tasks"] = set()
     app["sem"] = asyncio.Semaphore(DL_CONCURRENCY)
     app["upload_sem"] = asyncio.Semaphore(SOCIAL_INGEST_UPLOAD_CONCURRENCY)
+    app["structured_sem"] = asyncio.Semaphore(SOCIAL_INGEST_STRUCTURED_BACKGROUND_CONCURRENCY)
     app["session"] = aiohttp.ClientSession(
         headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"}
