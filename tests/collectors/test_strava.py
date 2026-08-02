@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -776,6 +777,40 @@ async def test_collect_runs_gps_backfill_before_owner_rosters(monkeypatch):
     await coll.collect([])
 
     assert order[:3] == ["repair", "gps", "rosters"]
+
+
+@pytest.mark.asyncio
+async def test_gps_backfill_logs_result_counts(monkeypatch, caplog):
+    _set_web_env(monkeypatch)
+    coll = StravaCollector()
+    pool = _make_pool()
+    pool._conn.fetch = AsyncMock(return_value=[
+        {"platform_activity_id": 1001, "start_latlng": None, "end_latlng": None},
+        {"platform_activity_id": 1002, "start_latlng": None, "end_latlng": None},
+        {"platform_activity_id": 1003, "start_latlng": None, "end_latlng": None},
+    ])
+    coll.set_pool(pool)
+    coll._sync_persisted_gps_stream_cooldown = AsyncMock(return_value=False)
+
+    results = iter(["inserted_stream", "empty_stream", "fetch_failed"])
+
+    async def collect_streams(*args, **kwargs):
+        return next(results)
+
+    coll._collect_gps_streams = AsyncMock(side_effect=collect_streams)
+
+    with caplog.at_level(logging.INFO, logger="src.collectors.strava"):
+        done = await coll._backfill_missing_gps_streams(batch_size=3)
+
+    assert done == 3
+    assert any(
+        "GPS backfill processed 3 activities this cycle"
+        in record.getMessage()
+        and "inserted_stream=1" in record.getMessage()
+        and "empty_stream=1" in record.getMessage()
+        and "fetch_failed=1" in record.getMessage()
+        for record in caplog.records
+    )
 
 
 def test_normalize_collection_target_accepts_special_numeric_and_urls(monkeypatch):

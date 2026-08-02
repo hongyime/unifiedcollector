@@ -1871,6 +1871,7 @@ class StravaCollector(BaseCollector):
               "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
         logger.info("strava: GPS backfill — fetching streams for %d activities", len(rows))
         done = 0
+        result_counts: dict[str, int] = {}
         async with httpx.AsyncClient(timeout=30, cookies=jar, follow_redirects=True,
                                      headers={"User-Agent": ua}) as client:
             for row in rows:
@@ -1880,11 +1881,17 @@ class StravaCollector(BaseCollector):
                             "start_latlng": row["start_latlng"],
                             "end_latlng": row["end_latlng"]}
                 try:
-                    await self._collect_gps_streams(client, activity, str(row["platform_activity_id"]))
+                    result = await self._collect_gps_streams(
+                        client,
+                        activity,
+                        str(row["platform_activity_id"]),
+                    )
+                    result_counts[result or "unknown"] = result_counts.get(result or "unknown", 0) + 1
                     done += 1
                     if self._gps_stream_cooling_down():
                         break
                 except Exception as e:
+                    result_counts["error"] = result_counts.get("error", 0) + 1
                     logger.debug("GPS backfill failed for %s: %s",
                                  row["platform_activity_id"], e)
                 # EDIT 2026-07-13: tick the watchdog on EVERY attempted activity.
@@ -1894,7 +1901,10 @@ class StravaCollector(BaseCollector):
                 # the task mid-batch (observed 2026-07-13 02:56). Stream fetches
                 # ARE progress — same pattern as youtube's per-item ticks.
                 self._progress_count += 1
-        logger.info("strava: GPS backfill processed %d activities this cycle", done)
+        summary = ", ".join(
+            f"{name}={count}" for name, count in sorted(result_counts.items())
+        ) or "no_attempts=1"
+        logger.info("strava: GPS backfill processed %d activities this cycle (%s)", done, summary)
         return done
 
     async def _repair_existing_gps_stream_routes(self, batch_size: int = 100) -> int:
@@ -2117,11 +2127,11 @@ class StravaCollector(BaseCollector):
                 "LEFT JOIN strava_gps_streams s ON s.activity_id = a.id "
                 "WHERE a.platform_activity_id = $1", int(activity_id))
         if existing is not None and str(existing) not in ("[]", "null", ""):
-            return
+            return "already_has_stream"
         try:
             latlng_data, time_data, alt_data = await self._fetch_streams(client, activity_id)
             if latlng_data is None:
-                return  # fetch failed — do NOT cache empty; retry next cycle
+                return "fetch_failed"  # do NOT cache empty; retry next cycle
             if True:
                 async with self.pool.acquire() as conn:
                     act_row = await conn.fetchrow("SELECT id FROM strava_activities WHERE platform_activity_id = $1", int(activity_id))
@@ -2156,7 +2166,11 @@ class StravaCollector(BaseCollector):
                             act_row['id'],
                             fields["summary_polyline"] or None,
                         )
-        except Exception as e: logger.debug("GPS stream fetch failed for activity %s: %s", activity_id, e)
+                        return "inserted_stream" if fields["point_count"] else "empty_stream"
+                    return "missing_activity_row"
+        except Exception as e:
+            logger.debug("GPS stream fetch failed for activity %s: %s", activity_id, e)
+            return "error"
 
     async def get_backfill_items(self, batch_size: int) -> list[dict]:
         if not self.pool:
