@@ -1753,7 +1753,7 @@ const lemon8 = {
     }
     const activeMediaRevisit = currentBrowserMediaRevisit("lemon8");
     markBrowserMediaRevisitItems("lemon8", sink, activeMediaRevisit);
-    const ingestResponse = await send({
+    const ingestPayload = {
       type: "ingest",
       platform: "lemon8",
       username: entity,
@@ -1761,11 +1761,26 @@ const lemon8 = {
       record_empty: true,
       probe_reason: sink.items.length ? "media_candidates_found" : "no_dom_media_candidates",
       probe_meta: { users: uniqueUserCount },
-    });
+    };
+    const ingestResponse = forcedRecovery
+      ? (sendSideEffect(
+          ingestPayload,
+          "lemon8",
+          `Lemon8 ${entity} forced media write`,
+          { timeoutMs: 30000 }
+        ), null)
+      : await send(ingestPayload, { timeoutMs: 45000 });
     if (activeMediaRevisit) {
       await finishBrowserMediaRevisit("lemon8", activeMediaRevisit, ingestResponse, sink.items.length, entity);
     }
-    if (uniqueUsers.length) await send({ type: "users", platform: "lemon8", context: "author", users: uniqueUsers });
+    if (uniqueUsers.length) {
+      const usersPayload = { type: "users", platform: "lemon8", context: "author", users: uniqueUsers };
+      if (forcedRecovery) {
+        sendSideEffect(usersPayload, "lemon8", "Lemon8 author write", { timeoutMs: 12000 });
+      } else {
+        await send(usersPayload, { timeoutMs: 25000 });
+      }
+    }
     return { targets: 1, saved: sink.items.length, discovered: users.length };
   },
 };

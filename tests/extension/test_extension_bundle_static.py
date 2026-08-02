@@ -220,16 +220,25 @@ def test_direct_fallback_fetches_are_bounded():
     assert "fetch(DIRECT_INGEST_BASE + request.path" in direct_block
 
 
-def test_facebook_and_x_optional_writes_are_nonblocking():
+def test_browser_recovery_optional_writes_are_nonblocking():
     content = _read("extension/content.js")
+    lemon8_block = content.split("const lemon8 = {", 1)[1].split(
+        "// ===========================================================================\n// Twitter / X",
+        1,
+    )[0]
     x_block = content.split("const x = {", 1)[1].split("function harvestFacebookPosts", 1)[0]
     facebook_block = content.split("const facebook = {", 1)[1].split(
         "const STRAVA_ROUTE_NAV_MIN_MS", 1
     )[0]
 
     assert "function sendSideEffect" in content
+    assert "Lemon8 author write" in lemon8_block
+    assert "Lemon8 ${entity} forced media write" in lemon8_block
     assert "X seen-user write" in x_block
     assert "Facebook seen-user write" in facebook_block
+    assert "forcedRecovery\n      ? (sendSideEffect(" in lemon8_block
+    assert "await send(ingestPayload, { timeoutMs: 45000 })" in lemon8_block
+    assert "sendSideEffect(usersPayload, \"lemon8\"" in lemon8_block
     assert 'send({ type: "posts", platform: "x"' not in x_block
     assert 'await send({ type: "posts", platform: "facebook"' not in facebook_block
     assert "{ timeoutMs: forcedRecovery ? 30000 : 45000 }" in x_block
