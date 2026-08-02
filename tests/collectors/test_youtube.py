@@ -1099,6 +1099,17 @@ def test_usable_cookie_file_ignores_malformed_cookie(tmp_path, monkeypatch):
     assert coll._usable_cookie_file() == ""
 
 
+def test_usable_cookie_file_ignores_empty_cookie(tmp_path, monkeypatch, caplog):
+    cookie_file = tmp_path / "cookies.txt"
+    cookie_file.write_text("", encoding="utf-8")
+    coll = _new_collector(monkeypatch, YOUTUBE_COOKIE_FILE=str(cookie_file))
+
+    with caplog.at_level("WARNING", logger="src.collectors.youtube"):
+        assert coll._usable_cookie_file() == ""
+
+    assert "empty cookie file" in caplog.text
+
+
 @pytest.mark.asyncio
 async def test_collect_channel_limits_live_video_downloads(monkeypatch):
     coll = _new_collector(monkeypatch, YOUTUBE_VIDEO_DOWNLOADS_PER_TARGET="2")

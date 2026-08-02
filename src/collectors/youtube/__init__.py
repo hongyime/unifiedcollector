@@ -1967,6 +1967,15 @@ class YoutubeCollector(BaseCollector):
             self._usable_cookie_file_cache = ""
             return ""
         try:
+            if p.stat().st_size <= 0:
+                logger.warning("youtube: ignoring empty cookie file %s", path)
+                self._usable_cookie_file_cache = ""
+                return ""
+        except Exception as exc:
+            logger.warning("youtube: ignoring unreadable cookie file %s: %s", path, _safe_log_text(exc))
+            self._usable_cookie_file_cache = ""
+            return ""
+        try:
             lines: list[str] = []
             with p.open("r", encoding="utf-8", errors="replace") as fh:
                 for _ in range(20):
