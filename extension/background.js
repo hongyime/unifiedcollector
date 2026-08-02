@@ -29,7 +29,7 @@ const DEFAULT_INGEST = "http://127.0.0.1:8765";
 const DEFAULT_CONTROL = "http://127.0.0.1:8700";
 const LOG_KEY = "ucLog";
 const LOG_MAX = 200;
-const WATCHDOG_MIN = 13;         // re-nudge any open scraper tab whose loop died
+const WATCHDOG_MIN = 7;          // re-nudge any open scraper tab whose loop died
 const KICK_DEBOUNCE_MS = 30000;  // don't re-nudge the same tab more often than this
 const BROWSER_UPLOAD_MAX_BYTES = 256 * 1024 * 1024;
 const BROWSER_UPLOAD_FETCH_TIMEOUT_MS = 45000;
@@ -606,7 +606,7 @@ async function fetchJsonWithTimeout(url, timeoutMs = 12000) {
 // hourly — reloading respawns the content script + loop AND pulls fresh content,
 // so it can never silently die again.
 const ALARM_REFRESH = "uc-refresh";
-const REFRESH_MIN = 105;
+const REFRESH_MIN = 45;
 
 async function autoTabsEnabled() {
   const { ucAutoTabs } = await chrome.storage.local.get("ucAutoTabs");

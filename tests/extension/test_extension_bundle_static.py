@@ -41,3 +41,15 @@ def test_x_twitter_alias_is_registered_for_tabs_and_background():
     assert "function platformHosts(p)" in background
     assert "function platformUrlPatterns(p)" in background
     assert "platformHosts(p).includes(host)" in background
+
+
+def test_scraper_refresh_runs_before_dashboard_content_stale_window():
+    background = _read("extension/background.js")
+
+    watchdog = re.search(r"const WATCHDOG_MIN = (\d+);", background)
+    refresh = re.search(r"const REFRESH_MIN = (\d+);", background)
+
+    assert watchdog
+    assert refresh
+    assert int(watchdog.group(1)) <= 10
+    assert int(refresh.group(1)) < 60
