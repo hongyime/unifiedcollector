@@ -399,6 +399,13 @@ class StravaCollector(BaseCollector):
         except (TypeError, ValueError):
             self._gps_stream_cooldown_memory_seconds = 21600
         self._recent_gps_429s: dict[str, float] = {}
+        try:
+            self._gps_stream_fetch_failure_backoff_seconds = max(
+                0,
+                int(float(os.getenv("STRAVA_GPS_FETCH_FAILURE_BACKOFF_HOURS", "12")) * 3600),
+            )
+        except (TypeError, ValueError):
+            self._gps_stream_fetch_failure_backoff_seconds = 12 * 3600
 
         self._use_api = bool(self._client_id and self._client_secret and self._refresh_token)
         self._use_web = bool(self._session_cookie)
@@ -1818,6 +1825,7 @@ class StravaCollector(BaseCollector):
         jar = self._build_cookie_jar()
         if jar is None:
             return 0
+        failure_backoff_seconds = int(self._gps_stream_fetch_failure_backoff_seconds)
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
                 """
@@ -1839,6 +1847,13 @@ class StravaCollector(BaseCollector):
                 ) target ON TRUE
                 WHERE a.stream_status IS NULL
                   AND (s.latlng IS NULL OR s.latlng = '[]'::jsonb OR s.latlng = 'null'::jsonb)
+                  AND (
+                    $3::int <= 0
+                    OR COALESCE(
+                        (a.metadata->'gps_stream_backfill'->>'last_attempt_at')::timestamptz,
+                        'epoch'::timestamptz
+                    ) < now() - ($3::int * INTERVAL '1 second')
+                  )
                 -- EDIT 2026-07-13: was ORDER BY a.start_date DESC. Fetch-failures
                 -- (non-200 from both cookie accounts: private/deleted activities)
                 -- stay stream_status=NULL and re-sorted to the queue head forever —
@@ -1862,9 +1877,10 @@ class StravaCollector(BaseCollector):
                           OR COALESCE(a.sport_type, a.type, '') ILIKE '%hike%'
                         THEN 0 ELSE 1
                     END,
+                    a.start_date DESC NULLS LAST,
                     random()
                 LIMIT $1
-                """, batch_size, self._my_athlete_id)
+                """, batch_size, self._my_athlete_id, failure_backoff_seconds)
         if not rows:
             return 0
         ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -1887,6 +1903,11 @@ class StravaCollector(BaseCollector):
                         str(row["platform_activity_id"]),
                     )
                     result_counts[result or "unknown"] = result_counts.get(result or "unknown", 0) + 1
+                    if result in {"fetch_failed", "error", "missing_activity_row"}:
+                        await self._record_gps_stream_backfill_attempt(
+                            row["platform_activity_id"],
+                            result or "unknown",
+                        )
                     done += 1
                     if self._gps_stream_cooling_down():
                         break
@@ -1906,6 +1927,47 @@ class StravaCollector(BaseCollector):
         ) or "no_attempts=1"
         logger.info("strava: GPS backfill processed %d activities this cycle (%s)", done, summary)
         return done
+
+    async def _record_gps_stream_backfill_attempt(self, activity_id: str | int, result: str) -> None:
+        """Remember transient GPS stream failures so the bounded queue can move on."""
+        if not self.pool:
+            return
+        try:
+            platform_activity_id = int(activity_id)
+        except (TypeError, ValueError):
+            return
+        payload = json.dumps({
+            "last_attempt_at": datetime.now(timezone.utc).isoformat(),
+            "last_result": str(result or "unknown")[:80],
+        })
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE strava_activities
+                    SET metadata = jsonb_set(
+                        COALESCE(metadata, '{}'::jsonb),
+                        '{gps_stream_backfill}',
+                        (
+                            $2::jsonb
+                            || jsonb_build_object(
+                                'attempt_count',
+                                COALESCE((metadata->'gps_stream_backfill'->>'attempt_count')::int, 0) + 1
+                            )
+                        ),
+                        true
+                    )
+                    WHERE platform_activity_id = $1
+                    """,
+                    platform_activity_id,
+                    payload,
+                )
+        except Exception as exc:
+            logger.debug(
+                "strava: failed to record GPS stream backfill attempt for %s: %s",
+                activity_id,
+                exc,
+            )
 
     async def _repair_existing_gps_stream_routes(self, batch_size: int = 100) -> int:
         """Derive route metadata for old rows that already have GPS streams.
