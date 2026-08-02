@@ -3990,7 +3990,9 @@ async def accounts_overview(_user: dict = Depends(require_role("viewer"))):
         try:
             h = await asyncio.to_thread(_do)
             return {"session": bridge, "ready": bool(h.get("whatsapp_ready")),
-                    "status": "connected" if h.get("whatsapp_ready") else "awaiting_scan"}
+                    "status": "connected" if h.get("whatsapp_ready") else "awaiting_scan",
+                    "needs_scan": bool(h.get("needs_scan")),
+                    "auth_state": h.get("auth_state")}
         except Exception as exc:  # noqa: BLE001
             return {"session": bridge, "ready": False, "status": "unreachable", "error": str(exc)}
 
@@ -6782,6 +6784,8 @@ async def whatsapp_qr(bridge: str):
         "last_qr_at": None,
         "registered": None,
         "connected": None,
+        "needs_scan": False,
+        "auth_state": None,
         "last_disconnect_status_code": None,
         "last_disconnect_reason": None,
         "last_disconnect_at": None,
@@ -6797,6 +6801,8 @@ async def whatsapp_qr(bridge: str):
         out["status"] = health.get("status", "unknown")
         out["registered"] = health.get("registered")
         out["connected"] = health.get("connected")
+        out["needs_scan"] = bool(health.get("needs_scan"))
+        out["auth_state"] = health.get("auth_state")
         out["last_disconnect_status_code"] = health.get("last_disconnect_status_code")
         out["last_disconnect_reason"] = health.get("last_disconnect_reason")
         out["last_disconnect_at"] = health.get("last_disconnect_at")
@@ -6813,6 +6819,8 @@ async def whatsapp_qr(bridge: str):
         out["last_qr_at"] = qrd.get("last_qr_at") or health.get("last_qr_at")
         out["registered"] = qrd.get("registered", out["registered"])
         out["connected"] = qrd.get("connected", out["connected"])
+        out["needs_scan"] = bool(qrd.get("needs_scan", out["needs_scan"]))
+        out["auth_state"] = qrd.get("auth_state") or out["auth_state"]
         out["last_disconnect_status_code"] = qrd.get(
             "last_disconnect_status_code",
             out["last_disconnect_status_code"],

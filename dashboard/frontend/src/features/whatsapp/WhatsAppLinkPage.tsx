@@ -3,6 +3,23 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../services/api";
 import { Header } from "../../components/layout/Header";
 
+function authNoteLabel(note?: string | null) {
+  switch (note) {
+    case "registered_credentials_present":
+      return "Saved session present.";
+    case "creds_json_present_but_unregistered":
+      return "Saved credentials exist but are not registered.";
+    case "auth_files_present_without_creds_json":
+      return "Partial auth files found, but the saved session is missing.";
+    case "empty_auth_path":
+      return "No saved session in this slot.";
+    case "auth_path_missing":
+      return "No auth folder for this slot.";
+    default:
+      return note || null;
+  }
+}
+
 function BridgeCard({ bridge }: { bridge: 1 | 2 }) {
   const qc = useQueryClient();
   const [msg, setMsg] = useState<string | null>(null);
@@ -62,6 +79,12 @@ function BridgeCard({ bridge }: { bridge: 1 | 2 }) {
   const ready = Boolean(sessionReady || data?.ready || data?.connected);
   const status = ready ? "connected" : data?.status ?? identity?.status ?? "loading";
   const pairingRecovery = Boolean(data?.pairing_recovery_active || identity?.pairing_recovery_active);
+  const authState = data?.auth_state ?? identity?.auth_state ?? null;
+  const needsScan = Boolean(data?.needs_scan || identity?.needs_scan || authState?.has_registered_creds === false);
+  const authNote = authNoteLabel(authState?.note);
+  const qrAgeSeconds = data?.last_qr_at
+    ? Math.max(0, Math.round((Date.now() - Date.parse(data.last_qr_at)) / 1000))
+    : null;
   const qrSrc = !ready && data?.qr
     ? data.qr.startsWith("data:")
       ? data.qr
@@ -97,12 +120,16 @@ function BridgeCard({ bridge }: { bridge: 1 | 2 }) {
           <span className="text-danger">Bridge unreachable</span>
         ) : status === "qr_renderer_missing" ? (
           <span className="text-danger">Dashboard QR renderer missing</span>
+        ) : qrSrc && needsScan ? (
+          <span className="text-text-muted">No saved session here. Scan this QR to pair.</span>
         ) : qrSrc ? (
           <span className="text-text-muted">Scan this code now. It refreshes automatically.</span>
         ) : pairingRecovery || status === "pairing_restart" || status === "pairing_restart_backoff" ? (
           <span className="text-text-muted">Pairing is recovering after WhatsApp asked for a restart. Keep this page open.</span>
         ) : status === "requesting_fresh_qr" || status === "waiting_for_fresh_qr" || status === "fresh_qr_requested" || status === "auth_cleared" ? (
           <span className="text-text-muted">Requesting a fresh QR. Keep this page open.</span>
+        ) : status === "awaiting_scan" && needsScan ? (
+          <span className="text-text-muted">No saved session here. Waiting for a QR.</span>
         ) : status === "awaiting_scan" ? (
           <span className="text-text-muted">Waiting for the next QR. Keep this page open.</span>
         ) : status === "connecting_unpaired" || status === "connecting" ? (
@@ -114,6 +141,13 @@ function BridgeCard({ bridge }: { bridge: 1 | 2 }) {
       {data?.last_qr_at && !ready && (
         <p className="mt-1 text-center text-[11px] text-text-muted">
           QR issued {new Date(data.last_qr_at).toLocaleTimeString()}
+          {qrAgeSeconds !== null ? ` - ${qrAgeSeconds}s old` : ""}
+        </p>
+      )}
+      {authNote && !ready && (
+        <p className="mt-1 text-center text-[11px] text-text-muted">
+          {authNote}
+          {typeof authState?.auth_file_count === "number" ? ` (${authState.auth_file_count} auth files)` : ""}
         </p>
       )}
       {staleDisconnectReason && (

@@ -1079,6 +1079,7 @@ class WhatsappCollector(BaseCollector):
         while not self._stop.is_set():
             saw_ready_bridge = False
             waiting_sessions: list[str] = []
+            missing_credential_sessions: list[str] = []
             for session_name, bridge_url in self._session_bridges.items():
                 if self._stop.is_set():
                     break
@@ -1109,6 +1110,9 @@ class WhatsappCollector(BaseCollector):
                             status = str(health.get("status") or "not_ready").lower()
                             if status in {"awaiting_scan", "refreshing_qr", "requesting_fresh_qr", "waiting_for_fresh_qr"} or health.get("qr_available"):
                                 waiting_sessions.append(session_name)
+                                auth_state = health.get("auth_state") if isinstance(health.get("auth_state"), dict) else {}
+                                if health.get("needs_scan") or auth_state.get("creds_json_exists") is False:
+                                    missing_credential_sessions.append(session_name)
                             logger.debug("Session %s not ready: %s", session_name, health.get("status"))
                             continue
 
@@ -1145,10 +1149,9 @@ class WhatsappCollector(BaseCollector):
                 await self._mark_source_bridge_ready()
             elif waiting_sessions:
                 now = time.time()
-                detail = (
-                    "WhatsApp bridge waiting for QR pairing: "
-                    + ", ".join(sorted(set(waiting_sessions)))
-                    + ". Open Link WhatsApp and scan a fresh QR."
+                detail = self._format_pairing_wait_detail(
+                    waiting_sessions,
+                    missing_credential_sessions,
                 )
                 await self._mark_source_waiting_for_pairing(detail)
                 if now - self._last_pairing_wait_log > 300:
@@ -1156,6 +1159,24 @@ class WhatsappCollector(BaseCollector):
                     logger.warning(detail)
 
             await asyncio.sleep(self._backfill_poll)
+
+    @staticmethod
+    def _format_pairing_wait_detail(
+        waiting_sessions: list[str],
+        missing_credential_sessions: list[str] | None = None,
+    ) -> str:
+        missing = set(missing_credential_sessions or [])
+        labels = []
+        for session_name in sorted(set(waiting_sessions)):
+            if session_name in missing:
+                labels.append(f"{session_name} (no saved session credentials; scan required)")
+            else:
+                labels.append(session_name)
+        return (
+            "WhatsApp bridge waiting for QR pairing: "
+            + ", ".join(labels)
+            + ". Open Link WhatsApp and scan a fresh QR."
+        )
 
     async def _bridge_pairing_health_loop(self):
         while not self._stop.is_set():
@@ -1168,6 +1189,7 @@ class WhatsappCollector(BaseCollector):
     async def _update_bridge_pairing_health(self):
         saw_ready_bridge = False
         waiting_sessions: list[str] = []
+        missing_credential_sessions: list[str] = []
         async with httpx.AsyncClient(timeout=15) as client:
             for session_name, bridge_url in self._session_bridges.items():
                 try:
@@ -1189,15 +1211,17 @@ class WhatsappCollector(BaseCollector):
                     continue
                 if status in {"awaiting_scan", "refreshing_qr", "requesting_fresh_qr", "waiting_for_fresh_qr"} or health.get("qr_available"):
                     waiting_sessions.append(session_name)
+                    auth_state = health.get("auth_state") if isinstance(health.get("auth_state"), dict) else {}
+                    if health.get("needs_scan") or auth_state.get("creds_json_exists") is False:
+                        missing_credential_sessions.append(session_name)
 
         if saw_ready_bridge:
             await self._mark_source_bridge_ready()
         elif waiting_sessions:
             now = time.time()
-            detail = (
-                "WhatsApp bridge waiting for QR pairing: "
-                + ", ".join(sorted(set(waiting_sessions)))
-                + ". Open Link WhatsApp and scan a fresh QR."
+            detail = self._format_pairing_wait_detail(
+                waiting_sessions,
+                missing_credential_sessions,
             )
             await self._mark_source_waiting_for_pairing(detail)
             if now - self._last_pairing_wait_log > 300:

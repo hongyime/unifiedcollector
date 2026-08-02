@@ -300,6 +300,18 @@ export const api = {
       last_qr_at?: string | null;
       registered?: boolean | null;
       connected?: boolean | null;
+      needs_scan?: boolean;
+      auth_state?: {
+        session_name?: string | null;
+        auth_path_exists?: boolean;
+        creds_json_exists?: boolean;
+        creds_json_size?: number;
+        creds_json_mtime?: string | null;
+        auth_file_count?: number;
+        has_registered_creds?: boolean;
+        has_recoverable_state?: boolean;
+        note?: string | null;
+      } | null;
       last_disconnect_status_code?: number | null;
       last_disconnect_reason?: string | null;
       last_disconnect_at?: string | null;

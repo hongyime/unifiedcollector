@@ -146,17 +146,20 @@ function bridgeState() {
     const user = activeSock?.user || null;
     const wid: string | null = user?.id || null;
     const phone_number = wid ? wid.split(':')[0].split('@')[0] : null;
+    const auth_state = authStateSummary();
     return {
         status: serviceHealthy ? 'ready' : (latestQr ? 'awaiting_scan' : connectionState),
         whatsapp_ready: serviceHealthy,
         connected: serviceHealthy,
         registered: socketRegistered,
         qr_available: Boolean(latestQr),
+        needs_scan: !serviceHealthy && !auth_state.has_registered_creds,
         last_qr_at: latestQrAt ? new Date(latestQrAt).toISOString() : null,
         session_name: process.env.SESSION_NAME || 'default',
         wid,
         phone_number,
         push_name: user?.name || user?.notify || null,
+        auth_state,
         last_disconnect_status_code: lastDisconnectStatusCode,
         last_disconnect_reason: lastDisconnectReason,
         last_disconnect_at: lastDisconnectAt ? new Date(lastDisconnectAt).toISOString() : null,
@@ -407,6 +410,47 @@ function authPathHasRecoverableState(authPath = currentAuthPath()): boolean {
     } catch {
         return false;
     }
+}
+
+function authStateSummary(authPath = currentAuthPath()) {
+    const summary = {
+        session_name: process.env.SESSION_NAME || 'default',
+        auth_path_exists: false,
+        creds_json_exists: false,
+        creds_json_size: 0,
+        creds_json_mtime: null as string | null,
+        auth_file_count: 0,
+        has_registered_creds: false,
+        has_recoverable_state: false,
+        note: 'auth_path_missing',
+    };
+    try {
+        summary.auth_path_exists = fs.existsSync(authPath);
+        if (summary.auth_path_exists) {
+            summary.auth_file_count = fs.readdirSync(authPath).length;
+        }
+        const credsPath = path.join(authPath, 'creds.json');
+        summary.creds_json_exists = fs.existsSync(credsPath);
+        if (summary.creds_json_exists) {
+            const st = fs.statSync(credsPath);
+            summary.creds_json_size = st.size;
+            summary.creds_json_mtime = st.mtime.toISOString();
+        }
+        summary.has_registered_creds = authPathHasRegisteredCreds(authPath);
+        summary.has_recoverable_state = authPathHasRecoverableState(authPath);
+        if (summary.has_registered_creds) {
+            summary.note = 'registered_credentials_present';
+        } else if (summary.creds_json_exists) {
+            summary.note = 'creds_json_present_but_unregistered';
+        } else if (summary.auth_file_count > 0) {
+            summary.note = 'auth_files_present_without_creds_json';
+        } else if (summary.auth_path_exists) {
+            summary.note = 'empty_auth_path';
+        }
+    } catch (err: any) {
+        summary.note = `auth_state_unreadable: ${err?.message || String(err)}`;
+    }
+    return summary;
 }
 
 function archiveAuthState(authPath: string, reason: string): string | null {

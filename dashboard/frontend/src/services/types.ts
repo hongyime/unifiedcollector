@@ -803,6 +803,8 @@ export interface WaBridgeSession {
   connected?: boolean;          // bridge paired AND socket open
   status?: string | null;       // ready, awaiting_scan, connecting, etc.
   registered?: boolean;         // Baileys has valid local creds
+  needs_scan?: boolean;          // no registered local creds; phone scan is required
+  auth_state?: WaBridgeAuthState | null;
   qr_available?: boolean;       // bridge currently has a scannable QR payload
   last_qr_at?: string | null;   // ISO timestamp of newest QR
   session_name?: string | null; // bridge slot label from env (e.g. "session_1")
@@ -814,6 +816,17 @@ export interface WaBridgeSession {
   last_disconnect_reason?: string | null;
   pairing_recovery_until?: string | null;
   pairing_recovery_active?: boolean;
+}
+export interface WaBridgeAuthState {
+  session_name?: string | null;
+  auth_path_exists?: boolean;
+  creds_json_exists?: boolean;
+  creds_json_size?: number;
+  creds_json_mtime?: string | null;
+  auth_file_count?: number;
+  has_registered_creds?: boolean;
+  has_recoverable_state?: boolean;
+  note?: string | null;
 }
 export interface WaSessionsResponse {
   sessions: WaBridgeSession[];
