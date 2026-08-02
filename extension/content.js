@@ -1,3 +1,9 @@
+(() => {
+if (globalThis.__UC_CONTENT_SCRIPT_ACTIVE__) {
+  return;
+}
+globalThis.__UC_CONTENT_SCRIPT_ACTIVE__ = true;
+
 // UnifiedCollector Social Bridge — content script.
 //
 // Runs ON a social site, so its fetches to that site's internal API are
@@ -3048,3 +3054,4 @@ window.addEventListener("message", (ev) => {
 // Auto-start the loop the moment the tab loads (respawns after a reload/crash).
 send({ type: "tabReady", platform: (currentPlatform() || {}).id }).catch(() => {});
 mainLoop();
+})();
