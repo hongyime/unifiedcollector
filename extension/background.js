@@ -46,6 +46,7 @@ const browserUploadChains = {};
 const PAGE_RECOVERY_PREFIX = "uc-page-recovery:";
 const PAGE_RECOVERY_STATE_KEY = "ucPageRecovery";
 const PAGE_RECOVERY_MAX_ATTEMPTS = 3;
+const PAGE_RECOVERY_STATE_TTL_MS = 60 * 60 * 1000;
 const RELOAD_INTENT_KEY = "ucReloadIntent";
 const LOADED_VERSION_KEY = "ucLoadedExtensionVersion";
 const SCRAPER_HEARTBEAT_TIMEOUT_MS = 12000;
@@ -677,6 +678,9 @@ async function performStartupRecovery(reason, options = {}) {
     lastStartupRecoveryAttempt: attempt,
   });
   await log("info", `startup recovery ${reason}${attempt ? " retry " + attempt : ""}`);
+  if (attempt === 0 && shouldResetPageRecoveryForStartup(reason)) {
+    await clearPageRecoveryState(reason).catch(() => {});
+  }
   await scheduleAlarm().catch((e) => log("warn", `${reason} schedule failed: ${e && e.message ? e.message : e}`));
   await syncCookies().catch(() => {});
   await ensureScraperTabsOpen(reason, { force })
@@ -746,10 +750,36 @@ function normalizeRecoveryUrl(url) {
 }
 async function pageRecoveryState() {
   const { [PAGE_RECOVERY_STATE_KEY]: cur = {} } = await chrome.storage.local.get(PAGE_RECOVERY_STATE_KEY);
-  return cur && typeof cur === "object" ? cur : {};
+  const state = cur && typeof cur === "object" ? cur : {};
+  const now = Date.now();
+  let changed = false;
+  for (const [key, rec] of Object.entries(state)) {
+    const lastSeenAt = Number(rec && rec.lastSeenAt || 0);
+    if (!lastSeenAt || now - lastSeenAt > PAGE_RECOVERY_STATE_TTL_MS) {
+      delete state[key];
+      changed = true;
+    }
+  }
+  if (changed) await savePageRecoveryState(state);
+  return state;
 }
 async function savePageRecoveryState(state) {
   await chrome.storage.local.set({ [PAGE_RECOVERY_STATE_KEY]: state || {} });
+}
+async function clearPageRecoveryState(reason) {
+  try { await chrome.storage.local.remove(PAGE_RECOVERY_STATE_KEY); } catch (e) {}
+  try {
+    const alarms = await chrome.alarms.getAll();
+    for (const alarm of alarms || []) {
+      if (alarm && alarm.name && alarm.name.startsWith(PAGE_RECOVERY_PREFIX)) {
+        await chrome.alarms.clear(alarm.name);
+      }
+    }
+  } catch (e) {}
+  await log("info", `page recovery state reset (${reason})`);
+}
+function shouldResetPageRecoveryForStartup(reason) {
+  return /^(installed|manual_extension_reload|version_changed)$/i.test(String(reason || ""));
 }
 async function clearPageRecoveryForTab(tabId, reason) {
   if (tabId == null) return;
