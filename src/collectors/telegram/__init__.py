@@ -179,6 +179,14 @@ def _is_flood_wait(exc):
     return hasattr(exc, "seconds") and "flood" in name.lower()
 
 
+def _is_file_reference_expired(exc):
+    """Detect expired Telethon media references without importing telethon."""
+    name = type(exc).__name__
+    if name == "FileReferenceExpiredError":
+        return True
+    return "file reference has expired" in str(exc).lower()
+
+
 def _format_exception(exc) -> str:
     """Stable exception text for Telegram alerts/DLQ rows.
 
@@ -2886,7 +2894,7 @@ class TelegramCollector(BaseCollector):
                 data = item["data"]
             else:
                 client = worker.client if worker else self._primary_client
-                data = await client.download_media(item["media"], bytes)
+                data = await self._download_media_bytes(client, item)
 
             if not data:
                 return
@@ -2945,6 +2953,60 @@ class TelegramCollector(BaseCollector):
             error_text = _format_exception(e)
             logger.error("Download failed %s: %s", cid, error_text)
             await self.send_to_dlq(item["entity_id"], cid, error_text)
+
+    async def _download_media_bytes(self, client, item: dict):
+        """Download Telegram media, refreshing expired file references once."""
+        try:
+            return await client.download_media(item["media"], bytes)
+        except Exception as exc:
+            if not _is_file_reference_expired(exc):
+                raise
+            refreshed_media = await self._refetch_message_media(client, item)
+            if refreshed_media is None:
+                raise
+            logger.info(
+                "Telegram media file reference refreshed for %s chat=%s msg=%s",
+                item.get("content_id"),
+                item.get("entity_id") or item.get("chat_id"),
+                item.get("message_id"),
+            )
+            return await client.download_media(refreshed_media, bytes)
+
+    async def _refetch_message_media(self, client, item: dict):
+        chat_id = item.get("chat_id") or item.get("entity_id")
+        message_id = item.get("message_id")
+        if chat_id is None or message_id is None:
+            logger.debug(
+                "Telegram media file reference expired for %s but no chat/message ref is available",
+                item.get("content_id"),
+            )
+            return None
+        try:
+            message = await client.get_messages(int(chat_id), ids=int(message_id))
+        except Exception as exc:
+            logger.warning(
+                "Telegram media refresh failed for %s chat=%s msg=%s: %s",
+                item.get("content_id"),
+                chat_id,
+                message_id,
+                _format_exception(exc),
+            )
+            return None
+        if isinstance(message, (list, tuple)):
+            message = message[0] if message else None
+        media = getattr(message, "media", None)
+        if media is None:
+            return None
+        if hasattr(message, "to_dict"):
+            try:
+                item["raw"] = message.to_dict()
+            except Exception:
+                pass
+        if item.get("content_type") == "photo" and getattr(media, "photo", None) is not None:
+            return media.photo
+        if getattr(media, "document", None) is not None:
+            return media.document
+        return media
 
     async def _handle_photo(self, worker: "TelegramWorker", message, chat_id: str,
                             chat_name: str, chat_username: str | None = None):

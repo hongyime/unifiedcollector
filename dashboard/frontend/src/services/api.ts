@@ -333,6 +333,18 @@ export const api = {
     note?: string;
     error?: string;
   }>(`/whatsapp/${bridge}/fresh-qr`, {}),
+  waPairingCode: (bridge: 1 | 2, phone: string) => post<{
+    bridge: string;
+    ok: boolean;
+    status?: string;
+    code?: string;
+    phone_last4?: string | null;
+    ready?: boolean;
+    registered?: boolean | null;
+    connected?: boolean | null;
+    note?: string;
+    error?: string;
+  }>(`/whatsapp/${bridge}/pairing-code`, { phone }),
 
   // Per-bridge session identity (phone number, push name, connected state).
   // Populated after a QR scan so the Link page can show WHICH account is on

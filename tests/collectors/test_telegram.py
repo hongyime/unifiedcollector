@@ -62,6 +62,13 @@ class _FakeFloodWait(Exception):
 _FakeFloodWait.__name__ = "FloodWaitError"
 
 
+class _FakeFileReferenceExpired(Exception):
+    """Mimics telethon.errors.FileReferenceExpiredError without importing telethon."""
+
+
+_FakeFileReferenceExpired.__name__ = "FileReferenceExpiredError"
+
+
 class _FakePool:
     """Minimal asyncpg-pool stand-in: pool.acquire() returns an async ctx
     manager whose __aenter__ yields a connection mock with execute/fetchrow.
@@ -1039,6 +1046,47 @@ async def test_download_media_dlq_records_exception_type_for_blank_timeout(monke
     coll.insert_media_item.assert_not_awaited()
     coll.send_to_dlq.assert_awaited_once()
     assert coll.send_to_dlq.await_args.args == ("12345", "blank-timeout", "TimeoutError")
+
+
+@pytest.mark.asyncio
+async def test_download_media_refreshes_expired_file_reference(monkeypatch, tmp_path):
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    monkeypatch.setattr(tg_mod, "VAULT_ROOT", vault_root)
+    coll = _make_collector(monkeypatch)
+    coll.insert_media_item = AsyncMock(return_value=True)
+    coll.send_to_dlq = AsyncMock()
+    worker = _make_worker(coll)
+
+    stale_media = object()
+    fresh_media = object()
+    fresh_message = SimpleNamespace(
+        id=99,
+        media=SimpleNamespace(photo=fresh_media),
+        to_dict=lambda: {"id": 99, "refreshed": True},
+    )
+    worker.client.get_messages = AsyncMock(return_value=fresh_message)
+    worker.client.download_media = AsyncMock(
+        side_effect=[_FakeFileReferenceExpired("file reference has expired"), b"fresh bytes"]
+    )
+
+    await coll.download_media({
+        "entity_id": "12345",
+        "entity_name": "Test Chat",
+        "content_type": "photo",
+        "content_id": "12345_99",
+        "media": stale_media,
+        "extension": "jpg",
+        "message_id": 99,
+    }, worker=worker)
+
+    worker.client.get_messages.assert_awaited_once_with(12345, ids=99)
+    assert worker.client.download_media.await_args_list[0].args == (stale_media, bytes)
+    assert worker.client.download_media.await_args_list[1].args == (fresh_media, bytes)
+    kwargs = coll.insert_media_item.await_args.kwargs
+    assert Path(kwargs["file_path"]).read_bytes() == b"fresh bytes"
+    assert kwargs["metadata"]["raw"] == {"id": 99, "refreshed": True}
+    coll.send_to_dlq.assert_not_awaited()
 
 
 @pytest.mark.asyncio
