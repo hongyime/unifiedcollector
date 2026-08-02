@@ -181,6 +181,7 @@ try:
     )
 except (TypeError, ValueError):
     BROWSER_CONTENT_HINT_RESPONSE_TIMEOUT_SECONDS = 0.75
+UC_EXTENSION_EXPECTED_VERSION = os.getenv("UC_EXTENSION_EXPECTED_VERSION", "").strip()
 try:
     SOCIAL_INGEST_STARTUP_DDL_TIMEOUT_SECONDS = max(
         15.0,
@@ -4912,6 +4913,25 @@ def _browser_content_timeout_hint(platform: str, reason: str) -> dict:
     return {"force_cycle": False, "force_reason": reason}
 
 
+def _normalize_extension_version(value) -> str:
+    return re.sub(r"^v", "", str(value or "").strip(), flags=re.IGNORECASE)
+
+
+def _extension_reload_hint(extension_version) -> dict:
+    expected = _normalize_extension_version(UC_EXTENSION_EXPECTED_VERSION)
+    current = _normalize_extension_version(extension_version)
+    if not expected:
+        return {}
+    hint = {"expected_extension_version": expected}
+    if current and current != expected:
+        hint.update({
+            "reload_extension": True,
+            "reload_reason": "extension_version_mismatch",
+            "current_extension_version": current,
+        })
+    return hint
+
+
 async def browser_heartbeat_handler(request):
     body = await _safe_json(request)
     platform = _norm_platform(body.get("platform"), allow_diagnostics=True)
@@ -4991,6 +5011,7 @@ async def browser_heartbeat_handler(request):
         "running": running,
         "telemetry_degraded": telemetry_degraded,
         **recovery_hint,
+        **_extension_reload_hint(body.get("extension_version")),
     }))
 
 

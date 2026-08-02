@@ -1281,6 +1281,51 @@ def test_browser_heartbeat_handler_reports_degraded_when_pool_missing():
     assert payload["telemetry_degraded"] is True
 
 
+def test_browser_heartbeat_handler_requests_extension_reload_for_old_version(monkeypatch):
+    monkeypatch.setattr(ig_ingest, "UC_EXTENSION_EXPECTED_VERSION", "1.23.1")
+    req = _FakeRequest(
+        {"pool": None},
+        {
+            "platform": "bridge",
+            "label": "UnifiedCollector Bridge",
+            "running": True,
+            "tab_id": "service_worker",
+            "extension_version": "1.23.0",
+        },
+    )
+
+    resp = asyncio.run(ig_ingest.browser_heartbeat_handler(req))
+
+    assert resp.status == 200
+    payload = json.loads(resp.text)
+    assert payload["expected_extension_version"] == "1.23.1"
+    assert payload["current_extension_version"] == "1.23.0"
+    assert payload["reload_extension"] is True
+    assert payload["reload_reason"] == "extension_version_mismatch"
+
+
+def test_browser_heartbeat_handler_does_not_reload_current_extension(monkeypatch):
+    monkeypatch.setattr(ig_ingest, "UC_EXTENSION_EXPECTED_VERSION", "1.23.1")
+    req = _FakeRequest(
+        {"pool": None},
+        {
+            "platform": "bridge",
+            "label": "UnifiedCollector Bridge",
+            "running": True,
+            "tab_id": "service_worker",
+            "extension_version": "v1.23.1",
+        },
+    )
+
+    resp = asyncio.run(ig_ingest.browser_heartbeat_handler(req))
+
+    assert resp.status == 200
+    payload = json.loads(resp.text)
+    assert payload["expected_extension_version"] == "1.23.1"
+    assert "reload_extension" not in payload
+    assert "current_extension_version" not in payload
+
+
 def test_browser_heartbeat_handler_requests_forced_cycle_when_content_stale(monkeypatch):
     monkeypatch.setattr(ig_ingest, "BROWSER_CONTENT_STALE_SECONDS", 3600)
     ig_ingest._BROWSER_CONTENT_HINT_CACHE.clear()

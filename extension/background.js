@@ -121,7 +121,15 @@ async function reportBridgeHeartbeat(reason) {
     health_reason: reason || "startup",
   });
   try {
-    await postJsonWithTimeout(base + "/social/browser-heartbeat", payload);
+    const result = await postJsonWithTimeout(base + "/social/browser-heartbeat", payload);
+    const body = parseHeartbeatResponseBody(result && result.body);
+    await maybeAutoReloadExtension(
+      base,
+      null,
+      { id: "bridge", label: "UnifiedCollector Bridge" },
+      body,
+      reason || "bridge_heartbeat",
+    );
     await setStatus({
       lastBridgeHeartbeatOkAt: Date.now(),
       lastBridgeHeartbeatError: null,
@@ -263,6 +271,10 @@ const FORCED_CYCLE_HARD_RELOAD_MS_BY_PLATFORM = {
 };
 const FORCED_CYCLE_RELOAD_DEBOUNCE_MS = 10 * 60 * 1000;
 const FORCED_CYCLE_FAILURE_DEBOUNCE_MS = 10 * 60 * 1000;
+const EXTENSION_AUTO_RELOAD_STATE_KEY = "ucExtensionAutoReloadState";
+const EXTENSION_AUTO_RELOAD_DEBOUNCE_MS = 2 * 60 * 1000;
+const EXTENSION_AUTO_RELOAD_DELAY_MS = 1200;
+const EXTENSION_AUTO_RELOAD_MAX_ATTEMPTS = 2;
 
 function forcedCycleHardReloadMs(platformId) {
   return FORCED_CYCLE_HARD_RELOAD_MS_BY_PLATFORM[platformId] || 5 * 60 * 1000;
@@ -360,9 +372,68 @@ function parseHeartbeatResponseBody(responseBody) {
   try { return JSON.parse(String(responseBody)); } catch (e) { return null; }
 }
 
+function normalizeExtensionVersion(value) {
+  return String(value || "").trim().replace(/^v/i, "");
+}
+
+async function maybeAutoReloadExtension(base, tab, platform, body, reason) {
+  if (!body || body.reload_extension !== true) return false;
+  const expected = normalizeExtensionVersion(body.expected_extension_version);
+  const current = normalizeExtensionVersion(extensionVersion());
+  if (!expected || !current || expected === current) return false;
+
+  const now = Date.now();
+  const stored = await chrome.storage.local.get(EXTENSION_AUTO_RELOAD_STATE_KEY);
+  const state = stored[EXTENSION_AUTO_RELOAD_STATE_KEY] || {};
+  const attempts = state.expected === expected ? Number(state.attempts || 0) : 0;
+  const lastAt = state.expected === expected ? Number(state.last_at || 0) : 0;
+  const reloadReason = body.reload_reason || reason || "extension_version_mismatch";
+
+  if (attempts >= EXTENSION_AUTO_RELOAD_MAX_ATTEMPTS) {
+    await recordServiceWorkerRecovery(base, tab, platform, "extension_auto_reload_gave_up", reloadReason, {
+      expected_extension_version: expected,
+      current_extension_version: current,
+      reload_attempts: attempts,
+      reload_max_attempts: EXTENSION_AUTO_RELOAD_MAX_ATTEMPTS,
+    });
+    return false;
+  }
+  if (lastAt && now - lastAt < EXTENSION_AUTO_RELOAD_DEBOUNCE_MS) {
+    await recordServiceWorkerRecovery(base, tab, platform, "extension_auto_reload_debounced", reloadReason, {
+      expected_extension_version: expected,
+      current_extension_version: current,
+      reload_attempts: attempts,
+      reload_age_ms: now - lastAt,
+    });
+    return true;
+  }
+
+  const nextAttempts = attempts + 1;
+  await chrome.storage.local.set({
+    [EXTENSION_AUTO_RELOAD_STATE_KEY]: {
+      expected,
+      attempts: nextAttempts,
+      last_at: now,
+    },
+  });
+  await recordServiceWorkerRecovery(base, tab, platform, "extension_auto_reload_scheduled", reloadReason, {
+    expected_extension_version: expected,
+    current_extension_version: current,
+    reload_attempt: nextAttempts,
+    reload_delay_ms: EXTENSION_AUTO_RELOAD_DELAY_MS,
+  });
+  await log("warn", `extension ${current} is older than expected ${expected}; reloading extension`);
+  setTimeout(() => {
+    try { chrome.runtime.reload(); } catch (e) {}
+  }, EXTENSION_AUTO_RELOAD_DELAY_MS);
+  return true;
+}
+
 async function maybeForceScrapeCycle(tab, platform, responseBody, reason, base = null) {
   const body = parseHeartbeatResponseBody(responseBody);
-  if (!body || body.force_cycle !== true || !tab || !tab.id) return;
+  if (!body) return;
+  const reloadScheduled = await maybeAutoReloadExtension(base, tab, platform, body, reason);
+  if (reloadScheduled || body.force_cycle !== true || !tab || !tab.id) return;
   const now = Date.now();
   const key = String(tab.id);
   const lastForcedAt = Number(lastForcedCycleByTab[key] || 0);
