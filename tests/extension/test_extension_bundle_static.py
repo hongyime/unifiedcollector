@@ -204,6 +204,8 @@ def test_post_reload_scrape_nudge_waits_and_retries_for_heavy_tabs():
     assert re.search(r"x:\s*90000", retry_block)
     assert "post_reload_scrape_nudge_retry_scheduled" in background
     assert "post_reload_retry: true" in background
+    assert "post_reload_timeout_programmatic_inject" in background
+    assert "forced_cycle_reload_debounced_inject" in background
 
 
 def test_facebook_has_post_text_fallback_when_permalink_ids_are_missing():
