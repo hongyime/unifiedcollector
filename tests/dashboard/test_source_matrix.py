@@ -983,6 +983,52 @@ async def test_source_content_summary_does_not_false_zero_media_on_timeout(monke
 
 
 @pytest.mark.asyncio
+async def test_source_content_summary_can_skip_heavy_media_window(monkeypatch):
+    async def no_beeper_subsources(conn, since_sql, before_sql=None):
+        return {}
+
+    monkeypatch.setattr(
+        "src.dashboard.api._beeper_subsource_content_summary",
+        no_beeper_subsources,
+    )
+
+    class FakeConn:
+        def __init__(self):
+            self.content_queries = []
+
+        async def fetchval(self, query, *args, timeout=None):
+            assert "information_schema.tables" in query
+            return ["telegram_messages", "media_items"]
+
+        async def fetch(self, query, *args, timeout=None):
+            self.content_queries.append((query, timeout))
+            assert "FROM media_items" not in query
+            return [
+                {
+                    "source": "telegram",
+                    "records": 12,
+                    "messages": 12,
+                    "media_items": 0,
+                    "latest_record_at": datetime(2026, 7, 28, 1, 5, tzinfo=timezone.utc),
+                    "latest_media_at": None,
+                },
+            ]
+
+    conn = FakeConn()
+    out = await _source_content_summary(
+        conn,
+        "now() - interval '24 hours'",
+        include_media=False,
+    )
+
+    assert len(conn.content_queries) == 1
+    assert out["telegram"]["records"] == 12
+    assert out["telegram"]["messages"] == 12
+    assert out["telegram"]["media_items"] == 0
+    assert out["telegram"]["media_stats_unavailable"] is True
+
+
+@pytest.mark.asyncio
 async def test_source_matrix_section_uses_fresh_cache_without_awaiting():
     _SOURCE_MATRIX_SECTION_CACHE.clear()
     errors: list[dict] = []
