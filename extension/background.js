@@ -1011,7 +1011,7 @@ async function recordPageHealth(base, msg, sender, extra = {}) {
     }), SCRAPER_HEARTBEAT_TIMEOUT_MS);
     const tab = sender && sender.tab ? sender.tab : null;
     const platform = platformById(msg.platform) || { id: msg.platform, label: msg.label || msg.platform };
-    await maybeForceScrapeCycle(tab, platform, result && result.body, msg.reason || msg.status || "page_health", base);
+    scheduleMaybeForceScrapeCycle(tab, platform, result && result.body, msg.reason || msg.status || "page_health", base);
   } catch (e) {}
 }
 function recoveryDelayMs(attempt, platformId) {

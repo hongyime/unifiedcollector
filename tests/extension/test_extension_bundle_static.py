@@ -60,7 +60,38 @@ def test_scraper_heartbeat_summary_is_not_blocked_by_recovery():
     heartbeat_fn = background.split("async function reportScraperTabHeartbeats", 1)[1].split(
         "async function reportScraperHeartbeatSummary", 1
     )[0]
+    page_health_fn = background.split("async function recordPageHealth", 1)[1].split(
+        "function recoveryDelayMs", 1
+    )[0]
 
     assert "function scheduleMaybeForceScrapeCycle" in background
     assert "scheduleMaybeForceScrapeCycle(" in heartbeat_fn
     assert "await maybeForceScrapeCycle(" not in heartbeat_fn
+    assert "scheduleMaybeForceScrapeCycle(" in page_health_fn
+    assert "await maybeForceScrapeCycle(" not in page_health_fn
+
+
+def test_recoverable_page_shells_try_native_retry_before_waiting():
+    content = _read("extension/content.js")
+
+    assert "function findRecoverablePageActionButton" in content
+    assert "async function attemptRecoverablePageInteraction" in content
+    assert "await attemptRecoverablePageInteraction(p.id, shell)" in content
+
+
+def test_facebook_scrape_pass_is_bounded_but_not_reload_happy():
+    content = _read("extension/content.js")
+
+    one_shot_block = content.split("const ONE_SHOT_TIMEOUT_MS_BY_PLATFORM = {", 1)[1].split(
+        "};", 1
+    )[0]
+    loop_block = content.split("const LOOP_CYCLE_TIMEOUT_MS_BY_PLATFORM = {", 1)[1].split(
+        "};", 1
+    )[0]
+    facebook_block = content.split("const facebook = {", 1)[1].split(
+        "const strava = {", 1
+    )[0]
+
+    assert re.search(r"facebook:\s*5\s*\*\s*60\s*\*\s*1000", one_shot_block)
+    assert re.search(r"facebook:\s*7\s*\*\s*60\s*\*\s*1000", loop_block)
+    assert "autoScroll(forcedRecovery ? 4 : 7" in facebook_block

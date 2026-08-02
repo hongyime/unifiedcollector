@@ -446,6 +446,41 @@ async function reportRecoverablePageShell(p, shell) {
   }).catch(() => null);
 }
 
+function findRecoverablePageActionButton() {
+  const candidates = [
+    ...document.querySelectorAll('button, [role="button"], a[href]'),
+  ];
+  return candidates.find((el) => {
+    const text = String(el.innerText || el.textContent || el.getAttribute("aria-label") || "")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!text || text.length > 80) return false;
+    return /^(try again|retry|reload|refresh)$/i.test(text)
+      || /\b(try again|retry|reload|refresh)\b/i.test(text);
+  }) || null;
+}
+
+async function attemptRecoverablePageInteraction(platformId, shell) {
+  if (!PAGE_RECOVERY_ENABLED.has(platformId) || !shell) return false;
+  const key = `uc_recover_click_${platformId}_${shell.reason || "shell"}`;
+  const last = lsNum(key);
+  if (last && Date.now() - last < 60000) return false;
+  const button = findRecoverablePageActionButton();
+  if (!button) return false;
+  lsSet(key, String(Date.now()));
+  try {
+    button.scrollIntoView({ block: "center", inline: "center" });
+  } catch (e) {}
+  await sleep(jitter(700));
+  try {
+    button.click();
+    clog("warn", `${platformId} page shell action clicked (${shell.reason || "recoverable"})`, platformId);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
 // Capture is ALWAYS ON (user: "i want them on at all times"). Stories, highlights
 // and comments are captured every cycle — no toggles. Pacing is handled by the
 // human-paced loop + wall cooldown, not by disabling capture.
@@ -2547,7 +2582,7 @@ const facebook = {
     if (mediaRevisit && mediaRevisit.navigating) return { targets: 1, saved: 0, discovered: 0 };
     clog("info", `cycle start on ${entity} (person profile: ${person})`, "facebook");
     await reportBrowserRecoveryProbe("facebook", entity, { entity, person });
-    await autoScroll(forcedRecovery ? 4 : 12, 1400, forcedRecovery ? 900 : 1800, {
+    await autoScroll(forcedRecovery ? 4 : 7, 1400, forcedRecovery ? 900 : 1800, {
       maxPauseMs: forcedRecovery ? 1500 : 3500,
     });
     let saved = 0;
@@ -2891,7 +2926,7 @@ const ONE_SHOT_TIMEOUT_MS_BY_PLATFORM = {
   lemon8: 4 * 60 * 1000,
   threads: 4 * 60 * 1000,
   x: 3 * 60 * 1000,
-  facebook: 3 * 60 * 1000,
+  facebook: 5 * 60 * 1000,
 };
 const LOOP_CYCLE_TIMEOUT_MS_BY_PLATFORM = {
   instagram: 12 * 60 * 1000,
@@ -2900,7 +2935,7 @@ const LOOP_CYCLE_TIMEOUT_MS_BY_PLATFORM = {
   lemon8: 5 * 60 * 1000,
   threads: 5 * 60 * 1000,
   x: 4 * 60 * 1000,
-  facebook: 4 * 60 * 1000,
+  facebook: 7 * 60 * 1000,
 };
 const TIMEOUT_RELOAD_STREAK_BY_PLATFORM = {
   instagram: 2,
@@ -3027,12 +3062,13 @@ async function mainLoop() {
         const shell = detectRecoverablePageShell(p.id);
         if (shell) {
           markLoopProgress();
+          const clicked = await attemptRecoverablePageInteraction(p.id, shell);
           const recovery = await reportRecoverablePageShell(p, shell);
           if (recovery && recovery.cooldown_mins) {
             setWall(p.id, recovery.cooldown_mins);
           }
           const delay = Number((recovery && recovery.delay_ms) || passRestMs(p.id));
-          await sleep(human(Math.max(30000, Math.min(delay, 300000))));
+          await sleep(clicked ? human(12000) : human(Math.max(30000, Math.min(delay, 300000))));
           continue;
         }
         markLoopProgress();
@@ -3196,9 +3232,11 @@ async function runOneShotCycle(reason) {
     }
     const shell = detectRecoverablePageShell(p.id);
     if (shell) {
+      const clicked = await attemptRecoverablePageInteraction(p.id, shell);
       await reportRecoverablePageShell(p, shell);
       await reportForcedCycleHealth(p, "forced_cycle_skipped", shell.reason || "recoverable_error_shell", {
         content_counts: shell.content_counts || pageContentCounts(),
+        recovery_click_attempted: clicked || null,
       });
       return;
     }
