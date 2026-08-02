@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from collections.abc import Mapping
 from typing import Any
 
 from src.core.vault import RawPayloadResult
 
 logger = logging.getLogger(__name__)
+
+_PENDING_FAILURE_TASKS: set[asyncio.Task[Any]] = set()
 
 
 _ENTITY_KEYS = (
@@ -45,6 +48,14 @@ def raw_archive_entity_id(source: str, metadata: Mapping[str, Any] | None) -> st
 def raw_archive_content_id(artifact_id: str) -> str:
     normalized = str(artifact_id or "unknown").replace("\\", "/")
     return _short(f"raw:{normalized}")
+
+
+def _max_pending_failure_tasks() -> int:
+    raw = os.getenv("RAW_ARCHIVE_FAILURE_TASK_LIMIT", "200")
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return 200
 
 
 async def insert_raw_archive_failure(
@@ -100,7 +111,16 @@ def report_raw_archive_result(
             artifact_id,
         )
         return
-    loop.create_task(
+    limit = _max_pending_failure_tasks()
+    if len(_PENDING_FAILURE_TASKS) >= limit:
+        log.warning(
+            "%s raw archive failure DLQ queue saturated (%d pending); dropping report for %s",
+            source,
+            len(_PENDING_FAILURE_TASKS),
+            artifact_id,
+        )
+        return
+    task = loop.create_task(
         insert_raw_archive_failure(
             pool,
             source=source,
@@ -109,3 +129,18 @@ def report_raw_archive_result(
             metadata=metadata,
         )
     )
+    _PENDING_FAILURE_TASKS.add(task)
+
+    def _done(done_task: asyncio.Task[Any]) -> None:
+        _PENDING_FAILURE_TASKS.discard(done_task)
+        try:
+            done_task.result()
+        except Exception as exc:  # noqa: BLE001 - failure reporting is best effort
+            log.warning(
+                "%s raw archive failure DLQ insert failed for %s: %s",
+                source,
+                artifact_id,
+                exc,
+            )
+
+    task.add_done_callback(_done)

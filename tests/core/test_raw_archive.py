@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 import pytest
 
 from src.core.raw_archive import (
+    _PENDING_FAILURE_TASKS,
     raw_archive_content_id,
     raw_archive_entity_id,
     report_raw_archive_result,
@@ -37,6 +38,7 @@ def test_raw_archive_identifiers_fit_dlq_columns():
 
 @pytest.mark.asyncio
 async def test_report_raw_archive_result_queues_failed_write():
+    _PENDING_FAILURE_TASKS.clear()
     pool = _Pool()
 
     report_raw_archive_result(
@@ -55,3 +57,21 @@ async def test_report_raw_archive_result_queues_failed_write():
     assert entity_id == "123"
     assert content_id == "raw:messages/456"
     assert "vault unavailable" in error
+
+
+@pytest.mark.asyncio
+async def test_report_raw_archive_result_respects_pending_task_limit(monkeypatch):
+    _PENDING_FAILURE_TASKS.clear()
+    monkeypatch.setenv("RAW_ARCHIVE_FAILURE_TASK_LIMIT", "0")
+    pool = _Pool()
+
+    report_raw_archive_result(
+        pool,
+        source="whatsapp",
+        artifact_id="messages/456",
+        result=RawPayloadResult(ok=False, error="cannot allocate memory"),
+        metadata={"platform_chat_id": "123"},
+    )
+    await asyncio.sleep(0)
+
+    assert pool.conn.execute_calls == []
