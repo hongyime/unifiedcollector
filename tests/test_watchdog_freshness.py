@@ -103,7 +103,36 @@ async def test_watchdog_clears_stale_marker_after_source_recovers(monkeypatch):
     query, args = executed[0]
     assert "UPDATE source_health" in query
     assert "LIKE 'stale %watchdog%'" in query
+    assert "LIKE 'watchdog waiting for qr pairing%'" in query
     assert args == ("website",)
+
+
+@pytest.mark.asyncio
+async def test_mark_degraded_words_whatsapp_qr_pairing_as_operator_action(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgres://collector:collector@localhost/unifiedcollector")
+    import src.watchdog.freshness as freshness
+
+    freshness = importlib.reload(freshness)
+    executed: list[tuple[str, tuple]] = []
+
+    class FakeDB:
+        async def execute(self, query: str, *args):
+            executed.append((query, args))
+
+    await freshness._mark_degraded(
+        FakeDB(),
+        "whatsapp",
+        20,
+        False,
+        "waiting for QR pairing; not restarted",
+    )
+
+    assert len(executed) == 1
+    _query, args = executed[0]
+    assert args == (
+        "whatsapp",
+        "watchdog waiting for QR pairing; not restarted; newest row 20s ago",
+    )
 
 
 @pytest.mark.asyncio

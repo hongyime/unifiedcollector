@@ -221,7 +221,10 @@ async def _mark_degraded(
     Self-clearing: the worker's _mark_source_healthy UPSERTs status='running' on the
     next observed progress, so a source that recovers flips back automatically.
     """
-    note = f"stale {age:.0f}s — watchdog {detail or ('restarted container' if restarted else 'in cooldown')}"
+    if source == "whatsapp" and detail and "qr pairing" in detail.lower():
+        note = f"watchdog {detail}; newest row {age:.0f}s ago"
+    else:
+        note = f"stale {age:.0f}s — watchdog {detail or ('restarted container' if restarted else 'in cooldown')}"
     try:
         await db.execute(
             "INSERT INTO source_health (source, status, last_error, crash_count, updated_at) "
@@ -248,7 +251,10 @@ async def _mark_running_if_stale_watchdog(db: asyncpg.Connection, source: str) -
                 updated_at=NOW()
             WHERE source=$1
               AND status='degraded'
-              AND lower(coalesce(last_error, '')) LIKE 'stale %watchdog%'
+              AND (
+                lower(coalesce(last_error, '')) LIKE 'stale %watchdog%'
+                OR lower(coalesce(last_error, '')) LIKE 'watchdog waiting for qr pairing%'
+              )
             """,
             source,
         )
