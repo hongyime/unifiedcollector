@@ -1122,6 +1122,31 @@ def test_targets_refresh_side_caches_once_per_ttl(monkeypatch):
     assert calls == ["proximity", "priority"]
 
 
+def test_cached_targets_for_reuses_response_inside_ttl(monkeypatch):
+    calls = []
+
+    async def fake_targets(pool, platform):
+        calls.append(platform)
+        return [{"username": "alpha", "hop": 0}]
+
+    monkeypatch.setattr(ig_ingest, "SOCIAL_TARGET_RESPONSE_CACHE_SECONDS", 45.0)
+    monkeypatch.setattr(ig_ingest, "_targets_for", fake_targets)
+    ig_ingest._SOCIAL_TARGET_RESPONSE_CACHE.clear()
+    ig_ingest._SOCIAL_TARGET_RESPONSE_LOCKS.clear()
+    pool = _FakePool()
+
+    async def run_twice():
+        first = await ig_ingest._cached_targets_for(pool, "instagram")
+        second = await ig_ingest._cached_targets_for(pool, "instagram")
+        return first, second
+
+    first, second = asyncio.run(run_twice())
+
+    assert first == [{"username": "alpha", "hop": 0}]
+    assert second == first
+    assert calls == ["instagram"]
+
+
 def test_browser_heartbeat_handler_reports_degraded_when_pool_missing():
     req = _FakeRequest(
         {"pool": None},

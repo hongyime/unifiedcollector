@@ -264,6 +264,7 @@ IG_SPIDER_TARGETS_LIMIT = int(os.getenv("IG_SPIDER_TARGETS_LIMIT", "250"))
 SOCIAL_TARGET_CACHE_REFRESH_ON_REQUEST = os.getenv("SOCIAL_TARGET_CACHE_REFRESH_ON_REQUEST", "0").strip().lower() in {"1", "true", "yes", "on"}
 SOCIAL_TARGET_CACHE_REFRESH_SECONDS = int(os.getenv("SOCIAL_TARGET_CACHE_REFRESH_SECONDS", "300"))
 SOCIAL_TARGET_CACHE_REFRESH_INLINE_BUDGET_SECONDS = float(os.getenv("SOCIAL_TARGET_CACHE_REFRESH_INLINE_BUDGET_SECONDS", "0.25"))
+SOCIAL_TARGET_RESPONSE_CACHE_SECONDS = float(os.getenv("SOCIAL_TARGET_RESPONSE_CACHE_SECONDS", "45.0"))
 X_PROFILE_TARGET_REVISIT_SECONDS = int(os.getenv("X_PROFILE_TARGET_REVISIT_SECONDS", str(12 * 60 * 60)))
 X_PROFILE_TARGET_RETRY_SECONDS = int(os.getenv("X_PROFILE_TARGET_RETRY_SECONDS", str(45 * 60)))
 TIKTOK_FOLLOW_OWNER_FALLBACK = (
@@ -272,6 +273,8 @@ TIKTOK_FOLLOW_OWNER_FALLBACK = (
 _SOCIAL_TARGET_CACHE_REFRESH_LAST = 0.0
 _SOCIAL_TARGET_CACHE_REFRESH_LOCK: asyncio.Lock | None = None
 _SOCIAL_TARGET_CACHE_REFRESH_TASKS: set[asyncio.Task] = set()
+_SOCIAL_TARGET_RESPONSE_CACHE: dict[str, tuple[float, list[dict]]] = {}
+_SOCIAL_TARGET_RESPONSE_LOCKS: dict[str, asyncio.Lock] = {}
 
 _SPIDER_DDL = """
 CREATE TABLE IF NOT EXISTS instagram_spider_targets (
@@ -862,9 +865,31 @@ async def _targets_for(pool, platform):
     return out
 
 
+async def _cached_targets_for(pool, platform):
+    ttl = max(0.0, SOCIAL_TARGET_RESPONSE_CACHE_SECONDS)
+    now = time.time()
+    cached = _SOCIAL_TARGET_RESPONSE_CACHE.get(platform)
+    if ttl and cached and now - cached[0] <= ttl:
+        return cached[1]
+    lock = _SOCIAL_TARGET_RESPONSE_LOCKS.get(platform)
+    if lock is None:
+        lock = asyncio.Lock()
+        _SOCIAL_TARGET_RESPONSE_LOCKS[platform] = lock
+    if lock.locked() and cached:
+        return cached[1]
+    async with lock:
+        now = time.time()
+        cached = _SOCIAL_TARGET_RESPONSE_CACHE.get(platform)
+        if ttl and cached and now - cached[0] <= ttl:
+            return cached[1]
+        out = await _targets_for(pool, platform)
+        _SOCIAL_TARGET_RESPONSE_CACHE[platform] = (time.time(), out)
+        return out
+
+
 async def get_targets(request):
     platform = _norm_platform(request.query.get("platform"))
-    out = await _targets_for(request.app["pool"], platform)
+    out = await _cached_targets_for(request.app["pool"], platform)
     return _cors(web.json_response({
         "platform": platform,
         "targets": out,
@@ -875,7 +900,7 @@ async def get_targets(request):
 
 async def get_targets_ig(request):  # /ig/targets alias
     request.query  # noqa
-    out = await _targets_for(request.app["pool"], "instagram")
+    out = await _cached_targets_for(request.app["pool"], "instagram")
     return _cors(web.json_response({
         "targets": out,
         "usernames": [t["username"] for t in out],
