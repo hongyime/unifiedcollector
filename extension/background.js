@@ -310,17 +310,16 @@ async function hardRefreshForcedCycleTab(base, tab, platform, reason, extra = {}
   return true;
 }
 
-async function injectContentScriptForTab(base, tab, platform, reason, extra = {}) {
+async function refreshTabForMissingContentScript(base, tab, platform, reason, extra = {}) {
   if (!tab || tab.id == null || !platform || !platform.id) return false;
-  if (!chrome.scripting || !chrome.scripting.executeScript) return false;
-  await recordServiceWorkerRecovery(base, tab, platform, "content_script_reinject_started", reason || "content_script_missing", extra);
-  await chrome.scripting.executeScript({
-    target: { tabId: tab.id, allFrames: false },
-    files: ["content.js"],
+  // content.js is already registered as a manifest content script. Re-injecting
+  // it into an existing isolated world can throw top-level redeclaration errors
+  // such as "Identifier 'sleep' has already been declared". A tab refresh is
+  // slower, but lets Chrome run the manifest script exactly once for the page.
+  return hardRefreshForcedCycleTab(base, tab, platform, reason || "content_script_receiver_missing", {
+    recovery: "manifest_content_script_refresh",
+    ...extra,
   });
-  await _sleep(750);
-  await recordServiceWorkerRecovery(base, tab, platform, "content_script_reinjected", reason || "content_script_missing", extra);
-  return true;
 }
 
 function parseHeartbeatResponseBody(responseBody) {
@@ -389,29 +388,22 @@ async function maybeForceScrapeCycle(tab, platform, responseBody, reason, base =
       no_receiver: receiverMissing || null,
     });
     try {
-      let recoveredByInjection = false;
       if (receiverMissing) {
         try {
-          recoveredByInjection = await injectContentScriptForTab(base, tab, platform, "content_script_receiver_missing", {
+          const reloaded = await refreshTabForMissingContentScript(base, tab, platform, "content_script_receiver_missing", {
             content_age_seconds: body.content_age_seconds || null,
             cycle_error: cycleError,
             no_receiver: true,
           });
-          if (recoveredByInjection) {
-            await chrome.tabs.sendMessage(tab.id, recoveryMessage);
-            await recordServiceWorkerRecovery(base, tab, platform, "forced_cycle_request_sent_after_reinject", body.force_reason || "browser_content_stale", {
-              content_age_seconds: body.content_age_seconds || null,
-              message_type: recoveryMessage.type,
-              no_receiver: true,
-            });
-            await log("warn", `${platform.label}: content script was missing; reinjected content.js and nudged scraper loop`);
+          if (reloaded) {
+            await log("warn", `${platform.label}: content script receiver missing; hard-refreshed tab so manifest content.js can reload`);
             return;
           }
-        } catch (injectErr) {
-          await recordServiceWorkerRecovery(base, tab, platform, "content_script_reinject_failed", "content_script_receiver_missing", {
+        } catch (refreshErr) {
+          await recordServiceWorkerRecovery(base, tab, platform, "content_script_refresh_failed", "content_script_receiver_missing", {
             content_age_seconds: body.content_age_seconds || null,
             cycle_error: cycleError,
-            reinject_error: injectErr && injectErr.message ? injectErr.message : String(injectErr),
+            refresh_error: refreshErr && refreshErr.message ? refreshErr.message : String(refreshErr),
             no_receiver: true,
           });
         }
@@ -945,16 +937,14 @@ async function ensureLoops(reason) {
             cycle_error: firstErr && firstErr.message ? firstErr.message : String(firstErr),
             no_receiver: true,
           });
-          const injected = await injectContentScriptForTab(base, t, platform, "ensure_loop_receiver_missing", {
+          const reloaded = await refreshTabForMissingContentScript(base, t, platform, "ensure_loop_receiver_missing", {
             cycle_error: firstErr && firstErr.message ? firstErr.message : String(firstErr),
             no_receiver: true,
           });
-          if (injected) {
-            await chrome.tabs.sendMessage(t.id, { type: forceCycle ? "scrapeCycle" : "ensureLoop", reason });
-            await log("warn", `content scraper missing in tab ${t.id}; reinjected content.js (${reason})`);
+          if (reloaded) {
+            await log("warn", `content scraper missing in tab ${t.id}; hard-refreshed so manifest content.js can reload (${reason})`);
           } else {
-            await chrome.tabs.reload(t.id, { bypassCache: true });
-            await log("warn", `content scraper missing in tab ${t.id}; hard-refreshed after reinject was unavailable (${reason})`);
+            await log("warn", `content scraper missing in tab ${t.id}; hard-refresh already debounced (${reason})`);
           }
         } else {
           throw firstErr;
