@@ -502,10 +502,18 @@ function parseEmbeddedState(ids) {
   return null;
 }
 
-async function autoScroll(times = 8, dist = 1400, pause = 1800) {
+function cappedHuman(base, maxMs) {
+  const ms = human(base);
+  return Number.isFinite(Number(maxMs)) && Number(maxMs) > 0
+    ? Math.min(ms, Number(maxMs))
+    : ms;
+}
+
+async function autoScroll(times = 8, dist = 1400, pause = 1800, options = {}) {
+  const maxPauseMs = options && options.maxPauseMs;
   for (let i = 0; i < times; i++) {
     window.scrollBy(0, dist * (0.7 + Math.random() * 0.6));
-    await hsleep(pause); // human, irregular scroll cadence
+    await sleep(cappedHuman(pause, maxPauseMs)); // human, irregular scroll cadence
   }
 }
 
@@ -570,7 +578,7 @@ async function maybeSweepFollowGraph({ platform, owner, urls, homeUrl }) {
     return "";
   })();
   if (active && active.owner === owner && active.side && sideFromPath === active.side) {
-    await autoScroll(active.side === "following" ? 10 : 8, 1200, 1800);
+    await autoScroll(active.side === "following" ? 10 : 8, 1200, 1800, { maxPauseMs: 3500 });
     const context = active.side === "followers" ? "follower" : "follow";
     const users = collectFollowHandlesFromDom(platform, owner);
     if (users.length) {
@@ -1217,7 +1225,7 @@ const tiktok = {
     if (revisit && revisit.navigating) return { targets: 1, saved: 0, discovered: 0 };
     clog("info", `cycle start on @${entity}`, "tiktok");
     const sink = makeSink();
-    await autoScroll(10);
+    await autoScroll(10, 1400, 1800, { maxPauseMs: 3500 });
     const state = parseEmbeddedState(["__UNIVERSAL_DATA_FOR_REHYDRATION__", "SIGI_STATE", "sigi-persisted-data"]);
     if (state) { deepCollectMedia(state, sink, entity); const us = []; deepCollectUsers(state, us); if (us.length) await send({ type: "users", platform: "tiktok", context: "seen", users: us }); }
     // also harvest whatever the DOM rendered. TikTok playback URLs are
@@ -1432,7 +1440,7 @@ const lemon8 = {
     if (mediaRevisit && mediaRevisit.navigating) return { targets: 1, saved: 0, discovered: 0 };
     clog("info", `cycle start on ${entity}`, "lemon8");
     const sink = makeSink();
-    await autoScroll(18);
+    await autoScroll(18, 1400, 1800, { maxPauseMs: 3500 });
     const state = parseEmbeddedState(["__NEXT_DATA__"]);
     const users = [];
     if (state) {
@@ -1828,7 +1836,7 @@ const x = {
     }
     clog("info", `X cycle on ${feed} — scrolling for tweets`, "x");
     const sink = makeSink();
-    await autoScroll(12);
+    await autoScroll(12, 1400, 1800, { maxPauseMs: 3500 });
     if (entity !== "timeline") {
       const profile = scrapeXProfile(entity);
       if (profile) {
@@ -2162,7 +2170,7 @@ const threads = {
   // Scrape one Threads profile we navigated to (the IG→Threads reverse direction).
   async _scrapeProfile(user) {
     clog("info", `Threads profile @${user} — scraping (IG-known real account)`, "threads");
-    await autoScroll(8);
+    await autoScroll(8, 1400, 1800, { maxPauseMs: 3500 });
     const sink = harvestDom(user, { ...THREADS_IMG, platform: "threads" });
     const activeMediaRevisit = currentBrowserMediaRevisit("threads");
     markBrowserMediaRevisitItems("threads", sink, activeMediaRevisit);
@@ -2230,7 +2238,7 @@ const threads = {
       ? ((await threadsSelectFeed("For you")) ? "foryou" : "feed")
       : ((await threadsSelectFeed("Following")) ? "following" : "feed");
     clog("info", `Threads cycle on ${feed} — scrolling`, "threads");
-    await autoScroll(10);
+    await autoScroll(10, 1400, 1800, { maxPauseMs: 3500 });
     const sink = harvestDom(feed, { ...THREADS_IMG, platform: "threads" });
     const activeMediaRevisit = currentBrowserMediaRevisit("threads");
     markBrowserMediaRevisitItems("threads", sink, activeMediaRevisit);
@@ -2332,7 +2340,7 @@ const facebook = {
     const mediaRevisit = await maybeStartBrowserMediaRevisit("facebook", facebookLoggedInOwner());
     if (mediaRevisit && mediaRevisit.navigating) return { targets: 1, saved: 0, discovered: 0 };
     clog("info", `cycle start on ${entity} (person profile: ${person})`, "facebook");
-    await autoScroll(12);
+    await autoScroll(12, 1400, 1800, { maxPauseMs: 3500 });
     let saved = 0;
     const profile = scrapeFacebookProfile(entity, person);
     if (profile) {

@@ -254,11 +254,17 @@ _BROWSER_CAPTURE_COMPRESSED_ENDPOINTS = {"profile", "posts", "comments"}
 IG_SPIDER_MAX_HOP = int(os.getenv("INSTA_SPIDER_HOPS", "2"))
 IG_SPIDER_FAMOUS_CAP = int(os.getenv("INSTA_SPIDER_FAMOUS_CAP", "100000"))
 IG_SPIDER_TARGETS_LIMIT = int(os.getenv("IG_SPIDER_TARGETS_LIMIT", "250"))
+SOCIAL_TARGET_CACHE_REFRESH_ON_REQUEST = os.getenv("SOCIAL_TARGET_CACHE_REFRESH_ON_REQUEST", "0").strip().lower() in {"1", "true", "yes", "on"}
+SOCIAL_TARGET_CACHE_REFRESH_SECONDS = int(os.getenv("SOCIAL_TARGET_CACHE_REFRESH_SECONDS", "300"))
+SOCIAL_TARGET_CACHE_REFRESH_INLINE_BUDGET_SECONDS = float(os.getenv("SOCIAL_TARGET_CACHE_REFRESH_INLINE_BUDGET_SECONDS", "0.25"))
 X_PROFILE_TARGET_REVISIT_SECONDS = int(os.getenv("X_PROFILE_TARGET_REVISIT_SECONDS", str(12 * 60 * 60)))
 X_PROFILE_TARGET_RETRY_SECONDS = int(os.getenv("X_PROFILE_TARGET_RETRY_SECONDS", str(45 * 60)))
 TIKTOK_FOLLOW_OWNER_FALLBACK = (
     os.getenv("TIKTOK_FOLLOW_OWNER_FALLBACK", "").strip().lstrip("@") or None
 )
+_SOCIAL_TARGET_CACHE_REFRESH_LAST = 0.0
+_SOCIAL_TARGET_CACHE_REFRESH_LOCK: asyncio.Lock | None = None
+_SOCIAL_TARGET_CACHE_REFRESH_TASKS: set[asyncio.Task] = set()
 
 _SPIDER_DDL = """
 CREATE TABLE IF NOT EXISTS instagram_spider_targets (
@@ -647,6 +653,56 @@ async def db_pool_middleware(request, handler):
 # ---------------------------------------------------------------------------
 # targets
 # ---------------------------------------------------------------------------
+async def _refresh_target_side_caches(pool) -> None:
+    """Refresh target ranking side caches at most once per TTL.
+
+    These cache builders can be expensive on the live DB. Running them for every
+    browser /social/targets poll made target selection miss its response budget
+    during active extension bursts.
+    """
+    global _SOCIAL_TARGET_CACHE_REFRESH_LAST, _SOCIAL_TARGET_CACHE_REFRESH_LOCK
+    ttl = max(0, SOCIAL_TARGET_CACHE_REFRESH_SECONDS)
+    now = time.time()
+    if ttl and now - _SOCIAL_TARGET_CACHE_REFRESH_LAST < ttl:
+        return
+    lock = _SOCIAL_TARGET_CACHE_REFRESH_LOCK
+    if lock is None:
+        lock = asyncio.Lock()
+        _SOCIAL_TARGET_CACHE_REFRESH_LOCK = lock
+    if lock.locked():
+        return
+
+    async def _runner() -> None:
+        global _SOCIAL_TARGET_CACHE_REFRESH_LAST
+        async with lock:
+            now = time.time()
+            if ttl and now - _SOCIAL_TARGET_CACHE_REFRESH_LAST < ttl:
+                return
+            _SOCIAL_TARGET_CACHE_REFRESH_LAST = now
+            try:
+                await refresh_account_proximity_cache(pool)
+                await refresh_collector_priority_hints(pool)
+                _SOCIAL_TARGET_CACHE_REFRESH_LAST = time.time()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("target side-cache refresh failed", exc_info=True)
+
+    task = asyncio.create_task(_runner())
+    _SOCIAL_TARGET_CACHE_REFRESH_TASKS.add(task)
+    task.add_done_callback(_SOCIAL_TARGET_CACHE_REFRESH_TASKS.discard)
+    budget = max(0.0, SOCIAL_TARGET_CACHE_REFRESH_INLINE_BUDGET_SECONDS)
+    if budget <= 0:
+        return
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=budget)
+    except asyncio.TimeoutError:
+        logger.info(
+            "target side-cache refresh continuing in background after %.2fs",
+            budget,
+        )
+
+
 async def _targets_for(pool, platform):
     """seed targets (collection_targets) UNION instagram spider targets (IG only)."""
     seen = set()
@@ -694,24 +750,15 @@ async def _targets_for(pool, platform):
             logger.exception("targets query failed (%s)", platform)
         return out
     try:
-        await refresh_account_proximity_cache(pool)
-        await refresh_collector_priority_hints(pool)
+        if SOCIAL_TARGET_CACHE_REFRESH_ON_REQUEST:
+            await _refresh_target_side_caches(pool)
         async with pool.acquire() as conn:
             seeds = await conn.fetch(
                 """
-                SELECT ct.target_id, MIN(ap.tier) AS proximity_tier, ct.priority
+                SELECT ct.target_id, ct.priority
                 FROM collection_targets ct
-                LEFT JOIN account_proximity_cache ap
-                  ON ap.platform = ct.source
-                 AND ap.account_id = lower(ct.target_id)
                 WHERE ct.source = $1
-                GROUP BY ct.target_id, ct.priority, ct.created_at
                 ORDER BY
-                    CASE
-                        WHEN MIN(ap.tier) IN (1, 2) THEN 2
-                        WHEN MIN(ap.tier) = 3 THEN 1
-                        ELSE 0
-                    END DESC,
                     ct.priority DESC,
                     ct.created_at ASC
                 """,
@@ -725,27 +772,17 @@ async def _targets_for(pool, platform):
             if platform == "instagram":
                 spider = await conn.fetch(
                     """
-                    SELECT s.username, s.hop, prox.proximity_tier
+                    SELECT s.username, s.hop
                     FROM instagram_spider_targets s
-                    LEFT JOIN LATERAL (
-                        SELECT MIN(ap.tier) AS proximity_tier
-                        FROM account_proximity_cache ap
-                        WHERE ap.platform = 'instagram'
-                          AND ap.account_id = lower(s.username)
-                    ) prox ON TRUE
                     WHERE s.status='active' AND s.hop <= $1
                     ORDER BY
-                        CASE
-                            WHEN prox.proximity_tier IN (1, 2) THEN 2
-                            WHEN prox.proximity_tier = 3 THEN 1
-                            ELSE 0
-                        END DESC,
                         s.hop ASC,
                         s.last_scraped_at ASC NULLS FIRST,
                         s.discovered_at ASC
                     LIMIT $2
                     """,
-                    IG_SPIDER_MAX_HOP, IG_SPIDER_TARGETS_LIMIT,
+                    IG_SPIDER_MAX_HOP,
+                    IG_SPIDER_TARGETS_LIMIT,
                 )
                 for r in spider:
                     u = r["username"]
@@ -758,21 +795,10 @@ async def _targets_for(pool, platform):
                 # are scrapeable Threads profiles. Hand them to the Threads tab to visit.
                 ig = await conn.fetch(
                     """
-                    SELECT s.username, prox.proximity_tier
+                    SELECT s.username
                     FROM instagram_spider_targets s
-                    LEFT JOIN LATERAL (
-                        SELECT MIN(ap.tier) AS proximity_tier
-                        FROM account_proximity_cache ap
-                        WHERE ap.platform = 'instagram'
-                          AND ap.account_id = lower(s.username)
-                    ) prox ON TRUE
                     WHERE s.status='active'
                     ORDER BY
-                        CASE
-                            WHEN prox.proximity_tier IN (1, 2) THEN 2
-                            WHEN prox.proximity_tier = 3 THEN 1
-                            ELSE 0
-                        END DESC,
                         s.last_scraped_at ASC NULLS FIRST,
                         s.discovered_at ASC
                     LIMIT $1
@@ -781,19 +807,10 @@ async def _targets_for(pool, platform):
                 )
                 ig2 = await conn.fetch(
                     """
-                    SELECT ct.target_id AS username, MIN(ap.tier) AS proximity_tier
+                    SELECT ct.target_id AS username
                     FROM collection_targets ct
-                    LEFT JOIN account_proximity_cache ap
-                      ON ap.platform = 'instagram'
-                     AND ap.account_id = lower(ct.target_id)
                     WHERE ct.source='instagram'
-                    GROUP BY ct.target_id, ct.priority, ct.created_at
                     ORDER BY
-                        CASE
-                            WHEN MIN(ap.tier) IN (1, 2) THEN 2
-                            WHEN MIN(ap.tier) = 3 THEN 1
-                            ELSE 0
-                        END DESC,
                         ct.priority DESC,
                         ct.created_at ASC
                     """
@@ -1403,6 +1420,12 @@ def _classify_tiktok_candidate_result(
         if _reject_count(result.get("saved")) > 0 or _reject_count(result.get("stored")) > 0:
             return "stored", None, False
         reason = str(result.get("reason") or "browser_upload_failed")
+        if reason == "deferred_upload_budget":
+            return (
+                "deferred",
+                reason,
+                _tiktok_candidate_is_video(item) or bool((item or {}).get("browser_upload_only")),
+            )
         if reason in {"duplicate_content_id", "duplicate_sha256"}:
             return "duplicate", reason, False
         if reason.startswith("http_") or reason in {"timeout", "failed", "browser_upload_failed"}:
@@ -1464,6 +1487,12 @@ def _classify_browser_candidate_result(
         if _reject_count(result.get("saved")) > 0 or _reject_count(result.get("stored")) > 0:
             return "stored", None, False
         reason = str(result.get("reason") or "browser_upload_failed")
+        if reason == "deferred_upload_budget":
+            return (
+                "deferred",
+                reason,
+                is_video or bool((item or {}).get("browser_upload_only")),
+            )
         if reason in {"duplicate_content_id", "duplicate_sha256"}:
             return "duplicate", reason, False
         if reason.startswith("http_") or reason in {"timeout", "failed", "browser_upload_failed"}:
@@ -3229,82 +3258,160 @@ async def _save_comments(pool, platform, post_pid, comments) -> int:
 # Instagram — which IS target/profile-driven. Cross-seed them into the IG spider
 # queue. Gated to non-"foryou" contexts so we don't import algorithmic brand spam.
 async def _cross_seed_instagram(conn, usernames, source) -> int:
-    added = 0
-    for uname in usernames:
-        uname = (uname or "").strip().lstrip("@")
-        if not uname or len(uname) > 30:
-            continue
-        try:
-            res = await conn.execute(
-                """
+    clean = sorted({
+        (uname or "").strip().lstrip("@")
+        for uname in usernames
+        if (uname or "").strip().lstrip("@") and len((uname or "").strip().lstrip("@")) <= 30
+    })
+    if not clean:
+        return 0
+    try:
+        added = int(await conn.fetchval(
+            """
+            WITH input(username) AS (
+                SELECT DISTINCT unnest($1::text[])
+            ),
+            inserted AS (
                 INSERT INTO instagram_spider_targets (username, hop, discovered_from)
-                VALUES ($1, 1, $2)
+                SELECT username, 1, $2
+                FROM input
                 ON CONFLICT (username) DO NOTHING
-                """,
-                uname, source,
+                RETURNING 1
             )
-            if res.endswith("1"):
-                added += 1
-        except Exception:
-            logger.debug("cross-seed ig target failed %s", uname, exc_info=True)
+            SELECT count(*) FROM inserted
+            """,
+            clean,
+            source,
+        ) or 0)
+    except Exception:
+        logger.debug("cross-seed ig target batch failed", exc_info=True)
+        added = 0
+        for uname in clean:
+            try:
+                res = await conn.execute(
+                    """
+                    INSERT INTO instagram_spider_targets (username, hop, discovered_from)
+                    VALUES ($1, 1, $2)
+                    ON CONFLICT (username) DO NOTHING
+                    """,
+                    uname, source,
+                )
+                if res.endswith("1"):
+                    added += 1
+            except Exception:
+                logger.debug("cross-seed ig target failed %s", uname, exc_info=True)
     if added:
         logger.info("cross-seed instagram <- %s: +%d real handles", source, added)
     return added
 
 
+_SOCIAL_USERS_UPSERT_SQL = """
+INSERT INTO social_users (platform, uid, platform_user_id, username, display_name, profile_photo_url, contexts)
+VALUES ($1,$2,$3,$4,$5,$6,$7)
+ON CONFLICT (platform, uid) DO UPDATE SET
+   last_seen = now(),
+   times_seen = social_users.times_seen + 1,
+   username = COALESCE(EXCLUDED.username, social_users.username),
+   platform_user_id = COALESCE(EXCLUDED.platform_user_id, social_users.platform_user_id),
+   display_name = COALESCE(EXCLUDED.display_name, social_users.display_name),
+   profile_photo_url = COALESCE(EXCLUDED.profile_photo_url, social_users.profile_photo_url),
+   contexts = (SELECT array_agg(DISTINCT c) FROM unnest(social_users.contexts || EXCLUDED.contexts) AS c)
+"""
+
+_FOLLOW_EDGES_UPSERT_SQL = """
+INSERT INTO follow_edges
+    (platform, owner_account, target_uid, direction, target_username, first_seen, last_seen)
+VALUES ($1, $2, $3, $4, $5, now(), now())
+ON CONFLICT (platform, owner_account, target_uid, direction) DO UPDATE SET
+    last_seen = now(),
+    target_username = COALESCE(EXCLUDED.target_username, follow_edges.target_username)
+"""
+
+
 async def _record_users(pool, platform, users, context, owner=None) -> int:
     if not users:
         return 0
-    n = 0
-    _cross = []  # threads handles to push into the IG spider queue
+    rows = []
+    context_value = str(context or "seen")[:64]
+    cross_handles = []  # threads handles to push into the IG spider queue
     # PER-ACCOUNT follow graph: when the extension sends an owner (the logged-in
     # account) with a follow/follower context, also record a directional edge in
     # follow_edges so each of your accounts' graphs is distinct (multi-account).
     owner_account, direction = _owner_account_for_follow(platform, context, owner)
+    owner_account = str(owner_account) if owner_account else None
+    for u in users:
+        if isinstance(u, str):
+            u = {"username": u}
+        if not isinstance(u, dict):
+            continue
+        user_id = u.get("user_id") or u.get("pk") or u.get("id")
+        username = (u.get("username") or "").strip().lstrip("@") or None
+        uid = str(user_id) if user_id else username
+        if not uid:
+            continue
+        rows.append({
+            "uid": uid,
+            "user_id": str(user_id) if user_id else None,
+            "username": username,
+            "display_name": u.get("display_name") or u.get("full_name") or None,
+            "profile_photo_url": (
+                u.get("profile_pic_url")
+                or u.get("profile_photo_url")
+                or u.get("avatar_url")
+                or None
+            ),
+        })
+    if not rows:
+        return 0
+
+    user_args = [
+        (
+            platform,
+            r["uid"],
+            r["user_id"],
+            r["username"],
+            r["display_name"],
+            r["profile_photo_url"],
+            [context_value],
+        )
+        for r in rows
+    ]
+    edge_args = [
+        (platform, owner_account, r["uid"], direction, r["username"])
+        for r in rows
+        if owner_account and direction
+    ]
+    n = 0
     async with pool.acquire() as conn:
-        for u in users:
-            if isinstance(u, str):
-                u = {"username": u}
-            if not isinstance(u, dict):
-                continue
-            user_id = u.get("user_id") or u.get("pk") or u.get("id")
-            username = (u.get("username") or "").strip().lstrip("@") or None
-            uid = str(user_id) if user_id else username
-            if not uid:
-                continue
+        successful_rows = rows
+        try:
+            await conn.executemany(_SOCIAL_USERS_UPSERT_SQL, user_args)
+            n = len(rows)
+        except Exception:
+            logger.debug("record users batch failed %s/%d", platform, len(rows), exc_info=True)
+            successful_rows = []
+            for r, args in zip(rows, user_args, strict=False):
+                try:
+                    await conn.execute(_SOCIAL_USERS_UPSERT_SQL, *args)
+                    successful_rows.append(r)
+                    n += 1
+                except Exception:
+                    logger.debug("record user failed %s", r["uid"], exc_info=True)
+        if edge_args:
             try:
-                await conn.execute(
-                    """
-                    INSERT INTO social_users (platform, uid, platform_user_id, username, display_name, profile_photo_url, contexts)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7)
-                    ON CONFLICT (platform, uid) DO UPDATE SET
-                       last_seen = now(),
-                       times_seen = social_users.times_seen + 1,
-                       username = COALESCE(EXCLUDED.username, social_users.username),
-                       platform_user_id = COALESCE(EXCLUDED.platform_user_id, social_users.platform_user_id),
-                       display_name = COALESCE(EXCLUDED.display_name, social_users.display_name),
-                       profile_photo_url = COALESCE(EXCLUDED.profile_photo_url, social_users.profile_photo_url),
-                       contexts = (SELECT array_agg(DISTINCT c) FROM unnest(social_users.contexts || EXCLUDED.contexts) AS c)
-                    """,
-                    platform, uid, str(user_id) if user_id else None, username,
-                    u.get("display_name") or u.get("full_name") or None,
-                    u.get("profile_pic_url") or u.get("profile_photo_url") or u.get("avatar_url") or None, [context],
-                )
-                n += 1
-                if owner_account and direction:
-                    await conn.execute(
-                        """
-                        INSERT INTO follow_edges
-                            (platform, owner_account, target_uid, direction, target_username, first_seen, last_seen)
-                        VALUES ($1, $2, $3, $4, $5, now(), now())
-                        ON CONFLICT (platform, owner_account, target_uid, direction) DO UPDATE SET
-                            last_seen = now(),
-                            target_username = COALESCE(EXCLUDED.target_username, follow_edges.target_username)
-                        """,
-                        platform, str(owner_account), uid, direction, username,
-                    )
+                await conn.executemany(_FOLLOW_EDGES_UPSERT_SQL, edge_args)
+            except Exception:
+                logger.debug("record follow edges batch failed %s/%d", platform, len(edge_args), exc_info=True)
+                for args in edge_args:
+                    try:
+                        await conn.execute(_FOLLOW_EDGES_UPSERT_SQL, *args)
+                    except Exception:
+                        logger.debug("record follow edge failed %s", args[2], exc_info=True)
+        for r in successful_rows:
+            username = r["username"]
+            try:
                 if platform == "x" and username:
-                    ctx = (context or "seen").lower()
+                    ctx = context_value.lower()
                     if ctx == "follow":
                         source, priority = "following", 95
                     elif ctx == "follower":
@@ -3320,12 +3427,12 @@ async def _record_users(pool, platform, users, context, owner=None) -> int:
                         priority,
                         {
                             "source": "social_users",
-                            "context": context,
+                            "context": context_value,
                             "owner_account": owner_account,
                         },
                     )
                 if platform == "tiktok" and username:
-                    ctx = (context or "seen").lower()
+                    ctx = context_value.lower()
                     if ctx in {"follow", "following"}:
                         source, priority = "following", 2
                     elif ctx == "follower":
@@ -3341,12 +3448,12 @@ async def _record_users(pool, platform, users, context, owner=None) -> int:
                         priority,
                         {
                             "source": "social_users",
-                            "context": context,
+                            "context": context_value,
                             "owner_account": owner_account,
                         },
                     )
                 if platform == "lemon8" and username:
-                    ctx = (context or "seen").lower()
+                    ctx = context_value.lower()
                     if ctx in {"author", "profile", "post"}:
                         source, priority = ctx, 2
                     elif ctx in {"follow", "following"}:
@@ -3362,16 +3469,16 @@ async def _record_users(pool, platform, users, context, owner=None) -> int:
                         priority,
                         {
                             "source": "social_users",
-                            "context": context,
+                            "context": context_value,
                             "owner_account": owner_account,
                         },
                     )
-                if platform == "threads" and username and (context or "").lower() != "foryou":
-                    _cross.append(username)
+                if platform == "threads" and username and context_value.lower() != "foryou":
+                    cross_handles.append(username)
             except Exception:
-                logger.debug("record user failed %s", uid, exc_info=True)
-        if _cross:
-            await _cross_seed_instagram(conn, _cross, "threads:" + (context or "feed"))
+                logger.debug("post-user enqueue failed %s", r["uid"], exc_info=True)
+        if cross_handles:
+            await _cross_seed_instagram(conn, cross_handles, "threads:" + (context_value or "feed"))
     return n
 
 

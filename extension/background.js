@@ -32,7 +32,17 @@ const LOG_MAX = 200;
 const WATCHDOG_MIN = 13;         // re-nudge any open scraper tab whose loop died
 const KICK_DEBOUNCE_MS = 30000;  // don't re-nudge the same tab more often than this
 const BROWSER_UPLOAD_MAX_BYTES = 256 * 1024 * 1024;
-let browserUploadChain = Promise.resolve();
+const BROWSER_UPLOAD_FETCH_TIMEOUT_MS = 45000;
+const BROWSER_UPLOAD_POST_TIMEOUT_MS = 30000;
+const BROWSER_UPLOAD_ATTEMPT_LIMIT_BY_PLATFORM = {
+  instagram: 3,
+  threads: 2,
+  tiktok: 1,
+  facebook: 1,
+  x: 1,
+  lemon8: 1,
+};
+const browserUploadChains = {};
 const PAGE_RECOVERY_PREFIX = "uc-page-recovery:";
 const PAGE_RECOVERY_STATE_KEY = "ucPageRecovery";
 const PAGE_RECOVERY_MAX_ATTEMPTS = 3;
@@ -851,9 +861,30 @@ function arrayBufferToBase64(buffer) {
   return btoa(out);
 }
 
+function platformUploadKey(platform) {
+  return String(platform || "unknown").toLowerCase() || "unknown";
+}
+
+function browserUploadAttemptLimit(platform) {
+  const n = Number(BROWSER_UPLOAD_ATTEMPT_LIMIT_BY_PLATFORM[platformUploadKey(platform)]);
+  return Number.isFinite(n) && n > 0 ? n : 2;
+}
+
+async function fetchWithAbort(url, options, timeoutMs) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...(options || {}), signal: ctrl.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function uploadMediaViaBrowser(base, msg, item) {
-  const next = browserUploadChain.catch(() => null).then(() => uploadMediaViaBrowserNow(base, msg, item));
-  browserUploadChain = next.catch(() => null);
+  const key = platformUploadKey(msg.platform || "instagram");
+  const prev = browserUploadChains[key] || Promise.resolve();
+  const next = prev.catch(() => null).then(() => uploadMediaViaBrowserNow(base, msg, item));
+  browserUploadChains[key] = next.catch(() => null);
   return next;
 }
 
@@ -876,14 +907,14 @@ async function postBrowserUpload(base, payload, blob) {
   const form = new FormData();
   form.append("metadata", JSON.stringify(payload));
   form.append("file", blob, safeUploadFilename(payload.item || {}, blob));
-  let r = await fetch(base + "/social/ingest-upload-binary", {
+  let r = await fetchWithAbort(base + "/social/ingest-upload-binary", {
     method: "POST",
     body: form,
-  });
+  }, BROWSER_UPLOAD_POST_TIMEOUT_MS);
   if (r.status !== 404 && r.status !== 405) return r;
 
   const b64 = arrayBufferToBase64(await blob.arrayBuffer());
-  return fetch(base + "/social/ingest-upload", {
+  return fetchWithAbort(base + "/social/ingest-upload", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -893,20 +924,17 @@ async function postBrowserUpload(base, payload, blob) {
         data_b64: b64,
       },
     }),
-  });
+  }, BROWSER_UPLOAD_POST_TIMEOUT_MS);
 }
 
 async function uploadMediaViaBrowserNow(base, msg, item) {
   const platform = msg.platform || "instagram";
   if (!browserUploadAllowed(platform, item.url)) return { ok: false, reason: "disallowed_host" };
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 180000);
   try {
-    const response = await fetch(item.url, {
+    const response = await fetchWithAbort(item.url, {
       credentials: "include",
       cache: "force-cache",
-      signal: ctrl.signal,
-    });
+    }, BROWSER_UPLOAD_FETCH_TIMEOUT_MS);
     if (!response.ok) return { ok: false, reason: "http_" + response.status };
     const headerSize = Number(response.headers.get("content-length") || 0);
     if (headerSize && headerSize > BROWSER_UPLOAD_MAX_BYTES) return { ok: false, reason: "too_large_header", bytes: headerSize };
@@ -941,8 +969,6 @@ async function uploadMediaViaBrowserNow(base, msg, item) {
     };
   } catch (e) {
     return { ok: false, reason: e && e.name === "AbortError" ? "timeout" : String(e.message || e) };
-  } finally {
-    clearTimeout(timer);
   }
 }
 
@@ -962,13 +988,16 @@ function topRejectReason(stats) {
 
 async function uploadBrowserMediaCandidates(base, msg, items) {
   const candidates = (items || []).filter(shouldBrowserUploadMedia);
+  const limit = browserUploadAttemptLimit(msg.platform || "instagram");
+  const activeCandidates = candidates.slice(0, limit);
+  const deferredCandidates = candidates.slice(limit);
   let accepted = 0;
   let saved = 0;
   let deduped = 0;
   let attempted = 0;
   const failures = {};
   const failedCandidates = [];
-  for (const item of candidates) {
+  for (const item of activeCandidates) {
     attempted++;
     const result = await uploadMediaViaBrowser(base, msg, item);
     if (result.ok) {
@@ -981,16 +1010,25 @@ async function uploadBrowserMediaCandidates(base, msg, items) {
       failedCandidates.push({ item, result, ingest_mode: "browser_upload" });
     }
   }
-  if (attempted) {
+  for (const item of deferredCandidates) {
+    const result = {
+      ok: false,
+      reason: "deferred_upload_budget",
+      upload_attempt_limit: limit,
+    };
+    failures.deferred_upload_budget = (failures.deferred_upload_budget || 0) + 1;
+    failedCandidates.push({ item, result, ingest_mode: "browser_upload" });
+  }
+  if (attempted || deferredCandidates.length) {
     const detail = ` (${saved} new${deduped ? `, ${deduped} duplicate` : ""})`;
     await log(
       accepted ? (Object.keys(failures).length ? "warn" : "info") : "warn",
-      `📦 ${msg.platform || "instagram"} · ${msg.username} · browser-upload ${accepted}/${attempted} accepted${detail}`
+      `📦 ${msg.platform || "instagram"} · ${msg.username} · browser-upload ${accepted}/${attempted} accepted${detail}${deferredCandidates.length ? `, ${deferredCandidates.length} deferred` : ""}`
     );
     if (Object.keys(failures).length) await log("warn", `browser-upload misses: ${JSON.stringify(failures)}`);
   }
   if (failedCandidates.length) await recordBrowserMediaCandidateResults(base, msg, failedCandidates);
-  return { attempted, stored: accepted, accepted, saved, deduped, failures };
+  return { attempted, deferred: deferredCandidates.length, stored: accepted, accepted, saved, deduped, failures };
 }
 
 async function recordBrowserMediaCandidateResults(base, msg, items) {

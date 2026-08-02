@@ -11,10 +11,17 @@ from src.bridges import ig_ingest
 class _FakeConn:
     def __init__(self):
         self.executes = []
+        self.executemany_calls = []
+        self.fetches = []
         self.fetchvals = []
         self.fetchrows = []
+        self.fetch_result = []
         self.fetchrow_result = None
         self.fetchval_result = None
+
+    async def fetch(self, query, *args):
+        self.fetches.append((query, args))
+        return self.fetch_result
 
     async def fetchval(self, query, *args):
         self.fetchvals.append((query, args))
@@ -27,6 +34,9 @@ class _FakeConn:
     async def execute(self, query, *args):
         self.executes.append((query, args))
         return "INSERT 0 1"
+
+    async def executemany(self, query, args):
+        self.executemany_calls.append((query, list(args)))
 
 
 class _AcquireContext:
@@ -208,6 +218,47 @@ def test_browser_classifier_marks_x_video_fetch_failure_revisitable():
 
     assert outcome == "browser_fetch_failed"
     assert reason == "timeout"
+    assert needs_revisit is True
+
+
+def test_browser_classifier_queues_deferred_browser_only_media():
+    item = {
+        "content_type": "photo",
+        "url": "https://video.twimg.com/ext_tw_video/123/pu/img/full.jpg",
+        "browser_upload_only": True,
+        "meta": {"x_asset_role": "image"},
+    }
+
+    outcome, reason, needs_revisit = ig_ingest._classify_browser_candidate_result(
+        "x",
+        item,
+        saved=False,
+        browser_result={"reason": "deferred_upload_budget"},
+        ingest_mode="browser_upload",
+    )
+
+    assert outcome == "deferred"
+    assert reason == "deferred_upload_budget"
+    assert needs_revisit is True
+
+
+def test_tiktok_classifier_queues_deferred_video_revisit():
+    item = {
+        "content_type": "video",
+        "url": "https://v16-webapp.tiktok.com/video.mp4",
+        "browser_upload_only": True,
+        "meta": {"tiktok_asset_role": "video_playaddr"},
+    }
+
+    outcome, reason, needs_revisit = ig_ingest._classify_tiktok_candidate_result(
+        item,
+        saved=False,
+        browser_result={"reason": "deferred_upload_budget"},
+        ingest_mode="browser_upload",
+    )
+
+    assert outcome == "deferred"
+    assert reason == "deferred_upload_budget"
     assert needs_revisit is True
 
 
@@ -991,6 +1042,60 @@ def test_structured_browser_capture_paths_use_structured_timeout(monkeypatch):
     assert ig_ingest._request_timeout_seconds("/social/browser-heartbeat") == 31.0
     assert ig_ingest._request_timeout_seconds("/social/ingest-upload") == 60.0
     assert ig_ingest._request_timeout_seconds("/social/targets") == 8.0
+
+
+def test_record_users_batches_user_and_follow_edge_upserts():
+    pool = _FakePool()
+
+    recorded = asyncio.run(ig_ingest._record_users(
+        pool,
+        "instagram",
+        [
+            {"user_id": "100", "username": "alpha", "full_name": "Alpha"},
+            {"username": "beta", "profile_pic_url": "https://example.test/beta.jpg"},
+        ],
+        "follow",
+        owner="me",
+    ))
+
+    assert recorded == 2
+    assert len(pool.conn.executemany_calls) == 2
+    user_query, user_args = pool.conn.executemany_calls[0]
+    assert "INSERT INTO social_users" in user_query
+    assert user_args[0][:4] == ("instagram", "100", "100", "alpha")
+    assert user_args[1][:4] == ("instagram", "beta", None, "beta")
+    edge_query, edge_args = pool.conn.executemany_calls[1]
+    assert "INSERT INTO follow_edges" in edge_query
+    assert edge_args == [
+        ("instagram", "me", "100", "following", "alpha"),
+        ("instagram", "me", "beta", "following", "beta"),
+    ]
+
+
+def test_targets_refresh_side_caches_once_per_ttl(monkeypatch):
+    calls = []
+
+    async def fake_refresh_proximity(pool):
+        calls.append("proximity")
+
+    async def fake_refresh_priority(pool):
+        calls.append("priority")
+
+    monkeypatch.setattr(ig_ingest, "SOCIAL_TARGET_CACHE_REFRESH_SECONDS", 300)
+    monkeypatch.setattr(ig_ingest, "SOCIAL_TARGET_CACHE_REFRESH_ON_REQUEST", True)
+    monkeypatch.setattr(ig_ingest, "_SOCIAL_TARGET_CACHE_REFRESH_LAST", 0.0)
+    monkeypatch.setattr(ig_ingest, "_SOCIAL_TARGET_CACHE_REFRESH_LOCK", None)
+    monkeypatch.setattr(ig_ingest, "refresh_account_proximity_cache", fake_refresh_proximity)
+    monkeypatch.setattr(ig_ingest, "refresh_collector_priority_hints", fake_refresh_priority)
+    pool = _FakePool()
+
+    async def run_twice():
+        await ig_ingest._targets_for(pool, "instagram")
+        await ig_ingest._targets_for(pool, "instagram")
+
+    asyncio.run(run_twice())
+
+    assert calls == ["proximity", "priority"]
 
 
 def test_browser_heartbeat_handler_reports_degraded_when_pool_missing():
