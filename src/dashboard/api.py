@@ -58,6 +58,12 @@ _SOURCE_MATRIX_SECTION_CACHE: dict[str, dict[str, object]] = {}
 _SOURCE_MATRIX_SECTION_CACHE_TTL_SECONDS = int(os.getenv("SOURCE_MATRIX_SECTION_CACHE_TTL_SECONDS", "30"))
 _SOURCE_MATRIX_SECTION_STALE_SECONDS = int(os.getenv("SOURCE_MATRIX_SECTION_STALE_SECONDS", "900"))
 _INGESTION_HOURLY_CACHE: dict[int, dict[str, object]] = {}
+_COLLECTORS_LIVE_CACHE: dict[str, object] = {"ts": 0.0, "payload": None}
+_COLLECTORS_LIVE_CACHE_TTL_SECONDS = int(os.getenv("COLLECTORS_LIVE_CACHE_TTL_SECONDS", "15"))
+_COLLECTORS_LIVE_STALE_SECONDS = int(os.getenv("COLLECTORS_LIVE_STALE_SECONDS", "300"))
+_DASHBOARD_DB_ACQUIRE_TIMEOUT_SECONDS = float(os.getenv("DASHBOARD_DB_ACQUIRE_TIMEOUT_SECONDS", "2.5"))
+_RATE_LIMITS_RECENT_CACHE: dict[tuple[int, int], dict[str, object]] = {}
+_RATE_LIMITS_RECENT_STALE_SECONDS = int(os.getenv("RATE_LIMITS_RECENT_STALE_SECONDS", "300"))
 _TELEGRAM_STATS_CACHE: dict[str, object] = {"ts": 0.0, "payload": None}
 _TELEGRAM_STATS_TTL_SECONDS = int(os.getenv("TELEGRAM_STATS_TTL_SECONDS", "30"))
 _YOUTUBE_MEDIA_BACKLOG_CACHE: dict[str, object] = {"ts": 0.0, "row": None}
@@ -997,6 +1003,54 @@ def _source_matrix_fallback_liveness_rows(detail: str) -> list[dict]:
         }
         for source, _query, threshold in FRESHNESS
     ]
+
+
+def _collectors_live_fallback_payload(exc: BaseException) -> dict:
+    """Return stale/skeleton liveness when dashboard DB acquisition is saturated."""
+    detail = f"collector live status unavailable: {exc.__class__.__name__}"
+    cached = _COLLECTORS_LIVE_CACHE.get("payload")
+    cache_age = time.time() - float(_COLLECTORS_LIVE_CACHE.get("ts") or 0.0)
+    if cached is not None and cache_age < _COLLECTORS_LIVE_STALE_SECONDS:
+        payload = _copy_cache_value(cached)
+        payload["stats_stale"] = True
+        payload["stats_error"] = exc.__class__.__name__
+        payload["cache_age_seconds"] = int(cache_age)
+        return payload
+    sources = _source_matrix_fallback_liveness_rows(detail)
+    return {
+        "total": len(sources),
+        "live": 0,
+        "degraded": len(sources),
+        "sources": sources,
+        "whatsapp_bridge_health": None,
+        "stats_stale": True,
+        "stats_error": exc.__class__.__name__,
+    }
+
+
+async def _acquire_dashboard_conn(pool):
+    return await asyncio.wait_for(pool.acquire(), timeout=_DASHBOARD_DB_ACQUIRE_TIMEOUT_SECONDS)
+
+
+def _rate_limits_recent_fallback_payload(hours: int, limit: int, exc: BaseException) -> dict:
+    cache_key = (hours, limit)
+    cached = _RATE_LIMITS_RECENT_CACHE.get(cache_key)
+    cache_age = time.time() - float((cached or {}).get("ts") or 0.0)
+    if cached and cache_age < _RATE_LIMITS_RECENT_STALE_SECONDS:
+        payload = _copy_cache_value(cached.get("payload"))
+        payload["stats_stale"] = True
+        payload["stats_error"] = exc.__class__.__name__
+        payload["cache_age_seconds"] = int(cache_age)
+        return payload
+    return {
+        "events": [],
+        "active": [],
+        "active_event_summary": [],
+        "cursor_history": [],
+        "recent_summary": [],
+        "stats_stale": True,
+        "stats_error": exc.__class__.__name__,
+    }
 
 
 async def _youtube_media_backlog(conn) -> dict:
@@ -3272,18 +3326,51 @@ async def collectors_live(_user: dict = Depends(require_role("viewer"))):
     """
     from src.core.source_freshness import compute_liveness
     pool = await get_pool()
-    async with pool.acquire() as conn:
-        sources = await compute_liveness(conn)
-    sources, whatsapp_bridge_health = await _with_bridge_overrides(sources)
+    now_ts = time.time()
+    cached = _COLLECTORS_LIVE_CACHE.get("payload")
+    cache_age = now_ts - float(_COLLECTORS_LIVE_CACHE.get("ts") or 0.0)
+    if cached is not None and cache_age < _COLLECTORS_LIVE_CACHE_TTL_SECONDS:
+        payload = _copy_cache_value(cached)
+        payload["cache_age_seconds"] = int(cache_age)
+        return payload
+    conn = None
+    try:
+        conn = await _acquire_dashboard_conn(pool)
+        sources = await asyncio.wait_for(compute_liveness(conn), timeout=18)
+    except Exception as exc:  # noqa: BLE001 - status page must fail soft under DB load
+        logger.warning("collectors live failed: %s", exc.__class__.__name__)
+        return _collectors_live_fallback_payload(exc)
+    finally:
+        if conn is not None:
+            await pool.release(conn)
+    try:
+        sources, whatsapp_bridge_health = await asyncio.wait_for(
+            _with_bridge_overrides(sources),
+            timeout=3,
+        )
+    except Exception as exc:  # noqa: BLE001 - bridge override should not hang source liveness
+        logger.warning("collectors live bridge override failed: %s", exc.__class__.__name__)
+        whatsapp_bridge_health = {
+            "summary": {
+                "status": "unreachable",
+                "detail": f"WhatsApp bridge health check failed: {exc.__class__.__name__}",
+                "ready_count": 0,
+                "reachable_count": 0,
+                "total": 2,
+            },
+            "bridges": [],
+        }
     live = sum(1 for s in sources if s["status"] == "live")
     degraded = sum(1 for s in sources if s["status"] in {"degraded", "stale", "unpaired", "unreachable"})
-    return {
+    payload = {
         "total": len(sources),
         "live": live,
         "degraded": degraded,
         "sources": sources,
         "whatsapp_bridge_health": whatsapp_bridge_health,
     }
+    _COLLECTORS_LIVE_CACHE.update({"ts": time.time(), "payload": _copy_cache_value(payload)})
+    return payload
 
 
 @app.get("/collectors/source-matrix")
@@ -4093,22 +4180,26 @@ async def hourly_ingestion(hours: int = 12, _user: dict = Depends(require_role("
     content_parts = _INGESTION_CONTENT_PARTS
     required_tables = [table for _source, table, _column, _label in content_parts]
     required_tables.extend(["media_items", "rate_limit_events"])
-    async with pool.acquire() as conn:
-        try:
-            existing_tables = set(await conn.fetchval(
-                """
-                SELECT COALESCE(array_agg(table_name), ARRAY[]::text[])
-                FROM information_schema.tables
-                WHERE table_schema = 'public'
-                  AND table_name = ANY($1::text[])
-                """,
-                required_tables,
-                timeout=8,
-            ))
-        except asyncio.CancelledError as exc:
-            return _fallback_rows(exc)
-        except Exception as exc:  # noqa: BLE001 - dashboard should degrade under DB load
-            return _fallback_rows(exc)
+    conn = None
+    try:
+        conn = await _acquire_dashboard_conn(pool)
+        existing_tables = set(await conn.fetchval(
+            """
+            SELECT COALESCE(array_agg(table_name), ARRAY[]::text[])
+            FROM information_schema.tables
+            WHERE table_schema = 'public'
+              AND table_name = ANY($1::text[])
+            """,
+            required_tables,
+            timeout=8,
+        ))
+    except asyncio.CancelledError as exc:
+        return _fallback_rows(exc)
+    except Exception as exc:  # noqa: BLE001 - dashboard should degrade under DB load
+        return _fallback_rows(exc)
+    finally:
+        if conn is not None:
+            await pool.release(conn)
     raw_parts = [
         f"""
         SELECT '{source}'::text AS source,
@@ -4190,13 +4281,17 @@ async def hourly_ingestion(hours: int = 12, _user: dict = Depends(require_role("
         ORDER BY hour DESC, source
     """
     labels = {source: label for source, _table, _column, label in content_parts}
-    async with pool.acquire() as conn:
-        try:
-            rows = await conn.fetch(sql, str(hours), timeout=30)
-        except asyncio.CancelledError as exc:
-            return _fallback_rows(exc)
-        except Exception as exc:  # noqa: BLE001 - dashboard should degrade under DB load
-            return _fallback_rows(exc)
+    conn = None
+    try:
+        conn = await _acquire_dashboard_conn(pool)
+        rows = await conn.fetch(sql, str(hours), timeout=30)
+    except asyncio.CancelledError as exc:
+        return _fallback_rows(exc)
+    except Exception as exc:  # noqa: BLE001 - dashboard should degrade under DB load
+        return _fallback_rows(exc)
+    finally:
+        if conn is not None:
+            await pool.release(conn)
     out = []
     for row in rows:
         d = dict(row)
@@ -4212,7 +4307,9 @@ async def recent_rate_limits(hours: int = 24, limit: int = 100,
     hours = max(1, min(hours, 168))
     limit = max(1, min(limit, 500))
     pool = await get_pool()
-    async with pool.acquire() as conn:
+    conn = None
+    try:
+        conn = await _acquire_dashboard_conn(pool)
         table_exists = bool(await conn.fetchval("SELECT to_regclass('public.rate_limit_events') IS NOT NULL", timeout=8))
         if table_exists:
             events = [dict(r) for r in await conn.fetch(
@@ -4281,13 +4378,24 @@ async def recent_rate_limits(hours: int = 24, limit: int = 100,
         except Exception:
             active = []
             cursor_history = []
-    return {
+    except Exception as exc:  # noqa: BLE001 - dashboard status panels must fail soft
+        logger.warning("recent rate limits failed: %s", exc.__class__.__name__)
+        return _rate_limits_recent_fallback_payload(hours, limit, exc)
+    finally:
+        if conn is not None:
+            await pool.release(conn)
+    payload = {
         "events": events,
         "active": active,
         "active_event_summary": active_event_summary,
         "cursor_history": cursor_history,
         "recent_summary": recent_summary,
     }
+    _RATE_LIMITS_RECENT_CACHE[(hours, limit)] = {
+        "ts": time.time(),
+        "payload": _copy_cache_value(payload),
+    }
+    return payload
 
 
 # ---------------------------------------------------------------------------

@@ -121,13 +121,8 @@ def _age_seconds(value, now: datetime) -> float | None:
 
 async def _latest_browser_heartbeats(conn, timeout: float) -> dict[str, dict] | None:
     """Return newest Chrome-extension heartbeat per browser-assisted platform."""
+    query_timeout = min(3.0, max(0.75, timeout))
     try:
-        exists = await conn.fetchval(
-            "SELECT to_regclass('browser_ingest_events')",
-            timeout=max(0.25, timeout),
-        )
-        if exists is None:
-            return None
         rows = await conn.fetch(
             """
             SELECT DISTINCT ON (platform)
@@ -143,10 +138,12 @@ async def _latest_browser_heartbeats(conn, timeout: float) -> dict[str, dict] | 
             ORDER BY platform, created_at DESC
             """,
             list(_BROWSER_HEARTBEAT_SOURCES),
-            timeout=max(0.25, timeout),
+            timeout=query_timeout,
         )
         return {str(row["platform"]): dict(row) for row in rows}
-    except Exception:
+    except Exception as exc:
+        if exc.__class__.__name__ == "UndefinedTableError":
+            return None
         return None
 
 
