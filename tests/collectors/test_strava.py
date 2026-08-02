@@ -707,6 +707,40 @@ async def test_collect_handles_per_target_exception_and_dlq(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_collect_cookie_timeout_after_progress_checkpoints_not_dlq(monkeypatch, caplog):
+    _set_web_env(monkeypatch)
+    monkeypatch.setenv("STRAVA_SPIDER_ENABLED", "false")
+    monkeypatch.setenv("STRAVA_FOLLOW_SCRAPE_ENABLED", "false")
+    monkeypatch.setenv("STRAVA_GPS_BACKFILL_FIRST", "false")
+    monkeypatch.setenv("STRAVA_PHOTO_BACKFILL_FIRST", "false")
+
+    coll = StravaCollector()
+    pool = _make_pool()
+    coll.set_pool(pool)
+    coll.checkpoint.save_progress = AsyncMock()
+    coll.send_to_dlq = AsyncMock()
+    coll._repair_existing_gps_stream_routes = AsyncMock()
+    coll._sync_persisted_gps_stream_cooldown = AsyncMock()
+    coll._scrape_activity_pages = AsyncMock()
+    coll._backfill_missing_photo_media = AsyncMock()
+    coll._backfill_missing_gps_streams = AsyncMock()
+    coll._enrich_athlete_names = AsyncMock()
+
+    async def partial_timeout():
+        coll._progress_count += 420
+        raise TimeoutError()
+
+    coll._collect_via_cookies = AsyncMock(side_effect=partial_timeout)
+
+    with caplog.at_level("WARNING", logger="src.collectors.strava"):
+        await coll.collect(["me"])
+
+    coll.checkpoint.save_progress.assert_awaited_once_with("me")
+    coll.send_to_dlq.assert_not_awaited()
+    assert any("timed out after partial progress (420 item(s))" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
 async def test_collect_athlete_web_uses_cookie_jar_not_raw_cookie_header(monkeypatch):
     _set_web_env(monkeypatch)
     coll = StravaCollector()

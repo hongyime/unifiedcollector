@@ -778,6 +778,7 @@ class StravaCollector(BaseCollector):
         for target in targets:
             if self._stop.is_set(): break
             logger.info("Collecting strava/%s", target)
+            progress_before_target = self._progress_count
             try:
                 if target.lower() == "me" and self._use_api:
                     await self._collect_authenticated_athlete()
@@ -795,6 +796,18 @@ class StravaCollector(BaseCollector):
                 await self.checkpoint.save_progress(target)
             except Exception as e:
                 error_text = _format_exception(e)
+                if (
+                    target.lower() in {"me", "feed"}
+                    and isinstance(e, (asyncio.TimeoutError, TimeoutError))
+                    and self._progress_count > progress_before_target
+                ):
+                    logger.warning(
+                        "strava/%s timed out after partial progress (%d item(s)); checkpointing and continuing",
+                        target,
+                        self._progress_count - progress_before_target,
+                    )
+                    await self.checkpoint.save_progress(target)
+                    continue
                 logger.error("Failed strava/%s: %s", target, error_text)
                 await self.send_to_dlq(target, target, error_text)
 
