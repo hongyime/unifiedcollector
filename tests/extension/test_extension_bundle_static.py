@@ -179,6 +179,15 @@ def test_background_forced_recovery_waits_longer_than_content_one_shot():
         assert minutes(reload_block, platform, hard_reload_fallback_min) > minutes(one_shot_block, platform)
 
 
+def test_x_page_recovery_limit_cools_then_retries():
+    background = _read("extension/background.js")
+
+    assert "const PAGE_RECOVERY_LIMIT_COOLDOWN_MS_BY_PLATFORM = {" in background
+    assert "x: 10 * 60 * 1000" in background
+    assert "limitUntil" in background
+    assert "attempt_limit_cooling" in background
+
+
 def test_facebook_has_post_text_fallback_when_permalink_ids_are_missing():
     content = _read("extension/content.js")
     facebook_block = content.split("function harvestFacebookPosts(entity)", 1)[1].split(

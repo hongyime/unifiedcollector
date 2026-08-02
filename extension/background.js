@@ -47,6 +47,10 @@ const PAGE_RECOVERY_PREFIX = "uc-page-recovery:";
 const PAGE_RECOVERY_STATE_KEY = "ucPageRecovery";
 const PAGE_RECOVERY_MAX_ATTEMPTS = 3;
 const PAGE_RECOVERY_STATE_TTL_MS = 60 * 60 * 1000;
+const PAGE_RECOVERY_LIMIT_COOLDOWN_MS = 30 * 60 * 1000;
+const PAGE_RECOVERY_LIMIT_COOLDOWN_MS_BY_PLATFORM = {
+  x: 10 * 60 * 1000,
+};
 const RELOAD_INTENT_KEY = "ucReloadIntent";
 const LOADED_VERSION_KEY = "ucLoadedExtensionVersion";
 const SCRAPER_HEARTBEAT_TIMEOUT_MS = 12000;
@@ -202,7 +206,7 @@ async function reportScraperTabHeartbeats(reason) {
           health_reason: reason || "background_watchdog",
           page_title: tab.title || null,
         }), SCRAPER_HEARTBEAT_TIMEOUT_MS);
-        scheduleMaybeForceScrapeCycle(tab, platform, result && result.body, reason || "background_watchdog", base);
+        await scheduleMaybeForceScrapeCycle(tab, platform, result && result.body, reason || "background_watchdog", base);
         sent++;
       } catch (e) {
         failed++;
@@ -670,11 +674,12 @@ async function maybeForceScrapeCycle(tab, platform, responseBody, reason, base =
   }
 }
 
-function scheduleMaybeForceScrapeCycle(tab, platform, responseBody, reason, base = null) {
-  setTimeout(() => {
-    maybeForceScrapeCycle(tab, platform, responseBody, reason, base)
-      .catch((e) => log("warn", `${platform && platform.label ? platform.label : "scraper"} recovery failed: ${e && e.message ? e.message : e}`));
-  }, 50);
+async function scheduleMaybeForceScrapeCycle(tab, platform, responseBody, reason, base = null) {
+  try {
+    await maybeForceScrapeCycle(tab, platform, responseBody, reason, base);
+  } catch (e) {
+    await log("warn", `${platform && platform.label ? platform.label : "scraper"} recovery failed: ${e && e.message ? e.message : e}`);
+  }
 }
 async function fetchJsonWithTimeout(url, timeoutMs = 12000) {
   const ctrl = new AbortController();
@@ -1098,7 +1103,7 @@ async function recordPageHealth(base, msg, sender, extra = {}) {
     }), SCRAPER_HEARTBEAT_TIMEOUT_MS);
     const tab = sender && sender.tab ? sender.tab : null;
     const platform = platformById(msg.platform) || { id: msg.platform, label: msg.label || msg.platform };
-    scheduleMaybeForceScrapeCycle(tab, platform, result && result.body, msg.reason || msg.status || "page_health", base);
+    await scheduleMaybeForceScrapeCycle(tab, platform, result && result.body, msg.reason || msg.status || "page_health", base);
   } catch (e) {}
 }
 function recoveryDelayMs(attempt, platformId) {
@@ -1113,6 +1118,9 @@ function recoveryDelayMs(attempt, platformId) {
   const win = windows[idx];
   return _randBetween(win[0], win[1]);
 }
+function recoveryLimitCooldownMs(platformId) {
+  return PAGE_RECOVERY_LIMIT_COOLDOWN_MS_BY_PLATFORM[platformId] || PAGE_RECOVERY_LIMIT_COOLDOWN_MS;
+}
 async function schedulePageRecovery(base, msg, sender) {
   const tab = sender && sender.tab;
   if (!tab || tab.id == null) return { ok: false, reason: "no_sender_tab" };
@@ -1126,6 +1134,27 @@ async function schedulePageRecovery(base, msg, sender) {
   const samePage = prev.url === current;
   let attempts = samePage ? Number(prev.attempts || 0) : 0;
   const now = Date.now();
+  const limitUntil = samePage ? Number(prev.limitUntil || 0) : 0;
+
+  if (limitUntil && now < limitUntil) {
+    const delay = Math.max(0, limitUntil - now);
+    await recordPageHealth(base, msg, sender, {
+      recovery_scheduled: false,
+      recovery_attempt: attempts,
+      recovery_limit: true,
+      recovery_delay_ms: delay,
+    });
+    return {
+      ok: true,
+      scheduled: false,
+      reason: "attempt_limit_cooling",
+      attempt: attempts,
+      cooldown_mins: Math.ceil(delay / 60000),
+    };
+  }
+  if (limitUntil && now >= limitUntil) {
+    attempts = 0;
+  }
 
   if (prev.nextAt && now < prev.nextAt && samePage) {
     const delay = Math.max(0, prev.nextAt - now);
@@ -1139,7 +1168,8 @@ async function schedulePageRecovery(base, msg, sender) {
   }
 
   if (attempts >= PAGE_RECOVERY_MAX_ATTEMPTS) {
-    state[key] = { ...prev, url: current, lastSeenAt: now, limitLogged: true };
+    const cooldownMs = recoveryLimitCooldownMs(platform.id);
+    state[key] = { ...prev, url: current, lastSeenAt: now, limitLogged: true, limitUntil: now + cooldownMs };
     await savePageRecoveryState(state);
     if (!prev.limitLogged) {
       await log("warn", `${platform.label} page recovery hit attempt limit on tab ${tab.id}; cooling instead of reload loop`);
@@ -1148,8 +1178,9 @@ async function schedulePageRecovery(base, msg, sender) {
       recovery_scheduled: false,
       recovery_attempt: attempts,
       recovery_limit: true,
+      recovery_delay_ms: cooldownMs,
     });
-    return { ok: true, scheduled: false, reason: "attempt_limit", attempt: attempts, cooldown_mins: 30 };
+    return { ok: true, scheduled: false, reason: "attempt_limit", attempt: attempts, cooldown_mins: Math.ceil(cooldownMs / 60000) };
   }
 
   attempts += 1;
