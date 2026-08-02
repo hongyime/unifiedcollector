@@ -495,7 +495,13 @@ async def _beeper_subsource_content_summary(
     return out
 
 
-async def _source_content_summary(conn, since_sql: str, before_sql: str | None = None) -> dict[str, dict]:
+async def _source_content_summary(
+    conn,
+    since_sql: str,
+    before_sql: str | None = None,
+    *,
+    include_media: bool = True,
+) -> dict[str, dict]:
     required_tables = [table for _source, table, _column, _label in _INGESTION_CONTENT_PARTS]
     required_tables.append("media_items")
     existing_tables = await _existing_public_tables(conn, required_tables)
@@ -568,7 +574,7 @@ async def _source_content_summary(conn, since_sql: str, before_sql: str | None =
         except Exception as exc:  # noqa: BLE001 - source matrix should degrade, not fail
             logger.warning("source content row summary failed: %s", exc.__class__.__name__)
 
-    if "media_items" in existing_tables:
+    if include_media and "media_items" in existing_tables:
         try:
             rows = await conn.fetch(
                 f"""
@@ -591,6 +597,9 @@ async def _source_content_summary(conn, since_sql: str, before_sql: str | None =
             logger.warning("source content media summary failed: %s", exc.__class__.__name__)
             for row in out.values():
                 row["media_stats_unavailable"] = True
+    elif not include_media:
+        for row in out.values():
+            row["media_stats_unavailable"] = True
 
     beeper_timeout = max(0.1, min(
         _BEEPER_SUBSOURCE_TOTAL_TIMEOUT_SECONDS,
@@ -3624,7 +3633,11 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
                 label="24h content summary",
                 errors=errors,
                 fallback={},
-                awaitable=_source_content_summary(conn, "now() - interval '24 hours'"),
+                awaitable=_source_content_summary(
+                    conn,
+                    "now() - interval '24 hours'",
+                    include_media=False,
+                ),
                 cache_key="day_content",
                 cache_ttl=120,
                 timeout=_SOURCE_MATRIX_DAY_CONTENT_TIMEOUT_SECONDS,
