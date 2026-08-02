@@ -55,6 +55,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import time
@@ -142,6 +143,14 @@ class YoutubeCollector(BaseCollector):
         self._api_cooldown_restored = False
         self._max_concurrent = int(os.getenv("YOUTUBE_MAX_CONCURRENT_DOWNLOADS", "3"))
         self._use_yt_dlp = self._check_yt_dlp()
+        self._ffmpeg_available = shutil.which("ffmpeg") is not None
+        self._ffprobe_available = shutil.which("ffprobe") is not None
+        logger.info(
+            "youtube tool availability: yt-dlp=%s ffmpeg=%s ffprobe=%s",
+            self._use_yt_dlp,
+            self._ffmpeg_available,
+            self._ffprobe_available,
+        )
         self._sem = asyncio.Semaphore(self._max_concurrent)
         self._download_videos = os.getenv("YOUTUBE_DOWNLOAD_VIDEOS", "true").lower() == "true"
         self._oauth_pickle = Path(os.getenv("YOUTUBE_OAUTH_PICKLE", "data/youtube_oauth.pickle"))
