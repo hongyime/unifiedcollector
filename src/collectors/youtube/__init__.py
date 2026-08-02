@@ -130,8 +130,9 @@ class YoutubeCollector(BaseCollector):
         self._api_key = os.getenv("YOUTUBE_API_KEY", "")
         self._cookie_browser = os.getenv("YOUTUBE_COOKIE_BROWSER", "")
         self._cookie_file = os.getenv("YOUTUBE_COOKIE_FILE", "")
+        self._usable_cookie_file_cache: str | None = None
         self._max_duration = int(os.getenv("YOUTUBE_MAX_VIDEO_DURATION_MINUTES", "0"))
-        self._ytdlp_format = os.getenv("YOUTUBE_YTDLP_FORMAT", "bestvideo+bestaudio/best")
+        self._ytdlp_format = os.getenv("YOUTUBE_YTDLP_FORMAT", "auto")
         self._merge_format = os.getenv("YOUTUBE_MERGE_FORMAT", "mp4")
         self._download_delay = float(os.getenv("YOUTUBE_DOWNLOAD_DELAY", "5.0"))
         self._api_delay = float(os.getenv("YOUTUBE_API_DELAY", "3.0"))
@@ -1873,7 +1874,7 @@ class YoutubeCollector(BaseCollector):
             await asyncio.sleep(self._download_delay)
             async with managed_tempdir("yt_") as tmpdir:
                 logger.info("youtube yt-dlp starting %s", url)
-                extra: list[str] = ["-f", self._ytdlp_format, "--merge-output-format", self._merge_format]
+                extra = self._yt_dlp_extra_args()
                 if self._max_duration:
                     extra.extend(["--match-filter", f"duration<={self._max_duration * 60}"])
                 if self._cookie_browser:
@@ -1882,7 +1883,7 @@ class YoutubeCollector(BaseCollector):
                     extra.extend(["--playlist-end", "50"])
                 result = await yt_dlp_download(
                     url,
-                    cookies_file=self._cookie_file,
+                    cookies_file=self._usable_cookie_file() or None,
                     output_template=os.path.join(tmpdir, "%(id)s.%(ext)s"),
                     max_downloads=None,  # respect playlist-end / per-video
                     retries=3,
@@ -1895,16 +1896,17 @@ class YoutubeCollector(BaseCollector):
                     stop_event=self._stop if hasattr(self._stop, "wait") else None,
                 )
                 if not result.ok and not result.cancelled:
+                    reason = result.output_summary(400)
                     logger.warning(
-                        "youtube yt-dlp video download failed for %s: rc=%s timed_out=%s stderr_tail=%s",
-                        url, result.returncode, result.timed_out, result.err_summary(400),
+                        "youtube yt-dlp video download failed for %s: rc=%s timed_out=%s output_tail=%s",
+                        url, result.returncode, result.timed_out, reason,
                     )
                     m = re.search(r"watch\?v=([\w-]+)", url)
                     if m:
                         await self._mark_video_media_attempt(
                             m.group(1),
                             status="failed",
-                            reason=result.err_summary(400) or f"yt-dlp rc={result.returncode}",
+                            reason=reason or f"yt-dlp rc={result.returncode}",
                         )
                     self._progress_count += 1  # tick watchdog so metadata-only runs don't look hung
                 eligible_files = 0
@@ -1940,6 +1942,57 @@ class YoutubeCollector(BaseCollector):
                     skipped_extension,
                 )
         return stored_total
+
+    def _yt_dlp_extra_args(self) -> list[str]:
+        """Build yt-dlp args, letting yt-dlp auto-select formats by default."""
+        extra: list[str] = []
+        fmt = (self._ytdlp_format or "").strip()
+        if fmt and fmt.lower() not in {"auto", "default", "best"}:
+            extra.extend(["-f", fmt])
+        if self._merge_format:
+            extra.extend(["--merge-output-format", self._merge_format])
+        return extra
+
+    def _usable_cookie_file(self) -> str:
+        """Return a valid Netscape cookies.txt path, or blank if unusable."""
+        if self._usable_cookie_file_cache is not None:
+            return self._usable_cookie_file_cache
+        path = (self._cookie_file or "").strip()
+        if not path:
+            self._usable_cookie_file_cache = ""
+            return ""
+        p = Path(path)
+        if not p.exists() or not p.is_file():
+            logger.warning("youtube: ignoring missing cookie file %s", path)
+            self._usable_cookie_file_cache = ""
+            return ""
+        try:
+            lines: list[str] = []
+            with p.open("r", encoding="utf-8", errors="replace") as fh:
+                for _ in range(20):
+                    line = fh.readline()
+                    if not line:
+                        break
+                    lines.append(line.rstrip("\n"))
+        except Exception as exc:
+            logger.warning("youtube: ignoring unreadable cookie file %s: %s", path, _safe_log_text(exc))
+            self._usable_cookie_file_cache = ""
+            return ""
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if "Netscape HTTP Cookie File" in stripped:
+                self._usable_cookie_file_cache = path
+                return path
+            if stripped.startswith("#"):
+                continue
+            if len(stripped.split("\t")) >= 7:
+                self._usable_cookie_file_cache = path
+                return path
+        logger.warning("youtube: ignoring cookie file %s because it is not Netscape cookies.txt format", path)
+        self._usable_cookie_file_cache = ""
+        return ""
 
     async def _filter_video_ids_already_archived(self, video_ids: list[str]) -> tuple[list[str], int]:
         """Drop explicit video IDs that Postgres already has archived files for.
@@ -1994,7 +2047,7 @@ class YoutubeCollector(BaseCollector):
                 extra.extend(["--cookies-from-browser", self._cookie_browser])
             result = await yt_dlp_download(
                 channel_url,
-                cookies_file=self._cookie_file,
+                cookies_file=self._usable_cookie_file() or None,
                 output_template=os.path.join(tmpdir, "%(id)s.%(ext)s"),
                 max_downloads=None,
                 retries=3,
@@ -2093,8 +2146,9 @@ class YoutubeCollector(BaseCollector):
             ]
             if self._cookie_browser:
                 cmd.extend(["--cookies-from-browser", self._cookie_browser])
-            if self._cookie_file:
-                cmd.extend(["--cookies", self._cookie_file])
+            cookie_file = self._usable_cookie_file()
+            if cookie_file:
+                cmd.extend(["--cookies", cookie_file])
             cmd.extend(["--", url])
             loop = asyncio.get_event_loop()
             proc = await loop.run_in_executor(
@@ -2187,8 +2241,9 @@ class YoutubeCollector(BaseCollector):
             ]
             if self._cookie_browser:
                 cmd.extend(["--cookies-from-browser", self._cookie_browser])
-            if self._cookie_file:
-                cmd.extend(["--cookies", self._cookie_file])
+            cookie_file = self._usable_cookie_file()
+            if cookie_file:
+                cmd.extend(["--cookies", cookie_file])
             cmd.extend(["--", url])
             loop = asyncio.get_event_loop()
             proc = await loop.run_in_executor(
@@ -3017,8 +3072,9 @@ class YoutubeCollector(BaseCollector):
             cmd.extend(["--dateafter", f"now-{days}days"])
         if self._cookie_browser:
             cmd.extend(["--cookies-from-browser", self._cookie_browser])
-        if self._cookie_file:
-            cmd.extend(["--cookies", self._cookie_file])
+        cookie_file = self._usable_cookie_file()
+        if cookie_file:
+            cmd.extend(["--cookies", cookie_file])
         cmd.extend(["--", url])
 
         loop = asyncio.get_event_loop()

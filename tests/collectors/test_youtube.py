@@ -1063,6 +1063,42 @@ async def test_download_videos_uses_configured_hard_timeout(monkeypatch):
     assert ytdlp.await_args.kwargs["timeout"] == 123
 
 
+def test_ytdlp_extra_args_lets_best_use_default_selector(monkeypatch):
+    coll = _new_collector(monkeypatch, YOUTUBE_YTDLP_FORMAT="best")
+
+    extra = coll._yt_dlp_extra_args()
+
+    assert "-f" not in extra
+    assert extra == ["--merge-output-format", "mp4"]
+
+
+def test_ytdlp_extra_args_preserves_custom_selector(monkeypatch):
+    coll = _new_collector(monkeypatch, YOUTUBE_YTDLP_FORMAT="bv*+ba/b", YOUTUBE_MERGE_FORMAT="webm")
+
+    extra = coll._yt_dlp_extra_args()
+
+    assert extra == ["-f", "bv*+ba/b", "--merge-output-format", "webm"]
+
+
+def test_usable_cookie_file_accepts_netscape_cookie(tmp_path, monkeypatch):
+    cookie_file = tmp_path / "cookies.txt"
+    cookie_file.write_text(
+        "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t0\tSID\tvalue\n",
+        encoding="utf-8",
+    )
+    coll = _new_collector(monkeypatch, YOUTUBE_COOKIE_FILE=str(cookie_file))
+
+    assert coll._usable_cookie_file() == str(cookie_file)
+
+
+def test_usable_cookie_file_ignores_malformed_cookie(tmp_path, monkeypatch):
+    cookie_file = tmp_path / "cookies.txt"
+    cookie_file.write_text('{"cookies": []}\n', encoding="utf-8")
+    coll = _new_collector(monkeypatch, YOUTUBE_COOKIE_FILE=str(cookie_file))
+
+    assert coll._usable_cookie_file() == ""
+
+
 @pytest.mark.asyncio
 async def test_collect_channel_limits_live_video_downloads(monkeypatch):
     coll = _new_collector(monkeypatch, YOUTUBE_VIDEO_DOWNLOADS_PER_TARGET="2")

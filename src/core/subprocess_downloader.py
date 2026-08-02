@@ -11,10 +11,9 @@ What it does
 * Add the safety ``--`` separator before any URL (yt-dlp/gallery-dl arg
   injection guard; same pattern the audit added to tiktok.py:359 and
   youtube.py:396).
-* Spawn the subprocess via asyncio.create_subprocess_exec (true non-
-  blocking; not the run_in_executor pattern that pinned a thread per
-  download). Capture stdout/stderr with a hard timeout. Stream the
-  output through a callback hook so callers can tail-log progress.
+* Spawn the subprocess in a bounded worker thread using Popen with a hard
+  timeout. Redirect stdout/stderr to temporary files, then keep only diagnostic
+  tails so failed downloads are explainable without pipe deadlocks.
 * Return ``DownloadResult`` with: returncode, stdout, stderr, files
   (list of Path objects under tempdir), tempdir Path, elapsed seconds.
 
@@ -122,8 +121,27 @@ class DownloadResult:
         return (self.returncode in (0, 101)) and not self.timed_out and not self.cancelled
 
     def err_summary(self, limit: int = 800) -> str:
-        """Compact tail of stderr for logging."""
-        return (self.stderr or "")[-limit:]
+        """Backward-compatible diagnostic tail for logging and DB reasons."""
+        return self.output_summary(limit)
+
+    def output_summary(self, limit: int = 800) -> str:
+        """Compact subprocess diagnostics, preferring stderr but using stdout too."""
+        stderr = (self.stderr or "").strip()
+        stdout = (self.stdout or "").strip()
+        if stderr and stdout:
+            half = max(1, limit // 2)
+            return f"stderr: {stderr[-half:]}\nstdout: {stdout[-half:]}"
+        if stderr:
+            return stderr[-limit:]
+        if stdout:
+            return stdout[-limit:]
+        if self.timed_out:
+            return f"process timed out after {self.elapsed:.1f}s"
+        if self.cancelled:
+            return "process cancelled"
+        if self.returncode not in (0, 101):
+            return f"process exited with rc={self.returncode}; no stderr/stdout captured"
+        return ""
 
 
 # ---------------------------------------------------------------------------
@@ -169,7 +187,9 @@ async def _run_subprocess(
 
     Uses subprocess.run() in a ThreadPoolExecutor thread instead of asyncio
     subprocess machinery, which can hang waiting for SIGCHLD in WSL2/Docker.
-    Both stdout and stderr are discarded to prevent pipe-full deadlock.
+    Stdout/stderr are redirected to temporary files instead of pipes. This keeps
+    the no-deadlock behavior while preserving a bounded diagnostic tail for
+    failures.
 
     Returns (returncode, stdout, stderr, timed_out, cancelled).
     """
@@ -177,6 +197,26 @@ async def _run_subprocess(
 
     timed_out = False
     cancelled = False
+    stdout = ""
+    stderr = ""
+    try:
+        output_tail_bytes = max(1024, int(os.getenv("SUBPROCESS_OUTPUT_TAIL_BYTES", "65536")))
+    except ValueError:
+        output_tail_bytes = 65536
+
+    def _read_tail(f) -> str:
+        try:
+            f.flush()
+            size = f.tell()
+            start = max(0, size - output_tail_bytes)
+            f.seek(start)
+            data = f.read()
+            text = data.decode("utf-8", errors="replace") if isinstance(data, bytes) else str(data)
+            if start > 0:
+                return f"... truncated {start} bytes ...\n{text}"
+            return text
+        except Exception:
+            return ""
 
     def _kill_pg(pid: int) -> None:
         """SIGKILL the whole process group, best-effort, NEVER blocking on wait().
@@ -192,25 +232,30 @@ async def _run_subprocess(
             except Exception:
                 pass
 
-    def _run_sync() -> int:
+    def _run_sync() -> tuple[int, str, str]:
         # Use Popen + communicate(timeout=) rather than subprocess.run(timeout=).
         # subprocess.run's TimeoutExpired path internally calls proc.kill() THEN
         # proc.wait() with no timeout — that second wait() is exactly what hangs on
         # a lost SIGCHLD, wedging this thread forever. Here we kill the process group
         # and return immediately WITHOUT a blocking re-wait.
         proc = None
+        stdout_f = None
+        stderr_f = None
         try:
+            stdout_f = tempfile.TemporaryFile()
+            stderr_f = tempfile.TemporaryFile()
             proc = subprocess.Popen(
                 list(argv),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=stdout_f,
+                stderr=stderr_f,
                 cwd=cwd,
                 env=env,
                 start_new_session=True,
             )
             try:
                 proc.communicate(timeout=timeout)
-                return proc.returncode if proc.returncode is not None else -1
+                rc = proc.returncode if proc.returncode is not None else -1
+                return rc, _read_tail(stdout_f), _read_tail(stderr_f)
             except subprocess.TimeoutExpired:
                 _kill_pg(proc.pid)
                 # One short, bounded reap attempt — do NOT wait unbounded.
@@ -218,11 +263,18 @@ async def _run_subprocess(
                     proc.communicate(timeout=5)
                 except Exception:
                     pass
-                return -9  # SIGKILL / timed out
-        except Exception:
+                return -9, _read_tail(stdout_f), _read_tail(stderr_f)  # SIGKILL / timed out
+        except Exception as exc:
             if proc is not None:
                 _kill_pg(proc.pid)
-            return -1
+            return -1, "", f"{type(exc).__name__}: {exc}"
+        finally:
+            for f in (stdout_f, stderr_f):
+                try:
+                    if f is not None:
+                        f.close()
+                except Exception:
+                    pass
 
     loop = asyncio.get_running_loop()
     # daemon threads so an irrecoverably-wedged subprocess thread can never block
@@ -264,7 +316,10 @@ async def _run_subprocess(
             if poll < 2.0:
                 poll = min(poll * 1.5, 2.0)
 
-        rc = future.result() if (not cancelled and not timed_out and future.done()) else -1
+        if not cancelled and not timed_out and future.done():
+            rc, stdout, stderr = future.result()
+        else:
+            rc = -1
         if rc == -9:
             timed_out = True
     except concurrent.futures.CancelledError:
@@ -276,7 +331,7 @@ async def _run_subprocess(
     finally:
         executor.shutdown(wait=False)
 
-    return rc, "", "", timed_out, cancelled
+    return rc, stdout, stderr, timed_out, cancelled
 
 
 # ---------------------------------------------------------------------------
@@ -404,10 +459,20 @@ async def _run_and_collect(
         logger.exception("subprocess_downloader: tempdir walk failed for %s", tempdir)
 
     if rc != 0 and rc != 101:
+        summary = DownloadResult(
+            returncode=rc,
+            stdout=stdout,
+            stderr=stderr,
+            files=[],
+            tempdir=Path(tempdir),
+            elapsed=elapsed,
+            timed_out=timed_out,
+            cancelled=cancelled,
+        ).output_summary(300)
         logger.info(
             "subprocess_downloader: %s rc=%s timed_out=%s cancelled=%s files=%d "
-            "elapsed=%.1fs stderr_tail=%s",
-            argv[0], rc, timed_out, cancelled, len(files), elapsed, (stderr or "")[-300:],
+            "elapsed=%.1fs output_tail=%s",
+            argv[0], rc, timed_out, cancelled, len(files), elapsed, summary,
         )
     else:
         logger.info(
