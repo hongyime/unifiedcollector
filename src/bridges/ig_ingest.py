@@ -4741,6 +4741,7 @@ async def browser_heartbeat_handler(request):
                 "text_sample": body.get("text_sample"),
                 "content_counts": body.get("content_counts"),
                 "cycle_reason": body.get("cycle_reason"),
+                "message_type": body.get("message_type"),
                 "cycle_targets": body.get("cycle_targets"),
                 "cycle_saved": body.get("cycle_saved"),
                 "cycle_discovered": body.get("cycle_discovered"),

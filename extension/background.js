@@ -239,6 +239,25 @@ async function recordServiceWorkerRecovery(base, tab, platform, status, reason, 
   } catch (e) {}
 }
 
+async function hardRefreshForcedCycleTab(base, tab, platform, reason, extra = {}) {
+  if (!tab || tab.id == null || !platform || !platform.id) return false;
+  const now = Date.now();
+  const key = String(tab.id);
+  const lastReloadAt = Number(lastForcedReloadByTab[key] || 0);
+  if (lastReloadAt && now - lastReloadAt < FORCED_CYCLE_RELOAD_DEBOUNCE_MS) {
+    await recordServiceWorkerRecovery(base, tab, platform, "forced_cycle_reload_skipped", "reload_debounce", {
+      reload_age_ms: now - lastReloadAt,
+      ...extra,
+    });
+    return false;
+  }
+  await recordServiceWorkerRecovery(base, tab, platform, "forced_cycle_hard_refresh", reason || "forced_cycle_recovery", extra);
+  await chrome.tabs.reload(tab.id, { bypassCache: true });
+  lastForcedReloadByTab[key] = now;
+  lastForcedCycleByTab[key] = 0;
+  return true;
+}
+
 function parseHeartbeatResponseBody(responseBody) {
   if (!responseBody) return null;
   if (typeof responseBody === "object") return responseBody;
@@ -257,14 +276,11 @@ async function maybeForceScrapeCycle(tab, platform, responseBody, reason, base =
     const lastReloadAt = Number(lastForcedReloadByTab[key] || 0);
     if (!lastReloadAt || now - lastReloadAt > FORCED_CYCLE_RELOAD_DEBOUNCE_MS) {
       try {
-        await recordServiceWorkerRecovery(base, tab, platform, "forced_cycle_hard_refresh", "stale_forced_cycle", {
+        await hardRefreshForcedCycleTab(base, tab, platform, "stale_forced_cycle", {
           forced_age_ms: forcedAgeMs,
           hard_reload_ms: hardReloadMs,
           content_age_seconds: body.content_age_seconds || null,
         });
-        await chrome.tabs.reload(tab.id, { bypassCache: true });
-        lastForcedReloadByTab[key] = now;
-        lastForcedCycleByTab[key] = 0;
         await log("warn", `${platform.label}: stale forced scrape did not finish after ${Math.round(forcedAgeMs / 1000)}s; hard-refreshed tab`);
       } catch (e) {
         await log("warn", `${platform.label}: stale forced scrape hard-refresh failed: ${e && e.message ? e.message : e}`);
@@ -273,17 +289,19 @@ async function maybeForceScrapeCycle(tab, platform, responseBody, reason, base =
     }
   }
   if (lastForcedAt && forcedAgeMs < FORCED_CYCLE_DEBOUNCE_MS) return;
+  const recoveryMessage = {
+    type: "ensureLoop",
+    reason: body.force_reason || "browser_content_stale",
+    content_age_seconds: body.content_age_seconds || null,
+  };
   try {
-    await chrome.tabs.sendMessage(tab.id, {
-      type: "scrapeCycle",
-      reason: body.force_reason || "browser_content_stale",
-      content_age_seconds: body.content_age_seconds || null,
-    });
     lastForcedCycleByTab[key] = now;
+    await chrome.tabs.sendMessage(tab.id, recoveryMessage);
     await recordServiceWorkerRecovery(base, tab, platform, "forced_cycle_request_sent", body.force_reason || "browser_content_stale", {
       content_age_seconds: body.content_age_seconds || null,
+      message_type: recoveryMessage.type,
     });
-    await log("warn", `${platform.label}: forced one scrape pass because browser content is stale`);
+    await log("warn", `${platform.label}: nudged scraper loop because browser content is stale`);
   } catch (firstErr) {
     try {
       if (!chrome.scripting || !chrome.scripting.executeScript) throw firstErr;
@@ -292,23 +310,32 @@ async function maybeForceScrapeCycle(tab, platform, responseBody, reason, base =
         files: ["content.js"],
       });
       await _sleep(500);
-      await chrome.tabs.sendMessage(tab.id, {
-        type: "scrapeCycle",
-        reason: body.force_reason || "browser_content_stale",
-        content_age_seconds: body.content_age_seconds || null,
-      });
-      lastForcedCycleByTab[key] = now;
+      await chrome.tabs.sendMessage(tab.id, recoveryMessage);
       await recordServiceWorkerRecovery(base, tab, platform, "forced_cycle_request_sent", body.force_reason || "browser_content_stale", {
         content_age_seconds: body.content_age_seconds || null,
         revived_content_script: true,
+        message_type: recoveryMessage.type,
       });
-      await log("warn", `${platform.label}: revived content script and forced one stale-content scrape pass`);
+      await log("warn", `${platform.label}: revived content script and nudged stale-content loop`);
     } catch (e) {
+      const cycleError = e && e.message ? e.message : String(e);
       await recordServiceWorkerRecovery(base, tab, platform, "forced_cycle_request_failed", body.force_reason || "browser_content_stale", {
         content_age_seconds: body.content_age_seconds || null,
-        cycle_error: e && e.message ? e.message : String(e),
+        cycle_error: cycleError,
       });
-      await log("warn", `${platform.label}: stale-content forced scrape failed: ${e && e.message ? e.message : e}`);
+      try {
+        const reloaded = await hardRefreshForcedCycleTab(base, tab, platform, "failed_force_message", {
+          content_age_seconds: body.content_age_seconds || null,
+          cycle_error: cycleError,
+        });
+        if (reloaded) {
+          await log("warn", `${platform.label}: stale-content forced scrape failed; hard-refreshed tab (${cycleError})`);
+        } else {
+          await log("warn", `${platform.label}: stale-content forced scrape failed; reload already debounced (${cycleError})`);
+        }
+      } catch (reloadErr) {
+        await log("warn", `${platform.label}: stale-content forced scrape failed and hard-refresh failed: ${reloadErr && reloadErr.message ? reloadErr.message : reloadErr}`);
+      }
     }
   }
 }
@@ -719,7 +746,7 @@ async function runPageRecovery(tabId) {
 // crash) or the service worker had been asleep. No scrape cadence here — pacing
 // lives inside the loop (rate-limited + jittered).
 async function ensureLoops(reason) {
-  const forceCycle = /^(manual|browser_content_stale|stale_content)$/.test(String(reason || ""));
+  const forceCycle = false;
   const tabs = await chrome.tabs.query({ url: scraperUrlPatterns() });
   if (!tabs || !tabs.length) {
     await log("warn", `no scraper tab open — paused (${reason}). Open one via 🗂 Manage social tabs.`);
