@@ -4924,13 +4924,31 @@ def _normalize_extension_version(value) -> str:
     return re.sub(r"^v", "", str(value or "").strip(), flags=re.IGNORECASE)
 
 
+def _extension_version_at_least(current: str, expected: str) -> bool | None:
+    def parse(value: str) -> tuple[int, ...] | None:
+        text = _normalize_extension_version(value)
+        if not re.fullmatch(r"\d+(?:\.\d+)*", text):
+            return None
+        return tuple(int(part) for part in text.split("."))
+
+    current_parts = parse(current)
+    expected_parts = parse(expected)
+    if current_parts is None or expected_parts is None:
+        return None
+    width = max(len(current_parts), len(expected_parts))
+    current_parts = current_parts + (0,) * (width - len(current_parts))
+    expected_parts = expected_parts + (0,) * (width - len(expected_parts))
+    return current_parts >= expected_parts
+
+
 def _extension_reload_hint(extension_version) -> dict:
     expected = _normalize_extension_version(UC_EXTENSION_EXPECTED_VERSION)
     current = _normalize_extension_version(extension_version)
     if not expected:
         return {}
     hint = {"expected_extension_version": expected}
-    if current and current != expected:
+    at_least = _extension_version_at_least(current, expected) if current else None
+    if current and current != expected and at_least is not True:
         hint.update({
             "reload_extension": True,
             "reload_reason": "extension_version_mismatch",

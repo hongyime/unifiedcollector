@@ -229,7 +229,24 @@ def _expected_extension_version() -> str | None:
 def _extension_versions_match(current: str | None, expected: str | None) -> bool:
     if not current or not expected:
         return True
-    return current.lstrip("vV") == expected.lstrip("vV")
+    current_norm = current.lstrip("vV")
+    expected_norm = expected.lstrip("vV")
+    if current_norm == expected_norm:
+        return True
+
+    def parse(value: str) -> tuple[int, ...] | None:
+        if not re.fullmatch(r"\d+(?:\.\d+)*", value):
+            return None
+        return tuple(int(part) for part in value.split("."))
+
+    current_parts = parse(current_norm)
+    expected_parts = parse(expected_norm)
+    if current_parts is None or expected_parts is None:
+        return False
+    width = max(len(current_parts), len(expected_parts))
+    current_parts = current_parts + (0,) * (width - len(current_parts))
+    expected_parts = expected_parts + (0,) * (width - len(expected_parts))
+    return current_parts >= expected_parts
 
 
 def _extension_reload_target_from_url(url: object) -> tuple[str | None, str | None]:

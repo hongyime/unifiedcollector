@@ -14,6 +14,7 @@ from src.dashboard.api import _browser_extension_payload, _extension_versions_ma
 def test_extension_versions_match_ignores_v_prefix():
     assert _extension_versions_match("1.21.32", "v1.21.32")
     assert _extension_versions_match("v1.21.32", "1.21.32")
+    assert _extension_versions_match("1.21.33", "1.21.32")
     assert not _extension_versions_match("1.21.28", "1.21.32")
 
 
