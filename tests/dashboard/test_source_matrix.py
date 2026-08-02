@@ -973,10 +973,13 @@ async def test_source_content_summary_does_not_false_zero_media_on_timeout(monke
             ]
 
     conn = FakeConn()
-    with pytest.raises(asyncio.TimeoutError):
-        await _source_content_summary(conn, "now() - interval '24 hours'")
+    out = await _source_content_summary(conn, "now() - interval '24 hours'")
 
     assert len(conn.content_queries) == 2
+    assert out["telegram"]["records"] == 12
+    assert out["telegram"]["messages"] == 12
+    assert out["telegram"]["media_items"] == 0
+    assert out["telegram"]["media_stats_unavailable"] is True
 
 
 @pytest.mark.asyncio

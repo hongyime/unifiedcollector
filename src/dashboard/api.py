@@ -511,6 +511,7 @@ async def _source_content_summary(conn, since_sql: str, before_sql: str | None =
             "media_items": 0,
             "latest_record_at": None,
             "latest_media_at": None,
+            "media_stats_unavailable": False,
         })
         target["records"] = int(target.get("records") or 0) + int(row.get("records") or 0)
         target["messages"] = int(target.get("messages") or 0) + int(row.get("messages") or 0)
@@ -525,6 +526,8 @@ async def _source_content_summary(conn, since_sql: str, before_sql: str | None =
             not target.get("latest_media_at") or latest_media > target["latest_media_at"]
         ):
             target["latest_media_at"] = latest_media
+        if row.get("media_stats_unavailable"):
+            target["media_stats_unavailable"] = True
 
     raw_parts = [
         f"""
@@ -586,7 +589,8 @@ async def _source_content_summary(conn, since_sql: str, before_sql: str | None =
                 merge(row["source"], dict(row))
         except Exception as exc:  # noqa: BLE001 - keep row counts if media stats lag
             logger.warning("source content media summary failed: %s", exc.__class__.__name__)
-            raise
+            for row in out.values():
+                row["media_stats_unavailable"] = True
 
     beeper_timeout = max(0.1, min(
         _BEEPER_SUBSOURCE_TOTAL_TIMEOUT_SECONDS,
@@ -1646,6 +1650,7 @@ def _merge_source_window(content: dict | None, rate: dict | None) -> dict:
             "media_items": int(content.get("media_items") or 0),
             "latest_record_at": content.get("latest_record_at"),
             "latest_media_at": content.get("latest_media_at"),
+            "media_stats_unavailable": bool(content.get("media_stats_unavailable")),
         })
     if rate:
         out.update({
