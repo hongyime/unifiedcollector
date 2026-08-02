@@ -833,6 +833,9 @@ services:
       dockerfile: docker/Dockerfile.dashboard
     container_name: unifiedcollector_dashboard
     ports:
+      # Keep the original local dashboard URL alive while 8700 remains the
+      # canonical service port.
+      - "8001:8700"
       - "8700:8700"
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
