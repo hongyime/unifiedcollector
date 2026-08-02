@@ -55,7 +55,6 @@ import json
 import logging
 import os
 import re
-import shutil
 import subprocess
 import tempfile
 import time
@@ -74,6 +73,7 @@ from src.core.discovered_links import persist_discovered_links
 from src.core.link_extractor import extract_all_links
 from src.core.file_naming import sanitize_name
 from src.core.vault import VAULT_ROOT, write_atomic_artifact
+from src.core.subprocess_downloader import check_tool
 from src.core.user_change_tracker import (
     UserChangeTracker,
     YOUTUBE_TRACKED_FIELDS,
@@ -96,6 +96,11 @@ _YOUTUBE_CHANNEL_URL_RE = re.compile(
 _YOUTUBE_HANDLE_URL_RE = re.compile(
     r"https?://(?:www\.)?(?:m\.)?youtube\.com/@([A-Za-z0-9._-]{2,80})",
     re.IGNORECASE,
+)
+_YOUTUBE_PROGRESSIVE_FORMAT = (
+    "best[ext=mp4][vcodec!=none][acodec!=none]/"
+    "best[ext=webm][vcodec!=none][acodec!=none]/"
+    "best[vcodec!=none][acodec!=none]/best"
 )
 
 
@@ -143,8 +148,8 @@ class YoutubeCollector(BaseCollector):
         self._api_cooldown_restored = False
         self._max_concurrent = int(os.getenv("YOUTUBE_MAX_CONCURRENT_DOWNLOADS", "3"))
         self._use_yt_dlp = self._check_yt_dlp()
-        self._ffmpeg_available = shutil.which("ffmpeg") is not None
-        self._ffprobe_available = shutil.which("ffprobe") is not None
+        self._ffmpeg_available = check_tool("ffmpeg")
+        self._ffprobe_available = check_tool("ffprobe")
         logger.info(
             "youtube tool availability: yt-dlp=%s ffmpeg=%s ffprobe=%s",
             self._use_yt_dlp,
@@ -1953,12 +1958,20 @@ class YoutubeCollector(BaseCollector):
         return stored_total
 
     def _yt_dlp_extra_args(self) -> list[str]:
-        """Build yt-dlp args, letting yt-dlp auto-select formats by default."""
+        """Build yt-dlp args.
+
+        Without ffmpeg, yt-dlp cannot merge separate video/audio streams. In
+        that runtime, prefer single-file progressive formats so archival still
+        produces playable media instead of partial/error-prone downloads.
+        """
         extra: list[str] = []
         fmt = (self._ytdlp_format or "").strip()
-        if fmt and fmt.lower() not in {"auto", "default", "best"}:
+        auto_format = not fmt or fmt.lower() in {"auto", "default", "best"}
+        if auto_format and not self._ffmpeg_available:
+            extra.extend(["-f", _YOUTUBE_PROGRESSIVE_FORMAT])
+        elif not auto_format:
             extra.extend(["-f", fmt])
-        if self._merge_format:
+        if self._merge_format and self._ffmpeg_available:
             extra.extend(["--merge-output-format", self._merge_format])
         return extra
 

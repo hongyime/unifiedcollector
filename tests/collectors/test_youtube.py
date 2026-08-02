@@ -1065,6 +1065,7 @@ async def test_download_videos_uses_configured_hard_timeout(monkeypatch):
 
 def test_ytdlp_extra_args_lets_best_use_default_selector(monkeypatch):
     coll = _new_collector(monkeypatch, YOUTUBE_YTDLP_FORMAT="best")
+    coll._ffmpeg_available = True
 
     extra = coll._yt_dlp_extra_args()
 
@@ -1072,12 +1073,31 @@ def test_ytdlp_extra_args_lets_best_use_default_selector(monkeypatch):
     assert extra == ["--merge-output-format", "mp4"]
 
 
+def test_ytdlp_extra_args_uses_progressive_selector_without_ffmpeg(monkeypatch):
+    coll = _new_collector(monkeypatch, YOUTUBE_YTDLP_FORMAT="best")
+    coll._ffmpeg_available = False
+
+    extra = coll._yt_dlp_extra_args()
+
+    assert extra == ["-f", youtube_mod._YOUTUBE_PROGRESSIVE_FORMAT]
+
+
 def test_ytdlp_extra_args_preserves_custom_selector(monkeypatch):
     coll = _new_collector(monkeypatch, YOUTUBE_YTDLP_FORMAT="bv*+ba/b", YOUTUBE_MERGE_FORMAT="webm")
+    coll._ffmpeg_available = True
 
     extra = coll._yt_dlp_extra_args()
 
     assert extra == ["-f", "bv*+ba/b", "--merge-output-format", "webm"]
+
+
+def test_ytdlp_extra_args_skips_merge_without_ffmpeg(monkeypatch):
+    coll = _new_collector(monkeypatch, YOUTUBE_YTDLP_FORMAT="bv*+ba/b", YOUTUBE_MERGE_FORMAT="webm")
+    coll._ffmpeg_available = False
+
+    extra = coll._yt_dlp_extra_args()
+
+    assert extra == ["-f", "bv*+ba/b"]
 
 
 def test_usable_cookie_file_accepts_netscape_cookie(tmp_path, monkeypatch):
