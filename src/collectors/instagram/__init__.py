@@ -1207,6 +1207,7 @@ class InstagramCollector(BaseCollector):
         _ig_headers = self._headers(self._current_account)
         if cookies.get("csrftoken"):
             _ig_headers["X-CSRFToken"] = cookies["csrftoken"]
+        retry_with_next_account = False
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(30.0),
             follow_redirects=True,
@@ -1238,17 +1239,25 @@ class InstagramCollector(BaseCollector):
                 except Exception as e:
                     logger.error("instagram: unexpected error for %s: %s", target, e, exc_info=True)
                 # If this account's session is dead (401), stop wasting the cycle on
-                # it — mark it dead and end so the next cycle rotates to a healthy
-                # account. (Existing accounts only; no credential change.)
+                # it. Mark it dead and immediately retry this same cycle with the
+                # next healthy cookie account instead of burning a full scheduler
+                # interval on one expired session.
                 if self._session_auth_dead:
                     self._dead_cookie_accounts.add(acct_name)
                     await self._record_cookie_status(acct_name, "dead", "401 session expired")
+                    remaining = [
+                        a for a in cookie_accounts
+                        if a not in self._dead_cookie_accounts
+                        and not self._daily_quota_exhausted(a)
+                    ]
                     logger.warning(
                         "instagram: account %s session is dead (401) — marked dead, "
-                        "rotating to another account next cycle. Healthy remaining: %s",
+                        "rotating to another account%s. Healthy remaining: %s",
                         acct_name,
-                        [a for a in cookie_accounts if a not in self._dead_cookie_accounts] or "NONE",
+                        " in this cycle" if remaining else " next cycle",
+                        remaining or "NONE",
                     )
+                    retry_with_next_account = bool(remaining)
                     break
                 if self._daily_quota_exhausted(acct_name):
                     logger.info(
@@ -1262,6 +1271,11 @@ class InstagramCollector(BaseCollector):
                 elif acct_name:
                     await self._record_cookie_status(acct_name, "ok", None)
                 await asyncio.sleep(2)
+
+        if retry_with_next_account and not self._stop.is_set():
+            self._session_auth_dead = False
+            await self.collect(targets)
+            return
 
         # If the entire cycle completed without triggering any 429s, clear the
         # persisted rate-limit entry so the next cycle starts clean.

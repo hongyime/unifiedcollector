@@ -515,6 +515,66 @@ async def test_collect_skips_headless_when_instagram_extension_is_fresh(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_collect_retries_same_cycle_after_dead_cookie_account(monkeypatch):
+    coll = _bare_collector()
+    coll._stop = SimpleNamespace(is_set=lambda: False)
+    coll._account_browser_cookies = {"acct_bad": "bad.txt", "acct_good": "good.txt"}
+    coll._account_username_aliases = {}
+    coll._dead_cookie_accounts = set()
+    coll._session_auth_dead = False
+    coll._consecutive_429s_by_account = {}
+    coll._fresh_extension_activity = AsyncMock(return_value=None)
+    coll._normalize_instagram_targets = MagicMock(side_effect=lambda targets: list(targets))
+    coll._auto_discover_cookies = MagicMock(return_value=dict(coll._account_browser_cookies))
+    coll._load_account_username_aliases = MagicMock(return_value={})
+    coll._restore_account_rate_limit_state = AsyncMock()
+    coll._daily_quota_exhausted = MagicMock(return_value=False)
+    coll._collect_all_account_graphs = AsyncMock()
+    coll._load_cookies_for_account = MagicMock(return_value={"csrftoken": "token"})
+    coll._headers = MagicMock(return_value={})
+    coll._warmup = AsyncMock()
+    coll._record_cookie_status = AsyncMock()
+    coll._target_timeout_seconds = MagicMock(return_value=30.0)
+    coll._instagram_domain_delay_seconds = MagicMock(return_value=1.0)
+
+    async def select_first_healthy(healthy, _targets):
+        return healthy[0]
+
+    coll._select_cycle_account = AsyncMock(side_effect=select_first_healthy)
+    accounts_seen = []
+
+    async def process_target(_client, _target):
+        accounts_seen.append(coll._current_account.name)
+        coll._session_auth_dead = coll._current_account.name == "acct_bad"
+
+    coll._process_target = AsyncMock(side_effect=process_target)
+
+    class _Client:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(instagram_mod.httpx, "AsyncClient", _Client)
+
+    await coll.collect(["target_user"])
+
+    assert accounts_seen[0] == "acct_bad"
+    assert set(accounts_seen[1:]) == {"acct_good"}
+    assert "acct_bad" in coll._dead_cookie_accounts
+    assert coll._record_cookie_status.await_args_list[0].args == (
+        "acct_bad",
+        "dead",
+        "401 session expired",
+    )
+    assert coll._record_cookie_status.await_args_list[-1].args == ("acct_good", "ok", None)
+
+
+@pytest.mark.asyncio
 async def test_fetch_profile_playwright_records_429_without_marking_session_dead(monkeypatch):
     coll = _bare_collector()
     coll._session_auth_dead = False
