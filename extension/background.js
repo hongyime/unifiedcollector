@@ -19,7 +19,7 @@ globalThis.UC_PLATFORMS = [
   { id: "threads",   label: "Threads",     url: "https://www.threads.com/",         host: "www.threads.com",    cookieUrl: "https://www.threads.com",        cookie: "sessionid",  scraper: true },
   { id: "tiktok",    label: "TikTok",      url: "https://www.tiktok.com/following", host: "www.tiktok.com",     cookieUrl: "https://www.tiktok.com",         cookie: "sessionid",  scraper: true, extraUrls: ["https://www.tiktok.com/foryou"] },
   { id: "lemon8",    label: "Lemon8",      url: "https://www.lemon8-app.com/",      host: "www.lemon8-app.com", cookieUrl: "https://www.lemon8-app.com",     cookie: "sessionid",  scraper: true, noLogin: true },
-  { id: "x",         label: "Twitter / X", url: "https://x.com/home",               host: "x.com",              cookieUrl: "https://x.com",                  cookie: "auth_token", scraper: true },
+  { id: "x",         label: "Twitter / X", url: "https://x.com/home",               host: "x.com",              aliasHosts: ["twitter.com"], cookieUrl: "https://x.com",                  cookie: "auth_token", scraper: true },
   { id: "facebook",  label: "Facebook",    url: "https://www.facebook.com/",        host: "www.facebook.com",   cookieUrl: "https://www.facebook.com",       cookie: "c_user",     scraper: true },
   { id: "strava",    label: "Strava",      url: "https://www.strava.com/dashboard", host: "www.strava.com",     cookieUrl: "https://www.strava.com",         cookie: "_strava4_session", scraper: true },
 ];
@@ -173,7 +173,7 @@ async function sendManualIngestProbe() {
 function platformForTabUrl(url) {
   let host = "";
   try { host = new URL(url || "").host; } catch (e) { return null; }
-  return scraperPlatforms().find((p) => host === p.host) || null;
+  return scraperPlatforms().find((p) => platformHosts(p).includes(host)) || null;
 }
 async function reportScraperTabHeartbeats(reason) {
   const base = await ingestBase();
@@ -304,10 +304,61 @@ async function recordServiceWorkerRecovery(base, tab, platform, status, reason, 
   } catch (e) {}
 }
 
+async function injectContentScriptAndNudge(base, tab, platform, reason, extra = {}) {
+  if (!tab || tab.id == null || !platform || !platform.id) return false;
+  const tabId = tab.id;
+  let freshTab = tab;
+  try {
+    freshTab = await chrome.tabs.get(tabId);
+  } catch (e) {}
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ["content.js"],
+    });
+    await recordServiceWorkerRecovery(base, freshTab, platform, "content_script_programmatic_injected", reason || "content_script_receiver_missing", extra);
+  } catch (e) {
+    await recordServiceWorkerRecovery(base, freshTab, platform, "content_script_programmatic_inject_failed", reason || "content_script_receiver_missing", {
+      ...extra,
+      inject_error: e && e.message ? e.message : String(e),
+    });
+    return false;
+  }
+  try {
+    await chrome.tabs.sendMessage(tabId, {
+      type: "scrapeCycle",
+      reason: reason || "content_script_receiver_missing",
+    });
+    await recordServiceWorkerRecovery(base, freshTab, platform, "content_script_programmatic_nudge_sent", reason || "content_script_receiver_missing", extra);
+    return true;
+  } catch (e) {
+    await recordServiceWorkerRecovery(base, freshTab, platform, "content_script_programmatic_nudge_failed", reason || "content_script_receiver_missing", {
+      ...extra,
+      cycle_error: e && e.message ? e.message : String(e),
+    });
+    return false;
+  }
+}
+
+const POST_RELOAD_NUDGE_DELAY_MS_BY_PLATFORM = {
+  facebook: 30000,
+  instagram: 25000,
+  lemon8: 25000,
+  tiktok: 25000,
+  x: 25000,
+};
+
+function postReloadScrapeNudgeDelayMs(platform, extra = {}) {
+  if (Number.isFinite(Number(extra.post_reload_delay_ms)) && Number(extra.post_reload_delay_ms) > 0) {
+    return Number(extra.post_reload_delay_ms);
+  }
+  return POST_RELOAD_NUDGE_DELAY_MS_BY_PLATFORM[platform && platform.id] || 12000;
+}
+
 function schedulePostReloadScrapeNudge(base, tab, platform, reason, extra = {}) {
   if (!tab || tab.id == null || !platform || !platform.id) return;
   const tabId = tab.id;
-  const delayMs = Number(extra.post_reload_delay_ms || 12000);
+  const delayMs = postReloadScrapeNudgeDelayMs(platform, extra);
   setTimeout(() => {
     (async () => {
       let freshTab = tab;
@@ -324,6 +375,14 @@ function schedulePostReloadScrapeNudge(base, tab, platform, reason, extra = {}) 
           post_reload_delay_ms: delayMs,
         });
       } catch (e) {
+        if (isNoReceiverError(e)) {
+          const injected = await injectContentScriptAndNudge(base, freshTab, platform, reason || "post_reload_recovery", {
+            ...extra,
+            post_reload_delay_ms: delayMs,
+            recovery: "post_reload_programmatic_inject",
+          });
+          if (injected) return;
+        }
         await recordServiceWorkerRecovery(base, freshTab, platform, "post_reload_scrape_nudge_failed", reason || "post_reload_recovery", {
           ...extra,
           cycle_error: e && e.message ? e.message : String(e),
@@ -356,10 +415,13 @@ async function hardRefreshForcedCycleTab(base, tab, platform, reason, extra = {}
 
 async function refreshTabForMissingContentScript(base, tab, platform, reason, extra = {}) {
   if (!tab || tab.id == null || !platform || !platform.id) return false;
-  // content.js is already registered as a manifest content script. Re-injecting
-  // it into an existing isolated world can throw top-level redeclaration errors
-  // such as "Identifier 'sleep' has already been declared". A tab refresh is
-  // slower, but lets Chrome run the manifest script exactly once for the page.
+  const injected = await injectContentScriptAndNudge(base, tab, platform, reason || "content_script_receiver_missing", {
+    recovery: "receiver_missing_programmatic_inject",
+    ...extra,
+  });
+  if (injected) return true;
+  // If programmatic injection still cannot attach, reload the page so Chrome can
+  // run the manifest content script in a clean page context.
   return hardRefreshForcedCycleTab(base, tab, platform, reason || "content_script_receiver_missing", {
     recovery: "manifest_content_script_refresh",
     ...extra,
@@ -667,7 +729,7 @@ async function ensureScraperTabsOpen(reason, options = {}) {
   let opened = 0, closed = 0, navigated = 0;
   try {
     for (const p of scraperPlatforms()) {
-      const tabs = (await chrome.tabs.query({ url: `*://${p.host}/*` })) || [];
+      const tabs = (await chrome.tabs.query({ url: platformUrlPatterns(p) })) || [];
       if (!(p.extraUrls && p.extraUrls.length)) {
         // single-feed: keep one tab on the host, close the rest
         if (tabs.length === 0) {
@@ -843,7 +905,13 @@ chrome.alarms.onAlarm.addListener(async (a) => {
 
 // scraper hosts that have a content-script scraper
 function scraperPlatforms() { return (globalThis.UC_PLATFORMS || []).filter((p) => p.scraper); }
-function scraperUrlPatterns() { return scraperPlatforms().map((p) => `https://${p.host}/*`); }
+function platformHosts(p) {
+  return [p && p.host, ...((p && p.aliasHosts) || [])].filter(Boolean);
+}
+function platformUrlPatterns(p) {
+  return platformHosts(p).map((host) => `https://${host}/*`);
+}
+function scraperUrlPatterns() { return scraperPlatforms().flatMap(platformUrlPatterns); }
 function platformById(id) { return scraperPlatforms().find((p) => p.id === id) || null; }
 function pageRecoveryAlarm(tabId) { return PAGE_RECOVERY_PREFIX + String(tabId); }
 function normalizeRecoveryUrl(url) {
@@ -1110,12 +1178,12 @@ async function kick(reason, tabId) {
 chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
   if (info.status !== "complete" || !tab.url) return;
   const host = (() => { try { return new URL(tab.url).host; } catch (e) { return ""; } })();
-  if (scraperPlatforms().some((p) => host === p.host)) kick("tab-loaded", tabId);
+  if (scraperPlatforms().some((p) => platformHosts(p).includes(host))) kick("tab-loaded", tabId);
 });
 
 // ---- social tab launcher -------------------------------------------------
-async function tabForHost(host) {
-  const tabs = await chrome.tabs.query({ url: `*://${host}/*` });
+async function tabForPlatform(p) {
+  const tabs = await chrome.tabs.query({ url: platformUrlPatterns(p) });
   return tabs && tabs[0] ? tabs[0] : null;
 }
 async function isLoggedIn(p) {
@@ -1125,7 +1193,7 @@ async function isLoggedIn(p) {
 async function platformStatuses() {
   const out = [];
   for (const p of globalThis.UC_PLATFORMS || []) {
-    const tab = await tabForHost(p.host);
+    const tab = await tabForPlatform(p);
     out.push({ id: p.id, label: p.label, url: p.url, host: p.host, scraper: !!p.scraper, noLogin: !!p.noLogin, tabOpen: !!tab, tabId: tab ? tab.id : null, loggedIn: await isLoggedIn(p) });
   }
   return out;
@@ -1352,7 +1420,7 @@ async function recordBrowserMediaCandidateResults(base, msg, items) {
 // "Open all" look like nothing happened).
 async function openOrFocus(p, { active = false } = {}) {
   try {
-    const tab = await tabForHost(p.host);
+    const tab = await tabForPlatform(p);
     if (tab) { await chrome.tabs.update(tab.id, { active }); return { id: p.id, focused: true, tabId: tab.id }; }
     const created = await chrome.tabs.create({ url: p.url, active });
     await log("info", `opened tab: ${p.label}`);

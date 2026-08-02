@@ -8,13 +8,10 @@ const UC_CONTENT_VERSION = (() => {
 })();
 const UC_CONTENT_INSTALL_ID = `${UC_CONTENT_VERSION}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
 const UC_CONTENT_STATE = globalThis.__UC_CONTENT_SCRIPT_ACTIVE__;
-if (
-  UC_CONTENT_STATE &&
-  typeof UC_CONTENT_STATE === "object" &&
-  UC_CONTENT_STATE.version === UC_CONTENT_VERSION &&
-  UC_CONTENT_STATE.running === true
-) {
-  return;
+if (UC_CONTENT_STATE && typeof UC_CONTENT_STATE === "object") {
+  UC_CONTENT_STATE.running = false;
+  UC_CONTENT_STATE.superseded_at = Date.now();
+  UC_CONTENT_STATE.superseded_by = UC_CONTENT_INSTALL_ID;
 }
 globalThis.__UC_CONTENT_SCRIPT_ACTIVE__ = {
   version: UC_CONTENT_VERSION,
@@ -22,6 +19,14 @@ globalThis.__UC_CONTENT_SCRIPT_ACTIVE__ = {
   token: UC_CONTENT_INSTALL_ID,
   running: true,
 };
+function ucContentScriptCurrent() {
+  try {
+    const state = globalThis.__UC_CONTENT_SCRIPT_ACTIVE__;
+    return !!state && state.token === UC_CONTENT_INSTALL_ID && state.running === true;
+  } catch (e) {
+    return false;
+  }
+}
 
 // UnifiedCollector Social Bridge — content script.
 //
@@ -2998,6 +3003,7 @@ function passRestMs(platformId) {
 async function mainLoop() {
   const p = currentPlatform();
   if (!p) return;
+  if (!ucContentScriptCurrent()) return;
   if (LOOP_RUNNING) return;            // one loop per tab
   LOOP_RUNNING = true;
   LOOP_STARTED_AT = Date.now();
@@ -3005,7 +3011,7 @@ async function mainLoop() {
   clog("info", `${p.label} loop started — continuous & human-paced (no fixed timer)`, p.label);
   await send({ type: "loopStatus", platform: p.id, label: p.label, running: true, url: location.href }).catch(() => {});
   try {
-    while (LOOP_RUNNING) {
+    while (LOOP_RUNNING && ucContentScriptCurrent()) {
       try {
         const leftMs = wallLeftMs(p.id);
         if (leftMs > 0) {
@@ -3242,6 +3248,7 @@ async function runOneShotCycle(reason) {
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg) return;
+  if (!ucContentScriptCurrent()) return false;
   // "ensureLoop" (watchdog / manual Scrape-now): start the loop if it isn't running.
   if (msg.type === "ensureLoop" || msg.type === "scrapeCycle") {
     const p = currentPlatform();
@@ -3286,6 +3293,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 // inject.js reads Meta's own GraphQL/REST responses (likes/replies/reposts) and
 // postMessages them here; we forward to the posts endpoint. Robust, no extra reqs.
 window.addEventListener("message", (ev) => {
+  if (!ucContentScriptCurrent()) return;
   const m = ev.data;
   if (!m || m.__uc !== true) return;
   // label the source so logs say WHERE it came from instead of "undefined".
