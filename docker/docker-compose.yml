@@ -351,7 +351,7 @@ services:
       COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
-      WEBSITE_TARGET_TIMEOUT_SECONDS: "300"
+      WEBSITE_TARGET_TIMEOUT_SECONDS: "90"
       # Concurrency drives REAL RSS (each task holds a page + parse tree). After
       # the host OOM, dialled 10 -> 6 to lower website's memory peak — a real RSS
       # cut (unlike a mem_limit cap), minor throughput cost across 421 sites.
