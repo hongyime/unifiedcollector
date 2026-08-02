@@ -503,93 +503,63 @@ async def _source_content_summary(conn, since_sql: str, before_sql: str | None =
     required_tables.append("media_items")
     existing_tables = await _existing_public_tables(conn, required_tables)
     out: dict[str, dict] = {}
-    deadline = time.monotonic() + max(1.0, _SOURCE_CONTENT_SUMMARY_BUDGET_SECONDS)
-
-    def remaining_timeout(default: float) -> float:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return 0.0
-        return min(default, max(0.1, remaining))
-
-    def merge(source: str, row: dict | None) -> None:
-        if not row:
-            return
-        target = out.setdefault(source, {
-            "source": source,
-            "records": 0,
-            "messages": 0,
-            "media_items": 0,
-            "latest_record_at": None,
-            "latest_media_at": None,
-        })
-        target["records"] = int(target.get("records") or 0) + int(row.get("records") or 0)
-        target["messages"] = int(target.get("messages") or 0) + int(row.get("messages") or 0)
-        target["media_items"] = int(target.get("media_items") or 0) + int(row.get("media_items") or 0)
-        latest_record = row.get("latest_record_at")
-        latest_media = row.get("latest_media_at")
-        if latest_record and (
-            not target.get("latest_record_at") or latest_record > target["latest_record_at"]
-        ):
-            target["latest_record_at"] = latest_record
-        if latest_media and (
-            not target.get("latest_media_at") or latest_media > target["latest_media_at"]
-        ):
-            target["latest_media_at"] = latest_media
-
+    raw_parts = [
+        f"""
+        SELECT '{source}'::text AS source,
+               count(*)::bigint AS records,
+               {("count(*)" if label == "messages" else "0")}::bigint AS messages,
+               0::bigint AS media_items,
+               max({column}) AS latest_record_at,
+               NULL::timestamptz AS latest_media_at
+        FROM {table}
+        WHERE {column} >= {since_sql}
+          {f"AND {column} < {before_sql}" if before_sql else ""}
+        """
+        for source, table, column, label in _INGESTION_CONTENT_PARTS
+        if table in existing_tables
+    ]
     if "media_items" in existing_tables:
-        timeout = remaining_timeout(_SOURCE_CONTENT_MEDIA_TIMEOUT_SECONDS)
-        if timeout > 0:
-            try:
-                rows = await conn.fetch(
-                    f"""
-                    SELECT source,
-                           0::bigint AS records,
-                           0::bigint AS messages,
-                           count(*)::bigint AS media_items,
-                           NULL::timestamptz AS latest_record_at,
-                           max(collected_at) AS latest_media_at
-                    FROM media_items
-                    WHERE collected_at >= {since_sql}
-                      {f"AND collected_at < {before_sql}" if before_sql else ""}
-                    GROUP BY source
-                    """,
-                    timeout=timeout,
-                )
-                for row in rows:
-                    merge(row["source"], dict(row))
-            except Exception as exc:  # noqa: BLE001 - source matrix should keep row counts if media stats lag
-                logger.warning("source content media summary failed: %s", exc.__class__.__name__)
+        raw_parts.append(
+            f"""
+            SELECT source,
+                   0::bigint AS records,
+                   0::bigint AS messages,
+                   count(*)::bigint AS media_items,
+                   NULL::timestamptz AS latest_record_at,
+                   max(collected_at) AS latest_media_at
+            FROM media_items
+            WHERE collected_at >= {since_sql}
+              {f"AND collected_at < {before_sql}" if before_sql else ""}
+            GROUP BY source
+            """
+        )
 
-    for source, table, column, label in _INGESTION_CONTENT_PARTS:
-        if table not in existing_tables:
-            continue
-        timeout = remaining_timeout(_SOURCE_CONTENT_PART_TIMEOUT_SECONDS)
-        if timeout <= 0:
-            logger.warning("source content summary budget exhausted before %s/%s", source, table)
-            break
+    if raw_parts:
         try:
-            row = await conn.fetchrow(
+            rows = await conn.fetch(
                 f"""
-                SELECT count(*)::bigint AS records,
-                       {("count(*)" if label == "messages" else "0")}::bigint AS messages,
-                       0::bigint AS media_items,
-                       max({column}) AS latest_record_at,
-                       NULL::timestamptz AS latest_media_at
-                FROM {table}
-                WHERE {column} >= {since_sql}
-                  {f"AND {column} < {before_sql}" if before_sql else ""}
+                WITH raw AS (
+                    {" UNION ALL ".join(raw_parts)}
+                )
+                SELECT source,
+                       COALESCE(sum(records), 0)::bigint AS records,
+                       COALESCE(sum(messages), 0)::bigint AS messages,
+                       COALESCE(sum(media_items), 0)::bigint AS media_items,
+                       max(latest_record_at) AS latest_record_at,
+                       max(latest_media_at) AS latest_media_at
+                FROM raw
+                GROUP BY source
                 """,
-                timeout=timeout,
+                timeout=max(1.0, _SOURCE_CONTENT_SUMMARY_BUDGET_SECONDS),
             )
-            merge(source, dict(row) if row else None)
-        except Exception as exc:  # noqa: BLE001 - source matrix should keep other sources truthful
-            logger.warning(
-                "source content summary part failed for %s/%s: %s",
-                source,
-                table,
-                exc.__class__.__name__,
-            )
-    beeper_timeout = remaining_timeout(_BEEPER_SUBSOURCE_TOTAL_TIMEOUT_SECONDS)
+            out = {row["source"]: dict(row) for row in rows}
+        except Exception as exc:  # noqa: BLE001 - source matrix should degrade, not fail
+            logger.warning("source content summary failed: %s", exc.__class__.__name__)
+
+    beeper_timeout = max(0.1, min(
+        _BEEPER_SUBSOURCE_TOTAL_TIMEOUT_SECONDS,
+        max(1.0, _SOURCE_CONTENT_SUMMARY_BUDGET_SECONDS),
+    ))
     if beeper_timeout > 0:
         try:
             out.update(await asyncio.wait_for(

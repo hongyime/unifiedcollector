@@ -24,6 +24,7 @@ from src.dashboard.api import (
     _rate_limit_cursor_payload,
     _source_matrix_blocker,
     _source_matrix_section,
+    _source_content_summary,
     _source_media_freshness,
     _source_matrix_row,
     _source_window_totals,
@@ -725,6 +726,63 @@ async def test_source_media_totals_keeps_rollups_when_beeper_split_times_out():
     assert out["x"]["total_media_items"] == 23
     assert "__stats_unavailable__" not in out
     assert out["__beeper_subsource_stats_unavailable__"] is True
+
+
+@pytest.mark.asyncio
+async def test_source_content_summary_uses_one_grouped_query(monkeypatch):
+    async def no_beeper_subsources(conn, since_sql, before_sql=None):
+        return {}
+
+    monkeypatch.setattr(
+        "src.dashboard.api._beeper_subsource_content_summary",
+        no_beeper_subsources,
+    )
+
+    class FakeConn:
+        def __init__(self):
+            self.content_queries = []
+
+        async def fetchval(self, query, *args, timeout=None):
+            assert "information_schema.tables" in query
+            return ["telegram_messages", "youtube_videos", "media_items"]
+
+        async def fetch(self, query, *args, timeout=None):
+            self.content_queries.append((query, timeout))
+            assert "WITH raw AS" in query
+            assert "UNION ALL" in query
+            assert "telegram_messages" in query
+            assert "youtube_videos" in query
+            assert "media_items" in query
+            return [
+                {
+                    "source": "telegram",
+                    "records": 12,
+                    "messages": 12,
+                    "media_items": 3,
+                    "latest_record_at": datetime(2026, 7, 28, 1, 5, tzinfo=timezone.utc),
+                    "latest_media_at": datetime(2026, 7, 28, 1, 4, tzinfo=timezone.utc),
+                },
+                {
+                    "source": "youtube",
+                    "records": 8,
+                    "messages": 0,
+                    "media_items": 2,
+                    "latest_record_at": datetime(2026, 7, 28, 1, 3, tzinfo=timezone.utc),
+                    "latest_media_at": datetime(2026, 7, 28, 1, 2, tzinfo=timezone.utc),
+                },
+            ]
+
+    conn = FakeConn()
+    out = await _source_content_summary(conn, "now() - interval '24 hours'")
+
+    assert len(conn.content_queries) == 1
+    assert conn.content_queries[0][1] >= 1.0
+    assert out["telegram"]["records"] == 12
+    assert out["telegram"]["messages"] == 12
+    assert out["telegram"]["media_items"] == 3
+    assert out["youtube"]["records"] == 8
+    assert out["youtube"]["messages"] == 0
+    assert out["youtube"]["media_items"] == 2
 
 
 @pytest.mark.asyncio
