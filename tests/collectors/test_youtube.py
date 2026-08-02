@@ -39,6 +39,11 @@ def _isolate_drive(tmp_path, monkeypatch):
         YoutubeCollector, "_check_yt_dlp",
         staticmethod(lambda: True),
     )
+    monkeypatch.setattr(
+        youtube_mod,
+        "check_tool",
+        lambda name: name in {"ffmpeg", "ffprobe"},
+    )
     yield
 
 
