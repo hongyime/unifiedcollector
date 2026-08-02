@@ -1,8 +1,27 @@
 (() => {
-if (globalThis.__UC_CONTENT_SCRIPT_ACTIVE__) {
+const UC_CONTENT_VERSION = (() => {
+  try {
+    return (chrome.runtime.getManifest && chrome.runtime.getManifest().version) || "unknown";
+  } catch (e) {
+    return "unknown";
+  }
+})();
+const UC_CONTENT_INSTALL_ID = `${UC_CONTENT_VERSION}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+const UC_CONTENT_STATE = globalThis.__UC_CONTENT_SCRIPT_ACTIVE__;
+if (
+  UC_CONTENT_STATE &&
+  typeof UC_CONTENT_STATE === "object" &&
+  UC_CONTENT_STATE.version === UC_CONTENT_VERSION &&
+  UC_CONTENT_STATE.running === true
+) {
   return;
 }
-globalThis.__UC_CONTENT_SCRIPT_ACTIVE__ = true;
+globalThis.__UC_CONTENT_SCRIPT_ACTIVE__ = {
+  version: UC_CONTENT_VERSION,
+  installed_at: Date.now(),
+  token: UC_CONTENT_INSTALL_ID,
+  running: true,
+};
 
 // UnifiedCollector Social Bridge — content script.
 //
