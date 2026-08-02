@@ -326,54 +326,39 @@ async function maybeForceScrapeCycle(tab, platform, responseBody, reason, base =
     });
     await log("warn", `${platform.label}: nudged scraper loop because browser content is stale`);
   } catch (firstErr) {
-    try {
-      if (!chrome.scripting || !chrome.scripting.executeScript) throw firstErr;
-      await chrome.scripting.executeScript({
-        target: { tabId: tab.id, allFrames: false },
-        files: ["content.js"],
-      });
-      await _sleep(500);
-      await chrome.tabs.sendMessage(tab.id, recoveryMessage);
-      await recordServiceWorkerRecovery(base, tab, platform, "forced_cycle_request_sent", body.force_reason || "browser_content_stale", {
+    const cycleError = firstErr && firstErr.message ? firstErr.message : String(firstErr);
+    const failKey = `${key}:${platform && platform.id ? platform.id : "unknown"}`;
+    const lastFailureAt = Number(lastForcedFailureByTab[failKey] || 0);
+    const failureAgeMs = lastFailureAt ? Date.now() - lastFailureAt : 0;
+    const receiverMissing = isNoReceiverError(firstErr);
+    if (receiverMissing && lastFailureAt && failureAgeMs < FORCED_CYCLE_FAILURE_DEBOUNCE_MS) {
+      await recordServiceWorkerRecovery(base, tab, platform, "forced_cycle_request_debounced", body.force_reason || "browser_content_stale", {
         content_age_seconds: body.content_age_seconds || null,
-        revived_content_script: true,
-        message_type: recoveryMessage.type,
+        cycle_error: cycleError,
+        failure_age_ms: failureAgeMs,
+        no_receiver: true,
       });
-      await log("warn", `${platform.label}: revived content script and nudged stale-content loop`);
-    } catch (e) {
-      const cycleError = e && e.message ? e.message : String(e);
-      const failKey = `${key}:${platform && platform.id ? platform.id : "unknown"}`;
-      const lastFailureAt = Number(lastForcedFailureByTab[failKey] || 0);
-      const failureAgeMs = lastFailureAt ? Date.now() - lastFailureAt : 0;
-      const receiverMissing = isNoReceiverError(e) || isNoReceiverError(firstErr);
-      if (receiverMissing && lastFailureAt && failureAgeMs < FORCED_CYCLE_FAILURE_DEBOUNCE_MS) {
-        await recordServiceWorkerRecovery(base, tab, platform, "forced_cycle_request_debounced", body.force_reason || "browser_content_stale", {
-          content_age_seconds: body.content_age_seconds || null,
-          cycle_error: cycleError,
-          failure_age_ms: failureAgeMs,
-          no_receiver: true,
-        });
-        return;
-      }
-      lastForcedFailureByTab[failKey] = Date.now();
-      await recordServiceWorkerRecovery(base, tab, platform, "forced_cycle_request_failed", body.force_reason || "browser_content_stale", {
+      return;
+    }
+    lastForcedFailureByTab[failKey] = Date.now();
+    await recordServiceWorkerRecovery(base, tab, platform, "forced_cycle_request_failed", body.force_reason || "browser_content_stale", {
+      content_age_seconds: body.content_age_seconds || null,
+      cycle_error: cycleError,
+      no_receiver: receiverMissing || null,
+    });
+    try {
+      const reloaded = await hardRefreshForcedCycleTab(base, tab, platform, receiverMissing ? "content_script_receiver_missing" : "failed_force_message", {
         content_age_seconds: body.content_age_seconds || null,
         cycle_error: cycleError,
         no_receiver: receiverMissing || null,
       });
-      try {
-        const reloaded = await hardRefreshForcedCycleTab(base, tab, platform, "failed_force_message", {
-          content_age_seconds: body.content_age_seconds || null,
-          cycle_error: cycleError,
-        });
-        if (reloaded) {
-          await log("warn", `${platform.label}: stale-content forced scrape failed; hard-refreshed tab (${cycleError})`);
-        } else {
-          await log("warn", `${platform.label}: stale-content forced scrape failed; reload already debounced (${cycleError})`);
-        }
-      } catch (reloadErr) {
-        await log("warn", `${platform.label}: stale-content forced scrape failed and hard-refresh failed: ${reloadErr && reloadErr.message ? reloadErr.message : reloadErr}`);
+      if (reloaded) {
+        await log("warn", `${platform.label}: stale-content forced scrape failed; hard-refreshed tab instead of reinjecting content.js (${cycleError})`);
+      } else {
+        await log("warn", `${platform.label}: stale-content forced scrape failed; reload already debounced (${cycleError})`);
       }
+    } catch (reloadErr) {
+      await log("warn", `${platform.label}: stale-content forced scrape failed and hard-refresh failed: ${reloadErr && reloadErr.message ? reloadErr.message : reloadErr}`);
     }
   }
 }
@@ -883,16 +868,21 @@ async function ensureLoops(reason) {
       await chrome.tabs.sendMessage(t.id, { type: forceCycle ? "scrapeCycle" : "ensureLoop", reason });
     } catch (firstErr) {
       try {
-        if (!chrome.scripting || !chrome.scripting.executeScript) throw firstErr;
-        await chrome.scripting.executeScript({
-          target: { tabId: t.id, allFrames: false },
-          files: ["content.js"],
-        });
-        await _sleep(500);
-        await chrome.tabs.sendMessage(t.id, { type: forceCycle ? "scrapeCycle" : "ensureLoop", reason });
-        await log("info", `revived content scraper in tab ${t.id} (${reason})`);
+        const platform = platformForTabUrl(t.url);
+        const receiverMissing = isNoReceiverError(firstErr);
+        if (platform && receiverMissing) {
+          const base = await ingestBase();
+          await recordServiceWorkerRecovery(base, t, platform, "content_script_missing_refresh", reason || "ensure_loop", {
+            cycle_error: firstErr && firstErr.message ? firstErr.message : String(firstErr),
+            no_receiver: true,
+          });
+          await chrome.tabs.reload(t.id, { bypassCache: true });
+          await log("warn", `content scraper missing in tab ${t.id}; hard-refreshed instead of reinjecting content.js (${reason})`);
+        } else {
+          throw firstErr;
+        }
       } catch (e) {
-        await log("warn", `content scraper revive failed for tab ${t.id}: ${e && e.message ? e.message : e}`);
+        await log("warn", `content scraper recovery failed for tab ${t.id}: ${e && e.message ? e.message : e}`);
       }
     }
   }
