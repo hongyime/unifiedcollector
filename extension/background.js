@@ -504,6 +504,8 @@ async function refreshScraperTabs(options = {}) {
   _tabsOpInProgress = true;
   const bypassCache = !!options.bypassCache;
   const reason = options.reason || "refresh";
+  const requestedGapMs = Number(options.gapMs);
+  const gapMs = Number.isFinite(requestedGapMs) && requestedGapMs >= 250 ? requestedGapMs : 8000;
   let reloaded = 0;
   let errors = 0;
   try {
@@ -512,13 +514,13 @@ async function refreshScraperTabs(options = {}) {
       try {
         await chrome.tabs.reload(t.id, { bypassCache });
         reloaded++;
-        await _sleep(_humanGap(8000));
+        await _sleep(_humanGap(gapMs));
       } catch (e) {
         errors++;
       }
     }
     const mode = bypassCache ? "hard-refreshed" : "auto-refreshed";
-    await log("info", `${mode} ${tabs ? tabs.length : 0} scraper tab(s), staggered → loop respawns fresh (${reason})`);
+    await log("info", `${mode} ${tabs ? tabs.length : 0} scraper tab(s), staggered ${gapMs}ms → loop respawns fresh (${reason})`);
     return { ok: true, reloaded, errors, tabs: tabs ? tabs.length : 0 };
   } finally { _tabsOpInProgress = false; }
 }
@@ -563,7 +565,8 @@ async function performStartupRecovery(reason, options = {}) {
   await reportScraperTabHeartbeats(reason)
     .catch((e) => log("warn", `${reason} scraper heartbeat failed: ${e && e.message ? e.message : e}`));
   if (refreshTabs) {
-    await refreshScraperTabs({ bypassCache: true, force, reason })
+    const refreshGapMs = Number.isFinite(Number(options.refreshGapMs)) ? Number(options.refreshGapMs) : 1500;
+    await refreshScraperTabs({ bypassCache: true, force, reason, gapMs: refreshGapMs })
       .catch((e) => log("warn", `${reason} tab refresh failed: ${e && e.message ? e.message : e}`));
     await reportScraperTabHeartbeats(reason + "_refresh")
       .catch((e) => log("warn", `${reason} refresh heartbeat failed: ${e && e.message ? e.message : e}`));
@@ -585,7 +588,7 @@ async function performStartupRecovery(reason, options = {}) {
 // them dead until the 75-min auto-refresh. This is the "I reloaded the extension and
 // scraping stopped" fix.
 chrome.runtime.onInstalled.addListener(() => {
-  runStartupRecovery("installed", { force: true, refreshTabs: true, retries: 2 });
+  runStartupRecovery("installed", { force: true, refreshTabs: true, refreshGapMs: 1500, retries: 2 });
 });
 chrome.runtime.onStartup.addListener(() => {
   runStartupRecovery("startup", { force: false, refreshTabs: false, retries: 2 });
@@ -1643,6 +1646,7 @@ async function consumeReloadIntent() {
     runStartupRecovery("manual_extension_reload", {
       force: intent && intent.force_open_all !== false,
       refreshTabs: true,
+      refreshGapMs: 1500,
       retries: 3,
     })
       .catch((e) => log("warn", `reload-intent recovery failed: ${e && e.message ? e.message : e}`));
@@ -1680,7 +1684,7 @@ async function rememberExtensionVersion() {
       const from = versionState.previous || "unknown";
       await log("info", `extension version changed ${from} -> ${versionState.version}; hard-refreshing scraper tabs`);
       setTimeout(() => {
-        runStartupRecovery("version_changed", { force: true, refreshTabs: true, retries: 3 })
+        runStartupRecovery("version_changed", { force: true, refreshTabs: true, refreshGapMs: 1500, retries: 3 })
           .catch((e) => log("warn", `version-change recovery failed: ${e && e.message ? e.message : e}`));
       }, 500);
     } else {
