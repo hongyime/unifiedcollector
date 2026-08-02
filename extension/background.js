@@ -172,12 +172,15 @@ async function reportScraperTabHeartbeats(reason) {
   let sent = 0;
   let failed = 0;
   let lastError = null;
+  let canonical = 0;
+  let skipped = 0;
   try {
     const allTabs = await chrome.tabs.query({ url: scraperUrlPatterns() });
-    const tabs = (allTabs || [])
-      .map((tab) => ({ tab, platform: platformForTabUrl(tab.url) }))
-      .filter((row) => row.platform);
-    seen = tabs.length;
+    const selection = selectCanonicalScraperTabRows(allTabs);
+    const tabs = selection.rows;
+    seen = selection.seen;
+    canonical = tabs.length;
+    skipped = selection.skipped;
     await mapLimit(tabs, SCRAPER_HEARTBEAT_CONCURRENCY, async ({ tab, platform }) => {
       try {
         const result = await postJsonWithTimeout(base + "/social/browser-heartbeat", withExtensionVersion({
@@ -205,6 +208,8 @@ async function reportScraperTabHeartbeats(reason) {
     lastScraperHeartbeatSeen: seen,
     lastScraperHeartbeatSent: sent,
     lastScraperHeartbeatFailed: failed,
+    lastScraperHeartbeatCanonical: canonical,
+    lastScraperHeartbeatSkippedDuplicates: skipped,
     lastScraperHeartbeatError: lastError,
     lastScraperHeartbeatBase: base,
     lastScraperHeartbeatReason: reason || "background_watchdog",
@@ -426,6 +431,74 @@ async function mapLimit(items, limit, worker) {
 // tab is never duplicated.
 const _tpath = (u) => { try { return new URL(u).pathname.split("?")[0].replace(/\/$/, "") || "/"; } catch (e) { return "/"; } };
 const _mainWorldHookHostRe = /(^|\.)((instagram|tiktok|strava)\.com|threads\.com|x\.com|twitter\.com|facebook\.com)$/i;
+
+function scraperTabRows(tabs) {
+  return (tabs || [])
+    .map((tab) => ({ tab, platform: platformForTabUrl(tab.url) }))
+    .filter((row) => row.platform && row.tab && row.tab.id != null);
+}
+
+function platformTargetPaths(platform) {
+  if (!platform) return [];
+  return [platform.url, ...((platform.extraUrls || []))]
+    .filter(Boolean)
+    .map(_tpath);
+}
+
+function canonicalTabKey(row) {
+  const platform = row && row.platform;
+  const tab = row && row.tab;
+  if (!platform || !tab) return null;
+  const targets = platformTargetPaths(platform);
+  if (targets.length <= 1) return platform.id;
+  const path = _tpath(tab.url || "");
+  const matched = targets.find((want) => path === want || (want !== "/" && path.startsWith(want)));
+  return `${platform.id}:${matched || path}`;
+}
+
+function canonicalTabScore(row) {
+  const tab = row && row.tab ? row.tab : {};
+  const path = _tpath(tab.url || "");
+  const targets = platformTargetPaths(row && row.platform);
+  let score = 0;
+  if (tab.status === "complete") score += 50;
+  if (!tab.discarded) score += 20;
+  if (tab.active) score += 10;
+  if (tab.pinned) score += 5;
+  if (targets.some((want) => path === want)) score += 8;
+  else if (targets.some((want) => want !== "/" && path.startsWith(want))) score += 4;
+  return score;
+}
+
+function selectCanonicalScraperTabRows(tabs) {
+  const rows = scraperTabRows(tabs);
+  const byKey = new Map();
+  let skipped = 0;
+  for (const row of rows) {
+    const key = canonicalTabKey(row);
+    if (!key) continue;
+    const cur = byKey.get(key);
+    if (!cur) {
+      byKey.set(key, row);
+      continue;
+    }
+    const rowScore = canonicalTabScore(row);
+    const curScore = canonicalTabScore(cur);
+    const rowId = Number(row.tab && row.tab.id);
+    const curId = Number(cur.tab && cur.tab.id);
+    if (rowScore > curScore || (rowScore === curScore && rowId < curId)) {
+      byKey.set(key, row);
+    }
+    skipped++;
+  }
+  const selected = Array.from(byKey.values()).sort((a, b) => {
+    const ak = canonicalTabKey(a) || "";
+    const bk = canonicalTabKey(b) || "";
+    return ak.localeCompare(bk);
+  });
+  return { rows: selected, seen: rows.length, skipped };
+}
+
 function shouldNormalizeSingleFeedTab(p, tab, reason) {
   if (!p || p.id !== "x" || !tab || !tab.url) return false;
   const path = _tpath(tab.url);
@@ -509,7 +582,9 @@ async function refreshScraperTabs(options = {}) {
   let reloaded = 0;
   let errors = 0;
   try {
-    const tabs = await chrome.tabs.query({ url: scraperUrlPatterns() });
+    const allTabs = await chrome.tabs.query({ url: scraperUrlPatterns() });
+    const selection = selectCanonicalScraperTabRows(allTabs);
+    const tabs = selection.rows.map((row) => row.tab);
     for (const t of tabs || []) {
       try {
         await chrome.tabs.reload(t.id, { bypassCache });
@@ -520,8 +595,8 @@ async function refreshScraperTabs(options = {}) {
       }
     }
     const mode = bypassCache ? "hard-refreshed" : "auto-refreshed";
-    await log("info", `${mode} ${tabs ? tabs.length : 0} scraper tab(s), staggered ${gapMs}ms → loop respawns fresh (${reason})`);
-    return { ok: true, reloaded, errors, tabs: tabs ? tabs.length : 0 };
+    await log("info", `${mode} ${tabs ? tabs.length : 0}/${selection.seen} canonical scraper tab(s), skipped ${selection.skipped} duplicate(s), staggered ${gapMs}ms → loop respawns fresh (${reason})`);
+    return { ok: true, reloaded, errors, tabs: tabs ? tabs.length : 0, totalTabs: selection.seen, skippedDuplicates: selection.skipped };
   } finally { _tabsOpInProgress = false; }
 }
 
@@ -783,8 +858,10 @@ async function runPageRecovery(tabId) {
 // lives inside the loop (rate-limited + jittered).
 async function ensureLoops(reason) {
   const forceCycle = /browser_content_stale|manual|scrape|tabs_page|stale/i.test(reason || "");
-  const tabs = await chrome.tabs.query({ url: scraperUrlPatterns() });
-  if (!tabs || !tabs.length) {
+  const allTabs = await chrome.tabs.query({ url: scraperUrlPatterns() });
+  const selection = selectCanonicalScraperTabRows(allTabs);
+  const tabs = selection.rows.map((row) => row.tab);
+  if (!selection.seen) {
     await log("warn", `no scraper tab open — paused (${reason}). Open one via 🗂 Manage social tabs.`);
     await setStatus({ loopRunning: false });
     return false;
