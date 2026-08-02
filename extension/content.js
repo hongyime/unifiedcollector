@@ -2632,9 +2632,20 @@ function currentPlatform() {
 // service-worker watchdog re-nudges any open tab that isn't looping.
 // ===========================================================================
 let LOOP_RUNNING = false;
+let LOOP_STARTED_AT = 0;
+let LOOP_LAST_PROGRESS_AT = 0;
 let ONE_SHOT_RUNNING = false;
 let ONE_SHOT_STARTED_AT = 0;
 let ONE_SHOT_REASON = "";
+const LOOP_STALE_MS = 8 * 60 * 1000;
+const LOOP_STALE_MS_BY_PLATFORM = {
+  x: 4 * 60 * 1000,
+  facebook: 4 * 60 * 1000,
+  tiktok: 5 * 60 * 1000,
+  lemon8: 5 * 60 * 1000,
+  threads: 5 * 60 * 1000,
+  strava: 6 * 60 * 1000,
+};
 const ONE_SHOT_STALE_MS = 8 * 60 * 1000;
 const ONE_SHOT_STALE_MS_BY_PLATFORM = {
   x: 3 * 60 * 1000,
@@ -2660,6 +2671,19 @@ function oneShotTimeoutMs(platformId) {
 
 function oneShotStaleMs(platformId) {
   return ONE_SHOT_STALE_MS_BY_PLATFORM[platformId] || ONE_SHOT_STALE_MS;
+}
+
+function loopStaleMs(platformId) {
+  return LOOP_STALE_MS_BY_PLATFORM[platformId] || LOOP_STALE_MS;
+}
+
+function markLoopProgress() {
+  LOOP_LAST_PROGRESS_AT = Date.now();
+}
+
+function loopProgressAgeMs() {
+  const anchor = Math.max(LOOP_LAST_PROGRESS_AT || 0, LOOP_STARTED_AT || 0);
+  return anchor ? Date.now() - anchor : 0;
 }
 
 function deferBrowserMediaRevisitForForcedRecovery(platform) {
@@ -2700,6 +2724,8 @@ async function mainLoop() {
   if (!p) return;
   if (LOOP_RUNNING) return;            // one loop per tab
   LOOP_RUNNING = true;
+  LOOP_STARTED_AT = Date.now();
+  markLoopProgress();
   clog("info", `${p.label} loop started — continuous & human-paced (no fixed timer)`, p.label);
   await send({ type: "loopStatus", platform: p.id, label: p.label, running: true, url: location.href }).catch(() => {});
   try {
@@ -2707,6 +2733,7 @@ async function mainLoop() {
       try {
         const leftMs = wallLeftMs(p.id);
         if (leftMs > 0) {
+          markLoopProgress();
           const now = Date.now();
           if (!LAST_WALL_LOG_AT[p.id] || now - LAST_WALL_LOG_AT[p.id] > WALL_LOG_GAP_MS) {
             LAST_WALL_LOG_AT[p.id] = now;
@@ -2717,6 +2744,7 @@ async function mainLoop() {
         }
         const shell = detectRecoverablePageShell(p.id);
         if (shell) {
+          markLoopProgress();
           const recovery = await reportRecoverablePageShell(p, shell);
           if (recovery && recovery.cooldown_mins) {
             setWall(p.id, recovery.cooldown_mins);
@@ -2725,7 +2753,9 @@ async function mainLoop() {
           await sleep(human(Math.max(30000, Math.min(delay, 300000))));
           continue;
         }
+        markLoopProgress();
         const stats = await p.runCycle();  // one pass: IG = a few profiles; others = scrape current page
+        markLoopProgress();
         if (!stats || !stats.skip_cycle_report) {
           await send({ type: "cycleReport", platform: p.label, ...stats }).catch(() => {});
         }
@@ -2740,11 +2770,14 @@ async function mainLoop() {
         await sleep(human(60000));
       }
       // heartbeat so the popup shows the loop is alive between passes
+      markLoopProgress();
       await send({ type: "loopStatus", platform: p.id, label: p.label, running: true, url: location.href }).catch(() => {});
       await sleep(human(passRestMs(p.id))); // long human rest between passes
     }
   } finally {
     LOOP_RUNNING = false;
+    LOOP_STARTED_AT = 0;
+    LOOP_LAST_PROGRESS_AT = 0;
     await send({ type: "loopStatus", platform: p.id, label: p.label, running: false, url: location.href }).catch(() => {});
   }
 }
@@ -2767,6 +2800,8 @@ async function reportForcedCycleHealth(p, status, reason, extra = {}) {
     title: document.title || "",
     content_counts: pageContentCounts(),
     loop_running: LOOP_RUNNING,
+    loop_age_ms: LOOP_STARTED_AT ? Date.now() - LOOP_STARTED_AT : 0,
+    loop_progress_age_ms: loopProgressAgeMs(),
     one_shot_running: ONE_SHOT_RUNNING,
     one_shot_age_ms: ONE_SHOT_RUNNING && ONE_SHOT_STARTED_AT ? Date.now() - ONE_SHOT_STARTED_AT : 0,
     ...extra,
@@ -2856,9 +2891,29 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg) return;
   // "ensureLoop" (watchdog / manual Scrape-now): start the loop if it isn't running.
   if (msg.type === "ensureLoop" || msg.type === "scrapeCycle") {
-    sendResponse({ ok: true, running: LOOP_RUNNING, forced: msg.type === "scrapeCycle" });
+    const p = currentPlatform();
+    const progressAgeMs = loopProgressAgeMs();
+    const staleMs = loopStaleMs(p && p.id);
+    sendResponse({
+      ok: true,
+      running: LOOP_RUNNING,
+      forced: msg.type === "scrapeCycle",
+      loop_progress_age_ms: progressAgeMs,
+      stale_after_ms: staleMs,
+    });
     if (msg.type === "scrapeCycle") runOneShotCycle(msg.reason || "manual");
     else if (!LOOP_RUNNING) mainLoop();
+    else if (/browser_content_stale|stale/i.test(msg.reason || "") && progressAgeMs > staleMs) {
+      reportForcedCycleHealth(p, "loop_stale_reloading", msg.reason || "browser_content_stale", {
+        loop_progress_age_ms: progressAgeMs,
+        stale_after_ms: staleMs,
+      }).finally(() => scheduleOneShotReload(p, "loop stale"));
+    } else if (/browser_content_stale|stale/i.test(msg.reason || "")) {
+      reportForcedCycleHealth(p, "ensure_loop_already_running", msg.reason || "browser_content_stale", {
+        loop_progress_age_ms: progressAgeMs,
+        stale_after_ms: staleMs,
+      });
+    }
     return false;
   }
 });

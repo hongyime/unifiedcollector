@@ -290,7 +290,7 @@ async function maybeForceScrapeCycle(tab, platform, responseBody, reason, base =
   }
   if (lastForcedAt && forcedAgeMs < FORCED_CYCLE_DEBOUNCE_MS) return;
   const recoveryMessage = {
-    type: "ensureLoop",
+    type: "scrapeCycle",
     reason: body.force_reason || "browser_content_stale",
     content_age_seconds: body.content_age_seconds || null,
   };
@@ -746,7 +746,7 @@ async function runPageRecovery(tabId) {
 // crash) or the service worker had been asleep. No scrape cadence here — pacing
 // lives inside the loop (rate-limited + jittered).
 async function ensureLoops(reason) {
-  const forceCycle = false;
+  const forceCycle = /browser_content_stale|manual|scrape|tabs_page|stale/i.test(reason || "");
   const tabs = await chrome.tabs.query({ url: scraperUrlPatterns() });
   if (!tabs || !tabs.length) {
     await log("warn", `no scraper tab open — paused (${reason}). Open one via 🗂 Manage social tabs.`);
