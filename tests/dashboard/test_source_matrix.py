@@ -377,6 +377,53 @@ def test_source_matrix_blocker_reports_auth_error():
     assert "auth" in blocker["next_action"].lower()
 
 
+def test_source_matrix_blocker_reports_recent_429_as_rate_limit_not_auth():
+    blocker = _source_matrix_blocker(
+        _source(status="stale"),
+        rate_row={
+            "active_now": False,
+            "access_errors": 1,
+            "latest_status_code": 429,
+            "latest_account": "tiktok_bryanseah234",
+            "latest_scope": "gallery-dl_local",
+            "latest_reason": "local tool output matched rate-limit signature",
+        },
+        cursor_row=None,
+        extension_issues=[],
+    )
+
+    assert blocker["kind"] == "rate_limit_recent"
+    assert blocker["severity"] == "warning"
+    assert "429" in blocker["summary"]
+    assert "bad login" in blocker["next_action"]
+
+
+def test_source_matrix_blocker_prioritizes_extension_action_over_inactive_429():
+    blocker = _source_matrix_blocker(
+        _source(status="degraded"),
+        rate_row={
+            "active_now": False,
+            "access_errors": 1,
+            "latest_status_code": "429",
+            "latest_reason": "local tool output matched rate-limit signature",
+        },
+        cursor_row=None,
+        extension_issues=[
+            {
+                "kind": "extension_version_mismatch",
+                "endpoint": "browser_heartbeat",
+                "extension_version": "1.21.95",
+                "expected_version": "1.21.97",
+                "needs_new_event": True,
+            }
+        ],
+    )
+
+    assert blocker["kind"] == "extension_version_mismatch"
+    assert blocker["severity"] == "warning"
+    assert "expected v1.21.97" in blocker["summary"]
+
+
 def test_source_matrix_blocker_does_not_block_live_source_for_rotated_auth_event():
     blocker = _source_matrix_blocker(
         _source(status="live"),

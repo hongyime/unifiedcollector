@@ -1591,6 +1591,13 @@ def _short_age(seconds: object) -> str | None:
     return f"{hours // 24}d"
 
 
+def _int_or_none(value) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _is_beeper_subsource_row(source_row: dict) -> bool:
     source = str(source_row.get("source") or "")
     return source.startswith(_BEEPER_SUBSOURCE_PREFIX) or source_row.get("parent_source") == "beeper"
@@ -1687,12 +1694,28 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
         }
     if rate_row and int(rate_row.get("access_errors") or 0) > 0 and status != "live":
         status_code = rate_row.get("latest_status_code")
-        return {
-            "kind": "auth_or_access",
-            "severity": "error",
-            "summary": rate_row.get("latest_reason") or f"Latest HTTP access event was {status_code}.",
-            "next_action": "Refresh auth cookies/session or inspect the account-specific scraper log.",
-        }
+        latest_is_429 = _int_or_none(status_code) == 429
+        if latest_is_429 and not extension_issues:
+            scope = " / ".join(
+                str(v) for v in (rate_row.get("latest_account"), rate_row.get("latest_scope")) if v
+            )
+            return {
+                "kind": "rate_limit_recent",
+                "severity": "warning",
+                "summary": (
+                    f"Recent HTTP 429 pressure"
+                    f"{' for ' + scope if scope else ''}: "
+                    f"{rate_row.get('latest_reason') or 'rate limit detected'}."
+                ),
+                "next_action": "Let the collector backoff continue; do not treat this as a bad login unless 401/403 errors appear.",
+            }
+        if not latest_is_429:
+            return {
+                "kind": "auth_or_access",
+                "severity": "error",
+                "summary": rate_row.get("latest_reason") or f"Latest HTTP access event was {status_code}.",
+                "next_action": "Refresh auth cookies/session or inspect the account-specific scraper log.",
+            }
     if extension_issues:
         issue = extension_issues[0]
         age_text = _short_age(issue.get("age_seconds"))
