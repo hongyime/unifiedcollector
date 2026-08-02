@@ -25,6 +25,28 @@ def test_whatsapp_bridge_summary_reports_unpaired_qr_loop():
     assert "QR pairing" in summary["detail"]
 
 
+def test_whatsapp_bridge_summary_treats_qr_refresh_states_as_unpaired():
+    summary = summarize_whatsapp_bridge_health([
+        {
+            "bridge": "1",
+            "ok": True,
+            "status": "refreshing_qr",
+            "whatsapp_ready": False,
+            "qr_available": False,
+            "last_disconnect_reason": "QR refs attempts ended",
+        },
+        {
+            "bridge": "2",
+            "ok": True,
+            "status": "connecting_unpaired",
+            "whatsapp_ready": False,
+            "qr_available": False,
+        },
+    ])
+
+    assert summary["status"] == "unpaired"
+
+
 def test_whatsapp_bridge_summary_reports_paired_if_any_slot_ready():
     summary = summarize_whatsapp_bridge_health([
         {"bridge": "1", "ok": True, "status": "ready", "whatsapp_ready": True},

@@ -49,9 +49,19 @@ def summarize_whatsapp_bridge_health(states: list[dict[str, Any]]) -> dict[str, 
         s for s in reachable
         if s.get("whatsapp_ready") is True or s.get("ready") is True or s.get("connected") is True
     ]
+    qr_waiting_statuses = {
+        "awaiting_scan",
+        "connecting_unpaired",
+        "pairing",
+        "qr",
+        "qr_expired",
+        "refreshing_qr",
+    }
     qr_waiting = [
         s for s in reachable
-        if s.get("qr_available") is True or str(s.get("status") or "").lower() in {"awaiting_scan", "qr", "pairing"}
+        if s.get("qr_available") is True
+        or str(s.get("status") or "").lower() in qr_waiting_statuses
+        or "qr" in str(s.get("last_disconnect_reason") or "").lower()
     ]
 
     if ready:
