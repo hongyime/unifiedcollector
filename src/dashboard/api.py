@@ -1698,6 +1698,23 @@ def _source_matrix_primary_extension_issue(extension_issues: list[dict]) -> dict
     )
 
 
+def _source_matrix_filter_extension_issues_for_current_content(
+    extension_issues: list[dict],
+    current_content: dict | None,
+) -> list[dict]:
+    current = current_content or {}
+    has_current_content = any(
+        int(current.get(key) or 0) > 0
+        for key in ("records", "messages", "media_items")
+    )
+    if not has_current_content:
+        return extension_issues
+    return [
+        issue for issue in extension_issues
+        if issue.get("kind") != "browser_content_stale"
+    ]
+
+
 def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: dict | None,
                            extension_issues: list[dict]) -> dict:
     source = source_row.get("source")
@@ -2052,6 +2069,10 @@ def _source_matrix_row(source_row: dict, current_content: dict | None, current_r
                        day_content: dict | None, day_rate: dict | None, media_total: dict | None,
                        cursor_row: dict | None, extension_issues: list[dict],
                        now: datetime | None = None, media_backlog: dict | None = None) -> dict:
+    extension_issues = _source_matrix_filter_extension_issues_for_current_content(
+        extension_issues,
+        current_content,
+    )
     blocker = _source_matrix_blocker(source_row, day_rate, cursor_row, extension_issues)
     source = source_row.get("source")
     total_media = media_total or {}

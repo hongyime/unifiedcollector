@@ -579,6 +579,31 @@ def test_source_matrix_row_labels_live_source_degraded_when_extension_blocked():
     assert row["blocker"]["kind"] == "extension_version_mismatch"
 
 
+def test_source_matrix_row_suppresses_stale_browser_content_when_current_media_flows():
+    row = _source_matrix_row(
+        _source(source="threads"),
+        current_content={"records": 0, "messages": 0, "media_items": 10},
+        current_rate=None,
+        day_content={"records": 20, "messages": 0, "media_items": 18},
+        day_rate=None,
+        media_total={"total_media_items": 3417},
+        cursor_row=None,
+        extension_issues=[
+            {
+                "kind": "browser_content_stale",
+                "platform": "threads",
+                "detail": "Browser tab heartbeat is fresh, but no useful content has arrived.",
+                "content_age_seconds": 7200,
+            }
+        ],
+    )
+
+    assert row["status"] == "live"
+    assert row["status_label"] == "live"
+    assert row["blocker"]["kind"] == "none"
+    assert row["extension_issues"] == []
+
+
 def test_source_matrix_reports_media_quiet_without_blocking_live_rows():
     now = datetime(2026, 7, 28, 1, 30, tzinfo=timezone.utc)
     row = _source_matrix_row(
