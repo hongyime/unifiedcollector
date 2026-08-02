@@ -567,7 +567,38 @@ async def test_collect_continues_messages_when_chat_enumeration_times_out(monkey
     assert stats["messages_inserted"] == 4
     assert stats["transient"] == 1
     assert stats["errors"] == 0
-    assert events == ["chats", "messages"]
+    assert events == ["messages", "chats"]
+
+
+@pytest.mark.asyncio
+async def test_collect_cools_optional_chat_phase_after_timeout(monkeypatch, tmp_path):
+    monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
+    monkeypatch.setenv("COLLECTOR_DRIVE_PATH", str(tmp_path))
+    monkeypatch.setenv("BEEPER_CHATS_TIMEOUT", "0.01")
+    monkeypatch.setenv("BEEPER_OPTIONAL_PHASE_TIMEOUT_COOLDOWN_SECONDS", "60")
+    monkeypatch.setenv("BEEPER_NETWORK_REPAIR_LIMIT", "0")
+
+    pool, _conn = _mock_pool()
+    coll = BeeperCollector(client=MagicMock(spec=BeeperClient))
+    coll.set_pool(pool)
+    coll._api_cooldown_restored = True
+    coll._sync_accounts = AsyncMock(return_value=1)
+    coll._sync_messages = AsyncMock(return_value=4)
+
+    async def _slow_chats():
+        await asyncio.sleep(10)
+        return 99
+
+    coll._sync_chats = AsyncMock(side_effect=_slow_chats)
+
+    first = await coll.collect([])
+    second = await coll.collect([])
+
+    assert first["messages_inserted"] == 4
+    assert first["transient"] == 1
+    assert second["messages_inserted"] == 4
+    assert second["transient"] == 0
+    assert coll._sync_chats.await_count == 1
 
 
 @pytest.mark.asyncio

@@ -77,6 +77,13 @@ def _format_exception(exc: BaseException) -> str:
     return f"{name}: {detail}" if detail else name
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _beeper_backfill_candidate_limit(batch_size: int) -> int:
     raw = os.getenv("BEEPER_BACKFILL_CANDIDATE_MESSAGES")
     if raw:
@@ -936,6 +943,7 @@ class BeeperCollector(BaseCollector):
         self._writer_override = writer
         self._api_cooldown_until = 0.0
         self._api_cooldown_restored = False
+        self._optional_phase_cooldowns: dict[str, float] = {}
 
     @property
     def writer(self) -> Optional[BeeperWriter]:
@@ -1007,13 +1015,47 @@ class BeeperCollector(BaseCollector):
         except (TypeError, ValueError):
             return 20.0
 
+    def _optional_phase_cooldown_seconds(self) -> float:
+        try:
+            return max(
+                0.0,
+                float(os.getenv("BEEPER_OPTIONAL_PHASE_TIMEOUT_COOLDOWN_SECONDS", "900")),
+            )
+        except (TypeError, ValueError):
+            return 900.0
+
+    def _phase_cooling_down(self, phase: str) -> bool:
+        until = self._optional_phase_cooldowns.get(phase, 0.0)
+        if until <= time.time():
+            self._optional_phase_cooldowns.pop(phase, None)
+            return False
+        remaining = int(until - time.time())
+        logger.info("Beeper %s phase skipped; optional phase cooling down for %ds", phase, remaining)
+        return True
+
+    def _cool_optional_phase(self, phase: str) -> None:
+        cooldown = self._optional_phase_cooldown_seconds()
+        if cooldown <= 0:
+            return
+        self._optional_phase_cooldowns[phase] = time.time() + cooldown
+
     def _phase_timeout(self, phase: str, default: float) -> float:
         try:
             return max(0.0, float(os.getenv(f"BEEPER_{phase.upper()}_TIMEOUT", str(default))))
         except (TypeError, ValueError):
             return default
 
-    async def _run_optional_phase(self, phase: str, awaitable, timeout: float) -> tuple[int, BaseException | None]:
+    async def _run_optional_phase(
+        self,
+        phase: str,
+        awaitable,
+        timeout: float,
+        *,
+        cooldown_on_transient: bool = False,
+    ) -> tuple[int, BaseException | None]:
+        if cooldown_on_transient and self._phase_cooling_down(phase):
+            awaitable.close()
+            return 0, None
         try:
             if timeout > 0:
                 return int(await asyncio.wait_for(awaitable, timeout=timeout) or 0), None
@@ -1024,6 +1066,8 @@ class BeeperCollector(BaseCollector):
                 phase,
                 _format_exception(exc),
             )
+            if cooldown_on_transient:
+                self._cool_optional_phase(phase)
             return 0, exc
 
     async def _restore_api_cooldown(self) -> None:
@@ -1089,33 +1133,58 @@ class BeeperCollector(BaseCollector):
             logger.info("Beeper: %s", self._intentional_idle_reason)
             return stats
         try:
-            phase = "accounts"
-            stats["accounts"], phase_error = await self._run_optional_phase(
-                phase,
-                self._sync_accounts(),
-                self._phase_timeout("accounts", 30.0),
-            )
-            if phase_error:
-                stats["transient"] += 1
-            phase = "chats"
-            stats["chats"], phase_error = await self._run_optional_phase(
-                phase,
-                self._sync_chats(),
-                self._phase_timeout("chats", 120.0),
-            )
-            if phase_error:
-                stats["transient"] += 1
-            phase = "messages"
-            stats["messages_inserted"], phase_error = await self._run_optional_phase(
-                phase,
-                self._sync_messages(),
-                self._phase_timeout("messages", 900.0),
-            )
-            if phase_error:
-                stats["transient"] += 1
+            message_phase_error: BaseException | None = None
+
+            async def run_accounts() -> BaseException | None:
+                stats["accounts"], error = await self._run_optional_phase(
+                    "accounts",
+                    self._sync_accounts(),
+                    self._phase_timeout("accounts", 30.0),
+                    cooldown_on_transient=True,
+                )
+                if error:
+                    stats["transient"] += 1
+                return error
+
+            async def run_chats() -> BaseException | None:
+                stats["chats"], error = await self._run_optional_phase(
+                    "chats",
+                    self._sync_chats(),
+                    self._phase_timeout("chats", 120.0),
+                    cooldown_on_transient=True,
+                )
+                if error:
+                    stats["transient"] += 1
+                return error
+
+            async def run_messages() -> BaseException | None:
+                stats["messages_inserted"], error = await self._run_optional_phase(
+                    "messages",
+                    self._sync_messages(),
+                    self._phase_timeout("messages", 900.0),
+                )
+                if error:
+                    stats["transient"] += 1
+                return error
+
+            if _env_bool("BEEPER_MESSAGES_FIRST", default=True):
+                phase = "messages"
+                message_phase_error = await run_messages()
+                phase = "accounts"
+                await run_accounts()
+                phase = "chats"
+                await run_chats()
+            else:
+                phase = "accounts"
+                await run_accounts()
+                phase = "chats"
+                await run_chats()
+                phase = "messages"
+                message_phase_error = await run_messages()
+
             w = self.writer
             repair_limit = self._network_repair_limit()
-            if w is not None and repair_limit > 0 and not phase_error:
+            if w is not None and repair_limit > 0 and message_phase_error is None:
                 phase = "network_repair"
                 try:
                     stats["networks_repaired"] = await asyncio.wait_for(

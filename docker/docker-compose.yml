@@ -526,10 +526,12 @@ services:
       BEEPER_BACKFILL_PAGES_PER_CYCLE: "4"
       BEEPER_BACKFILL_CANDIDATE_MESSAGES: "1000"
       BEEPER_BACKFILL_QUERY_TIMEOUT: "30"
+      BEEPER_MESSAGES_FIRST: "true"
       BEEPER_ACCOUNTS_TIMEOUT: "20"
       BEEPER_CHATS_TIMEOUT: "90"
       BEEPER_MESSAGES_TIMEOUT: "600"
       BEEPER_CHAT_SYNC_TIMEOUT_SECONDS: "45"
+      BEEPER_OPTIONAL_PHASE_TIMEOUT_COOLDOWN_SECONDS: "900"
       # Keep live message sync ahead of historical network cleanup. The repair
       # runs after message sync and is intentionally bounded so a DB-heavy pass
       # cannot make Beeper look stale.
