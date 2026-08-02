@@ -76,14 +76,18 @@ let lastDisconnectAt: number | null = null;
 let pairingRecoveryUntil: number | null = null;
 let terminalQrPrinted = false;
 let lastFreshQrRequestAt = 0;
+let lastQrEndpointAt = 0;
 const FRESH_QR_MIN_INTERVAL_MS = Number(process.env.WHATSAPP_FRESH_QR_MIN_INTERVAL_MS || 30_000);
 // QR pairing is operator-driven and time-sensitive. If Baileys closes an
 // unpaired socket after "QR refs attempts ended", reconnect quickly so the
 // dashboard does not sit in a no-QR gap for half a minute.
 const UNPAIRED_QR_RECONNECT_MS = Number(process.env.WHATSAPP_UNPAIRED_QR_RECONNECT_MS || 5_000);
+const UNPAIRED_QR_IDLE_RECONNECT_MS = Number(process.env.WHATSAPP_UNPAIRED_QR_IDLE_RECONNECT_MS || 60_000);
+const QR_VIEW_ACTIVE_MS = Number(process.env.WHATSAPP_QR_VIEW_ACTIVE_MS || 120_000);
 const QR_STABILITY_MS = Number(process.env.WHATSAPP_QR_STABILITY_MS || 45_000);
 const AUTH_SCAN_FILE_LIMIT = Number(process.env.WHATSAPP_AUTH_SCAN_FILE_LIMIT || 1000);
 const STALE_UNREGISTERED_AUTH_FILE_THRESHOLD = Number(process.env.WHATSAPP_STALE_UNREGISTERED_AUTH_FILE_THRESHOLD || 1000);
+const AUTH_STATE_CACHE_TTL_MS = Number(process.env.WHATSAPP_AUTH_STATE_CACHE_TTL_MS || 5_000);
 let reconnectTimer: NodeJS.Timeout | null = null;
 let socketEpoch = 0;
 let saveCredsTimer: NodeJS.Timeout | null = null;
@@ -95,8 +99,39 @@ const MAX_RAPID_515 = 3;
 const WINDOW_515_MS = 60_000;
 let lastQrLogAt = 0;
 
+type AuthStateSummary = {
+    session_name: string;
+    auth_path_exists: boolean;
+    creds_json_exists: boolean;
+    creds_json_size: number;
+    creds_json_mtime: string | null;
+    auth_file_count: number;
+    auth_file_count_capped: boolean;
+    auth_non_watermark_file_seen: boolean;
+    has_registered_creds: boolean;
+    has_recoverable_state: boolean;
+    note: string;
+};
+
+let cachedAuthStateSummary: AuthStateSummary | null = null;
+let cachedAuthStateSummaryAt = 0;
+let authStateRefreshTimer: NodeJS.Timeout | null = null;
+
 function isQrRefsExpired(reason: string | null | undefined): boolean {
     return String(reason || '').toLowerCase().includes('qr refs attempts ended');
+}
+
+function qrViewerActive(): boolean {
+    return Date.now() - lastQrEndpointAt < QR_VIEW_ACTIVE_MS;
+}
+
+function nudgePairingIfQrViewerNeedsCode(): void {
+    if (serviceHealthy || latestQr || socketRegistered || reconnectTimer) return;
+    if (connectionState === 'connecting' || connectionState === 'connecting_unpaired' || connectionState === 'awaiting_scan') {
+        return;
+    }
+    connectionState = 'waiting_for_fresh_qr';
+    scheduleReconnect('qr_endpoint_requested', 1000);
 }
 
 type MediaDecryptErrorInfo = {
@@ -151,7 +186,7 @@ function bridgeState() {
     const user = activeSock?.user || null;
     const wid: string | null = user?.id || null;
     const phone_number = wid ? wid.split(':')[0].split('@')[0] : null;
-    const auth_state = authStateSummary();
+    const auth_state = cachedAuthStateSummaryForHealth();
     return {
         status: serviceHealthy ? 'ready' : (latestQr ? 'awaiting_scan' : connectionState),
         whatsapp_ready: serviceHealthy,
@@ -183,6 +218,8 @@ app.get('/ready', (_req, res) => {
     res.status(serviceHealthy ? 200 : 503).json(bridgeState());
 });
 app.get('/qr', (_req, res) => {
+    lastQrEndpointAt = Date.now();
+    nudgePairingIfQrViewerNeedsCode();
     if (serviceHealthy) {
         res.status(200).json({ ...bridgeState(), status: 'already_paired', qr: null, ready: true });
     } else if (latestQr) {
@@ -244,7 +281,8 @@ app.post('/reconnect', (_req, res) => {
 // separate Disconnect control for explicit unpairing; Fresh QR is only a nudge
 // for bridge slots that are already in QR-pairing mode.
 app.post('/fresh-qr', async (_req, res) => {
-    const auth_state = authStateSummary();
+    lastQrEndpointAt = Date.now();
+    const auth_state = refreshAuthStateSummary();
     const registered = Boolean(
         serviceHealthy
         || socketRegistered
@@ -446,7 +484,7 @@ function authDirStats(authPath = currentAuthPath()) {
     return out;
 }
 
-function authStateSummary(authPath = currentAuthPath()) {
+function authStateSummary(authPath = currentAuthPath()): AuthStateSummary {
     let dirStats = {
         auth_path_exists: false,
         auth_file_count: 0,
@@ -498,6 +536,38 @@ function authStateSummary(authPath = currentAuthPath()) {
     return summary;
 }
 
+function refreshAuthStateSummary(): AuthStateSummary {
+    cachedAuthStateSummary = authStateSummary();
+    cachedAuthStateSummaryAt = Date.now();
+    return cachedAuthStateSummary;
+}
+
+function cachedAuthStateSummaryForHealth(): AuthStateSummary {
+    const now = Date.now();
+    if (!cachedAuthStateSummary || now - cachedAuthStateSummaryAt > AUTH_STATE_CACHE_TTL_MS) {
+        return refreshAuthStateSummary();
+    }
+    return cachedAuthStateSummary;
+}
+
+function invalidateAuthStateSummaryCache(): void {
+    cachedAuthStateSummary = null;
+    cachedAuthStateSummaryAt = 0;
+}
+
+function startAuthStateCacheRefresh(): void {
+    if (authStateRefreshTimer) return;
+    refreshAuthStateSummary();
+    authStateRefreshTimer = setInterval(() => {
+        try {
+            refreshAuthStateSummary();
+        } catch (err) {
+            logger.debug({ err }, 'auth state cache refresh failed');
+        }
+    }, Math.max(1000, AUTH_STATE_CACHE_TTL_MS));
+    authStateRefreshTimer.unref?.();
+}
+
 function authStateNeedsCleanPairing(summary = authStateSummary()): boolean {
     return Boolean(
         summary.auth_path_exists
@@ -538,7 +608,9 @@ function clearAuthState(reason = 'manual'): void {
         serviceHealthy = false;
         latestQr = null;
         latestQrAt = null;
+        invalidateAuthStateSummaryCache();
         connectionState = 'auth_cleared';
+        refreshAuthStateSummary();
         logger.info(
             { authPath, archived: Boolean(archivePath), archivePath: archivePath ? path.basename(archivePath) : null },
             'Auth state cleared'
@@ -549,7 +621,7 @@ function clearAuthState(reason = 'manual'): void {
 }
 
 function clearStaleUnregisteredAuthIfNeeded(reason: string): void {
-    const summary = authStateSummary();
+    const summary = refreshAuthStateSummary();
     if (!authStateNeedsCleanPairing(summary)) return;
     logger.warn(
         {
@@ -671,6 +743,7 @@ async function connectToWhatsApp(): Promise<void> {
         isFirstConnect = false;
     }
 
+    refreshAuthStateSummary();
     clearStaleUnregisteredAuthIfNeeded('startup_no_creds');
     const { state, saveCreds } = await getAuthState();
 
@@ -742,6 +815,7 @@ async function connectToWhatsApp(): Promise<void> {
             latestQrAt = now;
             socketRegistered = false;
             connectionState = 'awaiting_scan';
+            refreshAuthStateSummary();
             lastDisconnectStatusCode = null;
             lastDisconnectReason = null;
             lastDisconnectAt = null;
@@ -771,6 +845,8 @@ async function connectToWhatsApp(): Promise<void> {
             serviceHealthy = true;
             socketRegistered = true;
             connectionState = 'open';
+            invalidateAuthStateSummaryCache();
+            refreshAuthStateSummary();
             lastDisconnectStatusCode = null;
             lastDisconnectReason = null;
             lastDisconnectAt = null;
@@ -810,6 +886,7 @@ async function connectToWhatsApp(): Promise<void> {
             const qrWasRecent = Boolean(latestQrAt && Date.now() - latestQrAt < 120_000);
             await flushCredsSave();
             socketRegistered = Boolean(sock.authState.creds.registered);
+            refreshAuthStateSummary();
             // Clear the stale QR — a new one will be emitted by the next
             // connection.update tick if reauth is needed.
             latestQr = null;
@@ -890,8 +967,14 @@ async function connectToWhatsApp(): Promise<void> {
             } else if (qrExpiredBeforeScan) {
                 retryCount = 0;
                 connectionState = 'refreshing_qr';
-                const delay = Math.max(1000, UNPAIRED_QR_RECONNECT_MS);
-                logger.info(`QR expired before scan; refreshing QR in ${Math.round(delay / 1000)}s`);
+                const delay = Math.max(
+                    1000,
+                    qrViewerActive() ? UNPAIRED_QR_RECONNECT_MS : UNPAIRED_QR_IDLE_RECONNECT_MS,
+                );
+                logger.info(
+                    `QR expired before scan; refreshing QR in ${Math.round(delay / 1000)}s`
+                    + (qrViewerActive() ? '' : ' (dashboard QR page idle)')
+                );
                 scheduleReconnect('qr_refs_expired', delay);
             } else {
                 retryCount++;
@@ -920,6 +1003,7 @@ async function shutdown(sessionName: string): Promise<void> {
 }
 
 console.log(`[wa-bridge] starting (session=${process.env.SESSION_NAME || 'default'})...`);
+startAuthStateCacheRefresh();
 connectToWhatsApp().catch((err) => {
     console.error('[FATAL] Failed to start WhatsApp client:', err);
     setTimeout(() => process.exit(1), 500);

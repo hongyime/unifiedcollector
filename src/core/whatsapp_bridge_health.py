@@ -16,14 +16,34 @@ def _bridge_base(bridge: str) -> str:
     return os.getenv(f"WA_BRIDGE_{bridge}_URL", f"http://wa-bridge-{bridge}:3001")
 
 
+def _fetch_json(url: str, timeout: float) -> dict[str, Any]:
+    with urllib.request.urlopen(url, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
 def _fetch_bridge_health(bridge: str, timeout: float) -> dict[str, Any]:
     base = _bridge_base(bridge)
     try:
-        with urllib.request.urlopen(f"{base}/health", timeout=timeout) as response:
-            body = json.loads(response.read().decode("utf-8"))
+        body = _fetch_json(f"{base}/health", timeout)
         return {"bridge": bridge, "ok": True, **body}
-    except Exception as exc:  # noqa: BLE001 - health must be best effort
-        return {"bridge": bridge, "ok": False, "status": "unreachable", "error": str(exc)}
+    except Exception as health_exc:  # noqa: BLE001 - health must be best effort
+        try:
+            livez = _fetch_json(f"{base}/livez", min(timeout, 2))
+            return {
+                "bridge": bridge,
+                "ok": True,
+                "status": "health_timeout_alive",
+                "error": str(health_exc),
+                **livez,
+            }
+        except Exception as live_exc:  # noqa: BLE001 - health must be best effort
+            return {
+                "bridge": bridge,
+                "ok": False,
+                "status": "unreachable",
+                "error": str(live_exc),
+                "health_error": str(health_exc),
+            }
 
 
 async def fetch_whatsapp_bridge_health(timeout: float = 5) -> list[dict[str, Any]]:

@@ -55,3 +55,13 @@ def test_whatsapp_bridge_summary_reports_paired_if_any_slot_ready():
 
     assert summary["status"] == "paired"
     assert summary["ready_count"] == 1
+
+
+def test_whatsapp_bridge_summary_does_not_call_livez_fallback_unreachable():
+    summary = summarize_whatsapp_bridge_health([
+        {"bridge": "1", "ok": True, "status": "health_timeout_alive"},
+        {"bridge": "2", "ok": False, "status": "unreachable", "error": "timed out"},
+    ])
+
+    assert summary["status"] == "degraded"
+    assert summary["reachable_count"] == 1
