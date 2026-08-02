@@ -239,3 +239,88 @@ async def test_watchdog_clears_dlq_marker_after_queue_drains(monkeypatch):
     assert "UPDATE source_health" in query
     assert "LIKE 'dlq backlog:%watchdog%'" in query
     assert args == ("threads",)
+
+
+@pytest.mark.asyncio
+async def test_browser_source_tick_marks_stalled_browser_source(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgres://collector:collector@localhost/unifiedcollector")
+    import src.watchdog.freshness as freshness
+
+    freshness = importlib.reload(freshness)
+    monkeypatch.setattr(freshness, "BROWSER_SOURCE_WATCH_SOURCES", {"facebook"})
+    monkeypatch.setattr(freshness, "_last_browser_source_alert", {})
+
+    degraded: list[tuple[str, str]] = []
+    cleared: list[str] = []
+    notified: list[str] = []
+
+    async def fake_compute_liveness(db):
+        return [
+            {
+                "source": "facebook",
+                "status": "degraded",
+                "detail": "Chrome extension heartbeat is 7200s old (> 3600s)",
+                "browser_heartbeat_age_seconds": 7200,
+                "browser_content_stale": True,
+            }
+        ]
+
+    async def fake_mark_degraded(db, source: str, detail: str) -> None:
+        degraded.append((source, detail))
+
+    async def fake_mark_running(db, source: str) -> None:
+        cleared.append(source)
+
+    async def fake_notify(text: str) -> None:
+        notified.append(text)
+
+    monkeypatch.setattr("src.core.source_freshness.compute_liveness", fake_compute_liveness)
+    monkeypatch.setattr(freshness, "_mark_degraded_browser_source", fake_mark_degraded)
+    monkeypatch.setattr(freshness, "_mark_running_if_browser_watchdog", fake_mark_running)
+    monkeypatch.setattr(freshness, "_notify", fake_notify)
+
+    await freshness._browser_source_tick(object())
+
+    assert degraded == [("facebook", "Chrome extension heartbeat is 7200s old (> 3600s)")]
+    assert cleared == []
+    assert notified
+    assert "facebook browser collection stalled" in notified[0]
+    assert "Container restart will not fix" in notified[0]
+
+
+@pytest.mark.asyncio
+async def test_browser_source_tick_clears_recovered_browser_source(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgres://collector:collector@localhost/unifiedcollector")
+    import src.watchdog.freshness as freshness
+
+    freshness = importlib.reload(freshness)
+    monkeypatch.setattr(freshness, "BROWSER_SOURCE_WATCH_SOURCES", {"facebook"})
+
+    degraded: list[tuple[str, str]] = []
+    cleared: list[str] = []
+
+    async def fake_compute_liveness(db):
+        return [
+            {
+                "source": "facebook",
+                "status": "live",
+                "detail": "newest row is inside the freshness window",
+                "browser_heartbeat_age_seconds": 45,
+                "browser_content_stale": False,
+            }
+        ]
+
+    async def fake_mark_degraded(db, source: str, detail: str) -> None:
+        degraded.append((source, detail))
+
+    async def fake_mark_running(db, source: str) -> None:
+        cleared.append(source)
+
+    monkeypatch.setattr("src.core.source_freshness.compute_liveness", fake_compute_liveness)
+    monkeypatch.setattr(freshness, "_mark_degraded_browser_source", fake_mark_degraded)
+    monkeypatch.setattr(freshness, "_mark_running_if_browser_watchdog", fake_mark_running)
+
+    await freshness._browser_source_tick(object())
+
+    assert degraded == []
+    assert cleared == ["facebook"]

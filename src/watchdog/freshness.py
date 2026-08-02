@@ -164,6 +164,22 @@ _last_restart: dict[str, float] = {}
 _last_cooldown_stale_alert: dict[str, float] = {}
 
 
+# Browser-only / browser-primary source monitoring. The normal CHECKS above can
+# restart containers, but these sources live in Chrome. Restarting a container
+# cannot revive a dead content script, so this path marks/alerts only.
+BROWSER_SOURCE_WATCH_ENABLED = os.getenv("WATCHDOG_BROWSER_SOURCES_ENABLED", "1") == "1"
+BROWSER_SOURCE_ALERT_COOLDOWN = int(os.getenv("WATCHDOG_BROWSER_SOURCE_ALERT_COOLDOWN", "3600"))
+BROWSER_SOURCE_WATCH_SOURCES = {
+    s.strip()
+    for s in os.getenv(
+        "WATCHDOG_BROWSER_SOURCE_SOURCES",
+        "facebook,threads,x,tiktok",
+    ).split(",")
+    if s.strip()
+}
+_last_browser_source_alert: dict[str, float] = {}
+
+
 async def _notify(text: str) -> None:
     """Best-effort Telegram alert. Never raises (notifier is send-only/fail-safe).
 
@@ -243,6 +259,40 @@ async def _mark_running_if_dlq_watchdog(db: asyncpg.Connection, source: str) -> 
         )
     except Exception as e:
         log.error("source_health DLQ recovery update failed for %s: %s", source, e)
+
+
+async def _mark_degraded_browser_source(db: asyncpg.Connection, source: str, detail: str) -> None:
+    note = f"browser capture stalled: {detail} (watchdog)"
+    try:
+        await db.execute(
+            "INSERT INTO source_health (source, status, last_error, updated_at) "
+            "VALUES ($1, 'degraded', $2, NOW()) "
+            "ON CONFLICT (source) DO UPDATE "
+            "SET status='degraded', last_error=$2, updated_at=NOW()",
+            source, note,
+        )
+    except Exception as e:
+        log.error("source_health browser upsert failed for %s: %s", source, e)
+
+
+async def _mark_running_if_browser_watchdog(db: asyncpg.Connection, source: str) -> None:
+    try:
+        await db.execute(
+            """
+            UPDATE source_health
+            SET status='running',
+                last_error=NULL,
+                crash_count=0,
+                last_success_at=COALESCE(last_success_at, NOW()),
+                updated_at=NOW()
+            WHERE source=$1
+              AND status='degraded'
+              AND lower(coalesce(last_error, '')) LIKE 'browser capture stalled:%watchdog%'
+            """,
+            source,
+        )
+    except Exception as e:
+        log.error("source_health browser recovery update failed for %s: %s", source, e)
 
 
 async def _restart(container: str) -> None:
@@ -436,6 +486,53 @@ async def _tick(db: asyncpg.Connection) -> None:
             log.info("%s ok (newest %.0fs ago)", src, age)
 
 
+async def _browser_source_tick(db: asyncpg.Connection) -> None:
+    """Surface stalled Chrome-extension sources as operator-actionable state.
+
+    The collector cannot safely restart Chrome from inside Docker. This turns a
+    silent extension/tab stall into source_health + Telegram evidence, while
+    leaving the fix to the operator/browser control path.
+    """
+    if not BROWSER_SOURCE_WATCH_SOURCES:
+        return
+    now = time.time()
+    try:
+        from src.core.source_freshness import compute_liveness
+
+        rows = await compute_liveness(db)
+    except Exception as e:
+        log.error("browser source liveness query failed: %s", e)
+        return
+
+    for row in rows:
+        source = str(row.get("source") or "")
+        if source not in BROWSER_SOURCE_WATCH_SOURCES:
+            continue
+        status = row.get("status")
+        heartbeat_age = row.get("browser_heartbeat_age_seconds")
+        content_stale = bool(row.get("browser_content_stale"))
+        if status in {"degraded", "stale", "dead", "unknown"} and (
+            heartbeat_age is not None or content_stale
+        ):
+            detail = str(row.get("detail") or "browser extension/content path is stale")
+            log.warning("%s browser capture stalled: %s", source, detail)
+            await _mark_degraded_browser_source(db, source, detail)
+            if now - _last_browser_source_alert.get(source, 0) >= BROWSER_SOURCE_ALERT_COOLDOWN:
+                _last_browser_source_alert[source] = now
+                await _notify(
+                    f"⚠️ <b>watchdog: {source} browser collection stalled</b>\n"
+                    f"{detail}\n"
+                    "Container restart will not fix this path. Reload the UnifiedCollector Chrome "
+                    "extension, refresh/reopen the platform tab, then press Scrape now on Social Tabs."
+                )
+        else:
+            await _mark_running_if_browser_watchdog(db, source)
+            if heartbeat_age is None:
+                log.info("%s browser source ok (no heartbeat requirement active)", source)
+            else:
+                log.info("%s browser source ok (heartbeat %.0fs ago)", source, heartbeat_age)
+
+
 # ── DLQ-growth monitoring (P2 review §2) ─────────────────────────────────────
 # Freshness checks can't see a source that ingests metadata fine (fresh
 # collected_at) while failing every media download into dead_letter_queue. This
@@ -580,6 +677,8 @@ async def main() -> None:
             db = await asyncpg.connect(DB)
             try:
                 await _tick(db)
+                if BROWSER_SOURCE_WATCH_ENABLED:
+                    await _browser_source_tick(db)
                 if DLQ_ENABLED:
                     await _dlq_tick(db)
                 if DM_HOOK_ENABLED:

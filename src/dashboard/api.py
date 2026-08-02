@@ -503,6 +503,32 @@ async def _source_content_summary(conn, since_sql: str, before_sql: str | None =
     required_tables.append("media_items")
     existing_tables = await _existing_public_tables(conn, required_tables)
     out: dict[str, dict] = {}
+
+    def merge(source: str, row: dict | None) -> None:
+        if not source or not row:
+            return
+        target = out.setdefault(source, {
+            "source": source,
+            "records": 0,
+            "messages": 0,
+            "media_items": 0,
+            "latest_record_at": None,
+            "latest_media_at": None,
+        })
+        target["records"] = int(target.get("records") or 0) + int(row.get("records") or 0)
+        target["messages"] = int(target.get("messages") or 0) + int(row.get("messages") or 0)
+        target["media_items"] = int(target.get("media_items") or 0) + int(row.get("media_items") or 0)
+        latest_record = row.get("latest_record_at")
+        latest_media = row.get("latest_media_at")
+        if latest_record and (
+            not target.get("latest_record_at") or latest_record > target["latest_record_at"]
+        ):
+            target["latest_record_at"] = latest_record
+        if latest_media and (
+            not target.get("latest_media_at") or latest_media > target["latest_media_at"]
+        ):
+            target["latest_media_at"] = latest_media
+
     raw_parts = [
         f"""
         SELECT '{source}'::text AS source,
@@ -518,21 +544,6 @@ async def _source_content_summary(conn, since_sql: str, before_sql: str | None =
         for source, table, column, label in _INGESTION_CONTENT_PARTS
         if table in existing_tables
     ]
-    if "media_items" in existing_tables:
-        raw_parts.append(
-            f"""
-            SELECT source,
-                   0::bigint AS records,
-                   0::bigint AS messages,
-                   count(*)::bigint AS media_items,
-                   NULL::timestamptz AS latest_record_at,
-                   max(collected_at) AS latest_media_at
-            FROM media_items
-            WHERE collected_at >= {since_sql}
-              {f"AND collected_at < {before_sql}" if before_sql else ""}
-            GROUP BY source
-            """
-        )
 
     if raw_parts:
         try:
@@ -552,9 +563,33 @@ async def _source_content_summary(conn, since_sql: str, before_sql: str | None =
                 """,
                 timeout=max(1.0, _SOURCE_CONTENT_SUMMARY_BUDGET_SECONDS),
             )
-            out = {row["source"]: dict(row) for row in rows}
+            for row in rows:
+                merge(row["source"], dict(row))
         except Exception as exc:  # noqa: BLE001 - source matrix should degrade, not fail
-            logger.warning("source content summary failed: %s", exc.__class__.__name__)
+            logger.warning("source content row summary failed: %s", exc.__class__.__name__)
+
+    if "media_items" in existing_tables:
+        try:
+            rows = await conn.fetch(
+                f"""
+                SELECT source,
+                       0::bigint AS records,
+                       0::bigint AS messages,
+                       count(*)::bigint AS media_items,
+                       NULL::timestamptz AS latest_record_at,
+                       max(collected_at) AS latest_media_at
+                FROM media_items
+                WHERE collected_at >= {since_sql}
+                  {f"AND collected_at < {before_sql}" if before_sql else ""}
+                GROUP BY source
+                """,
+                timeout=max(1.0, _SOURCE_CONTENT_MEDIA_TIMEOUT_SECONDS),
+            )
+            for row in rows:
+                merge(row["source"], dict(row))
+        except Exception as exc:  # noqa: BLE001 - keep row counts if media stats lag
+            logger.warning("source content media summary failed: %s", exc.__class__.__name__)
+            raise
 
     beeper_timeout = max(0.1, min(
         _BEEPER_SUBSOURCE_TOTAL_TIMEOUT_SECONDS,
