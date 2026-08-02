@@ -84,10 +84,12 @@ def test_content_script_recovery_bounds_tab_messages():
     background = _read("extension/background.js")
 
     assert "const TAB_MESSAGE_TIMEOUT_MS = 10000" in background
+    assert "const FORCED_CYCLE_RELOAD_DEBOUNCE_MS = 4 * 60 * 1000" in background
     assert "const FORCED_CYCLE_FAILURE_DEBOUNCE_MS = 90 * 1000" in background
     assert "async function sendTabMessageWithTimeout" in background
     assert background.count("sendTabMessageWithTimeout(") >= 5
     assert "new Error(\"tab message timed out\")" in background
+    assert "tab message timed out/i.test" in background
 
 
 def test_recoverable_page_shells_try_native_retry_before_waiting():

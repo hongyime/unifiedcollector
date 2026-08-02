@@ -269,7 +269,7 @@ const FORCED_CYCLE_HARD_RELOAD_MS_BY_PLATFORM = {
   threads: 4 * 60 * 1000,
   instagram: 11 * 60 * 1000,
 };
-const FORCED_CYCLE_RELOAD_DEBOUNCE_MS = 10 * 60 * 1000;
+const FORCED_CYCLE_RELOAD_DEBOUNCE_MS = 4 * 60 * 1000;
 const FORCED_CYCLE_FAILURE_DEBOUNCE_MS = 90 * 1000;
 const TAB_MESSAGE_TIMEOUT_MS = 10000;
 const EXTENSION_AUTO_RELOAD_STATE_KEY = "ucExtensionAutoReloadState";
@@ -282,7 +282,7 @@ function forcedCycleHardReloadMs(platformId) {
 }
 
 function isNoReceiverError(err) {
-  return /Could not establish connection|Receiving end does not exist|Extension context invalidated/i.test(
+  return /Could not establish connection|Receiving end does not exist|Extension context invalidated|tab message timed out/i.test(
     String((err && err.message) || err || "")
   );
 }

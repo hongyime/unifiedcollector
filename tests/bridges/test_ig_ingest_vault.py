@@ -1350,7 +1350,7 @@ def test_browser_heartbeat_handler_reports_degraded_when_pool_missing():
 
 
 def test_browser_heartbeat_handler_requests_extension_reload_for_old_version(monkeypatch):
-    monkeypatch.setattr(ig_ingest, "UC_EXTENSION_EXPECTED_VERSION", "1.23.8")
+    monkeypatch.setattr(ig_ingest, "UC_EXTENSION_EXPECTED_VERSION", "1.23.9")
     req = _FakeRequest(
         {"pool": None},
         {
@@ -1358,7 +1358,7 @@ def test_browser_heartbeat_handler_requests_extension_reload_for_old_version(mon
             "label": "UnifiedCollector Bridge",
             "running": True,
             "tab_id": "service_worker",
-            "extension_version": "1.23.7",
+            "extension_version": "1.23.8",
         },
     )
 
@@ -1366,14 +1366,14 @@ def test_browser_heartbeat_handler_requests_extension_reload_for_old_version(mon
 
     assert resp.status == 200
     payload = json.loads(resp.text)
-    assert payload["expected_extension_version"] == "1.23.8"
-    assert payload["current_extension_version"] == "1.23.7"
+    assert payload["expected_extension_version"] == "1.23.9"
+    assert payload["current_extension_version"] == "1.23.8"
     assert payload["reload_extension"] is True
     assert payload["reload_reason"] == "extension_version_mismatch"
 
 
 def test_browser_heartbeat_handler_does_not_reload_current_extension(monkeypatch):
-    monkeypatch.setattr(ig_ingest, "UC_EXTENSION_EXPECTED_VERSION", "1.23.8")
+    monkeypatch.setattr(ig_ingest, "UC_EXTENSION_EXPECTED_VERSION", "1.23.9")
     req = _FakeRequest(
         {"pool": None},
         {
@@ -1381,7 +1381,7 @@ def test_browser_heartbeat_handler_does_not_reload_current_extension(monkeypatch
             "label": "UnifiedCollector Bridge",
             "running": True,
             "tab_id": "service_worker",
-            "extension_version": "v1.23.8",
+            "extension_version": "v1.23.9",
         },
     )
 
@@ -1389,7 +1389,7 @@ def test_browser_heartbeat_handler_does_not_reload_current_extension(monkeypatch
 
     assert resp.status == 200
     payload = json.loads(resp.text)
-    assert payload["expected_extension_version"] == "1.23.8"
+    assert payload["expected_extension_version"] == "1.23.9"
     assert "reload_extension" not in payload
     assert "current_extension_version" not in payload
 
