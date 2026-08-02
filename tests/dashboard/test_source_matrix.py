@@ -22,6 +22,7 @@ from src.dashboard.api import (
     _messaging_policy,
     _normalize_beeper_network,
     _rate_limit_cursor_payload,
+    _release_dashboard_conn,
     _source_matrix_blocker,
     _source_matrix_section,
     _source_content_summary,
@@ -73,6 +74,15 @@ def test_source_matrix_expensive_sections_have_bounded_default_timeouts():
     assert _SOURCE_MATRIX_MEDIA_TOTALS_TIMEOUT_SECONDS <= 8
     assert _SOURCE_MATRIX_YOUTUBE_BACKLOG_TIMEOUT_SECONDS <= 8
     assert _SOURCE_MATRIX_BROWSER_EXTENSION_TIMEOUT_SECONDS <= 6
+
+
+@pytest.mark.asyncio
+async def test_release_dashboard_conn_swallows_cancelled_release():
+    class Pool:
+        async def release(self, conn):
+            raise asyncio.CancelledError()
+
+    await _release_dashboard_conn(Pool(), object(), "test source matrix")
 
 
 def test_messaging_coverage_normalizes_unknown_beeper_messages_from_chat_network():

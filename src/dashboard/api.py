@@ -1048,6 +1048,15 @@ async def _acquire_dashboard_conn(pool):
     return await asyncio.wait_for(pool.acquire(), timeout=_DASHBOARD_DB_ACQUIRE_TIMEOUT_SECONDS)
 
 
+async def _release_dashboard_conn(pool, conn, label: str = "dashboard") -> None:
+    try:
+        await asyncio.shield(pool.release(conn))
+    except asyncio.CancelledError:
+        logger.warning("%s DB release cancelled; continuing with degraded response", label)
+    except Exception as exc:  # noqa: BLE001 - release failures should not 500 dashboards
+        logger.warning("%s DB release failed: %s", label, exc.__class__.__name__)
+
+
 def _rate_limits_recent_fallback_payload(hours: int, limit: int, exc: BaseException) -> dict:
     cache_key = (hours, limit)
     cached = _RATE_LIMITS_RECENT_CACHE.get(cache_key)
@@ -3381,7 +3390,7 @@ async def collectors_live(_user: dict = Depends(require_role("viewer"))):
         return _collectors_live_fallback_payload(exc)
     finally:
         if conn is not None:
-            await pool.release(conn)
+            await _release_dashboard_conn(pool, conn, "collectors live")
     try:
         sources, whatsapp_bridge_health = await asyncio.wait_for(
             _with_bridge_overrides(sources),
@@ -3605,7 +3614,7 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
             )
     finally:
         if conn is not None:
-            await pool.release(conn)
+            await _release_dashboard_conn(pool, conn, "source matrix")
 
     generated_at = datetime.now(timezone.utc)
     live_sources = [*live_sources, *beeper_subsources]
@@ -4272,7 +4281,7 @@ async def hourly_ingestion(hours: int = 12, _user: dict = Depends(require_role("
         return _fallback_rows(exc)
     finally:
         if conn is not None:
-            await pool.release(conn)
+            await _release_dashboard_conn(pool, conn, "hourly ingestion")
     raw_parts = [
         f"""
         SELECT '{source}'::text AS source,
@@ -4364,7 +4373,7 @@ async def hourly_ingestion(hours: int = 12, _user: dict = Depends(require_role("
         return _fallback_rows(exc)
     finally:
         if conn is not None:
-            await pool.release(conn)
+            await _release_dashboard_conn(pool, conn, "rate limits recent")
     out = []
     for row in rows:
         d = dict(row)
@@ -4456,7 +4465,7 @@ async def recent_rate_limits(hours: int = 24, limit: int = 100,
         return _rate_limits_recent_fallback_payload(hours, limit, exc)
     finally:
         if conn is not None:
-            await pool.release(conn)
+            await _release_dashboard_conn(pool, conn, "operational events")
     payload = {
         "events": events,
         "active": active,
