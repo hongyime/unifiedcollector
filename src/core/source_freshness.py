@@ -125,22 +125,33 @@ async def _latest_browser_heartbeats(conn, timeout: float) -> dict[str, dict] | 
     try:
         rows = await conn.fetch(
             """
-            SELECT DISTINCT ON (platform)
-                   platform,
-                   created_at AS last_seen_at,
-                   extract(epoch FROM now() - created_at)::int AS age_seconds,
-                   metadata->>'extension_version' AS extension_version,
-                   metadata->>'url' AS url,
-                   metadata->>'health_status' AS health_status
-            FROM browser_ingest_events
-            WHERE endpoint = 'browser_heartbeat'
-              AND platform = ANY($1::text[])
-            ORDER BY platform, created_at DESC
+            WITH wanted(platform) AS (
+                SELECT unnest($1::text[])
+            )
+            SELECT wanted.platform,
+                   latest.created_at AS last_seen_at,
+                   extract(epoch FROM now() - latest.created_at)::int AS age_seconds,
+                   latest.metadata->>'extension_version' AS extension_version,
+                   latest.metadata->>'url' AS url,
+                   latest.metadata->>'health_status' AS health_status
+            FROM wanted
+            LEFT JOIN LATERAL (
+                SELECT created_at, metadata
+                FROM browser_ingest_events
+                WHERE endpoint = 'browser_heartbeat'
+                  AND platform = wanted.platform
+                ORDER BY created_at DESC
+                LIMIT 1
+            ) latest ON true
             """,
             list(_BROWSER_HEARTBEAT_SOURCES),
             timeout=query_timeout,
         )
-        return {str(row["platform"]): dict(row) for row in rows}
+        return {
+            str(row["platform"]): dict(row)
+            for row in rows
+            if row["last_seen_at"] is not None
+        }
     except Exception as exc:
         if exc.__class__.__name__ == "UndefinedTableError":
             return None
