@@ -210,6 +210,20 @@ function sendTimeoutMs(msg, explicitTimeoutMs) {
 }
 
 const DIRECT_INGEST_BASE = "http://127.0.0.1:8765";
+const DEFAULT_DIRECT_SEND_TIMEOUT_MS = 20000;
+const DIRECT_SEND_TIMEOUT_MS_BY_TYPE = {
+  ingest: 45000,
+  posts: 20000,
+  comments: 20000,
+  profile: 20000,
+  users: 20000,
+  dms: 30000,
+  strava_streams: 30000,
+  pageHealth: 15000,
+  loopStatus: 10000,
+  cycleReport: 10000,
+  log: 7000,
+};
 
 function directPlatform(msg) {
   const current = currentPlatform();
@@ -223,6 +237,11 @@ function directPlatform(msg) {
 
 function withDirectVersion(payload) {
   return { ...payload, extension_version: UC_CONTENT_VERSION };
+}
+
+function directSendTimeoutMs(msg) {
+  const type = String((msg && msg.type) || "");
+  return DIRECT_SEND_TIMEOUT_MS_BY_TYPE[type] || DEFAULT_DIRECT_SEND_TIMEOUT_MS;
 }
 
 function directHeartbeatPayload(msg, error, status) {
@@ -319,11 +338,18 @@ function directFallbackRequest(msg, error) {
 async function directSendFallback(msg, error) {
   const request = directFallbackRequest(msg, error);
   if (!request) return null;
-  const response = await fetch(DIRECT_INGEST_BASE + request.path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(request.payload),
-  });
+  const type = String((msg && msg.type) || "message");
+  const timeoutMs = directSendTimeoutMs(msg);
+  const response = await withDeadline(
+    fetch(DIRECT_INGEST_BASE + request.path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request.payload),
+    }),
+    timeoutMs,
+    `${type} direct fallback timed out after ${Math.ceil(timeoutMs / 1000)}s`,
+    "UCDirectSendTimeout"
+  );
   const body = await response.json().catch(() => ({}));
   return { ok: response.ok, direct_fallback: true, status: response.status, ...body };
 }
@@ -357,6 +383,13 @@ async function send(msg, { retries = 1, timeoutMs = null } = {}) {
 }
 function clog(level, msg, platform) {
   send({ type: "log", level, msg, platform }).catch(() => {});
+}
+
+function sendSideEffect(msg, platform, label, options = {}) {
+  send(msg, options).catch((e) => {
+    const detail = e && e.message ? e.message : String(e || "unknown error");
+    if (label) clog("warn", `${label} skipped: ${detail}`, platform);
+  });
 }
 
 const PAGE_HEALTH_REPORT_GAP_MS = 60000;
@@ -486,7 +519,21 @@ async function attemptRecoverablePageInteraction(platformId, shell) {
   const last = lsNum(key);
   if (last && Date.now() - last < 60000) return false;
   const button = findRecoverablePageActionButton();
-  if (!button) return false;
+  if (!button) {
+    if (platformId === "x" && /try_again|something_went_wrong|no_internet|page_not_available|page_not_found/i.test(shell.reason || "")) {
+      const navKey = `uc_x_shell_nav_${shell.reason || "shell"}`;
+      const lastNav = lsNum(navKey);
+      if (!lastNav || Date.now() - lastNav > 120000) {
+        lsSet(navKey, String(Date.now()));
+        const host = String(location.hostname || "").toLowerCase();
+        const target = host.includes("twitter.com") ? "https://x.com/home" : "https://twitter.com/home";
+        clog("warn", `x page shell has no retry button (${shell.reason}); switching host to recover`, "x");
+        location.href = target;
+        return true;
+      }
+    }
+    return false;
+  }
   lsSet(key, String(Date.now()));
   try {
     button.scrollIntoView({ block: "center", inline: "center" });
@@ -2088,14 +2135,24 @@ const x = {
     if (entity !== "timeline") {
       const profile = scrapeXProfile(entity);
       if (profile) {
-        await send({ type: "profile", platform: "x", profile, owner: { username: owner } });
+        sendSideEffect(
+          { type: "profile", platform: "x", profile, owner: { username: owner } },
+          "x",
+          `X @${profile.username} profile write`,
+          { timeoutMs: forcedRecovery ? 12000 : 25000 }
+        );
         clog("info", `X @${profile.username}: profile captured`, "x");
       }
     }
     // post engagement (the x_posts gap) — DOM-harvested, hook-independent.
     const xposts = harvestXPosts(entity, feed);
     if (xposts.length) {
-      await send({ type: "posts", platform: "x", username: feed, posts: xposts });
+      sendSideEffect(
+        { type: "posts", platform: "x", username: feed, posts: xposts },
+        "x",
+        `X ${feed} post write`,
+        { timeoutMs: forcedRecovery ? 12000 : 25000 }
+      );
       clog("info", `X ${feed}: ${xposts.length} tweet(s) w/ counts`, "x");
     }
     document.querySelectorAll('article[data-testid="tweet"], article[role="article"]').forEach((art) => {
@@ -2132,7 +2189,14 @@ const x = {
       });
     }
     const xu = collectPermalinkAuthors(/^\/([A-Za-z0-9_]{1,20})\/status\//, /^(home|explore|search|messages|notifications|i|settings)$/);
-    if (xu.length) await send({ type: "users", platform: "x", context: "seen", users: xu });
+    if (xu.length) {
+      sendSideEffect(
+        { type: "users", platform: "x", context: "seen", users: xu },
+        "x",
+        "X seen-user write",
+        { timeoutMs: forcedRecovery ? 12000 : 25000 }
+      );
+    }
     const ingestResponse = await send({
       type: "ingest",
       platform: "x",
@@ -2141,7 +2205,7 @@ const x = {
       record_empty: true,
       probe_reason: sink.items.length ? "media_candidates_found" : "no_dom_media_candidates",
       probe_meta: { feed, posts: xposts.length },
-    });
+    }, { timeoutMs: forcedRecovery ? 30000 : 45000 });
     const profileSeen = entity !== "timeline" && !xIsStatusPage() && !!scrapeXProfile(entity);
     const progressCounts = {
       feed,
@@ -2702,17 +2766,36 @@ const facebook = {
       record_empty: true,
       probe_reason: sink.items.length ? "media_candidates_found" : "no_dom_media_candidates",
       probe_meta: { posts: posts.length, users: fu.length, person },
-    });
+    }, { timeoutMs: forcedRecovery ? 30000 : 45000 });
     if (sink.items.length) saved = sink.items.length;
     if (activeMediaRevisit) {
       await finishBrowserMediaRevisit("facebook", activeMediaRevisit, ingestResponse, sink.items.length, entity);
     }
     if (profile) {
-      await send({ type: "profile", platform: "facebook", profile });
+      sendSideEffect(
+        { type: "profile", platform: "facebook", profile },
+        "facebook",
+        `Facebook ${entity} profile write`,
+        { timeoutMs: forcedRecovery ? 12000 : 25000 }
+      );
       clog("info", `Facebook ${entity}: profile captured (person=${person})`, "facebook");
     }
-    if (posts.length) await send({ type: "posts", platform: "facebook", username: entity, posts });
-    if (fu.length) await send({ type: "users", platform: "facebook", context: "seen", users: fu });
+    if (posts.length) {
+      sendSideEffect(
+        { type: "posts", platform: "facebook", username: entity, posts },
+        "facebook",
+        `Facebook ${entity} post write`,
+        { timeoutMs: forcedRecovery ? 12000 : 25000 }
+      );
+    }
+    if (fu.length) {
+      sendSideEffect(
+        { type: "users", platform: "facebook", context: "seen", users: fu },
+        "facebook",
+        "Facebook seen-user write",
+        { timeoutMs: forcedRecovery ? 12000 : 25000 }
+      );
+    }
     return { targets: 1, saved, discovered: 0 };
   },
 };
