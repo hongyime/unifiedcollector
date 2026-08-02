@@ -188,6 +188,24 @@ def test_x_page_recovery_limit_cools_then_retries():
     assert "attempt_limit_cooling" in background
 
 
+def test_post_reload_scrape_nudge_waits_and_retries_for_heavy_tabs():
+    background = _read("extension/background.js")
+
+    delay_block = background.split("const POST_RELOAD_NUDGE_DELAY_MS_BY_PLATFORM = {", 1)[1].split(
+        "};", 1
+    )[0]
+    retry_block = background.split("const POST_RELOAD_NUDGE_RETRY_DELAY_MS_BY_PLATFORM = {", 1)[1].split(
+        "};", 1
+    )[0]
+
+    assert re.search(r"tiktok:\s*75000", delay_block)
+    assert re.search(r"x:\s*75000", delay_block)
+    assert re.search(r"tiktok:\s*90000", retry_block)
+    assert re.search(r"x:\s*90000", retry_block)
+    assert "post_reload_scrape_nudge_retry_scheduled" in background
+    assert "post_reload_retry: true" in background
+
+
 def test_facebook_has_post_text_fallback_when_permalink_ids_are_missing():
     content = _read("extension/content.js")
     facebook_block = content.split("function harvestFacebookPosts(entity)", 1)[1].split(

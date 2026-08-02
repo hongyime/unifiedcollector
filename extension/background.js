@@ -390,8 +390,12 @@ const POST_RELOAD_NUDGE_DELAY_MS_BY_PLATFORM = {
   facebook: 30000,
   instagram: 25000,
   lemon8: 25000,
-  tiktok: 25000,
-  x: 25000,
+  tiktok: 75000,
+  x: 75000,
+};
+const POST_RELOAD_NUDGE_RETRY_DELAY_MS_BY_PLATFORM = {
+  tiktok: 90000,
+  x: 90000,
 };
 
 function postReloadScrapeNudgeDelayMs(platform, extra = {}) {
@@ -399,6 +403,9 @@ function postReloadScrapeNudgeDelayMs(platform, extra = {}) {
     return Number(extra.post_reload_delay_ms);
   }
   return POST_RELOAD_NUDGE_DELAY_MS_BY_PLATFORM[platform && platform.id] || 12000;
+}
+function postReloadScrapeNudgeRetryDelayMs(platform) {
+  return POST_RELOAD_NUDGE_RETRY_DELAY_MS_BY_PLATFORM[platform && platform.id] || 45000;
 }
 
 function schedulePostReloadScrapeNudge(base, tab, platform, reason, extra = {}) {
@@ -421,6 +428,7 @@ function schedulePostReloadScrapeNudge(base, tab, platform, reason, extra = {}) 
           post_reload_delay_ms: delayMs,
         });
       } catch (e) {
+        const messageTimedOut = isTabMessageTimeout(e);
         if (isNoReceiverError(e)) {
           const injected = await injectContentScriptAndNudge(base, freshTab, platform, reason || "post_reload_recovery", {
             ...extra,
@@ -429,9 +437,36 @@ function schedulePostReloadScrapeNudge(base, tab, platform, reason, extra = {}) 
           });
           if (injected) return;
         }
+        if (messageTimedOut && !extra.post_reload_retry) {
+          const retryDelayMs = postReloadScrapeNudgeRetryDelayMs(platform);
+          await recordServiceWorkerRecovery(base, freshTab, platform, "post_reload_scrape_nudge_retry_scheduled", reason || "post_reload_recovery", {
+            ...extra,
+            cycle_error: e && e.message ? e.message : String(e),
+            message_timeout: true,
+            post_reload_delay_ms: delayMs,
+            post_reload_retry_delay_ms: retryDelayMs,
+          });
+          schedulePostReloadScrapeNudge(base, freshTab, platform, reason || "post_reload_recovery", {
+            ...extra,
+            post_reload_retry: true,
+            post_reload_delay_ms: retryDelayMs,
+          });
+          return;
+        }
+        if (messageTimedOut) {
+          const injected = await injectContentScriptAndNudge(base, freshTab, platform, reason || "post_reload_recovery", {
+            ...extra,
+            cycle_error: e && e.message ? e.message : String(e),
+            message_timeout: true,
+            post_reload_delay_ms: delayMs,
+            recovery: "post_reload_timeout_programmatic_inject",
+          });
+          if (injected) return;
+        }
         await recordServiceWorkerRecovery(base, freshTab, platform, "post_reload_scrape_nudge_failed", reason || "post_reload_recovery", {
           ...extra,
           cycle_error: e && e.message ? e.message : String(e),
+          message_timeout: messageTimedOut || null,
           post_reload_delay_ms: delayMs,
         });
       }
@@ -613,6 +648,23 @@ async function maybeForceScrapeCycle(tab, platform, responseBody, reason, base =
           stale_refresh_attempted: true,
           stale_refresh_ok: reloaded || null,
         });
+        if (!reloaded) {
+          const injected = await injectContentScriptAndNudge(base, tab, platform, "forced_cycle_reload_debounced_timeout", {
+            content_age_seconds: contentAgeSeconds,
+            stale_reload_seconds: staleReloadSeconds,
+            cycle_error: cycleError,
+            message_timeout: true,
+            recovery: "reload_debounced_programmatic_inject",
+          });
+          await recordServiceWorkerRecovery(base, tab, platform, "forced_cycle_reload_debounced_inject", body.force_reason || "browser_content_stale", {
+            content_age_seconds: contentAgeSeconds,
+            stale_reload_seconds: staleReloadSeconds,
+            cycle_error: cycleError,
+            message_timeout: true,
+            reinject_attempted: true,
+            reinject_ok: injected || null,
+          });
+        }
         await log("warn", `${platform.label}: stale-content forced scrape message timed out; ${reloaded ? "hard-refreshed stale tab" : "refresh skipped by debounce"}`);
         return;
       }
