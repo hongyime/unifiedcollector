@@ -1303,9 +1303,9 @@ class InstagramCollector(BaseCollector):
             seconds = 7200
         seconds = max(300, min(seconds, 86400))
         try:
-            media_seconds = int(os.getenv("INSTA_EXTENSION_FRESH_MEDIA_SECONDS", "1800"))
+            media_seconds = int(os.getenv("INSTA_EXTENSION_FRESH_MEDIA_SECONDS", "900"))
         except ValueError:
-            media_seconds = 1800
+            media_seconds = 900
         media_seconds = max(300, min(media_seconds, seconds))
         require_media = os.getenv("INSTA_EXTENSION_FRESH_REQUIRE_STORED_MEDIA", "true").lower() in {
             "1",
