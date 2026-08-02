@@ -1595,6 +1595,7 @@ const lemon8 = {
     }
     lemon8CollectDomMedia(sink, entity);
     lemon8CollectDomUsers().forEach((u) => users.push(u));
+    let uniqueUserCount = 0;
     if (users.length) {
       const seen = new Set();
       const uniqueUsers = users.filter((u) => {
@@ -1603,13 +1604,20 @@ const lemon8 = {
         seen.add(key);
         return true;
       });
+      uniqueUserCount = uniqueUsers.length;
       if (uniqueUsers.length) await send({ type: "users", platform: "lemon8", context: "author", users: uniqueUsers });
     }
     const activeMediaRevisit = currentBrowserMediaRevisit("lemon8");
     markBrowserMediaRevisitItems("lemon8", sink, activeMediaRevisit);
-    const ingestResponse = sink.items.length
-      ? await send({ type: "ingest", platform: "lemon8", username: entity, items: sink.items })
-      : null;
+    const ingestResponse = await send({
+      type: "ingest",
+      platform: "lemon8",
+      username: entity,
+      items: sink.items,
+      record_empty: true,
+      probe_reason: sink.items.length ? "media_candidates_found" : "no_dom_media_candidates",
+      probe_meta: { users: uniqueUserCount },
+    });
     if (activeMediaRevisit) {
       await finishBrowserMediaRevisit("lemon8", activeMediaRevisit, ingestResponse, sink.items.length, entity);
     }
@@ -2320,13 +2328,19 @@ const threads = {
     const sink = harvestDom(user, { ...THREADS_IMG, platform: "threads" });
     const activeMediaRevisit = currentBrowserMediaRevisit("threads");
     markBrowserMediaRevisitItems("threads", sink, activeMediaRevisit);
-    const ingestResponse = sink.items.length
-      ? await send({ type: "ingest", platform: "threads", username: user, items: sink.items })
-      : null;
+    const posts = harvestPermalinkPosts(/\/@([^/]+)\/post\/([^/?#]+)/, (m) => m[2]);
+    const ingestResponse = await send({
+      type: "ingest",
+      platform: "threads",
+      username: user,
+      items: sink.items,
+      record_empty: true,
+      probe_reason: sink.items.length ? "media_candidates_found" : "no_dom_media_candidates",
+      probe_meta: { posts: posts.length, mode: "profile" },
+    });
     if (activeMediaRevisit) {
       await finishBrowserMediaRevisit("threads", activeMediaRevisit, ingestResponse, sink.items.length, user);
     }
-    const posts = harvestPermalinkPosts(/\/@([^/]+)\/post\/([^/?#]+)/, (m) => m[2]);
     if (posts.length) {
       await send({ type: "posts", platform: "threads", username: user, posts });
       clog("info", `Threads @${user}: ${posts.length} post(s)`, "threads");
@@ -2388,20 +2402,26 @@ const threads = {
     const sink = harvestDom(feed, { ...THREADS_IMG, platform: "threads" });
     const activeMediaRevisit = currentBrowserMediaRevisit("threads");
     markBrowserMediaRevisitItems("threads", sink, activeMediaRevisit);
-    const ingestResponse = sink.items.length
-      ? await send({ type: "ingest", platform: "threads", username: feed, items: sink.items })
-      : null;
+    const posts = harvestPermalinkPosts(/\/@([^/]+)\/post\/([^/?#]+)/, (m) => m[2]);
+    const authors = collectPermalinkAuthors(/^\/@([A-Za-z0-9._]{1,30})(?:\/|$)/, /^(search|explore|activity|saved)$/);
+    const ingestResponse = await send({
+      type: "ingest",
+      platform: "threads",
+      username: feed,
+      items: sink.items,
+      record_empty: true,
+      probe_reason: sink.items.length ? "media_candidates_found" : "no_dom_media_candidates",
+      probe_meta: { posts: posts.length, authors: authors.length, feed },
+    });
     if (activeMediaRevisit) {
       await finishBrowserMediaRevisit("threads", activeMediaRevisit, ingestResponse, sink.items.length, feed);
     }
-    const posts = harvestPermalinkPosts(/\/@([^/]+)\/post\/([^/?#]+)/, (m) => m[2]);
     if (posts.length) {
       await send({ type: "posts", platform: "threads", username: feed, posts });
       clog("info", `Threads ${feed}: ${posts.length} post(s)`, "threads");
     }
     // every threads handle IS an instagram handle — push feed authors into the
     // shared user graph so IG scrapes them too (forward cross-pollination).
-    const authors = collectPermalinkAuthors(/^\/@([A-Za-z0-9._]{1,30})(?:\/|$)/, /^(search|explore|activity|saved)$/);
     if (authors.length) await send({ type: "users", platform: "threads", context: feed, users: authors });
 
     // REVERSE direction rotation: every 3rd cycle, hop to one IG-known real account
@@ -2499,22 +2519,28 @@ const facebook = {
     const sink = harvestDom(entity, { imgRe: /fbcdn\.net/, junkRe: /rsrc\.php|emoji|static|\/s\d+x\d+\/|profile|sprite/, platform: "facebook" });
     const activeMediaRevisit = currentBrowserMediaRevisit("facebook");
     markBrowserMediaRevisitItems("facebook", sink, activeMediaRevisit);
-    const ingestResponse = sink.items.length
-      ? await send({ type: "ingest", platform: "facebook", username: entity, items: sink.items })
-      : null;
-    if (sink.items.length) saved = sink.items.length;
-    if (activeMediaRevisit) {
-      await finishBrowserMediaRevisit("facebook", activeMediaRevisit, ingestResponse, sink.items.length, entity);
-    }
     // POSTS (captions) + USERS — captured EVERYWHERE incl. pages/groups, for the
     // user registry + spidering (user: "when spider we can use either").
     const posts = harvestPermalinkPosts(/\/(?:posts\/|permalink\.php\?story_fbid=|[^/]+\/posts\/)?(pfbid[\w]+|\d{6,})/, (m) => m[1]);
     if (person) posts.forEach((p) => { if (!p.author_username) p.author_username = entity; });
-    if (posts.length) await send({ type: "posts", platform: "facebook", username: entity, posts });
     const fu = collectPermalinkAuthors(
       /^\/([A-Za-z0-9.]{5,40})(?:\/(posts|photos|videos))?(?:[/?]|$)/,
       /^(home|watch|marketplace|groups|friends|notifications|messages|reels|events|gaming|bookmarks|stories|pages|story\.php|permalink\.php|profile\.php|sharer|login|policies)$/
     );
+    const ingestResponse = await send({
+      type: "ingest",
+      platform: "facebook",
+      username: entity,
+      items: sink.items,
+      record_empty: true,
+      probe_reason: sink.items.length ? "media_candidates_found" : "no_dom_media_candidates",
+      probe_meta: { posts: posts.length, users: fu.length, person },
+    });
+    if (sink.items.length) saved = sink.items.length;
+    if (activeMediaRevisit) {
+      await finishBrowserMediaRevisit("facebook", activeMediaRevisit, ingestResponse, sink.items.length, entity);
+    }
+    if (posts.length) await send({ type: "posts", platform: "facebook", username: entity, posts });
     if (fu.length) await send({ type: "users", platform: "facebook", context: "seen", users: fu });
     return { targets: 1, saved, discovered: 0 };
   },

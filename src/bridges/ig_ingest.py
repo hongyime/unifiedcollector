@@ -2307,7 +2307,7 @@ async def _write_browser_ingest_event(
             stored,
             json.dumps(metadata or {}),
         )
-        if _browser_event_marks_source_success(platform, endpoint, observed, stored):
+        if _browser_event_marks_source_success(platform, endpoint, observed, stored, metadata):
             await conn.execute(
                 """
                 INSERT INTO source_health
@@ -2328,10 +2328,13 @@ def _browser_event_marks_source_success(
     endpoint: str,
     observed_count: int,
     stored_count: int,
+    metadata: dict | None = None,
 ) -> bool:
     if not platform or platform == "bridge" or endpoint == "browser_heartbeat":
         return False
-    return observed_count > 0 or stored_count > 0
+    if observed_count > 0 or stored_count > 0:
+        return True
+    return bool(isinstance(metadata, dict) and metadata.get("probe_reason"))
 
 
 async def _ingest(app, platform, body):
@@ -4850,10 +4853,15 @@ async def _browser_content_recovery_hint(pool, platform: str) -> dict:
                     FROM browser_ingest_events
                     WHERE platform = $1
                       AND endpoint <> 'browser_heartbeat'
-                      AND (observed_count > 0 OR stored_count > 0)
+                      AND (
+                        observed_count > 0
+                        OR stored_count > 0
+                        OR metadata ? 'probe_reason'
+                      )
                       AND (
                         stored_count > 0
                         OR endpoint IN ('posts', 'profile', 'strava_route_visit', 'strava_streams')
+                        OR metadata ? 'probe_reason'
                       )
                     ORDER BY created_at DESC
                     LIMIT 1

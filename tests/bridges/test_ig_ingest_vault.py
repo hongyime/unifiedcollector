@@ -718,6 +718,33 @@ def test_record_browser_ingest_event_does_not_mark_heartbeat_success():
     assert args[:5] == ("threads", "browser_heartbeat", "tab-1", 1, 0)
 
 
+def test_record_browser_ingest_event_marks_empty_probe_success():
+    pool = _FakePool()
+
+    asyncio.run(
+        ig_ingest._record_browser_ingest_event(
+            pool,
+            "x",
+            "media",
+            "timeline",
+            observed_count=0,
+            stored_count=0,
+            metadata={
+                "extension_version": "1.22.4",
+                "probe_reason": "no_dom_media_candidates",
+            },
+        )
+    )
+
+    assert len(pool.conn.executes) == 2
+    query, args = pool.conn.executes[0]
+    assert "browser_ingest_events" in query
+    assert args[:5] == ("x", "media", "timeline", 0, 0)
+    health_query, health_args = pool.conn.executes[1]
+    assert "source_health" in health_query
+    assert health_args == ("x",)
+
+
 def test_browser_upload_duplicate_counts_as_accepted(monkeypatch):
     pool = _FakePool()
     events = []
@@ -871,6 +898,23 @@ def test_ingest_records_explicit_empty_media_probe(monkeypatch):
             },
         )
     ]
+
+
+def test_empty_media_probe_marks_browser_content_progress():
+    assert ig_ingest._browser_event_marks_source_success(
+        "facebook",
+        "media",
+        0,
+        0,
+        {"probe_reason": "no_dom_media_candidates"},
+    )
+    assert not ig_ingest._browser_event_marks_source_success(
+        "facebook",
+        "media",
+        0,
+        0,
+        {},
+    )
 
 
 def test_browser_heartbeat_handler_records_platform_loop():
@@ -1248,7 +1292,7 @@ def test_browser_heartbeat_handler_requests_forced_cycle_when_content_stale(monk
     assert payload["force_reason"] == "browser_content_stale"
     assert payload["content_age_seconds"] == 7200
     query, args = pool.conn.fetchrows[0]
-    assert "observed_count > 0 OR stored_count > 0" in query
+    assert "metadata ? 'probe_reason'" in query
     assert "ORDER BY created_at DESC" in query
     assert args == ("x",)
 
