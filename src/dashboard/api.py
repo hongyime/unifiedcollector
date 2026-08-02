@@ -7017,14 +7017,19 @@ def _wa_bridge_base(bridge: str) -> str:
     return os.getenv(f"WA_BRIDGE_{bridge}_URL", f"http://wa-bridge-{bridge}:3001")
 
 
-async def _wa_bridge_post(bridge: str, path: str) -> dict:
+async def _wa_bridge_post(bridge: str, path: str, payload: dict | None = None) -> dict:
     """POST to a wa-bridge control route (disconnect/reconnect), off the event loop."""
     import urllib.request
 
     base = _wa_bridge_base(bridge)
 
     def _do():
-        req = urllib.request.Request(f"{base}/{path}", data=b"", method="POST")
+        data = b""
+        headers = {}
+        if payload is not None:
+            data = json.dumps(payload).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(f"{base}/{path}", data=data, headers=headers, method="POST")
         with urllib.request.urlopen(req, timeout=15) as r:
             return __import__("json").loads(r.read().decode())
 
@@ -7108,6 +7113,45 @@ async def whatsapp_fresh_qr(bridge: str, _user: dict = Depends(require_role("vie
     return await _wa_bridge_post(bridge, "fresh-qr")
 
 
+@app.post("/whatsapp/{bridge}/pairing-code")
+async def whatsapp_pairing_code(
+    bridge: str,
+    request: Request,
+    _user: dict = Depends(require_role("viewer")),
+):
+    """Request a phone-number pairing code for an unregistered bridge slot."""
+    health = await _wa_bridge_get(bridge, "health", timeout=8)
+    if health.get("ok") and (
+        health.get("whatsapp_ready") or health.get("connected") or health.get("registered")
+    ):
+        return {
+            "bridge": bridge,
+            "ok": True,
+            "status": "registered_session",
+            "ready": bool(health.get("whatsapp_ready") or health.get("connected")),
+            "registered": health.get("registered"),
+            "connected": health.get("connected"),
+            "note": "Bridge is already registered; use Reconnect to recover or Disconnect to unpair.",
+        }
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    raw_phone = str(body.get("phone") or "").strip()
+    digits = re.sub(r"\D+", "", raw_phone)
+    if not raw_phone or not re.fullmatch(r"\+?[1-9]\d{1,14}", raw_phone):
+        return {
+            "bridge": bridge,
+            "ok": False,
+            "status": "invalid_phone",
+            "error": "Enter the WhatsApp phone number in E.164 format, for example +6591234567.",
+        }
+    result = await _wa_bridge_post(bridge, "pairing-code", {"phone": raw_phone})
+    if result.get("ok"):
+        result["phone_last4"] = result.get("phone_last4") or (digits[-4:] if digits else None)
+    return result
+
+
 @app.get("/whatsapp/link")
 async def whatsapp_link_page():
     """Self-contained QR linking page with auto-refresh.
@@ -7135,6 +7179,12 @@ async def whatsapp_link_page():
  .identity{margin-top:10px;text-align:center}
  .identity .phone{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:15px;color:#e9edef;font-weight:600}
  .identity .name{font-size:13px;color:#8696a0;margin-top:2px}
+ .pairing{display:flex;gap:8px;margin-top:14px}
+ .pairing input{min-width:0;flex:1;background:#0b141a;border:1px solid #2a3942;border-radius:8px;color:#e9edef;padding:9px 10px;font-size:13px}
+ .pairing button{background:#00a884;border:0;border-radius:8px;color:#06130f;font-weight:700;padding:9px 10px;cursor:pointer}
+ .pairing button:disabled{opacity:.55;cursor:not-allowed}
+ .code{margin-top:10px;text-align:center;color:#d1fae5;font-size:13px;min-height:18px}
+ .code strong{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:22px;letter-spacing:2px;color:#e9edef}
  .dot{width:9px;height:9px;border-radius:50%;display:inline-block}
  .dot.wait{background:#f0b232}.dot.ok{background:#22c55e}.dot.err{background:#ef4444}
  .connected{color:#22c55e;font-weight:600}
@@ -7147,14 +7197,15 @@ async def whatsapp_link_page():
  <h1>Link WhatsApp accounts</h1>
  <p class="sub">Two independent account slots. Link either one in any order. QR refreshes automatically &mdash; just leave this open.</p>
  <div class="grid">
-  <div class="card"><h2>Bridge 1 <span id="t1"></span></h2><div class="qrbox" id="q1"><span class="spinner"></span></div><div class="status" id="s1">Loading&hellip;</div><div class="identity" id="i1"></div></div>
-  <div class="card"><h2>Bridge 2 <span id="t2"></span></h2><div class="qrbox" id="q2"><span class="spinner"></span></div><div class="status" id="s2">Loading&hellip;</div><div class="identity" id="i2"></div></div>
+  <div class="card"><h2>Bridge 1 <span id="t1"></span></h2><div class="qrbox" id="q1"><span class="spinner"></span></div><div class="status" id="s1">Loading&hellip;</div><div class="identity" id="i1"></div><div class="pairing"><input id="p1" inputmode="tel" autocomplete="tel" placeholder="+6591234567"><button id="b1" onclick="pairCode('1')">Code</button></div><div class="code" id="c1"></div></div>
+  <div class="card"><h2>Bridge 2 <span id="t2"></span></h2><div class="qrbox" id="q2"><span class="spinner"></span></div><div class="status" id="s2">Loading&hellip;</div><div class="identity" id="i2"></div><div class="pairing"><input id="p2" inputmode="tel" autocomplete="tel" placeholder="+6591234567"><button id="b2" onclick="pairCode('2')">Code</button></div><div class="code" id="c2"></div></div>
  </div>
  <div class="steps">
   <b>On your phone:</b> WhatsApp &rarr; Settings &rarr; <b>Linked Devices</b> &rarr; <b>Link a Device</b> &rarr; point the camera at a QR above.<br>
-  The panel turns <span class="connected">green</span> automatically once linked. No need to refresh the page.
+  If QR scanning keeps failing, enter the phone number for that bridge and use the code fallback. The panel turns <span class="connected">green</span> automatically once linked.
  </div>
 <script>
+function esc(s){return String(s||'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
 async function fetchJsonWithRetry(url, tries){
   let lastErr=null;
   for(let i=0;i<(tries||2);i++){
@@ -7172,6 +7223,31 @@ async function fetchJsonWithRetry(url, tries){
     }
   }
   throw lastErr;
+}
+async function pairCode(b){
+  const input=document.getElementById('p'+b), btn=document.getElementById('b'+b), out=document.getElementById('c'+b);
+  const phone=(input&&input.value||'').trim();
+  if(!phone){ out.innerHTML='Enter the phone number first.'; return; }
+  btn.disabled=true; out.innerHTML='<span class="spinner"></span> requesting code&hellip;';
+  try{
+    const r=await fetch('/whatsapp/'+b+'/pairing-code',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      credentials:'same-origin',
+      body:JSON.stringify({phone})
+    });
+    const d=await r.json();
+    if(d.ok&&d.code){
+      out.innerHTML='Use code<br><strong>'+esc(d.code)+'</strong><br>WhatsApp &rarr; Linked Devices &rarr; Link with phone number';
+      poll(b);
+    }else{
+      out.innerHTML=esc(d.error||d.note||d.status||'pairing code failed');
+    }
+  }catch(e){
+    out.innerHTML='Pairing-code request failed: '+esc(e&&e.message?e.message:e);
+  }finally{
+    btn.disabled=false;
+  }
 }
 async function pollSession(b){
   // Fetch the paired-account identity (phone, push name) for this bridge and

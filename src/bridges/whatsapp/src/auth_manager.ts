@@ -15,14 +15,17 @@ export async function getAuthState() {
     return { state, saveCreds };
 }
 
-export async function handlePairingCode(sock: any, phone: string): Promise<void> {
+export async function requestPairingCode(sock: any, phone: string): Promise<string> {
     if (!phone.match(/^\+?[1-9]\d{1,14}$/)) {
-        logger.error(`Invalid phone for pairing code: ${phone}. Must be E.164.`);
-        return;
+        throw new Error('Invalid phone for pairing code. Use E.164 digits, for example +6591234567.');
     }
+    const normalized = phone.replace(/[^0-9]/g, '');
+    return await sock.requestPairingCode(normalized);
+}
+
+export async function handlePairingCode(sock: any, phone: string): Promise<void> {
     try {
-        const normalized = phone.replace(/[^0-9]/g, '');
-        const code = await sock.requestPairingCode(normalized);
+        const code = await requestPairingCode(sock, phone);
         logger.info(`\n=========================\nPAIRING CODE: ${code}\n=========================\n`);
     } catch (err) {
         logger.error({ err }, 'Failed to request pairing code');

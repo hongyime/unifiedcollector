@@ -17,7 +17,7 @@ import express from 'express';
 import crypto from 'crypto';
 import * as qrcode from 'qrcode-terminal';
 
-import { getAuthState, handlePairingCode } from './auth_manager';
+import { getAuthState, handlePairingCode, requestPairingCode } from './auth_manager';
 import { bindStore, getMessage } from './store';
 import { producer } from './producer';
 import { registerMessagesHandler } from './event_handlers/messages';
@@ -333,6 +333,52 @@ app.post('/fresh-qr', async (_req, res) => {
 // Body: { messageId, mediaKey, directPath, mimetype? }
 // Auth: HMAC-SHA256 of JSON body with BRIDGE_SECRET, passed as X-Signature header.
 app.use(express.json({ limit: '1mb' }));
+
+// POST /pairing-code — QR fallback for unregistered slots.
+// Body: { phone: "+6591234567" }. Returns the short WhatsApp pairing code for
+// phone-side Linked Devices > Link with phone number. The phone number is not
+// stored by the bridge; it is used only for this one Baileys request.
+app.post('/pairing-code', async (req, res) => {
+    const registered = Boolean(
+        serviceHealthy
+        || socketRegistered
+        || activeSock?.authState?.creds?.registered
+        || authPathHasRegisteredCreds()
+    );
+    if (registered) {
+        res.status(200).json({
+            ...bridgeState(),
+            status: 'registered_session',
+            note: 'bridge is already registered; use reconnect to recover or disconnect to unpair',
+        });
+        return;
+    }
+    if (!activeSock) {
+        res.status(503).json({ ...bridgeState(), error: 'no active socket; wait for QR state then retry' });
+        return;
+    }
+    const phone = String(req.body?.phone || '').trim();
+    if (!phone) {
+        res.status(400).json({ ...bridgeState(), error: 'phone is required in E.164 format' });
+        return;
+    }
+    try {
+        lastQrEndpointAt = Date.now();
+        connectionState = 'pairing_code_requested';
+        const code = await requestPairingCode(activeSock, phone);
+        const digits = phone.replace(/[^0-9]/g, '');
+        res.status(200).json({
+            ...bridgeState(),
+            status: 'pairing_code_requested',
+            code,
+            phone_last4: digits.slice(-4) || null,
+        });
+    } catch (err: any) {
+        logger.warn({ err: err?.message || String(err) }, 'pairing code request failed');
+        res.status(400).json({ ...bridgeState(), error: err?.message || 'pairing code request failed' });
+    }
+});
+
 app.post('/media/decrypt', async (req, res) => {
     const bridgeSecret = process.env.WHATSAPP_MEDIA_BRIDGE_SECRET || process.env.BRIDGE_SECRET || '';
     if (bridgeSecret) {

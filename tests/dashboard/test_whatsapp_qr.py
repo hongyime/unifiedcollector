@@ -209,3 +209,64 @@ def test_whatsapp_fresh_qr_refuses_registered_bridge(monkeypatch):
     assert out["status"] == "registered_session"
     assert out["ready"] is True
     assert out["registered"] is True
+
+
+def test_whatsapp_pairing_code_rejects_invalid_phone(monkeypatch):
+    async def fake_get(bridge: str, path: str, timeout: int = 0):
+        return {
+            "bridge": bridge,
+            "ok": True,
+            "status": "awaiting_scan",
+            "whatsapp_ready": False,
+            "connected": False,
+            "registered": False,
+        }
+
+    async def fail_post(_bridge: str, _path: str, _payload=None):
+        raise AssertionError("invalid phone must not be sent to bridge")
+
+    class FakeRequest:
+        async def json(self):
+            return {"phone": "not-a-phone"}
+
+    monkeypatch.setattr(dashboard_api, "_wa_bridge_get", fake_get)
+    monkeypatch.setattr(dashboard_api, "_wa_bridge_post", fail_post)
+
+    out = asyncio.run(dashboard_api.whatsapp_pairing_code("1", FakeRequest(), _user={}))
+
+    assert out["ok"] is False
+    assert out["status"] == "invalid_phone"
+
+
+def test_whatsapp_pairing_code_proxies_phone_to_unregistered_bridge(monkeypatch):
+    async def fake_get(bridge: str, path: str, timeout: int = 0):
+        assert bridge == "2"
+        assert path == "health"
+        assert timeout == 8
+        return {
+            "bridge": bridge,
+            "ok": True,
+            "status": "awaiting_scan",
+            "whatsapp_ready": False,
+            "connected": False,
+            "registered": False,
+        }
+
+    async def fake_post(bridge: str, path: str, payload=None):
+        assert bridge == "2"
+        assert path == "pairing-code"
+        assert payload == {"phone": "+6592348112"}
+        return {"bridge": bridge, "ok": True, "status": "pairing_code_requested", "code": "ABCD-1234"}
+
+    class FakeRequest:
+        async def json(self):
+            return {"phone": "+6592348112"}
+
+    monkeypatch.setattr(dashboard_api, "_wa_bridge_get", fake_get)
+    monkeypatch.setattr(dashboard_api, "_wa_bridge_post", fake_post)
+
+    out = asyncio.run(dashboard_api.whatsapp_pairing_code("2", FakeRequest(), _user={}))
+
+    assert out["ok"] is True
+    assert out["code"] == "ABCD-1234"
+    assert out["phone_last4"] == "8112"
