@@ -398,6 +398,7 @@ async def yt_dlp_download(
     impersonate: Optional[str] = "chrome",
     write_thumbnail: bool = True,
     no_overwrites: bool = True,
+    no_update: bool = True,
     extra_args: Optional[Sequence[str]] = None,
     timeout: float = 300.0,
     progress_hook: Optional[Callable[[str], None]] = None,
@@ -422,6 +423,8 @@ async def yt_dlp_download(
         argv.append("--write-thumbnail")
     if no_overwrites:
         argv.append("--no-overwrites")
+    if no_update:
+        argv.append("--no-update")
     argv.extend(["-o", output_template])
     if max_downloads is not None:
         argv.extend(["--max-downloads", str(max_downloads)])

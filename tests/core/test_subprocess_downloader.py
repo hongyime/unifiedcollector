@@ -1,5 +1,9 @@
 from pathlib import Path
+from unittest.mock import AsyncMock
 
+import pytest
+
+from src.core import subprocess_downloader
 from src.core.subprocess_downloader import DownloadResult
 
 
@@ -40,3 +44,15 @@ def test_output_summary_classifies_blank_failure():
 def test_output_summary_classifies_timeout_and_cancel():
     assert _result(timed_out=True).output_summary(80) == "process timed out after 12.3s"
     assert _result(cancelled=True).output_summary(80) == "process cancelled"
+
+
+@pytest.mark.asyncio
+async def test_yt_dlp_download_disables_update_check(monkeypatch, tmp_path):
+    monkeypatch.setattr(subprocess_downloader, "check_tool", lambda name: True)
+    runner = AsyncMock(return_value=_result(returncode=0, tempdir=tmp_path))
+    monkeypatch.setattr(subprocess_downloader, "_run_and_collect", runner)
+
+    await subprocess_downloader.yt_dlp_download("https://example.test/video", tempdir=str(tmp_path))
+
+    argv = runner.await_args.args[0]
+    assert "--no-update" in argv
