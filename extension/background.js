@@ -1629,6 +1629,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             running: !!msg.running,
             url: msg.url || (tab && tab.url) || null,
             tab_id: tab ? tab.id : null,
+            health_status: msg.health_status || null,
+            health_reason: msg.health_reason || null,
+            message_type: msg.type || null,
+            loop_running: !!msg.running,
+            content_age_seconds: msg.content_age_seconds ?? null,
+            stale_after_ms: msg.stale_after_ms ?? null,
           }), SCRAPER_HEARTBEAT_TIMEOUT_MS);
           await maybeForceScrapeCycle(tab, platform, result && result.body, "loop_status", base);
         } catch (e) {}

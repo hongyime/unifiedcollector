@@ -235,6 +235,8 @@ function directHeartbeatPayload(msg, error, status) {
     cycle_saved: msg.saved ?? null,
     cycle_discovered: msg.discovered ?? null,
     loop_running: msg.type === "loopStatus" ? !!msg.running : null,
+    content_age_seconds: msg.content_age_seconds ?? null,
+    stale_after_ms: msg.stale_after_ms ?? null,
     text_sample: msg.msg ? String(msg.msg).slice(0, 260) : null,
   });
 }
@@ -3111,6 +3113,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       loop_progress_age_ms: progressAgeMs,
       stale_after_ms: staleMs,
     });
+    send({
+      type: "loopStatus",
+      platform: p && p.id,
+      label: p && p.label,
+      running: LOOP_RUNNING,
+      url: location.href,
+      health_status: msg.type === "scrapeCycle" ? "watchdog_scrape_nudge" : "watchdog_loop_nudge",
+      health_reason: msg.reason || msg.type,
+      content_age_seconds: Math.round(progressAgeMs / 1000),
+      stale_after_ms: staleMs,
+    }).catch(() => {});
     if (msg.type === "scrapeCycle") runOneShotCycle(msg.reason || "manual");
     else if (!LOOP_RUNNING) mainLoop();
     else if (/browser_content_stale|stale/i.test(msg.reason || "") && progressAgeMs > staleMs) {
