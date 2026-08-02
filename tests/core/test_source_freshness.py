@@ -73,8 +73,62 @@ async def test_compute_liveness_ignores_stale_watchdog_marker_when_data_is_fresh
     rows = await source_freshness.compute_liveness(FreshWebsiteConn())
 
     assert rows[0]["status"] == "live"
-    assert "stale watchdog marker ignored" in rows[0]["detail"]
+    assert "watchdog marker ignored" in rows[0]["detail"]
     assert rows[0]["source_health_status"] == "degraded"
+
+
+@pytest.mark.asyncio
+async def test_compute_liveness_ignores_browser_watchdog_marker_and_rebuilds_detail(monkeypatch):
+    from src.core import source_freshness
+
+    class BrowserWatchdogConn:
+        async def fetch(self, query: str, *args, timeout: int = 8):
+            if "FROM source_health" in query:
+                return [
+                    {
+                        "source": "facebook",
+                        "status": "degraded",
+                        "last_error": (
+                            "browser capture stalled: Chrome extension heartbeat is 7200s old "
+                            "(> 3600s) (watchdog)"
+                        ),
+                        "last_success_at": datetime.now(timezone.utc) - timedelta(seconds=120),
+                        "updated_at": datetime.now(timezone.utc),
+                    }
+                ]
+            if "FROM browser_ingest_events" in query and "browser_heartbeat" in query:
+                return [
+                    {
+                        "platform": "facebook",
+                        "last_seen_at": datetime.now(timezone.utc) - timedelta(seconds=7300),
+                        "age_seconds": 7300,
+                        "extension_version": "1.21.95",
+                        "url": "https://www.facebook.com/",
+                        "health_status": "background_tab_seen",
+                    }
+                ]
+            raise AssertionError(query)
+
+        async def fetchval(self, query: str, *args, timeout: int = 8):
+            if "facebook_posts" in query:
+                return 120
+            return None
+
+    monkeypatch.setenv("BROWSER_HEARTBEAT_STALE_WARN_SECONDS", "3600")
+    monkeypatch.setattr(
+        source_freshness,
+        "FRESHNESS",
+        [("facebook", "SELECT extract(epoch FROM now()-max(collected_at)) FROM facebook_posts", 172800)],
+    )
+
+    rows = await source_freshness.compute_liveness(BrowserWatchdogConn())
+
+    assert rows[0]["status"] == "degraded"
+    assert rows[0]["source_health_status"] == "degraded"
+    assert "Chrome extension heartbeat is 7300s old" in rows[0]["detail"]
+    assert "7200s" not in rows[0]["detail"]
+    assert "browser capture stalled" not in rows[0]["detail"]
+    assert "(watchdog)" not in rows[0]["detail"]
 
 
 @pytest.mark.asyncio

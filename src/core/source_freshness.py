@@ -140,6 +140,15 @@ def _stale_watchdog_marker(error: str | None) -> bool:
     return lowered.startswith("stale ") and "watchdog" in lowered
 
 
+def _watchdog_marker(error: str | None) -> bool:
+    if _stale_watchdog_marker(error):
+        return True
+    if not error:
+        return False
+    lowered = error.lower()
+    return lowered.startswith("browser capture stalled:") and "watchdog" in lowered
+
+
 def _age_seconds(value, now: datetime) -> float | None:
     if value is None:
         return None
@@ -260,7 +269,7 @@ async def compute_liveness(conn) -> list[dict]:
                 health_age is not None
                 and health_age <= thresh
                 and hs not in {"auth_paused", "dead"}
-                and not (hs == "degraded" and not _stale_watchdog_marker(h_error))
+                and not (hs == "degraded" and not _watchdog_marker(h_error))
             ):
                 age = health_age
                 status = "live"
@@ -274,13 +283,13 @@ async def compute_liveness(conn) -> list[dict]:
         elif hs == "auth_paused":
             status = "degraded"
             detail = h_error or "source_health reports auth_paused"
-        elif hs == "degraded" and not _stale_watchdog_marker(h_error):
+        elif hs == "degraded" and not _watchdog_marker(h_error):
             status = "degraded"
             detail = h_error or "source_health reports degraded"
         else:
             status = "live"
-            if hs == "degraded" and _stale_watchdog_marker(h_error):
-                detail = "newest row is inside the freshness window; stale watchdog marker ignored"
+            if hs == "degraded" and _watchdog_marker(h_error):
+                detail = "newest row is inside the freshness window; watchdog marker ignored"
             else:
                 detail = "newest row is inside the freshness window"
         browser_heartbeat = browser_heartbeats.get(name) if browser_heartbeats is not None else None
