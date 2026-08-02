@@ -296,6 +296,8 @@ class WorkerService:
         self._tg_chat_id = os.getenv("NOTIFY_TELEGRAM_CHAT_ID", "")
         self._tg_thread_id = os.getenv("NOTIFY_TELEGRAM_THREAD_ID", "")
         self._last_net_notify: float = 0  # dedup network-down alerts (5 min cooldown)
+        self._last_health_report_failure_log_at: float = 0
+        self._health_report_failure_count: int = 0
 
     async def start(self, sources: list[str]):
         logger.info("Worker service starting with sources: %s", sources)
@@ -1097,19 +1099,54 @@ class WorkerService:
             await self._report_health("running")
 
     async def _report_health(self, status: str):
+        conn = None
         try:
-            async with self.pool.acquire() as conn:
-                await conn.execute(
-                    "INSERT INTO service_cursors (service, last_processed_at, status) "
-                    "VALUES ('_worker', NOW(), $1) "
-                    "ON CONFLICT (service) DO UPDATE "
-                    "SET last_processed_at = NOW(), status = $1",
-                    status,
-                )
-        except Exception:
-            # Operators won't see worker liveness if this fails silently.
-            # Use warning + stack so degraded health is observable.
-            logger.warning("Health report failed", exc_info=True)
+            conn = await asyncio.wait_for(self.pool.acquire(), timeout=10)
+            await conn.execute(
+                "INSERT INTO service_cursors (service, last_processed_at, status) "
+                "VALUES ('_worker', NOW(), $1) "
+                "ON CONFLICT (service) DO UPDATE "
+                "SET last_processed_at = NOW(), status = $1",
+                status,
+            )
+            self._health_report_failure_count = 0
+        except asyncio.CancelledError as exc:
+            if self._stop.is_set():
+                raise
+            self._log_health_report_failure(exc, include_stack=False)
+        except (asyncio.TimeoutError, TimeoutError) as exc:
+            self._log_health_report_failure(exc, include_stack=False)
+        except Exception as exc:
+            # Operators won't see worker liveness if this fails silently. Keep a
+            # stack for unexpected failures, but throttle repeated reports so DB
+            # pressure does not drown out collector logs.
+            self._log_health_report_failure(exc, include_stack=True)
+        finally:
+            if conn is not None:
+                try:
+                    await asyncio.shield(self.pool.release(conn))
+                except asyncio.CancelledError:
+                    if self._stop.is_set():
+                        raise
+                    logger.debug("Health report DB release cancelled")
+                except Exception:
+                    logger.debug("Health report DB release failed", exc_info=True)
+
+    def _log_health_report_failure(self, exc: BaseException, *, include_stack: bool) -> None:
+        self._health_report_failure_count += 1
+        now = time.monotonic()
+        gap = float(os.getenv("COLLECTOR_HEALTH_REPORT_LOG_GAP_SECONDS", "300"))
+        if now - self._last_health_report_failure_log_at < gap:
+            return
+        self._last_health_report_failure_log_at = now
+        msg = (
+            "Health report failed (%s; suppressed repeats=%d)"
+            % (_format_exception(exc), max(0, self._health_report_failure_count - 1))
+        )
+        if include_stack:
+            logger.warning(msg, exc_info=True)
+        else:
+            logger.warning(msg)
 
     async def _mark_source_dead(self, source: str, error: str, crash_count: int):
         """P2-4: persist a permanently-dead source so it's queryable + alertable.
