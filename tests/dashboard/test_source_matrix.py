@@ -241,6 +241,38 @@ def test_source_matrix_blocker_reports_browser_content_stale_without_reload_firs
     assert "forced scrape pass" in blocker["next_action"]
 
 
+def test_source_matrix_blocker_prioritizes_stale_content_over_old_extension_signal():
+    blocker = _source_matrix_blocker(
+        _source(source="x"),
+        rate_row=None,
+        cursor_row=None,
+        extension_issues=[
+            {
+                "platform": "x",
+                "kind": "extension_version_mismatch",
+                "detail": "Browser ingest event came from an older extension bundle.",
+                "endpoint": "browser_heartbeat",
+                "extension_version": "1.22.2",
+                "expected_version": "1.22.3",
+                "age_seconds": 120,
+            },
+            {
+                "platform": "x",
+                "kind": "browser_content_stale",
+                "detail": "Browser tab heartbeat is fresh, but no useful content has arrived.",
+                "heartbeat_age_seconds": 120,
+                "content_age_seconds": 7200,
+                "stale_after_seconds": 3600,
+                "url": "https://x.com/home",
+            },
+        ],
+    )
+
+    assert blocker["kind"] == "browser_content_stale"
+    assert "useful content is stale" in blocker["summary"]
+    assert "do not reload it first" in blocker["next_action"]
+
+
 def test_source_matrix_blocker_uses_extension_reload_url_when_available():
     extension_id, reload_url = _extension_reload_target_from_url(
         "chrome-extension://pkmdmcklnjdeocoeigmlakhomhhcpafb/background.js"

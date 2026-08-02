@@ -1679,6 +1679,25 @@ def _source_window_totals(rows: list[dict], window_key: str) -> dict:
     return out
 
 
+def _source_matrix_primary_extension_issue(extension_issues: list[dict]) -> dict | None:
+    """Pick the issue that best explains missing collection for one source."""
+    if not extension_issues:
+        return None
+    priority = {
+        "hook_stale": 0,
+        "browser_content_stale": 1,
+        "browser_heartbeat_stale": 2,
+        "extension_version_mismatch": 9,
+    }
+    return min(
+        extension_issues,
+        key=lambda issue: (
+            priority.get(str(issue.get("kind") or ""), 5),
+            int(issue.get("age_seconds") or issue.get("content_age_seconds") or 0),
+        ),
+    )
+
+
 def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: dict | None,
                            extension_issues: list[dict]) -> dict:
     source = source_row.get("source")
@@ -1740,8 +1759,8 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
                 "summary": rate_row.get("latest_reason") or f"Latest HTTP access event was {status_code}.",
                 "next_action": "Refresh auth cookies/session or inspect the account-specific scraper log.",
             }
-    if extension_issues:
-        issue = extension_issues[0]
+    issue = _source_matrix_primary_extension_issue(extension_issues)
+    if issue:
         age_text = _short_age(issue.get("age_seconds"))
         endpoint = issue.get("endpoint")
         version = issue.get("extension_version") or "unknown"
