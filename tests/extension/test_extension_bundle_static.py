@@ -86,7 +86,7 @@ def test_content_script_recovery_bounds_tab_messages():
     assert "const TAB_MESSAGE_TIMEOUT_MS = 30000" in background
     assert "const FORCED_CYCLE_RELOAD_DEBOUNCE_MS = 4 * 60 * 1000" in background
     assert "const FORCED_CYCLE_FAILURE_DEBOUNCE_MS = 90 * 1000" in background
-    assert 'const REFRESH_AFTER_PROGRAMMATIC_INJECT_PLATFORMS = new Set(["x"])' in background
+    assert 'const REFRESH_AFTER_PROGRAMMATIC_INJECT_PLATFORMS = new Set(["x", "threads"])' in background
     assert "async function sendTabMessageWithTimeout" in background
     assert background.count("sendTabMessageWithTimeout(") >= 5
     assert "new Error(\"tab message timed out\")" in background
@@ -238,6 +238,20 @@ def test_x_page_recovery_limit_cools_then_retries():
     assert "attempt_limit_cooling" in background
 
 
+def test_x_threads_hard_recovery_returns_to_home_feed():
+    background = _read("extension/background.js")
+    hard_refresh_block = background.split("async function hardRefreshForcedCycleTab", 1)[1].split(
+        "async function refreshTabForMissingContentScript",
+        1,
+    )[0]
+
+    assert 'const HOME_NAV_HARD_REFRESH_PLATFORMS = new Set(["x", "threads"])' in background
+    assert "HOME_NAV_HARD_REFRESH_PLATFORMS.has(platform.id)" in hard_refresh_block
+    assert "recovery_nav" in hard_refresh_block
+    assert "chrome.tabs.update(tab.id, { url: targetUrl })" in hard_refresh_block
+    assert "chrome.tabs.reload(tab.id, { bypassCache: true })" in hard_refresh_block
+
+
 def test_post_reload_scrape_nudge_waits_and_retries_for_heavy_tabs():
     background = _read("extension/background.js")
 
@@ -249,7 +263,9 @@ def test_post_reload_scrape_nudge_waits_and_retries_for_heavy_tabs():
     )[0]
 
     assert re.search(r"tiktok:\s*75000", delay_block)
+    assert re.search(r"threads:\s*45000", delay_block)
     assert re.search(r"x:\s*75000", delay_block)
+    assert re.search(r"threads:\s*60000", retry_block)
     assert re.search(r"tiktok:\s*90000", retry_block)
     assert re.search(r"x:\s*90000", retry_block)
     assert "post_reload_scrape_nudge_retry_scheduled" in background
@@ -280,6 +296,7 @@ def test_stalled_scrape_passes_are_force_cleared_on_timeout():
     assert "forceClearScrapePass();" in content
     assert "scrape_pass_forced_clear: true" in content
     assert re.search(r"tiktok:\s*1", timeout_table)
+    assert re.search(r"threads:\s*1", timeout_table)
     assert re.search(r"x:\s*1", timeout_table)
     assert re.search(r"facebook:\s*1", timeout_table)
 
@@ -320,7 +337,9 @@ def test_browser_recovery_optional_writes_are_nonblocking():
     assert "sendSideEffect(usersPayload, \"lemon8\"" in lemon8_block
     assert 'send({ type: "posts", platform: "x"' not in x_block
     assert 'await send({ type: "posts", platform: "facebook"' not in facebook_block
-    assert "{ timeoutMs: forcedRecovery ? 30000 : 45000 }" in x_block
+    assert "`X ${entity} forced media write`" in x_block
+    assert "{ timeoutMs: 12000 }" in x_block
+    assert "await send(ingestPayload, { timeoutMs: 45000 })" in x_block
     assert "{ timeoutMs: forcedRecovery ? 30000 : 45000 }" in facebook_block
 
 

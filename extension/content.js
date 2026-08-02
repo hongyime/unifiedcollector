@@ -396,7 +396,7 @@ const PAGE_HEALTH_REPORT_GAP_MS = 60000;
 const WALL_LOG_GAP_MS = 10 * 60000;
 const LAST_PAGE_HEALTH_REPORT = {};
 const LAST_WALL_LOG_AT = {};
-const PAGE_RECOVERY_ENABLED = new Set(["tiktok", "x"]);
+const PAGE_RECOVERY_ENABLED = new Set(["tiktok", "threads", "x"]);
 const RECOVERABLE_PAGE_SHELL_PATTERNS = {
   tiktok: [
     { reason: "sorry_could_not_show_page", re: /sorry,?\s*we\s+couldn(?:'|\u2019)?t\s+show\s+that\s+page/i },
@@ -407,6 +407,12 @@ const RECOVERABLE_PAGE_SHELL_PATTERNS = {
     { reason: "try_again_empty_state", re: /\btry\s+again\b/i, lowContent: true },
     { reason: "no_internet_connection", re: /no\s+internet\s+connection/i, lowContent: true },
     { reason: "video_unavailable", re: /video\s+currently\s+unavailable/i, lowContent: true },
+  ],
+  threads: [
+    { reason: "something_went_wrong", re: /something\s+went\s+wrong/i, lowContent: true },
+    { reason: "try_again_empty_state", re: /\btry\s+again\b/i, lowContent: true },
+    { reason: "page_not_available", re: /this\s+page\s+isn(?:'|\u2019)?t\s+available/i, lowContent: true },
+    { reason: "login_shell", re: /\b(log\s*in|continue\s+with\s+instagram)\b/i, lowContent: true },
   ],
   default: [
     { reason: "page_not_available", re: /this\s+page\s+isn(?:'|\u2019)?t\s+available/i },
@@ -2288,7 +2294,7 @@ const x = {
         { timeoutMs: forcedRecovery ? 12000 : 25000 }
       );
     }
-    const ingestResponse = await send({
+    const ingestPayload = {
       type: "ingest",
       platform: "x",
       username: entity,
@@ -2296,7 +2302,15 @@ const x = {
       record_empty: true,
       probe_reason: sink.items.length ? "media_candidates_found" : "no_dom_media_candidates",
       probe_meta: { feed, posts: xposts.length },
-    }, { timeoutMs: forcedRecovery ? 30000 : 45000 });
+    };
+    const ingestResponse = forcedRecovery
+      ? (sendSideEffect(
+          ingestPayload,
+          "x",
+          `X ${entity} forced media write`,
+          { timeoutMs: 12000 }
+        ), null)
+      : await send(ingestPayload, { timeoutMs: 45000 });
     const profileSeen = entity !== "timeline" && !xIsStatusPage() && !!scrapeXProfile(entity);
     const progressCounts = {
       feed,
@@ -2335,7 +2349,7 @@ const x = {
         await xReportPageHealth("zero_content", "x_content_zero_progress", progressCounts);
       }
     }
-    if (activeMediaRevisit) {
+    if (activeMediaRevisit && !forcedRecovery) {
       await finishBrowserMediaRevisit("x", activeMediaRevisit, ingestResponse, sink.items.length, entity);
     }
     if (!forcedRecovery && entity !== "timeline" && !xIsStatusPage()) {
@@ -2571,14 +2585,17 @@ const threads = {
   entity() { const m = location.pathname.match(/^\/@([^/?#]+)/); return m ? m[1] : "feed"; },
 
   // Scrape one Threads profile we navigated to (the IG→Threads reverse direction).
-  async _scrapeProfile(user) {
+  async _scrapeProfile(user, forcedRecovery = false) {
     clog("info", `Threads profile @${user} — scraping (IG-known real account)`, "threads");
-    await autoScroll(8, 1400, 1800, { maxPauseMs: 3500 });
+    await reportBrowserRecoveryProbe("threads", user, { mode: "profile" });
+    await autoScroll(forcedRecovery ? 4 : 8, 1400, forcedRecovery ? 900 : 1800, {
+      maxPauseMs: forcedRecovery ? 1500 : 3500,
+    });
     const sink = harvestDom(user, { ...THREADS_IMG, platform: "threads" });
     const activeMediaRevisit = currentBrowserMediaRevisit("threads");
     markBrowserMediaRevisitItems("threads", sink, activeMediaRevisit);
     const posts = harvestPermalinkPosts(/\/@([^/]+)\/post\/([^/?#]+)/, (m) => m[2]);
-    const ingestResponse = await send({
+    const ingestPayload = {
       type: "ingest",
       platform: "threads",
       username: user,
@@ -2586,12 +2603,25 @@ const threads = {
       record_empty: true,
       probe_reason: sink.items.length ? "media_candidates_found" : "no_dom_media_candidates",
       probe_meta: { posts: posts.length, mode: "profile" },
-    });
-    if (activeMediaRevisit) {
+    };
+    const ingestResponse = forcedRecovery
+      ? (sendSideEffect(
+          ingestPayload,
+          "threads",
+          `Threads @${user} forced media write`,
+          { timeoutMs: 12000 }
+        ), null)
+      : await send(ingestPayload);
+    if (activeMediaRevisit && !forcedRecovery) {
       await finishBrowserMediaRevisit("threads", activeMediaRevisit, ingestResponse, sink.items.length, user);
     }
     if (posts.length) {
-      await send({ type: "posts", platform: "threads", username: user, posts });
+      const postsPayload = { type: "posts", platform: "threads", username: user, posts };
+      if (forcedRecovery) {
+        sendSideEffect(postsPayload, "threads", `Threads @${user} forced post write`, { timeoutMs: 12000 });
+      } else {
+        await send(postsPayload);
+      }
       clog("info", `Threads @${user}: ${posts.length} post(s)`, "threads");
     }
     return { saved: sink.items.length, posts: posts.length };
@@ -2599,7 +2629,8 @@ const threads = {
 
   async runCycle() {
     const owner = ownerFromStoredOrDom("threads", threadsLoggedInOwner);
-    if (await maybeSweepFollowGraph({
+    const forcedRecovery = forcedRecoveryMode("threads");
+    if (!forcedRecovery && await maybeSweepFollowGraph({
       platform: "threads",
       owner,
       urls: {
@@ -2610,7 +2641,7 @@ const threads = {
       },
       homeUrl: "https://www.threads.com/",
     })) return { targets: 1, saved: 0, posts: 0, discovered: 0 };
-    const mediaRevisit = await maybeStartBrowserMediaRevisit("threads", owner);
+    const mediaRevisit = forcedRecovery ? null : await maybeStartBrowserMediaRevisit("threads", owner);
     if (mediaRevisit && mediaRevisit.navigating) return { targets: 1, saved: 0, posts: 0, discovered: 0 };
 
     // REVERSE direction: if we navigated to a target profile, scrape it then return
@@ -2627,7 +2658,7 @@ const threads = {
         thMarkNoAcct(user);
         clog("info", `Threads @${user}: no Threads account — blacklisted from reverse rotation`, "threads");
       } else {
-        const r = await this._scrapeProfile(user);
+        const r = await this._scrapeProfile(user, forcedRecovery);
         // always bounce back to the feed so the rotation keeps moving (robust even if
         // target tracking desyncs); this is a dedicated scraper tab, not manual browsing.
         lsSet("uc_th_target", "");
@@ -2647,13 +2678,16 @@ const threads = {
       ? ((await threadsSelectFeed("For you")) ? "foryou" : "feed")
       : ((await threadsSelectFeed("Following")) ? "following" : "feed");
     clog("info", `Threads cycle on ${feed} — scrolling`, "threads");
-    await autoScroll(10, 1400, 1800, { maxPauseMs: 3500 });
+    await reportBrowserRecoveryProbe("threads", feed, { mode: "feed", feed });
+    await autoScroll(forcedRecovery ? 4 : 10, 1400, forcedRecovery ? 900 : 1800, {
+      maxPauseMs: forcedRecovery ? 1500 : 3500,
+    });
     const sink = harvestDom(feed, { ...THREADS_IMG, platform: "threads" });
     const activeMediaRevisit = currentBrowserMediaRevisit("threads");
     markBrowserMediaRevisitItems("threads", sink, activeMediaRevisit);
     const posts = harvestPermalinkPosts(/\/@([^/]+)\/post\/([^/?#]+)/, (m) => m[2]);
     const authors = collectPermalinkAuthors(/^\/@([A-Za-z0-9._]{1,30})(?:\/|$)/, /^(search|explore|activity|saved)$/);
-    const ingestResponse = await send({
+    const ingestPayload = {
       type: "ingest",
       platform: "threads",
       username: feed,
@@ -2661,21 +2695,41 @@ const threads = {
       record_empty: true,
       probe_reason: sink.items.length ? "media_candidates_found" : "no_dom_media_candidates",
       probe_meta: { posts: posts.length, authors: authors.length, feed },
-    });
-    if (activeMediaRevisit) {
+    };
+    const ingestResponse = forcedRecovery
+      ? (sendSideEffect(
+          ingestPayload,
+          "threads",
+          `Threads ${feed} forced media write`,
+          { timeoutMs: 12000 }
+        ), null)
+      : await send(ingestPayload);
+    if (activeMediaRevisit && !forcedRecovery) {
       await finishBrowserMediaRevisit("threads", activeMediaRevisit, ingestResponse, sink.items.length, feed);
     }
     if (posts.length) {
-      await send({ type: "posts", platform: "threads", username: feed, posts });
+      const postsPayload = { type: "posts", platform: "threads", username: feed, posts };
+      if (forcedRecovery) {
+        sendSideEffect(postsPayload, "threads", `Threads ${feed} forced post write`, { timeoutMs: 12000 });
+      } else {
+        await send(postsPayload);
+      }
       clog("info", `Threads ${feed}: ${posts.length} post(s)`, "threads");
     }
     // every threads handle IS an instagram handle — push feed authors into the
     // shared user graph so IG scrapes them too (forward cross-pollination).
-    if (authors.length) await send({ type: "users", platform: "threads", context: feed, users: authors });
+    if (authors.length) {
+      const usersPayload = { type: "users", platform: "threads", context: feed, users: authors };
+      if (forcedRecovery) {
+        sendSideEffect(usersPayload, "threads", `Threads ${feed} forced user write`, { timeoutMs: 12000 });
+      } else {
+        await send(usersPayload);
+      }
+    }
 
     // REVERSE direction rotation: every 3rd cycle, hop to one IG-known real account
     // and scrape their Threads. Heavily paced (one profile per rotation) to stay gentle.
-    if (c % 3 === 0) {
+    if (!forcedRecovery && c % 3 === 0) {
       try {
         const resp = (await send({ type: "getTargets", platform: "threads" })) || [];
         const pool = (Array.isArray(resp) ? resp : (resp.targets || []))
@@ -3209,7 +3263,7 @@ const TIMEOUT_RELOAD_STREAK_BY_PLATFORM = {
   strava: 2,
   tiktok: 1,
   lemon8: 2,
-  threads: 2,
+  threads: 1,
   x: 1,
   facebook: 1,
 };

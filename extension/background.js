@@ -60,7 +60,8 @@ const PAGE_RECOVERY_DELAY_WINDOWS_MS = [
   [240000, 480000],
   [720000, 1200000],
 ];
-const REFRESH_AFTER_PROGRAMMATIC_INJECT_PLATFORMS = new Set(["x"]);
+const REFRESH_AFTER_PROGRAMMATIC_INJECT_PLATFORMS = new Set(["x", "threads"]);
+const HOME_NAV_HARD_REFRESH_PLATFORMS = new Set(["x", "threads"]);
 
 // ---- persistent logging --------------------------------------------------
 async function log(level, msg) {
@@ -392,10 +393,12 @@ const POST_RELOAD_NUDGE_DELAY_MS_BY_PLATFORM = {
   facebook: 30000,
   instagram: 25000,
   lemon8: 25000,
+  threads: 45000,
   tiktok: 75000,
   x: 75000,
 };
 const POST_RELOAD_NUDGE_RETRY_DELAY_MS_BY_PLATFORM = {
+  threads: 60000,
   tiktok: 90000,
   x: 90000,
 };
@@ -488,8 +491,19 @@ async function hardRefreshForcedCycleTab(base, tab, platform, reason, extra = {}
     });
     return false;
   }
-  await recordServiceWorkerRecovery(base, tab, platform, "forced_cycle_hard_refresh", reason || "forced_cycle_recovery", extra);
-  await chrome.tabs.reload(tab.id, { bypassCache: true });
+  const homeNav = HOME_NAV_HARD_REFRESH_PLATFORMS.has(platform.id);
+  const currentUrl = tab && tab.url ? String(tab.url) : "";
+  const targetUrl = homeNav && platform.url && currentUrl !== platform.url ? platform.url : null;
+  await recordServiceWorkerRecovery(base, tab, platform, "forced_cycle_hard_refresh", reason || "forced_cycle_recovery", {
+    ...extra,
+    recovery_nav: targetUrl ? "home_url" : "reload",
+    recovery_target_url: targetUrl || null,
+  });
+  if (targetUrl) {
+    await chrome.tabs.update(tab.id, { url: targetUrl });
+  } else {
+    await chrome.tabs.reload(tab.id, { bypassCache: true });
+  }
   lastForcedReloadByTab[key] = now;
   lastForcedCycleByTab[key] = 0;
   schedulePostReloadScrapeNudge(base, tab, platform, reason || "forced_cycle_recovery", extra);

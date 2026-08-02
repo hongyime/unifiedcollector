@@ -758,7 +758,7 @@ services:
       TIKTOK_FOLLOW_OWNER_FALLBACK: ${TIKTOK_FOLLOW_OWNER_FALLBACK:-bryanseah234}
       SOCIAL_INGEST_PREP_DB_ON_STARTUP: "true"
       BROWSER_CONTENT_HINT_RESPONSE_TIMEOUT_SECONDS: "2.0"
-      UC_EXTENSION_EXPECTED_VERSION: "1.23.22"
+      UC_EXTENSION_EXPECTED_VERSION: "1.23.23"
     volumes:
       - z:/unifiedcollector/media:/media
       - z:/unifiedcollector:/vault
@@ -786,7 +786,7 @@ services:
       DB_POOL_MAX_SIZE: "4"
       # Operator status compares live Chrome hook heartbeats against this repo
       # extension build. Update with extension/manifest.json version bumps.
-      UC_EXTENSION_EXPECTED_VERSION: "1.23.22"
+      UC_EXTENSION_EXPECTED_VERSION: "1.23.23"
     volumes:
       - z:/unifiedcollector/media:/media
       - z:/unifiedcollector:/vault
@@ -846,7 +846,7 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
-      UC_EXTENSION_EXPECTED_VERSION: "1.23.22"
+      UC_EXTENSION_EXPECTED_VERSION: "1.23.23"
       YOUTUBE_MAX_VIDEO_DURATION_MINUTES: "0"
       STRAVA_ROUTE_STREAM_SHARED_COOLDOWN: "true"
       STRAVA_BROWSER_ROUTE_QUEUE_CANDIDATE_LIMIT: "50"
