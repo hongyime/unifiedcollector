@@ -139,6 +139,7 @@ class YoutubeCollector(BaseCollector):
         self._usable_cookie_file_cache: str | None = None
         self._max_duration = int(os.getenv("YOUTUBE_MAX_VIDEO_DURATION_MINUTES", "0"))
         self._ytdlp_format = os.getenv("YOUTUBE_YTDLP_FORMAT", "auto")
+        self._ytdlp_max_filesize = os.getenv("YOUTUBE_MAX_FILESIZE", "").strip()
         self._merge_format = os.getenv("YOUTUBE_MERGE_FORMAT", "mp4")
         self._download_delay = float(os.getenv("YOUTUBE_DOWNLOAD_DELAY", "5.0"))
         self._api_delay = float(os.getenv("YOUTUBE_API_DELAY", "3.0"))
@@ -1979,6 +1980,8 @@ class YoutubeCollector(BaseCollector):
             extra.extend(["-f", _YOUTUBE_PROGRESSIVE_FORMAT])
         elif not auto_format:
             extra.extend(["-f", fmt])
+        if self._ytdlp_max_filesize:
+            extra.extend(["--max-filesize", self._ytdlp_max_filesize])
         if self._merge_format and self._ffmpeg_available:
             extra.extend(["--merge-output-format", self._merge_format])
         return extra

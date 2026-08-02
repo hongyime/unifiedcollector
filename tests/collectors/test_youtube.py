@@ -1130,6 +1130,26 @@ def test_ytdlp_extra_args_preserves_custom_selector(monkeypatch):
     assert extra == ["-f", "bv*+ba/b", "--merge-output-format", "webm"]
 
 
+def test_ytdlp_extra_args_adds_max_filesize_guard(monkeypatch):
+    coll = _new_collector(
+        monkeypatch,
+        YOUTUBE_YTDLP_FORMAT="best[height<=720]/best[height<=480]",
+        YOUTUBE_MAX_FILESIZE="900M",
+    )
+    coll._ffmpeg_available = True
+
+    extra = coll._yt_dlp_extra_args()
+
+    assert extra == [
+        "-f",
+        "best[height<=720]/best[height<=480]",
+        "--max-filesize",
+        "900M",
+        "--merge-output-format",
+        "mp4",
+    ]
+
+
 def test_ytdlp_extra_args_skips_merge_without_ffmpeg(monkeypatch):
     coll = _new_collector(monkeypatch, YOUTUBE_YTDLP_FORMAT="bv*+ba/b", YOUTUBE_MERGE_FORMAT="webm")
     coll._ffmpeg_available = False
