@@ -106,7 +106,10 @@ _YOUTUBE_PROGRESSIVE_FORMAT = (
 
 def _safe_log_text(value) -> str:
     """Redact URL query secrets from exception text before logging/DLQ."""
-    return _SECRET_QUERY_PARAM_RE.sub(r"\1<redacted>", str(value))
+    text = str(value).strip()
+    if not text and isinstance(value, BaseException):
+        text = type(value).__name__
+    return _SECRET_QUERY_PARAM_RE.sub(r"\1<redacted>", text)
 
 
 def parse_iso8601_duration(duration_str: str) -> int:

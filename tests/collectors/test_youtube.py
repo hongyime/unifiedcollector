@@ -143,6 +143,11 @@ def test_safe_log_text_redacts_url_query_secrets():
     assert "key=<redacted>" in redacted
 
 
+def test_safe_log_text_names_blank_exceptions():
+    assert _safe_log_text(TimeoutError()) == "TimeoutError"
+    assert _safe_log_text(AssertionError()) == "AssertionError"
+
+
 def test_parse_iso8601_duration_empty_or_garbage():
     assert parse_iso8601_duration("") == 0
     assert parse_iso8601_duration(None) == 0  # type: ignore[arg-type]
