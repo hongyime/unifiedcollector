@@ -77,7 +77,10 @@ let pairingRecoveryUntil: number | null = null;
 let terminalQrPrinted = false;
 let lastFreshQrRequestAt = 0;
 const FRESH_QR_MIN_INTERVAL_MS = Number(process.env.WHATSAPP_FRESH_QR_MIN_INTERVAL_MS || 30_000);
-const UNPAIRED_QR_RECONNECT_MS = Number(process.env.WHATSAPP_UNPAIRED_QR_RECONNECT_MS || 30_000);
+// QR pairing is operator-driven and time-sensitive. If Baileys closes an
+// unpaired socket after "QR refs attempts ended", reconnect quickly so the
+// dashboard does not sit in a no-QR gap for half a minute.
+const UNPAIRED_QR_RECONNECT_MS = Number(process.env.WHATSAPP_UNPAIRED_QR_RECONNECT_MS || 5_000);
 const QR_STABILITY_MS = Number(process.env.WHATSAPP_QR_STABILITY_MS || 45_000);
 const AUTH_SCAN_FILE_LIMIT = Number(process.env.WHATSAPP_AUTH_SCAN_FILE_LIMIT || 1000);
 const STALE_UNREGISTERED_AUTH_FILE_THRESHOLD = Number(process.env.WHATSAPP_STALE_UNREGISTERED_AUTH_FILE_THRESHOLD || 1000);
