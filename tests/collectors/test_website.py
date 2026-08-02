@@ -53,6 +53,7 @@ def _make_pool(*, target_id: int | None = 99, executes_raise: bool = False):
         conn.fetchrow = AsyncMock(return_value=None)
     else:
         conn.fetchrow = AsyncMock(return_value={"id": target_id})
+    conn.fetchval = AsyncMock(return_value=None)
 
     @asynccontextmanager
     async def _acquire():
@@ -140,6 +141,23 @@ async def test_collect_demotes_timed_out_target(monkeypatch):
     assert any("status = 'error'" in sql and "priority = LEAST" in sql for sql in sql_calls)
     c.checkpoint.save_progress.assert_awaited_once_with("https://example.com")
     c.send_to_dlq.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_collect_skips_recent_timed_out_target(monkeypatch):
+    c = WebsiteCollector()
+    c.pool = _make_pool()
+    c.pool._conn.fetchval.return_value = 3600
+    c.checkpoint.save_progress = AsyncMock()
+    spider = AsyncMock()
+
+    monkeypatch.setattr(c, "spider_domain", spider)
+    monkeypatch.setattr(c, "_promote_discovered_sg_domains", AsyncMock())
+
+    await c.collect(["https://example.com"])
+
+    spider.assert_not_awaited()
+    c.checkpoint.save_progress.assert_awaited_once_with("https://example.com")
 
 
 @pytest.mark.asyncio

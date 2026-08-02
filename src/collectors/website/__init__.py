@@ -104,6 +104,9 @@ WEBSITE_TIMEOUT                 Per-request timeout in seconds (default 30).
 WEBSITE_TARGET_TIMEOUT_SECONDS  Per-target wall-clock cap before deferring
                                 the site behind the rest of the queue
                                 (default 1500).
+WEBSITE_TARGET_RETRY_BACKOFF_SECONDS
+                                How long to skip targets that hit the
+                                wall-clock cap (default 21600 = 6h).
 WEBSITE_RESPECT_ROBOTS          '0' to ignore robots.txt (default '1').
 WEBSITE_FOLLOW_EXTERNAL         '1' to follow links off the seed domain
                                 (default 0; same-host BFS).
@@ -461,6 +464,7 @@ class WebsiteCollector(BaseCollector):
         # HTTP
         self._timeout = httpx.Timeout(float(os.getenv("WEBSITE_TIMEOUT", "30")), connect=10.0)
         self._target_timeout = float(os.getenv("WEBSITE_TARGET_TIMEOUT_SECONDS", "1500"))
+        self._target_retry_backoff = float(os.getenv("WEBSITE_TARGET_RETRY_BACKOFF_SECONDS", "21600"))
         # Behaviour toggles
         self._respect_robots = os.getenv("WEBSITE_RESPECT_ROBOTS", "1") == "1"
         self._follow_external = os.getenv("WEBSITE_FOLLOW_EXTERNAL", "0") == "1"
@@ -513,6 +517,15 @@ class WebsiteCollector(BaseCollector):
             if self._stop.is_set():
                 break
             seed = url if url.startswith(("http://", "https://")) else f"https://{url}"
+            backoff_left = await self._target_backoff_left(url, seed)
+            if backoff_left > 0:
+                logger.info(
+                    "Skipping website/%s: retry backoff %.0fs remaining after prior timeout",
+                    seed,
+                    backoff_left,
+                )
+                await self.checkpoint.save_progress(seed)
+                continue
             logger.info("Collecting website/%s", seed)
             try:
                 stats = await asyncio.wait_for(
@@ -1514,6 +1527,45 @@ class WebsiteCollector(BaseCollector):
                 )
         except Exception as e:
             logger.debug("mark website target finished failed for %s: %s", seed_url, e)
+
+    async def _target_backoff_left(self, target_id: str, seed_url: str) -> float:
+        """Return seconds left before retrying a target that timed out.
+
+        Static configured targets are still passed to this collector even when
+        their DB status is error. This guard keeps slow sites from monopolising
+        cycles after every worker restart while preserving scheduled retries.
+        """
+        if not self.pool or self._target_retry_backoff <= 0:
+            return 0.0
+        target_ids = list({target_id, seed_url, seed_url.rstrip("/")})
+        try:
+            async with self.pool.acquire() as conn:
+                value = await conn.fetchval(
+                    """
+                    SELECT GREATEST(
+                               0,
+                               EXTRACT(EPOCH FROM (
+                                   ($2::double precision * INTERVAL '1 second')
+                                   - (NOW() - last_collection_at)
+                               ))
+                           )
+                      FROM collection_targets
+                     WHERE source = 'website'
+                       AND target_id = ANY($1::text[])
+                       AND status = 'error'
+                       AND last_collection_at IS NOT NULL
+                       AND COALESCE(error_message, '') ILIKE 'target exceeded%'
+                       AND NOW() - last_collection_at < ($2::double precision * INTERVAL '1 second')
+                     ORDER BY last_collection_at DESC
+                     LIMIT 1
+                    """,
+                    target_ids,
+                    self._target_retry_backoff,
+                )
+                return float(value or 0.0)
+        except Exception as e:
+            logger.debug("website target backoff lookup failed for %s: %s", seed_url, e)
+            return 0.0
 
     async def _defer_target(self, target_id: str, seed_url: str, reason: str) -> None:
         """Move a failing website target behind fresh pending targets.
