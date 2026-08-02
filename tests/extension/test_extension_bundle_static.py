@@ -103,6 +103,8 @@ def test_tab_message_timeouts_do_not_trigger_receiver_missing_refresh():
     assert "forced_cycle_request_timed_out" in background
     assert "content_script_message_timeout" in background
     assert "message_timeout_programmatic_inject" in background
+    assert "MESSAGE_TIMEOUT_STALE_RELOAD_SECONDS_BY_PLATFORM" in background
+    assert "function messageTimeoutStaleReloadSeconds" in background
 
     forced_catch = background.split("const messageTimedOut = isTabMessageTimeout(firstErr);", 1)[1].split(
         "await recordServiceWorkerRecovery(base, tab, platform, \"forced_cycle_request_failed\"",
@@ -114,9 +116,11 @@ def test_tab_message_timeouts_do_not_trigger_receiver_missing_refresh():
     )[0]
 
     assert "return;" in forced_catch
+    assert "contentAgeSeconds >= staleReloadSeconds" in forced_catch
+    assert "\"message_timeout_content_stale\"" in forced_catch
+    assert "\"message_timeout_stale_refresh\"" in forced_catch
     assert "injectContentScriptAndNudge(base, tab, platform, \"forced_cycle_message_timeout\"" in forced_catch
     assert "reinject_attempted: true" in forced_catch
-    assert "hardRefreshForcedCycleTab" not in forced_catch
     assert "injectContentScriptAndNudge(base, t, platform, \"ensure_loop_message_timeout\"" in ensure_catch
     assert "refreshTabForMissingContentScript" not in ensure_catch
 
@@ -230,6 +234,20 @@ def test_facebook_and_x_optional_writes_are_nonblocking():
     assert 'await send({ type: "posts", platform: "facebook"' not in facebook_block
     assert "{ timeoutMs: forcedRecovery ? 30000 : 45000 }" in x_block
     assert "{ timeoutMs: forcedRecovery ? 30000 : 45000 }" in facebook_block
+
+
+def test_forced_recovery_probe_does_not_block_scrape_cycle():
+    content = _read("extension/content.js")
+    probe_block = content.split("async function reportBrowserRecoveryProbe", 1)[1].split(
+        "function browserMediaRevisitUrlOk", 1
+    )[0]
+
+    assert "probe_reason: \"forced_recovery_started\"" in probe_block
+    assert "send({" in probe_block
+    assert "return send({" not in probe_block
+    assert "await send({" not in probe_block
+    assert "{ timeoutMs: 8000 }" in probe_block
+    assert "return null;" in probe_block
 
 
 def test_x_error_shell_can_switch_host_when_native_retry_is_missing():

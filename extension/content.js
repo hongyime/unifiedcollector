@@ -1381,7 +1381,7 @@ function forcedRecoveryMode(platform) {
 }
 async function reportBrowserRecoveryProbe(platform, username, meta = {}) {
   if (!forcedRecoveryMode(platform)) return null;
-  return send({
+  send({
     type: "ingest",
     platform,
     username: username || "unknown",
@@ -1393,7 +1393,8 @@ async function reportBrowserRecoveryProbe(platform, username, meta = {}) {
       content_counts: pageContentCounts(),
       ...meta,
     },
-  }, { timeoutMs: 15000 }).catch(() => null);
+  }, { timeoutMs: 8000 }).catch(() => null);
+  return null;
 }
 function browserMediaRevisitUrlOk(platform, url) {
   if (!url || !/^https?:\/\//i.test(url)) return false;

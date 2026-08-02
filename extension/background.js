@@ -273,6 +273,14 @@ const FORCED_CYCLE_HARD_RELOAD_MS_BY_PLATFORM = {
 const FORCED_CYCLE_RELOAD_DEBOUNCE_MS = 4 * 60 * 1000;
 const FORCED_CYCLE_FAILURE_DEBOUNCE_MS = 90 * 1000;
 const TAB_MESSAGE_TIMEOUT_MS = 30000;
+const MESSAGE_TIMEOUT_STALE_RELOAD_SECONDS_BY_PLATFORM = {
+  facebook: 10 * 60,
+  instagram: 10 * 60,
+  lemon8: 10 * 60,
+  x: 10 * 60,
+  tiktok: 10 * 60,
+  threads: 10 * 60,
+};
 const EXTENSION_AUTO_RELOAD_STATE_KEY = "ucExtensionAutoReloadState";
 const EXTENSION_AUTO_RELOAD_DEBOUNCE_MS = 2 * 60 * 1000;
 const EXTENSION_AUTO_RELOAD_DELAY_MS = 1200;
@@ -290,6 +298,10 @@ function isNoReceiverError(err) {
 
 function isTabMessageTimeout(err) {
   return /tab message timed out/i.test(String((err && err.message) || err || ""));
+}
+
+function messageTimeoutStaleReloadSeconds(platformId) {
+  return MESSAGE_TIMEOUT_STALE_RELOAD_SECONDS_BY_PLATFORM[platformId] || 10 * 60;
 }
 
 async function sendTabMessageWithTimeout(tabId, message, timeoutMs = TAB_MESSAGE_TIMEOUT_MS) {
@@ -579,6 +591,27 @@ async function maybeForceScrapeCycle(tab, platform, responseBody, reason, base =
     }
     lastForcedFailureByTab[failKey] = Date.now();
     if (messageTimedOut) {
+      const contentAgeSeconds = Number(body.content_age_seconds || 0);
+      const staleReloadSeconds = messageTimeoutStaleReloadSeconds(platform && platform.id);
+      if (Number.isFinite(contentAgeSeconds) && contentAgeSeconds >= staleReloadSeconds) {
+        const reloaded = await hardRefreshForcedCycleTab(base, tab, platform, "message_timeout_content_stale", {
+          content_age_seconds: contentAgeSeconds,
+          stale_reload_seconds: staleReloadSeconds,
+          cycle_error: cycleError,
+          message_timeout: true,
+          recovery: "message_timeout_stale_refresh",
+        });
+        await recordServiceWorkerRecovery(base, tab, platform, "forced_cycle_request_timed_out", body.force_reason || "browser_content_stale", {
+          content_age_seconds: contentAgeSeconds,
+          stale_reload_seconds: staleReloadSeconds,
+          cycle_error: cycleError,
+          message_timeout: true,
+          stale_refresh_attempted: true,
+          stale_refresh_ok: reloaded || null,
+        });
+        await log("warn", `${platform.label}: stale-content forced scrape message timed out; ${reloaded ? "hard-refreshed stale tab" : "refresh skipped by debounce"}`);
+        return;
+      }
       const injected = await injectContentScriptAndNudge(base, tab, platform, "forced_cycle_message_timeout", {
         content_age_seconds: body.content_age_seconds || null,
         cycle_error: cycleError,
