@@ -83,7 +83,7 @@ def test_scraper_heartbeat_summary_is_not_blocked_by_recovery():
 def test_content_script_recovery_bounds_tab_messages():
     background = _read("extension/background.js")
 
-    assert "const TAB_MESSAGE_TIMEOUT_MS = 10000" in background
+    assert "const TAB_MESSAGE_TIMEOUT_MS = 30000" in background
     assert "const FORCED_CYCLE_RELOAD_DEBOUNCE_MS = 4 * 60 * 1000" in background
     assert "const FORCED_CYCLE_FAILURE_DEBOUNCE_MS = 90 * 1000" in background
     assert "async function sendTabMessageWithTimeout" in background
