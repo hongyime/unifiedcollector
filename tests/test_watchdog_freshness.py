@@ -288,6 +288,26 @@ async def test_browser_source_tick_marks_stalled_browser_source(monkeypatch):
     assert "Container restart will not fix" in notified[0]
 
 
+def test_clean_browser_source_detail_removes_nested_watchdog_prefixes():
+    import src.watchdog.freshness as freshness
+
+    detail = (
+        "browser capture stalled: browser capture stalled: "
+        "Chrome extension heartbeat is 7200s old (> 3600s) (watchdog); "
+        "Chrome extension heartbeat is 7200s old (> 3600s); "
+        "browser content progress is 9000s old (> 3600s) (watchdog)"
+    )
+
+    cleaned = freshness._clean_browser_source_detail(detail)
+
+    assert cleaned == (
+        "Chrome extension heartbeat is 7200s old (> 3600s); "
+        "browser content progress is 9000s old (> 3600s)"
+    )
+    assert "browser capture stalled" not in cleaned
+    assert "(watchdog)" not in cleaned
+
+
 @pytest.mark.asyncio
 async def test_browser_source_tick_clears_recovered_browser_source(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "postgres://collector:collector@localhost/unifiedcollector")

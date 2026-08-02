@@ -180,6 +180,22 @@ BROWSER_SOURCE_WATCH_SOURCES = {
 _last_browser_source_alert: dict[str, float] = {}
 
 
+def _clean_browser_source_detail(detail: object) -> str:
+    """Remove previous watchdog decoration before storing a fresh browser-stall note."""
+    text = str(detail or "browser extension/content path is stale").strip()
+    parts: list[str] = []
+    for raw in text.split(";"):
+        item = raw.strip()
+        while item.lower().startswith("browser capture stalled:"):
+            item = item.split(":", 1)[1].strip()
+        if item.endswith("(watchdog)"):
+            item = item[: -len("(watchdog)")].strip()
+        if item and item not in parts:
+            parts.append(item)
+    cleaned = "; ".join(parts).strip()
+    return (cleaned or "browser extension/content path is stale")[:600]
+
+
 async def _notify(text: str) -> None:
     """Best-effort Telegram alert. Never raises (notifier is send-only/fail-safe).
 
@@ -514,7 +530,7 @@ async def _browser_source_tick(db: asyncpg.Connection) -> None:
         if status in {"degraded", "stale", "dead", "unknown"} and (
             heartbeat_age is not None or content_stale
         ):
-            detail = str(row.get("detail") or "browser extension/content path is stale")
+            detail = _clean_browser_source_detail(row.get("detail"))
             log.warning("%s browser capture stalled: %s", source, detail)
             await _mark_degraded_browser_source(db, source, detail)
             if now - _last_browser_source_alert.get(source, 0) >= BROWSER_SOURCE_ALERT_COOLDOWN:
