@@ -80,9 +80,6 @@ def _tiktok_revisit_claim_timeout_seconds() -> int:
 _YOUTUBE_MEDIA_BACKLOG_TTL_SECONDS = int(os.getenv("YOUTUBE_MEDIA_BACKLOG_TTL_SECONDS", "600"))
 _YOUTUBE_COMPLETENESS_CACHE: dict[str, object] = {"ts": 0.0, "payload": None}
 _YOUTUBE_COMPLETENESS_TTL_SECONDS = int(os.getenv("YOUTUBE_COMPLETENESS_TTL_SECONDS", "60"))
-_WA_FRESH_QR_LAST_REQUEST: dict[str, float] = {}
-_WA_FRESH_QR_MIN_INTERVAL_SECONDS = int(os.getenv("WA_FRESH_QR_MIN_INTERVAL_SECONDS", "45"))
-
 
 def _encode_polyline(points, precision: int = 5) -> str:
     """Encode GPS points into a compact map thumbnail polyline."""
@@ -6993,27 +6990,15 @@ async def whatsapp_qr(bridge: str):
             qrd.get("pairing_recovery_active", out["pairing_recovery_active"])
         )
         raw_qr = qrd.get("qr", "")
-        if not raw_qr and _should_request_fresh_wa_qr(health, qrd):
-            now = time.monotonic()
-            last_request = _WA_FRESH_QR_LAST_REQUEST.get(bridge, 0.0)
-            if now - last_request < _WA_FRESH_QR_MIN_INTERVAL_SECONDS:
-                out["status"] = "waiting_for_fresh_qr"
-                out["last_disconnect_status_code"] = None
-                out["last_disconnect_reason"] = None
-                out["error"] = "Fresh QR was already requested recently; waiting for the bridge to publish it."
-            else:
-                kick = await _wa_bridge_post(bridge, "fresh-qr")
-                out["status"] = "requesting_fresh_qr"
-                if kick.get("ok"):
-                    _WA_FRESH_QR_LAST_REQUEST[bridge] = now
-                    out["last_disconnect_status_code"] = None
-                    out["last_disconnect_reason"] = None
-                out["error"] = (
-                    "Bridge had no active QR; requested a fresh QR. "
-                    "The next poll should render it."
-                    if kick.get("ok")
-                    else f"Bridge had no active QR; fresh QR request failed: {kick.get('error')}"
-                )
+        if not raw_qr and _should_wait_for_fresh_wa_qr(health, qrd):
+            out["status"] = "waiting_for_fresh_qr"
+            out["last_disconnect_status_code"] = None
+            out["last_disconnect_reason"] = None
+            out["error"] = (
+                "Bridge has no active QR yet. The read-only QR poll nudged the "
+                "bridge reconnect path; waiting for the next code without "
+                "clearing WhatsApp auth state."
+            )
         if raw_qr:
             # Convert the raw Baileys QR string to a base64-encoded PNG so the
             # browser can use it directly as <img src="data:image/png;base64,…">
@@ -7038,14 +7023,15 @@ async def whatsapp_qr(bridge: str):
     return out
 
 
-def _should_request_fresh_wa_qr(health: dict, qrd: dict) -> bool:
-    """Nudge an unpaired bridge out of the no-QR retry gap.
+def _should_wait_for_fresh_wa_qr(health: dict, qrd: dict) -> bool:
+    """Render a waiting state for an unpaired bridge in the no-QR retry gap.
 
     Baileys expires a QR after several refresh attempts and briefly reports
     disconnected with no QR until the next reconnect timer fires. The link page
-    polls /whatsapp/qr/{bridge}; use that poll to request a fresh QR only when
-    the bridge is clearly unregistered. Registered-but-disconnected sessions
-    should keep their credentials and use the manual reconnect path instead.
+    polls /whatsapp/qr/{bridge}; the bridge's read-only /qr handler already
+    nudges reconnect if a viewer is active. Do not POST /fresh-qr from this
+    automatic polling path because that route can clear unregistered local auth
+    state while the phone is still pairing.
     """
     if bool(health.get("whatsapp_ready")) or bool(health.get("registered")):
         return False
@@ -7342,9 +7328,9 @@ async function poll(b){
       qEl.innerHTML='&#9888;'; qEl.style.background='#3d1414'; qEl.style.color='#ef4444'; qEl.style.fontSize='60px';
       sEl.innerHTML='<span class="dot err"></span> Bridge unreachable: '+(d.error||'');
       tEl.innerHTML='<span class="dot err"></span>';
-    } else if(d.status==='refreshing_qr'||d.status==='requesting_fresh_qr'||d.status==='waiting_for_fresh_qr'){
+    } else if(d.status==='refreshing_qr'||d.status==='requesting_fresh_qr'||d.status==='waiting_for_fresh_qr'||d.status==='fresh_qr_reconnect_requested'){
       qEl.innerHTML='<span class="spinner"></span>'; qEl.style.background='#fff'; qEl.style.color='#111b21'; qEl.style.fontSize='16px';
-      sEl.innerHTML='<span class="dot wait"></span> QR expired; requesting a fresh code&hellip;';
+      sEl.innerHTML='<span class="dot wait"></span> Waiting for the next QR code&hellip;';
       tEl.innerHTML='<span class="dot wait"></span>';
     } else {
       sEl.innerHTML='<span class="dot wait"></span> '+(d.status||'starting')+'&hellip;';

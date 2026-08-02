@@ -126,8 +126,10 @@ function BridgeCard({ bridge }: { bridge: 1 | 2 }) {
           <span className="text-text-muted">Scan this code now. It refreshes automatically.</span>
         ) : pairingRecovery || status === "pairing_restart" || status === "pairing_restart_backoff" ? (
           <span className="text-text-muted">Pairing is recovering after WhatsApp asked for a restart. Keep this page open.</span>
-        ) : status === "requesting_fresh_qr" || status === "waiting_for_fresh_qr" || status === "fresh_qr_requested" || status === "auth_cleared" ? (
-          <span className="text-text-muted">Requesting a fresh QR. Keep this page open.</span>
+        ) : status === "waiting_for_fresh_qr" || status === "fresh_qr_reconnect_requested" ? (
+          <span className="text-text-muted">Waiting for the next QR. Keep this page open.</span>
+        ) : status === "requesting_fresh_qr" || status === "fresh_qr_requested" || status === "auth_cleared" ? (
+          <span className="text-text-muted">Fresh QR requested. Keep this page open.</span>
         ) : status === "awaiting_scan" && needsScan ? (
           <span className="text-text-muted">No saved session here. Waiting for a QR.</span>
         ) : status === "awaiting_scan" ? (

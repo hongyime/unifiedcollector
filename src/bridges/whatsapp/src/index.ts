@@ -316,6 +316,20 @@ app.post('/fresh-qr', async (_req, res) => {
     lastDisconnectReason = null;
     lastDisconnectAt = null;
     pairingRecoveryUntil = null;
+    if (authStateLooksLikePairingInProgress(auth_state)) {
+        try {
+            activeSock?.end?.(new Error('manual fresh QR reconnect preserving partial auth'));
+        } catch (err: any) {
+            logger.warn({ err: err?.message || String(err) }, 'Fresh QR reconnect could not close active socket');
+        }
+        scheduleReconnect('manual_fresh_qr_preserve_auth', 1000);
+        res.status(200).json({
+            ...bridgeState(),
+            status: 'fresh_qr_reconnect_requested',
+            note: 'Partial WhatsApp pairing/auth state exists; reconnecting without clearing local auth.',
+        });
+        return;
+    }
     try {
         clearAuthState('fresh_qr');
         activeSock?.end?.(new Error('manual fresh QR'));
@@ -626,6 +640,13 @@ function authStateNeedsCleanPairing(summary = authStateSummary()): boolean {
         && summary.auth_non_watermark_file_seen
         && summary.auth_file_count >= STALE_UNREGISTERED_AUTH_FILE_THRESHOLD
     );
+}
+
+function authStateLooksLikePairingInProgress(summary = authStateSummary()): boolean {
+    if (!summary.auth_path_exists || summary.has_registered_creds) return false;
+    if (summary.creds_json_exists && summary.creds_json_size > 0) return true;
+    if (!summary.auth_non_watermark_file_seen) return false;
+    return !authStateNeedsCleanPairing(summary);
 }
 
 function archiveAuthState(authPath: string, reason: string): string | null {

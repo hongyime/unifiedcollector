@@ -9,7 +9,7 @@ os.environ.setdefault("DASHBOARD_JWT_SECRET", "test-secret-only-for-pytest-do-no
 os.environ.setdefault("DASHBOARD_ADMIN_PASSWORD", "x")
 
 import src.dashboard.api as dashboard_api
-from src.dashboard.api import _should_request_fresh_wa_qr, whatsapp_qr
+from src.dashboard.api import _should_wait_for_fresh_wa_qr, whatsapp_qr
 
 
 class _FakeUrlopenResponse:
@@ -26,29 +26,29 @@ class _FakeUrlopenResponse:
         return self._body
 
 
-def test_should_request_fresh_wa_qr_when_unregistered_and_no_qr():
-    assert _should_request_fresh_wa_qr(
+def test_should_wait_for_fresh_wa_qr_when_unregistered_and_no_qr():
+    assert _should_wait_for_fresh_wa_qr(
         {"whatsapp_ready": False, "registered": False, "status": "disconnected"},
         {"qr": None},
     )
 
 
-def test_should_request_fresh_wa_qr_while_bridge_is_refreshing_qr():
-    assert _should_request_fresh_wa_qr(
+def test_should_wait_for_fresh_wa_qr_while_bridge_is_refreshing_qr():
+    assert _should_wait_for_fresh_wa_qr(
         {"whatsapp_ready": False, "registered": False, "status": "refreshing_qr"},
         {"qr": None},
     )
 
 
 def test_should_not_request_fresh_wa_qr_for_registered_session():
-    assert not _should_request_fresh_wa_qr(
+    assert not _should_wait_for_fresh_wa_qr(
         {"whatsapp_ready": False, "registered": True, "status": "disconnected"},
         {"qr": None},
     )
 
 
 def test_should_not_request_fresh_wa_qr_when_qr_exists():
-    assert not _should_request_fresh_wa_qr(
+    assert not _should_wait_for_fresh_wa_qr(
         {"whatsapp_ready": False, "registered": False, "status": "awaiting_scan"},
         {"qr": "raw-code"},
     )
@@ -103,9 +103,7 @@ def test_whatsapp_qr_proxy_forwards_bridge_metadata(monkeypatch):
     assert out["qr"].startswith("data:image/png;base64,")
 
 
-def test_whatsapp_qr_proxy_clears_stale_disconnect_after_fresh_qr_kick(monkeypatch):
-    dashboard_api._WA_FRESH_QR_LAST_REQUEST.clear()
-
+def test_whatsapp_qr_proxy_waits_without_destructive_fresh_qr_post(monkeypatch):
     def fake_urlopen(url: str, timeout: int = 0):
         assert timeout == 8
         if url.endswith("/health"):
@@ -135,28 +133,27 @@ def test_whatsapp_qr_proxy_clears_stale_disconnect_after_fresh_qr_kick(monkeypat
         raise AssertionError(f"unexpected URL: {url}")
 
     async def fake_post(bridge: str, path: str):
-        return {"bridge": bridge, "ok": True, "status": "fresh_qr_requested"}
+        raise AssertionError(f"QR polling must not POST {bridge}/{path}")
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     monkeypatch.setattr(dashboard_api, "_wa_bridge_post", fake_post)
 
     out = asyncio.run(whatsapp_qr("2"))
 
-    assert out["status"] == "requesting_fresh_qr"
+    assert out["status"] == "waiting_for_fresh_qr"
     assert out["qr_available"] is False
     assert out["last_disconnect_status_code"] is None
     assert out["last_disconnect_reason"] is None
+    assert "without clearing WhatsApp auth state" in out["error"]
 
 
-def test_whatsapp_qr_proxy_throttles_repeated_fresh_qr_kicks(monkeypatch):
-    dashboard_api._WA_FRESH_QR_LAST_REQUEST["2"] = 1_000_000.0
-
+def test_whatsapp_qr_proxy_waits_while_refreshing_qr_without_post(monkeypatch):
     def fake_urlopen(url: str, timeout: int = 0):
         assert timeout == 8
         if url.endswith("/health") or url.endswith("/qr"):
             return _FakeUrlopenResponse(
                 {
-                    "status": "disconnected",
+                    "status": "refreshing_qr",
                     "whatsapp_ready": False,
                     "registered": False,
                     "connected": False,
@@ -168,10 +165,9 @@ def test_whatsapp_qr_proxy_throttles_repeated_fresh_qr_kicks(monkeypatch):
         raise AssertionError(f"unexpected URL: {url}")
 
     async def fail_post(_bridge: str, _path: str):
-        raise AssertionError("fresh-qr should be throttled")
+        raise AssertionError("fresh-qr must not be posted from QR polling")
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-    monkeypatch.setattr(dashboard_api.time, "monotonic", lambda: 1_000_010.0)
     monkeypatch.setattr(dashboard_api, "_wa_bridge_post", fail_post)
 
     out = asyncio.run(whatsapp_qr("2"))
@@ -179,8 +175,6 @@ def test_whatsapp_qr_proxy_throttles_repeated_fresh_qr_kicks(monkeypatch):
     assert out["status"] == "waiting_for_fresh_qr"
     assert out["last_disconnect_status_code"] is None
     assert out["last_disconnect_reason"] is None
-
-    dashboard_api._WA_FRESH_QR_LAST_REQUEST.clear()
 
 
 def test_whatsapp_fresh_qr_refuses_registered_bridge(monkeypatch):
