@@ -109,10 +109,10 @@ except (TypeError, ValueError):
 try:
     DM_HOOK_HEARTBEAT_WRITE_TIMEOUT_SECONDS = max(
         0.25,
-        float(os.getenv("DM_HOOK_HEARTBEAT_WRITE_TIMEOUT_SECONDS", "2.0")),
+        float(os.getenv("DM_HOOK_HEARTBEAT_WRITE_TIMEOUT_SECONDS", "6.0")),
     )
 except (TypeError, ValueError):
-    DM_HOOK_HEARTBEAT_WRITE_TIMEOUT_SECONDS = 2.0
+    DM_HOOK_HEARTBEAT_WRITE_TIMEOUT_SECONDS = 6.0
 try:
     IG_COOLDOWN_READ_TIMEOUT_SECONDS = max(
         0.25,
