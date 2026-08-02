@@ -428,6 +428,29 @@ async def test_collect_user_records_api_fallback_success(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_collect_user_skips_metadata_during_metadata_cooldown(monkeypatch):
+    with patch.object(TiktokCollector, "_check_tool", staticmethod(lambda *_: False)):
+        c = TiktokCollector()
+    c._quota = None
+    c._browser_fallback = False
+    c._use_gallery_dl = False
+    c._use_yt_dlp = False
+    c._profile_metadata_cooldown_until = tiktok_mod.time.time() + 1800
+    c._profile_metadata_cooldown_reason = "profile_wall:challenge"
+    monkeypatch.setattr(c, "_stored_followers_count", AsyncMock(return_value=10))
+    monkeypatch.setattr(c, "_scrape_profile_metadata", AsyncMock())
+    monkeypatch.setattr(c, "_collect_via_api", AsyncMock(return_value=True))
+    monkeypatch.setattr(c, "_record_profile_access", AsyncMock())
+
+    out = await c._collect_user("bryan")
+
+    assert out == "collected"
+    c._scrape_profile_metadata.assert_not_awaited()
+    c._collect_via_api.assert_awaited_once_with("bryan")
+    c._record_profile_access.assert_awaited_once_with("bryan", True)
+
+
+@pytest.mark.asyncio
 async def test_collect_user_profile_quota_exhausted(monkeypatch):
     with patch.object(TiktokCollector, "_check_tool", staticmethod(lambda *_: False)):
         c = TiktokCollector()
@@ -495,7 +518,7 @@ async def test_scrape_profile_metadata_records_challenge_wall(monkeypatch):
     assert out["status"] == "delayed"
     assert out["error"] == "profile_wall:security_check"
     assert c._profile_metadata_cooling_down() is True
-    assert c._local_tool_cooling_down() is True
+    assert c._local_tool_cooling_down() is False
     assert events[0]["source"] == "tiktok"
     assert events[0]["scope"] == "profile_metadata"
 

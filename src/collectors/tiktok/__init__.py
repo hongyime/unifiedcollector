@@ -745,9 +745,6 @@ class TiktokCollector(BaseCollector):
             until,
         )
         self._profile_metadata_cooldown_reason = reason
-        # A profile challenge usually means the same account/browser fingerprint
-        # is challenged for media too. Rest the heavy downloader as well.
-        self._local_tool_cooldown_until = max(self._local_tool_cooldown_until, until)
 
     async def _sync_persisted_local_tool_cooldown(self) -> None:
         if self._local_tool_cooldown_restored or self.pool is None:
@@ -755,7 +752,7 @@ class TiktokCollector(BaseCollector):
         self._local_tool_cooldown_restored = True
         try:
             async with self.pool.acquire() as conn:
-                row = await conn.fetchrow(
+                rows = await conn.fetch(
                     """
                     SELECT created_at, cooldown_seconds, reason, scope
                     FROM rate_limit_events
@@ -765,40 +762,51 @@ class TiktokCollector(BaseCollector):
                       AND cooldown_seconds IS NOT NULL
                       AND created_at + (cooldown_seconds * INTERVAL '1 second') > NOW()
                     ORDER BY created_at DESC
-                    LIMIT 1
+                    LIMIT 10
                     """,
                     self._account_name(),
                 )
         except Exception as exc:
             logger.debug("tiktok: persisted local-tool cooldown check failed: %s", exc)
             return
-        if not row:
+        if not rows:
             return
-        created_at = row["created_at"]
-        if created_at.tzinfo is None:
-            created_at = created_at.replace(tzinfo=timezone.utc)
-        remaining = (
-            created_at.astimezone(timezone.utc)
-            + timedelta(seconds=int(row["cooldown_seconds"] or 0))
-            - datetime.now(timezone.utc)
-        ).total_seconds()
-        if remaining <= 0:
+        restored_any = False
+        for row in rows:
+            created_at = row["created_at"]
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+            remaining = (
+                created_at.astimezone(timezone.utc)
+                + timedelta(seconds=int(row["cooldown_seconds"] or 0))
+                - datetime.now(timezone.utc)
+            ).total_seconds()
+            if remaining <= 0:
+                continue
+            if row["scope"] == "profile_metadata":
+                self._profile_metadata_cooldown_until = max(
+                    self._profile_metadata_cooldown_until,
+                    time.time() + remaining,
+                )
+                self._profile_metadata_cooldown_reason = row["reason"] or "profile_metadata"
+                logger.info(
+                    "tiktok: restored profile metadata cooldown for %ds (%s)",
+                    int(remaining),
+                    row["reason"] or "profile_metadata",
+                )
+            else:
+                self._local_tool_cooldown_until = max(
+                    self._local_tool_cooldown_until,
+                    time.time() + remaining,
+                )
+                logger.info(
+                    "tiktok: restored local tool cooldown for %ds (%s)",
+                    int(remaining),
+                    row["reason"] or "rate-limit",
+                )
+            restored_any = True
+        if not restored_any:
             return
-        self._local_tool_cooldown_until = max(
-            self._local_tool_cooldown_until,
-            time.time() + remaining,
-        )
-        if row["scope"] == "profile_metadata":
-            self._profile_metadata_cooldown_until = max(
-                self._profile_metadata_cooldown_until,
-                time.time() + remaining,
-            )
-            self._profile_metadata_cooldown_reason = row["reason"] or "profile_metadata"
-        logger.info(
-            "tiktok: restored local tool cooldown for %ds (%s)",
-            int(remaining),
-            row["reason"] or "rate-limit",
-        )
 
     async def _record_local_rate_limit_event(
         self,
@@ -861,21 +869,22 @@ class TiktokCollector(BaseCollector):
         cooldown_profile_attempts = 0
         for username in cycle_targets:
             if self._stop.is_set(): break
-            if self._profile_metadata_cooling_down():
-                remaining = int(self._profile_metadata_cooldown_until - time.time())
-                reason = self._profile_metadata_cooldown_reason or "profile metadata cooldown"
-                self._intentional_idle_reason = (
-                    f"TikTok profile metadata cooldown active for {self._account_name()} "
-                    f"({remaining}s remaining; {reason})"
-                )
-                logger.info("tiktok: %s", self._intentional_idle_reason)
-                break
             if self._local_tool_cooling_down():
                 remaining = int(self._local_tool_cooldown_until - time.time())
                 self._intentional_idle_reason = (
                     f"TikTok local downloader cooldown active for {self._account_name()} "
                     f"({remaining}s remaining)"
                 )
+                if self._profile_metadata_cooling_down():
+                    meta_remaining = int(self._profile_metadata_cooldown_until - time.time())
+                    reason = self._profile_metadata_cooldown_reason or "profile metadata cooldown"
+                    logger.info(
+                        "tiktok: %s; profile metadata also cooling down (%ds remaining; %s)",
+                        self._intentional_idle_reason,
+                        meta_remaining,
+                        reason,
+                    )
+                    break
                 if cooldown_profile_attempts >= self._cooldown_profile_only_per_cycle:
                     logger.info(
                         "tiktok: %s; profile-only cooldown budget exhausted (%d)",
@@ -1091,7 +1100,19 @@ class TiktokCollector(BaseCollector):
         self._last_gallery_dl_empty_user = None
         self._last_gallery_dl_timeout_user = None
         known_followers = await self._stored_followers_count(username)
-        metadata = await self._scrape_profile_metadata(username)
+        if self._profile_metadata_cooling_down():
+            remaining = int(self._profile_metadata_cooldown_until - time.time())
+            reason = self._profile_metadata_cooldown_reason or "profile metadata cooldown"
+            logger.info(
+                "tiktok: profile metadata cooldown active for %s (%ds remaining; %s); "
+                "trying media fallback without metadata fetch",
+                self._account_name(),
+                remaining,
+                reason,
+            )
+            metadata = {"status": "metadata_cooldown"}
+        else:
+            metadata = await self._scrape_profile_metadata(username)
         status = str(metadata.get("status") or "")
         if status in {"unavailable", "not_found", "deleted", "account_deleted", "username_changed"}:
             await self._record_profile_access(username, False, error=status)
