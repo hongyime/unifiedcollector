@@ -48,6 +48,9 @@ _SOURCE_MATRIX_LIVENESS_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_LIVENES
 _SOURCE_MATRIX_DAY_CONTENT_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_DAY_CONTENT_TIMEOUT_SECONDS", "3"))
 _SOURCE_MATRIX_MEDIA_TOTALS_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_MEDIA_TOTALS_TIMEOUT_SECONDS", "3"))
 _SOURCE_MATRIX_YOUTUBE_BACKLOG_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_YOUTUBE_BACKLOG_TIMEOUT_SECONDS", "2"))
+_SOURCE_MATRIX_ENABLE_YOUTUBE_BACKLOG = os.getenv("SOURCE_MATRIX_ENABLE_YOUTUBE_BACKLOG", "0").lower() in {
+    "1", "true", "yes", "on"
+}
 _SOURCE_MATRIX_BROWSER_EXTENSION_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_BROWSER_EXTENSION_TIMEOUT_SECONDS", "6"))
 _BROWSER_EXTENSION_QUERY_TIMEOUT_SECONDS = float(os.getenv("BROWSER_EXTENSION_QUERY_TIMEOUT_SECONDS", "2.5"))
 _BROWSER_EXTENSION_PAYLOAD_BUDGET_SECONDS = float(os.getenv("BROWSER_EXTENSION_PAYLOAD_BUDGET_SECONDS", "5.5"))
@@ -3526,16 +3529,24 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
                 cache_ttl=120,
                 timeout=_SOURCE_MATRIX_MEDIA_TOTALS_TIMEOUT_SECONDS,
             )
-            youtube_media_backlog = await _source_matrix_section(
-                section="youtube_media_backlog",
-                label="youtube media backlog",
-                errors=errors,
-                fallback={},
-                awaitable=_youtube_media_backlog(conn),
-                cache_key="youtube_media_backlog",
-                cache_ttl=300,
-                timeout=_SOURCE_MATRIX_YOUTUBE_BACKLOG_TIMEOUT_SECONDS,
-            )
+            if _SOURCE_MATRIX_ENABLE_YOUTUBE_BACKLOG:
+                youtube_media_backlog = await _source_matrix_section(
+                    section="youtube_media_backlog",
+                    label="youtube media backlog",
+                    errors=errors,
+                    fallback={},
+                    awaitable=_youtube_media_backlog(conn),
+                    cache_key="youtube_media_backlog",
+                    cache_ttl=300,
+                    timeout=_SOURCE_MATRIX_YOUTUBE_BACKLOG_TIMEOUT_SECONDS,
+                )
+            else:
+                cached_backlog = _YOUTUBE_MEDIA_BACKLOG_CACHE.get("row")
+                youtube_media_backlog = dict(cached_backlog) if isinstance(cached_backlog, dict) else {
+                    "stats_unavailable": True,
+                    "stats_error": "skipped_on_live_source_matrix",
+                }
+                youtube_media_backlog["stats_stale"] = True
             active_cursors = await _source_matrix_section(
                 section="active_cursors",
                 label="active cursor summary",
