@@ -1880,19 +1880,43 @@ const lemon8 = {
 // timeline DOM (pbs.twimg.com images + video posters). Open Home / a profile's
 // Media tab and leave it; scroll loads more.
 // ===========================================================================
+function xStatusHref(root) {
+  try {
+    const link = root && root.querySelector && root.querySelector('a[href*="/status/"]');
+    return (link && (link.getAttribute("href") || ""))
+      .replace(/^https?:\/\/(?:www\.)?(?:x\.com|twitter\.com)/i, "")
+      .split("?")[0];
+  } catch (e) {
+    return "";
+  }
+}
+
+function xTweetRoots() {
+  const roots = [];
+  const seen = new Set();
+  document.querySelectorAll('article[data-testid="tweet"], article[role="article"], div[data-testid="cellInnerDiv"]').forEach((root) => {
+    const href = xStatusHref(root);
+    const m = href.match(/^\/([A-Za-z0-9_]{1,20})\/status\/(\d+)/);
+    if (!m) return;
+    const key = m[1].toLowerCase() + ":" + m[2];
+    if (seen.has(key)) return;
+    seen.add(key);
+    roots.push(root);
+  });
+  return roots;
+}
+
 // Read tweet records straight off the DOM. This is the reliable path for X — it
 // does NOT depend on the inject GraphQL hook firing (X throttles background-tab
-// fetches and the home feed can load before the hook installs). Each <article> has
-// a permalink (author + id), tweetText, and a [role=group] whose aria-label carries
-// the full counts ("13 replies, 4 reposts, 88 likes, 9,000 views").
+// fetches and the home feed can load before the hook installs). X has changed
+// wrappers over time, so we accept both old <article> tweets and modern timeline
+// cells with a status permalink. Counts still usually live on a [role=group]
+// aria-label ("13 replies, 4 reposts, 88 likes, 9,000 views").
 function harvestXPosts(entity, feed) {
   const posts = [];
-  document.querySelectorAll('article[data-testid="tweet"], article[role="article"]').forEach((art) => {
+  xTweetRoots().forEach((art) => {
     try {
-      const link = art.querySelector('a[href*="/status/"]');
-      const href = (link && (link.getAttribute("href") || ""))
-        .replace(/^https?:\/\/(?:www\.)?(?:x\.com|twitter\.com)/i, "")
-        .split("?")[0];
+      const href = xStatusHref(art);
       const m = href.match(/^\/([A-Za-z0-9_]{1,20})\/status\/(\d+)/);
       if (!m) return;
       const author = m[1], pid = m[2];
@@ -2002,10 +2026,7 @@ function xProfileCount(handle, suffix) {
 
 function xStatusContext(root) {
   try {
-    const link = root && root.querySelector && root.querySelector('a[href*="/status/"]');
-    const href = (link && (link.getAttribute("href") || ""))
-      .replace(/^https?:\/\/(?:www\.)?(?:x\.com|twitter\.com)/i, "")
-      .split("?")[0];
+    const href = xStatusHref(root);
     const m = href.match(/^\/([A-Za-z0-9_]{1,20})\/status\/(\d+)/);
     if (m) return { author: m[1], post_id: m[2], href };
   } catch (e) {}
@@ -2268,7 +2289,7 @@ const x = {
       );
       clog("info", `X ${feed}: ${xposts.length} tweet(s) w/ counts`, "x");
     }
-    document.querySelectorAll('article[data-testid="tweet"], article[role="article"]').forEach((art) => {
+    xTweetRoots().forEach((art) => {
       const ctx = xStatusContext(art);
       art.querySelectorAll('img[src*="pbs.twimg.com"], img[srcset*="pbs.twimg.com"]').forEach((im) => {
         if (imageLooksTooSmall(im, 120)) return;

@@ -241,6 +241,24 @@ def test_x_page_recovery_limit_cools_then_retries():
     assert "attempt_limit_cooling" in background
 
 
+def test_x_scraper_accepts_modern_timeline_cells():
+    content = _read("extension/content.js")
+    harvest_block = content.split("function harvestXPosts", 1)[1].split(
+        "// Click a named home-timeline tab",
+        1,
+    )[0]
+    x_block = content.split("const x = {", 1)[1].split(
+        "const threads = {",
+        1,
+    )[0]
+
+    assert "function xStatusHref" in content
+    assert "function xTweetRoots" in content
+    assert 'div[data-testid="cellInnerDiv"]' in content
+    assert "xTweetRoots().forEach((art)" in harvest_block
+    assert "xTweetRoots().forEach((art)" in x_block
+
+
 def test_x_threads_hard_recovery_returns_to_home_feed():
     background = _read("extension/background.js")
     ingest = _read("src/bridges/ig_ingest.py")
