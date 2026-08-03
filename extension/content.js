@@ -3664,8 +3664,20 @@ async function runOneShotCycle(reason) {
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (!msg) return;
-  if (!ucContentScriptCurrent()) return false;
+  if (!msg) {
+    try { sendResponse({ ok: false, reason: "empty_message" }); } catch (_) {}
+    return false;
+  }
+  // Fast negative reply during content-script re-init on SPAs like X/Threads:
+  // pushState navigations frequently unload+re-attach the content script, and
+  // if a SW-side chrome.tabs.sendMessage lands during that window, the handler
+  // would previously `return false` without calling sendResponse -- Chrome
+  // then closes the port with no response and the SW promise hangs its full
+  // 15s timeout budget. Respond immediately so the SW can recover fast.
+  if (!ucContentScriptCurrent()) {
+    try { sendResponse({ ok: false, reason: "content_script_not_current" }); } catch (_) {}
+    return false;
+  }
   // "ensureLoop" (watchdog / manual Scrape-now): start the loop if it isn't running.
   if (msg.type === "ensureLoop" || msg.type === "scrapeCycle") {
     const p = currentPlatform();
