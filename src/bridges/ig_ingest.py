@@ -5278,6 +5278,42 @@ async def ingest_ig(request):  # /ig/ingest alias
     return _cors(web.json_response(await _ingest(request.app, "instagram", body)))
 
 
+async def sw_crash_handler(request):
+    """Accept extension MV3 service-worker crash reports (companion to a014dc4).
+
+    background.js POSTs here from its self.addEventListener('error') and
+    'unhandledrejection' hooks. Persist to browser_ingest_events under the
+    'bridge' diagnostic platform so operators can query recent SW instability
+    (e.g. `SELECT metadata FROM browser_ingest_events WHERE endpoint='sw_crash'
+    ORDER BY created_at DESC`) and log at WARNING so it shows in docker logs.
+    Best-effort — never fails the request.
+    """
+    body = await _safe_json(request)
+    kind = str(body.get("kind") or "sw_crash")[:64]
+    message = str(body.get("message") or "")[:512]
+    ext_version = str(body.get("extension_version") or "unknown")[:32]
+    logger.warning(
+        "extension SW crash: kind=%s ext=%s msg=%s",
+        kind, ext_version, message,
+    )
+    pool = request.app.get("pool")
+    subject = ext_version[:128]
+    _schedule_app_task(
+        request.app,
+        _record_browser_ingest_event(
+            pool,
+            "bridge",
+            "sw_crash",
+            subject,
+            observed_count=1,
+            stored_count=0,
+            metadata=body if isinstance(body, dict) else None,
+        ),
+        label="sw_crash_record",
+    )
+    return _cors(web.json_response({"ok": True}, status=202))
+
+
 # ---------------------------------------------------------------------------
 async def _safe_json(request):
     if request.get("_json_cache") is not None:
@@ -5411,6 +5447,7 @@ def make_app():
     app.router.add_post("/social/strava-route-visit", strava_route_visit_handler)
     app.router.add_post("/social/strava-streams", strava_streams_handler)
     app.router.add_post("/social/browser-heartbeat", browser_heartbeat_handler)
+    app.router.add_post("/social/sw-crash", sw_crash_handler)
     # instagram back-compat aliases
     app.router.add_get("/ig/targets", get_targets_ig)
     app.router.add_post("/ig/ingest", ingest_ig)
