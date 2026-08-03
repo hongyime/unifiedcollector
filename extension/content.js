@@ -521,12 +521,23 @@ function switchXHostForRecoverableShell(shell) {
     return false;
   }
   const navKey = `uc_x_shell_nav_${shell.reason || "shell"}`;
+  const stepKey = `uc_x_shell_step_${shell.reason || "shell"}`;
   const lastNav = lsNum(navKey);
   if (lastNav && Date.now() - lastNav < 120000) return false;
   lsSet(navKey, String(Date.now()));
   const host = String(location.hostname || "").toLowerCase();
-  const target = host.includes("twitter.com") ? "https://x.com/home" : "https://twitter.com/home";
-  clog("warn", `x page shell still stuck (${shell.reason}); switching host to recover`, "x");
+  const alternateHost = host.includes("twitter.com") ? "https://x.com/home" : "https://twitter.com/home";
+  const owner = ownerFromStoredOrDom("x", xLoggedInOwner);
+  const step = (lsNum(stepKey) % 4) + 1;
+  lsSet(stepKey, String(step));
+  const target = step === 2 && owner
+    ? "https://x.com/" + encodeURIComponent(owner)
+    : step === 3
+      ? "https://x.com/explore"
+      : step === 4
+        ? "https://x.com/home?uc_recover=" + Math.floor(Date.now() / 1000)
+        : alternateHost;
+  clog("warn", `x page shell still stuck (${shell.reason}); navigating to ${target}`, "x");
   location.href = target;
   return true;
 }
