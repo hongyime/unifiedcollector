@@ -1100,8 +1100,17 @@ class WorkerService:
 
     async def _report_health(self, status: str):
         conn = None
+        # 30s (was 10s): under Telethon bursts the container's event loop can
+        # stall for 10+s while MTProto sockets flush. The old 10s wait_for
+        # would trip every cycle even though the DB pool was healthy, spamming
+        # "Health report failed (TimeoutError)" for hours. Configurable via
+        # COLLECTOR_HEALTH_REPORT_TIMEOUT_SECONDS if you need to tune per env.
         try:
-            conn = await asyncio.wait_for(self.pool.acquire(), timeout=10)
+            _timeout = float(os.getenv("COLLECTOR_HEALTH_REPORT_TIMEOUT_SECONDS", "30"))
+        except (TypeError, ValueError):
+            _timeout = 30.0
+        try:
+            conn = await asyncio.wait_for(self.pool.acquire(), timeout=_timeout)
             await conn.execute(
                 "INSERT INTO service_cursors (service, last_processed_at, status) "
                 "VALUES ('_worker', NOW(), $1) "
