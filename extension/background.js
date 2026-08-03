@@ -297,6 +297,24 @@ function forcedCycleHardReloadMs(platformId) {
   return FORCED_CYCLE_HARD_RELOAD_MS_BY_PLATFORM[platformId] || 5 * 60 * 1000;
 }
 
+function hardRefreshNavigationUrl(platform, currentUrl, now) {
+  if (!platform || !HOME_NAV_HARD_REFRESH_PLATFORMS.has(platform.id)) return null;
+  const current = String(currentUrl || "");
+  if (platform.id === "x") {
+    try {
+      const u = new URL(current || platform.url || "https://x.com/home");
+      if (/twitter\.com$/i.test(u.hostname)) return "https://x.com/home";
+      return "https://twitter.com/home";
+    } catch (e) {
+      return "https://twitter.com/home";
+    }
+  }
+  if (platform.id === "threads") {
+    return `https://www.threads.com/?uc_recover=${Math.floor(now / 1000)}`;
+  }
+  return platform.url && current !== platform.url ? platform.url : null;
+}
+
 function isNoReceiverError(err) {
   return /Could not establish connection|Receiving end does not exist|Extension context invalidated/i.test(
     String((err && err.message) || err || "")
@@ -491,9 +509,8 @@ async function hardRefreshForcedCycleTab(base, tab, platform, reason, extra = {}
     });
     return false;
   }
-  const homeNav = HOME_NAV_HARD_REFRESH_PLATFORMS.has(platform.id);
   const currentUrl = tab && tab.url ? String(tab.url) : "";
-  const targetUrl = homeNav && platform.url && currentUrl !== platform.url ? platform.url : null;
+  const targetUrl = hardRefreshNavigationUrl(platform, currentUrl, now);
   await recordServiceWorkerRecovery(base, tab, platform, "forced_cycle_hard_refresh", reason || "forced_cycle_recovery", {
     ...extra,
     recovery_nav: targetUrl ? "home_url" : "reload",

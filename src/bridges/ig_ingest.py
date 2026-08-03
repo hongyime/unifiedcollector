@@ -5020,6 +5020,8 @@ async def browser_heartbeat_handler(request):
                 "recovery_attempt": body.get("recovery_attempt"),
                 "recovery_delay_ms": body.get("recovery_delay_ms"),
                 "recovery_limit": body.get("recovery_limit"),
+                "recovery_nav": body.get("recovery_nav"),
+                "recovery_target_url": body.get("recovery_target_url"),
                 "scraper_tabs_seen": body.get("scraper_tabs_seen"),
                 "scraper_tabs_sent": body.get("scraper_tabs_sent"),
                 "scraper_tabs_failed": body.get("scraper_tabs_failed"),

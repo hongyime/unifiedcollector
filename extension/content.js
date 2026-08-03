@@ -396,7 +396,7 @@ const PAGE_HEALTH_REPORT_GAP_MS = 60000;
 const WALL_LOG_GAP_MS = 10 * 60000;
 const LAST_PAGE_HEALTH_REPORT = {};
 const LAST_WALL_LOG_AT = {};
-const PAGE_RECOVERY_ENABLED = new Set(["tiktok", "threads", "x"]);
+const PAGE_RECOVERY_ENABLED = new Set(["lemon8", "tiktok", "threads", "x"]);
 const RECOVERABLE_PAGE_SHELL_PATTERNS = {
   tiktok: [
     { reason: "sorry_could_not_show_page", re: /sorry,?\s*we\s+couldn(?:'|\u2019)?t\s+show\s+that\s+page/i },
@@ -407,6 +407,11 @@ const RECOVERABLE_PAGE_SHELL_PATTERNS = {
     { reason: "try_again_empty_state", re: /\btry\s+again\b/i, lowContent: true },
     { reason: "no_internet_connection", re: /no\s+internet\s+connection/i, lowContent: true },
     { reason: "video_unavailable", re: /video\s+currently\s+unavailable/i, lowContent: true },
+  ],
+  lemon8: [
+    { reason: "something_went_wrong", re: /something\s+went\s+wrong/i, lowContent: true },
+    { reason: "try_again_empty_state", re: /\btry\s+again\b/i, lowContent: true },
+    { reason: "feed_empty_state", re: /\b(no\s+more|no\s+content|refresh)\b/i, lowContent: true },
   ],
   threads: [
     { reason: "something_went_wrong", re: /something\s+went\s+wrong/i, lowContent: true },

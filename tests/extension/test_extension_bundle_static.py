@@ -240,14 +240,19 @@ def test_x_page_recovery_limit_cools_then_retries():
 
 def test_x_threads_hard_recovery_returns_to_home_feed():
     background = _read("extension/background.js")
+    ingest = _read("src/bridges/ig_ingest.py")
     hard_refresh_block = background.split("async function hardRefreshForcedCycleTab", 1)[1].split(
         "async function refreshTabForMissingContentScript",
         1,
     )[0]
 
     assert 'const HOME_NAV_HARD_REFRESH_PLATFORMS = new Set(["x", "threads"])' in background
-    assert "HOME_NAV_HARD_REFRESH_PLATFORMS.has(platform.id)" in hard_refresh_block
+    assert "function hardRefreshNavigationUrl" in background
+    assert "https://twitter.com/home" in background
+    assert "uc_recover=" in background
     assert "recovery_nav" in hard_refresh_block
+    assert '"recovery_nav": body.get("recovery_nav")' in ingest
+    assert '"recovery_target_url": body.get("recovery_target_url")' in ingest
     assert "chrome.tabs.update(tab.id, { url: targetUrl })" in hard_refresh_block
     assert "chrome.tabs.reload(tab.id, { bypassCache: true })" in hard_refresh_block
 
@@ -293,6 +298,8 @@ def test_stalled_scrape_passes_are_force_cleared_on_timeout():
     timeout_table = content.split("const TIMEOUT_RELOAD_STREAK_BY_PLATFORM = {", 1)[1].split("};", 1)[0]
 
     assert "function forceClearScrapePass()" in content
+    assert 'const PAGE_RECOVERY_ENABLED = new Set(["lemon8", "tiktok", "threads", "x"])' in content
+    assert "feed_empty_state" in content
     assert "forceClearScrapePass();" in content
     assert "scrape_pass_forced_clear: true" in content
     assert re.search(r"tiktok:\s*1", timeout_table)
