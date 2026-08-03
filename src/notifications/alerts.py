@@ -618,6 +618,14 @@ def _backfill_phase(src: str, snap: dict) -> str:
 async def notify_status(snapshot: dict) -> bool:
     """Recurring heartbeat, built by the scheduler's _build_status().
 
+    Emits one Telegram message per logical section (header, current-hour
+    totals, per-source activity, rate limits, vault, backups, freshness,
+    extension hooks, browser ingest, per-platform media follow-ups, X health,
+    backfill state, dead/degraded) via telegram.send_many, so each category
+    reads as a standalone update in the group chat instead of one huge
+    concatenated post. The DB-unreachable early-exit branch is still a single
+    send() call.
+
     Accurate keys (all optional, tolerated if missing):
       ok (bool), media_items (int), media_items_estimate (bool), media_24h (int),
       msgs_24h (int), source_ages ({source: secs}), stale_sources (list),
@@ -629,68 +637,114 @@ async def notify_status(snapshot: dict) -> bool:
             f"<code>{_esc(snapshot['error'])[:300]}</code>"
         )
 
+    section_builders = (
+        _section_header,
+        _section_current_hour,
+        _section_top_activity,
+        _section_previous_hour,
+        _section_rate_limits,
+        _section_operational,
+        _section_vault,
+        _section_backups,
+        _section_realtime_freshness,
+        _section_extension_hooks,
+        _section_browser_ingest,
+        _section_browser_content_gaps,
+        _section_browser_media_diagnosis,
+        _section_browser_media_revisit,
+        _section_tiktok_media,
+        _section_x_health,
+        _section_browser_api_freshness,
+        _section_backfill_state,
+        _section_dead_degraded,
+    )
+    messages: list[str] = []
+    for build in section_builders:
+        section = build(snapshot)
+        if not section:
+            continue
+        messages.append("\n".join(section))
+    return await telegram.send_many(messages)
+
+
+def _section_header(snapshot: dict) -> list[str]:
     head = "✅" if snapshot.get("ok", True) else "⚠️"
-    lines = [
+    return [
         f"{head} <b>UnifiedCollector hourly status</b>",
         f"<i>{_now()} · current hour since {_current_hour_window()}</i>",
     ]
 
+
+def _section_current_hour(snapshot: dict) -> list[str] | None:
     hourly = snapshot.get("hourly_ingestion") or {}
     totals = hourly.get("totals") or {}
-    if totals:
-        rows = int(totals.get("records", 0) or 0)
-        msgs = int(totals.get("messages", 0) or 0)
-        files = int(totals.get("files", 0) or 0)
-        r429 = int(totals.get("rate_limits", 0) or 0)
-        access_errors = int(totals.get("access_errors", 0) or 0)
-        lines.append("")
-        lines.append("<b>Current hour</b>")
-        lines.append(
-            f"Stored {rows:,} {_plural(rows, 'source row')}, including "
-            f"{msgs:,} {_plural(msgs, 'chat message')} and "
-            f"{files:,} {_plural(files, 'media file')}."
-        )
-        lines.append("This is the partial clock-hour window; it resets at the top of each hour.")
-        if r429:
-            lines.append(f"Recorded rate-limit events this hour: {r429:,}.")
-        else:
-            lines.append("Recorded rate-limit events this hour: 0.")
-        if access_errors:
-            lines.append(f"Recorded login/access or other HTTP errors this hour: {access_errors:,}.")
+    if not totals:
+        return None
+    rows = int(totals.get("records", 0) or 0)
+    msgs = int(totals.get("messages", 0) or 0)
+    files = int(totals.get("files", 0) or 0)
+    r429 = int(totals.get("rate_limits", 0) or 0)
+    access_errors = int(totals.get("access_errors", 0) or 0)
+    lines = ["<b>Current hour</b>"]
+    lines.append(
+        f"Stored {rows:,} {_plural(rows, 'source row')}, including "
+        f"{msgs:,} {_plural(msgs, 'chat message')} and "
+        f"{files:,} {_plural(files, 'media file')}."
+    )
+    lines.append("This is the partial clock-hour window; it resets at the top of each hour.")
+    if r429:
+        lines.append(f"Recorded rate-limit events this hour: {r429:,}.")
+    else:
+        lines.append("Recorded rate-limit events this hour: 0.")
+    if access_errors:
+        lines.append(f"Recorded login/access or other HTTP errors this hour: {access_errors:,}.")
+    return lines
 
-        top = [_format_hourly_source(row) for row in (hourly.get("sources") or [])[:6]]
-        if top:
-            lines.append("")
-            lines.append("<b>Top activity this hour</b>")
-            lines.extend(top)
 
-        previous = hourly.get("previous_complete_hour") or {}
-        previous_totals = previous.get("totals") or {}
-        if previous_totals:
-            prev_rows = int(previous_totals.get("records", 0) or 0)
-            prev_msgs = int(previous_totals.get("messages", 0) or 0)
-            prev_files = int(previous_totals.get("files", 0) or 0)
-            prev_429 = int(previous_totals.get("rate_limits", 0) or 0)
-            prev_access = int(previous_totals.get("access_errors", 0) or 0)
-            lines.append("")
-            lines.append("<b>Previous complete hour</b>")
-            lines.append(
-                f"Stored {prev_rows:,} {_plural(prev_rows, 'source row')}, including "
-                f"{prev_msgs:,} {_plural(prev_msgs, 'chat message')} and "
-                f"{prev_files:,} {_plural(prev_files, 'media file')}; "
-                f"{prev_429:,} rate-limit {_plural(prev_429, 'event')} and "
-                f"{prev_access:,} login/access or other HTTP {_plural(prev_access, 'error')}."
-            )
-            previous_top = [_format_hourly_source(row) for row in (previous.get("sources") or [])[:4]]
-            if previous_top:
-                lines.extend(previous_top)
+def _section_top_activity(snapshot: dict) -> list[str] | None:
+    hourly = snapshot.get("hourly_ingestion") or {}
+    if not (hourly.get("totals") or {}):
+        return None
+    top = [_format_hourly_source(row) for row in (hourly.get("sources") or [])[:6]]
+    if not top:
+        return None
+    return ["<b>Top activity this hour</b>", *top]
 
+
+def _section_previous_hour(snapshot: dict) -> list[str] | None:
+    hourly = snapshot.get("hourly_ingestion") or {}
+    if not (hourly.get("totals") or {}):
+        return None
+    previous = hourly.get("previous_complete_hour") or {}
+    previous_totals = previous.get("totals") or {}
+    if not previous_totals:
+        return None
+    prev_rows = int(previous_totals.get("records", 0) or 0)
+    prev_msgs = int(previous_totals.get("messages", 0) or 0)
+    prev_files = int(previous_totals.get("files", 0) or 0)
+    prev_429 = int(previous_totals.get("rate_limits", 0) or 0)
+    prev_access = int(previous_totals.get("access_errors", 0) or 0)
+    lines = ["<b>Previous complete hour</b>"]
+    lines.append(
+        f"Stored {prev_rows:,} {_plural(prev_rows, 'source row')}, including "
+        f"{prev_msgs:,} {_plural(prev_msgs, 'chat message')} and "
+        f"{prev_files:,} {_plural(prev_files, 'media file')}; "
+        f"{prev_429:,} rate-limit {_plural(prev_429, 'event')} and "
+        f"{prev_access:,} login/access or other HTTP {_plural(prev_access, 'error')}."
+    )
+    previous_top = [_format_hourly_source(row) for row in (previous.get("sources") or [])[:4]]
+    if previous_top:
+        lines.extend(previous_top)
+    return lines
+
+
+def _section_rate_limits(snapshot: dict) -> list[str]:
+    """Always emitted; falls back to 'no limits' line when all buckets empty."""
     active_limits = snapshot.get("active_rate_limits") or []
     recent_limits = snapshot.get("rate_limit_events") or []
     access_events = snapshot.get("access_events") or []
     quota_usage = snapshot.get("quota_usage") or []
-    lines.append("")
-    lines.append("<b>Rate limits, cooldowns, and sessions</b>")
+    lines = ["<b>Rate limits, cooldowns, and sessions</b>"]
     if active_limits:
         lines.extend(_format_cooldown(r) for r in active_limits[:4])
     if recent_limits:
@@ -703,180 +757,210 @@ async def notify_status(snapshot: dict) -> bool:
         lines.extend(_format_quota_usage(r) for r in quota_usage[:6])
     if not active_limits and not recent_limits and not access_events and not quota_usage:
         lines.append("No recorded rate-limit events, active cooldowns, or login/session failures this hour.")
+    return lines
 
+
+def _section_operational(snapshot: dict) -> list[str] | None:
     operational_events = snapshot.get("operational_events") or []
-    if operational_events:
-        lines.append("")
-        lines.append("<b>Recent self-heals and operational events</b>")
-        lines.extend(_format_operational_events(operational_events))
+    if not operational_events:
+        return None
+    lines = ["<b>Recent self-heals and operational events</b>"]
+    lines.extend(_format_operational_events(operational_events))
+    return lines
 
+
+def _section_vault(snapshot: dict) -> list[str] | None:
     vault = snapshot.get("vault") or {}
-    if vault:
-        available = bool(vault.get("available"))
-        writable = bool(vault.get("writable"))
-        queued = int(vault.get("artifacts_queued") or 0)
-        partial = int(vault.get("artifacts_partial") or 0)
-        quarantined = int(vault.get("artifacts_quarantined") or 0)
-        missing = int(vault.get("artifacts_missing_sidecar") or 0)
-        recent_missing = int(vault.get("artifacts_missing_sidecar_recent_24h") or 0)
-        missing_label = f"about {missing:,}" if vault.get("artifacts_missing_sidecar_estimated") else f"{missing:,}"
-        failures = int(vault.get("sidecar_failures") or 0)
-        lines.append("")
-        lines.append("<b>Vault</b>")
-        if available and writable:
-            lines.append(
-                f"Writable at <code>{_esc(vault.get('root') or '')}</code>; "
-                f"{_fmt_bytes(vault.get('free_bytes'))} free."
-            )
-        else:
-            lines.append(
-                f"Not safe for file-backed artifacts at <code>{_esc(vault.get('root') or '')}</code>"
-                + (f": {_esc(vault.get('error'))}" if vault.get("error") else ".")
-            )
-        if queued or partial or quarantined or missing or recent_missing or failures:
-            lines.append(
-                f"Artifact health: {queued:,} repair queue {_plural(queued, 'item')}, "
-                f"{partial:,} active partial media {_plural(partial, 'record')}, "
-                f"{quarantined:,} quarantined bad media {_plural(quarantined, 'record')}, "
-                f"{recent_missing:,} media {_plural(recent_missing, 'record')} from the last 24h missing occurrence sidecars, "
-                f"{missing_label} historical media {_plural(missing, 'record')} missing occurrence sidecars, "
-                f"{failures:,} total sidecar write {_plural(failures, 'failure')} recorded."
-            )
-        elif vault.get("counts_error"):
-            lines.append(
-                "Artifact health counts partially timed out; vault write check still passed. "
-                f"Query error: <code>{_esc(vault.get('counts_error'))}</code>."
-            )
-        else:
-            lines.append(
-                "Artifact health: no queued artifact repairs and no recent media records missing occurrence sidecars."
-            )
+    if not vault:
+        return None
+    available = bool(vault.get("available"))
+    writable = bool(vault.get("writable"))
+    queued = int(vault.get("artifacts_queued") or 0)
+    partial = int(vault.get("artifacts_partial") or 0)
+    quarantined = int(vault.get("artifacts_quarantined") or 0)
+    missing = int(vault.get("artifacts_missing_sidecar") or 0)
+    recent_missing = int(vault.get("artifacts_missing_sidecar_recent_24h") or 0)
+    missing_label = f"about {missing:,}" if vault.get("artifacts_missing_sidecar_estimated") else f"{missing:,}"
+    failures = int(vault.get("sidecar_failures") or 0)
+    lines = ["<b>Vault</b>"]
+    if available and writable:
+        lines.append(
+            f"Writable at <code>{_esc(vault.get('root') or '')}</code>; "
+            f"{_fmt_bytes(vault.get('free_bytes'))} free."
+        )
+    else:
+        lines.append(
+            f"Not safe for file-backed artifacts at <code>{_esc(vault.get('root') or '')}</code>"
+            + (f": {_esc(vault.get('error'))}" if vault.get("error") else ".")
+        )
+    if queued or partial or quarantined or missing or recent_missing or failures:
+        lines.append(
+            f"Artifact health: {queued:,} repair queue {_plural(queued, 'item')}, "
+            f"{partial:,} active partial media {_plural(partial, 'record')}, "
+            f"{quarantined:,} quarantined bad media {_plural(quarantined, 'record')}, "
+            f"{recent_missing:,} media {_plural(recent_missing, 'record')} from the last 24h missing occurrence sidecars, "
+            f"{missing_label} historical media {_plural(missing, 'record')} missing occurrence sidecars, "
+            f"{failures:,} total sidecar write {_plural(failures, 'failure')} recorded."
+        )
+    elif vault.get("counts_error"):
+        lines.append(
+            "Artifact health counts partially timed out; vault write check still passed. "
+            f"Query error: <code>{_esc(vault.get('counts_error'))}</code>."
+        )
+    else:
+        lines.append(
+            "Artifact health: no queued artifact repairs and no recent media records missing occurrence sidecars."
+        )
+    return lines
 
+
+def _section_backups(snapshot: dict) -> list[str] | None:
     backups = snapshot.get("backups") or {}
-    if backups:
-        lines.append("")
-        lines.append("<b>DB backups</b>")
-        lines.append(_format_backup_status(backups))
+    if not backups:
+        return None
+    return ["<b>DB backups</b>", _format_backup_status(backups)]
 
+
+def _section_realtime_freshness(snapshot: dict) -> list[str] | None:
     ages: dict = snapshot.get("source_ages") or {}
     stale = set(snapshot.get("stale_sources") or [])
-
-    # Live feeds line: realtime platforms with their true last-activity age.
     live = []
     for s in _REALTIME:
         if s in ages:
             stale_note = " (stale)" if s in stale else ""
             live.append(f"{_display_source(s)} {_humanize_age(ages[s])} ago{stale_note}")
-    if live:
-        lines.append("")
-        lines.append("<b>Realtime freshness</b>")
-        lines.append("; ".join(live) + ".")
+    if not live:
+        return None
+    return ["<b>Realtime freshness</b>", "; ".join(live) + "."]
 
+
+def _section_extension_hooks(snapshot: dict) -> list[str] | None:
     hooks = snapshot.get("extension_hooks") or []
-    if hooks:
-        lines.append("")
-        lines.append("<b>Chrome extension hooks</b>")
-        lines.extend(_format_extension_hook(row) for row in hooks[:4])
+    if not hooks:
+        return None
+    lines = ["<b>Chrome extension hooks</b>"]
+    lines.extend(_format_extension_hook(row) for row in hooks[:4])
+    return lines
 
+
+def _section_browser_ingest(snapshot: dict) -> list[str] | None:
     browser_ingest = snapshot.get("browser_ingest_events") or []
-    if browser_ingest:
-        lines.append("")
-        lines.append("<b>Browser extension ingest</b>")
-        lines.extend(_format_browser_ingest_event(row) for row in browser_ingest[:6])
+    if not browser_ingest:
+        return None
+    lines = ["<b>Browser extension ingest</b>"]
+    lines.extend(_format_browser_ingest_event(row) for row in browser_ingest[:6])
+    return lines
 
+
+def _section_browser_content_gaps(snapshot: dict) -> list[str] | None:
     browser_content_gaps = snapshot.get("browser_content_gaps") or []
-    if browser_content_gaps:
-        lines.append("")
-        lines.append("<b>Browser content gaps</b>")
-        lines.extend(_format_browser_content_gap(row) for row in browser_content_gaps[:5])
+    if not browser_content_gaps:
+        return None
+    lines = ["<b>Browser content gaps</b>"]
+    lines.extend(_format_browser_content_gap(row) for row in browser_content_gaps[:5])
+    return lines
 
-    browser_media_diagnostics = snapshot.get("browser_media_diagnostics") or []
-    browser_media_lines = _format_browser_media_diagnostics(browser_media_diagnostics)
-    if browser_media_lines:
-        lines.append("")
-        lines.append("<b>Browser media diagnosis</b>")
-        lines.extend(browser_media_lines)
 
-    browser_revisit_lines = _format_browser_media_revisit_queue(snapshot.get("browser_media_revisit_queue") or [])
-    if browser_revisit_lines:
-        lines.append("")
-        lines.append("<b>Browser media detail follow-up</b>")
-        lines.extend(browser_revisit_lines)
+def _section_browser_media_diagnosis(snapshot: dict) -> list[str] | None:
+    diag = _format_browser_media_diagnostics(snapshot.get("browser_media_diagnostics") or [])
+    if not diag:
+        return None
+    return ["<b>Browser media diagnosis</b>", *diag]
 
+
+def _section_browser_media_revisit(snapshot: dict) -> list[str] | None:
+    revisit = _format_browser_media_revisit_queue(snapshot.get("browser_media_revisit_queue") or [])
+    if not revisit:
+        return None
+    return ["<b>Browser media detail follow-up</b>", *revisit]
+
+
+def _section_tiktok_media(snapshot: dict) -> list[str] | None:
     tiktok_diagnostics = snapshot.get("tiktok_browser_media_diagnostics") or []
     tiktok_revisit = snapshot.get("tiktok_browser_revisit_queue") or {}
-    if tiktok_diagnostics or tiktok_revisit:
-        lines.append("")
-        lines.append("<b>TikTok media follow-up</b>")
-        lines.extend(_format_tiktok_media_diagnostics(tiktok_diagnostics, tiktok_revisit))
+    if not (tiktok_diagnostics or tiktok_revisit):
+        return None
+    body = _format_tiktok_media_diagnostics(tiktok_diagnostics, tiktok_revisit)
+    if not body:
+        return None
+    return ["<b>TikTok media follow-up</b>", *body]
 
+
+def _section_x_health(snapshot: dict) -> list[str] | None:
     x_health = snapshot.get("x_collection_health") or {}
-    if x_health:
-        lines.append("")
-        lines.append("<b>Twitter / X profile and media queue</b>")
-        lines.extend(_format_x_collection_health(x_health))
+    if not x_health:
+        return None
+    return ["<b>Twitter / X profile and media queue</b>", *_format_x_collection_health(x_health)]
 
-    # Headless coverage: how many are fresh, and name any that are stale.
+
+def _section_browser_api_freshness(snapshot: dict) -> list[str] | None:
+    ages: dict = snapshot.get("source_ages") or {}
+    stale = set(snapshot.get("stale_sources") or [])
     headless = [s for s in ages if s not in _REALTIME]
-    if headless:
-        fresh = sum(1 for s in headless if s not in stale)
-        lines.append("")
-        lines.append("<b>Browser and API freshness</b>")
-        lines.append(f"{fresh}/{len(headless)} non-chat sources are fresh.")
-
+    if not headless:
+        return None
+    fresh = sum(1 for s in headless if s not in stale)
+    lines = [
+        "<b>Browser and API freshness</b>",
+        f"{fresh}/{len(headless)} non-chat sources are fresh.",
+    ]
     stale_headless = sorted(s for s in stale if s not in _REALTIME)
     if stale_headless:
         lines.append("Needs attention: " + ", ".join(
             f"{_display_source(s)} ({_humanize_age(ages[s])} ago)"
             for s in stale_headless if s in ages))
+    return lines
 
-    # Backfill vs realtime, per collector. Classify every seen source, summarize
-    # the phase counts, and name what's still draining / crawling.
+
+def _section_backfill_state(snapshot: dict) -> list[str] | None:
     seen = sorted(
         set(snapshot.get("source_ages") or {})
         | set(snapshot.get("realtime_pct") or {})
         | set(snapshot.get("queue_pending") or {})
     )
-    if seen:
-        phases = {s: _backfill_phase(s, snapshot) for s in seen}
-        n = lambda p: sum(1 for v in phases.values() if v == p)  # noqa: E731
-        parts = []
-        for label, key in (("realtime", "realtime"), ("draining", "draining"),
-                            ("current", "current"), ("crawl", "crawl")):
-            if n(key):
-                parts.append(f"{n(key)} {label}")
-        if parts:
-            lines.append("")
-            lines.append("<b>Backfill state</b>")
-            lines.append(
-                "Sources by phase: "
-                + "; ".join(parts)
-                + ". Realtime means caught up; draining means history is still being pulled; "
-                + "crawl means a long-running discovery frontier."
-            )
+    if not seen:
+        return None
+    phases = {s: _backfill_phase(s, snapshot) for s in seen}
+    n = lambda p: sum(1 for v in phases.values() if v == p)  # noqa: E731
+    parts = []
+    for label, key in (("realtime", "realtime"), ("draining", "draining"),
+                        ("current", "current"), ("crawl", "crawl")):
+        if n(key):
+            parts.append(f"{n(key)} {label}")
+    if not parts:
+        return None
+    lines = [
+        "<b>Backfill state</b>",
+        "Sources by phase: "
+        + "; ".join(parts)
+        + ". Realtime means caught up; draining means history is still being pulled; "
+        + "crawl means a long-running discovery frontier.",
+    ]
+    qp = snapshot.get("queue_pending") or {}
+    draining = [s for s in seen if phases[s] == "draining"]
+    if draining:
+        lines.append("Still draining: " + ", ".join(
+            f"{_display_source(s)} ({_fmt_count(qp.get(s, 0))} queued)" if qp.get(s) else _display_source(s)
+            for s in draining))
+    crawl = [s for s in seen if phases[s] == "crawl"]
+    if crawl:
+        lines.append("Discovery crawl backlog: " + "; ".join(
+            f"{_display_source(s)} {_fmt_count(qp.get(s, 0))}" for s in crawl))
+    return lines
 
-        qp = snapshot.get("queue_pending") or {}
-        draining = [s for s in seen if phases[s] == "draining"]
-        if draining:
-            lines.append("Still draining: " + ", ".join(
-                f"{_display_source(s)} ({_fmt_count(qp.get(s, 0))} queued)" if qp.get(s) else _display_source(s)
-                for s in draining))
-        crawl = [s for s in seen if phases[s] == "crawl"]
-        if crawl:
-            lines.append("Discovery crawl backlog: " + "; ".join(
-                f"{_display_source(s)} {_fmt_count(qp.get(s, 0))}" for s in crawl))
 
+def _section_dead_degraded(snapshot: dict) -> list[str] | None:
     dead = snapshot.get("dead_sources") or []
     degraded = snapshot.get("degraded_sources") or []
+    if not dead and not degraded:
+        return None
+    lines = ["<b>Dead / Degraded sources</b>"]
     if dead:
-        lines.append("")
         lines.append("Dead sources: " + ", ".join(_display_source(s) for s in dead))
     if degraded:
-        lines.append("")
         lines.append("Degraded sources: " + ", ".join(_display_source(s) for s in degraded))
         details = snapshot.get("degraded_details") or []
         if details:
             lines.append("Why degraded:")
             lines.extend(_format_degraded_source(row) for row in details[:5])
-
-    return await telegram.send("\n".join(lines))
+    return lines

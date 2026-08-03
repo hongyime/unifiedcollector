@@ -32,6 +32,11 @@ async def test_notify_status_splits_rate_limit_from_auth_events(monkeypatch):
 
     monkeypatch.setattr(alerts.telegram, "send", fake_send)
 
+    async def _noop_sleep(_secs):
+        pass
+
+    monkeypatch.setattr(alerts.telegram.asyncio, "sleep", _noop_sleep)
+
     ok = await alerts.notify_status({
         "ok": False,
         "hourly_ingestion": {
@@ -218,7 +223,8 @@ async def test_notify_status_splits_rate_limit_from_auth_events(monkeypatch):
     })
 
     assert ok is True
-    msg = sent[0]
+    assert len(sent) >= 3, f"expected multiple section messages, got {len(sent)}"
+    msg = "\n".join(sent)
     assert "This is the partial clock-hour window" in msg
     assert "Recorded rate-limit events this hour: 1." in msg
     assert "Recorded login/access or other HTTP errors this hour: 1." in msg
@@ -263,3 +269,148 @@ async def test_notify_status_splits_rate_limit_from_auth_events(monkeypatch):
     assert "Latest collector DB backup is 2.0h old" in msg
     assert "4 dumps retained under <code>/vault/backups/db</code>" in msg
     assert "1 abandoned temp dump" in msg
+
+
+
+
+@pytest.mark.asyncio
+async def test_notify_status_emits_multiple_categorised_messages(monkeypatch):
+    """A rich snapshot should fan out into >=3 non-empty section messages."""
+    from src.notifications import alerts
+
+    sent: list[str] = []
+    send_many_calls: list[list[str]] = []
+
+    async def fake_send(text: str) -> bool:
+        sent.append(text)
+        return True
+
+    async def fake_send_many(messages: list[str]) -> bool:
+        send_many_calls.append(list(messages))
+        # Forward each non-empty entry through the patched send() so downstream
+        # per-message assertions still see the individual pieces.
+        ok = True
+        for m in messages:
+            if not m:
+                continue
+            ok = bool(await fake_send(m)) and ok
+        return ok
+
+    monkeypatch.setattr(alerts.telegram, "send", fake_send)
+    monkeypatch.setattr(alerts.telegram, "send_many", fake_send_many)
+
+    ok = await alerts.notify_status({
+        "ok": True,
+        "hourly_ingestion": {
+            "totals": {"records": 5, "messages": 1, "files": 1, "rate_limits": 0, "access_errors": 0},
+            "sources": [{"source": "instagram", "records": 5, "files": 1}],
+        },
+        "backups": {"status": "ok", "root": "/vault/backups/db", "latest_path": "/x.dump",
+                     "latest_age_seconds": 60, "latest_size_bytes": 1_000_000, "backup_count": 1,
+                     "in_progress": False, "max_age_hours": 30},
+        "dead_sources": ["strava"],
+    })
+
+    assert ok is True
+    # send_many called exactly once, with a list of at least three separate
+    # category messages (header + rate-limits + current-hour + backups + ...).
+    assert len(send_many_calls) == 1
+    messages = send_many_calls[0]
+    assert len(messages) >= 3, f"expected >=3 category messages, got {len(messages)}: {messages!r}"
+    # Every emitted section starts with a bold header so it stands alone.
+    assert all("<b>" in m for m in messages if m), messages
+    # And the fan-out actually reaches send() once per section.
+    assert len(sent) == len([m for m in messages if m])
+
+
+@pytest.mark.asyncio
+async def test_notify_status_omits_empty_sections(monkeypatch):
+    """Minimal snapshot => only the always-on sections (header + rate limits)."""
+    from src.notifications import alerts
+
+    send_many_calls: list[list[str]] = []
+
+    async def fake_send_many(messages: list[str]) -> bool:
+        send_many_calls.append(list(messages))
+        return True
+
+    async def fake_send(_text: str) -> bool:  # should NOT be reached on the main path
+        raise AssertionError("send() must not be used when send_many is available")
+
+    monkeypatch.setattr(alerts.telegram, "send_many", fake_send_many)
+    monkeypatch.setattr(alerts.telegram, "send", fake_send)
+
+    ok = await alerts.notify_status({"ok": True})
+
+    assert ok is True
+    assert len(send_many_calls) == 1
+    messages = send_many_calls[0]
+    # Header (always) + Rate limits fallback (always) = exactly 2 messages.
+    assert len(messages) == 2, f"expected exactly 2 sections, got {len(messages)}: {messages!r}"
+    assert "UnifiedCollector hourly status" in messages[0]
+    assert "<b>Rate limits, cooldowns, and sessions</b>" in messages[1]
+    assert "No recorded rate-limit events" in messages[1]
+
+
+@pytest.mark.asyncio
+async def test_notify_status_error_snapshot_uses_single_send(monkeypatch):
+    """The DB-unreachable early-exit branch must still be a single send()."""
+    from src.notifications import alerts
+
+    sent: list[str] = []
+    send_many_called = False
+
+    async def fake_send(text: str) -> bool:
+        sent.append(text)
+        return True
+
+    async def fake_send_many(_messages):
+        nonlocal send_many_called
+        send_many_called = True
+        return True
+
+    monkeypatch.setattr(alerts.telegram, "send", fake_send)
+    monkeypatch.setattr(alerts.telegram, "send_many", fake_send_many)
+
+    ok = await alerts.notify_status({"error": "connection refused"})
+
+    assert ok is True
+    assert send_many_called is False
+    assert len(sent) == 1
+    assert "DB unreachable" in sent[0]
+    assert "connection refused" in sent[0]
+
+
+def test_section_builders_are_callable_and_pure():
+    """Sanity check: every _section_* helper is importable and returns list|None."""
+    from src.notifications import alerts
+
+    builders = [
+        alerts._section_header,
+        alerts._section_current_hour,
+        alerts._section_top_activity,
+        alerts._section_previous_hour,
+        alerts._section_rate_limits,
+        alerts._section_operational,
+        alerts._section_vault,
+        alerts._section_backups,
+        alerts._section_realtime_freshness,
+        alerts._section_extension_hooks,
+        alerts._section_browser_ingest,
+        alerts._section_browser_content_gaps,
+        alerts._section_browser_media_diagnosis,
+        alerts._section_browser_media_revisit,
+        alerts._section_tiktok_media,
+        alerts._section_x_health,
+        alerts._section_browser_api_freshness,
+        alerts._section_backfill_state,
+        alerts._section_dead_degraded,
+    ]
+    for fn in builders:
+        result = fn({})
+        assert result is None or isinstance(result, list), (fn.__name__, result)
+        if isinstance(result, list):
+            assert all(isinstance(x, str) for x in result), (fn.__name__, result)
+    # Header and rate-limits are always emitted, even on an empty snapshot.
+    assert alerts._section_header({}) is not None
+    assert alerts._section_rate_limits({}) is not None

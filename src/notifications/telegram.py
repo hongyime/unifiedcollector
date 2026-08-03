@@ -113,3 +113,25 @@ async def send(text: str, parse_mode: str = "HTML") -> bool:
     except Exception as e:  # noqa: BLE001 - belt-and-suspenders
         logger.warning("telegram send error: %s", e)
         return False
+
+
+async def send_many(messages: list[str]) -> bool:
+    """Send several Telegram messages back-to-back, one per non-empty entry.
+
+    Each entry becomes its own standalone Telegram message via send(), so long
+    entries still transparently split at 3800 chars. Falsy entries (empty
+    strings, None) are skipped. A 200ms pause is inserted between consecutive
+    sends to stay under Telegram's per-chat throughput limit. Returns True only
+    if every non-empty entry was delivered successfully (or if the list was
+    entirely empty/falsy). Never raises.
+    """
+    ok = True
+    first = True
+    for msg in messages:
+        if not msg:
+            continue
+        if not first:
+            await asyncio.sleep(0.2)
+        first = False
+        ok = bool(await send(msg)) and ok
+    return ok
