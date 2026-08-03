@@ -49,11 +49,65 @@ function shouldSuppressExpectedPairingLog(args: any[]): boolean {
     return text.includes('QR refs attempts ended') && text.includes('connection errored');
 }
 
+// Classify Baileys logger emissions that are noisy-but-expected in specific
+// lifecycle windows and return a milder pino level. The Baileys/libsignal
+// stack emits several classes of error at fatal (level 50) that are actually
+// transient and self-healing:
+//
+//   * MessageCounterError ("Key used already or never filled") — the ratchet
+//     counter for a Signal session is out of order. Fires in bursts right
+//     after a QR re-pair when WhatsApp servers replay buffered pkmsg/msg
+//     envelopes that the mobile client already consumed. Baileys retries via
+//     retryRequestDelayMs / maxMsgRetryCount; missed frames rarely represent
+//     data loss because WhatsApp re-transmits when the receipt is not sent
+//     and multi-device self-echoes are duplicated from mobile anyway.
+//
+//   * Bad MAC — libsignal MAC verification failed on a message; almost
+//     always a stale session record where the sender's ratchet advanced
+//     while our previous session was down. Same recovery path as above.
+//
+//   * transaction failed, rolling back { MessageCounterError } — the same
+//     event, wrapped in Baileys' auth-state transaction.
+//
+//   * error in handling message ... Precondition Required Connection Closed
+//     — a message arrived while the socket was in the middle of a stream
+//     restart (515) shortly after pairing. Handled by Baileys reconnect.
+//
+//   * blocked on missing key from v0, {retrying with snapshot|parking after
+//     2 attempts} — app-state (contacts/labels/mutes) syncd mutations
+//     signed with an LTHash key we never received because the mutation
+//     predates this pairing. Baileys retries with snapshot then parks; no
+//     message data is affected.
+//
+// Downgrading these to warn/info avoids waking on-call from a routine
+// re-pair burst while still surfacing genuinely new fatal conditions. If
+// any of these ever start firing outside a pairing window, they will still
+// appear in logs and the count-based watchdog can alert on them.
+function classifyBaileysNoise(text: string): 'warn' | 'info' | null {
+    if (text.includes('blocked on missing key from v0')) return 'info';
+    if (text.includes('MessageCounterError')) return 'warn';
+    if (text.includes('"message":"Bad MAC"') || text.includes("'Bad MAC'")) return 'warn';
+    if (text.includes('transaction failed, rolling back')
+        && text.includes('MessageCounterError')) return 'warn';
+    if (text.includes('error in handling message')
+        && text.includes('Precondition Required')
+        && text.includes('Connection Closed')) return 'warn';
+    return null;
+}
+
 const logger = pino({
     level: process.env.LOG_LEVEL || 'info',
     hooks: {
         logMethod(this: any, args: any[], method: any) {
             if (shouldSuppressExpectedPairingLog(args)) return;
+            const text = args.map(bridgeLogArgText).join(' ');
+            const downgrade = classifyBaileysNoise(text);
+            if (downgrade === 'warn' && typeof this.warn === 'function') {
+                return this.warn.apply(this, args);
+            }
+            if (downgrade === 'info' && typeof this.info === 'function') {
+                return this.info.apply(this, args);
+            }
             return method.apply(this, args);
         },
     },
