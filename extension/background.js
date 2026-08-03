@@ -10,6 +10,57 @@
 // This file also keeps a persistent, storage-backed LOG ring buffer so the popup
 // shows recent activity even after the worker slept and respawned.
 
+// Global crash sinks: if any listener throws async or the top-level IIFE below
+// rejects, MV3 logs "Service worker went to a bad state unexpectedly" and gives
+// up. Capture both here so the next time it happens we have a stack in ucLog
+// AND on the ingest backend, instead of an anonymous ":0" frame in
+// chrome://extensions.
+self.addEventListener("error", (event) => {
+  const detail = {
+    kind: "sw_error_event",
+    message: (event && event.message) || null,
+    filename: (event && event.filename) || null,
+    lineno: (event && event.lineno) || null,
+    colno: (event && event.colno) || null,
+    stack: (event && event.error && event.error.stack) || null,
+  };
+  try { console.error("[UC sw_error]", detail); } catch (_) {}
+  try { _reportSwCrash(detail); } catch (_) {}
+});
+self.addEventListener("unhandledrejection", (event) => {
+  const reason = event && event.reason;
+  const detail = {
+    kind: "sw_unhandled_rejection",
+    message: (reason && reason.message) || (typeof reason === "string" ? reason : null),
+    stack: (reason && reason.stack) || null,
+  };
+  try { console.error("[UC sw_reject]", detail); } catch (_) {}
+  try { _reportSwCrash(detail); } catch (_) {}
+});
+function _reportSwCrash(detail) {
+  // Fire-and-forget: never throw from the reporter or we'll re-enter the error
+  // handler. Both storage write and network POST are best-effort.
+  try {
+    chrome.storage.local.get("ucLog").then(({ ucLog = [] }) => {
+      ucLog.push({ t: Date.now(), level: "error", msg: "sw_crash", detail });
+      while (ucLog.length > 200) ucLog.shift();
+      chrome.storage.local.set({ ucLog }).catch(() => {});
+    }).catch(() => {});
+  } catch (_) {}
+  try {
+    fetch("http://127.0.0.1:8765/social/sw-crash", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...detail,
+        extension_version: (chrome.runtime.getManifest && chrome.runtime.getManifest().version) || null,
+        reported_at: Date.now(),
+      }),
+      keepalive: true,
+    }).catch(() => {});
+  } catch (_) {}
+}
+
 // Keep the service worker boot path self-contained. A failed importScripts()
 // during MV3 startup prevents every alarm/listener from registering, so the
 // background worker owns its platform registry directly. Popup/tabs pages still
@@ -2281,25 +2332,33 @@ async function rememberExtensionVersion() {
 }
 
 // Warm start (worker waking from sleep or after chrome.runtime.reload()).
+// Wrapped so a rejection here does not become an unhandledrejection that
+// tears down the SW into "bad state". Any failure is captured via _reportSwCrash
+// (see top of file) and left for the alarm-based recovery to retry.
 (async () => {
-  await setStatus({ swStartedAt: Date.now() });
-  await log("info", "service worker active");
-  const versionState = await rememberExtensionVersion();
-  const consumed = await consumeReloadIntent()
-    .catch((e) => {
-      log("warn", `reload intent handling failed: ${e && e.message ? e.message : e}`);
-      return false;
-    });
-  if (!consumed) {
-    if (versionState.changed) {
-      const from = versionState.previous || "unknown";
-      await log("info", `extension version changed ${from} -> ${versionState.version}; hard-refreshing scraper tabs`);
-      setTimeout(() => {
-        runStartupRecovery("version_changed", { force: true, refreshTabs: true, refreshGapMs: 1500, retries: 3 })
-          .catch((e) => log("warn", `version-change recovery failed: ${e && e.message ? e.message : e}`));
-      }, 500);
-    } else {
-      await runStartupRecovery("warm_start", { force: false, refreshTabs: false, retries: 2 });
+  try {
+    await setStatus({ swStartedAt: Date.now() });
+    await log("info", "service worker active");
+    const versionState = await rememberExtensionVersion();
+    const consumed = await consumeReloadIntent()
+      .catch((e) => {
+        log("warn", `reload intent handling failed: ${e && e.message ? e.message : e}`);
+        return false;
+      });
+    if (!consumed) {
+      if (versionState.changed) {
+        const from = versionState.previous || "unknown";
+        await log("info", `extension version changed ${from} -> ${versionState.version}; hard-refreshing scraper tabs`);
+        setTimeout(() => {
+          runStartupRecovery("version_changed", { force: true, refreshTabs: true, refreshGapMs: 1500, retries: 3 })
+            .catch((e) => log("warn", `version-change recovery failed: ${e && e.message ? e.message : e}`));
+        }, 500);
+      } else {
+        await runStartupRecovery("warm_start", { force: false, refreshTabs: false, retries: 2 });
+      }
     }
+  } catch (e) {
+    try { _reportSwCrash({ kind: "warm_start_throw", message: e && e.message, stack: e && e.stack }); } catch (_) {}
+    try { await log("warn", `warm-start crashed: ${e && e.message ? e.message : e}`); } catch (_) {}
   }
 })();
