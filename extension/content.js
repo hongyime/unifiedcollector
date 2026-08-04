@@ -3454,6 +3454,35 @@ async function mainLoop() {
           if (recovery && recovery.cooldown_mins) {
             setWall(p.id, recovery.cooldown_mins);
           }
+          // Emit an empty-ingest probe so the dashboard's "content endpoint"
+          // rate for this platform reflects "recovery attempts in progress"
+          // rather than silence. Without this, a platform stuck in the
+          // recoverable-shell state (e.g. threads showing "Something went
+          // wrong" after Meta's server-side block) shows 0 media/posts rows
+          // even though the loop is actively probing every cycle — which
+          // looks like a broken scraper from the operator's view. Fire and
+          // forget (sendSideEffect), so we never block the recovery sleep.
+          try {
+            sendSideEffect(
+              {
+                type: "ingest",
+                platform: p.id,
+                username: p.entity ? (p.entity() || "feed") : "feed",
+                items: [],
+                record_empty: true,
+                probe_reason: "recoverable_error_shell",
+                probe_meta: {
+                  shell_reason: shell.reason,
+                  content_counts: shell.content_counts || null,
+                  url: location.href,
+                  clicked_retry: !!clicked,
+                },
+              },
+              p.id,
+              `${p.label} shell probe`,
+              { timeoutMs: 8000 }
+            );
+          } catch (_) {}
           const delay = Number((recovery && recovery.delay_ms) || passRestMs(p.id));
           await sleep(clicked ? human(12000) : human(Math.max(30000, Math.min(delay, 300000))));
           continue;
