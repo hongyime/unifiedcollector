@@ -9,6 +9,7 @@ from pathlib import Path
 from src.backup.db_backup import backup_status
 from src.db.connection import get_pool, close_pool
 from src.core.env import env_int
+from src.core.source_freshness import FRESHNESS as _CANONICAL_FRESHNESS
 from src.core.vault import VAULT_ROOT, vault_artifact_counts, vault_health
 
 logger = logging.getLogger(__name__)
@@ -265,35 +266,17 @@ class Scheduler:
             logger.warning("identity reconcile failed: %s", e)
 
     # Per-source newest-activity freshness — the ACCURATE liveness signal, read
-    # from the real data tables (mirrors src/watchdog/freshness.py). The old status
-    # derived "quiet" from collection_runs, which the realtime collectors
-    # (telegram/whatsapp/beeper) never populate — so they were ALWAYS reported quiet
-    # even while actively ingesting. (source, freshness_query, stale_threshold_secs).
-    _FRESHNESS: list[tuple[str, str, int]] = [
-        ("telegram",  "SELECT extract(epoch FROM now()-max(collected_at)) FROM telegram_messages", 7200),
-        ("whatsapp",  "SELECT extract(epoch FROM now()-max(collected_at)) FROM whatsapp_messages", 14400),
-        ("beeper",    "SELECT extract(epoch FROM now()-max(ingested_at)) FROM beeper_shadow_messages", 10800),
-        ("instagram", "SELECT extract(epoch FROM now()-max(collected_at)) FROM media_items WHERE source='instagram'", 172800),
-        ("tiktok",    "SELECT extract(epoch FROM now()-max(collected_at)) FROM media_items WHERE source='tiktok'", 172800),
-        ("lemon8",    "SELECT extract(epoch FROM now()-max(collected_at)) FROM media_items WHERE source='lemon8'", 172800),
-        ("threads",   "SELECT extract(epoch FROM now()-max(collected_at)) FROM threads_posts", 172800),
-        ("facebook",  "SELECT extract(epoch FROM now()-max(collected_at)) FROM facebook_posts", 172800),
-        ("x",         "SELECT extract(epoch FROM now()-max(collected_at)) FROM x_posts", 172800),
-        ("youtube",   "SELECT extract(epoch FROM now()-max(collected_at)) FROM youtube_videos", 172800),
-        ("website",   "SELECT extract(epoch FROM now()-max(collected_at)) FROM website_pages", 259200),
-        ("github",    "SELECT extract(epoch FROM now()-max(collected_at)) FROM github_commits", 259200),
-        ("strava",    """
-            SELECT extract(epoch FROM now()-max(ts))
-            FROM (
-                SELECT max(collected_at) AS ts FROM strava_activities
-                UNION ALL
-                SELECT max(collected_at) AS ts FROM strava_gps_streams
-                UNION ALL
-                SELECT max(collected_at) AS ts FROM media_items WHERE source='strava'
-            ) progress
-        """, 259200),
-        ("search",    "SELECT extract(epoch FROM now()-max(collected_at)) FROM search_results", 259200),
-    ]
+    # from the real data tables. Delegates to the canonical FRESHNESS table in
+    # src.core.source_freshness so scheduler alerts, watchdog restarts, and the
+    # dashboard freshness UI all read the SAME per-source query set. Previously
+    # this was a hand-maintained duplicate that could drift: e.g. this file used
+    # to check only `media_items` for instagram/tiktok/lemon8, so a fresh
+    # profile-metadata sweep with no new media would still look stale in the
+    # Telegram heartbeat while the dashboard (which already used compute_liveness)
+    # reported it live. Text-heavy realtime sources (whatsapp/beeper/telegram)
+    # are unchanged — they read their per-source message tables, never
+    # media_items.
+    _FRESHNESS: list[tuple[str, str, int]] = _CANONICAL_FRESHNESS
 
     async def _maybe_check_cookies(self):
         """Actively test every cookie's validity on the first tick, then every N
