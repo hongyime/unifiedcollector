@@ -63,6 +63,64 @@ async def test_watchdog_skips_stale_restart_during_active_429_cooldown(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_watchdog_bypasses_cooldown_and_restarts_realtime_source(monkeypatch):
+    """Realtime sources (telegram/whatsapp/beeper) must restart when stale even
+    if a per-account FloodWait cooldown is active — the cooldown reflects a
+    specific backfill/resolve API path, not the live event stream, and a dead
+    MTProto/WS connection can only be healed by restart. Regression pin for
+    the incident where telegram sat 4h stale while a backfill FloodWait from
+    hours earlier kept the watchdog deferring restarts indefinitely.
+    """
+    monkeypatch.setenv("DATABASE_URL", "postgres://collector:collector@localhost/unifiedcollector")
+    import src.watchdog.freshness as freshness
+
+    freshness = importlib.reload(freshness)
+    monkeypatch.setattr(
+        freshness,
+        "CHECKS",
+        {"telegram": ("SELECT 20000", 7200, ["unifiedcollector_collector_telegram"])},
+    )
+    monkeypatch.setattr(freshness, "_last_restart", {})
+
+    restarted: list[str] = []
+    degraded: list[tuple[str, float, bool, str | None]] = []
+
+    async def fake_restart(container: str) -> None:
+        restarted.append(container)
+
+    async def fake_mark_degraded(db, source: str, age: float, restarted_any: bool, detail: str | None = None) -> None:
+        degraded.append((source, age, restarted_any, detail))
+
+    async def fake_notify(text: str) -> None:
+        pass
+
+    monkeypatch.setattr(freshness, "_restart", fake_restart)
+    monkeypatch.setattr(freshness, "_mark_degraded", fake_mark_degraded)
+    monkeypatch.setattr(freshness, "_notify", fake_notify)
+
+    class FakeDB:
+        async def fetchval(self, query: str):
+            assert query == "SELECT 20000"
+            return 20000  # ~5.5h stale, well over 2h telegram threshold
+
+        async def fetchrow(self, query: str, *args):
+            # Simulate an active FloodWait cooldown record — must be ignored.
+            if "FROM service_cursors" in query:
+                return {
+                    "service": "telegram_rate_limit",
+                    "last_processed_id": f"{time.time() + 36000}:1",
+                }
+            raise AssertionError(query)
+
+    await freshness._tick(FakeDB())
+
+    assert restarted == ["unifiedcollector_collector_telegram"]
+    assert len(degraded) == 1
+    _src, _age, restarted_any, _detail = degraded[0]
+    assert restarted_any is True
+
+
+@pytest.mark.asyncio
 async def test_watchdog_clears_stale_marker_after_source_recovers(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "postgres://collector:collector@localhost/unifiedcollector")
     import src.watchdog.freshness as freshness

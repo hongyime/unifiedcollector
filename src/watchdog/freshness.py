@@ -66,6 +66,17 @@ import asyncio
 import aiohttp
 import asyncpg
 
+# Realtime sources hold a persistent connection (MTProto / Baileys WS / Matrix
+# sync). When they go stale past threshold, the connection itself is what's
+# broken; a container restart is the only fix. Their entries in
+# `rate_limit_events` reflect per-account FloodWaits on specific API calls
+# (e.g. Telethon resolve/backfill) and are decoupled from the live event
+# stream — so those cooldowns must NOT block a full-collector restart.
+# The 30-min container-level restart cooldown (`COOLDOWN`) still prevents
+# restart storms. Headless HTTP scrapers keep the cooldown deferral because
+# a restart there would just probe the same blocked endpoint again.
+REALTIME_SOURCES = {"telegram", "whatsapp", "beeper"}
+
 # source -> (freshness_query, stale_threshold_seconds, [containers that own the connection])
 # Thresholds are generous: an account with many active chats will always have SOME
 # activity inside the window, so exceeding it ≈ a dead connection, not a quiet spell.
@@ -459,6 +470,15 @@ async def _tick(db: asyncpg.Connection) -> None:
                     continue
 
             cooldown = await _active_source_cooldown(db, src, now)
+            if cooldown and src in REALTIME_SOURCES:
+                # Cooldown record exists but doesn't reflect live-connection health;
+                # log it for context, then proceed with the restart path below.
+                log.warning(
+                    "%s STALE (%.0fs > %ds) with active cooldown (%ds left) — "
+                    "bypassing cooldown-defer for realtime source; restart is safe",
+                    src, age, thresh, int(cooldown.get("seconds_remaining") or 0),
+                )
+                cooldown = None
             if cooldown:
                 seconds = int(cooldown.get("seconds_remaining") or 0)
                 streak = cooldown.get("streak")
