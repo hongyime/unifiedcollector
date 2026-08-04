@@ -758,7 +758,7 @@ services:
       TIKTOK_FOLLOW_OWNER_FALLBACK: ${TIKTOK_FOLLOW_OWNER_FALLBACK:-bryanseah234}
       SOCIAL_INGEST_PREP_DB_ON_STARTUP: "true"
       BROWSER_CONTENT_HINT_RESPONSE_TIMEOUT_SECONDS: "2.0"
-      UC_EXTENSION_EXPECTED_VERSION: "1.23.29"
+      UC_EXTENSION_EXPECTED_VERSION: "1.23.30"
     volumes:
       - z:/unifiedcollector/media:/media
       - z:/unifiedcollector:/vault
@@ -786,7 +786,7 @@ services:
       DB_POOL_MAX_SIZE: "4"
       # Operator status compares live Chrome hook heartbeats against this repo
       # extension build. Update with extension/manifest.json version bumps.
-      UC_EXTENSION_EXPECTED_VERSION: "1.23.29"
+      UC_EXTENSION_EXPECTED_VERSION: "1.23.30"
     volumes:
       - z:/unifiedcollector/media:/media
       - z:/unifiedcollector:/vault
@@ -846,7 +846,7 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
-      UC_EXTENSION_EXPECTED_VERSION: "1.23.29"
+      UC_EXTENSION_EXPECTED_VERSION: "1.23.30"
       YOUTUBE_MAX_VIDEO_DURATION_MINUTES: "0"
       STRAVA_ROUTE_STREAM_SHARED_COOLDOWN: "true"
       STRAVA_BROWSER_ROUTE_QUEUE_CANDIDATE_LIMIT: "50"
@@ -1046,6 +1046,46 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
+
+  # Chrome cookie vault: keeps a rolling on-disk backup of the social-platform
+  # cookie jar via CDP (host-side Chrome on :9222). Historically, Chrome
+  # restarts / profile-SQLite rewrites have silently killed sessionid /
+  # c_user / auth_token cookies and stranded whole collectors until a human
+  # noticed. This service snapshots every 5 min so a restore is one command,
+  # and Chrome control stays permanently hands-off. Read-only relative to
+  # source platforms — see `src/tools/browser_cookie_vault.py`.
+  browser_cookie_vault:
+    image: unifiedcollector-collector:latest
+    container_name: unifiedcollector_browser_cookie_vault
+    command: python -m src.tools.browser_cookie_vault
+    mem_limit: 128m
+    ports:
+      - "8790:8790"
+    environment:
+      # host.docker.internal maps to the Windows host via extra_hosts below;
+      # Chrome's DNS-rebinding guard is worked around inside the daemon by
+      # forcing the Host header to "localhost:9222" on the HTTP call.
+      CHROME_CDP_URL: "http://host.docker.internal:9222"
+      BROWSER_COOKIE_VAULT_DIR: "/app/credentials/browser_cookies"
+      BROWSER_COOKIE_VAULT_INTERVAL_SECONDS: "300"
+      BROWSER_COOKIE_VAULT_KEEP_SNAPSHOTS: "10"
+      BROWSER_COOKIE_VAULT_HEALTH_PORT: "8790"
+      # Auto-restore-on-startup stays OFF by default so a stale snapshot
+      # cannot silently clobber a working live session. Toggle to "1" only
+      # right after a confirmed Chrome cookie-loss event.
+      BROWSER_COOKIE_VAULT_AUTORESTORE: "0"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ../src:/app/src
+      - ../credentials/browser_cookies:/app/credentials/browser_cookies
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8790/health',timeout=5).status==200 else 1)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
 
 volumes:
   pgdata:
