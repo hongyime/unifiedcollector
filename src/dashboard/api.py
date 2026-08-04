@@ -1959,6 +1959,27 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
     }
 
 
+def _activity_last_seen_at(age_seconds: int | float | None, now: datetime | None = None) -> datetime | None:
+    """Wall-clock timestamp of the newest source-specific activity row.
+
+    Complements ``latest_media_at`` (newest media_items row for the source).
+    Both are useful for operators: ``activity_last_seen_at`` is the true source
+    liveness signal (message table row / posts row / profile update) that
+    compute_liveness uses; ``latest_media_at`` is the newest DOWNLOADED media
+    file, which for text-heavy realtime sources (whatsapp/beeper) can be days
+    or weeks old even while messages are flowing every minute. Exposing them
+    as separate fields keeps the freshness UI from having to guess.
+    """
+    if age_seconds is None:
+        return None
+    try:
+        seconds = int(age_seconds)
+    except (TypeError, ValueError):
+        return None
+    ref = now or datetime.now(timezone.utc)
+    return ref - timedelta(seconds=seconds)
+
+
 def _source_media_freshness(source: str | None, current_window: dict, day_window: dict,
                             media_total: dict | None, now: datetime | None = None) -> dict:
     """Report media freshness separately from source liveness.
@@ -2189,6 +2210,7 @@ def _source_matrix_row(source_row: dict, current_content: dict | None, current_r
         "collection_methods": _source_collection_methods(source),
         "freshness_basis": source_row.get("freshness_basis"),
         "age_seconds": source_row.get("age_seconds"),
+        "activity_last_seen_at": _activity_last_seen_at(source_row.get("age_seconds"), now),
         "stale_after_seconds": source_row.get("stale_after_seconds"),
         "detail": source_row.get("detail"),
         "source_health_status": source_row.get("source_health_status"),

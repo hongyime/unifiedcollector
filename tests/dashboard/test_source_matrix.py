@@ -19,6 +19,7 @@ from src.dashboard.api import (
     _SOURCE_MEDIA_TOTALS_CACHE,
     _SOURCE_MATRIX_SECTION_CACHE,
     _SOURCE_MATRIX_YOUTUBE_BACKLOG_TIMEOUT_SECONDS,
+    _activity_last_seen_at,
     _beeper_source_key,
     _extension_reload_target_from_url,
     _messaging_policy,
@@ -549,6 +550,8 @@ def test_source_matrix_row_counts_and_live_blocker():
     assert row["media_freshness"]["current_hour_items"] == 7
     assert row["source_health_last_success_at"] == datetime(2026, 7, 28, 1, 0, tzinfo=timezone.utc)
     assert row["source_health_updated_at"] == datetime(2026, 7, 28, 1, 5, tzinfo=timezone.utc)
+    # activity_last_seen_at is now - age_seconds. age_seconds is 60 in _source().
+    assert row["activity_last_seen_at"] == now - timedelta(seconds=60)
     assert row["blocker"]["kind"] == "none"
 
 
@@ -759,6 +762,80 @@ def test_source_media_freshness_does_not_warn_for_github_commits():
 
     assert freshness["status"] == "not_primary"
     assert freshness["severity"] == "ok"
+
+
+def test_activity_last_seen_at_helper_handles_edge_values():
+    now = datetime(2026, 8, 4, 8, 30, tzinfo=timezone.utc)
+
+    assert _activity_last_seen_at(None, now) is None
+    assert _activity_last_seen_at("not-a-number", now) is None
+    assert _activity_last_seen_at(0, now) == now
+    assert _activity_last_seen_at(2712, now) == now - timedelta(seconds=2712)
+
+
+def test_source_matrix_row_separates_source_activity_from_media_for_text_heavy_source():
+    """Regression: whatsapp/beeper are text-heavy realtime sources whose media
+    rows are naturally rare. The freshness panel must surface
+    ``activity_last_seen_at`` (source liveness) and ``latest_media_at`` (media
+    row cadence) as distinct fields, so a 17h-old newest media file does not
+    make the source itself look 900+ min stale when messages are flowing every
+    minute. compute_liveness already reads whatsapp_messages, not media_items —
+    this locks the response schema to that intent.
+    """
+    now = datetime(2026, 8, 4, 8, 30, tzinfo=timezone.utc)
+    row = _source_matrix_row(
+        _source(
+            source="whatsapp",
+            status="live",
+            collection_mode="whatsapp bridge",
+            freshness_basis="whatsapp_messages.collected_at",
+            age_seconds=2712,  # ~45 min — messages flowing
+            stale_after_seconds=14400,
+        ),
+        current_content={"records": 42, "messages": 42, "media_items": 0},
+        current_rate=None,
+        day_content={"records": 800, "messages": 800, "media_items": 0},
+        day_rate=None,
+        media_total={
+            "total_media_items": 5320,
+            "total_media_bytes": 2_000_000_000,
+            "latest_media_at": now - timedelta(hours=17),  # media naturally rare
+        },
+        cursor_row=None,
+        extension_issues=[],
+        now=now,
+    )
+
+    # Source activity is fresh (compute_liveness read whatsapp_messages).
+    assert row["status"] == "live"
+    assert row["age_seconds"] == 2712
+    assert row["activity_last_seen_at"] == now - timedelta(seconds=2712)
+    assert row["freshness_basis"] == "whatsapp_messages.collected_at"
+
+    # Media row is old — expected for a text-heavy source, kept as a separate
+    # signal so it does NOT feed into source liveness.
+    assert row["latest_media_at"] == now - timedelta(hours=17)
+    assert row["media_freshness"]["status"] == "recent"
+    assert row["media_freshness"]["severity"] == "ok"
+    assert row["blocker"]["kind"] == "none"
+
+
+def test_source_matrix_row_activity_last_seen_at_is_null_when_age_unknown():
+    now = datetime(2026, 8, 4, 8, 30, tzinfo=timezone.utc)
+    row = _source_matrix_row(
+        _source(source="beeper", status="unknown", age_seconds=None),
+        current_content=None,
+        current_rate=None,
+        day_content=None,
+        day_rate=None,
+        media_total={"total_media_items": 0, "total_media_bytes": 0, "latest_media_at": None},
+        cursor_row=None,
+        extension_issues=[],
+        now=now,
+    )
+
+    assert row["age_seconds"] is None
+    assert row["activity_last_seen_at"] is None
 
 
 def test_source_window_totals_sums_counts_and_active_sources():
