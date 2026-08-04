@@ -2139,6 +2139,40 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
         break;
       }
+      case "swFetchProxy": {
+        // Extension-origin fetch proxy for content scripts running on page
+        // origins subject to Chrome's Local Network Access / Private Network
+        // Access enforcement (observed: https://www.lemon8-app.com). Those
+        // pages cannot reach 127.0.0.1 even when the extension declares
+        // http://127.0.0.1/* in host_permissions — Chrome blocks the request
+        // before preflight with "Permission was denied for this request to
+        // access the `loopback` address space." The SW's own fetches are
+        // exempt from LNA/PNA (extension origin + host_permissions), so we
+        // do the network call here and hand the JSON body back.
+        try {
+          const path = String(msg.path || "");
+          const payload = msg.payload || {};
+          if (!path.startsWith("/")) {
+            sendResponse({ ok: false, error: "invalid path" });
+            break;
+          }
+          const proxied = await postJsonWithTimeout(
+            base + path,
+            withExtensionVersion(payload),
+            SCRAPER_HEARTBEAT_TIMEOUT_MS
+          );
+          let parsedBody = null;
+          try { parsedBody = proxied && proxied.body ? JSON.parse(proxied.body) : null; } catch (_) {}
+          sendResponse({
+            ok: !!(proxied && proxied.response && proxied.response.ok),
+            status: proxied && proxied.response ? proxied.response.status : 0,
+            body: parsedBody,
+          });
+        } catch (e) {
+          sendResponse({ ok: false, error: String((e && e.message) || e) });
+        }
+        break;
+      }
       case "wall": {  // the in-tab loop hit a throttle/login wall and is sleeping
         const mins = msg.mins || 45;
         await setStatus({ cooldownUntil: Date.now() + mins * 60000 });

@@ -340,18 +340,40 @@ async function directSendFallback(msg, error) {
   if (!request) return null;
   const type = String((msg && msg.type) || "message");
   const timeoutMs = directSendTimeoutMs(msg);
-  const response = await withDeadline(
-    fetch(DIRECT_INGEST_BASE + request.path, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(request.payload),
-    }),
-    timeoutMs,
-    `${type} direct fallback timed out after ${Math.ceil(timeoutMs / 1000)}s`,
-    "UCDirectSendTimeout"
-  );
-  const body = await response.json().catch(() => ({}));
-  return { ok: response.ok, direct_fallback: true, status: response.status, ...body };
+  try {
+    const response = await withDeadline(
+      fetch(DIRECT_INGEST_BASE + request.path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(request.payload),
+      }),
+      timeoutMs,
+      `${type} direct fallback timed out after ${Math.ceil(timeoutMs / 1000)}s`,
+      "UCDirectSendTimeout"
+    );
+    const body = await response.json().catch(() => ({}));
+    return { ok: response.ok, direct_fallback: true, status: response.status, ...body };
+  } catch (directError) {
+    // Chrome's Local Network Access / PNA policy blocks direct fetches to
+    // 127.0.0.1 from some page origins (observed: https://www.lemon8-app.com)
+    // regardless of CORS headers — the block fires before preflight. Fall
+    // back to a SW-proxied fetch: the service worker runs in extension
+    // origin (127.0.0.1/* declared in host_permissions), so its fetch is
+    // exempt from LNA and reaches the ingest bridge.
+    try {
+      const proxy = await chrome.runtime.sendMessage({
+        type: "swFetchProxy",
+        path: request.path,
+        payload: request.payload,
+      });
+      if (proxy && proxy.ok !== undefined) {
+        return { ok: !!proxy.ok, direct_fallback: true, proxied: true, status: proxy.status, ...(proxy.body || {}) };
+      }
+    } catch (proxyError) {
+      // fall through and rethrow the original direct-fetch error
+    }
+    throw directError;
+  }
 }
 
 async function send(msg, { retries = 1, timeoutMs = null } = {}) {
