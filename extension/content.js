@@ -3780,6 +3780,30 @@ window.addEventListener("message", (ev) => {
   }
 });
 
+// First-boot direct heartbeat — bypasses the SW so the ingest bridge learns
+// this tab is alive even if the very next action (e.g. lemon8's
+// maybeStartBrowserMediaRevisit inside runCycle) navigates the tab away before
+// the SW-mediated tabReady below can be delivered. Uses fetch keepalive so the
+// request survives an in-flight unload. Fire-and-forget, non-blocking.
+try {
+  const _bootP = currentPlatform() || {};
+  const _bootPayload = withDirectVersion({
+    platform: _bootP.id || "unknown",
+    label: _bootP.label || null,
+    running: true,
+    url: location.href,
+    tab_id: "content_direct",
+    health_status: "content_script_boot",
+    health_reason: "first-boot ping before mainLoop starts",
+  });
+  fetch(DIRECT_INGEST_BASE + "/social/browser-heartbeat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(_bootPayload),
+    keepalive: true,
+  }).catch(() => {});
+} catch (e) {}
+
 // Auto-start the loop the moment the tab loads (respawns after a reload/crash).
 send({ type: "tabReady", platform: (currentPlatform() || {}).id }).catch(() => {});
 mainLoop();
