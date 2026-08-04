@@ -317,7 +317,7 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       WATCHDOG_INTERVAL: "300"
-      WATCHDOG_STALE_TELEGRAM: "7200"
+      WATCHDOG_STALE_TELEGRAM: "3600"
       WATCHDOG_STALE_WHATSAPP: "14400"
       WATCHDOG_STALE_BEEPER: "10800"
     volumes:

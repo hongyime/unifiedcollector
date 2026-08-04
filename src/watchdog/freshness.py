@@ -83,7 +83,7 @@ REALTIME_SOURCES = {"telegram", "whatsapp", "beeper"}
 CHECKS = {
     "telegram": (
         "SELECT extract(epoch FROM now()-max(collected_at)) FROM telegram_messages",
-        int(os.getenv("WATCHDOG_STALE_TELEGRAM", "7200")),   # 2h
+        int(os.getenv("WATCHDOG_STALE_TELEGRAM", "3600")),   # 1h — 4 accounts / 162 targets means a 1h dead zone is already very unusual
         ["unifiedcollector_collector_telegram"],
     ),
     "whatsapp": (

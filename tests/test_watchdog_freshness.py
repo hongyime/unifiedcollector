@@ -78,7 +78,7 @@ async def test_watchdog_bypasses_cooldown_and_restarts_realtime_source(monkeypat
     monkeypatch.setattr(
         freshness,
         "CHECKS",
-        {"telegram": ("SELECT 20000", 7200, ["unifiedcollector_collector_telegram"])},
+        {"telegram": ("SELECT 20000", 3600, ["unifiedcollector_collector_telegram"])},
     )
     monkeypatch.setattr(freshness, "_last_restart", {})
 
@@ -101,7 +101,7 @@ async def test_watchdog_bypasses_cooldown_and_restarts_realtime_source(monkeypat
     class FakeDB:
         async def fetchval(self, query: str):
             assert query == "SELECT 20000"
-            return 20000  # ~5.5h stale, well over 2h telegram threshold
+            return 20000  # ~5.5h stale, well over 1h telegram threshold
 
         async def fetchrow(self, query: str, *args):
             # Simulate an active FloodWait cooldown record — must be ignored.
@@ -431,3 +431,26 @@ async def test_browser_source_tick_clears_recovered_browser_source(monkeypatch):
 
     assert degraded == []
     assert cleared == ["facebook"]
+
+
+
+
+@pytest.mark.asyncio
+async def test_telegram_default_stale_threshold_is_1h(monkeypatch):
+    """Regression pin: telegram default staleness threshold is 3600s (1h).
+
+    Under normal load (4 accounts / 162 targets) a 1h idle window is already
+    very unusual; earlier detection triggers faster self-heal. Widening this
+    back to 2h reintroduces the incident where telegram sat dead for hours
+    while the watchdog waited out an over-generous threshold.
+    """
+    # Ensure no env override leaks in from the test runner.
+    monkeypatch.delenv("WATCHDOG_STALE_TELEGRAM", raising=False)
+    monkeypatch.setenv("DATABASE_URL", "postgres://collector:collector@localhost/unifiedcollector")
+    import src.watchdog.freshness as freshness
+
+    freshness = importlib.reload(freshness)
+
+    _query, threshold, containers = freshness.CHECKS["telegram"]
+    assert threshold == 3600, f"telegram threshold must be 1h/3600s, got {threshold}s"
+    assert containers == ["unifiedcollector_collector_telegram"]
