@@ -980,7 +980,13 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    restart: unless-stopped
+    # `always` (not `unless-stopped`): after a SIGKILL (exit 137, OOM) the Docker
+    # daemon sometimes records the last state as "stopped" rather than "exited",
+    # which `unless-stopped` treats as "operator intent — don't restart". That
+    # left the backup container dead until manually restarted (2026-08 incident).
+    # `always` restarts regardless of prior state; safe here because backups are
+    # long-idle sleeps between short bursts, so restart churn cannot compound.
+    restart: always
 
   rabbitmq:
     image: rabbitmq:3.13-alpine
