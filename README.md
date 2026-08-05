@@ -38,6 +38,18 @@ Everything runs as Docker Compose services sharing one Postgres DB. Code lives u
   realtime collector's container if its newest row goes stale (the container
   healthcheck only tests HTTP, so a dead MTProto/WhatsApp connection would otherwise
   sit silently — telegram once ran dead 26h, whatsapp 4d).
+- **`realtime_feed`** (`src/notifications/realtime_feed.py`) — every newly-inserted
+  `media_items` row is fire-and-forget enqueued to Redis (`uc:realtime_post_feed`);
+  this drain sends a per-post Telegram message with local-file multipart upload,
+  token-bucket rate-limit (default 6/min), and 7-day sha256 dedupe. `sent to
+  telegram: ok=<bool> ...` INFO line per item. Companion hourly digest lives in
+  `src/notifications/status.py`; 15-min delta in `status_delta.py`.
+- **`browser_cookie_vault`** (`src/tools/browser_cookie_vault.py`, :8790) — snapshots
+  every social cookie from host Chrome via CDP every 5 min (default), keeps 10
+  rotating snapshots + a `latest.json`, and on container start (with
+  `BROWSER_COOKIE_VAULT_AUTORESTORE=1`) pushes them back into Chrome so a profile
+  wipe / clean-cookie event no longer strands whole collectors. Health at
+  `/health`; last-backup timestamp is what the watchdog trusts.
 - **infra** — `postgres` (unified DB), `rabbitmq` (messaging broker), `redis` (dedup/
   cache), `scheduler`, `onboard_bot`, `backup`.
 
