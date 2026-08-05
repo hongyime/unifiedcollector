@@ -964,3 +964,153 @@ def _section_dead_degraded(snapshot: dict) -> list[str] | None:
             lines.append("Why degraded:")
             lines.extend(_format_degraded_source(row) for row in details[:5])
     return lines
+
+
+# --- 15-minute delta status update ---------------------------------------
+# A tighter, supplementary heartbeat that runs on a shorter cadence than the
+# 19-section digest above. It reports ONLY what changed since the last tick
+# and doesn't repeat the full breakdown — the hourly digest stays authoritative
+# for that. See scheduler._maybe_status_delta() and _build_status_delta().
+
+
+def _format_delta_row(row: dict) -> str:
+    source = _display_source(row.get("source", "?"))
+    posts = int(row.get("posts", 0) or 0)
+    media = int(row.get("media", 0) or 0)
+    messages = int(row.get("messages", 0) or 0)
+    parts: list[str] = []
+    if posts:
+        parts.append(f"{posts:,} {_plural(posts, 'post')}")
+    if media:
+        parts.append(f"{media:,} {_plural(media, 'media file')}")
+    if messages:
+        parts.append(f"{messages:,} {_plural(messages, 'message')}")
+    if not parts:
+        return f"• {source}: no new activity"
+    return f"• {source}: " + ", ".join(parts)
+
+
+def _format_new_cooldown(row: dict) -> str:
+    service = _display_source(row.get("service") or row.get("source") or "?")
+    account = str(row.get("account") or "").strip()
+    scope = _display_scope(row.get("scope"))
+    remaining = _humanize_age(int(row.get("seconds_remaining", 0) or 0))
+    subject = service
+    if scope:
+        subject += f" {scope}"
+    if account:
+        subject += f" for {_esc(account)}"
+    reason = str(row.get("reason") or "").strip()
+    detail = f" ({_esc(reason)})" if reason else ""
+    return f"• new cooldown on {subject}: {remaining} left{detail}."
+
+
+def _extension_summary_line(hooks: list[dict]) -> str:
+    """Compact 1-line extension health line for the delta digest."""
+    if not hooks:
+        return "Extension: no hook heartbeats recorded."
+    versions = sorted({str(h.get("extension_version") or "?").strip() for h in hooks})
+    versions = [v for v in versions if v and v != "?"]
+    version_text = "/".join(versions) if versions else "unknown"
+    fresh: list[str] = []
+    stale: list[str] = []
+    stale_after = 3600
+    for h in hooks:
+        platform = _display_source(h.get("platform", "?"))
+        age = int(h.get("age_seconds") or 0)
+        if age <= stale_after:
+            fresh.append(str(platform))
+        else:
+            stale.append(str(platform))
+    parts = [f"Extension {_esc('v' + version_text if not version_text.startswith('v') else version_text)}"]
+    if fresh:
+        parts.append(f"heartbeating on {', '.join(fresh)}")
+    if stale:
+        parts.append(f"stale on {', '.join(stale)}")
+    if not fresh and not stale:
+        parts.append("no active platforms")
+    return "; ".join(parts) + "."
+
+
+def _delta_window_label(secs: int | None) -> str:
+    if not secs or secs <= 0:
+        return "since last tick"
+    return f"in the last {_humanize_age(int(secs))}"
+
+
+async def notify_status_delta(snapshot: dict) -> bool:
+    """Small, frequent (default 15 min) status update.
+
+    Complements the hourly notify_status() digest — never replaces it. Focuses
+    on what changed since the previous delta tick, so a fresh reader can tell
+    at a glance whether things advanced.
+
+    Snapshot keys (all optional):
+      window_seconds (int)    - width of the delta window
+      previous_tick_at (str)  - ISO timestamp of the previous tick (informational)
+      per_source ({src: {posts, media, messages}}) - counts within the window
+      new_cooldowns (list[dict])   - cooldowns that BECAME active in the window
+      new_dead_sources (list[str]) - sources that entered dead state in the window
+      extension_hooks (list[dict]) - snapshot of current extension hooks
+      totals ({posts, media, messages, cooldowns})
+      error (str)             - present if DB was unreachable; short-circuits
+    """
+    if snapshot.get("error"):
+        return await telegram.send(
+            f"⚠️ <b>UnifiedCollector 15-min status</b>\n"
+            f"DB unreachable: <code>{_esc(snapshot['error'])[:300]}</code>"
+        )
+
+    totals = snapshot.get("totals") or {}
+    per_source = snapshot.get("per_source") or {}
+    new_cooldowns = snapshot.get("new_cooldowns") or []
+    new_dead = snapshot.get("new_dead_sources") or []
+    extension_hooks = snapshot.get("extension_hooks") or []
+    window_label = _delta_window_label(snapshot.get("window_seconds"))
+
+    posts_total = int(totals.get("posts", 0) or 0)
+    media_total = int(totals.get("media", 0) or 0)
+    messages_total = int(totals.get("messages", 0) or 0)
+
+    lines: list[str] = []
+    head_icon = "✅" if not (new_cooldowns or new_dead) else "⚠️"
+    lines.append(f"{head_icon} <b>UnifiedCollector delta</b> · <i>{_now()}</i>")
+    lines.append(
+        f"{posts_total:,} new {_plural(posts_total, 'post')}, "
+        f"{media_total:,} new {_plural(media_total, 'media file')}, "
+        f"{messages_total:,} new {_plural(messages_total, 'message')} {window_label}."
+    )
+
+    # Per-source detail: only sources with movement, sorted by total activity.
+    active_sources: list[tuple[str, dict]] = []
+    for src, row in per_source.items():
+        row = dict(row or {})
+        total = (
+            int(row.get("posts", 0) or 0)
+            + int(row.get("media", 0) or 0)
+            + int(row.get("messages", 0) or 0)
+        )
+        if total <= 0:
+            continue
+        row["source"] = src
+        active_sources.append((src, row))
+    active_sources.sort(
+        key=lambda pair: -(
+            int(pair[1].get("posts", 0) or 0)
+            + int(pair[1].get("media", 0) or 0)
+            + int(pair[1].get("messages", 0) or 0)
+        )
+    )
+    for _, row in active_sources[:8]:
+        lines.append(_format_delta_row(row))
+
+    if new_cooldowns:
+        lines.append("<b>New cooldowns</b>")
+        lines.extend(_format_new_cooldown(row) for row in new_cooldowns[:4])
+    if new_dead:
+        pretty = ", ".join(_display_source(s) for s in new_dead)
+        lines.append(f"<b>New dead sources:</b> {pretty}")
+
+    lines.append(_extension_summary_line(extension_hooks))
+
+    return await telegram.send("\n".join(lines))

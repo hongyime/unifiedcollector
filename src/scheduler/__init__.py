@@ -186,6 +186,10 @@ class Scheduler:
         await self._notify_startup_safe()
         self._heartbeat_hours = env_int("STATUS_HEARTBEAT_INTERVAL_HOURS", 6, min_value=0)
         self._last_status = 0.0  # monotonic; 0 forces a heartbeat on first tick
+        # 15-minute delta status update (Feature 2). Independent of the hourly
+        # digest so it can be disabled with STATUS_DELTA_INTERVAL_MINUTES=0.
+        self._status_delta_minutes = env_int("STATUS_DELTA_INTERVAL_MINUTES", 15, min_value=0)
+        self._last_status_delta = 0.0  # monotonic; 0 forces on first tick
         # Identity reconciliation cadence (P2 review §3). 0 disables.
         self._reconcile_hours = env_int("RECONCILE_INTERVAL_HOURS", 12, min_value=0)
         self._last_reconcile = 0.0  # monotonic; 0 forces a run on first tick
@@ -202,6 +206,7 @@ class Scheduler:
                 logger.error("Scheduler tick error: %s", e)
 
             await self._maybe_heartbeat()
+            await self._maybe_status_delta()
             await self._maybe_reconcile_identities()
             await self._maybe_check_cookies()
 
@@ -247,6 +252,33 @@ class Scheduler:
             await alerts.notify_status(snapshot)
         except Exception as e:
             logger.warning("status heartbeat failed: %s", e)
+
+    async def _maybe_status_delta(self):
+        """Fire the 15-minute delta status update (Feature 2).
+
+        Independent from _maybe_heartbeat: the hourly digest keeps its
+        cadence and content; this is a smaller supplementary tick that
+        reports only what changed since the previous delta. Persists the
+        last-tick timestamp in service_cursors so a scheduler restart
+        won't double-send. 0 minutes disables the feature entirely.
+        Wrapped so a failure never disturbs scheduling.
+        """
+        interval_minutes = getattr(self, "_status_delta_minutes", 0)
+        if interval_minutes <= 0:
+            return
+        import time as _time
+        now = _time.monotonic()
+        if now - self._last_status_delta < interval_minutes * 60:
+            return
+        self._last_status_delta = now
+        try:
+            from src.notifications import alerts
+            snapshot = await self._build_status_delta(interval_minutes)
+            if snapshot is None:
+                return  # not yet due per persisted cursor
+            await alerts.notify_status_delta(snapshot)
+        except Exception as e:
+            logger.warning("status delta failed: %s", e)
 
     async def _maybe_reconcile_identities(self):
         """Merge fragmented social_users rows (username-keyed -> id-keyed) on the
@@ -1019,6 +1051,222 @@ class Scheduler:
         backups_bad = bool(backups) and backups.get("status") not in {"ok", "refreshing"}
         snap["ok"] = not (snap.get("dead_sources") or snap.get("stale_sources") or vault_bad or backups_bad)
         return snap
+
+    # --- 15-minute delta snapshot (Feature 2) -----------------------------
+
+    async def _build_status_delta(self, interval_minutes: int) -> dict | None:
+        """Build a small snapshot for notify_status_delta.
+
+        Uses service_cursors with service='notify_status_delta' to persist the
+        last-tick timestamp. On the first ever run (no cursor row yet) it
+        seeds the cursor with (now - interval) so the very first delta message
+        still reports content instead of an empty tick. Returns None ONLY
+        when the persisted cursor says the last tick was less than
+        ``interval_minutes`` ago (a scheduler that just restarted must not
+        double-send).
+        """
+        interval_seconds = max(60, int(interval_minutes) * 60)
+        now_dt = datetime.now(timezone.utc)
+        snap: dict = {}
+        try:
+            async with self.pool.acquire() as conn:
+                cursor_row = await conn.fetchrow(
+                    "SELECT last_processed_at FROM service_cursors "
+                    "WHERE service = 'notify_status_delta'",
+                )
+                previous_tick = None
+                if cursor_row and cursor_row["last_processed_at"]:
+                    previous_tick = cursor_row["last_processed_at"]
+                    if previous_tick.tzinfo is None:
+                        previous_tick = previous_tick.replace(tzinfo=timezone.utc)
+                else:
+                    previous_tick = now_dt - timedelta(seconds=interval_seconds)
+
+                elapsed = (now_dt - previous_tick).total_seconds()
+                if elapsed < interval_seconds * 0.9:
+                    # Persisted cursor says another scheduler already ticked
+                    # recently. Skip; the monotonic gate will re-attempt in
+                    # a minute.
+                    return None
+
+                snap["window_seconds"] = int(elapsed)
+                snap["previous_tick_at"] = previous_tick.isoformat()
+                snap["per_source"] = await self._delta_per_source_counts(conn, previous_tick)
+                snap["new_cooldowns"] = await self._delta_new_cooldowns(conn, previous_tick)
+                snap["new_dead_sources"] = await self._delta_new_dead_sources(conn, previous_tick)
+                snap["extension_hooks"] = await self._delta_extension_hooks(conn)
+
+                totals = {"posts": 0, "media": 0, "messages": 0}
+                for row in snap["per_source"].values():
+                    totals["posts"] += int(row.get("posts", 0) or 0)
+                    totals["media"] += int(row.get("media", 0) or 0)
+                    totals["messages"] += int(row.get("messages", 0) or 0)
+                totals["cooldowns"] = len(snap["new_cooldowns"])
+                snap["totals"] = totals
+
+                # Persist the new tick BEFORE returning so a crash mid-send
+                # doesn't cause a duplicate on the next tick.
+                await conn.execute(
+                    "INSERT INTO service_cursors (service, last_processed_at, status) "
+                    "VALUES ('notify_status_delta', $1, 'idle') "
+                    "ON CONFLICT (service) DO UPDATE SET last_processed_at = EXCLUDED.last_processed_at",
+                    now_dt,
+                )
+        except Exception as exc:
+            snap.setdefault("error", str(exc)[:300])
+        return snap
+
+    async def _delta_per_source_counts(self, conn, since) -> dict[str, dict[str, int]]:
+        """Per-source delta counts since ``since`` for posts, media, messages."""
+        result: dict[str, dict[str, int]] = {}
+        # Messages: telegram / whatsapp / beeper.
+        message_queries = (
+            ("telegram", "telegram_messages", "collected_at"),
+            ("whatsapp", "whatsapp_messages", "collected_at"),
+            ("beeper", "beeper_shadow_messages", "ingested_at"),
+        )
+        for src, tbl, col in message_queries:
+            try:
+                n = int(await conn.fetchval(
+                    f"SELECT count(*) FROM {tbl} WHERE {col} > $1",
+                    since, timeout=10,
+                ) or 0)
+            except Exception:
+                continue
+            if n:
+                bucket = result.setdefault(src, {"posts": 0, "media": 0, "messages": 0})
+                bucket["messages"] = n
+
+        # Posts: per-platform post tables. Use the same set as _STATUS_CONTENT_PARTS
+        # but only the ones that carry post-shaped rows the operator cares about.
+        post_queries = (
+            ("instagram", "instagram_posts", "collected_at", "posts"),
+            ("tiktok", "tiktok_posts", "collected_at", "posts"),
+            ("lemon8", "lemon8_posts", "collected_at", "posts"),
+            ("threads", "threads_posts", "collected_at", "posts"),
+            ("facebook", "facebook_posts", "collected_at", "posts"),
+            ("x", "x_posts", "collected_at", "posts"),
+            ("youtube", "youtube_videos", "collected_at", "posts"),
+            ("github", "github_commits", "collected_at", "posts"),
+            ("website", "website_pages", "collected_at", "posts"),
+            ("strava", "strava_activities", "collected_at", "posts"),
+            ("search", "search_results", "collected_at", "posts"),
+        )
+        for src, tbl, col, _label in post_queries:
+            try:
+                n = int(await conn.fetchval(
+                    f"SELECT count(*) FROM {tbl} WHERE {col} > $1",
+                    since, timeout=10,
+                ) or 0)
+            except Exception:
+                continue
+            if n:
+                bucket = result.setdefault(src, {"posts": 0, "media": 0, "messages": 0})
+                bucket["posts"] = n
+
+        # Media across all sources.
+        try:
+            for row in await conn.fetch(
+                "SELECT source, count(*)::int AS n FROM media_items "
+                "WHERE collected_at > $1 GROUP BY source",
+                since, timeout=15,
+            ):
+                bucket = result.setdefault(
+                    row["source"], {"posts": 0, "media": 0, "messages": 0},
+                )
+                bucket["media"] = int(row["n"] or 0)
+        except Exception:
+            pass
+        return result
+
+    async def _delta_new_cooldowns(self, conn, since) -> list[dict]:
+        """Cooldowns that BECAME active in the delta window and are still active.
+
+        Uses the same shape as _build_status()'s active_rate_limits so the
+        formatter can reuse fields, but restricted to rows created after
+        ``since`` and still in cooldown.
+        """
+        rows: list[dict] = []
+        try:
+            fetched = await conn.fetch(
+                """
+                SELECT source, account, scope,
+                       max(created_at) AS started_at,
+                       extract(epoch FROM
+                           max(created_at + cooldown_seconds * interval '1 second') - now()
+                       )::int AS seconds_remaining,
+                       count(*)::int AS events,
+                       max(reason) AS reason
+                FROM rate_limit_events
+                WHERE created_at > $1
+                  AND cooldown_seconds IS NOT NULL
+                  AND created_at + cooldown_seconds * interval '1 second' > now()
+                GROUP BY source, account, scope
+                ORDER BY started_at DESC
+                LIMIT 6
+                """,
+                since, timeout=10,
+            )
+        except Exception:
+            return rows
+        for r in fetched:
+            remaining = int(r["seconds_remaining"] or 0)
+            if remaining <= 0:
+                continue
+            rows.append({
+                "service": r["source"],
+                "account": r["account"],
+                "scope": r["scope"],
+                "seconds_remaining": remaining,
+                "events": int(r["events"] or 0),
+                "reason": r["reason"],
+            })
+        return rows
+
+    async def _delta_new_dead_sources(self, conn, since) -> list[str]:
+        """Sources with operational_events severity=fatal added in the window."""
+        try:
+            if await conn.fetchval("SELECT to_regclass('operational_events')", timeout=5) is None:
+                return []
+            fetched = await conn.fetch(
+                """
+                SELECT DISTINCT source
+                FROM operational_events
+                WHERE created_at > $1
+                  AND severity IN ('fatal', 'critical')
+                  AND COALESCE(resolved_at, 'infinity'::timestamptz) > now()
+                """,
+                since, timeout=10,
+            )
+        except Exception:
+            return []
+        return [str(r["source"]) for r in fetched if r["source"]]
+
+    async def _delta_extension_hooks(self, conn) -> list[dict]:
+        """Compact per-platform extension hook state for the delta 1-liner."""
+        try:
+            if await conn.fetchval("SELECT to_regclass('dm_hook_heartbeat')", timeout=5) is None:
+                return []
+            fetched = await conn.fetch(
+                """
+                SELECT platform,
+                       extract(epoch FROM now() - max(last_seen))::int AS age_seconds,
+                       (array_agg(extension_version ORDER BY last_seen DESC))[1] AS extension_version
+                FROM dm_hook_heartbeat
+                GROUP BY platform
+                """,
+                timeout=10,
+            )
+        except Exception:
+            return []
+        return [
+            {
+                "platform": str(r["platform"]),
+                "age_seconds": int(r["age_seconds"] or 0),
+                "extension_version": r["extension_version"],
+            }
+            for r in fetched
+        ]
 
     async def _init_db(self):
         # P0-1/P0-2: ledger-backed runner applies schemas/ + migrations/.
