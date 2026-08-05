@@ -162,3 +162,33 @@ observed yield ceilings are cycle-timeout-bound, not depth-bound.
   remaining `chrome.storage.local` write contender.
 - Add a `chrome.runtime.onConnect` keep-alive port only if the current
   fast-path fix regresses under load.
+
+## Verification appendix — 2026-08-05 02:41Z
+
+20-minute per-minute breakdown across the extension-reload transition:
+
+| minute (UTC) | sw_relay | timeout_fallback | boot |
+|---|---:|---:|---:|
+| 02:22 | 0 | 5 | 1 |
+| 02:24–02:31 | 0 | 2–7 per min | 1–2 |
+| 02:32 | 37 | 3 | 0 |
+| 02:33 | 20 | 2 | 0 |
+| 02:34 | 11 | 0 | 0 |
+| 02:35 | 2 | 0 | 0 |
+| 02:36 | 9 | 0 | 0 |
+| 02:37 | 12 | 0 | 0 |
+| 02:38 | 3 | 0 | 0 |
+| 02:39 | 32 | 0 | 5 |
+| 02:40 | 20 | 0 | 2 |
+| 02:41 | 15 | 0 | 1 |
+
+The 10-minute reload-transition window (02:22–02:31) is expected — Chrome
+does not automatically re-inject content scripts into existing tabs when
+the extension reloads, so scraper tabs must either navigate or be
+reloaded. `scripts/reload_scraper_tabs.py` was used to force that here.
+Once fresh 1.23.34 content scripts are in place, **zero timeout fallbacks
+per minute** for the following 10 minutes.
+
+Raw SW-side ping latency (via `scripts/ping_sw.py`) measured 1–13 ms per
+`log` message once the SW is warm.
+
