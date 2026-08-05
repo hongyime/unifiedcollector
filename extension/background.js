@@ -974,7 +974,15 @@ function selectCanonicalScraperTabRows(tabs) {
 }
 
 function shouldNormalizeSingleFeedTab(p, tab, reason) {
-  if (!p || p.id !== "x" || !tab || !tab.url) return false;
+  if (!p || !tab || !tab.url) return false;
+  // Platforms where a wandering tab (user clicked into a profile, or the SPA
+  // routed away from the working feed URL) should snap back to p.url on the
+  // next watchdog / startup / install / manual-reload sweep. x is included
+  // because failedScript URLs sit in that same "wandered off canonical" bucket;
+  // lemon8 is included because the working /topic/<slug> feed is easy to
+  // stray from into /@handle / /post/<id> subpaths that have lower yield.
+  const NORMALIZE_PLATFORMS = new Set(["x", "lemon8"]);
+  if (!NORMALIZE_PLATFORMS.has(p.id)) return false;
   try {
     const u = new URL(tab.url);
     if (u.searchParams.has("failedScript")) return true;
