@@ -1073,7 +1073,7 @@ services:
       # Auto-restore-on-startup stays OFF by default so a stale snapshot
       # cannot silently clobber a working live session. Toggle to "1" only
       # right after a confirmed Chrome cookie-loss event.
-      BROWSER_COOKIE_VAULT_AUTORESTORE: "0"
+      BROWSER_COOKIE_VAULT_AUTORESTORE: "1"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
