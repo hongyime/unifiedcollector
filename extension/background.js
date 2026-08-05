@@ -1177,27 +1177,58 @@ async function refreshScraperTabs(options = {}) {
 // non-standard Chromium API but works in the content-script isolated world
 // and reports the shared process heap; where the FB frame is same-process
 // with the extension SW the numbers match Performance.getMetrics.
+//
+// Facebook (2026-08-05 verification) exposes `performance.memory` only in the
+// MAIN world — the isolated world returns undefined. So when isolated-world
+// injection returns a null heap, we retry in the MAIN world to catch that
+// primary signal. `document.querySelectorAll('*').length` works from either
+// world; MAIN-world injection is only for the memory reading.
 async function fetchTabMemoryMetrics(tabId) {
+  const reader = () => ({
+    js_heap_bytes:
+      (typeof performance !== "undefined"
+        && performance.memory
+        && performance.memory.usedJSHeapSize) || null,
+    js_heap_limit_bytes:
+      (typeof performance !== "undefined"
+        && performance.memory
+        && performance.memory.jsHeapSizeLimit) || null,
+    dom_nodes: document.querySelectorAll("*").length,
+  });
+  let isolatedResult = null;
   try {
     const results = await chrome.scripting.executeScript({
       target: { tabId },
-      func: () => ({
-        js_heap_bytes:
-          (typeof performance !== "undefined"
-            && performance.memory
-            && performance.memory.usedJSHeapSize) || null,
-        js_heap_limit_bytes:
-          (typeof performance !== "undefined"
-            && performance.memory
-            && performance.memory.jsHeapSizeLimit) || null,
-        dom_nodes: document.querySelectorAll("*").length,
-      }),
+      func: reader,
     });
-    if (results && results[0] && results[0].result) return results[0].result;
+    if (results && results[0] && results[0].result) isolatedResult = results[0].result;
   } catch (e) {
     return { error: (e && e.message) || String(e) };
   }
-  return null;
+  if (isolatedResult && isolatedResult.js_heap_bytes !== null) return isolatedResult;
+  // Fall back to MAIN world for sites that lock performance.memory behind
+  // the page context (facebook.com verified 2026-08-05).
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      func: reader,
+    });
+    if (results && results[0] && results[0].result) {
+      const main = results[0].result;
+      // Prefer isolated dom_nodes if MAIN failed to read them (matches user's
+      // scrape-cycle sampling). Prefer MAIN heap when isolated returned null.
+      return {
+        js_heap_bytes: main.js_heap_bytes !== null ? main.js_heap_bytes : (isolatedResult && isolatedResult.js_heap_bytes),
+        js_heap_limit_bytes: main.js_heap_limit_bytes !== null ? main.js_heap_limit_bytes : (isolatedResult && isolatedResult.js_heap_limit_bytes),
+        dom_nodes: main.dom_nodes !== null ? main.dom_nodes : (isolatedResult && isolatedResult.dom_nodes),
+      };
+    }
+  } catch (e) {
+    if (isolatedResult) return isolatedResult;
+    return { error: (e && e.message) || String(e) };
+  }
+  return isolatedResult;
 }
 
 async function memoryReloadThresholdMB() {
