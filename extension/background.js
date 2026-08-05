@@ -1747,6 +1747,69 @@ async function openOrFocus(p, { active = false } = {}) {
 
 // ---- message router ------------------------------------------------------
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  // Fast-path for high-frequency fire-and-forget message types: reply
+  // synchronously BEFORE any await, so a cold-start of the service worker
+  // (which pays for a chrome.storage.local.get in ingestBase()) can't push
+  // us past the content-script's 10-15 s deadline. All these callers use
+  // .catch(()=>{}) and never consume the return value, and log() /
+  // setStatus() / postJsonWithTimeout() etc. keep the SW alive on their own.
+  const fastReplyTypes = new Set(["log", "tabReady", "loopStatus", "cycleReport"]);
+  if (msg && fastReplyTypes.has(msg.type)) {
+    sendResponse({ ok: true });
+    // Continue heavy work asynchronously; the outer listener still returns
+    // true below so Chrome doesn't complain about a closed channel.
+    (async () => {
+      try {
+        const base = await ingestBase();
+        if (msg.type === "log") {
+          await log(msg.level || "info", `[${msg.platform || "?"}] ${msg.msg}`);
+          return;
+        }
+        if (msg.type === "tabReady") {
+          return; // already acked; nothing else to do
+        }
+        if (msg.type === "loopStatus") {
+          await setStatus({
+            loopRunning: !!msg.running,
+            loopPlatform: msg.platform,
+            loopPlatformLabel: msg.label || msg.platform,
+            lastLoopPing: Date.now(),
+          });
+          try {
+            const tab = sender && sender.tab ? sender.tab : null;
+            const platform = (globalThis.UC_PLATFORMS || []).find((p) => p.id === msg.platform) || {
+              id: msg.platform,
+              label: msg.label || msg.platform,
+            };
+            const result = await postJsonWithTimeout(base + "/social/browser-heartbeat", withExtensionVersion({
+              platform: msg.platform,
+              label: msg.label || null,
+              running: !!msg.running,
+              url: msg.url || (tab && tab.url) || null,
+              tab_id: tab ? tab.id : null,
+              health_status: msg.health_status || null,
+              health_reason: msg.health_reason || null,
+              message_type: msg.type || null,
+              loop_running: !!msg.running,
+              content_age_seconds: msg.content_age_seconds ?? null,
+              stale_after_ms: msg.stale_after_ms ?? null,
+            }), SCRAPER_HEARTBEAT_TIMEOUT_MS);
+            await maybeForceScrapeCycle(tab, platform, result && result.body, "loop_status", base);
+          } catch (e) { /* swallow: content already got its ack */ }
+          return;
+        }
+        if (msg.type === "cycleReport") {
+          await setStatus({ lastCycleAt: Date.now(), lastCycle: { platform: msg.platform, targets: msg.targets, saved: msg.saved, discovered: msg.discovered } });
+          await clearPageRecoveryForTab(sender && sender.tab ? sender.tab.id : null, "cycle-ok");
+          await log("info", `✅ cycle done [${msg.platform}]: ${msg.targets} targets, ${msg.saved} media candidate(s), ${msg.discovered} discovered`);
+          return;
+        }
+      } catch (e) {
+        try { await log("error", `fast-path ${msg.type} failed: ${e && e.message ? e.message : e}`); } catch (_) {}
+      }
+    })();
+    return true;
+  }
   (async () => {
     try {
       const base = await ingestBase();
@@ -2209,59 +2272,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         sendResponse({ ok: true });
         break;
       }
-      case "loopStatus": {  // continuous loop liveness ping
-        // Reply immediately so the content script never falls back to
-        // content_direct if the ingest bridge briefly stalls. All callers
-        // treat this message as fire-and-forget (.catch(()=>{}))
-        // — no return value is consumed. The SW forward + optional cycle
-        // nudge continue in the background; the pending fetch keeps the
-        // worker alive for as long as chrome allows.
-        sendResponse({ ok: true });
-        await setStatus({
-          loopRunning: !!msg.running,
-          loopPlatform: msg.platform,
-          loopPlatformLabel: msg.label || msg.platform,
-          lastLoopPing: Date.now(),
-        });
-        try {
-          const tab = sender && sender.tab ? sender.tab : null;
-          const platform = (globalThis.UC_PLATFORMS || []).find((p) => p.id === msg.platform) || {
-            id: msg.platform,
-            label: msg.label || msg.platform,
-          };
-          const result = await postJsonWithTimeout(base + "/social/browser-heartbeat", withExtensionVersion({
-            platform: msg.platform,
-            label: msg.label || null,
-            running: !!msg.running,
-            url: msg.url || (tab && tab.url) || null,
-            tab_id: tab ? tab.id : null,
-            health_status: msg.health_status || null,
-            health_reason: msg.health_reason || null,
-            message_type: msg.type || null,
-            loop_running: !!msg.running,
-            content_age_seconds: msg.content_age_seconds ?? null,
-            stale_after_ms: msg.stale_after_ms ?? null,
-          }), SCRAPER_HEARTBEAT_TIMEOUT_MS);
-          await maybeForceScrapeCycle(tab, platform, result && result.body, "loop_status", base);
-        } catch (e) {}
-        break;
-      }
-      case "tabReady": {  // scraper tab loaded; the loop auto-starts in the tab
-        sendResponse({ ok: true });
-        break;
-      }
-      case "log":
-        // Reply first so a log-storm cannot back-pressure content scripts
-        // (log() itself does chrome.storage.local get+set, which becomes a
-        // serialization bottleneck under high heartbeat volume).
-        sendResponse({ ok: true });
-        log(msg.level || "info", `[${msg.platform || "?"}] ${msg.msg}`);
-        break;
+      case "loopStatus":
+      case "tabReady":
       case "cycleReport":
+      case "log":
+        // Handled by the fast-path above; this catch-all keeps the slow-path
+        // switch tidy if a straggler reaches here.
         sendResponse({ ok: true });
-        setStatus({ lastCycleAt: Date.now(), lastCycle: { platform: msg.platform, targets: msg.targets, saved: msg.saved, discovered: msg.discovered } });
-        await clearPageRecoveryForTab(sender && sender.tab ? sender.tab.id : null, "cycle-ok");
-        log("info", `✅ cycle done [${msg.platform}]: ${msg.targets} targets, ${msg.saved} media candidate(s), ${msg.discovered} discovered`);
         break;
       case "getPlatforms":
         sendResponse(await platformStatuses());
