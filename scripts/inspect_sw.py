@@ -1,44 +1,56 @@
-"""Quick SW state inspection via CDP.
-
-Reads ucLog and ucStatus from chrome.storage.local in the extension SW.
-"""
+"""Read ucLog & ucStatus via tabs.html chrome.storage (SW may be dormant)."""
+import io
 import json
+import sys
 import urllib.request
 
 import websocket
 
+# Force UTF-8 stdout on Windows
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
-def main() -> None:
-    targets = json.loads(urllib.request.urlopen("http://127.0.0.1:9222/json/list").read())
-    sw = [t for t in targets if t["type"] == "service_worker" and "pkmd" in t["url"]][0]
-    ws = websocket.create_connection(sw["webSocketDebuggerUrl"], timeout=8, origin="http://127.0.0.1:9222")
+
+def rpc(ws, request_id, method, params=None):
+    body = {"id": request_id, "method": method}
+    if params:
+        body["params"] = params
+    ws.send(json.dumps(body))
+    while True:
+        r = json.loads(ws.recv())
+        if r.get("id") == request_id:
+            return r
+
+
+def main():
+    ts = json.loads(urllib.request.urlopen("http://127.0.0.1:9222/json/list").read())
+    tabs = [t for t in ts if "tabs.html" in t.get("url", "")]
+    if not tabs:
+        print("no tabs.html found; open chrome-extension://pkmdmcklnjdeocoeigmlakhomhhcpafb/tabs.html first")
+        return
+    ws = websocket.create_connection(tabs[0]["webSocketDebuggerUrl"], timeout=10, origin="http://127.0.0.1:9222")
     try:
-        ws.send(json.dumps({"id": 1, "method": "Runtime.enable"}))
-        while True:
-            r = json.loads(ws.recv())
-            if r.get("id") == 1:
-                break
+        rpc(ws, 1, "Runtime.enable")
         expr = (
-            "chrome.storage.local.get(['ucLog','ucStatus']).then(x => JSON.stringify({"
-            "logCount:(x.ucLog||[]).length,"
-            "lastLog:(x.ucLog||[]).slice(-6),"
-            "status:x.ucStatus||{}"
+            'chrome.storage.local.get(["ucLog","ucStatus"]).then(x => JSON.stringify({'
+            'logCount:(x.ucLog||[]).length,'
+            'lastLogs:(x.ucLog||[]).slice(-20),'
+            'status:x.ucStatus||{}'
             "}))"
         )
-        ws.send(json.dumps({
-            "id": 2,
-            "method": "Runtime.evaluate",
-            "params": {"expression": expr, "awaitPromise": True, "returnByValue": True},
-        }))
-        while True:
-            r = json.loads(ws.recv())
-            if r.get("id") == 2:
-                value = r.get("result", {}).get("result", {}).get("value", "{}")
-                data = json.loads(value)
-                print(json.dumps(data, indent=2)[:2400])
-                break
+        r = rpc(ws, 2, "Runtime.evaluate", {"expression": expr, "awaitPromise": True, "returnByValue": True})
+        v = r.get("result", {}).get("result", {}).get("value", "{}")
+        data = json.loads(v)
+        print("logCount:", data.get("logCount"))
+        print("status:")
+        print(json.dumps(data.get("status", {}), indent=2, ensure_ascii=False))
+        print("\nlast 20 log entries:")
+        for e in data.get("lastLogs", []):
+            print(f"  [{e.get('level')}] {e.get('msg')}")
     finally:
-        ws.close()
+        try:
+            ws.close()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
