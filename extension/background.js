@@ -987,6 +987,55 @@ function shouldNormalizeSingleFeedTab(p, tab, reason) {
   return /^(manual_extension_reload|startup|installed|watchdog)$/.test(String(reason || ""));
 }
 
+// Chrome tab-group awareness — when the user has grouped their social tabs,
+// newly-opened recovery / dedup-replacement tabs should join the same group so
+// the layout stays clean. chrome.tabs.query already surfaces groupId on every
+// tab under the "tabs" permission (no "tabGroups" permission needed for reads
+// or for calling chrome.tabs.group({groupId, tabIds})). Verified empirically
+// against Chrome 150 with scripts/probe_tabs_group.py.
+async function scraperGroupHint() {
+  try {
+    const patterns = scraperUrlPatterns();
+    if (!patterns.length) return null;
+    const tabs = (await chrome.tabs.query({ url: patterns })) || [];
+    // Vote by (groupId, windowId) so ties fall on the busiest group in a single
+    // window. groupId -1 (TAB_GROUP_ID_NONE) is skipped — un-grouped tabs mean
+    // "the user isn't grouping". Tab-group membership is per-window, so we also
+    // capture windowId to route the new tab into the correct window.
+    const counts = new Map();
+    for (const t of tabs) {
+      const gid = Number(t.groupId);
+      const wid = Number(t.windowId);
+      if (!Number.isFinite(gid) || gid < 0 || !Number.isFinite(wid)) continue;
+      const key = gid + "|" + wid;
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+    if (!counts.size) return null;
+    let bestKey = null, bestCount = 0;
+    for (const [k, c] of counts.entries()) {
+      if (c > bestCount) { bestKey = k; bestCount = c; }
+    }
+    const [gid, wid] = bestKey.split("|").map(Number);
+    return { groupId: gid, windowId: wid };
+  } catch (e) { return null; }
+}
+
+// Wrap chrome.tabs.create so newly-opened scraper tabs (a) land in the same
+// window as the existing social group and (b) immediately join that group.
+// Falls back silently to a plain tabs.create if there's no group to join or
+// the grouping call fails (e.g. group was deleted mid-call).
+async function createTabInSocialGroup(createOptions, hint) {
+  const groupHint = hint === undefined ? await scraperGroupHint() : hint;
+  const opts = { ...createOptions };
+  if (groupHint && Number.isFinite(groupHint.windowId)) opts.windowId = groupHint.windowId;
+  const created = await chrome.tabs.create(opts);
+  if (groupHint && Number.isFinite(groupHint.groupId) && created && created.id != null) {
+    try { await chrome.tabs.group({ tabIds: [created.id], groupId: groupHint.groupId }); }
+    catch (e) { /* group vanished or cross-window mismatch — leave tab where it is */ }
+  }
+  return created;
+}
+
 // Keep exactly ONE tab per single-feed platform (instagram/threads/lemon8/x/facebook)
 // and one per target path for multi-url platforms (tiktok = foryou + following).
 // Closes duplicates so the extension never piles up tabs (the old bug: when the
@@ -996,13 +1045,16 @@ async function ensureScraperTabsOpen(reason, options = {}) {
   if ((!(await autoTabsEnabled()) && !force) || _tabsOpInProgress) return;
   _tabsOpInProgress = true;
   let opened = 0, closed = 0, navigated = 0;
+  // Compute group hint once per sweep — cheap chrome.tabs.query, and reusing
+  // it keeps every newly-opened tab pointed at the same group.
+  const groupHint = await scraperGroupHint();
   try {
     for (const p of scraperPlatforms()) {
       const tabs = (await chrome.tabs.query({ url: platformUrlPatterns(p) })) || [];
       if (!(p.extraUrls && p.extraUrls.length)) {
         // single-feed: keep one tab on the host, close the rest
         if (tabs.length === 0) {
-          try { await chrome.tabs.create({ url: p.url, pinned: true, active: false }); opened++; await _sleep(_humanGap(3000)); } catch (e) {}
+          try { await createTabInSocialGroup({ url: p.url, pinned: true, active: false }, groupHint); opened++; await _sleep(_humanGap(3000)); } catch (e) {}
         } else {
           if (shouldNormalizeSingleFeedTab(p, tabs[0], reason)) {
             try { await chrome.tabs.update(tabs[0].id, { url: p.url }); navigated++; await _sleep(_humanGap(3000)); } catch (e) {}
@@ -1020,7 +1072,7 @@ async function ensureScraperTabsOpen(reason, options = {}) {
           if (m) { if (kept.has(m)) { try { await chrome.tabs.remove(t.id); closed++; } catch (e) {} } else kept.add(m); }
         }
         for (let i = 0; i < targets.length; i++) {
-          if (!kept.has(wantPaths[i])) { try { await chrome.tabs.create({ url: targets[i], pinned: true, active: false }); opened++; await _sleep(_humanGap(3000)); } catch (e) {} }
+          if (!kept.has(wantPaths[i])) { try { await createTabInSocialGroup({ url: targets[i], pinned: true, active: false }, groupHint); opened++; await _sleep(_humanGap(3000)); } catch (e) {} }
         }
       }
     }
@@ -1731,12 +1783,13 @@ async function recordBrowserMediaCandidateResults(base, msg, items) {
 }
 // Returns {opened|focused, tabId}. `active` brings the tab to the foreground so
 // the user actually SEES it (the old version opened pinned+inactive, which made
-// "Open all" look like nothing happened).
+// "Open all" look like nothing happened). New tabs join the social group when
+// the user has grouped their scraper tabs (see scraperGroupHint).
 async function openOrFocus(p, { active = false } = {}) {
   try {
     const tab = await tabForPlatform(p);
     if (tab) { await chrome.tabs.update(tab.id, { active }); return { id: p.id, focused: true, tabId: tab.id }; }
-    const created = await chrome.tabs.create({ url: p.url, active });
+    const created = await createTabInSocialGroup({ url: p.url, active });
     await log("info", `opened tab: ${p.label}`);
     return { id: p.id, opened: true, tabId: created.id };
   } catch (e) {
