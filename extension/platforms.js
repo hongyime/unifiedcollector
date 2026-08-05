@@ -8,7 +8,11 @@ globalThis.UC_PLATFORMS = [
   { id: "instagram", label: "Instagram",   url: "https://www.instagram.com/",   host: "www.instagram.com",   cookieUrl: "https://www.instagram.com",   cookie: "sessionid",  scraper: true, extraUrls: ["https://www.instagram.com/direct/inbox/"] },
   // Threads moved threads.net -> threads.com in Apr 2025 (.net just redirects).
   { id: "threads",   label: "Threads",     url: "https://www.threads.com/",     host: "www.threads.com",     cookieUrl: "https://www.threads.com",     cookie: "sessionid",  scraper: true  },
-  { id: "tiktok",    label: "TikTok",      url: "https://www.tiktok.com/following", host: "www.tiktok.com",  cookieUrl: "https://www.tiktok.com",      cookie: "sessionid",  scraper: true, extraUrls: ["https://www.tiktok.com/foryou"] },
+  // extraUrls: /foryou is personalized (recycles heavily on stable session)
+  // and /explore surfaces non-personalized trending content — combining all
+  // three cuts duplicate rate from ~51% observed. Order matters: /following
+  // is the primary (auth-verified feed), /foryou + /explore add diversity.
+  { id: "tiktok",    label: "TikTok",      url: "https://www.tiktok.com/following", host: "www.tiktok.com",  cookieUrl: "https://www.tiktok.com",      cookie: "sessionid",  scraper: true, extraUrls: ["https://www.tiktok.com/foryou", "https://www.tiktok.com/explore"] },
   // Lemon8's SPA renders "Not found" for /feed/<cat> and legacy paths as of
   // 2026-08-05 — single-segment paths (/foryou, /discover, /explore) get
   // treated as usernames (redirected to /@handle) and 404 too. Verified
