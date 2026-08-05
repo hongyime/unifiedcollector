@@ -486,6 +486,20 @@ class RealtimeFeedDrain:
             return
 
         delivered, retry_after = await _deliver_one(payload)
+        # One-line outcome log so operators can see whether individual posts
+        # actually reached Telegram. Kept at INFO so `docker logs` shows it
+        # without turning on debug noise. Format: `sent to telegram: ok=<bool>
+        # source=<src> author=<who> cid=<cid> retry_after=<s>`.
+        try:
+            src = payload.get("source") or "?"
+            author = payload.get("author") or "?"
+            cid = payload.get("content_id") or "?"
+            logger.info(
+                "sent to telegram: ok=%s source=%s author=%s cid=%s retry_after=%d",
+                bool(delivered), src, author, cid, int(retry_after or 0),
+            )
+        except Exception:
+            logger.debug("realtime_feed outcome log failed", exc_info=True)
         if not delivered and retry_after > 0:
             # 429: back off and requeue this item at the head so we don't lose it.
             with contextlib.suppress(Exception):
