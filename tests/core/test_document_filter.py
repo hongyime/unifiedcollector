@@ -41,11 +41,15 @@ def test_executables_and_code_skipped():
         assert not d.download, f"expected SKIP for {name}: {d.reason}"
 
 
-def test_audio_is_stored():
+def test_audio_is_disabled():
+    # Audio downloads are intentionally disabled (see commit a3f4416:
+    # "drop audio everywhere" — user: "dont need audio files no mp3 or wav").
+    # document_filter.classify_document must return download=False for audio/*.
     d = classify_document("audio/ogg", "voice.ogg")
-    assert d.download and d.content_type == "audio"
+    assert not d.download and d.content_type == "audio"
+    assert "audio disabled" in (d.reason or "")
     d2 = classify_document("audio/mpeg", "song.mp3")
-    assert d2.download and d2.content_type == "audio"
+    assert not d2.download and d2.content_type == "audio"
 
 
 def test_video_document_is_media():
