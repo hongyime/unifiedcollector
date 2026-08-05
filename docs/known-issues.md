@@ -3,6 +3,31 @@
 Live known-issues log for operators. Every entry cites reproduction steps,
 proximal cause, and either the fix that landed or the reason it's deferred.
 
+## 0. Lemon8 SPA URL migration — FIXED 2026-08-05 (Round 2)
+
+**Symptom** — retrospective flagged lemon8 at 2 rows / 5h in `media_items`
+despite 156 media obs / 5h in `browser_ingest_events`.
+
+**Root cause** — lemon8's client-side SPA now returns "Not found" for the
+prior canonical `/feed/food?region=sg` path (and for every other legacy
+path we tried: `/foryou`, `/discover`, `/category/food`, etc.). Every
+scrape cycle was collecting exactly one site-default asset image, all
+sharing the same sha256 → 100% duplicate rejection.
+
+**Fix** — commits db30817 + c313fad + b8d6219 + c694866:
+
+- Add "Not found" pattern to `RECOVERABLE_PAGE_SHELL_PATTERNS.lemon8`
+- Add `"lemon8"` to `HOME_NAV_HARD_REFRESH_PLATFORMS`
+- Make `runPageRecovery` prefer URL-navigate over reload for those platforms
+- Update `lemon8.url` from `/` to `/topic/food?region=sg` (200-cards/page)
+- Broaden `shouldNormalizeSingleFeedTab` beyond just `x`
+- Duplicate the URL fix into the SW-inline registry in `background.js`
+
+**Observed uplift**: 28 stored candidates in 5 min post-fix vs 2 rows /
+5h pre-fix (~170× rate).
+
+See `docs/optimization-round2.md` for the full investigation.
+
 ## 1. "Threads bridge filtering anomaly" — misdiagnosis (2026-08-05)
 
 **Retrospective claim** (`docs/coverage-report-20260805_1027.md`): "110 media +
@@ -26,12 +51,20 @@ inserts.
   a `something_went_wrong` shell (~171 hits in a 5h window), so the DOM
   never has media candidates to harvest.
 
-**Actual freshness is fine**: `compute_liveness()` uses
-`threads_posts.collected_at` as the threads freshness basis
-(`src/core/source_freshness.py` line 95). Dashboard shows threads healthy.
-The `media_items.created_at`-based ad-hoc freshness query showed 40h stale
-because no _image files_ have been downloaded from threads — which is
-literally what that metric measures.
+**Update 2026-08-05 (Round 2 verification)**: User logged in with a
+different account (bypassing the historically-blocked Meta 4630001
+account). `Storage.getCookies` for `.threads.com` shows the new
+`ds_user_id=63260788288` with fresh sessionid + csrftoken. The
+"something_went_wrong" shell IS now gone (no `recoverable_error_shell`
+events in the last 15 min). BUT threads-specific content endpoints
+(`media`, `posts`) are still at zero because content.js on the threads
+tab loads (5+ `content_script_boot` events / 5 min) yet the SW's
+subsequent `chrome.tabs.sendMessage` calls time out with "receiver
+missing". CDP-level `Runtime.evaluate` on the tab also times out
+(>45s), suggesting Chrome has throttled the background tab's JS thread.
+Bring threads to foreground once to break out of the throttle; further
+fix (auto-foreground rotation or programmatic-inject debouncing) is a
+separate investigation.
 
 **What's actually broken and how to spot it**:
 - Threads DOM is stuck showing "something went wrong" for the extension
