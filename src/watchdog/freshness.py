@@ -338,6 +338,125 @@ async def _restart(container: str) -> None:
         log.error("restart %s failed: %s", container, e)
 
 
+# ── Container-liveness sweep ─────────────────────────────────────────────────
+# The data-freshness checks above only fire when a container is *up but silent*
+# (dead MTProto/WS connection). They can't see a container that is fully
+# stopped — no rows come out either way. Docker's own restart policy handles
+# most exits, but the 2026-08 backup incident showed that under some daemon
+# conditions (SIGKILL 137 recorded as "stopped" rather than "exited"), even
+# `restart: unless-stopped` sits idle. This sweep is the safety net for that
+# gap: list all unifiedcollector_ containers, and if any is stopped/dead/
+# created, POST /containers/<name>/start. Uses the same Docker Engine HTTP API
+# over the mounted socket as `_restart` above; NO docker CLI dependency, no
+# image rebuild.
+#
+# Safety cap: track our own start attempts per container, and if we've tried
+# more than LIVENESS_MAX_RESTARTS in the last LIVENESS_WINDOW_SECONDS, back off
+# and log — do NOT amplify a crash loop by hammering restart. The container's
+# own restart policy is still in effect, so it will keep trying on its own
+# schedule; this sweep only intervenes when the policy itself is stuck.
+LIVENESS_ENABLED = os.getenv("WATCHDOG_LIVENESS_ENABLED", "1") == "1"
+LIVENESS_MAX_RESTARTS = int(os.getenv("WATCHDOG_LIVENESS_MAX_RESTARTS", "3"))
+LIVENESS_WINDOW_SECONDS = int(os.getenv("WATCHDOG_LIVENESS_WINDOW_SECONDS", "1800"))  # 30 min
+# States that mean "not running and not recovering itself right now" — restart
+# candidates. `restarting` means Docker is already retrying (leave it alone);
+# `paused` is intentional (leave it alone); `running` is fine. Everything else
+# is a stop indicator.
+LIVENESS_STOPPED_STATES = {"exited", "dead", "created"}
+_liveness_restarts: dict[str, list[float]] = {}
+
+
+async def _list_project_containers() -> list[dict]:
+    """List all containers whose name starts with 'unifiedcollector_' (any state).
+
+    Uses Docker Engine HTTP API over the mounted unix socket. Returns raw
+    /containers/json rows so callers can read State/Names directly.
+    """
+    connector = aiohttp.UnixConnector(path=DOCKER_SOCK)
+    async with aiohttp.ClientSession(connector=connector) as s:
+        # `all=1` includes stopped/dead containers. The name filter matches on
+        # substring so `unifiedcollector_` catches every project container.
+        params = {"all": "1", "filters": '{"name":["unifiedcollector_"]}'}
+        async with s.get("http://docker/containers/json", params=params) as r:
+            r.raise_for_status()
+            return await r.json()
+
+
+async def _start_container(container: str) -> int:
+    """POST /containers/<name>/start; return HTTP status (204 = success)."""
+    connector = aiohttp.UnixConnector(path=DOCKER_SOCK)
+    async with aiohttp.ClientSession(connector=connector) as s:
+        async with s.post(f"http://docker/containers/{container}/start") as r:
+            return r.status
+
+
+def _extract_project_name(names: list) -> str | None:
+    """Docker prefixes names with '/'. Return the first unifiedcollector_ name."""
+    for raw in names or []:
+        stripped = str(raw).lstrip("/")
+        if stripped.startswith("unifiedcollector_"):
+            return stripped
+    return None
+
+
+async def _sweep_container_liveness(now: float) -> None:
+    """Restart any expected unifiedcollector_ container that is not running.
+
+    Runs alongside _tick / _dlq_tick. Uses Docker Engine HTTP API for state
+    queries and container start. Safety cap: skip a container that has been
+    restarted by us > LIVENESS_MAX_RESTARTS times in the last
+    LIVENESS_WINDOW_SECONDS to avoid amplifying a crash loop.
+    """
+    try:
+        containers = await _list_project_containers()
+    except Exception as e:
+        # Never let a Docker API blip kill the loop; freshness checks below
+        # depend on the loop continuing.
+        log.warning("liveness sweep: list containers failed: %s", e)
+        return
+    for c in containers:
+        name = _extract_project_name(c.get("Names") or [])
+        if not name:
+            continue
+        # Never restart ourselves — mid-loop suicide is a footgun and Docker's
+        # own restart policy already covers us.
+        if name == "unifiedcollector_watchdog":
+            continue
+        state = str(c.get("State") or "").lower()
+        if state in {"running", "restarting", "paused"}:
+            continue
+        if state not in LIVENESS_STOPPED_STATES:
+            # Unknown / transitional state. Log for visibility and skip; we
+            # don't want to poke a container that's mid-transition.
+            log.info("liveness: %s state=%s (unknown) — skipping", name, state)
+            continue
+
+        history = _liveness_restarts.setdefault(name, [])
+        # Prune attempts outside the window in-place so the cap slides.
+        history[:] = [t for t in history if now - t < LIVENESS_WINDOW_SECONDS]
+        if len(history) >= LIVENESS_MAX_RESTARTS:
+            log.warning(
+                "liveness: %s state=%s but %d restarts in last %ds — crash-loop cap; skipping",
+                name, state, len(history), LIVENESS_WINDOW_SECONDS,
+            )
+            continue
+
+        log.warning(
+            "liveness: %s state=%s — starting (attempt %d/%d in %ds window)",
+            name, state, len(history) + 1, LIVENESS_MAX_RESTARTS, LIVENESS_WINDOW_SECONDS,
+        )
+        history.append(now)
+        try:
+            status = await _start_container(name)
+            # 204 No Content = started; 304 = already started (harmless race).
+            if status in (204, 304):
+                log.warning("liveness: %s start -> HTTP %d (ok)", name, status)
+            else:
+                log.error("liveness: %s start -> HTTP %d (unexpected)", name, status)
+        except Exception as e:
+            log.error("liveness: %s start failed: %s", name, e)
+
+
 def _row_get(row, key: str, default=None):
     try:
         return row[key]
@@ -727,6 +846,12 @@ async def main() -> None:
                     await _dm_hook_tick(db)
             finally:
                 await db.close()
+            # Container liveness runs AFTER the DB connection closes so a slow
+            # Docker API call can't hold a Postgres connection open. Runs on
+            # every tick; the sweep is cheap (single API call + O(n) scan) and
+            # container drift can happen between any two ticks.
+            if LIVENESS_ENABLED:
+                await _sweep_container_liveness(time.time())
         except Exception as e:
             log.error("watchdog loop error: %s", e)
         # Heartbeat AFTER the tick (even on DB error) — proves the loop is alive

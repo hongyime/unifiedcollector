@@ -454,3 +454,241 @@ async def test_telegram_default_stale_threshold_is_1h(monkeypatch):
     _query, threshold, containers = freshness.CHECKS["telegram"]
     assert threshold == 3600, f"telegram threshold must be 1h/3600s, got {threshold}s"
     assert containers == ["unifiedcollector_collector_telegram"]
+
+
+
+# ─── Container-liveness sweep tests ──────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_container_sweep_restarts_stopped_container(monkeypatch):
+    """A single stopped project container is started once via the Docker API."""
+    monkeypatch.setenv("DATABASE_URL", "postgres://collector:collector@localhost/unifiedcollector")
+    import src.watchdog.freshness as freshness
+
+    freshness = importlib.reload(freshness)
+    monkeypatch.setattr(freshness, "_liveness_restarts", {})
+
+    started: list[str] = []
+
+    async def fake_list():
+        # Two containers: one running (skip), one exited (restart target).
+        return [
+            {"Names": ["/unifiedcollector_backup"], "State": "exited"},
+            {"Names": ["/unifiedcollector_scheduler"], "State": "running"},
+        ]
+
+    async def fake_start(name: str) -> int:
+        started.append(name)
+        return 204  # Docker "No Content" = started
+
+    monkeypatch.setattr(freshness, "_list_project_containers", fake_list)
+    monkeypatch.setattr(freshness, "_start_container", fake_start)
+
+    await freshness._sweep_container_liveness(now=1_000_000.0)
+
+    assert started == ["unifiedcollector_backup"]
+    # One attempt recorded in history for the crash-loop cap.
+    assert freshness._liveness_restarts["unifiedcollector_backup"] == [1_000_000.0]
+
+
+@pytest.mark.asyncio
+async def test_container_sweep_respects_crash_loop_cap(monkeypatch):
+    """4th restart attempt within the window must be skipped, not fired.
+
+    Regression pin: the watchdog itself must not amplify a crash loop by
+    hammering `start` on a container that keeps dying. Docker's own restart
+    policy handles the retry rhythm; this sweep only intervenes when that
+    policy is stuck.
+    """
+    monkeypatch.setenv("DATABASE_URL", "postgres://collector:collector@localhost/unifiedcollector")
+    import src.watchdog.freshness as freshness
+
+    freshness = importlib.reload(freshness)
+
+    now = 1_000_000.0
+    # Pre-load 3 recent attempts (cap = 3). Next attempt must be skipped.
+    monkeypatch.setattr(
+        freshness,
+        "_liveness_restarts",
+        {"unifiedcollector_backup": [now - 900, now - 600, now - 100]},
+    )
+    # Also drop LIVENESS_MAX_RESTARTS explicit assertion in this test's scope:
+    assert freshness.LIVENESS_MAX_RESTARTS == 3
+    assert freshness.LIVENESS_WINDOW_SECONDS == 1800
+
+    started: list[str] = []
+
+    async def fake_list():
+        return [{"Names": ["/unifiedcollector_backup"], "State": "exited"}]
+
+    async def fake_start(name: str) -> int:
+        started.append(name)
+        return 204
+
+    monkeypatch.setattr(freshness, "_list_project_containers", fake_list)
+    monkeypatch.setattr(freshness, "_start_container", fake_start)
+
+    await freshness._sweep_container_liveness(now=now)
+
+    assert started == []  # capped, must not fire
+    # History untouched (still 3 entries — the sweep never appended a 4th).
+    assert len(freshness._liveness_restarts["unifiedcollector_backup"]) == 3
+
+
+@pytest.mark.asyncio
+async def test_container_sweep_prunes_old_attempts_outside_window(monkeypatch):
+    """History older than the window slides out — a stopped container that
+    recovered on its own and later re-fails must not be capped by ancient
+    attempts."""
+    monkeypatch.setenv("DATABASE_URL", "postgres://collector:collector@localhost/unifiedcollector")
+    import src.watchdog.freshness as freshness
+
+    freshness = importlib.reload(freshness)
+
+    now = 1_000_000.0
+    # 3 attempts, all older than 1800s window: should be pruned and 4th allowed.
+    monkeypatch.setattr(
+        freshness,
+        "_liveness_restarts",
+        {"unifiedcollector_backup": [now - 5000, now - 4000, now - 3000]},
+    )
+
+    started: list[str] = []
+
+    async def fake_list():
+        return [{"Names": ["/unifiedcollector_backup"], "State": "exited"}]
+
+    async def fake_start(name: str) -> int:
+        started.append(name)
+        return 204
+
+    monkeypatch.setattr(freshness, "_list_project_containers", fake_list)
+    monkeypatch.setattr(freshness, "_start_container", fake_start)
+
+    await freshness._sweep_container_liveness(now=now)
+
+    assert started == ["unifiedcollector_backup"]
+    assert freshness._liveness_restarts["unifiedcollector_backup"] == [now]
+
+
+@pytest.mark.asyncio
+async def test_container_sweep_ignores_healthy(monkeypatch):
+    """All running/restarting/paused containers untouched — no start calls."""
+    monkeypatch.setenv("DATABASE_URL", "postgres://collector:collector@localhost/unifiedcollector")
+    import src.watchdog.freshness as freshness
+
+    freshness = importlib.reload(freshness)
+    monkeypatch.setattr(freshness, "_liveness_restarts", {})
+
+    started: list[str] = []
+
+    async def fake_list():
+        return [
+            {"Names": ["/unifiedcollector_scheduler"], "State": "running"},
+            {"Names": ["/unifiedcollector_collector_telegram"], "State": "running"},
+            {"Names": ["/unifiedcollector_collector_website"], "State": "restarting"},
+            {"Names": ["/unifiedcollector_wa_bridge_1"], "State": "paused"},
+        ]
+
+    async def fake_start(name: str) -> int:
+        started.append(name)
+        return 204
+
+    monkeypatch.setattr(freshness, "_list_project_containers", fake_list)
+    monkeypatch.setattr(freshness, "_start_container", fake_start)
+
+    await freshness._sweep_container_liveness(now=1_000_000.0)
+
+    assert started == []
+    assert freshness._liveness_restarts == {}
+
+
+@pytest.mark.asyncio
+async def test_container_sweep_survives_docker_error(monkeypatch):
+    """Docker API blip must not kill the loop — log and continue.
+
+    The whole point of the watchdog is to be the safety net; a Docker socket
+    hiccup cannot become a reason the safety net dies. Freshness checks share
+    this loop, so any exception here has broad blast radius.
+    """
+    monkeypatch.setenv("DATABASE_URL", "postgres://collector:collector@localhost/unifiedcollector")
+    import src.watchdog.freshness as freshness
+
+    freshness = importlib.reload(freshness)
+
+    async def fake_list():
+        raise RuntimeError("docker socket EPIPE")
+
+    async def fake_start(name: str) -> int:
+        raise AssertionError("start should never be reached when list fails")
+
+    monkeypatch.setattr(freshness, "_list_project_containers", fake_list)
+    monkeypatch.setattr(freshness, "_start_container", fake_start)
+
+    # Must not raise.
+    await freshness._sweep_container_liveness(now=1_000_000.0)
+
+
+@pytest.mark.asyncio
+async def test_container_sweep_skips_self(monkeypatch):
+    """The watchdog must never try to restart its own container mid-loop.
+
+    Docker's restart:unless-stopped on the watchdog already covers a real
+    death; a mid-loop self-start attempt is a footgun (races the healthcheck,
+    can double-book a container name in some Docker versions).
+    """
+    monkeypatch.setenv("DATABASE_URL", "postgres://collector:collector@localhost/unifiedcollector")
+    import src.watchdog.freshness as freshness
+
+    freshness = importlib.reload(freshness)
+    monkeypatch.setattr(freshness, "_liveness_restarts", {})
+
+    started: list[str] = []
+
+    async def fake_list():
+        # Hypothetically the watchdog reports itself as exited — should still
+        # be skipped by name check.
+        return [{"Names": ["/unifiedcollector_watchdog"], "State": "exited"}]
+
+    async def fake_start(name: str) -> int:
+        started.append(name)
+        return 204
+
+    monkeypatch.setattr(freshness, "_list_project_containers", fake_list)
+    monkeypatch.setattr(freshness, "_start_container", fake_start)
+
+    await freshness._sweep_container_liveness(now=1_000_000.0)
+
+    assert started == []
+
+
+@pytest.mark.asyncio
+async def test_container_sweep_treats_dead_and_created_as_stopped(monkeypatch):
+    """State='dead' and state='created' are both treated as restart candidates."""
+    monkeypatch.setenv("DATABASE_URL", "postgres://collector:collector@localhost/unifiedcollector")
+    import src.watchdog.freshness as freshness
+
+    freshness = importlib.reload(freshness)
+    monkeypatch.setattr(freshness, "_liveness_restarts", {})
+
+    started: list[str] = []
+
+    async def fake_list():
+        return [
+            {"Names": ["/unifiedcollector_backup"], "State": "dead"},
+            {"Names": ["/unifiedcollector_scheduler"], "State": "created"},
+        ]
+
+    async def fake_start(name: str) -> int:
+        started.append(name)
+        return 204
+
+    monkeypatch.setattr(freshness, "_list_project_containers", fake_list)
+    monkeypatch.setattr(freshness, "_start_container", fake_start)
+
+    await freshness._sweep_container_liveness(now=1_000_000.0)
+
+    assert sorted(started) == sorted(
+        ["unifiedcollector_backup", "unifiedcollector_scheduler"]
+    )
