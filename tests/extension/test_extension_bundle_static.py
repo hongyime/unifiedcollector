@@ -406,3 +406,50 @@ def test_x_error_shell_can_switch_host_when_native_retry_is_missing():
     assert "navigating to ${target}" in switch_block
     assert "uc_x_shell_step_" in switch_block
     assert "last && Date.now() - last < 10 * 60000" in recover_block
+
+
+
+
+def test_memory_sensitive_tabs_get_scheduled_soft_reload():
+    background = _read("extension/background.js")
+
+    assert 'const ALARM_MEMORY = "uc-memory-check"' in background
+    assert 'const MEMORY_SENSITIVE_PLATFORMS = new Set(["facebook", "threads"])' in background
+    assert re.search(r"const MEMORY_CHECK_INTERVAL_MIN\s*=\s*30\s*;", background)
+    assert re.search(r"const MEMORY_RELOAD_THRESHOLD_JS_MB\s*=\s*250\s*;", background)
+    assert re.search(r"const MEMORY_RELOAD_DOM_NODES\s*=\s*40000\s*;", background)
+    assert re.search(r"const MEMORY_RELOAD_MIN_INTERVAL_MIN\s*=\s*90\s*;", background)
+    assert re.search(r"const MEMORY_TIME_CAP_MIN\s*=\s*240\s*;", background)
+    assert "async function checkMemorySensitiveTabs" in background
+    assert "async function fetchTabMemoryMetrics" in background
+    assert "async function memoryReloadThresholdMB" in background
+    # Alarm is created alongside the other periodic alarms.
+    assert "chrome.alarms.create(ALARM_MEMORY" in background
+    # Dispatcher branch runs the check when the alarm fires.
+    alarm_block = background.split("chrome.alarms.onAlarm.addListener", 1)[1].split(
+        "// scraper hosts that have a content-script scraper",
+        1,
+    )[0]
+    assert "a.name === ALARM_MEMORY" in alarm_block
+    assert "checkMemorySensitiveTabs(" in alarm_block
+    # Reload uses tabs.reload (preserves tab group + pinned state).
+    check_block = background.split("async function checkMemorySensitiveTabs", 1)[1].split(
+        "async function scheduleAlarm",
+        1,
+    )[0]
+    assert "chrome.tabs.reload(tab.id, { bypassCache: false })" in check_block
+    # Post-reload nudge reuses the existing scheduler primitive.
+    assert "schedulePostReloadScrapeNudge(base, tab, platform, `memory_soft_reload_${triggerReason}`" in check_block
+    # Debounce shares state with the forced-cycle path so we never double-reload.
+    assert "lastForcedReloadByTab[String(tab.id)]" in check_block
+    # Testing override key so a low threshold can force a reload during verification.
+    assert 'const MEMORY_THRESHOLD_MB_OVERRIDE_KEY = "memoryReloadThresholdMB"' in background
+    # Observability lands in browser_ingest_events via recordServiceWorkerRecovery.
+    assert '"memory_soft_reload"' in check_block
+    assert '"memory_reload_debounced"' in check_block
+    assert '"memory_check_skipped"' in check_block
+    # Metrics fields propagated in the extras.
+    assert "memory_js_heap_mb" in check_block
+    assert "memory_dom_nodes" in check_block
+    # Popup counter is incremented via ucStatus.
+    assert "memoryReloadCount" in check_block

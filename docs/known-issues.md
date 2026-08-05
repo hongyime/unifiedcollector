@@ -78,19 +78,43 @@ separate investigation.
      freshly logged-in threads.com, it's a Threads-side issue and we
      should widen the recovery-nav rotation.
 
-## 2. Facebook DOM-node leak (~139 MB, 22.5k nodes) — deferred
+## 2. Facebook DOM-node leak (~139 MB, 22.5k nodes) — FIXED 2026-08-05
 
-Prior agent measured the FB tab retaining ~22.5k DOM nodes / 139 MB heap.
-The extension does not yet perform periodic soft-reload of the FB tab.
-Facebook freshness (`facebook_posts.collected_at`) is currently healthy
-(<10 min lag), so this is a slow-growth memory concern, not an
-availability concern.
+Prior agent measured the FB tab retaining ~22.5k DOM nodes / 139 MB heap
+after 4h. A re-measurement at fix time via CDP showed the same tab at
+242.7 MB `Performance.getMetrics.JSHeapUsedSize` / 260.4 MB
+`performance.memory.usedJSHeapSize` / 18.3k DOM elements / 32.5k Blink
+nodes / 27.6k LayoutObjects, so the growth was accelerating past what
+the 45-min `ALARM_REFRESH` cycle could contain.
 
-Deferred: adding a scheduled `chrome.tabs.reload` for the FB tab every 4h
-via `background.js` would fix it in <20 lines, but each reload risks the
-recovery-shell loop threads is stuck in. Better done after threads is
-recovered, so we can distinguish tab-reload-induced shell errors from
-platform-side ones.
+**Fix** — extension 1.23.41+: added `ALARM_MEMORY` (30-min cadence)
+that polls memory-sensitive scraper tabs (`facebook`, `threads`) for JS
+heap size + DOM node count via `chrome.scripting.executeScript`.
+Soft-reloads the tab when any of:
+
+- `performance.memory.usedJSHeapSize` ≥ 250 MB (override via
+  `chrome.storage.local.set({memoryReloadThresholdMB: N})`)
+- `document.querySelectorAll('*').length` ≥ 40 000
+- Time-cap: last memory-driven reload > 4h ago (only after a baseline is
+  established, so we don't reload on the very first check post-install)
+
+Never reloads the same tab more often than 90 min. Uses
+`chrome.tabs.reload(tabId, { bypassCache: false })` which preserves tab
+group + pinned state (same primitive `refreshScraperTabs` uses). Shares
+the `lastForcedReloadByTab` debounce map with the forced-cycle recovery
+path so we never double-reload. Post-reload, the existing
+`chrome.tabs.onUpdated -> kick -> ensureLoops` chain respawns the
+content script, and `schedulePostReloadScrapeNudge` re-issues a
+`scrapeCycle` message after the platform-specific warm-up delay
+(facebook = 30 s).
+
+Observability: emits `browser_heartbeat` events with
+`health_status='memory_soft_reload'` /
+`'memory_reload_debounced'` / `'memory_check_skipped'` /
+`'memory_reload_failed'`, carrying `memory_js_heap_mb`,
+`memory_dom_nodes`, `memory_threshold_mb`, `memory_last_reload_age_ms`
+in the metadata. `ucStatus.memoryReloadCount` tracks lifetime reload
+count for the popup.
 
 ## 3. Delta-status cursor cold-start — verified as expected
 
