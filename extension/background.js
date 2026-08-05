@@ -135,14 +135,35 @@ async function getStatus() {
 }
 
 // ---- config --------------------------------------------------------------
+// Cached copies of the endpoint bases. Chrome.storage.local.get from inside
+// the message handler was measurable overhead under high heartbeat load: 7
+// content tabs × loopStatus every 20–30s + per-cycle logs all serialized on
+// storage.local — the SW frequently could not reply within the content
+// script's 15 s loopStatus / 10 s log budget and content fell back to
+// content_direct. Reading from a module-scope cache eliminates that hop.
+// The values are only writable via popup.js (chrome.storage.local.set), so
+// a storage.onChanged listener keeps the cache honest.
+let _cachedIngestBase = null;
+let _cachedControlBase = null;
 async function ingestBase() {
+  if (_cachedIngestBase) return _cachedIngestBase;
   const { ingestBase } = await chrome.storage.local.get("ingestBase");
-  return ingestBase || DEFAULT_INGEST;
+  _cachedIngestBase = ingestBase || DEFAULT_INGEST;
+  return _cachedIngestBase;
 }
 async function controlBase() {
+  if (_cachedControlBase) return _cachedControlBase;
   const { controlBase } = await chrome.storage.local.get("controlBase");
-  return controlBase || DEFAULT_CONTROL;
+  _cachedControlBase = controlBase || DEFAULT_CONTROL;
+  return _cachedControlBase;
 }
+try {
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== "local") return;
+    if (changes.ingestBase) _cachedIngestBase = changes.ingestBase.newValue || DEFAULT_INGEST;
+    if (changes.controlBase) _cachedControlBase = changes.controlBase.newValue || DEFAULT_CONTROL;
+  });
+} catch (e) { /* addListener unavailable in some contexts */ }
 function extensionVersion() {
   return (chrome.runtime.getManifest && chrome.runtime.getManifest().version) || null;
 }
@@ -2128,14 +2149,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
       case "pageHealth": {
         if (msg.status === "recoverable_error_shell") {
+          // Response carries recovery.cooldown_mins, which the content
+          // script consumes to set a throttle wall. Keep this path awaited.
           sendResponse(await schedulePageRecovery(base, msg, sender));
         } else if (msg.status === "healthy") {
+          // Fire-and-forget: content script uses .catch(()=>null) and never
+          // reads the response — reply first so a slow ingest fetch cannot
+          // push us over the 20 s content-side deadline.
+          sendResponse({ ok: true });
           await clearPageRecoveryForTab(sender && sender.tab ? sender.tab.id : null, "healthy");
           await recordPageHealth(base, msg, sender, { recovery_scheduled: false });
-          sendResponse({ ok: true });
         } else {
-          await recordPageHealth(base, msg, sender, { recovery_scheduled: false });
           sendResponse({ ok: true });
+          await recordPageHealth(base, msg, sender, { recovery_scheduled: false });
         }
         break;
       }
@@ -2184,6 +2210,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         break;
       }
       case "loopStatus": {  // continuous loop liveness ping
+        // Reply immediately so the content script never falls back to
+        // content_direct if the ingest bridge briefly stalls. All callers
+        // treat this message as fire-and-forget (.catch(()=>{}))
+        // — no return value is consumed. The SW forward + optional cycle
+        // nudge continue in the background; the pending fetch keeps the
+        // worker alive for as long as chrome allows.
+        sendResponse({ ok: true });
         await setStatus({
           loopRunning: !!msg.running,
           loopPlatform: msg.platform,
@@ -2211,7 +2244,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           }), SCRAPER_HEARTBEAT_TIMEOUT_MS);
           await maybeForceScrapeCycle(tab, platform, result && result.body, "loop_status", base);
         } catch (e) {}
-        sendResponse({ ok: true });
         break;
       }
       case "tabReady": {  // scraper tab loaded; the loop auto-starts in the tab
@@ -2219,14 +2251,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         break;
       }
       case "log":
-        log(msg.level || "info", `[${msg.platform || "?"}] ${msg.msg}`);
+        // Reply first so a log-storm cannot back-pressure content scripts
+        // (log() itself does chrome.storage.local get+set, which becomes a
+        // serialization bottleneck under high heartbeat volume).
         sendResponse({ ok: true });
+        log(msg.level || "info", `[${msg.platform || "?"}] ${msg.msg}`);
         break;
       case "cycleReport":
+        sendResponse({ ok: true });
         setStatus({ lastCycleAt: Date.now(), lastCycle: { platform: msg.platform, targets: msg.targets, saved: msg.saved, discovered: msg.discovered } });
         await clearPageRecoveryForTab(sender && sender.tab ? sender.tab.id : null, "cycle-ok");
         log("info", `✅ cycle done [${msg.platform}]: ${msg.targets} targets, ${msg.saved} media candidate(s), ${msg.discovered} discovered`);
-        sendResponse({ ok: true });
         break;
       case "getPlatforms":
         sendResponse(await platformStatuses());
