@@ -210,6 +210,22 @@ function sendTimeoutMs(msg, explicitTimeoutMs) {
 }
 
 const DIRECT_INGEST_BASE = "http://127.0.0.1:8765";
+// Page origins whose CSP `connect-src` blocks http://127.0.0.1:* — the page's
+// own CSP will refuse the direct fetch with "Refused to connect" BEFORE
+// preflight, generating a console error even if we .catch() the promise. For
+// these platforms, skip the direct-fetch attempt entirely and route through
+// the extension-origin SW proxy (chrome-extension:// is exempt from page CSP).
+//
+// Observed on Instagram: `connect-src *.instagram.com wss://edge-chat.instagram.com
+// ... ws://localhost:* 'self' ...` — allows ws://localhost but NOT http://127.0.0.1.
+// Threads and Facebook enforce the same policy (same Meta CSP template).
+const DIRECT_FETCH_CSP_BLOCKED = new Set(["instagram", "threads", "facebook"]);
+
+function directFetchAllowed() {
+  const p = currentPlatform();
+  return !(p && p.id && DIRECT_FETCH_CSP_BLOCKED.has(p.id));
+}
+
 const DEFAULT_DIRECT_SEND_TIMEOUT_MS = 20000;
 const DIRECT_SEND_TIMEOUT_MS_BY_TYPE = {
   ingest: 45000,
@@ -335,11 +351,43 @@ function directFallbackRequest(msg, error) {
   return { path: jsonRoutes[type][0], payload: withDirectVersion(jsonRoutes[type][1]) };
 }
 
+async function trySwFetchProxy(request) {
+  try {
+    const proxy = await chrome.runtime.sendMessage({
+      type: "swFetchProxy",
+      path: request.path,
+      payload: request.payload,
+    });
+    if (proxy && proxy.ok !== undefined) {
+      return {
+        ok: !!proxy.ok,
+        direct_fallback: true,
+        proxied: true,
+        status: proxy.status,
+        ...(proxy.body || {}),
+      };
+    }
+  } catch (_) {
+    // channel closed / extension context invalidated — caller decides what to do
+  }
+  return null;
+}
+
 async function directSendFallback(msg, error) {
   const request = directFallbackRequest(msg, error);
   if (!request) return null;
   const type = String((msg && msg.type) || "message");
   const timeoutMs = directSendTimeoutMs(msg);
+
+  // On page origins whose CSP `connect-src` blocks http://127.0.0.1:*
+  // (instagram/threads/facebook), do NOT attempt the direct fetch: it would
+  // raise a "Refused to connect" console error before failing, even if we
+  // .catch() the promise. Go straight to the extension-origin SW proxy.
+  if (!directFetchAllowed()) {
+    const proxied = await trySwFetchProxy(request);
+    return proxied; // may be null; send() treats null as "no fallback"
+  }
+
   try {
     const response = await withDeadline(
       fetch(DIRECT_INGEST_BASE + request.path, {
@@ -360,18 +408,8 @@ async function directSendFallback(msg, error) {
     // back to a SW-proxied fetch: the service worker runs in extension
     // origin (127.0.0.1/* declared in host_permissions), so its fetch is
     // exempt from LNA and reaches the ingest bridge.
-    try {
-      const proxy = await chrome.runtime.sendMessage({
-        type: "swFetchProxy",
-        path: request.path,
-        payload: request.payload,
-      });
-      if (proxy && proxy.ok !== undefined) {
-        return { ok: !!proxy.ok, direct_fallback: true, proxied: true, status: proxy.status, ...(proxy.body || {}) };
-      }
-    } catch (proxyError) {
-      // fall through and rethrow the original direct-fetch error
-    }
+    const proxied = await trySwFetchProxy(request);
+    if (proxied) return proxied;
     throw directError;
   }
 }
@@ -3836,11 +3874,19 @@ window.addEventListener("message", (ev) => {
   }
 });
 
-// First-boot direct heartbeat — bypasses the SW so the ingest bridge learns
-// this tab is alive even if the very next action (e.g. lemon8's
-// maybeStartBrowserMediaRevisit inside runCycle) navigates the tab away before
-// the SW-mediated tabReady below can be delivered. Uses fetch keepalive so the
-// request survives an in-flight unload. Fire-and-forget, non-blocking.
+// First-boot heartbeat — makes the ingest bridge learn this tab is alive
+// even if the very next action (e.g. lemon8's maybeStartBrowserMediaRevisit
+// inside runCycle) navigates the tab away before the SW-mediated tabReady
+// below can be delivered. Fire-and-forget, non-blocking.
+//
+// Route selection:
+//   - CSP-blocked page origins (instagram/threads/facebook) — page CSP forbids
+//     connect-src to http://127.0.0.1:*, so direct fetch would raise a
+//     "Refused to connect" console error. Route via SW proxy instead
+//     (extension origin is exempt from page CSP).
+//   - All other origins — direct fetch with keepalive: true so the request
+//     survives an in-flight unload (the SW proxy's chrome.runtime.sendMessage
+//     does NOT survive unload the same way).
 try {
   const _bootP = currentPlatform() || {};
   const _bootPayload = withDirectVersion({
@@ -3852,12 +3898,23 @@ try {
     health_status: "content_script_boot",
     health_reason: "first-boot ping before mainLoop starts",
   });
-  fetch(DIRECT_INGEST_BASE + "/social/browser-heartbeat", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(_bootPayload),
-    keepalive: true,
-  }).catch(() => {});
+  if (DIRECT_FETCH_CSP_BLOCKED.has(_bootP.id)) {
+    // SW proxy fills in the real tab_id from sender.tab.id (see background.js
+    // swFetchProxy handler), so DB records the real tab instead of the
+    // "content_direct" placeholder.
+    chrome.runtime.sendMessage({
+      type: "swFetchProxy",
+      path: "/social/browser-heartbeat",
+      payload: _bootPayload,
+    }).catch(() => {});
+  } else {
+    fetch(DIRECT_INGEST_BASE + "/social/browser-heartbeat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(_bootPayload),
+      keepalive: true,
+    }).catch(() => {});
+  }
 } catch (e) {}
 
 // Auto-start the loop the moment the tab loads (respawns after a reload/crash).

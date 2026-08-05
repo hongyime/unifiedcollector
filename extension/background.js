@@ -2309,14 +2309,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
       case "swFetchProxy": {
         // Extension-origin fetch proxy for content scripts running on page
-        // origins subject to Chrome's Local Network Access / Private Network
-        // Access enforcement (observed: https://www.lemon8-app.com). Those
-        // pages cannot reach 127.0.0.1 even when the extension declares
-        // http://127.0.0.1/* in host_permissions — Chrome blocks the request
-        // before preflight with "Permission was denied for this request to
-        // access the `loopback` address space." The SW's own fetches are
-        // exempt from LNA/PNA (extension origin + host_permissions), so we
-        // do the network call here and hand the JSON body back.
+        // origins subject to either:
+        //   (a) Chrome's Local Network Access / PNA enforcement (observed on
+        //       https://www.lemon8-app.com) — Chrome blocks the request BEFORE
+        //       preflight with "Permission was denied for this request to
+        //       access the `loopback` address space."
+        //   (b) The page's own CSP `connect-src` (instagram/threads/facebook) —
+        //       Meta's template allows ws://localhost:* but NOT http://127.0.0.1:*,
+        //       so a direct fetch produces a "Refused to connect" console error.
+        // The SW's own fetches are exempt from BOTH (extension origin +
+        // host_permissions declares 127.0.0.1/*), so we do the network call
+        // here and hand the JSON body back.
         try {
           const path = String(msg.path || "");
           const payload = msg.payload || {};
@@ -2324,9 +2327,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             sendResponse({ ok: false, error: "invalid path" });
             break;
           }
+          let finalPayload = withExtensionVersion(payload);
+          // For proxied heartbeats, overwrite `tab_id: "content_direct"` (the
+          // placeholder set by content.js because it can't see its own tab.id)
+          // with the real sender.tab.id so the ingest bridge records the tab
+          // that actually sent the heartbeat.
+          if (
+            path === "/social/browser-heartbeat"
+            && sender && sender.tab && Number.isFinite(sender.tab.id)
+          ) {
+            finalPayload = { ...finalPayload, tab_id: sender.tab.id };
+          }
           const proxied = await postJsonWithTimeout(
             base + path,
-            withExtensionVersion(payload),
+            finalPayload,
             SCRAPER_HEARTBEAT_TIMEOUT_MS
           );
           let parsedBody = null;
