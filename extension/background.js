@@ -112,7 +112,7 @@ const PAGE_RECOVERY_DELAY_WINDOWS_MS = [
   [720000, 1200000],
 ];
 const REFRESH_AFTER_PROGRAMMATIC_INJECT_PLATFORMS = new Set(["x", "threads"]);
-const HOME_NAV_HARD_REFRESH_PLATFORMS = new Set(["x", "threads"]);
+const HOME_NAV_HARD_REFRESH_PLATFORMS = new Set(["x", "threads", "lemon8"]);
 
 // ---- persistent logging --------------------------------------------------
 async function log(level, msg) {
@@ -1443,6 +1443,19 @@ async function runPageRecovery(tabId) {
       delete state[key];
       await savePageRecoveryState(state);
       await log("info", `page recovery skipped for tab ${tabId}; tab moved away`);
+      return;
+    }
+    // If this platform gets home-URL hard-refresh on forced-cycle recovery, use
+    // the same navigation strategy here: reloading a lemon8 SPA that's showing
+    // "Not found" on /feed/food?region=sg just re-serves the same broken page.
+    // Navigating to platform.url gets the tab back onto a fresh feed root.
+    const platform = platformById(rec.platform);
+    const navTarget = platform ? hardRefreshNavigationUrl(platform, tab.url, Date.now()) : null;
+    if (navTarget) {
+      await chrome.tabs.update(Number(tabId), { url: navTarget });
+      state[key] = { ...rec, nextAt: 0, lastReloadAt: Date.now(), lastNavTo: navTarget };
+      await savePageRecoveryState(state);
+      await log("warn", `page recovery navigated tab ${tabId} to ${navTarget} (${rec.platform || "scraper"}, attempt ${rec.attempts || rec.attempt || 1})`);
       return;
     }
     await chrome.tabs.reload(Number(tabId), { bypassCache: true });

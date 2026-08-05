@@ -434,6 +434,11 @@ const RECOVERABLE_PAGE_SHELL_PATTERNS = {
     { reason: "something_went_wrong", re: /something\s+went\s+wrong/i, lowContent: true },
     { reason: "try_again_empty_state", re: /\btry\s+again\b/i, lowContent: true },
     { reason: "feed_empty_state", re: /\b(no\s+more|no\s+content|refresh)\b/i, lowContent: true },
+    // Lemon8's SPA renders "Not found" when a /feed/<category> path is stale
+    // (route removed by the app). The page is HTTP 200 so a plain reload keeps
+    // the same broken URL — background.js runPageRecovery navigates the tab to
+    // platform.url instead of reloading when the reason is "not_found".
+    { reason: "not_found", re: /\bnot\s+found\b/i, lowContent: true },
   ],
   threads: [
     { reason: "something_went_wrong", re: /something\s+went\s+wrong/i, lowContent: true },
