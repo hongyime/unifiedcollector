@@ -12,13 +12,19 @@ Telegram outage can't crash the collector.
 import asyncio
 import json
 import logging
+import mimetypes
 import os
+import secrets
 import urllib.request
+from pathlib import Path
+from urllib.error import HTTPError
 
 logger = logging.getLogger(__name__)
 
 _API = "https://api.telegram.org"
 _MAX_TEXT_CHARS = 3800
+# Telegram caption hard limit for sendPhoto / sendVideo. 1024 chars.
+MAX_CAPTION_CHARS = 1024
 
 
 def _config() -> tuple[str, str, str]:
@@ -135,3 +141,201 @@ async def send_many(messages: list[str]) -> bool:
         first = False
         ok = bool(await send(msg)) and ok
     return ok
+
+
+# --- Media send: sendPhoto / sendVideo -----------------------------------
+#
+# Two shapes: a URL string (Telegram will fetch it — cheap, but only works for
+# public direct-media URLs) or a local file Path (multipart upload — always
+# works but takes a real HTTP body).
+#
+# Return value is a tuple (ok, retry_after_seconds) so the caller can back off
+# on a 429 without losing information: on any non-429 failure retry_after is 0,
+# on 429 it's Telegram's suggested wait window.
+
+_MAX_MEDIA_BYTES = 45 * 1024 * 1024  # sendPhoto is 10MB, sendVideo docs say
+                                     # 50MB via bot API; leave a safety margin.
+
+
+def _truncate_caption(caption: str) -> str:
+    """Trim caption to Telegram's 1024-char cap (rounded on a soft boundary)."""
+    if caption is None:
+        return ""
+    caption = str(caption)
+    if len(caption) <= MAX_CAPTION_CHARS:
+        return caption
+    # Try to cut on the last whitespace within the limit so we don't split a word.
+    limit = MAX_CAPTION_CHARS - 1  # leave room for ellipsis
+    trimmed = caption[:limit]
+    space = trimmed.rfind(" ")
+    if space > limit * 0.75:
+        trimmed = trimmed[:space]
+    return trimmed.rstrip() + "…"
+
+
+def _encode_multipart(fields: dict, file_field: str, file_path: str) -> tuple[bytes, str]:
+    """Build a multipart/form-data body for one file + optional text fields."""
+    boundary = "----uc-realtime-" + secrets.token_hex(12)
+    lines: list[bytes] = []
+    for name, value in fields.items():
+        if value is None:
+            continue
+        lines.append(f"--{boundary}".encode())
+        lines.append(f'Content-Disposition: form-data; name="{name}"'.encode())
+        lines.append(b"")
+        lines.append(str(value).encode("utf-8"))
+
+    path = Path(file_path)
+    filename = path.name
+    ctype, _ = mimetypes.guess_type(str(path))
+    ctype = ctype or "application/octet-stream"
+    with open(path, "rb") as fh:
+        payload = fh.read()
+
+    lines.append(f"--{boundary}".encode())
+    lines.append(
+        f'Content-Disposition: form-data; name="{file_field}"; filename="{filename}"'.encode()
+    )
+    lines.append(f"Content-Type: {ctype}".encode())
+    lines.append(b"")
+    lines.append(payload)
+    lines.append(f"--{boundary}--".encode())
+    lines.append(b"")
+
+    body = b"\r\n".join(lines)
+    return body, f"multipart/form-data; boundary={boundary}"
+
+
+def _post_media(token: str, method: str, file_field: str,
+                url_or_path: str, fields: dict) -> tuple[bool, int]:
+    """Call sendPhoto/sendVideo. Returns (ok, retry_after_seconds).
+
+    If ``url_or_path`` is an http(s):// URL the JSON API is used and Telegram
+    fetches the media itself. Otherwise it is treated as a local file path and
+    uploaded via multipart/form-data. Any error is caught and returned as
+    (False, retry_after).
+    """
+    url = f"{_API}/bot{token}/{method}"
+    is_remote = url_or_path.startswith(("http://", "https://"))
+
+    if is_remote:
+        payload = {**fields, file_field: url_or_path}
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=data, headers={"Content-Type": "application/json"}
+        )
+    else:
+        try:
+            body, content_type = _encode_multipart(fields, file_field, url_or_path)
+        except (OSError, FileNotFoundError) as e:
+            logger.warning("telegram %s: cannot read %s: %s", method, url_or_path, e)
+            return False, 0
+        # Refuse to upload very large blobs; Telegram bot API will reject them.
+        if len(body) > _MAX_MEDIA_BYTES:
+            logger.warning(
+                "telegram %s: %s exceeds %d bytes; skipping upload",
+                method, url_or_path, _MAX_MEDIA_BYTES,
+            )
+            return False, 0
+        req = urllib.request.Request(
+            url, data=body, headers={"Content-Type": content_type}
+        )
+
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return resp.status == 200, 0
+    except HTTPError as e:
+        retry_after = 0
+        body_text = ""
+        try:
+            body_text = e.read().decode("utf-8", "replace")[:400]
+        except Exception:
+            pass
+        if e.code == 429:
+            try:
+                parsed = json.loads(body_text or "{}")
+                params = parsed.get("parameters") or {}
+                retry_after = int(params.get("retry_after") or 0)
+            except Exception:
+                retry_after = 0
+            # Try header too (Telegram sometimes sets Retry-After).
+            hdr = e.headers.get("Retry-After") if e.headers else None
+            if hdr:
+                try:
+                    retry_after = max(retry_after, int(hdr))
+                except (TypeError, ValueError):
+                    pass
+            logger.warning("telegram %s 429 retry_after=%ss", method, retry_after)
+            return False, max(retry_after, 1)
+        logger.warning("telegram %s HTTPError %s: %s", method, e.code, body_text)
+        return False, 0
+    except Exception as e:  # noqa: BLE001 - notifications must never raise
+        logger.warning("telegram %s failed: %s", method, e)
+        return False, 0
+
+
+async def send_photo(url_or_path: str, caption: str = "",
+                     parse_mode: str = "HTML") -> tuple[bool, int]:
+    """Send a photo. ``url_or_path`` can be a public URL or local file path.
+
+    Returns (ok, retry_after_seconds). retry_after > 0 only on 429.
+    Never raises.
+    """
+    token, chat_id, thread = _config()
+    if not token or not chat_id:
+        logger.debug("telegram send_photo skipped: token/chat_id not set")
+        return False, 0
+    fields = {
+        "chat_id": chat_id,
+        "caption": _truncate_caption(caption),
+        "parse_mode": parse_mode,
+    }
+    if thread:
+        try:
+            fields["message_thread_id"] = int(thread)
+        except ValueError:
+            logger.warning("invalid TELEGRAM_THREAD_ID=%r", thread)
+    try:
+        return await asyncio.to_thread(
+            _post_media, token, "sendPhoto", "photo", url_or_path, fields,
+        )
+    except Exception as e:  # noqa: BLE001 - belt-and-suspenders
+        logger.warning("telegram send_photo error: %s", e)
+        return False, 0
+
+
+async def send_video(url_or_path: str, caption: str = "",
+                     parse_mode: str = "HTML",
+                     thumbnail_path: str | None = None) -> tuple[bool, int]:
+    """Send a video. ``url_or_path`` can be a public URL or local file path.
+
+    ``thumbnail_path`` is currently informational: multipart upload of an extra
+    ``thumb`` field is not needed on happy path because Telegram auto-generates
+    a preview. The parameter is kept so callers can pass a pre-generated tiny
+    thumbnail for oversized clips in a follow-up.
+
+    Returns (ok, retry_after_seconds). Never raises.
+    """
+    token, chat_id, thread = _config()
+    if not token or not chat_id:
+        logger.debug("telegram send_video skipped: token/chat_id not set")
+        return False, 0
+    fields = {
+        "chat_id": chat_id,
+        "caption": _truncate_caption(caption),
+        "parse_mode": parse_mode,
+        "supports_streaming": "true",
+    }
+    if thread:
+        try:
+            fields["message_thread_id"] = int(thread)
+        except ValueError:
+            logger.warning("invalid TELEGRAM_THREAD_ID=%r", thread)
+    _ = thumbnail_path  # reserved for future oversized-clip thumbnails.
+    try:
+        return await asyncio.to_thread(
+            _post_media, token, "sendVideo", "video", url_or_path, fields,
+        )
+    except Exception as e:  # noqa: BLE001 - belt-and-suspenders
+        logger.warning("telegram send_video error: %s", e)
+        return False, 0

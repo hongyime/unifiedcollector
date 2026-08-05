@@ -832,6 +832,56 @@ services:
       start_period: 15s
     restart: unless-stopped
 
+  # Real-time post feed drain. Reads uc:realtime_post_feed off Redis (produced by
+  # every successful media_items insert across the collectors) and posts a
+  # small per-post Telegram message via send_photo / send_video. Rate-limited
+  # (REALTIME_POST_FEED_MAX_PER_MINUTE, default 6) with a token bucket in
+  # Redis + a rolling sha256 dedupe so a re-scraped post never posts twice.
+  # A 15-min "skipped N burst" summary is emitted when the cap kicks in.
+  realtime_feed:
+    image: unifiedcollector-collector:latest
+    container_name: unifiedcollector_realtime_feed
+    init: true
+    command: python -m src.notifications.realtime_feed
+    mem_limit: 256m
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      COLLECTOR_DRIVE_PATH: /media
+      COLLECTOR_VAULT_ROOT: /vault
+      REDIS_HOST: redis
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-localdevredis123}
+      REDIS_URL: "redis://:${REDIS_PASSWORD:-localdevredis123}@redis:6379/0"
+      # 1 = on, 0 = off. Default on so a fresh deploy posts realtime by default.
+      REALTIME_POST_FEED_ENABLED: "${REALTIME_POST_FEED_ENABLED:-1}"
+      REALTIME_POST_FEED_MAX_PER_MINUTE: "${REALTIME_POST_FEED_MAX_PER_MINUTE:-6}"
+      REALTIME_POST_FEED_DEDUPE_TTL_DAYS: "${REALTIME_POST_FEED_DEDUPE_TTL_DAYS:-7}"
+      REALTIME_POST_FEED_INCLUDE_PROFILES: "${REALTIME_POST_FEED_INCLUDE_PROFILES:-0}"
+      REALTIME_POST_FEED_BURST_SUMMARY: "${REALTIME_POST_FEED_BURST_SUMMARY:-1}"
+      REALTIME_POST_FEED_BURST_SUMMARY_SECONDS: "${REALTIME_POST_FEED_BURST_SUMMARY_SECONDS:-900}"
+      LOG_LEVEL: info
+    volumes:
+      # The vault mount lets the drain read local media files instead of
+      # relying on Telegram to fetch a URL (which fails for auth-gated media).
+      - z:/unifiedcollector/media:/media
+      - z:/unifiedcollector:/vault
+      - ../src:/app/src
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    env_file:
+      - ../.env
+    healthcheck:
+      # Lightweight import check — the drain has no HTTP port. Failure here
+      # means the module doesn't even import (i.e. code broke).
+      test: ["CMD", "python", "-c", "import src.notifications.realtime_feed; import sys; sys.exit(0)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
   dashboard:
     build:
       context: ..

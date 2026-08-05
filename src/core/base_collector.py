@@ -756,6 +756,27 @@ class BaseCollector(ABC):
                     exc_info=True,
                 )
             self._progress_count += 1
+            # Real-time post feed: fire-and-forget enqueue. Never raises, never
+            # blocks. Disabled/no-Redis is a silent no-op. See
+            # src/notifications/realtime_feed.py.
+            try:
+                from src.notifications import realtime_feed
+                realtime_feed.enqueue_from_insert(
+                    source=self.SOURCE_NAME,
+                    entity_name=entity_name,
+                    content_id=content_id,
+                    file_path=file_path,
+                    source_url=source_url,
+                    sha256=sha256,
+                    metadata=metadata,
+                    kind=kind,
+                    content_type=content_type,
+                )
+            except Exception:
+                logger.debug(
+                    "realtime_feed enqueue failed for %s/%s",
+                    self.SOURCE_NAME, content_id, exc_info=True,
+                )
             return True
         logger.debug("Duplicate skipped (content_id or sha256): %s/%s", self.SOURCE_NAME, content_id)
         return False
