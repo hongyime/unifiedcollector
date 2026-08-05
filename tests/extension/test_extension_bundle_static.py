@@ -267,7 +267,12 @@ def test_x_threads_hard_recovery_returns_to_home_feed():
         1,
     )[0]
 
-    assert 'const HOME_NAV_HARD_REFRESH_PLATFORMS = new Set(["x", "threads"])' in background
+    assert 'const HOME_NAV_HARD_REFRESH_PLATFORMS = new Set([' in background
+    # x + threads are the original hard-recovery targets; lemon8 was added later
+    # (c313fad — canonical /topic/food?region=sg) — the test just requires both
+    # legacy platforms remain in the set.
+    _hr_line = [line for line in background.splitlines() if "const HOME_NAV_HARD_REFRESH_PLATFORMS" in line][0]
+    assert '"x"' in _hr_line and '"threads"' in _hr_line
     assert "function hardRefreshNavigationUrl" in background
     assert "https://twitter.com/home" in background
     assert "uc_recover=" in background

@@ -215,15 +215,25 @@ async def test_sha256_file_async_does_not_block_loop(tmp_path):
         pass
 
     assert len(digest) == SHA256_HEX_LEN
-    assert elapsed < 5.0, f"hash took {elapsed:.2f}s, budget 5s"
+    # Absolute wall time is a poor proxy for "loop not blocked" on slow disks
+    # (100 MB can legitimately take >5s on constrained VMs). The real invariant
+    # is measured by pre_hash_ticks below: heartbeat ticks fired CONCURRENTLY
+    # with the hash. If the loop had been blocked those ticks would all land
+    # after the hash returned.
 
     # The heartbeat must have produced ticks DURING the hash, not just
     # after it finished. We measure: count ticks that landed before the
     # hash completed. Should be at least a handful.
     pre_hash_ticks = [t for t in ticks if t - t0 < elapsed]
-    assert len(pre_hash_ticks) >= 3, (
+    # Expect ~elapsed/0.1 ticks concurrently, minus a small startup fudge.
+    # A ratio of 0.5 tolerates GC/scheduler jitter on slow CI while still
+    # failing hard if the loop is genuinely blocked (0 concurrent ticks).
+    # Cap by the total number of ticks the heartbeat can emit (60) so a
+    # slow disk (hash > heartbeat window) doesn't fail on arithmetic.
+    min_expected = min(len(ticks), max(3, int((elapsed / 0.1) * 0.5)))
+    assert len(pre_hash_ticks) >= min_expected, (
         f"event loop appeared blocked: only {len(pre_hash_ticks)} "
-        f"heartbeats in {elapsed:.2f}s"
+        f"heartbeats concurrent with a {elapsed:.2f}s hash (expected >= {min_expected})"
     )
 
 
