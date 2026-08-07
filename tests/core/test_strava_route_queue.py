@@ -94,7 +94,7 @@ def test_route_capture_queue_respects_matching_account_cooldown():
         cooldown={
             "cooldown_until": datetime(2026, 7, 23, 13, 0, tzinfo=timezone.utc),
             "reason": "browser Strava stream HTTP 429",
-            "account": "bryanseah234",
+            "account": "hongyime",
             "scope": "browser_strava_streams",
             "activity_id": "19283135496",
             "created_at": datetime(2026, 7, 23, 12, 30, tzinfo=timezone.utc),
@@ -105,15 +105,15 @@ def test_route_capture_queue_respects_matching_account_cooldown():
         fetch_strava_route_capture_queue(
             _Pool(conn),
             limit=3,
-            account="bryanseah234",
+            account="hongyime",
             respect_cooldown=True,
         )
     )
 
-    assert conn.fetchrow_args == ("bryanseah234", True)
+    assert conn.fetchrow_args == ("hongyime", True)
     assert out["items"] == []
     assert out["cooldown"]["active"] is True
-    assert out["cooldown"]["account"] == "bryanseah234"
+    assert out["cooldown"]["account"] == "hongyime"
     assert out["cooldown"]["scope"] == "browser_strava_streams"
     assert conn.fetch_called is False
 
@@ -123,7 +123,7 @@ def test_route_capture_queue_respects_other_account_cooldown_by_default():
         cooldown={
             "cooldown_until": datetime(2026, 7, 23, 13, 0, tzinfo=timezone.utc),
             "reason": "browser Strava stream HTTP 429",
-            "account": "bryanseah234",
+            "account": "hongyime",
             "scope": "browser_strava_streams",
             "activity_id": "19283135496",
             "created_at": datetime(2026, 7, 23, 12, 30, tzinfo=timezone.utc),
@@ -158,7 +158,7 @@ def test_route_capture_queue_respects_other_account_cooldown_by_default():
     assert conn.fetchrow_args == ("shotsbyseah234", True)
     assert conn.fetch_called is False
     assert out["cooldown"]["active"] is True
-    assert out["cooldown"]["account"] == "bryanseah234"
+    assert out["cooldown"]["account"] == "hongyime"
     assert out["account"] == "shotsbyseah234"
     assert out["shared_cooldown"] is True
 
@@ -169,7 +169,7 @@ def test_route_capture_queue_can_use_account_local_cooldown(monkeypatch):
         cooldown={
             "cooldown_until": datetime(2026, 7, 23, 13, 0, tzinfo=timezone.utc),
             "reason": "browser Strava stream HTTP 429",
-            "account": "bryanseah234",
+            "account": "hongyime",
             "scope": "browser_strava_streams",
             "activity_id": "19283135496",
             "created_at": datetime(2026, 7, 23, 12, 30, tzinfo=timezone.utc),

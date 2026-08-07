@@ -250,7 +250,7 @@ class GithubCollector(BaseCollector):
     def _owner_accounts(self) -> set[str]:
         raw = os.getenv("GITHUB_OWNER_ACCOUNTS", "").strip()
         if not raw:
-            raw = os.getenv("GITHUB_SPIDER_SEED", "bryanseah234")
+            raw = os.getenv("GITHUB_SPIDER_SEED", "hongyime")
         return {p.strip().lstrip("@").lower() for p in raw.split(",") if p.strip()}
 
     @staticmethod
@@ -734,7 +734,7 @@ class GithubCollector(BaseCollector):
         Uses the legacy ``github_spider_queue`` for back-compat with existing
         production rows. Returns the number of users newly enqueued at hop 1.
         """
-        seed = seed or os.getenv("GITHUB_SPIDER_SEED", "bryanseah234")
+        seed = seed or os.getenv("GITHUB_SPIDER_SEED", "hongyime")
         added = 0
         try:
             async with self._make_client() as client:
@@ -1666,7 +1666,7 @@ class GithubCollector(BaseCollector):
         # 4. Releases / assets — skip for repos we don't own (too large)
         _own_logins = {login.lower()} if login else set()
         _skip_assets = full_name.lower() not in {f"{login.lower()}/{r}" for r in []} and login.lower() not in {
-            os.getenv("GITHUB_ASSET_OWNER_LOGIN", "bryanseah234").lower()
+            os.getenv("GITHUB_ASSET_OWNER_LOGIN", "hongyime").lower()
         }
         releases = await self._paginate(
             client, f"{API_BASE}/repos/{full_name}/releases"

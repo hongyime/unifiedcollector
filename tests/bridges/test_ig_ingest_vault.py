@@ -1125,7 +1125,7 @@ def test_dm_hook_heartbeat_fails_open_when_db_is_stuck(monkeypatch):
         {"pool": _StuckPool()},
         {
             "platform": "tiktok",
-            "owner": "bryanseah234",
+            "owner": "hongyime",
             "probes_sent": 1,
             "samples_shipped": 0,
             "extension_version": "1.21.92",
@@ -1496,7 +1496,7 @@ def test_record_strava_stream_http_429_writes_rate_limit_event(monkeypatch):
     async def fake_record_dynamic_cooldown(*args, **kwargs):
         return SimpleNamespace(
             seconds_remaining=1234,
-            service="rate_limit:strava:gps_streams:bryanseah234",
+            service="rate_limit:strava:gps_streams:hongyime",
             streak=1,
         )
 
@@ -1513,7 +1513,7 @@ def test_record_strava_stream_http_429_writes_rate_limit_event(monkeypatch):
                 "activity_id": "19283135496",
                 "request_url": "https://www.strava.com/activities/19283135496/streams",
                 "http_status": 429,
-                "owner": "bryanseah234",
+                "owner": "hongyime",
                 "extension_version": "1.21.24",
             },
         )
@@ -1528,7 +1528,7 @@ def test_record_strava_stream_http_429_writes_rate_limit_event(monkeypatch):
     assert "rate_limit_events" in query
     assert args[:6] == (
         "strava",
-        "bryanseah234",
+        "hongyime",
         "browser_strava_streams",
         429,
         1234,
@@ -1549,7 +1549,7 @@ def test_record_strava_stream_http_429_does_not_extend_active_duplicate_cooldown
                 "activity_id": "19283135496",
                 "request_url": "https://www.strava.com/activities/19283135496/streams",
                 "http_status": 429,
-                "owner": "bryanseah234",
+                "owner": "hongyime",
                 "extension_version": "1.21.33",
             },
         )
@@ -1560,7 +1560,7 @@ def test_record_strava_stream_http_429_does_not_extend_active_duplicate_cooldown
     query, args = pool.conn.fetchvals[0]
     assert "UPDATE rate_limit_events" in query
     assert "duplicate_suppressed_count" in query
-    assert args[:3] == ("bryanseah234", "19283135496", 429)
+    assert args[:3] == ("hongyime", "19283135496", 429)
     assert args[3] == "https://www.strava.com/activities/19283135496/streams"
 
 
@@ -1728,19 +1728,19 @@ def test_strava_stream_response_status_treats_empty_stream_as_processed():
 
 def test_owner_account_for_follow_accepts_dict_and_string_owner():
     assert ig_ingest._owner_account_for_follow(
-        "tiktok", "follow", {"username": "@bryanseah234"}
-    ) == ("bryanseah234", "following")
+        "tiktok", "follow", {"username": "@hongyime"}
+    ) == ("hongyime", "following")
     assert ig_ingest._owner_account_for_follow(
         "x", "follower", "oopspwned"
     ) == ("oopspwned", "follower")
 
 
 def test_owner_account_for_follow_uses_tiktok_fallback(monkeypatch):
-    monkeypatch.setattr(ig_ingest, "TIKTOK_FOLLOW_OWNER_FALLBACK", "bryanseah234")
+    monkeypatch.setattr(ig_ingest, "TIKTOK_FOLLOW_OWNER_FALLBACK", "hongyime")
 
     assert ig_ingest._owner_account_for_follow(
         "tiktok", "follow", None
-    ) == ("bryanseah234", "following")
+    ) == ("hongyime", "following")
     assert ig_ingest._owner_account_for_follow(
         "instagram", "follow", None
     ) == (None, "following")

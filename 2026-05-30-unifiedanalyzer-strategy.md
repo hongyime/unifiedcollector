@@ -643,7 +643,7 @@ IDENTITY_MIN_SIGNALS=2
 USERNAME_NORMALIZE_STRIP_CHARS=._-
 
 # Whether to strip trailing digits from usernames before comparison.
-# e.g. bryanseah234 → bryanseah
+# e.g. hongyime → bryanseah
 USERNAME_NORMALIZE_STRIP_TRAILING_DIGITS=true
 
 # Minimum rapidfuzz token_sort_ratio score (0–100) for a real name to be
@@ -931,7 +931,7 @@ The confidence scoring formula requires **2 independent signals**. But signals c
 
 #### B2. Username Recycling
 
-Platforms allow username changes and eventual recycling. `@bryanseah234` on Instagram in 2022 may not be the same person as `@bryanseah234` on Instagram in 2026 if the account was deleted and re-registered. The collector stores whatever it found at collection time. The analyzer has no way to know if a username was recycled unless it detects a dramatic content/behavioral shift.
+Platforms allow username changes and eventual recycling. `@hongyime` on Instagram in 2022 may not be the same person as `@hongyime` on Instagram in 2026 if the account was deleted and re-registered. The collector stores whatever it found at collection time. The analyzer has no way to know if a username was recycled unless it detects a dramatic content/behavioral shift.
 
 #### B3. Common Name Collision
 
@@ -1007,7 +1007,7 @@ This deserves its own entry. Strava privacy zones mean:
 - **High false positive rate for common usernames** on sites that return HTTP 200 for any username (e.g., WordPress.com, Gravatar, About.me). The site just shows a profile page regardless of whether the account exists. Sherlock's detection heuristics catch many but not all of these.
 - **Result is URL, not profile data.** Sherlock confirms existence; it does not return the profile's name, bio, or photo. Maigret extracts that but is 10× slower.
 - **Sites go offline / change response patterns.** Sherlock's site list is community-maintained and frequently has stale entries. A result of "not found" may mean the account doesn't exist OR the site changed its response format.
-- **Cannot distinguish an account that is the target vs. a different person with the same username.** A Sherlock result for `bryanseah234` on a random platform requires manual verification.
+- **Cannot distinguish an account that is the target vs. a different person with the same username.** A Sherlock result for `hongyime` on a random platform requires manual verification.
 - **Mitigation:** Use Sherlock results as suggestions to investigate, not as confirmed identity links. Never auto-add Sherlock results to `ana_entity_platform_links` at high confidence. Feed into `ana_discovery` with `confidence=0.30`.
 
 #### D2. Holehe — Email to Platform Check

@@ -106,13 +106,13 @@ def test_playwright_posts_zero_breaker_resets_on_edges():
 def test_owned_instagram_usernames_include_cookie_alias_and_real_handle(monkeypatch):
     coll = _bare_collector()
     monkeypatch.setenv("INSTA_ACCOUNT_1_NAME", "local_cookie_label")
-    monkeypatch.setenv("INSTA_ACCOUNT_1_USER", "bryanseah234")
+    monkeypatch.setenv("INSTA_ACCOUNT_1_USER", "hongyime")
     coll._account_username_aliases = coll._load_account_username_aliases()
     coll._account_browser_cookies = {"local_cookie_label": "cookies/bryan.txt"}
 
     assert coll._is_owned_instagram_username("local_cookie_label") is True
-    assert coll._is_owned_instagram_username("bryanseah234") is True
-    assert coll._is_owned_instagram_username("@bryanseah234") is True
+    assert coll._is_owned_instagram_username("hongyime") is True
+    assert coll._is_owned_instagram_username("@hongyime") is True
     assert coll._is_owned_instagram_username("not_my_account") is False
 
 

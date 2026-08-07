@@ -340,7 +340,7 @@ class TiktokCollector(BaseCollector):
         """Return the best per-username cookie file under credentials/tiktok/.
 
         Bryan's convention: cookies are exported per-account as
-        ``tiktok_<username>.txt`` (e.g. ``tiktok_bryanseah234.txt``). The old
+        ``tiktok_<username>.txt`` (e.g. ``tiktok_hongyime.txt``). The old
         default was a single ``tiktok_cookies.txt`` stub which is sometimes
         left behind as an empty placeholder — the collector must skip it in
         favor of any real named file.

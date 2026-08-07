@@ -80,7 +80,7 @@ async def test_notify_status_splits_rate_limit_from_auth_events(monkeypatch):
         "rate_limit_events": [
             {
                 "source": "instagram",
-                "account": "bryanseah234",
+                "account": "hongyime",
                 "scope": "profile_fetch",
                 "status_code": 429,
                 "count": 1,
@@ -104,7 +104,7 @@ async def test_notify_status_splits_rate_limit_from_auth_events(monkeypatch):
         "access_events": [
             {
                 "source": "instagram",
-                "account": "bryanseah234",
+                "account": "hongyime",
                 "scope": "profile_fetch_playwright",
                 "status_code": 401,
                 "count": 1,

@@ -78,7 +78,7 @@ async def test_notify_status_delta_flags_new_cooldowns(monkeypatch):
         "totals": {"posts": 0, "media": 0, "messages": 0, "cooldowns": 1},
         "per_source": {},
         "new_cooldowns": [
-            {"service": "instagram", "scope": "feed", "account": "bryanseah234",
+            {"service": "instagram", "scope": "feed", "account": "hongyime",
              "seconds_remaining": 1800, "events": 2, "reason": "http 429"},
         ],
         "new_dead_sources": [],

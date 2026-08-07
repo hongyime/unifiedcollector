@@ -365,7 +365,7 @@ async def test_sync_persisted_gps_stream_cooldown_restores_after_restart(monkeyp
     pool._conn.fetchrow = AsyncMock(return_value={
         "created_at": datetime.now(timezone.utc),
         "cooldown_seconds": 1800,
-        "reason": "streams 429 for 123 via web:bryanseah234",
+        "reason": "streams 429 for 123 via web:hongyime",
     })
     coll.set_pool(pool)
 
