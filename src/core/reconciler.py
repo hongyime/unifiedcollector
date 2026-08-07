@@ -368,7 +368,7 @@ class Reconciler:
         try:
             async with self.pool.acquire() as conn:
                 rows = await conn.fetch(
-                    "SELECT m.content_id, m.file_path, m.source_url "
+                    "SELECT m.content_id, m.file_path, m.source_url, m.entity_id "
                     "FROM media_items m "
                     "WHERE m.source = $1 AND NOT EXISTS ("
                     "  SELECT 1 FROM media_recover_state t "
@@ -395,6 +395,14 @@ class Reconciler:
             self._missing_seen += 1  # keeps auto-complete from firing prematurely
             if is_video or downloaded >= self.budget:
                 continue  # count missing, but defer (video) or budget-capped
+            
+            # For sources with expiring CDN URLs, bypass redownload and queue a fresh scrape
+            if self.source in ("tiktok", "instagram"):
+                await self._queue_rescrape(r["content_id"], r.get("entity_id"))
+                self._tombstoned.add(r["content_id"])
+                self._dirty.add(r["content_id"])
+                continue
+
             repair = await self._redownload(r["source_url"], fp, content_id=r["content_id"])
             if repair and await self._update_repaired_media_item(r["content_id"], repair):
                 downloaded += 1
@@ -405,6 +413,32 @@ class Reconciler:
                         self.source, downloaded)
         await self.persist()
         return downloaded
+
+    async def _queue_rescrape(self, content_id: str, entity_id: str | None = None) -> None:
+        """Send expiring-URL media to the revisit/dead-letter queue instead of failing."""
+        if not self.pool: return
+        try:
+            async with self.pool.acquire() as conn:
+                if self.source in ("tiktok", "instagram"):
+                    await conn.execute(
+                        """
+                        INSERT INTO browser_media_revisit_queue (platform, content_id, priority)
+                        VALUES ($1, $2, 100)
+                        ON CONFLICT (platform, content_id) DO UPDATE
+                        SET status = 'pending', priority = 100
+                        """,
+                        self.source, content_id
+                    )
+                else:
+                    await conn.execute(
+                        """
+                        INSERT INTO dead_letter_queue (source, entity_id, content_id, error_message)
+                        VALUES ($1, $2, $3, $4)
+                        """,
+                        self.source, entity_id, content_id, "reconciler expired URL rescrape"
+                    )
+        except Exception:
+            logger.debug("%s: reconciler queue rescrape failed", self.source, exc_info=True)
 
     # --- DB persistence (isolated; integration-tested) ---------------------
 

@@ -589,32 +589,31 @@ class BaseCollector(ABC):
         # sources, skip storing bytes we already have under a different content_id
         # (the two paths key content_ids differently). Messaging sources are EXCLUDED
         # — the same media legitimately appears in multiple chats there.
-        if sha256 and self.SOURCE_NAME in (
-            "instagram", "tiktok", "lemon8", "threads", "facebook", "x",
-            "search", "website", "github", "strava",
-        ):
-            try:
-                async with self.pool.acquire() as conn:
+        async with self.pool.acquire() as conn:
+            if sha256 and self.SOURCE_NAME in (
+                "instagram", "tiktok", "lemon8", "threads", "facebook", "x",
+                "search", "website", "github", "strava",
+            ):
+                try:
                     dup = await conn.fetchval(
                         "SELECT 1 FROM media_items WHERE source=$1 AND sha256=$2 LIMIT 1",
                         self.SOURCE_NAME, sha256,
-                )
-                if dup:
-                    _unlink_duplicate_media_file(file_path)
-                    logger.debug("cross-collector dup skipped: %s sha=%s", self.SOURCE_NAME, sha256[:12])
-                    return False
-            except Exception:
-                pass
+                    )
+                    if dup:
+                        _unlink_duplicate_media_file(file_path)
+                        logger.debug("cross-collector dup skipped: %s sha=%s", self.SOURCE_NAME, sha256[:12])
+                        return False
+                except Exception:
+                    pass
 
-        # ATOMIC dedup (P2 review §3): `ON CONFLICT DO NOTHING` (no target) skips on
-        # ANY unique violation — both the (source, content_id) index and the partial
-        # unique (source, sha256) index (uq_media_source_sha256, in-scope sources).
-        # This replaces the old racy SELECT-then-INSERT sha256 pre-check + the
-        # UniqueViolationError catch: two concurrent tasks can no longer both insert
-        # the same bytes under different content_ids. The advisory sha256 pre-check
-        # above still runs first to delete the redundant blob in the common case;
-        # the DB constraint is the backstop for the race it couldn't close.
-        async with self.pool.acquire() as conn:
+            # ATOMIC dedup (P2 review §3): `ON CONFLICT DO NOTHING` (no target) skips on
+            # ANY unique violation — both the (source, content_id) index and the partial
+            # unique (source, sha256) index (uq_media_source_sha256, in-scope sources).
+            # This replaces the old racy SELECT-then-INSERT sha256 pre-check + the
+            # UniqueViolationError catch: two concurrent tasks can no longer both insert
+            # the same bytes under different content_ids. The advisory sha256 pre-check
+            # above still runs first to delete the redundant blob in the common case;
+            # the DB constraint is the backstop for the race it couldn't close.
             status = await conn.execute(
                 """
                 INSERT INTO media_items
@@ -630,36 +629,36 @@ class BaseCollector(ABC):
                 sha256, source_url, json.dumps(metadata, default=str) if metadata is not None else None,
                 self.INGEST_PATH, kind,
             )
-        # asyncpg returns the command tag, e.g. "INSERT 0 1" (stored) / "INSERT 0 0"
-        # (a unique conflict skipped it).
-        if status.endswith(" 1"):
-            sidecar = write_media_sidecar(
-                source=self.SOURCE_NAME,
-                entity_id=entity_id,
-                entity_name=entity_name,
-                content_type=content_type,
-                content_id=content_id,
-                filename=filename,
-                file_path=file_path,
-                file_size=file_size,
-                width=width,
-                height=height,
-                sha256=sha256,
-                source_url=source_url,
-                metadata=metadata,
-                ingest_path=self.INGEST_PATH,
-                kind=kind,
-            )
-            sidecar_meta = {
-                "vault_sidecar": {
-                    "enabled": sidecar.enabled,
-                    "ok": sidecar.ok,
-                    "path": sidecar.relative_path,
-                    "error": sidecar.error,
+            
+            # asyncpg returns the command tag, e.g. "INSERT 0 1" (stored) / "INSERT 0 0"
+            # (a unique conflict skipped it).
+            if status.endswith(" 1"):
+                sidecar = write_media_sidecar(
+                    source=self.SOURCE_NAME,
+                    entity_id=entity_id,
+                    entity_name=entity_name,
+                    content_type=content_type,
+                    content_id=content_id,
+                    filename=filename,
+                    file_path=file_path,
+                    file_size=file_size,
+                    width=width,
+                    height=height,
+                    sha256=sha256,
+                    source_url=source_url,
+                    metadata=metadata,
+                    ingest_path=self.INGEST_PATH,
+                    kind=kind,
+                )
+                sidecar_meta = {
+                    "vault_sidecar": {
+                        "enabled": sidecar.enabled,
+                        "ok": sidecar.ok,
+                        "path": sidecar.relative_path,
+                        "error": sidecar.error,
+                    }
                 }
-            }
-            try:
-                async with self.pool.acquire() as conn:
+                try:
                     await conn.execute(
                         """
                         UPDATE media_items
@@ -681,15 +680,15 @@ class BaseCollector(ABC):
                             content_id,
                             f"vault sidecar write failed: {sidecar.error}",
                         )
-            except Exception:
-                logger.warning(
-                    "vault sidecar status update failed for %s/%s",
-                    self.SOURCE_NAME,
-                    content_id,
-                    exc_info=True,
-                )
-            try:
-                async with self.pool.acquire() as conn:
+                except Exception:
+                    logger.warning(
+                        "vault sidecar status update failed for %s/%s",
+                        self.SOURCE_NAME,
+                        content_id,
+                        exc_info=True,
+                    )
+                
+                try:
                     timeout_ms = _media_db_consistency_timeout_ms()
                     async def record_consistency() -> None:
                         consistency = await verify_media_item_db_consistency(
@@ -742,19 +741,19 @@ class BaseCollector(ABC):
                             self.SOURCE_NAME,
                             content_id,
                         )
-            except (asyncio.TimeoutError, TimeoutError, QueryCanceledError):
-                logger.warning(
-                    "vault artifact db consistency check timed out for %s/%s; media row kept",
-                    self.SOURCE_NAME,
-                    content_id,
-                )
-            except Exception:
-                logger.warning(
-                    "vault artifact db consistency check failed for %s/%s",
-                    self.SOURCE_NAME,
-                    content_id,
-                    exc_info=True,
-                )
+                except (asyncio.TimeoutError, TimeoutError, QueryCanceledError):
+                    logger.warning(
+                        "vault artifact db consistency check timed out for %s/%s; media row kept",
+                        self.SOURCE_NAME,
+                        content_id,
+                    )
+                except Exception:
+                    logger.warning(
+                        "vault artifact db consistency check failed for %s/%s",
+                        self.SOURCE_NAME,
+                        content_id,
+                        exc_info=True,
+                    )
             self._progress_count += 1
             # Real-time post feed: fire-and-forget enqueue. Never raises, never
             # blocks. Disabled/no-Redis is a silent no-op. See

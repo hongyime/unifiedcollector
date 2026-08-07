@@ -73,6 +73,15 @@ async def apply_all(pool) -> dict:
     summary = {"schemas": 0, "migrations_applied": [], "migrations_skipped": 0, "deferred": False}
 
     async with pool.acquire() as conn:
+        try:
+            locked = await conn.fetchval("SELECT pg_try_advisory_lock(hashtext('unifiedcollector_migrate'))")
+            if not locked:
+                logger.warning("Migration runner deferred: another instance is currently migrating.")
+                summary["deferred"] = True
+                return summary
+        except Exception:
+            pass
+
         # DDL vs. the daily pg_dump: pg_dump holds AccessShareLock on EVERY table
         # for the whole dump (minutes). A migration's ACCESS EXCLUSIVE request would
         # queue behind it AND block all other traffic on that table behind the
@@ -174,6 +183,10 @@ async def apply_all(pool) -> dict:
                 await conn.execute("SET lock_timeout = DEFAULT")
             except Exception:  # pragma: no cover - defensive
                 logger.debug("could not reset lock_timeout", exc_info=True)
+            try:
+                await conn.execute("SELECT pg_advisory_unlock(hashtext('unifiedcollector_migrate'))")
+            except Exception:
+                pass
 
     if summary["migrations_applied"]:
         logger.info(

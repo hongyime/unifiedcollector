@@ -565,6 +565,8 @@ def _atomic_write_text(path: Path, content: str) -> None:
             f.write(content)
             if content and not content.endswith("\n"):
                 f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
         tmp.replace(path)
     finally:
         try:
@@ -580,6 +582,8 @@ def _atomic_write_bytes(path: Path, content: bytes) -> None:
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
         tmp.replace(path)
     finally:
         try:
@@ -596,6 +600,8 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
             json.dump(payload, f, ensure_ascii=False, sort_keys=True, indent=2, default=str)
             f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
         tmp.replace(path)
     finally:
         try:
