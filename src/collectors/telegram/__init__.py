@@ -145,6 +145,26 @@ def _tier1_raw_archives_enabled() -> bool:
     return raw.strip().lower() not in {"0", "false", "no", "off"}
 
 
+def _parse_optional_int_env(name: str, default: str | None) -> int | None:
+    """Read an int from env `name`, falling back to `default` (string or None).
+
+    Returns None if unset/empty/unparseable — self-bot filtering must never
+    break the collector on a malformed value; it just degrades to Layer 2 (or
+    off entirely).
+    """
+    raw = os.getenv(name, "")
+    raw = raw.strip() if isinstance(raw, str) else ""
+    if not raw and default is not None:
+        raw = str(default).strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        logger.warning("invalid int for env %s=%r; ignoring", name, raw)
+        return None
+
+
 def _telethon_payload(obj) -> dict:
     if hasattr(obj, "to_dict"):
         try:
@@ -593,6 +613,24 @@ class TelegramCollector(BaseCollector):
         self._realtime_running = False
         self._realtime_handler_clients: set[tuple[int, int]] = set()
         self._hub_group_id: int | None = None
+        # Self-bot skip filter — prevents circular loop where the realtime-feed
+        # bot posts to a Telegram log group we also monitor via Telethon. Two
+        # complementary layers:
+        #   Layer 1: sender_id == our notify bot's user_id  (env: UC_NOTIFY_BOT_USER_ID
+        #            or resolved lazily via NOTIFY_TELEGRAM_BOT_TOKEN + /getMe).
+        #   Layer 2: chat_id == TELEGRAM_LOGS_CHAT_ID  (defaults to TELEGRAM_CHAT_ID
+        #            / NOTIFY_TELEGRAM_CHAT_ID). Aggressive: the logs chat is ours,
+        #            not a collection target.
+        # See src/notifications/realtime_feed.py for the defense-in-depth pre-check.
+        self._logs_chat_id: int | None = _parse_optional_int_env(
+            "TELEGRAM_LOGS_CHAT_ID",
+            os.getenv("TELEGRAM_CHAT_ID") or os.getenv("NOTIFY_TELEGRAM_CHAT_ID"),
+        )
+        self._notify_bot_user_id: int | None = _parse_optional_int_env(
+            "UC_NOTIFY_BOT_USER_ID", None
+        )
+        self._notify_bot_user_id_lock: asyncio.Lock | None = None
+        self._notify_bot_resolve_attempted = False
         try:
             self._realtime_write_attempts = max(
                 1,
@@ -3899,6 +3937,14 @@ class TelegramCollector(BaseCollector):
         if not self._workers:
             logger.error("_register_realtime_handlers: no Telegram workers connected")
             return
+        # Warm up the self-bot filter's Layer 1 (sender_id) cache once, so the
+        # very first message we see in the logs chat is filtered without a
+        # per-event getMe lookup. Failure here is non-fatal — Layer 2 (chat_id)
+        # still applies.
+        try:
+            await self._ensure_notify_bot_user_id()
+        except Exception as exc:
+            logger.debug("notify bot user_id warmup failed: %s", _format_exception(exc))
         registered = 0
         for worker in self._workers:
             if self._register_realtime_handlers_for_worker(worker, events):
@@ -4063,6 +4109,85 @@ class TelegramCollector(BaseCollector):
             except Exception as exc:
                 logger.debug("user photo pass failed: %s", exc)
 
+    async def _ensure_notify_bot_user_id(self) -> int | None:
+        """Return the realtime-feed bot's user_id, resolving via /getMe if
+        UC_NOTIFY_BOT_USER_ID is unset. Safe to call repeatedly (cached).
+
+        On any failure we log once and return None; Layer 2 (chat_id skip)
+        remains the primary defence when Layer 1 can't identify the bot.
+        """
+        if self._notify_bot_user_id is not None:
+            return self._notify_bot_user_id
+        if self._notify_bot_resolve_attempted:
+            # Already tried and failed; don't hammer the API each call.
+            return None
+        token = os.getenv("NOTIFY_TELEGRAM_BOT_TOKEN", "").strip()
+        if not token:
+            self._notify_bot_resolve_attempted = True
+            return None
+        if self._notify_bot_user_id_lock is None:
+            self._notify_bot_user_id_lock = asyncio.Lock()
+        async with self._notify_bot_user_id_lock:
+            if self._notify_bot_user_id is not None:
+                return self._notify_bot_user_id
+            if self._notify_bot_resolve_attempted:
+                return None
+            self._notify_bot_resolve_attempted = True
+            try:
+                import aiohttp
+
+                url = f"https://api.telegram.org/bot{token}/getMe"
+                timeout = aiohttp.ClientTimeout(total=10)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.get(url) as resp:
+                        data = await resp.json()
+                if not isinstance(data, dict) or not data.get("ok"):
+                    logger.warning(
+                        "telegram self-bot filter: getMe returned not-ok "
+                        "(layer-1 sender-id skip disabled; layer-2 chat-id skip still active)"
+                    )
+                    return None
+                uid = (data.get("result") or {}).get("id")
+                if not uid:
+                    logger.warning(
+                        "telegram self-bot filter: getMe returned no id field"
+                    )
+                    return None
+                self._notify_bot_user_id = int(uid)
+                logger.info(
+                    "telegram self-bot filter: resolved notify bot user_id=%d via getMe",
+                    self._notify_bot_user_id,
+                )
+                return self._notify_bot_user_id
+            except Exception as exc:
+                logger.warning(
+                    "telegram self-bot filter: getMe resolution failed (%s); "
+                    "layer-1 sender-id skip disabled — layer-2 chat-id skip still active",
+                    _format_exception(exc),
+                )
+                return None
+
+    def _should_skip_self_bot_message(self, chat_id, message) -> str | None:
+        """Return a reason string if this realtime message should be skipped
+        because it originated from our own realtime-feed bot, else None.
+        """
+        sender_id = getattr(message, "sender_id", None)
+        
+        # Layer 1: sender_id match (bot_uid resolved from token)
+        bot_uid = self._notify_bot_user_id
+        if bot_uid is not None and sender_id is not None and int(sender_id) == int(bot_uid):
+            return "notify_bot"
+            
+        # Layer 2: fallback if we couldn't resolve the bot's UID (e.g. network failure on boot).
+        # To avoid a catastrophic loop, we must skip the bot's messages in the logs chat.
+        # But if we know the bot's UID and it didn't match above, it's a human message!
+        # So we only fallback to skipping the logs chat if bot_uid is None.
+        if self._logs_chat_id is not None and chat_id == self._logs_chat_id:
+            if bot_uid is None:
+                return "logs_chat_unresolved_bot"
+                
+        return None
+
     async def _write_realtime_message_with_retry(
         self,
         worker: "TelegramWorker",
@@ -4098,6 +4223,18 @@ class TelegramCollector(BaseCollector):
             if self._hub_group_id is not None and chat_id == self._hub_group_id:
                 return  # discard hub-group messages
             message = event.message
+            # Circular-loop guard: skip messages authored by our own realtime-feed
+            # bot in the logs chat. Without this, the bot's per-post notifications
+            # would be re-ingested as new telegram media_items, which the feed
+            # would then re-send, ad infinitum.
+            skip_reason = self._should_skip_self_bot_message(chat_id, message)
+            if skip_reason is not None:
+                logger.debug(
+                    "telegram skip: self_bot reason=%s chat=%s msg=%s sender=%s",
+                    skip_reason, chat_id, getattr(message, "id", None),
+                    getattr(message, "sender_id", None),
+                )
+                return
             await self._write_realtime_message_with_retry(worker, message, chat_id)
             # Sender resolution hits the network and can raise ChannelPrivateError
             # for private/restricted channels (or if we were removed). Isolate it so
@@ -4122,6 +4259,16 @@ class TelegramCollector(BaseCollector):
         try:
             chat_id = event.chat_id
             message = event.message
+            # Circular-loop guard: same rationale as _on_new_message. An edited
+            # self-bot message must not be ingested either.
+            skip_reason = self._should_skip_self_bot_message(chat_id, message)
+            if skip_reason is not None:
+                logger.debug(
+                    "telegram skip: self_bot reason=%s chat=%s msg=%s sender=%s edit=1",
+                    skip_reason, chat_id, getattr(message, "id", None),
+                    getattr(message, "sender_id", None),
+                )
+                return
             await self._write_realtime_message_with_retry(worker, message, chat_id, is_edit=True)
         except Exception as exc:
             logger.error("_on_message_edited error: %s", _format_exception(exc), exc_info=True)
