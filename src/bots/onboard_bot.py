@@ -99,10 +99,15 @@ async def delete_user_message(update: Update):
         pass
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/start — prompt to begin."""
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """/start — prompt to begin. Auto-triggers onboarding ONLY for deep-link arrivals."""
     await delete_user_message(update)
+    # Deep-link auto-trigger: t.me/bryanseahbot?start=migrate (from theprawnhunter redirect)
+    # ONLY activates on explicit deep-link params — bare /start stays passive
+    if context.args and context.args[0] in ("migrate", "verify", "unlock"):
+        return await startcollector(update, context)
     await send_ephemeral(update, "Send /startcollector to add an account.")
+    return ConversationHandler.END
 
 
 async def startcollector(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -359,7 +364,10 @@ def build_application(token: str, bot_name: str) -> Application:
 
     # Conversation handler for onboarding flow
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("startcollector", startcollector)],
+        entry_points=[
+            CommandHandler("startcollector", startcollector),
+            CommandHandler("start", start),
+        ],
         states={
             ASK_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_phone)],
             ASK_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_code)],
