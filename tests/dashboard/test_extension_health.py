@@ -641,7 +641,7 @@ async def test_browser_extension_payload_content_gap_ignores_manual_backend_prob
 
         async def fetch(self, query: str, *args, timeout: int | None = None):
             nonlocal seen_content_gap_query
-            if "WITH heartbeat AS" in query:
+            if "WITH selected(platform) AS" in query:
                 seen_content_gap_query = query
                 return []
             if "FROM browser_ingest_events" in query:

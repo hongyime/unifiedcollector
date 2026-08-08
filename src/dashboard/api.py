@@ -3289,37 +3289,48 @@ async def _browser_extension_payload(conn) -> dict:
         content_gap_rows = await _fetch_or_empty(
             "browser_content_gap",
             """
-            WITH heartbeat AS (
-                SELECT DISTINCT ON (platform)
-                       platform,
-                       created_at AS heartbeat_at,
-                       metadata
-                FROM browser_ingest_events
-                WHERE endpoint = 'browser_heartbeat'
-                  AND platform = ANY($2::text[])
-                ORDER BY platform, created_at DESC
+            WITH selected(platform) AS (
+                SELECT unnest($2::text[])
+            ),
+            heartbeat AS (
+                SELECT selected.platform,
+                       latest.created_at AS heartbeat_at,
+                       latest.metadata
+                FROM selected
+                LEFT JOIN LATERAL (
+                    SELECT created_at, metadata
+                    FROM browser_ingest_events
+                    WHERE endpoint = 'browser_heartbeat'
+                      AND platform = selected.platform
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                ) latest ON TRUE
             ),
             content AS (
-                SELECT DISTINCT ON (platform)
-                       platform,
-                       created_at AS last_content_at
-                FROM browser_ingest_events
-                WHERE endpoint <> 'browser_heartbeat'
-                  AND (
-                    observed_count > 0
-                    OR stored_count > 0
-                    OR (
-                      metadata ? 'probe_reason'
-                      AND COALESCE(metadata->>'probe_reason', '')
-                          NOT IN (
-                            'manual_backend_probe',
-                            'forced_recovery_started',
-                            'recoverable_error_shell'
-                          )
-                    )
-                  )
-                  AND platform = ANY($2::text[])
-                ORDER BY platform, created_at DESC
+                SELECT selected.platform,
+                       latest.created_at AS last_content_at
+                FROM selected
+                LEFT JOIN LATERAL (
+                    SELECT created_at
+                    FROM browser_ingest_events
+                    WHERE endpoint <> 'browser_heartbeat'
+                      AND platform = selected.platform
+                      AND (
+                        observed_count > 0
+                        OR stored_count > 0
+                        OR (
+                          metadata ? 'probe_reason'
+                          AND COALESCE(metadata->>'probe_reason', '')
+                              NOT IN (
+                                'manual_backend_probe',
+                                'forced_recovery_started',
+                                'recoverable_error_shell'
+                              )
+                        )
+                      )
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                ) latest ON TRUE
             )
             SELECT heartbeat.platform,
                    heartbeat.heartbeat_at,
