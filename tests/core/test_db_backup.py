@@ -291,7 +291,58 @@ def test_pg_dump_prefers_pg_env_over_host_database_url(monkeypatch, tmp_path):
     )
 
     assert commands
+    assert commands[0][1:4] == ["-Fc", "-Z", "0"]
     assert commands[0][-1] == "unifiedcollector"
+
+
+def test_pg_dump_honors_configured_compression(monkeypatch, tmp_path):
+    from src.backup import db_backup
+
+    commands = []
+    monkeypatch.setenv("COLLECTOR_DB_BACKUP_COMPRESSION", "3")
+    monkeypatch.setattr(db_backup, "_run", lambda cmd, *_args, **_kwargs: commands.append(cmd))
+    monkeypatch.setattr(db_backup, "_ensure_nonempty", lambda _path: None)
+
+    db_backup._run_pg_dump(
+        tmp_path / "unifiedcollector_20260720_090000.dump",
+        pg_dump_exe="pg_dump",
+        database="unifiedcollector",
+    )
+
+    assert commands
+    assert commands[0][1:4] == ["-Fc", "-Z", "3"]
+
+
+def test_docker_pg_dump_honors_configured_compression(monkeypatch, tmp_path):
+    from src.backup import db_backup
+
+    commands = []
+    monkeypatch.setenv("COLLECTOR_DB_BACKUP_COMPRESSION", "0")
+    monkeypatch.setattr(db_backup, "_run", lambda cmd, *_args, **_kwargs: commands.append(cmd))
+    monkeypatch.setattr(db_backup, "_ensure_nonempty", lambda _path: None)
+
+    db_backup._run_docker_pg_dump(
+        tmp_path / ".inprogress_20260720_090000.dump",
+        docker_container="postgres",
+        docker_exe="docker",
+        database="unifiedcollector",
+    )
+
+    assert commands
+    assert " -Fc -Z 0 " in commands[0][-1]
+
+
+def test_pg_dump_rejects_invalid_compression(monkeypatch, tmp_path):
+    from src.backup import db_backup
+
+    monkeypatch.setenv("COLLECTOR_DB_BACKUP_COMPRESSION", "10")
+
+    with pytest.raises(ValueError, match="must be between 0 and 9"):
+        db_backup._run_pg_dump(
+            tmp_path / "unifiedcollector_20260720_090000.dump",
+            pg_dump_exe="pg_dump",
+            database="unifiedcollector",
+        )
 
 
 def test_run_kills_dump_when_progress_file_stalls(tmp_path):

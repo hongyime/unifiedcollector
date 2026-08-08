@@ -30,10 +30,11 @@ DEFAULT_WEEKLY = 4
 DEFAULT_MONTHLY = 3
 TIMESTAMP_FORMAT = "%Y%m%d_%H%M%S"
 DEFAULT_STALE_TEMP_MAX_AGE_MINUTES = 60
-DEFAULT_COMMAND_TIMEOUT_SECONDS = 2 * 60 * 60
-DEFAULT_STALL_TIMEOUT_SECONDS = 5 * 60
+DEFAULT_COMMAND_TIMEOUT_SECONDS = 6 * 60 * 60
+DEFAULT_STALL_TIMEOUT_SECONDS = 30 * 60
 DEFAULT_VALIDATE_TIMEOUT_SECONDS = 10 * 60
 DEFAULT_LOCK_STALE_SECONDS = 6 * 60 * 60
+DEFAULT_DUMP_COMPRESSION = 0
 
 _BACKUP_RE = re.compile(r"^(?P<prefix>.+)_(?P<stamp>\d{8}_\d{6})\.dump$")
 
@@ -109,6 +110,19 @@ def _env_int(name: str, default: int) -> int:
 def _env_seconds(name: str, default: int) -> int | None:
     value = _env_int(name, default)
     return value if value > 0 else None
+
+
+def _env_dump_compression() -> str:
+    raw = os.getenv("COLLECTOR_DB_BACKUP_COMPRESSION")
+    if raw is None or raw.strip() == "":
+        return str(DEFAULT_DUMP_COMPRESSION)
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"env var COLLECTOR_DB_BACKUP_COMPRESSION={raw!r} is not an integer") from exc
+    if not 0 <= value <= 9:
+        raise ValueError(f"env var COLLECTOR_DB_BACKUP_COMPRESSION={value} must be between 0 and 9")
+    return str(value)
 
 
 def parse_backup_file(path: Path, *, prefix: str = DEFAULT_PREFIX) -> BackupFile | None:
@@ -503,7 +517,7 @@ def _default_docker_exe() -> str:
 
 
 def _run_pg_dump(tmp: Path, *, pg_dump_exe: str, database: str) -> None:
-    cmd = [pg_dump_exe, "-Fc", "-f", str(tmp)]
+    cmd = [pg_dump_exe, "-Fc", "-Z", _env_dump_compression(), "-f", str(tmp)]
     dsn = os.getenv("DATABASE_URL")
     # In Docker, ../.env may still contain a host-facing DATABASE_URL such as
     # localhost:5500. If PGHOST is explicitly set, trust libpq env instead.
@@ -535,7 +549,7 @@ def _run_docker_pg_dump(
 ) -> None:
     shell = (
         'PGPASSWORD="${POSTGRES_PASSWORD:-}" '
-        'pg_dump -U "${POSTGRES_USER:-collector}" -Fc '
+        f"pg_dump -U \"${{POSTGRES_USER:-collector}}\" -Fc -Z {_env_dump_compression()} "
         f"{_sh_quote(database)}"
     )
     with tmp.open("wb") as fh:
