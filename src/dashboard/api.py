@@ -3039,7 +3039,11 @@ async def _browser_extension_payload(conn) -> dict:
                     OR (
                       metadata ? 'probe_reason'
                       AND COALESCE(metadata->>'probe_reason', '')
-                          NOT IN ('manual_backend_probe', 'forced_recovery_started')
+                          NOT IN (
+                            'manual_backend_probe',
+                            'forced_recovery_started',
+                            'recoverable_error_shell'
+                          )
                     )
                   )
                   AND platform = ANY($2::text[])

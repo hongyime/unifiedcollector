@@ -222,10 +222,10 @@ async def _latest_browser_content_progress(conn, timeout: float) -> dict[str, di
 
     Browser-assisted collectors can make real progress without immediately writing
     a source table row: for example a TikTok/X page can report an empty scrape
-    probe, a page-shell diagnosis, or a candidate queue event. Those events are
-    still the browser proving it ran the content cycle. Treat them as content
-    liveness so the dashboard does not keep reporting an old media/table row as a
-    capture stall after the extension has already recovered.
+    probe or a candidate queue event. Those events are still the browser proving
+    it ran the content cycle. Login/error-shell recovery probes are deliberately
+    excluded: they prove the loop is awake, but not that useful collection is
+    flowing.
     """
     query_timeout = min(3.0, max(0.75, timeout))
     try:
@@ -253,7 +253,11 @@ async def _latest_browser_content_progress(conn, timeout: float) -> dict[str, di
                     OR (
                       metadata ? 'probe_reason'
                       AND COALESCE(metadata->>'probe_reason', '')
-                          NOT IN ('manual_backend_probe', 'forced_recovery_started')
+                          NOT IN (
+                            'manual_backend_probe',
+                            'forced_recovery_started',
+                            'recoverable_error_shell'
+                          )
                     )
                   )
                 ORDER BY created_at DESC
