@@ -1949,7 +1949,17 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
     source_health_error_lc = str(source_health_error).lower()
     detail_lc = str(source_row.get("detail") or "").lower()
     browser_stall_text = f"{source_health_error_lc}\n{detail_lc}"
-    if source_health_error_lc.startswith("browser capture stalled:") or "browser content progress is" in browser_stall_text:
+    browser_stall_marker = source_health_error_lc.startswith("browser capture stalled:") or (
+        "browser content progress is" in source_health_error_lc
+    )
+    stale_browser_marker = browser_stall_marker and (
+        "watchdog" in source_health_error_lc
+    )
+    stale_browser_content_now = bool(source_row.get("browser_content_stale")) or status != "live"
+    if stale_browser_content_now and (
+        browser_stall_marker
+        or "browser content progress is" in detail_lc
+    ):
         platform = str(source or "this platform")
         return {
             "kind": "browser_capture_stalled",
@@ -1961,7 +1971,12 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
                 "Docker collector logs are secondary for this browser-tab stall."
             ),
         }
-    if source_row.get("source_health_status") in {"dead", "auth_paused", "degraded"}:
+    stale_watchdog_degraded_cleared = (
+        status == "live"
+        and source_row.get("source_health_status") == "degraded"
+        and stale_browser_marker
+    )
+    if source_row.get("source_health_status") in {"dead", "auth_paused", "degraded"} and not stale_watchdog_degraded_cleared:
         return {
             "kind": source_row.get("source_health_status"),
             "severity": "error" if source_row.get("source_health_status") == "dead" else "warning",
@@ -2515,6 +2530,26 @@ async def _browser_extension_payload(conn) -> dict:
             _record_diagnostic_error(label, exc)
             return None
 
+    browser_ingest_events_exists = await _fetchval_or_none(
+        "browser_ingest_events_table",
+        "SELECT to_regclass('browser_ingest_events')",
+    ) is not None
+    if browser_ingest_events_exists:
+        extension_id, reload_url = _extension_reload_target_from_url(await _fetchval_or_none(
+            "browser_extension_reload_target",
+            """
+            SELECT metadata->>'url'
+            FROM browser_ingest_events
+            WHERE platform = 'bridge'
+              AND endpoint = 'browser_heartbeat'
+              AND metadata->>'url' LIKE 'chrome-extension://%/background.js'
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+        ))
+        payload["extension_id"] = extension_id
+        payload["reload_url"] = reload_url
+
     if await _fetchval_or_none("dm_hook_table", "SELECT to_regclass('dm_hook_heartbeat')") is not None:
         rows = await _fetch_or_empty(
             "dm_hook_heartbeat",
@@ -2570,22 +2605,7 @@ async def _browser_extension_payload(conn) -> dict:
                     "needs_new_event": not recent,
                 })
 
-    if await _fetchval_or_none("browser_ingest_events_table", "SELECT to_regclass('browser_ingest_events')") is not None:
-        extension_id, reload_url = _extension_reload_target_from_url(await _fetchval_or_none(
-            "browser_extension_reload_target",
-            """
-            SELECT metadata->>'url'
-            FROM browser_ingest_events
-            WHERE platform = 'bridge'
-              AND endpoint = 'browser_heartbeat'
-              AND metadata->>'url' LIKE 'chrome-extension://%/background.js'
-            ORDER BY created_at DESC
-            LIMIT 1
-            """,
-        ))
-        payload["extension_id"] = extension_id
-        payload["reload_url"] = reload_url
-
+    if browser_ingest_events_exists:
         rows = await _fetch_or_empty(
             "browser_ingest_events",
             """

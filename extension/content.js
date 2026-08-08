@@ -588,7 +588,8 @@ function switchXHostForRecoverableShell(shell) {
   const navKey = `uc_x_shell_nav_${shell.reason || "shell"}`;
   const stepKey = "uc_x_shell_global_step";
   const lastNav = lsNum(navKey);
-  if (lastNav && Date.now() - lastNav < 90000) return false;
+  const minNavGapMs = /try_again/i.test(shell.reason || "") ? 30000 : 90000;
+  if (lastNav && Date.now() - lastNav < minNavGapMs) return false;
   lsSet(navKey, String(Date.now()));
   const host = String(location.hostname || "").toLowerCase();
   const stamp = Math.floor(Date.now() / 1000);
@@ -628,8 +629,13 @@ async function attemptRecoverablePageInteraction(platformId, shell) {
   }
   const key = `uc_recover_click_${platformId}_${shell.reason || "shell"}`;
   const last = lsNum(key);
-  if (platformId === "x" && last && Date.now() - last < 10 * 60000) {
+  if (platformId === "x") {
+    if (last && Date.now() - last < 15000) return false;
+    lsSet(key, String(Date.now()));
     if (switchXHostForRecoverableShell(shell)) return true;
+    // X's native "Try again" shell often re-renders the same empty SPA. Avoid
+    // clicking it repeatedly; the scheduled page recovery will hard-navigate.
+    return false;
   }
   if (last && Date.now() - last < 60000) return false;
   const button = findRecoverablePageActionButton();

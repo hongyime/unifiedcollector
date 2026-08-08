@@ -94,7 +94,20 @@ FRESHNESS: list[tuple[str, str, int]] = [
     ),
     ("threads",   "SELECT extract(epoch FROM now()-max(collected_at)) FROM threads_posts", 2 * _DAY),
     ("facebook",  "SELECT extract(epoch FROM now()-max(collected_at)) FROM facebook_posts", 2 * _DAY),
-    ("x",         "SELECT extract(epoch FROM now()-max(collected_at)) FROM x_posts", 2 * _DAY),
+    (
+        "x",
+        """
+        SELECT extract(epoch FROM now()-max(ts))
+        FROM (
+            SELECT max(updated_at) AS ts FROM x_profiles
+            UNION ALL
+            SELECT max(collected_at) AS ts FROM x_posts
+            UNION ALL
+            SELECT max(collected_at) AS ts FROM media_items WHERE source='x'
+        ) progress
+        """,
+        2 * _DAY,
+    ),
     ("youtube",   "SELECT extract(epoch FROM now()-max(collected_at)) FROM youtube_videos", 2 * _DAY),
     ("website",   "SELECT extract(epoch FROM now()-max(collected_at)) FROM website_pages", 3 * _DAY),
     ("github",    "SELECT extract(epoch FROM now()-max(collected_at)) FROM github_commits", 3 * _DAY),
@@ -111,7 +124,7 @@ FRESHNESS_BASIS = {
     "lemon8": "newest Lemon8 profile update or media row",
     "threads": "threads_posts.collected_at",
     "facebook": "facebook_posts.collected_at",
-    "x": "x_posts.collected_at",
+    "x": "newest X profile update, post row, or media row",
     "youtube": "youtube_videos.collected_at",
     "website": "website_pages.collected_at",
     "github": "github_commits.collected_at",

@@ -147,7 +147,7 @@ def test_extension_auto_reload_is_immediate_with_alarm_backup():
     assert "chrome.runtime.reload()" in alarm_block
 
 
-def test_recoverable_page_shells_try_native_retry_before_waiting():
+def test_recoverable_page_shells_recover_without_waiting_on_x_native_retry():
     content = _read("extension/content.js")
 
     assert "function findRecoverablePageActionButton" in content
@@ -157,6 +157,12 @@ def test_recoverable_page_shells_try_native_retry_before_waiting():
     assert "uc_x_shell_global_step" in content
     assert "https://x.com/i/flow/login?redirect_after_login=%2Fhome" in content
     assert "https://x.com/home?uc_recover=" in content
+    recover_block = content.split("async function attemptRecoverablePageInteraction", 1)[1].split(
+        "// Capture is ALWAYS ON", 1
+    )[0]
+    assert "platformId === \"x\"" in recover_block
+    assert "Date.now() - last < 15000" in recover_block
+    assert "switchXHostForRecoverableShell(shell)" in recover_block
 
 
 def test_tiktok_zero_progress_reports_probe_and_page_recovery():
@@ -410,7 +416,7 @@ def test_x_error_shell_can_switch_host_when_native_retry_is_missing():
     assert "failed_script" in switch_block
     assert "uc_recover_click_x_failed_script_url" in recover_block
     assert '"https://x.com/home?uc_recover="' in recover_block
-    assert "last && Date.now() - last < 10 * 60000" in recover_block
+    assert "Date.now() - last < 15000" in recover_block
 
 
 

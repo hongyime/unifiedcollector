@@ -357,3 +357,67 @@ async def test_browser_content_stale_does_not_depend_on_heartbeat_query(monkeypa
     assert rows[0]["browser_heartbeat_age_seconds"] is None
     assert rows[0]["browser_content_stale"] is True
     assert "browser content progress is 9000s old" in rows[0]["detail"]
+
+
+@pytest.mark.asyncio
+async def test_x_media_progress_clears_old_browser_watchdog_marker(monkeypatch):
+    from src.core import source_freshness
+
+    class XMediaProgressConn:
+        async def fetch(self, query: str, *args, timeout: int = 8):
+            if "FROM source_health" in query:
+                return [
+                    {
+                        "source": "x",
+                        "status": "degraded",
+                        "last_error": "browser capture stalled: browser content progress is 9000s old (> 3600s) (watchdog)",
+                        "last_success_at": None,
+                        "updated_at": None,
+                    }
+                ]
+            if "browser_ingest_events" in query:
+                return [
+                    {
+                        "platform": "x",
+                        "last_seen_at": "2026-07-28T01:00:00+00:00",
+                        "age_seconds": 30,
+                        "extension_version": "1.23.45",
+                        "url": "https://x.com/home",
+                        "health_status": "background_tab_seen",
+                    }
+                ]
+            raise AssertionError(query)
+
+        async def fetchval(self, query: str, *args, timeout: int = 8):
+            if "x_profiles" in query and "x_posts" in query and "media_items WHERE source='x'" in query:
+                return 300
+            return None
+
+    monkeypatch.setenv("BROWSER_CONTENT_STALE_WARN_SECONDS", "3600")
+    monkeypatch.setattr(
+        source_freshness,
+        "FRESHNESS",
+        [
+            (
+                "x",
+                """
+                SELECT extract(epoch FROM now()-max(ts))
+                FROM (
+                    SELECT max(updated_at) AS ts FROM x_profiles
+                    UNION ALL
+                    SELECT max(collected_at) AS ts FROM x_posts
+                    UNION ALL
+                    SELECT max(collected_at) AS ts FROM media_items WHERE source='x'
+                ) progress
+                """,
+                172800,
+            )
+        ],
+    )
+
+    rows = await source_freshness.compute_liveness(XMediaProgressConn())
+
+    assert rows[0]["status"] == "live"
+    assert rows[0]["age_seconds"] == 300
+    assert rows[0]["browser_content_stale"] is False
+    assert "watchdog marker ignored" in rows[0]["detail"]

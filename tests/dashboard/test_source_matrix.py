@@ -141,6 +141,21 @@ def test_source_matrix_blocker_browser_watchdog_gives_tab_action():
     assert detail_only_blocker["summary"] == "browser content progress is 14612s old (> 3600s)"
     assert "refresh the x browser tab" in detail_only_blocker["next_action"]
 
+    cleared_blocker = _source_matrix_blocker(
+        _source(
+            source="x",
+            status="live",
+            source_health_status="degraded",
+            source_health_error="browser capture stalled: browser content progress is 9000s old (> 3600s) (watchdog)",
+            browser_content_stale=False,
+        ),
+        rate_row=None,
+        cursor_row=None,
+        extension_issues=[],
+    )
+
+    assert cleared_blocker["kind"] == "none"
+
 
 def test_source_matrix_expensive_sections_have_bounded_default_timeouts():
     assert _SOURCE_MATRIX_DAY_CONTENT_TIMEOUT_SECONDS <= 8
