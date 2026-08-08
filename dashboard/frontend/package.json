@@ -9,20 +9,20 @@
     "preview": "vite preview"
   },
   "devDependencies": {
-    "@tailwindcss/vite": "^4.3.0",
-    "@types/react": "^19.2.14",
-    "@types/react-dom": "^19.2.3",
-    "@vitejs/plugin-react": "^6.0.2",
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@vitejs/plugin-react": "^6.0.5",
     "tailwindcss": "^4.3.0",
-    "typescript": "~6.0.2",
-    "vite": "^8.1.5"
+    "typescript": "~7.0.2",
+    "vite": "^8.2.0"
   },
   "dependencies": {
-    "@tanstack/react-query": "^5.100.10",
-    "@tanstack/react-table": "^8.21.3",
+    "@tanstack/react-query": "^5.101.4",
+    "@tanstack/react-table": "^9.0.0",
     "clsx": "^2.1.1",
-    "date-fns": "^4.1.0",
-    "lucide-react": "^1.16.0",
+    "date-fns": "^4.4.0",
+    "lucide-react": "^1.28.0",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
     "react-router": "^8.3.0"
