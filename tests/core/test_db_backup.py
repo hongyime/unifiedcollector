@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
@@ -31,10 +32,13 @@ def _dump(tmp_path: Path, stamp: str, *, size: int = 1) -> Path:
     return path
 
 
-def _active_lock(tmp_path: Path) -> Path:
+def _active_lock(tmp_path: Path, *, started_at: str | None = None) -> Path:
     lock = tmp_path / ".backup.lock"
     lock.mkdir()
-    (lock / "owner.json").write_text("{}", encoding="utf-8")
+    payload = {}
+    if started_at is not None:
+        payload["started_at"] = started_at
+    (lock / "owner.json").write_text(json.dumps(payload), encoding="utf-8")
     return lock
 
 
@@ -170,6 +174,24 @@ def test_backup_status_marks_empty_dir_refreshing_when_new_dump_active(tmp_path)
     assert status["latest_path"] is None
     assert status["backup_count"] == 0
     assert status["in_progress"] is True
+
+
+def test_backup_status_reports_long_running_active_dump(tmp_path, monkeypatch):
+    _dump(tmp_path, "20200101_000000")
+    temp = tmp_path / ".inprogress_20260721_033012.dump"
+    temp.write_bytes(b"x" * 7)
+    started = "2026-07-21T03:30:12"
+    _active_lock(tmp_path, started_at=started)
+    monkeypatch.setenv("COLLECTOR_DB_BACKUP_LONG_RUNNING_SECONDS", "3600")
+
+    status = backup_status(tmp_path, max_age_hours=1)
+
+    assert status["status"] == "refreshing"
+    assert status["in_progress_started_at"] == started
+    assert status["in_progress_elapsed_seconds"] is not None
+    assert status["in_progress_elapsed_seconds"] > 3600
+    assert status["in_progress_long_running"] is True
+    assert status["in_progress_long_running_seconds"] == 3600
 
 
 def test_retention_keeps_newest_daily_weekly_monthly_buckets(tmp_path):

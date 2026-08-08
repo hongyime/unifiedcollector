@@ -36,6 +36,7 @@ DEFAULT_VALIDATE_TIMEOUT_SECONDS = 10 * 60
 DEFAULT_LOCK_STALE_SECONDS = 6 * 60 * 60
 DEFAULT_DUMP_COMPRESSION = 0
 DEFAULT_PROGRESS_LOG_SECONDS = 5 * 60
+DEFAULT_LONG_RUNNING_SECONDS = 4 * 60 * 60
 
 _BACKUP_RE = re.compile(r"^(?P<prefix>.+)_(?P<stamp>\d{8}_\d{6})\.dump$")
 
@@ -168,6 +169,10 @@ def backup_status(
             "COLLECTOR_DB_BACKUP_LOCK_STALE_SECONDS",
             DEFAULT_LOCK_STALE_SECONDS,
         )
+        long_running_seconds = _env_int(
+            "COLLECTOR_DB_BACKUP_LONG_RUNNING_SECONDS",
+            DEFAULT_LONG_RUNNING_SECONDS,
+        )
         backups = list_backup_files(root, prefix=prefix)
         temp_files = sorted(root.glob(".inprogress_*.dump")) if root.exists() else []
         lock_dir = root / ".backup.lock"
@@ -187,6 +192,10 @@ def backup_status(
             "in_progress_recent_max_age_seconds": None,
             "lock_active": False,
             "lock_age_seconds": None,
+            "in_progress_started_at": None,
+            "in_progress_elapsed_seconds": None,
+            "in_progress_long_running": False,
+            "in_progress_long_running_seconds": None,
             "max_age_hours": max_age_hours,
             "error": str(exc),
         }
@@ -208,13 +217,29 @@ def backup_status(
         )
     lock_age_seconds = None
     lock_active = False
+    lock_started_at: str | None = None
+    lock_elapsed_seconds: int | None = None
     if lock_dir.exists():
         try:
             lock_age_seconds = max(0, int(now.timestamp() - lock_dir.stat().st_mtime))
             lock_active = lock_stale_seconds <= 0 or lock_age_seconds <= lock_stale_seconds
+            owner_path = lock_dir / "owner.json"
+            if owner_path.exists():
+                try:
+                    owner = json.loads(owner_path.read_text(encoding="utf-8"))
+                    started_raw = owner.get("started_at")
+                    if started_raw:
+                        started_dt = datetime.fromisoformat(str(started_raw))
+                        lock_started_at = started_dt.isoformat()
+                        lock_elapsed_seconds = max(0, int((now - started_dt).total_seconds()))
+                except Exception:
+                    lock_started_at = None
+                    lock_elapsed_seconds = None
         except OSError:
             lock_age_seconds = None
             lock_active = False
+            lock_started_at = None
+            lock_elapsed_seconds = None
     active_temp_records = [
         record
         for record in temp_records
@@ -249,6 +274,15 @@ def backup_status(
         "in_progress_recent_max_age_seconds": active_temp_max_age_seconds,
         "lock_active": lock_active,
         "lock_age_seconds": lock_age_seconds,
+        "in_progress_started_at": lock_started_at if lock_active else None,
+        "in_progress_elapsed_seconds": lock_elapsed_seconds if lock_active else None,
+        "in_progress_long_running": (
+            bool(lock_active)
+            and lock_elapsed_seconds is not None
+            and long_running_seconds > 0
+            and lock_elapsed_seconds >= long_running_seconds
+        ),
+        "in_progress_long_running_seconds": long_running_seconds,
     }
     latest = backups[0] if backups else None
     if latest is None:

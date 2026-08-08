@@ -24,6 +24,31 @@ def test_format_backup_status_reports_first_dump_refreshing():
     assert "Latest collector DB backup" not in msg
 
 
+def test_format_backup_status_reports_long_running_refreshing_dump():
+    from src.notifications.alerts import _format_backup_status
+
+    msg = _format_backup_status({
+        "status": "refreshing",
+        "root": "/vault/backups/db",
+        "latest_path": "/vault/backups/db/unifiedcollector_20260731_033013.dump",
+        "latest_age_seconds": 8 * 24 * 3600,
+        "latest_size_bytes": 3_800_000_000,
+        "backup_count": 7,
+        "max_age_hours": 30,
+        "in_progress": True,
+        "in_progress_temp_size_bytes": 6_500_000_000,
+        "in_progress_temp_updated_age_seconds": 0,
+        "in_progress_elapsed_seconds": 13 * 3600,
+        "in_progress_long_running": True,
+        "stale_in_progress_count": 0,
+    })
+
+    assert "Previous completed dump is older than 30h" in msg
+    assert "after running 13.0h" in msg
+    assert "6.1 GB temp file" in msg
+    assert "long-running" in msg
+
+
 @pytest.mark.asyncio
 async def test_notify_status_splits_rate_limit_from_auth_events(monkeypatch):
     from src.notifications import alerts
