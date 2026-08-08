@@ -586,22 +586,25 @@ function switchXHostForRecoverableShell(shell) {
     return false;
   }
   const navKey = `uc_x_shell_nav_${shell.reason || "shell"}`;
-  const stepKey = `uc_x_shell_step_${shell.reason || "shell"}`;
+  const stepKey = "uc_x_shell_global_step";
   const lastNav = lsNum(navKey);
-  if (lastNav && Date.now() - lastNav < 120000) return false;
+  if (lastNav && Date.now() - lastNav < 90000) return false;
   lsSet(navKey, String(Date.now()));
   const host = String(location.hostname || "").toLowerCase();
-  const alternateHost = host.includes("twitter.com") ? "https://x.com/home" : "https://twitter.com/home";
+  const stamp = Math.floor(Date.now() / 1000);
+  const alternateHost = host.includes("twitter.com") ? `https://x.com/home?uc_recover=${stamp}` : `https://twitter.com/home?uc_recover=${stamp}`;
   const owner = ownerFromStoredOrDom("x", xLoggedInOwner);
-  const step = (lsNum(stepKey) % 4) + 1;
+  const step = (lsNum(stepKey) % 5) + 1;
   lsSet(stepKey, String(step));
-  const target = step === 2 && owner
-    ? "https://x.com/" + encodeURIComponent(owner)
+  const target = step === 1
+    ? `https://x.com/explore?uc_recover=${stamp}`
+    : step === 2
+      ? "https://x.com/i/flow/login?redirect_after_login=%2Fhome"
     : step === 3
-      ? "https://x.com/explore"
-      : step === 4
-        ? "https://x.com/home?uc_recover=" + Math.floor(Date.now() / 1000)
-        : alternateHost;
+      ? alternateHost
+      : step === 4 && owner
+        ? "https://x.com/" + encodeURIComponent(owner) + "?uc_recover=" + stamp
+        : "https://x.com/home?uc_recover=" + stamp;
   clog("warn", `x page shell still stuck (${shell.reason}); navigating to ${target}`, "x");
   location.href = target;
   return true;

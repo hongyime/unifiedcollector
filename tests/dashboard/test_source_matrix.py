@@ -109,6 +109,21 @@ def test_source_matrix_blocker_browser_watchdog_gives_tab_action():
     assert "refresh the threads browser tab" in blocker["next_action"]
     assert "Docker collector logs are secondary" in blocker["next_action"]
 
+    x_blocker = _source_matrix_blocker(
+        _source(
+            source="x",
+            status="degraded",
+            source_health_status="degraded",
+            source_health_error="browser content progress is 14124s old (> 3600s)",
+        ),
+        rate_row=None,
+        cursor_row=None,
+        extension_issues=[],
+    )
+
+    assert x_blocker["kind"] == "browser_capture_stalled"
+    assert "refresh the x browser tab" in x_blocker["next_action"]
+
 
 def test_source_matrix_expensive_sections_have_bounded_default_timeouts():
     assert _SOURCE_MATRIX_DAY_CONTENT_TIMEOUT_SECONDS <= 8

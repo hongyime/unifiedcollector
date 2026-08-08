@@ -1946,7 +1946,8 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
             "summary": detail,
             "next_action": next_action,
         }
-    if str(source_health_error).lower().startswith("browser capture stalled:"):
+    source_health_error_lc = str(source_health_error).lower()
+    if source_health_error_lc.startswith("browser capture stalled:") or "browser content progress is" in source_health_error_lc:
         platform = str(source or "this platform")
         return {
             "kind": "browser_capture_stalled",
