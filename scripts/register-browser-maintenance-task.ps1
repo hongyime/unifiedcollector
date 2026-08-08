@@ -31,13 +31,35 @@ $settings = New-ScheduledTaskSettingsSet `
     -ExecutionTimeLimit (New-TimeSpan -Hours 0) `
     -MultipleInstances IgnoreNew
 
-Register-ScheduledTask `
-    -TaskName $TaskName `
-    -Action $action `
-    -Trigger $trigger `
-    -Settings $settings `
-    -Description "Keeps UnifiedCollector browser tab audit/reload maintenance loop alive." `
-    -Force | Out-Null
+try {
+    Register-ScheduledTask `
+        -TaskName $TaskName `
+        -Action $action `
+        -Trigger $trigger `
+        -Settings $settings `
+        -Description "Keeps UnifiedCollector browser tab audit/reload maintenance loop alive." `
+        -Force | Out-Null
 
-Write-Host "Registered scheduled task $TaskName."
-Write-Host "Start it now with: Start-ScheduledTask -TaskName $TaskName"
+    Write-Host "Registered scheduled task $TaskName."
+    Write-Host "Start it now with: Start-ScheduledTask -TaskName $TaskName"
+    exit 0
+} catch {
+    $message = $_.Exception.Message
+    if ($message -notmatch "Access is denied|0x80070005") {
+        throw
+    }
+    $startup = [Environment]::GetFolderPath("Startup")
+    if (-not $startup) {
+        throw "Scheduled task registration was denied and the user Startup folder could not be resolved."
+    }
+    $cmdPath = Join-Path $startup "$TaskName.cmd"
+    $cmd = @(
+        "@echo off",
+        "cd /d `"$repo`"",
+        "`"$psExe`" -NoProfile -ExecutionPolicy Bypass -File `"$starter`" -IntervalMinutes $IntervalMinutes -InitialDelaySeconds 60"
+    ) -join "`r`n"
+    Set-Content -LiteralPath $cmdPath -Value $cmd -Encoding ASCII
+    Write-Warning "Scheduled task registration was denied; installed current-user Startup fallback instead."
+    Write-Host "Startup fallback: $cmdPath"
+    Write-Host "Start it now with: powershell -ExecutionPolicy Bypass -File `"$starter`" -IntervalMinutes $IntervalMinutes -InitialDelaySeconds 0"
+}
