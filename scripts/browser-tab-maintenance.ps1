@@ -32,11 +32,11 @@ function Get-ChromeCdpDiagnostics {
             $browserRoots += $proc
         }
     }
-    $hint = "Start or restart the scraper Chrome with --remote-debugging-port=9222; do not open extra Chrome windows manually for maintenance."
+    $hint = "Close Chrome, then run scripts\start-scraper-chrome-cdp.ps1 so the scraper Chrome starts with --remote-debugging-port=9222; do not open extra Chrome windows manually for maintenance."
     $reason = "chrome_cdp_unavailable"
     if ($processes.Count -eq 0) {
         $reason = "chrome_not_running"
-        $hint = "Open the collector scraper Chrome profile with --remote-debugging-port=9222, then reload the extension tabs."
+        $hint = "Run scripts\start-scraper-chrome-cdp.ps1 to open the collector scraper Chrome profile with --remote-debugging-port=9222, then reload the extension tabs."
     } elseif ($withCdp.Count -eq 0) {
         $reason = "chrome_running_without_cdp"
     }
