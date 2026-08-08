@@ -1,6 +1,6 @@
 param(
     [int]$IntervalMinutes = 30,
-    [int]$InitialDelaySeconds = 1800
+    [int]$InitialDelaySeconds = 60
 )
 
 $ErrorActionPreference = "Stop"

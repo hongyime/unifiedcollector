@@ -33,6 +33,7 @@ function Get-ChromeCdpDiagnostics {
             $browserRoots += $proc
         }
     }
+    $repairCommand = "powershell -ExecutionPolicy Bypass -File scripts\start-scraper-chrome-cdp.ps1"
     $hint = "Close Chrome, then run scripts\start-scraper-chrome-cdp.ps1 so the scraper Chrome starts with --remote-debugging-port=9222; do not open extra Chrome windows manually for maintenance."
     $reason = "chrome_cdp_unavailable"
     if ($processes.Count -eq 0) {
@@ -40,6 +41,10 @@ function Get-ChromeCdpDiagnostics {
         $hint = "Run scripts\start-scraper-chrome-cdp.ps1 to open the collector scraper Chrome profile with --remote-debugging-port=9222, then reload the extension tabs."
     } elseif ($withCdp.Count -eq 0) {
         $reason = "chrome_running_without_cdp"
+        if ($visibleWindows.Count -eq 0) {
+            $repairCommand = "powershell -ExecutionPolicy Bypass -File scripts\start-scraper-chrome-cdp.ps1 -CloseExistingIfNoVisibleWindows"
+            $hint = "Chrome has no visible windows and no CDP. Run scripts\start-scraper-chrome-cdp.ps1 -CloseExistingIfNoVisibleWindows to close orphaned background Chrome and relaunch scraper Chrome with CDP. If Windows denies protected Chrome PIDs, close Chrome from Task Manager or restart the Windows Chrome session."
+        }
     }
     return [ordered]@{
         reason = $reason
@@ -49,6 +54,7 @@ function Get-ChromeCdpDiagnostics {
         chrome_cdp_process_count = $withCdp.Count
         chrome_user_data_process_count = $withUserData.Count
         hint = $hint
+        repair_command = $repairCommand
     }
 }
 
