@@ -61,6 +61,7 @@ _BROWSER_TAB_MAINTENANCE_STATUS_PATH = os.getenv(
 _SOURCE_CONTENT_PART_TIMEOUT_SECONDS = float(os.getenv("SOURCE_CONTENT_PART_TIMEOUT_SECONDS", "0.75"))
 _SOURCE_CONTENT_MEDIA_TIMEOUT_SECONDS = float(os.getenv("SOURCE_CONTENT_MEDIA_TIMEOUT_SECONDS", "1.25"))
 _SOURCE_CONTENT_SUMMARY_BUDGET_SECONDS = float(os.getenv("SOURCE_CONTENT_SUMMARY_BUDGET_SECONDS", "2.5"))
+_BROWSER_TAB_MAINTENANCE_STALE_SECONDS = int(os.getenv("BROWSER_TAB_MAINTENANCE_STALE_SECONDS", "2700"))
 _SOURCE_MATRIX_SECTION_CACHE: dict[str, dict[str, object]] = {}
 _SOURCE_MATRIX_SECTION_CACHE_TTL_SECONDS = int(os.getenv("SOURCE_MATRIX_SECTION_CACHE_TTL_SECONDS", "30"))
 _SOURCE_MATRIX_SECTION_STALE_SECONDS = int(os.getenv("SOURCE_MATRIX_SECTION_STALE_SECONDS", "900"))
@@ -285,11 +286,18 @@ def _browser_tab_maintenance_payload(
         age_seconds = max(0, int(time.time() - path.stat().st_mtime))
     except OSError:
         age_seconds = None
+    stale = bool(
+        age_seconds is not None
+        and _BROWSER_TAB_MAINTENANCE_STALE_SECONDS > 0
+        and age_seconds > _BROWSER_TAB_MAINTENANCE_STALE_SECONDS
+    )
     return {
         "state": str(raw.get("state") or "unknown"),
         "detail": raw.get("detail"),
         "checked_at": raw.get("checked_at"),
         "age_seconds": age_seconds,
+        "stale": stale,
+        "stale_after_seconds": _BROWSER_TAB_MAINTENANCE_STALE_SECONDS,
         "cdp_url": raw.get("cdp_url"),
         "audit_result": raw.get("audit_result"),
         "reload_plan": raw.get("reload_plan"),
@@ -2574,6 +2582,18 @@ async def _browser_extension_payload(conn) -> dict:
     if maintenance:
         payload["maintenance"] = maintenance
         state = str(maintenance.get("state") or "")
+        if maintenance.get("stale"):
+            payload["issues"].append({
+                "platform": "browser",
+                "kind": "browser_maintenance_stale",
+                "detail": (
+                    "Browser tab maintenance has not reported recently; "
+                    "tab reload/audit automation may not be running."
+                ),
+                "age_seconds": maintenance.get("age_seconds"),
+                "stale_after_seconds": maintenance.get("stale_after_seconds"),
+                "checked_at": maintenance.get("checked_at"),
+            })
         if state in {"cdp_unavailable", "unreadable", "invalid"}:
             diagnostics = maintenance.get("diagnostics") or {}
             reason = diagnostics.get("reason")

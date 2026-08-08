@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import json
 import os
+import time
 
 import pytest
 
@@ -51,6 +52,7 @@ def test_browser_tab_maintenance_payload_reads_host_status(tmp_path):
     assert payload["pid"] == 15168
     assert payload["diagnostics"]["reason"] == "chrome_running_without_cdp"
     assert payload["diagnostics"]["chrome_process_count"] == 26
+    assert payload["stale"] is False
     assert isinstance(payload["age_seconds"], int)
 
 
@@ -169,6 +171,48 @@ async def test_browser_extension_payload_includes_browser_maintenance_issue(monk
     assert payload["issues"][0]["cdp_url"] == "http://127.0.0.1:9222"
     assert payload["issues"][0]["diagnostics"]["chrome_cdp_process_count"] == 0
     assert "chrome_running_without_cdp" in payload["issues"][0]["detail"]
+
+
+@pytest.mark.asyncio
+async def test_browser_extension_payload_flags_stale_browser_maintenance(monkeypatch, tmp_path):
+    status = tmp_path / "browser_tab_maintenance_status.json"
+    status.write_text(
+        json.dumps({
+            "state": "ok",
+            "detail": "audit and reload completed",
+            "checked_at": "2026-08-08T18:26:17.1804359+08:00",
+        }),
+        encoding="utf-8",
+    )
+    old = time.time() - 7200
+    os.utime(status, (old, old))
+    monkeypatch.setattr(dashboard_api, "_BROWSER_TAB_MAINTENANCE_STATUS_PATH", str(status))
+    monkeypatch.setattr(dashboard_api, "_BROWSER_TAB_MAINTENANCE_STALE_SECONDS", 2700)
+
+    class FakeConn:
+        async def fetchval(self, query: str, timeout: int | None = None):
+            if "dm_hook_heartbeat" in query:
+                return None
+            if "browser_ingest_events" in query:
+                return None
+            if "tiktok_browser_media_candidates" in query:
+                return None
+            if "tiktok_browser_revisit_queue" in query:
+                return None
+            if "browser_media_candidates" in query:
+                return None
+            if "browser_media_revisit_queue" in query:
+                return None
+            raise AssertionError(query)
+
+        async def fetch(self, query: str, *args, timeout: int | None = None):
+            raise AssertionError(query)
+
+    payload = await _browser_extension_payload(FakeConn())
+
+    assert payload["maintenance"]["stale"] is True
+    assert payload["maintenance"]["stale_after_seconds"] == 2700
+    assert payload["issues"][0]["kind"] == "browser_maintenance_stale"
 
 
 @pytest.mark.asyncio
