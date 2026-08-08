@@ -2191,6 +2191,7 @@ def _source_matrix_is_x_auth_wall_url(browser_url: str) -> bool:
         "/i/flow/login" in url_lc
         or "/i/jf/onboarding" in url_lc
         or "mode=login" in url_lc
+        or "logout=" in url_lc
     )
 
 
