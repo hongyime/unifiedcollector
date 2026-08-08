@@ -2845,12 +2845,16 @@ class YoutubeCollector(BaseCollector):
             safe_error = _safe_log_text(e)
             status = getattr(getattr(e, "response", None), "status_code", None)
             if status == 404 and item.get("content_type") == "thumbnail":
-                logger.warning(
+                logger.info(
                     "YouTube thumbnail unavailable %s: %s",
                     cid,
                     request_url or safe_error,
                 )
-                await self.send_to_dlq(item["entity_id"], cid, f"thumbnail_not_found: {safe_error}")
+                await self._mark_video_media_attempt(
+                    cid,
+                    status="thumbnail_unavailable",
+                    reason=safe_error or "thumbnail_not_found",
+                )
                 return False
             logger.error("Download failed %s: %s", cid, safe_error)
             await self.send_to_dlq(item["entity_id"], cid, safe_error)

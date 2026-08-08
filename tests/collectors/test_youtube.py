@@ -737,7 +737,9 @@ async def test_download_media_thumbnail_404_is_audited_warning(monkeypatch, tmp_
 
     monkeypatch.setattr(youtube_mod.httpx, "AsyncClient", _StubAsyncClient)
 
-    with caplog.at_level("WARNING"):
+    coll._mark_video_media_attempt = AsyncMock()
+
+    with caplog.at_level("INFO", logger="src.collectors.youtube"):
         inserted = await coll.download_media({
             "entity_id": "UC123",
             "entity_name": "Example Channel",
@@ -749,10 +751,17 @@ async def test_download_media_thumbnail_404_is_audited_warning(monkeypatch, tmp_
 
     assert inserted is False
     coll.insert_media_item.assert_not_awaited()
-    coll.send_to_dlq.assert_awaited_once()
-    assert "thumbnail_not_found" in coll.send_to_dlq.await_args.args[2]
+    coll.send_to_dlq.assert_not_awaited()
+    coll._mark_video_media_attempt.assert_awaited_once()
+    assert coll._mark_video_media_attempt.await_args.args[0] == "abc123xyz90"
+    assert coll._mark_video_media_attempt.await_args.kwargs["status"] == "thumbnail_unavailable"
     assert "YouTube thumbnail unavailable abc123xyz90" in caplog.text
     assert "Download failed abc123xyz90" not in caplog.text
+    assert not any(
+        record.levelname == "WARNING"
+        and "YouTube thumbnail unavailable abc123xyz90" in record.message
+        for record in caplog.records
+    )
 
 
 @pytest.mark.asyncio
