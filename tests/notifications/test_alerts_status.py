@@ -461,3 +461,38 @@ def test_section_builders_are_callable_and_pure():
     # Header and rate-limits are always emitted, even on an empty snapshot.
     assert alerts._section_header({}) is not None
     assert alerts._section_rate_limits({}) is not None
+
+
+def test_browser_ingest_section_calls_out_heartbeat_only_cdp_stuck_state():
+    from src.notifications import alerts
+
+    lines = alerts._section_browser_ingest({
+        "browser_ingest_health": {
+            "state": "active",
+            "active": True,
+            "heartbeat_active": True,
+            "content_active": False,
+            "last_seen_age_seconds": 15,
+            "last_content_age_seconds": 1_203,
+            "active_platforms": ["instagram", "tiktok"],
+            "content_platforms": [],
+            "fresh_after_seconds": 600,
+        },
+        "browser_maintenance": {
+            "state": "cdp_unavailable",
+            "age_seconds": 30,
+            "diagnostics": {
+                "reason": "chrome_running_without_cdp",
+                "chrome_process_count": 10,
+                "chrome_visible_window_count": 0,
+            },
+        },
+    })
+
+    msg = "\n".join(lines or [])
+    assert "extension ingest is heartbeat-only; useful browser content is stale" in msg
+    assert "newest event 15s ago" in msg
+    assert "useful content 20m ago" in msg
+    assert "extension ingest is still running with stale useful content" in msg
+    assert "Chrome has 10 background processes and no visible window" in msg
+    assert "scripts\\start-scraper-chrome-cdp.ps1" in msg

@@ -876,7 +876,12 @@ def _section_browser_ingest(snapshot: dict) -> list[str] | None:
         content_age = ingest_health.get("last_content_age_seconds")
         platforms = ingest_health.get("active_platforms") or []
         content_platforms = ingest_health.get("content_platforms") or []
+        heartbeat_active = bool(ingest_health.get("heartbeat_active"))
         state = "active" if active else str(ingest_health.get("state") or "unknown")
+        if active and heartbeat_active and not content_active:
+            state = "heartbeat-only; useful browser content is stale"
+        elif active and not content_active:
+            state = "active, but useful browser content is stale"
         parts = [f"extension ingest is {state}"]
         if age is not None:
             parts.append(f"newest event {_humanize_age(int(age or 0))} ago")
@@ -898,6 +903,21 @@ def _section_browser_ingest(snapshot: dict) -> list[str] | None:
                 detail += f" ({_display_scope(reason)})"
             if ingest_health.get("active"):
                 detail += ", but extension ingest is still running"
+                if not ingest_health.get("content_active"):
+                    detail += " with stale useful content"
+            visible_windows = diagnostics.get("chrome_visible_window_count")
+            chrome_processes = diagnostics.get("chrome_process_count")
+            if (
+                reason == "chrome_running_without_cdp"
+                and visible_windows == 0
+                and chrome_processes
+            ):
+                detail += (
+                    f"; Chrome has {int(chrome_processes):,} background process"
+                    f"{'' if int(chrome_processes) == 1 else 'es'} and no visible window. "
+                    "Close Chrome from Task Manager or restart the Windows Chrome session, "
+                    "then run <code>scripts\\start-scraper-chrome-cdp.ps1</code>"
+                )
             if age is not None:
                 detail += f"; checked {_humanize_age(int(age or 0))} ago"
             lines.append("• " + detail + ".")
