@@ -2581,6 +2581,18 @@ async def _browser_extension_payload(conn) -> dict:
         "media_revisit_queue": [],
         "tiktok_media": None,
         "maintenance": None,
+        "ingest_health": {
+            "state": "unknown",
+            "active": False,
+            "heartbeat_active": False,
+            "content_active": False,
+            "last_seen_at": None,
+            "last_content_at": None,
+            "fresh_after_seconds": 600,
+            "active_platforms": [],
+            "content_platforms": [],
+            "note": "No browser extension ingest event has been read yet.",
+        },
         "issues": [],
         "diagnostic_errors": [],
     }
@@ -2807,6 +2819,75 @@ async def _browser_extension_payload(conn) -> dict:
                     "stored_count": item["stored_count"],
                     "needs_new_event": not recent,
                 })
+
+        try:
+            ingest_fresh_after_seconds = int(os.getenv("BROWSER_INGEST_ACTIVE_SECONDS", "600") or "600")
+        except Exception:
+            ingest_fresh_after_seconds = 600
+        ingest_fresh_after_seconds = max(60, ingest_fresh_after_seconds)
+        ingest_items = list(payload.get("ingest") or [])
+        fresh_items = [
+            item for item in ingest_items
+            if int(item.get("age_seconds") or 0) <= ingest_fresh_after_seconds
+        ]
+        fresh_heartbeats = [
+            item for item in fresh_items
+            if str(item.get("endpoint") or "") == "browser_heartbeat"
+        ]
+        fresh_content = [
+            item for item in fresh_items
+            if str(item.get("endpoint") or "") != "browser_heartbeat"
+            and (int(item.get("observed_count") or 0) > 0 or int(item.get("stored_count") or 0) > 0)
+        ]
+        latest_seen = min(
+            (int(item.get("age_seconds") or 0) for item in ingest_items),
+            default=None,
+        )
+        latest_content = min(
+            (int(item.get("age_seconds") or 0) for item in ingest_items
+             if str(item.get("endpoint") or "") != "browser_heartbeat"
+             and (int(item.get("observed_count") or 0) > 0 or int(item.get("stored_count") or 0) > 0)),
+            default=None,
+        )
+        payload["ingest_health"] = {
+            "state": "active" if fresh_items else ("stale" if ingest_items else "missing"),
+            "active": bool(fresh_items),
+            "heartbeat_active": bool(fresh_heartbeats),
+            "content_active": bool(fresh_content),
+            "last_seen_at": min(
+                (item.get("last_seen_at") for item in ingest_items if item.get("last_seen_at") is not None),
+                default=None,
+                key=lambda dt: -dt.timestamp() if hasattr(dt, "timestamp") else 0,
+            ),
+            "last_content_at": min(
+                (
+                    item.get("last_seen_at") for item in ingest_items
+                    if item.get("last_seen_at") is not None
+                    and str(item.get("endpoint") or "") != "browser_heartbeat"
+                    and (int(item.get("observed_count") or 0) > 0 or int(item.get("stored_count") or 0) > 0)
+                ),
+                default=None,
+                key=lambda dt: -dt.timestamp() if hasattr(dt, "timestamp") else 0,
+            ),
+            "last_seen_age_seconds": latest_seen,
+            "last_content_age_seconds": latest_content,
+            "fresh_after_seconds": ingest_fresh_after_seconds,
+            "active_platforms": sorted({str(item.get("platform")) for item in fresh_items if item.get("platform")}),
+            "content_platforms": sorted({str(item.get("platform")) for item in fresh_content if item.get("platform")}),
+            "note": (
+                "Browser extension ingest is active; CDP maintenance/cookie-vault status is separate."
+                if fresh_items else
+                "No fresh browser extension ingest event is present in the active window."
+            ),
+        }
+        if fresh_items:
+            for issue in payload["issues"]:
+                if issue.get("kind") == "browser_maintenance_cdp_unavailable":
+                    issue["extension_ingest_active"] = True
+                    issue["detail"] = (
+                        str(issue.get("detail") or "")
+                        + " Browser extension ingest is still active; CDP tab maintenance and cookie backup are unavailable."
+                    ).strip()
 
         try:
             stale_seconds = int(os.getenv("BROWSER_CONTENT_STALE_WARN_SECONDS", "3600") or "3600")
@@ -4030,6 +4111,7 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
             "extension_id": browser_extension.get("extension_id"),
             "reload_url": browser_extension.get("reload_url"),
             "maintenance": browser_extension.get("maintenance"),
+            "ingest_health": browser_extension.get("ingest_health"),
             "issues": browser_extension.get("issues", []),
         },
         "errors": errors,

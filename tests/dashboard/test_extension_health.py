@@ -174,6 +174,87 @@ async def test_browser_extension_payload_includes_browser_maintenance_issue(monk
 
 
 @pytest.mark.asyncio
+async def test_browser_extension_payload_distinguishes_ingest_active_from_cdp_down(monkeypatch, tmp_path):
+    status = tmp_path / "browser_tab_maintenance_status.json"
+    status.write_text(
+        json.dumps({
+            "state": "cdp_unavailable",
+            "detail": "Unable to connect to the remote server",
+            "cdp_url": "http://127.0.0.1:9222",
+            "checked_at": "2026-08-08T18:26:17.1804359+08:00",
+            "diagnostics": {
+                "reason": "chrome_running_without_cdp",
+                "chrome_process_count": 26,
+                "chrome_cdp_process_count": 0,
+                "hint": "Start scraper Chrome with CDP.",
+            },
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(dashboard_api, "_BROWSER_TAB_MAINTENANCE_STATUS_PATH", str(status))
+    monkeypatch.setenv("BROWSER_INGEST_ACTIVE_SECONDS", "600")
+
+    class FakeConn:
+        async def fetchval(self, query: str, timeout: int | None = None):
+            if "dm_hook_heartbeat" in query:
+                return None
+            if "SELECT to_regclass('browser_ingest_events')" in query:
+                return "browser_ingest_events"
+            if "FROM browser_ingest_events" in query:
+                return None
+            if "tiktok_browser_media_candidates" in query:
+                return None
+            if "tiktok_browser_revisit_queue" in query:
+                return None
+            if "browser_media_candidates" in query:
+                return None
+            if "browser_media_revisit_queue" in query:
+                return None
+            raise AssertionError(query)
+
+        async def fetch(self, query: str, *args, timeout: int | None = None):
+            if "WITH heartbeat AS" in query:
+                return []
+            if "FROM browser_ingest_events" in query:
+                return [
+                    {
+                        "platform": "instagram",
+                        "endpoint": "media",
+                        "requests": 10,
+                        "observed_count": 20,
+                        "stored_count": 8,
+                        "last_seen_at": datetime(2026, 8, 8, tzinfo=timezone.utc),
+                        "age_seconds": 30,
+                        "extension_version": "1.23.49",
+                    },
+                    {
+                        "platform": "tiktok",
+                        "endpoint": "browser_heartbeat",
+                        "requests": 5,
+                        "observed_count": 5,
+                        "stored_count": 0,
+                        "last_seen_at": datetime(2026, 8, 8, tzinfo=timezone.utc),
+                        "age_seconds": 25,
+                        "extension_version": "1.23.49",
+                    },
+                ]
+            raise AssertionError(query)
+
+    payload = await _browser_extension_payload(FakeConn())
+
+    assert payload["ingest_health"]["state"] == "active"
+    assert payload["ingest_health"]["active"] is True
+    assert payload["ingest_health"]["heartbeat_active"] is True
+    assert payload["ingest_health"]["content_active"] is True
+    assert payload["ingest_health"]["active_platforms"] == ["instagram", "tiktok"]
+    assert payload["ingest_health"]["content_platforms"] == ["instagram"]
+    issue = payload["issues"][0]
+    assert issue["kind"] == "browser_maintenance_cdp_unavailable"
+    assert issue["extension_ingest_active"] is True
+    assert "Browser extension ingest is still active" in issue["detail"]
+
+
+@pytest.mark.asyncio
 async def test_browser_extension_payload_flags_stale_browser_maintenance(monkeypatch, tmp_path):
     status = tmp_path / "browser_tab_maintenance_status.json"
     status.write_text(
