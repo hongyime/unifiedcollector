@@ -46,6 +46,7 @@ logger = logging.getLogger(__name__)
 KNOWN_SOURCES = (
     "github", "instagram", "lemon8", "telegram", "tiktok",
     "youtube", "strava", "website", "search", "beeper", "whatsapp",
+    "instagram_dm",
 )
 
 

@@ -9,6 +9,7 @@ from .strava import StravaCollector
 from .whatsapp import WhatsappCollector
 from .search import SearchCollector
 from .beeper import BeeperCollector
+from .instagram_dm import InstagramDmCollector
 
 COLLECTORS = {
     "github": GithubCollector,
@@ -22,6 +23,7 @@ COLLECTORS = {
     "whatsapp": WhatsappCollector,
     "search": SearchCollector,
     "beeper": BeeperCollector,
+    "instagram_dm": InstagramDmCollector,
 }
 
 ALL_COLLECTORS = list(COLLECTORS.values())

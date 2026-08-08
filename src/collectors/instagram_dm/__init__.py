@@ -74,11 +74,10 @@ CREDENTIALS_DIR = Path(os.getenv(
 class InstagramDmCollector(BaseCollector):
     """Mobile-API-backed Instagram DM collector. Ban-risky, feature-flagged off.
 
-    Not yet registered in ``src/collectors/__init__.py::COLLECTORS`` on
-    purpose — the worker's schedule loop should not schedule this collector
-    until the mobile-API auth flow is implemented and Bryan flips the flag.
-    Kept as an importable module so the docker compose service can boot the
-    container and log 'disabled by feature flag' cleanly when running.
+    Registered in ``src/collectors/__init__.py::COLLECTORS`` so the dedicated
+    Docker service can boot cleanly. The feature flag still prevents any
+    mobile-API network traffic until the auth flow is implemented and Bryan
+    flips the flag.
     """
 
     SOURCE_NAME = "instagram_dm"

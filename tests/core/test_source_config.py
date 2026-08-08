@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.core.source_config import _sync_targets_to_db
+from src.core.source_config import KNOWN_SOURCES, _sync_targets_to_db
 
 
 def _pool():
@@ -24,6 +24,10 @@ def _pool():
     pool.acquire = _acquire
     pool.conn = conn
     return pool
+
+
+def test_instagram_dm_is_a_known_file_config_source():
+    assert "instagram_dm" in KNOWN_SOURCES
 
 
 @pytest.mark.asyncio
