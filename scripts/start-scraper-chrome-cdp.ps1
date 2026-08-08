@@ -51,7 +51,7 @@ function Get-ChromeProcesses {
 }
 
 function Get-VisibleChromeWindows {
-    return @(Get-Process chrome -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle })
+    return @(Get-Process chrome -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 })
 }
 
 function Stop-ChromeProcessTree {
