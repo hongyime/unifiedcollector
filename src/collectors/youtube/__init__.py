@@ -1730,7 +1730,7 @@ class YoutubeCollector(BaseCollector):
                     logger.warning("YouTube playlistItems 403 (quota or permission) for channel %s", channel_id)
                     break
                 if resp.status_code == 404:
-                    logger.warning("YouTube uploads playlist 404 for channel %s (%s)", channel_id, uploads_playlist)
+                    logger.info("YouTube uploads playlist 404 for channel %s (%s)", channel_id, uploads_playlist)
                     await self._mark_channel_skip(channel_id, "uploads_playlist_404", {"playlist_id": uploads_playlist})
                     self._skip_channel_fallback_after_api_empty.add(channel_id)
                     break

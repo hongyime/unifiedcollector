@@ -471,14 +471,15 @@ async def test_collect_channel_skips_fallback_when_uploads_playlist_is_empty(mon
 
 
 @pytest.mark.asyncio
-async def test_collect_video_list_404_marks_channel_fallback_skip(monkeypatch):
+async def test_collect_video_list_404_marks_channel_fallback_skip(monkeypatch, caplog):
     coll = _new_collector(monkeypatch, YOUTUBE_API_KEY="AIzaK")
     coll._has_auth = True
     coll._record_api_request = AsyncMock()
     coll._mark_channel_skip = AsyncMock()
     _patch_httpx_async_client(monkeypatch, _make_response(status=404))
 
-    out = await coll._collect_video_list_via_api("UC404", "Gone Channel", "UU404")
+    with caplog.at_level("INFO", logger="src.collectors.youtube"):
+        out = await coll._collect_video_list_via_api("UC404", "Gone Channel", "UU404")
 
     assert out == []
     assert "UC404" in coll._skip_channel_fallback_after_api_empty
@@ -486,6 +487,16 @@ async def test_collect_video_list_404_marks_channel_fallback_skip(monkeypatch):
         "UC404",
         "uploads_playlist_404",
         {"playlist_id": "UU404"},
+    )
+    assert any(
+        record.levelname == "INFO"
+        and "YouTube uploads playlist 404" in record.message
+        for record in caplog.records
+    )
+    assert not any(
+        record.levelname == "WARNING"
+        and "YouTube uploads playlist 404" in record.message
+        for record in caplog.records
     )
 
 
