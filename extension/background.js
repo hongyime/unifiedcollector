@@ -1838,8 +1838,8 @@ async function platformStatuses() {
 function browserUploadAllowed(platform, rawUrl) {
   let host = "";
   try { host = new URL(rawUrl || "").hostname.toLowerCase(); } catch (e) { return false; }
+  if (platform === "tiktok") return tiktokBrowserUploadHostAllowed(host);
   const rules = {
-    tiktok: /(^|\.)((tiktokcdn|tiktokv|byteoversea|byteimg|ibytedtos|muscdn)\.com)$/i,
     facebook: /(^|\.)(fbcdn\.net)$/i,
     threads: /(^|\.)((fbcdn\.net)|(cdninstagram\.com))$/i,
     instagram: /(^|\.)((fbcdn\.net)|(cdninstagram\.com))$/i,
@@ -1847,6 +1847,14 @@ function browserUploadAllowed(platform, rawUrl) {
     lemon8: /(^|\.)((lemon8-app\.com)|(byteimg\.com)|(ibytedtos\.com))$/i,
   };
   return Boolean((rules[platform] || /$a/).test(host));
+}
+
+function tiktokBrowserUploadHostAllowed(host) {
+  const h = String(host || "").toLowerCase();
+  if (/(^|\.)((tiktokcdn|tiktokv|byteoversea|byteimg|ibytedtos|muscdn)\.com)$/i.test(h)) return true;
+  // TikTok web playback URLs are first-party CDN hosts, not profile/page hosts.
+  // Example seen live: v16-webapp-prime.tiktok.com/video/...
+  return /^v\d+-webapp(?:-[a-z0-9-]+)?\.tiktok\.com$/i.test(h);
 }
 
 function shouldBrowserUploadMedia(item) {

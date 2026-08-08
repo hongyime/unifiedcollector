@@ -193,6 +193,19 @@ def test_tiktok_forced_recovery_uses_short_scroll_pass():
     assert "maxPauseMs: forcedRecovery ? 1500 : 3500" in tiktok_block
 
 
+def test_tiktok_browser_upload_allows_webapp_prime_cdn_not_regular_pages():
+    background = _read("extension/background.js")
+    allow_block = background.split("function tiktokBrowserUploadHostAllowed", 1)[1].split(
+        "function shouldBrowserUploadMedia",
+        1,
+    )[0]
+
+    assert "v16-webapp-prime.tiktok.com" in allow_block
+    assert "v\\d+-webapp" in allow_block
+    assert "if (platform === \"tiktok\") return tiktokBrowserUploadHostAllowed(host);" in background
+    assert "www.tiktok.com" not in allow_block
+
+
 def test_facebook_scrape_pass_is_bounded_but_not_reload_happy():
     content = _read("extension/content.js")
 
