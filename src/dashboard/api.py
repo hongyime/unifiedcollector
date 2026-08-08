@@ -429,7 +429,12 @@ def _browser_ingest_health_from_items(ingest_items: list[dict]) -> dict:
         "active_platforms": sorted({str(item.get("platform")) for item in fresh_items if item.get("platform")}),
         "content_platforms": sorted({str(item.get("platform")) for item in fresh_content if item.get("platform")}),
         "note": (
-            "Browser extension ingest is active; CDP maintenance/cookie-vault status is separate."
+            "Browser extension ingest has fresh heartbeats and useful content; CDP maintenance/cookie-vault status is separate."
+            if fresh_content else
+            (
+                "Browser extension heartbeats are active, but useful browser content is stale or missing; "
+                "CDP maintenance/cookie-vault status is separate."
+            )
             if fresh_items else
             "No fresh browser extension ingest event is present in the active window."
         ),
@@ -440,7 +445,14 @@ def _browser_extension_apply_ingest_health(payload: dict, ingest_items: list[dic
     health = _browser_ingest_health_from_items(ingest_items)
     payload["ingest_health"] = health
     if health.get("active"):
-        active_detail = "Browser extension ingest is still active; CDP tab maintenance and cookie backup are unavailable."
+        active_detail = (
+            "Browser extension ingest is still producing useful content; CDP tab maintenance and cookie backup are unavailable."
+            if health.get("content_active")
+            else (
+                "Browser extension heartbeats are still active, but useful browser content is stale; "
+                "CDP tab maintenance and cookie backup are unavailable."
+            )
+        )
         for issue in payload.get("issues", []):
             if issue.get("kind") == "browser_maintenance_cdp_unavailable":
                 issue["extension_ingest_active"] = True
