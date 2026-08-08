@@ -65,6 +65,10 @@ _BROWSER_TAB_MAINTENANCE_STALE_SECONDS = int(os.getenv("BROWSER_TAB_MAINTENANCE_
 _SOURCE_MATRIX_SECTION_CACHE: dict[str, dict[str, object]] = {}
 _SOURCE_MATRIX_SECTION_CACHE_TTL_SECONDS = int(os.getenv("SOURCE_MATRIX_SECTION_CACHE_TTL_SECONDS", "30"))
 _SOURCE_MATRIX_SECTION_STALE_SECONDS = int(os.getenv("SOURCE_MATRIX_SECTION_STALE_SECONDS", "900"))
+_SOURCE_MATRIX_PAYLOAD_CACHE: dict[str, object] = {"ts": 0.0, "payload": None}
+_SOURCE_MATRIX_PAYLOAD_CACHE_TTL_SECONDS = float(os.getenv("SOURCE_MATRIX_PAYLOAD_CACHE_TTL_SECONDS", "10"))
+_SOURCE_MATRIX_PAYLOAD_STALE_SECONDS = float(os.getenv("SOURCE_MATRIX_PAYLOAD_STALE_SECONDS", "300"))
+_SOURCE_MATRIX_PAYLOAD_BUILD_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_PAYLOAD_BUILD_TIMEOUT_SECONDS", "15"))
 _INGESTION_HOURLY_CACHE: dict[int, dict[str, object]] = {}
 _COLLECTORS_LIVE_CACHE: dict[str, object] = {"ts": 0.0, "payload": None}
 _COLLECTORS_LIVE_CACHE_TTL_SECONDS = int(os.getenv("COLLECTORS_LIVE_CACHE_TTL_SECONDS", "15"))
@@ -3872,8 +3876,113 @@ async def collectors_live(_user: dict = Depends(require_role("viewer"))):
     return payload
 
 
+def _source_matrix_unavailable_payload(error: str) -> dict:
+    generated_at = datetime.now(timezone.utc)
+    current_hour_started_at = generated_at.replace(minute=0, second=0, microsecond=0)
+    previous_hour_started_at = current_hour_started_at - timedelta(hours=1)
+    live_sources = _source_matrix_fallback_liveness_rows(
+        "source matrix build timed out before a cache was available; showing known source skeleton"
+    )
+    browser_extension = {"expected_version": _expected_extension_version(), "issues": []}
+    rows = [
+        _source_matrix_row(
+            source_row,
+            None,
+            None,
+            None,
+            None,
+            {"stats_unavailable": True, "stats_error": error},
+            None,
+            [],
+            generated_at,
+            None,
+        )
+        for source_row in live_sources
+    ]
+    return {
+        "generated_at": generated_at,
+        "current_hour_started_at": current_hour_started_at,
+        "last_complete_hour_started_at": previous_hour_started_at,
+        "summary": {
+            "current_hour": {
+                **_source_window_totals(rows, "current_hour"),
+                "started_at": current_hour_started_at,
+                "elapsed_seconds": int((generated_at - current_hour_started_at).total_seconds()),
+            },
+            "last_complete_hour": {
+                **_source_window_totals(rows, "last_complete_hour"),
+                "started_at": previous_hour_started_at,
+                "elapsed_seconds": 3600,
+            },
+            "last_24h": {
+                **_source_window_totals(rows, "last_24h"),
+                "started_at": generated_at - timedelta(hours=24),
+                "elapsed_seconds": 86400,
+            },
+        },
+        "sources": rows,
+        "whatsapp_bridge_health": None,
+        "browser_extension": {
+            "expected_version": browser_extension.get("expected_version"),
+            "extension_id": None,
+            "reload_url": None,
+            "maintenance": None,
+            "ingest_health": None,
+            "issues": [],
+        },
+        "errors": [{"section": "source_matrix", "error": error}],
+        "cache": {"status": "unavailable"},
+    }
+
+
 @app.get("/collectors/source-matrix")
 async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))):
+    now = time.time()
+    cached_payload = _SOURCE_MATRIX_PAYLOAD_CACHE.get("payload")
+    cached_ts = float(_SOURCE_MATRIX_PAYLOAD_CACHE.get("ts") or 0.0)
+    if (
+        cached_payload is not None
+        and _SOURCE_MATRIX_PAYLOAD_CACHE_TTL_SECONDS > 0
+        and now - cached_ts <= _SOURCE_MATRIX_PAYLOAD_CACHE_TTL_SECONDS
+    ):
+        payload = _copy_cache_value(cached_payload)
+        payload["cache"] = {"status": "fresh", "age_seconds": int(now - cached_ts)}
+        return payload
+    try:
+        payload = await asyncio.wait_for(
+            _collectors_source_matrix_payload(),
+            timeout=max(1.0, _SOURCE_MATRIX_PAYLOAD_BUILD_TIMEOUT_SECONDS),
+        )
+    except asyncio.TimeoutError:
+        if cached_payload is not None and now - cached_ts <= max(
+            _SOURCE_MATRIX_PAYLOAD_CACHE_TTL_SECONDS,
+            _SOURCE_MATRIX_PAYLOAD_STALE_SECONDS,
+        ):
+            payload = _copy_cache_value(cached_payload)
+            payload.setdefault("errors", []).append({
+                "section": "source_matrix",
+                "error": "TimeoutError",
+                "stale_cache": True,
+                "cache_age_seconds": int(now - cached_ts),
+            })
+            payload["cache"] = {"status": "stale", "age_seconds": int(now - cached_ts)}
+            logger.warning(
+                "source matrix build timed out after %.1fs; serving stale payload age=%ds",
+                max(1.0, _SOURCE_MATRIX_PAYLOAD_BUILD_TIMEOUT_SECONDS),
+                int(now - cached_ts),
+            )
+            return payload
+        logger.warning(
+            "source matrix build timed out after %.1fs with no cache",
+            max(1.0, _SOURCE_MATRIX_PAYLOAD_BUILD_TIMEOUT_SECONDS),
+        )
+        return _source_matrix_unavailable_payload("TimeoutError")
+    _SOURCE_MATRIX_PAYLOAD_CACHE.update({"ts": time.time(), "payload": _copy_cache_value(payload)})
+    payload["cache"] = {"status": "rebuilt", "age_seconds": 0}
+    return payload
+
+
+async def _collectors_source_matrix_payload():
     """Operator matrix: source status, collection method, volume, and blocker."""
     from src.core.source_freshness import compute_liveness
     pool = await get_pool()

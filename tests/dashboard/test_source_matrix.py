@@ -21,6 +21,7 @@ from src.dashboard.api import (
     _BEEPER_SUBSOURCE_TOTAL_TIMEOUT_SECONDS,
     _BEEPER_SUBSOURCE_MEDIA_TOTALS_CACHE,
     _SOURCE_MEDIA_TOTALS_CACHE,
+    _SOURCE_MATRIX_PAYLOAD_CACHE,
     _SOURCE_MATRIX_SECTION_CACHE,
     _SOURCE_MATRIX_YOUTUBE_BACKLOG_TIMEOUT_SECONDS,
     _activity_last_seen_at,
@@ -37,6 +38,7 @@ from src.dashboard.api import (
     _source_matrix_row,
     _source_window_totals,
     _source_media_totals,
+    collectors_source_matrix,
 )
 
 
@@ -1525,3 +1527,58 @@ async def test_source_matrix_section_can_prefer_stale_cache_without_awaiting():
     assert out == {"instagram": {"total_media_items": 12}}
     assert started is False
     assert errors == []
+
+
+@pytest.mark.asyncio
+async def test_collectors_source_matrix_reuses_fresh_payload_cache(monkeypatch):
+    _SOURCE_MATRIX_PAYLOAD_CACHE.update({
+        "ts": dashboard_api.time.time(),
+        "payload": {
+            "generated_at": datetime(2026, 8, 8, tzinfo=timezone.utc),
+            "sources": [{"source": "instagram"}],
+            "errors": [],
+        },
+    })
+    started = False
+
+    async def should_not_build():
+        nonlocal started
+        started = True
+        raise AssertionError("fresh payload cache should not rebuild")
+
+    monkeypatch.setattr(dashboard_api, "_collectors_source_matrix_payload", should_not_build)
+    monkeypatch.setattr(dashboard_api, "_SOURCE_MATRIX_PAYLOAD_CACHE_TTL_SECONDS", 60.0)
+
+    out = await collectors_source_matrix(_user={})
+
+    assert out["sources"] == [{"source": "instagram"}]
+    assert out["cache"]["status"] == "fresh"
+    assert started is False
+
+
+@pytest.mark.asyncio
+async def test_collectors_source_matrix_serves_stale_payload_on_timeout(monkeypatch):
+    _SOURCE_MATRIX_PAYLOAD_CACHE.update({
+        "ts": dashboard_api.time.time() - 30,
+        "payload": {
+            "generated_at": datetime(2026, 8, 8, tzinfo=timezone.utc),
+            "sources": [{"source": "instagram"}],
+            "errors": [],
+        },
+    })
+
+    async def slow_build():
+        await asyncio.sleep(10)
+        return {"sources": [{"source": "late"}], "errors": []}
+
+    monkeypatch.setattr(dashboard_api, "_collectors_source_matrix_payload", slow_build)
+    monkeypatch.setattr(dashboard_api, "_SOURCE_MATRIX_PAYLOAD_CACHE_TTL_SECONDS", 0.01)
+    monkeypatch.setattr(dashboard_api, "_SOURCE_MATRIX_PAYLOAD_STALE_SECONDS", 60.0)
+    monkeypatch.setattr(dashboard_api, "_SOURCE_MATRIX_PAYLOAD_BUILD_TIMEOUT_SECONDS", 0.01)
+
+    out = await collectors_source_matrix(_user={})
+
+    assert out["sources"] == [{"source": "instagram"}]
+    assert out["cache"]["status"] == "stale"
+    assert out["errors"][-1]["section"] == "source_matrix"
+    assert out["errors"][-1]["stale_cache"] is True
