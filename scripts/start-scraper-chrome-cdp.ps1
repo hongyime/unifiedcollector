@@ -4,6 +4,7 @@ param(
     [string]$ExtensionPath = "C:\unifiedcollector\extension",
     [int]$RemoteDebuggingPort = 9222,
     [switch]$AllowWhileChromeRunning,
+    [switch]$CloseExistingIfNoVisibleWindows,
     [switch]$DryRun
 )
 
@@ -45,6 +46,40 @@ function Test-CdpAvailable {
     }
 }
 
+function Get-ChromeProcesses {
+    return @(Get-CimInstance Win32_Process -Filter "name='chrome.exe'" -ErrorAction SilentlyContinue)
+}
+
+function Get-VisibleChromeWindows {
+    return @(Get-Process chrome -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle })
+}
+
+function Stop-ChromeProcessTree {
+    param([array]$Processes)
+    if ($Processes.Count -eq 0) {
+        return
+    }
+    foreach ($proc in $Processes) {
+        try {
+            Stop-Process -Id $proc.ProcessId -Force -ErrorAction Stop
+        } catch {
+            # Some Chrome profile/session owners refuse Stop-Process. Fall back to taskkill below.
+        }
+    }
+    Start-Sleep -Seconds 2
+    $remaining = @(Get-ChromeProcesses)
+    if ($remaining.Count -eq 0) {
+        return
+    }
+    $taskkill = Start-Process -FilePath "$env:SystemRoot\System32\taskkill.exe" -ArgumentList "/IM chrome.exe /F /T" -Wait -PassThru -NoNewWindow
+    Start-Sleep -Seconds 2
+    $remaining = @(Get-ChromeProcesses)
+    if ($remaining.Count -gt 0) {
+        $ids = ($remaining | Select-Object -ExpandProperty ProcessId) -join ", "
+        throw "Chrome is still running after repair attempt; remaining PIDs: $ids"
+    }
+}
+
 function Quote-Argument {
     param([string]$Value)
     if ($Value -notmatch '[\s"]') {
@@ -56,7 +91,8 @@ function Quote-Argument {
 $chrome = Resolve-ChromePath $ChromePath
 $profile = Resolve-UserDataDir $UserDataDir
 $extension = (Resolve-Path -LiteralPath $ExtensionPath).Path
-$chromeProcesses = @(Get-CimInstance Win32_Process -Filter "name='chrome.exe'" -ErrorAction SilentlyContinue)
+$chromeProcesses = @(Get-ChromeProcesses)
+$visibleChromeWindows = @(Get-VisibleChromeWindows)
 $cdpAlreadyUp = Test-CdpAvailable $RemoteDebuggingPort
 
 if ($cdpAlreadyUp) {
@@ -83,17 +119,28 @@ if ($DryRun) {
     Write-Host "Chrome path: $chrome"
     Write-Host "User data dir: $profile"
     Write-Host "Extension path: $extension"
+    Write-Host "Visible Chrome windows: $($visibleChromeWindows.Count)"
     Write-Host $runningNote
     Write-Host "Arguments:"
     $args | ForEach-Object { Write-Host "  $_" }
     exit 0
 }
 
+if ($chromeProcesses.Count -gt 0 -and -not $AllowWhileChromeRunning -and $CloseExistingIfNoVisibleWindows) {
+    if ($visibleChromeWindows.Count -gt 0) {
+        Write-Error "Chrome has visible windows open; refusing automatic close. Close Chrome manually, then rerun this script."
+    }
+    Write-Host "Chrome is running without CDP and has no visible windows; closing orphaned/background Chrome processes first."
+    Stop-ChromeProcessTree -Processes $chromeProcesses
+    $chromeProcesses = @(Get-ChromeProcesses)
+}
+
 if ($chromeProcesses.Count -gt 0 -and -not $AllowWhileChromeRunning) {
     Write-Error (
         "Chrome is already running without CDP. Close all Chrome windows first, then rerun this script. " +
         "Starting Chrome with the same profile while it is already open usually ignores --remote-debugging-port " +
-        "and can create extra windows. Use -AllowWhileChromeRunning only for an intentional isolated/debug profile."
+        "and can create extra windows. Use -CloseExistingIfNoVisibleWindows only when Chrome has no visible windows, " +
+        "or -AllowWhileChromeRunning only for an intentional isolated/debug profile."
     )
 }
 

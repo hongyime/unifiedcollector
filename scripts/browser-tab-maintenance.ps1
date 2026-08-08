@@ -20,6 +20,7 @@ function Get-ChromeCdpDiagnostics {
     $withCdp = @()
     $withUserData = @()
     $browserRoots = @()
+    $visibleWindows = @(Get-Process chrome -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle })
     foreach ($proc in $processes) {
         $cmd = [string]$proc.CommandLine
         if ($cmd -match "--remote-debugging-port(?:=|\s+)9222\b") {
@@ -44,6 +45,7 @@ function Get-ChromeCdpDiagnostics {
         reason = $reason
         chrome_process_count = $processes.Count
         chrome_root_process_count = $browserRoots.Count
+        chrome_visible_window_count = $visibleWindows.Count
         chrome_cdp_process_count = $withCdp.Count
         chrome_user_data_process_count = $withUserData.Count
         hint = $hint
