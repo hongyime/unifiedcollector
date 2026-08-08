@@ -343,7 +343,7 @@ def test_pg_dump_prefers_pg_env_over_host_database_url(monkeypatch, tmp_path):
     )
 
     assert commands
-    assert commands[0][1:4] == ["-Fc", "-Z", "0"]
+    assert commands[0][1:4] == ["-Fc", "-Z", "1"]
     assert commands[0][-1] == "unifiedcollector"
 
 

@@ -1026,7 +1026,7 @@ class WorkerService:
                     # to 0 on every successful cycle.
                     hangs = self._hang_counts.get(source, 0) + 1
                     self._hang_counts[source] = hangs
-                    logger.error(
+                    logger.warning(
                         "Watchdog: %s HUNG (no progress for %.0fs > %.0fs limit) "
                         "(%d/%d hangs) -- cancelling; relaunch on next pass",
                         source, stalled, self.hang_timeout, hangs, self.max_hang_cycles,
