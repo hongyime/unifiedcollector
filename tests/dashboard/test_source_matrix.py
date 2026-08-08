@@ -88,7 +88,7 @@ def test_source_matrix_blocker_reports_partial_whatsapp_pairing():
             bridge_detail=(
                 "1 WhatsApp bridge slot(s) paired and ready; "
                 "1 slot(s) waiting for QR/session pairing: 1. "
-                "Collection continues through the paired slot(s), but coverage is incomplete."
+                "Collection continues through the paired slot(s); scan the waiting slot only if you expect another WhatsApp account/device to collect."
             ),
         ),
         rate_row=None,
@@ -99,7 +99,7 @@ def test_source_matrix_blocker_reports_partial_whatsapp_pairing():
     assert blocker["kind"] == "whatsapp_partial_pairing"
     assert blocker["severity"] == "warning"
     assert "Collection is still running" in blocker["next_action"]
-    assert "coverage is incomplete" in blocker["summary"]
+    assert "scan the waiting slot" in blocker["summary"]
 
 
 def test_source_matrix_blocker_explains_paired_whatsapp_without_messages():

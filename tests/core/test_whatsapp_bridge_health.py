@@ -49,25 +49,43 @@ def test_whatsapp_bridge_summary_treats_qr_refresh_states_as_unpaired():
 
 def test_whatsapp_bridge_summary_reports_partial_if_only_some_slots_ready():
     summary = summarize_whatsapp_bridge_health([
-        {"bridge": "1", "ok": True, "status": "ready", "whatsapp_ready": True},
-        {"bridge": "2", "ok": True, "status": "awaiting_scan", "qr_available": True},
+        {
+            "bridge": "1",
+            "ok": True,
+            "status": "ready",
+            "whatsapp_ready": True,
+            "phone_number": "6584731565",
+            "push_name": "Prawn Productions",
+        },
+        {
+            "bridge": "2",
+            "ok": True,
+            "status": "awaiting_scan",
+            "qr_available": True,
+            "auth_state": {"note": "creds_json_empty_scan_required"},
+        },
     ])
 
     assert summary["status"] == "partial"
     assert summary["ready_count"] == 1
     assert summary["waiting_count"] == 1
-    assert "coverage is incomplete" in summary["detail"]
+    assert "6584731565" in summary["detail"]
+    assert "Prawn Productions" in summary["detail"]
+    assert "empty slot" in summary["detail"]
+    assert "scan the waiting slot only if you expect another WhatsApp account/device" in summary["detail"]
 
 
 def test_whatsapp_bridge_summary_reports_paired_when_all_slots_ready():
     summary = summarize_whatsapp_bridge_health([
-        {"bridge": "1", "ok": True, "status": "ready", "whatsapp_ready": True},
-        {"bridge": "2", "ok": True, "status": "ready", "whatsapp_ready": True},
+        {"bridge": "1", "ok": True, "status": "ready", "whatsapp_ready": True, "phone_number": "111"},
+        {"bridge": "2", "ok": True, "status": "ready", "whatsapp_ready": True, "phone_number": "222"},
     ])
 
     assert summary["status"] == "paired"
     assert summary["ready_count"] == 2
     assert summary["waiting_count"] == 0
+    assert "111" in summary["detail"]
+    assert "222" in summary["detail"]
 
 
 def test_whatsapp_bridge_summary_does_not_call_livez_fallback_unreachable():

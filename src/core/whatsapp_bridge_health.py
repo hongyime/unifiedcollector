@@ -85,18 +85,21 @@ def summarize_whatsapp_bridge_health(states: list[dict[str, Any]]) -> dict[str, 
         or "qr" in str(s.get("last_disconnect_reason") or "").lower()
     ]
     waiting_labels = [
-        str(s.get("session_name") or s.get("bridge") or "?")
+        _bridge_label(s, include_auth_hint=True)
         for s in qr_waiting
     ]
+    ready_labels = [_bridge_label(s) for s in ready]
 
     if ready:
         if qr_waiting or len(ready) < total:
             detail = f"{len(ready)} WhatsApp bridge slot(s) paired and ready"
+            if ready_labels:
+                detail += f": {', '.join(ready_labels)}"
             if waiting_labels:
                 detail += f"; {len(qr_waiting)} slot(s) waiting for QR/session pairing: {', '.join(waiting_labels)}"
             elif len(ready) < total:
                 detail += f"; {total - len(ready)} slot(s) not ready"
-            detail += ". Collection continues through the paired slot(s), but coverage is incomplete."
+            detail += ". Collection continues through the paired slot(s); scan the waiting slot only if you expect another WhatsApp account/device to collect."
             return {
                 "status": "partial",
                 "ready_count": len(ready),
@@ -111,7 +114,7 @@ def summarize_whatsapp_bridge_health(states: list[dict[str, Any]]) -> dict[str, 
             "reachable_count": len(reachable),
             "waiting_count": 0,
             "total": total,
-            "detail": f"{len(ready)} WhatsApp bridge slot(s) paired and ready.",
+            "detail": f"{len(ready)} WhatsApp bridge slot(s) paired and ready{': ' + ', '.join(ready_labels) if ready_labels else ''}.",
         }
     if not reachable:
         return {
@@ -139,3 +142,26 @@ def summarize_whatsapp_bridge_health(states: list[dict[str, Any]]) -> dict[str, 
         "total": total,
         "detail": "WhatsApp bridge endpoints respond, but no bridge reports a ready collection session.",
     }
+
+
+def _bridge_label(state: dict[str, Any], *, include_auth_hint: bool = False) -> str:
+    bridge = str(state.get("bridge") or state.get("session_name") or "?")
+    session = str(state.get("session_name") or "").strip()
+    phone = str(state.get("phone_number") or "").strip()
+    push_name = str(state.get("push_name") or "").strip()
+    parts = [f"bridge {bridge}"]
+    if session and session != bridge:
+        parts.append(session)
+    if phone:
+        parts.append(phone)
+    if push_name:
+        parts.append(push_name)
+    label = " / ".join(parts)
+    if include_auth_hint:
+        auth_state = state.get("auth_state") if isinstance(state.get("auth_state"), dict) else {}
+        note = str(auth_state.get("note") or "").strip()
+        if note == "creds_json_empty_scan_required":
+            label += " (empty slot; scan to add another account)"
+        elif note:
+            label += f" ({note})"
+    return label
