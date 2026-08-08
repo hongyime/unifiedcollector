@@ -234,17 +234,27 @@ def _post_media_detailed(token: str, method: str, file_field: str,
             url, data=data, headers={"Content-Type": "application/json"}
         )
     else:
+        max_bytes = _max_upload_bytes(method)
         try:
-            body, content_type = _encode_multipart(fields, file_field, url_or_path)
+            file_size = Path(url_or_path).stat().st_size
         except (OSError, FileNotFoundError) as e:
             logger.warning("telegram %s: cannot read %s: %s", method, url_or_path, e)
             return False, 0, "local_read_failed", str(e)
+        if file_size > max_bytes:
+            logger.info(
+                "telegram %s: %s is %d bytes, over Telegram Bot API cap %d; stored locally only",
+                method, url_or_path, file_size, max_bytes,
+            )
+            return False, 0, "too_large", f"exceeds {max_bytes} bytes"
+        try:
+            body, content_type = _encode_multipart(fields, file_field, url_or_path)
+        except OSError as e:
+            logger.warning("telegram %s: cannot read %s: %s", method, url_or_path, e)
+            return False, 0, "local_read_failed", str(e)
         # Refuse uploads Telegram Bot API will reject.
-        max_bytes = _max_upload_bytes(method)
         if len(body) > max_bytes:
-            log = logger.warning if method == "sendDocument" else logger.info
-            log(
-                "telegram %s: %s exceeds %d bytes; skipping upload",
+            logger.info(
+                "telegram %s: %s multipart body exceeds Telegram Bot API cap %d; stored locally only",
                 method, url_or_path, max_bytes,
             )
             return False, 0, "too_large", f"exceeds {max_bytes} bytes"
