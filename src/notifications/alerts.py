@@ -864,9 +864,48 @@ def _section_extension_hooks(snapshot: dict) -> list[str] | None:
 
 def _section_browser_ingest(snapshot: dict) -> list[str] | None:
     browser_ingest = snapshot.get("browser_ingest_events") or []
-    if not browser_ingest:
+    ingest_health = snapshot.get("browser_ingest_health") or {}
+    maintenance = snapshot.get("browser_maintenance") or {}
+    if not browser_ingest and not ingest_health and not maintenance:
         return None
     lines = ["<b>Browser extension ingest</b>"]
+    if ingest_health:
+        active = bool(ingest_health.get("active"))
+        content_active = bool(ingest_health.get("content_active"))
+        age = ingest_health.get("last_seen_age_seconds")
+        content_age = ingest_health.get("last_content_age_seconds")
+        platforms = ingest_health.get("active_platforms") or []
+        content_platforms = ingest_health.get("content_platforms") or []
+        state = "active" if active else str(ingest_health.get("state") or "unknown")
+        parts = [f"extension ingest is {state}"]
+        if age is not None:
+            parts.append(f"newest event {_humanize_age(int(age or 0))} ago")
+        if content_age is not None:
+            parts.append(f"useful content {_humanize_age(int(content_age or 0))} ago")
+        if platforms:
+            parts.append("active: " + ", ".join(_display_source(p) for p in platforms[:8]))
+        if content_platforms and content_active:
+            parts.append("content: " + ", ".join(_display_source(p) for p in content_platforms[:8]))
+        lines.append("• " + "; ".join(parts) + ".")
+    if maintenance:
+        state = str(maintenance.get("state") or "unknown")
+        diagnostics = maintenance.get("diagnostics") or {}
+        reason = str(diagnostics.get("reason") or "").strip()
+        age = maintenance.get("age_seconds")
+        if state == "cdp_unavailable":
+            detail = "CDP maintenance/cookie backup is unavailable"
+            if reason:
+                detail += f" ({_display_scope(reason)})"
+            if ingest_health.get("active"):
+                detail += ", but extension ingest is still running"
+            if age is not None:
+                detail += f"; checked {_humanize_age(int(age or 0))} ago"
+            lines.append("• " + detail + ".")
+        elif state:
+            detail = f"CDP maintenance state: {_display_scope(state)}"
+            if age is not None:
+                detail += f"; checked {_humanize_age(int(age or 0))} ago"
+            lines.append("• " + detail + ".")
     lines.extend(_format_browser_ingest_event(row) for row in browser_ingest[:6])
     return lines
 

@@ -29,6 +29,25 @@ def _expected_extension_version() -> str | None:
         return None
 
 
+def _browser_maintenance_status() -> dict | None:
+    path = Path(os.getenv("BROWSER_TAB_MAINTENANCE_STATUS_PATH", "/app/tmp/browser_tab_maintenance_status.json"))
+    try:
+        if not path.exists():
+            return None
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+        if not isinstance(data, dict):
+            return None
+        try:
+            checked_at = datetime.fromisoformat(str(data.get("checked_at") or ""))
+            now = datetime.now(checked_at.tzinfo) if checked_at.tzinfo else datetime.now()
+            data["age_seconds"] = max(0, int((now - checked_at).total_seconds()))
+        except Exception:
+            data["age_seconds"] = None
+        return data
+    except Exception:
+        return None
+
+
 def _tiktok_revisit_claim_timeout_seconds() -> int:
     try:
         return env_int("TIKTOK_BROWSER_REVISIT_CLAIM_TIMEOUT_SECONDS", 1800, min_value=60)
@@ -551,6 +570,52 @@ class Scheduler:
                             """,
                             timeout=10,
                         )]
+                        health_rows = [dict(r) for r in await conn.fetch(
+                            """
+                            SELECT platform,
+                                   endpoint,
+                                   count(*)::int AS requests,
+                                   sum(observed_count)::int AS observed_count,
+                                   sum(stored_count)::int AS stored_count,
+                                   max(created_at) AS last_seen_at,
+                                   extract(epoch FROM now() - max(created_at))::int AS age_seconds
+                            FROM browser_ingest_events
+                            WHERE created_at >= now() - interval '30 minutes'
+                            GROUP BY platform, endpoint
+                            ORDER BY last_seen_at DESC
+                            LIMIT 20
+                            """,
+                            timeout=10,
+                        )]
+                        fresh_after = env_int("BROWSER_INGEST_ACTIVE_SECONDS", 600, min_value=60)
+                        fresh = [r for r in health_rows if int(r.get("age_seconds") or 0) <= fresh_after]
+                        fresh_content = [
+                            r for r in fresh
+                            if str(r.get("endpoint") or "") != "browser_heartbeat"
+                            and (int(r.get("observed_count") or 0) > 0 or int(r.get("stored_count") or 0) > 0)
+                        ]
+                        snap["browser_ingest_health"] = {
+                            "state": "active" if fresh else ("stale" if health_rows else "missing"),
+                            "active": bool(fresh),
+                            "heartbeat_active": any(str(r.get("endpoint") or "") == "browser_heartbeat" for r in fresh),
+                            "content_active": bool(fresh_content),
+                            "active_platforms": sorted({str(r.get("platform")) for r in fresh if r.get("platform")}),
+                            "content_platforms": sorted({str(r.get("platform")) for r in fresh_content if r.get("platform")}),
+                            "last_seen_age_seconds": min((int(r.get("age_seconds") or 0) for r in health_rows), default=None),
+                            "last_content_age_seconds": min(
+                                (
+                                    int(r.get("age_seconds") or 0)
+                                    for r in health_rows
+                                    if str(r.get("endpoint") or "") != "browser_heartbeat"
+                                    and (int(r.get("observed_count") or 0) > 0 or int(r.get("stored_count") or 0) > 0)
+                                ),
+                                default=None,
+                            ),
+                            "fresh_after_seconds": fresh_after,
+                        }
+                        maintenance = _browser_maintenance_status()
+                        if maintenance:
+                            snap["browser_maintenance"] = maintenance
                         content_stale_seconds = env_int(
                             "BROWSER_CONTENT_STALE_WARN_SECONDS",
                             3600,

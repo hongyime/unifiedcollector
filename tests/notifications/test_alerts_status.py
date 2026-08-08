@@ -182,6 +182,22 @@ async def test_notify_status_splits_rate_limit_from_auth_events(monkeypatch):
                 "stored_count": 1,
             },
         ],
+        "browser_ingest_health": {
+            "state": "active",
+            "active": True,
+            "heartbeat_active": True,
+            "content_active": True,
+            "last_seen_age_seconds": 3,
+            "last_content_age_seconds": 32,
+            "active_platforms": ["bridge", "facebook", "instagram", "threads"],
+            "content_platforms": ["facebook", "instagram", "threads"],
+            "fresh_after_seconds": 600,
+        },
+        "browser_maintenance": {
+            "state": "cdp_unavailable",
+            "age_seconds": 175,
+            "diagnostics": {"reason": "chrome_running_without_cdp"},
+        },
         "browser_media_diagnostics": [
             {"platform": "facebook", "outcome": "tiny_thumbnail", "candidates": 12, "needs_revisit": 0},
             {"platform": "x", "outcome": "browser_fetch_failed", "candidates": 2, "needs_revisit": 2},
@@ -277,6 +293,8 @@ async def test_notify_status_splits_rate_limit_from_auth_events(monkeypatch):
     assert "last decoded frame 1m ago" in msg
     assert "repo expects v1.21.24; reload the unpacked extension" in msg
     assert "<b>Browser extension ingest</b>" in msg
+    assert "extension ingest is active; newest event 3s ago; useful content 32s ago" in msg
+    assert "CDP maintenance/cookie backup is unavailable (chrome running without cdp), but extension ingest is still running" in msg
     assert "Threads media files: browser saw 12 items; stored 3; 2 POSTs this hour." in msg
     assert "Instagram profiles: browser saw 1 item; stored 1; 1 POST this hour." in msg
     assert "<b>Browser media diagnosis</b>" in msg
