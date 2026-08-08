@@ -2043,6 +2043,13 @@ async function uploadBrowserMediaCandidates(base, msg, items) {
   return { attempted, deferred: deferredCandidates.length, stored: accepted, accepted, saved, deduped, failures };
 }
 
+function hasActiveBrowserMediaRevisit(items) {
+  return (items || []).some((it) => {
+    const meta = it && typeof it === "object" && it.meta && typeof it.meta === "object" ? it.meta : {};
+    return !!(meta.revisit_content_id || meta.revisit_platform);
+  });
+}
+
 async function recordBrowserMediaCandidateResults(base, msg, items) {
   try {
     const r = await fetch(base + "/social/browser-media-candidates", {
@@ -2275,23 +2282,50 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
       case "ingest": {
         try {
+          const platform = msg.platform || "instagram";
           const allItems = Array.isArray(msg.items) ? msg.items : [];
           const urlItems = allItems.filter((it) => !(it && it.browser_upload_only === true));
+          const uploadCandidateCount = allItems.filter(shouldBrowserUploadMedia).length;
+          const tiktokUploadOnlyProgress = platform === "tiktok" && allItems.length > 0 && urlItems.length === 0;
           const r = await fetch(base + "/social/ingest", {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify(withExtensionVersion({
-              platform: msg.platform || "instagram",
+              platform,
               username: msg.username,
               items: urlItems,
-              record_empty: !!msg.record_empty,
-              probe_reason: msg.probe_reason || null,
-              probe_meta: msg.probe_meta || null,
+              record_empty: !!msg.record_empty || tiktokUploadOnlyProgress,
+              probe_reason: msg.probe_reason || (tiktokUploadOnlyProgress ? "browser_upload_candidates_queued" : null),
+              probe_meta: msg.probe_meta || (tiktokUploadOnlyProgress ? {
+                media_candidates: allItems.length,
+                browser_upload_candidates: uploadCandidateCount,
+              } : null),
             })),
           });
           const j = await r.json().catch(() => ({}));
-          const upload = await uploadBrowserMediaCandidates(base, msg, allItems);
-          await log("info", `📥 ${msg.platform || "instagram"} · ${msg.username} · ${j.accepted ?? urlItems.length} URL media queued, ${upload.stored}/${upload.attempted} browser-uploaded`);
-          sendResponse({ ok: r.ok, upload });
+          const uploadAndLog = async () => {
+            const upload = await uploadBrowserMediaCandidates(base, msg, allItems);
+            await log("info", `📥 ${platform} · ${msg.username} · ${j.accepted ?? urlItems.length} URL media queued, ${upload.stored}/${upload.attempted} browser-uploaded`);
+            return upload;
+          };
+          if (platform === "tiktok" && uploadCandidateCount > 0 && !hasActiveBrowserMediaRevisit(allItems)) {
+            uploadAndLog().catch((err) => log("warn", `TikTok async browser-upload failed: ${err && err.message ? err.message : err}`));
+            sendResponse({
+              ok: r.ok,
+              upload: {
+                queued: uploadCandidateCount,
+                attempted: 0,
+                deferred: uploadCandidateCount,
+                stored: 0,
+                accepted: 0,
+                saved: 0,
+                deduped: 0,
+                async: true,
+              },
+            });
+          } else {
+            const upload = await uploadAndLog();
+            sendResponse({ ok: r.ok, upload });
+          }
         } catch (e) {
           await log("error", `ingest ${msg.username} failed: ${e.message}`);
           sendResponse({ ok: false, error: String(e) });

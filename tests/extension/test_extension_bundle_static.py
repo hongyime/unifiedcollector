@@ -206,6 +206,19 @@ def test_tiktok_browser_upload_allows_webapp_prime_cdn_not_regular_pages():
     assert "www.tiktok.com" not in allow_block
 
 
+def test_tiktok_browser_upload_is_async_for_normal_cycles():
+    background = _read("extension/background.js")
+    ingest_block = background.split('case "ingest": {', 1)[1].split(
+        'case "discover": {',
+        1,
+    )[0]
+
+    assert 'platform === "tiktok" && uploadCandidateCount > 0' in ingest_block
+    assert "!hasActiveBrowserMediaRevisit(allItems)" in ingest_block
+    assert "browser_upload_candidates_queued" in ingest_block
+    assert "async: true" in ingest_block
+
+
 def test_facebook_scrape_pass_is_bounded_but_not_reload_happy():
     content = _read("extension/content.js")
 
