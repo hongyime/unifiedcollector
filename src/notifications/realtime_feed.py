@@ -160,16 +160,62 @@ def enqueue_from_insert(*, source: str, entity_name: str, content_id: str,
     loop.create_task(_enqueue(payload))
 
 
+def _logs_chat_id() -> int | None:
+    """Return the chat_id of the log group whose telegram messages must NOT be
+    re-broadcast (circular-loop safety). Falls back to TELEGRAM_CHAT_ID and then
+    NOTIFY_TELEGRAM_CHAT_ID if the dedicated var is unset. Returns None when
+    none of the vars is set to a parseable integer — filter degrades to allow
+    (the primary defence is in the telegram collector itself)."""
+    for name in ("TELEGRAM_LOGS_CHAT_ID", "TELEGRAM_CHAT_ID", "NOTIFY_TELEGRAM_CHAT_ID"):
+        raw = os.getenv(name, "")
+        raw = raw.strip() if isinstance(raw, str) else ""
+        if not raw:
+            continue
+        try:
+            return int(raw)
+        except ValueError:
+            continue
+    return None
+
+
+def _is_own_logs_chat_telegram(payload: dict) -> bool:
+    """Defence-in-depth: drop any telegram payload whose chat_id matches the
+    realtime-feed log chat. Prevents the circular loop where our own bot's
+    posts get ingested by the telegram collector and re-sent.
+
+    Telegram media_items use content_id shape ``<chat_id>_<message_id>`` (see
+    src/collectors/telegram._telegram_message_content_id), which is stable
+    enough to parse without touching the DB.
+    """
+    if (payload.get("source") or "").lower() != "telegram":
+        return False
+    logs_chat = _logs_chat_id()
+    if logs_chat is None:
+        return False
+    content_id = payload.get("content_id") or ""
+    prefix, sep, _rest = str(content_id).partition("_")
+    if not sep or not prefix:
+        return False
+    try:
+        chat_id = int(prefix)
+    except ValueError:
+        return False
+    return chat_id == logs_chat
+
+
 def _passes_filter(payload: dict) -> bool:
     """Filter posts to what the operator actually wants surfaced in real time.
 
     * Platform must be in ALLOWED_PLATFORMS.
+    * Telegram payloads from our own logs chat are dropped unconditionally
+      (defence-in-depth against the self-bot circular loop; the primary
+      filter lives in the telegram collector).
     * Kind (post/image/video/photo) or content_type must be recognised media.
     * We need either a caption or a downloadable file to make a useful message.
     * Profile updates are opt-in via REALTIME_POST_FEED_INCLUDE_PROFILES.
     """
     source = (payload.get("source") or "").lower()
-    if source not in ALLOWED_PLATFORMS:
+    if _is_own_logs_chat_telegram(payload):
         return False
     include_profiles = _flag("REALTIME_POST_FEED_INCLUDE_PROFILES", "0")
     content_type = (payload.get("content_type") or "").lower()
