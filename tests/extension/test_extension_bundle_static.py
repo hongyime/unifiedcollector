@@ -20,7 +20,7 @@ def test_extension_expected_version_matches_manifest():
     assert set(versions) == {manifest["version"]}
 
 
-def test_content_script_can_be_reinjected_without_top_level_redeclare():
+def test_content_script_has_install_guard_for_manifest_reload():
     content = _read("extension/content.js").strip()
 
     assert content.startswith("(() => {")
@@ -86,9 +86,11 @@ def test_content_script_recovery_bounds_tab_messages():
     assert "const TAB_MESSAGE_TIMEOUT_MS = 30000" in background
     assert "const FORCED_CYCLE_RELOAD_DEBOUNCE_MS = 4 * 60 * 1000" in background
     assert "const FORCED_CYCLE_FAILURE_DEBOUNCE_MS = 90 * 1000" in background
-    assert 'const REFRESH_AFTER_PROGRAMMATIC_INJECT_PLATFORMS = new Set(["x", "threads"])' in background
     assert "async function sendTabMessageWithTimeout" in background
-    assert background.count("sendTabMessageWithTimeout(") >= 5
+    assert background.count("sendTabMessageWithTimeout(") >= 4
+    assert 'files: ["content.js"]' not in background
+    assert "async function refreshContentScriptAndNudge" in background
+    assert "content_script_manifest_refresh_scheduled" in background
     assert "new Error(\"tab message timed out\")" in background
     assert "function isTabMessageTimeout" in background
     no_receiver_block = background.split("function isNoReceiverError", 1)[1].split(
@@ -100,10 +102,9 @@ def test_content_script_recovery_bounds_tab_messages():
 def test_tab_message_timeouts_do_not_trigger_receiver_missing_refresh():
     background = _read("extension/background.js")
 
-    assert "content_script_programmatic_nudge_timed_out" in background
     assert "forced_cycle_request_timed_out" in background
     assert "content_script_message_timeout" in background
-    assert "message_timeout_programmatic_inject" in background
+    assert "message_timeout_manifest_refresh" in background
     assert "MESSAGE_TIMEOUT_STALE_RELOAD_SECONDS_BY_PLATFORM" in background
     assert "function messageTimeoutStaleReloadSeconds" in background
 
@@ -120,12 +121,11 @@ def test_tab_message_timeouts_do_not_trigger_receiver_missing_refresh():
     assert "contentAgeSeconds >= staleReloadSeconds" in forced_catch
     assert "\"message_timeout_content_stale\"" in forced_catch
     assert "\"message_timeout_stale_refresh\"" in forced_catch
-    assert "injectContentScriptAndNudge(base, tab, platform, \"forced_cycle_message_timeout\"" in forced_catch
-    assert "reinject_attempted: true" in forced_catch
-    assert "injectContentScriptAndNudge(base, t, platform, \"ensure_loop_message_timeout\"" in ensure_catch
+    assert "refreshContentScriptAndNudge(base, tab, platform, \"forced_cycle_message_timeout\"" in forced_catch
+    assert "refresh_attempted: true" in forced_catch
+    assert "refreshContentScriptAndNudge(base, t, platform, \"ensure_loop_message_timeout\"" in ensure_catch
     assert "refreshTabForMissingContentScript" not in ensure_catch
-    assert "content_script_injected_refresh" in background
-    assert "receiver_missing_injected_then_refresh" in background
+    assert "content_script_manifest_refresh_scheduled" in background
 
 
 def test_extension_auto_reload_is_immediate_with_alarm_backup():
@@ -334,8 +334,8 @@ def test_post_reload_scrape_nudge_waits_and_retries_for_heavy_tabs():
     assert re.search(r"x:\s*90000", retry_block)
     assert "post_reload_scrape_nudge_retry_scheduled" in background
     assert "post_reload_retry: true" in background
-    assert "post_reload_timeout_programmatic_inject" in background
-    assert "forced_cycle_reload_debounced_inject" in background
+    assert "post_reload_timeout_manifest_refresh" in background
+    assert "forced_cycle_reload_debounced_refresh" in background
 
 
 def test_facebook_has_post_text_fallback_when_permalink_ids_are_missing():

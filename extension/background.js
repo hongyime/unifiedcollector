@@ -116,7 +116,6 @@ const PAGE_RECOVERY_DELAY_WINDOWS_MS = [
   [240000, 480000],
   [720000, 1200000],
 ];
-const REFRESH_AFTER_PROGRAMMATIC_INJECT_PLATFORMS = new Set(["x", "threads"]);
 const HOME_NAV_HARD_REFRESH_PLATFORMS = new Set(["x", "threads", "lemon8"]);
 
 // ---- persistent logging --------------------------------------------------
@@ -438,50 +437,21 @@ async function recordServiceWorkerRecovery(base, tab, platform, status, reason, 
   } catch (e) {}
 }
 
-async function injectContentScriptAndNudge(base, tab, platform, reason, extra = {}) {
+async function refreshContentScriptAndNudge(base, tab, platform, reason, extra = {}) {
   if (!tab || tab.id == null || !platform || !platform.id) return false;
-  const tabId = tab.id;
   let freshTab = tab;
   try {
-    freshTab = await chrome.tabs.get(tabId);
+    freshTab = await chrome.tabs.get(tab.id);
   } catch (e) {}
-  try {
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      files: ["content.js"],
-    });
-    await recordServiceWorkerRecovery(base, freshTab, platform, "content_script_programmatic_injected", reason || "content_script_receiver_missing", extra);
-  } catch (e) {
-    await recordServiceWorkerRecovery(base, freshTab, platform, "content_script_programmatic_inject_failed", reason || "content_script_receiver_missing", {
-      ...extra,
-      inject_error: e && e.message ? e.message : String(e),
-    });
-    return false;
-  }
-  try {
-    await sendTabMessageWithTimeout(tabId, {
-      type: "scrapeCycle",
-      reason: reason || "content_script_receiver_missing",
-    });
-    await recordServiceWorkerRecovery(base, freshTab, platform, "content_script_programmatic_nudge_sent", reason || "content_script_receiver_missing", extra);
-    return true;
-  } catch (e) {
-    const messageTimedOut = isTabMessageTimeout(e);
-    await recordServiceWorkerRecovery(base, freshTab, platform, "content_script_programmatic_nudge_failed", reason || "content_script_receiver_missing", {
-      ...extra,
-      cycle_error: e && e.message ? e.message : String(e),
-      message_timeout: messageTimedOut || null,
-    });
-    if (messageTimedOut) {
-      await recordServiceWorkerRecovery(base, freshTab, platform, "content_script_programmatic_nudge_timed_out", reason || "content_script_receiver_missing", {
-        ...extra,
-        cycle_error: e && e.message ? e.message : String(e),
-        message_timeout: true,
-      });
-      return true;
-    }
-    return false;
-  }
+  const refreshed = await hardRefreshForcedCycleTab(base, freshTab, platform, reason || "content_script_receiver_missing", {
+    ...extra,
+    recovery: "manifest_content_script_refresh",
+  });
+  await recordServiceWorkerRecovery(base, freshTab, platform, "content_script_manifest_refresh_scheduled", reason || "content_script_receiver_missing", {
+    ...extra,
+    refresh_ok: refreshed || null,
+  });
+  return refreshed;
 }
 
 const POST_RELOAD_NUDGE_DELAY_MS_BY_PLATFORM = {
@@ -530,12 +500,12 @@ function schedulePostReloadScrapeNudge(base, tab, platform, reason, extra = {}) 
       } catch (e) {
         const messageTimedOut = isTabMessageTimeout(e);
         if (isNoReceiverError(e)) {
-          const injected = await injectContentScriptAndNudge(base, freshTab, platform, reason || "post_reload_recovery", {
+          const refreshed = await refreshContentScriptAndNudge(base, freshTab, platform, reason || "post_reload_recovery", {
             ...extra,
             post_reload_delay_ms: delayMs,
-            recovery: "post_reload_programmatic_inject",
+            recovery: "post_reload_manifest_refresh",
           });
-          if (injected) return;
+          if (refreshed) return;
         }
         if (messageTimedOut && !extra.post_reload_retry) {
           const retryDelayMs = postReloadScrapeNudgeRetryDelayMs(platform);
@@ -554,14 +524,14 @@ function schedulePostReloadScrapeNudge(base, tab, platform, reason, extra = {}) 
           return;
         }
         if (messageTimedOut) {
-          const injected = await injectContentScriptAndNudge(base, freshTab, platform, reason || "post_reload_recovery", {
+          const refreshed = await refreshContentScriptAndNudge(base, freshTab, platform, reason || "post_reload_recovery", {
             ...extra,
             cycle_error: e && e.message ? e.message : String(e),
             message_timeout: true,
             post_reload_delay_ms: delayMs,
-            recovery: "post_reload_timeout_programmatic_inject",
+            recovery: "post_reload_timeout_manifest_refresh",
           });
-          if (injected) return;
+          if (refreshed) return;
         }
         await recordServiceWorkerRecovery(base, freshTab, platform, "post_reload_scrape_nudge_failed", reason || "post_reload_recovery", {
           ...extra,
@@ -606,26 +576,10 @@ async function hardRefreshForcedCycleTab(base, tab, platform, reason, extra = {}
 
 async function refreshTabForMissingContentScript(base, tab, platform, reason, extra = {}) {
   if (!tab || tab.id == null || !platform || !platform.id) return false;
-  const injected = await injectContentScriptAndNudge(base, tab, platform, reason || "content_script_receiver_missing", {
-    recovery: "receiver_missing_programmatic_inject",
-    ...extra,
-  });
-  if (injected) {
-    if (REFRESH_AFTER_PROGRAMMATIC_INJECT_PLATFORMS.has(platform.id)) {
-      await recordServiceWorkerRecovery(base, tab, platform, "content_script_injected_refresh", reason || "content_script_receiver_missing", {
-        recovery: "receiver_missing_injected_then_refresh",
-        ...extra,
-      });
-      return hardRefreshForcedCycleTab(base, tab, platform, reason || "content_script_receiver_missing", {
-        recovery: "receiver_missing_injected_then_refresh",
-        ...extra,
-      });
-    }
-    return true;
-  }
-  // If programmatic injection still cannot attach, reload the page so Chrome can
-  // run the manifest content script in a clean page context.
-  return hardRefreshForcedCycleTab(base, tab, platform, reason || "content_script_receiver_missing", {
+  // Reload the page so Chrome runs the manifest content script in a clean page
+  // context. Re-injecting content.js into an already loaded page can redeclare
+  // top-level consts in the isolated world and break scraping.
+  return refreshContentScriptAndNudge(base, tab, platform, reason || "content_script_receiver_missing", {
     recovery: "manifest_content_script_refresh",
     ...extra,
   });
@@ -772,39 +726,39 @@ async function maybeForceScrapeCycle(tab, platform, responseBody, reason, base =
           stale_refresh_ok: reloaded || null,
         });
         if (!reloaded) {
-          const injected = await injectContentScriptAndNudge(base, tab, platform, "forced_cycle_reload_debounced_timeout", {
+          const refreshed = await refreshContentScriptAndNudge(base, tab, platform, "forced_cycle_reload_debounced_timeout", {
             content_age_seconds: contentAgeSeconds,
             stale_reload_seconds: staleReloadSeconds,
             cycle_error: cycleError,
             message_timeout: true,
-            recovery: "reload_debounced_programmatic_inject",
+            recovery: "reload_debounced_manifest_refresh",
           });
-          await recordServiceWorkerRecovery(base, tab, platform, "forced_cycle_reload_debounced_inject", body.force_reason || "browser_content_stale", {
+          await recordServiceWorkerRecovery(base, tab, platform, "forced_cycle_reload_debounced_refresh", body.force_reason || "browser_content_stale", {
             content_age_seconds: contentAgeSeconds,
             stale_reload_seconds: staleReloadSeconds,
             cycle_error: cycleError,
             message_timeout: true,
-            reinject_attempted: true,
-            reinject_ok: injected || null,
+            refresh_attempted: true,
+            refresh_ok: refreshed || null,
           });
         }
         await log("warn", `${platform.label}: stale-content forced scrape message timed out; ${reloaded ? "hard-refreshed stale tab" : "refresh skipped by debounce"}`);
         return;
       }
-      const injected = await injectContentScriptAndNudge(base, tab, platform, "forced_cycle_message_timeout", {
+      const refreshed = await refreshContentScriptAndNudge(base, tab, platform, "forced_cycle_message_timeout", {
         content_age_seconds: body.content_age_seconds || null,
         cycle_error: cycleError,
         message_timeout: true,
-        recovery: "message_timeout_programmatic_inject",
+        recovery: "message_timeout_manifest_refresh",
       });
       await recordServiceWorkerRecovery(base, tab, platform, "forced_cycle_request_timed_out", body.force_reason || "browser_content_stale", {
         content_age_seconds: body.content_age_seconds || null,
         cycle_error: cycleError,
         message_timeout: true,
-        reinject_attempted: true,
-        reinject_ok: injected || null,
+        refresh_attempted: true,
+        refresh_ok: refreshed || null,
       });
-      await log("warn", `${platform.label}: stale-content forced scrape message timed out; ${injected ? "re-injected content script and left tab running" : "leaving the tab running and retrying later"}`);
+      await log("warn", `${platform.label}: stale-content forced scrape message timed out; ${refreshed ? "hard-refreshed tab for manifest content script" : "leaving the tab running and retrying later"}`);
       return;
     }
     await recordServiceWorkerRecovery(base, tab, platform, "forced_cycle_request_failed", body.force_reason || "browser_content_stale", {
@@ -1762,18 +1716,18 @@ async function ensureLoops(reason) {
         const cycleError = firstErr && firstErr.message ? firstErr.message : String(firstErr);
         if (platform && messageTimedOut) {
           const base = await ingestBase();
-          const injected = await injectContentScriptAndNudge(base, t, platform, "ensure_loop_message_timeout", {
+          const refreshed = await refreshContentScriptAndNudge(base, t, platform, "ensure_loop_message_timeout", {
             cycle_error: cycleError,
             message_timeout: true,
-            recovery: "message_timeout_programmatic_inject",
+            recovery: "message_timeout_manifest_refresh",
           });
           await recordServiceWorkerRecovery(base, t, platform, "content_script_message_timeout", reason || "ensure_loop", {
             cycle_error: cycleError,
             message_timeout: true,
-            reinject_attempted: true,
-            reinject_ok: injected || null,
+            refresh_attempted: true,
+            refresh_ok: refreshed || null,
           });
-          await log("warn", `${platform.label}: scraper tab did not answer loop nudge within timeout; ${injected ? "re-injected content script and left it open" : "leaving it open to finish current work"} (${reason})`);
+          await log("warn", `${platform.label}: scraper tab did not answer loop nudge within timeout; ${refreshed ? "hard-refreshed tab for manifest content script" : "leaving it open to finish current work"} (${reason})`);
         } else if (platform && receiverMissing) {
           const base = await ingestBase();
           await recordServiceWorkerRecovery(base, t, platform, "content_script_missing_refresh", reason || "ensure_loop", {
