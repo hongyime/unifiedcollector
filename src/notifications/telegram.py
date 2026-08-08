@@ -156,6 +156,7 @@ async def send_many(messages: list[str]) -> bool:
 _MAX_PHOTO_BYTES = 10 * 1024 * 1024
 _MAX_VIDEO_BYTES = 45 * 1024 * 1024  # Bot API says 50MB; leave video safety margin.
 _MAX_DOCUMENT_BYTES = 49 * 1024 * 1024
+_MEDIA_UPLOAD_TIMEOUT_SECONDS = 180
 
 
 def _max_upload_bytes(method: str) -> int:
@@ -263,7 +264,7 @@ def _post_media_detailed(token: str, method: str, file_field: str,
         )
 
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with urllib.request.urlopen(req, timeout=_MEDIA_UPLOAD_TIMEOUT_SECONDS) as resp:
             return resp.status == 200, 0, "", ""
     except HTTPError as e:
         retry_after = 0
