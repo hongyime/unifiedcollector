@@ -547,7 +547,20 @@ def _format_backup_status(backups: dict) -> str:
     status = str(backups.get("status") or "unknown")
     root = _esc(backups.get("root") or "")
     in_progress = bool(backups.get("in_progress"))
-    progress = " Backup is currently writing a replacement dump." if in_progress else ""
+    progress = ""
+    if in_progress:
+        temp_size = backups.get("in_progress_temp_size_bytes")
+        temp_age = backups.get("in_progress_temp_updated_age_seconds")
+        if temp_size is not None:
+            progress = (
+                " Backup is currently writing a replacement dump"
+                f" ({_fmt_bytes(temp_size)} temp file"
+            )
+            if temp_age is not None:
+                progress += f", last grew {_humanize_age(int(temp_age or 0))} ago"
+            progress += ")."
+        else:
+            progress = " Backup is currently writing a replacement dump."
     stale_temp_count = int(backups.get("stale_in_progress_count") or 0)
     stale_temp_age = backups.get("stale_in_progress_oldest_age_seconds")
     stale_temp = ""

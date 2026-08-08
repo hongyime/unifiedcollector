@@ -86,6 +86,9 @@ def test_backup_status_reports_latest_dump_and_in_progress(tmp_path):
     assert status["backup_count"] == 2
     assert status["in_progress"] is True
     assert status["in_progress_count"] == 1
+    assert status["in_progress_temp_path"] is not None
+    assert status["in_progress_temp_size_bytes"] == 1
+    assert status["in_progress_temp_updated_age_seconds"] is not None
     assert status["stale_in_progress_count"] == 0
     assert status["in_progress_recent_max_age_seconds"] == 15 * 60
     assert status["lock_active"] is True
@@ -135,7 +138,8 @@ def test_backup_status_marks_old_dump_stale(tmp_path):
 
 def test_backup_status_marks_stale_dump_refreshing_when_new_dump_active(tmp_path):
     _dump(tmp_path, "20200101_000000")
-    (tmp_path / ".inprogress_20260721_033012.dump").write_bytes(b"x")
+    temp = tmp_path / ".inprogress_20260721_033012.dump"
+    temp.write_bytes(b"x" * 7)
     _active_lock(tmp_path)
 
     status = backup_status(tmp_path, max_age_hours=1)
@@ -143,6 +147,8 @@ def test_backup_status_marks_stale_dump_refreshing_when_new_dump_active(tmp_path
     assert status["status"] == "refreshing"
     assert status["in_progress"] is True
     assert status["in_progress_count"] == 1
+    assert status["in_progress_temp_path"] == str(temp)
+    assert status["in_progress_temp_size_bytes"] == 7
     assert status["latest_path"] is not None
 
 

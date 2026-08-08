@@ -35,6 +35,7 @@ DEFAULT_STALL_TIMEOUT_SECONDS = 30 * 60
 DEFAULT_VALIDATE_TIMEOUT_SECONDS = 10 * 60
 DEFAULT_LOCK_STALE_SECONDS = 6 * 60 * 60
 DEFAULT_DUMP_COMPRESSION = 0
+DEFAULT_PROGRESS_LOG_SECONDS = 5 * 60
 
 _BACKUP_RE = re.compile(r"^(?P<prefix>.+)_(?P<stamp>\d{8}_\d{6})\.dump$")
 
@@ -192,12 +193,19 @@ def backup_status(
 
     now = datetime.now()
     active_temp_max_age_seconds = active_temp_minutes * 60
-    temp_ages: list[int] = []
+    temp_records: list[dict] = []
     for path in temp_files:
         try:
-            temp_ages.append(max(0, int(now.timestamp() - path.stat().st_mtime)))
+            stat = path.stat()
         except OSError:
             continue
+        temp_records.append(
+            {
+                "path": path,
+                "updated_age_seconds": max(0, int(now.timestamp() - stat.st_mtime)),
+                "size_bytes": stat.st_size,
+            }
+        )
     lock_age_seconds = None
     lock_active = False
     if lock_dir.exists():
@@ -207,19 +215,35 @@ def backup_status(
         except OSError:
             lock_age_seconds = None
             lock_active = False
-    active_temp_count = sum(
-        1
-        for age in temp_ages
-        if lock_active and (active_temp_max_age_seconds <= 0 or age <= active_temp_max_age_seconds)
-    )
-    stale_temp_ages = [
-        age
-        for age in temp_ages
-        if not lock_active or (active_temp_max_age_seconds > 0 and age > active_temp_max_age_seconds)
+    active_temp_records = [
+        record
+        for record in temp_records
+        if lock_active
+        and (
+            active_temp_max_age_seconds <= 0
+            or int(record["updated_age_seconds"]) <= active_temp_max_age_seconds
+        )
     ]
+    stale_temp_ages = [
+        int(record["updated_age_seconds"])
+        for record in temp_records
+        if not lock_active
+        or (
+            active_temp_max_age_seconds > 0
+            and int(record["updated_age_seconds"]) > active_temp_max_age_seconds
+        )
+    ]
+    active_temp = max(
+        active_temp_records,
+        key=lambda record: int(record["size_bytes"]),
+        default=None,
+    )
     temp_payload = {
-        "in_progress": lock_active or active_temp_count > 0,
-        "in_progress_count": active_temp_count,
+        "in_progress": lock_active or len(active_temp_records) > 0,
+        "in_progress_count": len(active_temp_records),
+        "in_progress_temp_path": str(active_temp["path"]) if active_temp else None,
+        "in_progress_temp_size_bytes": int(active_temp["size_bytes"]) if active_temp else None,
+        "in_progress_temp_updated_age_seconds": int(active_temp["updated_age_seconds"]) if active_temp else None,
         "stale_in_progress_count": len(stale_temp_ages),
         "stale_in_progress_oldest_age_seconds": max(stale_temp_ages) if stale_temp_ages else None,
         "in_progress_recent_max_age_seconds": active_temp_max_age_seconds,
@@ -228,7 +252,7 @@ def backup_status(
     }
     latest = backups[0] if backups else None
     if latest is None:
-        status = "refreshing" if active_temp_count > 0 else "missing"
+        status = "refreshing" if active_temp_records else "missing"
         return {
             "status": status,
             "root": str(root),
@@ -244,7 +268,7 @@ def backup_status(
 
     age_seconds = max(0, int((now - latest.created_at).total_seconds()))
     stale = threshold_hours > 0 and age_seconds > threshold_hours * 3600
-    status = "refreshing" if stale and active_temp_count > 0 else ("stale" if stale else "ok")
+    status = "refreshing" if stale and active_temp_records else ("stale" if stale else "ok")
     try:
         latest_size = latest.path.stat().st_size
     except OSError:
@@ -592,6 +616,11 @@ def _run(
     started = time.monotonic()
     last_progress_at = started
     last_progress_size = _file_size(progress_path)
+    last_progress_log_at = started
+    progress_log_interval = _env_int(
+        "COLLECTOR_DB_BACKUP_PROGRESS_LOG_SECONDS",
+        DEFAULT_PROGRESS_LOG_SECONDS,
+    )
     process = subprocess.Popen(
         list(cmd),
         stdin=stdin,
@@ -622,6 +651,17 @@ def _run(
                         last_progress_size = size
                         last_progress_at = now
                         _touch_progress_lock(progress_path)
+                        if (
+                            progress_log_interval > 0
+                            and now - last_progress_log_at >= progress_log_interval
+                        ):
+                            last_progress_log_at = now
+                            print(
+                                "[backup] progress "
+                                f"{progress_path} size={size or 0} bytes "
+                                f"elapsed={int(now - started)}s",
+                                flush=True,
+                            )
                     elif now - last_progress_at > stall_timeout:
                         stderr = _terminate_process(process)
                         err = stderr.decode("utf-8", errors="replace").strip()

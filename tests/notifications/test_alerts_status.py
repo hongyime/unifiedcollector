@@ -12,11 +12,15 @@ def test_format_backup_status_reports_first_dump_refreshing():
         "latest_size_bytes": None,
         "backup_count": 0,
         "in_progress": True,
+        "in_progress_temp_size_bytes": 1_500_000_000,
+        "in_progress_temp_updated_age_seconds": 12,
         "stale_in_progress_count": 0,
     })
 
     assert "No completed collector DB backup dump found" in msg
     assert "writing a replacement dump" in msg
+    assert "1.4 GB temp file" in msg
+    assert "last grew 12s ago" in msg
     assert "Latest collector DB backup" not in msg
 
 

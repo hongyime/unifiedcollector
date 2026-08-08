@@ -3,6 +3,8 @@ $ErrorActionPreference = "Stop"
 $repo = "C:\unifiedcollector"
 $tmp = Join-Path $repo "tmp"
 $log = Join-Path $tmp "browser_tab_maintenance.log"
+$statusPath = Join-Path $tmp "browser_tab_maintenance_status.json"
+$script:LastCdpError = $null
 
 if (-not (Test-Path $tmp)) {
     New-Item -ItemType Directory -Path $tmp | Out-Null
@@ -11,6 +13,19 @@ if (-not (Test-Path $tmp)) {
 function Write-Log($message) {
     $stamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     Add-Content -LiteralPath $log -Value "[$stamp] $message"
+}
+
+function Write-Status([string]$state, [string]$detail = "") {
+    $payload = [ordered]@{
+        checked_at = (Get-Date).ToString("o")
+        state = $state
+        detail = $detail
+        cdp_url = "http://127.0.0.1:9222"
+        audit_result = (Join-Path $tmp "browser_tab_audit_result.json")
+        reload_plan = (Join-Path $tmp "browser_tab_reload_plan.json")
+        pid = $PID
+    }
+    $payload | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $statusPath -Encoding UTF8
 }
 
 function Resolve-Python {
@@ -25,9 +40,11 @@ function Test-CdpAvailable {
     $url = "http://127.0.0.1:9222/json/version"
     try {
         $response = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 3
+        $script:LastCdpError = $null
         return ($response.StatusCode -ge 200 -and $response.StatusCode -lt 300)
     } catch {
-        Write-Log ("Chrome CDP unavailable at ${url}: " + $_.Exception.Message)
+        $script:LastCdpError = $_.Exception.Message
+        Write-Log ("Chrome CDP unavailable at ${url}: " + $script:LastCdpError)
         return $false
     }
 }
@@ -92,11 +109,13 @@ $audit = Join-Path $repo "tools\browser_tab_audit.py"
 $reload = Join-Path $repo "tools\browser_tab_reload.py"
 
 Write-Log "browser tab maintenance start"
+Write-Status "running" "maintenance pass started"
 
 Push-Location $repo
 try {
     if (-not (Test-CdpAvailable)) {
         Write-Log "browser tab maintenance skipped because Chrome CDP is unavailable"
+        Write-Status "cdp_unavailable" $script:LastCdpError
         return
     }
     $python = Resolve-Python
@@ -106,8 +125,10 @@ try {
     Invoke-PythonScript -command $python -script $audit -timeoutSeconds $auditTimeout
     Invoke-PythonScript -command $python -script $reload -timeoutSeconds $reloadTimeout
     Write-Log "browser tab maintenance complete"
+    Write-Status "ok" "audit and reload completed"
 } catch {
     Write-Log ("browser tab maintenance failed: " + $_.Exception.Message)
+    Write-Status "failed" $_.Exception.Message
     throw
 } finally {
     Pop-Location
