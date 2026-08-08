@@ -987,15 +987,17 @@ async def test_download_via_bridge_signs_request_and_returns_bytes(
 
 @pytest.mark.asyncio
 async def test_download_via_bridge_returns_none_on_non_200(
-    configured_collector, monkeypatch,
+    configured_collector, monkeypatch, caplog,
 ):
     resp = MagicMock(status_code=403, content=b"",
                        raise_for_status=MagicMock())
     _patch_async_client(monkeypatch, post_response=resp, response=resp)
-    out = await configured_collector._download_via_bridge(
-        "sess1", "m1", "key", "/path",
-    )
+    with caplog.at_level("WARNING", logger="src.collectors.whatsapp"):
+        out = await configured_collector._download_via_bridge(
+            "sess1", "m1", "key", "/path",
+        )
     assert out is None
+    assert any("Bridge decrypt failed m1: 403" in r.getMessage() for r in caplog.records)
     calls = _rate_limit_calls(configured_collector._test_conn)
     assert len(calls) == 1
     assert calls[0][1:7] == (
@@ -1006,6 +1008,32 @@ async def test_download_via_bridge_returns_none_on_non_200(
         None,
         "WhatsApp media decrypt HTTP 403",
     )
+
+
+@pytest.mark.asyncio
+async def test_download_via_bridge_logs_retryable_503_at_info(
+    configured_collector, monkeypatch, caplog,
+):
+    health = MagicMock(status_code=200, content=b"", raise_for_status=MagicMock())
+    health.json = MagicMock(return_value={"status": "ok", "whatsapp_ready": True})
+    resp = MagicMock(status_code=503, content=b"", raise_for_status=MagicMock())
+    resp.json = MagicMock(return_value={
+        "code": "media_fetch_transient",
+        "retryable": True,
+        "error": "stream temporarily unavailable",
+    })
+    _patch_async_client(monkeypatch, response=health, post_response=resp)
+
+    with caplog.at_level("INFO", logger="src.collectors.whatsapp"):
+        out = await configured_collector._download_via_bridge(
+            "sess1", "m-transient", "key", "/path",
+        )
+
+    assert out is None
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("Bridge decrypt deferred m-transient: HTTP 503" in m for m in messages)
+    assert not any("Bridge decrypt failed m-transient" in m for m in messages)
+    assert _rate_limit_calls(configured_collector._test_conn) == []
 
 
 @pytest.mark.asyncio

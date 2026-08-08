@@ -1610,7 +1610,15 @@ class WhatsappCollector(BaseCollector):
                             error_code or "",
                         )
                         return None
-                    logger.warning("Bridge decrypt failed %s: %d", msg_id, resp.status_code)
+                    if retryable is True or resp.status_code in {408, 429, 500, 502, 503, 504}:
+                        logger.info(
+                            "Bridge decrypt deferred %s: HTTP %d %s",
+                            msg_id,
+                            resp.status_code,
+                            error_code or "",
+                        )
+                    else:
+                        logger.warning("Bridge decrypt failed %s: %d", msg_id, resp.status_code)
                     await self._record_http_event(
                         session_name=session,
                         scope="media_decrypt",
