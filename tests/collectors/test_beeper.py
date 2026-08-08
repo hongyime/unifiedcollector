@@ -1068,7 +1068,7 @@ async def test_sync_one_chat_timeout_does_not_abort_cycle(monkeypatch, tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_sync_messages_bounds_each_chat_timeout(monkeypatch, tmp_path):
+async def test_sync_messages_bounds_each_chat_timeout(monkeypatch, tmp_path, caplog):
     monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
     monkeypatch.setenv("COLLECTOR_DRIVE_PATH", str(tmp_path))
     monkeypatch.setattr(beeper_mod, "_beeper_chat_sync_timeout", lambda: 0.01)
@@ -1096,12 +1096,23 @@ async def test_sync_messages_bounds_each_chat_timeout(monkeypatch, tmp_path):
 
     monkeypatch.setattr(coll, "_sync_one_chat", slow_chat)
 
-    inserted = await coll._sync_messages()
+    with caplog.at_level("INFO", logger="src.collectors.beeper"):
+        inserted = await coll._sync_messages()
 
     assert inserted == 0
     writer.update_sync_state.assert_awaited_once()
     assert writer.update_sync_state.await_args.args[0] == "!slow:beeper.local"
     assert writer.update_sync_state.await_args.kwargs["error"] == "TimeoutError"
+    assert any(
+        record.levelname == "INFO"
+        and "sync exceeded" in record.message
+        for record in caplog.records
+    )
+    assert not any(
+        record.levelname == "WARNING"
+        and "sync exceeded" in record.message
+        for record in caplog.records
+    )
 
 
 @pytest.mark.asyncio

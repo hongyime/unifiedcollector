@@ -1549,7 +1549,7 @@ class BeeperCollector(BaseCollector):
                 else:
                     inserted = await sync_one
             except TimeoutError as exc:
-                logger.warning(
+                logger.info(
                     "chat %s sync exceeded %.0fs; retrying this chat next cycle: %s",
                     row["chat_id"],
                     chat_timeout,
