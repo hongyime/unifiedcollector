@@ -84,10 +84,16 @@ async def delete_message_later(message: Message, delay: int = AUTO_DELETE_DELAY)
         pass  # Already deleted or no permission
 
 
-async def send_ephemeral(update: Update, text: str) -> Message:
+async def send_ephemeral(update: Update, text: str, *, delay: int = AUTO_DELETE_DELAY) -> Message:
     """Send a message that auto-deletes after AUTO_DELETE_DELAY seconds."""
-    msg = await update.message.reply_text(text)
-    asyncio.create_task(delete_message_later(msg))
+    chat = update.effective_chat
+    chat_id = chat.id if chat is not None else update.message.chat_id
+    try:
+        bot = update.get_bot()
+    except RuntimeError:
+        bot = update.message.get_bot()
+    msg = await bot.send_message(chat_id=chat_id, text=text)
+    asyncio.create_task(delete_message_later(msg, delay=delay))
     return msg
 
 
@@ -310,8 +316,7 @@ async def finalize_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE
             logger.debug("Could not delete Telegram chat history: %s", e)
 
         # Send success — delete after 10s (shorter than default 60s, less visible)
-        msg = await update.message.reply_text(f"✅ {name}")
-        asyncio.create_task(delete_message_later(msg, delay=10))
+        await send_ephemeral(update, f"✅ {name}", delay=10)
         logger.info("Onboarded account: %s (phone=%s, bot=%s)", name, phone[:4] + "****", bot_name)
 
     except Exception as e:

@@ -17,6 +17,26 @@ def _context(args):
 
 
 @pytest.mark.asyncio
+async def test_send_ephemeral_uses_chat_send_not_reply(monkeypatch):
+    sent = SimpleNamespace(delete=AsyncMock())
+    bot = SimpleNamespace(send_message=AsyncMock(return_value=sent))
+    message = SimpleNamespace(chat_id=123, get_bot=lambda: bot, reply_text=AsyncMock())
+    update = SimpleNamespace(effective_chat=SimpleNamespace(id=456), message=message, get_bot=lambda: bot)
+
+    def fake_create_task(coro):
+        coro.close()
+        return None
+
+    monkeypatch.setattr(onboard_bot.asyncio, "create_task", fake_create_task)
+
+    msg = await onboard_bot.send_ephemeral(update, "hello", delay=10)
+
+    assert msg is sent
+    bot.send_message.assert_awaited_once_with(chat_id=456, text="hello")
+    message.reply_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_start_without_deeplink_stays_passive(monkeypatch):
     delete_user_message = AsyncMock()
     send_ephemeral = AsyncMock()
