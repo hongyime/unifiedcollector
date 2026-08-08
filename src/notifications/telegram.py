@@ -273,7 +273,6 @@ def _post_media_detailed(token: str, method: str, file_field: str,
                 str(parsed.get("error_code") or e.code),
                 str(parsed.get("description") or body_text),
             )
-        logger.warning("telegram %s HTTPError %s: %s", method, e.code, body_text)
         error_code = str(e.code)
         description = body_text
         try:
@@ -282,6 +281,10 @@ def _post_media_detailed(token: str, method: str, file_field: str,
             description = str(parsed.get("description") or body_text)
         except Exception:
             pass
+        if method == "sendPhoto" and "IMAGE_PROCESS_FAILED" in str(description):
+            logger.info("telegram sendPhoto could not process image; trying document fallback")
+        else:
+            logger.warning("telegram %s HTTPError %s: %s", method, e.code, body_text)
         return False, 0, error_code, description
     except Exception as e:  # noqa: BLE001 - notifications must never raise
         logger.warning("telegram %s failed: %s", method, e)
@@ -325,9 +328,6 @@ async def send_photo(url_or_path: str, caption: str = "",
         if ok or retry_after > 0:
             return ok, retry_after
         if "IMAGE_PROCESS_FAILED" in str(description):
-            logger.warning(
-                "telegram sendPhoto image processing failed; falling back to sendDocument"
-            )
             return await send_document(url_or_path, caption=caption, parse_mode=parse_mode)
         _ = error_code
         return False, 0
