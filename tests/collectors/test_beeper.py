@@ -498,7 +498,7 @@ async def test_collector_full_cycle_smoke(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_collect_prioritizes_messages_before_network_repair(monkeypatch, tmp_path):
+async def test_collect_prioritizes_messages_before_network_repair(monkeypatch, tmp_path, caplog):
     monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
     monkeypatch.setenv("COLLECTOR_DRIVE_PATH", str(tmp_path))
     monkeypatch.setenv("BEEPER_NETWORK_REPAIR_LIMIT", "100")
@@ -525,17 +525,28 @@ async def test_collect_prioritizes_messages_before_network_repair(monkeypatch, t
     coll._sync_chats = AsyncMock(return_value=2)
     coll._sync_messages = AsyncMock(side_effect=_sync_messages)
 
-    stats = await coll.collect([])
+    with caplog.at_level("INFO", logger="src.collectors.beeper"):
+        stats = await coll.collect([])
 
     assert stats["messages_inserted"] == 3
     assert stats["networks_repaired"] == 0
     assert stats["transient"] == 1
     assert stats["errors"] == 0
     assert events == ["messages", ("repair", 100)]
+    assert any(
+        record.levelname == "INFO"
+        and "network repair skipped" in record.message
+        for record in caplog.records
+    )
+    assert not any(
+        record.levelname == "WARNING"
+        and "network repair skipped" in record.message
+        for record in caplog.records
+    )
 
 
 @pytest.mark.asyncio
-async def test_collect_continues_messages_when_chat_enumeration_times_out(monkeypatch, tmp_path):
+async def test_collect_continues_messages_when_chat_enumeration_times_out(monkeypatch, tmp_path, caplog):
     monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
     monkeypatch.setenv("COLLECTOR_DRIVE_PATH", str(tmp_path))
     monkeypatch.setenv("BEEPER_CHATS_TIMEOUT", "0.01")
@@ -560,7 +571,8 @@ async def test_collect_continues_messages_when_chat_enumeration_times_out(monkey
     coll._sync_chats = AsyncMock(side_effect=_slow_chats)
     coll._sync_messages = AsyncMock(side_effect=_sync_messages)
 
-    stats = await coll.collect([])
+    with caplog.at_level("INFO", logger="src.collectors.beeper"):
+        stats = await coll.collect([])
 
     assert stats["accounts"] == 1
     assert stats["chats"] == 0
@@ -568,6 +580,16 @@ async def test_collect_continues_messages_when_chat_enumeration_times_out(monkey
     assert stats["transient"] == 1
     assert stats["errors"] == 0
     assert events == ["messages", "chats"]
+    assert any(
+        record.levelname == "INFO"
+        and "phase skipped after transient failure" in record.message
+        for record in caplog.records
+    )
+    assert not any(
+        record.levelname == "WARNING"
+        and "phase skipped after transient failure" in record.message
+        for record in caplog.records
+    )
 
 
 @pytest.mark.asyncio

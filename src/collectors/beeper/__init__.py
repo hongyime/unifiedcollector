@@ -1061,7 +1061,7 @@ class BeeperCollector(BaseCollector):
                 return int(await asyncio.wait_for(awaitable, timeout=timeout) or 0), None
             return int(await awaitable or 0), None
         except (TimeoutError, BeeperTransientError, httpx.TransportError, OSError) as exc:
-            logger.warning(
+            logger.info(
                 "Beeper %s phase skipped after transient failure; continuing: %s",
                 phase,
                 _format_exception(exc),
@@ -1192,7 +1192,7 @@ class BeeperCollector(BaseCollector):
                         timeout=self._network_repair_timeout(),
                     )
                 except Exception as exc:  # noqa: BLE001 - repair is non-critical
-                    logger.warning(
+                    logger.info(
                         "Beeper network repair skipped after live sync: %s",
                         _format_exception(exc),
                     )
