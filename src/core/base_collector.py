@@ -742,7 +742,7 @@ class BaseCollector(ABC):
                             content_id,
                         )
                 except (asyncio.TimeoutError, TimeoutError, QueryCanceledError):
-                    logger.warning(
+                    logger.info(
                         "vault artifact db consistency check timed out for %s/%s; media row kept",
                         self.SOURCE_NAME,
                         content_id,

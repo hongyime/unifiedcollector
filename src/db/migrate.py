@@ -76,7 +76,7 @@ async def apply_all(pool) -> dict:
         try:
             locked = await conn.fetchval("SELECT pg_try_advisory_lock(hashtext('unifiedcollector_migrate'))")
             if not locked:
-                logger.warning("Migration runner deferred: another instance is currently migrating.")
+                logger.info("Migration runner deferred: another instance is currently migrating.")
                 summary["deferred"] = True
                 return summary
         except Exception:

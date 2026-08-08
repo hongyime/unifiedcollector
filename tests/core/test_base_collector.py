@@ -436,3 +436,72 @@ async def test_insert_media_item_queues_dlq_when_vault_db_consistency_fails(tmp_
     ]
     assert dlq_calls
     assert "sha256 mismatch" in dlq_calls[-1][4]
+
+
+@pytest.mark.asyncio
+async def test_insert_media_item_logs_vault_db_consistency_timeout_as_info(tmp_path, monkeypatch, caplog):
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    media_file = vault_root / "media" / "blobs" / "aa" / "bb" / "asset.jpg"
+    media_file.parent.mkdir(parents=True)
+    media_file.write_bytes(b"asset")
+    digest = hashlib.sha256(b"asset").hexdigest()
+    monkeypatch.setattr(base_collector, "VAULT_ROOT", vault_root)
+    monkeypatch.setattr(
+        base_collector,
+        "write_media_sidecar",
+        lambda **_kwargs: SimpleNamespace(
+            enabled=True,
+            ok=True,
+            relative_path="sidecars/media/telegram/asset.json",
+            error=None,
+        ),
+    )
+
+    async def _timeout_consistency(*_args, **_kwargs):
+        raise TimeoutError("db busy")
+
+    monkeypatch.setattr(
+        base_collector,
+        "verify_media_item_db_consistency",
+        _timeout_consistency,
+    )
+    coll = _TelegramCollector()
+    coll.pool = _InsertPool(
+        {
+            "file_path": str(media_file),
+            "file_size": media_file.stat().st_size,
+            "sha256": digest,
+            "metadata": {
+                "vault_sidecar": {
+                    "ok": True,
+                    "path": "sidecars/media/telegram/asset.json",
+                }
+            },
+        }
+    )
+
+    with caplog.at_level("INFO", logger="src.core.base_collector"):
+        inserted = await coll.insert_media_item(
+            entity_id="chat1",
+            entity_name="Chat One",
+            content_type="photo",
+            content_id="m1",
+            filename="asset.jpg",
+            file_path=str(media_file),
+            file_size=media_file.stat().st_size,
+            sha256=digest,
+            metadata={},
+        )
+
+    assert inserted is True
+    assert any(
+        record.levelname == "INFO"
+        and "vault artifact db consistency check timed out" in record.message
+        for record in caplog.records
+    )
+    assert not any(
+        record.levelname == "WARNING"
+        and "vault artifact db consistency check timed out" in record.message
+        for record in caplog.records
+    )
