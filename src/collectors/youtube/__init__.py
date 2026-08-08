@@ -111,6 +111,7 @@ _YOUTUBE_EXPECTED_YTDLP_STATES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bthis video is unavailable\b", re.IGNORECASE), "unavailable"),
     (re.compile(r"\bmembers-only\b", re.IGNORECASE), "restricted"),
     (re.compile(r"\bsign in to confirm your age\b", re.IGNORECASE), "restricted"),
+    (re.compile(r"\bhttp error 403:\s*forbidden\b", re.IGNORECASE), "restricted"),
 )
 
 
