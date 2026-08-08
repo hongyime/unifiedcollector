@@ -138,6 +138,7 @@ def test_source_matrix_blocker_browser_watchdog_gives_tab_action():
     )
 
     assert detail_only_blocker["kind"] == "browser_capture_stalled"
+    assert detail_only_blocker["summary"] == "browser content progress is 14612s old (> 3600s)"
     assert "refresh the x browser tab" in detail_only_blocker["next_action"]
 
 

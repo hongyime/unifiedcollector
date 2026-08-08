@@ -1954,7 +1954,7 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
         return {
             "kind": "browser_capture_stalled",
             "severity": "warning",
-            "summary": source_health_error,
+            "summary": source_health_error or source_row.get("detail") or "Browser content capture has stalled.",
             "next_action": (
                 f"Focus or refresh the {platform} browser tab, then press Scrape now on Social Tabs. "
                 "Reload the unpacked extension only if heartbeats or bundle version are stale too; "
