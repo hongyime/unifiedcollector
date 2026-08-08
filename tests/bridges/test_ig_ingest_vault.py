@@ -1328,6 +1328,42 @@ def test_cached_targets_for_reuses_response_inside_ttl(monkeypatch):
     assert calls == ["instagram"]
 
 
+def test_cached_targets_for_serves_stale_cache_on_timeout(monkeypatch):
+    async def slow_targets(pool, platform):
+        await asyncio.sleep(10)
+        return [{"username": "late", "hop": 0}]
+
+    monkeypatch.setattr(ig_ingest, "SOCIAL_TARGET_RESPONSE_CACHE_SECONDS", 0.01)
+    monkeypatch.setattr(ig_ingest, "SOCIAL_TARGET_STALE_RESPONSE_SECONDS", 60.0)
+    monkeypatch.setattr(ig_ingest, "SOCIAL_TARGET_QUERY_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(ig_ingest, "_targets_for", slow_targets)
+    ig_ingest._SOCIAL_TARGET_RESPONSE_CACHE.clear()
+    ig_ingest._SOCIAL_TARGET_RESPONSE_LOCKS.clear()
+    ig_ingest._SOCIAL_TARGET_RESPONSE_CACHE["instagram"] = (
+        ig_ingest.time.time() - 1.0,
+        [{"username": "cached", "hop": 0}],
+    )
+
+    result = asyncio.run(ig_ingest._cached_targets_for(_FakePool(), "instagram"))
+
+    assert result == [{"username": "cached", "hop": 0}]
+
+
+def test_cached_targets_for_returns_empty_on_timeout_without_cache(monkeypatch):
+    async def slow_targets(pool, platform):
+        await asyncio.sleep(10)
+        return [{"username": "late", "hop": 0}]
+
+    monkeypatch.setattr(ig_ingest, "SOCIAL_TARGET_QUERY_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(ig_ingest, "_targets_for", slow_targets)
+    ig_ingest._SOCIAL_TARGET_RESPONSE_CACHE.clear()
+    ig_ingest._SOCIAL_TARGET_RESPONSE_LOCKS.clear()
+
+    result = asyncio.run(ig_ingest._cached_targets_for(_FakePool(), "instagram"))
+
+    assert result == []
+
+
 def test_browser_heartbeat_handler_reports_degraded_when_pool_missing():
     req = _FakeRequest(
         {"pool": None},
@@ -1562,6 +1598,28 @@ def test_record_strava_stream_http_429_does_not_extend_active_duplicate_cooldown
     assert "duplicate_suppressed_count" in query
     assert args[:3] == ("hongyime", "19283135496", 429)
     assert args[3] == "https://www.strava.com/activities/19283135496/streams"
+
+
+def test_strava_route_queue_handler_returns_timeout_payload(monkeypatch):
+    async def slow_queue(*args, **kwargs):
+        await asyncio.sleep(10)
+        return {"items": [{"platform_activity_id": 1}]}
+
+    monkeypatch.setattr(ig_ingest, "STRAVA_ROUTE_QUEUE_RESPONSE_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(ig_ingest, "fetch_strava_route_capture_queue", slow_queue)
+    ig_ingest._STRAVA_ROUTE_QUEUE_RESPONSE_CACHE.clear()
+
+    resp = asyncio.run(
+        ig_ingest.strava_route_queue_handler(
+            _FakeRequest({"pool": _FakePool()}, {}, query={"limit": "2", "account": "72101656"})
+        )
+    )
+    payload = json.loads(resp.text)
+
+    assert payload["timeout"] is True
+    assert payload["reason"] == "route_queue_timeout"
+    assert payload["items"] == []
+    assert payload["account"] == "72101656"
 
 
 def test_archive_browser_capture_writes_dm_sample_raw_payload(monkeypatch):

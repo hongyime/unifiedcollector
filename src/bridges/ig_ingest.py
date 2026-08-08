@@ -281,6 +281,8 @@ SOCIAL_TARGET_CACHE_REFRESH_ON_REQUEST = os.getenv("SOCIAL_TARGET_CACHE_REFRESH_
 SOCIAL_TARGET_CACHE_REFRESH_SECONDS = int(os.getenv("SOCIAL_TARGET_CACHE_REFRESH_SECONDS", "300"))
 SOCIAL_TARGET_CACHE_REFRESH_INLINE_BUDGET_SECONDS = float(os.getenv("SOCIAL_TARGET_CACHE_REFRESH_INLINE_BUDGET_SECONDS", "0.25"))
 SOCIAL_TARGET_RESPONSE_CACHE_SECONDS = float(os.getenv("SOCIAL_TARGET_RESPONSE_CACHE_SECONDS", "45.0"))
+SOCIAL_TARGET_QUERY_TIMEOUT_SECONDS = float(os.getenv("SOCIAL_TARGET_QUERY_TIMEOUT_SECONDS", "2.0"))
+SOCIAL_TARGET_STALE_RESPONSE_SECONDS = float(os.getenv("SOCIAL_TARGET_STALE_RESPONSE_SECONDS", "600.0"))
 X_PROFILE_TARGET_REVISIT_SECONDS = int(os.getenv("X_PROFILE_TARGET_REVISIT_SECONDS", str(12 * 60 * 60)))
 X_PROFILE_TARGET_RETRY_SECONDS = int(os.getenv("X_PROFILE_TARGET_RETRY_SECONDS", str(45 * 60)))
 TIKTOK_FOLLOW_OWNER_FALLBACK = (
@@ -291,6 +293,11 @@ _SOCIAL_TARGET_CACHE_REFRESH_LOCK: asyncio.Lock | None = None
 _SOCIAL_TARGET_CACHE_REFRESH_TASKS: set[asyncio.Task] = set()
 _SOCIAL_TARGET_RESPONSE_CACHE: dict[str, tuple[float, list[dict]]] = {}
 _SOCIAL_TARGET_RESPONSE_LOCKS: dict[str, asyncio.Lock] = {}
+_STRAVA_ROUTE_QUEUE_RESPONSE_CACHE: dict[str, tuple[float, dict]] = {}
+_STRAVA_ROUTE_QUEUE_TIMEOUT_LOG_LAST: dict[str, float] = {}
+STRAVA_ROUTE_QUEUE_RESPONSE_CACHE_SECONDS = float(os.getenv("STRAVA_ROUTE_QUEUE_RESPONSE_CACHE_SECONDS", "30.0"))
+STRAVA_ROUTE_QUEUE_RESPONSE_TIMEOUT_SECONDS = float(os.getenv("STRAVA_ROUTE_QUEUE_RESPONSE_TIMEOUT_SECONDS", "2.0"))
+STRAVA_ROUTE_QUEUE_TIMEOUT_WARN_SECONDS = float(os.getenv("STRAVA_ROUTE_QUEUE_TIMEOUT_WARN_SECONDS", "600.0"))
 
 _SPIDER_DDL = """
 CREATE TABLE IF NOT EXISTS instagram_spider_targets (
@@ -894,6 +901,8 @@ async def _targets_for(pool, platform):
 
 async def _cached_targets_for(pool, platform):
     ttl = max(0.0, SOCIAL_TARGET_RESPONSE_CACHE_SECONDS)
+    stale_ttl = max(ttl, SOCIAL_TARGET_STALE_RESPONSE_SECONDS)
+    query_timeout = max(0.1, SOCIAL_TARGET_QUERY_TIMEOUT_SECONDS)
     now = time.time()
     cached = _SOCIAL_TARGET_RESPONSE_CACHE.get(platform)
     if ttl and cached and now - cached[0] <= ttl:
@@ -909,7 +918,23 @@ async def _cached_targets_for(pool, platform):
         cached = _SOCIAL_TARGET_RESPONSE_CACHE.get(platform)
         if ttl and cached and now - cached[0] <= ttl:
             return cached[1]
-        out = await _targets_for(pool, platform)
+        try:
+            out = await asyncio.wait_for(_targets_for(pool, platform), timeout=query_timeout)
+        except asyncio.TimeoutError:
+            if cached and now - cached[0] <= stale_ttl:
+                logger.warning(
+                    "targets query timed out for %s after %.1fs; serving stale cache age=%.0fs",
+                    platform,
+                    query_timeout,
+                    now - cached[0],
+                )
+                return cached[1]
+            logger.warning(
+                "targets query timed out for %s after %.1fs; serving empty list",
+                platform,
+                query_timeout,
+            )
+            return []
         _SOCIAL_TARGET_RESPONSE_CACHE[platform] = (time.time(), out)
         return out
 
@@ -4825,12 +4850,45 @@ async def strava_route_queue_handler(request):
         or request.query.get("owner")
         or ""
     ).strip() or None
-    queue = await fetch_strava_route_capture_queue(
-        request.app["pool"],
-        limit=limit,
-        account=account,
-        respect_cooldown=True,
-    )
+    cache_key = f"{account or ''}:{limit}"
+    now = time.time()
+    cached = _STRAVA_ROUTE_QUEUE_RESPONSE_CACHE.get(cache_key)
+    try:
+        queue = await asyncio.wait_for(
+            fetch_strava_route_capture_queue(
+                request.app["pool"],
+                limit=limit,
+                account=account,
+                respect_cooldown=True,
+            ),
+            timeout=max(0.1, STRAVA_ROUTE_QUEUE_RESPONSE_TIMEOUT_SECONDS),
+        )
+        _STRAVA_ROUTE_QUEUE_RESPONSE_CACHE[cache_key] = (time.time(), queue)
+    except asyncio.TimeoutError:
+        if cached and now - cached[0] <= max(STRAVA_ROUTE_QUEUE_RESPONSE_CACHE_SECONDS, 1.0):
+            queue = dict(cached[1])
+            queue["stale"] = True
+            queue["timeout"] = True
+            queue["cache_age_seconds"] = int(now - cached[0])
+        else:
+            queue = {
+                "items": [],
+                "timeout": True,
+                "reason": "route_queue_timeout",
+                "account": account,
+            }
+        last_warn = _STRAVA_ROUTE_QUEUE_TIMEOUT_LOG_LAST.get(cache_key, 0.0)
+        should_warn = now - last_warn >= max(1.0, STRAVA_ROUTE_QUEUE_TIMEOUT_WARN_SECONDS)
+        if should_warn:
+            _STRAVA_ROUTE_QUEUE_TIMEOUT_LOG_LAST[cache_key] = now
+        log = logger.warning if should_warn else logger.info
+        log(
+            "strava route queue timed out after %.1fs account=%s limit=%s; returned %d cached/live items",
+            max(0.1, STRAVA_ROUTE_QUEUE_RESPONSE_TIMEOUT_SECONDS),
+            account or "",
+            limit,
+            len(queue.get("items") or []),
+        )
     return _cors(web.json_response(queue))
 
 
