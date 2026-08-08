@@ -51,9 +51,14 @@ _SOURCE_MATRIX_YOUTUBE_BACKLOG_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_
 _SOURCE_MATRIX_ENABLE_YOUTUBE_BACKLOG = os.getenv("SOURCE_MATRIX_ENABLE_YOUTUBE_BACKLOG", "0").lower() in {
     "1", "true", "yes", "on"
 }
-_SOURCE_MATRIX_BROWSER_EXTENSION_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_BROWSER_EXTENSION_TIMEOUT_SECONDS", "4"))
+_SOURCE_MATRIX_BROWSER_EXTENSION_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_BROWSER_EXTENSION_TIMEOUT_SECONDS", "6"))
 _BROWSER_EXTENSION_QUERY_TIMEOUT_SECONDS = float(os.getenv("BROWSER_EXTENSION_QUERY_TIMEOUT_SECONDS", "2.5"))
-_BROWSER_EXTENSION_PAYLOAD_BUDGET_SECONDS = float(os.getenv("BROWSER_EXTENSION_PAYLOAD_BUDGET_SECONDS", "5.5"))
+_BROWSER_EXTENSION_PAYLOAD_BUDGET_SECONDS = float(os.getenv("BROWSER_EXTENSION_PAYLOAD_BUDGET_SECONDS", "8.5"))
+_BROWSER_EXTENSION_INGEST_SUMMARY_HOURS = max(1, int(os.getenv("BROWSER_EXTENSION_INGEST_SUMMARY_HOURS", "6")))
+_BROWSER_MEDIA_CANDIDATE_SUMMARY_HOURS = max(1, int(os.getenv("BROWSER_MEDIA_CANDIDATE_SUMMARY_HOURS", "6")))
+_BROWSER_EXTENSION_OPTIONAL_QUERY_TIMEOUT_SECONDS = float(
+    os.getenv("BROWSER_EXTENSION_OPTIONAL_QUERY_TIMEOUT_SECONDS", "0.5")
+)
 _BROWSER_TAB_MAINTENANCE_STATUS_PATH = os.getenv(
     "BROWSER_TAB_MAINTENANCE_STATUS_PATH",
     "/app/tmp/browser_tab_maintenance_status.json",
@@ -69,7 +74,7 @@ _SOURCE_MATRIX_PAYLOAD_CACHE: dict[str, object] = {"ts": 0.0, "payload": None}
 _SOURCE_MATRIX_PAYLOAD_BUILD_TASK: asyncio.Task | None = None
 _SOURCE_MATRIX_PAYLOAD_CACHE_TTL_SECONDS = float(os.getenv("SOURCE_MATRIX_PAYLOAD_CACHE_TTL_SECONDS", "10"))
 _SOURCE_MATRIX_PAYLOAD_STALE_SECONDS = float(os.getenv("SOURCE_MATRIX_PAYLOAD_STALE_SECONDS", "300"))
-_SOURCE_MATRIX_PAYLOAD_BUILD_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_PAYLOAD_BUILD_TIMEOUT_SECONDS", "9"))
+_SOURCE_MATRIX_PAYLOAD_BUILD_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_PAYLOAD_BUILD_TIMEOUT_SECONDS", "15"))
 _INGESTION_HOURLY_CACHE: dict[int, dict[str, object]] = {}
 _COLLECTORS_LIVE_CACHE: dict[str, object] = {"ts": 0.0, "payload": None}
 _COLLECTORS_LIVE_CACHE_TTL_SECONDS = int(os.getenv("COLLECTORS_LIVE_CACHE_TTL_SECONDS", "15"))
@@ -2189,6 +2194,14 @@ def _source_matrix_filter_extension_blockers_for_current_content(
     ]
 
 
+def _source_matrix_has_current_content(current_content: dict | None) -> bool:
+    current = current_content or {}
+    return any(
+        int(current.get(key) or 0) > 0
+        for key in ("records", "messages", "media_items")
+    )
+
+
 def _source_matrix_x_auth_wall_blocker(browser_url: str) -> dict:
     location = browser_url or "the X browser tab"
     return {
@@ -2726,6 +2739,13 @@ def _source_matrix_row(source_row: dict, current_content: dict | None, current_r
         current_window,
     )
     blocker = _source_matrix_blocker(source_row, day_rate, cursor_row, blocker_issues)
+    effective_source_row = source_row
+    if (
+        blocker.get("kind") == "browser_capture_stalled"
+        and _source_matrix_has_current_content(current_window)
+    ):
+        blocker = {"kind": "none", "severity": "ok", "summary": None, "next_action": "No action."}
+        effective_source_row = {**source_row, "status": "live"}
     media_freshness = _source_media_freshness(source, current_window, day_window, total_media, now)
     if (
         blocker.get("kind") == "quiet_beeper_subsource"
@@ -2780,7 +2800,7 @@ def _source_matrix_row(source_row: dict, current_content: dict | None, current_r
         "parent_source": source_row.get("parent_source"),
         "rollup_exclude": bool(source_row.get("rollup_exclude")),
         "status": source_row.get("status"),
-        **_source_operator_status(source_row, blocker),
+        **_source_operator_status(effective_source_row, blocker),
         "collection_mode": source_row.get("collection_mode"),
         "collection_methods": _source_collection_methods(source),
         "freshness_basis": source_row.get("freshness_basis"),
@@ -3058,11 +3078,14 @@ async def _browser_extension_payload(conn) -> dict:
 
     deadline = time.monotonic() + max(0.5, _BROWSER_EXTENSION_PAYLOAD_BUDGET_SECONDS)
 
-    def _remaining_timeout() -> float | None:
+    def _remaining_timeout(max_timeout: float | None = None) -> float | None:
         remaining = deadline - time.monotonic()
         if remaining <= 0.1:
             return None
-        return max(0.1, min(_BROWSER_EXTENSION_QUERY_TIMEOUT_SECONDS, remaining))
+        query_timeout = _BROWSER_EXTENSION_QUERY_TIMEOUT_SECONDS
+        if max_timeout is not None:
+            query_timeout = min(query_timeout, max(0.1, max_timeout))
+        return max(0.1, min(query_timeout, remaining))
 
     def _record_diagnostic_error(label: str, exc: BaseException | None = None) -> None:
         payload["diagnostic_errors"].append({
@@ -3072,21 +3095,29 @@ async def _browser_extension_payload(conn) -> dict:
         if exc:
             logger.debug("browser extension diagnostic %s failed: %s", label, exc.__class__.__name__)
 
-    async def _fetchval_or_none(label: str, query: str, *args):
-        timeout = _remaining_timeout()
+    async def _fetchval_or_none(
+        label: str,
+        query: str,
+        *args,
+        max_timeout: float | None = None,
+        record_error: bool = True,
+    ):
+        timeout = _remaining_timeout(max_timeout)
         if timeout is None:
-            _record_diagnostic_error(label)
+            if record_error:
+                _record_diagnostic_error(label)
             return None
         try:
             return await conn.fetchval(query, *args, timeout=timeout)
         except AssertionError:
             raise
         except Exception as exc:  # noqa: BLE001 - dashboard diagnostics are best-effort
-            _record_diagnostic_error(label, exc)
+            if record_error:
+                _record_diagnostic_error(label, exc)
             return None
 
-    async def _fetch_or_empty(label: str, query: str, *args):
-        timeout = _remaining_timeout()
+    async def _fetch_or_empty(label: str, query: str, *args, max_timeout: float | None = None):
+        timeout = _remaining_timeout(max_timeout)
         if timeout is None:
             _record_diagnostic_error(label)
             return []
@@ -3098,8 +3129,8 @@ async def _browser_extension_payload(conn) -> dict:
             _record_diagnostic_error(label, exc)
             return []
 
-    async def _fetchrow_or_none(label: str, query: str, *args):
-        timeout = _remaining_timeout()
+    async def _fetchrow_or_none(label: str, query: str, *args, max_timeout: float | None = None):
+        timeout = _remaining_timeout(max_timeout)
         if timeout is None:
             _record_diagnostic_error(label)
             return None
@@ -3130,6 +3161,8 @@ async def _browser_extension_payload(conn) -> dict:
             ORDER BY created_at DESC
             LIMIT 1
             """,
+            max_timeout=_BROWSER_EXTENSION_OPTIONAL_QUERY_TIMEOUT_SECONDS,
+            record_error=False,
         ))
         payload["extension_id"] = extension_id
         payload["reload_url"] = reload_url
@@ -3238,11 +3271,12 @@ async def _browser_extension_payload(conn) -> dict:
                    (array_agg(NULLIF(metadata->>'extension_version', '') ORDER BY created_at DESC))[1]
                        AS extension_version
             FROM browser_ingest_events
-            WHERE created_at >= now() - interval '24 hours'
+            WHERE created_at >= now() - ($1::int * interval '1 hour')
             GROUP BY platform, endpoint
             ORDER BY last_seen_at DESC
             LIMIT 30
             """,
+            _BROWSER_EXTENSION_INGEST_SUMMARY_HOURS,
         )
         for row in rows:
             current = row["extension_version"]
@@ -3397,11 +3431,12 @@ async def _browser_extension_payload(conn) -> dict:
                    max(last_seen) AS last_seen_at,
                    extract(epoch FROM now() - max(last_seen))::int AS age_seconds
             FROM browser_media_candidates
-            WHERE last_seen >= now() - interval '24 hours'
+            WHERE last_seen >= now() - ($1::int * interval '1 hour')
             GROUP BY platform, outcome
             ORDER BY platform, candidates DESC, last_seen_at DESC
             LIMIT 60
             """,
+            _BROWSER_MEDIA_CANDIDATE_SUMMARY_HOURS,
         )
         payload["media_candidates"] = [
             {
@@ -3467,11 +3502,12 @@ async def _browser_extension_payload(conn) -> dict:
                    count(*) FILTER (WHERE needs_revisit)::int AS needs_revisit,
                    max(last_seen) AS last_seen_at
             FROM tiktok_browser_media_candidates
-            WHERE last_seen >= now() - interval '24 hours'
+            WHERE last_seen >= now() - ($1::int * interval '1 hour')
             GROUP BY outcome
             ORDER BY candidates DESC, last_seen_at DESC
             LIMIT 12
             """,
+            _BROWSER_MEDIA_CANDIDATE_SUMMARY_HOURS,
         )
         queue = None
         if await _fetchval_or_none("tiktok_browser_revisit_queue_table", "SELECT to_regclass('tiktok_browser_revisit_queue')") is not None:

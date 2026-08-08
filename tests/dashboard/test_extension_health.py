@@ -140,7 +140,7 @@ async def test_browser_extension_payload_flags_stale_and_old_versions(monkeypatc
             if "tiktok_browser_revisit_queue" in query:
                 return None
             if "browser_media_candidates" in query:
-                return None
+                return "browser_media_candidates"
             if "browser_media_revisit_queue" in query:
                 return None
             raise AssertionError(query)
@@ -171,6 +171,8 @@ async def test_browser_extension_payload_flags_stale_and_old_versions(monkeypatc
                         "extension_version": "1.21.28",
                     }
                 ]
+            if "FROM browser_media_candidates" in query:
+                return []
             raise AssertionError(query)
 
     payload = await _browser_extension_payload(FakeConn())
@@ -220,12 +222,14 @@ async def test_browser_extension_payload_includes_browser_maintenance_issue(monk
             if "tiktok_browser_revisit_queue" in query:
                 return None
             if "browser_media_candidates" in query:
-                return None
+                return "browser_media_candidates"
             if "browser_media_revisit_queue" in query:
                 return None
             raise AssertionError(query)
 
         async def fetch(self, query: str, *args, timeout: int | None = None):
+            if "FROM browser_media_candidates" in query:
+                return []
             raise AssertionError(query)
 
     payload = await _browser_extension_payload(FakeConn())
@@ -272,7 +276,7 @@ async def test_browser_extension_payload_distinguishes_ingest_active_from_cdp_do
             if "tiktok_browser_revisit_queue" in query:
                 return None
             if "browser_media_candidates" in query:
-                return None
+                return "browser_media_candidates"
             if "browser_media_revisit_queue" in query:
                 return None
             raise AssertionError(query)
@@ -303,6 +307,8 @@ async def test_browser_extension_payload_distinguishes_ingest_active_from_cdp_do
                         "extension_version": "1.23.49",
                     },
                 ]
+            if "FROM browser_media_candidates" in query:
+                return []
             raise AssertionError(query)
 
     payload = await _browser_extension_payload(FakeConn())
@@ -366,6 +372,8 @@ async def test_browser_extension_fallback_payload_uses_fast_ingest(monkeypatch, 
                         "extension_version": "1.23.50",
                     },
                 ]
+            if "FROM browser_media_candidates" in query:
+                return []
             raise AssertionError(query)
 
     class FakePool:
@@ -622,6 +630,8 @@ async def test_browser_extension_payload_suppresses_recent_old_endpoint_after_ne
 async def test_browser_extension_payload_content_gap_ignores_manual_backend_probe(monkeypatch):
     monkeypatch.setenv("UC_EXTENSION_EXPECTED_VERSION", "1.22.7")
     seen_content_gap_query = None
+    seen_ingest_summary_args = None
+    seen_media_candidate_args = None
 
     class FakeConn:
         async def fetchval(self, query: str, timeout: int | None = None):
@@ -634,22 +644,30 @@ async def test_browser_extension_payload_content_gap_ignores_manual_backend_prob
             if "tiktok_browser_revisit_queue" in query:
                 return None
             if "browser_media_candidates" in query:
-                return None
+                return "browser_media_candidates"
             if "browser_media_revisit_queue" in query:
                 return None
             raise AssertionError(query)
 
         async def fetch(self, query: str, *args, timeout: int | None = None):
-            nonlocal seen_content_gap_query
+            nonlocal seen_content_gap_query, seen_ingest_summary_args, seen_media_candidate_args
             if "WITH selected(platform) AS" in query:
                 seen_content_gap_query = query
                 return []
+            if "FROM browser_media_candidates" in query:
+                if "$1::int * interval '1 hour'" in query:
+                    seen_media_candidate_args = args
+                return []
             if "FROM browser_ingest_events" in query:
+                if "$1::int * interval '1 hour'" in query:
+                    seen_ingest_summary_args = args
                 return []
             raise AssertionError(query)
 
     await _browser_extension_payload(FakeConn())
 
+    assert seen_ingest_summary_args == (6,)
+    assert seen_media_candidate_args == (6,)
     assert seen_content_gap_query is not None
     assert "manual_backend_probe" in seen_content_gap_query
     assert "forced_recovery_started" in seen_content_gap_query

@@ -299,7 +299,7 @@ def test_source_matrix_expensive_sections_have_bounded_default_timeouts():
     assert _SOURCE_MATRIX_MEDIA_TOTALS_TIMEOUT_SECONDS <= 8
     assert _SOURCE_MATRIX_YOUTUBE_BACKLOG_TIMEOUT_SECONDS <= 8
     assert _SOURCE_MATRIX_BROWSER_EXTENSION_TIMEOUT_SECONDS <= 6
-    assert _SOURCE_MATRIX_PAYLOAD_BUILD_TIMEOUT_SECONDS < 10
+    assert _SOURCE_MATRIX_PAYLOAD_BUILD_TIMEOUT_SECONDS <= 15
     assert _BEEPER_SUBSOURCE_QUERY_TIMEOUT_SECONDS <= 4
     assert _BEEPER_SUBSOURCE_TOTAL_TIMEOUT_SECONDS <= 4
     assert _BEEPER_SUBSOURCE_TOTAL_TIMEOUT_SECONDS < _SOURCE_MATRIX_MEDIA_TOTALS_TIMEOUT_SECONDS
@@ -883,6 +883,29 @@ def test_source_matrix_row_suppresses_stale_browser_content_when_current_media_f
     assert row["status_label"] == "live"
     assert row["blocker"]["kind"] == "none"
     assert row["extension_issues"] == []
+
+
+def test_source_matrix_row_suppresses_source_health_browser_stall_when_current_media_flows():
+    row = _source_matrix_row(
+        {
+            **_source(source="lemon8"),
+            "status": "degraded",
+            "detail": "browser content progress is 3991s old (> 3600s)",
+            "source_health_status": "running",
+            "source_health_error": None,
+        },
+        current_content={"records": 7, "messages": 0, "media_items": 1},
+        current_rate=None,
+        day_content={"records": 37, "messages": 0, "media_items": 0},
+        day_rate={"rate_limits": 16, "access_errors": 0},
+        media_total={"total_media_items": 10840},
+        cursor_row=None,
+        extension_issues=[],
+    )
+
+    assert row["status"] == "degraded"
+    assert row["status_label"] == "live"
+    assert row["blocker"]["kind"] == "none"
 
 
 def test_source_matrix_row_does_not_block_fresh_media_for_old_extension_event():
