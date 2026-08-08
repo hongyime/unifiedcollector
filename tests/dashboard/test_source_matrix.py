@@ -653,6 +653,7 @@ def test_source_matrix_row_counts_and_live_blocker():
     assert row["media_freshness"]["current_hour_items"] == 7
     assert row["source_health_last_success_at"] == datetime(2026, 7, 28, 1, 0, tzinfo=timezone.utc)
     assert row["source_health_updated_at"] == datetime(2026, 7, 28, 1, 5, tzinfo=timezone.utc)
+    assert "browser_url" in row
     # activity_last_seen_at is now - age_seconds. age_seconds is 60 in _source().
     assert row["activity_last_seen_at"] == now - timedelta(seconds=60)
     assert row["blocker"]["kind"] == "none"

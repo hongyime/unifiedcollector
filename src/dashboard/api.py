@@ -2277,6 +2277,7 @@ def _source_matrix_row(source_row: dict, current_content: dict | None, current_r
         "source_health_error": source_row.get("source_health_error"),
         "source_health_last_success_at": source_row.get("source_health_last_success_at"),
         "source_health_updated_at": source_row.get("source_health_updated_at"),
+        "browser_url": source_row.get("browser_url"),
         "bridge_status": source_row.get("bridge_status"),
         "bridge_detail": source_row.get("bridge_detail"),
         "current_hour": current_window,
