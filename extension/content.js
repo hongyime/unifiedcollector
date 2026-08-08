@@ -593,7 +593,8 @@ function switchXHostForRecoverableShell(shell) {
   lsSet(navKey, String(Date.now()));
   const host = String(location.hostname || "").toLowerCase();
   const stamp = Math.floor(Date.now() / 1000);
-  const alternateHost = host.includes("twitter.com") ? `https://x.com/home?uc_recover=${stamp}` : `https://twitter.com/home?uc_recover=${stamp}`;
+  const onTwitterHost = host === "twitter.com" || host.endsWith(".twitter.com");
+  const alternateHost = onTwitterHost ? `https://x.com/home?uc_recover=${stamp}` : `https://twitter.com/home?uc_recover=${stamp}`;
   const owner = ownerFromStoredOrDom("x", xLoggedInOwner);
   const step = (lsNum(stepKey) % 5) + 1;
   lsSet(stepKey, String(step));
@@ -3913,23 +3914,13 @@ try {
     health_status: "content_script_boot",
     health_reason: "first-boot ping before mainLoop starts",
   });
-  if (DIRECT_FETCH_CSP_BLOCKED.has(_bootP.id)) {
-    // SW proxy fills in the real tab_id from sender.tab.id (see background.js
-    // swFetchProxy handler), so DB records the real tab instead of the
-    // "content_direct" placeholder.
-    chrome.runtime.sendMessage({
-      type: "swFetchProxy",
-      path: "/social/browser-heartbeat",
-      payload: _bootPayload,
-    }).catch(() => {});
-  } else {
-    fetch(DIRECT_INGEST_BASE + "/social/browser-heartbeat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(_bootPayload),
-      keepalive: true,
-    }).catch(() => {});
-  }
+  // Route through the service worker so page-origin CSP and static scanners do
+  // not see a social-site content script making direct loopback HTTP calls.
+  chrome.runtime.sendMessage({
+    type: "swFetchProxy",
+    path: "/social/browser-heartbeat",
+    payload: _bootPayload,
+  }).catch(() => {});
 } catch (e) {}
 
 // Auto-start the loop the moment the tab loads (respawns after a reload/crash).

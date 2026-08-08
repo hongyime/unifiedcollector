@@ -1,6 +1,7 @@
 """Peek threads via browser-level CDP session (works even when tab is busy)."""
 import json
 import urllib.request
+from urllib.parse import urlparse
 
 import websocket  # type: ignore
 
@@ -8,6 +9,11 @@ import websocket  # type: ignore
 ver = json.loads(urllib.request.urlopen("http://127.0.0.1:9222/json/version").read())
 ws = websocket.create_connection(ver["webSocketDebuggerUrl"], timeout=25)
 n = [0]
+
+
+def is_threads_url(url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    return host == "threads.com" or host.endswith(".threads.com")
 
 def call(method, params=None, session=None, timeout=30):
     n[0] += 1
@@ -31,7 +37,7 @@ def call(method, params=None, session=None, timeout=30):
 
 
 targets = call("Target.getTargets")["result"]["targetInfos"]
-th = next((t for t in targets if t.get("type") == "page" and "threads.com" in t.get("url", "")), None)
+th = next((t for t in targets if t.get("type") == "page" and is_threads_url(t.get("url", ""))), None)
 if not th:
     raise SystemExit("no threads tab")
 

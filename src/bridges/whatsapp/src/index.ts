@@ -539,11 +539,25 @@ healthServer.headersTimeout = 20000;
 const getEnv = (key: string, dflt = ''): string => (process.env[key] || dflt).split('#')[0].trim();
 
 function currentAuthPath(): string {
-    return process.env.AUTH_STORAGE_PATH || `./auth_info/${getEnv('SESSION_NAME', 'default')}`;
+    return path.resolve(process.env.AUTH_STORAGE_PATH || `./auth_info/${getEnv('SESSION_NAME', 'default')}`);
+}
+
+function safeSessionFilePart(value: string): string {
+    const cleaned = String(value || 'default').replace(/[^A-Za-z0-9_.-]/g, '_').slice(0, 80);
+    return cleaned || 'default';
+}
+
+function authPathChild(authPath: string, childName: string): string {
+    const root = path.resolve(authPath);
+    const child = path.resolve(root, childName);
+    if (child !== root && !child.startsWith(root + path.sep)) {
+        throw new Error('auth_path_escape');
+    }
+    return child;
 }
 
 function authPathHasRegisteredCreds(authPath = currentAuthPath()): boolean {
-    const credsPath = path.join(authPath, 'creds.json');
+    const credsPath = authPathChild(authPath, 'creds.json');
     if (!fs.existsSync(credsPath)) return false;
     try {
         if (fs.statSync(credsPath).size <= 0) return false;
@@ -561,7 +575,7 @@ function authPathHasRecoverableState(authPath = currentAuthPath()): boolean {
     if (!fs.existsSync(authPath)) return false;
     if (authPathHasRegisteredCreds(authPath)) return true;
     try {
-        const credsPath = path.join(authPath, 'creds.json');
+        const credsPath = authPathChild(authPath, 'creds.json');
         if (fs.existsSync(credsPath) && fs.statSync(credsPath).size > 0) {
             return true;
         }
@@ -630,7 +644,7 @@ function authStateSummary(authPath = currentAuthPath()): AuthStateSummary {
         summary.auth_file_count = dirStats.auth_file_count;
         summary.auth_file_count_capped = dirStats.auth_file_count_capped;
         summary.auth_non_watermark_file_seen = dirStats.auth_non_watermark_file_seen;
-        const credsPath = path.join(authPath, 'creds.json');
+        const credsPath = authPathChild(authPath, 'creds.json');
         summary.creds_json_exists = fs.existsSync(credsPath);
         if (summary.creds_json_exists) {
             const st = fs.statSync(credsPath);
@@ -830,8 +844,8 @@ let lidBackfillDone = false;
 async function emitStoredLidMappings(sessionName: string): Promise<void> {
     if (lidBackfillDone) return;
     lidBackfillDone = true;
-    const authPath = process.env.AUTH_STORAGE_PATH || `./auth_info/${getEnv('SESSION_NAME', 'default')}`;
-    const markerPath = path.join(authPath, `.lid-backfill-${sessionName}.json`);
+    const authPath = currentAuthPath();
+    const markerPath = authPathChild(authPath, `.lid-backfill-${safeSessionFilePart(sessionName)}.json`);
     if (LID_BACKFILL_MIN_INTERVAL_MS > 0) {
         try {
             const marker = JSON.parse(await fs.promises.readFile(markerPath, 'utf8'));

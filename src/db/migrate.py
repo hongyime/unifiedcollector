@@ -91,7 +91,7 @@ async def apply_all(pool) -> dict:
         # setting can't leak to the pooled connection's later users.
         lock_ms = int(os.getenv("MIGRATE_LOCK_TIMEOUT_MS", "10000"))
         try:
-            await conn.execute(f"SET lock_timeout = {lock_ms}")
+            await conn.execute("SELECT set_config('lock_timeout', $1, true)", f"{lock_ms}ms")
         except Exception:  # pragma: no cover - defensive
             logger.debug("could not SET lock_timeout", exc_info=True)
 

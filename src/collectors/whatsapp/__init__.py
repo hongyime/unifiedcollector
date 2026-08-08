@@ -520,7 +520,9 @@ class WhatsappCollector(BaseCollector):
         phone = event.get("phone_number") or event.get("phone")
         detail = f"WhatsApp bridge {session_name} {status}"
         if phone:
-            detail += f" ({phone})"
+            digits = "".join(ch for ch in str(phone) if ch.isdigit())
+            masked = f"...{digits[-4:]}" if len(digits) >= 4 else "<redacted>"
+            detail += f" ({masked})"
         async with self.pool.acquire() as conn:
             await conn.execute(
                 """

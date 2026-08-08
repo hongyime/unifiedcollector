@@ -6,6 +6,11 @@ import urllib.request
 import websocket  # type: ignore
 
 
+def is_threads_cookie_domain(domain: str) -> bool:
+    host = str(domain or "").lstrip(".").lower()
+    return host == "threads.com" or host.endswith(".threads.com")
+
+
 ver = json.loads(urllib.request.urlopen("http://127.0.0.1:9222/json/version").read())
 ws = websocket.create_connection(ver["webSocketDebuggerUrl"], timeout=15)
 n = [0]
@@ -33,7 +38,7 @@ if "error" in r:
     print("failed:", r)
     raise SystemExit
 cookies = r["result"]["cookies"]
-threads_cookies = [c for c in cookies if "threads.com" in (c.get("domain", ""))]
+threads_cookies = [c for c in cookies if is_threads_cookie_domain(c.get("domain", ""))]
 print(f"threads.com cookies: {len(threads_cookies)}")
 important = ["sessionid", "ig_did", "csrftoken", "ds_user_id"]
 for c in threads_cookies:

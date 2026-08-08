@@ -1,13 +1,19 @@
 """Inspect the live threads tab: DOM content, login status, recoverable-shell probe."""
 import json
 import urllib.request
+from urllib.parse import urlparse
 
 import websocket  # type: ignore
 
 
+def is_threads_url(url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    return host == "threads.com" or host.endswith(".threads.com")
+
+
 tabs = json.loads(urllib.request.urlopen("http://127.0.0.1:9222/json/list").read())
 th = next(
-    (t for t in tabs if "threads.com" in t.get("url", "") and t.get("type") == "page"),
+    (t for t in tabs if is_threads_url(t.get("url", "")) and t.get("type") == "page"),
     None,
 )
 if not th:
