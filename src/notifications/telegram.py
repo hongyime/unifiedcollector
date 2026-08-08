@@ -153,8 +153,17 @@ async def send_many(messages: list[str]) -> bool:
 # on a 429 without losing information: on any non-429 failure retry_after is 0,
 # on 429 it's Telegram's suggested wait window.
 
-_MAX_MEDIA_BYTES = 45 * 1024 * 1024  # sendPhoto is 10MB, sendVideo docs say
-                                     # 50MB via bot API; leave a safety margin.
+_MAX_PHOTO_BYTES = 10 * 1024 * 1024
+_MAX_VIDEO_BYTES = 45 * 1024 * 1024  # Bot API says 50MB; leave video safety margin.
+_MAX_DOCUMENT_BYTES = 49 * 1024 * 1024
+
+
+def _max_upload_bytes(method: str) -> int:
+    if method == "sendPhoto":
+        return _MAX_PHOTO_BYTES
+    if method == "sendDocument":
+        return _MAX_DOCUMENT_BYTES
+    return _MAX_VIDEO_BYTES
 
 
 def _truncate_caption(caption: str) -> str:
@@ -230,13 +239,15 @@ def _post_media_detailed(token: str, method: str, file_field: str,
         except (OSError, FileNotFoundError) as e:
             logger.warning("telegram %s: cannot read %s: %s", method, url_or_path, e)
             return False, 0, "local_read_failed", str(e)
-        # Refuse to upload very large blobs; Telegram bot API will reject them.
-        if len(body) > _MAX_MEDIA_BYTES:
-            logger.warning(
+        # Refuse uploads Telegram Bot API will reject.
+        max_bytes = _max_upload_bytes(method)
+        if len(body) > max_bytes:
+            log = logger.warning if method == "sendDocument" else logger.info
+            log(
                 "telegram %s: %s exceeds %d bytes; skipping upload",
-                method, url_or_path, _MAX_MEDIA_BYTES,
+                method, url_or_path, max_bytes,
             )
-            return False, 0, "too_large", f"exceeds {_MAX_MEDIA_BYTES} bytes"
+            return False, 0, "too_large", f"exceeds {max_bytes} bytes"
         req = urllib.request.Request(
             url, data=body, headers={"Content-Type": content_type}
         )
@@ -396,9 +407,16 @@ async def send_video(url_or_path: str, caption: str = "",
             logger.warning("invalid TELEGRAM_THREAD_ID=%r", thread)
     _ = thumbnail_path  # reserved for future oversized-clip thumbnails.
     try:
-        return await asyncio.to_thread(
-            _post_media, token, "sendVideo", "video", url_or_path, fields,
+        ok, retry_after, error_code, description = await asyncio.to_thread(
+            _post_media_detailed, token, "sendVideo", "video", url_or_path, fields,
         )
+        if ok or retry_after > 0:
+            return ok, retry_after
+        if error_code == "too_large" and not url_or_path.startswith(("http://", "https://")):
+            logger.info("telegram sendVideo too large; trying document fallback")
+            return await send_document(url_or_path, caption=caption, parse_mode=parse_mode)
+        _ = description
+        return False, 0
     except Exception as e:  # noqa: BLE001 - belt-and-suspenders
         logger.warning("telegram send_video error: %s", e)
         return False, 0

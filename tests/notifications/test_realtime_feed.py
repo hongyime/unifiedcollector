@@ -738,12 +738,42 @@ async def test_send_video_marks_streaming(monkeypatch):
     def fake_post_media(token, method, file_field, url_or_path, fields):
         seen_fields.update(fields)
         seen_fields["_method"] = method
-        return True, 0
+        return True, 0, "", ""
 
-    monkeypatch.setattr(telegram, "_post_media", fake_post_media)
+    monkeypatch.setattr(telegram, "_post_media_detailed", fake_post_media)
     monkeypatch.setattr(telegram, "_config", lambda: ("tok", "chat", ""))
 
     ok, _ = await telegram.send_video("https://ig/x.mp4", caption="clip")
     assert ok is True
     assert seen_fields["_method"] == "sendVideo"
     assert seen_fields.get("supports_streaming") == "true"
+
+
+@pytest.mark.asyncio
+async def test_send_video_falls_back_to_document_when_local_upload_too_large(monkeypatch):
+    from src.notifications import telegram
+
+    calls = []
+
+    def fake_post_media_detailed(token, method, file_field, url_or_path, fields):
+        calls.append((method, file_field, url_or_path))
+        if method == "sendVideo":
+            return False, 0, "too_large", "exceeds video cap"
+        raise AssertionError("sendDocument should use _post_media")
+
+    def fake_post_media(token, method, file_field, url_or_path, fields):
+        calls.append((method, file_field, url_or_path))
+        return True, 0
+
+    monkeypatch.setattr(telegram, "_post_media_detailed", fake_post_media_detailed)
+    monkeypatch.setattr(telegram, "_post_media", fake_post_media)
+    monkeypatch.setattr(telegram, "_config", lambda: ("tok", "chat", ""))
+
+    ok, retry = await telegram.send_video("C:\\vault\\large.mp4", caption="large clip")
+
+    assert ok is True
+    assert retry == 0
+    assert calls == [
+        ("sendVideo", "video", "C:\\vault\\large.mp4"),
+        ("sendDocument", "document", "C:\\vault\\large.mp4"),
+    ]
