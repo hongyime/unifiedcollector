@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 import os
 
 import pytest
@@ -8,7 +9,12 @@ import pytest
 os.environ.setdefault("DASHBOARD_JWT_SECRET", "test-secret-only-for-pytest-do-not-use")
 os.environ.setdefault("DASHBOARD_ADMIN_PASSWORD", "x")
 
-from src.dashboard.api import _browser_extension_payload, _extension_versions_match
+from src.dashboard import api as dashboard_api
+from src.dashboard.api import (
+    _browser_extension_payload,
+    _browser_tab_maintenance_payload,
+    _extension_versions_match,
+)
 
 
 def test_extension_versions_match_ignores_v_prefix():
@@ -16,6 +22,32 @@ def test_extension_versions_match_ignores_v_prefix():
     assert _extension_versions_match("v1.21.32", "1.21.32")
     assert _extension_versions_match("1.21.33", "1.21.32")
     assert not _extension_versions_match("1.21.28", "1.21.32")
+
+
+def test_browser_tab_maintenance_payload_reads_host_status(tmp_path):
+    status = tmp_path / "browser_tab_maintenance_status.json"
+    status.write_text(
+        "\ufeff" + json.dumps({
+            "checked_at": "2026-08-08T18:26:17.1804359+08:00",
+            "state": "cdp_unavailable",
+            "detail": "Unable to connect to the remote server",
+            "cdp_url": "http://127.0.0.1:9222",
+            "pid": 15168,
+        }),
+        encoding="utf-8",
+    )
+
+    payload = _browser_tab_maintenance_payload(status)
+
+    assert payload["state"] == "cdp_unavailable"
+    assert payload["detail"] == "Unable to connect to the remote server"
+    assert payload["cdp_url"] == "http://127.0.0.1:9222"
+    assert payload["pid"] == 15168
+    assert isinstance(payload["age_seconds"], int)
+
+
+def test_browser_tab_maintenance_payload_ignores_missing_status(tmp_path):
+    assert _browser_tab_maintenance_payload(tmp_path / "missing.json") is None
 
 
 @pytest.mark.asyncio
@@ -80,6 +112,46 @@ async def test_browser_extension_payload_flags_stale_and_old_versions(monkeypatc
     assert by_age[3700]["needs_new_event"] is True
     assert "waiting for a fresh heartbeat" in by_age[3700]["detail"]
     assert by_age[45]["needs_new_event"] is False
+
+
+@pytest.mark.asyncio
+async def test_browser_extension_payload_includes_browser_maintenance_issue(monkeypatch, tmp_path):
+    status = tmp_path / "browser_tab_maintenance_status.json"
+    status.write_text(
+        json.dumps({
+            "state": "cdp_unavailable",
+            "detail": "Unable to connect to the remote server",
+            "cdp_url": "http://127.0.0.1:9222",
+            "checked_at": "2026-08-08T18:26:17.1804359+08:00",
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(dashboard_api, "_BROWSER_TAB_MAINTENANCE_STATUS_PATH", str(status))
+
+    class FakeConn:
+        async def fetchval(self, query: str, timeout: int | None = None):
+            if "dm_hook_heartbeat" in query:
+                return None
+            if "browser_ingest_events" in query:
+                return None
+            if "tiktok_browser_media_candidates" in query:
+                return None
+            if "tiktok_browser_revisit_queue" in query:
+                return None
+            if "browser_media_candidates" in query:
+                return None
+            if "browser_media_revisit_queue" in query:
+                return None
+            raise AssertionError(query)
+
+        async def fetch(self, query: str, *args, timeout: int | None = None):
+            raise AssertionError(query)
+
+    payload = await _browser_extension_payload(FakeConn())
+
+    assert payload["maintenance"]["state"] == "cdp_unavailable"
+    assert payload["issues"][0]["kind"] == "browser_maintenance_cdp_unavailable"
+    assert payload["issues"][0]["cdp_url"] == "http://127.0.0.1:9222"
 
 
 @pytest.mark.asyncio

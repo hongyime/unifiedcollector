@@ -54,6 +54,10 @@ _SOURCE_MATRIX_ENABLE_YOUTUBE_BACKLOG = os.getenv("SOURCE_MATRIX_ENABLE_YOUTUBE_
 _SOURCE_MATRIX_BROWSER_EXTENSION_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_BROWSER_EXTENSION_TIMEOUT_SECONDS", "6"))
 _BROWSER_EXTENSION_QUERY_TIMEOUT_SECONDS = float(os.getenv("BROWSER_EXTENSION_QUERY_TIMEOUT_SECONDS", "2.5"))
 _BROWSER_EXTENSION_PAYLOAD_BUDGET_SECONDS = float(os.getenv("BROWSER_EXTENSION_PAYLOAD_BUDGET_SECONDS", "5.5"))
+_BROWSER_TAB_MAINTENANCE_STATUS_PATH = os.getenv(
+    "BROWSER_TAB_MAINTENANCE_STATUS_PATH",
+    "/app/tmp/browser_tab_maintenance_status.json",
+)
 _SOURCE_CONTENT_PART_TIMEOUT_SECONDS = float(os.getenv("SOURCE_CONTENT_PART_TIMEOUT_SECONDS", "0.75"))
 _SOURCE_CONTENT_MEDIA_TIMEOUT_SECONDS = float(os.getenv("SOURCE_CONTENT_MEDIA_TIMEOUT_SECONDS", "1.25"))
 _SOURCE_CONTENT_SUMMARY_BUDGET_SECONDS = float(os.getenv("SOURCE_CONTENT_SUMMARY_BUDGET_SECONDS", "2.5"))
@@ -255,6 +259,43 @@ def _extension_reload_target_from_url(url: object) -> tuple[str | None, str | No
         return None, None
     extension_id = match.group(1)
     return extension_id, f"chrome-extension://{extension_id}/tabs.html?reload=1"
+
+
+def _browser_tab_maintenance_payload(
+    status_path: str | os.PathLike[str] | None = None,
+) -> dict | None:
+    path = Path(status_path or _BROWSER_TAB_MAINTENANCE_STATUS_PATH)
+    if not path.is_file():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception as exc:  # noqa: BLE001 - diagnostics must not break dashboard
+        return {
+            "state": "unreadable",
+            "detail": str(exc),
+            "status_path": str(path),
+        }
+    if not isinstance(raw, dict):
+        return {
+            "state": "invalid",
+            "detail": "maintenance status file is not a JSON object",
+            "status_path": str(path),
+        }
+    try:
+        age_seconds = max(0, int(time.time() - path.stat().st_mtime))
+    except OSError:
+        age_seconds = None
+    return {
+        "state": str(raw.get("state") or "unknown"),
+        "detail": raw.get("detail"),
+        "checked_at": raw.get("checked_at"),
+        "age_seconds": age_seconds,
+        "cdp_url": raw.get("cdp_url"),
+        "audit_result": raw.get("audit_result"),
+        "reload_plan": raw.get("reload_plan"),
+        "pid": raw.get("pid"),
+        "status_path": str(path),
+    }
 
 
 def _extension_management_url(extension_id: object) -> str | None:
@@ -2528,9 +2569,27 @@ async def _browser_extension_payload(conn) -> dict:
         "media_candidates": [],
         "media_revisit_queue": [],
         "tiktok_media": None,
+        "maintenance": None,
         "issues": [],
         "diagnostic_errors": [],
     }
+
+    maintenance = _browser_tab_maintenance_payload()
+    if maintenance:
+        payload["maintenance"] = maintenance
+        state = str(maintenance.get("state") or "")
+        if state in {"cdp_unavailable", "unreadable", "invalid"}:
+            payload["issues"].append({
+                "platform": "browser",
+                "kind": "browser_maintenance_cdp_unavailable",
+                "detail": (
+                    maintenance.get("detail")
+                    or "Browser tab maintenance cannot reach Chrome CDP."
+                ),
+                "age_seconds": maintenance.get("age_seconds"),
+                "cdp_url": maintenance.get("cdp_url"),
+                "checked_at": maintenance.get("checked_at"),
+            })
 
     deadline = time.monotonic() + max(0.5, _BROWSER_EXTENSION_PAYLOAD_BUDGET_SECONDS)
 
@@ -3936,6 +3995,7 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
             "expected_version": browser_extension.get("expected_version"),
             "extension_id": browser_extension.get("extension_id"),
             "reload_url": browser_extension.get("reload_url"),
+            "maintenance": browser_extension.get("maintenance"),
             "issues": browser_extension.get("issues", []),
         },
         "errors": errors,
