@@ -351,13 +351,15 @@ async def vault_artifact_counts(conn, *, timeout: float | None = 10.0) -> dict[s
         """
         SELECT COUNT(*)::int
         FROM media_items
-        WHERE collected_at >= now() - interval '24 hours'
+        WHERE file_path IS NOT NULL
+          AND file_path <> ''
+          AND content_id IS NOT NULL
+          AND content_id <> ''
+          AND collected_at >= now() - interval '24 hours'
+          AND NOT (COALESCE(metadata, '{}'::jsonb) ? 'vault_sidecar')
           AND NOT (
-            COALESCE(metadata, '{}'::jsonb) ? 'vault_sidecar'
-            OR (
-              COALESCE(metadata, '{}'::jsonb) ? 'vault_artifact'
-              AND COALESCE(metadata->'vault_artifact'->>'sidecar_path', '') <> ''
-            )
+            COALESCE(metadata, '{}'::jsonb) ? 'vault_artifact'
+            AND COALESCE(metadata->'vault_artifact'->>'sidecar_path', '') <> ''
           )
         """,
     )

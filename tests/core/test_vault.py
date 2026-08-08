@@ -592,6 +592,8 @@ async def test_vault_artifact_counts_checks_both_sidecar_metadata_shapes():
     assert "quarantined" in combined
     assert "idx_media_missing_occurrence_sidecar" in combined
     assert "to_regclass" in combined
+    assert "file_path IS NOT NULL" in combined
+    assert "content_id IS NOT NULL" in combined
     assert counts["artifacts_partial"] == 2
     assert counts["artifacts_quarantined"] == 1
     assert counts["artifacts_missing_sidecar"] == 3
