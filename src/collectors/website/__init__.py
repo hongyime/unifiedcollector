@@ -221,6 +221,13 @@ DEFAULT_USER_AGENT = (
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
 
+PLAYWRIGHT_LAUNCH_ARGS = [
+    "--disable-dev-shm-usage",
+    "--js-flags=--max-old-space-size=512",
+    "--disable-background-timer-throttling",
+    "--renderer-process-limit=10",
+]
+
 # Regex used by the toolkit for free-text URL extraction.
 TEXT_LINK_RE = re.compile(
     r"https?://[^\s<>\"'\)]+",
@@ -1061,7 +1068,10 @@ class WebsiteCollector(BaseCollector):
             return None
         try:
             async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True)
+                browser = await p.chromium.launch(
+                    headless=True,
+                    args=PLAYWRIGHT_LAUNCH_ARGS,
+                )
                 try:
                     context = await browser.new_context(user_agent=DEFAULT_USER_AGENT)
                     page = await context.new_page()

@@ -49,12 +49,6 @@ SEEN_SHA_KEY_DEFAULT = "uc:realtime_post_feed:seen_sha"
 SKIPPED_KEY_DEFAULT = "uc:realtime_post_feed:skipped_burst"
 LAST_BURST_REPORT_KEY = "uc:realtime_post_feed:last_burst_report"
 
-ALLOWED_PLATFORMS = frozenset({
-    "instagram", "threads", "x", "twitter",
-    "tiktok", "lemon8", "facebook",
-    "strava", "telegram", "whatsapp",
-})
-
 ALLOWED_KINDS = frozenset({"image", "video", "post", "photo"})
 
 
@@ -88,6 +82,18 @@ def _redis_url() -> str:
 
 # -- Payload construction -------------------------------------------------
 
+def _metadata_text(meta: dict | None, *keys: str) -> str | None:
+    if not isinstance(meta, dict):
+        return None
+    for key in keys:
+        value = meta.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
+
 def build_payload(*, source: str, entity_name: str, content_id: str,
                   file_path: str | None, source_url: str | None,
                   sha256: str | None, metadata: dict | None,
@@ -119,6 +125,13 @@ def build_payload(*, source: str, entity_name: str, content_id: str,
         "source_url": str(source_url or "") or None,
         "sha256": str(sha256 or "") or None,
         "caption": caption,
+        "sender_id": _metadata_text(
+            meta,
+            "platform_sender_id",
+            "telegram_sender_id",
+            "sender_platform_id",
+            "sender_id",
+        ),
         "kind": str(kind or "").strip().lower() or None,
         "content_type": str(content_type or "").strip().lower() or None,
         "enqueued_at": time.time(),
@@ -178,10 +191,24 @@ def _logs_chat_id() -> int | None:
     return None
 
 
+def _notify_bot_user_id() -> int | None:
+    raw = os.getenv("UC_NOTIFY_BOT_USER_ID", "")
+    raw = raw.strip() if isinstance(raw, str) else ""
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
 def _is_own_logs_chat_telegram(payload: dict) -> bool:
-    """Defence-in-depth: drop any telegram payload whose chat_id matches the
-    realtime-feed log chat. Prevents the circular loop where our own bot's
-    posts get ingested by the telegram collector and re-sent.
+    """Defence-in-depth for telegram payloads from the realtime log chat.
+
+    If the notifier bot id and sender id are both known, only the bot's own
+    messages are dropped. That prevents the circular loop while still allowing
+    operator/manual media posted in the logs chat to flow through. If either id
+    is missing, fall back to dropping the whole logs chat for safety.
 
     Telegram media_items use content_id shape ``<chat_id>_<message_id>`` (see
     src/collectors/telegram._telegram_message_content_id), which is stable
@@ -200,21 +227,31 @@ def _is_own_logs_chat_telegram(payload: dict) -> bool:
         chat_id = int(prefix)
     except ValueError:
         return False
-    return chat_id == logs_chat
+    if chat_id != logs_chat:
+        return False
+    bot_id = _notify_bot_user_id()
+    sender_raw = payload.get("sender_id") or payload.get("telegram_sender_id")
+    try:
+        sender_id = int(str(sender_raw).strip()) if sender_raw is not None else None
+    except ValueError:
+        sender_id = None
+    if bot_id is not None and sender_id is not None:
+        return sender_id == bot_id
+    return True
 
 
 def _passes_filter(payload: dict) -> bool:
     """Filter posts to what the operator actually wants surfaced in real time.
 
-    * Platform must be in ALLOWED_PLATFORMS.
-    * Telegram payloads from our own logs chat are dropped unconditionally
-      (defence-in-depth against the self-bot circular loop; the primary
-      filter lives in the telegram collector).
+    * Any collector source is allowed through. This feed is the operator's
+      cross-source media/log surface, so source filtering belongs in collection
+      config, not here.
+    * Telegram payloads from our own logs chat are sender-aware when possible:
+      bot-authored messages are dropped, human/manual messages can pass.
     * Kind (post/image/video/photo) or content_type must be recognised media.
     * We need either a caption or a downloadable file to make a useful message.
     * Profile updates are opt-in via REALTIME_POST_FEED_INCLUDE_PROFILES.
     """
-    source = (payload.get("source") or "").lower()
     if _is_own_logs_chat_telegram(payload):
         return False
     include_profiles = _flag("REALTIME_POST_FEED_INCLUDE_PROFILES", "0")

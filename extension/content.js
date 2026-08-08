@@ -582,7 +582,7 @@ function findRecoverablePageActionButton() {
 }
 
 function switchXHostForRecoverableShell(shell) {
-  if (!shell || !/try_again|something_went_wrong|no_internet|page_not_available|page_not_found/i.test(shell.reason || "")) {
+  if (!shell || !/failed_script|try_again|something_went_wrong|no_internet|page_not_available|page_not_found/i.test(shell.reason || "")) {
     return false;
   }
   const navKey = `uc_x_shell_nav_${shell.reason || "shell"}`;
@@ -610,11 +610,17 @@ function switchXHostForRecoverableShell(shell) {
 async function attemptRecoverablePageInteraction(platformId, shell) {
   if (!PAGE_RECOVERY_ENABLED.has(platformId) || !shell) return false;
   if (platformId === "x" && shell.reason === "failed_script_url") {
+    const key = "uc_recover_click_x_failed_script_url";
+    const last = lsNum(key);
+    if (last && Date.now() - last < 2 * 60000) {
+      if (switchXHostForRecoverableShell(shell)) return true;
+    }
+    lsSet(key, String(Date.now()));
     try {
       history.replaceState(null, "", "https://x.com/home");
     } catch (e) {}
     clog("warn", "x failedScript URL detected; returning to clean home", "x");
-    location.href = "https://x.com/home";
+    location.href = "https://x.com/home?uc_recover=" + Math.floor(Date.now() / 1000);
     return true;
   }
   const key = `uc_recover_click_${platformId}_${shell.reason || "shell"}`;

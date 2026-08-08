@@ -168,6 +168,9 @@ PLAYWRIGHT_LAUNCH_ARGS = [
     "--no-sandbox",
     "--disable-dev-shm-usage",
     "--disable-gpu",
+    "--js-flags=--max-old-space-size=512",
+    "--disable-background-timer-throttling",
+    "--renderer-process-limit=10",
     "--no-zygote",
 ]
 

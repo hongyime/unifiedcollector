@@ -153,7 +153,7 @@ def test_filter_accepts_valid_post():
     assert _passes_filter(payload) is True
 
 
-def test_filter_drops_unknown_platform():
+def test_filter_accepts_new_collector_source():
     from src.notifications.realtime_feed import _passes_filter, build_payload
 
     payload = build_payload(
@@ -162,7 +162,7 @@ def test_filter_drops_unknown_platform():
         sha256="a" * 64, metadata={"caption": "hi"}, kind="video",
         content_type="video",
     )
-    assert _passes_filter(payload) is False
+    assert _passes_filter(payload) is True
 
 
 def test_filter_drops_profile_updates_by_default(monkeypatch):
@@ -230,6 +230,168 @@ def test_format_caption_escapes_html():
     assert "hello &amp; &lt;world&gt;" in text
 
 
+# -- Self-bot circular-loop defence --------------------------------------
+
+def test_filter_drops_notify_bot_telegram_from_logs_chat(monkeypatch):
+    """Defence-in-depth: even if the telegram collector's filter drifts, we
+    must NOT re-broadcast the notify bot's own media from the logs chat."""
+    from src.notifications.realtime_feed import _passes_filter, build_payload
+
+    monkeypatch.setenv("TELEGRAM_LOGS_CHAT_ID", "-1003849817923")
+    monkeypatch.setenv("UC_NOTIFY_BOT_USER_ID", "8953242118")
+    payload = build_payload(
+        source="telegram", entity_name="notify bot", content_id="-1003849817923_555",
+        file_path="/vault/media/blobs/x.jpg", source_url="https://t/1",
+        sha256="a" * 64,
+        metadata={"caption": "our own repost", "platform_sender_id": "8953242118"},
+        kind="image",
+        content_type="post_image",
+    )
+    assert payload["sender_id"] == "8953242118"
+    assert _passes_filter(payload) is False
+
+
+def test_filter_allows_human_telegram_from_logs_chat_when_sender_known(monkeypatch):
+    """Manual human media posted in the logs chat is allowed when the sender id
+    proves it was not sent by the realtime-feed bot."""
+    from src.notifications.realtime_feed import _passes_filter, build_payload
+
+    monkeypatch.setenv("TELEGRAM_LOGS_CHAT_ID", "-1003849817923")
+    monkeypatch.setenv("UC_NOTIFY_BOT_USER_ID", "8953242118")
+    payload = build_payload(
+        source="telegram", entity_name="human", content_id="-1003849817923_556",
+        file_path="/vault/media/blobs/x.jpg", source_url="https://t/1",
+        sha256="a" * 64,
+        metadata={"caption": "manual upload", "platform_sender_id": "12345"},
+        kind="image",
+        content_type="post_image",
+    )
+    assert payload["sender_id"] == "12345"
+    assert _passes_filter(payload) is True
+
+
+def test_filter_drops_logs_chat_when_sender_or_bot_unknown(monkeypatch):
+    """If sender/bot identity is missing, prefer loop safety over broadcasting."""
+    from src.notifications.realtime_feed import _passes_filter, build_payload
+
+    monkeypatch.setenv("TELEGRAM_LOGS_CHAT_ID", "-1003849817923")
+    monkeypatch.delenv("UC_NOTIFY_BOT_USER_ID", raising=False)
+    payload = build_payload(
+        source="telegram", entity_name="unknown", content_id="-1003849817923_557",
+        file_path="/vault/media/blobs/x.jpg", source_url="https://t/1",
+        sha256="a" * 64, metadata={"caption": "unknown sender"}, kind="image",
+        content_type="post_image",
+    )
+    assert _passes_filter(payload) is False
+
+
+def test_filter_allows_telegram_from_other_chats(monkeypatch):
+    """Telegram messages from a normal target group must still be delivered."""
+    from src.notifications.realtime_feed import _passes_filter, build_payload
+
+    monkeypatch.setenv("TELEGRAM_LOGS_CHAT_ID", "-1003849817923")
+    payload = build_payload(
+        source="telegram", entity_name="Some Group", content_id="-1001234567890_42",
+        file_path="/vault/media/blobs/x.jpg", source_url="https://t/2",
+        sha256="b" * 64, metadata={"caption": "real content"}, kind="image",
+        content_type="post_image",
+    )
+    assert _passes_filter(payload) is True
+
+
+def test_filter_falls_back_to_telegram_chat_id(monkeypatch):
+    """TELEGRAM_LOGS_CHAT_ID unset → fall back to TELEGRAM_CHAT_ID for the skip."""
+    from src.notifications.realtime_feed import _passes_filter, build_payload
+
+    monkeypatch.delenv("TELEGRAM_LOGS_CHAT_ID", raising=False)
+    monkeypatch.delenv("UC_NOTIFY_BOT_USER_ID", raising=False)
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "-1003849817923")
+    payload = build_payload(
+        source="telegram", entity_name="notify bot", content_id="-1003849817923_9001",
+        file_path="/vault/media/blobs/x.jpg", source_url="https://t/3",
+        sha256="c" * 64, metadata={"caption": "our own repost"}, kind="image",
+        content_type="post_image",
+    )
+    assert _passes_filter(payload) is False
+
+
+def test_filter_ignores_non_telegram_payloads_with_matching_prefix(monkeypatch):
+    """A non-telegram platform must never be dropped by this filter — even if
+    its content_id happens to lead with digits identical to the logs chat."""
+    from src.notifications.realtime_feed import _passes_filter, build_payload
+
+    monkeypatch.setenv("TELEGRAM_LOGS_CHAT_ID", "-1003849817923")
+    payload = build_payload(
+        source="instagram", entity_name="alice", content_id="-1003849817923_x",
+        file_path="/vault/media/blobs/x.jpg", source_url="https://ig/x",
+        sha256="d" * 64, metadata={"caption": "ok"}, kind="image",
+        content_type="post_image",
+    )
+    assert _passes_filter(payload) is True
+
+
+def test_filter_noop_when_logs_env_unset(monkeypatch):
+    """No env at all → filter must NOT crash and must NOT drop the payload
+    on our own defensive layer (the primary skip still lives in the collector)."""
+    from src.notifications.realtime_feed import _passes_filter, build_payload
+
+    monkeypatch.delenv("TELEGRAM_LOGS_CHAT_ID", raising=False)
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+    monkeypatch.delenv("NOTIFY_TELEGRAM_CHAT_ID", raising=False)
+    payload = build_payload(
+        source="telegram", entity_name="Some Group", content_id="-1001234567890_1",
+        file_path="/vault/media/blobs/x.jpg", source_url="https://t/4",
+        sha256="e" * 64, metadata={"caption": "ok"}, kind="image",
+        content_type="post_image",
+    )
+    assert _passes_filter(payload) is True
+
+
+def test_filter_handles_malformed_telegram_content_id(monkeypatch):
+    """content_id without the expected chat_id_message_id shape must not
+    trip the filter — we should let the payload through rather than drop it."""
+    from src.notifications.realtime_feed import _passes_filter, build_payload
+
+    monkeypatch.setenv("TELEGRAM_LOGS_CHAT_ID", "-1003849817923")
+    payload = build_payload(
+        source="telegram", entity_name="something", content_id="not-a-chat-shape",
+        file_path="/vault/media/blobs/x.jpg", source_url="https://t/5",
+        sha256="f" * 64, metadata={"caption": "ok"}, kind="image",
+        content_type="post_image",
+    )
+    assert _passes_filter(payload) is True
+
+
+@pytest.mark.asyncio
+async def test_drain_drops_self_bot_telegram_payload(fake_redis, telegram_stub, monkeypatch):
+    """End-to-end: a telegram media_item whose chat_id is our logs chat must
+    NOT reach telegram.send_photo / _video / send. Prevents the circular loop
+    from surviving one extra hop even if the collector's filter breaks."""
+    from src.notifications import realtime_feed
+
+    monkeypatch.setenv("REALTIME_POST_FEED_MAX_PER_MINUTE", "10")
+    monkeypatch.setenv("TELEGRAM_LOGS_CHAT_ID", "-1003849817923")
+    monkeypatch.setenv("UC_NOTIFY_BOT_USER_ID", "8953242118")
+
+    payload = realtime_feed.build_payload(
+        source="telegram", entity_name="notify bot",
+        content_id="-1003849817923_777",
+        file_path=None, source_url="https://t/loop.jpg",
+        sha256="1" * 64,
+        metadata={"caption": "would loop", "platform_sender_id": "8953242118"},
+        kind="image",
+        content_type="post_image",
+    )
+    await fake_redis.rpush("uc:realtime_post_feed", json.dumps(payload))
+
+    drain = realtime_feed.RealtimeFeedDrain()
+    await drain._tick(fake_redis)
+
+    assert telegram_stub["send_photo"] == []
+    assert telegram_stub["send_video"] == []
+    assert telegram_stub["send"] == []
+
+
 # -- Enqueue --------------------------------------------------------------
 
 @pytest.mark.asyncio
@@ -271,7 +433,7 @@ async def test_enqueue_disabled_is_noop(fake_redis, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_enqueue_filters_out_unknown_platforms(fake_redis, monkeypatch):
+async def test_enqueue_accepts_new_collector_sources(fake_redis, monkeypatch):
     from src.notifications import realtime_feed
 
     monkeypatch.setenv("REALTIME_POST_FEED_ENABLED", "1")
@@ -282,7 +444,7 @@ async def test_enqueue_filters_out_unknown_platforms(fake_redis, monkeypatch):
         content_type="video",
     )
     await asyncio.sleep(0)
-    assert fake_redis.lists.get("uc:realtime_post_feed") in (None, [])
+    assert fake_redis.lists.get("uc:realtime_post_feed")
 
 
 # -- Drain loop happy path -----------------------------------------------

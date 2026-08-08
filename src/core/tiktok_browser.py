@@ -45,6 +45,9 @@ logger = logging.getLogger(__name__)
 _CHROMIUM_ARGS = [
     "--disable-blink-features=AutomationControlled",
     "--disable-dev-shm-usage",
+    "--js-flags=--max-old-space-size=512",
+    "--disable-background-timer-throttling",
+    "--renderer-process-limit=10",
     "--no-sandbox",
 ]
 

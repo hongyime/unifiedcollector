@@ -405,6 +405,9 @@ def test_x_error_shell_can_switch_host_when_native_retry_is_missing():
     assert '"https://x.com/home"' in switch_block
     assert "navigating to ${target}" in switch_block
     assert "uc_x_shell_step_" in switch_block
+    assert "failed_script" in switch_block
+    assert "uc_recover_click_x_failed_script_url" in recover_block
+    assert '"https://x.com/home?uc_recover="' in recover_block
     assert "last && Date.now() - last < 10 * 60000" in recover_block
 
 
