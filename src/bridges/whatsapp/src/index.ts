@@ -147,6 +147,7 @@ let socketEpoch = 0;
 let saveCredsTimer: NodeJS.Timeout | null = null;
 let saveCredsPending: (() => Promise<void>) | null = null;
 const POST_PAIR_515_GRACE_MS = Number(process.env.WHATSAPP_POST_PAIR_515_GRACE_MS || 90_000);
+const LID_BACKFILL_MIN_INTERVAL_MS = Number(process.env.WHATSAPP_LID_BACKFILL_MIN_INTERVAL_MS || 24 * 60 * 60 * 1000);
 
 let stream515: number[] = [];
 const MAX_RAPID_515 = 3;
@@ -545,6 +546,7 @@ function authPathHasRegisteredCreds(authPath = currentAuthPath()): boolean {
     const credsPath = path.join(authPath, 'creds.json');
     if (!fs.existsSync(credsPath)) return false;
     try {
+        if (fs.statSync(credsPath).size <= 0) return false;
         const raw = fs.readFileSync(credsPath, 'utf8');
         const parsed = JSON.parse(raw);
         return Boolean(parsed?.registered || parsed?.me || parsed?.account);
@@ -639,6 +641,8 @@ function authStateSummary(authPath = currentAuthPath()): AuthStateSummary {
         summary.has_recoverable_state = authPathHasRecoverableState(authPath);
         if (summary.has_registered_creds) {
             summary.note = 'registered_credentials_present';
+        } else if (summary.creds_json_exists && summary.creds_json_size <= 0) {
+            summary.note = 'creds_json_empty_scan_required';
         } else if (summary.creds_json_exists) {
             summary.note = 'creds_json_present_but_unregistered';
         } else if (authStateNeedsCleanPairing(summary)) {
@@ -827,6 +831,24 @@ async function emitStoredLidMappings(sessionName: string): Promise<void> {
     if (lidBackfillDone) return;
     lidBackfillDone = true;
     const authPath = process.env.AUTH_STORAGE_PATH || `./auth_info/${getEnv('SESSION_NAME', 'default')}`;
+    const markerPath = path.join(authPath, `.lid-backfill-${sessionName}.json`);
+    if (LID_BACKFILL_MIN_INTERVAL_MS > 0) {
+        try {
+            const marker = JSON.parse(await fs.promises.readFile(markerPath, 'utf8'));
+            const lastEmittedAt = Number(marker?.emitted_at_ms || 0);
+            const ageMs = Date.now() - lastEmittedAt;
+            if (lastEmittedAt > 0 && ageMs >= 0 && ageMs < LID_BACKFILL_MIN_INTERVAL_MS) {
+                logger.info({
+                    sessionName,
+                    ageMs,
+                    minIntervalMs: LID_BACKFILL_MIN_INTERVAL_MS,
+                }, 'lid backfill: skipped recently emitted stored lid mappings');
+                return;
+            }
+        } catch {
+            // Missing/corrupt marker means emit once and replace it below.
+        }
+    }
     let files: string[];
     try {
         files = fs.readdirSync(authPath);
@@ -853,6 +875,20 @@ async function emitStoredLidMappings(sessionName: string): Promise<void> {
             });
         }));
         for (const r of results) r.status === 'fulfilled' ? count++ : errors++;
+    }
+    try {
+        await fs.promises.writeFile(
+            markerPath,
+            JSON.stringify({
+                emitted_at: new Date().toISOString(),
+                emitted_at_ms: Date.now(),
+                count,
+                errors,
+                session_name: sessionName,
+            }),
+        );
+    } catch (e) {
+        logger.warn({ err: e, markerPath }, 'lid backfill: could not write throttle marker');
     }
     logger.info({ count, errors, sessionName }, 'lid backfill: emitted stored lid mappings');
 }

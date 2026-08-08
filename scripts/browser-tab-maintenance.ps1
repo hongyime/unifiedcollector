@@ -21,6 +21,26 @@ function Resolve-Python {
     throw "python.exe/py.exe not found in PATH"
 }
 
+function Test-CdpAvailable {
+    $url = "http://127.0.0.1:9222/json/version"
+    try {
+        $response = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 3
+        return ($response.StatusCode -ge 200 -and $response.StatusCode -lt 300)
+    } catch {
+        Write-Log ("Chrome CDP unavailable at ${url}: " + $_.Exception.Message)
+        return $false
+    }
+}
+
+function Get-PositiveIntEnv([string]$name, [int]$fallback) {
+    $value = [Environment]::GetEnvironmentVariable($name)
+    $parsed = 0
+    if ([int]::TryParse($value, [ref]$parsed) -and $parsed -gt 0) {
+        return $parsed
+    }
+    return $fallback
+}
+
 function Write-OutputLines($text) {
     if (-not $text) { return }
     $text -split "`r?`n" | Where-Object { $_ -ne "" } | ForEach-Object { Write-Log $_ }
@@ -75,10 +95,16 @@ Write-Log "browser tab maintenance start"
 
 Push-Location $repo
 try {
+    if (-not (Test-CdpAvailable)) {
+        Write-Log "browser tab maintenance skipped because Chrome CDP is unavailable"
+        return
+    }
     $python = Resolve-Python
+    $auditTimeout = Get-PositiveIntEnv "UC_BROWSER_AUDIT_TIMEOUT_SECONDS" 90
+    $reloadTimeout = Get-PositiveIntEnv "UC_BROWSER_RELOAD_TIMEOUT_SECONDS" 90
     Write-Log ("using python command: " + ($python -join " "))
-    Invoke-PythonScript -command $python -script $audit -timeoutSeconds 180
-    Invoke-PythonScript -command $python -script $reload -timeoutSeconds 120
+    Invoke-PythonScript -command $python -script $audit -timeoutSeconds $auditTimeout
+    Invoke-PythonScript -command $python -script $reload -timeoutSeconds $reloadTimeout
     Write-Log "browser tab maintenance complete"
 } catch {
     Write-Log ("browser tab maintenance failed: " + $_.Exception.Message)

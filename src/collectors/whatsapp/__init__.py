@@ -410,6 +410,14 @@ class WhatsappCollector(BaseCollector):
         )
         await group_queue.bind(exchange, routing_key="groups.#")
 
+        # Session queue: bridge online/offline/heartbeat events. These are not
+        # user messages, so they must not update whatsapp_messages freshness, but
+        # they do prove the bridge and RabbitMQ path are alive.
+        session_queue = await self._broker_channel.declare_queue(
+            "unifiedcollector.sessions", durable=True,
+        )
+        await session_queue.bind(exchange, routing_key="session.#")
+
         async def _consume_contacts():
             async with contact_queue.iterator() as qi:
                 async for message in qi:
@@ -433,6 +441,18 @@ class WhatsappCollector(BaseCollector):
                             await self._handle_group_event(body)
                         except Exception as e:
                             logger.debug("Group event processing failed: %s", e)
+
+        async def _consume_sessions():
+            async with session_queue.iterator() as qi:
+                async for message in qi:
+                    if self._stop.is_set():
+                        break
+                    async with message.process():
+                        try:
+                            body = json.loads(message.body.decode())
+                            await self._handle_session_event(body)
+                        except Exception as e:
+                            logger.debug("Session event processing failed: %s", e)
 
         async def _consume_messages():
             async with msg_queue.iterator() as qi:
@@ -463,6 +483,7 @@ class WhatsappCollector(BaseCollector):
             asyncio.create_task(_consume_messages()),
             asyncio.create_task(_consume_contacts()),
             asyncio.create_task(_consume_groups()),
+            asyncio.create_task(_consume_sessions()),
         ]
         try:
             done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
@@ -485,6 +506,34 @@ class WhatsappCollector(BaseCollector):
                 if not task.done():
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _handle_session_event(self, event: dict):
+        """Persist bridge session heartbeats without pretending messages flowed."""
+        if not self.pool:
+            return
+        session_name = (
+            event.get("session_name")
+            or (event.get("_metadata") or {}).get("session_name")
+            or "unknown"
+        )
+        status = str(event.get("status") or "heartbeat").strip() or "heartbeat"
+        phone = event.get("phone_number") or event.get("phone")
+        detail = f"WhatsApp bridge {session_name} {status}"
+        if phone:
+            detail += f" ({phone})"
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO source_health (source, status, last_success_at, last_error, updated_at)
+                VALUES ('whatsapp', 'running', NOW(), NULL, NOW())
+                ON CONFLICT (source) DO UPDATE SET
+                    status='running',
+                    last_success_at=NOW(),
+                    last_error=NULL,
+                    updated_at=NOW()
+                """,
+            )
+        logger.debug(detail)
 
     async def _handle_contact_event(self, event: dict):
         """Maintain whatsapp_users and whatsapp_lid_map from contacts.update events.

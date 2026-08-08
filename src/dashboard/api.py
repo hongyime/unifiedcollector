@@ -1775,6 +1775,21 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
             "summary": source_row.get("bridge_detail") or "WhatsApp bridge is not paired.",
             "next_action": "Open Link WhatsApp and scan the QR for any unpaired bridge.",
         }
+    if source == "whatsapp" and bridge_status == "paired" and status in {"stale", "unknown", None}:
+        bridge_detail = source_row.get("bridge_detail") or "WhatsApp bridge slots are paired and ready."
+        freshness_basis = source_row.get("freshness_basis") or "whatsapp_messages.collected_at"
+        return {
+            "kind": "whatsapp_message_stale",
+            "severity": "warning",
+            "summary": (
+                f"{bridge_detail} However {freshness_basis} has no fresh rows, so the bridge is alive "
+                "but WhatsApp message/history sync is not emitting data."
+            ),
+            "next_action": (
+                "Check the WhatsApp bridge HistorySync progress and collector_whatsapp logs. "
+                "If it remains at 0 messages after reconnect, unlink/relink that WhatsApp slot from the phone."
+            ),
+        }
     if cursor_row and cursor_row.get("active_now"):
         active_until = cursor_row.get("active_until")
         return {

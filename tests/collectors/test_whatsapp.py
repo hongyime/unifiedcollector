@@ -88,6 +88,20 @@ def test_constructor_defaults(collector):
     assert collector.SOURCE_NAME == "whatsapp"
     assert collector._session_bridges == {}
     assert collector._bridge_secret == ""
+
+
+@pytest.mark.asyncio
+async def test_handle_session_event_marks_bridge_health_without_message_freshness(collector):
+    await collector._handle_session_event({
+        "session_name": "session_1",
+        "status": "active",
+        "phone_number": "6592348112",
+    })
+
+    sql, *_args = collector._test_conn.execute.await_args.args
+    assert "INSERT INTO source_health" in sql
+    assert "last_success_at=NOW()" in sql
+    assert "last_error=NULL" in sql
     assert collector._session_names == []
     assert collector._use_realtime is False
     assert collector._use_export is False

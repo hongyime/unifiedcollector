@@ -72,6 +72,26 @@ def test_source_matrix_blocker_prioritizes_whatsapp_pairing():
     assert "QR" in blocker["next_action"]
 
 
+def test_source_matrix_blocker_explains_paired_whatsapp_without_messages():
+    blocker = _source_matrix_blocker(
+        _source(
+            source="whatsapp",
+            status="stale",
+            bridge_status="paired",
+            bridge_detail="2 WhatsApp bridge slot(s) paired and ready.",
+            freshness_basis="whatsapp_messages.collected_at",
+        ),
+        rate_row=None,
+        cursor_row=None,
+        extension_issues=[],
+    )
+
+    assert blocker["kind"] == "whatsapp_message_stale"
+    assert blocker["severity"] == "warning"
+    assert "bridge is alive" in blocker["summary"]
+    assert "HistorySync" in blocker["next_action"]
+
+
 def test_source_matrix_expensive_sections_have_bounded_default_timeouts():
     assert _SOURCE_MATRIX_DAY_CONTENT_TIMEOUT_SECONDS <= 8
     assert _SOURCE_MATRIX_MEDIA_TOTALS_TIMEOUT_SECONDS <= 8
