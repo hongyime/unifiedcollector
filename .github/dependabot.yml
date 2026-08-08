@@ -65,6 +65,13 @@ updates:
     labels:
       - "dependencies"
       - "docker"
+    ignore:
+      - dependency-name: "python"
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: "postgres"
+        update-types:
+          - "version-update:semver-major"
     open-pull-requests-limit: 5
 
   - package-ecosystem: "docker"
@@ -77,4 +84,8 @@ updates:
       - "dependencies"
       - "docker"
       - "whatsapp-bridge"
+    ignore:
+      - dependency-name: "node"
+        update-types:
+          - "version-update:semver-major"
     open-pull-requests-limit: 5

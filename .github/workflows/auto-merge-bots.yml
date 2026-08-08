@@ -68,7 +68,7 @@ jobs:
       - name: Merge bot PR (build passed)
         if: steps.find-pr.outputs.pr_url != ''
         run: |
-          gh pr merge --admin --squash "$PR_URL" || {
+          gh pr merge --auto --squash "$PR_URL" || {
             echo "Auto-merge failed; leaving PR open for manual triage."
             exit 0
           }
@@ -90,7 +90,7 @@ jobs:
             gh pr list --author "$login" --state open --json number --jq '.[].number' \
             | while IFS= read -r pr; do
                 echo "Merging PR #$pr from $login"
-                gh pr merge --admin --squash "#$pr" || echo "Skip #$pr"
+                gh pr merge --auto --squash "#$pr" || echo "Skip #$pr"
               done
           done
         env:
