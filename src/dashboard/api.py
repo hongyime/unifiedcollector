@@ -1015,6 +1015,7 @@ async def _source_matrix_section(
     cache_key: str | None = None,
     cache_ttl: int | None = None,
     stale_ttl: int | None = None,
+    prefer_stale_cache: bool = False,
 ):
     now_ts = time.time()
     cached = _SOURCE_MATRIX_SECTION_CACHE.get(cache_key or "") if cache_key else None
@@ -1022,6 +1023,12 @@ async def _source_matrix_section(
         cache_age = now_ts - float(cached.get("ts") or 0.0)
         max_fresh = _SOURCE_MATRIX_SECTION_CACHE_TTL_SECONDS if cache_ttl is None else cache_ttl
         if cache_age < max_fresh:
+            close = getattr(awaitable, "close", None)
+            if callable(close):
+                close()
+            return _copy_cache_value(cached.get("value"))
+        max_stale = _SOURCE_MATRIX_SECTION_STALE_SECONDS if stale_ttl is None else stale_ttl
+        if prefer_stale_cache and cache_age < max_stale:
             close = getattr(awaitable, "close", None)
             if callable(close):
                 close()
@@ -3874,6 +3881,7 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
                 ),
                 cache_key="day_content",
                 cache_ttl=120,
+                prefer_stale_cache=True,
                 timeout=_SOURCE_MATRIX_DAY_CONTENT_TIMEOUT_SECONDS,
             )
             day_rate = await _source_matrix_section(
@@ -3894,6 +3902,7 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
                 awaitable=_source_media_totals(conn),
                 cache_key="media_totals",
                 cache_ttl=120,
+                prefer_stale_cache=True,
                 timeout=_SOURCE_MATRIX_MEDIA_TOTALS_TIMEOUT_SECONDS,
             )
             if _SOURCE_MATRIX_ENABLE_YOUTUBE_BACKLOG:

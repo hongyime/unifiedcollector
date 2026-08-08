@@ -1408,3 +1408,45 @@ async def test_source_matrix_section_returns_stale_cache_on_timeout():
     assert errors[-1]["error"] == "TimeoutError"
     assert errors[-1]["stale_cache"] is True
     assert errors[-1]["cache_age_seconds"] >= 0
+
+
+@pytest.mark.asyncio
+async def test_source_matrix_section_can_prefer_stale_cache_without_awaiting():
+    _SOURCE_MATRIX_SECTION_CACHE.clear()
+    errors: list[dict] = []
+    started = False
+
+    async def returns(value):
+        return value
+
+    async def should_not_run():
+        nonlocal started
+        started = True
+        raise AssertionError("preferred stale section should not await query")
+
+    await _source_matrix_section(
+        section="media_totals",
+        label="media totals",
+        errors=errors,
+        fallback={},
+        awaitable=returns({"instagram": {"total_media_items": 12}}),
+        timeout=1,
+        cache_key="test_prefer_stale_media_totals",
+        cache_ttl=0,
+    )
+    out = await _source_matrix_section(
+        section="media_totals",
+        label="media totals",
+        errors=errors,
+        fallback={},
+        awaitable=should_not_run(),
+        timeout=1,
+        cache_key="test_prefer_stale_media_totals",
+        cache_ttl=0,
+        stale_ttl=60,
+        prefer_stale_cache=True,
+    )
+
+    assert out == {"instagram": {"total_media_items": 12}}
+    assert started is False
+    assert errors == []
