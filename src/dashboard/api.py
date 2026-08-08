@@ -374,6 +374,144 @@ def _browser_extension_fallback_payload(reason: str = "unavailable") -> dict:
     }
 
 
+def _browser_ingest_health_from_items(ingest_items: list[dict]) -> dict:
+    try:
+        ingest_fresh_after_seconds = int(os.getenv("BROWSER_INGEST_ACTIVE_SECONDS", "600") or "600")
+    except Exception:
+        ingest_fresh_after_seconds = 600
+    ingest_fresh_after_seconds = max(60, ingest_fresh_after_seconds)
+    fresh_items = [
+        item for item in ingest_items
+        if int(item.get("age_seconds") or 0) <= ingest_fresh_after_seconds
+    ]
+    fresh_heartbeats = [
+        item for item in fresh_items
+        if str(item.get("endpoint") or "") == "browser_heartbeat"
+    ]
+    fresh_content = [
+        item for item in fresh_items
+        if str(item.get("endpoint") or "") != "browser_heartbeat"
+        and (int(item.get("observed_count") or 0) > 0 or int(item.get("stored_count") or 0) > 0)
+    ]
+    latest_seen = min(
+        (int(item.get("age_seconds") or 0) for item in ingest_items),
+        default=None,
+    )
+    latest_content = min(
+        (
+            int(item.get("age_seconds") or 0) for item in ingest_items
+            if str(item.get("endpoint") or "") != "browser_heartbeat"
+            and (int(item.get("observed_count") or 0) > 0 or int(item.get("stored_count") or 0) > 0)
+        ),
+        default=None,
+    )
+    return {
+        "state": "active" if fresh_items else ("stale" if ingest_items else "missing"),
+        "active": bool(fresh_items),
+        "heartbeat_active": bool(fresh_heartbeats),
+        "content_active": bool(fresh_content),
+        "last_seen_at": max(
+            (item.get("last_seen_at") for item in ingest_items if item.get("last_seen_at") is not None),
+            default=None,
+        ),
+        "last_content_at": max(
+            (
+                item.get("last_seen_at") for item in ingest_items
+                if item.get("last_seen_at") is not None
+                and str(item.get("endpoint") or "") != "browser_heartbeat"
+                and (int(item.get("observed_count") or 0) > 0 or int(item.get("stored_count") or 0) > 0)
+            ),
+            default=None,
+        ),
+        "last_seen_age_seconds": latest_seen,
+        "last_content_age_seconds": latest_content,
+        "fresh_after_seconds": ingest_fresh_after_seconds,
+        "active_platforms": sorted({str(item.get("platform")) for item in fresh_items if item.get("platform")}),
+        "content_platforms": sorted({str(item.get("platform")) for item in fresh_content if item.get("platform")}),
+        "note": (
+            "Browser extension ingest is active; CDP maintenance/cookie-vault status is separate."
+            if fresh_items else
+            "No fresh browser extension ingest event is present in the active window."
+        ),
+    }
+
+
+def _browser_extension_apply_ingest_health(payload: dict, ingest_items: list[dict]) -> None:
+    health = _browser_ingest_health_from_items(ingest_items)
+    payload["ingest_health"] = health
+    if health.get("active"):
+        for issue in payload.get("issues", []):
+            if issue.get("kind") == "browser_maintenance_cdp_unavailable":
+                issue["extension_ingest_active"] = True
+                issue["ingest_diagnostics_unavailable"] = False
+                issue["detail"] = (
+                    str(issue.get("detail") or "")
+                    + " Browser extension ingest is still active; CDP tab maintenance and cookie backup are unavailable."
+                ).strip()
+
+
+async def _browser_extension_fallback_payload_with_fast_ingest(reason: str) -> dict:
+    payload = _browser_extension_fallback_payload(reason)
+    pool = None
+    conn = None
+    try:
+        pool = await asyncio.wait_for(get_pool(), timeout=1.0)
+        conn = await asyncio.wait_for(pool.acquire(), timeout=1.0)
+        exists = await conn.fetchval(
+            "SELECT to_regclass('browser_ingest_events')",
+            timeout=0.5,
+        )
+        if exists is None:
+            return payload
+        rows = await conn.fetch(
+            """
+            SELECT platform,
+                   endpoint,
+                   count(*)::int AS requests,
+                   sum(observed_count)::int AS observed_count,
+                   sum(stored_count)::int AS stored_count,
+                   max(created_at) AS last_seen_at,
+                   extract(epoch FROM now() - max(created_at))::int AS age_seconds,
+                   (array_agg(NULLIF(metadata->>'extension_version', '') ORDER BY created_at DESC))[1]
+                       AS extension_version
+            FROM browser_ingest_events
+            WHERE created_at >= now() - interval '30 minutes'
+            GROUP BY platform, endpoint
+            ORDER BY last_seen_at DESC
+            LIMIT 20
+            """,
+            timeout=1.0,
+        )
+        ingest_items = [
+            {
+                "platform": row["platform"],
+                "endpoint": row["endpoint"],
+                "requests": int(row["requests"] or 0),
+                "observed_count": int(row["observed_count"] or 0),
+                "stored_count": int(row["stored_count"] or 0),
+                "last_seen_at": row["last_seen_at"],
+                "age_seconds": int(row["age_seconds"] or 0),
+                "extension_version": row["extension_version"],
+                "version_ok": _extension_versions_match(row["extension_version"], payload.get("expected_version")),
+            }
+            for row in rows
+        ]
+        if ingest_items:
+            payload["ingest"] = ingest_items
+            _browser_extension_apply_ingest_health(payload, ingest_items)
+            payload["fast_ingest_fallback"] = True
+    except Exception as exc:  # noqa: BLE001 - fallback diagnostics must not break source matrix
+        payload.setdefault("diagnostic_errors", []).append({
+            "section": "source_matrix_browser_extension_fast_ingest",
+            "error": exc.__class__.__name__,
+        })
+        logger.debug("browser extension fast ingest fallback failed: %s", exc.__class__.__name__)
+    finally:
+        if pool is not None and conn is not None:
+            await _release_dashboard_conn(pool, conn, "browser extension fast ingest fallback")
+    return payload
+
+
 def _extension_management_url(extension_id: object) -> str | None:
     extension_id = str(extension_id or "").strip()
     if not re.fullmatch(r"[a-p]{32}", extension_id):
@@ -2837,73 +2975,7 @@ async def _browser_extension_payload(conn) -> dict:
             return None
 
     def _set_ingest_health(ingest_items: list[dict]) -> None:
-        try:
-            ingest_fresh_after_seconds = int(os.getenv("BROWSER_INGEST_ACTIVE_SECONDS", "600") or "600")
-        except Exception:
-            ingest_fresh_after_seconds = 600
-        ingest_fresh_after_seconds = max(60, ingest_fresh_after_seconds)
-        fresh_items = [
-            item for item in ingest_items
-            if int(item.get("age_seconds") or 0) <= ingest_fresh_after_seconds
-        ]
-        fresh_heartbeats = [
-            item for item in fresh_items
-            if str(item.get("endpoint") or "") == "browser_heartbeat"
-        ]
-        fresh_content = [
-            item for item in fresh_items
-            if str(item.get("endpoint") or "") != "browser_heartbeat"
-            and (int(item.get("observed_count") or 0) > 0 or int(item.get("stored_count") or 0) > 0)
-        ]
-        latest_seen = min(
-            (int(item.get("age_seconds") or 0) for item in ingest_items),
-            default=None,
-        )
-        latest_content = min(
-            (
-                int(item.get("age_seconds") or 0) for item in ingest_items
-                if str(item.get("endpoint") or "") != "browser_heartbeat"
-                and (int(item.get("observed_count") or 0) > 0 or int(item.get("stored_count") or 0) > 0)
-            ),
-            default=None,
-        )
-        payload["ingest_health"] = {
-            "state": "active" if fresh_items else ("stale" if ingest_items else "missing"),
-            "active": bool(fresh_items),
-            "heartbeat_active": bool(fresh_heartbeats),
-            "content_active": bool(fresh_content),
-            "last_seen_at": max(
-                (item.get("last_seen_at") for item in ingest_items if item.get("last_seen_at") is not None),
-                default=None,
-            ),
-            "last_content_at": max(
-                (
-                    item.get("last_seen_at") for item in ingest_items
-                    if item.get("last_seen_at") is not None
-                    and str(item.get("endpoint") or "") != "browser_heartbeat"
-                    and (int(item.get("observed_count") or 0) > 0 or int(item.get("stored_count") or 0) > 0)
-                ),
-                default=None,
-            ),
-            "last_seen_age_seconds": latest_seen,
-            "last_content_age_seconds": latest_content,
-            "fresh_after_seconds": ingest_fresh_after_seconds,
-            "active_platforms": sorted({str(item.get("platform")) for item in fresh_items if item.get("platform")}),
-            "content_platforms": sorted({str(item.get("platform")) for item in fresh_content if item.get("platform")}),
-            "note": (
-                "Browser extension ingest is active; CDP maintenance/cookie-vault status is separate."
-                if fresh_items else
-                "No fresh browser extension ingest event is present in the active window."
-            ),
-        }
-        if fresh_items:
-            for issue in payload["issues"]:
-                if issue.get("kind") == "browser_maintenance_cdp_unavailable":
-                    issue["extension_ingest_active"] = True
-                    issue["detail"] = (
-                        str(issue.get("detail") or "")
-                        + " Browser extension ingest is still active; CDP tab maintenance and cookie backup are unavailable."
-                    ).strip()
+        _browser_extension_apply_ingest_health(payload, ingest_items)
 
     browser_ingest_events_exists = await _fetchval_or_none(
         "browser_ingest_events_table",
@@ -4015,7 +4087,11 @@ async def collectors_live(_user: dict = Depends(require_role("viewer"))):
     return payload
 
 
-def _source_matrix_unavailable_payload(error: str, live_sources: list[dict] | None = None) -> dict:
+def _source_matrix_unavailable_payload(
+    error: str,
+    live_sources: list[dict] | None = None,
+    browser_extension: dict | None = None,
+) -> dict:
     generated_at = datetime.now(timezone.utc)
     current_hour_started_at = generated_at.replace(minute=0, second=0, microsecond=0)
     previous_hour_started_at = current_hour_started_at - timedelta(hours=1)
@@ -4023,7 +4099,8 @@ def _source_matrix_unavailable_payload(error: str, live_sources: list[dict] | No
         live_sources = _source_matrix_fallback_liveness_rows(
             "source matrix build timed out before a cache was available; showing known source skeleton"
         )
-    browser_extension = _browser_extension_fallback_payload(error)
+    if browser_extension is None:
+        browser_extension = _browser_extension_fallback_payload(error)
     rows = [
         _source_matrix_row(
             source_row,
@@ -4081,7 +4158,8 @@ async def _source_matrix_unavailable_payload_with_fast_health(error: str) -> dic
         "showing fast source_health fallback"
     )
     live_sources = await _source_matrix_fallback_liveness_rows_with_source_health(detail)
-    return _source_matrix_unavailable_payload(error, live_sources)
+    browser_extension = await _browser_extension_fallback_payload_with_fast_ingest(error)
+    return _source_matrix_unavailable_payload(error, live_sources, browser_extension)
 
 
 @app.get("/collectors/source-matrix")
@@ -4405,6 +4483,11 @@ async def _collectors_source_matrix_payload():
     finally:
         if conn is not None:
             await _release_dashboard_conn(pool, conn, "source matrix")
+
+    if str((browser_extension.get("ingest_health") or {}).get("state") or "") == "unknown":
+        fast_browser_extension = await _browser_extension_fallback_payload_with_fast_ingest("TimeoutError")
+        if (fast_browser_extension.get("ingest_health") or {}).get("active"):
+            browser_extension = fast_browser_extension
 
     generated_at = datetime.now(timezone.utc)
     live_sources = [*live_sources, *beeper_subsources]

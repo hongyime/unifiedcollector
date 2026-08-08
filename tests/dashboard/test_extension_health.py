@@ -12,7 +12,9 @@ os.environ.setdefault("DASHBOARD_ADMIN_PASSWORD", "x")
 
 from src.dashboard import api as dashboard_api
 from src.dashboard.api import (
+    _browser_extension_fallback_payload_with_fast_ingest,
     _browser_extension_fallback_payload,
+    _browser_ingest_health_from_items,
     _browser_extension_payload,
     _browser_tab_maintenance_payload,
     _extension_versions_match,
@@ -24,6 +26,36 @@ def test_extension_versions_match_ignores_v_prefix():
     assert _extension_versions_match("v1.21.32", "1.21.32")
     assert _extension_versions_match("1.21.33", "1.21.32")
     assert not _extension_versions_match("1.21.28", "1.21.32")
+
+
+def test_browser_ingest_health_from_items_marks_content_active(monkeypatch):
+    monkeypatch.setenv("BROWSER_INGEST_ACTIVE_SECONDS", "600")
+
+    health = _browser_ingest_health_from_items([
+        {
+            "platform": "instagram",
+            "endpoint": "media",
+            "observed_count": 12,
+            "stored_count": 7,
+            "last_seen_at": datetime(2026, 8, 8, tzinfo=timezone.utc),
+            "age_seconds": 20,
+        },
+        {
+            "platform": "tiktok",
+            "endpoint": "browser_heartbeat",
+            "observed_count": 1,
+            "stored_count": 0,
+            "last_seen_at": datetime(2026, 8, 8, tzinfo=timezone.utc),
+            "age_seconds": 15,
+        },
+    ])
+
+    assert health["state"] == "active"
+    assert health["active"] is True
+    assert health["heartbeat_active"] is True
+    assert health["content_active"] is True
+    assert health["active_platforms"] == ["instagram", "tiktok"]
+    assert health["content_platforms"] == ["instagram"]
 
 
 def test_browser_tab_maintenance_payload_reads_host_status(tmp_path):
@@ -279,6 +311,87 @@ async def test_browser_extension_payload_distinguishes_ingest_active_from_cdp_do
     assert issue["kind"] == "browser_maintenance_cdp_unavailable"
     assert issue["extension_ingest_active"] is True
     assert "Browser extension ingest is still active" in issue["detail"]
+
+
+@pytest.mark.asyncio
+async def test_browser_extension_fallback_payload_uses_fast_ingest(monkeypatch, tmp_path):
+    status = tmp_path / "browser_tab_maintenance_status.json"
+    status.write_text(
+        json.dumps({
+            "state": "cdp_unavailable",
+            "detail": "Unable to connect to the remote server",
+            "checked_at": "2026-08-08T18:26:17.1804359+08:00",
+            "cdp_url": "http://127.0.0.1:9222",
+            "diagnostics": {"reason": "chrome_running_without_cdp"},
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(dashboard_api, "_BROWSER_TAB_MAINTENANCE_STATUS_PATH", str(status))
+    monkeypatch.setenv("BROWSER_INGEST_ACTIVE_SECONDS", "600")
+
+    class FakeConn:
+        async def fetchval(self, query: str, timeout: float | None = None):
+            if "to_regclass('browser_ingest_events')" in query:
+                return "browser_ingest_events"
+            raise AssertionError(query)
+
+        async def fetch(self, query: str, timeout: float | None = None):
+            if "FROM browser_ingest_events" in query:
+                return [
+                    {
+                        "platform": "instagram",
+                        "endpoint": "media",
+                        "requests": 4,
+                        "observed_count": 10,
+                        "stored_count": 8,
+                        "last_seen_at": datetime(2026, 8, 8, tzinfo=timezone.utc),
+                        "age_seconds": 12,
+                        "extension_version": "1.23.50",
+                    },
+                    {
+                        "platform": "x",
+                        "endpoint": "browser_heartbeat",
+                        "requests": 3,
+                        "observed_count": 3,
+                        "stored_count": 0,
+                        "last_seen_at": datetime(2026, 8, 8, tzinfo=timezone.utc),
+                        "age_seconds": 18,
+                        "extension_version": "1.23.50",
+                    },
+                ]
+            raise AssertionError(query)
+
+    class FakePool:
+        def __init__(self):
+            self.conn = FakeConn()
+            self.released = False
+
+        async def acquire(self):
+            return self.conn
+
+        async def release(self, conn):
+            assert conn is self.conn
+            self.released = True
+
+    fake_pool = FakePool()
+
+    async def fake_get_pool():
+        return fake_pool
+
+    monkeypatch.setattr(dashboard_api, "get_pool", fake_get_pool)
+
+    payload = await _browser_extension_fallback_payload_with_fast_ingest("TimeoutError")
+
+    assert fake_pool.released is True
+    assert payload["fast_ingest_fallback"] is True
+    assert payload["ingest_health"]["state"] == "active"
+    assert payload["ingest_health"]["content_active"] is True
+    assert payload["ingest_health"]["active_platforms"] == ["instagram", "x"]
+    assert payload["ingest_health"]["content_platforms"] == ["instagram"]
+    issue = payload["issues"][0]
+    assert issue["kind"] == "browser_maintenance_cdp_unavailable"
+    assert issue["extension_ingest_active"] is True
+    assert issue["ingest_diagnostics_unavailable"] is False
 
 
 @pytest.mark.asyncio
