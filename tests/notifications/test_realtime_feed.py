@@ -669,9 +669,9 @@ async def test_send_photo_truncates_caption(monkeypatch):
         seen_fields.update(fields)
         seen_fields["_method"] = method
         seen_fields["_target"] = url_or_path
-        return True, 0
+        return True, 0, "", ""
 
-    monkeypatch.setattr(telegram, "_post_media", fake_post_media)
+    monkeypatch.setattr(telegram, "_post_media_detailed", fake_post_media)
     monkeypatch.setattr(telegram, "_config", lambda: ("tok", "chat", ""))
 
     long_caption = "x" * 5000
@@ -681,6 +681,52 @@ async def test_send_photo_truncates_caption(monkeypatch):
     assert seen_fields["_method"] == "sendPhoto"
     assert seen_fields["_target"] == "https://ig/x.jpg"
     assert len(seen_fields["caption"]) <= telegram.MAX_CAPTION_CHARS
+
+
+@pytest.mark.asyncio
+async def test_send_photo_falls_back_to_document_on_image_processing_failure(monkeypatch):
+    from src.notifications import telegram
+
+    calls = []
+
+    def fake_post_media(token, method, file_field, url_or_path, fields):
+        calls.append((method, file_field, url_or_path))
+        if method == "sendPhoto":
+            return False, 0, "400", "Bad Request: IMAGE_PROCESS_FAILED"
+        return True, 0
+
+    monkeypatch.setattr(telegram, "_post_media_detailed", fake_post_media)
+    monkeypatch.setattr(telegram, "_post_media", fake_post_media)
+    monkeypatch.setattr(telegram, "_config", lambda: ("tok", "chat", ""))
+
+    ok, retry = await telegram.send_photo("https://ig/odd.jpg", caption="odd image")
+
+    assert ok is True
+    assert retry == 0
+    assert calls == [
+        ("sendPhoto", "photo", "https://ig/odd.jpg"),
+        ("sendDocument", "document", "https://ig/odd.jpg"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_send_photo_does_not_fallback_on_429(monkeypatch):
+    from src.notifications import telegram
+
+    calls = []
+
+    def fake_post_media(token, method, file_field, url_or_path, fields):
+        calls.append(method)
+        return False, 12, "429", "Too Many Requests"
+
+    monkeypatch.setattr(telegram, "_post_media_detailed", fake_post_media)
+    monkeypatch.setattr(telegram, "_config", lambda: ("tok", "chat", ""))
+
+    ok, retry = await telegram.send_photo("https://ig/rate.jpg", caption="rate")
+
+    assert ok is False
+    assert retry == 12
+    assert calls == ["sendPhoto"]
 
 
 @pytest.mark.asyncio

@@ -206,14 +206,14 @@ def _encode_multipart(fields: dict, file_field: str, file_path: str) -> tuple[by
     return body, f"multipart/form-data; boundary={boundary}"
 
 
-def _post_media(token: str, method: str, file_field: str,
-                url_or_path: str, fields: dict) -> tuple[bool, int]:
-    """Call sendPhoto/sendVideo. Returns (ok, retry_after_seconds).
+def _post_media_detailed(token: str, method: str, file_field: str,
+                         url_or_path: str, fields: dict) -> tuple[bool, int, str, str]:
+    """Call a Telegram media method.
 
     If ``url_or_path`` is an http(s):// URL the JSON API is used and Telegram
     fetches the media itself. Otherwise it is treated as a local file path and
     uploaded via multipart/form-data. Any error is caught and returned as
-    (False, retry_after).
+    (False, retry_after, error_code, description).
     """
     url = f"{_API}/bot{token}/{method}"
     is_remote = url_or_path.startswith(("http://", "https://"))
@@ -229,21 +229,21 @@ def _post_media(token: str, method: str, file_field: str,
             body, content_type = _encode_multipart(fields, file_field, url_or_path)
         except (OSError, FileNotFoundError) as e:
             logger.warning("telegram %s: cannot read %s: %s", method, url_or_path, e)
-            return False, 0
+            return False, 0, "local_read_failed", str(e)
         # Refuse to upload very large blobs; Telegram bot API will reject them.
         if len(body) > _MAX_MEDIA_BYTES:
             logger.warning(
                 "telegram %s: %s exceeds %d bytes; skipping upload",
                 method, url_or_path, _MAX_MEDIA_BYTES,
             )
-            return False, 0
+            return False, 0, "too_large", f"exceeds {_MAX_MEDIA_BYTES} bytes"
         req = urllib.request.Request(
             url, data=body, headers={"Content-Type": content_type}
         )
 
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
-            return resp.status == 200, 0
+            return resp.status == 200, 0, "", ""
     except HTTPError as e:
         retry_after = 0
         body_text = ""
@@ -252,6 +252,7 @@ def _post_media(token: str, method: str, file_field: str,
         except Exception:
             pass
         if e.code == 429:
+            parsed = {}
             try:
                 parsed = json.loads(body_text or "{}")
                 params = parsed.get("parameters") or {}
@@ -266,12 +267,34 @@ def _post_media(token: str, method: str, file_field: str,
                 except (TypeError, ValueError):
                     pass
             logger.warning("telegram %s 429 retry_after=%ss", method, retry_after)
-            return False, max(retry_after, 1)
+            return (
+                False,
+                max(retry_after, 1),
+                str(parsed.get("error_code") or e.code),
+                str(parsed.get("description") or body_text),
+            )
         logger.warning("telegram %s HTTPError %s: %s", method, e.code, body_text)
-        return False, 0
+        error_code = str(e.code)
+        description = body_text
+        try:
+            parsed = json.loads(body_text or "{}")
+            error_code = str(parsed.get("error_code") or e.code)
+            description = str(parsed.get("description") or body_text)
+        except Exception:
+            pass
+        return False, 0, error_code, description
     except Exception as e:  # noqa: BLE001 - notifications must never raise
         logger.warning("telegram %s failed: %s", method, e)
-        return False, 0
+        return False, 0, e.__class__.__name__, str(e)
+
+
+def _post_media(token: str, method: str, file_field: str,
+                url_or_path: str, fields: dict) -> tuple[bool, int]:
+    """Call sendPhoto/sendVideo. Returns (ok, retry_after_seconds)."""
+    ok, retry_after, _error_code, _description = _post_media_detailed(
+        token, method, file_field, url_or_path, fields,
+    )
+    return ok, retry_after
 
 
 async def send_photo(url_or_path: str, caption: str = "",
@@ -296,11 +319,51 @@ async def send_photo(url_or_path: str, caption: str = "",
         except ValueError:
             logger.warning("invalid TELEGRAM_THREAD_ID=%r", thread)
     try:
-        return await asyncio.to_thread(
-            _post_media, token, "sendPhoto", "photo", url_or_path, fields,
+        ok, retry_after, error_code, description = await asyncio.to_thread(
+            _post_media_detailed, token, "sendPhoto", "photo", url_or_path, fields,
         )
+        if ok or retry_after > 0:
+            return ok, retry_after
+        if "IMAGE_PROCESS_FAILED" in str(description):
+            logger.warning(
+                "telegram sendPhoto image processing failed; falling back to sendDocument"
+            )
+            return await send_document(url_or_path, caption=caption, parse_mode=parse_mode)
+        _ = error_code
+        return False, 0
     except Exception as e:  # noqa: BLE001 - belt-and-suspenders
         logger.warning("telegram send_photo error: %s", e)
+        return False, 0
+
+
+async def send_document(url_or_path: str, caption: str = "",
+                        parse_mode: str = "HTML") -> tuple[bool, int]:
+    """Send media as a document fallback when Telegram cannot process a photo.
+
+    This preserves the operator log entry for odd/corrupt/unsupported images
+    instead of dropping the realtime feed item after ``sendPhoto`` returns
+    IMAGE_PROCESS_FAILED.
+    """
+    token, chat_id, thread = _config()
+    if not token or not chat_id:
+        logger.debug("telegram send_document skipped: token/chat_id not set")
+        return False, 0
+    fields = {
+        "chat_id": chat_id,
+        "caption": _truncate_caption(caption),
+        "parse_mode": parse_mode,
+    }
+    if thread:
+        try:
+            fields["message_thread_id"] = int(thread)
+        except ValueError:
+            logger.warning("invalid TELEGRAM_THREAD_ID=%r", thread)
+    try:
+        return await asyncio.to_thread(
+            _post_media, token, "sendDocument", "document", url_or_path, fields,
+        )
+    except Exception as e:  # noqa: BLE001 - notifications must never raise
+        logger.warning("telegram send_document error: %s", e)
         return False, 0
 
 
