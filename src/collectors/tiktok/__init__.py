@@ -125,6 +125,20 @@ _BROWSER_FALLBACK_TRIGGER_KEYWORDS = (
     "not found", "forbidden", "unauthorized", "captcha",
 )
 
+_EXPECTED_LOCAL_FALLBACK_BLOCK_KEYWORDS = (
+    "failed to solve javascript challenge",
+    "could not extract rehydration data",
+    "failed to retrieve rehydration data",
+    "unable to extract secondary user id",
+    "account is either private",
+    "embedding disabled",
+    "captcha",
+    "login required",
+    "login_required",
+    "forbidden",
+    "unauthorized",
+)
+
 REQUIRED_COOKIES = {"sessionid", "tt_csrf_token", "ttwid", "msToken", "tt_chain_token", "sid_guard"}
 RECOMMENDED_COOKIES = {"s_v_web_id", "odin_tt", "cmpl_token", "passport_csrf_token"}
 
@@ -169,6 +183,20 @@ def validate_username(username: str) -> str:
     if not USERNAME_PATTERN.match(sanitized):
         raise ValueError(f"invalid username format: {username!r}")
     return sanitized
+
+
+def _is_expected_local_fallback_block(*, output: str, timed_out: bool, file_count: int) -> bool:
+    """Classify no-file TikTok downloader failures that are normal platform blocks.
+
+    These are still recorded and backed off by the caller. The classification
+    only keeps logs at info level so real collector breakage remains visible.
+    """
+    if file_count > 0:
+        return False
+    text = str(output or "").lower()
+    if any(keyword in text for keyword in _EXPECTED_LOCAL_FALLBACK_BLOCK_KEYWORDS):
+        return True
+    return bool(timed_out)
 
 
 # Keyword sets ported from invalid_username_detector.py — used by
@@ -1694,7 +1722,13 @@ class TiktokCollector(BaseCollector):
                     stop_event=self._stop if hasattr(self._stop, "wait") else None,
                 )
                 if not result.ok:
-                    logger.warning(
+                    output = f"{result.err_summary(800)} {(result.stdout or '')[:400]}"
+                    log = logger.info if _is_expected_local_fallback_block(
+                        output=output,
+                        timed_out=result.timed_out,
+                        file_count=result.file_count,
+                    ) else logger.warning
+                    log(
                         "tiktok fallback gallery-dl failed for %s: rc=%s timed_out=%s "
                         "files=%d stderr=%s stdout=%s",
                         username, result.returncode, result.timed_out, result.file_count,
@@ -1767,7 +1801,13 @@ class TiktokCollector(BaseCollector):
                     stop_event=self._stop if hasattr(self._stop, "wait") else None,
                 )
                 if not result.ok:
-                    logger.warning(
+                    output = f"{result.err_summary(800)} {(result.stdout or '')[:400]}"
+                    log = logger.info if _is_expected_local_fallback_block(
+                        output=output,
+                        timed_out=result.timed_out,
+                        file_count=result.file_count,
+                    ) else logger.warning
+                    log(
                         "tiktok fallback yt-dlp failed for %s: rc=%s timed_out=%s "
                         "files=%d stderr=%s stdout=%s",
                         username, result.returncode, result.timed_out, result.file_count,

@@ -76,6 +76,34 @@ def test_validate_username_rejects_bad_chars():
         validate_username(123)  # type: ignore[arg-type]
 
 
+def test_expected_local_fallback_block_classifier_matches_platform_walls():
+    assert tiktok_mod._is_expected_local_fallback_block(
+        output="Failed to solve JavaScript challenge",
+        timed_out=True,
+        file_count=0,
+    )
+    assert tiktok_mod._is_expected_local_fallback_block(
+        output="could not extract rehydration data",
+        timed_out=False,
+        file_count=0,
+    )
+    assert tiktok_mod._is_expected_local_fallback_block(
+        output="This user's account is either private or has embedding disabled. Unable to extract secondary user ID.",
+        timed_out=False,
+        file_count=0,
+    )
+    assert not tiktok_mod._is_expected_local_fallback_block(
+        output="Failed to solve JavaScript challenge",
+        timed_out=True,
+        file_count=1,
+    )
+    assert not tiktok_mod._is_expected_local_fallback_block(
+        output="unexpected ffmpeg crash",
+        timed_out=False,
+        file_count=0,
+    )
+
+
 def test_classify_rate_limit_by_status_and_text():
     r = classify_invalid_username("got rate limit", http_status=200)
     assert r.is_rate_limited and r.should_retry and r.is_valid
