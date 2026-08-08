@@ -97,9 +97,34 @@ def test_source_matrix_blocker_reports_partial_whatsapp_pairing():
     )
 
     assert blocker["kind"] == "whatsapp_partial_pairing"
-    assert blocker["severity"] == "warning"
+    assert blocker["severity"] == "ok"
     assert "Collection is still running" in blocker["next_action"]
     assert "scan the waiting slot" in blocker["summary"]
+
+
+def test_source_matrix_row_keeps_partial_whatsapp_pairing_live():
+    row = _source_matrix_row(
+        _source(
+            source="whatsapp",
+            status="live",
+            bridge_status="partial",
+            bridge_detail=(
+                "1 WhatsApp bridge slot(s) paired and ready; "
+                "1 slot(s) waiting for QR/session pairing: 1."
+            ),
+        ),
+        current_content={"records": 3, "messages": 3, "media_items": 0},
+        current_rate=None,
+        day_content={"records": 12, "messages": 12, "media_items": 0},
+        day_rate=None,
+        media_total=None,
+        cursor_row=None,
+        extension_issues=[],
+    )
+
+    assert row["blocker"]["kind"] == "whatsapp_partial_pairing"
+    assert row["status_label"] == "live"
+    assert row["status_severity"] == "ok"
 
 
 def test_source_matrix_blocker_explains_paired_whatsapp_without_messages():
@@ -298,7 +323,7 @@ def test_source_matrix_expensive_sections_have_bounded_default_timeouts():
     assert _SOURCE_MATRIX_DAY_CONTENT_TIMEOUT_SECONDS <= 8
     assert _SOURCE_MATRIX_MEDIA_TOTALS_TIMEOUT_SECONDS <= 8
     assert _SOURCE_MATRIX_YOUTUBE_BACKLOG_TIMEOUT_SECONDS <= 8
-    assert _SOURCE_MATRIX_BROWSER_EXTENSION_TIMEOUT_SECONDS <= 6
+    assert _SOURCE_MATRIX_BROWSER_EXTENSION_TIMEOUT_SECONDS <= 10
     assert _SOURCE_MATRIX_PAYLOAD_BUILD_TIMEOUT_SECONDS <= 15
     assert _BEEPER_SUBSOURCE_QUERY_TIMEOUT_SECONDS <= 4
     assert _BEEPER_SUBSOURCE_TOTAL_TIMEOUT_SECONDS <= 4

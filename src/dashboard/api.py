@@ -51,7 +51,7 @@ _SOURCE_MATRIX_YOUTUBE_BACKLOG_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_
 _SOURCE_MATRIX_ENABLE_YOUTUBE_BACKLOG = os.getenv("SOURCE_MATRIX_ENABLE_YOUTUBE_BACKLOG", "0").lower() in {
     "1", "true", "yes", "on"
 }
-_SOURCE_MATRIX_BROWSER_EXTENSION_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_BROWSER_EXTENSION_TIMEOUT_SECONDS", "6"))
+_SOURCE_MATRIX_BROWSER_EXTENSION_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_BROWSER_EXTENSION_TIMEOUT_SECONDS", "10"))
 _BROWSER_EXTENSION_QUERY_TIMEOUT_SECONDS = float(os.getenv("BROWSER_EXTENSION_QUERY_TIMEOUT_SECONDS", "2.5"))
 _BROWSER_EXTENSION_PAYLOAD_BUDGET_SECONDS = float(os.getenv("BROWSER_EXTENSION_PAYLOAD_BUDGET_SECONDS", "8.5"))
 _BROWSER_EXTENSION_INGEST_SUMMARY_HOURS = max(1, int(os.getenv("BROWSER_EXTENSION_INGEST_SUMMARY_HOURS", "6")))
@@ -2276,7 +2276,7 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
     if source == "whatsapp" and bridge_status == "partial":
         return {
             "kind": "whatsapp_partial_pairing",
-            "severity": "warning",
+            "severity": "ok",
             "summary": source_row.get("bridge_detail") or "WhatsApp collection is running with only some bridge slots paired.",
             "next_action": (
                 "Collection is still running from the paired WhatsApp bridge. "
