@@ -1133,7 +1133,8 @@ class InstagramCollector(BaseCollector):
 
         cookie_accounts = list(self._account_browser_cookies.keys())
         if not cookie_accounts:
-            logger.warning("instagram: no cookie accounts available — skipping cycle")
+            self._intentional_idle_reason = "no Instagram cookie accounts available"
+            logger.warning("instagram: %s — skipping cycle", self._intentional_idle_reason)
             return
 
         await self._restore_account_rate_limit_state(cookie_accounts)
@@ -1147,11 +1148,13 @@ class InstagramCollector(BaseCollector):
             _healthy = [a for a in _healthy if cooling.get(a, 0.0) <= 30.0]
             if not _healthy and cooling:
                 min_remaining = min(cooling.values())
+                self._intentional_idle_reason = (
+                    f"all {len(cooling)} healthy Instagram cookie account(s) are cooling down "
+                    f"(min {min_remaining:.0f}s remaining)"
+                )
                 logger.info(
-                    "instagram: all %d healthy cookie account(s) are cooling down; "
-                    "skipping cycle for %.0fs instead of probing a flagged account",
-                    len(cooling),
-                    min_remaining,
+                    "instagram: %s; skipping cycle instead of probing a flagged account",
+                    self._intentional_idle_reason,
                 )
                 return
         if not _healthy:
@@ -1162,10 +1165,12 @@ class InstagramCollector(BaseCollector):
             _healthy = cookie_accounts  # try anyway
         _quota_healthy = [a for a in _healthy if not self._daily_quota_exhausted(a)]
         if not _quota_healthy:
+            self._intentional_idle_reason = (
+                f"all {len(_healthy)} healthy Instagram cookie account(s) hit local daily quota"
+            )
             logger.info(
-                "instagram: all %d healthy cookie account(s) hit local daily quota; "
-                "skipping cycle until the quota window resets",
-                len(_healthy),
+                "instagram: %s; skipping cycle until the quota window resets",
+                self._intentional_idle_reason,
             )
             return
         _healthy = _quota_healthy
@@ -1197,7 +1202,8 @@ class InstagramCollector(BaseCollector):
         )
         cookies = self._load_cookies_for_account(self._current_account)
         if not cookies:
-            logger.warning("instagram: failed to load cookies for %s — skipping cycle", acct_name)
+            self._intentional_idle_reason = f"failed to load Instagram cookies for {acct_name}"
+            logger.warning("instagram: %s — skipping cycle", self._intentional_idle_reason)
             return
 
         _streak_before = self._consecutive_429s_by_account.get(

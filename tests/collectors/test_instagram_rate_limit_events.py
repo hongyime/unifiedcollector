@@ -51,6 +51,7 @@ def _bare_collector():
     coll._daily_actions = {}
     coll._daily_quota_exhausted_keys = set()
     coll._daily_quota_warned_keys = set()
+    coll._account_username_aliases = {}
     coll.rate_limiter = object()
     coll.account_pool = MagicMock()
     coll.account_pool._accounts = []
@@ -512,6 +513,67 @@ async def test_collect_skips_headless_when_instagram_extension_is_fresh(monkeypa
 
     assert "browser extension is fresh" in coll.intentional_idle_reason
     coll._auto_discover_cookies.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_collect_marks_all_cookie_cooldowns_as_intentional_idle(monkeypatch):
+    coll = _bare_collector()
+    coll._account_browser_cookies = {"acct1": "missing-cookie.txt"}
+    coll._dead_cookie_accounts = set()
+    coll._fresh_extension_activity = AsyncMock(return_value=None)
+    coll._normalize_instagram_targets = MagicMock(side_effect=lambda targets: list(targets))
+    coll._auto_discover_cookies = MagicMock(return_value=dict(coll._account_browser_cookies))
+    coll._load_account_username_aliases = MagicMock(return_value={})
+    coll._restore_account_rate_limit_state = AsyncMock()
+    limiter = instagram_mod.HumanLikeRateLimiter()
+    limiter.set_cooldown_remaining("instagram.com", 120, account="acct1")
+    coll.rate_limiter = limiter
+
+    await coll.collect(["target_user"])
+
+    assert "cooling down" in coll.intentional_idle_reason
+    coll._restore_account_rate_limit_state.assert_awaited_once_with(["acct1"])
+
+
+@pytest.mark.asyncio
+async def test_collect_marks_daily_quota_skip_as_intentional_idle(monkeypatch):
+    coll = _bare_collector()
+    coll._account_browser_cookies = {"acct1": "missing-cookie.txt"}
+    coll._dead_cookie_accounts = set()
+    coll._fresh_extension_activity = AsyncMock(return_value=None)
+    coll._normalize_instagram_targets = MagicMock(side_effect=lambda targets: list(targets))
+    coll._auto_discover_cookies = MagicMock(return_value=dict(coll._account_browser_cookies))
+    coll._load_account_username_aliases = MagicMock(return_value={})
+    coll._restore_account_rate_limit_state = AsyncMock()
+    coll._daily_quota_exhausted = MagicMock(return_value=True)
+    coll.rate_limiter = instagram_mod.HumanLikeRateLimiter()
+
+    await coll.collect(["target_user"])
+
+    assert "daily quota" in coll.intentional_idle_reason
+    coll._daily_quota_exhausted.assert_called_once_with("acct1")
+
+
+@pytest.mark.asyncio
+async def test_collect_marks_missing_selected_cookie_as_intentional_idle(monkeypatch):
+    coll = _bare_collector()
+    coll._account_browser_cookies = {"acct1": "missing-cookie.txt"}
+    coll._dead_cookie_accounts = set()
+    coll._fresh_extension_activity = AsyncMock(return_value=None)
+    coll._normalize_instagram_targets = MagicMock(side_effect=lambda targets: list(targets))
+    coll._auto_discover_cookies = MagicMock(return_value=dict(coll._account_browser_cookies))
+    coll._load_account_username_aliases = MagicMock(return_value={})
+    coll._restore_account_rate_limit_state = AsyncMock()
+    coll._daily_quota_exhausted = MagicMock(return_value=False)
+    coll._select_cycle_account = AsyncMock(return_value="acct1")
+    coll._collect_all_account_graphs = AsyncMock()
+    coll._load_cookies_for_account = MagicMock(return_value={})
+    coll.rate_limiter = instagram_mod.HumanLikeRateLimiter()
+
+    await coll.collect(["target_user"])
+
+    assert "failed to load Instagram cookies" in coll.intentional_idle_reason
+    coll._load_cookies_for_account.assert_called_once()
 
 
 @pytest.mark.asyncio
