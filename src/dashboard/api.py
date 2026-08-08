@@ -1771,6 +1771,8 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
     source_health_error = source_row.get("source_health_error") or ""
     browser_url = str(source_row.get("browser_url") or "")
     browser_url_lc = browser_url.lower()
+    browser_health_status = str(source_row.get("browser_health_status") or "")
+    browser_health_reason = str(source_row.get("browser_health_reason") or "")
     if source == "whatsapp" and bridge_status in {"unpaired", "unreachable"}:
         return {
             "kind": "whatsapp_pairing",
@@ -1842,6 +1844,32 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
                 "summary": rate_row.get("latest_reason") or f"Latest HTTP access event was {status_code}.",
                 "next_action": "Refresh auth cookies/session or inspect the account-specific scraper log.",
             }
+    if browser_health_status == "recoverable_error_shell":
+        if source == "x" and "/i/flow/login" in browser_url_lc:
+            return {
+                "kind": "auth_wall",
+                "severity": "warning",
+                "summary": (
+                    "X browser tab is on the login flow, so the extension is alive but cannot scrape timeline content."
+                ),
+                "next_action": (
+                    f"Log in or restore the X session in the browser tab at {browser_url}, then press Scrape now on Social Tabs. "
+                    "Do not chase Docker logs for this one; the blocker is the interactive browser session."
+                ),
+            }
+        platform = str(source or "this platform")
+        reason = browser_health_reason or "recoverable page shell"
+        return {
+            "kind": "browser_page_error",
+            "severity": "warning",
+            "summary": (
+                f"{platform}: browser tab is alive, but the page is showing {reason} instead of usable content."
+            ),
+            "next_action": (
+                f"Focus or refresh the {platform} browser tab, then press Scrape now on Social Tabs. "
+                "Reload the unpacked extension only if normal browser heartbeats or bundle version are stale."
+            ),
+        }
     issue = _source_matrix_primary_extension_issue(extension_issues)
     if issue:
         age_text = _short_age(issue.get("age_seconds"))

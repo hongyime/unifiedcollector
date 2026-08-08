@@ -175,6 +175,42 @@ def test_source_matrix_blocker_browser_watchdog_gives_tab_action():
     assert cleared_blocker["kind"] == "none"
 
 
+def test_source_matrix_blocker_reports_live_browser_page_shell():
+    blocker = _source_matrix_blocker(
+        _source(
+            source="tiktok",
+            status="live",
+            browser_health_status="recoverable_error_shell",
+            browser_health_reason="tiktok_blank_page",
+            browser_url="https://www.tiktok.com/foryou",
+        ),
+        rate_row=None,
+        cursor_row=None,
+        extension_issues=[],
+    )
+
+    assert blocker["kind"] == "browser_page_error"
+    assert blocker["severity"] == "warning"
+    assert "tiktok_blank_page" in blocker["summary"]
+    assert "Scrape now" in blocker["next_action"]
+
+    auth_blocker = _source_matrix_blocker(
+        _source(
+            source="x",
+            status="live",
+            browser_health_status="recoverable_error_shell",
+            browser_health_reason="try_again_empty_state",
+            browser_url="https://x.com/i/flow/login?redirect_after_login=%2Fhome",
+        ),
+        rate_row=None,
+        cursor_row=None,
+        extension_issues=[],
+    )
+
+    assert auth_blocker["kind"] == "auth_wall"
+    assert "login flow" in auth_blocker["summary"]
+
+
 def test_source_matrix_expensive_sections_have_bounded_default_timeouts():
     assert _SOURCE_MATRIX_DAY_CONTENT_TIMEOUT_SECONDS <= 8
     assert _SOURCE_MATRIX_MEDIA_TOTALS_TIMEOUT_SECONDS <= 8

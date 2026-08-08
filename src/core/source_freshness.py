@@ -191,7 +191,8 @@ async def _latest_browser_heartbeats(conn, timeout: float) -> dict[str, dict] | 
                    extract(epoch FROM now() - latest.created_at)::int AS age_seconds,
                    latest.metadata->>'extension_version' AS extension_version,
                    latest.metadata->>'url' AS url,
-                   latest.metadata->>'health_status' AS health_status
+                   latest.metadata->>'health_status' AS health_status,
+                   latest.metadata->>'health_reason' AS health_reason
             FROM wanted
             LEFT JOIN LATERAL (
                 SELECT created_at, metadata
@@ -209,6 +210,63 @@ async def _latest_browser_heartbeats(conn, timeout: float) -> dict[str, dict] | 
             str(row["platform"]): dict(row)
             for row in rows
             if row["last_seen_at"] is not None
+        }
+    except Exception as exc:
+        if exc.__class__.__name__ == "UndefinedTableError":
+            return None
+        return None
+
+
+async def _latest_browser_content_progress(conn, timeout: float) -> dict[str, dict] | None:
+    """Return newest useful browser-ingest progress per browser-driven platform.
+
+    Browser-assisted collectors can make real progress without immediately writing
+    a source table row: for example a TikTok/X page can report an empty scrape
+    probe, a page-shell diagnosis, or a candidate queue event. Those events are
+    still the browser proving it ran the content cycle. Treat them as content
+    liveness so the dashboard does not keep reporting an old media/table row as a
+    capture stall after the extension has already recovered.
+    """
+    query_timeout = min(3.0, max(0.75, timeout))
+    try:
+        rows = await conn.fetch(
+            """
+            WITH wanted(platform) AS (
+                SELECT unnest($1::text[])
+            )
+            SELECT wanted.platform,
+                   latest.created_at AS last_content_at,
+                   extract(epoch FROM now() - latest.created_at)::int AS age_seconds,
+                   latest.endpoint,
+                   latest.observed_count,
+                   latest.stored_count,
+                   latest.metadata->>'probe_reason' AS probe_reason
+            FROM wanted
+            LEFT JOIN LATERAL (
+                SELECT created_at, endpoint, observed_count, stored_count, metadata
+                FROM browser_ingest_events
+                WHERE endpoint <> 'browser_heartbeat'
+                  AND platform = wanted.platform
+                  AND (
+                    observed_count > 0
+                    OR stored_count > 0
+                    OR (
+                      metadata ? 'probe_reason'
+                      AND COALESCE(metadata->>'probe_reason', '')
+                          NOT IN ('manual_backend_probe', 'forced_recovery_started')
+                    )
+                  )
+                ORDER BY created_at DESC
+                LIMIT 1
+            ) latest ON true
+            """,
+            list(_BROWSER_CONTENT_PROGRESS_SOURCES),
+            timeout=query_timeout,
+        )
+        return {
+            str(row["platform"]): dict(row)
+            for row in rows
+            if row["last_content_at"] is not None
         }
     except Exception as exc:
         if exc.__class__.__name__ == "UndefinedTableError":
@@ -253,6 +311,8 @@ async def compute_liveness(conn) -> list[dict]:
     now_utc = datetime.now(timezone.utc)
     browser_heartbeat_timeout = min(per_query_timeout, max(0.25, deadline - time.monotonic()))
     browser_heartbeats = await _latest_browser_heartbeats(conn, browser_heartbeat_timeout)
+    browser_content_timeout = min(per_query_timeout, max(0.25, deadline - time.monotonic()))
+    browser_content_progress = await _latest_browser_content_progress(conn, browser_content_timeout)
     browser_stale_after = _env_int(
         "BROWSER_HEARTBEAT_STALE_WARN_SECONDS",
         _env_int("BROWSER_CONTENT_STALE_WARN_SECONDS", 3600, min_value=300),
@@ -306,6 +366,23 @@ async def compute_liveness(conn) -> list[dict]:
             else:
                 detail = "newest row is inside the freshness window"
         browser_heartbeat = browser_heartbeats.get(name) if browser_heartbeats is not None else None
+        browser_content = (
+            browser_content_progress.get(name)
+            if browser_content_progress is not None
+            else None
+        )
+        browser_content_age = (
+            int(browser_content["age_seconds"])
+            if browser_content and browser_content.get("age_seconds") is not None
+            else None
+        )
+        if (
+            name in _BROWSER_CONTENT_PROGRESS_SOURCES
+            and browser_content_age is not None
+            and (age is None or browser_content_age < age)
+        ):
+            age = browser_content_age
+            detail = "fresh browser content/probe event is inside the freshness window"
         browser_age = (
             int(browser_heartbeat["age_seconds"])
             if browser_heartbeat and browser_heartbeat.get("age_seconds") is not None
@@ -330,13 +407,18 @@ async def compute_liveness(conn) -> list[dict]:
                 detail = f"{detail}; {browser_detail}"
         browser_content_stale = (
             name in _BROWSER_CONTENT_PROGRESS_SOURCES
-            and (data_age is None or data_age > browser_content_stale_after)
+            and (
+                browser_content_age > browser_content_stale_after
+                if browser_content_age is not None
+                else (data_age is None or data_age > browser_content_stale_after)
+            )
         )
         if browser_content_stale:
+            stale_age = browser_content_age if browser_content_age is not None else data_age
             content_detail = (
                 "browser content progress is missing"
-                if data_age is None
-                else f"browser content progress is {int(data_age)}s old (> {browser_content_stale_after}s)"
+                if stale_age is None
+                else f"browser content progress is {int(stale_age)}s old (> {browser_content_stale_after}s)"
             )
             if status == "live":
                 status = "degraded"
@@ -371,6 +453,19 @@ async def compute_liveness(conn) -> list[dict]:
             ),
             "browser_health_status": (
                 browser_heartbeat.get("health_status") if browser_heartbeat else None
+            ),
+            "browser_health_reason": (
+                browser_heartbeat.get("health_reason") if browser_heartbeat else None
+            ),
+            "browser_content_at": (
+                browser_content.get("last_content_at") if browser_content else None
+            ),
+            "browser_content_age_seconds": browser_content_age,
+            "browser_content_endpoint": (
+                browser_content.get("endpoint") if browser_content else None
+            ),
+            "browser_content_probe_reason": (
+                browser_content.get("probe_reason") if browser_content else None
             ),
             "detail": detail,
         })

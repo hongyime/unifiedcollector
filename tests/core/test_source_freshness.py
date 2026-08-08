@@ -329,6 +329,74 @@ async def test_browser_source_degrades_when_content_progress_is_stale(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_browser_source_uses_fresh_browser_content_progress(monkeypatch):
+    from src.core import source_freshness
+
+    class BrowserContentFreshConn:
+        async def fetch(self, query: str, *args, timeout: int = 8):
+            if "FROM source_health" in query:
+                return []
+            if "endpoint = 'browser_heartbeat'" in query:
+                return [
+                    {
+                        "platform": "tiktok",
+                        "last_seen_at": datetime.now(timezone.utc) - timedelta(seconds=20),
+                        "age_seconds": 20,
+                        "extension_version": "1.23.49",
+                        "url": "https://www.tiktok.com/foryou",
+                        "health_status": "healthy",
+                    }
+                ]
+            if "endpoint <> 'browser_heartbeat'" in query:
+                return [
+                    {
+                        "platform": "tiktok",
+                        "last_content_at": datetime.now(timezone.utc) - timedelta(seconds=45),
+                        "age_seconds": 45,
+                        "endpoint": "media",
+                        "observed_count": 0,
+                        "stored_count": 0,
+                        "probe_reason": "no_dom_media_candidates",
+                    }
+                ]
+            raise AssertionError(query)
+
+        async def fetchval(self, query: str, *args, timeout: int = 8):
+            if "tiktok_profiles" in query:
+                return 9000
+            return None
+
+    monkeypatch.setenv("BROWSER_CONTENT_STALE_WARN_SECONDS", "3600")
+    monkeypatch.setattr(
+        source_freshness,
+        "FRESHNESS",
+        [
+            (
+                "tiktok",
+                """
+                SELECT extract(epoch FROM now()-max(ts))
+                FROM (
+                    SELECT max(updated_at) AS ts FROM tiktok_profiles
+                    UNION ALL
+                    SELECT max(collected_at) AS ts FROM media_items WHERE source='tiktok'
+                ) progress
+                """,
+                172800,
+            )
+        ],
+    )
+
+    rows = await source_freshness.compute_liveness(BrowserContentFreshConn())
+
+    assert rows[0]["status"] == "live"
+    assert rows[0]["age_seconds"] == 45
+    assert rows[0]["browser_content_stale"] is False
+    assert rows[0]["browser_content_endpoint"] == "media"
+    assert rows[0]["browser_content_probe_reason"] == "no_dom_media_candidates"
+    assert "fresh browser content/probe event" in rows[0]["detail"]
+
+
+@pytest.mark.asyncio
 async def test_browser_content_stale_does_not_depend_on_heartbeat_query(monkeypatch):
     from src.core import source_freshness
 
