@@ -1061,7 +1061,8 @@ async def _source_matrix_section(
         errors.append({"section": section, "error": exc.__class__.__name__})
         return fallback
     except Exception as exc:  # noqa: BLE001 - source matrix should return partial data under load
-        logger.warning("source matrix %s failed: %s", label, exc.__class__.__name__)
+        log = logger.info if isinstance(exc, TimeoutError) else logger.warning
+        log("source matrix %s returned partial data: %s", label, exc.__class__.__name__)
         cached_value = None
         cache_age = None
         if cached is not None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
@@ -1409,6 +1410,41 @@ async def test_source_matrix_section_returns_stale_cache_on_timeout():
     assert errors[-1]["error"] == "TimeoutError"
     assert errors[-1]["stale_cache"] is True
     assert errors[-1]["cache_age_seconds"] >= 0
+
+
+@pytest.mark.asyncio
+async def test_source_matrix_section_timeout_logs_partial_data_at_info(caplog):
+    _SOURCE_MATRIX_SECTION_CACHE.clear()
+    errors: list[dict] = []
+
+    async def slow():
+        await asyncio.sleep(0.05)
+        return {"instagram": {"records": 99}}
+
+    with caplog.at_level(logging.INFO, logger="src.dashboard.api"):
+        out = await _source_matrix_section(
+            section="current_content",
+            label="current content summary",
+            errors=errors,
+            fallback={},
+            awaitable=slow(),
+            timeout=0.001,
+            cache_key="test_current_content_timeout_log",
+            cache_ttl=0,
+        )
+
+    assert out == {}
+    assert errors == [{"section": "current_content", "error": "TimeoutError"}]
+    assert any(
+        record.levelno == logging.INFO
+        and "source matrix current content summary returned partial data: TimeoutError" in record.message
+        for record in caplog.records
+    )
+    assert not any(
+        record.levelno >= logging.WARNING
+        and "source matrix current content summary" in record.message
+        for record in caplog.records
+    )
 
 
 @pytest.mark.asyncio
