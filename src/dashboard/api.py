@@ -966,7 +966,7 @@ async def _source_media_totals(conn) -> dict[str, dict]:
                 timeout=_BEEPER_SUBSOURCE_TOTAL_TIMEOUT_SECONDS,
             ))
         except Exception as exc:  # noqa: BLE001
-            logger.warning("beeper sub-source media totals failed: %s", exc)
+            _log_beeper_subsource_media_totals_error(exc)
             out["__beeper_subsource_stats_unavailable__"] = True
         _SOURCE_MEDIA_TOTALS_CACHE.update({"ts": time.time(), "rows": out})
         return out
@@ -998,10 +998,16 @@ async def _source_media_totals(conn) -> dict[str, dict]:
             timeout=_BEEPER_SUBSOURCE_TOTAL_TIMEOUT_SECONDS,
         ))
     except Exception as exc:  # noqa: BLE001
-        logger.warning("beeper sub-source media totals failed: %s", exc)
+        _log_beeper_subsource_media_totals_error(exc)
         out["__beeper_subsource_stats_unavailable__"] = True
     _SOURCE_MEDIA_TOTALS_CACHE.update({"ts": time.time(), "rows": out})
     return out
+
+
+def _log_beeper_subsource_media_totals_error(exc: BaseException) -> None:
+    detail = str(exc).strip() or exc.__class__.__name__
+    log = logger.info if isinstance(exc, TimeoutError) else logger.warning
+    log("beeper sub-source media totals unavailable: %s", detail)
 
 
 async def _source_matrix_section(

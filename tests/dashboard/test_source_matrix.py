@@ -19,6 +19,7 @@ from src.dashboard.api import (
     _SOURCE_MATRIX_MEDIA_TOTALS_TIMEOUT_SECONDS,
     _BEEPER_SUBSOURCE_QUERY_TIMEOUT_SECONDS,
     _BEEPER_SUBSOURCE_TOTAL_TIMEOUT_SECONDS,
+    _BEEPER_SUBSOURCE_MEDIA_TOTALS_CACHE,
     _SOURCE_MEDIA_TOTALS_CACHE,
     _SOURCE_MATRIX_SECTION_CACHE,
     _SOURCE_MATRIX_YOUTUBE_BACKLOG_TIMEOUT_SECONDS,
@@ -1141,6 +1142,22 @@ class _MediaTotalsSlowBeeperConn:
         raise AssertionError(query)
 
 
+class _MediaTotalsBlankTimeoutBeeperConn(_MediaTotalsSlowBeeperConn):
+    async def fetch(self, query, *_args, **_kwargs):
+        if "media_source_rollups" in query:
+            return [
+                {
+                    "source": "x",
+                    "total_media_items": 23,
+                    "total_media_bytes": 66_439_203,
+                    "latest_media_at": datetime(2026, 7, 28, tzinfo=timezone.utc),
+                }
+            ]
+        if "FROM media_items" in query:
+            raise TimeoutError()
+        raise AssertionError(query)
+
+
 @pytest.mark.asyncio
 async def test_source_media_totals_prefers_rollup_table():
     _SOURCE_MEDIA_TOTALS_CACHE.clear()
@@ -1159,6 +1176,27 @@ async def test_source_media_totals_keeps_rollups_when_beeper_split_times_out():
     assert out["x"]["total_media_items"] == 23
     assert "__stats_unavailable__" not in out
     assert out["__beeper_subsource_stats_unavailable__"] is True
+
+
+@pytest.mark.asyncio
+async def test_source_media_totals_logs_beeper_timeout_as_partial_info(caplog):
+    _SOURCE_MEDIA_TOTALS_CACHE.clear()
+    _BEEPER_SUBSOURCE_MEDIA_TOTALS_CACHE.clear()
+
+    with caplog.at_level(logging.INFO, logger="src.dashboard.api"):
+        out = await _source_media_totals(_MediaTotalsBlankTimeoutBeeperConn())
+
+    assert out["__beeper_subsource_stats_unavailable__"] is True
+    assert any(
+        record.levelno == logging.INFO
+        and "beeper sub-source media totals unavailable: TimeoutError" in record.message
+        for record in caplog.records
+    )
+    assert not any(
+        record.levelno >= logging.WARNING
+        and "beeper sub-source media totals" in record.message
+        for record in caplog.records
+    )
 
 
 @pytest.mark.asyncio
