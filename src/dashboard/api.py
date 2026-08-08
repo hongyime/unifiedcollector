@@ -294,6 +294,7 @@ def _browser_tab_maintenance_payload(
         "audit_result": raw.get("audit_result"),
         "reload_plan": raw.get("reload_plan"),
         "pid": raw.get("pid"),
+        "diagnostics": raw.get("diagnostics") if isinstance(raw.get("diagnostics"), dict) else None,
         "status_path": str(path),
     }
 
@@ -2579,16 +2580,25 @@ async def _browser_extension_payload(conn) -> dict:
         payload["maintenance"] = maintenance
         state = str(maintenance.get("state") or "")
         if state in {"cdp_unavailable", "unreadable", "invalid"}:
+            diagnostics = maintenance.get("diagnostics") or {}
+            reason = diagnostics.get("reason")
+            hint = diagnostics.get("hint")
+            detail = (
+                maintenance.get("detail")
+                or "Browser tab maintenance cannot reach Chrome CDP."
+            )
+            if reason:
+                detail = f"{detail} ({reason})"
+            if hint:
+                detail = f"{detail} {hint}"
             payload["issues"].append({
                 "platform": "browser",
                 "kind": "browser_maintenance_cdp_unavailable",
-                "detail": (
-                    maintenance.get("detail")
-                    or "Browser tab maintenance cannot reach Chrome CDP."
-                ),
+                "detail": detail,
                 "age_seconds": maintenance.get("age_seconds"),
                 "cdp_url": maintenance.get("cdp_url"),
                 "checked_at": maintenance.get("checked_at"),
+                "diagnostics": diagnostics or None,
             })
 
     deadline = time.monotonic() + max(0.5, _BROWSER_EXTENSION_PAYLOAD_BUDGET_SECONDS)

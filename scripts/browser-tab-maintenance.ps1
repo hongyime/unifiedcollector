@@ -15,7 +15,45 @@ function Write-Log($message) {
     Add-Content -LiteralPath $log -Value "[$stamp] $message"
 }
 
-function Write-Status([string]$state, [string]$detail = "") {
+function Get-ChromeCdpDiagnostics {
+    $processes = @(Get-CimInstance Win32_Process -Filter "name='chrome.exe'" -ErrorAction SilentlyContinue)
+    $withCdp = @()
+    $withUserData = @()
+    $browserRoots = @()
+    foreach ($proc in $processes) {
+        $cmd = [string]$proc.CommandLine
+        if ($cmd -match "--remote-debugging-port(?:=|\s+)9222\b") {
+            $withCdp += $proc
+        }
+        if ($cmd -match "--user-data-dir(?:=|\s+)") {
+            $withUserData += $proc
+        }
+        if ($cmd -and $cmd -notmatch "--type=") {
+            $browserRoots += $proc
+        }
+    }
+    $hint = "Start or restart the scraper Chrome with --remote-debugging-port=9222; do not open extra Chrome windows manually for maintenance."
+    $reason = "chrome_cdp_unavailable"
+    if ($processes.Count -eq 0) {
+        $reason = "chrome_not_running"
+        $hint = "Open the collector scraper Chrome profile with --remote-debugging-port=9222, then reload the extension tabs."
+    } elseif ($withCdp.Count -eq 0) {
+        $reason = "chrome_running_without_cdp"
+    }
+    return [ordered]@{
+        reason = $reason
+        chrome_process_count = $processes.Count
+        chrome_root_process_count = $browserRoots.Count
+        chrome_cdp_process_count = $withCdp.Count
+        chrome_user_data_process_count = $withUserData.Count
+        hint = $hint
+    }
+}
+
+function Write-Status([string]$state, [string]$detail = "", [object]$diagnostics = $null) {
+    if ($null -eq $diagnostics) {
+        $diagnostics = Get-ChromeCdpDiagnostics
+    }
     $payload = [ordered]@{
         checked_at = (Get-Date).ToString("o")
         state = $state
@@ -24,6 +62,7 @@ function Write-Status([string]$state, [string]$detail = "") {
         audit_result = (Join-Path $tmp "browser_tab_audit_result.json")
         reload_plan = (Join-Path $tmp "browser_tab_reload_plan.json")
         pid = $PID
+        diagnostics = $diagnostics
     }
     $payload | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $statusPath -Encoding UTF8
 }
@@ -114,8 +153,14 @@ Write-Status "running" "maintenance pass started"
 Push-Location $repo
 try {
     if (-not (Test-CdpAvailable)) {
+        $diagnostics = Get-ChromeCdpDiagnostics
+        if ($diagnostics.reason -eq "chrome_running_without_cdp") {
+            Write-Log "Chrome is running, but no process has --remote-debugging-port=9222"
+        } elseif ($diagnostics.reason -eq "chrome_not_running") {
+            Write-Log "Chrome is not running"
+        }
         Write-Log "browser tab maintenance skipped because Chrome CDP is unavailable"
-        Write-Status "cdp_unavailable" $script:LastCdpError
+        Write-Status "cdp_unavailable" $script:LastCdpError $diagnostics
         return
     }
     $python = Resolve-Python

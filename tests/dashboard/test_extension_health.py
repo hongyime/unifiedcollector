@@ -33,6 +33,12 @@ def test_browser_tab_maintenance_payload_reads_host_status(tmp_path):
             "detail": "Unable to connect to the remote server",
             "cdp_url": "http://127.0.0.1:9222",
             "pid": 15168,
+            "diagnostics": {
+                "reason": "chrome_running_without_cdp",
+                "chrome_process_count": 26,
+                "chrome_cdp_process_count": 0,
+                "hint": "Start or restart the scraper Chrome with --remote-debugging-port=9222.",
+            },
         }),
         encoding="utf-8",
     )
@@ -43,6 +49,8 @@ def test_browser_tab_maintenance_payload_reads_host_status(tmp_path):
     assert payload["detail"] == "Unable to connect to the remote server"
     assert payload["cdp_url"] == "http://127.0.0.1:9222"
     assert payload["pid"] == 15168
+    assert payload["diagnostics"]["reason"] == "chrome_running_without_cdp"
+    assert payload["diagnostics"]["chrome_process_count"] == 26
     assert isinstance(payload["age_seconds"], int)
 
 
@@ -123,6 +131,12 @@ async def test_browser_extension_payload_includes_browser_maintenance_issue(monk
             "detail": "Unable to connect to the remote server",
             "cdp_url": "http://127.0.0.1:9222",
             "checked_at": "2026-08-08T18:26:17.1804359+08:00",
+            "diagnostics": {
+                "reason": "chrome_running_without_cdp",
+                "chrome_process_count": 26,
+                "chrome_cdp_process_count": 0,
+                "hint": "Start or restart the scraper Chrome with --remote-debugging-port=9222.",
+            },
         }),
         encoding="utf-8",
     )
@@ -150,8 +164,11 @@ async def test_browser_extension_payload_includes_browser_maintenance_issue(monk
     payload = await _browser_extension_payload(FakeConn())
 
     assert payload["maintenance"]["state"] == "cdp_unavailable"
+    assert payload["maintenance"]["diagnostics"]["reason"] == "chrome_running_without_cdp"
     assert payload["issues"][0]["kind"] == "browser_maintenance_cdp_unavailable"
     assert payload["issues"][0]["cdp_url"] == "http://127.0.0.1:9222"
+    assert payload["issues"][0]["diagnostics"]["chrome_cdp_process_count"] == 0
+    assert "chrome_running_without_cdp" in payload["issues"][0]["detail"]
 
 
 @pytest.mark.asyncio
