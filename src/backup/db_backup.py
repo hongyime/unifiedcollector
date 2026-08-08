@@ -30,7 +30,7 @@ DEFAULT_WEEKLY = 4
 DEFAULT_MONTHLY = 3
 TIMESTAMP_FORMAT = "%Y%m%d_%H%M%S"
 DEFAULT_STALE_TEMP_MAX_AGE_MINUTES = 60
-DEFAULT_COMMAND_TIMEOUT_SECONDS = 6 * 60 * 60
+DEFAULT_COMMAND_TIMEOUT_SECONDS = 0
 DEFAULT_STALL_TIMEOUT_SECONDS = 30 * 60
 DEFAULT_VALIDATE_TIMEOUT_SECONDS = 10 * 60
 DEFAULT_LOCK_STALE_SECONDS = 6 * 60 * 60
@@ -621,6 +621,7 @@ def _run(
                     if size != last_progress_size:
                         last_progress_size = size
                         last_progress_at = now
+                        _touch_progress_lock(progress_path)
                     elif now - last_progress_at > stall_timeout:
                         stderr = _terminate_process(process)
                         err = stderr.decode("utf-8", errors="replace").strip()
@@ -643,6 +644,16 @@ def _file_size(path: Path | None) -> int | None:
         return path.stat().st_size
     except OSError:
         return None
+
+
+def _touch_progress_lock(progress_path: Path) -> None:
+    lock_dir = progress_path.parent / ".backup.lock"
+    try:
+        if lock_dir.exists() and lock_dir.is_dir():
+            now = time.time()
+            os.utime(lock_dir, (now, now))
+    except OSError:
+        pass
 
 
 def _poll_interval(*, timeout: int | float | None, stall_timeout: int | float | None) -> float:
@@ -772,7 +783,7 @@ def run_once(args: argparse.Namespace) -> int:
                     print(f"[backup] created {created} ({created.stat().st_size} bytes)")
         except BackupAlreadyRunning as exc:
             print(f"[backup] skipped: {exc}")
-            return 0
+            return 2
 
     plan = build_retention_plan(list_backup_files(backup_dir, prefix=prefix), policy)
     print(plan_to_json(plan) if args.json else format_plan(plan))

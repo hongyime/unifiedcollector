@@ -954,8 +954,9 @@ services:
       COLLECTOR_DB_BACKUP_RETRY_SECONDS: ${COLLECTOR_DB_BACKUP_RETRY_SECONDS:-3600}
       # The collector DB is now large/hot enough that compressed custom-format
       # dumps can exceed two hours during GitHub/Telegram backfill. Prefer a
-      # bigger Z-drive dump over a self-cancelled backup.
-      COLLECTOR_DB_BACKUP_TIMEOUT_SECONDS: "21600"
+      # bigger Z-drive dump over a self-cancelled backup; the stall watchdog
+      # below still kills dumps that stop making file progress.
+      COLLECTOR_DB_BACKUP_TIMEOUT_SECONDS: "0"
       COLLECTOR_DB_BACKUP_STALL_TIMEOUT_SECONDS: "1800"
       COLLECTOR_DB_BACKUP_VALIDATE_TIMEOUT_SECONDS: "1200"
       COLLECTOR_DB_BACKUP_COMPRESSION: ${COLLECTOR_DB_BACKUP_COMPRESSION:-0}

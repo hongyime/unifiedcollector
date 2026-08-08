@@ -4,6 +4,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -275,6 +276,29 @@ def test_backup_run_lock_recovers_stale_lock(tmp_path):
     assert not lock_dir.exists()
 
 
+def test_run_once_returns_retry_code_when_backup_already_running(tmp_path):
+    from src.backup import db_backup
+
+    _active_lock(tmp_path)
+    args = SimpleNamespace(
+        command="run",
+        backup_dir=str(tmp_path),
+        daily=7,
+        weekly=4,
+        monthly=3,
+        prefix="unifiedcollector",
+        dry_run=False,
+        database=None,
+        pg_dump="pg_dump",
+        pg_restore="pg_restore",
+        docker_container=None,
+        docker_exe=None,
+        json=False,
+    )
+
+    assert db_backup.run_once(args) == 2
+
+
 def test_pg_dump_prefers_pg_env_over_host_database_url(monkeypatch, tmp_path):
     from src.backup import db_backup
 
@@ -362,6 +386,34 @@ def test_run_kills_dump_when_progress_file_stalls(tmp_path):
         )
 
     assert time.monotonic() - started < 3
+
+
+def test_run_touches_backup_lock_when_dump_progresses(tmp_path):
+    from src.backup import db_backup
+
+    progress = tmp_path / ".inprogress_20260720_090000.dump"
+    progress.write_bytes(b"")
+    lock_dir = tmp_path / ".backup.lock"
+    lock_dir.mkdir()
+    old = time.time() - 7200
+    os.utime(lock_dir, (old, old))
+
+    script = (
+        "import pathlib, time; "
+        f"p = pathlib.Path({str(progress)!r}); "
+        "time.sleep(0.2); "
+        "p.write_bytes(b'progress'); "
+        "time.sleep(1.2)"
+    )
+    db_backup._run(
+        [sys.executable, "-c", script],
+        "pg_dump failed",
+        timeout=5,
+        progress_path=progress,
+        stall_timeout=3,
+    )
+
+    assert lock_dir.stat().st_mtime > old
 
 
 def test_backup_mount_ready_accepts_vault_mirrored_dir(monkeypatch, tmp_path):
