@@ -2,7 +2,7 @@
 # Multi-stage: build TS -> run compiled JS as non-root.
 
 # ---- build stage ----
-FROM node:20-alpine AS builder
+FROM node:25-alpine AS builder
 WORKDIR /app
 
 RUN apk add --no-cache git python3 make g++
@@ -17,7 +17,7 @@ COPY src/ ./src/
 RUN npm run build
 
 # ---- production stage ----
-FROM node:20-alpine
+FROM node:25-alpine
 WORKDIR /app
 
 RUN addgroup -S wac && adduser -S wac -G wac
