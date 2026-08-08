@@ -1768,6 +1768,7 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
     source = source_row.get("source")
     status = source_row.get("status")
     bridge_status = source_row.get("bridge_status")
+    source_health_error = source_row.get("source_health_error") or ""
     if source == "whatsapp" and bridge_status in {"unpaired", "unreachable"}:
         return {
             "kind": "whatsapp_pairing",
@@ -1944,6 +1945,18 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
             "severity": "warning",
             "summary": detail,
             "next_action": next_action,
+        }
+    if str(source_health_error).lower().startswith("browser capture stalled:"):
+        platform = str(source or "this platform")
+        return {
+            "kind": "browser_capture_stalled",
+            "severity": "warning",
+            "summary": source_health_error,
+            "next_action": (
+                f"Focus or refresh the {platform} browser tab, then press Scrape now on Social Tabs. "
+                "Reload the unpacked extension only if heartbeats or bundle version are stale too; "
+                "Docker collector logs are secondary for this browser-tab stall."
+            ),
         }
     if source_row.get("source_health_status") in {"dead", "auth_paused", "degraded"}:
         return {
