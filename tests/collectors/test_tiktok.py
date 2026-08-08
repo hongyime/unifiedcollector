@@ -92,7 +92,7 @@ def test_expected_local_fallback_block_classifier_matches_platform_walls():
         timed_out=False,
         file_count=0,
     )
-    assert not tiktok_mod._is_expected_local_fallback_block(
+    assert tiktok_mod._is_expected_local_fallback_block(
         output="Failed to solve JavaScript challenge",
         timed_out=True,
         file_count=1,

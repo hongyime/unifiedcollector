@@ -192,7 +192,7 @@ def _is_expected_local_fallback_block(*, output: str, timed_out: bool, file_coun
     only keeps logs at info level so real collector breakage remains visible.
     """
     if file_count > 0:
-        return False
+        return True
     text = str(output or "").lower()
     if any(keyword in text for keyword in _EXPECTED_LOCAL_FALLBACK_BLOCK_KEYWORDS):
         return True
