@@ -243,6 +243,7 @@ def test_source_matrix_expensive_sections_have_bounded_default_timeouts():
     assert _SOURCE_MATRIX_BROWSER_EXTENSION_TIMEOUT_SECONDS <= 6
     assert _BEEPER_SUBSOURCE_QUERY_TIMEOUT_SECONDS <= 4
     assert _BEEPER_SUBSOURCE_TOTAL_TIMEOUT_SECONDS <= 4
+    assert _BEEPER_SUBSOURCE_TOTAL_TIMEOUT_SECONDS < _SOURCE_MATRIX_MEDIA_TOTALS_TIMEOUT_SECONDS
 
 
 @pytest.mark.asyncio
