@@ -306,20 +306,22 @@ async def repair_partial_vault_artifacts(
     root = Path(vault_root) if vault_root else VAULT_ROOT
     report = MediaSidecarRepairReport(dry_run=dry_run)
 
-    where = [
-        """
+    partial_predicate = """
         (
-            COALESCE(metadata, '{}'::jsonb) ? 'vault_sidecar'
+            metadata ? 'vault_sidecar'
             AND metadata->'vault_sidecar'->>'ok' = 'false'
         ) OR (
-            COALESCE(metadata, '{}'::jsonb) ? 'vault_artifact'
+            metadata ? 'vault_artifact'
             AND (
                 metadata->'vault_artifact'->>'ok' = 'false'
                 OR metadata->'vault_artifact'->>'sidecar_ok' = 'false'
                 OR metadata->'vault_artifact'->>'partial' = 'true'
             )
         )
-        """,
+    """
+    where = [
+        partial_predicate,
+        "COALESCE(metadata->'vault_artifact'->>'quarantined', 'false') <> 'true'",
         "file_path IS NOT NULL",
         "file_path <> ''",
     ]
@@ -332,7 +334,10 @@ async def repair_partial_vault_artifacts(
     elif cursor_after:
         raise ValueError("cursor_after requires source for partial artifact repair")
     params.append(limit)
-    order_by = "content_id" if source else "source, content_id"
+    # Keep this aligned with idx_media_partial_sidecar_failure_source_content.
+    # Ordering by content_id alone makes PostgreSQL scan the broad source/content
+    # index and filter huge sources such as Telegram.
+    order_by = "source, content_id"
     rows = await conn.fetch(
         f"""
         SELECT id, source, content_id, filename, file_path, file_size, sha256,

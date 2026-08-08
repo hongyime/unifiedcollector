@@ -1763,6 +1763,29 @@ def _source_matrix_filter_extension_blockers_for_current_content(
     ]
 
 
+def _source_matrix_x_auth_wall_blocker(browser_url: str) -> dict:
+    return {
+        "kind": "auth_wall",
+        "severity": "warning",
+        "summary": (
+            "X browser tab is on the login flow, so the extension is alive but cannot scrape timeline content."
+        ),
+        "next_action": (
+            f"Log in or restore the X session in the browser tab at {browser_url}, then press Scrape now on Social Tabs. "
+            "Do not chase Docker logs for this one; the blocker is the interactive browser session."
+        ),
+    }
+
+
+def _source_matrix_is_x_auth_wall_url(browser_url: str) -> bool:
+    url_lc = str(browser_url or "").lower()
+    return (
+        "/i/flow/login" in url_lc
+        or "/i/jf/onboarding" in url_lc
+        or "mode=login" in url_lc
+    )
+
+
 def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: dict | None,
                            extension_issues: list[dict]) -> dict:
     source = source_row.get("source")
@@ -1770,9 +1793,10 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
     bridge_status = source_row.get("bridge_status")
     source_health_error = source_row.get("source_health_error") or ""
     browser_url = str(source_row.get("browser_url") or "")
-    browser_url_lc = browser_url.lower()
     browser_health_status = str(source_row.get("browser_health_status") or "")
     browser_health_reason = str(source_row.get("browser_health_reason") or "")
+    if source == "x" and _source_matrix_is_x_auth_wall_url(browser_url):
+        return _source_matrix_x_auth_wall_blocker(browser_url)
     if source == "whatsapp" and bridge_status == "partial":
         return {
             "kind": "whatsapp_partial_pairing",
@@ -1855,18 +1879,8 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
                 "next_action": "Refresh auth cookies/session or inspect the account-specific scraper log.",
             }
     if browser_health_status == "recoverable_error_shell":
-        if source == "x" and "/i/flow/login" in browser_url_lc:
-            return {
-                "kind": "auth_wall",
-                "severity": "warning",
-                "summary": (
-                    "X browser tab is on the login flow, so the extension is alive but cannot scrape timeline content."
-                ),
-                "next_action": (
-                    f"Log in or restore the X session in the browser tab at {browser_url}, then press Scrape now on Social Tabs. "
-                    "Do not chase Docker logs for this one; the blocker is the interactive browser session."
-                ),
-            }
+        if source == "x" and _source_matrix_is_x_auth_wall_url(browser_url):
+            return _source_matrix_x_auth_wall_blocker(browser_url)
         platform = str(source or "this platform")
         reason = browser_health_reason or "recoverable page shell"
         return {
@@ -2001,18 +2015,8 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
         or "browser content progress is" in detail_lc
     ):
         platform = str(source or "this platform")
-        if source == "x" and "/i/flow/login" in browser_url_lc:
-            return {
-                "kind": "auth_wall",
-                "severity": "warning",
-                "summary": (
-                    "X browser tab is on the login flow, so the extension is alive but cannot scrape timeline content."
-                ),
-                "next_action": (
-                    f"Log in or restore the X session in the browser tab at {browser_url}, then press Scrape now on Social Tabs. "
-                    "Do not chase Docker logs for this one; the blocker is the interactive browser session."
-                ),
-            }
+        if source == "x" and _source_matrix_is_x_auth_wall_url(browser_url):
+            return _source_matrix_x_auth_wall_blocker(browser_url)
         return {
             "kind": "browser_capture_stalled",
             "severity": "warning",

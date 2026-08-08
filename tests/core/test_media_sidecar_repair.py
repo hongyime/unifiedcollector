@@ -209,6 +209,10 @@ async def test_repair_partial_vault_artifacts_dry_run_skips_hashing(tmp_path, mo
     assert report.skipped == 1
     assert report.failed == 0
     assert conn.updates == []
+    assert "ORDER BY source, content_id" in conn.fetch_query
+    assert "COALESCE(metadata, '{}'::jsonb) ? 'vault_artifact'" not in conn.fetch_query
+    assert "metadata ? 'vault_artifact'" in conn.fetch_query
+    assert "quarantined" in conn.fetch_query
 
 
 @pytest.mark.asyncio

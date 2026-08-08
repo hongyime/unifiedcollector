@@ -745,6 +745,37 @@ def test_source_matrix_row_labels_live_source_degraded_when_extension_blocked():
     assert row["blocker"]["kind"] == "extension_version_mismatch"
 
 
+def test_source_matrix_row_labels_x_login_flow_as_auth_wall_even_with_fresh_heartbeat():
+    for url in (
+        "https://x.com/i/flow/login?redirect_after_login=%2Fhome",
+        "https://x.com/i/jf/onboarding/web?redirect_after_login=%2Fhome&mode=login",
+    ):
+        row = _source_matrix_row(
+            _source(
+                source="x",
+                source_health_status="degraded",
+                source_health_error="browser capture stalled: browser content progress is 28370s old (> 3600s) (watchdog)",
+                browser_url=url,
+                browser_health_status="content_script_boot",
+                browser_health_reason="first-boot ping before mainLoop starts",
+                browser_content_stale=False,
+            ),
+            current_content={"records": 0, "messages": 0, "media_items": 0},
+            current_rate=None,
+            day_content={"records": 1241, "messages": 0, "media_items": 0},
+            day_rate=None,
+            media_total={"total_media_items": 799},
+            cursor_row=None,
+            extension_issues=[],
+        )
+
+        assert row["status"] == "live"
+        assert row["status_label"] == "degraded"
+        assert row["status_severity"] == "warning"
+        assert row["blocker"]["kind"] == "auth_wall"
+        assert "login flow" in row["blocker"]["summary"]
+
+
 def test_source_matrix_row_suppresses_stale_browser_content_when_current_media_flows():
     row = _source_matrix_row(
         _source(source="threads"),
