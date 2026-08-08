@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
+from src.core.subprocess_downloader import DownloadResult
 
 # Force a writable drive path BEFORE importing the collector.
 os.environ.setdefault(
@@ -102,6 +103,19 @@ def test_expected_local_fallback_block_classifier_matches_platform_walls():
         timed_out=False,
         file_count=0,
     )
+
+
+def test_blocked_zero_file_result_detects_successful_challenge_output():
+    result = DownloadResult(
+        returncode=0,
+        stdout="Failed to retrieve rehydration data (1/4)",
+        stderr="",
+        files=[],
+        tempdir=Path("."),
+        elapsed=1.2,
+    )
+
+    assert tiktok_mod._is_blocked_zero_file_result(result) is True
 
 
 def test_classify_rate_limit_by_status_and_text():
@@ -1033,6 +1047,45 @@ async def test_browser_fallback_triggered_on_gallery_dl_failure(monkeypatch, tmp
     c.download_media.assert_awaited()  # at least one ingest happened
     assert fp.exists() is False
     assert "output_dir" not in calls["init"][0]
+
+
+@pytest.mark.asyncio
+async def test_gallery_dl_zero_file_challenge_is_not_clean_empty(monkeypatch, tmp_path):
+    with patch.object(TiktokCollector, "_check_tool", staticmethod(lambda *_: False)):
+        c = TiktokCollector()
+    c._cookies_file = ""
+    c.pool = _make_pool()
+    c._advance_gallery_dl_range_cursor = MagicMock()
+    c._record_profile_backoff = MagicMock()
+
+    async def fake_gallery_dl_download(*args, **kwargs):
+        return DownloadResult(
+            returncode=0,
+            stdout="Failed to retrieve rehydration data (1/4)",
+            stderr="",
+            files=[],
+            tempdir=Path(kwargs["tempdir"]),
+            elapsed=1.2,
+        )
+
+    record_rate_limit = AsyncMock()
+    monkeypatch.setattr(tiktok_mod, "record_rate_limit_event", record_rate_limit)
+    monkeypatch.setattr(
+        "src.core.subprocess_downloader.gallery_dl_download",
+        fake_gallery_dl_download,
+    )
+
+    ok = await c._collect_via_gallery_dl("alice", "https://www.tiktok.com/@alice")
+
+    assert ok is False
+    c._advance_gallery_dl_range_cursor.assert_not_called()
+    c._record_profile_backoff.assert_called_once_with(
+        "alice",
+        reason="gallery-dl_blocked_no_files",
+        seconds=c._profile_failure_backoff_seconds,
+    )
+    record_rate_limit.assert_awaited_once()
+    assert c._local_tool_cooling_down() is True
 
 
 @pytest.mark.asyncio

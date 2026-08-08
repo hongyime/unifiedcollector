@@ -199,6 +199,23 @@ def _is_expected_local_fallback_block(*, output: str, timed_out: bool, file_coun
     return bool(timed_out)
 
 
+def _is_blocked_zero_file_result(result) -> bool:
+    """Detect no-file downloader runs caused by TikTok challenge/block output.
+
+    gallery-dl can exit 0 after TikTok returns challenge/rehydration failures.
+    That is not a clean empty profile range; advancing the range cursor would
+    skip work that was never collected.
+    """
+    if getattr(result, "file_count", 0) > 0:
+        return False
+    output = f"{getattr(result, 'stderr', '') or ''}\n{getattr(result, 'stdout', '') or ''}"
+    return _is_expected_local_fallback_block(
+        output=output,
+        timed_out=bool(getattr(result, "timed_out", False)),
+        file_count=0,
+    )
+
+
 # Keyword sets ported from invalid_username_detector.py — used by
 # ``classify_invalid_username`` to map a scrape error → InvalidReason.
 _NOT_FOUND_KEYWORDS = (
@@ -863,7 +880,8 @@ class TiktokCollector(BaseCollector):
         text = f"{result.stderr or ''}\n{result.stdout or ''}"
         status_code = 429 if "429" in text else None
         validation = classify_invalid_username(text, http_status=status_code)
-        if not validation.is_rate_limited:
+        blocked_by_challenge = _is_blocked_zero_file_result(result)
+        if not validation.is_rate_limited and not blocked_by_challenge:
             return
 
         cooldown_seconds = self._local_tool_cooldown_seconds
@@ -885,13 +903,18 @@ class TiktokCollector(BaseCollector):
             scope=f"{tool}_local",
             status_code=status_code,
             cooldown_seconds=cooldown_seconds,
-            reason="local tool output matched rate-limit signature",
+            reason=(
+                "local tool output matched challenge/block signature"
+                if blocked_by_challenge and not validation.is_rate_limited
+                else "local tool output matched rate-limit signature"
+            ),
             metadata={
                 "username": username,
                 "tool": tool,
                 "returncode": result.returncode,
                 "timed_out": result.timed_out,
                 "file_count": result.file_count,
+                "blocked_by_challenge": blocked_by_challenge,
                 "stderr": result.err_summary(800),
                 "stdout": (result.stdout or "")[:400],
             },
@@ -1802,6 +1825,22 @@ class TiktokCollector(BaseCollector):
                     username, result.file_count, result.err_summary(300),
                 )
                 if result.file_count == 0:
+                    if _is_blocked_zero_file_result(result):
+                        logger.info(
+                            "tiktok fallback gallery-dl: %s returned 0 files due to challenge/block output",
+                            username,
+                        )
+                        await self._record_local_rate_limit_event(
+                            username=username,
+                            tool="gallery-dl",
+                            result=result,
+                        )
+                        self._record_profile_backoff(
+                            username,
+                            reason="gallery-dl_blocked_no_files",
+                            seconds=self._profile_failure_backoff_seconds,
+                        )
+                        return False
                     self._last_gallery_dl_empty_user = username
                     self._advance_gallery_dl_range_cursor(username, file_count=0, ok=True)
                     logger.info(
@@ -1883,6 +1922,13 @@ class TiktokCollector(BaseCollector):
                         tool="yt-dlp",
                         result=result,
                     )
+                    if _is_blocked_zero_file_result(result):
+                        self._record_profile_backoff(
+                            username,
+                            reason="yt-dlp_blocked_no_files",
+                            seconds=self._profile_failure_backoff_seconds,
+                        )
+                        return False
                     self._record_profile_backoff(
                         username,
                         reason="yt-dlp_empty",
