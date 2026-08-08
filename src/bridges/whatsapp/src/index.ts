@@ -148,6 +148,9 @@ let saveCredsTimer: NodeJS.Timeout | null = null;
 let saveCredsPending: (() => Promise<void>) | null = null;
 const POST_PAIR_515_GRACE_MS = Number(process.env.WHATSAPP_POST_PAIR_515_GRACE_MS || 90_000);
 const LID_BACKFILL_MIN_INTERVAL_MS = Number(process.env.WHATSAPP_LID_BACKFILL_MIN_INTERVAL_MS || 24 * 60 * 60 * 1000);
+const CONTACTS_RESYNC_MIN_INTERVAL_MS = Number(
+    process.env.WHATSAPP_CONTACTS_RESYNC_MIN_INTERVAL_MS || 24 * 60 * 60 * 1000,
+);
 
 let stream515: number[] = [];
 const MAX_RAPID_515 = 3;
@@ -178,6 +181,10 @@ function isQrRefsExpired(reason: string | null | undefined): boolean {
 
 function qrViewerActive(): boolean {
     return Date.now() - lastQrEndpointAt < QR_VIEW_ACTIVE_MS;
+}
+
+function markQrViewerActive(): void {
+    lastQrEndpointAt = Date.now();
 }
 
 function nudgePairingIfQrViewerNeedsCode(): void {
@@ -267,13 +274,17 @@ app.get('/livez', (_req, res) => {
     res.status(200).json({ status: 'alive', session_name: process.env.SESSION_NAME || 'default' });
 });
 app.get('/health', (_req, res) => {
+    if (!serviceHealthy && !socketRegistered) {
+        markQrViewerActive();
+        nudgePairingIfQrViewerNeedsCode();
+    }
     res.status(200).json(bridgeState());
 });
 app.get('/ready', (_req, res) => {
     res.status(serviceHealthy ? 200 : 503).json(bridgeState());
 });
 app.get('/qr', (_req, res) => {
-    lastQrEndpointAt = Date.now();
+    markQrViewerActive();
     nudgePairingIfQrViewerNeedsCode();
     if (serviceHealthy) {
         res.status(200).json({ ...bridgeState(), status: 'already_paired', qr: null, ready: true });
@@ -336,7 +347,7 @@ app.post('/reconnect', (_req, res) => {
 // separate Disconnect control for explicit unpairing; Fresh QR is only a nudge
 // for bridge slots that are already in QR-pairing mode.
 app.post('/fresh-qr', async (_req, res) => {
-    lastQrEndpointAt = Date.now();
+    markQrViewerActive();
     const auth_state = refreshAuthStateSummary();
     const registered = Boolean(
         serviceHealthy
@@ -432,7 +443,7 @@ app.post('/pairing-code', async (req, res) => {
         return;
     }
     try {
-        lastQrEndpointAt = Date.now();
+        markQrViewerActive();
         connectionState = 'pairing_code_requested';
         const code = await requestPairingCode(activeSock, phone);
         const digits = phone.replace(/[^0-9]/g, '');
@@ -841,6 +852,66 @@ async function flushCredsSave(): Promise<void> {
 
 let lidBackfillDone = false;
 
+async function maybeResyncContactsAppState(sock: any, sessionName: string): Promise<void> {
+    const authPath = currentAuthPath();
+    const markerPath = authPathChild(authPath, `.contacts-resync-${safeSessionFilePart(sessionName)}.json`);
+    const lidBackfillMarkerPath = authPathChild(authPath, `.lid-backfill-${safeSessionFilePart(sessionName)}.json`);
+    if (LID_BACKFILL_MIN_INTERVAL_MS > 0) {
+        try {
+            const marker = JSON.parse(await fs.promises.readFile(lidBackfillMarkerPath, 'utf8'));
+            const lastEmittedAt = Number(marker?.emitted_at_ms || 0);
+            const ageMs = Date.now() - lastEmittedAt;
+            if (lastEmittedAt > 0 && ageMs >= 0 && ageMs < LID_BACKFILL_MIN_INTERVAL_MS) {
+                logger.info({
+                    sessionName,
+                    ageMs,
+                    minIntervalMs: LID_BACKFILL_MIN_INTERVAL_MS,
+                }, 'contacts resync: skipped because stored lid mappings were recently emitted');
+                return;
+            }
+        } catch {
+            // Missing/corrupt LID marker means the app-state resync can still help.
+        }
+    }
+    if (CONTACTS_RESYNC_MIN_INTERVAL_MS > 0) {
+        try {
+            const marker = JSON.parse(await fs.promises.readFile(markerPath, 'utf8'));
+            const lastAttemptAt = Number(marker?.attempted_at_ms || 0);
+            const ageMs = Date.now() - lastAttemptAt;
+            if (lastAttemptAt > 0 && ageMs >= 0 && ageMs < CONTACTS_RESYNC_MIN_INTERVAL_MS) {
+                logger.info({
+                    sessionName,
+                    ageMs,
+                    minIntervalMs: CONTACTS_RESYNC_MIN_INTERVAL_MS,
+                }, 'contacts resync: skipped recent app-state resync attempt');
+                return;
+            }
+        } catch {
+            // Missing/corrupt marker means try once and replace it below.
+        }
+    }
+
+    try {
+        await fs.promises.writeFile(
+            markerPath,
+            JSON.stringify({
+                attempted_at: new Date().toISOString(),
+                attempted_at_ms: Date.now(),
+                session_name: sessionName,
+            }),
+        );
+    } catch (e) {
+        logger.warn({ err: e, markerPath }, 'contacts resync: could not write throttle marker');
+    }
+
+    try {
+        await sock.resyncAppState(['regular', 'regular_high', 'regular_low', 'critical_block', 'critical_unblock_low'], false);
+        logger.info({ sessionName }, 'contacts resync: app-state resync completed');
+    } catch (e: any) {
+        logger.warn({ err: e?.message || String(e), sessionName }, 'contacts resync failed');
+    }
+}
+
 async function emitStoredLidMappings(sessionName: string): Promise<void> {
     if (lidBackfillDone) return;
     lidBackfillDone = true;
@@ -1036,8 +1107,9 @@ async function connectToWhatsApp(): Promise<void> {
             // never fires. Force a resync so contacts with their `lid` fields
             // are emitted and the collector can populate whatsapp_lid_map.
             setTimeout(() => {
-                sock.resyncAppState(['regular', 'regular_high', 'regular_low', 'critical_block', 'critical_unblock_low'], false)
-                    .catch((e: Error) => logger.warn({ err: e?.message }, 'contacts resync failed'));
+                maybeResyncContactsAppState(sock, sessionName).catch((e: Error) => {
+                    logger.warn({ err: e?.message || String(e), sessionName }, 'contacts resync scheduling failed');
+                });
             }, 3000);
 
             // Backfill LID→phone mappings from Baileys' on-disk store.
