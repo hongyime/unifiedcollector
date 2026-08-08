@@ -12,6 +12,7 @@ os.environ.setdefault("DASHBOARD_ADMIN_PASSWORD", "x")
 
 from src.dashboard import api as dashboard_api
 from src.dashboard.api import (
+    _browser_extension_fallback_payload,
     _browser_extension_payload,
     _browser_tab_maintenance_payload,
     _extension_versions_match,
@@ -58,6 +59,32 @@ def test_browser_tab_maintenance_payload_reads_host_status(tmp_path):
 
 def test_browser_tab_maintenance_payload_ignores_missing_status(tmp_path):
     assert _browser_tab_maintenance_payload(tmp_path / "missing.json") is None
+
+
+def test_browser_extension_fallback_keeps_cdp_issue_when_ingest_times_out(monkeypatch, tmp_path):
+    status = tmp_path / "browser_tab_maintenance_status.json"
+    status.write_text(
+        json.dumps({
+            "state": "cdp_unavailable",
+            "detail": "Unable to connect to Chrome CDP",
+            "cdp_url": "http://127.0.0.1:9222",
+            "checked_at": "2026-08-08T18:26:17.1804359+08:00",
+            "diagnostics": {
+                "reason": "chrome_running_without_cdp",
+                "hint": "Start scraper Chrome with CDP.",
+            },
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(dashboard_api, "_BROWSER_TAB_MAINTENANCE_STATUS_PATH", str(status))
+
+    payload = _browser_extension_fallback_payload("TimeoutError")
+
+    assert payload["maintenance"]["state"] == "cdp_unavailable"
+    assert payload["ingest_health"]["state"] == "unknown"
+    assert payload["issues"][0]["kind"] == "browser_maintenance_cdp_unavailable"
+    assert payload["issues"][0]["ingest_diagnostics_unavailable"] is True
+    assert "TimeoutError" in payload["issues"][0]["detail"]
 
 
 @pytest.mark.asyncio

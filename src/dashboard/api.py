@@ -66,6 +66,7 @@ _SOURCE_MATRIX_SECTION_CACHE: dict[str, dict[str, object]] = {}
 _SOURCE_MATRIX_SECTION_CACHE_TTL_SECONDS = int(os.getenv("SOURCE_MATRIX_SECTION_CACHE_TTL_SECONDS", "30"))
 _SOURCE_MATRIX_SECTION_STALE_SECONDS = int(os.getenv("SOURCE_MATRIX_SECTION_STALE_SECONDS", "900"))
 _SOURCE_MATRIX_PAYLOAD_CACHE: dict[str, object] = {"ts": 0.0, "payload": None}
+_SOURCE_MATRIX_PAYLOAD_BUILD_TASK: asyncio.Task | None = None
 _SOURCE_MATRIX_PAYLOAD_CACHE_TTL_SECONDS = float(os.getenv("SOURCE_MATRIX_PAYLOAD_CACHE_TTL_SECONDS", "10"))
 _SOURCE_MATRIX_PAYLOAD_STALE_SECONDS = float(os.getenv("SOURCE_MATRIX_PAYLOAD_STALE_SECONDS", "300"))
 _SOURCE_MATRIX_PAYLOAD_BUILD_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_PAYLOAD_BUILD_TIMEOUT_SECONDS", "5"))
@@ -308,6 +309,68 @@ def _browser_tab_maintenance_payload(
         "pid": raw.get("pid"),
         "diagnostics": raw.get("diagnostics") if isinstance(raw.get("diagnostics"), dict) else None,
         "status_path": str(path),
+    }
+
+
+def _browser_extension_fallback_payload(reason: str = "unavailable") -> dict:
+    maintenance = _browser_tab_maintenance_payload()
+    issues = []
+    if maintenance:
+        state = str(maintenance.get("state") or "")
+        if state in {"cdp_unavailable", "unreadable", "invalid"}:
+            diagnostics = maintenance.get("diagnostics") or {}
+            detail = maintenance.get("detail") or "Browser tab maintenance cannot reach Chrome CDP."
+            diag_reason = diagnostics.get("reason")
+            hint = diagnostics.get("hint")
+            if diag_reason:
+                detail = f"{detail} ({diag_reason})"
+            if hint:
+                detail = f"{detail} {hint}"
+            issues.append({
+                "platform": "browser",
+                "kind": "browser_maintenance_cdp_unavailable",
+                "detail": (
+                    f"{detail} Browser extension ingest diagnostics were not available "
+                    f"because the source matrix section returned {reason}."
+                ).strip(),
+                "age_seconds": maintenance.get("age_seconds"),
+                "cdp_url": maintenance.get("cdp_url"),
+                "checked_at": maintenance.get("checked_at"),
+                "diagnostics": diagnostics or None,
+                "ingest_diagnostics_unavailable": True,
+            })
+        elif maintenance.get("stale"):
+            issues.append({
+                "platform": "browser",
+                "kind": "browser_maintenance_stale",
+                "detail": (
+                    "Browser tab maintenance has not reported recently; "
+                    f"ingest diagnostics were not available because the source matrix section returned {reason}."
+                ),
+                "age_seconds": maintenance.get("age_seconds"),
+                "stale_after_seconds": maintenance.get("stale_after_seconds"),
+                "checked_at": maintenance.get("checked_at"),
+                "ingest_diagnostics_unavailable": True,
+            })
+    return {
+        "expected_version": _expected_extension_version(),
+        "extension_id": None,
+        "reload_url": None,
+        "maintenance": maintenance,
+        "ingest_health": {
+            "state": "unknown",
+            "active": False,
+            "heartbeat_active": False,
+            "content_active": False,
+            "last_seen_at": None,
+            "last_content_at": None,
+            "fresh_after_seconds": 600,
+            "active_platforms": [],
+            "content_platforms": [],
+            "note": f"Browser extension ingest diagnostics unavailable: {reason}.",
+        },
+        "issues": issues,
+        "diagnostic_errors": [{"section": "source_matrix_browser_extension", "error": reason}],
     }
 
 
@@ -3883,7 +3946,7 @@ def _source_matrix_unavailable_payload(error: str) -> dict:
     live_sources = _source_matrix_fallback_liveness_rows(
         "source matrix build timed out before a cache was available; showing known source skeleton"
     )
-    browser_extension = {"expected_version": _expected_extension_version(), "issues": []}
+    browser_extension = _browser_extension_fallback_payload(error)
     rows = [
         _source_matrix_row(
             source_row,
@@ -3926,9 +3989,9 @@ def _source_matrix_unavailable_payload(error: str) -> dict:
             "expected_version": browser_extension.get("expected_version"),
             "extension_id": None,
             "reload_url": None,
-            "maintenance": None,
-            "ingest_health": None,
-            "issues": [],
+            "maintenance": browser_extension.get("maintenance"),
+            "ingest_health": browser_extension.get("ingest_health"),
+            "issues": browser_extension.get("issues", []),
         },
         "errors": [{"section": "source_matrix", "error": error}],
         "cache": {"status": "unavailable"},
@@ -3937,6 +4000,7 @@ def _source_matrix_unavailable_payload(error: str) -> dict:
 
 @app.get("/collectors/source-matrix")
 async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))):
+    global _SOURCE_MATRIX_PAYLOAD_BUILD_TASK
     now = time.time()
     cached_payload = _SOURCE_MATRIX_PAYLOAD_CACHE.get("payload")
     cached_ts = float(_SOURCE_MATRIX_PAYLOAD_CACHE.get("ts") or 0.0)
@@ -3948,11 +4012,51 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
         payload = _copy_cache_value(cached_payload)
         payload["cache"] = {"status": "fresh", "age_seconds": int(now - cached_ts)}
         return payload
+
+    def _background_build_done(task: asyncio.Task) -> None:
+        global _SOURCE_MATRIX_PAYLOAD_BUILD_TASK
+        if _SOURCE_MATRIX_PAYLOAD_BUILD_TASK is task:
+            _SOURCE_MATRIX_PAYLOAD_BUILD_TASK = None
+        try:
+            value = task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:  # noqa: BLE001 - background cache refresh must fail soft
+            logger.warning("source matrix background build failed: %s", exc.__class__.__name__)
+            return
+        _SOURCE_MATRIX_PAYLOAD_CACHE.update({"ts": time.time(), "payload": _copy_cache_value(value)})
+
+    active_task = _SOURCE_MATRIX_PAYLOAD_BUILD_TASK
+    if active_task is not None and active_task.done():
+        _background_build_done(active_task)
+        active_task = None
+    if active_task is not None:
+        if cached_payload is not None and now - cached_ts <= max(
+            _SOURCE_MATRIX_PAYLOAD_CACHE_TTL_SECONDS,
+            _SOURCE_MATRIX_PAYLOAD_STALE_SECONDS,
+        ):
+            payload = _copy_cache_value(cached_payload)
+            payload.setdefault("errors", []).append({
+                "section": "source_matrix",
+                "error": "BuildInProgress",
+                "stale_cache": True,
+                "cache_age_seconds": int(now - cached_ts),
+            })
+            payload["cache"] = {"status": "stale", "age_seconds": int(now - cached_ts)}
+            return payload
+        return _source_matrix_unavailable_payload("BuildInProgress")
+
+    build_task = asyncio.create_task(_collectors_source_matrix_payload())
+    _SOURCE_MATRIX_PAYLOAD_BUILD_TASK = build_task
+    build_task.add_done_callback(_background_build_done)
     try:
-        payload = await asyncio.wait_for(
-            _collectors_source_matrix_payload(),
+        done, _pending = await asyncio.wait(
+            {build_task},
             timeout=max(1.0, _SOURCE_MATRIX_PAYLOAD_BUILD_TIMEOUT_SECONDS),
         )
+        if build_task not in done:
+            raise asyncio.TimeoutError
+        payload = build_task.result()
     except asyncio.TimeoutError:
         if cached_payload is not None and now - cached_ts <= max(
             _SOURCE_MATRIX_PAYLOAD_CACHE_TTL_SECONDS,
@@ -3977,6 +4081,23 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
             max(1.0, _SOURCE_MATRIX_PAYLOAD_BUILD_TIMEOUT_SECONDS),
         )
         return _source_matrix_unavailable_payload("TimeoutError")
+    except Exception as exc:  # noqa: BLE001 - route should not hard-fail during DB pressure
+        if _SOURCE_MATRIX_PAYLOAD_BUILD_TASK is build_task:
+            _SOURCE_MATRIX_PAYLOAD_BUILD_TASK = None
+        if cached_payload is not None and now - cached_ts <= max(
+            _SOURCE_MATRIX_PAYLOAD_CACHE_TTL_SECONDS,
+            _SOURCE_MATRIX_PAYLOAD_STALE_SECONDS,
+        ):
+            payload = _copy_cache_value(cached_payload)
+            payload.setdefault("errors", []).append({
+                "section": "source_matrix",
+                "error": exc.__class__.__name__,
+                "stale_cache": True,
+                "cache_age_seconds": int(now - cached_ts),
+            })
+            payload["cache"] = {"status": "stale", "age_seconds": int(now - cached_ts)}
+            return payload
+        return _source_matrix_unavailable_payload(exc.__class__.__name__)
     _SOURCE_MATRIX_PAYLOAD_CACHE.update({"ts": time.time(), "payload": _copy_cache_value(payload)})
     payload["cache"] = {"status": "rebuilt", "age_seconds": 0}
     return payload
@@ -4007,7 +4128,7 @@ async def _collectors_source_matrix_payload():
         media_totals = {"__stats_unavailable__": True}
         youtube_media_backlog = {}
         active_cursors = {}
-        browser_extension = {"expected_version": _expected_extension_version(), "issues": []}
+        browser_extension = _browser_extension_fallback_payload("db_acquire_failed")
     else:
         liveness_fallback = _source_matrix_fallback_liveness_rows(
             "source liveness query timed out; showing known source skeleton until DB load drops"
@@ -4045,7 +4166,7 @@ async def _collectors_source_matrix_payload():
             media_totals = {"__stats_unavailable__": True}
             youtube_media_backlog = {}
             active_cursors = {}
-            browser_extension = {"expected_version": _expected_extension_version(), "issues": []}
+            browser_extension = _browser_extension_fallback_payload("source_liveness_unavailable")
         else:
             beeper_subsources = await _source_matrix_section(
                 section="beeper_subsource_liveness",
@@ -4171,7 +4292,7 @@ async def _collectors_source_matrix_payload():
                 section="browser_extension",
                 label="browser extension summary",
                 errors=errors,
-                fallback={"expected_version": _expected_extension_version(), "issues": []},
+                fallback=_browser_extension_fallback_payload("TimeoutError"),
                 awaitable=_browser_extension_payload(conn),
                 cache_key="browser_extension",
                 cache_ttl=15,
