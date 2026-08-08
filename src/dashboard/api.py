@@ -1923,6 +1923,13 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
     browser_health_reason = str(source_row.get("browser_health_reason") or "")
     if source == "x" and _source_matrix_is_x_auth_wall_url(browser_url):
         return _source_matrix_x_auth_wall_blocker(browser_url)
+    if status == "unknown" and str(source_health_error).startswith("source matrix build timed out"):
+        return {
+            "kind": "stats_unavailable",
+            "severity": "ok",
+            "summary": source_health_error,
+            "next_action": "Wait for the background source-matrix refresh; this is an API stats timeout, not evidence that the collector is degraded.",
+        }
     if source == "whatsapp" and bridge_status == "partial":
         return {
             "kind": "whatsapp_partial_pairing",
@@ -2348,6 +2355,8 @@ def _source_operator_status(source_row: dict, blocker: dict) -> dict:
     status = source_row.get("status") or "unknown"
     if blocker.get("kind") == "quiet_beeper_subsource":
         return {"status_label": "quiet", "status_severity": "ok"}
+    if blocker.get("kind") == "stats_unavailable":
+        return {"status_label": "unknown", "status_severity": "ok"}
     blocker_severity = blocker.get("severity")
     if blocker_severity in {"error", "warning"} and blocker.get("kind") != "none":
         if blocker_severity == "error":

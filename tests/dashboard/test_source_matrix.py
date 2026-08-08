@@ -241,6 +241,22 @@ def test_source_matrix_blocker_reports_live_browser_page_shell():
     assert "login flow" in auth_blocker["summary"]
 
 
+def test_source_matrix_blocker_treats_cold_api_timeout_as_stats_unavailable():
+    blocker = _source_matrix_blocker(
+        _source(
+            status="unknown",
+            source_health_error="source matrix build timed out before a cache was available; showing known source skeleton",
+        ),
+        rate_row=None,
+        cursor_row=None,
+        extension_issues=[],
+    )
+
+    assert blocker["kind"] == "stats_unavailable"
+    assert blocker["severity"] == "ok"
+    assert "not evidence" in blocker["next_action"]
+
+
 def test_source_matrix_expensive_sections_have_bounded_default_timeouts():
     assert _SOURCE_MATRIX_DAY_CONTENT_TIMEOUT_SECONDS <= 8
     assert _SOURCE_MATRIX_MEDIA_TOTALS_TIMEOUT_SECONDS <= 8
@@ -754,6 +770,26 @@ def test_source_matrix_row_labels_live_source_degraded_when_extension_blocked():
     assert row["status_label"] == "degraded"
     assert row["status_severity"] == "warning"
     assert row["blocker"]["kind"] == "extension_version_mismatch"
+
+
+def test_source_matrix_row_labels_cold_api_timeout_as_unknown_not_degraded():
+    row = _source_matrix_row(
+        _source(
+            status="unknown",
+            source_health_error="source matrix build timed out before a cache was available; showing known source skeleton",
+        ),
+        current_content=None,
+        current_rate=None,
+        day_content=None,
+        day_rate=None,
+        media_total={"stats_unavailable": True, "stats_error": "TimeoutError"},
+        cursor_row=None,
+        extension_issues=[],
+    )
+
+    assert row["status_label"] == "unknown"
+    assert row["status_severity"] == "ok"
+    assert row["blocker"]["kind"] == "stats_unavailable"
 
 
 def test_source_matrix_row_labels_x_login_flow_as_auth_wall_even_with_fresh_heartbeat():
