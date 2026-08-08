@@ -4046,6 +4046,23 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
             return payload
         return _source_matrix_unavailable_payload("BuildInProgress")
 
+    if cached_payload is not None and now - cached_ts <= max(
+        _SOURCE_MATRIX_PAYLOAD_CACHE_TTL_SECONDS,
+        _SOURCE_MATRIX_PAYLOAD_STALE_SECONDS,
+    ):
+        build_task = asyncio.create_task(_collectors_source_matrix_payload())
+        _SOURCE_MATRIX_PAYLOAD_BUILD_TASK = build_task
+        build_task.add_done_callback(_background_build_done)
+        payload = _copy_cache_value(cached_payload)
+        payload.setdefault("errors", []).append({
+            "section": "source_matrix",
+            "error": "BackgroundRefresh",
+            "stale_cache": True,
+            "cache_age_seconds": int(now - cached_ts),
+        })
+        payload["cache"] = {"status": "stale", "age_seconds": int(now - cached_ts)}
+        return payload
+
     build_task = asyncio.create_task(_collectors_source_matrix_payload())
     _SOURCE_MATRIX_PAYLOAD_BUILD_TASK = build_task
     build_task.add_done_callback(_background_build_done)

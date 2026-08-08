@@ -1560,6 +1560,7 @@ async def test_collectors_source_matrix_reuses_fresh_payload_cache(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_collectors_source_matrix_serves_stale_payload_on_timeout(monkeypatch):
+    dashboard_api._SOURCE_MATRIX_PAYLOAD_BUILD_TASK = None
     _SOURCE_MATRIX_PAYLOAD_CACHE.update({
         "ts": dashboard_api.time.time() - 30,
         "payload": {
@@ -1569,7 +1570,10 @@ async def test_collectors_source_matrix_serves_stale_payload_on_timeout(monkeypa
         },
     })
 
+    started = asyncio.Event()
+
     async def slow_build():
+        started.set()
         await asyncio.sleep(10)
         return {"sources": [{"source": "late"}], "errors": []}
 
@@ -1584,3 +1588,13 @@ async def test_collectors_source_matrix_serves_stale_payload_on_timeout(monkeypa
     assert out["cache"]["status"] == "stale"
     assert out["errors"][-1]["section"] == "source_matrix"
     assert out["errors"][-1]["stale_cache"] is True
+    assert out["errors"][-1]["error"] == "BackgroundRefresh"
+    assert dashboard_api._SOURCE_MATRIX_PAYLOAD_BUILD_TASK is not None
+    await asyncio.sleep(0)
+    assert started.is_set()
+    dashboard_api._SOURCE_MATRIX_PAYLOAD_BUILD_TASK.cancel()
+    try:
+        await dashboard_api._SOURCE_MATRIX_PAYLOAD_BUILD_TASK
+    except asyncio.CancelledError:
+        pass
+    dashboard_api._SOURCE_MATRIX_PAYLOAD_BUILD_TASK = None
