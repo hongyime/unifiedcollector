@@ -1346,15 +1346,22 @@ async def _source_matrix_browser_source_fields(
         return {}
     rows = await conn.fetch(
         """
-        SELECT DISTINCT ON (platform)
-               platform,
-               metadata->>'url' AS browser_url,
-               metadata->>'health_status' AS browser_health_status,
-               metadata->>'health_reason' AS browser_health_reason
-        FROM browser_ingest_events
-        WHERE endpoint = 'browser_heartbeat'
-          AND platform = ANY($1::text[])
-        ORDER BY platform, created_at DESC
+        WITH selected(platform) AS (
+            SELECT unnest($1::text[])
+        )
+        SELECT selected.platform,
+               latest.metadata->>'url' AS browser_url,
+               latest.metadata->>'health_status' AS browser_health_status,
+               latest.metadata->>'health_reason' AS browser_health_reason
+        FROM selected
+        JOIN LATERAL (
+            SELECT metadata
+            FROM browser_ingest_events
+            WHERE endpoint = 'browser_heartbeat'
+              AND platform = selected.platform
+            ORDER BY created_at DESC
+            LIMIT 1
+        ) latest ON TRUE
         """,
         selected,
     )
