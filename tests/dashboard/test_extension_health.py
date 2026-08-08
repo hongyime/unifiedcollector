@@ -311,6 +311,7 @@ async def test_browser_extension_payload_distinguishes_ingest_active_from_cdp_do
     assert issue["kind"] == "browser_maintenance_cdp_unavailable"
     assert issue["extension_ingest_active"] is True
     assert "Browser extension ingest is still active" in issue["detail"]
+    assert issue["detail"].count("Browser extension ingest is still active") == 1
 
 
 @pytest.mark.asyncio
@@ -392,6 +393,7 @@ async def test_browser_extension_fallback_payload_uses_fast_ingest(monkeypatch, 
     assert issue["kind"] == "browser_maintenance_cdp_unavailable"
     assert issue["extension_ingest_active"] is True
     assert issue["ingest_diagnostics_unavailable"] is False
+    assert issue["detail"].count("Browser extension ingest is still active") == 1
 
 
 @pytest.mark.asyncio

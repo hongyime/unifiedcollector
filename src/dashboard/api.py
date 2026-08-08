@@ -440,14 +440,15 @@ def _browser_extension_apply_ingest_health(payload: dict, ingest_items: list[dic
     health = _browser_ingest_health_from_items(ingest_items)
     payload["ingest_health"] = health
     if health.get("active"):
+        active_detail = "Browser extension ingest is still active; CDP tab maintenance and cookie backup are unavailable."
         for issue in payload.get("issues", []):
             if issue.get("kind") == "browser_maintenance_cdp_unavailable":
                 issue["extension_ingest_active"] = True
                 issue["ingest_diagnostics_unavailable"] = False
-                issue["detail"] = (
-                    str(issue.get("detail") or "")
-                    + " Browser extension ingest is still active; CDP tab maintenance and cookie backup are unavailable."
-                ).strip()
+                detail = str(issue.get("detail") or "").strip()
+                if active_detail not in detail:
+                    detail = f"{detail} {active_detail}".strip()
+                issue["detail"] = detail
 
 
 async def _browser_extension_fallback_payload_with_fast_ingest(reason: str) -> dict:
