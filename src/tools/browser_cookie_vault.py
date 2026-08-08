@@ -79,6 +79,10 @@ BACKUP_DIR: Path = Path(os.getenv("BROWSER_COOKIE_VAULT_DIR", _DEFAULT_BACKUP_DI
 INTERVAL_SECONDS: int = int(os.getenv("BROWSER_COOKIE_VAULT_INTERVAL_SECONDS", "300"))
 KEEP_SNAPSHOTS: int = int(os.getenv("BROWSER_COOKIE_VAULT_KEEP_SNAPSHOTS", "10"))
 HEALTH_PORT: int = int(os.getenv("BROWSER_COOKIE_VAULT_HEALTH_PORT", "8790"))
+CDP_UNREACHABLE_WARN_EVERY: int = max(
+    1,
+    int(os.getenv("BROWSER_COOKIE_VAULT_CDP_WARN_EVERY", "12")),
+)
 
 # Auto-restore on startup is intentionally OFF by default: an eager restore
 # could overwrite a working live session with a stale snapshot. Flip to "1"
@@ -179,6 +183,17 @@ def _snapshot_name(ts: str) -> str:
 
 class CDPUnreachable(RuntimeError):
     """Raised when the CDP HTTP endpoint can't be reached (Chrome down)."""
+
+
+def _should_warn_cdp_unreachable(consecutive_failures: int) -> bool:
+    """Warn on the first Chrome-down failure, then periodically.
+
+    The health endpoint already exposes every failure count and last error. A
+    long intentional CDP outage should not flood Docker logs every retry.
+    """
+    if consecutive_failures <= 1:
+        return True
+    return consecutive_failures % CDP_UNREACHABLE_WARN_EVERY == 0
 
 
 class CDPClient:
@@ -480,7 +495,8 @@ async def _backup_loop(vault: CookieVault, interval: int, stop_event: asyncio.Ev
             except CDPUnreachable as exc:
                 vault.consecutive_failures += 1
                 vault.last_error = f"cdp_unreachable: {exc}"
-                logger.warning(
+                log = logger.warning if _should_warn_cdp_unreachable(vault.consecutive_failures) else logger.info
+                log(
                     "backup failed (Chrome unreachable, attempt=%d): %s; sleeping %.1fs",
                     vault.consecutive_failures,
                     exc,

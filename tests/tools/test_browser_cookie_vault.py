@@ -320,6 +320,16 @@ async def test_daemon_loop_backs_off_when_chrome_missing(tmp_path: Path, monkeyp
     assert vault.last_error and vault.last_error.startswith("cdp_unreachable")
 
 
+def test_cdp_unreachable_warning_is_periodic(monkeypatch):
+    monkeypatch.setattr(vault_mod, "CDP_UNREACHABLE_WARN_EVERY", 12)
+
+    assert vault_mod._should_warn_cdp_unreachable(1) is True
+    assert vault_mod._should_warn_cdp_unreachable(2) is False
+    assert vault_mod._should_warn_cdp_unreachable(11) is False
+    assert vault_mod._should_warn_cdp_unreachable(12) is True
+    assert vault_mod._should_warn_cdp_unreachable(24) is True
+
+
 # ─── Health endpoint ────────────────────────────────────────────────────────
 
 
