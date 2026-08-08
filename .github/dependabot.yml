@@ -1,12 +1,5 @@
 version: 2
 updates:
-  # Conservative shared default.
-  #
-  # Language package ecosystems are intentionally not synced from sourcerepo:
-  # Dependabot has no manifest-aware conditionals in this file, so a global
-  # all-ecosystems template creates duplicate PRs and false CI failures in
-  # repos that do not use those ecosystems. Add npm, bun, pip, etc. directly
-  # in a target repo only when that repo actually owns the matching manifest.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
@@ -16,3 +9,72 @@ updates:
     labels:
       - "dependencies"
       - "github-actions"
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "15:10"
+    labels:
+      - "dependencies"
+      - "python"
+    groups:
+      python-runtime:
+        patterns:
+          - "*"
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: "npm"
+    directory: "/dashboard/frontend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "15:20"
+    labels:
+      - "dependencies"
+      - "frontend"
+    groups:
+      dashboard-frontend:
+        patterns:
+          - "*"
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: "npm"
+    directory: "/src/bridges/whatsapp"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "15:30"
+    labels:
+      - "dependencies"
+      - "whatsapp-bridge"
+    groups:
+      whatsapp-bridge:
+        patterns:
+          - "*"
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: "docker"
+    directory: "/docker"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "15:40"
+    labels:
+      - "dependencies"
+      - "docker"
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: "docker"
+    directory: "/src/bridges/whatsapp"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "15:50"
+    labels:
+      - "dependencies"
+      - "docker"
+      - "whatsapp-bridge"
+    open-pull-requests-limit: 5
