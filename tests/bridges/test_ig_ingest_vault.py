@@ -1480,8 +1480,26 @@ def test_browser_heartbeat_handler_requests_forced_cycle_when_content_stale(monk
     assert "metadata ? 'probe_reason'" in query
     assert "manual_backend_probe" in query
     assert "forced_recovery_started" in query
+    assert "recoverable_error_shell" in query
     assert "ORDER BY created_at DESC" in query
     assert args == ("x",)
+
+
+def test_recoverable_error_shell_probe_does_not_mark_source_success():
+    assert ig_ingest._browser_event_marks_source_success(
+        "x",
+        "media",
+        0,
+        0,
+        {"probe_reason": "recoverable_error_shell"},
+    ) is False
+    assert ig_ingest._browser_event_marks_source_success(
+        "x",
+        "media",
+        0,
+        0,
+        {"probe_reason": "no_dom_media_candidates"},
+    ) is True
 
 
 def test_browser_heartbeat_handler_fails_active_when_content_hint_is_slow(monkeypatch):

@@ -189,6 +189,26 @@ def test_source_matrix_blocker_browser_watchdog_gives_tab_action():
     assert "login flow" in auth_wall_blocker["summary"]
     assert "Do not chase Docker logs" in auth_wall_blocker["next_action"]
 
+    x_try_again_blocker = _source_matrix_blocker(
+        _source(
+            source="x",
+            status="degraded",
+            source_health_status="degraded",
+            source_health_error="browser capture stalled: browser content progress is 14612s old (> 3600s) (watchdog)",
+            browser_url="https://x.com/explore?uc_recover=1786220141",
+            browser_health_status="recoverable_error_shell",
+            browser_health_reason="try_again_empty_state",
+            browser_content_stale=True,
+        ),
+        rate_row=None,
+        cursor_row=None,
+        extension_issues=[],
+    )
+
+    assert x_try_again_blocker["kind"] == "auth_wall"
+    assert "session error shell" in x_try_again_blocker["summary"]
+    assert "restore the X session" in x_try_again_blocker["next_action"]
+
     cleared_blocker = _source_matrix_blocker(
         _source(
             source="x",

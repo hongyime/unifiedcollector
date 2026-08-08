@@ -2382,7 +2382,11 @@ def _browser_event_marks_source_success(
     if not isinstance(metadata, dict):
         return False
     probe_reason = str(metadata.get("probe_reason") or "").strip()
-    non_progress_probes = {"manual_backend_probe", "forced_recovery_started"}
+    non_progress_probes = {
+        "manual_backend_probe",
+        "forced_recovery_started",
+        "recoverable_error_shell",
+    }
     return bool(probe_reason and probe_reason not in non_progress_probes)
 
 
@@ -4941,7 +4945,7 @@ async def _browser_content_recovery_hint(pool, platform: str) -> dict:
                         OR (
                           metadata ? 'probe_reason'
                           AND COALESCE(metadata->>'probe_reason', '')
-                              NOT IN ('manual_backend_probe', 'forced_recovery_started')
+                              NOT IN ('manual_backend_probe', 'forced_recovery_started', 'recoverable_error_shell')
                         )
                       )
                       AND (
@@ -4950,7 +4954,7 @@ async def _browser_content_recovery_hint(pool, platform: str) -> dict:
                         OR (
                           metadata ? 'probe_reason'
                           AND COALESCE(metadata->>'probe_reason', '')
-                              NOT IN ('manual_backend_probe', 'forced_recovery_started')
+                              NOT IN ('manual_backend_probe', 'forced_recovery_started', 'recoverable_error_shell')
                         )
                       )
                     ORDER BY created_at DESC

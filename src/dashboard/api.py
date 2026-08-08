@@ -1324,6 +1324,48 @@ def _source_matrix_status_from_health(status: str | None) -> str:
     return "unknown"
 
 
+async def _source_matrix_browser_source_fields(
+    conn,
+    platforms: list[str] | None = None,
+) -> dict[str, dict]:
+    selected = platforms or ["instagram", "tiktok", "lemon8", "threads", "facebook", "x", "strava"]
+    selected = [str(platform) for platform in selected if platform]
+    if not selected:
+        return {}
+    rows = await conn.fetch(
+        """
+        SELECT DISTINCT ON (platform)
+               platform,
+               metadata->>'url' AS browser_url,
+               metadata->>'health_status' AS browser_health_status,
+               metadata->>'health_reason' AS browser_health_reason
+        FROM browser_ingest_events
+        WHERE endpoint = 'browser_heartbeat'
+          AND platform = ANY($1::text[])
+        ORDER BY platform, created_at DESC
+        """,
+        selected,
+    )
+    return {str(row["platform"]): dict(row) for row in rows}
+
+
+def _source_matrix_apply_browser_source_fields(
+    source_rows: list[dict],
+    browser_fields: dict[str, dict] | None,
+) -> None:
+    fields = browser_fields or {}
+    for row in source_rows:
+        source = str(row.get("source") or "")
+        browser = fields.get(source)
+        if not browser:
+            continue
+        row.update({
+            "browser_url": browser.get("browser_url"),
+            "browser_health_status": browser.get("browser_health_status"),
+            "browser_health_reason": browser.get("browser_health_reason"),
+        })
+
+
 async def _source_matrix_fallback_liveness_rows_with_source_health(detail: str) -> list[dict]:
     """Cheap fallback liveness from source_health when heavy matrix stats time out.
 
@@ -1337,15 +1379,38 @@ async def _source_matrix_fallback_liveness_rows_with_source_health(detail: str) 
     by_source = {row["source"]: row for row in rows}
     pool = await get_pool()
     conn = None
+    browser_fields = {}
     try:
         conn = await asyncio.wait_for(pool.acquire(), timeout=1.5)
-        health_rows = await conn.fetch(
-            """
-            SELECT source, status, last_success_at, last_error, updated_at
-            FROM source_health
-            """,
-            timeout=1.5,
-        )
+        try:
+            health_rows = await conn.fetch(
+                """
+                SELECT source, status, last_success_at, last_error, updated_at
+                FROM source_health
+                """,
+                timeout=1.5,
+            )
+        except Exception:
+            return rows
+        try:
+            browser_fields = await conn.fetch(
+                """
+                SELECT DISTINCT ON (platform)
+                       platform,
+                       metadata->>'url' AS browser_url,
+                       metadata->>'health_status' AS browser_health_status,
+                       metadata->>'health_reason' AS browser_health_reason
+                FROM browser_ingest_events
+                WHERE endpoint = 'browser_heartbeat'
+                  AND platform = ANY($1::text[])
+                ORDER BY platform, created_at DESC
+                """,
+                ["instagram", "tiktok", "lemon8", "threads", "facebook", "x", "strava"],
+                timeout=1.0,
+            )
+            browser_fields = {str(row["platform"]): dict(row) for row in browser_fields}
+        except Exception:
+            browser_fields = {}
     except Exception:
         return rows
     finally:
@@ -1375,6 +1440,7 @@ async def _source_matrix_fallback_liveness_rows_with_source_health(detail: str) 
             "source_health_updated_at": health.get("updated_at"),
             "detail": health_error or detail,
         })
+    _source_matrix_apply_browser_source_fields(rows, browser_fields)
     return rows
 
 
@@ -2092,14 +2158,16 @@ def _source_matrix_filter_extension_blockers_for_current_content(
 
 
 def _source_matrix_x_auth_wall_blocker(browser_url: str) -> dict:
+    location = browser_url or "the X browser tab"
     return {
         "kind": "auth_wall",
         "severity": "warning",
         "summary": (
-            "X browser tab is on the login flow, so the extension is alive but cannot scrape timeline content."
+            "X browser tab is on the login flow or a session error shell, so the extension is alive "
+            "but cannot scrape timeline content."
         ),
         "next_action": (
-            f"Log in or restore the X session in the browser tab at {browser_url}, then press Scrape now on Social Tabs. "
+            f"Log in or restore the X session in the browser tab at {location}, then press Scrape now on Social Tabs. "
             "Do not chase Docker logs for this one; the blocker is the interactive browser session."
         ),
     }
@@ -2114,6 +2182,29 @@ def _source_matrix_is_x_auth_wall_url(browser_url: str) -> bool:
     )
 
 
+def _source_matrix_is_x_session_shell(
+    browser_url: str,
+    browser_health_status: str = "",
+    browser_health_reason: str = "",
+) -> bool:
+    if _source_matrix_is_x_auth_wall_url(browser_url):
+        return True
+    url_lc = str(browser_url or "").lower()
+    if "x.com" not in url_lc and "twitter.com" not in url_lc:
+        return False
+    status_lc = str(browser_health_status or "").lower()
+    reason_lc = str(browser_health_reason or "").lower()
+    return (
+        status_lc == "recoverable_error_shell"
+        and reason_lc in {
+            "try_again_empty_state",
+            "something_went_wrong",
+            "no_internet_connection",
+            "failed_script_url",
+        }
+    )
+
+
 def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: dict | None,
                            extension_issues: list[dict]) -> dict:
     source = source_row.get("source")
@@ -2123,7 +2214,11 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
     browser_url = str(source_row.get("browser_url") or "")
     browser_health_status = str(source_row.get("browser_health_status") or "")
     browser_health_reason = str(source_row.get("browser_health_reason") or "")
-    if source == "x" and _source_matrix_is_x_auth_wall_url(browser_url):
+    if source == "x" and _source_matrix_is_x_session_shell(
+        browser_url,
+        browser_health_status,
+        browser_health_reason,
+    ):
         return _source_matrix_x_auth_wall_blocker(browser_url)
     if status == "unknown" and str(source_health_error).startswith("source matrix build timed out"):
         return {
@@ -2214,7 +2309,11 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
                 "next_action": "Refresh auth cookies/session or inspect the account-specific scraper log.",
             }
     if browser_health_status == "recoverable_error_shell":
-        if source == "x" and _source_matrix_is_x_auth_wall_url(browser_url):
+        if source == "x" and _source_matrix_is_x_session_shell(
+            browser_url,
+            browser_health_status,
+            browser_health_reason,
+        ):
             return _source_matrix_x_auth_wall_blocker(browser_url)
         platform = str(source or "this platform")
         reason = browser_health_reason or "recoverable page shell"
@@ -2350,7 +2449,11 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
         or "browser content progress is" in detail_lc
     ):
         platform = str(source or "this platform")
-        if source == "x" and _source_matrix_is_x_auth_wall_url(browser_url):
+        if source == "x" and _source_matrix_is_x_session_shell(
+            browser_url,
+            browser_health_status,
+            browser_health_reason,
+        ):
             return _source_matrix_x_auth_wall_blocker(browser_url)
         return {
             "kind": "browser_capture_stalled",
@@ -4334,6 +4437,23 @@ async def _collectors_source_matrix_payload():
             cache_ttl=15,
             timeout=3,
         )
+        browser_platforms = [
+            str(row.get("source"))
+            for row in live_sources
+            if str(row.get("source") or "") in {"instagram", "tiktok", "lemon8", "threads", "facebook", "x", "strava"}
+            and row.get("status") != "live"
+        ]
+        browser_source_fields = await _source_matrix_section(
+            section="browser_source_fields",
+            label="browser source fields",
+            errors=errors,
+            fallback={},
+            awaitable=_source_matrix_browser_source_fields(conn, browser_platforms),
+            cache_key="browser_source_fields",
+            cache_ttl=15,
+            timeout=1.5,
+        )
+        _source_matrix_apply_browser_source_fields(live_sources, browser_source_fields)
         if any(
             error["section"] == "source_liveness" and not error.get("stale_cache")
             for error in errors
