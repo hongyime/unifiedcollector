@@ -481,6 +481,8 @@ def test_browser_ingest_section_calls_out_heartbeat_only_cdp_stuck_state():
         "browser_maintenance": {
             "state": "cdp_unavailable",
             "age_seconds": 30,
+            "consecutive_cdp_unavailable_count": 4,
+            "cdp_unavailable_since": "2026-08-09T04:05:00+08:00",
             "diagnostics": {
                 "reason": "chrome_running_without_cdp",
                 "chrome_process_count": 10,
@@ -493,6 +495,7 @@ def test_browser_ingest_section_calls_out_heartbeat_only_cdp_stuck_state():
     assert "extension ingest is heartbeat-only; useful browser content is stale" in msg
     assert "newest event 15s ago" in msg
     assert "useful content 20m ago" in msg
+    assert "repeated for 4 maintenance passes since 2026-08-09T04:05:00+08:00" in msg
     assert "extension ingest is still running with stale useful content" in msg
     assert "Chrome has 10 background processes and no visible window" in msg
     assert "scripts\\start-scraper-chrome-cdp.ps1" in msg

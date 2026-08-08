@@ -67,6 +67,9 @@ def test_browser_tab_maintenance_payload_reads_host_status(tmp_path):
             "detail": "Unable to connect to the remote server",
             "cdp_url": "http://127.0.0.1:9222",
             "pid": 15168,
+            "last_terminal_state": "cdp_unavailable",
+            "consecutive_cdp_unavailable_count": 4,
+            "cdp_unavailable_since": "2026-08-08T17:00:00+08:00",
             "diagnostics": {
                 "reason": "chrome_running_without_cdp",
                 "chrome_process_count": 26,
@@ -83,6 +86,9 @@ def test_browser_tab_maintenance_payload_reads_host_status(tmp_path):
     assert payload["detail"] == "Unable to connect to the remote server"
     assert payload["cdp_url"] == "http://127.0.0.1:9222"
     assert payload["pid"] == 15168
+    assert payload["last_terminal_state"] == "cdp_unavailable"
+    assert payload["consecutive_cdp_unavailable_count"] == 4
+    assert payload["cdp_unavailable_since"] == "2026-08-08T17:00:00+08:00"
     assert payload["diagnostics"]["reason"] == "chrome_running_without_cdp"
     assert payload["diagnostics"]["chrome_process_count"] == 26
     assert payload["stale"] is False

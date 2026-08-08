@@ -64,14 +64,54 @@ function Write-Status([string]$state, [string]$detail = "", [object]$diagnostics
     if ($null -eq $diagnostics) {
         $diagnostics = Get-ChromeCdpDiagnostics
     }
+    $previous = $null
+    if (Test-Path -LiteralPath $statusPath) {
+        try {
+            $previous = Get-Content -LiteralPath $statusPath -Raw | ConvertFrom-Json
+        } catch {
+            $previous = $null
+        }
+    }
+    $checkedAt = (Get-Date).ToString("o")
+    $previousTerminalState = if ($previous -and $previous.last_terminal_state) {
+        [string]$previous.last_terminal_state
+    } elseif ($previous) {
+        [string]$previous.state
+    } else {
+        ""
+    }
+    $previousCount = 0
+    if ($previous -and [int]::TryParse([string]$previous.consecutive_cdp_unavailable_count, [ref]$previousCount)) {
+        # Parsed into $previousCount.
+    } else {
+        $previousCount = 0
+    }
+    $terminalState = if ($state -eq "running") { $previousTerminalState } else { $state }
+    $consecutiveCdpUnavailable = if ($state -eq "running" -and $previous) { $previousCount } else { 0 }
+    $cdpUnavailableSince = if ($state -eq "running" -and $previous -and $previous.cdp_unavailable_since) {
+        [string]$previous.cdp_unavailable_since
+    } else {
+        $null
+    }
+    if ($state -eq "cdp_unavailable") {
+        $consecutiveCdpUnavailable = if ($previousTerminalState -eq "cdp_unavailable") { $previousCount + 1 } else { 1 }
+        $cdpUnavailableSince = if ($previousTerminalState -eq "cdp_unavailable" -and $previous.cdp_unavailable_since) {
+            [string]$previous.cdp_unavailable_since
+        } else {
+            $checkedAt
+        }
+    }
     $payload = [ordered]@{
-        checked_at = (Get-Date).ToString("o")
+        checked_at = $checkedAt
         state = $state
         detail = $detail
         cdp_url = "http://127.0.0.1:9222"
         audit_result = (Join-Path $tmp "browser_tab_audit_result.json")
         reload_plan = (Join-Path $tmp "browser_tab_reload_plan.json")
         pid = $PID
+        last_terminal_state = $terminalState
+        consecutive_cdp_unavailable_count = $consecutiveCdpUnavailable
+        cdp_unavailable_since = $cdpUnavailableSince
         diagnostics = $diagnostics
     }
     $payload | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $statusPath -Encoding UTF8

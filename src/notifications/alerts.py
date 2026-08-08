@@ -901,6 +901,16 @@ def _section_browser_ingest(snapshot: dict) -> list[str] | None:
             detail = "CDP maintenance/cookie backup is unavailable"
             if reason:
                 detail += f" ({_display_scope(reason)})"
+            consecutive = maintenance.get("consecutive_cdp_unavailable_count")
+            since = maintenance.get("cdp_unavailable_since")
+            try:
+                consecutive_int = int(consecutive or 0)
+            except (TypeError, ValueError):
+                consecutive_int = 0
+            if consecutive_int > 1:
+                detail += f"; repeated for {consecutive_int:,} maintenance passes"
+                if since:
+                    detail += f" since {since}"
             if ingest_health.get("active"):
                 detail += ", but extension ingest is still running"
                 if not ingest_health.get("content_active"):

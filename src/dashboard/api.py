@@ -51,7 +51,7 @@ _SOURCE_MATRIX_YOUTUBE_BACKLOG_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_
 _SOURCE_MATRIX_ENABLE_YOUTUBE_BACKLOG = os.getenv("SOURCE_MATRIX_ENABLE_YOUTUBE_BACKLOG", "0").lower() in {
     "1", "true", "yes", "on"
 }
-_SOURCE_MATRIX_BROWSER_EXTENSION_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_BROWSER_EXTENSION_TIMEOUT_SECONDS", "6"))
+_SOURCE_MATRIX_BROWSER_EXTENSION_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_BROWSER_EXTENSION_TIMEOUT_SECONDS", "4"))
 _BROWSER_EXTENSION_QUERY_TIMEOUT_SECONDS = float(os.getenv("BROWSER_EXTENSION_QUERY_TIMEOUT_SECONDS", "2.5"))
 _BROWSER_EXTENSION_PAYLOAD_BUDGET_SECONDS = float(os.getenv("BROWSER_EXTENSION_PAYLOAD_BUDGET_SECONDS", "5.5"))
 _BROWSER_TAB_MAINTENANCE_STATUS_PATH = os.getenv(
@@ -307,6 +307,9 @@ def _browser_tab_maintenance_payload(
         "audit_result": raw.get("audit_result"),
         "reload_plan": raw.get("reload_plan"),
         "pid": raw.get("pid"),
+        "last_terminal_state": raw.get("last_terminal_state"),
+        "consecutive_cdp_unavailable_count": raw.get("consecutive_cdp_unavailable_count"),
+        "cdp_unavailable_since": raw.get("cdp_unavailable_since"),
         "diagnostics": raw.get("diagnostics") if isinstance(raw.get("diagnostics"), dict) else None,
         "status_path": str(path),
     }
@@ -820,34 +823,44 @@ async def _source_content_summary(
         if row.get("media_stats_unavailable"):
             target["media_stats_unavailable"] = True
 
-    row_deadline = time.monotonic() + max(1.0, _SOURCE_CONTENT_SUMMARY_BUDGET_SECONDS)
     row_summary_slow_parts: list[str] = []
+    row_parts = []
     for source, table, column, label in _INGESTION_CONTENT_PARTS:
         if table not in existing_tables:
             continue
-        remaining = row_deadline - time.monotonic()
-        if remaining <= 0:
-            row_summary_slow_parts.append(f"{source}:{table}:budget")
-            continue
+        row_parts.append(
+            f"""
+            SELECT '{source}'::text AS source,
+                   count(*)::bigint AS records,
+                   {("count(*)" if label == "messages" else "0")}::bigint AS messages,
+                   max({column}) AS latest_record_at
+            FROM {table}
+            WHERE {column} >= {since_sql}
+              {f"AND {column} < {before_sql}" if before_sql else ""}
+            """
+        )
+    if row_parts:
         try:
             rows = await conn.fetch(
                 f"""
-                SELECT '{source}'::text AS source,
-                       count(*)::bigint AS records,
-                       {("count(*)" if label == "messages" else "0")}::bigint AS messages,
+                WITH row_parts AS (
+                    {" UNION ALL ".join(row_parts)}
+                )
+                SELECT source,
+                       sum(records)::bigint AS records,
+                       sum(messages)::bigint AS messages,
                        0::bigint AS media_items,
-                       max({column}) AS latest_record_at,
+                       max(latest_record_at) AS latest_record_at,
                        NULL::timestamptz AS latest_media_at
-                FROM {table}
-                WHERE {column} >= {since_sql}
-                  {f"AND {column} < {before_sql}" if before_sql else ""}
+                FROM row_parts
+                GROUP BY source
                 """,
-                timeout=max(0.1, min(_SOURCE_CONTENT_PART_TIMEOUT_SECONDS, remaining)),
+                timeout=max(1.0, _SOURCE_CONTENT_SUMMARY_BUDGET_SECONDS),
             )
             for row in rows:
-                merge(source, dict(row))
-        except Exception as exc:  # noqa: BLE001 - one slow source must not blank the summary
-            row_summary_slow_parts.append(f"{source}:{table}:{exc.__class__.__name__}")
+                merge(row["source"], dict(row))
+        except Exception as exc:  # noqa: BLE001 - keep media stats if row summary lags
+            row_summary_slow_parts.append(f"combined_row_summary:{exc.__class__.__name__}")
     if row_summary_slow_parts:
         logger.warning(
             "source content row summary skipped slow parts: %s",
