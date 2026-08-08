@@ -1176,6 +1176,69 @@ def _source_matrix_fallback_liveness_rows(detail: str) -> list[dict]:
     ]
 
 
+def _source_matrix_status_from_health(status: str | None) -> str:
+    normalized = str(status or "").strip().lower()
+    if normalized in {"running", "ok", "healthy", "idle"}:
+        return "live"
+    if normalized in {"degraded", "dead", "auth_paused", "stale"}:
+        return normalized
+    return "unknown"
+
+
+async def _source_matrix_fallback_liveness_rows_with_source_health(detail: str) -> list[dict]:
+    """Cheap fallback liveness from source_health when heavy matrix stats time out.
+
+    The full source matrix touches large per-source tables. During pg_dump or
+    other DB pressure those sections can miss the route timeout before any
+    payload cache exists. A short source_health-only query is much cheaper and
+    lets the dashboard say "running/degraded with last success age" instead of
+    rendering every source as blank unknown/zero.
+    """
+    rows = _source_matrix_fallback_liveness_rows(detail)
+    by_source = {row["source"]: row for row in rows}
+    pool = await get_pool()
+    conn = None
+    try:
+        conn = await asyncio.wait_for(pool.acquire(), timeout=1.5)
+        health_rows = await conn.fetch(
+            """
+            SELECT source, status, last_success_at, last_error, updated_at
+            FROM source_health
+            """,
+            timeout=1.5,
+        )
+    except Exception:
+        return rows
+    finally:
+        if conn is not None:
+            await _release_dashboard_conn(pool, conn, "source matrix fallback")
+
+    now = datetime.now(timezone.utc)
+    for health_row in health_rows:
+        health = dict(health_row)
+        row = by_source.get(str(health["source"]))
+        if row is None:
+            continue
+        last_success_at = health.get("last_success_at")
+        age_seconds = None
+        if last_success_at is not None:
+            if last_success_at.tzinfo is None:
+                last_success_at = last_success_at.replace(tzinfo=timezone.utc)
+            age_seconds = int(max(0, (now - last_success_at.astimezone(timezone.utc)).total_seconds()))
+        health_status = str(health.get("status") or "")
+        health_error = health.get("last_error")
+        row.update({
+            "status": _source_matrix_status_from_health(health_status),
+            "age_seconds": age_seconds,
+            "source_health_status": health_status or None,
+            "source_health_error": health_error or detail,
+            "source_health_last_success_at": last_success_at,
+            "source_health_updated_at": health.get("updated_at"),
+            "detail": health_error or detail,
+        })
+    return rows
+
+
 def _collectors_live_fallback_payload(exc: BaseException) -> dict:
     """Return stale/skeleton liveness when dashboard DB acquisition is saturated."""
     detail = f"collector live status unavailable: {exc.__class__.__name__}"
@@ -3952,13 +4015,14 @@ async def collectors_live(_user: dict = Depends(require_role("viewer"))):
     return payload
 
 
-def _source_matrix_unavailable_payload(error: str) -> dict:
+def _source_matrix_unavailable_payload(error: str, live_sources: list[dict] | None = None) -> dict:
     generated_at = datetime.now(timezone.utc)
     current_hour_started_at = generated_at.replace(minute=0, second=0, microsecond=0)
     previous_hour_started_at = current_hour_started_at - timedelta(hours=1)
-    live_sources = _source_matrix_fallback_liveness_rows(
-        "source matrix build timed out before a cache was available; showing known source skeleton"
-    )
+    if live_sources is None:
+        live_sources = _source_matrix_fallback_liveness_rows(
+            "source matrix build timed out before a cache was available; showing known source skeleton"
+        )
     browser_extension = _browser_extension_fallback_payload(error)
     rows = [
         _source_matrix_row(
@@ -4011,6 +4075,15 @@ def _source_matrix_unavailable_payload(error: str) -> dict:
     }
 
 
+async def _source_matrix_unavailable_payload_with_fast_health(error: str) -> dict:
+    detail = (
+        "source matrix build timed out before a cache was available; "
+        "showing fast source_health fallback"
+    )
+    live_sources = await _source_matrix_fallback_liveness_rows_with_source_health(detail)
+    return _source_matrix_unavailable_payload(error, live_sources)
+
+
 @app.get("/collectors/source-matrix")
 async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))):
     global _SOURCE_MATRIX_PAYLOAD_BUILD_TASK
@@ -4057,7 +4130,7 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
             })
             payload["cache"] = {"status": "stale", "age_seconds": int(now - cached_ts)}
             return payload
-        return _source_matrix_unavailable_payload("BuildInProgress")
+        return await _source_matrix_unavailable_payload_with_fast_health("BuildInProgress")
 
     if cached_payload is not None and now - cached_ts <= max(
         _SOURCE_MATRIX_PAYLOAD_CACHE_TTL_SECONDS,
@@ -4110,7 +4183,7 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
             "source matrix build timed out after %.1fs with no cache",
             max(1.0, _SOURCE_MATRIX_PAYLOAD_BUILD_TIMEOUT_SECONDS),
         )
-        return _source_matrix_unavailable_payload("TimeoutError")
+        return await _source_matrix_unavailable_payload_with_fast_health("TimeoutError")
     except Exception as exc:  # noqa: BLE001 - route should not hard-fail during DB pressure
         if _SOURCE_MATRIX_PAYLOAD_BUILD_TASK is build_task:
             _SOURCE_MATRIX_PAYLOAD_BUILD_TASK = None
@@ -4127,7 +4200,7 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
             })
             payload["cache"] = {"status": "stale", "age_seconds": int(now - cached_ts)}
             return payload
-        return _source_matrix_unavailable_payload(exc.__class__.__name__)
+        return await _source_matrix_unavailable_payload_with_fast_health(exc.__class__.__name__)
     _SOURCE_MATRIX_PAYLOAD_CACHE.update({"ts": time.time(), "payload": _copy_cache_value(payload)})
     payload["cache"] = {"status": "rebuilt", "age_seconds": 0}
     return payload
