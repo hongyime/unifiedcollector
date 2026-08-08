@@ -594,44 +594,39 @@ async def _source_content_summary(
         if row.get("media_stats_unavailable"):
             target["media_stats_unavailable"] = True
 
-    raw_parts = [
-        f"""
-        SELECT '{source}'::text AS source,
-               count(*)::bigint AS records,
-               {("count(*)" if label == "messages" else "0")}::bigint AS messages,
-               0::bigint AS media_items,
-               max({column}) AS latest_record_at,
-               NULL::timestamptz AS latest_media_at
-        FROM {table}
-        WHERE {column} >= {since_sql}
-          {f"AND {column} < {before_sql}" if before_sql else ""}
-        """
-        for source, table, column, label in _INGESTION_CONTENT_PARTS
-        if table in existing_tables
-    ]
-
-    if raw_parts:
+    row_deadline = time.monotonic() + max(1.0, _SOURCE_CONTENT_SUMMARY_BUDGET_SECONDS)
+    row_summary_slow_parts: list[str] = []
+    for source, table, column, label in _INGESTION_CONTENT_PARTS:
+        if table not in existing_tables:
+            continue
+        remaining = row_deadline - time.monotonic()
+        if remaining <= 0:
+            row_summary_slow_parts.append(f"{source}:{table}:budget")
+            continue
         try:
             rows = await conn.fetch(
                 f"""
-                WITH raw AS (
-                    {" UNION ALL ".join(raw_parts)}
-                )
-                SELECT source,
-                       COALESCE(sum(records), 0)::bigint AS records,
-                       COALESCE(sum(messages), 0)::bigint AS messages,
-                       COALESCE(sum(media_items), 0)::bigint AS media_items,
-                       max(latest_record_at) AS latest_record_at,
-                       max(latest_media_at) AS latest_media_at
-                FROM raw
-                GROUP BY source
+                SELECT '{source}'::text AS source,
+                       count(*)::bigint AS records,
+                       {("count(*)" if label == "messages" else "0")}::bigint AS messages,
+                       0::bigint AS media_items,
+                       max({column}) AS latest_record_at,
+                       NULL::timestamptz AS latest_media_at
+                FROM {table}
+                WHERE {column} >= {since_sql}
+                  {f"AND {column} < {before_sql}" if before_sql else ""}
                 """,
-                timeout=max(1.0, _SOURCE_CONTENT_SUMMARY_BUDGET_SECONDS),
+                timeout=max(0.1, min(_SOURCE_CONTENT_PART_TIMEOUT_SECONDS, remaining)),
             )
             for row in rows:
-                merge(row["source"], dict(row))
-        except Exception as exc:  # noqa: BLE001 - source matrix should degrade, not fail
-            logger.warning("source content row summary failed: %s", exc.__class__.__name__)
+                merge(source, dict(row))
+        except Exception as exc:  # noqa: BLE001 - one slow source must not blank the summary
+            row_summary_slow_parts.append(f"{source}:{table}:{exc.__class__.__name__}")
+    if row_summary_slow_parts:
+        logger.warning(
+            "source content row summary skipped slow parts: %s",
+            ", ".join(row_summary_slow_parts[:6]),
+        )
 
     if include_media and "media_items" in existing_tables:
         try:

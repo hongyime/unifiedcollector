@@ -1179,10 +1179,7 @@ async def test_source_content_summary_groups_rows_and_keeps_media_separate(monke
 
         async def fetch(self, query, *args, timeout=None):
             self.content_queries.append((query, timeout))
-            if "WITH raw AS" in query:
-                assert "UNION ALL" in query
-                assert "telegram_messages" in query
-                assert "youtube_videos" in query
+            if "FROM telegram_messages" in query:
                 assert "FROM media_items" not in query
                 return [
                     {
@@ -1193,6 +1190,10 @@ async def test_source_content_summary_groups_rows_and_keeps_media_separate(monke
                         "latest_record_at": datetime(2026, 7, 28, 1, 5, tzinfo=timezone.utc),
                         "latest_media_at": None,
                     },
+                ]
+            if "FROM youtube_videos" in query:
+                assert "FROM media_items" not in query
+                return [
                     {
                         "source": "youtube",
                         "records": 8,
@@ -1226,9 +1227,8 @@ async def test_source_content_summary_groups_rows_and_keeps_media_separate(monke
     conn = FakeConn()
     out = await _source_content_summary(conn, "now() - interval '24 hours'")
 
-    assert len(conn.content_queries) == 2
-    assert conn.content_queries[0][1] >= 1.0
-    assert conn.content_queries[1][1] >= 1.0
+    assert len(conn.content_queries) == 3
+    assert all(timeout > 0 for _query, timeout in conn.content_queries)
     assert out["telegram"]["records"] == 12
     assert out["telegram"]["messages"] == 12
     assert out["telegram"]["media_items"] == 3
