@@ -141,6 +141,24 @@ def test_source_matrix_blocker_browser_watchdog_gives_tab_action():
     assert detail_only_blocker["summary"] == "browser content progress is 14612s old (> 3600s)"
     assert "refresh the x browser tab" in detail_only_blocker["next_action"]
 
+    auth_wall_blocker = _source_matrix_blocker(
+        _source(
+            source="x",
+            status="degraded",
+            source_health_status="degraded",
+            source_health_error="browser capture stalled: browser content progress is 14612s old (> 3600s) (watchdog)",
+            browser_url="https://x.com/i/flow/login?redirect_after_login=%2Fhome",
+            browser_content_stale=True,
+        ),
+        rate_row=None,
+        cursor_row=None,
+        extension_issues=[],
+    )
+
+    assert auth_wall_blocker["kind"] == "auth_wall"
+    assert "login flow" in auth_wall_blocker["summary"]
+    assert "Do not chase Docker logs" in auth_wall_blocker["next_action"]
+
     cleared_blocker = _source_matrix_blocker(
         _source(
             source="x",

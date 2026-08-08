@@ -366,6 +366,9 @@ async def compute_liveness(conn) -> list[dict]:
             "browser_extension_version": (
                 browser_heartbeat.get("extension_version") if browser_heartbeat else None
             ),
+            "browser_url": (
+                browser_heartbeat.get("url") if browser_heartbeat else None
+            ),
             "browser_health_status": (
                 browser_heartbeat.get("health_status") if browser_heartbeat else None
             ),

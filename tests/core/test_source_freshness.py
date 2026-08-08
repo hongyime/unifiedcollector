@@ -237,6 +237,7 @@ async def test_hybrid_browser_source_stays_live_when_extension_heartbeat_is_stal
     assert rows[0]["age_seconds"] == 60
     assert rows[0]["browser_heartbeat_age_seconds"] == 7200
     assert rows[0]["browser_extension_version"] == "1.21.58"
+    assert rows[0]["browser_url"] == "chrome-extension://id/background.js"
     assert "Chrome extension heartbeat is 7200s old" in rows[0]["detail"]
     assert "browser capture warning" in rows[0]["detail"]
 

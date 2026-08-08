@@ -1769,6 +1769,8 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
     status = source_row.get("status")
     bridge_status = source_row.get("bridge_status")
     source_health_error = source_row.get("source_health_error") or ""
+    browser_url = str(source_row.get("browser_url") or "")
+    browser_url_lc = browser_url.lower()
     if source == "whatsapp" and bridge_status in {"unpaired", "unreachable"}:
         return {
             "kind": "whatsapp_pairing",
@@ -1961,6 +1963,18 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
         or "browser content progress is" in detail_lc
     ):
         platform = str(source or "this platform")
+        if source == "x" and "/i/flow/login" in browser_url_lc:
+            return {
+                "kind": "auth_wall",
+                "severity": "warning",
+                "summary": (
+                    "X browser tab is on the login flow, so the extension is alive but cannot scrape timeline content."
+                ),
+                "next_action": (
+                    f"Log in or restore the X session in the browser tab at {browser_url}, then press Scrape now on Social Tabs. "
+                    "Do not chase Docker logs for this one; the blocker is the interactive browser session."
+                ),
+            }
         return {
             "kind": "browser_capture_stalled",
             "severity": "warning",
