@@ -885,6 +885,29 @@ def test_source_matrix_row_labels_x_login_flow_as_auth_wall_even_with_fresh_hear
         assert "login flow" in row["blocker"]["summary"]
 
 
+def test_source_matrix_row_suppresses_x_auth_wall_when_current_posts_flow():
+    row = _source_matrix_row(
+        _source(
+            source="x",
+            browser_url="https://x.com/i/jf/onboarding/web?redirect_after_login=%2Fhome&mode=login",
+            browser_health_status="content_script_boot",
+            browser_health_reason="first-boot ping before mainLoop starts",
+            browser_content_stale=False,
+        ),
+        current_content={"records": 4, "messages": 0, "media_items": 0},
+        current_rate=None,
+        day_content={"records": 1241, "messages": 0, "media_items": 0},
+        day_rate=None,
+        media_total={"total_media_items": 799},
+        cursor_row=None,
+        extension_issues=[],
+    )
+
+    assert row["status_label"] == "live"
+    assert row["status_severity"] == "ok"
+    assert row["blocker"]["kind"] == "none"
+
+
 def test_source_matrix_row_suppresses_stale_browser_content_when_current_media_flows():
     row = _source_matrix_row(
         _source(source="threads"),
