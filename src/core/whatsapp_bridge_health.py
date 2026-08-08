@@ -58,7 +58,8 @@ def summarize_whatsapp_bridge_health(states: list[dict[str, Any]]) -> dict[str, 
     """Summarize bridge states for collection health.
 
     Returned status:
-      paired      - at least one bridge is ready/connected.
+      paired      - every reachable/expected bridge is ready/connected.
+      partial     - at least one bridge is ready, but another slot needs QR/session attention.
       unpaired    - bridges are reachable but waiting for QR/session pairing.
       unreachable - no bridge endpoint responded.
       degraded    - reachable, but not paired and not clearly awaiting QR.
@@ -83,12 +84,32 @@ def summarize_whatsapp_bridge_health(states: list[dict[str, Any]]) -> dict[str, 
         or str(s.get("status") or "").lower() in qr_waiting_statuses
         or "qr" in str(s.get("last_disconnect_reason") or "").lower()
     ]
+    waiting_labels = [
+        str(s.get("session_name") or s.get("bridge") or "?")
+        for s in qr_waiting
+    ]
 
     if ready:
+        if qr_waiting or len(ready) < total:
+            detail = f"{len(ready)} WhatsApp bridge slot(s) paired and ready"
+            if waiting_labels:
+                detail += f"; {len(qr_waiting)} slot(s) waiting for QR/session pairing: {', '.join(waiting_labels)}"
+            elif len(ready) < total:
+                detail += f"; {total - len(ready)} slot(s) not ready"
+            detail += ". Collection continues through the paired slot(s), but coverage is incomplete."
+            return {
+                "status": "partial",
+                "ready_count": len(ready),
+                "reachable_count": len(reachable),
+                "waiting_count": len(qr_waiting),
+                "total": total,
+                "detail": detail,
+            }
         return {
             "status": "paired",
             "ready_count": len(ready),
             "reachable_count": len(reachable),
+            "waiting_count": 0,
             "total": total,
             "detail": f"{len(ready)} WhatsApp bridge slot(s) paired and ready.",
         }
@@ -97,6 +118,7 @@ def summarize_whatsapp_bridge_health(states: list[dict[str, Any]]) -> dict[str, 
             "status": "unreachable",
             "ready_count": 0,
             "reachable_count": 0,
+            "waiting_count": 0,
             "total": total,
             "detail": "No WhatsApp bridge HTTP endpoint is reachable.",
         }
@@ -105,6 +127,7 @@ def summarize_whatsapp_bridge_health(states: list[dict[str, Any]]) -> dict[str, 
             "status": "unpaired",
             "ready_count": 0,
             "reachable_count": len(reachable),
+            "waiting_count": len(qr_waiting),
             "total": total,
             "detail": "WhatsApp bridges are waiting for QR pairing; no live WhatsApp messages will collect until a bridge is paired.",
         }
@@ -112,6 +135,7 @@ def summarize_whatsapp_bridge_health(states: list[dict[str, Any]]) -> dict[str, 
         "status": "degraded",
         "ready_count": 0,
         "reachable_count": len(reachable),
+        "waiting_count": 0,
         "total": total,
         "detail": "WhatsApp bridge endpoints respond, but no bridge reports a ready collection session.",
     }

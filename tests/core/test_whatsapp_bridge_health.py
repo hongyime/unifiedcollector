@@ -47,14 +47,27 @@ def test_whatsapp_bridge_summary_treats_qr_refresh_states_as_unpaired():
     assert summary["status"] == "unpaired"
 
 
-def test_whatsapp_bridge_summary_reports_paired_if_any_slot_ready():
+def test_whatsapp_bridge_summary_reports_partial_if_only_some_slots_ready():
     summary = summarize_whatsapp_bridge_health([
         {"bridge": "1", "ok": True, "status": "ready", "whatsapp_ready": True},
         {"bridge": "2", "ok": True, "status": "awaiting_scan", "qr_available": True},
     ])
 
-    assert summary["status"] == "paired"
+    assert summary["status"] == "partial"
     assert summary["ready_count"] == 1
+    assert summary["waiting_count"] == 1
+    assert "coverage is incomplete" in summary["detail"]
+
+
+def test_whatsapp_bridge_summary_reports_paired_when_all_slots_ready():
+    summary = summarize_whatsapp_bridge_health([
+        {"bridge": "1", "ok": True, "status": "ready", "whatsapp_ready": True},
+        {"bridge": "2", "ok": True, "status": "ready", "whatsapp_ready": True},
+    ])
+
+    assert summary["status"] == "paired"
+    assert summary["ready_count"] == 2
+    assert summary["waiting_count"] == 0
 
 
 def test_whatsapp_bridge_summary_does_not_call_livez_fallback_unreachable():

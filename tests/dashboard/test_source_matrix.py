@@ -72,6 +72,29 @@ def test_source_matrix_blocker_prioritizes_whatsapp_pairing():
     assert "QR" in blocker["next_action"]
 
 
+def test_source_matrix_blocker_reports_partial_whatsapp_pairing():
+    blocker = _source_matrix_blocker(
+        _source(
+            source="whatsapp",
+            status="live",
+            bridge_status="partial",
+            bridge_detail=(
+                "1 WhatsApp bridge slot(s) paired and ready; "
+                "1 slot(s) waiting for QR/session pairing: 1. "
+                "Collection continues through the paired slot(s), but coverage is incomplete."
+            ),
+        ),
+        rate_row=None,
+        cursor_row=None,
+        extension_issues=[],
+    )
+
+    assert blocker["kind"] == "whatsapp_partial_pairing"
+    assert blocker["severity"] == "warning"
+    assert "Collection is still running" in blocker["next_action"]
+    assert "coverage is incomplete" in blocker["summary"]
+
+
 def test_source_matrix_blocker_explains_paired_whatsapp_without_messages():
     blocker = _source_matrix_blocker(
         _source(

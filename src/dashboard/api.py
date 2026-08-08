@@ -1773,6 +1773,16 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
     browser_url_lc = browser_url.lower()
     browser_health_status = str(source_row.get("browser_health_status") or "")
     browser_health_reason = str(source_row.get("browser_health_reason") or "")
+    if source == "whatsapp" and bridge_status == "partial":
+        return {
+            "kind": "whatsapp_partial_pairing",
+            "severity": "warning",
+            "summary": source_row.get("bridge_detail") or "WhatsApp collection is running with only some bridge slots paired.",
+            "next_action": (
+                "Collection is still running from the paired WhatsApp bridge. "
+                "Open Link WhatsApp and scan the unpaired slot if you expect that second account/device to collect too."
+            ),
+        }
     if source == "whatsapp" and bridge_status in {"unpaired", "unreachable"}:
         return {
             "kind": "whatsapp_pairing",
@@ -2960,7 +2970,7 @@ async def _with_bridge_overrides(sources: list[dict]) -> tuple[list[dict], dict 
                 source["whatsapp_bridges"] = bridge_summary.get("bridges", [])
                 if bridge_status in {"unpaired", "unreachable"}:
                     source["status"] = bridge_status
-                elif source.get("status") == "live":
+                elif bridge_status != "partial" and source.get("status") == "live":
                     source["status"] = "degraded"
                 source["detail"] = summary.get("detail") or source.get("detail")
                 break
