@@ -87,4 +87,25 @@ def test_recoverable_telethon_warning_filter_only_drops_wrong_session_id():
     filt = _RecoverableTelethonWarningFilter()
 
     assert filt.filter(_record("Security error while unpacking a received message: Server replied with a wrong session ID")) is False
+    assert filt.filter(_record(
+        "Server closed the connection: 0 bytes read on a total of 8 expected bytes",
+        logger_name="telethon.network.connection.connection",
+    )) is False
     assert filt.filter(_record("Attempt 1 at connecting failed: TimeoutError")) is True
+
+
+def test_recoverable_telethon_warning_filter_installs_on_connection_logger(monkeypatch):
+    from src.worker import (
+        _RecoverableTelethonWarningFilter,
+        _install_recoverable_telethon_warning_filter,
+    )
+
+    monkeypatch.setenv("COLLECTOR_SUPPRESS_RECOVERABLE_TELETHON_WARNINGS", "true")
+    target = logging.getLogger("telethon.network.connection.connection")
+    original = list(target.filters)
+    try:
+        target.filters = []
+        assert _install_recoverable_telethon_warning_filter() is True
+        assert any(isinstance(f, _RecoverableTelethonWarningFilter) for f in target.filters)
+    finally:
+        target.filters = original

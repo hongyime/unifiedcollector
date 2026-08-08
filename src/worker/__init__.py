@@ -50,6 +50,7 @@ class _FatalSpinLogWatcher(logging.Handler):
     )
     RECOVERABLE_PATTERNS = (
         "server replied with a wrong session id",
+        "server closed the connection: 0 bytes read",
     )
     PATTERNS = FATAL_PATTERNS
 
@@ -211,7 +212,10 @@ def _install_recoverable_telethon_warning_filter() -> bool:
     if os.getenv("COLLECTOR_SUPPRESS_RECOVERABLE_TELETHON_WARNINGS", "true").lower() != "true":
         return False
     installed = False
-    for logger_name in ("telethon.network.mtprotosender",):
+    for logger_name in (
+        "telethon.network.mtprotosender",
+        "telethon.network.connection.connection",
+    ):
         target = logging.getLogger(logger_name)
         if any(isinstance(f, _RecoverableTelethonWarningFilter) for f in target.filters):
             continue
