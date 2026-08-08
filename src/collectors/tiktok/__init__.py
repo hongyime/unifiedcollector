@@ -536,6 +536,23 @@ class TiktokCollector(BaseCollector):
             0,
             int(os.getenv("TIKTOK_COOLDOWN_PROFILE_ONLY_PER_CYCLE", "25") or "0"),
         )
+        self._defer_unknown_follower_media_during_metadata_cooldown = (
+            os.getenv(
+                "TIKTOK_DEFER_UNKNOWN_FOLLOWER_MEDIA_DURING_METADATA_COOLDOWN",
+                "true",
+            ).lower()
+            == "true"
+        )
+        self._unknown_follower_metadata_cooldown_backoff_seconds = max(
+            0,
+            int(
+                os.getenv(
+                    "TIKTOK_UNKNOWN_FOLLOWER_METADATA_COOLDOWN_BACKOFF_SECONDS",
+                    "1800",
+                )
+                or "0"
+            ),
+        )
         self._spider_queue_per_cycle = max(0, int(os.getenv("TIKTOK_SPIDER_QUEUE_PER_CYCLE", "80")))
         self._spider_first = os.getenv("TIKTOK_SPIDER_QUEUE_FIRST", "true").lower() == "true"
         self._spider_processing_stale_minutes = max(
@@ -1128,7 +1145,8 @@ class TiktokCollector(BaseCollector):
         self._last_gallery_dl_empty_user = None
         self._last_gallery_dl_timeout_user = None
         known_followers = await self._stored_followers_count(username)
-        if self._profile_metadata_cooling_down():
+        metadata_cooling_down = self._profile_metadata_cooling_down()
+        if metadata_cooling_down:
             remaining = int(self._profile_metadata_cooldown_until - time.time())
             reason = self._profile_metadata_cooldown_reason or "profile metadata cooldown"
             logger.info(
@@ -1168,6 +1186,24 @@ class TiktokCollector(BaseCollector):
             )
             await self._record_profile_access(username, True, is_private=False)
             return "profile_only"
+        if (
+            cap
+            and metadata_cooling_down
+            and followers_count is None
+            and self._defer_unknown_follower_media_during_metadata_cooldown
+        ):
+            logger.info(
+                "tiktok: defer media fallback for %s while profile metadata is cooling down "
+                "(unknown followers; cap %d)",
+                username,
+                cap,
+            )
+            self._record_profile_backoff(
+                username,
+                reason="metadata_cooldown_unknown_followers",
+                seconds=self._unknown_follower_metadata_cooldown_backoff_seconds,
+            )
+            return "delayed"
 
         backoff_remaining = self._profile_backoff_remaining(username)
         if backoff_remaining > 0:
