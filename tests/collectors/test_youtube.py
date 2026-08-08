@@ -25,6 +25,7 @@ from src.collectors.youtube import (
     YoutubeCollector,
     parse_iso8601_duration,
     _safe_log_text,
+    _classify_ytdlp_media_failure,
 )
 
 
@@ -1114,6 +1115,71 @@ async def test_download_videos_uses_configured_hard_timeout(monkeypatch):
     await coll._download_videos_via_yt_dlp("UC_a", "Channel A", ["v1"])
 
     assert ytdlp.await_args.kwargs["timeout"] == 123
+
+
+def test_classify_ytdlp_media_failure_expected_states():
+    assert _classify_ytdlp_media_failure("ERROR: [youtube] abc: This live event will begin in a few moments.") == (
+        "upcoming_live",
+        "info",
+        6,
+    )
+    assert _classify_ytdlp_media_failure("ERROR: [youtube] abc: Offline.") == (
+        "live_offline",
+        "info",
+        24,
+    )
+    assert _classify_ytdlp_media_failure("ERROR: [youtube] abc: Private video.") == (
+        "unavailable",
+        "info",
+        168,
+    )
+    assert _classify_ytdlp_media_failure("curl: (28) Connection timed out after 30001 milliseconds") == (
+        "transient_network",
+        "warning",
+        2,
+    )
+    assert _classify_ytdlp_media_failure("unexpected extractor failure") == (
+        "failed",
+        "warning",
+        0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_download_videos_marks_upcoming_live_without_warning(monkeypatch, caplog, tmp_path):
+    coll = _new_collector(monkeypatch, YOUTUBE_DOWNLOAD_DELAY="0")
+    coll._filter_video_ids_for_download = AsyncMock(return_value=(["v1"], 0))
+    coll._filter_video_ids_already_archived = AsyncMock(return_value=(["v1"], 0))
+    coll._mark_video_media_attempt = AsyncMock()
+
+    from src.core import subprocess_downloader
+    from src.core.subprocess_downloader import DownloadResult
+
+    ytdlp = AsyncMock(return_value=DownloadResult(
+        returncode=1,
+        stdout="",
+        stderr="ERROR: [youtube] v1: This live event will begin in a few moments.",
+        files=[],
+        tempdir=tmp_path,
+        elapsed=1.0,
+    ))
+    monkeypatch.setattr(subprocess_downloader, "yt_dlp_download", ytdlp)
+
+    with caplog.at_level("INFO", logger="src.collectors.youtube"):
+        await coll._download_videos_via_yt_dlp("UC_a", "Channel A", ["v1"])
+
+    coll._mark_video_media_attempt.assert_awaited_once()
+    assert coll._mark_video_media_attempt.await_args.kwargs["status"] == "upcoming_live"
+    assert any(
+        record.levelname == "INFO"
+        and "youtube yt-dlp video download upcoming_live" in record.message
+        for record in caplog.records
+    )
+    assert not any(
+        record.levelname == "WARNING"
+        and "youtube yt-dlp video download" in record.message
+        for record in caplog.records
+    )
 
 
 @pytest.mark.asyncio

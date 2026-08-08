@@ -102,6 +102,16 @@ _YOUTUBE_PROGRESSIVE_FORMAT = (
     "best[ext=webm][vcodec!=none][acodec!=none]/"
     "best[vcodec!=none][acodec!=none]/best"
 )
+_YOUTUBE_EXPECTED_YTDLP_STATES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\blive event will begin\b", re.IGNORECASE), "upcoming_live"),
+    (re.compile(r"\bpremiere will begin\b", re.IGNORECASE), "upcoming_live"),
+    (re.compile(r"\boffline\b", re.IGNORECASE), "live_offline"),
+    (re.compile(r"\bprivate video\b", re.IGNORECASE), "unavailable"),
+    (re.compile(r"\bvideo unavailable\b", re.IGNORECASE), "unavailable"),
+    (re.compile(r"\bthis video is unavailable\b", re.IGNORECASE), "unavailable"),
+    (re.compile(r"\bmembers-only\b", re.IGNORECASE), "restricted"),
+    (re.compile(r"\bsign in to confirm your age\b", re.IGNORECASE), "restricted"),
+)
 
 
 def _safe_log_text(value) -> str:
@@ -110,6 +120,21 @@ def _safe_log_text(value) -> str:
     if not text and isinstance(value, BaseException):
         text = type(value).__name__
     return _SECRET_QUERY_PARAM_RE.sub(r"\1<redacted>", text)
+
+
+def _classify_ytdlp_media_failure(summary: str) -> tuple[str, str, int]:
+    """Return media_status, log_level, retry_delay_hours for a yt-dlp failure."""
+    text = summary or ""
+    for pattern, status in _YOUTUBE_EXPECTED_YTDLP_STATES:
+        if pattern.search(text):
+            if status == "upcoming_live":
+                return status, "info", 6
+            if status == "live_offline":
+                return status, "info", 24
+            return status, "info", 168
+    if re.search(r"\b(?:curl:\s*\(28\)|timed?\s*out|connection\s+timed\s+out)\b", text, re.IGNORECASE):
+        return "transient_network", "warning", 2
+    return "failed", "warning", 0
 
 
 def parse_iso8601_duration(duration_str: str) -> int:
@@ -1919,15 +1944,17 @@ class YoutubeCollector(BaseCollector):
                     )
                     if not result.ok and not result.cancelled:
                         reason = result.output_summary(400)
-                        logger.warning(
-                            "youtube yt-dlp video download failed for %s: rc=%s timed_out=%s output_tail=%s",
-                            url, result.returncode, result.timed_out, reason,
+                        status, log_level, retry_delay_hours = _classify_ytdlp_media_failure(reason)
+                        log = logger.info if log_level == "info" else logger.warning
+                        log(
+                            "youtube yt-dlp video download %s for %s: rc=%s timed_out=%s retry_delay_hours=%s output_tail=%s",
+                            status, url, result.returncode, result.timed_out, retry_delay_hours, reason,
                         )
                         m = re.search(r"watch\?v=([\w-]+)", url)
                         if m:
                             await self._mark_video_media_attempt(
                                 m.group(1),
-                                status="failed",
+                                status=status,
                                 reason=reason or f"yt-dlp rc={result.returncode}",
                             )
                         self._progress_count += 1  # tick watchdog so metadata-only runs don't look hung
