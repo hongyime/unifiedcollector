@@ -75,6 +75,10 @@ _SOURCE_MATRIX_PAYLOAD_BUILD_TASK: asyncio.Task | None = None
 _SOURCE_MATRIX_PAYLOAD_CACHE_TTL_SECONDS = float(os.getenv("SOURCE_MATRIX_PAYLOAD_CACHE_TTL_SECONDS", "10"))
 _SOURCE_MATRIX_PAYLOAD_STALE_SECONDS = float(os.getenv("SOURCE_MATRIX_PAYLOAD_STALE_SECONDS", "300"))
 _SOURCE_MATRIX_PAYLOAD_BUILD_TIMEOUT_SECONDS = float(os.getenv("SOURCE_MATRIX_PAYLOAD_BUILD_TIMEOUT_SECONDS", "15"))
+_SOURCE_MATRIX_PAYLOAD_CACHE_PATH = os.getenv(
+    "SOURCE_MATRIX_PAYLOAD_CACHE_PATH",
+    "/app/tmp/source_matrix_payload_cache.json",
+)
 _INGESTION_HOURLY_CACHE: dict[int, dict[str, object]] = {}
 _COLLECTORS_LIVE_CACHE: dict[str, object] = {"ts": 0.0, "payload": None}
 _COLLECTORS_LIVE_CACHE_TTL_SECONDS = int(os.getenv("COLLECTORS_LIVE_CACHE_TTL_SECONDS", "15"))
@@ -4361,12 +4365,58 @@ async def _source_matrix_unavailable_payload_with_fast_health(error: str) -> dic
     return _source_matrix_unavailable_payload(error, live_sources, browser_extension)
 
 
+def _source_matrix_payload_stale_limit_seconds() -> float:
+    return max(_SOURCE_MATRIX_PAYLOAD_CACHE_TTL_SECONDS, _SOURCE_MATRIX_PAYLOAD_STALE_SECONDS)
+
+
+def _load_persisted_source_matrix_payload(now: float | None = None) -> tuple[float, dict] | None:
+    now = time.time() if now is None else now
+    path = Path(_SOURCE_MATRIX_PAYLOAD_CACHE_PATH)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except Exception as exc:  # noqa: BLE001 - corrupt cache should not break dashboard
+        logger.info("source matrix persisted cache ignored: %s", exc.__class__.__name__)
+        return None
+
+    try:
+        ts = float(raw.get("ts") or 0.0)
+    except (TypeError, ValueError):
+        return None
+    payload = raw.get("payload")
+    if not isinstance(payload, dict) or ts <= 0:
+        return None
+    if now - ts > _source_matrix_payload_stale_limit_seconds():
+        return None
+    _SOURCE_MATRIX_PAYLOAD_CACHE.update({"ts": ts, "payload": _copy_cache_value(payload)})
+    return ts, _copy_cache_value(payload)
+
+
+def _persist_source_matrix_payload(ts: float, payload: dict) -> None:
+    path = Path(_SOURCE_MATRIX_PAYLOAD_CACHE_PATH)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(
+            json.dumps({"ts": ts, "payload": payload}, default=str, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        tmp.replace(path)
+    except Exception as exc:  # noqa: BLE001 - cache persistence is best-effort
+        logger.info("source matrix persisted cache write skipped: %s", exc.__class__.__name__)
+
+
 @app.get("/collectors/source-matrix")
 async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))):
     global _SOURCE_MATRIX_PAYLOAD_BUILD_TASK
     now = time.time()
     cached_payload = _SOURCE_MATRIX_PAYLOAD_CACHE.get("payload")
     cached_ts = float(_SOURCE_MATRIX_PAYLOAD_CACHE.get("ts") or 0.0)
+    if cached_payload is None:
+        persisted = _load_persisted_source_matrix_payload(now)
+        if persisted is not None:
+            cached_ts, cached_payload = persisted
     if (
         cached_payload is not None
         and _SOURCE_MATRIX_PAYLOAD_CACHE_TTL_SECONDS > 0
@@ -4387,17 +4437,17 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
         except Exception as exc:  # noqa: BLE001 - background cache refresh must fail soft
             logger.warning("source matrix background build failed: %s", exc.__class__.__name__)
             return
-        _SOURCE_MATRIX_PAYLOAD_CACHE.update({"ts": time.time(), "payload": _copy_cache_value(value)})
+        ts = time.time()
+        payload_copy = _copy_cache_value(value)
+        _SOURCE_MATRIX_PAYLOAD_CACHE.update({"ts": ts, "payload": payload_copy})
+        _persist_source_matrix_payload(ts, payload_copy)
 
     active_task = _SOURCE_MATRIX_PAYLOAD_BUILD_TASK
     if active_task is not None and active_task.done():
         _background_build_done(active_task)
         active_task = None
     if active_task is not None:
-        if cached_payload is not None and now - cached_ts <= max(
-            _SOURCE_MATRIX_PAYLOAD_CACHE_TTL_SECONDS,
-            _SOURCE_MATRIX_PAYLOAD_STALE_SECONDS,
-        ):
+        if cached_payload is not None and now - cached_ts <= _source_matrix_payload_stale_limit_seconds():
             payload = _copy_cache_value(cached_payload)
             payload.setdefault("errors", []).append({
                 "section": "source_matrix",
@@ -4409,10 +4459,7 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
             return payload
         return await _source_matrix_unavailable_payload_with_fast_health("BuildInProgress")
 
-    if cached_payload is not None and now - cached_ts <= max(
-        _SOURCE_MATRIX_PAYLOAD_CACHE_TTL_SECONDS,
-        _SOURCE_MATRIX_PAYLOAD_STALE_SECONDS,
-    ):
+    if cached_payload is not None and now - cached_ts <= _source_matrix_payload_stale_limit_seconds():
         build_task = asyncio.create_task(_collectors_source_matrix_payload())
         _SOURCE_MATRIX_PAYLOAD_BUILD_TASK = build_task
         build_task.add_done_callback(_background_build_done)
@@ -4438,10 +4485,7 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
             raise asyncio.TimeoutError
         payload = build_task.result()
     except asyncio.TimeoutError:
-        if cached_payload is not None and now - cached_ts <= max(
-            _SOURCE_MATRIX_PAYLOAD_CACHE_TTL_SECONDS,
-            _SOURCE_MATRIX_PAYLOAD_STALE_SECONDS,
-        ):
+        if cached_payload is not None and now - cached_ts <= _source_matrix_payload_stale_limit_seconds():
             payload = _copy_cache_value(cached_payload)
             payload.setdefault("errors", []).append({
                 "section": "source_matrix",
@@ -4464,10 +4508,7 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
     except Exception as exc:  # noqa: BLE001 - route should not hard-fail during DB pressure
         if _SOURCE_MATRIX_PAYLOAD_BUILD_TASK is build_task:
             _SOURCE_MATRIX_PAYLOAD_BUILD_TASK = None
-        if cached_payload is not None and now - cached_ts <= max(
-            _SOURCE_MATRIX_PAYLOAD_CACHE_TTL_SECONDS,
-            _SOURCE_MATRIX_PAYLOAD_STALE_SECONDS,
-        ):
+        if cached_payload is not None and now - cached_ts <= _source_matrix_payload_stale_limit_seconds():
             payload = _copy_cache_value(cached_payload)
             payload.setdefault("errors", []).append({
                 "section": "source_matrix",
@@ -4478,7 +4519,10 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
             payload["cache"] = {"status": "stale", "age_seconds": int(now - cached_ts)}
             return payload
         return await _source_matrix_unavailable_payload_with_fast_health(exc.__class__.__name__)
-    _SOURCE_MATRIX_PAYLOAD_CACHE.update({"ts": time.time(), "payload": _copy_cache_value(payload)})
+    ts = time.time()
+    payload_copy = _copy_cache_value(payload)
+    _SOURCE_MATRIX_PAYLOAD_CACHE.update({"ts": ts, "payload": payload_copy})
+    _persist_source_matrix_payload(ts, payload_copy)
     payload["cache"] = {"status": "rebuilt", "age_seconds": 0}
     return payload
 

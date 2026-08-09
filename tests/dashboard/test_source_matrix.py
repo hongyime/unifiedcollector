@@ -1776,3 +1776,64 @@ async def test_collectors_source_matrix_serves_stale_payload_on_timeout(monkeypa
     except asyncio.CancelledError:
         pass
     dashboard_api._SOURCE_MATRIX_PAYLOAD_BUILD_TASK = None
+
+
+@pytest.mark.asyncio
+async def test_collectors_source_matrix_uses_persisted_payload_after_restart(monkeypatch, tmp_path):
+    dashboard_api._SOURCE_MATRIX_PAYLOAD_BUILD_TASK = None
+    _SOURCE_MATRIX_PAYLOAD_CACHE.update({"ts": 0.0, "payload": None})
+    cache_path = tmp_path / "source_matrix_payload_cache.json"
+    ts = dashboard_api.time.time() - 30
+    cache_path.write_text(
+        dashboard_api.json.dumps({
+            "ts": ts,
+            "payload": {
+                "generated_at": "2026-08-08T00:00:00+00:00",
+                "sources": [{"source": "telegram", "current_hour": {"records": 12}}],
+                "errors": [],
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    started = asyncio.Event()
+
+    async def slow_build():
+        started.set()
+        await asyncio.sleep(10)
+        return {"sources": [{"source": "late"}], "errors": []}
+
+    monkeypatch.setattr(dashboard_api, "_SOURCE_MATRIX_PAYLOAD_CACHE_PATH", str(cache_path))
+    monkeypatch.setattr(dashboard_api, "_collectors_source_matrix_payload", slow_build)
+    monkeypatch.setattr(dashboard_api, "_SOURCE_MATRIX_PAYLOAD_CACHE_TTL_SECONDS", 0.01)
+    monkeypatch.setattr(dashboard_api, "_SOURCE_MATRIX_PAYLOAD_STALE_SECONDS", 60.0)
+
+    out = await collectors_source_matrix(_user={})
+
+    assert out["sources"] == [{"source": "telegram", "current_hour": {"records": 12}}]
+    assert out["cache"]["status"] == "stale"
+    assert out["errors"][-1]["error"] == "BackgroundRefresh"
+    assert dashboard_api._SOURCE_MATRIX_PAYLOAD_BUILD_TASK is not None
+    await asyncio.sleep(0)
+    assert started.is_set()
+    dashboard_api._SOURCE_MATRIX_PAYLOAD_BUILD_TASK.cancel()
+    try:
+        await dashboard_api._SOURCE_MATRIX_PAYLOAD_BUILD_TASK
+    except asyncio.CancelledError:
+        pass
+    dashboard_api._SOURCE_MATRIX_PAYLOAD_BUILD_TASK = None
+
+
+def test_source_matrix_persisted_payload_expiry(monkeypatch, tmp_path):
+    _SOURCE_MATRIX_PAYLOAD_CACHE.update({"ts": 0.0, "payload": None})
+    cache_path = tmp_path / "source_matrix_payload_cache.json"
+    cache_path.write_text(
+        dashboard_api.json.dumps({"ts": 100.0, "payload": {"sources": []}}),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(dashboard_api, "_SOURCE_MATRIX_PAYLOAD_CACHE_PATH", str(cache_path))
+    monkeypatch.setattr(dashboard_api, "_SOURCE_MATRIX_PAYLOAD_CACHE_TTL_SECONDS", 0.01)
+    monkeypatch.setattr(dashboard_api, "_SOURCE_MATRIX_PAYLOAD_STALE_SECONDS", 60.0)
+
+    assert dashboard_api._load_persisted_source_matrix_payload(now=200.0) is None
