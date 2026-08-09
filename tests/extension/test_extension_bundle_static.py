@@ -132,6 +132,8 @@ def test_extension_auto_reload_is_immediate_with_alarm_backup():
     background = _read("extension/background.js")
 
     assert 'const EXTENSION_AUTO_RELOAD_ALARM = "uc-extension-auto-reload"' in background
+    assert "const EXTENSION_AUTO_RELOAD_DEBOUNCE_MS = 30 * 1000" in background
+    assert "const EXTENSION_AUTO_RELOAD_MAX_ATTEMPTS = 8" in background
     assert "chrome.alarms.create(EXTENSION_AUTO_RELOAD_ALARM" in background
     schedule_block = background.split('"extension_auto_reload_scheduled"', 1)[1].split(
         "return true;",
