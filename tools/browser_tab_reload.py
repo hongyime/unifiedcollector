@@ -16,6 +16,7 @@ import os
 import sys
 import time
 import urllib.request
+import urllib.parse
 from pathlib import Path
 
 import websocket
@@ -29,6 +30,18 @@ CDP_HOST = os.getenv(
 REPO_ROOT = Path(__file__).resolve().parents[1]
 AUDIT_PATH = REPO_ROOT / "tmp" / "browser_tab_audit_result.json"
 PLAN_PATH = REPO_ROOT / "tmp" / "browser_tab_reload_plan.json"
+HARD_REOPEN_PLATFORMS = {
+    p.strip().lower()
+    for p in os.getenv("UC_BROWSER_HARD_REOPEN_PLATFORMS", "tiktok").split(",")
+    if p.strip()
+}
+HARD_REOPEN_URLS = {
+    "tiktok": [
+        "https://www.tiktok.com/following",
+        "https://www.tiktok.com/foryou",
+        "https://www.tiktok.com/explore",
+    ],
+}
 
 
 def _target_version() -> str:
@@ -39,6 +52,25 @@ def _target_version() -> str:
 def _list_targets() -> list[dict]:
     resp = urllib.request.urlopen(f"{CDP_HOST}/json/list", timeout=10)
     return json.loads(resp.read().decode("utf-8"))
+
+
+def _cdp_request(path: str, timeout: float = 8.0, method: str = "GET") -> tuple[bool, str]:
+    url = f"{CDP_HOST}{path}"
+    try:
+        req = urllib.request.Request(url, method=method)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+        return True, body[:500]
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _close_target(target_id: str) -> tuple[bool, str]:
+    return _cdp_request(f"/json/close/{urllib.parse.quote(str(target_id), safe='')}", timeout=8.0)
+
+
+def _open_url(url: str) -> tuple[bool, str]:
+    return _cdp_request(f"/json/new?{urllib.parse.quote(url, safe='')}", timeout=8.0, method="PUT")
 
 
 def _decide_reload(tab: dict, target_version: str) -> tuple[bool, str]:
@@ -114,8 +146,56 @@ def _target_disappeared(message: str) -> bool:
     return "no such target" in text or "target closed" in text or "target detached" in text
 
 
+def _load_previous_plan() -> list[dict]:
+    try:
+        with PLAN_PATH.open(encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def _platform_had_previous_unresponsive_reload(previous: list[dict], platform: str) -> bool:
+    for item in previous:
+        if str(item.get("platform") or "").lower() != platform:
+            continue
+        if item.get("action") == "reload" and "unresponsive" in str(item.get("reason") or "").lower():
+            return True
+    return False
+
+
+def _hard_reopen_platform(platform: str, plans: list[dict]) -> list[dict]:
+    results: list[dict] = []
+    for p in plans:
+        ok, msg = _close_target(p["target_id"])
+        results.append({**p, "action": "hard_reopen_close", "status": "ok" if ok else "fail", "detail": msg})
+        print(f"  close  {platform:10} {p['target_id'][:12]} ... {'OK' if ok else 'FAIL'}: {msg[:160]}")
+        time.sleep(0.5)
+    for url in HARD_REOPEN_URLS.get(platform, []):
+        ok, msg = _open_url(url)
+        results.append({
+            "platform": platform,
+            "target_id": None,
+            "url": url,
+            "ws": None,
+            "reason": "reopen canonical tab after repeated unresponsive reload",
+            "action": "hard_reopen_open",
+            "auth_wall": False,
+            "heap_mb": None,
+            "cs": None,
+            "cs_version": None,
+            "responsive_main": None,
+            "status": "ok" if ok else "fail",
+            "detail": msg,
+        })
+        print(f"  open   {platform:10} {url[:80]} ... {'OK' if ok else 'FAIL'}: {msg[:160]}")
+        time.sleep(0.8)
+    return results
+
+
 def main():
     target_version = _target_version()
+    previous_plan = _load_previous_plan()
     with AUDIT_PATH.open(encoding="utf-8") as f:
         audit = json.load(f)
 
@@ -143,6 +223,18 @@ def main():
                 "responsive_main": tab.get("responsive_main"),
             })
 
+    hard_reopen_platforms: set[str] = set()
+    for platform in HARD_REOPEN_PLATFORMS:
+        platform_plans = [p for p in plan if p["platform"] == platform and not p["auth_wall"]]
+        if not platform_plans:
+            continue
+        unresponsive = [
+            p for p in platform_plans
+            if p["action"] == "reload" and "unresponsive" in str(p["reason"]).lower()
+        ]
+        if len(unresponsive) == len(platform_plans) and _platform_had_previous_unresponsive_reload(previous_plan, platform):
+            hard_reopen_platforms.add(platform)
+
     for p in plan:
         marker = "RELOAD" if p["action"] == "reload" else "skip"
         print(f"  [{marker:6}] {p['platform']:10} {p['target_id'][:12]}  cs={p['cs']}  ver={p['cs_version']}  resp={p['responsive_main']}  heap={p['heap_mb']}  reason={p['reason']}")
@@ -151,7 +243,16 @@ def main():
 
     print("# Executing reloads sequentially...")
     results = []
+    for platform in sorted(hard_reopen_platforms):
+        platform_plans = [p for p in plan if p["platform"] == platform and not p["auth_wall"]]
+        if not platform_plans:
+            continue
+        print(f"  hard reopen {platform}: repeated unresponsive reloads; closing stale tabs and opening canonical tabs")
+        results.extend(_hard_reopen_platform(platform, platform_plans))
+
     for p in plan:
+        if p["platform"] in hard_reopen_platforms and not p["auth_wall"]:
+            continue
         if p["action"] != "reload":
             results.append({**p, "status": "skipped"})
             continue
