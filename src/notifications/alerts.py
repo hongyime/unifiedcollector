@@ -926,7 +926,8 @@ def _section_browser_ingest(snapshot: dict) -> list[str] | None:
                     f"; Chrome has {int(chrome_processes):,} background process"
                     f"{'' if int(chrome_processes) == 1 else 'es'} and no visible window. "
                     "Close Chrome from Task Manager or restart the Windows Chrome session, "
-                    "then run <code>scripts\\start-scraper-chrome-cdp.ps1</code>"
+                    "then run <code>scripts\\start-scraper-chrome-cdp.ps1 "
+                    "-CloseExistingIfNoVisibleWindows -NoOpenAll -OpenIds x -NoTest</code>"
                 )
             if age is not None:
                 detail += f"; checked {_humanize_age(int(age or 0))} ago"
