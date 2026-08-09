@@ -20,6 +20,18 @@ function Write-LoopLog($message) {
     Add-Content -LiteralPath $log -Value "[$stamp] $message"
 }
 
+if (Test-Path -LiteralPath $pidPath) {
+    $oldPid = Get-Content -LiteralPath $pidPath -ErrorAction SilentlyContinue | Select-Object -First 1
+    $parsedPid = 0
+    if ([int]::TryParse([string]$oldPid, [ref]$parsedPid) -and $parsedPid -gt 0) {
+        $existing = Get-Process -Id $parsedPid -ErrorAction SilentlyContinue
+        if ($existing) {
+            Write-LoopLog "loop already running as pid=$parsedPid; refusing duplicate direct start pid=$PID"
+            exit 0
+        }
+    }
+}
+
 Set-Content -LiteralPath $pidPath -Value $PID
 Write-LoopLog "loop start pid=$PID interval=${IntervalMinutes}m initial_delay=${InitialDelaySeconds}s"
 

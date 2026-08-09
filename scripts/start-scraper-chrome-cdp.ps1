@@ -7,6 +7,7 @@ param(
     [switch]$CloseExistingIfNoVisibleWindows,
     [switch]$FallbackOpenControlIfCleanupBlocked,
     [string[]]$OpenIds = @(),
+    [switch]$OpenAll,
     [switch]$NoOpenAll,
     [switch]$NoScrape,
     [switch]$NoTest,
@@ -112,7 +113,10 @@ if ($cdpAlreadyUp) {
 }
 
 $tabsParams = [System.Collections.Generic.List[string]]::new()
-if (-not $NoOpenAll -and $OpenIds.Count -eq 0) {
+if ($FallbackOpenControlIfCleanupBlocked -and $OpenIds.Count -eq 0 -and -not $OpenAll) {
+    $NoOpenAll = $true
+}
+if ($OpenAll -and -not $NoOpenAll -and $OpenIds.Count -eq 0) {
     $tabsParams.Add("openAll=1")
 }
 if ($OpenIds.Count -gt 0) {
