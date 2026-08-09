@@ -690,6 +690,57 @@ async def test_browser_extension_payload_content_gap_ignores_manual_backend_prob
 
 
 @pytest.mark.asyncio
+async def test_browser_extension_payload_promotes_recoverable_shell_to_page_error(monkeypatch):
+    monkeypatch.setenv("UC_EXTENSION_EXPECTED_VERSION", "1.23.53")
+
+    class FakeConn:
+        async def fetchval(self, query: str, timeout: int | None = None):
+            if "dm_hook_heartbeat" in query:
+                return None
+            if "browser_ingest_events" in query:
+                return "browser_ingest_events"
+            if "tiktok_browser_media_candidates" in query:
+                return None
+            if "tiktok_browser_revisit_queue" in query:
+                return None
+            if "browser_media_candidates" in query:
+                return "browser_media_candidates"
+            if "browser_media_revisit_queue" in query:
+                return None
+            raise AssertionError(query)
+
+        async def fetch(self, query: str, *args, timeout: int | None = None):
+            if "WITH selected(platform) AS" in query:
+                return [
+                    {
+                        "platform": "x",
+                        "heartbeat_at": datetime(2026, 8, 9, tzinfo=timezone.utc),
+                        "heartbeat_age_seconds": 20,
+                        "last_content_at": datetime(2026, 8, 8, tzinfo=timezone.utc),
+                        "content_age_seconds": 7200,
+                        "url": "https://x.com/home",
+                        "health_status": "recoverable_error_shell",
+                        "health_reason": "try_again_empty_state",
+                        "extension_version": "1.23.53",
+                        "content_counts": {"links": 0, "images": 1, "videos": 0, "articles": 0},
+                    }
+                ]
+            if "FROM browser_media_candidates" in query:
+                return []
+            if "FROM browser_ingest_events" in query:
+                return []
+            raise AssertionError(query)
+
+    payload = await _browser_extension_payload(FakeConn())
+
+    page_errors = [issue for issue in payload["issues"] if issue["kind"] == "browser_page_error"]
+    assert len(page_errors) == 1
+    assert page_errors[0]["platform"] == "x"
+    assert page_errors[0]["health_reason"] == "try_again_empty_state"
+    assert page_errors[0]["content_counts"] == {"links": 0, "images": 1, "videos": 0, "articles": 0}
+
+
+@pytest.mark.asyncio
 async def test_browser_extension_payload_includes_media_candidate_diagnostics(monkeypatch):
     monkeypatch.setenv("UC_EXTENSION_EXPECTED_VERSION", "1.21.46")
 

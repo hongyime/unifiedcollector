@@ -503,6 +503,33 @@ def test_source_matrix_blocker_reports_browser_content_stale_without_reload_firs
     assert "forced scrape pass" in blocker["next_action"]
 
 
+def test_source_matrix_blocker_reports_browser_page_error_shell():
+    blocker = _source_matrix_blocker(
+        _source(source="x"),
+        rate_row=None,
+        cursor_row=None,
+        extension_issues=[
+            {
+                "platform": "x",
+                "kind": "browser_page_error",
+                "detail": "Browser tab is alive, but the page is showing a recoverable error shell.",
+                "heartbeat_age_seconds": 20,
+                "content_age_seconds": 7200,
+                "health_status": "recoverable_error_shell",
+                "health_reason": "try_again_empty_state",
+                "content_counts": {"links": 0, "images": 1, "videos": 0, "articles": 0},
+                "url": "https://x.com/home",
+            }
+        ],
+    )
+
+    assert blocker["kind"] == "browser_page_error"
+    assert "try_again_empty_state" in blocker["summary"]
+    assert "Content counts" in blocker["summary"]
+    assert "clear the visible page error" in blocker["next_action"]
+    assert "Reload the unpacked extension only if" in blocker["next_action"]
+
+
 def test_source_matrix_blocker_prioritizes_stale_content_over_old_extension_signal():
     blocker = _source_matrix_blocker(
         _source(source="x"),

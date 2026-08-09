@@ -2207,6 +2207,7 @@ def _source_matrix_primary_extension_issue(extension_issues: list[dict]) -> dict
         return None
     priority = {
         "hook_stale": 0,
+        "browser_page_error": 1,
         "browser_content_stale": 1,
         "browser_heartbeat_stale": 2,
         "extension_version_mismatch": 9,
@@ -2476,6 +2477,18 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
                 f"{' (' + content_age + ' old)' if content_age else ''}."
                 f"{' Expected within ' + stale_after + '.' if stale_after else ''}"
             )
+        elif issue.get("kind") == "browser_page_error":
+            heartbeat_age = _short_age(issue.get("heartbeat_age_seconds"))
+            platform = str(issue.get("platform") or source or "this platform")
+            health_reason = issue.get("health_reason") or "recoverable error shell"
+            counts = issue.get("content_counts")
+            detail = (
+                f"{platform}: browser tab is alive"
+                f"{' (' + heartbeat_age + ' heartbeat)' if heartbeat_age else ''}, "
+                f"but the page is showing {health_reason} instead of usable content."
+            )
+            if counts:
+                detail = f"{detail} Content counts: {counts}."
         if age_text:
             detail = f"{detail} Last seen {age_text} ago."
         if issue.get("kind") == "hook_stale":
@@ -2512,6 +2525,14 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
                 f"The extension is alive, so do not reload it first. The ingest bridge will ask the {platform} tab "
                 "to run one forced scrape pass on the next heartbeat. If this row stays degraded after a few minutes, "
                 f"focus or refresh the tab{(' at ' + target_url) if target_url else ''}, then press Scrape now on Social Tabs."
+            )
+        elif issue.get("kind") == "browser_page_error":
+            platform = str(issue.get("platform") or source or "this platform")
+            target_url = issue.get("url")
+            next_action = (
+                f"Focus or refresh the {platform} browser tab"
+                f"{(' at ' + target_url) if target_url else ''}, clear the visible page error/login shell, "
+                "then press Scrape now on Social Tabs. Reload the unpacked extension only if heartbeats or bundle version are stale."
             )
         elif manage_url:
             tab_action = (
@@ -3448,6 +3469,7 @@ async def _browser_extension_payload(conn) -> dict:
                    extract(epoch FROM now() - content.last_content_at)::int AS content_age_seconds,
                    heartbeat.metadata->>'url' AS url,
                    heartbeat.metadata->>'health_status' AS health_status,
+                   heartbeat.metadata->>'health_reason' AS health_reason,
                    heartbeat.metadata->>'extension_version' AS extension_version,
                    heartbeat.metadata->'content_counts' AS content_counts
             FROM heartbeat
@@ -3471,12 +3493,22 @@ async def _browser_extension_payload(conn) -> dict:
                 continue
             heartbeat_age = int(raw.get("heartbeat_age_seconds") or 0)
             heartbeat_stale = heartbeat_age > max(300, stale_seconds)
+            health_status = str(raw.get("health_status") or "")
+            page_error = (not heartbeat_stale and health_status == "recoverable_error_shell")
             payload["issues"].append({
                 "platform": raw.get("platform"),
-                "kind": "browser_heartbeat_stale" if heartbeat_stale else "browser_content_stale",
+                "kind": (
+                    "browser_heartbeat_stale"
+                    if heartbeat_stale else
+                    "browser_page_error"
+                    if page_error else
+                    "browser_content_stale"
+                ),
                 "detail": (
                     "Browser extension heartbeat is stale; browser-driven scraping is not currently active."
                     if heartbeat_stale else
+                    "Browser tab is alive, but the page is showing a recoverable error shell instead of usable content."
+                    if page_error else
                     "Browser tab heartbeat is fresh, but no useful posts/profile/media/route "
                     "ingest has arrived within the expected window."
                 ),
@@ -3485,6 +3517,7 @@ async def _browser_extension_payload(conn) -> dict:
                 "content_age_seconds": int(raw["content_age_seconds"]) if raw.get("content_age_seconds") is not None else None,
                 "url": raw.get("url"),
                 "health_status": raw.get("health_status"),
+                "health_reason": raw.get("health_reason"),
                 "extension_version": raw.get("extension_version"),
                 "content_counts": raw.get("content_counts"),
                 "stale_after_seconds": max(300, stale_seconds),
