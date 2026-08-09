@@ -1102,6 +1102,8 @@ def test_browser_extension_content_gap_query_excludes_strava_route_capture():
     section = source[source.index('"browser_content_gap"'):source.index('if payload.get("reload_url")')]
 
     assert '["instagram", "tiktok", "lemon8", "threads", "facebook", "x"]' in section
+    assert "FROM media_items" in section
+    assert "source = selected.platform" in section
     assert '"strava"' not in section
 
 

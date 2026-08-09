@@ -1,5 +1,6 @@
 import pytest
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 
 class FakeConn:
@@ -471,6 +472,21 @@ async def test_browser_content_stale_does_not_depend_on_heartbeat_query(monkeypa
     assert rows[0]["browser_heartbeat_age_seconds"] is None
     assert rows[0]["browser_content_stale"] is True
     assert "browser content progress is 9000s old" in rows[0]["detail"]
+
+
+def test_browser_content_progress_counts_media_items_as_useful_content():
+    from src.core import source_freshness
+
+    source = Path(source_freshness.__file__).read_text(encoding="utf-8")
+    section = source[
+        source.index("async def _latest_browser_content_progress"):
+        source.index("async def compute_liveness")
+    ]
+
+    assert "UNION ALL" in section
+    assert "FROM media_items" in section
+    assert "source = wanted.platform" in section
+    assert "'media_items' AS endpoint" in section
 
 
 @pytest.mark.asyncio

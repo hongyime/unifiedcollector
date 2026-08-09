@@ -3442,22 +3442,30 @@ async def _browser_extension_payload(conn) -> dict:
                 FROM selected
                 LEFT JOIN LATERAL (
                     SELECT created_at
-                    FROM browser_ingest_events
-                    WHERE endpoint <> 'browser_heartbeat'
-                      AND platform = selected.platform
-                      AND (
-                        observed_count > 0
-                        OR stored_count > 0
-                        OR (
-                          metadata ? 'probe_reason'
-                          AND COALESCE(metadata->>'probe_reason', '')
-                              NOT IN (
-                                'manual_backend_probe',
-                                'forced_recovery_started',
-                                'recoverable_error_shell'
-                              )
-                        )
-                      )
+                    FROM (
+                        SELECT created_at
+                        FROM browser_ingest_events
+                        WHERE endpoint <> 'browser_heartbeat'
+                          AND platform = selected.platform
+                          AND (
+                            observed_count > 0
+                            OR stored_count > 0
+                            OR (
+                              metadata ? 'probe_reason'
+                              AND COALESCE(metadata->>'probe_reason', '')
+                                  NOT IN (
+                                    'manual_backend_probe',
+                                    'forced_recovery_started',
+                                    'recoverable_error_shell'
+                                  )
+                            )
+                          )
+                        UNION ALL
+                        SELECT collected_at AS created_at
+                        FROM media_items
+                        WHERE source = selected.platform
+                          AND collected_at IS NOT NULL
+                    ) useful
                     ORDER BY created_at DESC
                     LIMIT 1
                 ) latest ON TRUE
