@@ -2421,14 +2421,17 @@ const x = {
       probe_reason: sink.items.length ? "media_candidates_found" : "no_dom_media_candidates",
       probe_meta: { feed, posts: xposts.length },
     };
-    const ingestResponse = forcedRecovery
-      ? (sendSideEffect(
-          ingestPayload,
-          "x",
-          `X ${entity} forced media write`,
-          { timeoutMs: 12000 }
-        ), null)
-      : await send(ingestPayload, { timeoutMs: 45000 });
+    let ingestResponse = null;
+    if (activeMediaRevisit && !forcedRecovery) {
+      ingestResponse = await send(ingestPayload, { timeoutMs: 45000 });
+    } else {
+      sendSideEffect(
+        ingestPayload,
+        "x",
+        `X ${entity} media write`,
+        { timeoutMs: forcedRecovery ? 12000 : 25000 }
+      );
+    }
     const profileSeen = entity !== "timeline" && !xIsStatusPage() && !!scrapeXProfile(entity);
     const progressCounts = {
       feed,

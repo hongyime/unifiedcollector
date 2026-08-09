@@ -403,8 +403,9 @@ def test_browser_recovery_optional_writes_are_nonblocking():
     assert "sendSideEffect(usersPayload, \"lemon8\"" in lemon8_block
     assert 'send({ type: "posts", platform: "x"' not in x_block
     assert 'await send({ type: "posts", platform: "facebook"' not in facebook_block
-    assert "`X ${entity} forced media write`" in x_block
-    assert "{ timeoutMs: 12000 }" in x_block
+    assert "if (activeMediaRevisit && !forcedRecovery)" in x_block
+    assert "`X ${entity} media write`" in x_block
+    assert "{ timeoutMs: forcedRecovery ? 12000 : 25000 }" in x_block
     assert "await send(ingestPayload, { timeoutMs: 45000 })" in x_block
     assert "{ timeoutMs: forcedRecovery ? 30000 : 45000 }" in facebook_block
 
