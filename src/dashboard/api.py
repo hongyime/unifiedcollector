@@ -2151,19 +2151,27 @@ def _apply_liveness_floor_to_window(source_row: dict, window: dict, now: datetim
     return out
 
 
-def _apply_current_media_floor_to_day_window(current_window: dict, day_window: dict) -> dict:
-    """Use current-hour media as a truthful 24h lower bound when exact 24h media is absent."""
-    current_media = int(current_window.get("media_items") or 0)
+def _apply_recent_media_floor_to_day_window(day_window: dict, *recent_windows: dict) -> dict:
+    """Use exact recent windows as a truthful 24h lower bound when exact 24h media is absent."""
+    current_media = sum(int(window.get("media_items") or 0) for window in recent_windows if window)
     day_media = int(day_window.get("media_items") or 0)
-    if current_media <= 0 or day_media > 0:
+    if current_media <= 0 or (day_media > 0 and not day_window.get("media_items_lower_bound")):
         return day_window
     out = dict(day_window)
-    out["media_items"] = current_media
-    current_latest = current_window.get("latest_media_at")
-    if current_latest and not out.get("latest_media_at"):
-        out["latest_media_at"] = current_latest
+    out["media_items"] = max(day_media, current_media)
+    latest_values = [
+        window.get("latest_media_at")
+        for window in recent_windows
+        if window and window.get("latest_media_at")
+    ]
+    if out.get("latest_media_at"):
+        latest_values.append(out["latest_media_at"])
+    if latest_values:
+        out["latest_media_at"] = max(latest_values)
     out["media_items_lower_bound"] = True
-    if current_window.get("media_stats_unavailable") or day_window.get("media_stats_unavailable"):
+    if day_window.get("media_stats_unavailable") or any(
+        window.get("media_stats_unavailable") for window in recent_windows if window
+    ):
         out["media_stats_unavailable"] = True
     return out
 
@@ -2795,7 +2803,7 @@ def _source_matrix_row(source_row: dict, current_content: dict | None, current_r
     current_window = _merge_source_window(current_content, current_rate)
     day_window = _merge_source_window(day_content, day_rate)
     day_window = _apply_liveness_floor_to_window(source_row, day_window, now)
-    day_window = _apply_current_media_floor_to_day_window(current_window, day_window)
+    day_window = _apply_recent_media_floor_to_day_window(day_window, current_window)
     extension_issues = _source_matrix_filter_extension_issues_for_current_content(
         extension_issues,
         current_window,
@@ -4839,6 +4847,11 @@ async def _collectors_source_matrix_payload():
         row["last_complete_hour"] = _merge_source_window(
             previous_content.get(source),
             previous_rate.get(source),
+        )
+        row["last_24h"] = _apply_recent_media_floor_to_day_window(
+            row["last_24h"],
+            row["current_hour"],
+            row["last_complete_hour"],
         )
     severity_rank = {"error": 0, "warning": 1, "ok": 2}
     rows.sort(key=lambda r: (

@@ -902,6 +902,47 @@ def test_source_matrix_row_uses_current_media_as_24h_lower_bound_when_day_media_
     assert row["last_24h"]["media_stats_unavailable"] is True
 
 
+def test_source_matrix_row_can_extend_24h_lower_bound_from_previous_hour():
+    row = _source_matrix_row(
+        _source(source="youtube", status="live", age_seconds=120),
+        current_content={"records": 0, "messages": 0, "media_items": 0},
+        current_rate=None,
+        day_content={
+            "records": 100,
+            "messages": 0,
+            "media_items": 0,
+            "media_stats_unavailable": True,
+        },
+        day_rate=None,
+        media_total={"total_media_items": 123},
+        cursor_row=None,
+        extension_issues=[],
+        now=datetime(2026, 8, 9, 3, 0, tzinfo=timezone.utc),
+    )
+    row["last_complete_hour"] = {
+        "records": 3,
+        "messages": 0,
+        "media_items": 41,
+        "rate_limits": 0,
+        "access_errors": 0,
+        "latest_record_at": datetime(2026, 8, 9, 2, 50, tzinfo=timezone.utc),
+        "latest_media_at": datetime(2026, 8, 9, 2, 55, tzinfo=timezone.utc),
+        "latest_event_at": None,
+        "media_stats_unavailable": False,
+    }
+
+    row["last_24h"] = dashboard_api._apply_recent_media_floor_to_day_window(
+        row["last_24h"],
+        row["current_hour"],
+        row["last_complete_hour"],
+    )
+
+    assert row["last_24h"]["media_items"] == 41
+    assert row["last_24h"]["latest_media_at"] == datetime(2026, 8, 9, 2, 55, tzinfo=timezone.utc)
+    assert row["last_24h"]["media_items_lower_bound"] is True
+    assert row["last_24h"]["media_stats_unavailable"] is True
+
+
 def test_source_matrix_row_labels_live_source_degraded_when_extension_blocked():
     row = _source_matrix_row(
         _source(),
