@@ -180,6 +180,7 @@ def _clear_youtube_env(monkeypatch):
     """Strip any YT/Google API vars so constructor sees a clean env."""
     for key in (
         "YOUTUBE_API_KEY",
+        "YOUTUBE_API_KEYS",
         "GOOGLE_API_KEY",
         "YOUTUBE_OAUTH_CREDENTIALS",
         "YOUTUBE_OAUTH_TOKEN",
@@ -204,6 +205,14 @@ def test_constructor_reads_env(monkeypatch):
     assert coll._api_key.startswith("AIza_")
     assert coll._download_videos is False
     assert coll._fetch_transcripts is False
+
+
+def test_constructor_reads_api_key_pool(monkeypatch):
+    _clear_youtube_env(monkeypatch)
+    monkeypatch.setenv("YOUTUBE_API_KEYS", "AIza_A, AIza_B;AIza_A\nAIza_C")
+    coll = YoutubeCollector()
+    assert coll._api_keys == ["AIza_A", "AIza_B", "AIza_C"]
+    assert coll._api_key == "AIza_A"
 
 
 def test_account_media_dir_isolated_by_api_key(monkeypatch):
@@ -346,9 +355,10 @@ async def test_api_get_returns_empty_on_non_200(monkeypatch, caplog):
 @pytest.mark.asyncio
 async def test_api_get_skips_when_persisted_api_cooldown_is_active(monkeypatch):
     coll = _new_collector(monkeypatch, YOUTUBE_API_KEY="AIzaK")
-    coll.pool._conn.fetchrow = AsyncMock(return_value={
+    coll.pool._conn.fetch = AsyncMock(return_value=[{
+        "account": coll._youtube_api_key_account("AIzaK"),
         "cooldown_until": datetime.now(timezone.utc) + timedelta(seconds=90),
-    })
+    }])
 
     class _NoClient:
         def __init__(self, *args, **kwargs):  # pragma: no cover - should not be reached
@@ -360,6 +370,35 @@ async def test_api_get_skips_when_persisted_api_cooldown_is_active(monkeypatch):
 
     assert out == {}
     assert coll._youtube_api_cooldown_remaining() > 0
+
+
+@pytest.mark.asyncio
+async def test_api_get_rotates_away_from_cooled_api_key_pool(monkeypatch):
+    coll = _new_collector(monkeypatch, YOUTUBE_API_KEYS="AIzaA,AIzaB")
+    coll.pool._conn.fetch = AsyncMock(return_value=[{
+        "account": coll._youtube_api_key_account("AIzaA"),
+        "cooldown_until": datetime.now(timezone.utc) + timedelta(seconds=90),
+    }])
+    seen_keys = []
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def get(self, url, params=None, headers=None):
+            seen_keys.append(params.get("key"))
+            return _make_response(status=200, json_body={"ok": True})
+
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr(youtube_mod.httpx, "AsyncClient", _Client)
+
+    out = await coll._api_get("channels", {"id": "UC123"})
+
+    assert out == {"ok": True}
+    assert seen_keys == ["AIzaB"]
+    assert coll._youtube_quota_account() == coll._youtube_api_key_account("AIzaB")
 
 
 @pytest.mark.asyncio

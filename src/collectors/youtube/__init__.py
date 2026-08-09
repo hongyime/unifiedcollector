@@ -162,7 +162,12 @@ class YoutubeCollector(BaseCollector):
 
     def __init__(self):
         super().__init__()
-        self._api_key = os.getenv("YOUTUBE_API_KEY", "")
+        self._api_keys = self._parse_api_keys(
+            os.getenv("YOUTUBE_API_KEYS", ""),
+            os.getenv("YOUTUBE_API_KEY", ""),
+        )
+        self._api_key_index = 0
+        self._api_key = self._api_keys[0] if self._api_keys else ""
         self._cookie_browser = os.getenv("YOUTUBE_COOKIE_BROWSER", "")
         self._cookie_file = os.getenv("YOUTUBE_COOKIE_FILE", "")
         self._usable_cookie_file_cache: str | None = None
@@ -175,6 +180,7 @@ class YoutubeCollector(BaseCollector):
         self._api_403_cooldown_seconds = int(os.getenv("YOUTUBE_API_403_COOLDOWN_SECONDS", "21600"))
         self._api_429_cooldown_seconds = int(os.getenv("YOUTUBE_API_429_COOLDOWN_SECONDS", "1800"))
         self._api_cooldown_until = 0.0
+        self._api_cooldown_until_by_key: dict[str, float] = {}
         self._api_cooldown_restored = False
         self._max_concurrent = int(os.getenv("YOUTUBE_MAX_CONCURRENT_DOWNLOADS", "3"))
         self._use_yt_dlp = self._check_yt_dlp()
@@ -234,6 +240,19 @@ class YoutubeCollector(BaseCollector):
         # FAMOUS-FILTER (Bryan): skip channels at or above this subscriber count,
         # even if subscribed. 0 disables. Overrides the subscription seed.
         self._famous_sub_cap = int(os.getenv("YOUTUBE_FAMOUS_SUB_CAP", "0") or "0")
+
+    @staticmethod
+    def _parse_api_keys(*raw_values: str) -> list[str]:
+        keys: list[str] = []
+        seen: set[str] = set()
+        for raw in raw_values:
+            for part in re.split(r"[,;\s]+", raw or ""):
+                key = part.strip()
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                keys.append(key)
+        return keys
 
     @staticmethod
     def _check_yt_dlp() -> bool:
@@ -552,50 +571,119 @@ class YoutubeCollector(BaseCollector):
             params["key"] = self._api_key
         return headers, params
 
+    @staticmethod
+    def _youtube_api_key_account(api_key: str) -> str:
+        return f"api_key:{sanitize_name(api_key[:8])}"
+
     def _youtube_quota_account(self) -> str:
         if self._api_key:
-            return f"api_key:{sanitize_name(self._api_key[:8])}"
+            return self._youtube_api_key_account(self._api_key)
         if self._oauth_credentials:
             return "oauth"
         return "anonymous"
 
+    def _youtube_quota_accounts(self) -> list[str]:
+        accounts = [self._youtube_api_key_account(key) for key in self._api_keys]
+        if self._oauth_credentials or not accounts:
+            accounts.append("oauth" if self._oauth_credentials else "anonymous")
+        return list(dict.fromkeys(accounts))
+
+    def _select_youtube_api_key(self) -> bool:
+        """Pick a non-cooled API key if one exists.
+
+        Returns True when the selected auth identity is allowed to call the API.
+        OAuth and anonymous modes keep the legacy single-cooldown behavior.
+        """
+        if not self._api_keys:
+            return self._youtube_api_cooldown_remaining() <= 0
+        now = time.time()
+        total = len(self._api_keys)
+        for offset in range(total):
+            idx = (self._api_key_index + offset) % total
+            key = self._api_keys[idx]
+            deadline = self._api_cooldown_until_by_key.get(
+                key,
+                self._api_cooldown_until if key == self._api_key else 0.0,
+            )
+            if deadline <= now:
+                self._api_key_index = idx
+                self._api_key = key
+                self._api_cooldown_until = self._api_cooldown_until_by_key.get(key, 0.0)
+                return True
+        # Keep the soonest-to-recover key selected so logging gives the useful ETA.
+        idx, key = min(
+            enumerate(self._api_keys),
+            key=lambda item: self._api_cooldown_until_by_key.get(
+                item[1],
+                self._api_cooldown_until if item[1] == self._api_key else 0.0,
+            ),
+        )
+        self._api_key_index = idx
+        self._api_key = key
+        self._api_cooldown_until = self._api_cooldown_until_by_key.get(
+            key,
+            self._api_cooldown_until,
+        )
+        return False
+
     def _youtube_api_cooldown_remaining(self) -> float:
+        if self._api_key:
+            self._api_cooldown_until = self._api_cooldown_until_by_key.get(
+                self._api_key,
+                self._api_cooldown_until,
+            )
         return max(0.0, self._api_cooldown_until - time.time())
 
     async def _restore_youtube_api_cooldown(self) -> None:
         if self._api_cooldown_restored or self.pool is None:
             return
         self._api_cooldown_restored = True
-        account = self._youtube_quota_account()
+        account_by_key = {self._youtube_api_key_account(key): key for key in self._api_keys}
+        accounts = self._youtube_quota_accounts()
         try:
             async with self.pool.acquire() as conn:
-                row = await conn.fetchrow(
+                rows = await conn.fetch(
                     """
-                    SELECT MAX(created_at + (COALESCE(cooldown_seconds, 0) * INTERVAL '1 second')) AS cooldown_until
+                    SELECT account,
+                           MAX(created_at + (COALESCE(cooldown_seconds, 0) * INTERVAL '1 second')) AS cooldown_until
                     FROM rate_limit_events
                     WHERE source = 'youtube'
-                      AND account = $1
+                      AND account = ANY($1::text[])
                       AND status_code IN (403, 429)
                       AND COALESCE(cooldown_seconds, 0) > 0
                       AND created_at + (COALESCE(cooldown_seconds, 0) * INTERVAL '1 second') > NOW()
+                    GROUP BY account
                     """,
-                    account,
+                    accounts,
                 )
         except Exception:
             logger.debug("youtube api cooldown restore failed", exc_info=True)
             return
-        cooldown_until = row["cooldown_until"] if row else None
-        if not cooldown_until:
-            return
-        if cooldown_until.tzinfo is None:
-            cooldown_until = cooldown_until.replace(tzinfo=timezone.utc)
-        remaining = (cooldown_until - datetime.now(timezone.utc)).total_seconds()
-        if remaining > 0:
-            self._api_cooldown_until = max(self._api_cooldown_until, time.time() + remaining)
+        for row in rows or []:
+            account = row["account"]
+            cooldown_until = row["cooldown_until"]
+            if not cooldown_until:
+                continue
+            if cooldown_until.tzinfo is None:
+                cooldown_until = cooldown_until.replace(tzinfo=timezone.utc)
+            remaining = (cooldown_until - datetime.now(timezone.utc)).total_seconds()
+            if remaining <= 0:
+                continue
+            deadline = time.time() + remaining
+            key = account_by_key.get(account)
+            if key:
+                self._api_cooldown_until_by_key[key] = max(
+                    self._api_cooldown_until_by_key.get(key, 0.0),
+                    deadline,
+                )
+            elif account == self._youtube_quota_account():
+                self._api_cooldown_until = max(self._api_cooldown_until, deadline)
             logger.info("youtube: restored Data API cooldown for %ds on %s", int(remaining), account)
 
     async def _youtube_api_cooldown_active(self, scope: str, target: str | None = None) -> bool:
         await self._restore_youtube_api_cooldown()
+        if self._select_youtube_api_key():
+            return False
         remaining = self._youtube_api_cooldown_remaining()
         if remaining <= 0:
             return False
@@ -612,7 +700,14 @@ class YoutubeCollector(BaseCollector):
     def _set_youtube_api_cooldown(self, seconds: int | None) -> None:
         if not seconds or seconds <= 0:
             return
-        self._api_cooldown_until = max(self._api_cooldown_until, time.time() + int(seconds))
+        deadline = time.time() + int(seconds)
+        if self._api_key:
+            self._api_cooldown_until_by_key[self._api_key] = max(
+                self._api_cooldown_until_by_key.get(self._api_key, 0.0),
+                deadline,
+            )
+        self._api_cooldown_until = max(self._api_cooldown_until, deadline)
+        self._select_youtube_api_key()
 
     async def _record_api_request(
         self,
