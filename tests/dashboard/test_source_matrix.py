@@ -755,6 +755,33 @@ def test_source_matrix_blocker_prioritizes_extension_action_over_inactive_429():
     assert "expected v1.21.97" in blocker["summary"]
 
 
+def test_source_matrix_blocker_suppresses_cooldown_when_browser_content_is_fresh():
+    now = datetime(2026, 8, 9, 0, 0, tzinfo=timezone.utc)
+    blocker = _source_matrix_blocker(
+        _source(
+            source="tiktok",
+            status="live",
+            detail="fresh browser content/probe event is inside the freshness window",
+            browser_content_stale=False,
+        ),
+        rate_row={
+            "active_now": True,
+            "active_until": now + timedelta(minutes=20),
+            "latest_account": "tiktok_bryanseah234",
+            "latest_scope": "gallery-dl_local",
+        },
+        cursor_row={
+            "active_now": True,
+            "active_until": now + timedelta(minutes=20),
+            "streak": 3,
+        },
+        extension_issues=[],
+    )
+
+    assert blocker["kind"] == "none"
+    assert blocker["severity"] == "ok"
+
+
 def test_source_matrix_blocker_does_not_block_live_source_for_rotated_auth_event():
     blocker = _source_matrix_blocker(
         _source(status="live"),

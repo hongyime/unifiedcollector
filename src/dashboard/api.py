@@ -2251,6 +2251,15 @@ def _source_matrix_is_x_session_shell(
     )
 
 
+def _source_matrix_has_fresh_browser_content(source_row: dict) -> bool:
+    if source_row.get("status") != "live":
+        return False
+    if source_row.get("browser_content_stale") is True:
+        return False
+    detail = str(source_row.get("detail") or "")
+    return "fresh browser content/probe event is inside the freshness window" in detail
+
+
 def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: dict | None,
                            extension_issues: list[dict]) -> dict:
     source = source_row.get("source")
@@ -2260,6 +2269,7 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
     browser_url = str(source_row.get("browser_url") or "")
     browser_health_status = str(source_row.get("browser_health_status") or "")
     browser_health_reason = str(source_row.get("browser_health_reason") or "")
+    fresh_browser_content = _source_matrix_has_fresh_browser_content(source_row)
     if source == "x" and _source_matrix_is_x_session_shell(
         browser_url,
         browser_health_status,
@@ -2305,7 +2315,7 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
                 "If it remains at 0 messages after reconnect, unlink/relink that WhatsApp slot from the phone."
             ),
         }
-    if cursor_row and cursor_row.get("active_now"):
+    if cursor_row and cursor_row.get("active_now") and not fresh_browser_content:
         active_until = cursor_row.get("active_until")
         return {
             "kind": "cooldown",
@@ -2317,7 +2327,7 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
             ),
             "next_action": "Let the cooldown expire; do not force this source unless it is Tier 1 emergency data.",
         }
-    if rate_row and rate_row.get("active_now"):
+    if rate_row and rate_row.get("active_now") and not fresh_browser_content:
         active_until = rate_row.get("active_until")
         scope = " / ".join(str(v) for v in (rate_row.get("latest_account"), rate_row.get("latest_scope")) if v)
         return {
