@@ -572,7 +572,7 @@ async def test_download_media_writes_vault_blob(collector, monkeypatch, tmp_path
         get_response=_make_httpx_response(status_code=200, content=data),
     )
 
-    await collector.download_media({
+    result = await collector.download_media({
         "entity_id": "alice",
         "entity_name": "alice",
         "content_type": "photo",
@@ -582,6 +582,7 @@ async def test_download_media_writes_vault_blob(collector, monkeypatch, tmp_path
         "raw": {"post_id": "post1"},
     })
 
+    assert result is True
     kwargs = collector.insert_media_item.await_args.kwargs
     stored_path = Path(kwargs["file_path"])
     assert stored_path == vault_root / "media" / "blobs" / digest[:2] / digest[2:4] / f"{digest}.jpg"
@@ -607,7 +608,7 @@ async def test_download_media_ignores_permanent_cdn_403_without_dlq(collector, m
     error = httpx.HTTPStatusError("forbidden", request=request, response=response)
     _patch_async_client(monkeypatch, get_raises=error)
 
-    await collector.download_media({
+    result = await collector.download_media({
         "entity_id": "alice",
         "entity_name": "alice",
         "content_type": "photo",
@@ -616,7 +617,36 @@ async def test_download_media_ignores_permanent_cdn_403_without_dlq(collector, m
         "url": "https://cdn.lemon8-app.com/avatar.jpg",
     })
 
+    assert result is False
     collector.insert_media_item.assert_not_awaited()
+    collector.send_to_dlq.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_download_media_returns_false_for_duplicate_insert(collector, monkeypatch, tmp_path):
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    monkeypatch.setattr(lemon8_mod, "VAULT_ROOT", vault_root)
+    collector._min_file_size = 1
+    collector.insert_media_item = AsyncMock(return_value=False)
+    collector.send_to_dlq = AsyncMock()
+
+    _patch_async_client(
+        monkeypatch,
+        get_response=_make_httpx_response(status_code=200, content=b"duplicate image bytes"),
+    )
+
+    result = await collector.download_media({
+        "entity_id": "alice",
+        "entity_name": "alice",
+        "content_type": "photo",
+        "content_id": "post1_img1",
+        "extension": "jpg",
+        "url": "https://cdn.lemon8-app.com/post1.jpg",
+    })
+
+    assert result is False
+    assert "post1_img1" not in collector._known_ids
     collector.send_to_dlq.assert_not_awaited()
 
 

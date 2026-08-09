@@ -2278,13 +2278,14 @@ class Lemon8Collector(BaseCollector):
 
     async def download_media(self, item: dict):
         cid = item["content_id"]
-        if self.is_known(cid): return
+        if self.is_known(cid):
+            return False
         content_type = item.get("content_type")
         if content_type == "profile_photo" and await self._cooldown_active_for_scope(
             "media_download",
             metadata={"content_type": content_type},
         ):
-            return
+            return False
         filename = self.build_filename(item["entity_id"], item["entity_name"], item["content_type"], cid, extension=item.get("extension", "jpg"))
         try:
             await self.rate_limiter.async_wait("lemon8-app.com", OperationType.MEDIA_DOWNLOAD)
@@ -2292,7 +2293,8 @@ class Lemon8Collector(BaseCollector):
                 resp = await client.get(item["url"])
                 resp.raise_for_status()
                 data = resp.content
-            if len(data) < self._min_file_size: return
+            if len(data) < self._min_file_size:
+                return False
             source_url = self._build_lemon8_source_url(item)
             metadata = {
                 "entity_id": item["entity_id"],
@@ -2328,7 +2330,7 @@ class Lemon8Collector(BaseCollector):
                 "duplicate_blob": artifact.duplicate_blob,
                 "error": artifact.error,
             }
-            await self.insert_media_item(
+            inserted = await self.insert_media_item(
                 entity_id=item["entity_id"],
                 entity_name=item["entity_name"],
                 content_type=item["content_type"],
@@ -2342,7 +2344,9 @@ class Lemon8Collector(BaseCollector):
             )
             if artifact.partial:
                 await self.send_to_dlq(item["entity_id"], cid, f"vault artifact partial: {artifact.error}")
-            self._known_ids.add(cid)
+            if inserted:
+                self._known_ids.add(cid)
+            return bool(inserted)
         except Exception as e:
             safe_error = _safe_log_text(e)
             await self._record_http_status_event(
@@ -2356,10 +2360,11 @@ class Lemon8Collector(BaseCollector):
             status_code = self._http_status_from_error(e)
             if status_code in (403, 404):
                 logger.warning("lemon8 media unavailable %s: HTTP %s", cid, status_code)
-                return
+                return False
             else:
                 logger.error("Download failed %s: %s", cid, safe_error)
             await self.send_to_dlq(item["entity_id"], cid, safe_error)
+            return False
 
     async def cleanup(self):
         pass
