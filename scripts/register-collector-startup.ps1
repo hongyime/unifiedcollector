@@ -1,6 +1,7 @@
 param(
     [string]$Repo = "C:\unifiedcollector",
-    [string[]]$TelegramSessions = @("6592348112", "6584731565", "6596647252", "60197282165")
+    [string[]]$TelegramSessions = @("6592348112", "6584731565", "6596647252", "60197282165"),
+    [int]$BrowserMaintenanceIntervalMinutes = 10
 )
 
 $ErrorActionPreference = "Stop"
@@ -25,6 +26,7 @@ $lines = @(
     "setlocal EnableExtensions",
     "set LOGFILE=$repoPath\scripts\boot_start.log",
     "set COMPOSE=$composePath",
+    "set BROWSER_MAINTENANCE=$repoPath\scripts\start-browser-maintenance-loop.ps1",
     "echo [%date% %time%] UnifiedCollector startup triggered >> %LOGFILE%",
     "",
     "set RETRIES=60",
@@ -56,6 +58,12 @@ $lines = @(
     "cd /d $repoPath",
     "docker compose -f %COMPOSE% up -d >> %LOGFILE% 2>&1",
     "echo [%date% %time%] docker compose up -d done (exit %errorlevel%) >> %LOGFILE%",
+    "if exist `"%BROWSER_MAINTENANCE%`" (",
+    "    echo [%date% %time%] Starting browser maintenance loop... >> %LOGFILE%",
+    "    start `"UnifiedCollectorBrowserMaintenance`" /min powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"%BROWSER_MAINTENANCE%`" -IntervalMinutes $BrowserMaintenanceIntervalMinutes -InitialDelaySeconds 15",
+    ") else (",
+    "    echo [%date% %time%] WARN browser maintenance launcher missing: %BROWSER_MAINTENANCE% >> %LOGFILE%",
+    ")",
     "",
     "powershell.exe -NoProfile -Command `"Start-Sleep -Seconds 20`" >nul 2>&1",
     "echo [%date% %time%] Syncing authorized Telegram sessions into shared sessions volume... >> %LOGFILE%",

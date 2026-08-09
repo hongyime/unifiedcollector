@@ -1,6 +1,6 @@
 param(
     [string]$TaskName = "UnifiedCollectorBrowserMaintenance",
-    [int]$IntervalMinutes = 30
+    [int]$IntervalMinutes = 10
 )
 
 $ErrorActionPreference = "Stop"

@@ -1,5 +1,5 @@
 param(
-    [int]$IntervalMinutes = 30,
+    [int]$IntervalMinutes = 10,
     [int]$InitialDelaySeconds = 60
 )
 
