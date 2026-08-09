@@ -16,6 +16,7 @@ def test_chrome_cdp_launcher_uses_robust_startup_flags():
     assert "--remote-allow-origins=http://127.0.0.1:$RemoteDebuggingPort" in script
     assert "--no-first-run" in script
     assert "--no-default-browser-check" in script
+    assert "--disable-extensions-except=$extension" in script
     assert "--disable-background-mode" in script
     assert "--disable-background-timer-throttling" in script
     assert "--js-flags=--max-old-space-size=512" in script
@@ -49,6 +50,7 @@ def test_chrome_cdp_launcher_ignores_stale_wmi_chrome_rows():
 
     assert "function Get-ChromeProcesses" in script
     assert "Get-Process chrome" in script
+    assert "$proc.HandleCount -le 0" in script
     assert "$liveIds.ContainsKey([int]$_.ProcessId)" in script
 
 

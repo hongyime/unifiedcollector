@@ -123,6 +123,9 @@ function Get-PlatformLaunchUrls {
 function Get-ChromeProcesses {
     $liveIds = @{}
     foreach ($proc in @(Get-Process chrome -ErrorAction SilentlyContinue)) {
+        if ($proc.HandleCount -le 0) {
+            continue
+        }
         $liveIds[[int]$proc.Id] = $true
     }
     return @(Get-CimInstance Win32_Process -Filter "name='chrome.exe'" -ErrorAction SilentlyContinue |
@@ -240,6 +243,7 @@ $args = @(
     "--remote-debugging-address=127.0.0.1",
     "--remote-allow-origins=http://127.0.0.1:$RemoteDebuggingPort",
     "--user-data-dir=$profile",
+    "--disable-extensions-except=$extension",
     "--load-extension=$extension",
     "--no-first-run",
     "--no-default-browser-check",
