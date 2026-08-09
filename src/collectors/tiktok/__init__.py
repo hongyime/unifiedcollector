@@ -570,6 +570,11 @@ class TiktokCollector(BaseCollector):
                 or "0"
             ),
         )
+        self._metadata_cooldown_media_fallbacks_per_cycle = max(
+            0,
+            int(os.getenv("TIKTOK_METADATA_COOLDOWN_MEDIA_FALLBACKS_PER_CYCLE", "5") or "0"),
+        )
+        self._metadata_cooldown_media_fallbacks_used = 0
         self._spider_queue_per_cycle = max(0, int(os.getenv("TIKTOK_SPIDER_QUEUE_PER_CYCLE", "80")))
         self._spider_first = os.getenv("TIKTOK_SPIDER_QUEUE_FIRST", "true").lower() == "true"
         self._spider_processing_stale_minutes = max(
@@ -923,6 +928,7 @@ class TiktokCollector(BaseCollector):
     async def collect(self, targets: list[str]):
         await self._load_tracker_state()
         await self._sync_persisted_local_tool_cooldown()
+        self._metadata_cooldown_media_fallbacks_used = 0
         spider_enabled = os.getenv("TIKTOK_SPIDER_ENABLED", "true").lower() == "true"
         if spider_enabled and self._spider_first:
             await self._process_spider_queue(max_items=self._spider_queue_per_cycle)
@@ -1172,12 +1178,39 @@ class TiktokCollector(BaseCollector):
         if metadata_cooling_down:
             remaining = int(self._profile_metadata_cooldown_until - time.time())
             reason = self._profile_metadata_cooldown_reason or "profile metadata cooldown"
+            if (
+                self._metadata_cooldown_media_fallbacks_used
+                >= self._metadata_cooldown_media_fallbacks_per_cycle
+            ):
+                logger.info(
+                    "tiktok: profile metadata cooldown active for %s (%ds remaining; %s); "
+                    "media fallback budget exhausted (%d/%d), deferring %s",
+                    self._account_name(),
+                    remaining,
+                    reason,
+                    self._metadata_cooldown_media_fallbacks_used,
+                    self._metadata_cooldown_media_fallbacks_per_cycle,
+                    username,
+                )
+                self._record_profile_backoff(
+                    username,
+                    reason="metadata_cooldown_media_budget",
+                    seconds=min(
+                        max(remaining, 0),
+                        self._unknown_follower_metadata_cooldown_backoff_seconds
+                        or self._local_tool_cooldown_seconds,
+                    ),
+                )
+                return "delayed"
+            self._metadata_cooldown_media_fallbacks_used += 1
             logger.info(
                 "tiktok: profile metadata cooldown active for %s (%ds remaining; %s); "
-                "trying media fallback without metadata fetch",
+                "trying media fallback without metadata fetch (%d/%d)",
                 self._account_name(),
                 remaining,
                 reason,
+                self._metadata_cooldown_media_fallbacks_used,
+                self._metadata_cooldown_media_fallbacks_per_cycle,
             )
             metadata = {"status": "metadata_cooldown"}
         else:

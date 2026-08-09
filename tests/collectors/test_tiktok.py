@@ -650,6 +650,37 @@ async def test_collect_user_defers_unknown_followers_during_metadata_cooldown(mo
 
 
 @pytest.mark.asyncio
+async def test_collect_user_defers_when_metadata_cooldown_media_budget_exhausted(monkeypatch):
+    monkeypatch.setenv("TIKTOK_METADATA_COOLDOWN_MEDIA_FALLBACKS_PER_CYCLE", "1")
+    with patch.object(TiktokCollector, "_check_tool", staticmethod(lambda *_: False)):
+        c = TiktokCollector()
+    c._quota = None
+    c._browser_fallback = False
+    c._use_gallery_dl = True
+    c._use_yt_dlp = True
+    c._profile_metadata_cooldown_until = tiktok_mod.time.time() + 600
+    c._profile_metadata_cooldown_reason = "captcha"
+    c._metadata_cooldown_media_fallbacks_used = 1
+    monkeypatch.setattr(c, "_stored_followers_count", AsyncMock(return_value=10))
+    monkeypatch.setattr(c, "_scrape_profile_metadata", AsyncMock())
+    monkeypatch.setattr(c, "_record_profile_backoff", MagicMock())
+    monkeypatch.setattr(c, "_collect_via_gallery_dl", AsyncMock(return_value=True))
+    monkeypatch.setattr(c, "_collect_via_yt_dlp", AsyncMock(return_value=True))
+    monkeypatch.setattr(c, "_collect_via_api", AsyncMock(return_value=True))
+    monkeypatch.setattr(c, "_record_profile_access", AsyncMock())
+
+    out = await c._collect_user("bryan")
+
+    assert out == "delayed"
+    c._scrape_profile_metadata.assert_not_awaited()
+    c._record_profile_backoff.assert_called_once()
+    assert c._record_profile_backoff.call_args.kwargs["reason"] == "metadata_cooldown_media_budget"
+    c._collect_via_gallery_dl.assert_not_awaited()
+    c._collect_via_yt_dlp.assert_not_awaited()
+    c._collect_via_api.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_collect_user_skips_ytdlp_after_clean_empty_gallery(monkeypatch):
     with patch.object(TiktokCollector, "_check_tool", staticmethod(lambda *_: False)):
         c = TiktokCollector()
