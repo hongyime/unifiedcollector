@@ -804,7 +804,7 @@ def test_source_matrix_blocker_suppresses_cooldown_when_browser_content_is_fresh
         rate_row={
             "active_now": True,
             "active_until": now + timedelta(minutes=20),
-            "latest_account": "tiktok_bryanseah234",
+            "latest_account": "tiktok_theprawnorganisation",
             "latest_scope": "gallery-dl_local",
         },
         cursor_row={

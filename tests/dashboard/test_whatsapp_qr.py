@@ -249,12 +249,12 @@ def test_whatsapp_pairing_code_proxies_phone_to_unregistered_bridge(monkeypatch)
     async def fake_post(bridge: str, path: str, payload=None):
         assert bridge == "2"
         assert path == "pairing-code"
-        assert payload == {"phone": "+6592348112"}
+        assert payload == {"phone": "00000000"}
         return {"bridge": bridge, "ok": True, "status": "pairing_code_requested", "code": "ABCD-1234"}
 
     class FakeRequest:
         async def json(self):
-            return {"phone": "+6592348112"}
+            return {"phone": "00000000"}
 
     monkeypatch.setattr(dashboard_api, "_wa_bridge_get", fake_get)
     monkeypatch.setattr(dashboard_api, "_wa_bridge_post", fake_post)
