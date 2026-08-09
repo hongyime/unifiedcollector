@@ -40,9 +40,16 @@ function Resolve-UserDataDir {
         return $Requested
     }
     # Chrome 136+ ignores --remote-debugging-port when pointed at the default
-    # Chrome profile directory. Use a durable, non-standard scraper profile so
-    # CDP stays available and scraper logins persist across restarts.
-    return "$env:LOCALAPPDATA\UnifiedCollector\ChromeCdpProfile"
+    # Chrome profile directory. Use the newest durable, non-standard scraper
+    # profile so CDP stays available and scraper logins persist across restarts.
+    $base = Join-Path $env:LOCALAPPDATA "UnifiedCollector"
+    $existing = @(Get-ChildItem -LiteralPath $base -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^ChromeCdpProfile\d*$' } |
+        Sort-Object LastWriteTime -Descending)
+    if ($existing.Count -gt 0) {
+        return $existing[0].FullName
+    }
+    return (Join-Path $base "ChromeCdpProfile")
 }
 
 function Test-CdpAvailable {
@@ -203,9 +210,6 @@ if (([IO.Path]::GetFullPath($profile).TrimEnd('\')) -ieq ([IO.Path]::GetFullPath
     Write-Warning "Chrome 136+ does not expose CDP for the default Chrome profile. Use a non-standard -UserDataDir such as $env:LOCALAPPDATA\UnifiedCollector\ChromeCdpProfile."
 }
 $extension = (Resolve-Path -LiteralPath $ExtensionPath).Path
-$chromeProcesses = @(Get-ChromeProcesses)
-$visibleChromeWindows = @(Get-VisibleChromeWindows)
-$cdpAlreadyUp = Test-CdpAvailable $RemoteDebuggingPort
 $OpenIds = @($OpenIds | ForEach-Object { ([string]$_) -split "," } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 
 $tabsParams = [System.Collections.Generic.List[string]]::new()
@@ -231,21 +235,6 @@ if ($tabsQuery) {
     $tabsUrlPath = "${tabsUrlPath}?$tabsQuery"
 }
 $fallbackTabsUrl = "chrome-extension://pkmdmcklnjdeocoeigmlakhomhhcpafb/$tabsUrlPath"
-
-if ($cdpAlreadyUp) {
-    $extensionId = Get-ExtensionIdFromCdp $RemoteDebuggingPort
-    if ($extensionId) {
-        $tabsUrl = "chrome-extension://$extensionId/$tabsUrlPath"
-        Open-CdpTarget -Port $RemoteDebuggingPort -Url $tabsUrl
-        Write-Host "Opened extension control page: $tabsUrl"
-    }
-    foreach ($url in @(Get-PlatformLaunchUrls -Ids $OpenIds -All ($OpenAll -and -not $NoOpenAll))) {
-        Open-CdpTarget -Port $RemoteDebuggingPort -Url $url
-        Start-Sleep -Milliseconds 500
-    }
-    Write-Host "Chrome CDP is already reachable on 127.0.0.1:$RemoteDebuggingPort."
-    exit 0
-}
 $args = @(
     "--remote-debugging-port=$RemoteDebuggingPort",
     "--remote-debugging-address=127.0.0.1",
@@ -266,17 +255,34 @@ $args = @(
 $argumentLine = ($args | ForEach-Object { Quote-Argument $_ }) -join " "
 
 if ($DryRun) {
-    $runningNote = if ($chromeProcesses.Count -gt 0) { "Chrome is currently running; normal launch would refuse until it is closed." } else { "Chrome is not currently running." }
     Write-Host "Chrome path: $chrome"
     Write-Host "User data dir: $profile"
     Write-Host "Extension path: $extension"
-    Write-Host "Visible Chrome windows: $($visibleChromeWindows.Count)"
-    Write-Host $runningNote
+    Write-Host "Dry run: skipped live Chrome/CDP probes."
     Write-Host "Arguments:"
     $args | ForEach-Object { Write-Host "  $_" }
     if ($FallbackOpenControlIfCleanupBlocked) {
-        Write-Host "Fallback if hidden Chrome cleanup is blocked: open existing Chrome to $tabsUrl"
+        Write-Host "Fallback if hidden Chrome cleanup is blocked: open existing Chrome to $fallbackTabsUrl"
     }
+    exit 0
+}
+
+$chromeProcesses = @(Get-ChromeProcesses)
+$visibleChromeWindows = @(Get-VisibleChromeWindows)
+$cdpAlreadyUp = Test-CdpAvailable $RemoteDebuggingPort
+
+if ($cdpAlreadyUp) {
+    $extensionId = Get-ExtensionIdFromCdp $RemoteDebuggingPort
+    if ($extensionId) {
+        $tabsUrl = "chrome-extension://$extensionId/$tabsUrlPath"
+        Open-CdpTarget -Port $RemoteDebuggingPort -Url $tabsUrl
+        Write-Host "Opened extension control page: $tabsUrl"
+    }
+    foreach ($url in @(Get-PlatformLaunchUrls -Ids $OpenIds -All ($OpenAll -and -not $NoOpenAll))) {
+        Open-CdpTarget -Port $RemoteDebuggingPort -Url $url
+        Start-Sleep -Milliseconds 500
+    }
+    Write-Host "Chrome CDP is already reachable on 127.0.0.1:$RemoteDebuggingPort."
     exit 0
 }
 

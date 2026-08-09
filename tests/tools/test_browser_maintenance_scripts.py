@@ -37,6 +37,8 @@ def test_chrome_cdp_launcher_uses_non_default_profile_for_cdp():
     script = _read_script("start-scraper-chrome-cdp.ps1")
 
     assert "Chrome 136+ ignores --remote-debugging-port" in script
+    assert "Sort-Object LastWriteTime -Descending" in script
+    assert "$existing[0].FullName" in script
     assert "UnifiedCollector\\ChromeCdpProfile" in script
     assert "$env:LOCALAPPDATA\\Google\\Chrome\\User Data" in script
     assert "does not expose CDP for the default Chrome profile" in script
@@ -61,6 +63,14 @@ def test_chrome_cdp_launcher_discovers_extension_id_from_cdp():
     assert '"chrome-extension://$extensionId/$tabsUrlPath"' in script
     assert "Opened extension control page" in script
     assert "Chrome CDP is already reachable" in script
+
+
+def test_chrome_cdp_launcher_dry_run_skips_live_probes():
+    script = _read_script("start-scraper-chrome-cdp.ps1")
+
+    assert "Dry run: skipped live Chrome/CDP probes." in script
+    assert script.index("if ($DryRun)") < script.index("$chromeProcesses = @(Get-ChromeProcesses)")
+    assert script.index("if ($DryRun)") < script.index("$cdpAlreadyUp = Test-CdpAvailable")
 
 
 def test_chrome_cdp_launcher_opens_requested_platform_urls_directly():
