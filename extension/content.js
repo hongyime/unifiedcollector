@@ -596,17 +596,25 @@ function switchXHostForRecoverableShell(shell) {
   const onTwitterHost = host === "twitter.com" || host.endsWith(".twitter.com");
   const alternateHost = onTwitterHost ? `https://x.com/home?uc_recover=${stamp}` : `https://twitter.com/home?uc_recover=${stamp}`;
   const owner = ownerFromStoredOrDom("x", xLoggedInOwner);
-  const step = (lsNum(stepKey) % 5) + 1;
-  lsSet(stepKey, String(step));
-  const target = step === 1
-    ? `https://x.com/explore?uc_recover=${stamp}`
-    : step === 2
-      ? "https://x.com/i/flow/login?redirect_after_login=%2Fhome"
-    : step === 3
-      ? alternateHost
-      : step === 4 && owner
-        ? "https://x.com/" + encodeURIComponent(owner) + "?uc_recover=" + stamp
-        : "https://x.com/home?uc_recover=" + stamp;
+  const reason = String(shell.reason || "");
+  const isGenericShell = /try_again|something_went_wrong|no_internet/i.test(reason);
+  const targets = isGenericShell
+    ? [
+        `https://x.com/home?uc_recover=${stamp}`,
+        `https://x.com/explore?uc_recover=${stamp}`,
+        alternateHost,
+        `https://x.com/home?uc_recover=${stamp}`,
+      ]
+    : [
+        `https://x.com/explore?uc_recover=${stamp}`,
+        alternateHost,
+        `https://x.com/home?uc_recover=${stamp}`,
+        ...(owner ? ["https://x.com/" + encodeURIComponent(owner) + "?uc_recover=" + stamp] : []),
+        "https://x.com/i/flow/login?redirect_after_login=%2Fhome",
+      ];
+  const step = lsNum(stepKey) % targets.length;
+  lsSet(stepKey, String(step + 1));
+  const target = targets[step] || `https://x.com/home?uc_recover=${stamp}`;
   clog("warn", `x page shell still stuck (${shell.reason}); navigating to ${target}`, "x");
   location.href = target;
   return true;
