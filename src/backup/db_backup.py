@@ -422,6 +422,7 @@ def backup_run_lock(
     backup_dir: Path,
     *,
     stale_seconds: int = DEFAULT_LOCK_STALE_SECONDS,
+    abandoned_seconds: int | None = None,
     dry_run: bool = False,
     now_ts: float | None = None,
 ) -> Iterator[Path | None]:
@@ -440,7 +441,28 @@ def backup_run_lock(
             age_seconds = max(0, now_ts - lock_dir.stat().st_mtime)
         except OSError:
             age_seconds = 0
-        if stale_seconds > 0 and age_seconds > stale_seconds:
+        if abandoned_seconds is not None and abandoned_seconds > 0:
+            temp_files = list(backup_dir.glob(".inprogress_*.dump"))
+            newest_temp_mtime = None
+            for path in temp_files:
+                try:
+                    mtime = path.stat().st_mtime
+                except OSError:
+                    continue
+                newest_temp_mtime = mtime if newest_temp_mtime is None else max(newest_temp_mtime, mtime)
+            abandoned = (
+                age_seconds > abandoned_seconds
+                if newest_temp_mtime is None
+                else max(0, now_ts - newest_temp_mtime) > abandoned_seconds
+            )
+            if abandoned:
+                shutil.rmtree(lock_dir, ignore_errors=True)
+                os.mkdir(lock_dir)
+            else:
+                raise BackupAlreadyRunning(
+                    f"another backup is already running (lock {lock_dir}, age {int(age_seconds)}s)"
+                ) from exc
+        elif stale_seconds > 0 and age_seconds > stale_seconds:
             shutil.rmtree(lock_dir, ignore_errors=True)
             os.mkdir(lock_dir)
         else:
@@ -828,6 +850,10 @@ def run_once(args: argparse.Namespace) -> int:
             with backup_run_lock(
                 backup_dir,
                 stale_seconds=lock_stale_seconds,
+                abandoned_seconds=_env_seconds(
+                    "COLLECTOR_DB_BACKUP_LOCK_ABANDONED_SECONDS",
+                    _env_seconds("COLLECTOR_DB_BACKUP_STALL_TIMEOUT_SECONDS", DEFAULT_STALL_TIMEOUT_SECONDS),
+                ),
                 dry_run=args.dry_run,
             ):
                 stale_temp_minutes = _env_int(

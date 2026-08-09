@@ -304,6 +304,47 @@ def test_backup_run_lock_recovers_stale_lock(tmp_path):
     assert not lock_dir.exists()
 
 
+def test_backup_run_lock_recovers_abandoned_temp_dump(tmp_path):
+    lock_dir = tmp_path / ".backup.lock"
+    lock_dir.mkdir()
+    temp = tmp_path / ".inprogress_20260810_033021.dump"
+    temp.write_bytes(b"partial")
+    now = time.time()
+    os.utime(lock_dir, (now - 900, now - 900))
+    os.utime(temp, (now - 700, now - 700))
+
+    with backup_run_lock(tmp_path, stale_seconds=3600, abandoned_seconds=600, now_ts=now) as acquired:
+        assert acquired == lock_dir
+        assert (lock_dir / "owner.json").exists()
+
+    assert not lock_dir.exists()
+
+
+def test_backup_run_lock_does_not_steal_fresh_lock_without_temp(tmp_path):
+    lock_dir = tmp_path / ".backup.lock"
+    lock_dir.mkdir()
+    now = time.time()
+    os.utime(lock_dir, (now - 30, now - 30))
+
+    with pytest.raises(BackupAlreadyRunning):
+        with backup_run_lock(tmp_path, stale_seconds=3600, abandoned_seconds=600, now_ts=now):
+            pass
+
+
+def test_backup_run_lock_does_not_steal_progressing_temp_dump(tmp_path):
+    lock_dir = tmp_path / ".backup.lock"
+    lock_dir.mkdir()
+    temp = tmp_path / ".inprogress_20260810_033021.dump"
+    temp.write_bytes(b"partial")
+    now = time.time()
+    os.utime(lock_dir, (now - 900, now - 900))
+    os.utime(temp, (now - 60, now - 60))
+
+    with pytest.raises(BackupAlreadyRunning):
+        with backup_run_lock(tmp_path, stale_seconds=3600, abandoned_seconds=600, now_ts=now):
+            pass
+
+
 def test_run_once_returns_retry_code_when_backup_already_running(tmp_path):
     from src.backup import db_backup
 
