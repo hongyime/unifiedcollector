@@ -274,6 +274,20 @@ function Invoke-PythonScript([object[]]$command, [string]$script, [int]$timeoutS
 $audit = Join-Path $repo "tools\browser_tab_audit.py"
 $reload = Join-Path $repo "tools\browser_tab_reload.py"
 
+$mutexName = "Global\UnifiedCollectorBrowserTabMaintenance"
+$mutex = [System.Threading.Mutex]::new($false, $mutexName)
+$haveMutex = $false
+try {
+    $haveMutex = $mutex.WaitOne(0)
+} catch {
+    $haveMutex = $false
+}
+if (-not $haveMutex) {
+    Write-Log "browser tab maintenance skipped because another pass is already running"
+    Write-Status "running" "another maintenance pass is already running"
+    exit 0
+}
+
 Write-Log "browser tab maintenance start"
 Write-Status "running" "maintenance pass started"
 
@@ -308,4 +322,10 @@ try {
     throw
 } finally {
     Pop-Location
+    if ($haveMutex) {
+        try { $mutex.ReleaseMutex() | Out-Null } catch {}
+    }
+    if ($mutex) {
+        $mutex.Dispose()
+    }
 }

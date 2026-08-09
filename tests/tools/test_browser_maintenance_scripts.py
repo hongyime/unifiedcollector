@@ -119,6 +119,13 @@ def test_browser_tab_audit_accepts_dynamic_extension_worlds():
     assert "'9333'" in script
 
 
+def test_browser_tab_audit_uses_load_tolerant_default_deadlines():
+    script = (REPO_ROOT / "tools" / "browser_tab_audit.py").read_text(encoding="utf-8")
+
+    assert 'UC_TAB_AUDIT_RUNTIME_ENABLE_TIMEOUT_SECONDS", 4.0' in script
+    assert 'UC_TAB_AUDIT_MAIN_TIMEOUT_SECONDS", 8.0' in script
+
+
 def test_browser_tab_reload_treats_disappeared_targets_as_skips():
     script = (REPO_ROOT / "tools" / "browser_tab_reload.py").read_text(encoding="utf-8")
 
@@ -168,6 +175,7 @@ def test_chrome_cdp_launcher_opens_requested_platform_urls_directly():
     assert "function Get-PlatformLaunchUrls" in script
     assert 'instagram = "https://www.instagram.com/"' in script
     assert 'tiktok = "https://www.tiktok.com/following"' in script
+    assert 'lemon8 = "https://www.lemon8-app.com/topic/7011425874067619842?region=sg"' in script
     assert 'strava = "https://www.strava.com/dashboard"' in script
     assert "$platforms.Keys -contains $id" in script
     assert "Get-PlatformLaunchUrls -Ids $OpenIds" in script
@@ -216,3 +224,12 @@ def test_browser_maintenance_repairs_missing_chrome():
     assert "-OpenIds instagram,tiktok,lemon8,x,threads,facebook,strava" in script
     assert "Chrome CDP repair succeeded; continuing maintenance pass" in script
     assert "chrome_cdp_available" in script
+
+
+def test_browser_maintenance_refuses_overlapping_passes():
+    script = _read_script("browser-tab-maintenance.ps1")
+
+    assert "Global\\UnifiedCollectorBrowserTabMaintenance" in script
+    assert "$mutex.WaitOne(0)" in script
+    assert "another pass is already running" in script
+    assert "$mutex.ReleaseMutex()" in script
