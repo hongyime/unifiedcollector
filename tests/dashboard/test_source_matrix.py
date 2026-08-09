@@ -238,6 +238,8 @@ def test_source_matrix_blocker_browser_watchdog_gives_tab_action():
 
     assert x_logout_blocker["kind"] == "auth_wall"
     assert "restore the X session" in x_logout_blocker["next_action"]
+    assert "Open https://x.com/home" in x_logout_blocker["next_action"]
+    assert "Last reported tab URL: https://x.com/?logout=1786225206509" in x_logout_blocker["next_action"]
 
     x_try_again_blocker = _source_matrix_blocker(
         _source(

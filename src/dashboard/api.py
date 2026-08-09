@@ -2212,7 +2212,9 @@ def _source_matrix_has_current_content(current_content: dict | None) -> bool:
 
 
 def _source_matrix_x_auth_wall_blocker(browser_url: str) -> dict:
-    location = browser_url or "the X browser tab"
+    raw_url = str(browser_url or "").strip()
+    location = raw_url or "the X browser tab"
+    recovery_url = "https://x.com/home" if "logout=" in raw_url.lower() else location
     return {
         "kind": "auth_wall",
         "severity": "warning",
@@ -2221,7 +2223,8 @@ def _source_matrix_x_auth_wall_blocker(browser_url: str) -> dict:
             "but cannot scrape timeline content."
         ),
         "next_action": (
-            f"Log in or restore the X session in the browser tab at {location}, then press Scrape now on Social Tabs. "
+            f"Open {recovery_url}, log in or restore the X session, then press Scrape now on Social Tabs. "
+            f"Last reported tab URL: {location}. "
             "Do not chase Docker logs for this one; the blocker is the interactive browser session."
         ),
     }
