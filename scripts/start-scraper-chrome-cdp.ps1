@@ -105,6 +105,7 @@ $args = @(
     "--remote-debugging-port=$RemoteDebuggingPort",
     "--user-data-dir=$profile",
     "--load-extension=$extension",
+    "--disable-dev-shm-usage",
     "--disable-background-timer-throttling",
     "--disable-renderer-backgrounding",
     "--disable-backgrounding-occluded-windows",
