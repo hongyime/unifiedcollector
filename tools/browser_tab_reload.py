@@ -164,6 +164,24 @@ def _platform_had_previous_unresponsive_reload(previous: list[dict], platform: s
     return False
 
 
+def _previous_reload_for_url(previous: list[dict], platform: str, url: str) -> dict | None:
+    normalized_url = str(url or "").split("#", 1)[0]
+    for item in previous:
+        if str(item.get("platform") or "").lower() != platform:
+            continue
+        if item.get("action") != "reload":
+            continue
+        prior_url = str(item.get("url") or "").split("#", 1)[0]
+        if prior_url == normalized_url:
+            return item
+    return None
+
+
+def _is_stuck_tab_reason(reason: str) -> bool:
+    text = str(reason or "").lower()
+    return "unresponsive" in text or "no content script attached" in text
+
+
 def _hard_reopen_platform(platform: str, plans: list[dict]) -> list[dict]:
     results: list[dict] = []
     for p in plans:
@@ -189,6 +207,31 @@ def _hard_reopen_platform(platform: str, plans: list[dict]) -> list[dict]:
             "detail": msg,
         })
         print(f"  open   {platform:10} {url[:80]} ... {'OK' if ok else 'FAIL'}: {msg[:160]}")
+        time.sleep(0.8)
+    return results
+
+
+def _hard_reopen_repeated_tabs(platform: str, plans: list[dict]) -> list[dict]:
+    """Close only repeated stuck tabs and reopen their current URLs."""
+    results: list[dict] = []
+    for p in plans:
+        ok, msg = _close_target(p["target_id"])
+        results.append({**p, "action": "hard_reopen_close", "status": "ok" if ok else "fail", "detail": msg})
+        print(f"  close  {platform:10} {p['target_id'][:12]} ... {'OK' if ok else 'FAIL'}: {msg[:160]}")
+        time.sleep(0.5)
+    for p in plans:
+        url = p.get("url") or HARD_REOPEN_URLS.get(platform, ["about:blank"])[0]
+        ok, msg = _open_url(url)
+        results.append({
+            **p,
+            "target_id": None,
+            "ws": None,
+            "reason": "reopen repeated stuck tab after prior soft reload",
+            "action": "hard_reopen_open",
+            "status": "ok" if ok else "fail",
+            "detail": msg,
+        })
+        print(f"  open   {platform:10} {str(url)[:80]} ... {'OK' if ok else 'FAIL'}: {msg[:160]}")
         time.sleep(0.8)
     return results
 
@@ -224,6 +267,7 @@ def main():
             })
 
     hard_reopen_platforms: set[str] = set()
+    hard_reopen_tabs: set[str] = set()
     for platform in HARD_REOPEN_PLATFORMS:
         platform_plans = [p for p in plan if p["platform"] == platform and not p["auth_wall"]]
         if not platform_plans:
@@ -234,6 +278,13 @@ def main():
         ]
         if len(unresponsive) == len(platform_plans) and _platform_had_previous_unresponsive_reload(previous_plan, platform):
             hard_reopen_platforms.add(platform)
+            continue
+        for p in platform_plans:
+            if p["action"] != "reload" or not _is_stuck_tab_reason(str(p.get("reason") or "")):
+                continue
+            previous = _previous_reload_for_url(previous_plan, platform, p.get("url") or "")
+            if previous and _is_stuck_tab_reason(str(previous.get("reason") or "")):
+                hard_reopen_tabs.add(str(p["target_id"]))
 
     for p in plan:
         marker = "RELOAD" if p["action"] == "reload" else "skip"
@@ -250,8 +301,22 @@ def main():
         print(f"  hard reopen {platform}: repeated unresponsive reloads; closing stale tabs and opening canonical tabs")
         results.extend(_hard_reopen_platform(platform, platform_plans))
 
+    for platform in HARD_REOPEN_PLATFORMS:
+        if platform in hard_reopen_platforms:
+            continue
+        platform_plans = [
+            p for p in plan
+            if p["platform"] == platform and str(p["target_id"]) in hard_reopen_tabs and not p["auth_wall"]
+        ]
+        if not platform_plans:
+            continue
+        print(f"  hard reopen {platform}: repeated stuck tab(s); closing only stale tabs and reopening same URL")
+        results.extend(_hard_reopen_repeated_tabs(platform, platform_plans))
+
     for p in plan:
         if p["platform"] in hard_reopen_platforms and not p["auth_wall"]:
+            continue
+        if str(p["target_id"]) in hard_reopen_tabs and not p["auth_wall"]:
             continue
         if p["action"] != "reload":
             results.append({**p, "status": "skipped"})

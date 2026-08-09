@@ -388,6 +388,7 @@ class TelegramWorker:
                         "[worker=%d account=%s] could not set WAL on session: %s",
                         self.worker_id, self.account.name, _pragma_err,
                     )
+        raw_client = None
         try:
             self.state = SessionState.CONNECTING
             raw_client = TelegramClient(session_file, api_id, api_hash)
@@ -432,8 +433,21 @@ class TelegramWorker:
                 "[worker=%d account=%s] Telegram client CONNECTED (%s)",
                 self.worker_id, self.account.name, me_label,
             )
+        except asyncio.CancelledError:
+            self.state = SessionState.ERROR
+            if raw_client is not None and self.client is None:
+                try:
+                    await raw_client.disconnect()
+                except Exception:
+                    pass
+            raise
         except Exception as e:
             self.state = SessionState.ERROR
+            if raw_client is not None and self.client is None:
+                try:
+                    await raw_client.disconnect()
+                except Exception:
+                    pass
             err_text = str(e).lower()
             if "auth" in err_text or "session" in err_text or "phone" in err_text or "key" in err_text:
                 kind = "auth_failure"
@@ -869,11 +883,13 @@ class TelegramCollector(BaseCollector):
                     "[worker=%d account=%s] connect timed out after 45s",
                     w.worker_id, w.account.name,
                 )
+                await w.disconnect()
             except Exception as e:
                 logger.error(
                     "[worker=%d account=%s] failed to connect: %s",
                     w.worker_id, w.account.name, e,
                 )
+                await w.disconnect()
 
         if live:
             self._primary_client = live[0].client

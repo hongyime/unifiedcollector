@@ -160,6 +160,34 @@ def _make_worker(coll, *, name="acct1"):
 # ── module-level helpers ──────────────────────────────────────────────────
 
 
+async def test_spawn_workers_disconnects_timed_out_worker(monkeypatch):
+    acct = SimpleNamespace(
+        name="slowacct",
+        credentials={"api_id": "1", "api_hash": "h", "session": "s", "phone": "+1"},
+    )
+    coll = _make_collector(monkeypatch, accounts=[acct])
+    disconnected = []
+
+    async def fake_connect(self):
+        return None
+
+    async def fake_disconnect(self):
+        disconnected.append(self.account.name)
+
+    async def fake_wait_for(coro, timeout):
+        coro.close()
+        raise asyncio.TimeoutError()
+
+    monkeypatch.setattr(TelegramWorker, "connect", fake_connect)
+    monkeypatch.setattr(TelegramWorker, "disconnect", fake_disconnect)
+    monkeypatch.setattr(tg_mod.asyncio, "wait_for", fake_wait_for)
+
+    live = await coll._spawn_workers()
+
+    assert live == []
+    assert disconnected == ["slowacct"]
+
+
 def test_tg_json_handles_bytes_and_datetime():
     assert _tg_json(b"\xde\xad\xbe\xef") == "deadbeef"
     dt = datetime(2024, 1, 2, 3, 4, 5, tzinfo=timezone.utc)

@@ -144,6 +144,15 @@ def test_browser_tab_reload_hard_reopens_repeatedly_stuck_tiktok_tabs():
     assert "hard_reopen_open" in script
 
 
+def test_browser_tab_reload_hard_reopens_individual_repeated_stuck_tabs():
+    script = (REPO_ROOT / "tools" / "browser_tab_reload.py").read_text(encoding="utf-8")
+
+    assert "def _hard_reopen_repeated_tabs" in script
+    assert "reopen repeated stuck tab after prior soft reload" in script
+    assert "_previous_reload_for_url(previous_plan, platform" in script
+    assert "hard_reopen_tabs.add" in script
+
+
 def test_chrome_cdp_launcher_dry_run_skips_live_probes():
     script = _read_script("start-scraper-chrome-cdp.ps1")
 
