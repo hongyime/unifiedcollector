@@ -566,7 +566,7 @@ async def test_drain_does_not_text_fallback_on_remote_source_url_429(fake_redis,
 
 
 @pytest.mark.asyncio
-async def test_drain_dedupes_by_sha(fake_redis, telegram_stub, monkeypatch):
+async def test_drain_dedupes_same_source_occurrence(fake_redis, telegram_stub, monkeypatch):
     from src.notifications import realtime_feed
 
     monkeypatch.setenv("REALTIME_POST_FEED_MAX_PER_MINUTE", "10")
@@ -586,6 +586,38 @@ async def test_drain_dedupes_by_sha(fake_redis, telegram_stub, monkeypatch):
     await drain._tick(fake_redis)
 
     assert len(telegram_stub["send_photo"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_drain_allows_same_sha_from_different_sources(fake_redis, telegram_stub, monkeypatch):
+    from src.notifications import realtime_feed
+
+    monkeypatch.setenv("REALTIME_POST_FEED_MAX_PER_MINUTE", "10")
+
+    same_sha = "d" * 64
+    first = realtime_feed.build_payload(
+        source="telegram", entity_name="group", content_id="-1001_1",
+        file_path=None, source_url="https://t.me/file.jpg",
+        sha256=same_sha, metadata={"caption": "same image"}, kind="image",
+        content_type="post_image",
+    )
+    second = realtime_feed.build_payload(
+        source="whatsapp", entity_name="chat", content_id="wa_1",
+        file_path=None, source_url="https://wa/file.jpg",
+        sha256=same_sha, metadata={"caption": "same image"}, kind="image",
+        content_type="post_image",
+    )
+    await fake_redis.rpush("uc:realtime_post_feed", json.dumps(first))
+    await fake_redis.rpush("uc:realtime_post_feed", json.dumps(second))
+
+    drain = realtime_feed.RealtimeFeedDrain()
+    await drain._tick(fake_redis)
+    await drain._tick(fake_redis)
+
+    assert len(telegram_stub["send_photo"]) == 2
+    captions = [call["caption"] for call in telegram_stub["send_photo"]]
+    assert any("Telegram" in caption for caption in captions)
+    assert any("WhatsApp" in caption for caption in captions)
 
 
 @pytest.mark.asyncio

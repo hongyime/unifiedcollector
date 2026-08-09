@@ -564,11 +564,13 @@ class RealtimeFeedDrain:
         if not _passes_filter(payload):
             return
 
-        # Dedup.
+        # Dedup exact source occurrences, not global physical files. The vault
+        # dedupes bytes by sha256; this feed should still surface that the same
+        # media appeared via another platform/source.
         ttl_days = _int("REALTIME_POST_FEED_DEDUPE_TTL_DAYS", 7, min_value=1)
-        sha = payload.get("sha256") or _hash_payload(payload)
-        if await _dedupe_seen(client, sha, ttl_days=ttl_days):
-            logger.debug("realtime_feed: dedup skip sha=%s", sha[:12])
+        dedupe_key = _dedupe_key(payload)
+        if await _dedupe_seen(client, dedupe_key, ttl_days=ttl_days):
+            logger.debug("realtime_feed: dedup skip key=%s", dedupe_key[:24])
             return
 
         # Rate-limit.
@@ -611,6 +613,21 @@ def _hash_payload(payload: dict) -> str:
     fingerprint = "|".join(str(payload.get(k) or "") for k in
                            ("source", "content_id", "source_url", "caption"))
     return hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()
+
+
+def _dedupe_key(payload: dict) -> str:
+    """Return a stable key for one source occurrence.
+
+    The collector stores every source occurrence even when the blob hash is the
+    same. The realtime feed should mirror that: dedupe duplicate queue attempts
+    for the same platform/content_id, but do not hide a WhatsApp copy just
+    because Telegram already posted the same sha256.
+    """
+    source = str(payload.get("source") or "").strip().lower()
+    content_id = str(payload.get("content_id") or "").strip()
+    if source and content_id:
+        return hashlib.sha256(f"{source}|{content_id}".encode("utf-8")).hexdigest()
+    return _hash_payload(payload)
 
 
 # -- Module entrypoint ----------------------------------------------------

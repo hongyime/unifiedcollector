@@ -32,7 +32,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-from telegram.error import TelegramError
+from telegram.error import NetworkError, TelegramError
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.errors import (
@@ -363,6 +363,20 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await send_ephemeral(update, "\n".join(lines))
 
 
+def polling_error_callback(error: TelegramError) -> None:
+    """Keep transient Telegram polling outages readable.
+
+    python-telegram-bot retries polling network failures internally. Without an
+    explicit callback, a one-off Telegram 502/Bad Gateway produces a full
+    traceback under telegram.ext.Updater, which looks like a fatal bot crash in
+    Docker logs even though polling continues.
+    """
+    if isinstance(error, NetworkError) and "Bad Gateway" in str(error):
+        logger.warning("Telegram polling transient NetworkError: Bad Gateway; polling will retry")
+        return
+    logger.error("Telegram polling failed: %s", error, exc_info=error)
+
+
 def build_application(token: str, bot_name: str) -> Application:
     """Build a telegram Application for one bot token."""
     app = Application.builder().token(token).build()
@@ -383,7 +397,6 @@ def build_application(token: str, bot_name: str) -> Application:
     )
 
     app.add_handler(conv_handler)
-    app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("cancel", cancel))
 
@@ -412,7 +425,10 @@ async def main():
             app = build_application(token, bot_name)
             await app.initialize()
             await app.start()
-            await app.updater.start_polling(drop_pending_updates=True)
+            await app.updater.start_polling(
+                drop_pending_updates=True,
+                error_callback=polling_error_callback,
+            )
             apps.append(app)
         except Exception as e:
             logger.error("Failed to start bot %s: %s", bot_name, e)
