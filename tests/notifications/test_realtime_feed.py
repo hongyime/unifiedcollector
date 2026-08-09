@@ -230,6 +230,16 @@ def test_format_caption_escapes_html():
     assert "hello &amp; &lt;world&gt;" in text
 
 
+def test_format_caption_labels_newly_allowed_sources():
+    from src.notifications.realtime_feed import format_caption
+
+    youtube = format_caption({"source": "youtube", "author": "chan", "caption": "clip"})
+    discord = format_caption({"source": "beeper_discord", "author": "room", "caption": "file"})
+
+    assert "<b>YouTube</b>" in youtube
+    assert "<b>Discord via Beeper</b>" in discord
+
+
 # -- Self-bot circular-loop defence --------------------------------------
 
 def test_filter_drops_notify_bot_telegram_from_logs_chat(monkeypatch):
