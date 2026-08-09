@@ -2137,20 +2137,35 @@ class YoutubeCollector(BaseCollector):
         if not path:
             self._usable_cookie_file_cache = ""
             return ""
-        p = Path(path)
+        candidates = [Path(path)]
+        parent = candidates[0].parent
+        if parent.exists():
+            for pattern in ("youtube_cookies.txt", "youtube*.txt", "cookies_*.txt"):
+                for candidate in sorted(parent.glob(pattern)):
+                    if candidate not in candidates:
+                        candidates.append(candidate)
+        for candidate in candidates:
+            usable = self._validate_cookie_file(candidate)
+            if usable:
+                if str(candidate) != path:
+                    logger.info("youtube: using fallback cookie file %s instead of %s", candidate, path)
+                self._usable_cookie_file_cache = str(candidate)
+                return str(candidate)
+        self._usable_cookie_file_cache = ""
+        return ""
+
+    def _validate_cookie_file(self, p: Path) -> bool:
+        path = str(p)
         if not p.exists() or not p.is_file():
             logger.warning("youtube: ignoring missing cookie file %s", path)
-            self._usable_cookie_file_cache = ""
-            return ""
+            return False
         try:
             if p.stat().st_size <= 0:
                 logger.warning("youtube: ignoring empty cookie file %s", path)
-                self._usable_cookie_file_cache = ""
-                return ""
+                return False
         except Exception as exc:
             logger.warning("youtube: ignoring unreadable cookie file %s: %s", path, _safe_log_text(exc))
-            self._usable_cookie_file_cache = ""
-            return ""
+            return False
         try:
             lines: list[str] = []
             with p.open("r", encoding="utf-8", errors="replace") as fh:
@@ -2161,23 +2176,19 @@ class YoutubeCollector(BaseCollector):
                     lines.append(line.rstrip("\n"))
         except Exception as exc:
             logger.warning("youtube: ignoring unreadable cookie file %s: %s", path, _safe_log_text(exc))
-            self._usable_cookie_file_cache = ""
-            return ""
+            return False
         for line in lines:
             stripped = line.strip()
             if not stripped:
                 continue
             if "Netscape HTTP Cookie File" in stripped:
-                self._usable_cookie_file_cache = path
-                return path
+                return True
             if stripped.startswith("#"):
                 continue
             if len(stripped.split("\t")) >= 7:
-                self._usable_cookie_file_cache = path
-                return path
+                return True
         logger.warning("youtube: ignoring cookie file %s because it is not Netscape cookies.txt format", path)
-        self._usable_cookie_file_cache = ""
-        return ""
+        return False
 
     async def _filter_video_ids_already_archived(self, video_ids: list[str]) -> tuple[list[str], int]:
         """Drop explicit video IDs that Postgres already has archived files for.
