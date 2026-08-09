@@ -15,6 +15,7 @@ import logging
 import mimetypes
 import os
 import secrets
+import time
 import urllib.request
 from pathlib import Path
 from urllib.error import HTTPError
@@ -25,6 +26,25 @@ _API = "https://api.telegram.org"
 _MAX_TEXT_CHARS = 3800
 # Telegram caption hard limit for sendPhoto / sendVideo. 1024 chars.
 MAX_CAPTION_CHARS = 1024
+_TEXT_COOLDOWN_UNTIL = 0.0
+
+
+def _extract_retry_after(body: str, headers=None) -> int:
+    retry_after = 0
+    try:
+        data = json.loads(body or "{}")
+        params = data.get("parameters") or {}
+        retry_after = int(params.get("retry_after") or 0)
+    except Exception:
+        retry_after = 0
+    if headers is not None:
+        try:
+            hdr = headers.get("Retry-After")
+            if hdr:
+                retry_after = max(retry_after, int(hdr))
+        except Exception:
+            pass
+    return max(0, retry_after)
 
 
 def _config() -> tuple[str, str, str]:
@@ -41,6 +61,11 @@ def _config() -> tuple[str, str, str]:
 
 def _post(token: str, payload: dict) -> bool:
     """Blocking POST to sendMessage. Returns True on HTTP 200. Never raises."""
+    global _TEXT_COOLDOWN_UNTIL
+    now = time.time()
+    if _TEXT_COOLDOWN_UNTIL > now:
+        logger.info("telegram send skipped: Bot API cooldown %.0fs remaining", _TEXT_COOLDOWN_UNTIL - now)
+        return False
     url = f"{_API}/bot{token}/sendMessage"
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
@@ -56,6 +81,11 @@ def _post(token: str, payload: dict) -> bool:
                 body = e.read().decode("utf-8", "replace")[:200]
             except Exception:
                 pass
+        if isinstance(e, HTTPError) and e.code == 429:
+            retry_after = _extract_retry_after(body, getattr(e, "headers", None))
+            _TEXT_COOLDOWN_UNTIL = time.time() + max(1, retry_after)
+            logger.warning("telegram send 429 retry_after=%ss", retry_after)
+            return False
         logger.warning("telegram send failed: %s %s", e, body)
         return False
 

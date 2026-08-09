@@ -1,4 +1,6 @@
 import pytest
+import io
+from urllib.error import HTTPError
 
 
 def test_split_text_prefers_line_boundaries():
@@ -10,6 +12,50 @@ def test_split_text_prefers_line_boundaries():
 
     assert parts == ["a\na\na\na", "b\nb\nb\nb"]
     assert all(len(part) <= 8 for part in parts)
+
+
+def test_text_post_records_retry_after_cooldown(monkeypatch):
+    from src.notifications import telegram
+
+    class FakeHeaders:
+        def get(self, _name):
+            return None
+
+    monkeypatch.setattr(telegram.time, "time", lambda: 1000.0)
+    telegram._TEXT_COOLDOWN_UNTIL = 0
+
+    def fake_urlopen(_req, timeout=15):
+        raise HTTPError(
+            url="https://api.telegram.org/botTOKEN/sendMessage",
+            code=429,
+            msg="Too Many Requests",
+            hdrs=FakeHeaders(),
+            fp=io.BytesIO(b'{"ok":false,"parameters":{"retry_after":17}}'),
+        )
+
+    monkeypatch.setattr(telegram.urllib.request, "urlopen", fake_urlopen)
+
+    ok = telegram._post("token", {"chat_id": "chat", "text": "hello"})
+
+    assert ok is False
+    assert telegram._TEXT_COOLDOWN_UNTIL == 1017.0
+    telegram._TEXT_COOLDOWN_UNTIL = 0
+
+
+def test_text_post_skips_during_cooldown(monkeypatch):
+    from src.notifications import telegram
+
+    def fake_urlopen(_req, timeout=15):
+        raise AssertionError("urlopen should not be called during cooldown")
+
+    monkeypatch.setattr(telegram.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(telegram.time, "time", lambda: 1000.0)
+    telegram._TEXT_COOLDOWN_UNTIL = 1015.0
+
+    ok = telegram._post("token", {"chat_id": "chat", "text": "hello"})
+
+    assert ok is False
+    telegram._TEXT_COOLDOWN_UNTIL = 0
 
 
 @pytest.mark.asyncio
