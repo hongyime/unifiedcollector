@@ -1213,6 +1213,11 @@ def test_classify_ytdlp_media_failure_expected_states():
         "warning",
         2,
     )
+    assert _classify_ytdlp_media_failure("[download] 21.3% of 226.21MiB ETA 02:13", timed_out=True) == (
+        "transient_network",
+        "warning",
+        2,
+    )
     assert _classify_ytdlp_media_failure("unexpected extractor failure") == (
         "failed",
         "warning",
@@ -1255,6 +1260,50 @@ async def test_download_videos_marks_upcoming_live_without_warning(monkeypatch, 
         and "youtube yt-dlp video download" in record.message
         for record in caplog.records
     )
+
+
+@pytest.mark.asyncio
+async def test_download_videos_marks_timeout_with_retry_delay(monkeypatch, tmp_path):
+    coll = _new_collector(monkeypatch, YOUTUBE_DOWNLOAD_DELAY="0")
+    coll._filter_video_ids_for_download = AsyncMock(return_value=(["v1"], 0))
+    coll._filter_video_ids_already_archived = AsyncMock(return_value=(["v1"], 0))
+    coll._mark_video_media_attempt = AsyncMock()
+
+    from src.core import subprocess_downloader
+    from src.core.subprocess_downloader import DownloadResult
+
+    ytdlp = AsyncMock(return_value=DownloadResult(
+        returncode=-9,
+        stdout="[download] 21.3% of 226.21MiB ETA 02:13",
+        stderr="",
+        files=[],
+        tempdir=tmp_path,
+        elapsed=600.0,
+        timed_out=True,
+    ))
+    monkeypatch.setattr(subprocess_downloader, "yt_dlp_download", ytdlp)
+
+    await coll._download_videos_via_yt_dlp("UC_a", "Channel A", ["v1"])
+
+    coll._mark_video_media_attempt.assert_awaited_once()
+    assert coll._mark_video_media_attempt.await_args.kwargs["status"] == "transient_network"
+    assert coll._mark_video_media_attempt.await_args.kwargs["retry_delay_hours"] == 2
+
+
+@pytest.mark.asyncio
+async def test_mark_video_media_attempt_sets_next_attempt_for_retry_delay(monkeypatch):
+    coll = _new_collector(monkeypatch)
+
+    await coll._mark_video_media_attempt("v1", status="transient_network", reason="timeout", retry_delay_hours=2)
+
+    coll.pool._conn.execute.assert_awaited_once()
+    sql, video_id, status, reason, retry_delay = coll.pool._conn.execute.await_args.args
+    assert "next_attempt_at" in sql
+    assert "make_interval(hours => $4::int)" in sql
+    assert video_id == "v1"
+    assert status == "transient_network"
+    assert reason == "timeout"
+    assert retry_delay == 2
 
 
 @pytest.mark.asyncio

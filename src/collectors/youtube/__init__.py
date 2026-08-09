@@ -123,8 +123,10 @@ def _safe_log_text(value) -> str:
     return _SECRET_QUERY_PARAM_RE.sub(r"\1<redacted>", text)
 
 
-def _classify_ytdlp_media_failure(summary: str) -> tuple[str, str, int]:
+def _classify_ytdlp_media_failure(summary: str, *, timed_out: bool = False) -> tuple[str, str, int]:
     """Return media_status, log_level, retry_delay_hours for a yt-dlp failure."""
+    if timed_out:
+        return "transient_network", "warning", 2
     text = summary or ""
     for pattern, status in _YOUTUBE_EXPECTED_YTDLP_STATES:
         if pattern.search(text):
@@ -1328,9 +1330,11 @@ class YoutubeCollector(BaseCollector):
             logger.debug("youtube channel skip update failed for %s", channel_id, exc_info=True)
 
     async def _mark_video_media_attempt(self, platform_video_id: str, *, status: str,
-                                        reason: str | None = None) -> None:
+                                        reason: str | None = None,
+                                        retry_delay_hours: int = 0) -> None:
         if not self.pool or not platform_video_id:
             return
+        retry_delay_hours = max(0, int(retry_delay_hours or 0))
         try:
             async with self.pool.acquire() as conn:
                 await conn.execute(
@@ -1338,12 +1342,17 @@ class YoutubeCollector(BaseCollector):
                     UPDATE youtube_videos
                     SET media_status=$2,
                         media_skip_reason=$3,
-                        last_media_attempt_at=NOW()
+                        last_media_attempt_at=NOW(),
+                        next_attempt_at = CASE
+                            WHEN $4::int > 0 THEN NOW() + make_interval(hours => $4::int)
+                            ELSE next_attempt_at
+                        END
                     WHERE platform_video_id=$1
                     """,
                     platform_video_id,
                     status,
                     reason[:1000] if reason else None,
+                    retry_delay_hours,
                 )
         except Exception:
             logger.debug("youtube video media status update failed for %s", platform_video_id, exc_info=True)
@@ -2042,7 +2051,10 @@ class YoutubeCollector(BaseCollector):
                     )
                     if not result.ok and not result.cancelled:
                         reason = result.output_summary(400)
-                        status, log_level, retry_delay_hours = _classify_ytdlp_media_failure(reason)
+                        status, log_level, retry_delay_hours = _classify_ytdlp_media_failure(
+                            reason,
+                            timed_out=result.timed_out,
+                        )
                         log = logger.info if log_level == "info" else logger.warning
                         log(
                             "youtube yt-dlp video download %s for %s: rc=%s timed_out=%s retry_delay_hours=%s output_tail=%s",
@@ -2054,6 +2066,7 @@ class YoutubeCollector(BaseCollector):
                                 m.group(1),
                                 status=status,
                                 reason=reason or f"yt-dlp rc={result.returncode}",
+                                retry_delay_hours=retry_delay_hours,
                             )
                         self._progress_count += 1  # tick watchdog so metadata-only runs don't look hung
                     eligible_files = 0
