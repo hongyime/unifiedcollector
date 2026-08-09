@@ -241,7 +241,7 @@ try {
         }
         Write-Log "browser tab maintenance skipped because Chrome CDP is unavailable"
         Write-Status "cdp_unavailable" $script:LastCdpError $diagnostics
-        return
+        exit 3
     }
     $python = Resolve-Python
     $auditTimeout = Get-PositiveIntEnv "UC_BROWSER_AUDIT_TIMEOUT_SECONDS" 90

@@ -32,7 +32,13 @@ try {
         try {
             Write-LoopLog "maintenance pass start"
             & powershell.exe -ExecutionPolicy Bypass -File $maintenance
-            Write-LoopLog "maintenance pass exit=$LASTEXITCODE"
+            if ($LASTEXITCODE -eq 0) {
+                Write-LoopLog "maintenance pass exit=0"
+            } elseif ($LASTEXITCODE -eq 3) {
+                Write-LoopLog "maintenance pass degraded: Chrome CDP unavailable"
+            } else {
+                Write-LoopLog "maintenance pass exit=$LASTEXITCODE"
+            }
         } catch {
             Write-LoopLog ("maintenance pass failed: " + $_.Exception.Message)
         }
