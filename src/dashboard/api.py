@@ -2128,6 +2128,29 @@ def _merge_source_window(content: dict | None, rate: dict | None) -> dict:
     return out
 
 
+def _apply_liveness_floor_to_window(source_row: dict, window: dict, now: datetime | None) -> dict:
+    """Avoid fake-zero 24h source activity when exact rollups time out.
+
+    Source liveness is much cheaper than the full per-table count rollup and is
+    already required to build the matrix. If the count window has no records but
+    liveness proves recent activity inside the window, surface a conservative
+    lower bound of one record instead of showing the operator "0".
+    """
+    if any(int(window.get(key) or 0) for key in ("records", "messages", "media_items")):
+        return window
+    if source_row.get("status") != "live":
+        return window
+    age_seconds = _int_or_none(source_row.get("age_seconds"))
+    if age_seconds is None or age_seconds < 0 or age_seconds > 86400:
+        return window
+    out = dict(window)
+    out["records"] = 1
+    if now is not None:
+        out["latest_record_at"] = now - timedelta(seconds=age_seconds)
+    out["liveness_floor"] = True
+    return out
+
+
 def _source_window_totals(rows: list[dict], window_key: str) -> dict:
     out = _empty_source_counts()
     active_sources = 0
@@ -2752,6 +2775,7 @@ def _source_matrix_row(source_row: dict, current_content: dict | None, current_r
     total_media = media_total or {}
     current_window = _merge_source_window(current_content, current_rate)
     day_window = _merge_source_window(day_content, day_rate)
+    day_window = _apply_liveness_floor_to_window(source_row, day_window, now)
     extension_issues = _source_matrix_filter_extension_issues_for_current_content(
         extension_issues,
         current_window,

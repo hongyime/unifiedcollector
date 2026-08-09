@@ -844,6 +844,31 @@ def test_source_matrix_row_counts_and_live_blocker():
     assert row["blocker"]["kind"] == "none"
 
 
+def test_source_matrix_row_uses_liveness_floor_when_24h_rollup_missing():
+    now = datetime(2026, 8, 9, 3, 0, tzinfo=timezone.utc)
+
+    row = _source_matrix_row(
+        _source(
+            source="telegram",
+            status="live",
+            age_seconds=120,
+            detail="newest row is inside the freshness window",
+        ),
+        current_content={"records": 3, "messages": 3, "media_items": 0},
+        current_rate=None,
+        day_content=None,
+        day_rate=None,
+        media_total={"total_media_items": 10},
+        cursor_row=None,
+        extension_issues=[],
+        now=now,
+    )
+
+    assert row["last_24h"]["records"] == 1
+    assert row["last_24h"]["liveness_floor"] is True
+    assert row["last_24h"]["latest_record_at"] == now - timedelta(seconds=120)
+
+
 def test_source_matrix_row_labels_live_source_degraded_when_extension_blocked():
     row = _source_matrix_row(
         _source(),
