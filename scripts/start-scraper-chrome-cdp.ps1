@@ -11,6 +11,7 @@ param(
     [switch]$NoOpenAll,
     [switch]$NoScrape,
     [switch]$NoTest,
+    [switch]$IsolateExtensions,
     [switch]$DryRun
 )
 
@@ -21,7 +22,21 @@ function Resolve-ChromePath {
     if ($Requested -and (Test-Path -LiteralPath $Requested)) {
         return (Resolve-Path -LiteralPath $Requested).Path
     }
+    # Branded Chrome 137+ removed command-line unpacked extension loading.
+    # Prefer Chrome-for-Testing/Playwright Chromium when available so the
+    # UnifiedCollector MV3 extension can be restored automatically after reboot.
+    $playwrightChromes = @()
+    $playwrightRoot = Join-Path $env:LOCALAPPDATA "ms-playwright"
+    if (Test-Path -LiteralPath $playwrightRoot) {
+        $playwrightChromes = @(Get-ChildItem -LiteralPath $playwrightRoot -Recurse -Filter chrome.exe -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -ExpandProperty FullName)
+    }
     $candidates = @(
+        "$env:LOCALAPPDATA\Google\Chrome for Testing\Application\chrome.exe",
+        "$env:ProgramFiles\Google\Chrome for Testing\Application\chrome.exe",
+        "${env:ProgramFiles(x86)}\Google\Chrome for Testing\Application\chrome.exe"
+    ) + $playwrightChromes + @(
         "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
         "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
         "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe"
@@ -40,16 +55,15 @@ function Resolve-UserDataDir {
         return $Requested
     }
     # Chrome 136+ ignores --remote-debugging-port when pointed at the default
-    # Chrome profile directory. Use the newest durable, non-standard scraper
-    # profile so CDP stays available and scraper logins persist across restarts.
+    # Chrome profile directory. Prefer the dedicated automation profile because
+    # older profile folders may have been created by branded Chrome and can be
+    # incompatible with Chrome-for-Testing / Playwright Chromium.
     $base = Join-Path $env:LOCALAPPDATA "UnifiedCollector"
-    $existing = @(Get-ChildItem -LiteralPath $base -Directory -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -match '^ChromeCdpProfile\d*$' } |
-        Sort-Object LastWriteTime -Descending)
-    if ($existing.Count -gt 0) {
-        return $existing[0].FullName
+    $automation = Join-Path $base "ChromeCdpAutomationProfile"
+    if (Test-Path -LiteralPath $automation) {
+        return $automation
     }
-    return (Join-Path $base "ChromeCdpProfile")
+    return $automation
 }
 
 function Test-CdpAvailable {
@@ -64,6 +78,7 @@ function Test-CdpAvailable {
 
 function Get-ExtensionIdFromCdp {
     param([int]$Port)
+    $knownIds = @(Get-KnownExtensionIds)
     try {
         $targets = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/json/list" -Method Get -TimeoutSec 5
         foreach ($target in @($targets)) {
@@ -73,14 +88,14 @@ function Get-ExtensionIdFromCdp {
                 continue
             }
             $match = [regex]::Match($url, '^chrome-extension://([a-p]{32})/')
-            if ($match.Success) {
+            if ($match.Success -and $knownIds -contains $match.Groups[1].Value) {
                 return $match.Groups[1].Value
             }
         }
         foreach ($target in @($targets)) {
             $url = [string]($target.url)
             $match = [regex]::Match($url, '^chrome-extension://([a-p]{32})/')
-            if ($match.Success) {
+            if ($match.Success -and $knownIds -contains $match.Groups[1].Value) {
                 return $match.Groups[1].Value
             }
         }
@@ -90,10 +105,50 @@ function Get-ExtensionIdFromCdp {
     return ""
 }
 
+function Get-KnownExtensionIds {
+    # Historical and current unpacked-extension ids used by this repo. Keep
+    # these as fallbacks because a dormant MV3 worker may not appear in
+    # /json/list until its options page is opened.
+    return @(
+        "nkeimhogjdpnpccoofpliimaahmaaome",
+        "pkmdmcklnjdeocoeigmlakhomhhcpafb"
+    )
+}
+
+function Get-PrimaryKnownExtensionId {
+    return @(Get-KnownExtensionIds)[0]
+}
+
 function Open-CdpTarget {
     param([int]$Port, [string]$Url)
     $encoded = [uri]::EscapeDataString($Url)
     Invoke-WebRequest -Uri "http://127.0.0.1:$Port/json/new?$encoded" -Method Put -UseBasicParsing -TimeoutSec 10 | Out-Null
+}
+
+function Open-ExtensionControlPage {
+    param([int]$Port, [string]$TabsUrlPath)
+    $extensionId = Get-ExtensionIdFromCdp $Port
+    if ($extensionId) {
+        $tabsUrl = "chrome-extension://$extensionId/$TabsUrlPath"
+        Open-CdpTarget -Port $Port -Url $tabsUrl
+        Write-Host "Opened extension control page: $tabsUrl"
+        return $true
+    }
+    foreach ($knownId in @(Get-KnownExtensionIds)) {
+        $tabsUrl = "chrome-extension://$knownId/$TabsUrlPath"
+        try {
+            Open-CdpTarget -Port $Port -Url $tabsUrl
+            Start-Sleep -Seconds 2
+            $extensionId = Get-ExtensionIdFromCdp $Port
+            if ($extensionId) {
+                Write-Host "Opened extension control page via known id: $tabsUrl"
+                return $true
+            }
+        } catch {
+            # Keep trying other known ids; if none work the caller will warn.
+        }
+    }
+    return $false
 }
 
 function Get-PlatformLaunchUrls {
@@ -237,13 +292,13 @@ $tabsUrlPath = "tabs.html"
 if ($tabsQuery) {
     $tabsUrlPath = "${tabsUrlPath}?$tabsQuery"
 }
-$fallbackTabsUrl = "chrome-extension://pkmdmcklnjdeocoeigmlakhomhhcpafb/$tabsUrlPath"
+$fallbackTabsUrl = "chrome-extension://$(Get-PrimaryKnownExtensionId)/$tabsUrlPath"
 $args = @(
     "--remote-debugging-port=$RemoteDebuggingPort",
-    "--remote-debugging-address=127.0.0.1",
-    "--remote-allow-origins=http://127.0.0.1:$RemoteDebuggingPort",
+    "--remote-debugging-address=0.0.0.0",
+    "--remote-allow-origins=*",
     "--user-data-dir=$profile",
-    "--disable-extensions-except=$extension",
+    "--enable-extensions",
     "--load-extension=$extension",
     "--no-first-run",
     "--no-default-browser-check",
@@ -256,6 +311,12 @@ $args = @(
     "--renderer-process-limit=10",
     "about:blank"
 )
+if ($IsolateExtensions) {
+    $insertAt = [Math]::Max(0, [Array]::IndexOf($args, "--load-extension=$extension"))
+    $before = if ($insertAt -gt 0) { $args[0..($insertAt - 1)] } else { @() }
+    $after = $args[$insertAt..($args.Count - 1)]
+    $args = @($before + "--disable-extensions-except=$extension" + $after)
+}
 $argumentLine = ($args | ForEach-Object { Quote-Argument $_ }) -join " "
 
 if ($DryRun) {
@@ -276,11 +337,8 @@ $visibleChromeWindows = @(Get-VisibleChromeWindows)
 $cdpAlreadyUp = Test-CdpAvailable $RemoteDebuggingPort
 
 if ($cdpAlreadyUp) {
-    $extensionId = Get-ExtensionIdFromCdp $RemoteDebuggingPort
-    if ($extensionId) {
-        $tabsUrl = "chrome-extension://$extensionId/$tabsUrlPath"
-        Open-CdpTarget -Port $RemoteDebuggingPort -Url $tabsUrl
-        Write-Host "Opened extension control page: $tabsUrl"
+    if (-not (Open-ExtensionControlPage -Port $RemoteDebuggingPort -TabsUrlPath $tabsUrlPath)) {
+        Write-Warning "Chrome CDP is reachable, but the UnifiedCollector extension target was not visible."
     }
     foreach ($url in @(Get-PlatformLaunchUrls -Ids $OpenIds -All ($OpenAll -and -not $NoOpenAll))) {
         Open-CdpTarget -Port $RemoteDebuggingPort -Url $url
@@ -324,13 +382,8 @@ $proc = Start-Process -FilePath $chrome -ArgumentList $argumentLine -PassThru
 Start-Sleep -Seconds 4
 
 if (Test-CdpAvailable $RemoteDebuggingPort) {
-    $extensionId = Get-ExtensionIdFromCdp $RemoteDebuggingPort
-    if ($extensionId) {
-        $tabsUrl = "chrome-extension://$extensionId/$tabsUrlPath"
-        Open-CdpTarget -Port $RemoteDebuggingPort -Url $tabsUrl
-        Write-Host "Opened extension control page: $tabsUrl"
-    } else {
-        Write-Warning "CDP is reachable, but no loaded extension target was found yet; open the UnifiedCollector extension options page manually."
+    if (-not (Open-ExtensionControlPage -Port $RemoteDebuggingPort -TabsUrlPath $tabsUrlPath)) {
+        Write-Warning "CDP is reachable, but no loaded UnifiedCollector extension target was found yet; reload the unpacked extension from chrome://extensions if browser heartbeats stay stale."
     }
     foreach ($url in @(Get-PlatformLaunchUrls -Ids $OpenIds -All ($OpenAll -and -not $NoOpenAll))) {
         Open-CdpTarget -Port $RemoteDebuggingPort -Url $url

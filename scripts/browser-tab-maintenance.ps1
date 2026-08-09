@@ -37,9 +37,23 @@ function Get-ChromeCdpDiagnostics {
     $repairCommand = "powershell -ExecutionPolicy Bypass -File scripts\start-scraper-chrome-cdp.ps1"
     $hint = "Close Chrome, then run scripts\start-scraper-chrome-cdp.ps1 so the scraper Chrome starts with --remote-debugging-port=9222; do not open extra Chrome windows manually for maintenance."
     $reason = "chrome_cdp_unavailable"
-    if ($processes.Count -eq 0) {
+    if ($withCdp.Count -gt 0) {
+        $reason = "chrome_cdp_available"
+        $hint = "Chrome CDP is reachable. If browser heartbeats are stale, reload platform tabs or the UnifiedCollector extension control page."
+        $repairCommand = "powershell -ExecutionPolicy Bypass -File scripts\start-scraper-chrome-cdp.ps1 -NoOpenAll -OpenIds instagram,tiktok,lemon8,x,threads,facebook,strava -NoTest"
+        if ($script:LastCdpError) {
+            $reason = "chrome_cdp_process_unreachable"
+            if ($visibleWindows.Count -eq 0) {
+                $repairCommand = "powershell -ExecutionPolicy Bypass -File scripts\start-scraper-chrome-cdp.ps1 -CloseExistingIfNoVisibleWindows -FallbackOpenControlIfCleanupBlocked -NoOpenAll -OpenIds instagram,tiktok,lemon8,x,threads,facebook,strava -NoTest"
+                $hint = "Chrome has hidden CDP processes, but the CDP socket is unreachable. The maintenance task can close those orphaned scraper processes and relaunch Chrome with CDP."
+            } else {
+                $hint = "Chrome has a CDP command line, but the CDP socket is unreachable. Save/finish visible browser work, close Chrome normally, then run scripts\start-scraper-chrome-cdp.ps1."
+            }
+        }
+    } elseif ($processes.Count -eq 0) {
         $reason = "chrome_not_running"
-        $hint = "Run scripts\start-scraper-chrome-cdp.ps1 to open the collector scraper Chrome profile with --remote-debugging-port=9222, then reload the extension tabs."
+        $repairCommand = "powershell -ExecutionPolicy Bypass -File scripts\start-scraper-chrome-cdp.ps1 -NoOpenAll -OpenIds instagram,tiktok,lemon8,x,threads,facebook,strava -NoTest"
+        $hint = "Chrome is not running. The maintenance task can relaunch scraper Chrome with CDP and the UnifiedCollector extension."
     } elseif ($withCdp.Count -eq 0) {
         $reason = "chrome_running_without_cdp"
         if ($visibleWindows.Count -eq 0) {
@@ -168,6 +182,33 @@ function Test-CdpAvailable {
     }
 }
 
+function Invoke-ChromeCdpRepair {
+    param([object]$Diagnostics)
+    $reason = [string]$Diagnostics.reason
+    $launcher = Join-Path $repo "scripts\start-scraper-chrome-cdp.ps1"
+    if (-not (Test-Path -LiteralPath $launcher)) {
+        Write-Log "Chrome CDP repair skipped: launcher not found at $launcher"
+        return $false
+    }
+    if ($reason -eq "chrome_not_running") {
+        Write-Log "Chrome CDP repair: relaunching scraper Chrome because Chrome is not running"
+        & powershell.exe -ExecutionPolicy Bypass -File $launcher -NoOpenAll -OpenIds instagram,tiktok,lemon8,x,threads,facebook,strava -NoTest
+        return (Test-CdpAvailable)
+    }
+    if ($reason -eq "chrome_running_without_cdp" -and [int]$Diagnostics.chrome_visible_window_count -eq 0) {
+        Write-Log "Chrome CDP repair: closing hidden Chrome and relaunching scraper Chrome with CDP"
+        & powershell.exe -ExecutionPolicy Bypass -File $launcher -CloseExistingIfNoVisibleWindows -FallbackOpenControlIfCleanupBlocked -NoOpenAll -OpenIds instagram,tiktok,lemon8,x,threads,facebook,strava -NoTest
+        return (Test-CdpAvailable)
+    }
+    if ($reason -eq "chrome_cdp_process_unreachable" -and [int]$Diagnostics.chrome_visible_window_count -eq 0) {
+        Write-Log "Chrome CDP repair: closing hidden unreachable CDP Chrome and relaunching scraper Chrome"
+        & powershell.exe -ExecutionPolicy Bypass -File $launcher -CloseExistingIfNoVisibleWindows -FallbackOpenControlIfCleanupBlocked -NoOpenAll -OpenIds instagram,tiktok,lemon8,x,threads,facebook,strava -NoTest
+        return (Test-CdpAvailable)
+    }
+    Write-Log "Chrome CDP repair skipped for reason=$reason visible_windows=$($Diagnostics.chrome_visible_window_count)"
+    return $false
+}
+
 function Get-PositiveIntEnv([string]$name, [int]$fallback) {
     $value = [Environment]::GetEnvironmentVariable($name)
     $parsed = 0
@@ -239,9 +280,13 @@ try {
         } elseif ($diagnostics.reason -eq "chrome_not_running") {
             Write-Log "Chrome is not running"
         }
-        Write-Log "browser tab maintenance skipped because Chrome CDP is unavailable"
-        Write-Status "cdp_unavailable" $script:LastCdpError $diagnostics
-        exit 3
+        if (Invoke-ChromeCdpRepair -Diagnostics $diagnostics) {
+            Write-Log "Chrome CDP repair succeeded; continuing maintenance pass"
+        } else {
+            Write-Log "browser tab maintenance skipped because Chrome CDP is unavailable"
+            Write-Status "cdp_unavailable" $script:LastCdpError $diagnostics
+            exit 3
+        }
     }
     $python = Resolve-Python
     $auditTimeout = Get-PositiveIntEnv "UC_BROWSER_AUDIT_TIMEOUT_SECONDS" 90

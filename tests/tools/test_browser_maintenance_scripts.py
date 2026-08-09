@@ -12,15 +12,35 @@ def test_chrome_cdp_launcher_uses_robust_startup_flags():
     script = _read_script("start-scraper-chrome-cdp.ps1")
 
     assert "--disable-dev-shm-usage" in script
-    assert "--remote-debugging-address=127.0.0.1" in script
-    assert "--remote-allow-origins=http://127.0.0.1:$RemoteDebuggingPort" in script
+    assert "--remote-debugging-address=0.0.0.0" in script
+    assert "--remote-allow-origins=*" in script
     assert "--no-first-run" in script
     assert "--no-default-browser-check" in script
+    assert "--enable-extensions" in script
     assert "--disable-extensions-except=$extension" in script
+    assert "[switch]$IsolateExtensions" in script
+    assert "if ($IsolateExtensions)" in script
     assert "--disable-background-mode" in script
     assert "--disable-background-timer-throttling" in script
     assert "--js-flags=--max-old-space-size=512" in script
     assert "--renderer-process-limit=10" in script
+
+
+def test_chrome_cdp_launcher_prefers_extension_capable_chromium():
+    script = _read_script("start-scraper-chrome-cdp.ps1")
+
+    assert "Chrome 137+ removed command-line unpacked extension loading" in script
+    assert "Chrome for Testing" in script
+    assert "ms-playwright" in script
+    assert 'Sort-Object LastWriteTime -Descending' in script
+
+
+def test_chrome_cdp_launcher_prefers_dedicated_automation_profile():
+    script = _read_script("start-scraper-chrome-cdp.ps1")
+
+    assert "ChromeCdpAutomationProfile" in script
+    assert 'return $automation' in script
+    assert "incompatible with Chrome-for-Testing / Playwright Chromium" in script
 
 
 def test_chrome_cdp_launcher_disables_profile_background_mode():
@@ -38,9 +58,9 @@ def test_chrome_cdp_launcher_uses_non_default_profile_for_cdp():
     script = _read_script("start-scraper-chrome-cdp.ps1")
 
     assert "Chrome 136+ ignores --remote-debugging-port" in script
-    assert "Sort-Object LastWriteTime -Descending" in script
-    assert "$existing[0].FullName" in script
-    assert "UnifiedCollector\\ChromeCdpProfile" in script
+    assert "ChromeCdpAutomationProfile" in script
+    assert "$existing[0].FullName" not in script
+    assert "^ChromeCdpProfile" not in script
     assert "$env:LOCALAPPDATA\\Google\\Chrome\\User Data" in script
     assert "does not expose CDP for the default Chrome profile" in script
 
@@ -58,13 +78,27 @@ def test_chrome_cdp_launcher_discovers_extension_id_from_cdp():
     script = _read_script("start-scraper-chrome-cdp.ps1")
 
     assert "function Get-ExtensionIdFromCdp" in script
+    assert "function Get-KnownExtensionIds" in script
+    assert "function Open-ExtensionControlPage" in script
     assert "function Open-CdpTarget" in script
+    assert "$knownIds = @(Get-KnownExtensionIds)" in script
+    assert "function Get-PrimaryKnownExtensionId" in script
     assert '("service_worker", "background_page")' in script
     assert "'^chrome-extension://([a-p]{32})/'" in script
+    assert '$knownIds -contains $match.Groups[1].Value' in script
+    assert "nkeimhogjdpnpccoofpliimaahmaaome" in script
+    assert 'chrome-extension://$(Get-PrimaryKnownExtensionId)/$tabsUrlPath' in script
     assert '"about:blank"' in script
-    assert '"chrome-extension://$extensionId/$tabsUrlPath"' in script
+    assert "chrome-extension://$extensionId/$TabsUrlPath" in script
     assert "Opened extension control page" in script
     assert "Chrome CDP is already reachable" in script
+
+
+def test_browser_tab_audit_accepts_dynamic_extension_worlds():
+    script = (REPO_ROOT / "tools" / "browser_tab_audit.py").read_text(encoding="utf-8")
+
+    assert 'os.getenv("UC_EXTENSION_ID"' in script
+    assert 'origin.startswith("chrome-extension://")' in script
 
 
 def test_chrome_cdp_launcher_dry_run_skips_live_probes():
@@ -110,3 +144,15 @@ def test_browser_maintenance_loop_refuses_duplicate_direct_start():
 
     assert "loop already running as pid=$parsedPid; refusing duplicate direct start" in script
     assert "Get-Process -Id $parsedPid" in script
+
+
+def test_browser_maintenance_repairs_missing_chrome():
+    script = _read_script("browser-tab-maintenance.ps1")
+
+    assert "function Invoke-ChromeCdpRepair" in script
+    assert 'reason -eq "chrome_not_running"' in script
+    assert "chrome_cdp_process_unreachable" in script
+    assert "hidden unreachable CDP Chrome" in script
+    assert "-OpenIds instagram,tiktok,lemon8,x,threads,facebook,strava" in script
+    assert "Chrome CDP repair succeeded; continuing maintenance pass" in script
+    assert "chrome_cdp_available" in script

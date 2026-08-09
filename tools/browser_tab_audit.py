@@ -18,6 +18,7 @@ For each candidate tab we do:
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 import urllib.request
@@ -28,7 +29,7 @@ import websocket
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 CDP_HOST = "http://127.0.0.1:9222"
-EXT_ID = "pkmdmcklnjdeocoeigmlakhomhhcpafb"
+EXT_ID = os.getenv("UC_EXTENSION_ID", "pkmdmcklnjdeocoeigmlakhomhhcpafb")
 REPO_ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_PATH = REPO_ROOT / "tmp" / "browser_tab_audit_result.json"
 
@@ -259,7 +260,8 @@ def audit_tab(target: dict, main_timeout=MAIN_TIMEOUT, iso_timeout=ISO_TIMEOUT) 
             # chrome-extension://<id>/ or the ctx name equals extension name.
             origin = ctx.get("origin") or ""
             name = ctx.get("name") or ""
-            if EXT_ID in origin or "UnifiedCollector" in name or aux.get("type") == "isolated":
+            is_extension_world = origin.startswith("chrome-extension://")
+            if EXT_ID in origin or "UnifiedCollector" in name or is_extension_world or aux.get("type") == "isolated":
                 if iso_ctx is None:
                     iso_ctx = ctx.get("id")
 
