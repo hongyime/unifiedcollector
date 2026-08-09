@@ -371,9 +371,9 @@ class StravaCollector(BaseCollector):
         self._access_token = ""
         self._sem = asyncio.Semaphore(2)
 
-        # Trimmed 5/10 -> 3/6: the web cookie path tolerates more than the strict
-        # 100-req/15min OAuth API ceiling, and we now spread load across multiple
-        # cookie accounts. Auto-backoff still kicks in on 429. Override via env.
+        # The web cookie path can collect profiles/activities steadily, but GPS
+        # stream XHRs are much more sensitive. Keep profile/activity pacing
+        # separate from route repair; route batches are deliberately small below.
         self._api_delay_min = float(os.getenv("STRAVA_API_DELAY_MIN", "3.0"))
         self._api_delay_max = float(os.getenv("STRAVA_API_DELAY_MAX", "6.0"))
         self._feed_delay_min = float(os.getenv("STRAVA_FEED_DELAY_MIN", "5.0"))
@@ -780,7 +780,7 @@ class StravaCollector(BaseCollector):
         # Disable via STRAVA_GPS_BACKFILL_FIRST=false. Same pacing/requests as
         # the tail call (3-6s STRAVA_API_DELAY per activity) — no ban-risk delta.
         try:
-            repair_batch = int(os.getenv("STRAVA_GPS_ROUTE_REPAIR_BATCH", "100"))
+            repair_batch = int(os.getenv("STRAVA_GPS_ROUTE_REPAIR_BATCH", "50"))
             await self._repair_existing_gps_stream_routes(batch_size=repair_batch)
         except Exception as e:
             logger.warning(
@@ -792,7 +792,7 @@ class StravaCollector(BaseCollector):
         if self._gps_enabled and self._use_web and \
                 os.getenv("STRAVA_GPS_BACKFILL_FIRST", "true").lower() == "true":
             try:
-                gps_batch = int(os.getenv("STRAVA_GPS_BACKFILL_BATCH", "150"))
+                gps_batch = int(os.getenv("STRAVA_GPS_BACKFILL_BATCH", "12"))
                 await self._backfill_missing_gps_streams(batch_size=gps_batch)
             except Exception as e:
                 logger.warning("strava: early GPS backfill failed: %s", e)
@@ -918,7 +918,7 @@ class StravaCollector(BaseCollector):
         # the corrected web-XHR path. Self-terminates once all are populated.
         if self._gps_enabled and self._use_web:
             try:
-                gps_batch = int(os.getenv("STRAVA_GPS_BACKFILL_BATCH", "150"))
+                gps_batch = int(os.getenv("STRAVA_GPS_BACKFILL_BATCH", "12"))
                 await self._backfill_missing_gps_streams(batch_size=gps_batch)
             except Exception as e:
                 logger.warning("strava: GPS backfill failed: %s", e)

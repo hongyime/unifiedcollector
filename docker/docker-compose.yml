@@ -252,8 +252,9 @@ services:
       # strava_activities.stream_status NULL count converges.
       STRAVA_SPIDER_MAX_PER_CYCLE: "3"
       # GPS-route backfill: bounded to protect DB/API pressure while Strava is
-      # already returning stream 429s. Re-raise after stream cooldowns stabilize.
-      STRAVA_GPS_BACKFILL_BATCH: "40"
+      # returning stream 429s. Keep this small; profiles/activity metadata keep
+      # flowing while route repair drains slowly after cooldowns expire.
+      STRAVA_GPS_BACKFILL_BATCH: "12"
       STRAVA_GPS_BACKFILL_FIRST: "true"
       STRAVA_ROUTE_STREAM_SHARED_COOLDOWN: "true"
       STRAVA_PROFILE_ENRICH_BATCH: "15"

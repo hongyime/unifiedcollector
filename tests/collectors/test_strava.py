@@ -824,6 +824,13 @@ def test_normalize_collection_target_accepts_special_numeric_and_urls(monkeypatc
     assert coll._normalize_collection_target("Ben") is None
 
 
+def test_strava_gps_backfill_defaults_stay_small():
+    source = Path(strava_mod.__file__).read_text(encoding="utf-8")
+
+    assert 'os.getenv("STRAVA_GPS_BACKFILL_BATCH", "12")' in source
+    assert 'os.getenv("STRAVA_GPS_ROUTE_REPAIR_BATCH", "50")' in source
+
+
 @pytest.mark.asyncio
 async def test_collect_marks_invalid_strava_target_without_scrape_or_dlq(monkeypatch, caplog):
     _set_web_env(monkeypatch)
