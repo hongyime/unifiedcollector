@@ -165,6 +165,8 @@ class YoutubeCollector(BaseCollector):
         self._api_keys = self._parse_api_keys(
             os.getenv("YOUTUBE_API_KEYS", ""),
             os.getenv("YOUTUBE_API_KEY", ""),
+            os.getenv("GOOGLE_API_KEYS", ""),
+            os.getenv("GOOGLE_API_KEY", ""),
         )
         self._api_key_index = 0
         self._api_key = self._api_keys[0] if self._api_keys else ""
@@ -362,7 +364,7 @@ class YoutubeCollector(BaseCollector):
             if oauth_token:
                 logger.info("Using OAuth credentials for YouTube API")
             else:
-                logger.warning("YouTube collector has neither YOUTUBE_API_KEY nor OAuth pickle — calls will fail")
+                logger.warning("YouTube collector has neither YouTube/Google API key nor OAuth pickle — calls will fail")
         self._has_auth = bool(self._api_key or self._oauth_credentials)
 
         if (

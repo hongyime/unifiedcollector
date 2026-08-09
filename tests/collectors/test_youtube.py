@@ -182,6 +182,7 @@ def _clear_youtube_env(monkeypatch):
         "YOUTUBE_API_KEY",
         "YOUTUBE_API_KEYS",
         "GOOGLE_API_KEY",
+        "GOOGLE_API_KEYS",
         "YOUTUBE_OAUTH_CREDENTIALS",
         "YOUTUBE_OAUTH_TOKEN",
     ):
@@ -210,9 +211,19 @@ def test_constructor_reads_env(monkeypatch):
 def test_constructor_reads_api_key_pool(monkeypatch):
     _clear_youtube_env(monkeypatch)
     monkeypatch.setenv("YOUTUBE_API_KEYS", "AIza_A, AIza_B;AIza_A\nAIza_C")
+    monkeypatch.setenv("GOOGLE_API_KEYS", "AIza_D")
+    monkeypatch.setenv("GOOGLE_API_KEY", "AIza_E")
     coll = YoutubeCollector()
-    assert coll._api_keys == ["AIza_A", "AIza_B", "AIza_C"]
+    assert coll._api_keys == ["AIza_A", "AIza_B", "AIza_C", "AIza_D", "AIza_E"]
     assert coll._api_key == "AIza_A"
+
+
+def test_constructor_reads_google_api_key_fallback(monkeypatch):
+    _clear_youtube_env(monkeypatch)
+    monkeypatch.setenv("GOOGLE_API_KEY", "AIza_google")
+    coll = YoutubeCollector()
+    assert coll._api_keys == ["AIza_google"]
+    assert coll._api_key == "AIza_google"
 
 
 def test_account_media_dir_isolated_by_api_key(monkeypatch):
