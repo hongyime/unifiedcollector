@@ -782,6 +782,34 @@ async def test_drain_dedupes_without_sha_via_content_id(fake_redis, telegram_stu
     assert len(telegram_stub["send_photo"]) == 1
 
 
+@pytest.mark.asyncio
+async def test_drain_dedupes_youtube_video_prefix_variant(fake_redis, telegram_stub, monkeypatch):
+    """YouTube can enqueue the same video as both video_<id> and bare <id>."""
+    from src.notifications import realtime_feed
+
+    monkeypatch.setenv("REALTIME_POST_FEED_MAX_PER_MINUTE", "10")
+
+    for content_id in ("video_JSuS-zXMVwE", "JSuS-zXMVwE"):
+        payload = realtime_feed.build_payload(
+            source="youtube",
+            entity_name="Channel",
+            content_id=content_id,
+            file_path=None,
+            source_url="https://www.youtube.com/watch?v=JSuS-zXMVwE",
+            sha256=None,
+            metadata={"caption": "same video"},
+            kind="video",
+            content_type="video",
+        )
+        await fake_redis.rpush("uc:realtime_post_feed", json.dumps(payload))
+
+    drain = realtime_feed.RealtimeFeedDrain()
+    await drain._tick(fake_redis)
+    await drain._tick(fake_redis)
+
+    assert len(telegram_stub["send_video"]) == 1
+
+
 # -- base_collector integration ------------------------------------------
 
 @pytest.mark.asyncio

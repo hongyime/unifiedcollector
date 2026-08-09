@@ -658,6 +658,8 @@ def _dedupe_key(payload: dict) -> str:
     """
     source = str(payload.get("source") or "").strip().lower()
     content_id = str(payload.get("content_id") or "").strip()
+    if source == "youtube" and content_id.startswith("video_"):
+        content_id = content_id.removeprefix("video_")
     if source and content_id:
         return hashlib.sha256(f"{source}|{content_id}".encode("utf-8")).hexdigest()
     return _hash_payload(payload)
