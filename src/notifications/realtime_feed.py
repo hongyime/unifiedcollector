@@ -373,6 +373,19 @@ _PLATFORM_LABEL = {
     "tiktok": "TikTok", "lemon8": "Lemon8",
     "facebook": "Facebook", "strava": "Strava",
     "telegram": "Telegram", "whatsapp": "WhatsApp",
+    "youtube": "YouTube", "website": "Website",
+    "search": "Search", "github": "GitHub",
+    "beeper": "Beeper",
+    "beeper_discord": "Discord via Beeper",
+    "beeper_slack": "Slack via Beeper",
+    "beeper_linkedin": "LinkedIn via Beeper",
+    "beeper_telegram": "Telegram via Beeper",
+    "beeper_whatsapp": "WhatsApp via Beeper",
+    "beeper_instagram": "Instagram via Beeper",
+    "beeper_signal": "Signal via Beeper",
+    "beeper_facebook_messenger": "Facebook/Messenger via Beeper",
+    "beeper_google_chat": "Google Chat via Beeper",
+    "beeper_beeper_matrix": "Beeper Matrix",
 }
 
 

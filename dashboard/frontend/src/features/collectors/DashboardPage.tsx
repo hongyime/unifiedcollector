@@ -108,9 +108,11 @@ function blockerBadgeStatus(severity: string) {
   return "warning";
 }
 
-function formatWindowFiles(row?: Pick<SourceCollectionMatrixRow["current_hour"], "media_items" | "media_stats_unavailable"> | null) {
-  if (row?.media_stats_unavailable) return "Unknown files";
-  return `${formatNumber(row?.media_items ?? 0)} files`;
+function formatWindowFiles(row?: Pick<SourceCollectionMatrixRow["current_hour"], "media_items" | "media_stats_unavailable" | "media_items_lower_bound"> | null) {
+  const files = row?.media_items ?? 0;
+  if (row?.media_items_lower_bound) return `at least ${formatNumber(files)} files`;
+  if (row?.media_stats_unavailable) return files > 0 ? `at least ${formatNumber(files)} files` : "Unknown files";
+  return `${formatNumber(files)} files`;
 }
 
 function renderWindow(row: SourceCollectionMatrixRow["current_hour"]) {
@@ -119,6 +121,7 @@ function renderWindow(row: SourceCollectionMatrixRow["current_hour"]) {
       <div>{formatNumber(row.records)} rows · {formatWindowFiles(row)}</div>
       <div className="text-[10px] uppercase tracking-wide text-text-muted">
         {formatNumber(row.messages)} msgs · {formatNumber(row.rate_limits)} 429 · {formatNumber(row.access_errors)} auth/other
+        {row.media_items_lower_bound ? " · media lower bound" : ""}
       </div>
     </div>
   );
