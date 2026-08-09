@@ -22,12 +22,12 @@ def rpc(ws, request_id, method, params=None):
 
 
 def main():
-    ts = json.loads(urllib.request.urlopen("http://127.0.0.1:9222/json/list").read())
+    ts = json.loads(urllib.request.urlopen("http://127.0.0.1:9333/json/list").read())
     tabs = [t for t in ts if "tabs.html" in t.get("url", "")]
     if not tabs:
         print("no tabs.html open; opening one")
         return
-    ws = websocket.create_connection(tabs[0]["webSocketDebuggerUrl"], timeout=25, origin="http://127.0.0.1:9222")
+    ws = websocket.create_connection(tabs[0]["webSocketDebuggerUrl"], timeout=25, origin="http://127.0.0.1:9333")
     try:
         rpc(ws, 1, "Runtime.enable")
         for i in range(5):

@@ -1,14 +1,14 @@
 <#
 .SYNOPSIS
     Register the browser_cookie_vault daemon as a Windows Scheduled Task
-    (fallback path when the Docker service cannot reach Chrome on :9222).
+    (fallback path when the Docker service cannot reach Chrome on :9333).
 
 .DESCRIPTION
     UnifiedCollector's cookie vault normally runs as the
     `browser_cookie_vault` service in docker-compose.yml. In some Windows
     setups (e.g. Docker Desktop networking wedged, corp firewall dropping
     host-gateway traffic) the container cannot reach the host Chrome on
-    localhost:9222. This script installs the exact same daemon on the host
+    localhost:9333. This script installs the exact same daemon on the host
     as a Scheduled Task, so cookie snapshots keep flowing without Docker in
     the loop.
 
@@ -52,7 +52,7 @@ if (-not (Test-Path $logDir)) {
 }
 $logFile = Join-Path $logDir "browser_cookie_vault.log"
 
-# Env vars the daemon needs on the host: it talks directly to localhost:9222
+# Env vars the daemon needs on the host: it talks directly to localhost:9333
 # and writes to credentials\browser_cookies under the repo.
 $backupDir = Join-Path $RepoRoot "credentials\browser_cookies"
 if (-not (Test-Path $backupDir)) {
@@ -63,7 +63,7 @@ if (-not (Test-Path $backupDir)) {
 # native redirection doesn't survive detached Scheduled Task contexts well.
 $argString = @(
     "/c",
-    "set CHROME_CDP_URL=http://localhost:9222",
+    "set CHROME_CDP_URL=http://localhost:9333",
     "&& set BROWSER_COOKIE_VAULT_DIR=$backupDir",
     "&& set BROWSER_COOKIE_VAULT_HEALTH_PORT=8790",
     "&& set BROWSER_COOKIE_VAULT_INTERVAL_SECONDS=300",

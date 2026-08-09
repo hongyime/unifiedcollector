@@ -11,7 +11,7 @@ def is_threads_url(url: str) -> bool:
     return host == "threads.com" or host.endswith(".threads.com")
 
 
-tabs = json.loads(urllib.request.urlopen("http://127.0.0.1:9222/json/list").read())
+tabs = json.loads(urllib.request.urlopen("http://127.0.0.1:9333/json/list").read())
 th = next(
     (t for t in tabs if is_threads_url(t.get("url", "")) and t.get("type") == "page"),
     None,

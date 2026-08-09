@@ -32,7 +32,7 @@ def _ws_call(ws: websocket.WebSocket, msg_id: int, method: str, params: dict | N
 
 
 def main() -> int:
-    ver = json.loads(urllib.request.urlopen("http://127.0.0.1:9222/json/version").read())
+    ver = json.loads(urllib.request.urlopen("http://127.0.0.1:9333/json/version").read())
     browser_ws = ver["webSocketDebuggerUrl"]
     ws = websocket.create_connection(browser_ws)
 

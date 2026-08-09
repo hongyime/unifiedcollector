@@ -4,7 +4,7 @@ import urllib.request
 
 import websocket  # type: ignore
 
-tabs = json.loads(urllib.request.urlopen("http://127.0.0.1:9222/json/list").read())
+tabs = json.loads(urllib.request.urlopen("http://127.0.0.1:9333/json/list").read())
 opt = next(
     t for t in tabs
     if "pkmdmc" in t.get("url", "") and "tabs.html" in t.get("url", "") and t.get("type") == "page"

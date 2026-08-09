@@ -2,7 +2,7 @@ param(
     [string]$ChromePath = "",
     [string]$UserDataDir = "",
     [string]$ExtensionPath = "C:\unifiedcollector\extension",
-    [int]$RemoteDebuggingPort = 9222,
+    [int]$RemoteDebuggingPort = 9333,
     [switch]$AllowWhileChromeRunning,
     [switch]$CloseExistingIfNoVisibleWindows,
     [switch]$FallbackOpenControlIfCleanupBlocked,

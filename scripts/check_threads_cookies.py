@@ -11,7 +11,7 @@ def is_threads_cookie_domain(domain: str) -> bool:
     return host == "threads.com" or host.endswith(".threads.com")
 
 
-ver = json.loads(urllib.request.urlopen("http://127.0.0.1:9222/json/version").read())
+ver = json.loads(urllib.request.urlopen("http://127.0.0.1:9333/json/version").read())
 ws = websocket.create_connection(ver["webSocketDebuggerUrl"], timeout=15)
 n = [0]
 

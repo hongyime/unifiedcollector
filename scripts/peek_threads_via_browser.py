@@ -6,7 +6,7 @@ from urllib.parse import urlparse
 import websocket  # type: ignore
 
 
-ver = json.loads(urllib.request.urlopen("http://127.0.0.1:9222/json/version").read())
+ver = json.loads(urllib.request.urlopen("http://127.0.0.1:9333/json/version").read())
 ws = websocket.create_connection(ver["webSocketDebuggerUrl"], timeout=25)
 n = [0]
 

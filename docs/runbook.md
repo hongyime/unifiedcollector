@@ -62,7 +62,7 @@ Trigger a background-service-worker reload without restarting Chrome:
 
 ```powershell
 # List targets, look for the extension's SW target (title starts with "UnifiedCollector Bridge").
-curl -s http://localhost:9222/json | ConvertFrom-Json | Where-Object { $_.title -like 'UnifiedCollector*' }
+curl -s http://localhost:9333/json | ConvertFrom-Json | Where-Object { $_.title -like 'UnifiedCollector*' }
 # Then hit its `webSocketDebuggerUrl` and evaluate:
 #   Runtime.evaluate({expression: "chrome.runtime.reload()"})
 # For a real reload of the SW state, use scripts/hard_reload_ext.py (already in-repo).

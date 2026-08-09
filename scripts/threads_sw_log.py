@@ -6,7 +6,7 @@ import urllib.request
 import websocket  # type: ignore
 
 
-ver = json.loads(urllib.request.urlopen("http://127.0.0.1:9222/json/version").read())
+ver = json.loads(urllib.request.urlopen("http://127.0.0.1:9333/json/version").read())
 ws = websocket.create_connection(ver["webSocketDebuggerUrl"], timeout=15)
 n = [0]
 
@@ -33,7 +33,7 @@ def call(method, params=None, session=None, timeout=15):
 targets = call("Target.getTargets")["result"]["targetInfos"]
 sw = next((t for t in targets if t.get("type") == "service_worker" and "pkmd" in t.get("url", "")), None)
 if not sw:
-    req = urllib.request.Request("http://127.0.0.1:9222/json/new?chrome-extension://pkmdmcklnjdeocoeigmlakhomhhcpafb/tabs.html", method="PUT")
+    req = urllib.request.Request("http://127.0.0.1:9333/json/new?chrome-extension://pkmdmcklnjdeocoeigmlakhomhhcpafb/tabs.html", method="PUT")
     urllib.request.urlopen(req).read()
     time.sleep(5)
     targets = call("Target.getTargets")["result"]["targetInfos"]

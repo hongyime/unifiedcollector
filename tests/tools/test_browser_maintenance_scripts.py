@@ -11,6 +11,7 @@ def _read_script(name: str) -> str:
 def test_chrome_cdp_launcher_uses_robust_startup_flags():
     script = _read_script("start-scraper-chrome-cdp.ps1")
 
+    assert "[int]$RemoteDebuggingPort = 9333" in script
     assert "--disable-dev-shm-usage" in script
     assert "--remote-debugging-address=0.0.0.0" in script
     assert "--remote-allow-origins=*" in script

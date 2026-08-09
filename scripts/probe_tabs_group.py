@@ -22,7 +22,7 @@ import websocket  # type: ignore
 
 
 def main() -> int:
-    ver = json.loads(urllib.request.urlopen("http://127.0.0.1:9222/json/version").read())
+    ver = json.loads(urllib.request.urlopen("http://127.0.0.1:9333/json/version").read())
     ws = websocket.create_connection(ver["webSocketDebuggerUrl"])
 
     def _call(mid: int, method: str, params: dict | None = None, session_id: str | None = None):

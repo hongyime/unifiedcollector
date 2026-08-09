@@ -12,7 +12,7 @@ import websocket  # type: ignore
 
 
 def _find_tabs_html():
-    tabs = json.loads(urllib.request.urlopen("http://127.0.0.1:9222/json/list").read())
+    tabs = json.loads(urllib.request.urlopen("http://127.0.0.1:9333/json/list").read())
     return next(
         (t for t in tabs if t.get("type") == "page" and "pkmdmc" in t.get("url", "") and "tabs.html" in t.get("url", "")),
         None,
@@ -52,7 +52,7 @@ opt2 = _find_tabs_html()
 if not opt2:
     print("no tabs.html after reload — opening one")
     req = urllib.request.Request(
-        "http://127.0.0.1:9222/json/new?chrome-extension://pkmdmcklnjdeocoeigmlakhomhhcpafb/tabs.html",
+        "http://127.0.0.1:9333/json/new?chrome-extension://pkmdmcklnjdeocoeigmlakhomhhcpafb/tabs.html",
         method="PUT",
     )
     urllib.request.urlopen(req).read()

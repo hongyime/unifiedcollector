@@ -7,7 +7,7 @@ import websocket  # type: ignore
 
 
 def _find_sw():
-    ver = json.loads(urllib.request.urlopen("http://127.0.0.1:9222/json/version").read())
+    ver = json.loads(urllib.request.urlopen("http://127.0.0.1:9333/json/version").read())
     ws = websocket.create_connection(ver["webSocketDebuggerUrl"], timeout=10)
     ws.send(json.dumps({"id": 1, "method": "Target.getTargets"}))
     r = json.loads(ws.recv())
@@ -24,7 +24,7 @@ ws, sw = _find_sw()
 if not sw:
     # Wake via tabs.html
     import urllib.request as ur
-    req = ur.Request("http://127.0.0.1:9222/json/new?chrome-extension://pkmdmcklnjdeocoeigmlakhomhhcpafb/tabs.html", method="PUT")
+    req = ur.Request("http://127.0.0.1:9333/json/new?chrome-extension://pkmdmcklnjdeocoeigmlakhomhhcpafb/tabs.html", method="PUT")
     ur.urlopen(req).read()
     time.sleep(6)
     ws, sw = _find_sw()

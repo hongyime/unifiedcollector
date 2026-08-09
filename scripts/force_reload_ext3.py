@@ -16,7 +16,7 @@ EXT_ID = "pkmdmcklnjdeocoeigmlakhomhhcpafb"
 
 
 def main():
-    ver = json.loads(urllib.request.urlopen("http://127.0.0.1:9222/json/version").read())
+    ver = json.loads(urllib.request.urlopen("http://127.0.0.1:9333/json/version").read())
     ws = websocket.create_connection(ver["webSocketDebuggerUrl"], timeout=10)
     n = [0]
 

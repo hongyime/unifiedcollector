@@ -9,7 +9,7 @@ import urllib.request
 import websocket  # type: ignore
 
 
-ver = json.loads(urllib.request.urlopen("http://127.0.0.1:9222/json/version").read())
+ver = json.loads(urllib.request.urlopen("http://127.0.0.1:9333/json/version").read())
 ws = websocket.create_connection(ver["webSocketDebuggerUrl"], timeout=10)
 ws.send(json.dumps({"id": 1, "method": "Target.getTargets"}))
 r = json.loads(ws.recv())

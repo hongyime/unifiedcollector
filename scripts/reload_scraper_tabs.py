@@ -33,13 +33,13 @@ def rpc(ws, request_id, method, params=None):
 
 
 def main():
-    ts = json.loads(urllib.request.urlopen("http://127.0.0.1:9222/json/list").read())
+    ts = json.loads(urllib.request.urlopen("http://127.0.0.1:9333/json/list").read())
     scraper_tabs = [t for t in ts if t.get("type") == "page" and any(h in t.get("url", "") for h in SCRAPER_HOSTS)]
     print(f"found {len(scraper_tabs)} scraper tabs")
     for t in scraper_tabs:
         url = t.get("url", "")[:70]
         try:
-            ws = websocket.create_connection(t["webSocketDebuggerUrl"], timeout=6, origin="http://127.0.0.1:9222")
+            ws = websocket.create_connection(t["webSocketDebuggerUrl"], timeout=6, origin="http://127.0.0.1:9333")
             rpc(ws, 1, "Page.enable")
             rpc(ws, 2, "Page.reload", {"ignoreCache": False})
             ws.close()
