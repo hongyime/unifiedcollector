@@ -1763,10 +1763,9 @@ async def test_collectors_source_matrix_serves_stale_payload_on_timeout(monkeypa
     out = await collectors_source_matrix(_user={})
 
     assert out["sources"] == [{"source": "instagram"}]
-    assert out["cache"]["status"] == "stale"
-    assert out["errors"][-1]["section"] == "source_matrix"
-    assert out["errors"][-1]["stale_cache"] is True
-    assert out["errors"][-1]["error"] == "BackgroundRefresh"
+    assert out["cache"]["status"] == "refreshing"
+    assert out["cache"]["refresh"] == "started"
+    assert out["errors"] == []
     assert dashboard_api._SOURCE_MATRIX_PAYLOAD_BUILD_TASK is not None
     await asyncio.sleep(0)
     assert started.is_set()
@@ -1811,8 +1810,9 @@ async def test_collectors_source_matrix_uses_persisted_payload_after_restart(mon
     out = await collectors_source_matrix(_user={})
 
     assert out["sources"] == [{"source": "telegram", "current_hour": {"records": 12}}]
-    assert out["cache"]["status"] == "stale"
-    assert out["errors"][-1]["error"] == "BackgroundRefresh"
+    assert out["cache"]["status"] == "refreshing"
+    assert out["cache"]["refresh"] == "started"
+    assert out["errors"] == []
     assert dashboard_api._SOURCE_MATRIX_PAYLOAD_BUILD_TASK is not None
     await asyncio.sleep(0)
     assert started.is_set()

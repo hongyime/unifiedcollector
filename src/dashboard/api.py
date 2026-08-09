@@ -4449,13 +4449,11 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
     if active_task is not None:
         if cached_payload is not None and now - cached_ts <= _source_matrix_payload_stale_limit_seconds():
             payload = _copy_cache_value(cached_payload)
-            payload.setdefault("errors", []).append({
-                "section": "source_matrix",
-                "error": "BuildInProgress",
-                "stale_cache": True,
-                "cache_age_seconds": int(now - cached_ts),
-            })
-            payload["cache"] = {"status": "stale", "age_seconds": int(now - cached_ts)}
+            payload["cache"] = {
+                "status": "refreshing",
+                "age_seconds": int(now - cached_ts),
+                "refresh": "in_progress",
+            }
             return payload
         return await _source_matrix_unavailable_payload_with_fast_health("BuildInProgress")
 
@@ -4464,13 +4462,11 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
         _SOURCE_MATRIX_PAYLOAD_BUILD_TASK = build_task
         build_task.add_done_callback(_background_build_done)
         payload = _copy_cache_value(cached_payload)
-        payload.setdefault("errors", []).append({
-            "section": "source_matrix",
-            "error": "BackgroundRefresh",
-            "stale_cache": True,
-            "cache_age_seconds": int(now - cached_ts),
-        })
-        payload["cache"] = {"status": "stale", "age_seconds": int(now - cached_ts)}
+        payload["cache"] = {
+            "status": "refreshing",
+            "age_seconds": int(now - cached_ts),
+            "refresh": "started",
+        }
         return payload
 
     build_task = asyncio.create_task(_collectors_source_matrix_payload())
