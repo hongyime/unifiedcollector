@@ -567,7 +567,6 @@ _INGESTION_CONTENT_PARTS = [
     ("github", "github_issue_comments", "collected_at", "issue comments"),
     ("github", "github_pr_reviews", "collected_at", "PR reviews"),
     ("github", "github_pr_review_comments", "collected_at", "PR review comments"),
-    ("github", "github_edges", "collected_at", "edges"),
     ("website", "website_pages", "collected_at", "pages"),
     ("strava", "strava_athletes", "updated_at", "profiles"),
     ("strava", "strava_activities", "collected_at", "activities"),

@@ -43,6 +43,14 @@ from src.dashboard.api import (
 )
 
 
+def test_source_content_summary_excludes_derived_github_edges_from_exact_rollup():
+    parts = {(source, table) for source, table, _column, _label in dashboard_api._INGESTION_CONTENT_PARTS}
+
+    assert ("github", "github_edges") not in parts
+    assert ("github", "github_issue_comments") in parts
+    assert ("github", "github_pr_reviews") in parts
+
+
 def _source(status: str = "live", **extra):
     row = {
         "source": "instagram",
