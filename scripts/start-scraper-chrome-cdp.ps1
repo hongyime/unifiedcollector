@@ -59,6 +59,10 @@ function Resolve-UserDataDir {
     # older profile folders may have been created by branded Chrome and can be
     # incompatible with Chrome-for-Testing / Playwright Chromium.
     $base = Join-Path $env:LOCALAPPDATA "UnifiedCollector"
+    $recovered = Join-Path $base "ChromeCdpRecoveredProfile"
+    if (Test-Path -LiteralPath $recovered) {
+        return $recovered
+    }
     $automation = Join-Path $base "ChromeCdpAutomationProfile"
     if (Test-Path -LiteralPath $automation) {
         return $automation
@@ -74,6 +78,58 @@ function Test-CdpAvailable {
     } catch {
         return $false
     }
+}
+
+function Get-PortListenerPids {
+    param([int]$Port)
+    $pids = @()
+    try {
+        $lines = & "$env:SystemRoot\System32\netstat.exe" -ano -p tcp
+        foreach ($line in @($lines)) {
+            if ($line -notmatch "\sLISTENING\s+(\d+)\s*$") {
+                continue
+            }
+            if ($line -notmatch "(:|\])$Port\s+") {
+                continue
+            }
+            $pid = 0
+            if ([int]::TryParse($Matches[1], [ref]$pid) -and $pid -gt 0) {
+                $pids += $pid
+            }
+        }
+    } catch {
+        return @()
+    }
+    return @($pids | Sort-Object -Unique)
+}
+
+function Stop-ProcessIds {
+    param([int[]]$Pids)
+    foreach ($pid in @($Pids | Sort-Object -Unique)) {
+        if ($pid -le 0) {
+            continue
+        }
+        try {
+            $taskkill = Start-Process -FilePath "$env:SystemRoot\System32\taskkill.exe" -ArgumentList @("/PID", [string]$pid, "/F", "/T") -Wait -PassThru -NoNewWindow
+            if ($taskkill.ExitCode -ne 0) {
+                Write-Warning "taskkill failed for PID ${pid} with exit code $($taskkill.ExitCode)"
+            }
+        } catch {
+            Write-Warning "Could not kill PID ${pid}: $($_.Exception.Message)"
+        }
+    }
+}
+
+function Wait-PortReleased {
+    param([int]$Port, [int]$TimeoutSeconds = 15)
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        if (@(Get-PortListenerPids -Port $Port).Count -eq 0) {
+            return $true
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    return (@(Get-PortListenerPids -Port $Port).Count -eq 0)
 }
 
 function Get-ExtensionIdFromCdp {
@@ -125,27 +181,37 @@ function Open-CdpTarget {
     Invoke-WebRequest -Uri "http://127.0.0.1:$Port/json/new?$encoded" -Method Put -UseBasicParsing -TimeoutSec 10 | Out-Null
 }
 
+function Try-OpenCdpTarget {
+    param([int]$Port, [string]$Url)
+    try {
+        Open-CdpTarget -Port $Port -Url $Url
+        return $true
+    } catch {
+        Write-Warning "Could not open CDP target ${Url}: $($_.Exception.Message)"
+        return $false
+    }
+}
+
 function Open-ExtensionControlPage {
     param([int]$Port, [string]$TabsUrlPath)
     $extensionId = Get-ExtensionIdFromCdp $Port
     if ($extensionId) {
         $tabsUrl = "chrome-extension://$extensionId/$TabsUrlPath"
-        Open-CdpTarget -Port $Port -Url $tabsUrl
-        Write-Host "Opened extension control page: $tabsUrl"
-        return $true
+        if (Try-OpenCdpTarget -Port $Port -Url $tabsUrl) {
+            Write-Host "Opened extension control page: $tabsUrl"
+            return $true
+        }
+        return $false
     }
     foreach ($knownId in @(Get-KnownExtensionIds)) {
         $tabsUrl = "chrome-extension://$knownId/$TabsUrlPath"
-        try {
-            Open-CdpTarget -Port $Port -Url $tabsUrl
+        if (Try-OpenCdpTarget -Port $Port -Url $tabsUrl) {
             Start-Sleep -Seconds 2
             $extensionId = Get-ExtensionIdFromCdp $Port
             if ($extensionId) {
                 Write-Host "Opened extension control page via known id: $tabsUrl"
                 return $true
             }
-        } catch {
-            # Keep trying other known ids; if none work the caller will warn.
         }
     }
     return $false
@@ -337,12 +403,13 @@ $visibleChromeWindows = @(Get-VisibleChromeWindows)
 $cdpAlreadyUp = Test-CdpAvailable $RemoteDebuggingPort
 
 if ($cdpAlreadyUp) {
-    if (-not (Open-ExtensionControlPage -Port $RemoteDebuggingPort -TabsUrlPath $tabsUrlPath)) {
+    $controlOpened = Open-ExtensionControlPage -Port $RemoteDebuggingPort -TabsUrlPath $tabsUrlPath
+    if (-not $controlOpened) {
         Write-Warning "Chrome CDP is reachable, but the UnifiedCollector extension target was not visible."
-    }
-    foreach ($url in @(Get-PlatformLaunchUrls -Ids $OpenIds -All ($OpenAll -and -not $NoOpenAll))) {
-        Open-CdpTarget -Port $RemoteDebuggingPort -Url $url
-        Start-Sleep -Milliseconds 500
+        foreach ($url in @(Get-PlatformLaunchUrls -Ids $OpenIds -All ($OpenAll -and -not $NoOpenAll))) {
+            Try-OpenCdpTarget -Port $RemoteDebuggingPort -Url $url | Out-Null
+            Start-Sleep -Milliseconds 500
+        }
     }
     Write-Host "Chrome CDP is already reachable on 127.0.0.1:$RemoteDebuggingPort."
     exit 0
@@ -367,6 +434,21 @@ if ($chromeProcesses.Count -gt 0 -and -not $AllowWhileChromeRunning -and $CloseE
     $chromeProcesses = @(Get-ChromeProcesses)
 }
 
+$portOwners = @(Get-PortListenerPids -Port $RemoteDebuggingPort)
+if ($portOwners.Count -gt 0 -and -not $cdpAlreadyUp -and -not $AllowWhileChromeRunning -and $CloseExistingIfNoVisibleWindows) {
+    $visibleChromeWindows = @(Get-VisibleChromeWindows)
+    if ($visibleChromeWindows.Count -gt 0) {
+        Write-Error "Port $RemoteDebuggingPort is owned by PID(s) $($portOwners -join ', '), but Chrome has visible windows open. Close Chrome manually, then rerun this script."
+    }
+    Write-Host "Port $RemoteDebuggingPort is still owned by stale PID(s) $($portOwners -join ', '); killing them before relaunch."
+    Stop-ProcessIds -Pids $portOwners
+    if (-not (Wait-PortReleased -Port $RemoteDebuggingPort -TimeoutSeconds 20)) {
+        $remainingPortOwners = @(Get-PortListenerPids -Port $RemoteDebuggingPort)
+        Write-Error "Port $RemoteDebuggingPort is still busy after cleanup; remaining PID(s): $($remainingPortOwners -join ', ')"
+    }
+    $chromeProcesses = @(Get-ChromeProcesses)
+}
+
 if ($chromeProcesses.Count -gt 0 -and -not $AllowWhileChromeRunning) {
     Write-Error (
         "Chrome is already running without CDP. Close all Chrome windows first, then rerun this script. " +
@@ -382,12 +464,13 @@ $proc = Start-Process -FilePath $chrome -ArgumentList $argumentLine -PassThru
 Start-Sleep -Seconds 4
 
 if (Test-CdpAvailable $RemoteDebuggingPort) {
-    if (-not (Open-ExtensionControlPage -Port $RemoteDebuggingPort -TabsUrlPath $tabsUrlPath)) {
+    $controlOpened = Open-ExtensionControlPage -Port $RemoteDebuggingPort -TabsUrlPath $tabsUrlPath
+    if (-not $controlOpened) {
         Write-Warning "CDP is reachable, but no loaded UnifiedCollector extension target was found yet; reload the unpacked extension from chrome://extensions if browser heartbeats stay stale."
-    }
-    foreach ($url in @(Get-PlatformLaunchUrls -Ids $OpenIds -All ($OpenAll -and -not $NoOpenAll))) {
-        Open-CdpTarget -Port $RemoteDebuggingPort -Url $url
-        Start-Sleep -Milliseconds 500
+        foreach ($url in @(Get-PlatformLaunchUrls -Ids $OpenIds -All ($OpenAll -and -not $NoOpenAll))) {
+            Try-OpenCdpTarget -Port $RemoteDebuggingPort -Url $url | Out-Null
+            Start-Sleep -Milliseconds 500
+        }
     }
     Write-Host "Started Chrome PID $($proc.Id); CDP is reachable on 127.0.0.1:$RemoteDebuggingPort."
     exit 0

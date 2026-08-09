@@ -3485,7 +3485,7 @@ async def _browser_extension_payload(conn) -> dict:
               heartbeat.heartbeat_at DESC
             """,
             max(300, stale_seconds),
-            ["instagram", "tiktok", "lemon8", "threads", "facebook", "x", "strava"],
+            ["instagram", "tiktok", "lemon8", "threads", "facebook", "x"],
         )
         for row in content_gap_rows:
             raw = dict(row)

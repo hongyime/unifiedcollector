@@ -1114,7 +1114,7 @@ services:
       retries: 3
 
   # Chrome cookie vault: keeps a rolling on-disk backup of the social-platform
-  # cookie jar via CDP (host-side Chrome on :9222). Historically, Chrome
+  # cookie jar via CDP (host-side Chrome on :9333 by default). Historically, Chrome
   # restarts / profile-SQLite rewrites have silently killed sessionid /
   # c_user / auth_token cookies and stranded whole collectors until a human
   # noticed. This service snapshots every 5 min so a restore is one command,
@@ -1130,8 +1130,8 @@ services:
     environment:
       # host.docker.internal maps to the Windows host via extra_hosts below;
       # Chrome's DNS-rebinding guard is worked around inside the daemon by
-      # forcing the Host header to "localhost:9222" on the HTTP call.
-      CHROME_CDP_URL: "http://host.docker.internal:9222"
+      # forcing the Host header to "localhost:<port>" on the HTTP call.
+      CHROME_CDP_URL: ${CHROME_CDP_URL:-http://host.docker.internal:9333}
       BROWSER_COOKIE_VAULT_DIR: "/app/credentials/browser_cookies"
       BROWSER_COOKIE_VAULT_INTERVAL_SECONDS: "300"
       BROWSER_COOKIE_VAULT_KEEP_SNAPSHOTS: "10"

@@ -12,6 +12,7 @@ Page.reload on each with ignoreCache=false (soft reload). Tabs already healthy
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 import urllib.request
@@ -21,7 +22,10 @@ import websocket
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-CDP_HOST = "http://127.0.0.1:9222"
+CDP_HOST = os.getenv(
+    "UC_CHROME_CDP_URL",
+    f"http://127.0.0.1:{os.getenv('UC_CHROME_CDP_PORT', '9333')}",
+)
 REPO_ROOT = Path(__file__).resolve().parents[1]
 AUDIT_PATH = REPO_ROOT / "tmp" / "browser_tab_audit_result.json"
 PLAN_PATH = REPO_ROOT / "tmp" / "browser_tab_reload_plan.json"
@@ -105,6 +109,11 @@ def send_reload(ws_url: str, target_id: str, ignore_cache: bool = False, timeout
             pass
 
 
+def _target_disappeared(message: str) -> bool:
+    text = (message or "").lower()
+    return "no such target" in text or "target closed" in text or "target detached" in text
+
+
 def main():
     target_version = _target_version()
     with AUDIT_PATH.open(encoding="utf-8") as f:
@@ -148,8 +157,12 @@ def main():
             continue
         print(f"  reload {p['platform']:10} {p['target_id'][:12]} ...", end=" ")
         ok, msg = send_reload(p["ws"], p["target_id"])
-        print(f"{'OK' if ok else 'FAIL'}: {msg}")
-        results.append({**p, "status": "ok" if ok else "fail", "detail": msg})
+        if not ok and _target_disappeared(msg):
+            print(f"SKIP: target disappeared before reload ({msg})")
+            results.append({**p, "status": "skipped", "detail": msg, "skip_reason": "target_disappeared"})
+        else:
+            print(f"{'OK' if ok else 'FAIL'}: {msg}")
+            results.append({**p, "status": "ok" if ok else "fail", "detail": msg})
         # Space out — the box is slow and we don't want to slam it
         time.sleep(1.5)
 

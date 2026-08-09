@@ -38,7 +38,9 @@ def test_chrome_cdp_launcher_prefers_extension_capable_chromium():
 def test_chrome_cdp_launcher_prefers_dedicated_automation_profile():
     script = _read_script("start-scraper-chrome-cdp.ps1")
 
+    assert "ChromeCdpRecoveredProfile" in script
     assert "ChromeCdpAutomationProfile" in script
+    assert "return $recovered" in script
     assert 'return $automation' in script
     assert "incompatible with Chrome-for-Testing / Playwright Chromium" in script
 
@@ -74,6 +76,17 @@ def test_chrome_cdp_launcher_ignores_stale_wmi_chrome_rows():
     assert "$liveIds.ContainsKey([int]$_.ProcessId)" in script
 
 
+def test_chrome_cdp_launcher_cleans_stale_debug_port_owner():
+    script = _read_script("start-scraper-chrome-cdp.ps1")
+
+    assert "function Get-PortListenerPids" in script
+    assert "netstat.exe" in script
+    assert "function Stop-ProcessIds" in script
+    assert "function Wait-PortReleased" in script
+    assert "Port $RemoteDebuggingPort is still owned by stale PID(s)" in script
+    assert "Wait-PortReleased -Port $RemoteDebuggingPort" in script
+
+
 def test_chrome_cdp_launcher_discovers_extension_id_from_cdp():
     script = _read_script("start-scraper-chrome-cdp.ps1")
 
@@ -81,6 +94,8 @@ def test_chrome_cdp_launcher_discovers_extension_id_from_cdp():
     assert "function Get-KnownExtensionIds" in script
     assert "function Open-ExtensionControlPage" in script
     assert "function Open-CdpTarget" in script
+    assert "function Try-OpenCdpTarget" in script
+    assert "Could not open CDP target" in script
     assert "$knownIds = @(Get-KnownExtensionIds)" in script
     assert "function Get-PrimaryKnownExtensionId" in script
     assert '("service_worker", "background_page")' in script
@@ -99,6 +114,20 @@ def test_browser_tab_audit_accepts_dynamic_extension_worlds():
 
     assert 'os.getenv("UC_EXTENSION_ID"' in script
     assert 'origin.startswith("chrome-extension://")' in script
+    assert "UC_CHROME_CDP_PORT" in script
+    assert "'9333'" in script
+
+
+def test_browser_tab_reload_treats_disappeared_targets_as_skips():
+    script = (REPO_ROOT / "tools" / "browser_tab_reload.py").read_text(encoding="utf-8")
+
+    assert "import os" in script
+    assert "UC_CHROME_CDP_PORT" in script
+    assert "'9333'" in script
+    assert "def _target_disappeared" in script
+    assert '"no such target" in text' in script
+    assert '"target_disappeared"' in script
+    assert "SKIP: target disappeared before reload" in script
 
 
 def test_chrome_cdp_launcher_dry_run_skips_live_probes():
@@ -119,6 +148,14 @@ def test_chrome_cdp_launcher_opens_requested_platform_urls_directly():
     assert 'strava = "https://www.strava.com/dashboard"' in script
     assert "$platforms.Keys -contains $id" in script
     assert "Get-PlatformLaunchUrls -Ids $OpenIds" in script
+
+
+def test_chrome_cdp_launcher_avoids_duplicate_platform_fanout_when_control_opens():
+    script = _read_script("start-scraper-chrome-cdp.ps1")
+
+    assert "$controlOpened = Open-ExtensionControlPage" in script
+    assert "if (-not $controlOpened)" in script
+    assert script.count("foreach ($url in @(Get-PlatformLaunchUrls") == 2
 
 
 def test_chrome_cdp_launcher_makes_open_all_explicit():

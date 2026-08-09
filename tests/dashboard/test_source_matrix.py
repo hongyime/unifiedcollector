@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import os
@@ -1094,6 +1095,14 @@ def test_source_matrix_row_suppresses_stale_browser_content_when_current_media_f
     assert row["status_label"] == "live"
     assert row["blocker"]["kind"] == "none"
     assert row["extension_issues"] == []
+
+
+def test_browser_extension_content_gap_query_excludes_strava_route_capture():
+    source = Path(dashboard_api.__file__).read_text(encoding="utf-8")
+    section = source[source.index('"browser_content_gap"'):source.index('if payload.get("reload_url")')]
+
+    assert '["instagram", "tiktok", "lemon8", "threads", "facebook", "x"]' in section
+    assert '"strava"' not in section
 
 
 def test_source_matrix_row_suppresses_source_health_browser_stall_when_current_media_flows():

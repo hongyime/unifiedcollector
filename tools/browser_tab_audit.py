@@ -28,7 +28,10 @@ import websocket
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-CDP_HOST = "http://127.0.0.1:9222"
+CDP_HOST = os.getenv(
+    "UC_CHROME_CDP_URL",
+    f"http://127.0.0.1:{os.getenv('UC_CHROME_CDP_PORT', '9333')}",
+)
 EXT_ID = os.getenv("UC_EXTENSION_ID", "pkmdmcklnjdeocoeigmlakhomhhcpafb")
 REPO_ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_PATH = REPO_ROOT / "tmp" / "browser_tab_audit_result.json"
