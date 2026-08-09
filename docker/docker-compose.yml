@@ -908,7 +908,7 @@ services:
       - z:/unifiedcollector/media:/media
       - z:/unifiedcollector:/vault
       - ../credentials:/app/credentials
-      - ../tmp:/app/tmp:ro
+      - ../tmp:/app/tmp
     depends_on:
       postgres:
         condition: service_healthy
