@@ -692,3 +692,25 @@ async def test_container_sweep_treats_dead_and_created_as_stopped(monkeypatch):
     assert sorted(started) == sorted(
         ["unifiedcollector_backup", "unifiedcollector_scheduler"]
     )
+
+
+def test_headless_watchdog_uses_canonical_lowrisk_progress_queries(monkeypatch):
+    """GitHub/Strava share collector_lowrisk, so stale checks must match the
+    dashboard/core liveness basis and not restart the shared container just
+    because one narrow table, such as github_commits, is quiet.
+    """
+    monkeypatch.setenv("DATABASE_URL", "postgres://collector:collector@localhost/unifiedcollector")
+    monkeypatch.setenv("WATCHDOG_HEADLESS_ENABLED", "1")
+
+    import src.watchdog.freshness as freshness
+    from src.core.source_freshness import GITHUB_PROGRESS_QUERY, STRAVA_PROGRESS_QUERY
+
+    freshness = importlib.reload(freshness)
+
+    assert freshness.CHECKS["github"][0] == GITHUB_PROGRESS_QUERY
+    assert "github_issue_comments" in freshness.CHECKS["github"][0]
+    assert "github_pr_reviews" in freshness.CHECKS["github"][0]
+    assert "github_edges" in freshness.CHECKS["github"][0]
+
+    assert freshness.CHECKS["strava"][0] == STRAVA_PROGRESS_QUERY
+    assert "strava_athletes" in freshness.CHECKS["strava"][0]

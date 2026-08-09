@@ -65,6 +65,7 @@ import asyncio
 
 import aiohttp
 import asyncpg
+from src.core.source_freshness import GITHUB_PROGRESS_QUERY, STRAVA_PROGRESS_QUERY
 
 # Realtime sources hold a persistent connection (MTProto / Baileys WS / Matrix
 # sync). When they go stale past threshold, the connection itself is what's
@@ -146,21 +147,12 @@ if os.getenv("WATCHDOG_HEADLESS_ENABLED", "1") == "1":
             ["unifiedcollector_collector_website"],
         ),
         "github": (
-            "SELECT extract(epoch FROM now()-max(collected_at)) FROM github_commits",
+            GITHUB_PROGRESS_QUERY,
             int(os.getenv("WATCHDOG_STALE_GITHUB", str(_D * 3))),      # 72h (900s cycle sleep)
             ["unifiedcollector_collector_lowrisk"],
         ),
         "strava": (
-            """
-            SELECT extract(epoch FROM now()-max(ts))
-            FROM (
-                SELECT max(collected_at) AS ts FROM strava_activities
-                UNION ALL
-                SELECT max(collected_at) AS ts FROM strava_gps_streams
-                UNION ALL
-                SELECT max(collected_at) AS ts FROM media_items WHERE source='strava'
-            ) progress
-            """,
+            STRAVA_PROGRESS_QUERY,
             int(os.getenv("WATCHDOG_STALE_STRAVA", str(_D * 3))),      # 72h
             ["unifiedcollector_collector_lowrisk"],
         ),
