@@ -2,6 +2,7 @@
 # pytest-asyncio: auto mode so `async def test_*` run without per-test decorators.
 asyncio_mode = "auto"
 testpaths = ["tests"]
+pythonpath = ["."]
 addopts = "-q"
 # Quiet the known third-party deprecation noise so real failures stand out.
 filterwarnings = [
