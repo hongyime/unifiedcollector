@@ -2151,6 +2151,23 @@ def _apply_liveness_floor_to_window(source_row: dict, window: dict, now: datetim
     return out
 
 
+def _apply_current_media_floor_to_day_window(current_window: dict, day_window: dict) -> dict:
+    """Use current-hour media as a truthful 24h lower bound when exact 24h media is absent."""
+    current_media = int(current_window.get("media_items") or 0)
+    day_media = int(day_window.get("media_items") or 0)
+    if current_media <= 0 or day_media > 0:
+        return day_window
+    out = dict(day_window)
+    out["media_items"] = current_media
+    current_latest = current_window.get("latest_media_at")
+    if current_latest and not out.get("latest_media_at"):
+        out["latest_media_at"] = current_latest
+    out["media_items_lower_bound"] = True
+    if current_window.get("media_stats_unavailable") or day_window.get("media_stats_unavailable"):
+        out["media_stats_unavailable"] = True
+    return out
+
+
 def _source_window_totals(rows: list[dict], window_key: str) -> dict:
     out = _empty_source_counts()
     active_sources = 0
@@ -2164,6 +2181,8 @@ def _source_window_totals(rows: list[dict], window_key: str) -> dict:
             out[key] += int(window.get(key) or 0)
         if window.get("media_stats_unavailable"):
             out["media_stats_unavailable"] = True
+        if window.get("media_items_lower_bound"):
+            out["media_items_lower_bound"] = True
         for key in ("latest_record_at", "latest_media_at", "latest_event_at"):
             value = window.get(key)
             if value and (out.get(key) is None or value > out[key]):
@@ -2776,6 +2795,7 @@ def _source_matrix_row(source_row: dict, current_content: dict | None, current_r
     current_window = _merge_source_window(current_content, current_rate)
     day_window = _merge_source_window(day_content, day_rate)
     day_window = _apply_liveness_floor_to_window(source_row, day_window, now)
+    day_window = _apply_current_media_floor_to_day_window(current_window, day_window)
     extension_issues = _source_matrix_filter_extension_issues_for_current_content(
         extension_issues,
         current_window,

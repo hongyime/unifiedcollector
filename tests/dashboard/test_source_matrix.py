@@ -869,6 +869,39 @@ def test_source_matrix_row_uses_liveness_floor_when_24h_rollup_missing():
     assert row["last_24h"]["latest_record_at"] == now - timedelta(seconds=120)
 
 
+def test_source_matrix_row_uses_current_media_as_24h_lower_bound_when_day_media_skipped():
+    now = datetime(2026, 8, 9, 3, 0, tzinfo=timezone.utc)
+    latest_media_at = now - timedelta(minutes=4)
+
+    row = _source_matrix_row(
+        _source(source="threads", status="live", age_seconds=90),
+        current_content={
+            "records": 12,
+            "messages": 0,
+            "media_items": 9,
+            "latest_media_at": latest_media_at,
+        },
+        current_rate=None,
+        day_content={
+            "records": 100,
+            "messages": 0,
+            "media_items": 0,
+            "media_stats_unavailable": True,
+        },
+        day_rate=None,
+        media_total={"total_media_items": 123},
+        cursor_row=None,
+        extension_issues=[],
+        now=now,
+    )
+
+    assert row["last_24h"]["records"] == 100
+    assert row["last_24h"]["media_items"] == 9
+    assert row["last_24h"]["latest_media_at"] == latest_media_at
+    assert row["last_24h"]["media_items_lower_bound"] is True
+    assert row["last_24h"]["media_stats_unavailable"] is True
+
+
 def test_source_matrix_row_labels_live_source_degraded_when_extension_blocked():
     row = _source_matrix_row(
         _source(),
@@ -1314,6 +1347,32 @@ def test_source_window_totals_preserves_media_unavailable_flag():
     assert out["records"] == 8
     assert out["media_items"] == 0
     assert out["media_stats_unavailable"] is True
+
+
+def test_source_window_totals_preserves_media_lower_bound_flag():
+    rows = [
+        {
+            "source": "threads",
+            "last_24h": {
+                "records": 100,
+                "messages": 0,
+                "media_items": 9,
+                "rate_limits": 0,
+                "access_errors": 0,
+                "latest_record_at": datetime(2026, 7, 28, 1, 5, tzinfo=timezone.utc),
+                "latest_media_at": datetime(2026, 7, 28, 1, 10, tzinfo=timezone.utc),
+                "latest_event_at": None,
+                "media_stats_unavailable": True,
+                "media_items_lower_bound": True,
+            },
+        }
+    ]
+
+    out = _source_window_totals(rows, "last_24h")
+
+    assert out["media_items"] == 9
+    assert out["media_stats_unavailable"] is True
+    assert out["media_items_lower_bound"] is True
 
 
 class _MediaTotalsConn:
