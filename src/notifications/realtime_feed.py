@@ -406,6 +406,23 @@ def format_caption(payload: dict, *, max_len: int | None = None) -> str:
     return text
 
 
+def _local_media_text_fallback(caption: str, target: str) -> str:
+    path = str(target or "").strip()
+    note = (
+        "\n\n"
+        "<i>Media was collected and stored locally, but Telegram could not upload "
+        "the full file here.</i>"
+    )
+    if path:
+        note += f"\n<code>{html.escape(path)}</code>"
+    text = f"{caption}{note}"
+    max_len = 3800
+    if len(text) > max_len:
+        keep = max(200, max_len - len(note) - 1)
+        text = caption[:keep].rstrip() + "…" + note
+    return text
+
+
 # -- Drain loop -----------------------------------------------------------
 
 def _resolve_media_path(payload: dict) -> Optional[str]:
@@ -486,8 +503,11 @@ async def _deliver_one(payload: dict) -> tuple[bool, int]:
         ok, retry_after = await telegram.send_video(target, caption=caption)
     else:
         ok, retry_after = await telegram.send_photo(target, caption=caption)
-    if ok or retry_after > 0 or not used_source_url_target:
+    if ok or retry_after > 0:
         return ok, retry_after
+    if not used_source_url_target:
+        text_ok = await telegram.send(_local_media_text_fallback(caption, target))
+        return bool(text_ok), 0
     # Remote source_url targets are often post pages or signed URLs Telegram
     # cannot fetch directly. Preserve the operator signal as text instead of
     # silently logging ok=False and dropping the row.

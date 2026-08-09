@@ -533,6 +533,55 @@ async def test_drain_falls_back_to_text_when_remote_source_url_media_fails(fake_
 
 
 @pytest.mark.asyncio
+async def test_drain_falls_back_to_text_when_local_media_upload_fails(
+    fake_redis,
+    telegram_stub,
+    monkeypatch,
+    tmp_path,
+):
+    from src.notifications import realtime_feed
+    from src.notifications import telegram
+
+    monkeypatch.setenv("REALTIME_POST_FEED_MAX_PER_MINUTE", "10")
+    local_video = tmp_path / "large.mp4"
+    local_video.write_bytes(b"not really large, send_video is stubbed to fail")
+
+    async def failing_send_video(target, caption="", parse_mode="HTML", thumbnail_path=None):
+        telegram_stub["send_video"].append(
+            {
+                "target": target,
+                "caption": caption,
+                "parse_mode": parse_mode,
+                "thumbnail_path": thumbnail_path,
+            }
+        )
+        return False, 0
+
+    monkeypatch.setattr(telegram, "send_video", failing_send_video)
+
+    payload = realtime_feed.build_payload(
+        source="youtube",
+        entity_name="Channel",
+        content_id="video_big",
+        file_path=str(local_video),
+        source_url="https://www.youtube.com/watch?v=big",
+        sha256="a" * 64,
+        metadata={"caption": "big video"},
+        kind="video",
+        content_type="video/mp4",
+    )
+    await fake_redis.rpush("uc:realtime_post_feed", json.dumps(payload))
+
+    drain = realtime_feed.RealtimeFeedDrain()
+    await drain._tick(fake_redis)
+
+    assert len(telegram_stub["send_video"]) == 1
+    assert len(telegram_stub["send"]) == 1
+    assert "stored locally" in telegram_stub["send"][0]["text"]
+    assert str(local_video) in telegram_stub["send"][0]["text"]
+
+
+@pytest.mark.asyncio
 async def test_drain_does_not_text_fallback_on_remote_source_url_429(fake_redis, telegram_stub, monkeypatch):
     from src.notifications import realtime_feed
     from src.notifications import telegram
