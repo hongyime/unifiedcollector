@@ -384,6 +384,47 @@ async def test_source_rate_summary_counts_cooldown_200_as_rate_limit(monkeypatch
     assert out["tiktok"]["active_now"] is True
 
 
+@pytest.mark.asyncio
+async def test_source_rate_summary_uses_active_cooldown_identity(monkeypatch):
+    monkeypatch.setattr(
+        dashboard_api,
+        "_existing_public_tables",
+        AsyncMock(return_value={"rate_limit_events"}),
+    )
+
+    active_until = datetime.now(timezone.utc) + timedelta(hours=3)
+
+    class Conn:
+        async def fetch(self, query, *args, **kwargs):
+            assert "active_account" in query
+            assert "active_scope" in query
+            return [
+                {
+                    "source": "instagram",
+                    "rate_limits": 1,
+                    "access_errors": 1,
+                    "latest_account": "cchmsmediaclub",
+                    "latest_scope": "profile_fetch_playwright",
+                    "latest_status_code": 401,
+                    "latest_reason": "Playwright profile auth response",
+                    "latest_event_at": datetime.now(timezone.utc),
+                    "active_account": "prawnproductions234",
+                    "active_scope": "daily_profile_view_quota",
+                    "active_status_code": None,
+                    "active_reason": "daily profile_view quota hit (60)",
+                    "active_until": active_until,
+                }
+            ]
+
+    out = await dashboard_api._source_rate_summary(Conn(), "now() - interval '24 hours'")
+
+    assert out["instagram"]["active_now"] is True
+    assert out["instagram"]["latest_account"] == "prawnproductions234"
+    assert out["instagram"]["latest_scope"] == "daily_profile_view_quota"
+    assert out["instagram"]["latest_status_code"] is None
+    assert out["instagram"]["latest_reason"] == "daily profile_view quota hit (60)"
+
+
 def test_messaging_coverage_normalizes_unknown_beeper_messages_from_chat_network():
     assert _normalize_beeper_network("unknown", "Discord") == "Discord"
     assert _normalize_beeper_network("", "WhatsApp") == "WhatsApp"
@@ -1124,6 +1165,40 @@ def test_source_matrix_row_suppresses_browser_cooldown_when_media_flows():
     assert row["status_severity"] == "ok"
     assert row["blocker"]["kind"] == "none"
     assert row["rate_limit"]["active_now"] is True
+
+
+def test_source_matrix_row_uses_active_rate_payload_identity():
+    now = datetime(2026, 8, 9, 0, 0, tzinfo=timezone.utc)
+    row = _source_matrix_row(
+        _source(source="instagram"),
+        current_content={"records": 0, "messages": 0, "media_items": 4},
+        current_rate={"rate_limits": 0, "access_errors": 0},
+        day_content={"records": 10, "messages": 0, "media_items": 4},
+        day_rate={
+            "active_now": True,
+            "active_until": now + timedelta(hours=3),
+            "active_account": "prawnproductions234",
+            "active_scope": "daily_profile_view_quota",
+            "active_status_code": None,
+            "active_reason": "daily profile_view quota hit (60)",
+            "latest_account": "cchmsmediaclub",
+            "latest_scope": "profile_fetch_playwright",
+            "latest_status_code": 401,
+            "latest_reason": "Playwright profile auth response",
+            "rate_limits": 1,
+            "access_errors": 1,
+        },
+        media_total={"total_media_items": 149119},
+        cursor_row=None,
+        extension_issues=[],
+        now=now,
+    )
+
+    assert row["rate_limit"]["active_now"] is True
+    assert row["rate_limit"]["latest_account"] == "prawnproductions234"
+    assert row["rate_limit"]["latest_scope"] == "daily_profile_view_quota"
+    assert row["rate_limit"]["latest_status_code"] is None
+    assert row["rate_limit"]["latest_reason"] == "daily profile_view quota hit (60)"
 
 
 def test_source_matrix_row_keeps_strava_gps_cooldown_even_with_activity_rows():

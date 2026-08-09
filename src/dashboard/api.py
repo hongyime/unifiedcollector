@@ -1165,6 +1165,14 @@ async def _source_rate_summary(conn, since_sql: str, before_sql: str | None = No
                (array_agg(status_code ORDER BY created_at DESC))[1]::int AS latest_status_code,
                (array_agg(reason ORDER BY created_at DESC))[1] AS latest_reason,
                max(created_at) AS latest_event_at,
+               (array_agg(account ORDER BY created_at + COALESCE(cooldown_seconds, 0) * interval '1 second' DESC)
+                   FILTER (WHERE NOT cleared_by_success AND cooldown_seconds IS NOT NULL))[1] AS active_account,
+               (array_agg(scope ORDER BY created_at + COALESCE(cooldown_seconds, 0) * interval '1 second' DESC)
+                   FILTER (WHERE NOT cleared_by_success AND cooldown_seconds IS NOT NULL))[1] AS active_scope,
+               (array_agg(status_code ORDER BY created_at + COALESCE(cooldown_seconds, 0) * interval '1 second' DESC)
+                   FILTER (WHERE NOT cleared_by_success AND cooldown_seconds IS NOT NULL))[1]::int AS active_status_code,
+               (array_agg(reason ORDER BY created_at + COALESCE(cooldown_seconds, 0) * interval '1 second' DESC)
+                   FILTER (WHERE NOT cleared_by_success AND cooldown_seconds IS NOT NULL))[1] AS active_reason,
                max(
                    CASE
                        WHEN NOT cleared_by_success
@@ -1183,6 +1191,11 @@ async def _source_rate_summary(conn, since_sql: str, before_sql: str | None = No
         d = dict(row)
         active_until = d.get("active_until")
         d["active_now"] = bool(active_until and active_until > now_utc)
+        if d["active_now"]:
+            d["latest_account"] = d.get("active_account") or d.get("latest_account")
+            d["latest_scope"] = d.get("active_scope") or d.get("latest_scope")
+            d["latest_status_code"] = d.get("active_status_code")
+            d["latest_reason"] = d.get("active_reason") or d.get("latest_reason")
         out[d["source"]] = d
     return out
 
@@ -2897,6 +2910,28 @@ def _source_matrix_row(source_row: dict, current_content: dict | None, current_r
                 "check yt-dlp/cookie logs for duration, auth, or format skips."
             ),
         }
+    day_rate = day_rate or {}
+    cursor_row = cursor_row or {}
+    rate_active = bool(cursor_row.get("active_now") or day_rate.get("active_now"))
+    day_rate_has_active_fields = any(
+        key in day_rate
+        for key in ("active_account", "active_scope", "active_status_code", "active_reason")
+    )
+    if day_rate.get("active_now") and day_rate_has_active_fields:
+        latest_status_code = day_rate.get("active_status_code")
+        latest_account = day_rate.get("active_account") or day_rate.get("latest_account")
+        latest_scope = day_rate.get("active_scope") or day_rate.get("latest_scope")
+        latest_reason = day_rate.get("active_reason") or day_rate.get("latest_reason")
+    elif rate_active and cursor_row.get("active_now") and not day_rate.get("active_now"):
+        latest_status_code = None
+        latest_account = day_rate.get("latest_account")
+        latest_scope = day_rate.get("latest_scope")
+        latest_reason = day_rate.get("latest_reason")
+    else:
+        latest_status_code = day_rate.get("latest_status_code")
+        latest_account = day_rate.get("latest_account")
+        latest_scope = day_rate.get("latest_scope")
+        latest_reason = day_rate.get("latest_reason")
     return {
         "source": source,
         "display_name": source_row.get("display_name"),
@@ -2928,13 +2963,13 @@ def _source_matrix_row(source_row: dict, current_content: dict | None, current_r
         "media_freshness": media_freshness,
         "media_backlog": backlog,
         "rate_limit": {
-            "active_now": bool((cursor_row and cursor_row.get("active_now")) or (day_rate and day_rate.get("active_now"))),
-            "active_until": (cursor_row or {}).get("active_until") or (day_rate or {}).get("active_until"),
-            "streak": (cursor_row or {}).get("streak"),
-            "latest_status_code": (day_rate or {}).get("latest_status_code"),
-            "latest_account": (day_rate or {}).get("latest_account"),
-            "latest_scope": (day_rate or {}).get("latest_scope"),
-            "latest_reason": (day_rate or {}).get("latest_reason"),
+            "active_now": rate_active,
+            "active_until": cursor_row.get("active_until") or day_rate.get("active_until"),
+            "streak": cursor_row.get("streak"),
+            "latest_status_code": latest_status_code,
+            "latest_account": latest_account,
+            "latest_scope": latest_scope,
+            "latest_reason": latest_reason,
         },
         "extension_issues": extension_issues,
         "blocker": blocker,
