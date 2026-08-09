@@ -1522,6 +1522,11 @@ class BeeperCollector(BaseCollector):
                 )
                 ORDER BY
                     CASE WHEN s.newest_cursor IS NOT NULL THEN 1 ELSE 0 END DESC,
+                    CASE
+                        WHEN COALESCE(s.last_error, '') LIKE 'TimeoutError%' THEN 1
+                        WHEN COALESCE(s.last_error, '') LIKE 'BeeperTransientError%' THEN 1
+                        ELSE 0
+                    END ASC,
                     s.last_synced_at ASC NULLS FIRST,
                     c.last_message_ts DESC NULLS LAST,
                     COALESCE(s.backfill_complete, FALSE) ASC
@@ -1550,7 +1555,7 @@ class BeeperCollector(BaseCollector):
                     inserted = await sync_one
             except TimeoutError as exc:
                 logger.info(
-                    "chat %s sync exceeded %.0fs; retrying this chat next cycle: %s",
+                    "chat %s sync exceeded %.0fs; deprioritizing this chat for later retry: %s",
                     row["chat_id"],
                     chat_timeout,
                     _format_exception(exc),

@@ -1125,9 +1125,12 @@ async def test_sync_messages_bounds_each_chat_timeout(monkeypatch, tmp_path, cap
     writer.update_sync_state.assert_awaited_once()
     assert writer.update_sync_state.await_args.args[0] == "!slow:beeper.local"
     assert writer.update_sync_state.await_args.kwargs["error"] == "TimeoutError"
+    sql = conn.fetch.await_args.args[0]
+    assert "COALESCE(s.last_error, '') LIKE 'TimeoutError%'" in sql
+    assert "COALESCE(s.last_error, '') LIKE 'BeeperTransientError%'" in sql
     assert any(
         record.levelname == "INFO"
-        and "sync exceeded" in record.message
+        and "deprioritizing this chat for later retry" in record.message
         for record in caplog.records
     )
     assert not any(
