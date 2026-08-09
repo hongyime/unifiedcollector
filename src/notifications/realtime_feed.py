@@ -466,12 +466,14 @@ async def _deliver_one(payload: dict) -> tuple[bool, int]:
 
     caption = format_caption(payload)
     file_path = _resolve_media_path(payload)
+    used_source_url_target = False
     if file_path:
         target = file_path
     elif payload.get("source_url"):
         target = payload["source_url"]  # Telegram will fetch it if it's a
                                         # direct-media URL. If it's a post page
                                         # this will fail; we fall back to text.
+        used_source_url_target = True
     else:
         target = None
 
@@ -481,8 +483,16 @@ async def _deliver_one(payload: dict) -> tuple[bool, int]:
         return bool(ok), 0
 
     if _looks_like_video(payload):
-        return await telegram.send_video(target, caption=caption)
-    return await telegram.send_photo(target, caption=caption)
+        ok, retry_after = await telegram.send_video(target, caption=caption)
+    else:
+        ok, retry_after = await telegram.send_photo(target, caption=caption)
+    if ok or retry_after > 0 or not used_source_url_target:
+        return ok, retry_after
+    # Remote source_url targets are often post pages or signed URLs Telegram
+    # cannot fetch directly. Preserve the operator signal as text instead of
+    # silently logging ok=False and dropping the row.
+    text_ok = await telegram.send(caption)
+    return bool(text_ok), 0
 
 
 class RealtimeFeedDrain:

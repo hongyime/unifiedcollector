@@ -496,6 +496,76 @@ async def test_drain_delivers_video_by_extension(fake_redis, telegram_stub, monk
 
 
 @pytest.mark.asyncio
+async def test_drain_falls_back_to_text_when_remote_source_url_media_fails(fake_redis, telegram_stub, monkeypatch):
+    from src.notifications import realtime_feed
+    from src.notifications import telegram
+
+    monkeypatch.setenv("REALTIME_POST_FEED_MAX_PER_MINUTE", "10")
+
+    async def failing_send_video(target, caption="", parse_mode="HTML", thumbnail_path=None):
+        telegram_stub["send_video"].append(
+            {
+                "target": target,
+                "caption": caption,
+                "parse_mode": parse_mode,
+                "thumbnail_path": thumbnail_path,
+            }
+        )
+        return False, 0
+
+    monkeypatch.setattr(telegram, "send_video", failing_send_video)
+
+    payload = realtime_feed.build_payload(
+        source="youtube", entity_name="PewDiePie", content_id="video_E5GJGLGse1o",
+        file_path=None, source_url="https://www.youtube.com/watch?v=E5GJGLGse1o",
+        sha256=None, metadata={"caption": "video page"}, kind="video",
+        content_type="post",
+    )
+    await fake_redis.rpush("uc:realtime_post_feed", json.dumps(payload))
+
+    drain = realtime_feed.RealtimeFeedDrain()
+    await drain._tick(fake_redis)
+
+    assert len(telegram_stub["send_video"]) == 1
+    assert len(telegram_stub["send"]) == 1
+    assert "PewDiePie" in telegram_stub["send"][0]["text"]
+    assert "youtube.com/watch" in telegram_stub["send"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_drain_does_not_text_fallback_on_remote_source_url_429(fake_redis, telegram_stub, monkeypatch):
+    from src.notifications import realtime_feed
+    from src.notifications import telegram
+
+    monkeypatch.setenv("REALTIME_POST_FEED_MAX_PER_MINUTE", "10")
+
+    async def rate_limited_send_photo(target, caption="", parse_mode="HTML"):
+        telegram_stub["send_photo"].append(
+            {"target": target, "caption": caption, "parse_mode": parse_mode}
+        )
+        return False, 7
+
+    monkeypatch.setattr(telegram, "send_photo", rate_limited_send_photo)
+
+    payload = realtime_feed.build_payload(
+        source="website", entity_name="example.com", content_id="remote-page",
+        file_path=None, source_url="https://example.com/product",
+        sha256=None, metadata={"caption": "product page"}, kind="photo",
+        content_type="photo",
+    )
+    encoded = json.dumps(payload)
+    await fake_redis.rpush("uc:realtime_post_feed", encoded)
+
+    drain = realtime_feed.RealtimeFeedDrain()
+    await drain._tick(fake_redis)
+
+    assert len(telegram_stub["send_photo"]) == 1
+    assert telegram_stub["send"] == []
+    assert drain._backoff_seconds >= 7
+    assert fake_redis.lists.get("uc:realtime_post_feed") == [encoded]
+
+
+@pytest.mark.asyncio
 async def test_drain_dedupes_by_sha(fake_redis, telegram_stub, monkeypatch):
     from src.notifications import realtime_feed
 
