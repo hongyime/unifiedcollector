@@ -352,17 +352,29 @@ async def _record_skip(client) -> None:
 
 
 async def _dedupe_seen(client, sha: str, *, ttl_days: int) -> bool:
-    """Return True if we've seen this sha256 recently. Records it either way."""
+    """Return True if we've seen this occurrence recently."""
     if not sha:
         return False
-    ttl = max(1, ttl_days) * 86400
     key = f"{SEEN_SHA_KEY_DEFAULT}:{sha}"
     try:
-        added = await client.set(key, "1", nx=True, ex=ttl)
+        seen = await client.get(key)
     except Exception:
         return False
-    # aioredis returns True/None depending on success of NX.
-    return not bool(added)
+    return bool(seen)
+
+
+async def _mark_dedupe_seen(client, sha: str, *, ttl_days: int) -> None:
+    """Record a delivered/non-retryable occurrence in the dedupe set.
+
+    This deliberately happens after delivery. If Telegram returns a 429, the
+    item is requeued and must not be poisoned by a pre-delivery dedupe mark.
+    """
+    if not sha:
+        return
+    ttl = max(1, ttl_days) * 86400
+    key = f"{SEEN_SHA_KEY_DEFAULT}:{sha}"
+    with contextlib.suppress(Exception):
+        await client.set(key, "1", ex=ttl)
 
 
 # -- Caption formatting ---------------------------------------------------
@@ -637,6 +649,9 @@ class RealtimeFeedDrain:
                 "realtime_feed: telegram 429; sleeping %.1fs and retrying",
                 self._backoff_seconds,
             )
+            return
+
+        await _mark_dedupe_seen(client, dedupe_key, ttl_days=ttl_days)
 
         await _flush_skip_summary(client)
 

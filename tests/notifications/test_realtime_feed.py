@@ -759,6 +759,46 @@ async def test_drain_backs_off_on_429(fake_redis, telegram_stub, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_drain_retries_429_payload_without_dedupe_drop(fake_redis, telegram_stub, monkeypatch):
+    from src.notifications import realtime_feed
+    from src.notifications import telegram
+
+    monkeypatch.setenv("REALTIME_POST_FEED_MAX_PER_MINUTE", "10")
+    attempts = 0
+
+    async def flappy_send_photo(target, caption="", parse_mode="HTML"):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return False, 5
+        telegram_stub["send_photo"].append(
+            {"target": target, "caption": caption, "parse_mode": parse_mode}
+        )
+        return True, 0
+
+    monkeypatch.setattr(telegram, "send_photo", flappy_send_photo)
+
+    payload = realtime_feed.build_payload(
+        source="instagram", entity_name="alice", content_id="retry_after_429",
+        file_path=None, source_url="https://ig/retry.jpg",
+        sha256="9" * 64, metadata={"caption": "retry"}, kind="image",
+        content_type="post_image",
+    )
+    await fake_redis.rpush("uc:realtime_post_feed", json.dumps(payload))
+
+    drain = realtime_feed.RealtimeFeedDrain()
+    await drain._tick(fake_redis)
+    assert len(fake_redis.lists.get("uc:realtime_post_feed") or []) == 1
+
+    drain._backoff_seconds = 0
+    await drain._tick(fake_redis)
+
+    assert attempts == 2
+    assert len(telegram_stub["send_photo"]) == 1
+    assert fake_redis.lists.get("uc:realtime_post_feed") in (None, [])
+
+
+@pytest.mark.asyncio
 async def test_drain_dedupes_without_sha_via_content_id(fake_redis, telegram_stub, monkeypatch):
     """Missing sha256 must not disable dedup — fall back on content_id fingerprint."""
     from src.notifications import realtime_feed
