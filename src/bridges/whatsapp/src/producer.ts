@@ -31,7 +31,7 @@ export class BrokerProducer {
         let attempt = 0;
         while (attempt < maxRetries) {
             try {
-                this.conn = await amqplib.connect(this.amqpUrl, { heartbeat: 10, timeout: 5000 });
+                this.conn = await amqplib.connect(this.amqpUrl, { heartbeat: 10, timeout: 5000 } as any);
                 this.channel = await this.conn.createConfirmChannel();
 
                 this.conn.on('error', (err: any) => {

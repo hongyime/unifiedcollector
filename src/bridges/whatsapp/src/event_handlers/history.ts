@@ -47,6 +47,7 @@ let unstuckOnce = false;
 // used to leave the driver wedged). So we track the live socket module-wide and
 // the interval reads it each tick.
 let currentSock: WASocket | null = null;
+let currentCanFetchHistory: (() => boolean) | null = null;
 
 // messageTimestamp may be a number or a Long — coerce to seconds.
 function toSec(t: any): number {
@@ -81,17 +82,23 @@ function saveWatermarks(): void {
     }
 }
 
+function readyForHistoryFetch(sk: WASocket | null): boolean {
+    if (!sk) return false;
+    if (currentCanFetchHistory) return currentCanFetchHistory();
+    return Boolean((sk as any)?.authState?.creds?.registered);
+}
+
 export function registerHistoryHandler(sock: WASocket, canFetchHistory?: () => boolean): void {
     loadWatermarks();
     currentSock = sock;  // always track the live socket (reconnects recreate it)
+    currentCanFetchHistory = canFetchHistory || null;
 
     if (!progressInterval) {
         progressInterval = setInterval(() => {
             const sk = currentSock;
             const readyForHistory =
                 Boolean(sk)
-                && (canFetchHistory ? canFetchHistory() : true)
-                && Boolean((sk as any)?.authState?.creds?.registered);
+                && readyForHistoryFetch(sk);
             let chats = 0;
             let msgs = 0;
             let complete = 0;
@@ -135,9 +142,7 @@ export function registerHistoryHandler(sock: WASocket, canFetchHistory?: () => b
         backfillInterval = setInterval(async () => {
             const sk = currentSock;
             if (!sk) return;  // no live socket yet
-            const readyForHistory =
-                (canFetchHistory ? canFetchHistory() : true) &&
-                Boolean((sk as any)?.authState?.creds?.registered);
+            const readyForHistory = readyForHistoryFetch(sk);
             if (!readyForHistory) {
                 // The interval survives reconnects. If the socket is currently
                 // unpaired or waiting for a QR scan, do not call
@@ -320,4 +325,40 @@ export function registerHistoryHandler(sock: WASocket, canFetchHistory?: () => b
             saveWatermarks();
         }
     });
+}
+
+export function getHistoryProgress() {
+    let chats = 0;
+    let messages = 0;
+    let complete = 0;
+    let anchored = 0;
+    let pending = 0;
+    let eligible = 0;
+    let oldestTimestamp: number | null = null;
+    let newestSyncTime: number | null = null;
+    for (const wm of Object.values(watermarks)) {
+        chats++;
+        messages += wm.messageCount || 0;
+        if (wm.isComplete) complete++;
+        if (wm.oldestKey) anchored++;
+        if (wm.pendingSince) pending++;
+        if (!wm.isComplete && wm.oldestKey && !wm.pendingSince) eligible++;
+        if (wm.oldestTimestamp && Number.isFinite(wm.oldestTimestamp)) {
+            oldestTimestamp = oldestTimestamp == null ? wm.oldestTimestamp : Math.min(oldestTimestamp, wm.oldestTimestamp);
+        }
+        if (wm.lastSyncTime) {
+            newestSyncTime = newestSyncTime == null ? wm.lastSyncTime : Math.max(newestSyncTime, wm.lastSyncTime);
+        }
+    }
+    return {
+        chats,
+        messages,
+        complete,
+        anchored,
+        pending,
+        eligible,
+        oldest_message_at: oldestTimestamp ? new Date(oldestTimestamp * 1000).toISOString() : null,
+        newest_sync_at: newestSyncTime ? new Date(newestSyncTime).toISOString() : null,
+        driver_ready: readyForHistoryFetch(currentSock),
+    };
 }

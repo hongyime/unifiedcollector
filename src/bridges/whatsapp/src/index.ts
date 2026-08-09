@@ -21,7 +21,7 @@ import { getAuthState, handlePairingCode, requestPairingCode } from './auth_mana
 import { bindStore, getMessage } from './store';
 import { producer } from './producer';
 import { registerMessagesHandler } from './event_handlers/messages';
-import { registerHistoryHandler } from './event_handlers/history';
+import { getHistoryProgress, registerHistoryHandler } from './event_handlers/history';
 import { registerContactsHandler } from './event_handlers/contacts';
 import { registerGroupsHandler } from './event_handlers/groups';
 
@@ -267,6 +267,7 @@ function bridgeState() {
         last_disconnect_at: lastDisconnectAt ? new Date(lastDisconnectAt).toISOString() : null,
         pairing_recovery_until: pairingRecoveryUntil ? new Date(pairingRecoveryUntil).toISOString() : null,
         pairing_recovery_active: Boolean(pairingRecoveryUntil && Date.now() < pairingRecoveryUntil),
+        history: getHistoryProgress(),
     };
 }
 
@@ -1028,7 +1029,7 @@ async function connectToWhatsApp(): Promise<void> {
     connectionState = socketRegistered ? 'connecting' : 'connecting_unpaired';
     bindStore(sock);
     registerMessagesHandler(sock);
-    registerHistoryHandler(sock, () => activeSock === sock && serviceHealthy && Boolean(sock.authState.creds.registered));
+    registerHistoryHandler(sock, () => serviceHealthy && socketRegistered);
     registerContactsHandler(sock);
     registerGroupsHandler(sock);
 
