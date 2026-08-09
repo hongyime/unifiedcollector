@@ -1208,6 +1208,11 @@ def test_classify_ytdlp_media_failure_expected_states():
         "info",
         168,
     )
+    assert _classify_ytdlp_media_failure("See https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies for tips on effectively exporting YouTube cookies") == (
+        "restricted",
+        "info",
+        168,
+    )
     assert _classify_ytdlp_media_failure("curl: (28) Connection timed out after 30001 milliseconds") == (
         "transient_network",
         "warning",
