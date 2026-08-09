@@ -693,6 +693,21 @@ async def test_process_spider_queue_claims_and_marks_completed(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_process_spider_queue_skips_when_worker_account_cooling_down(monkeypatch):
+    coll = _make_collector(monkeypatch)
+    coll.account_pool.add_account("acct1", credentials={})
+    coll.account_pool.record_flood_wait("acct1", 60)
+    worker = _make_worker(coll, name="acct1")
+    coll._collect_chat = AsyncMock()
+
+    processed = await coll._process_spider_queue(worker)
+
+    assert processed == 0
+    coll.pool.conn.fetchrow.assert_not_awaited()
+    coll._collect_chat.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_process_spider_queue_marks_failed_on_exception(monkeypatch):
     coll = _make_collector(monkeypatch)
     worker = _make_worker(coll)

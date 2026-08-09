@@ -1342,6 +1342,13 @@ class TelegramCollector(BaseCollector):
         """Process telegram_spider_queue jobs using the given worker's client."""
         from telethon.errors import FloodWaitError
         max_per_cycle = int(os.getenv("TELEGRAM_SPIDER_MAX_PER_CYCLE", "50"))
+        if not self._worker_can_resolve(worker):
+            logger.info(
+                "[spider w=%d account=%s] skipped: account unavailable or cooling down",
+                worker.worker_id,
+                worker.account.name,
+            )
+            return 0
         await refresh_account_proximity_cache(self.pool)
         processed = 0
         while not self._stop.is_set() and processed < max_per_cycle:
