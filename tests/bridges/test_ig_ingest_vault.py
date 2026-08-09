@@ -296,6 +296,69 @@ def test_browser_media_candidates_records_non_tiktok_platform():
     assert not any("tiktok_browser_media_candidates" in query for query, _args in pool.conn.executes)
 
 
+def test_browser_media_candidate_duplicate_does_not_increment_attempts():
+    pool = _FakePool()
+    asyncio.run(
+        ig_ingest.browser_media_candidates(
+            _FakeRequest(
+                {"pool": pool},
+                {
+                    "platform": "facebook",
+                    "username": "feed",
+                    "items": [
+                        {
+                            "ingest_mode": "browser_upload",
+                            "item": {
+                                "content_id": "fb_1",
+                                "content_type": "photo",
+                                "url": "https://scontent.xx.fbcdn.net/photo.jpg",
+                            },
+                            "result": {"reason": "http_403"},
+                        }
+                    ],
+                },
+            )
+        )
+    )
+
+    query = next(query for query, _args in pool.conn.executes if "browser_media_candidates" in query)
+    assert "attempts = browser_media_candidates.attempts + 1" not in query
+    assert "WHERE browser_media_candidates.outcome IS DISTINCT FROM 'stored'" in query
+    assert "AND EXCLUDED.outcome = 'stored'" in query
+
+
+def test_tiktok_browser_media_candidate_duplicate_does_not_increment_attempts():
+    pool = _FakePool()
+    asyncio.run(
+        ig_ingest.browser_media_candidates(
+            _FakeRequest(
+                {"pool": pool},
+                {
+                    "platform": "tiktok",
+                    "username": "alice",
+                    "items": [
+                        {
+                            "ingest_mode": "browser_upload",
+                            "item": {
+                                "content_id": "tt_1",
+                                "content_type": "video",
+                                "url": "https://v16.tiktokcdn.com/video.mp4",
+                                "browser_upload": True,
+                            },
+                            "result": {"reason": "http_403"},
+                        }
+                    ],
+                },
+            )
+        )
+    )
+
+    query = next(query for query, _args in pool.conn.executes if "tiktok_browser_media_candidates" in query)
+    assert "attempts = tiktok_browser_media_candidates.attempts + 1" not in query
+    assert "WHERE tiktok_browser_media_candidates.outcome IS DISTINCT FROM 'stored'" in query
+    assert "AND EXCLUDED.outcome = 'stored'" in query
+
+
 def test_browser_media_candidates_queues_x_video_revisit():
     pool = _FakePool()
     response = asyncio.run(

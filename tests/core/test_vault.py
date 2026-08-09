@@ -367,6 +367,32 @@ def test_write_atomic_artifact_from_path_moves_temp_file(tmp_path):
     assert sidecar["metadata"]["source_url"] == "https://example.com/v.mp4"
 
 
+def test_write_atomic_artifact_from_path_fsyncs_source_before_move(tmp_path, monkeypatch):
+    root = tmp_path / "vault"
+    root.mkdir()
+    source_path = tmp_path / "video.part"
+    source_path.write_bytes(b"streamed video bytes")
+    fsynced_fds = []
+
+    def fake_fsync(fd):
+        fsynced_fds.append(fd)
+
+    monkeypatch.setattr(vault.os, "fsync", fake_fsync)
+
+    result = vault.write_atomic_artifact_from_path(
+        source="website",
+        artifact_id="video/fsync",
+        artifact_kind="media_blob",
+        source_path=source_path,
+        extension=".mp4",
+        root=root,
+        delete_source=True,
+    )
+
+    assert result.ok is True
+    assert fsynced_fds
+
+
 def test_write_atomic_artifact_from_path_records_raw_payload_reference(tmp_path):
     root = tmp_path / "vault"
     root.mkdir()

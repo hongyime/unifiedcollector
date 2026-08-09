@@ -540,6 +540,20 @@ async def test_handle_flood_wait_can_pin_without_sleep(monkeypatch):
     assert event_call.args[5] == 77
 
 
+def test_collect_chat_checkpoints_seen_messages_not_only_media():
+    source = Path(tg_mod.__file__).read_text(encoding="utf-8")
+    block = source.split("async def _collect_chat", 1)[1].split(
+        "# Per-chat membership snapshot", 1
+    )[0]
+
+    assert "seen_count += 1" in block
+    assert "last_seen_message_id = int(message.id)" in block
+    assert "if seen_count % self._batch_size == 0" in block
+    assert "if last_seen_message_id is not None:" in block
+    assert "save_progress(str(last_seen_message_id))" in block
+    assert "if count % self._batch_size" not in block
+
+
 @pytest.mark.asyncio
 async def test_worker_unresolvable_target_does_not_penalize_account(monkeypatch):
     coll = _make_collector(monkeypatch)

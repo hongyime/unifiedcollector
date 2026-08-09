@@ -39,7 +39,10 @@ function Resolve-UserDataDir {
     if ($Requested) {
         return $Requested
     }
-    return "$env:LOCALAPPDATA\Google\Chrome\User Data"
+    # Chrome 136+ ignores --remote-debugging-port when pointed at the default
+    # Chrome profile directory. Use a durable, non-standard scraper profile so
+    # CDP stays available and scraper logins persist across restarts.
+    return "$env:LOCALAPPDATA\UnifiedCollector\ChromeCdpProfile"
 }
 
 function Test-CdpAvailable {
@@ -52,8 +55,71 @@ function Test-CdpAvailable {
     }
 }
 
+function Get-ExtensionIdFromCdp {
+    param([int]$Port)
+    try {
+        $targets = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/json/list" -Method Get -TimeoutSec 5
+        foreach ($target in @($targets)) {
+            $url = [string]($target.url)
+            $targetType = [string]($target.type)
+            if ($targetType -notin @("service_worker", "background_page")) {
+                continue
+            }
+            $match = [regex]::Match($url, '^chrome-extension://([a-p]{32})/')
+            if ($match.Success) {
+                return $match.Groups[1].Value
+            }
+        }
+        foreach ($target in @($targets)) {
+            $url = [string]($target.url)
+            $match = [regex]::Match($url, '^chrome-extension://([a-p]{32})/')
+            if ($match.Success) {
+                return $match.Groups[1].Value
+            }
+        }
+    } catch {
+        return ""
+    }
+    return ""
+}
+
+function Open-CdpTarget {
+    param([int]$Port, [string]$Url)
+    $encoded = [uri]::EscapeDataString($Url)
+    Invoke-WebRequest -Uri "http://127.0.0.1:$Port/json/new?$encoded" -Method Put -UseBasicParsing -TimeoutSec 10 | Out-Null
+}
+
+function Get-PlatformLaunchUrls {
+    param([string[]]$Ids, [bool]$All)
+    $platforms = [ordered]@{
+        instagram = "https://www.instagram.com/"
+        tiktok = "https://www.tiktok.com/following"
+        lemon8 = "https://www.lemon8-app.com/topic/food?region=sg"
+        x = "https://x.com/home"
+        threads = "https://www.threads.com/"
+        facebook = "https://www.facebook.com/"
+        strava = "https://www.strava.com/dashboard"
+    }
+    $selected = @()
+    if ($All) {
+        $selected = @($platforms.Keys)
+    } else {
+        $selected = @($Ids)
+    }
+    foreach ($id in $selected) {
+        if ($platforms.Keys -contains $id) {
+            $platforms[$id]
+        }
+    }
+}
+
 function Get-ChromeProcesses {
-    return @(Get-CimInstance Win32_Process -Filter "name='chrome.exe'" -ErrorAction SilentlyContinue)
+    $liveIds = @{}
+    foreach ($proc in @(Get-Process chrome -ErrorAction SilentlyContinue)) {
+        $liveIds[[int]$proc.Id] = $true
+    }
+    return @(Get-CimInstance Win32_Process -Filter "name='chrome.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $liveIds.ContainsKey([int]$_.ProcessId) })
 }
 
 function Get-VisibleChromeWindows {
@@ -86,6 +152,36 @@ function Stop-ChromeProcessTree {
     }
 }
 
+function Disable-ChromeBackgroundMode {
+    param([string]$UserDataDir)
+
+    $candidateFiles = @(
+        (Join-Path $UserDataDir "Local State"),
+        (Join-Path $UserDataDir "Default\Preferences")
+    )
+    foreach ($file in $candidateFiles) {
+        if (-not (Test-Path -LiteralPath $file)) {
+            continue
+        }
+        try {
+            $raw = Get-Content -LiteralPath $file -Raw -ErrorAction Stop
+            if (-not $raw.Trim()) {
+                continue
+            }
+            $json = $raw | ConvertFrom-Json -ErrorAction Stop
+            if (-not $json.background_mode) {
+                $json | Add-Member -NotePropertyName "background_mode" -NotePropertyValue ([pscustomobject]@{}) -Force
+            }
+            $json.background_mode | Add-Member -NotePropertyName "enabled" -NotePropertyValue $false -Force
+            $tmp = "$file.uc_tmp"
+            $json | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $tmp -Encoding UTF8
+            Move-Item -LiteralPath $tmp -Destination $file -Force
+        } catch {
+            Write-Warning "Could not disable Chrome background mode in ${file}: $($_.Exception.Message)"
+        }
+    }
+}
+
 function Open-ControlInExistingChrome {
     param([string]$ChromePath, [string]$Url)
     Write-Host "Opening collector extension control page in the existing Chrome session: $Url"
@@ -102,15 +198,15 @@ function Quote-Argument {
 
 $chrome = Resolve-ChromePath $ChromePath
 $profile = Resolve-UserDataDir $UserDataDir
+$defaultChromeProfile = "$env:LOCALAPPDATA\Google\Chrome\User Data"
+if (([IO.Path]::GetFullPath($profile).TrimEnd('\')) -ieq ([IO.Path]::GetFullPath($defaultChromeProfile).TrimEnd('\'))) {
+    Write-Warning "Chrome 136+ does not expose CDP for the default Chrome profile. Use a non-standard -UserDataDir such as $env:LOCALAPPDATA\UnifiedCollector\ChromeCdpProfile."
+}
 $extension = (Resolve-Path -LiteralPath $ExtensionPath).Path
 $chromeProcesses = @(Get-ChromeProcesses)
 $visibleChromeWindows = @(Get-VisibleChromeWindows)
 $cdpAlreadyUp = Test-CdpAvailable $RemoteDebuggingPort
-
-if ($cdpAlreadyUp) {
-    Write-Host "Chrome CDP is already reachable on 127.0.0.1:$RemoteDebuggingPort."
-    exit 0
-}
+$OpenIds = @($OpenIds | ForEach-Object { ([string]$_) -split "," } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 
 $tabsParams = [System.Collections.Generic.List[string]]::new()
 if ($FallbackOpenControlIfCleanupBlocked -and $OpenIds.Count -eq 0 -and -not $OpenAll) {
@@ -130,21 +226,42 @@ if (-not $NoTest) {
     $tabsParams.Add("test=1")
 }
 $tabsQuery = $tabsParams -join "&"
-$tabsUrl = "chrome-extension://pkmdmcklnjdeocoeigmlakhomhhcpafb/tabs.html"
+$tabsUrlPath = "tabs.html"
 if ($tabsQuery) {
-    $tabsUrl = "${tabsUrl}?$tabsQuery"
+    $tabsUrlPath = "${tabsUrlPath}?$tabsQuery"
+}
+$fallbackTabsUrl = "chrome-extension://pkmdmcklnjdeocoeigmlakhomhhcpafb/$tabsUrlPath"
+
+if ($cdpAlreadyUp) {
+    $extensionId = Get-ExtensionIdFromCdp $RemoteDebuggingPort
+    if ($extensionId) {
+        $tabsUrl = "chrome-extension://$extensionId/$tabsUrlPath"
+        Open-CdpTarget -Port $RemoteDebuggingPort -Url $tabsUrl
+        Write-Host "Opened extension control page: $tabsUrl"
+    }
+    foreach ($url in @(Get-PlatformLaunchUrls -Ids $OpenIds -All ($OpenAll -and -not $NoOpenAll))) {
+        Open-CdpTarget -Port $RemoteDebuggingPort -Url $url
+        Start-Sleep -Milliseconds 500
+    }
+    Write-Host "Chrome CDP is already reachable on 127.0.0.1:$RemoteDebuggingPort."
+    exit 0
 }
 $args = @(
     "--remote-debugging-port=$RemoteDebuggingPort",
+    "--remote-debugging-address=127.0.0.1",
+    "--remote-allow-origins=http://127.0.0.1:$RemoteDebuggingPort",
     "--user-data-dir=$profile",
     "--load-extension=$extension",
+    "--no-first-run",
+    "--no-default-browser-check",
     "--disable-dev-shm-usage",
+    "--disable-background-mode",
     "--disable-background-timer-throttling",
     "--disable-renderer-backgrounding",
     "--disable-backgrounding-occluded-windows",
     "--js-flags=--max-old-space-size=512",
     "--renderer-process-limit=10",
-    $tabsUrl
+    "about:blank"
 )
 $argumentLine = ($args | ForEach-Object { Quote-Argument $_ }) -join " "
 
@@ -173,7 +290,7 @@ if ($chromeProcesses.Count -gt 0 -and -not $AllowWhileChromeRunning -and $CloseE
     } catch {
         if ($FallbackOpenControlIfCleanupBlocked) {
             Write-Warning ("Could not close hidden Chrome for CDP relaunch: " + $_.Exception.Message)
-            Open-ControlInExistingChrome -ChromePath $chrome -Url $tabsUrl
+            Open-ControlInExistingChrome -ChromePath $chrome -Url $fallbackTabsUrl
             Write-Warning "CDP is still unavailable, but the extension control page was nudged in the existing Chrome session."
             exit 2
         }
@@ -191,10 +308,24 @@ if ($chromeProcesses.Count -gt 0 -and -not $AllowWhileChromeRunning) {
     )
 }
 
+Disable-ChromeBackgroundMode -UserDataDir $profile
+
 $proc = Start-Process -FilePath $chrome -ArgumentList $argumentLine -PassThru
 Start-Sleep -Seconds 4
 
 if (Test-CdpAvailable $RemoteDebuggingPort) {
+    $extensionId = Get-ExtensionIdFromCdp $RemoteDebuggingPort
+    if ($extensionId) {
+        $tabsUrl = "chrome-extension://$extensionId/$tabsUrlPath"
+        Open-CdpTarget -Port $RemoteDebuggingPort -Url $tabsUrl
+        Write-Host "Opened extension control page: $tabsUrl"
+    } else {
+        Write-Warning "CDP is reachable, but no loaded extension target was found yet; open the UnifiedCollector extension options page manually."
+    }
+    foreach ($url in @(Get-PlatformLaunchUrls -Ids $OpenIds -All ($OpenAll -and -not $NoOpenAll))) {
+        Open-CdpTarget -Port $RemoteDebuggingPort -Url $url
+        Start-Sleep -Milliseconds 500
+    }
     Write-Host "Started Chrome PID $($proc.Id); CDP is reachable on 127.0.0.1:$RemoteDebuggingPort."
     exit 0
 }

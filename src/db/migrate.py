@@ -80,7 +80,9 @@ async def apply_all(pool) -> dict:
                 summary["deferred"] = True
                 return summary
         except Exception:
-            pass
+            logger.warning("Migration runner deferred: advisory lock check failed.", exc_info=True)
+            summary["deferred"] = True
+            return summary
 
         # DDL vs. the daily pg_dump: pg_dump holds AccessShareLock on EVERY table
         # for the whole dump (minutes). A migration's ACCESS EXCLUSIVE request would

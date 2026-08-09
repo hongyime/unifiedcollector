@@ -799,6 +799,41 @@ async def test_drain_retries_429_payload_without_dedupe_drop(fake_redis, telegra
 
 
 @pytest.mark.asyncio
+async def test_drain_preserves_non_429_delivery_failure(fake_redis, telegram_stub, monkeypatch):
+    from src.notifications import realtime_feed
+    from src.notifications import telegram
+
+    monkeypatch.setenv("REALTIME_POST_FEED_MAX_PER_MINUTE", "10")
+
+    async def failed_send(text, parse_mode="HTML"):
+        return False
+
+    async def failed_send_photo(target, caption="", parse_mode="HTML"):
+        return False, 0
+
+    monkeypatch.setattr(telegram, "send", failed_send)
+    monkeypatch.setattr(telegram, "send_photo", failed_send_photo)
+
+    payload = realtime_feed.build_payload(
+        source="instagram", entity_name="alice", content_id="non_429_failure",
+        file_path=None, source_url="https://ig/fail.jpg",
+        sha256="8" * 64, metadata={"caption": "fail"}, kind="image",
+        content_type="post_image",
+    )
+    await fake_redis.rpush("uc:realtime_post_feed", json.dumps(payload))
+
+    drain = realtime_feed.RealtimeFeedDrain()
+    await drain._tick(fake_redis)
+
+    failed = fake_redis.lists.get(realtime_feed.FAILED_KEY_DEFAULT) or []
+    assert len(failed) == 1
+    saved = json.loads(failed[0])
+    assert saved["reason"] == "telegram_delivery_failed"
+    assert saved["payload"]["content_id"] == "non_429_failure"
+    assert not any(k.startswith(realtime_feed.SEEN_SHA_KEY_DEFAULT) for k in fake_redis.strings)
+
+
+@pytest.mark.asyncio
 async def test_drain_dedupes_without_sha_via_content_id(fake_redis, telegram_stub, monkeypatch):
     """Missing sha256 must not disable dedup — fall back on content_id fingerprint."""
     from src.notifications import realtime_feed

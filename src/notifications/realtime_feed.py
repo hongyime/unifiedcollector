@@ -47,6 +47,7 @@ logger = logging.getLogger(__name__)
 QUEUE_KEY_DEFAULT = "uc:realtime_post_feed"
 SEEN_SHA_KEY_DEFAULT = "uc:realtime_post_feed:seen_sha"
 SKIPPED_KEY_DEFAULT = "uc:realtime_post_feed:skipped_burst"
+FAILED_KEY_DEFAULT = "uc:realtime_post_feed:failed"
 LAST_BURST_REPORT_KEY = "uc:realtime_post_feed:last_burst_report"
 
 ALLOWED_KINDS = frozenset({"image", "video", "post", "photo"})
@@ -351,6 +352,17 @@ async def _record_skip(client) -> None:
         await client.incr(SKIPPED_KEY_DEFAULT)
 
 
+async def _record_failed_delivery(client, payload: dict, raw: str) -> None:
+    failure = {
+        "failed_at": time.time(),
+        "reason": "telegram_delivery_failed",
+        "payload": payload,
+        "raw": raw,
+    }
+    with contextlib.suppress(Exception):
+        await client.rpush(FAILED_KEY_DEFAULT, json.dumps(failure, default=str))
+
+
 async def _dedupe_seen(client, sha: str, *, ttl_days: int) -> bool:
     """Return True if we've seen this occurrence recently."""
     if not sha:
@@ -648,6 +660,15 @@ class RealtimeFeedDrain:
             logger.warning(
                 "realtime_feed: telegram 429; sleeping %.1fs and retrying",
                 self._backoff_seconds,
+            )
+            return
+
+        if not delivered:
+            await _record_failed_delivery(client, payload, raw)
+            logger.warning(
+                "realtime_feed: preserved failed telegram delivery source=%s cid=%s",
+                payload.get("source") or "?",
+                payload.get("content_id") or "?",
             )
             return
 

@@ -1815,12 +1815,16 @@ class TelegramCollector(BaseCollector):
         except (TypeError, ValueError):
             min_id = 0
         count = 0
+        seen_count = 0
+        last_seen_message_id: int | None = None
 
         async for message in client.iter_messages(entity, min_id=min_id, limit=None):
             if self._stop.is_set():
                 break
 
             await self.wait_rate_limit("telegram.org")
+            seen_count += 1
+            last_seen_message_id = int(message.id)
 
             sender_uuid = None
             if message.sender_id:
@@ -1850,17 +1854,17 @@ class TelegramCollector(BaseCollector):
             ):
                 count += 1
 
-            if count % self._batch_size == 0 and count > 0:
-                await self.checkpoint.save_progress(str(message.id))
+            if seen_count % self._batch_size == 0 and seen_count > 0:
+                await self.checkpoint.save_progress(str(last_seen_message_id))
 
         # P3-6: flush the final partial batch. The per-batch save above only
         # fires on exact _batch_size multiples, so the trailing remainder
         # (up to _batch_size-1 messages) was never checkpointed — a SIGTERM or
         # normal completion mid-remainder lost that cursor progress and forced
         # re-collection on restart. Persist the last seen id unconditionally.
-        if count > 0:
+        if last_seen_message_id is not None:
             try:
-                await self.checkpoint.save_progress(str(message.id))
+                await self.checkpoint.save_progress(str(last_seen_message_id))
             except Exception:
                 logger.warning("telegram/%s: final checkpoint flush failed",
                                chat_name, exc_info=True)

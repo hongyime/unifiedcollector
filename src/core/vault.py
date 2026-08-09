@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import logging
 import os
 import re
 import shutil
@@ -19,6 +20,8 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -1081,6 +1084,11 @@ def write_atomic_artifact_from_path(
             if delete_source and src.resolve(strict=False) != blob_path.resolve(strict=False):
                 src.unlink(missing_ok=True)
         else:
+            try:
+                with open(src, "rb") as source_handle:
+                    os.fsync(source_handle.fileno())
+            except OSError:
+                logger.debug("vault source fsync failed before atomic artifact move", exc_info=True)
             if delete_source:
                 try:
                     src.replace(blob_path)

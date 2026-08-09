@@ -662,18 +662,27 @@ class WorkerService:
         """Inter-cycle sleep in seconds (default 300).
 
         Per-source override via COLLECTOR_CYCLE_SLEEP_<SOURCE>, else the global
-        COLLECTOR_CYCLE_SLEEP_SECONDS, else 300. Lets slow / API-ceiling sources
-        (github, strava, website) idle longer between cycles — fewer wakeups,
-        lower steady-state CPU, zero data loss. Floored at 30s.
+        COLLECTOR_CYCLE_SLEEP_SECONDS, else 300. Instagram also accepts the
+        legacy/operator-facing INSTAGRAM_IDLE_SECONDS alias. Lets slow /
+        API-ceiling sources (github, strava, website) idle longer between
+        cycles — fewer wakeups, lower steady-state CPU, zero data loss.
+        Instagram defaults to 1800s because extension-fresh idle cycles should
+        not immediately wake headless and compete with browser capture. Floored
+        at 30s.
         """
-        for key in (f"COLLECTOR_CYCLE_SLEEP_{source.upper()}",
-                    "COLLECTOR_CYCLE_SLEEP_SECONDS"):
+        keys = [f"COLLECTOR_CYCLE_SLEEP_{source.upper()}"]
+        if source == "instagram":
+            keys.append("INSTAGRAM_IDLE_SECONDS")
+        keys.append("COLLECTOR_CYCLE_SLEEP_SECONDS")
+        for key in keys:
             val = os.getenv(key)
             if val:
                 try:
                     return max(30.0, float(val))
                 except ValueError:
                     continue
+        if source == "instagram":
+            return 1800.0
         return 300.0
 
     def _should_refresh_target_priorities(self, source: str) -> bool:
