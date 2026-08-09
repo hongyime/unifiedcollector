@@ -2837,6 +2837,13 @@ def _source_matrix_row(source_row: dict, current_content: dict | None, current_r
     blocker = _source_matrix_blocker(source_row, day_rate, cursor_row, blocker_issues)
     effective_source_row = source_row
     if (
+        blocker.get("kind") == "cooldown"
+        and source in {"instagram", "tiktok", "lemon8", "threads", "facebook", "x"}
+        and int(current_window.get("media_items") or 0) > 0
+    ):
+        blocker = {"kind": "none", "severity": "ok", "summary": None, "next_action": "No action."}
+        effective_source_row = {**source_row, "status": "live"}
+    if (
         blocker.get("kind") in {"auth_wall", "browser_capture_stalled"}
         and _source_matrix_has_current_content(current_window)
     ):

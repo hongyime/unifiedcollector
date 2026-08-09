@@ -1097,6 +1097,57 @@ def test_source_matrix_row_suppresses_stale_browser_content_when_current_media_f
     assert row["extension_issues"] == []
 
 
+def test_source_matrix_row_suppresses_browser_cooldown_when_media_flows():
+    now = datetime(2026, 8, 9, 0, 0, tzinfo=timezone.utc)
+    row = _source_matrix_row(
+        _source(source="tiktok"),
+        current_content={"records": 0, "messages": 0, "media_items": 23},
+        current_rate={"rate_limits": 1, "access_errors": 0},
+        day_content={"records": 6, "messages": 0, "media_items": 23},
+        day_rate={
+            "active_now": True,
+            "active_until": now + timedelta(minutes=20),
+            "latest_account": "tiktok_bryanseah234",
+            "latest_scope": "profile_metadata",
+            "latest_reason": "TikTok profile metadata challenge wall: captcha",
+            "rate_limits": 63,
+            "access_errors": 0,
+        },
+        media_total={"total_media_items": 26085},
+        cursor_row=None,
+        extension_issues=[],
+        now=now,
+    )
+
+    assert row["status"] == "live"
+    assert row["status_label"] == "live"
+    assert row["status_severity"] == "ok"
+    assert row["blocker"]["kind"] == "none"
+    assert row["rate_limit"]["active_now"] is True
+
+
+def test_source_matrix_row_keeps_strava_gps_cooldown_even_with_activity_rows():
+    now = datetime(2026, 8, 9, 0, 0, tzinfo=timezone.utc)
+    row = _source_matrix_row(
+        _source(source="strava"),
+        current_content={"records": 22, "messages": 0, "media_items": 0},
+        current_rate={"rate_limits": 0, "access_errors": 0},
+        day_content={"records": 294, "messages": 0, "media_items": 0},
+        day_rate=None,
+        media_total={"total_media_items": 14980},
+        cursor_row={
+            "active_now": True,
+            "active_until": now + timedelta(minutes=20),
+            "streak": 4,
+        },
+        extension_issues=[],
+        now=now,
+    )
+
+    assert row["status_label"] == "degraded"
+    assert row["blocker"]["kind"] == "cooldown"
+
+
 def test_browser_extension_content_gap_query_excludes_strava_route_capture():
     source = Path(dashboard_api.__file__).read_text(encoding="utf-8")
     section = source[source.index('"browser_content_gap"'):source.index('if payload.get("reload_url")')]
