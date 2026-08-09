@@ -319,6 +319,7 @@ def _browser_tab_maintenance_payload(
         "last_terminal_state": raw.get("last_terminal_state"),
         "consecutive_cdp_unavailable_count": raw.get("consecutive_cdp_unavailable_count"),
         "cdp_unavailable_since": raw.get("cdp_unavailable_since"),
+        "loop": raw.get("loop") if isinstance(raw.get("loop"), dict) else None,
         "diagnostics": raw.get("diagnostics") if isinstance(raw.get("diagnostics"), dict) else None,
         "status_path": str(path),
     }

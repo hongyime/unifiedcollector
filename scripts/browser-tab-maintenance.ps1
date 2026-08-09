@@ -4,6 +4,7 @@ $repo = "C:\unifiedcollector"
 $tmp = Join-Path $repo "tmp"
 $log = Join-Path $tmp "browser_tab_maintenance.log"
 $statusPath = Join-Path $tmp "browser_tab_maintenance_status.json"
+$loopPidPath = Join-Path $tmp "browser_tab_maintenance_loop.pid"
 $script:LastCdpError = $null
 
 if (-not (Test-Path $tmp)) {
@@ -60,6 +61,34 @@ function Get-ChromeCdpDiagnostics {
     }
 }
 
+function Get-LoopStatus {
+    if (-not (Test-Path -LiteralPath $loopPidPath)) {
+        return [ordered]@{
+            pid_path = $loopPidPath
+            pid = $null
+            alive = $false
+            detail = "loop pid file not found"
+        }
+    }
+    $rawPid = (Get-Content -LiteralPath $loopPidPath -ErrorAction SilentlyContinue | Select-Object -First 1)
+    $loopPid = 0
+    if (-not [int]::TryParse([string]$rawPid, [ref]$loopPid) -or $loopPid -le 0) {
+        return [ordered]@{
+            pid_path = $loopPidPath
+            pid = $rawPid
+            alive = $false
+            detail = "loop pid file is invalid"
+        }
+    }
+    $proc = Get-Process -Id $loopPid -ErrorAction SilentlyContinue
+    return [ordered]@{
+        pid_path = $loopPidPath
+        pid = $loopPid
+        alive = $null -ne $proc
+        detail = if ($proc) { "maintenance loop process is running" } else { "loop pid process is not running" }
+    }
+}
+
 function Write-Status([string]$state, [string]$detail = "", [object]$diagnostics = $null) {
     if ($null -eq $diagnostics) {
         $diagnostics = Get-ChromeCdpDiagnostics
@@ -112,6 +141,7 @@ function Write-Status([string]$state, [string]$detail = "", [object]$diagnostics
         last_terminal_state = $terminalState
         consecutive_cdp_unavailable_count = $consecutiveCdpUnavailable
         cdp_unavailable_since = $cdpUnavailableSince
+        loop = Get-LoopStatus
         diagnostics = $diagnostics
     }
     $payload | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $statusPath -Encoding UTF8

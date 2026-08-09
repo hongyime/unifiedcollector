@@ -76,6 +76,12 @@ def test_browser_tab_maintenance_payload_reads_host_status(tmp_path):
                 "chrome_cdp_process_count": 0,
                 "hint": "Start or restart the scraper Chrome with --remote-debugging-port=9222.",
             },
+            "loop": {
+                "pid_path": "C:\\unifiedcollector\\tmp\\browser_tab_maintenance_loop.pid",
+                "pid": 15168,
+                "alive": True,
+                "detail": "maintenance loop process is running",
+            },
         }),
         encoding="utf-8",
     )
@@ -91,6 +97,8 @@ def test_browser_tab_maintenance_payload_reads_host_status(tmp_path):
     assert payload["cdp_unavailable_since"] == "2026-08-08T17:00:00+08:00"
     assert payload["diagnostics"]["reason"] == "chrome_running_without_cdp"
     assert payload["diagnostics"]["chrome_process_count"] == 26
+    assert payload["loop"]["alive"] is True
+    assert payload["loop"]["pid"] == 15168
     assert payload["stale"] is False
     assert isinstance(payload["age_seconds"], int)
 
@@ -206,6 +214,12 @@ async def test_browser_extension_payload_includes_browser_maintenance_issue(monk
                 "chrome_cdp_process_count": 0,
                 "hint": "Start or restart the scraper Chrome with --remote-debugging-port=9222.",
             },
+            "loop": {
+                "pid_path": "C:\\unifiedcollector\\tmp\\browser_tab_maintenance_loop.pid",
+                "pid": 15168,
+                "alive": True,
+                "detail": "maintenance loop process is running",
+            },
         }),
         encoding="utf-8",
     )
@@ -236,6 +250,8 @@ async def test_browser_extension_payload_includes_browser_maintenance_issue(monk
 
     assert payload["maintenance"]["state"] == "cdp_unavailable"
     assert payload["maintenance"]["diagnostics"]["reason"] == "chrome_running_without_cdp"
+    assert payload["maintenance"]["loop"]["alive"] is True
+    assert payload["maintenance"]["loop"]["pid"] == 15168
     assert payload["issues"][0]["kind"] == "browser_maintenance_cdp_unavailable"
     assert payload["issues"][0]["cdp_url"] == "http://127.0.0.1:9222"
     assert payload["issues"][0]["diagnostics"]["chrome_cdp_process_count"] == 0
