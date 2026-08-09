@@ -1076,7 +1076,8 @@ class SearchCollector(BaseCollector):
         try:
             await self._upsert_query(query)
             for hit in hits:
-                await self._upsert_result(query, hit)
+                if await self._upsert_result(query, hit):
+                    self._progress_count += 1
         except Exception as e:
             logger.warning("DB persist failed for %r: %s", query, e)
 
@@ -1106,21 +1107,23 @@ class SearchCollector(BaseCollector):
                 query, "waterfall",
             )
 
-    async def _upsert_result(self, query: str, hit: dict) -> None:
+    async def _upsert_result(self, query: str, hit: dict) -> bool:
         if self.pool is None:
-            return
+            return False
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT id FROM search_queries WHERE query = $1 AND engine = $2",
                 query, "waterfall",
             )
             if not row:
-                return
-            await conn.execute(
+                return False
+            result = await conn.fetchrow(
                 """
                 INSERT INTO search_results
                     (query_id, url, title, snippet, rank, domain, date_published)
                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+                ON CONFLICT (query_id, url) DO NOTHING
+                RETURNING id
                 """,
                 row["id"],
                 hit["url"],
@@ -1130,6 +1133,7 @@ class SearchCollector(BaseCollector):
                 hit.get("domain") or urlparse(hit["url"]).netloc,
                 hit.get("date_published"),
             )
+            return result is not None
 
     # ------------------------------------------------------------------ #
     # Spider (HTML → image/PDF URL extraction)

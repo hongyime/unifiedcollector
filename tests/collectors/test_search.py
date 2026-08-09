@@ -544,10 +544,36 @@ async def test_finalise_query_persists_query_and_results(monkeypatch):
     out = await coll._finalise_query("q", hits)
 
     assert out == hits
-    # Three execute calls: 1 query upsert + 2 result inserts.
-    assert pool._conn.execute.await_count == 3
-    # Two fetchrow calls — one for each result row to look up query_id.
-    assert pool._conn.fetchrow.await_count == 2
+    # One execute call for the query upsert. Results use INSERT .. RETURNING
+    # so duplicate URL conflicts can be observed as no-progress.
+    assert pool._conn.execute.await_count == 1
+    # Four fetchrow calls: query lookup + insert-returning for each result row.
+    assert pool._conn.fetchrow.await_count == 4
+    assert coll.progress_count == 2
+
+
+@pytest.mark.asyncio
+async def test_finalise_query_does_not_count_duplicate_results_as_progress(monkeypatch):
+    _set_clean_env(monkeypatch)
+    coll = SearchCollector()
+    pool = _make_pool()
+    coll.set_pool(pool)
+    # _upsert_result calls fetchrow twice per hit: query lookup then
+    # INSERT ... ON CONFLICT DO NOTHING RETURNING id. The second hit conflicts.
+    pool._conn.fetchrow.side_effect = [
+        {"id": "query-uuid"}, {"id": "result-1"},
+        {"id": "query-uuid"}, None,
+    ]
+
+    hits = [
+        {"url": "https://a.com/1", "title": "A", "snippet": "s", "rank": 1},
+        {"url": "https://a.com/1", "title": "A again", "snippet": "s", "rank": 2},
+    ]
+    out = await coll._finalise_query("q", hits)
+
+    assert out == hits
+    assert pool._conn.fetchrow.await_count == 4
+    assert coll.progress_count == 1
 
 
 @pytest.mark.asyncio

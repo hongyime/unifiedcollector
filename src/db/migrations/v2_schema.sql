@@ -611,3 +611,4 @@ CREATE TABLE IF NOT EXISTS search_results (
     date_published TEXT,
     collected_at TIMESTAMP DEFAULT NOW()
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_search_results_query_url_unique ON search_results(query_id, url);
