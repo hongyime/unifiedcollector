@@ -35,6 +35,27 @@ FROM (
 ) progress
 """
 
+GITHUB_PROGRESS_QUERY = """
+SELECT extract(epoch FROM now()-max(ts))
+FROM (
+    SELECT max(collected_at) AS ts FROM github_users
+    UNION ALL
+    SELECT max(collected_at) AS ts FROM github_repos
+    UNION ALL
+    SELECT max(collected_at) AS ts FROM github_commits
+    UNION ALL
+    SELECT max(collected_at) AS ts FROM github_issues
+    UNION ALL
+    SELECT max(collected_at) AS ts FROM github_issue_comments
+    UNION ALL
+    SELECT max(collected_at) AS ts FROM github_pr_reviews
+    UNION ALL
+    SELECT max(collected_at) AS ts FROM github_pr_review_comments
+    UNION ALL
+    SELECT max(collected_at) AS ts FROM github_edges
+) progress
+"""
+
 SOURCE_MODES = {
     "telegram": "messaging",
     "whatsapp": "whatsapp bridge",
@@ -110,7 +131,7 @@ FRESHNESS: list[tuple[str, str, int]] = [
     ),
     ("youtube",   "SELECT extract(epoch FROM now()-max(collected_at)) FROM youtube_videos", 2 * _DAY),
     ("website",   "SELECT extract(epoch FROM now()-max(collected_at)) FROM website_pages", 3 * _DAY),
-    ("github",    "SELECT extract(epoch FROM now()-max(collected_at)) FROM github_commits", 3 * _DAY),
+    ("github",    GITHUB_PROGRESS_QUERY, 3 * _DAY),
     ("strava",    STRAVA_PROGRESS_QUERY, 3 * _DAY),
     ("search",    "SELECT extract(epoch FROM now()-max(collected_at)) FROM search_results", 3 * _DAY),
 ]
@@ -127,7 +148,7 @@ FRESHNESS_BASIS = {
     "x": "newest X profile update, post row, or media row",
     "youtube": "youtube_videos.collected_at",
     "website": "website_pages.collected_at",
-    "github": "github_commits.collected_at",
+    "github": "newest GitHub profile, repo, commit, issue, PR review, comment, or edge row",
     "strava": "newest Strava athlete profile, activity, GPS stream, or media row",
     "search": "search_results.collected_at",
 }

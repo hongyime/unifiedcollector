@@ -561,7 +561,13 @@ _INGESTION_CONTENT_PARTS = [
     ("youtube", "youtube_channels", "updated_at", "channels"),
     ("youtube", "youtube_videos", "collected_at", "videos"),
     ("github", "github_users", "collected_at", "users"),
+    ("github", "github_repos", "collected_at", "repos"),
     ("github", "github_commits", "collected_at", "commits"),
+    ("github", "github_issues", "collected_at", "issues"),
+    ("github", "github_issue_comments", "collected_at", "issue comments"),
+    ("github", "github_pr_reviews", "collected_at", "PR reviews"),
+    ("github", "github_pr_review_comments", "collected_at", "PR review comments"),
+    ("github", "github_edges", "collected_at", "edges"),
     ("website", "website_pages", "collected_at", "pages"),
     ("strava", "strava_athletes", "updated_at", "profiles"),
     ("strava", "strava_activities", "collected_at", "activities"),
@@ -4825,7 +4831,29 @@ _LATEST_ACTIVITY_QUERIES = {
     "x": ("SELECT max(collected_at) FROM x_posts", "x posts"),
     "youtube": ("SELECT max(collected_at) FROM youtube_videos", "youtube videos"),
     "website": ("SELECT max(collected_at) FROM website_pages", "website pages"),
-    "github": ("SELECT max(collected_at) FROM github_commits", "github commits"),
+    "github": (
+        """
+        SELECT max(ts)
+        FROM (
+            SELECT max(collected_at) AS ts FROM github_users
+            UNION ALL
+            SELECT max(collected_at) AS ts FROM github_repos
+            UNION ALL
+            SELECT max(collected_at) AS ts FROM github_commits
+            UNION ALL
+            SELECT max(collected_at) AS ts FROM github_issues
+            UNION ALL
+            SELECT max(collected_at) AS ts FROM github_issue_comments
+            UNION ALL
+            SELECT max(collected_at) AS ts FROM github_pr_reviews
+            UNION ALL
+            SELECT max(collected_at) AS ts FROM github_pr_review_comments
+            UNION ALL
+            SELECT max(collected_at) AS ts FROM github_edges
+        ) progress
+        """,
+        "GitHub profile, repo, commit, issue, PR review, comment, or edge rows",
+    ),
     "strava": (
         """
         SELECT max(ts)
