@@ -37,6 +37,7 @@ DEFAULT_LOCK_STALE_SECONDS = 6 * 60 * 60
 DEFAULT_DUMP_COMPRESSION = 1
 DEFAULT_PROGRESS_LOG_SECONDS = 5 * 60
 DEFAULT_LONG_RUNNING_SECONDS = 4 * 60 * 60
+DEFAULT_SKIP_IF_FRESH_SECONDS = 0
 
 _BACKUP_RE = re.compile(r"^(?P<prefix>.+)_(?P<stamp>\d{8}_\d{6})\.dump$")
 
@@ -841,6 +842,19 @@ def run_once(args: argparse.Namespace) -> int:
                 if removed_temp:
                     action = "would remove" if args.dry_run else "removed"
                     print(f"[backup] {action} {len(removed_temp)} stale temp dump(s)")
+                skip_if_fresh_seconds = _env_int(
+                    "COLLECTOR_DB_BACKUP_SKIP_IF_FRESH_SECONDS",
+                    DEFAULT_SKIP_IF_FRESH_SECONDS,
+                )
+                latest = next(iter(list_backup_files(backup_dir, prefix=prefix)), None)
+                if latest is not None and skip_if_fresh_seconds > 0:
+                    age_seconds = max(0, int((datetime.now() - latest.created_at).total_seconds()))
+                    if age_seconds < skip_if_fresh_seconds:
+                        print(
+                            "[backup] skipped: latest verified dump is fresh "
+                            f"({age_seconds}s old < {skip_if_fresh_seconds}s)"
+                        )
+                        return 0
                 if args.dry_run:
                     planned = create_dump(backup_dir, prefix=prefix, now=datetime.now(), dry_run=True)
                     print(f"DRY RUN: would create {planned}")

@@ -327,6 +327,37 @@ def test_run_once_returns_retry_code_when_backup_already_running(tmp_path):
     assert db_backup.run_once(args) == 2
 
 
+def test_run_once_skips_dump_when_latest_backup_is_fresh(monkeypatch, tmp_path, capsys):
+    from src.backup import db_backup
+
+    stamp = db_backup.datetime.now().strftime(db_backup.TIMESTAMP_FORMAT)
+    _dump(tmp_path, stamp)
+    monkeypatch.setenv("COLLECTOR_DB_BACKUP_SKIP_IF_FRESH_SECONDS", "86400")
+    monkeypatch.setattr(
+        db_backup,
+        "create_dump",
+        lambda *_args, **_kwargs: pytest.fail("create_dump should not run for fresh backups"),
+    )
+    args = SimpleNamespace(
+        command="run",
+        backup_dir=str(tmp_path),
+        daily=7,
+        weekly=4,
+        monthly=3,
+        prefix="unifiedcollector",
+        dry_run=False,
+        database=None,
+        pg_dump="pg_dump",
+        pg_restore="pg_restore",
+        docker_container=None,
+        docker_exe=None,
+        json=False,
+    )
+
+    assert db_backup.run_once(args) == 0
+    assert "latest verified dump is fresh" in capsys.readouterr().out
+
+
 def test_pg_dump_prefers_pg_env_over_host_database_url(monkeypatch, tmp_path):
     from src.backup import db_backup
 

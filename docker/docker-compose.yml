@@ -961,6 +961,10 @@ services:
       COLLECTOR_DB_BACKUP_STALL_TIMEOUT_SECONDS: "1800"
       COLLECTOR_DB_BACKUP_VALIDATE_TIMEOUT_SECONDS: "1200"
       COLLECTOR_DB_BACKUP_COMPRESSION: ${COLLECTOR_DB_BACKUP_COMPRESSION:-1}
+      # Container restarts should not immediately create a second expensive
+      # dump when a verified backup was just produced. The outer loop still
+      # performs daily backups after this freshness window expires.
+      COLLECTOR_DB_BACKUP_SKIP_IF_FRESH_SECONDS: ${COLLECTOR_DB_BACKUP_SKIP_IF_FRESH_SECONDS:-82800}
       COLLECTOR_DB_BACKUP_DATABASE: unifiedcollector
       COLLECTOR_DB_BACKUP_VAULT_ROOT: /vault
       COLLECTOR_DB_BACKUP_REQUIRE_VAULT_MIRROR: "1"
