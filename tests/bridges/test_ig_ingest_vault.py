@@ -731,7 +731,11 @@ def test_archive_browser_capture_writes_profile_raw_payload(monkeypatch):
     assert call["metadata"]["collection_account"] == "bryan"
     assert call["extension"] == "json.gz"
     assert call["metadata"]["extension_version"] == "1.21.19"
-    assert pool.conn.executes == []
+    assert len(pool.conn.executes) == 1
+    query, args = pool.conn.executes[0]
+    assert "DELETE FROM dead_letter_queue" in query
+    assert "browser raw archive failed:%" in query
+    assert args == ("instagram", "alice")
 
 
 def test_record_browser_ingest_event_writes_observed_and_stored_counts():

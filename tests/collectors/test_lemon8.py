@@ -597,6 +597,30 @@ async def test_download_media_writes_vault_blob(collector, monkeypatch, tmp_path
 
 
 @pytest.mark.asyncio
+async def test_download_media_ignores_permanent_cdn_403_without_dlq(collector, monkeypatch):
+    collector._min_file_size = 1
+    collector.insert_media_item = AsyncMock()
+    collector.send_to_dlq = AsyncMock()
+
+    request = httpx.Request("GET", "https://cdn.lemon8-app.com/avatar.jpg")
+    response = httpx.Response(403, request=request)
+    error = httpx.HTTPStatusError("forbidden", request=request, response=response)
+    _patch_async_client(monkeypatch, get_raises=error)
+
+    await collector.download_media({
+        "entity_id": "alice",
+        "entity_name": "alice",
+        "content_type": "photo",
+        "content_id": "profile_alice",
+        "extension": "jpg",
+        "url": "https://cdn.lemon8-app.com/avatar.jpg",
+    })
+
+    collector.insert_media_item.assert_not_awaited()
+    collector.send_to_dlq.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_collect_user_profile_returns_none_for_empty_username(collector):
     assert await collector.collect_user_profile("") is None
     assert await collector.collect_user_profile(None) is None  # type: ignore[arg-type]

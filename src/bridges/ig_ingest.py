@@ -4508,6 +4508,27 @@ async def _archive_browser_capture(pool, platform: str, endpoint: str, body: dic
         extension="json.gz" if endpoint in _BROWSER_CAPTURE_COMPRESSED_ENDPOINTS else "json",
     )
     if result.ok:
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    DELETE FROM dead_letter_queue
+                    WHERE source = $1
+                      AND entity_id = $2
+                      AND status IN ('pending', 'in_progress')
+                      AND error_message LIKE 'browser raw archive failed:%'
+                    """,
+                    source,
+                    subject,
+                )
+        except Exception:
+            logger.debug(
+                "browser raw archive stale-DLQ cleanup failed platform=%s endpoint=%s subject=%s",
+                source,
+                endpoint,
+                subject,
+                exc_info=True,
+            )
         return
     logger.warning(
         "browser raw archive failed platform=%s endpoint=%s artifact=%s: %s",

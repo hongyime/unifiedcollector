@@ -2356,6 +2356,7 @@ class Lemon8Collector(BaseCollector):
             status_code = self._http_status_from_error(e)
             if status_code in (403, 404):
                 logger.warning("lemon8 media unavailable %s: HTTP %s", cid, status_code)
+                return
             else:
                 logger.error("Download failed %s: %s", cid, safe_error)
             await self.send_to_dlq(item["entity_id"], cid, safe_error)
