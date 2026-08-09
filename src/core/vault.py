@@ -7,6 +7,7 @@ collectors do not each invent their own recovery metadata format.
 from __future__ import annotations
 
 import gzip
+import io
 import json
 import logging
 import os
@@ -642,6 +643,64 @@ def _raw_payload_bytes(payload: Any, *, extension: str) -> tuple[bytes, int | No
     return raw, None
 
 
+class _CountingTextWriter:
+    """Text writer wrapper that tracks UTF-8 bytes without buffering payloads."""
+
+    def __init__(self, handle):
+        self.handle = handle
+        self.bytes_written = 0
+
+    def write(self, text: str) -> int:
+        value = str(text)
+        self.bytes_written += len(value.encode("utf-8"))
+        return self.handle.write(value)
+
+
+def _stream_raw_payload_text(writer: _CountingTextWriter, payload: Any, *, extension: str) -> None:
+    base_extension = extension[:-3] if extension.endswith(".gz") else extension
+    if base_extension == "jsonl":
+        rows = payload if isinstance(payload, list) else [payload]
+        for row in rows:
+            json.dump(row, writer, ensure_ascii=False, sort_keys=True, default=str)
+            writer.write("\n")
+        return
+    json.dump(payload, writer, ensure_ascii=False, sort_keys=True, indent=2, default=str)
+    writer.write("\n")
+
+
+def _atomic_write_raw_payload(path: Path, payload: Any, *, extension: str) -> int | None:
+    """Atomically write raw payloads without materializing whole JSON in memory."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    tmp = Path(tmp_name)
+    try:
+        if extension.endswith(".gz"):
+            with os.fdopen(fd, "wb") as raw_file:
+                with gzip.GzipFile(fileobj=raw_file, mode="wb", compresslevel=6, mtime=0) as gz_file:
+                    text_file = io.TextIOWrapper(gz_file, encoding="utf-8", newline="\n")
+                    writer = _CountingTextWriter(text_file)
+                    _stream_raw_payload_text(writer, payload, extension=extension)
+                    text_file.flush()
+                    text_file.detach()
+                raw_file.flush()
+                os.fsync(raw_file.fileno())
+            tmp.replace(path)
+            return writer.bytes_written
+
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as text_file:
+            writer = _CountingTextWriter(text_file)
+            _stream_raw_payload_text(writer, payload, extension=extension)
+            text_file.flush()
+            os.fsync(text_file.fileno())
+        tmp.replace(path)
+        return None
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def _raw_payload_extension(extension: str | None) -> str:
     raw = str(extension or "json").strip().lower().lstrip(".") or "json"
     if raw in {"json", "jsonl", "json.gz", "jsonl.gz"}:
@@ -1266,8 +1325,7 @@ def write_raw_payload(
             collected_at=now,
             root=root,
         )
-        payload_bytes, uncompressed_size = _raw_payload_bytes(payload, extension=ext)
-        _atomic_write_bytes(path, payload_bytes)
+        uncompressed_size = _atomic_write_raw_payload(path, payload, extension=ext)
         meta = dict(metadata or {})
         meta["raw_payload"] = True
         if ext.endswith(".gz"):

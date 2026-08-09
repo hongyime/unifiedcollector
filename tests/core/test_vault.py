@@ -709,6 +709,40 @@ def test_write_raw_payload_records_raw_file_and_sidecar(tmp_path, monkeypatch):
     assert sidecar["rebuild"]["target_tables"] == ["telegram_messages"]
 
 
+def test_write_raw_payload_streams_without_building_whole_bytes(tmp_path, monkeypatch):
+    monkeypatch.setattr(vault, "SIDECARS_ENABLED", True)
+    root = tmp_path / "vault"
+    root.mkdir()
+
+    def fail_whole_payload_bytes(*_args, **_kwargs):
+        raise AssertionError("raw payload writes must stream instead of building one bytes object")
+
+    monkeypatch.setattr(vault, "_raw_payload_bytes", fail_whole_payload_bytes)
+    payload = [{"id": i, "text": "x" * 2048} for i in range(64)]
+
+    result = vault.write_raw_payload(
+        source="telegram",
+        artifact_id="messages/large",
+        payload=payload,
+        metadata={"collection_account": "bryan"},
+        target_tables=["telegram_messages"],
+        extension="jsonl.gz",
+        root=root,
+    )
+
+    assert result.ok is True
+    with gzip.open(result.path, "rt", encoding="utf-8") as handle:
+        rows = [json.loads(line) for line in handle]
+    assert rows == payload
+    sidecar = json.loads(result.sidecar.path.read_text(encoding="utf-8"))
+    assert sidecar["metadata"]["compression"] == "gzip"
+    assert sidecar["metadata"]["uncompressed_size"] == len(
+        "".join(json.dumps(row, ensure_ascii=False, sort_keys=True, default=str) + "\n" for row in payload).encode(
+            "utf-8"
+        )
+    )
+
+
 def test_write_artifact_sidecar_hashes_without_reading_whole_file(tmp_path, monkeypatch):
     monkeypatch.setattr(vault, "SIDECARS_ENABLED", True)
     root = tmp_path / "vault"
