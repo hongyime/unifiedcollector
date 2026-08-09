@@ -546,6 +546,33 @@ async def test_collect_prioritizes_messages_before_network_repair(monkeypatch, t
 
 
 @pytest.mark.asyncio
+async def test_collect_cools_network_repair_after_timeout(monkeypatch, tmp_path):
+    monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
+    monkeypatch.setenv("COLLECTOR_DRIVE_PATH", str(tmp_path))
+    monkeypatch.setenv("BEEPER_NETWORK_REPAIR_LIMIT", "100")
+    monkeypatch.setenv("BEEPER_OPTIONAL_PHASE_TIMEOUT_COOLDOWN_SECONDS", "60")
+
+    pool, _conn = _mock_pool()
+    writer = MagicMock(spec=BeeperWriter)
+    writer.repair_unknown_message_networks = AsyncMock(side_effect=TimeoutError())
+    coll = BeeperCollector(client=MagicMock(spec=BeeperClient), writer=writer)
+    coll.set_pool(pool)
+    coll._api_cooldown_restored = True
+    coll._sync_accounts = AsyncMock(return_value=1)
+    coll._sync_chats = AsyncMock(return_value=2)
+    coll._sync_messages = AsyncMock(return_value=3)
+
+    first = await coll.collect([])
+    second = await coll.collect([])
+
+    assert first["messages_inserted"] == 3
+    assert first["transient"] == 1
+    assert second["messages_inserted"] == 3
+    assert second["transient"] == 0
+    assert writer.repair_unknown_message_networks.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_collect_continues_messages_when_chat_enumeration_times_out(monkeypatch, tmp_path, caplog):
     monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
     monkeypatch.setenv("COLLECTOR_DRIVE_PATH", str(tmp_path))

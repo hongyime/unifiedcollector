@@ -1186,17 +1186,19 @@ class BeeperCollector(BaseCollector):
             repair_limit = self._network_repair_limit()
             if w is not None and repair_limit > 0 and message_phase_error is None:
                 phase = "network_repair"
-                try:
-                    stats["networks_repaired"] = await asyncio.wait_for(
-                        w.repair_unknown_message_networks(limit=repair_limit),
-                        timeout=self._network_repair_timeout(),
-                    )
-                except Exception as exc:  # noqa: BLE001 - repair is non-critical
-                    logger.info(
-                        "Beeper network repair skipped after live sync: %s",
-                        _format_exception(exc),
-                    )
-                    stats["transient"] += 1
+                if not self._phase_cooling_down("network_repair"):
+                    try:
+                        stats["networks_repaired"] = await asyncio.wait_for(
+                            w.repair_unknown_message_networks(limit=repair_limit),
+                            timeout=self._network_repair_timeout(),
+                        )
+                    except Exception as exc:  # noqa: BLE001 - repair is non-critical
+                        logger.info(
+                            "Beeper network repair skipped after live sync: %s",
+                            _format_exception(exc),
+                        )
+                        self._cool_optional_phase("network_repair")
+                        stats["transient"] += 1
         except TimeoutError as exc:
             logger.warning(
                 "Beeper sync timed out during %s; partial cycle will retry next run: %s",
