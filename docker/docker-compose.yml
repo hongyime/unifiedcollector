@@ -109,7 +109,7 @@ services:
       YOUTUBE_VIDEO_BACKFILL_FAILED_RETRY_HOURS: "24"
       YOUTUBE_VIDEO_BACKFILL_SCAN_LIMIT: "10000"
       YOUTUBE_VIDEO_DOWNLOADS_PER_TARGET: "5"
-      YOUTUBE_VIDEO_DOWNLOAD_TIMEOUT: "600"
+      YOUTUBE_VIDEO_DOWNLOAD_TIMEOUT: "1200"
       YOUTUBE_YTDLP_FORMAT: "best[height<=720][vcodec!=none][acodec!=none]/best[height<=480][vcodec!=none][acodec!=none]/best[height<=720]/best[height<=480]/worst"
       YOUTUBE_MAX_FILESIZE: "900M"
       YOUTUBE_DOWNLOAD_DELAY: "3.0"

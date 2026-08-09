@@ -230,7 +230,7 @@ class YoutubeCollector(BaseCollector):
         self._video_backfill_scan_limit = int(os.getenv("YOUTUBE_VIDEO_BACKFILL_SCAN_LIMIT", "5000"))
         self._video_download_timeout = max(
             30,
-            int(os.getenv("YOUTUBE_VIDEO_DOWNLOAD_TIMEOUT", "600")),
+            int(os.getenv("YOUTUBE_VIDEO_DOWNLOAD_TIMEOUT", "1200")),
         )
         self._prefill_media_backlog = os.getenv("YOUTUBE_PREFILL_MEDIA_BACKLOG", "true").lower() == "true"
         self._profile_queue_enabled = os.getenv("YOUTUBE_PROFILE_QUEUE_ENABLED", "true").lower() == "true"

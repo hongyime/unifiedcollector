@@ -196,6 +196,7 @@ def test_constructor_defaults(monkeypatch):
     assert coll._api_key == ""
     assert coll._oauth_credentials is None
     assert coll._download_videos is True
+    assert coll._video_download_timeout == 1200
 
 
 def test_constructor_reads_env(monkeypatch):
