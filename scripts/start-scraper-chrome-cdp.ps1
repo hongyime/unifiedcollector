@@ -5,6 +5,10 @@ param(
     [int]$RemoteDebuggingPort = 9222,
     [switch]$AllowWhileChromeRunning,
     [switch]$CloseExistingIfNoVisibleWindows,
+    [string[]]$OpenIds = @(),
+    [switch]$NoOpenAll,
+    [switch]$NoScrape,
+    [switch]$NoTest,
     [switch]$DryRun
 )
 
@@ -100,7 +104,25 @@ if ($cdpAlreadyUp) {
     exit 0
 }
 
-$tabsUrl = "chrome-extension://pkmdmcklnjdeocoeigmlakhomhhcpafb/tabs.html?openAll=1&scrape=1&test=1"
+$tabsParams = [System.Collections.Generic.List[string]]::new()
+if (-not $NoOpenAll -and $OpenIds.Count -eq 0) {
+    $tabsParams.Add("openAll=1")
+}
+if ($OpenIds.Count -gt 0) {
+    $encodedIds = @($OpenIds | ForEach-Object { [uri]::EscapeDataString([string]$_) }) -join ","
+    $tabsParams.Add("open=$encodedIds")
+}
+if (-not $NoScrape) {
+    $tabsParams.Add("scrape=1")
+}
+if (-not $NoTest) {
+    $tabsParams.Add("test=1")
+}
+$tabsQuery = $tabsParams -join "&"
+$tabsUrl = "chrome-extension://pkmdmcklnjdeocoeigmlakhomhhcpafb/tabs.html"
+if ($tabsQuery) {
+    $tabsUrl = "$tabsUrl?$tabsQuery"
+}
 $args = @(
     "--remote-debugging-port=$RemoteDebuggingPort",
     "--user-data-dir=$profile",
