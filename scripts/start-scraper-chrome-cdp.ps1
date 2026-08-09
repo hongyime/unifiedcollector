@@ -5,6 +5,7 @@ param(
     [int]$RemoteDebuggingPort = 9222,
     [switch]$AllowWhileChromeRunning,
     [switch]$CloseExistingIfNoVisibleWindows,
+    [switch]$FallbackOpenControlIfCleanupBlocked,
     [string[]]$OpenIds = @(),
     [switch]$NoOpenAll,
     [switch]$NoScrape,
@@ -84,6 +85,12 @@ function Stop-ChromeProcessTree {
     }
 }
 
+function Open-ControlInExistingChrome {
+    param([string]$ChromePath, [string]$Url)
+    Write-Host "Opening collector extension control page in the existing Chrome session: $Url"
+    Start-Process -FilePath $ChromePath -ArgumentList @($Url) | Out-Null
+}
+
 function Quote-Argument {
     param([string]$Value)
     if ($Value -notmatch '[\s"]') {
@@ -121,7 +128,7 @@ if (-not $NoTest) {
 $tabsQuery = $tabsParams -join "&"
 $tabsUrl = "chrome-extension://pkmdmcklnjdeocoeigmlakhomhhcpafb/tabs.html"
 if ($tabsQuery) {
-    $tabsUrl = "$tabsUrl?$tabsQuery"
+    $tabsUrl = "${tabsUrl}?$tabsQuery"
 }
 $args = @(
     "--remote-debugging-port=$RemoteDebuggingPort",
@@ -146,6 +153,9 @@ if ($DryRun) {
     Write-Host $runningNote
     Write-Host "Arguments:"
     $args | ForEach-Object { Write-Host "  $_" }
+    if ($FallbackOpenControlIfCleanupBlocked) {
+        Write-Host "Fallback if hidden Chrome cleanup is blocked: open existing Chrome to $tabsUrl"
+    }
     exit 0
 }
 
@@ -154,7 +164,17 @@ if ($chromeProcesses.Count -gt 0 -and -not $AllowWhileChromeRunning -and $CloseE
         Write-Error "Chrome has visible windows open; refusing automatic close. Close Chrome manually, then rerun this script."
     }
     Write-Host "Chrome is running without CDP and has no visible windows; closing orphaned/background Chrome processes first."
-    Stop-ChromeProcessTree -Processes $chromeProcesses
+    try {
+        Stop-ChromeProcessTree -Processes $chromeProcesses
+    } catch {
+        if ($FallbackOpenControlIfCleanupBlocked) {
+            Write-Warning ("Could not close hidden Chrome for CDP relaunch: " + $_.Exception.Message)
+            Open-ControlInExistingChrome -ChromePath $chrome -Url $tabsUrl
+            Write-Warning "CDP is still unavailable, but the extension control page was nudged in the existing Chrome session."
+            exit 2
+        }
+        throw
+    }
     $chromeProcesses = @(Get-ChromeProcesses)
 }
 

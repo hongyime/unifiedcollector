@@ -42,8 +42,8 @@ function Get-ChromeCdpDiagnostics {
     } elseif ($withCdp.Count -eq 0) {
         $reason = "chrome_running_without_cdp"
         if ($visibleWindows.Count -eq 0) {
-            $repairCommand = "powershell -ExecutionPolicy Bypass -File scripts\start-scraper-chrome-cdp.ps1 -CloseExistingIfNoVisibleWindows -NoOpenAll -OpenIds x -NoTest"
-            $hint = "Chrome has no visible windows and no CDP. Run scripts\start-scraper-chrome-cdp.ps1 -CloseExistingIfNoVisibleWindows -NoOpenAll -OpenIds x -NoTest to close orphaned background Chrome and relaunch only the X scraper tab with CDP. If Windows denies protected Chrome PIDs, close Chrome from Task Manager or restart the Windows Chrome session."
+            $repairCommand = "powershell -ExecutionPolicy Bypass -File scripts\start-scraper-chrome-cdp.ps1 -CloseExistingIfNoVisibleWindows -FallbackOpenControlIfCleanupBlocked -NoOpenAll -OpenIds x -NoTest"
+            $hint = "Chrome has no visible windows and no CDP. Run scripts\start-scraper-chrome-cdp.ps1 -CloseExistingIfNoVisibleWindows -FallbackOpenControlIfCleanupBlocked -NoOpenAll -OpenIds x -NoTest to close orphaned background Chrome and relaunch only the X scraper tab with CDP. If Windows denies protected Chrome PIDs, the script will at least nudge the collector extension control page in the existing Chrome session; close Chrome from Task Manager or restart the Windows Chrome session for full CDP recovery."
         } else {
             $hint = "Chrome has visible windows but was not launched with --remote-debugging-port=9222. Do not use -CloseExistingIfNoVisibleWindows; save/finish browser work, close Chrome normally, then run scripts\start-scraper-chrome-cdp.ps1 so tab maintenance and cookie backup can reconnect."
         }
