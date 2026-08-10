@@ -317,14 +317,21 @@ Add-Check $checks "browser maintenance loop" $pidOk $pidDetail
 $maintenanceStatusPath = Join-Path $repoPath "tmp\browser_tab_maintenance_status.json"
 $maintenanceOk = $false
 $maintenanceDetail = "missing status file: $maintenanceStatusPath"
+$maintenanceRunningWithOkPrevious = $false
 if (Test-Path -LiteralPath $maintenanceStatusPath) {
     try {
         $maintenanceStatus = Get-Content -LiteralPath $maintenanceStatusPath -Raw | ConvertFrom-Json
         $checkedAt = [datetime]$maintenanceStatus.checked_at
         $ageMinutes = ((Get-Date) - $checkedAt).TotalMinutes
+        $lastTerminalState = [string]$maintenanceStatus.last_terminal_state
+        $maintenanceRunningWithOkPrevious = (
+            $maintenanceStatus.state -eq "running" -and
+            $lastTerminalState -eq "ok" -and
+            $ageMinutes -le 10
+        )
         $maintenanceOk = (
             ($maintenanceStatus.state -eq "ok" -and $ageMinutes -le $MaintenanceStatusFreshMinutes) -or
-            ($maintenanceStatus.state -eq "running" -and $ageMinutes -le 10)
+            $maintenanceRunningWithOkPrevious
         )
         $maintenanceDetail = "state=$($maintenanceStatus.state), age=$([math]::Round($ageMinutes, 1))m, detail=$($maintenanceStatus.detail)"
     } catch {
@@ -335,7 +342,9 @@ Add-Check $checks "browser maintenance latest status" $maintenanceOk $maintenanc
 
 $auditResultPath = Join-Path $repoPath "tmp\browser_tab_audit_result.json"
 $extensionPlatforms = @("instagram", "threads", "tiktok", "lemon8", "x", "facebook", "strava")
-if (Test-Path -LiteralPath $auditResultPath) {
+if ($maintenanceRunningWithOkPrevious) {
+    Add-Check $checks "extension content script audit" $true "maintenance pass in progress; last_terminal_state=ok"
+} elseif (Test-Path -LiteralPath $auditResultPath) {
     try {
         $auditResult = Get-Content -LiteralPath $auditResultPath -Raw | ConvertFrom-Json
         foreach ($platform in $extensionPlatforms) {

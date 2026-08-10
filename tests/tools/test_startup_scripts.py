@@ -71,7 +71,10 @@ def test_boot_verifier_checks_reboot_critical_surfaces():
     assert "facebook = 60" in script
     assert "threads = 60" in script
     assert "x = 90" in script
-    assert '$maintenanceStatus.state -eq "running" -and $ageMinutes -le 10' in script
+    assert "$maintenanceRunningWithOkPrevious" in script
+    assert '$maintenanceStatus.state -eq "running" -and' in script
+    assert '$lastTerminalState -eq "ok"' in script
+    assert "maintenance pass in progress; last_terminal_state=ok" in script
     assert "status IN ('queued', 'retry')" in script
     assert "status = 'pending' AND next_retry_at <= NOW()" in script
     assert "DlqBacklogGraceMinutes" in script
