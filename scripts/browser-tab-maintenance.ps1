@@ -285,6 +285,33 @@ function Invoke-PythonScript([object[]]$command, [string]$script, [int]$timeoutS
     }
 }
 
+function Test-AuthWallUrl([string]$Url) {
+    if (-not $Url) {
+        return $false
+    }
+    try {
+        $uri = [System.Uri]$Url
+        $path = $uri.AbsolutePath.ToLowerInvariant()
+        $query = $uri.Query.ToLowerInvariant()
+        return (
+            $path -match "/login|/signin|/checkpoint|/challenge|/i/flow/login|/i/jf/onboarding" -or
+            $query -match "mode=login|redirect_after_login|auth_platform|recaptcha"
+        )
+    } catch {
+        return $false
+    }
+}
+
+function Get-AuditTabUrl($Tab) {
+    if ($null -ne $Tab -and [string]$Tab.url_snapshot) {
+        return [string]$Tab.url_snapshot
+    }
+    if ($null -ne $Tab -and [string]$Tab.url) {
+        return [string]$Tab.url
+    }
+    return ""
+}
+
 function Get-AuditHealth {
     $auditPath = Join-Path $tmp "browser_tab_audit_result.json"
     if (-not (Test-Path -LiteralPath $auditPath)) {
@@ -320,7 +347,8 @@ function Get-AuditHealth {
             $_.responsive_main -eq $true -and
             $_.cs -eq $true -and
             $_.cs_running -eq $true -and
-            [string]$_.cs_version
+            [string]$_.cs_version -and
+            -not (Test-AuthWallUrl (Get-AuditTabUrl $_))
         })
         if ($good.Count -gt 0) {
             $healthy += 1
@@ -330,14 +358,21 @@ function Get-AuditHealth {
                     $_.responsive_main -eq $true -and
                     $_.cs -eq $true -and
                     $_.cs_running -eq $true -and
-                    [string]$_.cs_version
+                    [string]$_.cs_version -and
+                    -not (Test-AuthWallUrl (Get-AuditTabUrl $_))
                 )
             })
             $sample = $bad | Select-Object -First 1
-            $unhealthy += "${platform}: $($good.Count)/$($tabs.Count) healthy; first_bad resp=$($sample.responsive_main), cs=$($sample.cs), running=$($sample.cs_running), err=$($sample.error)"
+            $sampleUrl = Get-AuditTabUrl $sample
+            $authWall = Test-AuthWallUrl $sampleUrl
+            $reason = if ($authWall) { "auth_wall_url=$sampleUrl" } else { "err=$($sample.error)" }
+            $unhealthy += "${platform}: $($good.Count)/$($tabs.Count) healthy; first_bad resp=$($sample.responsive_main), cs=$($sample.cs), running=$($sample.cs_running), $reason"
         }
     }
-    $minHealthy = Get-PositiveIntEnv "UC_BROWSER_MIN_HEALTHY_PLATFORMS" 5
+    # Default to all expected platform groups. A lower env override is still
+    # available for manual degraded operation, but normal boot/self-heal must
+    # not report success while a collector tab is missing its content script.
+    $minHealthy = Get-PositiveIntEnv "UC_BROWSER_MIN_HEALTHY_PLATFORMS" $platforms.Count
     return [ordered]@{
         ok = ($healthy -ge $minHealthy)
         healthy = $healthy

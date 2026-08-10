@@ -54,6 +54,35 @@ function Test-UrlHostMatches {
     }
 }
 
+function Test-AuthWallUrl {
+    param([string]$Url)
+    if (-not $Url) {
+        return $false
+    }
+    try {
+        $uri = [System.Uri]$Url
+        $path = $uri.AbsolutePath.ToLowerInvariant()
+        $query = $uri.Query.ToLowerInvariant()
+        return (
+            $path -match "/login|/signin|/checkpoint|/challenge|/i/flow/login|/i/jf/onboarding" -or
+            $query -match "mode=login|redirect_after_login|auth_platform|recaptcha"
+        )
+    } catch {
+        return $false
+    }
+}
+
+function Get-AuditTabUrl {
+    param($Tab)
+    if ($null -ne $Tab -and [string]$Tab.url_snapshot) {
+        return [string]$Tab.url_snapshot
+    }
+    if ($null -ne $Tab -and [string]$Tab.url) {
+        return [string]$Tab.url
+    }
+    return ""
+}
+
 function Invoke-PostgresText {
     param(
         [string]$Sql,
@@ -230,8 +259,16 @@ try {
     }
     foreach ($platform in $platforms.Keys) {
         $needle = $platforms[$platform]
-        $found = @($urls | Where-Object { Test-UrlHostMatches -Url $_ -ExpectedHost $needle } | Select-Object -First 1)
+        $found = @($urls | Where-Object {
+            (Test-UrlHostMatches -Url $_ -ExpectedHost $needle) -and -not (Test-AuthWallUrl $_)
+        } | Select-Object -First 1)
+        $authWall = @($urls | Where-Object {
+            (Test-UrlHostMatches -Url $_ -ExpectedHost $needle) -and (Test-AuthWallUrl $_)
+        } | Select-Object -First 1)
         $detail = if ($found.Count -gt 0) { [string]$found[0] } else { "missing" }
+        if ($found.Count -eq 0 -and $authWall.Count -gt 0) {
+            $detail = "auth wall: $([string]$authWall[0])"
+        }
         Add-Check $checks "tab: $platform" ($found.Count -gt 0) $detail
     }
     $ext = @($urls | Where-Object { $_ -like "chrome-extension://*/tabs.html*" } | Select-Object -First 1)
@@ -292,7 +329,8 @@ if (Test-Path -LiteralPath $auditResultPath) {
                     $_.responsive_main -eq $true -and
                     $_.cs -eq $true -and
                     $_.cs_running -eq $true -and
-                    [string]$_.cs_version
+                    [string]$_.cs_version -and
+                    -not (Test-AuthWallUrl (Get-AuditTabUrl $_))
                 }
             )
             $allTabsHealthy = ($healthy.Count -gt 0)

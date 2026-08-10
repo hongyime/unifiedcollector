@@ -282,6 +282,12 @@ def test_browser_maintenance_restarts_dedicated_profile_when_tabs_stay_unhealthy
 
     assert "function Get-AuditHealth" in script
     assert "UC_BROWSER_MIN_HEALTHY_PLATFORMS" in script
+    assert 'Get-PositiveIntEnv "UC_BROWSER_MIN_HEALTHY_PLATFORMS" $platforms.Count' in script
+    assert "function Test-AuthWallUrl" in script
+    assert "function Get-AuditTabUrl" in script
+    assert "/i/flow/login" in script
+    assert "redirect_after_login" in script
+    assert "-not (Test-AuthWallUrl (Get-AuditTabUrl $_))" in script
     assert "function Invoke-ScraperChromeProfileRestart" in script
     assert "-CloseExistingCdpProfile" in script
     assert "browser extension tabs unhealthy after reload/profile restart" in script
