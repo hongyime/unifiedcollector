@@ -20,7 +20,7 @@ $cmdPath = Join-Path $startup "UnifiedCollectorBrowserMaintenance.cmd"
 $lines = @(
     "@echo off",
     "cd /d `"$repo`"",
-    "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$starter`" -IntervalMinutes $IntervalMinutes -InitialDelaySeconds $InitialDelaySeconds"
+    "wscript.exe `"$repo\scripts\run_hidden.vbs`" `"powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"`"$starter`"`" -IntervalMinutes $IntervalMinutes -InitialDelaySeconds $InitialDelaySeconds`""
 )
 
 Set-Content -LiteralPath $cmdPath -Value $lines -Encoding ASCII
