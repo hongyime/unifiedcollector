@@ -52,6 +52,20 @@ def test_x_failed_script_url_is_canonicalized():
     assert 'location.href = "https://x.com/home"' in content
 
 
+def test_x_media_collector_handles_full_dom_media_shapes():
+    content = _read("extension/content.js")
+    x_block = content.split("function xCollectMediaFromRoot", 1)[1].split(
+        "function scrapeXProfile",
+        1,
+    )[0]
+
+    assert 'source[srcset*="pbs.twimg.com"]' in x_block
+    assert "urlsFromCssValue" in x_block
+    assert '"css_bg"' in x_block
+    assert "video_source" in x_block
+    assert 'u.searchParams.set("name", "orig")' in content
+
+
 def test_scraper_refresh_runs_before_dashboard_content_stale_window():
     background = _read("extension/background.js")
 

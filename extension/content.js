@@ -2216,6 +2216,35 @@ function addXVideoCandidate(sink, u, entity, role, context = {}) {
   });
 }
 
+function xCollectMediaFromRoot(root, sink, entity, context = {}) {
+  if (!root || !root.querySelectorAll) return;
+  root.querySelectorAll('img[src*="pbs.twimg.com"], img[srcset*="pbs.twimg.com"]').forEach((im) => {
+    if (imageLooksTooSmall(im, 120)) return;
+    imageUrlsFromElement(im).forEach((u) => addXMediaCandidate(sink, u, entity, "img", context));
+  });
+  root.querySelectorAll('picture source[srcset*="pbs.twimg.com"], source[srcset*="pbs.twimg.com"]').forEach((src) => {
+    try {
+      const srcset = src.getAttribute("srcset") || "";
+      srcset.split(",").forEach((part) => {
+        const u = part.trim().split(/\s+/)[0];
+        addXMediaCandidate(sink, u, entity, "source", context);
+      });
+    } catch (e) {}
+  });
+  root.querySelectorAll("video").forEach((v) => {
+    addXMediaCandidate(sink, v.poster, entity, "poster", context);
+    const u = v.currentSrc || v.src || (v.querySelector("source") && v.querySelector("source").src);
+    addXVideoCandidate(sink, u, entity, "video", context);
+    v.querySelectorAll("source[src]").forEach((source) => addXVideoCandidate(sink, source.src, entity, "video_source", context));
+  });
+  root.querySelectorAll("[style]").forEach((el) => {
+    if (elementLooksTooSmall(el, 120)) return;
+    try {
+      urlsFromCssValue(el.getAttribute("style") || "").forEach((u) => addXMediaCandidate(sink, u, entity, "css_bg", context));
+    } catch (e) {}
+  });
+}
+
 function scrapeXProfile(handle) {
   const username = (handle || "").trim().replace(/^@/, "");
   if (!username || username === "timeline") return null;
@@ -2407,27 +2436,11 @@ const x = {
     }
     xTweetRoots().forEach((art) => {
       const ctx = xStatusContext(art);
-      art.querySelectorAll('img[src*="pbs.twimg.com"], img[srcset*="pbs.twimg.com"]').forEach((im) => {
-        if (imageLooksTooSmall(im, 120)) return;
-        imageUrlsFromElement(im).forEach((u) => addXMediaCandidate(sink, u, entity, "img", ctx));
-      });
-      art.querySelectorAll("video").forEach((v) => {
-        addXMediaCandidate(sink, v.poster, entity, "poster", ctx);
-        const u = v.currentSrc || v.src || (v.querySelector("source") && v.querySelector("source").src);
-        addXVideoCandidate(sink, u, entity, "video", ctx);
-      });
+      xCollectMediaFromRoot(art, sink, entity, ctx);
     });
     // Fallback for media lightboxes/profile media tabs where images may sit
     // outside tweet <article> wrappers.
-    document.querySelectorAll('img[src*="pbs.twimg.com"], img[srcset*="pbs.twimg.com"]').forEach((im) => {
-      if (imageLooksTooSmall(im, 120)) return;
-      imageUrlsFromElement(im).forEach((u) => addXMediaCandidate(sink, u, entity, "img"));
-    });
-    document.querySelectorAll("video").forEach((v) => {
-      addXMediaCandidate(sink, v.poster, entity, "poster");
-      const u = v.currentSrc || v.src || (v.querySelector("source") && v.querySelector("source").src);
-      addXVideoCandidate(sink, u, entity, "video");
-    });
+    xCollectMediaFromRoot(document, sink, entity);
     const activeMediaRevisit = currentBrowserMediaRevisit("x");
     if (activeMediaRevisit && activeMediaRevisit.content_id) {
       sink.items.forEach((it) => {
