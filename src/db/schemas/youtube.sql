@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS youtube_videos (
     media_status TEXT NOT NULL DEFAULT 'pending',
     media_skip_reason TEXT,
     last_media_attempt_at TIMESTAMPTZ,
+    next_attempt_at TIMESTAMPTZ,
     transcript_status TEXT NOT NULL DEFAULT 'pending',
     transcript_error TEXT,
     last_transcript_attempt_at TIMESTAMPTZ,
