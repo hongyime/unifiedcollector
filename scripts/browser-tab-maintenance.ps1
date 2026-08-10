@@ -285,6 +285,67 @@ function Invoke-PythonScript([object[]]$command, [string]$script, [int]$timeoutS
     }
 }
 
+function Get-AuditHealth {
+    $auditPath = Join-Path $tmp "browser_tab_audit_result.json"
+    if (-not (Test-Path -LiteralPath $auditPath)) {
+        return [ordered]@{
+            ok = $false
+            healthy = 0
+            total = 0
+            unhealthy = @("missing audit result")
+        }
+    }
+    try {
+        $auditJson = Get-Content -LiteralPath $auditPath -Raw | ConvertFrom-Json
+    } catch {
+        return [ordered]@{
+            ok = $false
+            healthy = 0
+            total = 0
+            unhealthy = @("could not parse audit result: $($_.Exception.Message)")
+        }
+    }
+    $platforms = @("instagram", "threads", "tiktok", "lemon8", "x", "facebook", "strava")
+    $healthy = 0
+    $total = 0
+    $unhealthy = @()
+    foreach ($platform in $platforms) {
+        $tabs = @($auditJson.$platform)
+        if ($tabs.Count -eq 0) {
+            $unhealthy += "${platform}: missing tab"
+            continue
+        }
+        $total += 1
+        $good = @($tabs | Where-Object {
+            $_.responsive_main -eq $true -and
+            $_.cs -eq $true -and
+            $_.cs_running -eq $true -and
+            [string]$_.cs_version
+        })
+        if ($good.Count -gt 0) {
+            $healthy += 1
+        } else {
+            $sample = $tabs | Select-Object -First 1
+            $unhealthy += "${platform}: resp=$($sample.responsive_main), cs=$($sample.cs), running=$($sample.cs_running), err=$($sample.error)"
+        }
+    }
+    $minHealthy = Get-PositiveIntEnv "UC_BROWSER_MIN_HEALTHY_PLATFORMS" 5
+    return [ordered]@{
+        ok = ($healthy -ge $minHealthy)
+        healthy = $healthy
+        total = $total
+        min_healthy = $minHealthy
+        unhealthy = $unhealthy
+    }
+}
+
+function Invoke-ScraperChromeProfileRestart {
+    $launcher = Join-Path $repo "scripts\start-scraper-chrome-cdp.ps1"
+    Write-Log "browser tab maintenance escalation: restarting dedicated scraper Chrome profile"
+    & powershell.exe -ExecutionPolicy Bypass -File $launcher -RemoteDebuggingPort $script:CdpPort -CloseExistingCdpProfile -NoOpenAll -OpenIds instagram,tiktok,lemon8,x,threads,facebook,strava -NoTest
+    return (Test-CdpAvailable)
+}
+
 $audit = Join-Path $repo "tools\browser_tab_audit.py"
 $reload = Join-Path $repo "tools\browser_tab_reload.py"
 
@@ -341,6 +402,22 @@ try {
     # pre-reload snapshot.
     Invoke-PostReloadSettle -seconds $settleSeconds
     Invoke-PythonScript -command $python -script $audit -timeoutSeconds $auditTimeout
+    $auditHealth = Get-AuditHealth
+    Write-Log "browser tab audit health: healthy=$($auditHealth.healthy)/$($auditHealth.total), min=$($auditHealth.min_healthy)"
+    if (-not $auditHealth.ok) {
+        Write-Log ("browser tab audit still unhealthy after reload: " + (($auditHealth.unhealthy) -join " | "))
+        if (Invoke-ScraperChromeProfileRestart) {
+            Invoke-PostReloadSettle -seconds $settleSeconds
+            Invoke-PythonScript -command $python -script $audit -timeoutSeconds $auditTimeout
+            $auditHealth = Get-AuditHealth
+            Write-Log "browser tab audit health after profile restart: healthy=$($auditHealth.healthy)/$($auditHealth.total), min=$($auditHealth.min_healthy)"
+        }
+    }
+    if (-not $auditHealth.ok) {
+        Write-Log ("browser tab maintenance degraded after profile restart: " + (($auditHealth.unhealthy) -join " | "))
+        Write-Status "degraded" "browser extension tabs unhealthy after reload/profile restart"
+        exit 4
+    }
     Write-Log "browser tab maintenance complete"
     Write-Status "ok" "audit and reload completed"
 } catch {

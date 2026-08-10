@@ -265,34 +265,22 @@ async def _latest_browser_content_progress(conn, timeout: float) -> dict[str, di
             FROM wanted
             LEFT JOIN LATERAL (
                 SELECT created_at, endpoint, observed_count, stored_count, metadata
-                FROM (
-                    SELECT created_at, endpoint, observed_count, stored_count, metadata
-                    FROM browser_ingest_events
-                    WHERE endpoint <> 'browser_heartbeat'
-                      AND platform = wanted.platform
-                      AND (
-                        observed_count > 0
-                        OR stored_count > 0
-                        OR (
-                          metadata ? 'probe_reason'
-                          AND COALESCE(metadata->>'probe_reason', '')
-                              NOT IN (
-                                'manual_backend_probe',
-                                'forced_recovery_started',
-                                'recoverable_error_shell'
-                              )
-                        )
+                FROM browser_ingest_events
+                WHERE endpoint <> 'browser_heartbeat'
+                  AND platform = wanted.platform
+                  AND (
+                    observed_count > 0
+                    OR stored_count > 0
+                    OR (
+                      metadata ? 'probe_reason'
+                      AND COALESCE(metadata->>'probe_reason', '')
+                          NOT IN (
+                            'manual_backend_probe',
+                            'forced_recovery_started',
+                            'recoverable_error_shell'
+                          )
                       )
-                    UNION ALL
-                    SELECT collected_at AS created_at,
-                           'media_items' AS endpoint,
-                           1 AS observed_count,
-                           1 AS stored_count,
-                           '{}'::jsonb AS metadata
-                    FROM media_items
-                    WHERE source = wanted.platform
-                      AND collected_at IS NOT NULL
-                ) useful
+                  )
                 ORDER BY created_at DESC
                 LIMIT 1
             ) latest ON true

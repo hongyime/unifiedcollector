@@ -58,6 +58,11 @@ ISO_TIMEOUT = _float_env("UC_TAB_AUDIT_ISO_TIMEOUT_SECONDS", 1.0)
 PERF_TIMEOUT = _float_env("UC_TAB_AUDIT_PERF_TIMEOUT_SECONDS", 0.8)
 DRAIN_SECONDS = _float_env("UC_TAB_AUDIT_CONTEXT_DRAIN_SECONDS", 0.1)
 TAB_PAUSE_SECONDS = _float_env("UC_TAB_AUDIT_TAB_PAUSE_SECONDS", 0.1)
+ACTIVATE_BEFORE_AUDIT = os.getenv("UC_TAB_AUDIT_ACTIVATE", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+}
 
 PLATFORMS = {
     "instagram": ["instagram.com"],
@@ -194,6 +199,12 @@ def audit_tab(target: dict, main_timeout=MAIN_TIMEOUT, iso_timeout=ISO_TIMEOUT) 
     if not ws_url:
         out["error"] = "no webSocketDebuggerUrl"
         return out
+    if ACTIVATE_BEFORE_AUDIT and target.get("id"):
+        try:
+            urllib.request.urlopen(f"{CDP_HOST}/json/activate/{target['id']}", timeout=3).read()
+            time.sleep(0.8)
+        except Exception as e:
+            out["error"] = f"activate failed: {e}"
 
     try:
         cdp = CDP(ws_url, timeout=CONNECT_TIMEOUT)

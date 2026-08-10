@@ -474,7 +474,7 @@ async def test_browser_content_stale_does_not_depend_on_heartbeat_query(monkeypa
     assert "browser content progress is 9000s old" in rows[0]["detail"]
 
 
-def test_browser_content_progress_counts_media_items_as_useful_content():
+def test_browser_content_progress_avoids_media_items_scan():
     from src.core import source_freshness
 
     source = Path(source_freshness.__file__).read_text(encoding="utf-8")
@@ -483,10 +483,11 @@ def test_browser_content_progress_counts_media_items_as_useful_content():
         source.index("async def compute_liveness")
     ]
 
-    assert "UNION ALL" in section
-    assert "FROM media_items" in section
-    assert "source = wanted.platform" in section
-    assert "'media_items' AS endpoint" in section
+    assert "FROM browser_ingest_events" in section
+    assert "observed_count > 0" in section
+    assert "stored_count > 0" in section
+    assert "FROM media_items" not in section
+    assert "UNION ALL" not in section
 
 
 @pytest.mark.asyncio

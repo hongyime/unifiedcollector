@@ -5,6 +5,7 @@ param(
     [int]$RemoteDebuggingPort = 9333,
     [switch]$AllowWhileChromeRunning,
     [switch]$CloseExistingIfNoVisibleWindows,
+    [switch]$CloseExistingCdpProfile,
     [switch]$FallbackOpenControlIfCleanupBlocked,
     [string[]]$OpenIds = @(),
     [switch]$OpenAll,
@@ -105,18 +106,76 @@ function Get-PortListenerPids {
 
 function Stop-ProcessIds {
     param([int[]]$Pids)
-    foreach ($pid in @($Pids | Sort-Object -Unique)) {
-        if ($pid -le 0) {
+    foreach ($processId in @($Pids | Sort-Object -Unique)) {
+        if ($processId -le 0) {
             continue
         }
         try {
-            $taskkill = Start-Process -FilePath "$env:SystemRoot\System32\taskkill.exe" -ArgumentList @("/PID", [string]$pid, "/F", "/T") -Wait -PassThru -NoNewWindow
-            if ($taskkill.ExitCode -ne 0) {
-                Write-Warning "taskkill failed for PID ${pid} with exit code $($taskkill.ExitCode)"
+            Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Milliseconds 300
+        } catch {
+            # Fall through to taskkill below.
+        }
+        if (-not (Get-Process -Id $processId -ErrorAction SilentlyContinue)) {
+            continue
+        }
+        try {
+            $taskkill = Start-Process -FilePath "$env:SystemRoot\System32\taskkill.exe" -ArgumentList @("/PID", [string]$processId, "/F", "/T") -Wait -PassThru -NoNewWindow
+            if ($taskkill.ExitCode -ne 0 -and (Get-Process -Id $processId -ErrorAction SilentlyContinue)) {
+                Write-Warning "taskkill failed for PID ${processId} with exit code $($taskkill.ExitCode)"
             }
         } catch {
-            Write-Warning "Could not kill PID ${pid}: $($_.Exception.Message)"
+            if (Get-Process -Id $processId -ErrorAction SilentlyContinue) {
+                Write-Warning "Could not kill PID ${processId}: $($_.Exception.Message)"
+            }
         }
+    }
+}
+
+function Get-CdpProfileChromeProcesses {
+    param([string]$UserDataDir, [int]$Port)
+    $profileFull = [IO.Path]::GetFullPath($UserDataDir).TrimEnd('\')
+    $profileSlash = $profileFull.Replace('\', '/')
+    return @(Get-ChromeProcesses | Where-Object {
+        $cmd = [string]$_.CommandLine
+        if (-not $cmd) { return $false }
+        $hasProfile =
+            $cmd.IndexOf($profileFull, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $cmd.IndexOf($profileSlash, [StringComparison]::OrdinalIgnoreCase) -ge 0
+        $hasCdpPort = $cmd -match "--remote-debugging-port(?:=|\s+)$Port\b"
+        $hasProfile -and $hasCdpPort
+    })
+}
+
+function Stop-CdpProfileChrome {
+    param([string]$UserDataDir, [int]$Port)
+    $profileProcesses = @(Get-CdpProfileChromeProcesses -UserDataDir $UserDataDir -Port $Port)
+    if ($profileProcesses.Count -eq 0) {
+        return
+    }
+    $rootIds = @($profileProcesses |
+        Where-Object { [string]$_.CommandLine -notmatch "--type=" } |
+        Select-Object -ExpandProperty ProcessId |
+        Sort-Object -Unique)
+    $childIds = @($profileProcesses |
+        Where-Object { [string]$_.CommandLine -match "--type=" } |
+        Select-Object -ExpandProperty ProcessId |
+        Sort-Object -Unique)
+    $ids = @($rootIds + $childIds | Sort-Object -Unique)
+    Write-Host "Closing scraper Chrome profile process(es): $($ids -join ', ')"
+    if ($rootIds.Count -gt 0) {
+        Stop-ProcessIds -Pids $rootIds
+        Start-Sleep -Seconds 2
+    }
+    $remaining = @(Get-CdpProfileChromeProcesses -UserDataDir $UserDataDir -Port $Port |
+        Select-Object -ExpandProperty ProcessId |
+        Sort-Object -Unique)
+    if ($remaining.Count -gt 0) {
+        Stop-ProcessIds -Pids $remaining
+    }
+    if (-not (Wait-PortReleased -Port $Port -TimeoutSeconds 20)) {
+        $remainingPortOwners = @(Get-PortListenerPids -Port $Port)
+        Write-Error "Port $Port is still busy after scraper profile cleanup; remaining PID(s): $($remainingPortOwners -join ', ')"
     }
 }
 
@@ -313,6 +372,29 @@ function Disable-ChromeBackgroundMode {
     }
 }
 
+function Clear-ChromeSessionRestore {
+    param([string]$UserDataDir)
+
+    # Only removes crashed-tab/session restore state. Cookies, local storage,
+    # IndexedDB, extension storage, and saved logins stay in the profile.
+    $sessionDirs = @(
+        (Join-Path $UserDataDir "Default\Sessions"),
+        (Join-Path $UserDataDir "Profile 1\Sessions")
+    )
+    foreach ($dir in $sessionDirs) {
+        if (-not (Test-Path -LiteralPath $dir)) {
+            continue
+        }
+        try {
+            Get-ChildItem -LiteralPath $dir -Force -ErrorAction Stop |
+                Where-Object { $_.Name -match '^(Session|Tabs)_' } |
+                ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction Stop }
+        } catch {
+            Write-Warning "Could not clear Chrome session restore files in ${dir}: $($_.Exception.Message)"
+        }
+    }
+}
+
 function Open-ControlInExistingChrome {
     param([string]$ChromePath, [string]$Url)
     Write-Host "Opening collector extension control page in the existing Chrome session: $Url"
@@ -389,9 +471,13 @@ $args = @(
     "--disable-renderer-backgrounding",
     "--disable-backgrounding-occluded-windows",
     "--js-flags=--max-old-space-size=512",
-    "--renderer-process-limit=10",
     "about:blank"
 )
+$rendererLimitRaw = [Environment]::GetEnvironmentVariable("UC_CHROME_RENDERER_PROCESS_LIMIT")
+$rendererLimit = 0
+if ([int]::TryParse($rendererLimitRaw, [ref]$rendererLimit) -and $rendererLimit -gt 0) {
+    $args = @($args[0..($args.Count - 2)] + "--renderer-process-limit=$rendererLimit" + $args[-1])
+}
 if ($IsolateExtensions) {
     $insertAt = [Math]::Max(0, [Array]::IndexOf($args, "--load-extension=$extension"))
     $before = if ($insertAt -gt 0) { $args[0..($insertAt - 1)] } else { @() }
@@ -410,7 +496,17 @@ if ($DryRun) {
     if ($FallbackOpenControlIfCleanupBlocked) {
         Write-Host "Fallback if hidden Chrome cleanup is blocked: open existing Chrome to $fallbackTabsUrl"
     }
+    if ($CloseExistingCdpProfile) {
+        Write-Host "CloseExistingCdpProfile: would close only Chrome processes using $profile and --remote-debugging-port=$RemoteDebuggingPort"
+    }
     exit 0
+}
+
+$cdpProfileProcesses = @(Get-CdpProfileChromeProcesses -UserDataDir $profile -Port $RemoteDebuggingPort)
+if ($CloseExistingCdpProfile -and $cdpProfileProcesses.Count -gt 0) {
+    Stop-CdpProfileChrome -UserDataDir $profile -Port $RemoteDebuggingPort
+    Clear-ChromeSessionRestore -UserDataDir $profile
+    Start-Sleep -Seconds 2
 }
 
 $chromeProcesses = @(Get-ChromeProcesses)

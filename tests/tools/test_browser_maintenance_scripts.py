@@ -24,7 +24,11 @@ def test_chrome_cdp_launcher_uses_robust_startup_flags():
     assert "--disable-background-mode" in script
     assert "--disable-background-timer-throttling" in script
     assert "--js-flags=--max-old-space-size=512" in script
-    assert "--renderer-process-limit=10" in script
+    assert "UC_CHROME_RENDERER_PROCESS_LIMIT" in script
+    assert "--renderer-process-limit=$rendererLimit" in script
+    assert "[switch]$CloseExistingCdpProfile" in script
+    assert "function Get-CdpProfileChromeProcesses" in script
+    assert "function Stop-CdpProfileChrome" in script
 
 
 def test_chrome_cdp_launcher_prefers_extension_capable_chromium():
@@ -271,3 +275,14 @@ def test_browser_maintenance_uses_short_live_audit_probes():
     assert 'Set-DefaultEnv "UC_TAB_AUDIT_ISO_TIMEOUT_SECONDS" "0.8"' in script
     assert 'Set-DefaultEnv "UC_TAB_AUDIT_PERF_TIMEOUT_SECONDS" "0.5"' in script
     assert "without pinning the machine" in script
+
+
+def test_browser_maintenance_restarts_dedicated_profile_when_tabs_stay_unhealthy():
+    script = _read_script("browser-tab-maintenance.ps1")
+
+    assert "function Get-AuditHealth" in script
+    assert "UC_BROWSER_MIN_HEALTHY_PLATFORMS" in script
+    assert "function Invoke-ScraperChromeProfileRestart" in script
+    assert "-CloseExistingCdpProfile" in script
+    assert "browser extension tabs unhealthy after reload/profile restart" in script
+    assert 'Write-Status "degraded"' in script
