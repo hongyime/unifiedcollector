@@ -137,7 +137,13 @@ def _classify_ytdlp_media_failure(summary: str, *, timed_out: bool = False) -> t
             if status == "live_offline":
                 return status, "info", 24
             return status, "info", 168
-    if re.search(r"\b(?:curl:\s*\(28\)|timed?\s*out|connection\s+timed\s+out)\b", text, re.IGNORECASE):
+    if re.search(
+        r"\b(?:curl:\s*\((?:28|35|52|55|56|92)\)|"
+        r"timed?\s*out|connection\s+timed\s+out|connection\s+(?:closed|reset|aborted)|"
+        r"closed\s+abruptly|tls|ssl|http2|http/2)\b",
+        text,
+        re.IGNORECASE,
+    ):
         return "transient_network", "warning", 2
     return "failed", "warning", 0
 

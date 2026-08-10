@@ -1219,6 +1219,11 @@ def test_classify_ytdlp_media_failure_expected_states():
         "warning",
         2,
     )
+    assert _classify_ytdlp_media_failure("curl: (56) Connection closed abruptly. Giving up after 3 retries") == (
+        "transient_network",
+        "warning",
+        2,
+    )
     assert _classify_ytdlp_media_failure("[download] 21.3% of 226.21MiB ETA 02:13", timed_out=True) == (
         "transient_network",
         "warning",
