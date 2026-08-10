@@ -1,6 +1,6 @@
 param(
     [string]$Repo = "C:\unifiedcollector",
-    [string[]]$TelegramSessions = @("6592348112", "6584731565", "6596647252", "60197282165"),
+    [string[]]$TelegramSessions = @("00000000", "6584731565", "6596647252", "60197282165"),
     [int]$BrowserMaintenanceIntervalMinutes = 10
 )
 

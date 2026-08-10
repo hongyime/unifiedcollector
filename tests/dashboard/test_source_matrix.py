@@ -1148,7 +1148,7 @@ def test_source_matrix_row_suppresses_browser_cooldown_when_media_flows():
         day_rate={
             "active_now": True,
             "active_until": now + timedelta(minutes=20),
-            "latest_account": "tiktok_bryanseah234",
+            "latest_account": "tiktok_theprawnorganisation",
             "latest_scope": "profile_metadata",
             "latest_reason": "TikTok profile metadata challenge wall: captcha",
             "rate_limits": 63,
