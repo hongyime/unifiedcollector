@@ -138,9 +138,11 @@ function Stop-ProcessIds {
             continue
         }
         try {
-            $taskkill = Start-Process -FilePath "$env:SystemRoot\System32\taskkill.exe" -ArgumentList @("/PID", [string]$processId, "/F", "/T") -Wait -PassThru -NoNewWindow
-            if ($taskkill.ExitCode -ne 0 -and (Get-Process -Id $processId -ErrorAction SilentlyContinue)) {
-                Write-Warning "taskkill failed for PID ${processId} with exit code $($taskkill.ExitCode)"
+            $taskkillOutput = & "$env:SystemRoot\System32\taskkill.exe" /PID $processId /F /T 2>&1
+            $taskkillExitCode = $LASTEXITCODE
+            if ($taskkillExitCode -ne 0 -and (Get-Process -Id $processId -ErrorAction SilentlyContinue)) {
+                $detail = (($taskkillOutput | Select-Object -First 3) -join " ").Trim()
+                Write-Warning "taskkill failed for PID ${processId} with exit code ${taskkillExitCode}: $detail"
             }
         } catch {
             if (Get-Process -Id $processId -ErrorAction SilentlyContinue) {
@@ -404,12 +406,14 @@ function Stop-ChromeProcessTree {
     if ($remaining.Count -eq 0) {
         return
     }
-    $taskkill = Start-Process -FilePath "$env:SystemRoot\System32\taskkill.exe" -ArgumentList "/IM chrome.exe /F /T" -Wait -PassThru -NoNewWindow
+    $taskkillOutput = & "$env:SystemRoot\System32\taskkill.exe" /IM chrome.exe /F /T 2>&1
+    $taskkillExitCode = $LASTEXITCODE
     Start-Sleep -Seconds 2
     $remaining = @(Get-ChromeProcesses)
     if ($remaining.Count -gt 0) {
         $ids = ($remaining | Select-Object -ExpandProperty ProcessId) -join ", "
-        throw "Chrome is still running after repair attempt; remaining PIDs: $ids"
+        $detail = (($taskkillOutput | Select-Object -First 3) -join " ").Trim()
+        throw "Chrome is still running after repair attempt; taskkill exit code ${taskkillExitCode}; remaining PIDs: $ids; $detail"
     }
 }
 

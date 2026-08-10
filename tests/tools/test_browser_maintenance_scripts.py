@@ -100,6 +100,10 @@ def test_chrome_cdp_launcher_cleans_stale_debug_port_owner():
     assert "function Wait-PortReleased" in script
     assert "Port $RemoteDebuggingPort is still owned by stale PID(s)" in script
     assert "Wait-PortReleased -Port $RemoteDebuggingPort" in script
+    assert 'Start-Process -FilePath "$env:SystemRoot\\System32\\taskkill.exe"' not in script
+    assert '$taskkillOutput = & "$env:SystemRoot\\System32\\taskkill.exe"' in script
+    assert "$taskkillExitCode = $LASTEXITCODE" in script
+    assert "taskkill failed for PID ${processId} with exit code ${taskkillExitCode}" in script
 
 
 def test_chrome_cdp_launcher_discovers_extension_id_from_cdp():
