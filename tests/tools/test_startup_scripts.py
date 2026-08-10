@@ -96,6 +96,8 @@ def test_boot_verifier_checks_reboot_critical_surfaces():
     assert "recoverable_error_shell" in script
     assert "/i/flow/login" in script
     assert "redirect_after_login" in script
+    assert "/log_out" in script
+    assert "logout=" in script
     assert "(Test-UrlHostMatches -Url $_ -ExpectedHost $needle) -and -not (Test-AuthWallUrl $_)" in script
     assert "-not (Test-AuthWallUrl (Get-AuditTabUrl $_))" in script
     assert "-not (Test-AuditTabContentWall $_)" in script

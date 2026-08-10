@@ -502,7 +502,12 @@ function Open-RequestedPlatformTabs {
         $delayMs = $parsedDelay
     }
     foreach ($url in @(Get-PlatformLaunchUrls -Ids $Ids -All $All)) {
-        Try-OpenCdpTarget -Port $Port -Url $url | Out-Null
+        $opened = Try-OpenCdpTarget -Port $Port -Url $url
+        if ($opened) {
+            Write-Host "Opened requested platform tab: $url"
+        } else {
+            Write-Warning "Failed to open requested platform tab via CDP: $url"
+        }
         Start-Sleep -Milliseconds $delayMs
     }
 }

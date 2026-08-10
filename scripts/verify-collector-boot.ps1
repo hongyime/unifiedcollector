@@ -64,8 +64,8 @@ function Test-AuthWallUrl {
         $path = $uri.AbsolutePath.ToLowerInvariant()
         $query = $uri.Query.ToLowerInvariant()
         return (
-            $path -match "/login|/signin|/checkpoint|/challenge|/i/flow/login|/i/jf/onboarding" -or
-            $query -match "mode=login|redirect_after_login|auth_platform|recaptcha"
+            $path -match "/login|/signin|/checkpoint|/challenge|/i/flow/login|/i/jf/onboarding|/log_out" -or
+            $query -match "mode=login|redirect_after_login|auth_platform|recaptcha|(^\?|&)logout="
         )
     } catch {
         return $false

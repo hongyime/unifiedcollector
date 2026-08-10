@@ -152,6 +152,20 @@ def test_browser_tab_reload_treats_disappeared_targets_as_skips():
     assert "SKIP: target disappeared before reload" in script
 
 
+def test_browser_tab_reload_recovers_dom_error_shells_and_stale_auth_duplicates():
+    script = (REPO_ROOT / "tools" / "browser_tab_reload.py").read_text(encoding="utf-8")
+
+    assert 'tab.get("page_health_status") == "recoverable_error_shell"' in script
+    assert 'return True, f"page health: {reason}"' in script
+    assert '"/i/flow/login"' in script
+    assert '"redirect_after_login"' in script
+    assert '"?logout="' in script
+    assert "stale_auth_wall_close_tabs = {" in script
+    assert 'and p["platform"] in healthy_platforms' in script
+    assert '"close_duplicate_auth_wall"' in script
+    assert "if str(p[\"target_id\"]) in stale_auth_wall_close_tabs:" in script
+
+
 def test_browser_tab_reload_hard_reopens_repeatedly_stuck_tiktok_tabs():
     script = (REPO_ROOT / "tools" / "browser_tab_reload.py").read_text(encoding="utf-8")
 
@@ -213,6 +227,8 @@ def test_chrome_cdp_launcher_directly_opens_requested_platforms_after_control():
     assert "if ($OpenIds.Count -gt 0 -or ($OpenAll -and -not $NoOpenAll))" in script
     assert "UC_CHROME_OPEN_TAB_DELAY_MS" in script
     assert "$delayMs = 5000" in script
+    assert "Opened requested platform tab:" in script
+    assert "Failed to open requested platform tab via CDP:" in script
 
 
 def test_chrome_cdp_launcher_makes_open_all_explicit():

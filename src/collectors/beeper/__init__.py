@@ -1226,7 +1226,7 @@ class BeeperCollector(BaseCollector):
         if (
             stats["errors"] == 0
             and stats["messages_inserted"] == 0
-            and (stats["accounts"] > 0 or stats["chats"] > 0 or stats["networks_repaired"] > 0)
+            and message_phase_error is None
         ):
             self._intentional_idle_reason = (
                 "Beeper desktop_api reachable; no new messages this cycle"

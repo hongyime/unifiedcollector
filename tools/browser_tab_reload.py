@@ -85,6 +85,9 @@ def _open_url(url: str) -> tuple[bool, str]:
 
 
 def _decide_reload(tab: dict, target_version: str) -> tuple[bool, str]:
+    if tab.get("page_health_status") == "recoverable_error_shell":
+        reason = tab.get("page_health_reason") or "recoverable_error_shell"
+        return True, f"page health: {reason}"
     # Hard: main-world unresponsive
     if tab.get("responsive_main") is False:
         return True, "main-world unresponsive"
@@ -104,7 +107,21 @@ def _is_auth_wall(url: str) -> bool:
     if not url:
         return False
     u = url.lower()
-    markers = ("/login", "/signin", "/checkpoint", "/challenge", "auth_platform", "recaptcha", "/log_out")
+    markers = (
+        "/login",
+        "/signin",
+        "/checkpoint",
+        "/challenge",
+        "/i/flow/login",
+        "/i/jf/onboarding",
+        "mode=login",
+        "redirect_after_login",
+        "auth_platform",
+        "recaptcha",
+        "/log_out",
+        "?logout=",
+        "&logout=",
+    )
     return any(m in u for m in markers)
 
 
@@ -299,6 +316,13 @@ def main():
         and p["action"] == "reload"
         and not p["auth_wall"]
     }
+    stale_auth_wall_close_tabs = {
+        str(p["target_id"])
+        for p in plan
+        if CLOSE_UNHEALTHY_DUPLICATES
+        and p["platform"] in healthy_platforms
+        and p["auth_wall"]
+    }
     for platform in HARD_REOPEN_PLATFORMS:
         platform_plans = [p for p in plan if p["platform"] == platform and not p["auth_wall"]]
         if not platform_plans:
@@ -353,11 +377,21 @@ def main():
         time.sleep(0.5)
 
     for p in plan:
+        if str(p["target_id"]) not in stale_auth_wall_close_tabs:
+            continue
+        ok, msg = _close_target(p["target_id"])
+        results.append({**p, "action": "close_duplicate_auth_wall", "status": "ok" if ok else "fail", "detail": msg})
+        print(f"  close  {p['platform']:10} {p['target_id'][:12]} ... {'OK' if ok else 'FAIL'}: {msg[:160]}")
+        time.sleep(0.5)
+
+    for p in plan:
         if p["platform"] in hard_reopen_platforms and not p["auth_wall"]:
             continue
         if str(p["target_id"]) in hard_reopen_tabs and not p["auth_wall"]:
             continue
         if str(p["target_id"]) in duplicate_close_tabs:
+            continue
+        if str(p["target_id"]) in stale_auth_wall_close_tabs:
             continue
         if p["action"] != "reload":
             results.append({**p, "status": "skipped"})

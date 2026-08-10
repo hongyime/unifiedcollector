@@ -517,6 +517,27 @@ async def test_collect_marks_reachable_zero_message_cycle_as_intentional_idle(mo
 
 
 @pytest.mark.asyncio
+async def test_collect_marks_quiet_message_sync_healthy_when_other_phases_empty(monkeypatch, tmp_path):
+    monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
+    monkeypatch.setenv("COLLECTOR_DRIVE_PATH", str(tmp_path))
+
+    pool, _conn = _mock_pool()
+    coll = BeeperCollector(client=MagicMock(spec=BeeperClient))
+    coll.set_pool(pool)
+    coll._sync_accounts = AsyncMock(return_value=0)
+    coll._sync_chats = AsyncMock(return_value=0)
+    coll._sync_messages = AsyncMock(return_value=0)
+
+    stats = await coll.collect([])
+
+    assert stats["errors"] == 0
+    assert stats["messages_inserted"] == 0
+    assert stats["accounts"] == 0
+    assert stats["chats"] == 0
+    assert "desktop_api reachable" in coll.intentional_idle_reason
+
+
+@pytest.mark.asyncio
 async def test_collect_prioritizes_messages_before_network_repair(monkeypatch, tmp_path, caplog):
     monkeypatch.setenv("BEEPER_DESKTOP_API_TOKEN", "x")
     monkeypatch.setenv("COLLECTOR_DRIVE_PATH", str(tmp_path))
