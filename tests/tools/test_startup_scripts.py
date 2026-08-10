@@ -63,7 +63,7 @@ def test_boot_verifier_checks_reboot_critical_surfaces():
     assert "MaintenanceStatusFreshMinutes" in script
     assert "DefaultSourceFreshMinutes" in script
     assert "source_health" in script
-    assert "instagram = 30" in script
+    assert "instagram = 60" in script
     assert "strava = 60" in script
     assert 'Add-Check $checks "source fresh: $source"' in script
     assert "dead_letter_queue" in script
@@ -85,6 +85,7 @@ def test_boot_verifier_checks_reboot_critical_surfaces():
     assert "browser_tab_audit_result.json" in script
     assert "extension content script: $platform" in script
     assert "cs_running" in script
+    assert "$allTabsHealthy = ($healthy.Count -eq $tabs.Count)" in script
     assert "browser_tab_maintenance_loop.pid" in script
     assert "instagram.com" in script
     assert "tiktok.com" in script

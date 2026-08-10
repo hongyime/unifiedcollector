@@ -322,11 +322,19 @@ function Get-AuditHealth {
             $_.cs_running -eq $true -and
             [string]$_.cs_version
         })
-        if ($good.Count -gt 0) {
+        if ($good.Count -eq $tabs.Count) {
             $healthy += 1
         } else {
-            $sample = $tabs | Select-Object -First 1
-            $unhealthy += "${platform}: resp=$($sample.responsive_main), cs=$($sample.cs), running=$($sample.cs_running), err=$($sample.error)"
+            $bad = @($tabs | Where-Object {
+                -not (
+                    $_.responsive_main -eq $true -and
+                    $_.cs -eq $true -and
+                    $_.cs_running -eq $true -and
+                    [string]$_.cs_version
+                )
+            })
+            $sample = $bad | Select-Object -First 1
+            $unhealthy += "${platform}: $($good.Count)/$($tabs.Count) healthy; first_bad resp=$($sample.responsive_main), cs=$($sample.cs), running=$($sample.cs_running), err=$($sample.error)"
         }
     }
     $minHealthy = Get-PositiveIntEnv "UC_BROWSER_MIN_HEALTHY_PLATFORMS" 5

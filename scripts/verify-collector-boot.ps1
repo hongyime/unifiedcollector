@@ -295,12 +295,13 @@ if (Test-Path -LiteralPath $auditResultPath) {
                     [string]$_.cs_version
                 }
             )
+            $allTabsHealthy = ($healthy.Count -eq $tabs.Count)
             $detailRows = @(
                 $tabs | ForEach-Object {
                     "resp=$($_.responsive_main), cs=$($_.cs), running=$($_.cs_running), ver=$($_.cs_version), url=$($_.url_snapshot)"
                 }
             )
-            Add-Check $checks "extension content script: $platform" ($healthy.Count -gt 0) ($detailRows -join "; ")
+            Add-Check $checks "extension content script: $platform" $allTabsHealthy ($detailRows -join "; ")
         }
     } catch {
         Add-Check $checks "extension content script audit" $false "could not parse audit result: $($_.Exception.Message)"
