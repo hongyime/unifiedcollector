@@ -7,6 +7,7 @@ Run: python -m pytest tests/test_watchdog_autoheal.py -x  (or plain python).
 import asyncio
 import time
 import types
+from unittest.mock import AsyncMock
 
 
 def _make_service():
@@ -37,6 +38,41 @@ def _make_service():
     svc._auth_paused = {}
     svc._auth_pause_since = {}
     return svc
+
+
+async def test_telegram_dlq_handler_retries_exact_media(monkeypatch):
+    from src.worker import WorkerService
+
+    svc = WorkerService()
+    svc.pool = types.SimpleNamespace()
+    retry = AsyncMock(return_value=True)
+    svc._collectors = {
+        "telegram": types.SimpleNamespace(download_message_media=retry),
+    }
+
+    handler = svc._make_dlq_handler("telegram")
+    await handler({
+        "entity_id": "-100123",
+        "content_id": "-100123_456",
+    })
+
+    retry.assert_awaited_once_with(456, chat_id="-100123")
+
+
+async def test_dlq_handler_requeues_non_exact_rows(monkeypatch):
+    from src.worker import WorkerService
+
+    svc = WorkerService()
+    requeue = AsyncMock()
+    svc._requeue_dlq_target = requeue
+
+    handler = svc._make_dlq_handler("telegram")
+    await handler({
+        "entity_id": "-100123",
+        "content_id": "not-message-media",
+    })
+
+    requeue.assert_awaited_once_with("telegram", "-100123")
 
 
 async def _run_test():

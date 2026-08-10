@@ -4,6 +4,7 @@ import html
 import json
 import logging
 import os
+import re
 import signal
 import sys
 import threading
@@ -634,16 +635,60 @@ class WorkerService:
             if not entity:
                 from src.core.dlq_consumer import PermanentError
                 raise PermanentError("DLQ row has no entity_id/content_id")
-            async with self.pool.acquire() as conn:
-                await conn.execute(
-                    "INSERT INTO collection_targets (source, target_id, status, priority) "
-                    "VALUES ($1, $2, 'pending', 1) "
-                    "ON CONFLICT (source, target_id) DO UPDATE "
-                    "SET status='pending' "
-                    "WHERE collection_targets.status IN ('error', 'completed', 'active')",
-                    source, str(entity),
-                )
+            if source == "telegram" and await self._retry_telegram_media_dlq(row):
+                return
+            await asyncio.wait_for(
+                self._requeue_dlq_target(source, str(entity)),
+                timeout=float(os.getenv("DLQ_TARGET_REQUEUE_TIMEOUT_SECONDS", "20")),
+            )
         return _handler
+
+    async def _retry_telegram_media_dlq(self, row: dict) -> bool:
+        """Retry an exact Telegram media message from a DLQ row when possible.
+
+        Telegram media DLQ rows use content_id ``<chat_id>_<message_id>``. A
+        plain chat requeue is too coarse for realtime-only rows because the chat
+        can remain live while the exact failed media is never revisited. Retry the
+        precise message first; returning normally lets DLQConsumer delete the row.
+        """
+        content_id = str(row.get("content_id") or "")
+        entity_id = str(row.get("entity_id") or "")
+        match = re.fullmatch(r"(?P<chat>-?\d+)_(?P<message>\d+)", content_id)
+        if not match:
+            return False
+        chat_id = entity_id or match.group("chat")
+        message_id = int(match.group("message"))
+        collector = self._collectors.get("telegram")
+        if collector is None or not hasattr(collector, "download_message_media"):
+            return False
+        timeout = float(os.getenv("TELEGRAM_DLQ_MEDIA_RETRY_TIMEOUT_SECONDS", "120"))
+        ok = await asyncio.wait_for(
+            collector.download_message_media(message_id, chat_id=chat_id),
+            timeout=timeout,
+        )
+        if ok:
+            logger.info(
+                "telegram DLQ media retry succeeded: chat=%s message=%s content_id=%s",
+                chat_id,
+                message_id,
+                content_id,
+            )
+            return True
+        raise RuntimeError(
+            f"telegram exact media retry returned no media for chat={chat_id} "
+            f"message={message_id}"
+        )
+
+    async def _requeue_dlq_target(self, source: str, entity: str) -> None:
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO collection_targets (source, target_id, status, priority) "
+                "VALUES ($1, $2, 'pending', 1) "
+                "ON CONFLICT (source, target_id) DO UPDATE "
+                "SET status='pending' "
+                "WHERE collection_targets.status IN ('error', 'completed', 'active')",
+                source, entity,
+            )
 
     def _handle_signal(self):
         logger.info("Shutdown signal received")
