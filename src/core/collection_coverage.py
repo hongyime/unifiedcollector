@@ -54,52 +54,94 @@ async def build_collection_coverage_snapshot(
     if not sources:
         await _add_sources_from_table(conn, sources, "collection_runs", "source", source)
 
+    media_rollups: dict[str, Any] = {}
+    if await _table_exists(conn, "media_source_rollups"):
+        rows = await conn.fetch(
+            """
+            SELECT source, latest_media_at
+            FROM media_source_rollups
+            WHERE ($1::text IS NULL OR source = $1)
+            """,
+            source,
+        )
+        for row in rows:
+            media_rollups[str(row["source"])] = row["latest_media_at"]
+
+    media_recent: dict[str, dict[str, Any]] = {}
+    if await _table_exists(conn, "media_items"):
+        rows = await conn.fetch(
+            """
+            SELECT source,
+                   MAX(collected_at) AS latest_recent_at,
+                   COUNT(*)::bigint AS media_24h
+            FROM media_items
+            WHERE collected_at >= NOW() - INTERVAL '24 hours'
+              AND ($1::text IS NULL OR source = $1)
+            GROUP BY source
+            """,
+            source,
+        )
+        for row in rows:
+            media_recent[str(row["source"])] = {
+                "latest_recent_at": row["latest_recent_at"],
+                "media_24h": int(row["media_24h"] or 0),
+            }
+
+    run_stats: dict[str, dict[str, Any]] = {}
+    if await _table_exists(conn, "collection_runs"):
+        rows = await conn.fetch(
+            """
+            SELECT source,
+                   MAX(COALESCE(completed_at, started_at)) AS latest_run_at,
+                   COUNT(*) FILTER (
+                     WHERE started_at >= NOW() - INTERVAL '24 hours'
+                       AND status NOT IN ('success', 'completed')
+                   )::bigint AS errors_24h
+            FROM collection_runs
+            WHERE ($1::text IS NULL OR source = $1)
+            GROUP BY source
+            """,
+            source,
+        )
+        for row in rows:
+            run_stats[str(row["source"])] = {
+                "latest_run_at": row["latest_run_at"],
+                "errors_24h": int(row["errors_24h"] or 0),
+            }
+
+    source_health: dict[str, str | None] = {}
+    if await _table_exists(conn, "source_health"):
+        rows = await conn.fetch(
+            "SELECT source, status FROM source_health WHERE ($1::text IS NULL OR source = $1)",
+            source,
+        )
+        source_health = {str(row["source"]): row["status"] for row in rows}
+
+    rate_limits: dict[str, int] = {}
+    if await _table_exists(conn, "rate_limit_events"):
+        rows = await conn.fetch(
+            """
+            SELECT source, COUNT(*)::bigint AS rate_limits_24h
+            FROM rate_limit_events
+            WHERE created_at >= NOW() - INTERVAL '24 hours'
+              AND ($1::text IS NULL OR source = $1)
+            GROUP BY source
+            """,
+            source,
+        )
+        rate_limits = {str(row["source"]): int(row["rate_limits_24h"] or 0) for row in rows}
+
     snapshots = []
     for item_source in sorted(sources):
-        latest_data_at = None
-        media_24h = rows_24h = 0
-        if await _table_exists(conn, "media_items"):
-            row = await conn.fetchrow(
-                """
-                SELECT MAX(collected_at) AS latest_data_at,
-                       COUNT(*) FILTER (WHERE collected_at >= NOW() - INTERVAL '24 hours') AS media_24h
-                FROM media_items
-                WHERE source = $1
-                """,
-                item_source,
-            )
-            latest_data_at = row["latest_data_at"]
-            media_24h = int(row["media_24h"] or 0)
-            rows_24h += media_24h
-
-        latest_run_at = None
-        errors_24h = 0
-        if await _table_exists(conn, "collection_runs"):
-            row = await conn.fetchrow(
-                """
-                SELECT MAX(COALESCE(completed_at, started_at)) AS latest_run_at,
-                       COUNT(*) FILTER (
-                         WHERE started_at >= NOW() - INTERVAL '24 hours'
-                           AND status NOT IN ('success', 'completed')
-                       ) AS errors_24h
-                FROM collection_runs
-                WHERE source = $1
-                """,
-                item_source,
-            )
-            latest_run_at = row["latest_run_at"]
-            errors_24h = int(row["errors_24h"] or 0)
-
-        source_status = None
-        if await _table_exists(conn, "source_health"):
-            source_status = await conn.fetchval("SELECT status FROM source_health WHERE source = $1", item_source)
-
-        rate_limits_24h = 0
-        if await _table_exists(conn, "rate_limit_events"):
-            rate_limits_24h = int(await conn.fetchval(
-                "SELECT COUNT(*) FROM rate_limit_events WHERE source = $1 AND created_at >= NOW() - INTERVAL '24 hours'",
-                item_source,
-            ) or 0)
+        recent = media_recent.get(item_source, {})
+        run = run_stats.get(item_source, {})
+        latest_data_at = media_rollups.get(item_source) or recent.get("latest_recent_at")
+        media_24h = int(recent.get("media_24h") or 0)
+        rows_24h = media_24h
+        latest_run_at = run.get("latest_run_at")
+        errors_24h = int(run.get("errors_24h") or 0)
+        source_status = source_health.get(item_source)
+        rate_limits_24h = rate_limits.get(item_source, 0)
 
         status = _status(latest_data_at, latest_run_at, source_status, expected)
         snapshot = {

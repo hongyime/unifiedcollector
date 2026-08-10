@@ -19,8 +19,18 @@ class Conn:
         return None
 
     async def fetch(self, sql, *args):
-        if "FROM source_health" in sql:
+        if "SELECT DISTINCT" in sql and "FROM source_health" in sql:
             return [{"source": "telegram"}]
+        if "FROM media_source_rollups" in sql:
+            return [{"source": "telegram", "latest_media_at": self.now - timedelta(hours=1)}]
+        if "FROM media_items" in sql:
+            return [{"source": "telegram", "latest_recent_at": self.now - timedelta(hours=1), "media_24h": 42}]
+        if "FROM collection_runs" in sql:
+            return [{"source": "telegram", "latest_run_at": self.now - timedelta(hours=1), "errors_24h": 0}]
+        if "FROM source_health" in sql:
+            return [{"source": "telegram", "status": "running"}]
+        if "FROM rate_limit_events" in sql:
+            return [{"source": "telegram", "rate_limits_24h": 1}]
         return []
 
     async def fetchrow(self, sql, *args):

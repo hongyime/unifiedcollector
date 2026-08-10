@@ -4,14 +4,47 @@ import asyncio
 import json
 import os
 from typing import Any
+from urllib.parse import urlparse
 
 DEFAULT_MODULES = ("sfp_dnsresolve", "sfp_whois", "sfp_names")
 SUPPORTED_TYPES = {"domain", "ip", "email", "username", "url", "phone"}
+DEFAULT_INTRUSIVE_MODULES = {
+    "sfp_portscan_tcp",
+    "sfp_portscan_udp",
+    "sfp_dnsbrute",
+    "sfp_shodan",
+    "sfp_censys",
+}
+
+
+def _json_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+            return decoded if isinstance(decoded, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+    return {}
 
 
 def allowed_modules(raw: str | None = None) -> list[str]:
     modules = [item.strip() for item in (raw or os.getenv("SPIDERFOOT_MODULES") or "").split(",") if item.strip()]
-    return modules or list(DEFAULT_MODULES)
+    modules = modules or list(DEFAULT_MODULES)
+    allow_intrusive = os.getenv("SPIDERFOOT_ALLOW_INTRUSIVE", "").strip().lower() in {"1", "true", "yes"}
+    blocked = {
+        item.strip()
+        for item in os.getenv("SPIDERFOOT_BLOCKED_MODULES", ",".join(sorted(DEFAULT_INTRUSIVE_MODULES))).split(",")
+        if item.strip()
+    }
+    if not allow_intrusive:
+        modules = [module for module in modules if module not in blocked]
+    try:
+        max_modules = max(1, int(os.getenv("SPIDERFOOT_MAX_MODULES", "10")))
+    except ValueError:
+        max_modules = 10
+    return modules[:max_modules]
 
 
 def target_in_scope(target_value: str, allowlist: str | None = None) -> bool:
@@ -20,7 +53,12 @@ def target_in_scope(target_value: str, allowlist: str | None = None) -> bool:
     if not allowed:
         return True
     value = (target_value or "").lower()
-    return any(value == item or value.endswith("." + item) or item in value for item in allowed)
+    parsed = urlparse(value if "://" in value else f"//{value}")
+    host = (parsed.hostname or value.split("@")[-1]).strip(".")
+    candidates = {value, host}
+    if "@" in value:
+        candidates.add(value.split("@", 1)[1])
+    return any(candidate == item or candidate.endswith("." + item) for candidate in candidates for item in allowed)
 
 
 def normalize_observation(target_id: str, raw: dict[str, Any]) -> dict[str, Any] | None:
@@ -118,7 +156,10 @@ async def _run_spiderfoot_cli(target: dict[str, Any], modules: list[str], timeou
         raise RuntimeError(f"SpiderFoot timed out after {timeout_seconds}s")
     if proc.returncode != 0:
         raise RuntimeError((stderr or stdout).decode("utf-8", errors="replace")[:500])
-    payload = json.loads(stdout.decode("utf-8"))
+    return normalize_spiderfoot_payload(json.loads(stdout.decode("utf-8")))
+
+
+def normalize_spiderfoot_payload(payload: Any) -> list[dict[str, Any]]:
     if isinstance(payload, list):
         return [item for item in payload if isinstance(item, dict)]
     if isinstance(payload, dict):
@@ -132,7 +173,11 @@ async def run_spiderfoot_once(conn, *, dry_run: bool = False) -> dict[str, Any]:
         target = await _claim_target(conn)
     if not target:
         return {"status": "idle", "target": None, "observations": 0, "dry_run": dry_run}
-    if not target_in_scope(target["target_value"]):
+    scope = _json_dict(target.get("scope_json"))
+    scope_allowlist = scope.get("allowlist")
+    if isinstance(scope_allowlist, list):
+        scope_allowlist = ",".join(str(item) for item in scope_allowlist)
+    if not target_in_scope(target["target_value"], scope_allowlist):
         await conn.execute(
             "UPDATE recon_targets SET status = 'blocked', error = $2, updated_at = NOW() WHERE id = $1::uuid",
             target["id"],
@@ -140,7 +185,17 @@ async def run_spiderfoot_once(conn, *, dry_run: bool = False) -> dict[str, Any]:
         )
         return {"status": "blocked", "target": target, "observations": 0, "dry_run": dry_run}
 
-    modules = allowed_modules()
+    module_override = scope.get("modules")
+    if isinstance(module_override, list):
+        module_override = ",".join(str(item) for item in module_override)
+    modules = allowed_modules(module_override if isinstance(module_override, str) else None)
+    if not modules:
+        await conn.execute(
+            "UPDATE recon_targets SET status = 'blocked', error = $2, updated_at = NOW() WHERE id = $1::uuid",
+            target["id"],
+            "no SpiderFoot modules allowed by scope",
+        )
+        return {"status": "blocked", "target": target, "observations": 0, "dry_run": dry_run}
     if dry_run:
         await conn.execute("UPDATE recon_targets SET status = 'pending', updated_at = NOW() WHERE id = $1::uuid", target["id"])
         return {"status": "dry_run", "target": target, "modules": modules, "observations": 0, "dry_run": True}
