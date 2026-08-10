@@ -983,6 +983,20 @@ def test_empty_media_probe_marks_browser_content_progress():
         {},
     )
     assert ig_ingest._browser_event_marks_source_success(
+        "lemon8",
+        "media",
+        29,
+        0,
+        {"reject_stats": {"duplicate_content_id": 25, "duplicate_sha256": 3, "http_status": 1}},
+    )
+    assert not ig_ingest._browser_event_marks_source_success(
+        "lemon8",
+        "media",
+        29,
+        0,
+        {"reject_stats": {"duplicate_content_id": 2, "http_status": 27}},
+    )
+    assert ig_ingest._browser_event_marks_source_success(
         "facebook",
         "media",
         0,

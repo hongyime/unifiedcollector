@@ -319,6 +319,19 @@ async def _recent_browser_media_yield(conn, timeout: float) -> dict[str, dict] |
             SELECT wanted.platform,
                    COALESCE(sum(e.observed_count), 0)::int AS observed_count,
                    COALESCE(sum(e.stored_count), 0)::int AS stored_count,
+                   COALESCE(sum(
+                       CASE
+                           WHEN (e.metadata #>> '{reject_stats,duplicate_content_id}') ~ '^[0-9]+$'
+                           THEN (e.metadata #>> '{reject_stats,duplicate_content_id}')::int
+                           ELSE 0
+                       END
+                       +
+                       CASE
+                           WHEN (e.metadata #>> '{reject_stats,duplicate_sha256}') ~ '^[0-9]+$'
+                           THEN (e.metadata #>> '{reject_stats,duplicate_sha256}')::int
+                           ELSE 0
+                       END
+                   ), 0)::int AS duplicate_count,
                    max(e.created_at) AS last_media_at
             FROM wanted
             LEFT JOIN browser_ingest_events e
@@ -459,9 +472,14 @@ async def compute_liveness(conn) -> list[dict]:
         )
         media_observed_count = int(media_yield.get("observed_count") or 0) if media_yield else 0
         media_stored_count = int(media_yield.get("stored_count") or 0) if media_yield else 0
+        media_duplicate_count = int(media_yield.get("duplicate_count") or 0) if media_yield else 0
+        media_unresolved_count = max(
+            0,
+            media_observed_count - media_stored_count - media_duplicate_count,
+        )
         browser_media_zero_store = (
             name in _BROWSER_CONTENT_PROGRESS_SOURCES
-            and media_observed_count >= browser_media_zero_store_min_observed
+            and media_unresolved_count >= browser_media_zero_store_min_observed
             and media_stored_count == 0
         )
         if (
@@ -517,8 +535,9 @@ async def compute_liveness(conn) -> list[dict]:
                 detail = f"{detail}; {content_detail}"
         if browser_media_zero_store:
             yield_detail = (
-                f"browser media yield warning: observed {media_observed_count} media candidate(s) "
-                f"but stored 0 in the recent window"
+                f"browser media yield warning: {media_unresolved_count} unresolved media candidate(s) "
+                f"out of {media_observed_count} observed, {media_duplicate_count} duplicate/already archived, "
+                "stored 0 in the recent window"
             )
             if status == "live":
                 status = "degraded"
@@ -569,6 +588,8 @@ async def compute_liveness(conn) -> list[dict]:
             ),
             "browser_media_observed_count": media_observed_count,
             "browser_media_stored_count": media_stored_count,
+            "browser_media_duplicate_count": media_duplicate_count,
+            "browser_media_unresolved_count": media_unresolved_count,
             "browser_media_zero_store": browser_media_zero_store,
             "detail": detail,
         })

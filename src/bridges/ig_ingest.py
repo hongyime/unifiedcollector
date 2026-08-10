@@ -2382,6 +2382,9 @@ def _browser_event_marks_source_success(
     if endpoint == "media":
         if stored_count > 0:
             return True
+        duplicate_count = _browser_event_duplicate_count(metadata)
+        if observed_count > 0 and duplicate_count >= max(1, int(observed_count * 0.8)):
+            return True
     elif observed_count > 0 or stored_count > 0:
         return True
     if not isinstance(metadata, dict):
@@ -2393,6 +2396,21 @@ def _browser_event_marks_source_success(
         "recoverable_error_shell",
     }
     return bool(probe_reason and probe_reason not in non_progress_probes)
+
+
+def _browser_event_duplicate_count(metadata: dict | None) -> int:
+    if not isinstance(metadata, dict):
+        return 0
+    reject_stats = metadata.get("reject_stats")
+    if not isinstance(reject_stats, dict):
+        return 0
+    total = 0
+    for key in ("duplicate_content_id", "duplicate_sha256"):
+        try:
+            total += max(0, int(reject_stats.get(key) or 0))
+        except (TypeError, ValueError):
+            continue
+    return total
 
 
 async def _ingest(app, platform, body):

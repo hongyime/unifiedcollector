@@ -188,6 +188,14 @@ def test_pairing_health_state_is_throttled_and_refreshes(collector, monkeypatch)
     assert collector._test_conn.execute.await_count == 3
     assert "status='running'" in collector._test_conn.execute.await_args.args[0]
 
+    asyncio.run(collector._mark_source_bridge_ready())
+    assert collector._test_conn.execute.await_count == 3
+
+    now[0] += 301
+    asyncio.run(collector._mark_source_bridge_ready())
+    assert collector._test_conn.execute.await_count == 4
+    assert "last_success_at=NOW()" in collector._test_conn.execute.await_args.args[0]
+
 
 def test_bridge_pairing_health_marks_all_unpaired_sessions(collector, monkeypatch):
     collector._session_bridges = {

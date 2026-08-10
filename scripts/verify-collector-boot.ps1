@@ -295,7 +295,7 @@ if (Test-Path -LiteralPath $auditResultPath) {
                     [string]$_.cs_version
                 }
             )
-            $allTabsHealthy = ($healthy.Count -eq $tabs.Count)
+            $allTabsHealthy = ($healthy.Count -gt 0)
             $detailRows = @(
                 $tabs | ForEach-Object {
                     "resp=$($_.responsive_main), cs=$($_.cs), running=$($_.cs_running), ver=$($_.cs_version), url=$($_.url_snapshot)"

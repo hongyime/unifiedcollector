@@ -1505,10 +1505,11 @@ class WhatsappCollector(BaseCollector):
 
     async def _mark_source_bridge_ready(self):
         state = ("running", "")
-        if self._last_source_health_status == state:
+        now = time.time()
+        if self._last_source_health_status == state and now - self._last_source_health_write < 300:
             return
         self._last_source_health_status = state
-        self._last_source_health_write = time.time()
+        self._last_source_health_write = now
         try:
             async with self.pool.acquire() as conn:
                 await conn.execute(

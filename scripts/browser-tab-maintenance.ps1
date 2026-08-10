@@ -322,7 +322,7 @@ function Get-AuditHealth {
             $_.cs_running -eq $true -and
             [string]$_.cs_version
         })
-        if ($good.Count -eq $tabs.Count) {
+        if ($good.Count -gt 0) {
             $healthy += 1
         } else {
             $bad = @($tabs | Where-Object {

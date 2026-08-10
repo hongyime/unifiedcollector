@@ -46,6 +46,11 @@ HARD_REOPEN_URLS = {
         "https://www.lemon8-app.com/topic/food?region=sg",
     ],
 }
+CLOSE_UNHEALTHY_DUPLICATES = os.getenv("UC_BROWSER_CLOSE_UNHEALTHY_DUPLICATES", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+}
 
 
 def _target_version() -> str:
@@ -275,6 +280,23 @@ def main():
 
     hard_reopen_platforms: set[str] = set()
     hard_reopen_tabs: set[str] = set()
+    healthy_platforms = {
+        p["platform"]
+        for p in plan
+        if p["action"] == "skip"
+        and p["auth_wall"] is False
+        and p.get("responsive_main") is True
+        and p.get("cs") is True
+        and (not target_version or p.get("cs_version") == target_version)
+    }
+    duplicate_close_tabs = {
+        str(p["target_id"])
+        for p in plan
+        if CLOSE_UNHEALTHY_DUPLICATES
+        and p["platform"] in healthy_platforms
+        and p["action"] == "reload"
+        and not p["auth_wall"]
+    }
     for platform in HARD_REOPEN_PLATFORMS:
         platform_plans = [p for p in plan if p["platform"] == platform and not p["auth_wall"]]
         if not platform_plans:
@@ -321,9 +343,19 @@ def main():
         results.extend(_hard_reopen_repeated_tabs(platform, platform_plans))
 
     for p in plan:
+        if str(p["target_id"]) not in duplicate_close_tabs:
+            continue
+        ok, msg = _close_target(p["target_id"])
+        results.append({**p, "action": "close_duplicate_unhealthy", "status": "ok" if ok else "fail", "detail": msg})
+        print(f"  close  {p['platform']:10} {p['target_id'][:12]} ... {'OK' if ok else 'FAIL'}: {msg[:160]}")
+        time.sleep(0.5)
+
+    for p in plan:
         if p["platform"] in hard_reopen_platforms and not p["auth_wall"]:
             continue
         if str(p["target_id"]) in hard_reopen_tabs and not p["auth_wall"]:
+            continue
+        if str(p["target_id"]) in duplicate_close_tabs:
             continue
         if p["action"] != "reload":
             results.append({**p, "status": "skipped"})
