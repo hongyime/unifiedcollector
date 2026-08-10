@@ -539,7 +539,10 @@ async def compute_liveness(conn) -> list[dict]:
                 f"out of {media_observed_count} observed, {media_duplicate_count} duplicate/already archived, "
                 "stored 0 in the recent window"
             )
-            if status == "live":
+            duplicate_heavy_yield = media_duplicate_count > 0 and media_duplicate_count >= media_unresolved_count
+            if status == "live" and duplicate_heavy_yield:
+                detail = f"{detail}; {yield_detail}"
+            elif status == "live":
                 status = "degraded"
                 detail = yield_detail
             else:

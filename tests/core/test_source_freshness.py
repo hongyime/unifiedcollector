@@ -554,9 +554,9 @@ async def test_duplicate_dominated_browser_media_does_not_degrade_source(monkeyp
                 return [
                     {
                         "platform": "lemon8",
-                        "observed_count": 144,
+                        "observed_count": 1187,
                         "stored_count": 0,
-                        "duplicate_count": 139,
+                        "duplicate_count": 980,
                         "last_media_at": datetime.now(timezone.utc) - timedelta(seconds=30),
                     }
                 ]
@@ -602,9 +602,10 @@ async def test_duplicate_dominated_browser_media_does_not_degrade_source(monkeyp
     rows = await source_freshness.compute_liveness(BrowserMediaDuplicateConn())
 
     assert rows[0]["status"] == "live"
-    assert rows[0]["browser_media_zero_store"] is False
-    assert rows[0]["browser_media_duplicate_count"] == 139
-    assert rows[0]["browser_media_unresolved_count"] == 5
+    assert rows[0]["browser_media_zero_store"] is True
+    assert rows[0]["browser_media_duplicate_count"] == 980
+    assert rows[0]["browser_media_unresolved_count"] == 207
+    assert "browser media yield warning" in rows[0]["detail"]
 
 
 @pytest.mark.asyncio
