@@ -176,6 +176,24 @@ ORDER BY source
 }
 
 try {
+    $dlqRows = Invoke-PostgresText -Sql @"
+SELECT source || '|' || status || '|' || count(*)::text || '|' || COALESCE(round(extract(epoch from (now()-min(created_at)))/60, 1)::text, '0')
+FROM dead_letter_queue
+WHERE status IN ('pending', 'queued', 'retry')
+GROUP BY source, status
+ORDER BY count(*) DESC
+"@
+    $dlqRows = @($dlqRows | Where-Object { $_ })
+    if ($dlqRows.Count -eq 0) {
+        Add-Check $checks "dead letter backlog" $true "no pending/queued/retry rows"
+    } else {
+        Add-Check $checks "dead letter backlog" $false ($dlqRows -join "; ")
+    }
+} catch {
+    Add-Check $checks "dead letter backlog" $false $_.Exception.Message
+}
+
+try {
     $version = Invoke-JsonGet "$CdpUrl/json/version"
     Add-Check $checks "chrome cdp" ($version.Browser -match "^Chrome/") $version.Browser
 } catch {

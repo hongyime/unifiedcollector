@@ -66,6 +66,9 @@ def test_boot_verifier_checks_reboot_critical_surfaces():
     assert "instagram = 30" in script
     assert "strava = 60" in script
     assert 'Add-Check $checks "source fresh: $source"' in script
+    assert "dead_letter_queue" in script
+    assert "dead letter backlog" in script
+    assert "'pending', 'queued', 'retry'" in script
     assert "db backup freshness" in script
     assert ".inprogress_*.dump" in script
     assert "browser maintenance latest status" in script
