@@ -2,6 +2,7 @@ param(
     [string]$Repo = "C:\unifiedcollector",
     [string]$DashboardHealthUrl = "http://127.0.0.1:8700/health",
     [string]$CdpUrl = "http://127.0.0.1:9333",
+    [string[]]$WhatsAppBridgeHealthUrls = @("http://127.0.0.1:3011/health", "http://127.0.0.1:3012/health"),
     [string]$BackupDir = "Z:\unifiedcollector\backups\db",
     [int]$BackupFreshHours = 30,
     [int]$ActiveBackupFreshMinutes = 20,
@@ -38,6 +39,44 @@ function Invoke-JsonGet {
     } finally {
         $ProgressPreference = $oldProgress
     }
+}
+
+function Test-WhatsAppBridgeReady {
+    param($Health)
+    return (
+        $Health.whatsapp_ready -eq $true -or
+        $Health.ready -eq $true -or
+        $Health.connected -eq $true -or
+        $Health.registered -eq $true
+    )
+}
+
+function Test-WhatsAppBridgeWaitingForPairing {
+    param($Health)
+    $status = ([string]$Health.status).ToLowerInvariant()
+    $reason = ([string]$Health.last_disconnect_reason).ToLowerInvariant()
+    return (
+        $Health.qr_available -eq $true -or
+        $Health.needs_scan -eq $true -or
+        $status -in @("awaiting_scan", "connecting_unpaired", "pairing", "qr", "qr_expired", "refreshing_qr") -or
+        $reason.Contains("qr")
+    )
+}
+
+function Format-WhatsAppBridgeHealth {
+    param([int]$Index, $Health)
+    $status = [string]$Health.status
+    $phone = [string]$Health.phone_number
+    $pushName = [string]$Health.push_name
+    $authNote = ""
+    if ($Health.auth_state -and $Health.auth_state.note) {
+        $authNote = [string]$Health.auth_state.note
+    }
+    $parts = @("bridge ${Index}: $status")
+    if ($phone) { $parts += $phone }
+    if ($pushName) { $parts += $pushName }
+    if ($authNote) { $parts += $authNote }
+    return ($parts -join " / ")
 }
 
 function Test-UrlHostMatches {
@@ -172,6 +211,39 @@ try {
     Add-Check $checks "dashboard health" $ok ($health | ConvertTo-Json -Compress -Depth 6)
 } catch {
     Add-Check $checks "dashboard health" $false $_.Exception.Message
+}
+
+try {
+    $bridgeStates = @()
+    for ($i = 0; $i -lt $WhatsAppBridgeHealthUrls.Count; $i++) {
+        $url = $WhatsAppBridgeHealthUrls[$i]
+        try {
+            $health = Invoke-JsonGet $url
+            $bridgeStates += [pscustomobject]@{
+                index = $i + 1
+                reachable = $true
+                ready = Test-WhatsAppBridgeReady $health
+                waiting = Test-WhatsAppBridgeWaitingForPairing $health
+                detail = Format-WhatsAppBridgeHealth -Index ($i + 1) -Health $health
+            }
+        } catch {
+            $bridgeStates += [pscustomobject]@{
+                index = $i + 1
+                reachable = $false
+                ready = $false
+                waiting = $false
+                detail = "bridge $($i + 1): unreachable / $($_.Exception.Message)"
+            }
+        }
+    }
+    $readyCount = @($bridgeStates | Where-Object { $_.ready }).Count
+    $reachableCount = @($bridgeStates | Where-Object { $_.reachable }).Count
+    $waitingCount = @($bridgeStates | Where-Object { $_.waiting }).Count
+    $summary = "ready=$readyCount/$($bridgeStates.Count), reachable=$reachableCount/$($bridgeStates.Count), waiting_for_pairing=$waitingCount"
+    $detail = $summary + "; " + ((@($bridgeStates | ForEach-Object { $_.detail })) -join "; ")
+    Add-Check $checks "whatsapp bridge readiness" ($readyCount -ge 1) $detail
+} catch {
+    Add-Check $checks "whatsapp bridge readiness" $false $_.Exception.Message
 }
 
 try {

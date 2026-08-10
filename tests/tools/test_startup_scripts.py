@@ -56,6 +56,13 @@ def test_boot_verifier_checks_reboot_critical_surfaces():
     assert "UnifiedCollectorBrowserCookieVault.cmd" in script
     assert "docker compose -f $composePath ps --format json" in script
     assert "http://127.0.0.1:8700/health" in script
+    assert "WhatsAppBridgeHealthUrls" in script
+    assert "http://127.0.0.1:3011/health" in script
+    assert "http://127.0.0.1:3012/health" in script
+    assert "function Test-WhatsAppBridgeReady" in script
+    assert "function Test-WhatsAppBridgeWaitingForPairing" in script
+    assert "whatsapp bridge readiness" in script
+    assert "ready=$readyCount/$($bridgeStates.Count)" in script
     assert "http://127.0.0.1:9333" in script
     assert "Z:\\unifiedcollector\\backups\\db" in script
     assert "BackupFreshHours" in script
