@@ -52,7 +52,7 @@ def get_accounts(env: dict[str, str]) -> list[dict]:
                 "api_id": int(api_id),
                 "api_hash": api_hash,
                 "phone": phone,
-                "session": session,  # relative path like sessions/6592348112.session
+                "session": session,  # relative path like sessions/00000000.session
             }
         )
     return accts

@@ -103,3 +103,7 @@ Future maintainers: if outbound is needed for a specific use case, build it as
 a **separate service that consumes the unified DB** — do not embed it in the
 collector. The toolkits archived under `archive/` retain the
 original outbound implementations as reference.
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).

@@ -95,7 +95,7 @@ async def test_handle_session_event_marks_bridge_health_without_message_freshnes
     await collector._handle_session_event({
         "session_name": "session_1",
         "status": "active",
-        "phone_number": "6592348112",
+        "phone_number": "00000000",
     })
 
     sql, *_args = collector._test_conn.execute.await_args.args

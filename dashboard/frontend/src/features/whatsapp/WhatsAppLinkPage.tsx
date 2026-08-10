@@ -224,7 +224,7 @@ function BridgeCard({ bridge }: { bridge: 1 | 2 }) {
             onChange={(e) => setPhone(e.target.value)}
             type="tel"
             inputMode="tel"
-            placeholder="+6592348112"
+            placeholder="00000000"
             className="min-w-0 flex-1 bg-background border border-border rounded-md text-xs px-2.5 py-1.5 text-text-primary focus:outline-none focus:ring-2 focus:ring-white/20"
           />
           <button
