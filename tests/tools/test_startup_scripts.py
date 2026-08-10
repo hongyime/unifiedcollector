@@ -61,6 +61,11 @@ def test_boot_verifier_checks_reboot_critical_surfaces():
     assert "BackupFreshHours" in script
     assert "ActiveBackupFreshMinutes" in script
     assert "MaintenanceStatusFreshMinutes" in script
+    assert "DefaultSourceFreshMinutes" in script
+    assert "source_health" in script
+    assert "instagram = 30" in script
+    assert "strava = 60" in script
+    assert 'Add-Check $checks "source fresh: $source"' in script
     assert "db backup freshness" in script
     assert ".inprogress_*.dump" in script
     assert "browser maintenance latest status" in script

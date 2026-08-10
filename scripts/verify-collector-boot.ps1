@@ -6,6 +6,7 @@ param(
     [int]$BackupFreshHours = 30,
     [int]$ActiveBackupFreshMinutes = 20,
     [int]$MaintenanceStatusFreshMinutes = 45,
+    [int]$DefaultSourceFreshMinutes = 30,
     [int]$TimeoutSeconds = 8
 )
 
@@ -49,6 +50,18 @@ function Test-UrlHostMatches {
     } catch {
         return $false
     }
+}
+
+function Invoke-PostgresText {
+    param(
+        [string]$Sql,
+        [int]$QueryTimeoutSeconds = 20
+    )
+    return docker exec -e PGPASSWORD=collectorpass unifiedcollector_postgres psql `
+        -U collector `
+        -d unifiedcollector `
+        -v ON_ERROR_STOP=1 `
+        -Atc $Sql 2>$null
 }
 
 $checks = [System.Collections.Generic.List[object]]::new()
@@ -107,6 +120,59 @@ try {
     Add-Check $checks "dashboard health" $ok ($health | ConvertTo-Json -Compress -Depth 6)
 } catch {
     Add-Check $checks "dashboard health" $false $_.Exception.Message
+}
+
+try {
+    $sourceThresholds = [ordered]@{
+        beeper = 30
+        facebook = 30
+        github = 30
+        instagram = 30
+        lemon8 = 45
+        search = 240
+        strava = 60
+        telegram = 30
+        threads = 30
+        tiktok = 30
+        website = 30
+        whatsapp = 30
+        x = 45
+        youtube = 30
+    }
+    $sourcesSql = ($sourceThresholds.Keys | ForEach-Object { "'" + $_.Replace("'", "''") + "'" }) -join ","
+    $sourceRows = Invoke-PostgresText -Sql @"
+SELECT source || '|' || status || '|' || COALESCE(round(extract(epoch from (now()-last_success_at))/60, 1)::text, 'null') || '|' || COALESCE(left(last_error, 120), '')
+FROM source_health
+WHERE source IN ($sourcesSql)
+ORDER BY source
+"@
+    $sourceByName = @{}
+    foreach ($row in @($sourceRows)) {
+        if (-not $row) { continue }
+        $parts = ([string]$row).Split("|", 4)
+        if ($parts.Count -lt 3) { continue }
+        $sourceByName[$parts[0]] = [pscustomobject]@{
+            status = $parts[1]
+            age = $parts[2]
+            error = if ($parts.Count -ge 4) { $parts[3] } else { "" }
+        }
+    }
+    foreach ($source in $sourceThresholds.Keys) {
+        $row = $sourceByName[$source]
+        if (-not $row) {
+            Add-Check $checks "source fresh: $source" $false "missing source_health row"
+            continue
+        }
+        $age = [double]::PositiveInfinity
+        $hasAge = [double]::TryParse([string]$row.age, [ref]$age)
+        $threshold = [int]$sourceThresholds[$source]
+        $ok = $row.status -eq "running" -and $hasAge -and $age -le $threshold
+        $detail = "status=$($row.status), success_age=$($row.age)m, threshold=${threshold}m"
+        if ($row.error) { $detail += ", last_error=$($row.error)" }
+        Add-Check $checks "source fresh: $source" $ok $detail
+    }
+} catch {
+    Add-Check $checks "source freshness query" $false $_.Exception.Message
 }
 
 try {
