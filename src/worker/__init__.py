@@ -662,21 +662,50 @@ class WorkerService:
         if collector is None or not hasattr(collector, "download_message_media"):
             return False
         timeout = float(os.getenv("TELEGRAM_DLQ_MEDIA_RETRY_TIMEOUT_SECONDS", "120"))
-        ok = await asyncio.wait_for(
-            collector.download_message_media(message_id, chat_id=chat_id),
-            timeout=timeout,
-        )
-        if ok:
-            logger.info(
-                "telegram DLQ media retry succeeded: chat=%s message=%s content_id=%s",
-                chat_id,
-                message_id,
-                content_id,
-            )
-            return True
+        workers = list(getattr(collector, "_workers", []) or [])
+        last_error: BaseException | None = None
+        if workers:
+            for worker in workers:
+                try:
+                    ok = await asyncio.wait_for(
+                        collector.download_message_media(
+                            message_id,
+                            worker=worker,
+                            chat_id=chat_id,
+                        ),
+                        timeout=timeout,
+                    )
+                except Exception as exc:  # noqa: BLE001 - worker ownership varies.
+                    last_error = exc
+                    continue
+                if ok:
+                    logger.info(
+                        "telegram DLQ media retry succeeded: chat=%s message=%s content_id=%s",
+                        chat_id,
+                        message_id,
+                        content_id,
+                    )
+                    return True
+        else:
+            try:
+                ok = await asyncio.wait_for(
+                    collector.download_message_media(message_id, chat_id=chat_id),
+                    timeout=timeout,
+                )
+            except Exception as exc:  # noqa: BLE001 - preserve retry semantics.
+                last_error = exc
+            else:
+                if ok:
+                    logger.info(
+                        "telegram DLQ media retry succeeded: chat=%s message=%s content_id=%s",
+                        chat_id,
+                        message_id,
+                        content_id,
+                    )
+                    return True
         raise RuntimeError(
             f"telegram exact media retry returned no media for chat={chat_id} "
-            f"message={message_id}"
+            f"message={message_id}: {last_error or 'all workers returned empty'}"
         )
 
     async def _requeue_dlq_target(self, source: str, entity: str) -> None:

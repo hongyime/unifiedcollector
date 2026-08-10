@@ -45,9 +45,14 @@ async def test_telegram_dlq_handler_retries_exact_media(monkeypatch):
 
     svc = WorkerService()
     svc.pool = types.SimpleNamespace()
-    retry = AsyncMock(return_value=True)
+    worker_a = object()
+    worker_b = object()
+    retry = AsyncMock(side_effect=[None, True])
     svc._collectors = {
-        "telegram": types.SimpleNamespace(download_message_media=retry),
+        "telegram": types.SimpleNamespace(
+            _workers=[worker_a, worker_b],
+            download_message_media=retry,
+        ),
     }
 
     handler = svc._make_dlq_handler("telegram")
@@ -56,7 +61,9 @@ async def test_telegram_dlq_handler_retries_exact_media(monkeypatch):
         "content_id": "-100123_456",
     })
 
-    retry.assert_awaited_once_with(456, chat_id="-100123")
+    assert retry.await_count == 2
+    retry.assert_any_await(456, worker=worker_a, chat_id="-100123")
+    retry.assert_any_await(456, worker=worker_b, chat_id="-100123")
 
 
 async def test_dlq_handler_requeues_non_exact_rows(monkeypatch):
