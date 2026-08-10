@@ -312,7 +312,10 @@ async def _mark_running_if_browser_watchdog(db: asyncpg.Connection, source: str)
                 updated_at=NOW()
             WHERE source=$1
               AND status='degraded'
-              AND lower(coalesce(last_error, '')) LIKE 'browser capture stalled:%watchdog%'
+              AND (
+                lower(coalesce(last_error, '')) LIKE 'browser capture stalled:%watchdog%'
+                OR lower(coalesce(last_error, '')) LIKE 'browser capture stalled:%browser media yield warning:%'
+              )
             """,
             source,
         )

@@ -445,6 +445,28 @@ async def test_browser_source_tick_clears_recovered_browser_source(monkeypatch):
     assert cleared == ["facebook"]
 
 
+@pytest.mark.asyncio
+async def test_browser_recovery_clears_media_yield_warning_rows():
+    import src.watchdog.freshness as freshness
+
+    class Conn:
+        def __init__(self):
+            self.query = ""
+            self.args = ()
+
+        async def execute(self, query, *args):
+            self.query = query
+            self.args = args
+
+    conn = Conn()
+
+    await freshness._mark_running_if_browser_watchdog(conn, "lemon8")
+
+    assert conn.args == ("lemon8",)
+    assert "browser capture stalled:%watchdog%" in conn.query
+    assert "browser capture stalled:%browser media yield warning:%" in conn.query
+
+
 
 
 @pytest.mark.asyncio
