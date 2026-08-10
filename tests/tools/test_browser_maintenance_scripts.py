@@ -144,8 +144,9 @@ def test_browser_tab_reload_hard_reopens_repeatedly_stuck_tiktok_tabs():
     assert "UC_BROWSER_HARD_REOPEN_PLATFORMS" in script
     assert '"instagram,threads,tiktok,lemon8,x,facebook,strava"' in script
     assert '"https://www.tiktok.com/following"' in script
-    assert '"https://www.tiktok.com/foryou"' in script
-    assert '"https://www.tiktok.com/explore"' in script
+    hard_reopen_block = script.split("HARD_REOPEN_URLS = {", 1)[1].split("def _target_version", 1)[0]
+    assert '"https://www.tiktok.com/foryou"' not in hard_reopen_block
+    assert '"https://www.tiktok.com/explore"' not in hard_reopen_block
     assert '"https://www.lemon8-app.com/topic/food?region=sg"' in script
     assert "def _platform_had_previous_unresponsive_reload" in script
     assert "def _hard_reopen_platform" in script
@@ -182,15 +183,18 @@ def test_chrome_cdp_launcher_opens_requested_platform_urls_directly():
     assert 'lemon8 = "https://www.lemon8-app.com/topic/7011425874067619842?region=sg"' in script
     assert 'strava = "https://www.strava.com/dashboard"' in script
     assert "$platforms.Keys -contains $id" in script
-    assert "Get-PlatformLaunchUrls -Ids $OpenIds" in script
+    assert "Open-RequestedPlatformTabs -Port $RemoteDebuggingPort" in script
 
 
-def test_chrome_cdp_launcher_avoids_duplicate_platform_fanout_when_control_opens():
+def test_chrome_cdp_launcher_directly_opens_requested_platforms_after_control():
     script = _read_script("start-scraper-chrome-cdp.ps1")
 
     assert "$controlOpened = Open-ExtensionControlPage" in script
-    assert "if (-not $controlOpened)" in script
-    assert script.count("foreach ($url in @(Get-PlatformLaunchUrls") == 2
+    assert "function Open-RequestedPlatformTabs" in script
+    assert script.count("Open-RequestedPlatformTabs -Port $RemoteDebuggingPort") == 2
+    assert "if ($OpenIds.Count -gt 0 -or ($OpenAll -and -not $NoOpenAll))" in script
+    assert "UC_CHROME_OPEN_TAB_DELAY_MS" in script
+    assert "$delayMs = 5000" in script
 
 
 def test_chrome_cdp_launcher_makes_open_all_explicit():
@@ -244,3 +248,26 @@ def test_browser_maintenance_uses_load_tolerant_wrapper_timeouts():
 
     assert 'UC_BROWSER_AUDIT_TIMEOUT_SECONDS" 240' in script
     assert 'UC_BROWSER_RELOAD_TIMEOUT_SECONDS" 180' in script
+
+
+def test_browser_maintenance_reaudits_after_reload():
+    script = _read_script("browser-tab-maintenance.ps1")
+
+    audit_call = "Invoke-PythonScript -command $python -script $audit"
+    reload_call = "Invoke-PythonScript -command $python -script $reload"
+    assert script.count(audit_call) >= 2
+    assert script.count(reload_call) >= 1
+    assert script.index(audit_call) < script.index(reload_call)
+    assert script.rindex(audit_call) > script.index(reload_call)
+    assert "pre-reload snapshot" in script
+    assert "UC_BROWSER_POST_RELOAD_SETTLE_SECONDS" in script
+
+
+def test_browser_maintenance_uses_short_live_audit_probes():
+    script = _read_script("browser-tab-maintenance.ps1")
+
+    assert 'Set-DefaultEnv "UC_TAB_AUDIT_RUNTIME_ENABLE_TIMEOUT_SECONDS" "2.0"' in script
+    assert 'Set-DefaultEnv "UC_TAB_AUDIT_MAIN_TIMEOUT_SECONDS" "3.0"' in script
+    assert 'Set-DefaultEnv "UC_TAB_AUDIT_ISO_TIMEOUT_SECONDS" "0.8"' in script
+    assert 'Set-DefaultEnv "UC_TAB_AUDIT_PERF_TIMEOUT_SECONDS" "0.5"' in script
+    assert "without pinning the machine" in script

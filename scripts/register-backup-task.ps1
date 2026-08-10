@@ -36,8 +36,11 @@ $trigger = New-ScheduledTaskTrigger -Daily -At 3:30AM
 # logged-on user's Docker session. Highest privileges for docker access.
 $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest
 
+# Large collector dumps can run for multiple hours while still making progress.
+# Let src\backup\db_backup.py enforce the stall-progress timeout instead of
+# having Task Scheduler kill a valid dump at a fixed wall-clock limit.
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable `
-    -DontStopOnIdleEnd -ExecutionTimeLimit (New-TimeSpan -Hours 1)
+    -DontStopOnIdleEnd -ExecutionTimeLimit (New-TimeSpan -Hours 0)
 
 # Replace if it already exists.
 if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {

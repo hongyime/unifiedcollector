@@ -41,8 +41,6 @@ HARD_REOPEN_PLATFORMS = {
 HARD_REOPEN_URLS = {
     "tiktok": [
         "https://www.tiktok.com/following",
-        "https://www.tiktok.com/foryou",
-        "https://www.tiktok.com/explore",
     ],
     "lemon8": [
         "https://www.lemon8-app.com/topic/food?region=sg",

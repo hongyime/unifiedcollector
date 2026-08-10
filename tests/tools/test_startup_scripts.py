@@ -81,3 +81,12 @@ def test_boot_verifier_checks_reboot_critical_surfaces():
     assert "tiktok.com" in script
     assert "lemon8-app.com" in script
     assert "strava.com" in script
+
+
+def test_backup_task_allows_progress_guarded_long_dumps():
+    script = (REPO_ROOT / "scripts" / "register-backup-task.ps1").read_text(encoding="utf-8")
+
+    assert "UnifiedCollectorBackup" in script
+    assert "ExecutionTimeLimit (New-TimeSpan -Hours 0)" in script
+    assert "stall-progress timeout" in script
+    assert "fixed wall-clock limit" in script

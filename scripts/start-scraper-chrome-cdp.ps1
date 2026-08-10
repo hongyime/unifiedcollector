@@ -343,7 +343,7 @@ if ($FallbackOpenControlIfCleanupBlocked -and $OpenIds.Count -eq 0 -and -not $Op
 if ($OpenAll -and -not $NoOpenAll -and $OpenIds.Count -eq 0) {
     $tabsParams.Add("openAll=1")
 }
-if ($OpenIds.Count -gt 0) {
+if ($OpenIds.Count -gt 0 -and $NoOpenAll -and $FallbackOpenControlIfCleanupBlocked) {
     $encodedIds = @($OpenIds | ForEach-Object { [uri]::EscapeDataString([string]$_) }) -join ","
     $tabsParams.Add("open=$encodedIds")
 }
@@ -359,6 +359,21 @@ if ($tabsQuery) {
     $tabsUrlPath = "${tabsUrlPath}?$tabsQuery"
 }
 $fallbackTabsUrl = "chrome-extension://$(Get-PrimaryKnownExtensionId)/$tabsUrlPath"
+
+function Open-RequestedPlatformTabs {
+    param([int]$Port, [string[]]$Ids, [bool]$All)
+    $delayMs = 5000
+    $rawDelay = [Environment]::GetEnvironmentVariable("UC_CHROME_OPEN_TAB_DELAY_MS")
+    $parsedDelay = 0
+    if ([int]::TryParse($rawDelay, [ref]$parsedDelay) -and $parsedDelay -ge 500) {
+        $delayMs = $parsedDelay
+    }
+    foreach ($url in @(Get-PlatformLaunchUrls -Ids $Ids -All $All)) {
+        Try-OpenCdpTarget -Port $Port -Url $url | Out-Null
+        Start-Sleep -Milliseconds $delayMs
+    }
+}
+
 $args = @(
     "--remote-debugging-port=$RemoteDebuggingPort",
     "--remote-debugging-address=0.0.0.0",
@@ -404,12 +419,11 @@ $cdpAlreadyUp = Test-CdpAvailable $RemoteDebuggingPort
 
 if ($cdpAlreadyUp) {
     $controlOpened = Open-ExtensionControlPage -Port $RemoteDebuggingPort -TabsUrlPath $tabsUrlPath
+    if ($OpenIds.Count -gt 0 -or ($OpenAll -and -not $NoOpenAll)) {
+        Open-RequestedPlatformTabs -Port $RemoteDebuggingPort -Ids $OpenIds -All ($OpenAll -and -not $NoOpenAll)
+    }
     if (-not $controlOpened) {
         Write-Warning "Chrome CDP is reachable, but the UnifiedCollector extension target was not visible."
-        foreach ($url in @(Get-PlatformLaunchUrls -Ids $OpenIds -All ($OpenAll -and -not $NoOpenAll))) {
-            Try-OpenCdpTarget -Port $RemoteDebuggingPort -Url $url | Out-Null
-            Start-Sleep -Milliseconds 500
-        }
     }
     Write-Host "Chrome CDP is already reachable on 127.0.0.1:$RemoteDebuggingPort."
     exit 0
@@ -465,12 +479,11 @@ Start-Sleep -Seconds 4
 
 if (Test-CdpAvailable $RemoteDebuggingPort) {
     $controlOpened = Open-ExtensionControlPage -Port $RemoteDebuggingPort -TabsUrlPath $tabsUrlPath
+    if ($OpenIds.Count -gt 0 -or ($OpenAll -and -not $NoOpenAll)) {
+        Open-RequestedPlatformTabs -Port $RemoteDebuggingPort -Ids $OpenIds -All ($OpenAll -and -not $NoOpenAll)
+    }
     if (-not $controlOpened) {
         Write-Warning "CDP is reachable, but no loaded UnifiedCollector extension target was found yet; reload the unpacked extension from chrome://extensions if browser heartbeats stay stale."
-        foreach ($url in @(Get-PlatformLaunchUrls -Ids $OpenIds -All ($OpenAll -and -not $NoOpenAll))) {
-            Try-OpenCdpTarget -Port $RemoteDebuggingPort -Url $url | Out-Null
-            Start-Sleep -Milliseconds 500
-        }
     }
     Write-Host "Started Chrome PID $($proc.Id); CDP is reachable on 127.0.0.1:$RemoteDebuggingPort."
     exit 0

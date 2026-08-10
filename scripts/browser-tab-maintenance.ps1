@@ -224,6 +224,20 @@ function Get-PositiveIntEnv([string]$name, [int]$fallback) {
     return $fallback
 }
 
+function Invoke-PostReloadSettle([int]$seconds) {
+    if ($seconds -le 0) {
+        return
+    }
+    Write-Log "settling browser tabs for ${seconds}s before follow-up audit"
+    Start-Sleep -Seconds $seconds
+}
+
+function Set-DefaultEnv([string]$name, [string]$value) {
+    if (-not [Environment]::GetEnvironmentVariable($name)) {
+        [Environment]::SetEnvironmentVariable($name, $value, "Process")
+    }
+}
+
 function Write-OutputLines($text) {
     if (-not $text) { return }
     $text -split "`r?`n" | Where-Object { $_ -ne "" } | ForEach-Object { Write-Log $_ }
@@ -311,9 +325,22 @@ try {
     $python = Resolve-Python
     $auditTimeout = Get-PositiveIntEnv "UC_BROWSER_AUDIT_TIMEOUT_SECONDS" 240
     $reloadTimeout = Get-PositiveIntEnv "UC_BROWSER_RELOAD_TIMEOUT_SECONDS" 180
+    $settleSeconds = Get-PositiveIntEnv "UC_BROWSER_POST_RELOAD_SETTLE_SECONDS" 30
+    # Maintenance should heal the browser without pinning the machine for many
+    # minutes. Keep live-audit probes short here; deeper manual audits can still
+    # override these env vars.
+    Set-DefaultEnv "UC_TAB_AUDIT_RUNTIME_ENABLE_TIMEOUT_SECONDS" "2.0"
+    Set-DefaultEnv "UC_TAB_AUDIT_MAIN_TIMEOUT_SECONDS" "3.0"
+    Set-DefaultEnv "UC_TAB_AUDIT_ISO_TIMEOUT_SECONDS" "0.8"
+    Set-DefaultEnv "UC_TAB_AUDIT_PERF_TIMEOUT_SECONDS" "0.5"
     Write-Log ("using python command: " + ($python -join " "))
     Invoke-PythonScript -command $python -script $audit -timeoutSeconds $auditTimeout
     Invoke-PythonScript -command $python -script $reload -timeoutSeconds $reloadTimeout
+    # The reload step can open or replace tabs. Re-audit after a brief settle so
+    # verifiers and dashboards read the repaired browser state, not the
+    # pre-reload snapshot.
+    Invoke-PostReloadSettle -seconds $settleSeconds
+    Invoke-PythonScript -command $python -script $audit -timeoutSeconds $auditTimeout
     Write-Log "browser tab maintenance complete"
     Write-Status "ok" "audit and reload completed"
 } catch {
