@@ -185,7 +185,7 @@ def test_recoverable_page_shells_recover_without_waiting_on_x_native_retry():
     assert "await attemptRecoverablePageInteraction(p.id, shell)" in content
     assert "https://x.com/explore" in content
     assert "uc_x_shell_global_step" in content
-    assert "https://x.com/i/flow/login?redirect_after_login=%2Fhome" in content
+    assert "https://x.com/i/flow/login?redirect_after_login=%2Fhome" not in content
     assert "https://x.com/home?uc_recover=" in content
     recover_block = content.split("async function attemptRecoverablePageInteraction", 1)[1].split(
         "// Capture is ALWAYS ON", 1
@@ -469,7 +469,7 @@ def test_x_error_shell_can_switch_host_when_native_retry_is_missing():
     assert "https://x.com/home?uc_recover=" in switch_block
     assert "navigating to ${target}" in switch_block
     assert "uc_x_shell_global_step" in switch_block
-    assert "https://x.com/i/flow/login?redirect_after_login=%2Fhome" in switch_block
+    assert "https://x.com/i/flow/login?redirect_after_login=%2Fhome" not in switch_block
     assert "failed_script" in switch_block
     assert "uc_recover_click_x_failed_script_url" in recover_block
     assert '"https://x.com/home?uc_recover="' in recover_block

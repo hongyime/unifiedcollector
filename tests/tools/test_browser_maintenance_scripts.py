@@ -163,6 +163,8 @@ def test_browser_tab_reload_recovers_dom_error_shells_and_stale_auth_duplicates(
     assert "stale_auth_wall_close_tabs = {" in script
     assert 'and p["platform"] in healthy_platforms' in script
     assert '"close_duplicate_auth_wall"' in script
+    assert "duplicate_healthy_close_tabs" in script
+    assert '"close_duplicate_healthy_url"' in script
     assert "if str(p[\"target_id\"]) in stale_auth_wall_close_tabs:" in script
 
 
@@ -185,6 +187,9 @@ def test_browser_tab_reload_hard_reopens_repeatedly_stuck_tiktok_tabs():
     assert "dict.fromkeys" in script
     assert "hard_reopen_close" in script
     assert "hard_reopen_open" in script
+    assert "shell_tabs = [" in script
+    assert '"page health:" in str(p["reason"]).lower()' in script
+    assert "hard_reopen_tabs.update" in script
 
 
 def test_browser_tab_reload_hard_reopens_individual_repeated_stuck_tabs():
@@ -358,6 +363,25 @@ def test_browser_maintenance_restarts_dedicated_profile_when_tabs_stay_unhealthy
     assert "Invoke-ChromeCdpRepair -Diagnostics $diagnostics" in script
     assert "browser extension tabs unhealthy after reload/profile restart" in script
     assert 'Write-Status "degraded"' in script
+
+
+def test_browser_maintenance_reopens_missing_extension_control_tab():
+    script = _read_script("browser-tab-maintenance.ps1")
+
+    assert "function Test-ExtensionControlTab" in script
+    assert "function Ensure-ExtensionControlTab" in script
+    assert "chrome-extension://$extensionId/tabs.html" in script
+    assert "opened missing extension control tab" in script
+    assert "Ensure-ExtensionControlTab | Out-Null" in script
+
+
+def test_browser_maintenance_does_not_profile_restart_for_manual_auth():
+    script = _read_script("browser-tab-maintenance.ps1")
+
+    assert "function Test-AuditHealthNeedsManualAuth" in script
+    assert "auth_challenge|logout=" in script
+    assert "manual platform auth is required; skipping profile restart" in script
+    assert 'Write-Status "degraded" "browser tab requires manual platform auth"' in script
 
 
 def test_browser_audit_reports_dom_level_error_shells():

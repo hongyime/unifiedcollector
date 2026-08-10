@@ -205,6 +205,59 @@ function Test-CdpAvailable {
     }
 }
 
+function Get-CdpPageTargets {
+    try {
+        return @(Invoke-RestMethod -Uri "http://127.0.0.1:$script:CdpPort/json/list" -Method Get -TimeoutSec 5)
+    } catch {
+        Write-Log ("could not list Chrome CDP targets: " + $_.Exception.Message)
+        return @()
+    }
+}
+
+function Test-ExtensionControlTab {
+    foreach ($target in @(Get-CdpPageTargets)) {
+        $url = [string]$target.url
+        if ($url -match "^chrome-extension://[a-p]{32}/tabs\.html") {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Open-CdpTargetUrl {
+    param([string]$Url)
+    try {
+        $encoded = [uri]::EscapeDataString($Url)
+        Invoke-WebRequest -Uri "http://127.0.0.1:$script:CdpPort/json/new?$encoded" -Method Put -UseBasicParsing -TimeoutSec 10 | Out-Null
+        return $true
+    } catch {
+        Write-Log ("could not open CDP target ${Url}: " + $_.Exception.Message)
+        return $false
+    }
+}
+
+function Ensure-ExtensionControlTab {
+    if (Test-ExtensionControlTab) {
+        return $true
+    }
+    $knownIds = @(
+        "pkmdmcklnjdeocoeigmlakhomhhcpafb",
+        "nkeimhogjdpnpccoofpliimaahmaaome"
+    )
+    foreach ($extensionId in $knownIds) {
+        $url = "chrome-extension://$extensionId/tabs.html"
+        if (Open-CdpTargetUrl -Url $url) {
+            Start-Sleep -Seconds 2
+            if (Test-ExtensionControlTab) {
+                Write-Log "opened missing extension control tab: $url"
+                return $true
+            }
+        }
+    }
+    Write-Log "extension control tab is still missing after CDP open attempts"
+    return $false
+}
+
 function Invoke-ChromeCdpRepair {
     param([object]$Diagnostics)
     $reason = [string]$Diagnostics.reason
@@ -426,6 +479,23 @@ function Get-AuditHealth {
     }
 }
 
+function Test-AuditHealthNeedsManualAuth($AuditHealth) {
+    if ($null -eq $AuditHealth -or $AuditHealth.ok) {
+        return $false
+    }
+    $items = @($AuditHealth.unhealthy)
+    if ($items.Count -eq 0) {
+        return $false
+    }
+    foreach ($item in $items) {
+        $text = [string]$item
+        if ($text -notmatch "page_health=recoverable_error_shell" -or $text -notmatch "auth_challenge|logout=") {
+            return $false
+        }
+    }
+    return $true
+}
+
 function Invoke-ScraperChromeProfileRestart {
     $launcher = Join-Path $repo "scripts\start-scraper-chrome-cdp.ps1"
     Write-Log "browser tab maintenance escalation: restarting dedicated scraper Chrome profile"
@@ -512,6 +582,12 @@ try {
     }
     if (-not $auditHealth.ok) {
         Write-Log ("browser tab audit still unhealthy after second reload: " + (($auditHealth.unhealthy) -join " | "))
+        if (Test-AuditHealthNeedsManualAuth $auditHealth) {
+            Ensure-ExtensionControlTab | Out-Null
+            Write-Log "browser tab maintenance degraded: manual platform auth is required; skipping profile restart"
+            Write-Status "degraded" "browser tab requires manual platform auth"
+            exit 4
+        }
         if (Invoke-ScraperChromeProfileRestart) {
             Invoke-PostReloadSettle -seconds $profileRestartSettleSeconds
             Invoke-PythonScript -command $python -script $audit -timeoutSeconds $auditTimeout
@@ -524,6 +600,7 @@ try {
         Write-Status "degraded" "browser extension tabs unhealthy after reload/profile restart"
         exit 4
     }
+    Ensure-ExtensionControlTab | Out-Null
     Write-Log "browser tab maintenance complete"
     Write-Status "ok" "audit and reload completed"
 } catch {

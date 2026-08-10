@@ -634,7 +634,6 @@ function switchXHostForRecoverableShell(shell) {
         alternateHost,
         `https://x.com/home?uc_recover=${stamp}`,
         ...(owner ? ["https://x.com/" + encodeURIComponent(owner) + "?uc_recover=" + stamp] : []),
-        "https://x.com/i/flow/login?redirect_after_login=%2Fhome",
       ];
   const step = lsNum(stepKey) % targets.length;
   lsSet(stepKey, String(step + 1));
