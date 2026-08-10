@@ -27,8 +27,16 @@ def test_chrome_cdp_launcher_uses_robust_startup_flags():
     assert "UC_CHROME_RENDERER_PROCESS_LIMIT" in script
     assert "--renderer-process-limit=$rendererLimit" in script
     assert "[switch]$CloseExistingCdpProfile" in script
+    assert "function Get-ScraperProfileChromeProcesses" in script
     assert "function Get-CdpProfileChromeProcesses" in script
     assert "function Stop-CdpProfileChrome" in script
+    assert "function Test-UnifiedCollectorControlWindow" in script
+    assert "function Get-UnsafeVisibleChromeWindows" in script
+    assert "only UnifiedCollector control windows are visible" in script
+    assert "$scraperProfileProcesses = @(Get-ScraperProfileChromeProcesses -UserDataDir $profile)" in script
+    assert "if ($CloseExistingCdpProfile -and $scraperProfileProcesses.Count -gt 0)" in script
+    assert "$profileProcesses = @(Get-ScraperProfileChromeProcesses -UserDataDir $UserDataDir)" in script
+    assert "A failed Chrome startup can keep the scraper profile open" in script
 
 
 def test_chrome_cdp_launcher_prefers_extension_capable_chromium():

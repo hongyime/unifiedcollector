@@ -152,22 +152,33 @@ function Stop-ProcessIds {
 
 function Get-CdpProfileChromeProcesses {
     param([string]$UserDataDir, [int]$Port)
+    return @(Get-ScraperProfileChromeProcesses -UserDataDir $UserDataDir | Where-Object {
+        $cmd = [string]$_.CommandLine
+        $cmd -match "--remote-debugging-port(?:=|\s+)$Port\b"
+    })
+}
+
+function Get-ScraperProfileChromeProcesses {
+    param([string]$UserDataDir)
     $profileFull = [IO.Path]::GetFullPath($UserDataDir).TrimEnd('\')
     $profileSlash = $profileFull.Replace('\', '/')
     return @(Get-ChromeProcesses | Where-Object {
         $cmd = [string]$_.CommandLine
         if (-not $cmd) { return $false }
-        $hasProfile =
+        return (
             $cmd.IndexOf($profileFull, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
             $cmd.IndexOf($profileSlash, [StringComparison]::OrdinalIgnoreCase) -ge 0
-        $hasCdpPort = $cmd -match "--remote-debugging-port(?:=|\s+)$Port\b"
-        $hasProfile -and $hasCdpPort
+        )
     })
 }
 
 function Stop-CdpProfileChrome {
     param([string]$UserDataDir, [int]$Port)
-    $profileProcesses = @(Get-CdpProfileChromeProcesses -UserDataDir $UserDataDir -Port $Port)
+    # Close by the dedicated UnifiedCollector profile, not only by the CDP flag.
+    # A failed Chrome startup can keep the scraper profile open while dropping
+    # --remote-debugging-port, which otherwise traps maintenance in
+    # "visible Chrome without CDP" and prevents automatic recovery.
+    $profileProcesses = @(Get-ScraperProfileChromeProcesses -UserDataDir $UserDataDir)
     if ($profileProcesses.Count -eq 0) {
         return
     }
@@ -185,7 +196,7 @@ function Stop-CdpProfileChrome {
         Stop-ProcessIds -Pids $rootIds
         Start-Sleep -Seconds 2
     }
-    $remaining = @(Get-CdpProfileChromeProcesses -UserDataDir $UserDataDir -Port $Port |
+    $remaining = @(Get-ScraperProfileChromeProcesses -UserDataDir $UserDataDir |
         Select-Object -ExpandProperty ProcessId |
         Sort-Object -Unique)
     if ($remaining.Count -gt 0) {
@@ -338,6 +349,22 @@ function Get-ChromeProcesses {
 
 function Get-VisibleChromeWindows {
     return @(Get-Process chrome -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 })
+}
+
+function Test-UnifiedCollectorControlWindow {
+    param($Process)
+    $title = [string]$Process.MainWindowTitle
+    foreach ($knownId in @(Get-KnownExtensionIds)) {
+        if ($title -like "chrome-extension://$knownId/tabs.html*") {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Get-UnsafeVisibleChromeWindows {
+    param([array]$VisibleWindows)
+    return @($VisibleWindows | Where-Object { -not (Test-UnifiedCollectorControlWindow $_) })
 }
 
 function Stop-ChromeProcessTree {
@@ -521,13 +548,13 @@ if ($DryRun) {
         Write-Host "Fallback if hidden Chrome cleanup is blocked: open existing Chrome to $fallbackTabsUrl"
     }
     if ($CloseExistingCdpProfile) {
-        Write-Host "CloseExistingCdpProfile: would close only Chrome processes using $profile and --remote-debugging-port=$RemoteDebuggingPort"
+        Write-Host "CloseExistingCdpProfile: would close only Chrome processes using $profile"
     }
     exit 0
 }
 
-$cdpProfileProcesses = @(Get-CdpProfileChromeProcesses -UserDataDir $profile -Port $RemoteDebuggingPort)
-if ($CloseExistingCdpProfile -and $cdpProfileProcesses.Count -gt 0) {
+$scraperProfileProcesses = @(Get-ScraperProfileChromeProcesses -UserDataDir $profile)
+if ($CloseExistingCdpProfile -and $scraperProfileProcesses.Count -gt 0) {
     Stop-CdpProfileChrome -UserDataDir $profile -Port $RemoteDebuggingPort
     Clear-ChromeSessionRestore -UserDataDir $profile
     Start-Sleep -Seconds 2
@@ -550,10 +577,15 @@ if ($cdpAlreadyUp) {
 }
 
 if ($chromeProcesses.Count -gt 0 -and -not $AllowWhileChromeRunning -and $CloseExistingIfNoVisibleWindows) {
-    if ($visibleChromeWindows.Count -gt 0) {
+    $unsafeVisibleChromeWindows = @(Get-UnsafeVisibleChromeWindows -VisibleWindows $visibleChromeWindows)
+    if ($unsafeVisibleChromeWindows.Count -gt 0) {
         Write-Error "Chrome has visible windows open; refusing automatic close. Close Chrome manually, then rerun this script."
     }
-    Write-Host "Chrome is running without CDP and has no visible windows; closing orphaned/background Chrome processes first."
+    if ($visibleChromeWindows.Count -gt 0) {
+        Write-Host "Chrome is running without CDP and only UnifiedCollector control windows are visible; closing them before relaunch."
+    } else {
+        Write-Host "Chrome is running without CDP and has no visible windows; closing orphaned/background Chrome processes first."
+    }
     try {
         Stop-ChromeProcessTree -Processes $chromeProcesses
     } catch {
@@ -571,7 +603,8 @@ if ($chromeProcesses.Count -gt 0 -and -not $AllowWhileChromeRunning -and $CloseE
 $portOwners = @(Get-PortListenerPids -Port $RemoteDebuggingPort)
 if ($portOwners.Count -gt 0 -and -not $cdpAlreadyUp -and -not $AllowWhileChromeRunning -and $CloseExistingIfNoVisibleWindows) {
     $visibleChromeWindows = @(Get-VisibleChromeWindows)
-    if ($visibleChromeWindows.Count -gt 0) {
+    $unsafeVisibleChromeWindows = @(Get-UnsafeVisibleChromeWindows -VisibleWindows $visibleChromeWindows)
+    if ($unsafeVisibleChromeWindows.Count -gt 0) {
         Write-Error "Port $RemoteDebuggingPort is owned by PID(s) $($portOwners -join ', '), but Chrome has visible windows open. Close Chrome manually, then rerun this script."
     }
     Write-Host "Port $RemoteDebuggingPort is still owned by stale PID(s) $($portOwners -join ', '); killing them before relaunch."
