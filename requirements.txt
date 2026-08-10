@@ -26,7 +26,7 @@ curl_cffi>=0.16.0,<0.17
 gallery-dl>=1.32.9
 
 # PDF to image extraction (website collector)
-PyMuPDF>=1.28.0
+PyMuPDF>=1.28.2
 
 # Browser automation fallback (TikTok)
 playwright>=1.62.0
@@ -52,7 +52,7 @@ PyJWT>=2.8.0
 qrcode[pil]>=8.2
 
 # YouTube OAuth token refresh
-google-auth>=2.56.2
+google-auth>=2.56.3
 google-auth-oauthlib>=1.4.0
 
 # WhatsApp face recognition (pgvector similarity)
