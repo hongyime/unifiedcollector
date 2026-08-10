@@ -304,6 +304,43 @@ ORDER BY source
 }
 
 try {
+    $cooldownSql = @"
+SELECT source || '/' || COALESCE(account, '-') || '/' || COALESCE(scope, '-') ||
+       ' ' || COALESCE(status_code::text, 'local') ||
+       ' ' || round(extract(epoch FROM (created_at + cooldown_seconds * interval '1 second' - now())) / 60, 1)::text || 'm left' ||
+       CASE WHEN reason IS NULL OR reason = '' THEN '' ELSE ' ' || left(reason, 80) END
+FROM rate_limit_events
+WHERE cooldown_seconds IS NOT NULL
+  AND created_at + cooldown_seconds * interval '1 second' > now()
+ORDER BY created_at DESC
+LIMIT 12
+"@
+    $cooldowns = @(Invoke-PostgresText -Sql $cooldownSql -QueryTimeoutSeconds 10 | Where-Object { $_ })
+    $quotaSql = @"
+SELECT platform || '/' || account || ' hour=' || requests_hour::text || ' today=' || requests_today::text
+FROM account_quota_usage
+WHERE updated_at >= now() - interval '2 hours'
+ORDER BY updated_at DESC
+LIMIT 8
+"@
+    $quotaRows = @(Invoke-PostgresText -Sql $quotaSql -QueryTimeoutSeconds 10 | Where-Object { $_ })
+    $parts = @()
+    if ($cooldowns.Count -gt 0) {
+        $parts += "active cooldowns: " + (($cooldowns | Select-Object -First 8) -join "; ")
+    } else {
+        $parts += "active cooldowns: none"
+    }
+    if ($quotaRows.Count -gt 0) {
+        $parts += "recent quota counters: " + (($quotaRows | Select-Object -First 6) -join "; ")
+    } else {
+        $parts += "recent quota counters: none in last 2h"
+    }
+    Add-Check $checks "rate limits and quotas" $true ($parts -join " | ")
+} catch {
+    Add-Check $checks "rate limits and quotas" $false $_.Exception.Message
+}
+
+try {
     $recentSql = @'
 CREATE TEMP TABLE IF NOT EXISTS uc_recent_ingestion_counts (
     source_name text NOT NULL,

@@ -71,6 +71,11 @@ def test_boot_verifier_checks_reboot_critical_surfaces():
     assert "DefaultSourceFreshMinutes" in script
     assert "source_health" in script
     assert "RecentIngestionMinutes" in script
+    assert "rate limits and quotas" in script
+    assert "FROM rate_limit_events" in script
+    assert "FROM account_quota_usage" in script
+    assert "active cooldowns:" in script
+    assert "recent quota counters:" in script
     assert "recent ingestion window" in script
     assert "telegram_messages" in script
     assert "media_items" in script
