@@ -32,7 +32,7 @@ AUDIT_PATH = REPO_ROOT / "tmp" / "browser_tab_audit_result.json"
 PLAN_PATH = REPO_ROOT / "tmp" / "browser_tab_reload_plan.json"
 HARD_REOPEN_PLATFORMS = {
     p.strip().lower()
-    for p in os.getenv("UC_BROWSER_HARD_REOPEN_PLATFORMS", "tiktok").split(",")
+    for p in os.getenv("UC_BROWSER_HARD_REOPEN_PLATFORMS", "tiktok,lemon8").split(",")
     if p.strip()
 }
 HARD_REOPEN_URLS = {
@@ -40,6 +40,9 @@ HARD_REOPEN_URLS = {
         "https://www.tiktok.com/following",
         "https://www.tiktok.com/foryou",
         "https://www.tiktok.com/explore",
+    ],
+    "lemon8": [
+        "https://www.lemon8-app.com/topic/food?region=sg",
     ],
 }
 

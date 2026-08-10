@@ -70,6 +70,9 @@ def test_boot_verifier_checks_reboot_critical_surfaces():
     assert ".inprogress_*.dump" in script
     assert "browser maintenance latest status" in script
     assert "browser_tab_maintenance_status.json" in script
+    assert "browser_tab_audit_result.json" in script
+    assert "extension content script: $platform" in script
+    assert "cs_running" in script
     assert "browser_tab_maintenance_loop.pid" in script
     assert "instagram.com" in script
     assert "tiktok.com" in script

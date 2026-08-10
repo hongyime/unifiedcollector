@@ -248,6 +248,39 @@ if (Test-Path -LiteralPath $maintenanceStatusPath) {
 }
 Add-Check $checks "browser maintenance latest status" $maintenanceOk $maintenanceDetail
 
+$auditResultPath = Join-Path $repoPath "tmp\browser_tab_audit_result.json"
+$extensionPlatforms = @("instagram", "threads", "tiktok", "lemon8", "x", "facebook", "strava")
+if (Test-Path -LiteralPath $auditResultPath) {
+    try {
+        $auditResult = Get-Content -LiteralPath $auditResultPath -Raw | ConvertFrom-Json
+        foreach ($platform in $extensionPlatforms) {
+            $tabs = @($auditResult.$platform)
+            if ($tabs.Count -eq 0) {
+                Add-Check $checks "extension content script: $platform" $false "missing audit row"
+                continue
+            }
+            $healthy = @(
+                $tabs | Where-Object {
+                    $_.responsive_main -eq $true -and
+                    $_.cs -eq $true -and
+                    $_.cs_running -eq $true -and
+                    [string]$_.cs_version
+                }
+            )
+            $detailRows = @(
+                $tabs | ForEach-Object {
+                    "resp=$($_.responsive_main), cs=$($_.cs), running=$($_.cs_running), ver=$($_.cs_version), url=$($_.url_snapshot)"
+                }
+            )
+            Add-Check $checks "extension content script: $platform" ($healthy.Count -gt 0) ($detailRows -join "; ")
+        }
+    } catch {
+        Add-Check $checks "extension content script audit" $false "could not parse audit result: $($_.Exception.Message)"
+    }
+} else {
+    Add-Check $checks "extension content script audit" $false "missing audit result: $auditResultPath"
+}
+
 $backupOk = $false
 $backupDetail = "backup directory missing: $BackupDir"
 if (Test-Path -LiteralPath $BackupDir) {
