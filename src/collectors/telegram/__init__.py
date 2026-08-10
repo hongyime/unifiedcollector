@@ -5738,7 +5738,12 @@ class TelegramCollector(BaseCollector):
                 msgs = await client.get_messages(int(chat_id), ids=int(message_or_id))
                 message = msgs if hasattr(msgs, "media") else (msgs[0] if msgs else None)
             except Exception as exc:
-                logger.error("download_message_media: get_messages failed: %s", exc)
+                logger.warning(
+                    "download_message_media: get_messages failed for chat=%s message=%s: %s",
+                    chat_id,
+                    message_or_id,
+                    exc,
+                )
                 return None
 
         if message is None or getattr(message, "media", None) is None:
