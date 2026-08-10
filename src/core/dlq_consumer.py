@@ -170,33 +170,39 @@ class DLQConsumer:
         registered = list(self._handlers.keys())
         if not registered:
             return []
+        claimed_rows: list[dict] = []
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                """
-                WITH claimed AS (
-                    SELECT id
-                    FROM dead_letter_queue
-                    WHERE status = 'pending'
-                      AND next_retry_at <= NOW()
-                      AND source = ANY($2::text[])
-                    ORDER BY next_retry_at
-                    LIMIT $1
-                    FOR UPDATE SKIP LOCKED
+            for source in registered:
+                remaining = self.batch_size - len(claimed_rows)
+                if remaining <= 0:
+                    break
+                rows = await conn.fetch(
+                    """
+                    WITH claimed AS (
+                        SELECT id
+                        FROM dead_letter_queue
+                        WHERE status = 'pending'
+                          AND next_retry_at <= NOW()
+                          AND source = $2
+                        ORDER BY next_retry_at, id
+                        LIMIT $1
+                        FOR UPDATE SKIP LOCKED
+                    )
+                    UPDATE dead_letter_queue AS dlq
+                    SET status = 'in_progress',
+                        last_attempt_at = NOW()
+                    FROM claimed
+                    WHERE dlq.id = claimed.id
+                    RETURNING dlq.id, dlq.source, dlq.entity_id, dlq.content_id,
+                              dlq.error_message, dlq.retry_count, dlq.created_at,
+                              dlq.next_retry_at, dlq.last_attempt_at, dlq.status
+                    """,
+                    remaining,
+                    source,
+                    timeout=self.db_timeout_seconds,
                 )
-                UPDATE dead_letter_queue AS dlq
-                SET status = 'in_progress',
-                    last_attempt_at = NOW()
-                FROM claimed
-                WHERE dlq.id = claimed.id
-                RETURNING dlq.id, dlq.source, dlq.entity_id, dlq.content_id,
-                          dlq.error_message, dlq.retry_count, dlq.created_at,
-                          dlq.next_retry_at, dlq.last_attempt_at, dlq.status
-                """,
-                self.batch_size,
-                registered,
-                timeout=self.db_timeout_seconds,
-            )
-            return [dict(r) for r in rows]
+                claimed_rows.extend(dict(r) for r in rows)
+        return claimed_rows
 
     async def _on_success(self, row_id: int) -> None:
         """Delete the row from the DLQ."""

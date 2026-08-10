@@ -12,7 +12,9 @@ class _FakeConnection:
 
     async def fetch(self, query, *args, **kwargs):
         self.fetch_calls.append((query, args, kwargs))
-        return self.rows
+        if isinstance(self.rows, list):
+            return self.rows
+        return self.rows.get(args[1], [])
 
 
 class _AcquireContext:
@@ -65,8 +67,9 @@ async def test_claim_batch_uses_single_atomic_update_with_timeout():
     assert "UPDATE dead_letter_queue AS dlq" in query
     assert "RETURNING dlq.id" in query
     assert "FOR UPDATE SKIP LOCKED" in query
-    assert "source = ANY($2::text[])" in query
-    assert args == (16, ["telegram"])
+    assert "source = $2" in query
+    assert "ORDER BY next_retry_at, id" in query
+    assert args == (16, "telegram")
     assert kwargs == {"timeout": 7}
 
 
@@ -77,6 +80,52 @@ async def test_claim_batch_without_handlers_does_not_touch_db():
 
     assert await consumer._claim_batch() == []
     assert pool.conn.fetch_calls == []
+
+
+@pytest.mark.asyncio
+async def test_claim_batch_claims_sources_until_batch_limit():
+    rows = {
+        "telegram": [
+            {
+                "id": 1,
+                "source": "telegram",
+                "entity_id": "chat",
+                "content_id": "media-1",
+                "error_message": "retry",
+                "retry_count": 0,
+                "created_at": None,
+                "next_retry_at": None,
+                "last_attempt_at": None,
+                "status": "in_progress",
+            }
+        ],
+        "threads": [
+            {
+                "id": 2,
+                "source": "threads",
+                "entity_id": "post",
+                "content_id": "media-2",
+                "error_message": "retry",
+                "retry_count": 0,
+                "created_at": None,
+                "next_retry_at": None,
+                "last_attempt_at": None,
+                "status": "in_progress",
+            }
+        ],
+    }
+    pool = _FakePool(rows)
+    consumer = DLQConsumer(pool, batch_size=2)
+    consumer.register("telegram", lambda _row: None)
+    consumer.register("threads", lambda _row: None)
+    consumer.register("x", lambda _row: None)
+
+    claimed = await consumer._claim_batch()
+
+    assert [row["source"] for row in claimed] == ["telegram", "threads"]
+    assert len(pool.conn.fetch_calls) == 2
+    assert pool.conn.fetch_calls[0][1] == (2, "telegram")
+    assert pool.conn.fetch_calls[1][1] == (1, "threads")
 
 
 @pytest.mark.asyncio
