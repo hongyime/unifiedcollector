@@ -309,7 +309,15 @@ function Get-PlatformLaunchUrls {
     param([string[]]$Ids, [bool]$All)
     $platforms = [ordered]@{
         instagram = "https://www.instagram.com/"
-        tiktok = "https://www.tiktok.com/following"
+        # TikTok often serves a transient "Try again" or half-initialized shell
+        # on one feed after a cold browser/profile restart. Open a small spread
+        # so the extension has at least one healthy same-origin tab to resume
+        # collection without requiring manual intervention.
+        tiktok = @(
+            "https://www.tiktok.com/foryou",
+            "https://www.tiktok.com/following",
+            "https://www.tiktok.com/explore"
+        )
         lemon8 = @(
             "https://www.lemon8-app.com/topic/food?region=sg",
             "https://www.lemon8-app.com/topic/travel?region=sg",

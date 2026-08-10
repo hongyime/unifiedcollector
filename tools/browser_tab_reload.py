@@ -40,7 +40,13 @@ HARD_REOPEN_PLATFORMS = {
 }
 HARD_REOPEN_URLS = {
     "tiktok": [
+        "https://www.tiktok.com/foryou",
         "https://www.tiktok.com/following",
+        "https://www.tiktok.com/explore",
+    ],
+    "x": [
+        "https://x.com/home",
+        "https://twitter.com/home",
     ],
     "lemon8": [
         "https://www.lemon8-app.com/topic/food?region=sg",
@@ -207,7 +213,12 @@ def _previous_reload_for_url(previous: list[dict], platform: str, url: str) -> d
 
 def _is_stuck_tab_reason(reason: str) -> bool:
     text = str(reason or "").lower()
-    return "unresponsive" in text or "no content script attached" in text
+    return (
+        "unresponsive" in text
+        or "no content script attached" in text
+        or "page health:" in text
+        or "recoverable_error_shell" in text
+    )
 
 
 def _hard_reopen_platform(platform: str, plans: list[dict]) -> list[dict]:

@@ -65,7 +65,7 @@ function Get-ChromeCdpDiagnostics {
         if ($script:LastCdpError) {
             $reason = "chrome_cdp_process_unreachable"
             if ($unsafeVisibleWindows.Count -eq 0) {
-                $repairCommand = "powershell -ExecutionPolicy Bypass -File scripts\start-scraper-chrome-cdp.ps1 -RemoteDebuggingPort $script:CdpPort -CloseExistingCdpProfile -CloseExistingIfNoVisibleWindows -FallbackOpenControlIfCleanupBlocked -NoOpenAll -OpenIds instagram,tiktok,lemon8,x,threads,facebook,strava -NoTest"
+                $repairCommand = "powershell -ExecutionPolicy Bypass -File scripts\start-scraper-chrome-cdp.ps1 -RemoteDebuggingPort $script:CdpPort -CloseExistingCdpProfile -CloseExistingIfNoVisibleWindows -NoOpenAll -OpenIds instagram,tiktok,lemon8,x,threads,facebook,strava -NoTest"
                 $hint = "Chrome has no unsafe visible windows and the CDP socket is unreachable. The maintenance task can close collector-controlled Chrome windows/processes and relaunch Chrome with CDP."
             } else {
                 $hint = "Chrome has a CDP command line, but the CDP socket is unreachable. Save/finish visible browser work, close Chrome normally, then run scripts\start-scraper-chrome-cdp.ps1."
@@ -78,7 +78,7 @@ function Get-ChromeCdpDiagnostics {
     } elseif ($withCdp.Count -eq 0) {
         $reason = "chrome_running_without_cdp"
         if ($unsafeVisibleWindows.Count -eq 0) {
-            $repairCommand = "powershell -ExecutionPolicy Bypass -File scripts\start-scraper-chrome-cdp.ps1 -RemoteDebuggingPort $script:CdpPort -CloseExistingIfNoVisibleWindows -FallbackOpenControlIfCleanupBlocked -NoOpenAll -OpenIds instagram,tiktok,lemon8,x,threads,facebook,strava -NoTest"
+            $repairCommand = "powershell -ExecutionPolicy Bypass -File scripts\start-scraper-chrome-cdp.ps1 -RemoteDebuggingPort $script:CdpPort -CloseExistingIfNoVisibleWindows -NoOpenAll -OpenIds instagram,tiktok,lemon8,x,threads,facebook,strava -NoTest"
             $hint = "Chrome has no unsafe visible windows and no CDP. The maintenance task can close collector-controlled Chrome windows/processes and relaunch scraper Chrome with CDP."
         } else {
             $hint = "Chrome has visible windows but was not launched with --remote-debugging-port=$script:CdpPort. Do not use -CloseExistingIfNoVisibleWindows; save/finish browser work, close Chrome normally, then run scripts\start-scraper-chrome-cdp.ps1 so tab maintenance and cookie backup can reconnect."
@@ -226,12 +226,12 @@ function Invoke-ChromeCdpRepair {
     }
     if ($reason -eq "chrome_running_without_cdp" -and $unsafeVisibleWindowCount -eq 0) {
         Write-Log "Chrome CDP repair: closing collector-controlled Chrome and relaunching scraper Chrome with CDP"
-        & powershell.exe -ExecutionPolicy Bypass -File $launcher -RemoteDebuggingPort $script:CdpPort -CloseExistingCdpProfile -CloseExistingIfNoVisibleWindows -FallbackOpenControlIfCleanupBlocked -NoOpenAll -OpenIds instagram,tiktok,lemon8,x,threads,facebook,strava -NoTest
+        & powershell.exe -ExecutionPolicy Bypass -File $launcher -RemoteDebuggingPort $script:CdpPort -CloseExistingCdpProfile -CloseExistingIfNoVisibleWindows -NoOpenAll -OpenIds instagram,tiktok,lemon8,x,threads,facebook,strava -NoTest
         return (Test-CdpAvailable)
     }
     if ($reason -eq "chrome_cdp_process_unreachable" -and $unsafeVisibleWindowCount -eq 0) {
         Write-Log "Chrome CDP repair: closing collector-controlled unreachable CDP Chrome and relaunching scraper Chrome"
-        & powershell.exe -ExecutionPolicy Bypass -File $launcher -RemoteDebuggingPort $script:CdpPort -CloseExistingCdpProfile -CloseExistingIfNoVisibleWindows -FallbackOpenControlIfCleanupBlocked -NoOpenAll -OpenIds instagram,tiktok,lemon8,x,threads,facebook,strava -NoTest
+        & powershell.exe -ExecutionPolicy Bypass -File $launcher -RemoteDebuggingPort $script:CdpPort -CloseExistingCdpProfile -CloseExistingIfNoVisibleWindows -NoOpenAll -OpenIds instagram,tiktok,lemon8,x,threads,facebook,strava -NoTest
         return (Test-CdpAvailable)
     }
     Write-Log "Chrome CDP repair skipped for reason=$reason visible_windows=$($Diagnostics.chrome_visible_window_count)"
@@ -430,7 +430,7 @@ function Invoke-ScraperChromeProfileRestart {
     $launcher = Join-Path $repo "scripts\start-scraper-chrome-cdp.ps1"
     Write-Log "browser tab maintenance escalation: restarting dedicated scraper Chrome profile"
     try {
-        & powershell.exe -ExecutionPolicy Bypass -File $launcher -RemoteDebuggingPort $script:CdpPort -CloseExistingCdpProfile -CloseExistingIfNoVisibleWindows -FallbackOpenControlIfCleanupBlocked -NoOpenAll -OpenIds instagram,tiktok,lemon8,x,threads,facebook,strava -NoTest
+        & powershell.exe -ExecutionPolicy Bypass -File $launcher -RemoteDebuggingPort $script:CdpPort -CloseExistingCdpProfile -CloseExistingIfNoVisibleWindows -NoOpenAll -OpenIds instagram,tiktok,lemon8,x,threads,facebook,strava -NoTest
     } catch {
         Write-Log ("dedicated scraper Chrome profile restart command failed: " + $_.Exception.Message)
     }
@@ -483,6 +483,7 @@ try {
     $auditTimeout = Get-PositiveIntEnv "UC_BROWSER_AUDIT_TIMEOUT_SECONDS" 240
     $reloadTimeout = Get-PositiveIntEnv "UC_BROWSER_RELOAD_TIMEOUT_SECONDS" 180
     $settleSeconds = Get-PositiveIntEnv "UC_BROWSER_POST_RELOAD_SETTLE_SECONDS" 30
+    $profileRestartSettleSeconds = Get-PositiveIntEnv "UC_BROWSER_PROFILE_RESTART_SETTLE_SECONDS" 90
     # Maintenance should heal the browser without pinning the machine for many
     # minutes. Keep live-audit probes short here; deeper manual audits can still
     # override these env vars.
@@ -502,8 +503,17 @@ try {
     Write-Log "browser tab audit health: healthy=$($auditHealth.healthy)/$($auditHealth.total), min=$($auditHealth.min_healthy)"
     if (-not $auditHealth.ok) {
         Write-Log ("browser tab audit still unhealthy after reload: " + (($auditHealth.unhealthy) -join " | "))
+        Write-Log "running second targeted browser tab reload pass before profile restart"
+        Invoke-PythonScript -command $python -script $reload -timeoutSeconds $reloadTimeout
+        Invoke-PostReloadSettle -seconds $settleSeconds
+        Invoke-PythonScript -command $python -script $audit -timeoutSeconds $auditTimeout
+        $auditHealth = Get-AuditHealth
+        Write-Log "browser tab audit health after second reload: healthy=$($auditHealth.healthy)/$($auditHealth.total), min=$($auditHealth.min_healthy)"
+    }
+    if (-not $auditHealth.ok) {
+        Write-Log ("browser tab audit still unhealthy after second reload: " + (($auditHealth.unhealthy) -join " | "))
         if (Invoke-ScraperChromeProfileRestart) {
-            Invoke-PostReloadSettle -seconds $settleSeconds
+            Invoke-PostReloadSettle -seconds $profileRestartSettleSeconds
             Invoke-PythonScript -command $python -script $audit -timeoutSeconds $auditTimeout
             $auditHealth = Get-AuditHealth
             Write-Log "browser tab audit health after profile restart: healthy=$($auditHealth.healthy)/$($auditHealth.total), min=$($auditHealth.min_healthy)"

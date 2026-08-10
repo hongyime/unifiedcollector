@@ -171,10 +171,13 @@ def test_browser_tab_reload_hard_reopens_repeatedly_stuck_tiktok_tabs():
 
     assert "UC_BROWSER_HARD_REOPEN_PLATFORMS" in script
     assert '"instagram,threads,tiktok,lemon8,x,facebook,strava"' in script
+    assert '"https://www.tiktok.com/foryou"' in script
     assert '"https://www.tiktok.com/following"' in script
+    assert '"https://www.tiktok.com/explore"' in script
+    assert '"x": [' in script
+    assert '"https://x.com/home"' in script
+    assert '"https://twitter.com/home"' in script
     hard_reopen_block = script.split("HARD_REOPEN_URLS = {", 1)[1].split("def _target_version", 1)[0]
-    assert '"https://www.tiktok.com/foryou"' not in hard_reopen_block
-    assert '"https://www.tiktok.com/explore"' not in hard_reopen_block
     assert '"https://www.lemon8-app.com/topic/food?region=sg"' in script
     assert "def _platform_had_previous_unresponsive_reload" in script
     assert "def _hard_reopen_platform" in script
@@ -191,6 +194,8 @@ def test_browser_tab_reload_hard_reopens_individual_repeated_stuck_tabs():
     assert "reopen repeated stuck tab after prior soft reload" in script
     assert "_previous_reload_for_url(previous_plan, platform" in script
     assert "hard_reopen_tabs.add" in script
+    assert '"page health:" in text' in script
+    assert '"recoverable_error_shell" in text' in script
 
 
 def test_chrome_cdp_launcher_dry_run_skips_live_probes():
@@ -207,7 +212,11 @@ def test_chrome_cdp_launcher_opens_requested_platform_urls_directly():
     assert '([string]$_) -split ","' in script
     assert "function Get-PlatformLaunchUrls" in script
     assert 'instagram = "https://www.instagram.com/"' in script
-    assert 'tiktok = "https://www.tiktok.com/following"' in script
+    assert "TikTok often serves a transient" in script
+    assert "tiktok = @(" in script
+    assert '"https://www.tiktok.com/foryou"' in script
+    assert '"https://www.tiktok.com/following"' in script
+    assert '"https://www.tiktok.com/explore"' in script
     assert "lemon8 = @(" in script
     assert '"https://www.lemon8-app.com/topic/food?region=sg"' in script
     assert '"https://www.lemon8-app.com/topic/travel?region=sg"' in script
@@ -277,6 +286,7 @@ def test_browser_maintenance_repairs_missing_chrome():
     assert "\\\\UnifiedCollector\\\\ChromeCdp" in script
     assert "-CloseExistingCdpProfile -CloseExistingIfNoVisibleWindows" in script
     assert "collector-controlled unreachable CDP Chrome" in script
+    assert "-FallbackOpenControlIfCleanupBlocked" not in script
     assert "-OpenIds instagram,tiktok,lemon8,x,threads,facebook,strava" in script
     assert "Chrome CDP repair succeeded; continuing maintenance pass" in script
     assert "chrome_cdp_available" in script
@@ -296,6 +306,7 @@ def test_browser_maintenance_uses_load_tolerant_wrapper_timeouts():
 
     assert 'UC_BROWSER_AUDIT_TIMEOUT_SECONDS" 240' in script
     assert 'UC_BROWSER_RELOAD_TIMEOUT_SECONDS" 180' in script
+    assert 'UC_BROWSER_PROFILE_RESTART_SETTLE_SECONDS" 90' in script
 
 
 def test_browser_maintenance_reaudits_after_reload():
@@ -339,8 +350,11 @@ def test_browser_maintenance_restarts_dedicated_profile_when_tabs_stay_unhealthy
     assert "function Invoke-ScraperChromeProfileRestart" in script
     assert "-CloseExistingCdpProfile" in script
     assert "-CloseExistingIfNoVisibleWindows" in script
-    assert "-FallbackOpenControlIfCleanupBlocked" in script
     assert "dedicated scraper Chrome restart left CDP unavailable; fallback repair reason=" in script
+    assert "running second targeted browser tab reload pass before profile restart" in script
+    assert "browser tab audit health after second reload" in script
+    assert "browser tab audit still unhealthy after second reload" in script
+    assert "Invoke-PostReloadSettle -seconds $profileRestartSettleSeconds" in script
     assert "Invoke-ChromeCdpRepair -Diagnostics $diagnostics" in script
     assert "browser extension tabs unhealthy after reload/profile restart" in script
     assert 'Write-Status "degraded"' in script

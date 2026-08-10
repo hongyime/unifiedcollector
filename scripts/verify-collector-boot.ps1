@@ -177,7 +177,11 @@ try {
     $sourceThresholds = [ordered]@{
         beeper = 30
         facebook = 60
-        github = 30
+        # GitHub is drained by the shared low-risk worker. A healthy boot can
+        # spend more than 30 minutes on Strava/Search/Website before GitHub's
+        # next successful metadata write, so this must verify liveness rather
+        # than force a per-source half-hour cadence.
+        github = 240
         instagram = 60
         lemon8 = 45
         search = 240
