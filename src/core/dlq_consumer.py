@@ -90,6 +90,7 @@ class DLQConsumer:
         batch_size: int = 16,
         scan_interval_seconds: float = 60.0,
         db_timeout_seconds: float | None = None,
+        handler_timeout_seconds: float | None = None,
     ):
         if pool is None:
             raise ValueError("pool must not be None")
@@ -107,6 +108,14 @@ class DLQConsumer:
                 db_timeout_seconds = 20.0
         if db_timeout_seconds <= 0:
             raise ValueError("db_timeout_seconds must be >0")
+        if handler_timeout_seconds is None:
+            raw_handler_timeout = os.getenv("DLQ_CONSUMER_HANDLER_TIMEOUT_SECONDS", "180")
+            try:
+                handler_timeout_seconds = float(raw_handler_timeout)
+            except ValueError:
+                handler_timeout_seconds = 180.0
+        if handler_timeout_seconds <= 0:
+            raise ValueError("handler_timeout_seconds must be >0")
 
         self._pool = pool
         self.max_retries = max_retries
@@ -115,6 +124,7 @@ class DLQConsumer:
         self.batch_size = batch_size
         self.scan_interval_seconds = scan_interval_seconds
         self.db_timeout_seconds = db_timeout_seconds
+        self.handler_timeout_seconds = handler_timeout_seconds
 
         self._handlers: dict[str, HandlerFn] = {}
         self._stop = asyncio.Event()
@@ -277,7 +287,10 @@ class DLQConsumer:
             return
 
         try:
-            await handler(row)
+            await asyncio.wait_for(
+                handler(row),
+                timeout=self.handler_timeout_seconds,
+            )
         except PermanentError as e:
             await self._on_permanent(row, str(e))
         except asyncio.CancelledError:

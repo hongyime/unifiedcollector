@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from src.core.dlq_consumer import DLQConsumer
@@ -27,9 +29,14 @@ class _AcquireContext:
 class _FakePool:
     def __init__(self, rows):
         self.conn = _FakeConnection(rows)
+        self.execute_calls = []
 
     def acquire(self):
         return _AcquireContext(self.conn)
+
+    async def execute(self, query, *args, **kwargs):
+        self.execute_calls.append((query, args, kwargs))
+        return "UPDATE 1"
 
 
 @pytest.mark.asyncio
@@ -70,3 +77,44 @@ async def test_claim_batch_without_handlers_does_not_touch_db():
 
     assert await consumer._claim_batch() == []
     assert pool.conn.fetch_calls == []
+
+
+@pytest.mark.asyncio
+async def test_handler_timeout_reschedules_row():
+    row = {
+        "id": 42,
+        "source": "telegram",
+        "entity_id": "chat",
+        "content_id": "media",
+        "error_message": "retry",
+        "retry_count": 0,
+        "created_at": None,
+        "next_retry_at": None,
+        "last_attempt_at": None,
+        "status": "in_progress",
+    }
+    pool = _FakePool([])
+    consumer = DLQConsumer(
+        pool,
+        handler_timeout_seconds=0.01,
+        base_backoff_seconds=0.01,
+        max_backoff_seconds=0.01,
+    )
+
+    async def stuck_handler(_row):
+        await asyncio.sleep(10)
+
+    consumer.register("telegram", stuck_handler)
+    await consumer._process_row(row)
+
+    assert consumer.stats["retried"] == 1
+    query, args, _kwargs = pool.execute_calls[0]
+    assert "SET status = 'pending'" in query
+    assert args[0] == 42
+    assert args[1] == 1
+    assert "TimeoutError" in args[2]
+
+
+def test_handler_timeout_must_be_positive():
+    with pytest.raises(ValueError, match="handler_timeout_seconds"):
+        DLQConsumer(_FakePool([]), handler_timeout_seconds=0)

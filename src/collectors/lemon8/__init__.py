@@ -419,6 +419,7 @@ class Lemon8Collector(BaseCollector):
                 try:
                     await self._collect_user(client, username)
                     await self.checkpoint.save_progress(username)
+                    await self.heartbeat_source_health()
                 except Exception as e:
                     status_code = self._http_status_from_error(e)
                     safe_error = _safe_log_text(e)
@@ -438,6 +439,7 @@ class Lemon8Collector(BaseCollector):
             if self._feed_enabled:
                 try:
                     await self._collect_feed(client)
+                    await self.heartbeat_source_health()
                 except Exception as e:
                     safe_error = _safe_log_text(e)
                     await self._record_http_status_event(
@@ -500,6 +502,7 @@ class Lemon8Collector(BaseCollector):
                 try:
                     await self._collect_user(client, row['platform_user_id'])
                     processed += 1
+                    await self.heartbeat_source_health()
                     async with self.pool.acquire() as conn:
                         await conn.execute("UPDATE lemon8_spider_queue SET status = 'completed' WHERE platform_user_id = $1", row['platform_user_id'])
                 except Exception as e:
