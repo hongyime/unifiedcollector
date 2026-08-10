@@ -353,11 +353,16 @@ function directFallbackRequest(msg, error) {
 
 async function trySwFetchProxy(request) {
   try {
-    const proxy = await chrome.runtime.sendMessage({
-      type: "swFetchProxy",
-      path: request.path,
-      payload: request.payload,
-    });
+    const proxy = await withDeadline(
+      chrome.runtime.sendMessage({
+        type: "swFetchProxy",
+        path: request.path,
+        payload: request.payload,
+      }),
+      DIRECT_SEND_TIMEOUT_MS_BY_TYPE.swFetchProxy || 15000,
+      "swFetchProxy message timed out after 15s",
+      "UCSwFetchProxyTimeout"
+    );
     if (proxy && proxy.ok !== undefined) {
       return {
         ok: !!proxy.ok,
@@ -1564,7 +1569,10 @@ async function maybeStartBrowserMediaRevisit(platform, owner) {
   if (deferBrowserMediaRevisitForForcedRecovery(platform)) return null;
   const active = currentBrowserMediaRevisit(platform);
   if (active) return active;
-  const reply = await send({ type: "getBrowserMediaRevisitTarget", platform, owner: owner || null }).catch(() => null);
+  const reply = await send(
+    { type: "getBrowserMediaRevisitTarget", platform, owner: owner || null },
+    { retries: 0, timeoutMs: 8000 }
+  ).catch(() => null);
   const target = reply && reply.target;
   if (!target || !target.content_id) return null;
   const url = target.post_url || target.source_url;

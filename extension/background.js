@@ -1412,7 +1412,7 @@ chrome.runtime.onInstalled.addListener(() => {
   runStartupRecovery("installed", { force: true, refreshTabs: true, refreshGapMs: 1500, retries: 2 });
 });
 chrome.runtime.onStartup.addListener(() => {
-  runStartupRecovery("startup", { force: false, refreshTabs: false, retries: 2 });
+  runStartupRecovery("startup", { force: false, refreshTabs: true, refreshGapMs: 1500, retries: 2 });
 });
 
 chrome.alarms.onAlarm.addListener(async (a) => {
@@ -2683,7 +2683,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 async function scrapeNow() {
   await log("info", "manual 'Start/Resume loop' clicked");
   await setStatus({ cooldownUntil: 0 });
-  return { ok: await ensureLoops("manual") };
+  setTimeout(() => {
+    ensureLoops("manual")
+      .catch((e) => log("warn", `manual loop nudge failed: ${e && e.message ? e.message : e}`));
+  }, 0);
+  return { ok: true, scheduled: true };
 }
 
 async function consumeReloadIntent() {

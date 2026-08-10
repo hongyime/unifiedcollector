@@ -21,6 +21,7 @@ _DAY = 86400
 _BROWSER_HEARTBEAT_SOURCES = ("instagram", "tiktok", "lemon8", "threads", "facebook", "x", "strava")
 _BROWSER_CONTENT_PROGRESS_SOURCES = ("instagram", "tiktok", "lemon8", "threads", "facebook", "x")
 _BROWSER_REQUIRED_SOURCES = ("threads", "facebook", "x")
+_BROWSER_HYBRID_SOURCES = ("instagram", "tiktok", "lemon8")
 
 STRAVA_PROGRESS_QUERY = """
 SELECT extract(epoch FROM now()-max(ts))
@@ -445,7 +446,9 @@ async def compute_liveness(conn) -> list[dict]:
                 if stale_age is None
                 else f"browser content progress is {int(stale_age)}s old (> {browser_content_stale_after}s)"
             )
-            if status == "live":
+            if status == "live" and name in _BROWSER_HYBRID_SOURCES:
+                detail = f"{detail}; browser capture warning: {content_detail}"
+            elif status == "live":
                 status = "degraded"
                 detail = content_detail
             else:

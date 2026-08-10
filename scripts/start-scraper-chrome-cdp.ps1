@@ -225,8 +225,8 @@ function Get-KnownExtensionIds {
     # these as fallbacks because a dormant MV3 worker may not appear in
     # /json/list until its options page is opened.
     return @(
-        "nkeimhogjdpnpccoofpliimaahmaaome",
-        "pkmdmcklnjdeocoeigmlakhomhhcpafb"
+        "pkmdmcklnjdeocoeigmlakhomhhcpafb",
+        "nkeimhogjdpnpccoofpliimaahmaaome"
     )
 }
 
@@ -571,7 +571,13 @@ if ($chromeProcesses.Count -gt 0 -and -not $AllowWhileChromeRunning) {
 Disable-ChromeBackgroundMode -UserDataDir $profile
 
 $proc = Start-Process -FilePath $chrome -ArgumentList $argumentLine -PassThru
-Start-Sleep -Seconds 4
+$deadline = (Get-Date).AddSeconds(20)
+do {
+    Start-Sleep -Milliseconds 500
+    if (Test-CdpAvailable $RemoteDebuggingPort) {
+        break
+    }
+} while ((Get-Date) -lt $deadline)
 
 if (Test-CdpAvailable $RemoteDebuggingPort) {
     $controlOpened = Open-ExtensionControlPage -Port $RemoteDebuggingPort -TabsUrlPath $tabsUrlPath
