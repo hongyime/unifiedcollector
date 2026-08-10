@@ -54,7 +54,7 @@ def _float_env(name: str, default: float) -> float:
 CONNECT_TIMEOUT = _float_env("UC_TAB_AUDIT_CONNECT_TIMEOUT_SECONDS", 2.0)
 RUNTIME_ENABLE_TIMEOUT = _float_env("UC_TAB_AUDIT_RUNTIME_ENABLE_TIMEOUT_SECONDS", 4.0)
 MAIN_TIMEOUT = _float_env("UC_TAB_AUDIT_MAIN_TIMEOUT_SECONDS", 8.0)
-ISO_TIMEOUT = _float_env("UC_TAB_AUDIT_ISO_TIMEOUT_SECONDS", 1.0)
+ISO_TIMEOUT = _float_env("UC_TAB_AUDIT_ISO_TIMEOUT_SECONDS", 2.0)
 PERF_TIMEOUT = _float_env("UC_TAB_AUDIT_PERF_TIMEOUT_SECONDS", 0.8)
 DRAIN_SECONDS = _float_env("UC_TAB_AUDIT_CONTEXT_DRAIN_SECONDS", 0.1)
 TAB_PAUSE_SECONDS = _float_env("UC_TAB_AUDIT_TAB_PAUSE_SECONDS", 0.1)
@@ -156,14 +156,31 @@ CONTENT_EVAL_JS = (
 )
 
 MAIN_EVAL_JS = (
-    "JSON.stringify({"
-    "url:location.href,"
-    "nodes:document.querySelectorAll('*').length,"
+    "JSON.stringify((()=>{"
+    "const counts={articles:document.querySelectorAll('article').length,"
+    "videos:document.querySelectorAll('video').length,"
+    "images:document.querySelectorAll('img[src],img[srcset]').length,"
+    "links:document.querySelectorAll('a[href]').length};"
+    "const focused=[...document.querySelectorAll('[role=\"alert\"],[data-e2e*=\"error\" i],[data-e2e*=\"empty\" i],h1,h2,button')]"
+    ".map(e=>(e.innerText||e.textContent||'').trim()).filter(Boolean).slice(0,80).join('\\n');"
+    "const body=(document.body&&document.body.innerText?document.body.innerText.slice(0,9000):'');"
+    "const text=[document.title||'',focused,body].filter(Boolean).join('\\n');"
+    "const compact=text.replace(/\\s+/g,' ').trim().slice(0,260);"
+    "const low=(counts.articles+counts.videos+counts.images)<4&&counts.links<40;"
+    "let health_status='ok',health_reason='';"
+    "if(location.href.includes('/?logout=')||(low&&document.querySelector('iframe[src*=\"recaptcha\"]'))){health_status='recoverable_error_shell';health_reason='auth_challenge';}"
+    "else if(/sorry,?\\s*we\\s+couldn(?:'|\\u2019)?t\\s+show\\s+that\\s+page/i.test(text)){health_status='recoverable_error_shell';health_reason='sorry_could_not_show_page';}"
+    "else if(/couldn(?:'|\\u2019)?t\\s+show\\s+(?:this|that)\\s+page/i.test(text)){health_status='recoverable_error_shell';health_reason='could_not_show_page';}"
+    "else if(/this\\s+page\\s+isn(?:'|\\u2019)?t\\s+available|page\\s+not\\s+found/i.test(text)){health_status='recoverable_error_shell';health_reason='page_not_available';}"
+    "else if(low&&/\\btry\\s+again\\b/i.test(text)){health_status='recoverable_error_shell';health_reason='try_again_empty_state';}"
+    "else if(low&&/something\\s+went\\s+wrong/i.test(text)){health_status='recoverable_error_shell';health_reason='something_went_wrong';}"
+    "else if(/sign\\s+in\\s+to\\s+x|log\\s+in\\s+to\\s+x|log\\s+in\\s+to\\s+instagram|log\\s+in\\s+to\\s+tiktok/i.test(text)){health_status='recoverable_error_shell';health_reason='login_wall_text';}"
+    "return {url:location.href,nodes:document.querySelectorAll('*').length,"
     "heap_mb:Math.round((performance.memory?performance.memory.usedJSHeapSize:0)/1024/1024),"
-    "heap_bytes:performance.memory?performance.memory.usedJSHeapSize:0,"
-    "docReady:document.readyState,"
-    "hidden:document.hidden"
-    "})"
+    "heap_bytes:performance.memory?performance.memory.usedJSHeapSize:0,docReady:document.readyState,hidden:document.hidden,"
+    "page_health_status:health_status,page_health_reason:health_reason,page_health_sample:compact,"
+    "page_content_counts:counts};"
+    "})())"
 )
 
 
@@ -184,6 +201,10 @@ def audit_tab(target: dict, main_timeout=MAIN_TIMEOUT, iso_timeout=ISO_TIMEOUT) 
         "js_heap_used_bytes": None,
         "doc_ready": None,
         "hidden": None,
+        "page_health_status": None,
+        "page_health_reason": None,
+        "page_health_sample": None,
+        "page_content_counts": None,
         "cs": None,
         "cs_version": None,
         "cs_running": None,
@@ -247,6 +268,10 @@ def audit_tab(target: dict, main_timeout=MAIN_TIMEOUT, iso_timeout=ISO_TIMEOUT) 
                 out["js_heap_used_bytes"] = p.get("heap_bytes")
                 out["doc_ready"] = p.get("docReady")
                 out["hidden"] = p.get("hidden")
+                out["page_health_status"] = p.get("page_health_status")
+                out["page_health_reason"] = p.get("page_health_reason")
+                out["page_health_sample"] = p.get("page_health_sample")
+                out["page_content_counts"] = p.get("page_content_counts")
             else:
                 exc = (r.get("result") or {}).get("exceptionDetails")
                 if exc:
@@ -371,6 +396,11 @@ def main():
             )
             if info["error"]:
                 print(f"       ERROR: {info['error']}")
+            if info.get("page_health_status") and info["page_health_status"] != "ok":
+                print(
+                    f"       PAGE_HEALTH: {info['page_health_status']}  "
+                    f"reason={info.get('page_health_reason')}  sample={info.get('page_health_sample')}"
+                )
             time.sleep(TAB_PAUSE_SECONDS)
 
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)

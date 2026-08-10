@@ -270,9 +270,9 @@ def test_browser_maintenance_reaudits_after_reload():
 def test_browser_maintenance_uses_short_live_audit_probes():
     script = _read_script("browser-tab-maintenance.ps1")
 
-    assert 'Set-DefaultEnv "UC_TAB_AUDIT_RUNTIME_ENABLE_TIMEOUT_SECONDS" "2.0"' in script
-    assert 'Set-DefaultEnv "UC_TAB_AUDIT_MAIN_TIMEOUT_SECONDS" "3.0"' in script
-    assert 'Set-DefaultEnv "UC_TAB_AUDIT_ISO_TIMEOUT_SECONDS" "0.8"' in script
+    assert 'Set-DefaultEnv "UC_TAB_AUDIT_RUNTIME_ENABLE_TIMEOUT_SECONDS" "3.0"' in script
+    assert 'Set-DefaultEnv "UC_TAB_AUDIT_MAIN_TIMEOUT_SECONDS" "4.0"' in script
+    assert 'Set-DefaultEnv "UC_TAB_AUDIT_ISO_TIMEOUT_SECONDS" "2.0"' in script
     assert 'Set-DefaultEnv "UC_TAB_AUDIT_PERF_TIMEOUT_SECONDS" "0.5"' in script
     assert "without pinning the machine" in script
 
@@ -285,10 +285,32 @@ def test_browser_maintenance_restarts_dedicated_profile_when_tabs_stay_unhealthy
     assert 'Get-PositiveIntEnv "UC_BROWSER_MIN_HEALTHY_PLATFORMS" $platforms.Count' in script
     assert "function Test-AuthWallUrl" in script
     assert "function Get-AuditTabUrl" in script
+    assert "function Test-AuditTabContentWall" in script
+    assert "page_health_status" in script
+    assert "recoverable_error_shell" in script
     assert "/i/flow/login" in script
     assert "redirect_after_login" in script
     assert "-not (Test-AuthWallUrl (Get-AuditTabUrl $_))" in script
+    assert "-not (Test-AuditTabContentWall $_)" in script
     assert "function Invoke-ScraperChromeProfileRestart" in script
     assert "-CloseExistingCdpProfile" in script
+    assert "-CloseExistingIfNoVisibleWindows" in script
+    assert "-FallbackOpenControlIfCleanupBlocked" in script
+    assert "dedicated scraper Chrome restart left CDP unavailable; fallback repair reason=" in script
+    assert "Invoke-ChromeCdpRepair -Diagnostics $diagnostics" in script
     assert "browser extension tabs unhealthy after reload/profile restart" in script
     assert 'Write-Status "degraded"' in script
+
+
+def test_browser_audit_reports_dom_level_error_shells():
+    script = (REPO_ROOT / "tools" / "browser_tab_audit.py").read_text(encoding="utf-8")
+
+    assert "page_health_status" in script
+    assert "page_health_reason" in script
+    assert "page_health_sample" in script
+    assert 'ISO_TIMEOUT = _float_env("UC_TAB_AUDIT_ISO_TIMEOUT_SECONDS", 2.0)' in script
+    assert "recoverable_error_shell" in script
+    assert "try_again_empty_state" in script
+    assert "auth_challenge" in script
+    assert "recaptcha" in script
+    assert 'low&&document.querySelector(\'iframe[src*=\\"recaptcha\\"]\')' in script

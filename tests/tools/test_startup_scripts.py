@@ -88,10 +88,14 @@ def test_boot_verifier_checks_reboot_critical_surfaces():
     assert "$allTabsHealthy = ($healthy.Count -gt 0)" in script
     assert "function Test-AuthWallUrl" in script
     assert "function Get-AuditTabUrl" in script
+    assert "function Test-AuditTabContentWall" in script
+    assert "page_health_status" in script
+    assert "recoverable_error_shell" in script
     assert "/i/flow/login" in script
     assert "redirect_after_login" in script
     assert "(Test-UrlHostMatches -Url $_ -ExpectedHost $needle) -and -not (Test-AuthWallUrl $_)" in script
     assert "-not (Test-AuthWallUrl (Get-AuditTabUrl $_))" in script
+    assert "-not (Test-AuditTabContentWall $_)" in script
     assert "browser_tab_maintenance_loop.pid" in script
     assert "instagram.com" in script
     assert "tiktok.com" in script

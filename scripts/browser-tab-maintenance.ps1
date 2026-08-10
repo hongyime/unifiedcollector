@@ -312,6 +312,24 @@ function Get-AuditTabUrl($Tab) {
     return ""
 }
 
+function Test-AuditTabContentWall($Tab) {
+    if ($null -eq $Tab) {
+        return $false
+    }
+    $status = [string]$Tab.page_health_status
+    return $status -eq "recoverable_error_shell"
+}
+
+function Get-AuditTabWallDetail($Tab) {
+    if (-not (Test-AuditTabContentWall $Tab)) {
+        return ""
+    }
+    $reason = [string]$Tab.page_health_reason
+    $sample = [string]$Tab.page_health_sample
+    $url = Get-AuditTabUrl $Tab
+    return "page_health=recoverable_error_shell, reason=$reason, url=$url, sample=$sample"
+}
+
 function Get-AuditHealth {
     $auditPath = Join-Path $tmp "browser_tab_audit_result.json"
     if (-not (Test-Path -LiteralPath $auditPath)) {
@@ -348,7 +366,8 @@ function Get-AuditHealth {
             $_.cs -eq $true -and
             $_.cs_running -eq $true -and
             [string]$_.cs_version -and
-            -not (Test-AuthWallUrl (Get-AuditTabUrl $_))
+            -not (Test-AuthWallUrl (Get-AuditTabUrl $_)) -and
+            -not (Test-AuditTabContentWall $_)
         })
         if ($good.Count -gt 0) {
             $healthy += 1
@@ -359,13 +378,15 @@ function Get-AuditHealth {
                     $_.cs -eq $true -and
                     $_.cs_running -eq $true -and
                     [string]$_.cs_version -and
-                    -not (Test-AuthWallUrl (Get-AuditTabUrl $_))
+                    -not (Test-AuthWallUrl (Get-AuditTabUrl $_)) -and
+                    -not (Test-AuditTabContentWall $_)
                 )
             })
             $sample = $bad | Select-Object -First 1
             $sampleUrl = Get-AuditTabUrl $sample
             $authWall = Test-AuthWallUrl $sampleUrl
-            $reason = if ($authWall) { "auth_wall_url=$sampleUrl" } else { "err=$($sample.error)" }
+            $contentWall = Get-AuditTabWallDetail $sample
+            $reason = if ($authWall) { "auth_wall_url=$sampleUrl" } elseif ($contentWall) { $contentWall } else { "err=$($sample.error)" }
             $unhealthy += "${platform}: $($good.Count)/$($tabs.Count) healthy; first_bad resp=$($sample.responsive_main), cs=$($sample.cs), running=$($sample.cs_running), $reason"
         }
     }
@@ -385,8 +406,17 @@ function Get-AuditHealth {
 function Invoke-ScraperChromeProfileRestart {
     $launcher = Join-Path $repo "scripts\start-scraper-chrome-cdp.ps1"
     Write-Log "browser tab maintenance escalation: restarting dedicated scraper Chrome profile"
-    & powershell.exe -ExecutionPolicy Bypass -File $launcher -RemoteDebuggingPort $script:CdpPort -CloseExistingCdpProfile -NoOpenAll -OpenIds instagram,tiktok,lemon8,x,threads,facebook,strava -NoTest
-    return (Test-CdpAvailable)
+    try {
+        & powershell.exe -ExecutionPolicy Bypass -File $launcher -RemoteDebuggingPort $script:CdpPort -CloseExistingCdpProfile -CloseExistingIfNoVisibleWindows -FallbackOpenControlIfCleanupBlocked -NoOpenAll -OpenIds instagram,tiktok,lemon8,x,threads,facebook,strava -NoTest
+    } catch {
+        Write-Log ("dedicated scraper Chrome profile restart command failed: " + $_.Exception.Message)
+    }
+    if (Test-CdpAvailable) {
+        return $true
+    }
+    $diagnostics = Get-ChromeCdpDiagnostics
+    Write-Log "dedicated scraper Chrome restart left CDP unavailable; fallback repair reason=$($diagnostics.reason)"
+    return (Invoke-ChromeCdpRepair -Diagnostics $diagnostics)
 }
 
 $audit = Join-Path $repo "tools\browser_tab_audit.py"
@@ -433,9 +463,9 @@ try {
     # Maintenance should heal the browser without pinning the machine for many
     # minutes. Keep live-audit probes short here; deeper manual audits can still
     # override these env vars.
-    Set-DefaultEnv "UC_TAB_AUDIT_RUNTIME_ENABLE_TIMEOUT_SECONDS" "2.0"
-    Set-DefaultEnv "UC_TAB_AUDIT_MAIN_TIMEOUT_SECONDS" "3.0"
-    Set-DefaultEnv "UC_TAB_AUDIT_ISO_TIMEOUT_SECONDS" "0.8"
+    Set-DefaultEnv "UC_TAB_AUDIT_RUNTIME_ENABLE_TIMEOUT_SECONDS" "3.0"
+    Set-DefaultEnv "UC_TAB_AUDIT_MAIN_TIMEOUT_SECONDS" "4.0"
+    Set-DefaultEnv "UC_TAB_AUDIT_ISO_TIMEOUT_SECONDS" "2.0"
     Set-DefaultEnv "UC_TAB_AUDIT_PERF_TIMEOUT_SECONDS" "0.5"
     Write-Log ("using python command: " + ($python -join " "))
     Invoke-PythonScript -command $python -script $audit -timeoutSeconds $auditTimeout

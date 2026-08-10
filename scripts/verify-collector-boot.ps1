@@ -83,6 +83,26 @@ function Get-AuditTabUrl {
     return ""
 }
 
+function Test-AuditTabContentWall {
+    param($Tab)
+    if ($null -eq $Tab) {
+        return $false
+    }
+    $status = [string]$Tab.page_health_status
+    return $status -eq "recoverable_error_shell"
+}
+
+function Get-AuditTabWallDetail {
+    param($Tab)
+    if (-not (Test-AuditTabContentWall $Tab)) {
+        return ""
+    }
+    $reason = [string]$Tab.page_health_reason
+    $sample = [string]$Tab.page_health_sample
+    $url = Get-AuditTabUrl $Tab
+    return "page_health=recoverable_error_shell, reason=$reason, url=$url, sample=$sample"
+}
+
 function Invoke-PostgresText {
     param(
         [string]$Sql,
@@ -330,13 +350,17 @@ if (Test-Path -LiteralPath $auditResultPath) {
                     $_.cs -eq $true -and
                     $_.cs_running -eq $true -and
                     [string]$_.cs_version -and
-                    -not (Test-AuthWallUrl (Get-AuditTabUrl $_))
+                    -not (Test-AuthWallUrl (Get-AuditTabUrl $_)) -and
+                    -not (Test-AuditTabContentWall $_)
                 }
             )
             $allTabsHealthy = ($healthy.Count -gt 0)
             $detailRows = @(
                 $tabs | ForEach-Object {
-                    "resp=$($_.responsive_main), cs=$($_.cs), running=$($_.cs_running), ver=$($_.cs_version), url=$($_.url_snapshot)"
+                    $wall = Get-AuditTabWallDetail $_
+                    $detail = "resp=$($_.responsive_main), cs=$($_.cs), running=$($_.cs_running), ver=$($_.cs_version), page_health=$($_.page_health_status), url=$($_.url_snapshot)"
+                    if ($wall) { $detail += ", $wall" }
+                    $detail
                 }
             )
             Add-Check $checks "extension content script: $platform" $allTabsHealthy ($detailRows -join "; ")
