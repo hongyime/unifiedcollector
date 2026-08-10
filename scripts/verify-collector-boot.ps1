@@ -5,6 +5,7 @@ param(
     [string]$BackupDir = "Z:\unifiedcollector\backups\db",
     [int]$BackupFreshHours = 30,
     [int]$ActiveBackupFreshMinutes = 20,
+    [int]$MaintenanceStatusFreshMinutes = 45,
     [int]$TimeoutSeconds = 8
 )
 
@@ -164,6 +165,22 @@ if (Test-Path -LiteralPath $pidPath) {
     }
 }
 Add-Check $checks "browser maintenance loop" $pidOk $pidDetail
+
+$maintenanceStatusPath = Join-Path $repoPath "tmp\browser_tab_maintenance_status.json"
+$maintenanceOk = $false
+$maintenanceDetail = "missing status file: $maintenanceStatusPath"
+if (Test-Path -LiteralPath $maintenanceStatusPath) {
+    try {
+        $maintenanceStatus = Get-Content -LiteralPath $maintenanceStatusPath -Raw | ConvertFrom-Json
+        $checkedAt = [datetime]$maintenanceStatus.checked_at
+        $ageMinutes = ((Get-Date) - $checkedAt).TotalMinutes
+        $maintenanceOk = $maintenanceStatus.state -eq "ok" -and $ageMinutes -le $MaintenanceStatusFreshMinutes
+        $maintenanceDetail = "state=$($maintenanceStatus.state), age=$([math]::Round($ageMinutes, 1))m, detail=$($maintenanceStatus.detail)"
+    } catch {
+        $maintenanceDetail = "could not parse status file: $($_.Exception.Message)"
+    }
+}
+Add-Check $checks "browser maintenance latest status" $maintenanceOk $maintenanceDetail
 
 $backupOk = $false
 $backupDetail = "backup directory missing: $BackupDir"

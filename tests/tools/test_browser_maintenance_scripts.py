@@ -233,3 +233,10 @@ def test_browser_maintenance_refuses_overlapping_passes():
     assert "$mutex.WaitOne(0)" in script
     assert "another pass is already running" in script
     assert "$mutex.ReleaseMutex()" in script
+
+
+def test_browser_maintenance_uses_load_tolerant_wrapper_timeouts():
+    script = _read_script("browser-tab-maintenance.ps1")
+
+    assert 'UC_BROWSER_AUDIT_TIMEOUT_SECONDS" 240' in script
+    assert 'UC_BROWSER_RELOAD_TIMEOUT_SECONDS" 180' in script

@@ -309,8 +309,8 @@ try {
         }
     }
     $python = Resolve-Python
-    $auditTimeout = Get-PositiveIntEnv "UC_BROWSER_AUDIT_TIMEOUT_SECONDS" 90
-    $reloadTimeout = Get-PositiveIntEnv "UC_BROWSER_RELOAD_TIMEOUT_SECONDS" 90
+    $auditTimeout = Get-PositiveIntEnv "UC_BROWSER_AUDIT_TIMEOUT_SECONDS" 240
+    $reloadTimeout = Get-PositiveIntEnv "UC_BROWSER_RELOAD_TIMEOUT_SECONDS" 180
     Write-Log ("using python command: " + ($python -join " "))
     Invoke-PythonScript -command $python -script $audit -timeoutSeconds $auditTimeout
     Invoke-PythonScript -command $python -script $reload -timeoutSeconds $reloadTimeout
