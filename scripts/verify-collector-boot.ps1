@@ -454,6 +454,7 @@ if ($maintenanceRunningWithOkPrevious) {
                 }
             )
             $allTabsHealthy = ($healthy.Count -gt 0)
+            $problemCount = [Math]::Max(0, $tabs.Count - $healthy.Count)
             $detailRows = @(
                 $tabs | ForEach-Object {
                     $wall = Get-AuditTabWallDetail $_
@@ -462,7 +463,8 @@ if ($maintenanceRunningWithOkPrevious) {
                     $detail
                 }
             )
-            Add-Check $checks "extension content script: $platform" $allTabsHealthy ($detailRows -join "; ")
+            $summary = "healthy=$($healthy.Count)/$($tabs.Count), problem_or_stale=$problemCount"
+            Add-Check $checks "extension content script: $platform" $allTabsHealthy ($summary + "; " + ($detailRows -join "; "))
         }
     } catch {
         Add-Check $checks "extension content script audit" $false "could not parse audit result: $($_.Exception.Message)"

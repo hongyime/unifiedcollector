@@ -95,6 +95,8 @@ def test_boot_verifier_checks_reboot_critical_surfaces():
     assert "extension content script: $platform" in script
     assert "cs_running" in script
     assert "$allTabsHealthy = ($healthy.Count -gt 0)" in script
+    assert "problem_or_stale=" in script
+    assert "healthy=$($healthy.Count)/$($tabs.Count)" in script
     assert "function Test-AuthWallUrl" in script
     assert "function Get-AuditTabUrl" in script
     assert "function Test-AuditTabContentWall" in script
