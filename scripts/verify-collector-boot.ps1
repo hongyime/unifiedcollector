@@ -7,6 +7,7 @@ param(
     [int]$ActiveBackupFreshMinutes = 20,
     [int]$MaintenanceStatusFreshMinutes = 45,
     [int]$DefaultSourceFreshMinutes = 30,
+    [int]$RecentIngestionMinutes = 60,
     [int]$DlqBacklogGraceMinutes = 360,
     [int]$DlqPendingThreshold = 100,
     [int]$TimeoutSeconds = 8
@@ -228,6 +229,91 @@ ORDER BY source
     }
 } catch {
     Add-Check $checks "source freshness query" $false $_.Exception.Message
+}
+
+try {
+    $recentSql = @'
+CREATE TEMP TABLE IF NOT EXISTS uc_recent_ingestion_counts (
+    source_name text NOT NULL,
+    label text NOT NULL,
+    row_count bigint NOT NULL
+) ON COMMIT DROP;
+TRUNCATE uc_recent_ingestion_counts;
+DO $$
+DECLARE
+    part record;
+    n bigint;
+BEGIN
+    FOR part IN
+        SELECT *
+        FROM (VALUES
+            ('telegram', 'telegram_messages', 'collected_at', 'messages'),
+            ('whatsapp', 'whatsapp_messages', 'collected_at', 'messages'),
+            ('beeper', 'beeper_shadow_messages', 'ingested_at', 'messages'),
+            ('instagram', 'instagram_profiles', 'updated_at', 'profiles'),
+            ('instagram', 'instagram_posts', 'collected_at', 'posts'),
+            ('tiktok', 'tiktok_profiles', 'updated_at', 'profiles'),
+            ('tiktok', 'tiktok_posts', 'collected_at', 'posts'),
+            ('lemon8', 'lemon8_profiles', 'updated_at', 'profiles'),
+            ('lemon8', 'lemon8_posts', 'collected_at', 'posts'),
+            ('threads', 'threads_posts', 'collected_at', 'posts'),
+            ('facebook', 'facebook_profiles', 'updated_at', 'profiles'),
+            ('facebook', 'facebook_posts', 'collected_at', 'posts'),
+            ('x', 'x_profiles', 'updated_at', 'profiles'),
+            ('x', 'x_posts', 'collected_at', 'posts'),
+            ('youtube', 'youtube_channels', 'updated_at', 'channels'),
+            ('youtube', 'youtube_videos', 'collected_at', 'videos'),
+            ('github', 'github_users', 'collected_at', 'users'),
+            ('github', 'github_repos', 'collected_at', 'repos'),
+            ('github', 'github_commits', 'collected_at', 'commits'),
+            ('github', 'github_issues', 'collected_at', 'issues'),
+            ('github', 'github_issue_comments', 'collected_at', 'issue comments'),
+            ('github', 'github_pr_reviews', 'collected_at', 'PR reviews'),
+            ('github', 'github_pr_review_comments', 'collected_at', 'PR review comments'),
+            ('website', 'website_pages', 'collected_at', 'pages'),
+            ('strava', 'strava_athletes', 'updated_at', 'profiles'),
+            ('strava', 'strava_activities', 'collected_at', 'activities'),
+            ('search', 'search_results', 'collected_at', 'results')
+        ) AS v(source_name, table_name, column_name, label)
+    LOOP
+        IF to_regclass('public.' || part.table_name) IS NULL THEN
+            CONTINUE;
+        END IF;
+        EXECUTE format(
+            'SELECT count(*) FROM %I WHERE %I >= NOW() - make_interval(mins => %s)',
+            part.table_name,
+            part.column_name,
+            __MINUTES__
+        ) INTO n;
+        IF n > 0 THEN
+            INSERT INTO uc_recent_ingestion_counts VALUES (part.source_name, part.label, n);
+        END IF;
+    END LOOP;
+    IF to_regclass('public.media_items') IS NOT NULL THEN
+        INSERT INTO uc_recent_ingestion_counts
+        SELECT source, 'media', count(*)
+        FROM media_items
+        WHERE collected_at >= NOW() - make_interval(mins => __MINUTES__)
+        GROUP BY source
+        HAVING count(*) > 0;
+    END IF;
+END $$;
+SELECT source_name || ' ' || label || '=' || row_count::text
+FROM uc_recent_ingestion_counts
+ORDER BY row_count DESC, source_name, label
+LIMIT 18;
+'@.Replace("__MINUTES__", [string]$RecentIngestionMinutes)
+    $rows = @(Invoke-PostgresText -Sql $recentSql -QueryTimeoutSeconds 35 | Where-Object {
+        $_ -and [string]$_ -notmatch '^(CREATE TABLE|TRUNCATE TABLE|DO)$'
+    })
+    $detail = if ($rows.Count -gt 0) {
+        "last ${RecentIngestionMinutes}m: " + (($rows | Select-Object -First 18) -join "; ")
+    } else {
+        "last ${RecentIngestionMinutes}m: no source rows or media rows counted; source freshness checks still passed"
+    }
+    Add-Check $checks "recent ingestion window" $true $detail
+} catch {
+    Add-Check $checks "recent ingestion window" $false $_.Exception.Message
 }
 
 try {

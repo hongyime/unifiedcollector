@@ -63,6 +63,11 @@ def test_boot_verifier_checks_reboot_critical_surfaces():
     assert "MaintenanceStatusFreshMinutes" in script
     assert "DefaultSourceFreshMinutes" in script
     assert "source_health" in script
+    assert "RecentIngestionMinutes" in script
+    assert "recent ingestion window" in script
+    assert "telegram_messages" in script
+    assert "media_items" in script
+    assert "last ${RecentIngestionMinutes}m" in script
     assert "instagram = 60" in script
     assert "github = 240" in script
     assert "strava = 60" in script
