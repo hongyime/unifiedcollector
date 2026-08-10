@@ -685,6 +685,7 @@ class TelegramCollector(BaseCollector):
 
         # Hot-reload task (item 4.6) — listens for new accounts via NOTIFY.
         self._hot_reload_task: asyncio.Task | None = None
+        self._worker_spawn_lock = asyncio.Lock()
 
     def _is_spider_allowed(self, worker: "TelegramWorker") -> bool:
         """Return whether this worker may process spider/join work."""
@@ -855,6 +856,20 @@ class TelegramCollector(BaseCollector):
     # Worker lifecycle
     # ------------------------------------------------------------------
 
+    def _connected_workers(self) -> list[TelegramWorker]:
+        """Return currently usable workers without touching session files."""
+        live: list[TelegramWorker] = []
+        for worker in self._workers:
+            client = getattr(worker, "client", None)
+            if client is None:
+                continue
+            try:
+                if client.is_connected():
+                    live.append(worker)
+            except Exception:
+                continue
+        return live
+
     async def _spawn_workers(self) -> list[TelegramWorker]:
         """Connect one TelegramClient per loaded account, sequentially with delays.
         
@@ -862,59 +877,94 @@ class TelegramCollector(BaseCollector):
         multiple concurrent connections from the same IP. A small delay between
         connections avoids triggering this limit.
         """
-        accounts = list(self.account_pool._accounts)  # snapshot
-        if not accounts:
-            logger.error("No Telegram accounts in pool — cannot start workers")
-            return []
+        async with self._worker_spawn_lock:
+            accounts = list(self.account_pool._accounts)  # snapshot
+            if not accounts:
+                logger.error("No Telegram accounts in pool — cannot start workers")
+                return []
 
-        workers = [TelegramWorker(self, acc, idx) for idx, acc in enumerate(accounts)]
-        live: list[TelegramWorker] = []
-        
-        for w in workers:
-            try:
-                await asyncio.wait_for(w.connect(), timeout=45)
-                live.append(w)
-                # 15s between connections — prevents Telegram treating rapid
-                # parallel logins as a security event and revoking auth keys.
-                if len(live) < len(workers):
-                    await asyncio.sleep(15)
-            except asyncio.TimeoutError:
-                logger.error(
-                    "[worker=%d account=%s] connect timed out after 45s",
-                    w.worker_id, w.account.name,
+            account_names = {acc.name for acc in accounts}
+            live: list[TelegramWorker] = [
+                w for w in self._connected_workers()
+                if w.account.name in account_names
+            ]
+            live_names = {w.account.name for w in live}
+            if len(live_names) == len(account_names):
+                logger.info(
+                    "Telegram workers already connected: %d/%d; reusing existing clients",
+                    len(live_names), len(account_names),
                 )
-                await w.disconnect()
-            except Exception as e:
-                logger.error(
-                    "[worker=%d account=%s] failed to connect: %s",
-                    w.worker_id, w.account.name, e,
-                )
-                await w.disconnect()
+                self._workers = live
+                self._primary_client = live[0].client if live else None
+                await self._mark_runtime_healthy("all configured workers connected")
+                return live
 
-        if live:
-            self._primary_client = live[0].client
-        # P4-5: session-volume drift guard. Authoritative sessions are host files
-        # synced into the named volume by the boot script; a manual `compose up`
-        # bypasses that sync and can drift to stale/unauthorized sessions ->
-        # silent auth failure. Log LOUDLY (not INFO) when any worker failed to
-        # connect, naming the drifted accounts, so the gap is unmissable.
-        live_names = {w.account.name for w in live}
-        failed = [w.account.name for w in workers if w.account.name not in live_names]
-        if failed:
-            logger.error(
-                "TELEGRAM SESSION DRIFT: only %d/%d worker(s) connected. "
-                "UNAUTHORIZED/UNREACHABLE accounts: %s. The boot session-sync was "
-                "likely bypassed (manual `compose up`?). Re-run the boot script or "
-                "restore authorized .session files.",
-                len(live), len(workers), ", ".join(sorted(failed)),
-            )
-        else:
-            logger.info(
-                "Telegram parallel mode: %d/%d worker(s) connected",
-                len(live), len(workers),
-            )
-            await self._mark_runtime_healthy("all configured workers connected")
-        return live
+            # Drop stale disconnected worker objects before opening missing sessions.
+            stale = [
+                w for w in self._workers
+                if w.account.name in account_names and w.account.name not in live_names
+            ]
+            for worker in stale:
+                await worker.disconnect()
+
+            next_worker_id = 0
+            if live:
+                next_worker_id = max(w.worker_id for w in live) + 1
+            workers = list(live)
+            for acc in accounts:
+                if acc.name in live_names:
+                    continue
+                workers.append(TelegramWorker(self, acc, next_worker_id))
+                next_worker_id += 1
+
+            for w in workers:
+                if w.account.name in live_names:
+                    continue
+                try:
+                    await asyncio.wait_for(w.connect(), timeout=45)
+                    live.append(w)
+                    live_names.add(w.account.name)
+                    # 15s between new connections — prevents Telegram treating rapid
+                    # parallel logins as a security event and revoking auth keys.
+                    if len(live_names) < len(account_names):
+                        await asyncio.sleep(15)
+                except asyncio.TimeoutError:
+                    logger.error(
+                        "[worker=%d account=%s] connect timed out after 45s",
+                        w.worker_id, w.account.name,
+                    )
+                    await w.disconnect()
+                except Exception as e:
+                    logger.error(
+                        "[worker=%d account=%s] failed to connect: %s",
+                        w.worker_id, w.account.name, e,
+                    )
+                    await w.disconnect()
+
+            self._workers = live
+            if live:
+                self._primary_client = live[0].client
+            # P4-5: session-volume drift guard. Authoritative sessions are host files
+            # synced into the named volume by the boot script; a manual `compose up`
+            # bypasses that sync and can drift to stale/unauthorized sessions ->
+            # silent auth failure. Log LOUDLY (not INFO) when any worker failed to
+            # connect, naming the drifted accounts, so the gap is unmissable.
+            failed = [acc.name for acc in accounts if acc.name not in live_names]
+            if failed:
+                logger.error(
+                    "TELEGRAM SESSION DRIFT: only %d/%d worker(s) connected. "
+                    "UNAUTHORIZED/UNREACHABLE accounts: %s. The boot session-sync was "
+                    "likely bypassed (manual `compose up`?). Re-run the boot script or "
+                    "restore authorized .session files.",
+                    len(live), len(accounts), ", ".join(sorted(failed)),
+                )
+            else:
+                logger.info(
+                    "Telegram parallel mode: %d/%d worker(s) connected",
+                    len(live), len(accounts),
+                )
+                await self._mark_runtime_healthy("all configured workers connected")
+            return live
 
     async def _auto_backfill_new_accounts(self) -> None:
         """Auto-discover and backfill new Telegram accounts (item 2.4).

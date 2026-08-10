@@ -540,9 +540,28 @@ function detectRecoverablePageShell(platformId) {
   if (!PAGE_RECOVERY_ENABLED.has(platformId)) return null;
   const urlShell = detectRecoverableUrlShell(platformId);
   if (urlShell) return urlShell;
-  const text = visiblePageText();
-  if (!text) return null;
   const counts = pageContentCounts();
+  const text = visiblePageText();
+  if (platformId === "x") {
+    const pageAgeMs = (() => {
+      try { return Number(performance.now && performance.now()) || 0; } catch (e) { return 0; }
+    })();
+    const blankSpaShell = (
+      pageAgeMs > 20000
+      && counts.articles === 0
+      && counts.videos === 0
+      && counts.links < 3
+      && String(text || "").trim().length < 20
+    );
+    if (blankSpaShell) {
+      return {
+        reason: "x_blank_spa_shell",
+        sample: compactSample(document.title || location.href),
+        content_counts: counts,
+      };
+    }
+  }
+  if (!text) return null;
   const usefulNodes = counts.articles + counts.videos + counts.images;
   const lowContent = usefulNodes < 4 && counts.links < 40;
   const patterns = [...(RECOVERABLE_PAGE_SHELL_PATTERNS[platformId] || []), ...RECOVERABLE_PAGE_SHELL_PATTERNS.default];
@@ -587,7 +606,7 @@ function findRecoverablePageActionButton() {
 }
 
 function switchXHostForRecoverableShell(shell) {
-  if (!shell || !/failed_script|try_again|something_went_wrong|no_internet|page_not_available|page_not_found/i.test(shell.reason || "")) {
+  if (!shell || !/failed_script|blank_spa|try_again|something_went_wrong|no_internet|page_not_available|page_not_found/i.test(shell.reason || "")) {
     return false;
   }
   const navKey = `uc_x_shell_nav_${shell.reason || "shell"}`;
