@@ -176,7 +176,7 @@ BROWSER_SOURCE_WATCH_SOURCES = {
     s.strip()
     for s in os.getenv(
         "WATCHDOG_BROWSER_SOURCE_SOURCES",
-        "facebook,threads,x,tiktok",
+        "instagram,tiktok,lemon8,threads,facebook,x",
     ).split(",")
     if s.strip()
 }

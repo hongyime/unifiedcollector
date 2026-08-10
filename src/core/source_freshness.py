@@ -300,6 +300,49 @@ async def _latest_browser_content_progress(conn, timeout: float) -> dict[str, di
         return None
 
 
+async def _recent_browser_media_yield(conn, timeout: float) -> dict[str, dict] | None:
+    """Return recent browser media candidate yield per platform.
+
+    Content progress alone can be misleading: a tab may keep reporting media
+    candidates while every storage attempt is duplicate, blocked, or failing.
+    Keep this query bounded to browser_ingest_events so source liveness can flag
+    "awake but storing nothing" without scanning media_items.
+    """
+    query_timeout = min(3.0, max(0.75, timeout))
+    window_seconds = _env_int("BROWSER_MEDIA_ZERO_STORE_WINDOW_SECONDS", 3600, min_value=300)
+    try:
+        rows = await conn.fetch(
+            """
+            WITH wanted(platform) AS (
+                SELECT unnest($1::text[])
+            )
+            SELECT wanted.platform,
+                   COALESCE(sum(e.observed_count), 0)::int AS observed_count,
+                   COALESCE(sum(e.stored_count), 0)::int AS stored_count,
+                   max(e.created_at) AS last_media_at
+            FROM wanted
+            LEFT JOIN browser_ingest_events e
+              ON e.platform = wanted.platform
+             AND e.endpoint = 'media'
+             AND e.created_at >= now() - ($2::int * interval '1 second')
+             AND e.observed_count > 0
+            GROUP BY wanted.platform
+            """,
+            list(_BROWSER_CONTENT_PROGRESS_SOURCES),
+            window_seconds,
+            timeout=query_timeout,
+        )
+        return {
+            str(row["platform"]): dict(row)
+            for row in rows
+            if int(row["observed_count"] or 0) > 0
+        }
+    except Exception as exc:
+        if exc.__class__.__name__ == "UndefinedTableError":
+            return None
+        return None
+
+
 async def compute_liveness(conn) -> list[dict]:
     """Return per-source liveness using an open asyncpg connection.
 
@@ -339,12 +382,19 @@ async def compute_liveness(conn) -> list[dict]:
     browser_heartbeats = await _latest_browser_heartbeats(conn, browser_heartbeat_timeout)
     browser_content_timeout = min(per_query_timeout, max(0.25, deadline - time.monotonic()))
     browser_content_progress = await _latest_browser_content_progress(conn, browser_content_timeout)
+    browser_media_timeout = min(per_query_timeout, max(0.25, deadline - time.monotonic()))
+    browser_media_yield = await _recent_browser_media_yield(conn, browser_media_timeout)
     browser_stale_after = _env_int(
         "BROWSER_HEARTBEAT_STALE_WARN_SECONDS",
         _env_int("BROWSER_CONTENT_STALE_WARN_SECONDS", 3600, min_value=300),
         min_value=300,
     )
     browser_content_stale_after = _env_int("BROWSER_CONTENT_STALE_WARN_SECONDS", 3600, min_value=300)
+    browser_media_zero_store_min_observed = _env_int(
+        "BROWSER_MEDIA_ZERO_STORE_MIN_OBSERVED",
+        100,
+        min_value=1,
+    )
     out: list[dict] = []
     for name, query, thresh in FRESHNESS:
         remaining = deadline - time.monotonic()
@@ -402,6 +452,18 @@ async def compute_liveness(conn) -> list[dict]:
             if browser_content and browser_content.get("age_seconds") is not None
             else None
         )
+        media_yield = (
+            browser_media_yield.get(name)
+            if browser_media_yield is not None
+            else None
+        )
+        media_observed_count = int(media_yield.get("observed_count") or 0) if media_yield else 0
+        media_stored_count = int(media_yield.get("stored_count") or 0) if media_yield else 0
+        browser_media_zero_store = (
+            name in _BROWSER_CONTENT_PROGRESS_SOURCES
+            and media_observed_count >= browser_media_zero_store_min_observed
+            and media_stored_count == 0
+        )
         if (
             name in _BROWSER_CONTENT_PROGRESS_SOURCES
             and browser_content_age is not None
@@ -453,6 +515,16 @@ async def compute_liveness(conn) -> list[dict]:
                 detail = content_detail
             else:
                 detail = f"{detail}; {content_detail}"
+        if browser_media_zero_store:
+            yield_detail = (
+                f"browser media yield warning: observed {media_observed_count} media candidate(s) "
+                f"but stored 0 in the recent window"
+            )
+            if status == "live":
+                status = "degraded"
+                detail = yield_detail
+            else:
+                detail = f"{detail}; {yield_detail}"
         out.append({
             "source": name,
             "status": status,
@@ -495,6 +567,9 @@ async def compute_liveness(conn) -> list[dict]:
             "browser_content_probe_reason": (
                 browser_content.get("probe_reason") if browser_content else None
             ),
+            "browser_media_observed_count": media_observed_count,
+            "browser_media_stored_count": media_stored_count,
+            "browser_media_zero_store": browser_media_zero_store,
             "detail": detail,
         })
     return out

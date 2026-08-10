@@ -971,6 +971,20 @@ def test_empty_media_probe_marks_browser_content_progress():
     assert ig_ingest._browser_event_marks_source_success(
         "facebook",
         "media",
+        10,
+        2,
+        {},
+    )
+    assert not ig_ingest._browser_event_marks_source_success(
+        "facebook",
+        "media",
+        10,
+        0,
+        {},
+    )
+    assert ig_ingest._browser_event_marks_source_success(
+        "facebook",
+        "media",
         0,
         0,
         {"probe_reason": "no_dom_media_candidates"},
@@ -1750,7 +1764,11 @@ def test_archive_browser_capture_writes_dm_sample_raw_payload(monkeypatch):
         "platform",
         "transport",
     ]
-    assert pool.conn.executes == []
+    assert len(pool.conn.executes) == 1
+    query, args = pool.conn.executes[0]
+    assert "DELETE FROM dead_letter_queue" in query
+    assert "browser raw archive failed:%" in query
+    assert args == ("tiktok", "bryan_websocket_binary_2048")
 
 
 def test_archive_browser_capture_writes_decoded_dm_target_hints(monkeypatch):

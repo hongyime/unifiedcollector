@@ -2379,7 +2379,10 @@ def _browser_event_marks_source_success(
 ) -> bool:
     if not platform or platform == "bridge" or endpoint == "browser_heartbeat":
         return False
-    if observed_count > 0 or stored_count > 0:
+    if endpoint == "media":
+        if stored_count > 0:
+            return True
+    elif observed_count > 0 or stored_count > 0:
         return True
     if not isinstance(metadata, dict):
         return False

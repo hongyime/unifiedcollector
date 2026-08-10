@@ -375,6 +375,18 @@ async def test_browser_source_tick_marks_stalled_browser_source(monkeypatch):
     assert "Container restart will not fix" in notified[0]
 
 
+def test_default_browser_source_watch_includes_hybrid_sources(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgres://collector:collector@localhost/unifiedcollector")
+    monkeypatch.delenv("WATCHDOG_BROWSER_SOURCE_SOURCES", raising=False)
+    import src.watchdog.freshness as freshness
+
+    freshness = importlib.reload(freshness)
+
+    assert {"instagram", "tiktok", "lemon8", "threads", "facebook", "x"}.issubset(
+        freshness.BROWSER_SOURCE_WATCH_SOURCES
+    )
+
+
 def test_clean_browser_source_detail_removes_nested_watchdog_prefixes():
     import src.watchdog.freshness as freshness
 

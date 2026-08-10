@@ -453,6 +453,82 @@ async def test_browser_source_uses_fresh_browser_content_progress(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_browser_media_zero_store_window_degrades_source(monkeypatch):
+    from src.core import source_freshness
+
+    class BrowserMediaZeroStoreConn:
+        async def fetch(self, query: str, *args, timeout: int = 8):
+            if "FROM source_health" in query:
+                return []
+            if "endpoint = 'browser_heartbeat'" in query:
+                return [
+                    {
+                        "platform": "lemon8",
+                        "last_seen_at": datetime.now(timezone.utc) - timedelta(seconds=20),
+                        "age_seconds": 20,
+                        "extension_version": "1.23.56",
+                        "url": "https://www.lemon8-app.com/",
+                        "health_status": "healthy",
+                    }
+                ]
+            if "e.endpoint = 'media'" in query:
+                return [
+                    {
+                        "platform": "lemon8",
+                        "observed_count": 144,
+                        "stored_count": 0,
+                        "last_media_at": datetime.now(timezone.utc) - timedelta(seconds=30),
+                    }
+                ]
+            if "endpoint <> 'browser_heartbeat'" in query:
+                return [
+                    {
+                        "platform": "lemon8",
+                        "last_content_at": datetime.now(timezone.utc) - timedelta(seconds=45),
+                        "age_seconds": 45,
+                        "endpoint": "media",
+                        "observed_count": 29,
+                        "stored_count": 0,
+                        "probe_reason": None,
+                    }
+                ]
+            raise AssertionError(query)
+
+        async def fetchval(self, query: str, *args, timeout: int = 8):
+            if "lemon8_profiles" in query:
+                return 45
+            return None
+
+    monkeypatch.setenv("BROWSER_MEDIA_ZERO_STORE_MIN_OBSERVED", "100")
+    monkeypatch.setattr(
+        source_freshness,
+        "FRESHNESS",
+        [
+            (
+                "lemon8",
+                """
+                SELECT extract(epoch FROM now()-max(ts))
+                FROM (
+                    SELECT max(updated_at) AS ts FROM lemon8_profiles
+                    UNION ALL
+                    SELECT max(collected_at) AS ts FROM media_items WHERE source='lemon8'
+                ) progress
+                """,
+                172800,
+            )
+        ],
+    )
+
+    rows = await source_freshness.compute_liveness(BrowserMediaZeroStoreConn())
+
+    assert rows[0]["status"] == "degraded"
+    assert rows[0]["browser_media_zero_store"] is True
+    assert rows[0]["browser_media_observed_count"] == 144
+    assert rows[0]["browser_media_stored_count"] == 0
+    assert "observed 144 media candidate(s) but stored 0" in rows[0]["detail"]
+
+
+@pytest.mark.asyncio
 async def test_recoverable_error_shell_probe_does_not_mask_stale_browser_content(monkeypatch):
     from src.core import source_freshness
 
