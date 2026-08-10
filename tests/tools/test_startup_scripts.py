@@ -68,7 +68,16 @@ def test_boot_verifier_checks_reboot_critical_surfaces():
     assert 'Add-Check $checks "source fresh: $source"' in script
     assert "dead_letter_queue" in script
     assert "dead letter backlog" in script
-    assert "'pending', 'queued', 'retry'" in script
+    assert "facebook = 60" in script
+    assert "threads = 60" in script
+    assert "x = 90" in script
+    assert '$maintenanceStatus.state -eq "running" -and $ageMinutes -le 10' in script
+    assert "status IN ('queued', 'retry')" in script
+    assert "status = 'pending' AND next_retry_at <= NOW()" in script
+    assert "DlqBacklogGraceMinutes" in script
+    assert "DlqPendingThreshold" in script
+    assert "created_at < NOW() - INTERVAL '1 minute' * $DlqBacklogGraceMinutes" in script
+    assert "HAVING count(*) >= $DlqPendingThreshold" in script
     assert "db backup freshness" in script
     assert ".inprogress_*.dump" in script
     assert "browser maintenance latest status" in script

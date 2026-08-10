@@ -2440,6 +2440,11 @@ const x = {
     let ingestResponse = null;
     if (activeMediaRevisit && !forcedRecovery) {
       ingestResponse = await send(ingestPayload, { timeoutMs: 45000 });
+    } else if (sink.items.length === 0) {
+      ingestResponse = await send(ingestPayload, { timeoutMs: forcedRecovery ? 12000 : 25000 }).catch((e) => {
+        clog("warn", `X ${entity} empty media probe failed: ${e && e.message ? e.message : e}`, "x");
+        return null;
+      });
     } else {
       sendSideEffect(
         ingestPayload,

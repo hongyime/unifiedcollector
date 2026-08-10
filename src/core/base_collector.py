@@ -5,6 +5,7 @@ import logging
 import os
 import tempfile
 import threading
+import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 
@@ -106,6 +107,7 @@ class BaseCollector(ABC):
         # The worker samples this before/after each collect cycle; a cycle that
         # had targets but did not advance this counter is a "zero-progress" cycle.
         self._progress_count: int = 0
+        self._last_source_health_heartbeat: float | None = None
         # Set by a collector when a no-write cycle is intentional, for example
         # when a safer browser/extension path is already fresh.
         self._intentional_idle_reason: str | None = None
@@ -118,6 +120,43 @@ class BaseCollector(ABC):
     def progress_count(self) -> int:
         """Monotonic count of items actually persisted since process start."""
         return self._progress_count
+
+    async def heartbeat_source_health(self, *, min_interval_seconds: float = 300.0) -> None:
+        """Best-effort source_health heartbeat for successful zero-new-row work.
+
+        Worker-level health normally follows ``progress_count`` so real media
+        inserts update source_health. Some collectors can spend hours scanning
+        duplicate-heavy queues without new inserts; they should still be able to
+        prove liveness after a successful bounded unit of work.
+        """
+        if self.pool is None:
+            return
+        now = time.monotonic()
+        if (
+            self._last_source_health_heartbeat is not None
+            and min_interval_seconds > 0
+            and now - self._last_source_health_heartbeat < min_interval_seconds
+        ):
+            return
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO source_health
+                        (source, status, last_error, last_success_at, crash_count, updated_at)
+                    VALUES ($1, 'running', NULL, NOW(), 0, NOW())
+                    ON CONFLICT (source) DO UPDATE
+                    SET status='running',
+                        last_error=NULL,
+                        last_success_at=NOW(),
+                        crash_count=0,
+                        updated_at=NOW()
+                    """,
+                    self.SOURCE_NAME,
+                )
+            self._last_source_health_heartbeat = now
+        except Exception:
+            logger.debug("source_health heartbeat failed for %s", self.SOURCE_NAME, exc_info=True)
 
     @property
     def intentional_idle_reason(self) -> str | None:

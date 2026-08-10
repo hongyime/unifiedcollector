@@ -505,3 +505,31 @@ async def test_insert_media_item_logs_vault_db_consistency_timeout_as_info(tmp_p
         and "vault artifact db consistency check timed out" in record.message
         for record in caplog.records
     )
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_source_health_is_throttled(monkeypatch):
+    coll = _collector(monkeypatch)
+    ticks = iter([100.0, 101.0, 500.0])
+    last = 500.0
+
+    def fake_monotonic():
+        nonlocal last
+        try:
+            last = next(ticks)
+        except StopIteration:
+            pass
+        return last
+
+    monkeypatch.setattr(base_collector.time, "monotonic", fake_monotonic)
+
+    await coll.heartbeat_source_health(min_interval_seconds=300)
+    await coll.heartbeat_source_health(min_interval_seconds=300)
+    await coll.heartbeat_source_health(min_interval_seconds=300)
+
+    calls = [
+        args for args, _kwargs in coll.pool.conn.execute_calls
+        if "source_health" in args[0]
+    ]
+    assert len(calls) == 2
+    assert calls[0][1] == "github"

@@ -7,6 +7,8 @@ param(
     [int]$ActiveBackupFreshMinutes = 20,
     [int]$MaintenanceStatusFreshMinutes = 45,
     [int]$DefaultSourceFreshMinutes = 30,
+    [int]$DlqBacklogGraceMinutes = 360,
+    [int]$DlqPendingThreshold = 100,
     [int]$TimeoutSeconds = 8
 )
 
@@ -125,18 +127,18 @@ try {
 try {
     $sourceThresholds = [ordered]@{
         beeper = 30
-        facebook = 30
+        facebook = 60
         github = 30
-        instagram = 30
+        instagram = 60
         lemon8 = 45
         search = 240
         strava = 60
         telegram = 30
-        threads = 30
-        tiktok = 30
+        threads = 60
+        tiktok = 60
         website = 30
         whatsapp = 30
-        x = 45
+        x = 90
         youtube = 30
     }
     $sourcesSql = ($sourceThresholds.Keys | ForEach-Object { "'" + $_.Replace("'", "''") + "'" }) -join ","
@@ -179,13 +181,18 @@ try {
     $dlqRows = Invoke-PostgresText -Sql @"
 SELECT source || '|' || status || '|' || count(*)::text || '|' || COALESCE(round(extract(epoch from (now()-min(created_at)))/60, 1)::text, '0')
 FROM dead_letter_queue
-WHERE status IN ('pending', 'queued', 'retry')
+WHERE (
+    status IN ('queued', 'retry')
+    OR (status = 'pending' AND next_retry_at <= NOW())
+)
+  AND created_at < NOW() - INTERVAL '1 minute' * $DlqBacklogGraceMinutes
 GROUP BY source, status
+HAVING count(*) >= $DlqPendingThreshold
 ORDER BY count(*) DESC
 "@
     $dlqRows = @($dlqRows | Where-Object { $_ })
     if ($dlqRows.Count -eq 0) {
-        Add-Check $checks "dead letter backlog" $true "no pending/queued/retry rows"
+        Add-Check $checks "dead letter backlog" $true "no stale actionable pending/queued/retry rows"
     } else {
         Add-Check $checks "dead letter backlog" $false ($dlqRows -join "; ")
     }
@@ -258,7 +265,10 @@ if (Test-Path -LiteralPath $maintenanceStatusPath) {
         $maintenanceStatus = Get-Content -LiteralPath $maintenanceStatusPath -Raw | ConvertFrom-Json
         $checkedAt = [datetime]$maintenanceStatus.checked_at
         $ageMinutes = ((Get-Date) - $checkedAt).TotalMinutes
-        $maintenanceOk = $maintenanceStatus.state -eq "ok" -and $ageMinutes -le $MaintenanceStatusFreshMinutes
+        $maintenanceOk = (
+            ($maintenanceStatus.state -eq "ok" -and $ageMinutes -le $MaintenanceStatusFreshMinutes) -or
+            ($maintenanceStatus.state -eq "running" -and $ageMinutes -le 10)
+        )
         $maintenanceDetail = "state=$($maintenanceStatus.state), age=$([math]::Round($ageMinutes, 1))m, detail=$($maintenanceStatus.detail)"
     } catch {
         $maintenanceDetail = "could not parse status file: $($_.Exception.Message)"

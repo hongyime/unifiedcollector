@@ -542,6 +542,7 @@ class SearchCollector(BaseCollector):
                 await self.expand_paste_sites(direct)
                 for u in direct:
                     await self.checkpoint.save_progress(u)
+                await self.heartbeat_source_health()
             except Exception as e:
                 logger.exception("direct seed crawl failed: %s", e)
         for query in queries:
@@ -551,6 +552,7 @@ class SearchCollector(BaseCollector):
             try:
                 await self.search_query(query)
                 await self.checkpoint.save_progress(query)
+                await self.heartbeat_source_health()
             except Exception as e:
                 logger.exception("Failed search/%s: %s", query, e)
                 await self.send_to_dlq(query, query, str(e))

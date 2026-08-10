@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import random
 from typing import Any, Awaitable, Callable, Optional
 
@@ -88,6 +89,7 @@ class DLQConsumer:
         max_backoff_seconds: float = 3600.0,
         batch_size: int = 16,
         scan_interval_seconds: float = 60.0,
+        db_timeout_seconds: float | None = None,
     ):
         if pool is None:
             raise ValueError("pool must not be None")
@@ -97,6 +99,14 @@ class DLQConsumer:
             raise ValueError("batch_size must be >=1")
         if scan_interval_seconds <= 0:
             raise ValueError("scan_interval_seconds must be >0")
+        if db_timeout_seconds is None:
+            raw_timeout = os.getenv("DLQ_CONSUMER_DB_TIMEOUT_SECONDS", "20")
+            try:
+                db_timeout_seconds = float(raw_timeout)
+            except ValueError:
+                db_timeout_seconds = 20.0
+        if db_timeout_seconds <= 0:
+            raise ValueError("db_timeout_seconds must be >0")
 
         self._pool = pool
         self.max_retries = max_retries
@@ -104,6 +114,7 @@ class DLQConsumer:
         self.max_backoff_seconds = max_backoff_seconds
         self.batch_size = batch_size
         self.scan_interval_seconds = scan_interval_seconds
+        self.db_timeout_seconds = db_timeout_seconds
 
         self._handlers: dict[str, HandlerFn] = {}
         self._stop = asyncio.Event()
@@ -150,12 +161,10 @@ class DLQConsumer:
         if not registered:
             return []
         async with self._pool.acquire() as conn:
-            async with conn.transaction():
-                rows = await conn.fetch(
-                    """
-                    SELECT id, source, entity_id, content_id, error_message,
-                           retry_count, created_at, next_retry_at,
-                           last_attempt_at, status
+            rows = await conn.fetch(
+                """
+                WITH claimed AS (
+                    SELECT id
                     FROM dead_letter_queue
                     WHERE status = 'pending'
                       AND next_retry_at <= NOW()
@@ -163,22 +172,21 @@ class DLQConsumer:
                     ORDER BY next_retry_at
                     LIMIT $1
                     FOR UPDATE SKIP LOCKED
-                    """,
-                    self.batch_size, registered,
                 )
-                if not rows:
-                    return []
-                ids = [r["id"] for r in rows]
-                await conn.execute(
-                    """
-                    UPDATE dead_letter_queue
-                    SET status = 'in_progress',
-                        last_attempt_at = NOW()
-                    WHERE id = ANY($1::int[])
-                    """,
-                    ids,
-                )
-                return [dict(r) for r in rows]
+                UPDATE dead_letter_queue AS dlq
+                SET status = 'in_progress',
+                    last_attempt_at = NOW()
+                FROM claimed
+                WHERE dlq.id = claimed.id
+                RETURNING dlq.id, dlq.source, dlq.entity_id, dlq.content_id,
+                          dlq.error_message, dlq.retry_count, dlq.created_at,
+                          dlq.next_retry_at, dlq.last_attempt_at, dlq.status
+                """,
+                self.batch_size,
+                registered,
+                timeout=self.db_timeout_seconds,
+            )
+            return [dict(r) for r in rows]
 
     async def _on_success(self, row_id: int) -> None:
         """Delete the row from the DLQ."""
