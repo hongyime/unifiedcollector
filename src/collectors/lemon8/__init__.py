@@ -424,6 +424,7 @@ class Lemon8Collector(BaseCollector):
                     safe_error = _safe_log_text(e)
                     if status_code == 404:
                         logger.info("lemon8: skip unavailable profile %s: HTTP 404", username)
+                        await self._mark_profile_unavailable(username, "http_404")
                         await self.checkpoint.save_progress(username)
                         continue
                     await self._record_http_status_event(
@@ -449,6 +450,32 @@ class Lemon8Collector(BaseCollector):
 
         if os.getenv("LEMON8_SPIDER_ENABLED", "true").lower() == "true":
             await self._process_spider_queue(max_items=self._spider_queue_per_cycle)
+
+    async def _mark_profile_unavailable(self, username: str, reason: str) -> None:
+        """Stop retrying Lemon8 profile targets that the platform says do not exist."""
+        if self.pool is None or not username:
+            return
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE collection_targets
+                    SET status = 'unavailable',
+                        error_message = $3,
+                        metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+                            'unavailable_reason', $3,
+                            'unavailable_at', NOW()
+                        )
+                    WHERE source = $1
+                      AND target_id = $2
+                      AND status IN ('pending', 'error', 'active')
+                    """,
+                    self.SOURCE_NAME,
+                    username,
+                    reason,
+                )
+        except Exception:
+            logger.debug("lemon8: failed to mark %s unavailable", username, exc_info=True)
 
     async def _process_spider_queue(self, max_items: int | None = None):
         async with httpx.AsyncClient(timeout=30, cookies=self._cookies, headers=self._headers(), follow_redirects=True) as client:

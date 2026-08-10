@@ -310,6 +310,13 @@ async def test_collect_skips_unavailable_profile_without_dlq(monkeypatch, collec
 
     collector.send_to_dlq.assert_not_awaited()
     collector.checkpoint.save_progress.assert_awaited_once_with("missing")
+    collector._test_conn.execute.assert_awaited_once()
+    sql, source, target, reason = collector._test_conn.execute.await_args.args
+    assert "UPDATE collection_targets" in sql
+    assert "status = 'unavailable'" in sql
+    assert source == "lemon8"
+    assert target == "missing"
+    assert reason == "http_404"
 
 
 @pytest.mark.asyncio
