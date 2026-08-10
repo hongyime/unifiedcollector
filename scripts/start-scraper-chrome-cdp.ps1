@@ -352,10 +352,22 @@ function Get-VisibleChromeWindows {
 }
 
 function Test-UnifiedCollectorControlWindow {
-    param($Process)
+    param($Process, [string]$UserDataDir = "")
     $title = [string]$Process.MainWindowTitle
     foreach ($knownId in @(Get-KnownExtensionIds)) {
         if ($title -like "chrome-extension://$knownId/tabs.html*") {
+            return $true
+        }
+    }
+    if ($UserDataDir) {
+        $profileFull = [IO.Path]::GetFullPath($UserDataDir).TrimEnd('\')
+        $profileSlash = $profileFull.Replace('\', '/')
+        $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$($Process.Id)" -ErrorAction SilentlyContinue
+        $cmd = if ($proc) { [string]$proc.CommandLine } else { "" }
+        if (
+            $cmd.IndexOf($profileFull, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $cmd.IndexOf($profileSlash, [StringComparison]::OrdinalIgnoreCase) -ge 0
+        ) {
             return $true
         }
     }
@@ -363,8 +375,8 @@ function Test-UnifiedCollectorControlWindow {
 }
 
 function Get-UnsafeVisibleChromeWindows {
-    param([array]$VisibleWindows)
-    return @($VisibleWindows | Where-Object { -not (Test-UnifiedCollectorControlWindow $_) })
+    param([array]$VisibleWindows, [string]$UserDataDir = "")
+    return @($VisibleWindows | Where-Object { -not (Test-UnifiedCollectorControlWindow -Process $_ -UserDataDir $UserDataDir) })
 }
 
 function Stop-ChromeProcessTree {
@@ -582,7 +594,7 @@ if ($cdpAlreadyUp) {
 }
 
 if ($chromeProcesses.Count -gt 0 -and -not $AllowWhileChromeRunning -and $CloseExistingIfNoVisibleWindows) {
-    $unsafeVisibleChromeWindows = @(Get-UnsafeVisibleChromeWindows -VisibleWindows $visibleChromeWindows)
+    $unsafeVisibleChromeWindows = @(Get-UnsafeVisibleChromeWindows -VisibleWindows $visibleChromeWindows -UserDataDir $profile)
     if ($unsafeVisibleChromeWindows.Count -gt 0) {
         Write-Error "Chrome has visible windows open; refusing automatic close. Close Chrome manually, then rerun this script."
     }
@@ -608,7 +620,7 @@ if ($chromeProcesses.Count -gt 0 -and -not $AllowWhileChromeRunning -and $CloseE
 $portOwners = @(Get-PortListenerPids -Port $RemoteDebuggingPort)
 if ($portOwners.Count -gt 0 -and -not $cdpAlreadyUp -and -not $AllowWhileChromeRunning -and $CloseExistingIfNoVisibleWindows) {
     $visibleChromeWindows = @(Get-VisibleChromeWindows)
-    $unsafeVisibleChromeWindows = @(Get-UnsafeVisibleChromeWindows -VisibleWindows $visibleChromeWindows)
+    $unsafeVisibleChromeWindows = @(Get-UnsafeVisibleChromeWindows -VisibleWindows $visibleChromeWindows -UserDataDir $profile)
     if ($unsafeVisibleChromeWindows.Count -gt 0) {
         Write-Error "Port $RemoteDebuggingPort is owned by PID(s) $($portOwners -join ', '), but Chrome has visible windows open. Close Chrome manually, then rerun this script."
     }

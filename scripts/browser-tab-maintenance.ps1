@@ -28,6 +28,21 @@ function Get-ChromeCdpDiagnostics {
     $withUserData = @()
     $browserRoots = @()
     $visibleWindows = @(Get-Process chrome -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 })
+    $processById = @{}
+    foreach ($proc in $processes) {
+        $processById[[int]$proc.ProcessId] = $proc
+    }
+    $visibleControlWindows = @()
+    $unsafeVisibleWindows = @()
+    foreach ($window in $visibleWindows) {
+        $proc = $processById[[int]$window.Id]
+        $cmd = if ($proc) { [string]$proc.CommandLine } else { "" }
+        if ($cmd -match "chrome-extension://.*tabs\.html" -or $cmd -match "\\UnifiedCollector\\ChromeCdp") {
+            $visibleControlWindows += $window
+        } else {
+            $unsafeVisibleWindows += $window
+        }
+    }
     foreach ($proc in $processes) {
         $cmd = [string]$proc.CommandLine
         if ($cmd -match "--remote-debugging-port(?:=|\s+)$script:CdpPort\b") {
@@ -49,9 +64,9 @@ function Get-ChromeCdpDiagnostics {
         $repairCommand = "powershell -ExecutionPolicy Bypass -File scripts\start-scraper-chrome-cdp.ps1 -RemoteDebuggingPort $script:CdpPort -NoOpenAll -OpenIds instagram,tiktok,lemon8,x,threads,facebook,strava -NoTest"
         if ($script:LastCdpError) {
             $reason = "chrome_cdp_process_unreachable"
-            if ($visibleWindows.Count -eq 0) {
-                $repairCommand = "powershell -ExecutionPolicy Bypass -File scripts\start-scraper-chrome-cdp.ps1 -RemoteDebuggingPort $script:CdpPort -CloseExistingIfNoVisibleWindows -FallbackOpenControlIfCleanupBlocked -NoOpenAll -OpenIds instagram,tiktok,lemon8,x,threads,facebook,strava -NoTest"
-                $hint = "Chrome has hidden CDP processes, but the CDP socket is unreachable. The maintenance task can close those orphaned scraper processes and relaunch Chrome with CDP."
+            if ($unsafeVisibleWindows.Count -eq 0) {
+                $repairCommand = "powershell -ExecutionPolicy Bypass -File scripts\start-scraper-chrome-cdp.ps1 -RemoteDebuggingPort $script:CdpPort -CloseExistingCdpProfile -CloseExistingIfNoVisibleWindows -FallbackOpenControlIfCleanupBlocked -NoOpenAll -OpenIds instagram,tiktok,lemon8,x,threads,facebook,strava -NoTest"
+                $hint = "Chrome has no unsafe visible windows and the CDP socket is unreachable. The maintenance task can close collector-controlled Chrome windows/processes and relaunch Chrome with CDP."
             } else {
                 $hint = "Chrome has a CDP command line, but the CDP socket is unreachable. Save/finish visible browser work, close Chrome normally, then run scripts\start-scraper-chrome-cdp.ps1."
             }
@@ -62,9 +77,9 @@ function Get-ChromeCdpDiagnostics {
         $hint = "Chrome is not running. The maintenance task can relaunch scraper Chrome with CDP and the UnifiedCollector extension."
     } elseif ($withCdp.Count -eq 0) {
         $reason = "chrome_running_without_cdp"
-        if ($visibleWindows.Count -eq 0) {
-            $repairCommand = "powershell -ExecutionPolicy Bypass -File scripts\start-scraper-chrome-cdp.ps1 -RemoteDebuggingPort $script:CdpPort -CloseExistingIfNoVisibleWindows -FallbackOpenControlIfCleanupBlocked -NoOpenAll -OpenIds x -NoTest"
-            $hint = "Chrome has no visible windows and no CDP. Run scripts\start-scraper-chrome-cdp.ps1 -RemoteDebuggingPort $script:CdpPort -CloseExistingIfNoVisibleWindows -FallbackOpenControlIfCleanupBlocked -NoOpenAll -OpenIds x -NoTest to close orphaned background Chrome and relaunch only the X scraper tab with CDP. If Windows denies protected Chrome PIDs, the script will at least nudge the collector extension control page in the existing Chrome session; close Chrome from Task Manager or restart the Windows Chrome session for full CDP recovery."
+        if ($unsafeVisibleWindows.Count -eq 0) {
+            $repairCommand = "powershell -ExecutionPolicy Bypass -File scripts\start-scraper-chrome-cdp.ps1 -RemoteDebuggingPort $script:CdpPort -CloseExistingIfNoVisibleWindows -FallbackOpenControlIfCleanupBlocked -NoOpenAll -OpenIds instagram,tiktok,lemon8,x,threads,facebook,strava -NoTest"
+            $hint = "Chrome has no unsafe visible windows and no CDP. The maintenance task can close collector-controlled Chrome windows/processes and relaunch scraper Chrome with CDP."
         } else {
             $hint = "Chrome has visible windows but was not launched with --remote-debugging-port=$script:CdpPort. Do not use -CloseExistingIfNoVisibleWindows; save/finish browser work, close Chrome normally, then run scripts\start-scraper-chrome-cdp.ps1 so tab maintenance and cookie backup can reconnect."
         }
@@ -74,6 +89,8 @@ function Get-ChromeCdpDiagnostics {
         chrome_process_count = $processes.Count
         chrome_root_process_count = $browserRoots.Count
         chrome_visible_window_count = $visibleWindows.Count
+        chrome_visible_control_window_count = $visibleControlWindows.Count
+        chrome_unsafe_visible_window_count = $unsafeVisibleWindows.Count
         chrome_cdp_process_count = $withCdp.Count
         chrome_user_data_process_count = $withUserData.Count
         hint = $hint
@@ -201,14 +218,20 @@ function Invoke-ChromeCdpRepair {
         & powershell.exe -ExecutionPolicy Bypass -File $launcher -RemoteDebuggingPort $script:CdpPort -NoOpenAll -OpenIds instagram,tiktok,lemon8,x,threads,facebook,strava -NoTest
         return (Test-CdpAvailable)
     }
-    if ($reason -eq "chrome_running_without_cdp" -and [int]$Diagnostics.chrome_visible_window_count -eq 0) {
-        Write-Log "Chrome CDP repair: closing hidden Chrome and relaunching scraper Chrome with CDP"
-        & powershell.exe -ExecutionPolicy Bypass -File $launcher -RemoteDebuggingPort $script:CdpPort -CloseExistingIfNoVisibleWindows -FallbackOpenControlIfCleanupBlocked -NoOpenAll -OpenIds instagram,tiktok,lemon8,x,threads,facebook,strava -NoTest
+    $unsafeVisibleWindowCount = 0
+    if ($Diagnostics.PSObject.Properties.Name -contains "chrome_unsafe_visible_window_count") {
+        $unsafeVisibleWindowCount = [int]$Diagnostics.chrome_unsafe_visible_window_count
+    } else {
+        $unsafeVisibleWindowCount = [int]$Diagnostics.chrome_visible_window_count
+    }
+    if ($reason -eq "chrome_running_without_cdp" -and $unsafeVisibleWindowCount -eq 0) {
+        Write-Log "Chrome CDP repair: closing collector-controlled Chrome and relaunching scraper Chrome with CDP"
+        & powershell.exe -ExecutionPolicy Bypass -File $launcher -RemoteDebuggingPort $script:CdpPort -CloseExistingCdpProfile -CloseExistingIfNoVisibleWindows -FallbackOpenControlIfCleanupBlocked -NoOpenAll -OpenIds instagram,tiktok,lemon8,x,threads,facebook,strava -NoTest
         return (Test-CdpAvailable)
     }
-    if ($reason -eq "chrome_cdp_process_unreachable" -and [int]$Diagnostics.chrome_visible_window_count -eq 0) {
-        Write-Log "Chrome CDP repair: closing hidden unreachable CDP Chrome and relaunching scraper Chrome"
-        & powershell.exe -ExecutionPolicy Bypass -File $launcher -RemoteDebuggingPort $script:CdpPort -CloseExistingIfNoVisibleWindows -FallbackOpenControlIfCleanupBlocked -NoOpenAll -OpenIds instagram,tiktok,lemon8,x,threads,facebook,strava -NoTest
+    if ($reason -eq "chrome_cdp_process_unreachable" -and $unsafeVisibleWindowCount -eq 0) {
+        Write-Log "Chrome CDP repair: closing collector-controlled unreachable CDP Chrome and relaunching scraper Chrome"
+        & powershell.exe -ExecutionPolicy Bypass -File $launcher -RemoteDebuggingPort $script:CdpPort -CloseExistingCdpProfile -CloseExistingIfNoVisibleWindows -FallbackOpenControlIfCleanupBlocked -NoOpenAll -OpenIds instagram,tiktok,lemon8,x,threads,facebook,strava -NoTest
         return (Test-CdpAvailable)
     }
     Write-Log "Chrome CDP repair skipped for reason=$reason visible_windows=$($Diagnostics.chrome_visible_window_count)"

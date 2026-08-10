@@ -231,6 +231,15 @@ def test_chrome_cdp_launcher_directly_opens_requested_platforms_after_control():
     assert "Failed to open requested platform tab via CDP:" in script
 
 
+def test_chrome_cdp_launcher_treats_dedicated_profile_windows_as_safe_to_recover():
+    script = _read_script("start-scraper-chrome-cdp.ps1")
+
+    assert 'param($Process, [string]$UserDataDir = "")' in script
+    assert "$profileFull = [IO.Path]::GetFullPath($UserDataDir).TrimEnd('\\')" in script
+    assert 'ProcessId=$($Process.Id)' in script
+    assert "Get-UnsafeVisibleChromeWindows -VisibleWindows $visibleChromeWindows -UserDataDir $profile" in script
+
+
 def test_chrome_cdp_launcher_makes_open_all_explicit():
     script = _read_script("start-scraper-chrome-cdp.ps1")
 
@@ -262,7 +271,12 @@ def test_browser_maintenance_repairs_missing_chrome():
     assert "function Invoke-ChromeCdpRepair" in script
     assert 'reason -eq "chrome_not_running"' in script
     assert "chrome_cdp_process_unreachable" in script
-    assert "hidden unreachable CDP Chrome" in script
+    assert "chrome_visible_control_window_count" in script
+    assert "chrome_unsafe_visible_window_count" in script
+    assert "chrome-extension://.*tabs\\.html" in script
+    assert "\\\\UnifiedCollector\\\\ChromeCdp" in script
+    assert "-CloseExistingCdpProfile -CloseExistingIfNoVisibleWindows" in script
+    assert "collector-controlled unreachable CDP Chrome" in script
     assert "-OpenIds instagram,tiktok,lemon8,x,threads,facebook,strava" in script
     assert "Chrome CDP repair succeeded; continuing maintenance pass" in script
     assert "chrome_cdp_available" in script
