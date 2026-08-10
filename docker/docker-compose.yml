@@ -81,6 +81,27 @@ services:
       start_period: 30s
     restart: unless-stopped
 
+  collector_spiderfoot:
+    image: unifiedcollector-collector:latest
+    container_name: unifiedcollector_spiderfoot
+    profiles: ["recon"]
+    command: python -m src.main recon-spiderfoot --poll-interval ${RECON_SPIDERFOOT_POLL_INTERVAL:-60}
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      RECON_ALLOWLIST: "${RECON_ALLOWLIST:-}"
+      SPIDERFOOT_CLI: "${SPIDERFOOT_CLI:-}"
+      SPIDERFOOT_MODULES: "${SPIDERFOOT_MODULES:-sfp_dnsresolve,sfp_whois,sfp_names}"
+      SPIDERFOOT_TARGET_TIMEOUT_SECONDS: "${SPIDERFOOT_TARGET_TIMEOUT_SECONDS:-300}"
+      DB_POOL_MAX_SIZE: "3"
+    volumes:
+      - ../src:/app/src
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - ../.env
+    restart: unless-stopped
+
   # P3-1: youtube runs in its OWN process/container, isolated from the main
   # collector's shared event loop. yt-dlp invokes a blocking subprocess that can
   # wedge on lost SIGCHLD in WSL2/Docker (py-spy confirmed); in the shared worker

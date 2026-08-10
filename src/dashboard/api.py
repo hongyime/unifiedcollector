@@ -9613,6 +9613,55 @@ async def beeper_chat_detail(chat_id: str, limit: int = 200, _user: dict = Depen
     return {"chat": chat, "messages": out_messages}
 
 
+@app.get("/coverage/collectors")
+async def collectors_coverage(_user: dict = Depends(require_role("viewer"))):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT DISTINCT ON (source)
+                   source, expected_cadence::text, latest_data_at, latest_run_at,
+                   status, rows_24h, media_24h, errors_24h, rate_limits_24h,
+                   private_access_failures, stale_targets, created_at
+            FROM collection_coverage_snapshots
+            ORDER BY source, created_at DESC
+            """
+        )
+    payload = []
+    for row in rows:
+        payload.append({
+            "source": row["source"],
+            "expected_cadence": row["expected_cadence"],
+            "latest_data_at": row["latest_data_at"].isoformat() if row["latest_data_at"] else None,
+            "latest_run_at": row["latest_run_at"].isoformat() if row["latest_run_at"] else None,
+            "status": row["status"],
+            "rows_24h": row["rows_24h"],
+            "media_24h": row["media_24h"],
+            "errors_24h": row["errors_24h"],
+            "rate_limits_24h": row["rate_limits_24h"],
+            "private_access_failures": row["private_access_failures"],
+            "stale_targets": row["stale_targets"],
+            "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+        })
+    return {"sources": payload, "total": len(payload)}
+
+
+@app.get("/recon/targets")
+async def recon_targets(_user: dict = Depends(require_role("viewer"))):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id::text, target_type, target_value, source, priority, status,
+                   scope_json, error, created_at, updated_at
+            FROM recon_targets
+            ORDER BY priority, created_at DESC
+            LIMIT 200
+            """
+        )
+    return {"targets": [dict(row) for row in rows], "total": len(rows)}
+
+
 if DIST_DIR.is_dir():
     app.mount("/assets", StaticFiles(directory=str(DIST_DIR / "assets")), name="assets")
 

@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import json
 import logging
 import sys
 
@@ -62,6 +63,24 @@ def main():
     # status
     sp = sub.add_parser("status", help="Show collection status")
     sp.add_argument("--source", help="Filter by source")
+
+    cp = sub.add_parser("coverage-snapshot", help="Build collection coverage snapshot")
+    cp.add_argument("--source", default=None, help="Optional source filter")
+    cp.add_argument("--expected-cadence-hours", type=int, default=24)
+    cp.add_argument("--dry-run", action="store_true")
+    cp.add_argument("--json", action="store_true")
+
+    rq = sub.add_parser("recon-queue", help="Queue a bounded recon target")
+    rq.add_argument("--type", required=True, dest="target_type", choices=["domain", "ip", "email", "username", "url", "phone"])
+    rq.add_argument("--value", required=True, dest="target_value")
+    rq.add_argument("--source", default="manual")
+    rq.add_argument("--priority", type=int, default=5)
+    rq.add_argument("--json", action="store_true")
+    rs = sub.add_parser("recon-spiderfoot", help="Run guarded SpiderFoot recon sidecar")
+    rs.add_argument("--once", action="store_true")
+    rs.add_argument("--dry-run", action="store_true")
+    rs.add_argument("--poll-interval", type=float, default=60.0)
+    rs.add_argument("--json", action="store_true")
 
     # rebuild-report
     rp = sub.add_parser("rebuild-report", help="Dry-run rebuild coverage from vault sidecars")
@@ -219,6 +238,12 @@ def main():
         _cmd_list()
     elif args.command == "status":
         asyncio.run(_cmd_status(getattr(args, "source", None)))
+    elif args.command == "coverage-snapshot":
+        asyncio.run(_cmd_coverage_snapshot(args))
+    elif args.command == "recon-queue":
+        asyncio.run(_cmd_recon_queue(args))
+    elif args.command == "recon-spiderfoot":
+        asyncio.run(_cmd_recon_spiderfoot(args))
     elif args.command == "rebuild-report":
         asyncio.run(_cmd_rebuild_report(
             args.vault_root,
@@ -360,6 +385,65 @@ async def _cmd_status(source: str | None):
                     en = "enabled" if s["enabled"] else "disabled"
                     print(f"  {s['source']}: every {s['interval_hours']}h ({en}), next: {s['next_run']}")
     await close_pool()
+
+
+async def _cmd_coverage_snapshot(args):
+    from src.core.collection_coverage import build_collection_coverage_snapshot
+
+    pool = await get_pool()
+    await init_db(pool)
+    async with pool.acquire() as conn:
+        report = await build_collection_coverage_snapshot(
+            conn,
+            expected_cadence_hours=args.expected_cadence_hours,
+            source=args.source,
+            write=not args.dry_run,
+        )
+    await close_pool()
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True, default=str))
+    else:
+        print(report["summary"]["digest"])
+
+
+async def _cmd_recon_queue(args):
+    from src.core.recon import queue_recon_target
+
+    pool = await get_pool()
+    await init_db(pool)
+    async with pool.acquire() as conn:
+        result = await queue_recon_target(
+            conn,
+            target_type=args.target_type,
+            target_value=args.target_value,
+            source=args.source,
+            priority=args.priority,
+        )
+    await close_pool()
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True, default=str))
+    else:
+        print(f"queued {result['target_type']} {result['target_value']} ({result['status']})")
+
+
+async def _cmd_recon_spiderfoot(args):
+    from src.core.recon_spiderfoot import run_spiderfoot_once
+
+    pool = await get_pool()
+    await init_db(pool)
+    try:
+        while True:
+            async with pool.acquire() as conn:
+                report = await run_spiderfoot_once(conn, dry_run=args.dry_run)
+            if args.json:
+                print(json.dumps(report, indent=2, sort_keys=True, default=str))
+            else:
+                print(report)
+            if args.once:
+                break
+            await asyncio.sleep(args.poll_interval)
+    finally:
+        await close_pool()
 
 
 async def _cmd_rebuild_report(
