@@ -56,3 +56,25 @@ async def test_yt_dlp_download_disables_update_check(monkeypatch, tmp_path):
 
     argv = runner.await_args.args[0]
     assert "--no-update" in argv
+
+
+@pytest.mark.asyncio
+async def test_gallery_dl_runs_from_tempdir_to_capture_relative_outputs(monkeypatch, tmp_path):
+    monkeypatch.setattr(subprocess_downloader, "check_tool", lambda name: True)
+    runner = AsyncMock(return_value=_result(returncode=0, tempdir=tmp_path))
+    monkeypatch.setattr(subprocess_downloader, "_run_and_collect", runner)
+
+    await subprocess_downloader.gallery_dl_download("https://example.test/@user", tempdir=str(tmp_path))
+
+    assert runner.await_args.kwargs["cwd"] == str(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_yt_dlp_runs_from_tempdir_to_capture_relative_outputs(monkeypatch, tmp_path):
+    monkeypatch.setattr(subprocess_downloader, "check_tool", lambda name: True)
+    runner = AsyncMock(return_value=_result(returncode=0, tempdir=tmp_path))
+    monkeypatch.setattr(subprocess_downloader, "_run_and_collect", runner)
+
+    await subprocess_downloader.yt_dlp_download("https://example.test/video", tempdir=str(tmp_path))
+
+    assert runner.await_args.kwargs["cwd"] == str(tmp_path)

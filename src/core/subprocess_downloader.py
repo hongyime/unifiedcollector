@@ -385,7 +385,7 @@ async def gallery_dl_download(
     argv.append("--")
     argv.append(url)
 
-    return await _run_and_collect(argv, tempdir, timeout, progress_hook, stop_event)
+    return await _run_and_collect(argv, tempdir, timeout, progress_hook, stop_event, cwd=tempdir)
 
 
 async def yt_dlp_download(
@@ -437,7 +437,7 @@ async def yt_dlp_download(
     argv.append("--")
     argv.append(url)
 
-    return await _run_and_collect(argv, tempdir, timeout, progress_hook, stop_event)
+    return await _run_and_collect(argv, tempdir, timeout, progress_hook, stop_event, cwd=tempdir)
 
 
 async def _run_and_collect(
@@ -446,10 +446,15 @@ async def _run_and_collect(
     timeout: float,
     progress_hook: Optional[Callable[[str], None]],
     stop_event: Optional[asyncio.Event],
+    cwd: Optional[str] = None,
 ) -> DownloadResult:
     started = time.perf_counter()
     rc, stdout, stderr, timed_out, cancelled = await _run_subprocess(
-        argv, timeout=timeout, progress_hook=progress_hook, stop_event=stop_event,
+        argv,
+        timeout=timeout,
+        cwd=cwd,
+        progress_hook=progress_hook,
+        stop_event=stop_event,
     )
     elapsed = time.perf_counter() - started
 
