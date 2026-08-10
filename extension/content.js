@@ -1809,6 +1809,22 @@ function lemon8NoteIdFromHref(href) {
   }
 }
 
+function lemon8TopicFromHref(href) {
+  try {
+    const u = new URL(href || "", location.href);
+    const parts = u.pathname.split("/").filter(Boolean);
+    if ((parts[0] || "").toLowerCase() !== "topic" || !parts[1]) return "";
+    const topic = decodeURIComponent(parts[1])
+      .trim()
+      .replace(/^#/, "")
+      .replace(/[^A-Za-z0-9_.-]/g, "_")
+      .slice(0, 80);
+    return topic ? "topic_" + topic : "topic";
+  } catch (e) {
+    return "";
+  }
+}
+
 function lemon8MediaUrl(u) {
   if (!u || !/^https?:/i.test(u)) return false;
   if (!/lemon8|byteimg|ibytedtos|muscdn|p16|p19|tos-/i.test(u)) return false;
@@ -1923,6 +1939,8 @@ const lemon8 = {
   entity() {
     const handle = lemon8HandleFromHref(location.href);
     if (handle) return handle;
+    const topic = lemon8TopicFromHref(location.href);
+    if (topic) return topic;
     const m = location.pathname.match(/\/([^/?#]+)/);
     return m ? m[1] : "feed";
   },

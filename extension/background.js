@@ -73,8 +73,9 @@ globalThis.UC_PLATFORMS = [
   // 2026-08-05 — single-segment paths (/foryou, /discover, /explore) get
   // treated as usernames (redirected to /@handle) and 404 too. Verified
   // working feed URLs are /topic/<slug>?region=<cc>. See platforms.js for
-  // the same override applied to popup/tabs UI.
-  { id: "lemon8",    label: "Lemon8",      url: "https://www.lemon8-app.com/topic/food?region=sg", host: "www.lemon8-app.com", cookieUrl: "https://www.lemon8-app.com",     cookie: "sessionid",  scraper: true, noLogin: true },
+  // the same override applied to popup/tabs UI. Keep this bounded to three
+  // topic tabs so Lemon8 gets diversity without creating a browser tab storm.
+  { id: "lemon8",    label: "Lemon8",      url: "https://www.lemon8-app.com/topic/food?region=sg", host: "www.lemon8-app.com", cookieUrl: "https://www.lemon8-app.com",     cookie: "sessionid",  scraper: true, noLogin: true, extraUrls: ["https://www.lemon8-app.com/topic/travel?region=sg", "https://www.lemon8-app.com/topic/singapore?region=sg"] },
   { id: "x",         label: "Twitter / X", url: "https://x.com/home",               host: "x.com",              aliasHosts: ["twitter.com"], cookieUrl: "https://x.com",                  cookie: "auth_token", scraper: true },
   { id: "facebook",  label: "Facebook",    url: "https://www.facebook.com/",        host: "www.facebook.com",   cookieUrl: "https://www.facebook.com",       cookie: "c_user",     scraper: true },
   { id: "strava",    label: "Strava",      url: "https://www.strava.com/dashboard", host: "www.strava.com",     cookieUrl: "https://www.strava.com",         cookie: "_strava4_session", scraper: true },

@@ -186,7 +186,11 @@ def test_chrome_cdp_launcher_opens_requested_platform_urls_directly():
     assert "function Get-PlatformLaunchUrls" in script
     assert 'instagram = "https://www.instagram.com/"' in script
     assert 'tiktok = "https://www.tiktok.com/following"' in script
-    assert 'lemon8 = "https://www.lemon8-app.com/topic/7011425874067619842?region=sg"' in script
+    assert "lemon8 = @(" in script
+    assert '"https://www.lemon8-app.com/topic/food?region=sg"' in script
+    assert '"https://www.lemon8-app.com/topic/travel?region=sg"' in script
+    assert '"https://www.lemon8-app.com/topic/singapore?region=sg"' in script
+    assert "foreach ($url in @($platforms[$id]))" in script
     assert 'strava = "https://www.strava.com/dashboard"' in script
     assert "$platforms.Keys -contains $id" in script
     assert "Open-RequestedPlatformTabs -Port $RemoteDebuggingPort" in script

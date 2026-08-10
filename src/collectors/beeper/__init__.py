@@ -1123,6 +1123,7 @@ class BeeperCollector(BaseCollector):
         if self.pool is None:
             raise RuntimeError("BeeperCollector requires a DB pool — call set_pool() first")
 
+        self._intentional_idle_reason = None
         stats = {"accounts": 0, "chats": 0, "messages_inserted": 0,
                  "networks_repaired": 0, "errors": 0, "transient": 0}
         phase = "restore_api_cooldown"
@@ -1222,6 +1223,14 @@ class BeeperCollector(BaseCollector):
             stats["accounts"], stats["chats"], stats["messages_inserted"],
             stats["networks_repaired"], stats["errors"], stats["transient"],
         )
+        if (
+            stats["errors"] == 0
+            and stats["messages_inserted"] == 0
+            and (stats["accounts"] > 0 or stats["chats"] > 0 or stats["networks_repaired"] > 0)
+        ):
+            self._intentional_idle_reason = (
+                "Beeper desktop_api reachable; no new messages this cycle"
+            )
         return stats
 
     async def download_media(self, item: dict) -> None:

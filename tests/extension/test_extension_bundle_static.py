@@ -43,6 +43,20 @@ def test_x_twitter_alias_is_registered_for_tabs_and_background():
     assert "platformHosts(p).includes(host)" in background
 
 
+def test_lemon8_uses_bounded_multi_topic_seed_tabs():
+    background = _read("extension/background.js")
+    platforms = _read("extension/platforms.js")
+    content = _read("extension/content.js")
+
+    for text in (background, platforms):
+        assert '"https://www.lemon8-app.com/topic/food?region=sg"' in text
+        assert '"https://www.lemon8-app.com/topic/travel?region=sg"' in text
+        assert '"https://www.lemon8-app.com/topic/singapore?region=sg"' in text
+        assert "extraUrls" in text
+    assert "function lemon8TopicFromHref" in content
+    assert 'return topic ? "topic_" + topic : "topic";' in content
+
+
 def test_x_failed_script_url_is_canonicalized():
     background = _read("extension/background.js")
     content = _read("extension/content.js")

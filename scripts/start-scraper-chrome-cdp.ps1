@@ -299,7 +299,11 @@ function Get-PlatformLaunchUrls {
     $platforms = [ordered]@{
         instagram = "https://www.instagram.com/"
         tiktok = "https://www.tiktok.com/following"
-        lemon8 = "https://www.lemon8-app.com/topic/7011425874067619842?region=sg"
+        lemon8 = @(
+            "https://www.lemon8-app.com/topic/food?region=sg",
+            "https://www.lemon8-app.com/topic/travel?region=sg",
+            "https://www.lemon8-app.com/topic/singapore?region=sg"
+        )
         x = "https://x.com/home"
         threads = "https://www.threads.com/"
         facebook = "https://www.facebook.com/"
@@ -313,7 +317,9 @@ function Get-PlatformLaunchUrls {
     }
     foreach ($id in $selected) {
         if ($platforms.Keys -contains $id) {
-            $platforms[$id]
+            foreach ($url in @($platforms[$id])) {
+                $url
+            }
         }
     }
 }

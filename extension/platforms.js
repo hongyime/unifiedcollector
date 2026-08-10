@@ -17,9 +17,10 @@ globalThis.UC_PLATFORMS = [
   // 2026-08-05 — single-segment paths (/foryou, /discover, /explore) get
   // treated as usernames (redirected to /@handle) and 404 too. Verified
   // working feed URLs are /topic/<slug>?region=<cc> which resolve to
-  // /topic/<id>?... and serve 200+ post cards each. Food/fashion/beauty
-  // all work; food picked for continuity with the prior /feed/food config.
-  { id: "lemon8",    label: "Lemon8",      url: "https://www.lemon8-app.com/topic/food?region=sg",  host: "www.lemon8-app.com",  cookieUrl: "https://www.lemon8-app.com",  cookie: "sessionid",  scraper: true, noLogin: true },
+  // /topic/<id>?... and serve post cards. Keep this bounded to three tabs:
+  // enough diversity to avoid hammering one exhausted topic, without reviving
+  // the old "too many Chrome tabs" problem.
+  { id: "lemon8",    label: "Lemon8",      url: "https://www.lemon8-app.com/topic/food?region=sg",  host: "www.lemon8-app.com",  cookieUrl: "https://www.lemon8-app.com",  cookie: "sessionid",  scraper: true, noLogin: true, extraUrls: ["https://www.lemon8-app.com/topic/travel?region=sg", "https://www.lemon8-app.com/topic/singapore?region=sg"] },
   { id: "x",         label: "Twitter / X", url: "https://x.com/home",           host: "x.com",               aliasHosts: ["twitter.com"], cookieUrl: "https://x.com",               cookie: "auth_token", scraper: true  },
   { id: "facebook",  label: "Facebook",    url: "https://www.facebook.com/",    host: "www.facebook.com",    cookieUrl: "https://www.facebook.com",    cookie: "c_user",     scraper: true  },
   { id: "strava",    label: "Strava",      url: "https://www.strava.com/dashboard", host: "www.strava.com",  cookieUrl: "https://www.strava.com",      cookie: "_strava4_session", scraper: true },

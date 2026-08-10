@@ -44,6 +44,8 @@ HARD_REOPEN_URLS = {
     ],
     "lemon8": [
         "https://www.lemon8-app.com/topic/food?region=sg",
+        "https://www.lemon8-app.com/topic/travel?region=sg",
+        "https://www.lemon8-app.com/topic/singapore?region=sg",
     ],
 }
 CLOSE_UNHEALTHY_DUPLICATES = os.getenv("UC_BROWSER_CLOSE_UNHEALTHY_DUPLICATES", "1").strip().lower() not in {
