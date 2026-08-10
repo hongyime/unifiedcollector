@@ -60,14 +60,32 @@ function Resolve-UserDataDir {
     # older profile folders may have been created by branded Chrome and can be
     # incompatible with Chrome-for-Testing / Playwright Chromium.
     $base = Join-Path $env:LOCALAPPDATA "UnifiedCollector"
-    $recovered = Join-Path $base "ChromeCdpRecoveredProfile"
-    if (Test-Path -LiteralPath $recovered) {
-        return $recovered
+    $profileCandidates = @(
+        (Join-Path $base "ChromeCdpAutomationProfile"),
+        (Join-Path $base "ChromeCdpRecoveredProfile")
+    )
+    $existingProfiles = @($profileCandidates | Where-Object { Test-Path -LiteralPath $_ })
+    if ($existingProfiles.Count -gt 0) {
+        return @($existingProfiles | Sort-Object -Descending -Property @{
+            Expression = {
+                $stateFiles = @(
+                    (Join-Path $_ "Default\Network\Cookies"),
+                    (Join-Path $_ "Default\Cookies"),
+                    (Join-Path $_ "Default\Preferences"),
+                    $_
+                )
+                $freshest = Get-Date -Date "1970-01-01"
+                foreach ($stateFile in $stateFiles) {
+                    $item = Get-Item -LiteralPath $stateFile -ErrorAction SilentlyContinue
+                    if ($item -and $item.LastWriteTime -gt $freshest) {
+                        $freshest = $item.LastWriteTime
+                    }
+                }
+                $freshest
+            }
+        } | Select-Object -First 1)
     }
     $automation = Join-Path $base "ChromeCdpAutomationProfile"
-    if (Test-Path -LiteralPath $automation) {
-        return $automation
-    }
     return $automation
 }
 

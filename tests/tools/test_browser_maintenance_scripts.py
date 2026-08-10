@@ -45,7 +45,9 @@ def test_chrome_cdp_launcher_prefers_dedicated_automation_profile():
 
     assert "ChromeCdpRecoveredProfile" in script
     assert "ChromeCdpAutomationProfile" in script
-    assert "return $recovered" in script
+    assert script.index("ChromeCdpAutomationProfile") < script.index("ChromeCdpRecoveredProfile")
+    assert "Sort-Object -Descending" in script
+    assert 'Join-Path $_ "Default\\Network\\Cookies"' in script
     assert 'return $automation' in script
     assert "incompatible with Chrome-for-Testing / Playwright Chromium" in script
 
