@@ -426,6 +426,72 @@ LIMIT 18;
 }
 
 try {
+    $vaultArtifactSql = @"
+SET statement_timeout = '8s';
+WITH recent AS (
+    SELECT COALESCE(metadata, '{}'::jsonb) AS metadata,
+           file_path
+    FROM media_items
+    WHERE collected_at >= NOW() - INTERVAL '24 hours'
+),
+counts AS (
+    SELECT count(*)::bigint AS recent_24h,
+           count(*) FILTER (
+               WHERE metadata ? 'vault_sidecar'
+                 AND metadata->'vault_sidecar'->>'ok' = 'false'
+                 AND NOT (
+                     metadata ? 'vault_artifact'
+                     AND COALESCE(metadata->'vault_artifact'->>'sidecar_path', '') <> ''
+                     AND COALESCE(metadata->'vault_artifact'->>'partial', 'false') <> 'true'
+                     AND COALESCE(metadata->'vault_artifact'->>'ok', 'false') = 'true'
+                 )
+           )::bigint AS effective_sidecar_failed_24h,
+           count(*) FILTER (
+               WHERE metadata ? 'vault_artifact'
+                 AND (
+                     metadata->'vault_artifact'->>'ok' = 'false'
+                     OR metadata->'vault_artifact'->>'sidecar_ok' = 'false'
+                     OR metadata->'vault_artifact'->>'partial' = 'true'
+                 )
+                 AND COALESCE(metadata->'vault_artifact'->>'quarantined', 'false') <> 'true'
+           )::bigint AS active_partial_24h,
+           count(*) FILTER (
+               WHERE file_path IS NOT NULL
+                 AND file_path <> ''
+                 AND NOT (metadata ? 'vault_sidecar')
+                 AND NOT (
+                     metadata ? 'vault_artifact'
+                     AND COALESCE(metadata->'vault_artifact'->>'sidecar_path', '') <> ''
+                 )
+           )::bigint AS missing_sidecar_24h
+    FROM recent
+)
+SELECT recent_24h::text || '|' ||
+       effective_sidecar_failed_24h::text || '|' ||
+       active_partial_24h::text || '|' ||
+       missing_sidecar_24h::text
+FROM counts;
+"@
+    $vaultRows = @(Invoke-PostgresText -Sql $vaultArtifactSql -QueryTimeoutSeconds 12 | Where-Object {
+        $_ -and [string]$_ -ne "SET"
+    })
+    $parts = @([string]($vaultRows | Select-Object -Last 1) -split "\|")
+    if ($parts.Count -lt 4) {
+        Add-Check $checks "recent vault artifact health" $false "unexpected query result: $($vaultRows -join '; ')"
+    } else {
+        $recent24h = [int64]$parts[0]
+        $sidecarFailed24h = [int64]$parts[1]
+        $partial24h = [int64]$parts[2]
+        $missingSidecar24h = [int64]$parts[3]
+        $ok = ($sidecarFailed24h -eq 0 -and $partial24h -eq 0 -and $missingSidecar24h -eq 0)
+        $detail = "recent_24h=$recent24h, effective_sidecar_failed_24h=$sidecarFailed24h, active_partial_24h=$partial24h, missing_sidecar_24h=$missingSidecar24h"
+        Add-Check $checks "recent vault artifact health" $ok $detail
+    }
+} catch {
+    Add-Check $checks "recent vault artifact health" $false $_.Exception.Message
+}
+
+try {
     $dlqRows = Invoke-PostgresText -Sql @"
 SELECT source || '|' || status || '|' || count(*)::text || '|' || COALESCE(round(extract(epoch from (now()-min(created_at)))/60, 1)::text, '0')
 FROM dead_letter_queue

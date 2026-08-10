@@ -80,6 +80,11 @@ def test_boot_verifier_checks_reboot_critical_surfaces():
     assert "telegram_messages" in script
     assert "media_items" in script
     assert "last ${RecentIngestionMinutes}m" in script
+    assert "recent vault artifact health" in script
+    assert "effective_sidecar_failed_24h" in script
+    assert "active_partial_24h" in script
+    assert "missing_sidecar_24h" in script
+    assert "statement_timeout = '8s'" in script
     assert "instagram = 60" in script
     assert "github = 240" in script
     assert "strava = 60" in script

@@ -41,6 +41,7 @@ class FakeConn:
             self.updates.append(args)
         elif "INSERT INTO dead_letter_queue" in query:
             self.dlq.append(args)
+            return "INSERT 0 1"
         elif "INSERT INTO collection_targets" in query:
             self.targets.append(args)
             return "INSERT 0 1"
@@ -213,6 +214,8 @@ async def test_repair_partial_vault_artifacts_dry_run_skips_hashing(tmp_path, mo
     assert "COALESCE(metadata, '{}'::jsonb) ? 'vault_artifact'" not in conn.fetch_query
     assert "metadata ? 'vault_artifact'" in conn.fetch_query
     assert "quarantined" in conn.fetch_query
+    assert "content_type" in conn.fetch_query
+    assert "entity_id" in conn.fetch_query
 
 
 @pytest.mark.asyncio
@@ -230,6 +233,33 @@ async def test_repair_partial_vault_artifacts_keeps_checksum_mismatch_degraded(t
     assert report.failed == 1
     assert "sha256 mismatch" in report.failures[0]["error"]
     assert conn.updates == []
+
+
+@pytest.mark.asyncio
+async def test_repair_partial_vault_artifacts_quarantines_youtube_video_for_backfill(tmp_path, monkeypatch):
+    monkeypatch.setattr(vault, "SIDECARS_ENABLED", True)
+    row = _row(tmp_path)
+    row["source"] = "youtube"
+    row["content_type"] = "video"
+    row["content_id"] = "video_bad"
+    row["file_size"] = 999
+    row["sha256"] = ""
+    row["metadata"] = {"vault_artifact": {"ok": False, "partial": True, "error": "copy failed"}}
+    conn = FakeConn([row])
+
+    report = await repair_partial_vault_artifacts(conn, vault_root=tmp_path)
+
+    assert report.scanned == 1
+    assert report.repaired == 0
+    assert report.failed == 1
+    assert report.size_mismatch == 1
+    assert report.platform_backfill_required == 1
+    assert report.queued_backfill == 1
+    artifact_meta = json.loads(conn.updates[0][1])["vault_artifact"]
+    assert artifact_meta["quarantined"] is True
+    assert artifact_meta["platform_backfill_required"] is True
+    assert "youtube videos require yt-dlp/platform backfill" in artifact_meta["platform_backfill_reason"]
+    assert conn.dlq
 
 
 @pytest.mark.asyncio

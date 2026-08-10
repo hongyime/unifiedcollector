@@ -310,6 +310,12 @@ async def repair_partial_vault_artifacts(
         (
             metadata ? 'vault_sidecar'
             AND metadata->'vault_sidecar'->>'ok' = 'false'
+            AND NOT (
+                metadata ? 'vault_artifact'
+                AND COALESCE(metadata->'vault_artifact'->>'sidecar_path', '') <> ''
+                AND COALESCE(metadata->'vault_artifact'->>'partial', 'false') <> 'true'
+                AND COALESCE(metadata->'vault_artifact'->>'ok', 'false') = 'true'
+            )
         ) OR (
             metadata ? 'vault_artifact'
             AND (
@@ -340,7 +346,7 @@ async def repair_partial_vault_artifacts(
     order_by = "source, content_id"
     rows = await conn.fetch(
         f"""
-        SELECT id, source, content_id, filename, file_path, file_size, sha256,
+        SELECT id, source, entity_id, content_type, content_id, filename, file_path, file_size, sha256,
                source_url, metadata, ingest_path, collected_at
         FROM media_items
         WHERE {" AND ".join(f"({part})" for part in where)}
@@ -391,6 +397,40 @@ async def repair_partial_vault_artifacts(
             report.failed += 1
             if "media file is missing" in str(exc):
                 report.file_missing += 1
+            backfill_reason = _platform_backfill_reason(str(d.get("source") or ""), d)
+            if backfill_reason:
+                repaired_at = datetime.now(timezone.utc)
+                metadata = _coerce_metadata(d.get("metadata"))
+                previous_artifact = (
+                    metadata.get("vault_artifact") if isinstance(metadata.get("vault_artifact"), dict) else {}
+                )
+                artifact_meta = {
+                    **previous_artifact,
+                    "ok": False,
+                    "partial": True,
+                    "quarantined": True,
+                    "quarantined_at": repaired_at.isoformat(),
+                    "quarantine_reason": str(exc),
+                    "platform_backfill_required": True,
+                    "platform_backfill_reason": backfill_reason,
+                }
+                await conn.execute(
+                    """
+                    UPDATE media_items
+                    SET metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb
+                    WHERE id = $1
+                    """,
+                    media_id,
+                    json.dumps({"vault_artifact": artifact_meta}, default=str),
+                )
+                await _record_platform_backfill(
+                    conn,
+                    report,
+                    d,
+                    backfill_reason,
+                    dry_run=dry_run,
+                    queue=True,
+                )
             _append_failure(
                 report,
                 {
