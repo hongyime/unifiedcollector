@@ -6,6 +6,7 @@ import { AuthContext, useAuthProvider } from "./hooks/useAuth";
 import { DashboardPage } from "./features/collectors/DashboardPage";
 import { CollectorsPage } from "./features/collectors/CollectorsPage";
 import { CollectorDetailPage } from "./features/collectors/CollectorDetailPage";
+import { CoveragePage } from "./features/collectors/CoveragePage";
 import { MediaPage } from "./features/collectors/MediaPage";
 import { DLQPage } from "./features/collectors/DLQPage";
 import { HealthPage } from "./features/health/HealthPage";
@@ -14,6 +15,7 @@ import { TargetsPage } from "./features/targets/TargetsPage";
 import { SchedulesPage } from "./features/schedules/SchedulesPage";
 import { RunsPage } from "./features/runs/RunsPage";
 import { GraphPage } from "./features/graph/GraphPage";
+import { ReconPage } from "./features/recon/ReconPage";
 import { MediaBrowserPage } from "./features/media/MediaBrowserPage";
 import { StoriesPage } from "./features/stories/StoriesPage";
 import { UsersPage } from "./features/whatsapp/UsersPage";
@@ -55,6 +57,8 @@ const router = createBrowserRouter([
       { index: true, element: <DashboardPage /> },
       { path: "collectors", element: <CollectorsPage /> },
       { path: "collectors/:source", element: <CollectorDetailPage /> },
+      { path: "coverage", element: <CoveragePage /> },
+      { path: "recon", element: <ReconPage /> },
       { path: "targets", element: <TargetsPage /> },
       { path: "schedules", element: <SchedulesPage /> },
       { path: "runs", element: <RunsPage /> },

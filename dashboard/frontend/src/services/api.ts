@@ -2,6 +2,7 @@ import { API_BASE } from "../utils/constants";
 import type {
   HealthStatus,
   CollectorStatus,
+  CollectionCoverageRow,
   CollectorDetail,
   SourceCollectionMatrix,
   MediaItem,
@@ -12,6 +13,7 @@ import type {
   StoriesOverview,
   DLQItem,
   Target,
+  ReconTarget,
   Schedule,
   Run,
   GraphData,
@@ -115,6 +117,7 @@ export const api = {
   health: () => get<HealthStatus>("/health?include_sources=true"),
   collectors: () => get<CollectorStatus[]>("/collectors"),
   collectorsLive: () => get<CollectorsLive>("/collectors/live"),
+  collectorsCoverage: () => get<{ sources: CollectionCoverageRow[]; total: number }>("/coverage/collectors"),
   sourceMatrix: () => get<SourceCollectionMatrix>("/collectors/source-matrix"),
   collectorDetail: (source: string) => get<CollectorDetail>(`/collectors/${source}`),
 
@@ -166,6 +169,7 @@ export const api = {
   createTarget: (source: string, target: string, priority = 0, force = false) =>
     post(`/targets${force ? "?force=true" : ""}`, { source, target, priority }),
   deleteTarget: (id: number) => del(`/targets/${id}`),
+  reconTargets: () => get<{ targets: ReconTarget[]; total: number }>("/recon/targets"),
 
   schedules: () => get<Schedule[]>("/schedules"),
   updateSchedule: (source: string, interval_hours: number, enabled: boolean) =>

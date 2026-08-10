@@ -19,6 +19,8 @@ import {
   MessageCircle,
   QrCode,
   KeyRound,
+  Radar,
+  ShieldAlert,
 } from "lucide-react";
 
 // Per-platform sections: each social/messaging/other platform gets its own entry
@@ -30,6 +32,7 @@ const groups = [
     items: [
       { to: "/", label: "Dashboard", icon: LayoutDashboard },
       { to: "/collectors", label: "Collectors", icon: Database },
+      { to: "/coverage", label: "Coverage", icon: ShieldAlert },
       { to: "/browse", label: "All media", icon: ImageIcon },
       { to: "/stories", label: "Stories", icon: ImageIcon },
     ],
@@ -78,6 +81,7 @@ const groups = [
       { to: "/accounts", label: "Accounts", icon: KeyRound },
       { to: "/whatsapp/link", label: "Link Device", icon: QrCode },
       { to: "/targets", label: "Targets", icon: Target },
+      { to: "/recon", label: "Recon", icon: Radar },
       { to: "/schedules", label: "Schedules", icon: Calendar },
       { to: "/runs", label: "Runs", icon: PlayCircle },
     ],

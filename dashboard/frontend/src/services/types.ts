@@ -136,6 +136,21 @@ export interface CollectorStatus {
   status: string;
 }
 
+export interface CollectionCoverageRow {
+  source: string;
+  expected_cadence: string | null;
+  latest_data_at: string | null;
+  latest_run_at: string | null;
+  status: string;
+  rows_24h: number;
+  media_24h: number;
+  errors_24h: number;
+  rate_limits_24h: number;
+  private_access_failures: number;
+  stale_targets: number | string | unknown[] | null;
+  created_at: string | null;
+}
+
 export interface SourceWindowCounts {
   records: number;
   messages: number;
@@ -381,6 +396,19 @@ export interface Target {
   priority: number;
   metadata?: Record<string, unknown> | null;
   created_at: string;
+}
+
+export interface ReconTarget {
+  id: string;
+  target_type: string;
+  target_value: string;
+  source: string;
+  priority: number;
+  status: string;
+  scope_json: Record<string, unknown> | string | null;
+  error: string | null;
+  created_at: string | null;
+  updated_at: string | null;
 }
 
 export interface Schedule {
