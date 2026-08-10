@@ -2,6 +2,9 @@ param(
     [string]$Repo = "C:\unifiedcollector",
     [string]$DashboardHealthUrl = "http://127.0.0.1:8700/health",
     [string]$CdpUrl = "http://127.0.0.1:9333",
+    [string]$BackupDir = "Z:\unifiedcollector\backups\db",
+    [int]$BackupFreshHours = 30,
+    [int]$ActiveBackupFreshMinutes = 20,
     [int]$TimeoutSeconds = 8
 )
 
@@ -161,6 +164,35 @@ if (Test-Path -LiteralPath $pidPath) {
     }
 }
 Add-Check $checks "browser maintenance loop" $pidOk $pidDetail
+
+$backupOk = $false
+$backupDetail = "backup directory missing: $BackupDir"
+if (Test-Path -LiteralPath $BackupDir) {
+    $now = Get-Date
+    $completed = Get-ChildItem -LiteralPath $BackupDir -Filter "unifiedcollector_*.dump" -File -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1
+    $active = Get-ChildItem -LiteralPath $BackupDir -Filter ".inprogress_*.dump" -File -Force -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1
+    if ($completed -and (($now - $completed.LastWriteTime).TotalHours -le $BackupFreshHours)) {
+        $backupOk = $true
+        $backupDetail = "latest completed $($completed.Name), age=$([math]::Round(($now - $completed.LastWriteTime).TotalHours, 1))h"
+    } elseif ($active -and (($now - $active.LastWriteTime).TotalMinutes -le $ActiveBackupFreshMinutes)) {
+        $backupOk = $true
+        $backupDetail = "active dump $($active.Name), size=$($active.Length), touched=$([math]::Round(($now - $active.LastWriteTime).TotalMinutes, 1))m ago"
+    } elseif ($completed) {
+        $backupDetail = "latest completed $($completed.Name) is stale, age=$([math]::Round(($now - $completed.LastWriteTime).TotalHours, 1))h"
+        if ($active) {
+            $backupDetail += "; active dump $($active.Name) touched $([math]::Round(($now - $active.LastWriteTime).TotalMinutes, 1))m ago"
+        }
+    } elseif ($active) {
+        $backupDetail = "only active dump $($active.Name), touched $([math]::Round(($now - $active.LastWriteTime).TotalMinutes, 1))m ago"
+    } else {
+        $backupDetail = "no completed or active dump found in $BackupDir"
+    }
+}
+Add-Check $checks "db backup freshness" $backupOk $backupDetail
 
 $failed = @($checks | Where-Object { -not $_.ok })
 $result = [pscustomobject]@{

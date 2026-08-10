@@ -54,6 +54,11 @@ def test_boot_verifier_checks_reboot_critical_surfaces():
     assert "docker compose -f $composePath ps --format json" in script
     assert "http://127.0.0.1:8700/health" in script
     assert "http://127.0.0.1:9333" in script
+    assert "Z:\\unifiedcollector\\backups\\db" in script
+    assert "BackupFreshHours" in script
+    assert "ActiveBackupFreshMinutes" in script
+    assert "db backup freshness" in script
+    assert ".inprogress_*.dump" in script
     assert "browser_tab_maintenance_loop.pid" in script
     assert "instagram.com" in script
     assert "tiktok.com" in script
