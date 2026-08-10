@@ -142,13 +142,15 @@ def test_browser_tab_reload_hard_reopens_repeatedly_stuck_tiktok_tabs():
     script = (REPO_ROOT / "tools" / "browser_tab_reload.py").read_text(encoding="utf-8")
 
     assert "UC_BROWSER_HARD_REOPEN_PLATFORMS" in script
-    assert '"tiktok,lemon8"' in script
+    assert '"instagram,threads,tiktok,lemon8,x,facebook,strava"' in script
     assert '"https://www.tiktok.com/following"' in script
     assert '"https://www.tiktok.com/foryou"' in script
     assert '"https://www.tiktok.com/explore"' in script
     assert '"https://www.lemon8-app.com/topic/food?region=sg"' in script
     assert "def _platform_had_previous_unresponsive_reload" in script
     assert "def _hard_reopen_platform" in script
+    assert "reopen_urls = HARD_REOPEN_URLS.get(platform)" in script
+    assert "dict.fromkeys" in script
     assert "hard_reopen_close" in script
     assert "hard_reopen_open" in script
 

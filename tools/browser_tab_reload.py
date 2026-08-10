@@ -32,7 +32,10 @@ AUDIT_PATH = REPO_ROOT / "tmp" / "browser_tab_audit_result.json"
 PLAN_PATH = REPO_ROOT / "tmp" / "browser_tab_reload_plan.json"
 HARD_REOPEN_PLATFORMS = {
     p.strip().lower()
-    for p in os.getenv("UC_BROWSER_HARD_REOPEN_PLATFORMS", "tiktok,lemon8").split(",")
+    for p in os.getenv(
+        "UC_BROWSER_HARD_REOPEN_PLATFORMS",
+        "instagram,threads,tiktok,lemon8,x,facebook,strava",
+    ).split(",")
     if p.strip()
 }
 HARD_REOPEN_URLS = {
@@ -192,7 +195,10 @@ def _hard_reopen_platform(platform: str, plans: list[dict]) -> list[dict]:
         results.append({**p, "action": "hard_reopen_close", "status": "ok" if ok else "fail", "detail": msg})
         print(f"  close  {platform:10} {p['target_id'][:12]} ... {'OK' if ok else 'FAIL'}: {msg[:160]}")
         time.sleep(0.5)
-    for url in HARD_REOPEN_URLS.get(platform, []):
+    reopen_urls = HARD_REOPEN_URLS.get(platform) or list(dict.fromkeys(
+        str(p.get("url") or "").strip() for p in plans if str(p.get("url") or "").strip()
+    ))
+    for url in reopen_urls:
         ok, msg = _open_url(url)
         results.append({
             "platform": platform,
