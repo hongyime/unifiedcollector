@@ -390,21 +390,45 @@ class Lemon8Collector(BaseCollector):
     def _headers(self) -> dict[str, str]:
         return {"User-Agent": self.user_agents.get_for_domain("lemon8-app.com"), "Accept": "application/json", "Referer": "https://www.lemon8-app.com/"}
 
+    def _cycle_configured_targets(self, targets: list[str]) -> list[str]:
+        """Return the configured targets for this cycle, rotated after the cursor.
+
+        Lemon8 intentionally limits configured profile visits per cycle for
+        anti-ban pacing. Slicing ``targets[:limit]`` makes the first few
+        profiles monopolize every cycle, especially when they produce no media.
+        Use the persisted checkpoint as a round-robin cursor so each restart and
+        each cycle continues through the target list.
+        """
+        if not targets or not self._target_limit_per_cycle:
+            return targets
+        limit = min(self._target_limit_per_cycle, len(targets))
+        last_id = (self.checkpoint.last_processed_id or "").strip()
+        if not last_id:
+            return targets[:limit]
+        try:
+            start = (targets.index(last_id) + 1) % len(targets)
+        except ValueError:
+            return targets[:limit]
+        return [targets[(start + i) % len(targets)] for i in range(limit)]
+
     async def collect(self, targets: list[str]):
         async with httpx.AsyncClient(timeout=30, cookies=self._cookies, headers=self._headers(), follow_redirects=True) as client:
-            cycle_targets = targets
-            if self._target_limit_per_cycle:
-                cycle_targets = targets[: self._target_limit_per_cycle]
-                if len(targets) > len(cycle_targets):
-                    logger.info(
-                        "lemon8: processing %d/%d configured targets this cycle",
-                        len(cycle_targets),
-                        len(targets),
-                    )
+            cycle_targets = self._cycle_configured_targets(targets)
+            if self._target_limit_per_cycle and len(targets) > len(cycle_targets):
+                cursor = self.checkpoint.last_processed_id or "start"
+                logger.info(
+                    "lemon8: processing %d/%d configured targets this cycle after cursor=%s",
+                    len(cycle_targets),
+                    len(targets),
+                    cursor,
+                )
             for username in cycle_targets:
                 if self._stop.is_set(): break
                 if username.startswith("#"):
-                    try: await self._collect_tag(client, username.lstrip("#"))
+                    try:
+                        await self._collect_tag(client, username.lstrip("#"))
+                        await self.checkpoint.save_progress(username)
+                        await self.heartbeat_source_health()
                     except Exception as e:
                         safe_error = _safe_log_text(e)
                         await self._record_http_status_event(
@@ -459,23 +483,29 @@ class Lemon8Collector(BaseCollector):
             return
         try:
             async with self.pool.acquire() as conn:
-                await conn.execute(
+                result = await conn.execute(
                     """
                     UPDATE collection_targets
                     SET status = 'unavailable',
                         error_message = $3,
                         metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
                             'unavailable_reason', $3,
-                            'unavailable_at', NOW()
+                            'unavailable_at', NOW(),
+                            'preserve_on_source_config_sync', true
                         )
                     WHERE source = $1
                       AND target_id = $2
-                      AND status IN ('pending', 'error', 'active')
+                      AND COALESCE(status, 'pending') <> 'disabled'
                     """,
                     self.SOURCE_NAME,
                     username,
                     reason,
                 )
+                if result == "UPDATE 0":
+                    logger.warning(
+                        "lemon8: unavailable profile %s had no matching collection_targets row",
+                        username,
+                    )
         except Exception:
             logger.debug("lemon8: failed to mark %s unavailable", username, exc_info=True)
 

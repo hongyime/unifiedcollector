@@ -229,6 +229,56 @@ async def test_collect_limits_configured_targets_per_cycle(monkeypatch, collecto
 
 
 @pytest.mark.asyncio
+async def test_collect_rotates_configured_targets_after_checkpoint(monkeypatch, collector):
+    monkeypatch.setenv("LEMON8_SPIDER_ENABLED", "false")
+    collector._feed_enabled = False
+    collector._target_limit_per_cycle = 2
+    collector.checkpoint.last_processed_id = "bob"
+    seen = []
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+    monkeypatch.setattr(lemon8_mod.httpx, "AsyncClient", lambda *args, **kwargs: _Client())
+
+    async def _collect_user(_client, username):
+        seen.append(username)
+
+    monkeypatch.setattr(collector, "_collect_user", _collect_user)
+
+    await collector.collect(["alice", "bob", "carol"])
+
+    assert seen == ["carol", "alice"]
+
+
+@pytest.mark.asyncio
+async def test_collect_saves_progress_for_successful_tag(monkeypatch, collector):
+    monkeypatch.setenv("LEMON8_SPIDER_ENABLED", "false")
+    collector._feed_enabled = False
+    collector._target_limit_per_cycle = 0
+    collector._collect_tag = AsyncMock()
+    collector.checkpoint.save_progress = AsyncMock()
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+    monkeypatch.setattr(lemon8_mod.httpx, "AsyncClient", lambda *args, **kwargs: _Client())
+
+    await collector.collect(["#singapore"])
+
+    collector._collect_tag.assert_awaited_once()
+    collector.checkpoint.save_progress.assert_awaited_once_with("#singapore")
+
+
+@pytest.mark.asyncio
 async def test_process_spider_queue_respects_cycle_limit(monkeypatch, collector):
     conn = collector._test_conn  # type: ignore[attr-defined]
     conn.fetchrow = AsyncMock(
@@ -314,6 +364,9 @@ async def test_collect_skips_unavailable_profile_without_dlq(monkeypatch, collec
     sql, source, target, reason = collector._test_conn.execute.await_args.args
     assert "UPDATE collection_targets" in sql
     assert "status = 'unavailable'" in sql
+    assert "preserve_on_source_config_sync" in sql
+    assert "status IN ('pending', 'error', 'active')" not in sql
+    assert "COALESCE(status, 'pending') <> 'disabled'" in sql
     assert source == "lemon8"
     assert target == "missing"
     assert reason == "http_404"
