@@ -32,6 +32,9 @@ def test_browser_maintenance_startup_defaults_to_fast_recovery():
 
     assert "[int]$IntervalMinutes = 10" in task_script
     assert "[int]$IntervalMinutes = 10" in startup_script
+    assert "New-ScheduledTaskTrigger -AtLogOn" in task_script
+    assert "AtStartup registration was denied; registered current-user AtLogOn task instead" in task_script
+    assert "run_hidden.vbs" in task_script
 
 
 def test_browser_maintenance_startup_runs_hidden():

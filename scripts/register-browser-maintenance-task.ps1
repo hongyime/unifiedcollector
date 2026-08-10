@@ -48,15 +48,38 @@ try {
     if ($message -notmatch "Access is denied|0x80070005") {
         throw
     }
+
+    try {
+        $logonTrigger = New-ScheduledTaskTrigger -AtLogOn
+        Register-ScheduledTask `
+            -TaskName $TaskName `
+            -Action $action `
+            -Trigger $logonTrigger `
+            -Settings $settings `
+            -Description "Keeps UnifiedCollector browser tab audit/reload maintenance loop alive after user logon." `
+            -Force | Out-Null
+
+        Write-Warning "AtStartup registration was denied; registered current-user AtLogOn task instead."
+        Write-Host "Registered scheduled task $TaskName."
+        Write-Host "Start it now with: Start-ScheduledTask -TaskName $TaskName"
+        exit 0
+    } catch {
+        $logonMessage = $_.Exception.Message
+        if ($logonMessage -notmatch "Access is denied|0x80070005") {
+            throw
+        }
+    }
+
     $startup = [Environment]::GetFolderPath("Startup")
     if (-not $startup) {
         throw "Scheduled task registration was denied and the user Startup folder could not be resolved."
     }
     $cmdPath = Join-Path $startup "$TaskName.cmd"
+    $hiddenRunner = Join-Path $repo "scripts\run_hidden.vbs"
     $cmd = @(
         "@echo off",
         "cd /d `"$repo`"",
-        "`"$psExe`" -NoProfile -ExecutionPolicy Bypass -File `"$starter`" -IntervalMinutes $IntervalMinutes -InitialDelaySeconds 60"
+        "wscript.exe `"$hiddenRunner`" `"`"$psExe`" -NoProfile -ExecutionPolicy Bypass -File `"`"`"$starter`"`"`" -IntervalMinutes $IntervalMinutes -InitialDelaySeconds 60`""
     ) -join "`r`n"
     Set-Content -LiteralPath $cmdPath -Value $cmd -Encoding ASCII
     Write-Warning "Scheduled task registration was denied; installed current-user Startup fallback instead."
