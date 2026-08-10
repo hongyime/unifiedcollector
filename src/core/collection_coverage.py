@@ -8,6 +8,16 @@ async def _table_exists(conn, table: str) -> bool:
     return bool(await conn.fetchval("SELECT to_regclass($1) IS NOT NULL", table))
 
 
+async def _add_sources_from_table(conn, sources: set[str], table: str, column: str, source: str | None) -> None:
+    if not await _table_exists(conn, table):
+        return
+    rows = await conn.fetch(
+        f"SELECT DISTINCT {column} AS source FROM {table} WHERE ($1::text IS NULL OR {column} = $1)",
+        source,
+    )
+    sources.update(str(row["source"]) for row in rows if row["source"])
+
+
 def _status(latest_data_at, latest_run_at, source_status: str | None, expected_cadence: timedelta) -> str:
     if source_status in {"dead", "failed"}:
         return "stale"
@@ -37,15 +47,12 @@ async def build_collection_coverage_snapshot(
 ) -> dict[str, Any]:
     expected = timedelta(hours=expected_cadence_hours)
     sources: set[str] = set()
-    if await _table_exists(conn, "media_items"):
-        rows = await conn.fetch("SELECT DISTINCT source FROM media_items WHERE ($1::text IS NULL OR source = $1)", source)
-        sources.update(str(row["source"]) for row in rows if row["source"])
-    if await _table_exists(conn, "collection_runs"):
-        rows = await conn.fetch("SELECT DISTINCT source FROM collection_runs WHERE ($1::text IS NULL OR source = $1)", source)
-        sources.update(str(row["source"]) for row in rows if row["source"])
-    if await _table_exists(conn, "source_health"):
-        rows = await conn.fetch("SELECT source FROM source_health WHERE ($1::text IS NULL OR source = $1)", source)
-        sources.update(str(row["source"]) for row in rows if row["source"])
+    await _add_sources_from_table(conn, sources, "source_health", "source", source)
+    await _add_sources_from_table(conn, sources, "service_cursors", "service", source)
+    await _add_sources_from_table(conn, sources, "collection_schedules", "source", source)
+    await _add_sources_from_table(conn, sources, "media_source_rollups", "source", source)
+    if not sources:
+        await _add_sources_from_table(conn, sources, "collection_runs", "source", source)
 
     snapshots = []
     for item_source in sorted(sources):
@@ -70,7 +77,7 @@ async def build_collection_coverage_snapshot(
         if await _table_exists(conn, "collection_runs"):
             row = await conn.fetchrow(
                 """
-                SELECT MAX(finished_at) AS latest_run_at,
+                SELECT MAX(COALESCE(completed_at, started_at)) AS latest_run_at,
                        COUNT(*) FILTER (
                          WHERE started_at >= NOW() - INTERVAL '24 hours'
                            AND status NOT IN ('success', 'completed')
@@ -97,7 +104,7 @@ async def build_collection_coverage_snapshot(
         status = _status(latest_data_at, latest_run_at, source_status, expected)
         snapshot = {
             "source": item_source,
-            "expected_cadence": str(expected),
+            "expected_cadence": expected,
             "latest_data_at": latest_data_at,
             "latest_run_at": latest_run_at,
             "status": status,

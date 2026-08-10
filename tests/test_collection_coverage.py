@@ -19,11 +19,7 @@ class Conn:
         return None
 
     async def fetch(self, sql, *args):
-        if "DISTINCT source FROM media_items" in sql:
-            return [{"source": "telegram"}]
-        if "DISTINCT source FROM collection_runs" in sql:
-            return [{"source": "telegram"}]
-        if "source FROM source_health" in sql:
+        if "FROM source_health" in sql:
             return [{"source": "telegram"}]
         return []
 
