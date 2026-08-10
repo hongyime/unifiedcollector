@@ -204,7 +204,19 @@ async def test_hybrid_browser_source_stays_live_when_extension_heartbeat_is_stal
     class BrowserStaleConn:
         async def fetch(self, query: str, *args, timeout: int = 8):
             if "FROM source_health" in query:
-                return []
+                return [
+                    {
+                        "source": "lemon8",
+                        "status": "degraded",
+                        "last_error": (
+                            "browser capture stalled: browser media yield warning: "
+                            "207 unresolved media candidate(s) out of 1187 observed, "
+                            "980 duplicate/already archived, stored 0 in the recent window"
+                        ),
+                        "last_success_at": datetime.now(timezone.utc) - timedelta(seconds=45),
+                        "updated_at": datetime.now(timezone.utc) - timedelta(seconds=45),
+                    }
+                ]
             if "FROM browser_ingest_events" in query and "browser_heartbeat" in query:
                 return [
                     {

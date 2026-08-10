@@ -181,7 +181,9 @@ def _watchdog_marker(error: str | None) -> bool:
     if not error:
         return False
     lowered = error.lower()
-    return lowered.startswith("browser capture stalled:") and "watchdog" in lowered
+    return lowered.startswith("browser capture stalled:") and (
+        "watchdog" in lowered or "browser media yield warning:" in lowered
+    )
 
 
 def _age_seconds(value, now: datetime) -> float | None:
