@@ -481,7 +481,21 @@ function Get-AuditHealth {
         total = $total
         min_healthy = $minHealthy
         unhealthy = $unhealthy
+        unhealthy_count = $unhealthy.Count
     }
+}
+
+function Test-AuditHealthNeedsProfileRestart($AuditHealth) {
+    if ($null -eq $AuditHealth -or $AuditHealth.ok) {
+        return $false
+    }
+    $minUnhealthyForRestart = Get-PositiveIntEnv "UC_BROWSER_PROFILE_RESTART_MIN_UNHEALTHY_PLATFORMS" 3
+    $unhealthyCount = [int]$AuditHealth.unhealthy_count
+    if ($unhealthyCount -lt $minUnhealthyForRestart) {
+        Write-Log "browser tab maintenance degraded: $unhealthyCount unhealthy platform(s), below profile restart threshold $minUnhealthyForRestart"
+        return $false
+    }
+    return $true
 }
 
 function Test-AuditHealthNeedsManualAuth($AuditHealth) {
@@ -591,6 +605,11 @@ try {
             Ensure-ExtensionControlTab | Out-Null
             Write-Log "browser tab maintenance degraded: manual platform auth is required; skipping profile restart"
             Write-Status "degraded" "browser tab requires manual platform auth"
+            exit 4
+        }
+        if (-not (Test-AuditHealthNeedsProfileRestart $auditHealth)) {
+            Ensure-ExtensionControlTab | Out-Null
+            Write-Status "degraded" "browser extension tabs unhealthy after targeted reload; skipped profile restart"
             exit 4
         }
         if (Invoke-ScraperChromeProfileRestart) {

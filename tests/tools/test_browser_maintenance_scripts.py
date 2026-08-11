@@ -241,7 +241,7 @@ def test_chrome_cdp_launcher_opens_requested_platform_urls_directly():
     assert '([string]$_) -split ","' in script
     assert "function Get-PlatformLaunchUrls" in script
     assert 'instagram = "https://www.instagram.com/"' in script
-    assert "TikTok often serves a transient" in script
+    assert 'UC_CHROME_OPEN_EXPANDED_PLATFORM_TABS") -eq "1"' in script
     assert "tiktok = @(" in script
     assert '"https://www.tiktok.com/foryou"' in script
     assert '"https://www.tiktok.com/following"' in script
@@ -264,7 +264,7 @@ def test_chrome_cdp_launcher_directly_opens_requested_platforms_after_control():
     assert script.count("Open-RequestedPlatformTabs -Port $RemoteDebuggingPort") == 2
     assert "if ($OpenIds.Count -gt 0 -or ($OpenAll -and -not $NoOpenAll))" in script
     assert "UC_CHROME_OPEN_TAB_DELAY_MS" in script
-    assert "$delayMs = 5000" in script
+    assert "$delayMs = 1200" in script
     assert "Opened requested platform tab:" in script
     assert "Failed to open requested platform tab via CDP:" in script
 
@@ -385,6 +385,11 @@ def test_browser_maintenance_restarts_dedicated_profile_when_tabs_stay_unhealthy
     assert "running second targeted browser tab reload pass before profile restart" in script
     assert "browser tab audit health after second reload" in script
     assert "browser tab audit still unhealthy after second reload" in script
+    assert "function Test-AuditHealthNeedsProfileRestart" in script
+    assert "UC_BROWSER_PROFILE_RESTART_MIN_UNHEALTHY_PLATFORMS" in script
+    assert 'Get-PositiveIntEnv "UC_BROWSER_PROFILE_RESTART_MIN_UNHEALTHY_PLATFORMS" 3' in script
+    assert "below profile restart threshold" in script
+    assert "skipped profile restart" in script
     assert "Invoke-PostReloadSettle -seconds $profileRestartSettleSeconds" in script
     assert "Invoke-ChromeCdpRepair -Diagnostics $diagnostics" in script
     assert "browser extension tabs unhealthy after reload/profile restart" in script
