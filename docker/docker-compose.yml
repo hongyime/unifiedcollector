@@ -82,15 +82,18 @@ services:
     restart: unless-stopped
 
   collector_spiderfoot:
-    image: unifiedcollector-collector:latest
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.spiderfoot
+    image: unifiedcollector-spiderfoot:latest
     container_name: unifiedcollector_spiderfoot
     profiles: ["recon"]
-    command: python -m src.main recon-spiderfoot --poll-interval ${RECON_SPIDERFOOT_POLL_INTERVAL:-60}
+    command: python -m src.recon_spiderfoot_service --poll-interval ${RECON_SPIDERFOOT_POLL_INTERVAL:-60}
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       RECON_ALLOWLIST: "${RECON_ALLOWLIST:-}"
       RECON_ALLOW_UNSCOPED: "${RECON_ALLOW_UNSCOPED:-0}"
-      SPIDERFOOT_CLI: "${SPIDERFOOT_CLI:-}"
+      SPIDERFOOT_CLI: "${SPIDERFOOT_CLI:-/opt/spiderfoot-venv/bin/python /opt/spiderfoot/sf.py}"
       SPIDERFOOT_MODULES: "${SPIDERFOOT_MODULES:-sfp_dnsresolve,sfp_whois,sfp_names}"
       SPIDERFOOT_TARGET_TIMEOUT_SECONDS: "${SPIDERFOOT_TARGET_TIMEOUT_SECONDS:-300}"
       SPIDERFOOT_STALE_TARGET_MINUTES: "${SPIDERFOOT_STALE_TARGET_MINUTES:-120}"

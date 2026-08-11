@@ -1,0 +1,29 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+ARG SPIDERFOOT_VERSION=4.0
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates wget build-essential swig \
+    libffi-dev libssl-dev libxml2-dev libxslt1-dev zlib1g-dev \
+    libjpeg-dev libopenjp2-7-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir asyncpg==0.31.0
+
+RUN wget -q -O /tmp/spiderfoot.tar.gz "https://github.com/smicallef/spiderfoot/archive/v${SPIDERFOOT_VERSION}.tar.gz" \
+ && tar -xzf /tmp/spiderfoot.tar.gz -C /opt \
+ && mv "/opt/spiderfoot-${SPIDERFOOT_VERSION}" /opt/spiderfoot \
+ && python -m venv /opt/spiderfoot-venv \
+ && /opt/spiderfoot-venv/bin/pip install --no-cache-dir "pip<25" "setuptools<70" wheel "Cython<3" \
+ && /opt/spiderfoot-venv/bin/pip install --no-cache-dir --no-build-isolation "PyYAML==5.4.1" \
+ && /opt/spiderfoot-venv/bin/pip install --no-cache-dir -r /opt/spiderfoot/requirements.txt \
+ && rm -f /tmp/spiderfoot.tar.gz
+
+COPY src/ src/
+COPY config/ config/
+
+ENV SPIDERFOOT_CLI="/opt/spiderfoot-venv/bin/python /opt/spiderfoot/sf.py"
+
+CMD ["python", "-m", "src.recon_spiderfoot_service"]
