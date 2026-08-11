@@ -1,8 +1,8 @@
 # UnifiedCollector Agent State
 
-Updated: 2026-08-11 16:14 SGT
+Updated: 2026-08-11 16:19 SGT
 
-Current task: SpiderFoot recon operational setup completed safely; continue broader collector monitoring as needed.
+Current task: continue broader collector robustness work with media recovery as the current priority.
 
 Recent completed work:
 - SpiderFoot recon sidecar is live and verified under the `recon` Compose profile.
@@ -11,11 +11,7 @@ Recent completed work:
 - Collector-derived recon seeding was committed and pushed as `70212a23 feat: seed collector recon targets`.
 
 In-progress work:
-- Completing dirty recon changes that add collector-derived recon seeding:
-  - `src/core/recon_seed.py`
-  - `src/core/recon_spiderfoot.py`
-  - `src/main.py`
-  - `tests/test_recon.py`
+- Media recovery hardening: browser media revisit queues should never leave exhausted stale rows permanently `claimed`.
 
 Current evidence:
 - `python -m pytest tests/test_recon.py tests/test_recon_spiderfoot_service.py -q` passed with 17 tests.
@@ -35,8 +31,11 @@ Current evidence:
 - Live SpiderFoot sidecar processed a target after the value-hash migration and wrote 44 observations.
 - Committed and pushed `54c69a7e fix: harden spiderfoot recon observations`.
 - Final live check: worktree clean, `unifiedcollector_spiderfoot` healthy, `/health?include_sources=true` status `ok` with 0 source issues, and all 106 recon observations had `value_hash` populated.
+- Browser media revisit endpoints now expire stale exhausted `claimed`/`pending` rows to `failed` audit state before claiming new work.
+- Live Threads media revisit queue recovered old stuck claims: 42 claimed rows fell to 2 claimed rows, with the remaining attempt-5 row still inside the configured 30-minute claim timeout at verification.
+- `python -m pytest tests/bridges/test_ig_ingest_vault.py tests/dashboard/test_extension_health.py -q` passed with 82 tests.
 
 Next steps:
-1. Continue broader collector robustness audit from current live health.
-2. Facebook browser content was the latest remaining source issue after the WhatsApp fix; inspect extension/browser collection before suppressing anything.
+1. Commit and push the media revisit stale-claim fix.
+2. Continue broader collector robustness audit from current live health.
 3. Watch DB lock pressure from long GitHub COPY/backfill work; recon commands may log deferred base-schema migration while backup/backfill holds locks, but runtime recon operations still complete.

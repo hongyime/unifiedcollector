@@ -2646,6 +2646,27 @@ async def tiktok_revisit_target(request):
     claim_hold = TIKTOK_BROWSER_REVISIT_CLAIM_HOLD_SECONDS
     try:
         async with request.app["pool"].acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE tiktok_browser_revisit_queue
+                SET status = 'failed',
+                    reason = COALESCE(reason, 'exhausted_browser_revisit_attempts'),
+                    next_visit_at = now() + interval '1 day',
+                    metadata = metadata || jsonb_build_object(
+                      'exhausted_browser_revisit_attempts', true,
+                      'exhausted_at', now(),
+                      'max_attempts', $1::int,
+                      'previous_status', status
+                    ),
+                    updated_at = now()
+                WHERE status IN ('claimed', 'pending')
+                  AND attempts >= $1
+                  AND COALESCE(last_attempt_at, updated_at, created_at)
+                      <= now() - ($2::int * interval '1 second')
+                """,
+                max_attempts,
+                claim_timeout,
+            )
             row = await conn.fetchrow(
                 """
                 WITH picked AS (
@@ -2773,6 +2794,29 @@ async def browser_revisit_target(request):
     claim_hold = TIKTOK_BROWSER_REVISIT_CLAIM_HOLD_SECONDS
     try:
         async with request.app["pool"].acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE browser_media_revisit_queue
+                SET status = 'failed',
+                    reason = COALESCE(reason, 'exhausted_browser_revisit_attempts'),
+                    next_visit_at = now() + interval '1 day',
+                    metadata = metadata || jsonb_build_object(
+                      'exhausted_browser_revisit_attempts', true,
+                      'exhausted_at', now(),
+                      'max_attempts', $2::int,
+                      'previous_status', status
+                    ),
+                    updated_at = now()
+                WHERE platform = $1
+                  AND status IN ('claimed', 'pending')
+                  AND attempts >= $2
+                  AND COALESCE(last_attempt_at, updated_at, created_at)
+                      <= now() - ($3::int * interval '1 second')
+                """,
+                platform,
+                max_attempts,
+                claim_timeout,
+            )
             row = await conn.fetchrow(
                 """
                 WITH picked AS (

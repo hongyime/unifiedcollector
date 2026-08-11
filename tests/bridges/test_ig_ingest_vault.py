@@ -455,6 +455,10 @@ def test_browser_revisit_target_reclaims_stale_claimed(monkeypatch):
     assert payload["ok"] is True
     assert payload["target"]["platform"] == "x"
     assert payload["target"]["content_id"] == "x_video_1"
+    cleanup_query, cleanup_args = pool.conn.executes[0]
+    assert "exhausted_browser_revisit_attempts" in cleanup_query
+    assert "WHERE platform = $1" in cleanup_query
+    assert cleanup_args == ("x", 7, 120)
     query, args = pool.conn.fetchrows[0]
     assert "browser_media_revisit_queue" in query
     assert "platform = $1" in query
@@ -512,6 +516,10 @@ def test_tiktok_revisit_target_reclaims_stale_claimed(monkeypatch):
     assert payload["ok"] is True
     assert payload["target"]["content_id"] == "video_1"
     assert payload["target"]["metadata"]["last_claim_previous_status"] == "claimed"
+    cleanup_query, cleanup_args = pool.conn.executes[0]
+    assert "exhausted_browser_revisit_attempts" in cleanup_query
+    assert "tiktok_browser_revisit_queue" in cleanup_query
+    assert cleanup_args == (7, 120)
     query, args = pool.conn.fetchrows[0]
     assert "status = 'claimed'" in query
     assert "previous_status" in query
