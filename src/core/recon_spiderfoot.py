@@ -71,6 +71,13 @@ def stale_target_minutes() -> int:
         return 120
 
 
+def spiderfoot_max_threads() -> int:
+    try:
+        return max(1, min(int(os.getenv("SPIDERFOOT_MAX_THREADS", "4")), 20))
+    except ValueError:
+        return 4
+
+
 async def _mark_source_health(conn, status: str, error: str | None = None, *, success: bool = False) -> None:
     await conn.execute(
         """
@@ -196,6 +203,8 @@ async def _run_spiderfoot_cli(target: dict[str, Any], modules: list[str], timeou
         ",".join(modules),
         "-o",
         "json",
+        "-max-threads",
+        str(spiderfoot_max_threads()),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )

@@ -9,6 +9,7 @@ from src.core.recon_spiderfoot import (
     normalize_observation,
     normalize_spiderfoot_payload,
     run_spiderfoot_once,
+    spiderfoot_max_threads,
     target_in_scope,
 )
 
@@ -133,6 +134,20 @@ def test_spiderfoot_requires_scope_unless_explicitly_allowed(monkeypatch):
 
     monkeypatch.setenv("RECON_ALLOW_UNSCOPED", "1")
     assert target_in_scope("example.com")
+
+
+def test_spiderfoot_max_threads_is_bounded(monkeypatch):
+    monkeypatch.delenv("SPIDERFOOT_MAX_THREADS", raising=False)
+    assert spiderfoot_max_threads() == 4
+
+    monkeypatch.setenv("SPIDERFOOT_MAX_THREADS", "0")
+    assert spiderfoot_max_threads() == 1
+
+    monkeypatch.setenv("SPIDERFOOT_MAX_THREADS", "999")
+    assert spiderfoot_max_threads() == 20
+
+    monkeypatch.setenv("SPIDERFOOT_MAX_THREADS", "bad")
+    assert spiderfoot_max_threads() == 4
 
 
 def test_spiderfoot_module_guardrails_and_payload_shapes(monkeypatch):

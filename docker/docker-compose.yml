@@ -88,13 +88,17 @@ services:
     image: unifiedcollector-spiderfoot:latest
     container_name: unifiedcollector_spiderfoot
     profiles: ["recon"]
+    init: true
     command: python -m src.recon_spiderfoot_service --poll-interval ${RECON_SPIDERFOOT_POLL_INTERVAL:-60}
+    mem_limit: 1g
+    pids_limit: 256
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       RECON_ALLOWLIST: "${RECON_ALLOWLIST:-}"
       RECON_ALLOW_UNSCOPED: "${RECON_ALLOW_UNSCOPED:-0}"
       SPIDERFOOT_CLI: "${SPIDERFOOT_CLI:-/opt/spiderfoot-venv/bin/python /opt/spiderfoot/sf.py}"
       SPIDERFOOT_MODULES: "${SPIDERFOOT_MODULES:-sfp_dnsresolve,sfp_whois,sfp_names}"
+      SPIDERFOOT_MAX_THREADS: "${SPIDERFOOT_MAX_THREADS:-4}"
       SPIDERFOOT_TARGET_TIMEOUT_SECONDS: "${SPIDERFOOT_TARGET_TIMEOUT_SECONDS:-300}"
       SPIDERFOOT_STALE_TARGET_MINUTES: "${SPIDERFOOT_STALE_TARGET_MINUTES:-120}"
       DB_POOL_MAX_SIZE: "3"
@@ -105,6 +109,12 @@ services:
         condition: service_healthy
     env_file:
       - ../.env
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/spiderfoot-venv/bin/python /opt/spiderfoot/sf.py -V >/dev/null 2>&1"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 60s
     restart: unless-stopped
 
   # P3-1: youtube runs in its OWN process/container, isolated from the main
