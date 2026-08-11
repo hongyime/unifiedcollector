@@ -382,6 +382,20 @@ def test_facebook_has_post_text_fallback_when_permalink_ids_are_missing():
     assert "const posts = harvestFacebookPosts(entity)" in content
 
 
+def test_facebook_reports_content_progress_and_zero_progress():
+    content = _read("extension/content.js")
+    facebook_block = content.split("const facebook = {", 1)[1].split(
+        "const STRAVA_ROUTE_NAV_MIN_MS", 1
+    )[0]
+
+    assert "function facebookReportPageHealth" in content
+    assert "facebook_content_progress" in facebook_block
+    assert "facebook_content_zero_progress" in facebook_block
+    assert "zero_progress_streak" in facebook_block
+    assert "media_candidates" in facebook_block
+    assert 'scheduleOneShotReload(this, "zero content")' in facebook_block
+
+
 def test_stalled_scrape_passes_are_force_cleared_on_timeout():
     content = _read("extension/content.js")
     timeout_table = content.split("const TIMEOUT_RELOAD_STREAK_BY_PLATFORM = {", 1)[1].split("};", 1)[0]

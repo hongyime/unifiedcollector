@@ -3045,6 +3045,38 @@ function harvestFacebookPosts(entity) {
   return [...byId.values()].slice(0, 50);
 }
 
+function facebookProgressKey() {
+  return "uc_facebook_zero_progress_" + location.pathname.replace(/[^A-Za-z0-9_/-]/g, "_").slice(0, 180);
+}
+
+function facebookBumpZeroProgress() {
+  const key = facebookProgressKey();
+  const value = lsNum(key) + 1;
+  lsSet(key, String(value));
+  return value;
+}
+
+function facebookClearZeroProgress() {
+  lsSet(facebookProgressKey(), "0");
+}
+
+async function facebookReportPageHealth(status, reason, counts) {
+  return send({
+    type: "pageHealth",
+    platform: "facebook",
+    label: "Facebook",
+    status,
+    reason,
+    url: location.href,
+    title: document.title || "",
+    sample: status === "healthy" ? null : compactSample(visiblePageText()),
+    content_counts: {
+      ...pageContentCounts(),
+      ...(counts || {}),
+    },
+  }).catch(() => null);
+}
+
 // Facebook — DOM media from fbcdn; noisy (lots of UI chrome), so the size gate
 // does the heavy lifting. Open your feed / a profile's Photos tab and scroll.
 const facebook = {
@@ -3131,6 +3163,26 @@ const facebook = {
         "Facebook seen-user write",
         { timeoutMs: forcedRecovery ? 12000 : 25000 }
       );
+    }
+    const progressCounts = {
+      entity,
+      person,
+      posts: posts.length,
+      media_candidates: sink.items.length,
+      users: fu.length,
+      profile: profile ? 1 : 0,
+    };
+    if (posts.length || sink.items.length || fu.length || profile) {
+      facebookClearZeroProgress();
+      await facebookReportPageHealth("healthy", "facebook_content_progress", progressCounts);
+    } else {
+      const zeroProgressStreak = facebookBumpZeroProgress();
+      progressCounts.zero_progress_streak = zeroProgressStreak;
+      await facebookReportPageHealth("zero_content", "facebook_content_zero_progress", progressCounts);
+      if (zeroProgressStreak >= 2 && !forcedRecovery) {
+        clog("warn", `Facebook ${entity}: no posts/media/users after ${zeroProgressStreak} passes; reloading tab`, "facebook");
+        scheduleOneShotReload(this, "zero content");
+      }
     }
     return { targets: 1, saved, discovered: 0 };
   },

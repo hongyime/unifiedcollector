@@ -103,6 +103,7 @@ def test_boot_verifier_checks_reboot_critical_surfaces():
     assert "instagram = 60" in script
     assert "github = 240" in script
     assert "strava = 60" in script
+    assert "telegram = 45" in script
     assert 'Add-Check $checks "source fresh: $source"' in script
     assert "dead_letter_queue" in script
     assert "dead letter backlog" in script

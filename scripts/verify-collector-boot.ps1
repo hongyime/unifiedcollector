@@ -335,7 +335,7 @@ try {
         lemon8 = 45
         search = 240
         strava = 60
-        telegram = 30
+        telegram = 45
         threads = 60
         tiktok = 60
         website = 30
