@@ -75,6 +75,8 @@ def main():
     rq.add_argument("--value", required=True, dest="target_value")
     rq.add_argument("--source", default="manual")
     rq.add_argument("--priority", type=int, default=5)
+    rq.add_argument("--allowlist", default=None, help="Comma-separated allowed scope for this target")
+    rq.add_argument("--modules", default=None, help="Comma-separated SpiderFoot modules for this target")
     rq.add_argument("--json", action="store_true")
     rs = sub.add_parser("recon-spiderfoot", help="Run guarded SpiderFoot recon sidecar")
     rs.add_argument("--once", action="store_true")
@@ -409,6 +411,11 @@ async def _cmd_coverage_snapshot(args):
 async def _cmd_recon_queue(args):
     from src.core.recon import queue_recon_target
 
+    scope = {}
+    if args.allowlist:
+        scope["allowlist"] = [item.strip() for item in args.allowlist.split(",") if item.strip()]
+    if args.modules:
+        scope["modules"] = [item.strip() for item in args.modules.split(",") if item.strip()]
     pool = await get_pool()
     await init_db(pool)
     async with pool.acquire() as conn:
@@ -418,6 +425,7 @@ async def _cmd_recon_queue(args):
             target_value=args.target_value,
             source=args.source,
             priority=args.priority,
+            scope=scope,
         )
     await close_pool()
     if args.json:

@@ -3,10 +3,13 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shlex
+import shutil
 from typing import Any
 from urllib.parse import urlparse
 
 DEFAULT_MODULES = ("sfp_dnsresolve", "sfp_whois", "sfp_names")
+SOURCE_HEALTH_NAME = "spiderfoot"
 SUPPORTED_TYPES = {"domain", "ip", "email", "username", "url", "phone"}
 DEFAULT_INTRUSIVE_MODULES = {
     "sfp_portscan_tcp",
@@ -51,7 +54,7 @@ def target_in_scope(target_value: str, allowlist: str | None = None) -> bool:
     raw = allowlist if allowlist is not None else os.getenv("RECON_ALLOWLIST", "")
     allowed = [item.strip().lower() for item in raw.split(",") if item.strip()]
     if not allowed:
-        return True
+        return os.getenv("RECON_ALLOW_UNSCOPED", "").strip().lower() in {"1", "true", "yes"}
     value = (target_value or "").lower()
     parsed = urlparse(value if "://" in value else f"//{value}")
     host = (parsed.hostname or value.split("@")[-1]).strip(".")
@@ -59,6 +62,48 @@ def target_in_scope(target_value: str, allowlist: str | None = None) -> bool:
     if "@" in value:
         candidates.add(value.split("@", 1)[1])
     return any(candidate == item or candidate.endswith("." + item) for candidate in candidates for item in allowed)
+
+
+def stale_target_minutes() -> int:
+    try:
+        return max(5, int(os.getenv("SPIDERFOOT_STALE_TARGET_MINUTES", "120")))
+    except ValueError:
+        return 120
+
+
+async def _mark_source_health(conn, status: str, error: str | None = None, *, success: bool = False) -> None:
+    await conn.execute(
+        """
+        INSERT INTO source_health (source, status, last_success_at, last_error, updated_at)
+        VALUES ($1, $2, CASE WHEN $4 THEN NOW() ELSE NULL END, $3, NOW())
+        ON CONFLICT (source) DO UPDATE SET
+            status = EXCLUDED.status,
+            last_success_at = CASE
+                WHEN $4 THEN NOW()
+                ELSE source_health.last_success_at
+            END,
+            last_error = EXCLUDED.last_error,
+            updated_at = NOW()
+        """,
+        SOURCE_HEALTH_NAME,
+        status,
+        error,
+        success,
+    )
+
+
+async def _reclaim_stale_targets(conn) -> None:
+    await conn.execute(
+        """
+        UPDATE recon_targets
+        SET status = 'pending',
+            error = 'stale SpiderFoot run reclaimed',
+            updated_at = NOW()
+        WHERE status = 'in_progress'
+          AND updated_at < NOW() - ($1::int * INTERVAL '1 minute')
+        """,
+        stale_target_minutes(),
+    )
 
 
 def normalize_observation(target_id: str, raw: dict[str, Any]) -> dict[str, Any] | None:
@@ -137,8 +182,14 @@ async def _run_spiderfoot_cli(target: dict[str, Any], modules: list[str], timeou
     cli = os.getenv("SPIDERFOOT_CLI")
     if not cli:
         raise RuntimeError("SPIDERFOOT_CLI is not configured")
+    command = shlex.split(cli)
+    if not command:
+        raise RuntimeError("SPIDERFOOT_CLI is not configured")
+    executable = command[0]
+    if shutil.which(executable) is None and not os.path.exists(executable):
+        raise RuntimeError(f"SPIDERFOOT_CLI executable not found: {executable}")
     proc = await asyncio.create_subprocess_exec(
-        cli,
+        *command,
         "-s",
         target["target_value"],
         "-m",
@@ -170,8 +221,10 @@ def normalize_spiderfoot_payload(payload: Any) -> list[dict[str, Any]]:
 
 async def run_spiderfoot_once(conn, *, dry_run: bool = False) -> dict[str, Any]:
     async with conn.transaction():
+        await _reclaim_stale_targets(conn)
         target = await _claim_target(conn)
     if not target:
+        await _mark_source_health(conn, "running", None, success=True)
         return {"status": "idle", "target": None, "observations": 0, "dry_run": dry_run}
     scope = _json_dict(target.get("scope_json"))
     scope_allowlist = scope.get("allowlist")
@@ -183,6 +236,7 @@ async def run_spiderfoot_once(conn, *, dry_run: bool = False) -> dict[str, Any]:
             target["id"],
             "target outside RECON_ALLOWLIST",
         )
+        await _mark_source_health(conn, "running", None, success=True)
         return {"status": "blocked", "target": target, "observations": 0, "dry_run": dry_run}
 
     module_override = scope.get("modules")
@@ -195,9 +249,11 @@ async def run_spiderfoot_once(conn, *, dry_run: bool = False) -> dict[str, Any]:
             target["id"],
             "no SpiderFoot modules allowed by scope",
         )
+        await _mark_source_health(conn, "running", None, success=True)
         return {"status": "blocked", "target": target, "observations": 0, "dry_run": dry_run}
     if dry_run:
         await conn.execute("UPDATE recon_targets SET status = 'pending', updated_at = NOW() WHERE id = $1::uuid", target["id"])
+        await _mark_source_health(conn, "running", None, success=True)
         return {"status": "dry_run", "target": target, "modules": modules, "observations": 0, "dry_run": True}
 
     try:
@@ -215,6 +271,7 @@ async def run_spiderfoot_once(conn, *, dry_run: bool = False) -> dict[str, Any]:
             "UPDATE recon_targets SET status = 'completed', error = NULL, updated_at = NOW() WHERE id = $1::uuid",
             target["id"],
         )
+        await _mark_source_health(conn, "running", None, success=True)
         return {"status": "completed", "target": target, "modules": modules, "observations": written, "dry_run": False}
     except Exception as exc:  # noqa: BLE001
         await conn.execute(
@@ -222,4 +279,5 @@ async def run_spiderfoot_once(conn, *, dry_run: bool = False) -> dict[str, Any]:
             target["id"],
             str(exc)[:500],
         )
+        await _mark_source_health(conn, "degraded", str(exc)[:500])
         return {"status": "failed", "target": target, "modules": modules, "observations": 0, "error": str(exc)[:500], "dry_run": False}
