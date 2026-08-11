@@ -477,10 +477,15 @@ def _browser_extension_apply_ingest_health(payload: dict, ingest_items: list[dic
 
 
 _OPTIONAL_BROWSER_DIAGNOSTIC_SECTIONS = {
+    'browser_ingest_events',
     'browser_content_gap',
+    'browser_media_candidates_table',
     'browser_media_candidates',
+    'browser_media_revisit_queue_table',
     'browser_media_revisit_queue',
+    'tiktok_browser_media_candidates_table',
     'tiktok_browser_media_candidates',
+    'tiktok_browser_revisit_queue_table',
     'tiktok_browser_revisit_queue',
 }
 

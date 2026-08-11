@@ -63,8 +63,11 @@ def test_browser_extension_suppresses_optional_diagnostics_only_when_content_act
     payload = {
         "ingest_health": {"content_active": True},
         "diagnostic_errors": [
+            {"section": "browser_ingest_events", "error": "TimeoutError"},
+            {"section": "browser_media_candidates_table", "error": "TimeoutError"},
             {"section": "browser_media_candidates", "error": "TimeoutError"},
             {"section": "browser_content_gap", "error": "TimeoutError"},
+            {"section": "tiktok_browser_media_candidates_table", "error": "SkippedBudget"},
             {"section": "dm_hook_heartbeat", "error": "TimeoutError"},
         ],
     }
