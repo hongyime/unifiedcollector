@@ -1,8 +1,8 @@
 # UnifiedCollector Agent State
 
-Updated: 2026-08-11 16:19 SGT
+Updated: 2026-08-12 00:00 SGT
 
-Current task: continue broader collector robustness work with media recovery as the current priority.
+Current task: complete production-readiness work with Analyzer integration; Collector is currently in verification/hardening mode.
 
 Recent completed work:
 - SpiderFoot recon sidecar is live and verified under the `recon` Compose profile.
@@ -11,7 +11,7 @@ Recent completed work:
 - Collector-derived recon seeding was committed and pushed as `70212a23 feat: seed collector recon targets`.
 
 In-progress work:
-- Media recovery hardening: browser media revisit queues should never leave exhausted stale rows permanently `claimed`.
+- Browser media revisit backlog visibility: separate pending throughput pressure from stale/stuck claims in the dashboard.
 
 Current evidence:
 - `python -m pytest tests/test_recon.py tests/test_recon_spiderfoot_service.py -q` passed with 17 tests.
@@ -34,8 +34,10 @@ Current evidence:
 - Browser media revisit endpoints now expire stale exhausted `claimed`/`pending` rows to `failed` audit state before claiming new work.
 - Live Threads media revisit queue recovered old stuck claims: 42 claimed rows fell to 2 claimed rows, with the remaining attempt-5 row still inside the configured 30-minute claim timeout at verification.
 - `python -m pytest tests/bridges/test_ig_ingest_vault.py tests/dashboard/test_extension_health.py -q` passed with 82 tests.
+- Media revisit stale-claim fix was committed and pushed as `423fbbf3 fix: expire exhausted media revisit claims`.
+- Fresh read-only audit on 2026-08-12 found tracked worktree clean, `unifiedcollector_spiderfoot` healthy, recon targets `completed=24 failed=0`, `recon_observations=128`, all observations have `value_hash`, `/health?include_sources=true` status `ok` with `source_issues=0`, live CDP `page_targets=9`, and `duplicate_url_groups=0`.
 
 Next steps:
-1. Commit and push the media revisit stale-claim fix.
+1. Build/test the dashboard queue-health visibility change and commit it.
 2. Continue broader collector robustness audit from current live health.
 3. Watch DB lock pressure from long GitHub COPY/backfill work; recon commands may log deferred base-schema migration while backup/backfill holds locks, but runtime recon operations still complete.

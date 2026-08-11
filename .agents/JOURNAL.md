@@ -8,3 +8,4 @@
 - 2026-08-11 16:02 SGT: Treated WhatsApp bridge partial pairing as live when at least one bridge slot is ready; empty optional slots remain visible as operator notes rather than source failures.
 - 2026-08-11 16:11 SGT: Kept SpiderFoot observation dedupe on a SHA-256 `value_hash` unique index because raw observation values can be long or volatile; restored the applied migration body to match the live ledger instead of editing an already-applied migration.
 - 2026-08-11 16:19 SGT: Browser media revisit queues now expire stale exhausted claimed rows to failed audit state instead of leaving them permanently claimed; this preserves evidence while keeping media recovery queues drainable.
+- 2026-08-12 00:00 SGT: Added browser media revisit queue health to the Collector dashboard so pending backlog is separated from stale claimed rows; this keeps operator attention on throughput without mislabeling healthy backlog as deadlock.

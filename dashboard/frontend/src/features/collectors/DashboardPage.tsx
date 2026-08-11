@@ -539,6 +539,7 @@ export function DashboardPage() {
   const extensionIngest = extension?.ingest ?? [];
   const extensionMediaCandidates = extension?.media_candidates ?? [];
   const nonTiktokMediaCandidates = extensionMediaCandidates.filter((row) => row.platform !== "tiktok");
+  const nonTiktokMediaQueues = extension?.media_revisit_queue ?? [];
   const tiktokMedia = extension?.tiktok_media ?? null;
   const tiktokMediaOutcomes = tiktokMedia?.outcomes ?? [];
   const tiktokMediaTotal = tiktokMediaOutcomes.reduce((sum, row) => sum + (row.candidates || 0), 0);
@@ -867,6 +868,32 @@ export function DashboardPage() {
                   </div>
                 ))}
               </div>
+              {nonTiktokMediaQueues.length > 0 && (
+                <div className="mt-3 border-t border-border pt-2">
+                  <div className="mb-1 text-[11px] uppercase tracking-wide text-text-muted">
+                    Revisit queue health
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2">
+                    {nonTiktokMediaQueues.map((row) => (
+                      <div key={row.platform} className="border border-border rounded-md px-2 py-1.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-medium text-text-primary capitalize">{row.platform}</span>
+                          <StatusBadge
+                            status={row.stale_claimed ? "warning" : row.pending ? "idle" : "online"}
+                            label={`${formatNumber(row.pending)} pending`}
+                          />
+                        </div>
+                        <div className="text-text-muted mt-0.5">
+                          {formatNumber(row.due)} due · {formatNumber(row.claimed)} claimed · {formatNumber(row.stale_claimed)} stale claimed
+                        </div>
+                        <div className="text-text-muted mt-0.5">
+                          {formatNumber(row.completed)} completed · {formatNumber(row.failed)} failed · {formatNumber(row.unavailable)} unavailable
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
