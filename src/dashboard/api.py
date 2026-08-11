@@ -3790,6 +3790,8 @@ async def _with_bridge_overrides(sources: list[dict]) -> tuple[list[dict], dict 
                 source["whatsapp_bridges"] = bridge_summary.get("bridges", [])
                 if bridge_status in {"unpaired", "unreachable"}:
                     source["status"] = bridge_status
+                elif bridge_status == "partial" and int(summary.get("ready_count") or 0) > 0:
+                    source["status"] = "live"
                 elif bridge_status != "partial" and source.get("status") == "live":
                     source["status"] = "degraded"
                 source["detail"] = summary.get("detail") or source.get("detail")

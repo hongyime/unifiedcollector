@@ -1,6 +1,6 @@
 # UnifiedCollector Agent State
 
-Updated: 2026-08-11 15:45 SGT
+Updated: 2026-08-11 16:02 SGT
 
 Current task: continue hardening UnifiedCollector toward robust collection/recon operations.
 
@@ -29,7 +29,10 @@ Current evidence:
 - Dashboard was rebuilt/restarted and live `/health?include_sources=true` returned `status=ok`, `source_issues=0`, no browser diagnostic errors, and active browser content.
 - `src.recon_seed_service` works as an optional one-shot entrypoint and redacts dry-run samples.
 - Final live check after push: dashboard/spiderfoot/postgres/realtime_feed/watchdog and collector services are healthy; `/health?include_sources=true` returned `status=ok`, `source_issues=0`, and no browser diagnostic errors.
+- WhatsApp partial bridge health was patched so one ready bridge plus one optional empty QR slot keeps WhatsApp source status `live` instead of making `/health` degraded.
 
 Next steps:
 1. Continue broader collector robustness audit from current live health.
-2. Watch DB lock pressure from long GitHub COPY/backfill work; recon commands may log deferred base-schema migration while backup/backfill holds locks, but runtime recon operations still complete.
+2. Facebook browser content was the latest remaining source issue after the WhatsApp fix; inspect extension/browser collection before suppressing anything.
+3. Separate dirty recon value-hash work exists in `src/core/recon_spiderfoot.py` and `src/db/migrations/20260811_fix_recon_observation_value_hash.sql`; do not overwrite or stage blindly.
+4. Watch DB lock pressure from long GitHub COPY/backfill work; recon commands may log deferred base-schema migration while backup/backfill holds locks, but runtime recon operations still complete.

@@ -5,3 +5,4 @@
 - 2026-08-11 15:31 SGT: Allowed `.agents/` through the blanket dotfile ignore because AGENTS.md now requires committed cross-agent handoff state.
 - 2026-08-11 15:41 SGT: Kept recon seed dry-run output redacted by default so operator logs can show counts, source types, target hosts, and stable hashes without leaking full raw URLs or usernames.
 - 2026-08-11 15:45 SGT: Suppressed optional browser diagnostic timeouts only when useful browser content is already active; source failures and stale content still remain visible.
+- 2026-08-11 16:02 SGT: Treated WhatsApp bridge partial pairing as live when at least one bridge slot is ready; empty optional slots remain visible as operator notes rather than source failures.

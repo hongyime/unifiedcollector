@@ -39,6 +39,7 @@ from src.dashboard.api import (
     _source_media_freshness,
     _source_matrix_row,
     _source_window_totals,
+    _with_bridge_overrides,
     _source_media_totals,
     collectors_source_matrix,
 )
@@ -134,6 +135,42 @@ def test_source_matrix_row_keeps_partial_whatsapp_pairing_live():
     assert row["blocker"]["kind"] == "whatsapp_partial_pairing"
     assert row["status_label"] == "live"
     assert row["status_severity"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_bridge_overrides_marks_partial_whatsapp_ready_slot_live(monkeypatch):
+    async def fake_bridge_health(timeout: float = 1.5):
+        return [
+            {
+                "bridge": "1",
+                "ok": True,
+                "status": "awaiting_scan",
+                "qr_available": True,
+                "session_name": "session_1",
+            },
+            {
+                "bridge": "2",
+                "ok": True,
+                "status": "ready",
+                "whatsapp_ready": True,
+                "connected": True,
+                "session_name": "session_2",
+            },
+        ]
+
+    monkeypatch.setattr(dashboard_api, "fetch_whatsapp_bridge_health", fake_bridge_health)
+    sources, bridge_health = await _with_bridge_overrides([
+        _source(
+            source="whatsapp",
+            status="degraded",
+            source_health_status="degraded",
+            source_health_error="empty optional bridge slot",
+        )
+    ])
+
+    assert bridge_health["summary"]["status"] == "partial"
+    assert sources[0]["bridge_status"] == "partial"
+    assert sources[0]["status"] == "live"
 
 
 def test_source_matrix_blocker_explains_paired_whatsapp_without_messages():
