@@ -1,4 +1,7 @@
 import asyncio
+import hashlib
+import json
+from pathlib import Path
 
 import pytest
 
@@ -14,6 +17,9 @@ from src.core.recon_spiderfoot import (
     target_in_scope,
 )
 from src.core.recon_seed import seed_recon_targets_from_collector
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_normalize_recon_target_validates_domain_and_email():
@@ -309,9 +315,25 @@ def test_run_spiderfoot_once_stores_observations(monkeypatch):
     assert report["observations"] == 1
     assert len(conn.observation_batches) == 1
     assert conn.observation_batches[0][0][3] == "www.example.com"
+    assert conn.observation_batches[0][0][4] == hashlib.sha256(b"www.example.com").hexdigest()
     assert conn.reclaimed
     assert conn.health[-1][0] == "spiderfoot"
     assert conn.health[-1][1] == "running"
+
+
+def test_recon_observation_value_hash_migration_matches_upsert():
+    migration = (
+        ROOT
+        / "src"
+        / "db"
+        / "migrations"
+        / "20260811_fix_recon_observation_value_hash.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "value_hash TEXT" in migration
+    assert "ux_recon_observations_target_module_type_value_hash" in migration
+    assert "ON recon_observations (target_id, module, observation_type, value_hash)" in migration
+    assert "idx_recon_observations_type_value_hash" in migration
 
 
 def test_recon_seed_dry_run_builds_collector_candidates():
@@ -359,6 +381,52 @@ def test_recon_seed_dry_run_builds_collector_candidates():
     assert report["types"] == {"domain": 1, "url": 1, "username": 1}
     assert "target_value" not in report["sample"][0]
     assert "target_hash" in report["sample"][0]
+
+
+def test_recon_seed_scopes_username_targets_to_account_module(monkeypatch):
+    class Conn:
+        def __init__(self):
+            self.scopes = []
+
+        async def fetchval(self, sql, *args):
+            assert "to_regclass" in sql
+            return True
+
+        async def fetch(self, sql, *args):
+            if "FROM social_users" in sql:
+                return [{
+                    "source_record_id": "telegram:alice",
+                    "collector_source": "telegram",
+                    "target_value": "alice",
+                    "seen_at": None,
+                }]
+            return []
+
+        async def fetchrow(self, sql, *args):
+            assert "INSERT INTO recon_targets" in sql
+            self.scopes.append(json.loads(args[4]))
+            return {
+                "id": "00000000-0000-0000-0000-000000000001",
+                "target_type": args[0],
+                "target_value": args[1],
+                "source": args[2],
+                "priority": args[3],
+                "status": "pending",
+            }
+
+    monkeypatch.delenv("RECON_USERNAME_MODULES", raising=False)
+    conn = Conn()
+
+    report = asyncio.run(seed_recon_targets_from_collector(
+        conn,
+        include_urls=False,
+        per_source_limit=3,
+        total_limit=10,
+        dry_run=False,
+    ))
+
+    assert report["queued"] == 1
+    assert conn.scopes[0]["modules"] == ["sfp_accounts"]
 
 
 def test_run_spiderfoot_once_blocks_unscoped_target_by_default(monkeypatch):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from typing import Any
 from urllib.parse import urlparse
 
@@ -9,6 +10,7 @@ from src.core.recon import queue_recon_target
 
 DEFAULT_SOURCE_LIMIT = 25
 DEFAULT_TOTAL_LIMIT = 200
+DEFAULT_USERNAME_MODULES = ("sfp_accounts",)
 
 
 async def _table_exists(conn, table: str) -> bool:
@@ -34,6 +36,14 @@ def _sample_preview(row: dict[str, Any]) -> dict[str, Any]:
     if row.get("target_type") in {"domain", "url", "email"}:
         preview["target_host"] = _target_host(target_value)
     return preview
+
+
+def _module_scope_for(row: dict[str, Any]) -> list[str] | None:
+    if row.get("target_type") != "username":
+        return None
+    raw = os.getenv("RECON_USERNAME_MODULES", ",".join(DEFAULT_USERNAME_MODULES))
+    modules = [item.strip() for item in raw.split(",") if item.strip()]
+    return modules or None
 
 
 async def seed_recon_targets_from_collector(
@@ -178,6 +188,16 @@ async def seed_recon_targets_from_collector(
     queued = 0
     skipped = 0
     for row in candidates:
+        modules = _module_scope_for(row)
+        scope = {
+            "collector_derived": True,
+            "collector_source": row["collector_source"],
+            "source_table": row["source_table"],
+            "source_record_id": row["source_record_id"],
+            "seen_at": row["seen_at"].isoformat() if row.get("seen_at") else None,
+        }
+        if modules:
+            scope["modules"] = modules
         try:
             await queue_recon_target(
                 conn,
@@ -185,13 +205,7 @@ async def seed_recon_targets_from_collector(
                 target_value=row["target_value"],
                 source=f"collector:{row['source_table']}",
                 priority=priority,
-                scope={
-                    "collector_derived": True,
-                    "collector_source": row["collector_source"],
-                    "source_table": row["source_table"],
-                    "source_record_id": row["source_record_id"],
-                    "seen_at": row["seen_at"].isoformat() if row.get("seen_at") else None,
-                },
+                scope=scope,
             )
             queued += 1
         except ValueError:

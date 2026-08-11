@@ -1,8 +1,8 @@
 # UnifiedCollector Agent State
 
-Updated: 2026-08-11 16:02 SGT
+Updated: 2026-08-11 16:11 SGT
 
-Current task: continue hardening UnifiedCollector toward robust collection/recon operations.
+Current task: complete SpiderFoot recon operational setup safely.
 
 Recent completed work:
 - SpiderFoot recon sidecar is live and verified under the `recon` Compose profile.
@@ -30,9 +30,12 @@ Current evidence:
 - `src.recon_seed_service` works as an optional one-shot entrypoint and redacts dry-run samples.
 - Final live check after push: dashboard/spiderfoot/postgres/realtime_feed/watchdog and collector services are healthy; `/health?include_sources=true` returned `status=ok`, `source_issues=0`, and no browser diagnostic errors.
 - WhatsApp partial bridge health was patched so one ready bridge plus one optional empty QR slot keeps WhatsApp source status `live` instead of making `/health` degraded.
+- Recon observation storage now uses `value_hash` for idempotent SpiderFoot upserts; live DB migration `20260811_fix_recon_observation_value_hash.sql` is applied with checksum `f37e6c38e7ae`.
+- Collector-derived username recon targets are scoped to `RECON_USERNAME_MODULES` (`sfp_accounts` by default) so username targets do not run DNS/WHOIS modules.
+- Live SpiderFoot sidecar processed a target after the value-hash migration and wrote 44 observations.
 
 Next steps:
-1. Continue broader collector robustness audit from current live health.
-2. Facebook browser content was the latest remaining source issue after the WhatsApp fix; inspect extension/browser collection before suppressing anything.
-3. Separate dirty recon value-hash work exists in `src/core/recon_spiderfoot.py` and `src/db/migrations/20260811_fix_recon_observation_value_hash.sql`; do not overwrite or stage blindly.
+1. Commit and push the completed SpiderFoot recon value-hash/module-scope changes.
+2. Continue broader collector robustness audit from current live health.
+3. Facebook browser content was the latest remaining source issue after the WhatsApp fix; inspect extension/browser collection before suppressing anything.
 4. Watch DB lock pressure from long GitHub COPY/backfill work; recon commands may log deferred base-schema migration while backup/backfill holds locks, but runtime recon operations still complete.

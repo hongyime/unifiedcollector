@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import shlex
@@ -242,12 +243,13 @@ async def _store_observations(conn, observations: list[dict[str, Any]]) -> int:
     await conn.executemany(
         """
         INSERT INTO recon_observations (
-            target_id, module, observation_type, value, confidence, raw_json,
+            target_id, module, observation_type, value, value_hash, confidence, raw_json,
             first_seen_at, last_seen_at
         )
-        VALUES ($1::uuid, $2, $3, $4, $5, $6::jsonb, NOW(), NOW())
-        ON CONFLICT (target_id, module, observation_type, value) DO UPDATE SET
+        VALUES ($1::uuid, $2, $3, $4, $5, $6, $7::jsonb, NOW(), NOW())
+        ON CONFLICT (target_id, module, observation_type, value_hash) DO UPDATE SET
             confidence = GREATEST(recon_observations.confidence, EXCLUDED.confidence),
+            value = EXCLUDED.value,
             raw_json = EXCLUDED.raw_json,
             last_seen_at = NOW()
         """,
@@ -257,6 +259,7 @@ async def _store_observations(conn, observations: list[dict[str, Any]]) -> int:
                 row["module"],
                 row["observation_type"],
                 row["value"],
+                hashlib.sha256(str(row["value"]).encode("utf-8")).hexdigest(),
                 row["confidence"],
                 json.dumps(row["raw_json"]),
             )
