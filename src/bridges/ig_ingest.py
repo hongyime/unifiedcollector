@@ -1742,9 +1742,10 @@ async def _record_tiktok_browser_candidate(
                   reason = EXCLUDED.reason,
                   needs_revisit = EXCLUDED.needs_revisit,
                   metadata = tiktok_browser_media_candidates.metadata || EXCLUDED.metadata,
+                  attempts = tiktok_browser_media_candidates.attempts + 1,
                   last_seen = now()
                 WHERE tiktok_browser_media_candidates.outcome IS DISTINCT FROM 'stored'
-                  AND EXCLUDED.outcome = 'stored'
+                   OR EXCLUDED.outcome = 'stored'
                 """,
                 content_id,
                 username,
@@ -1870,9 +1871,10 @@ async def _record_browser_media_candidate(
                   reason = EXCLUDED.reason,
                   needs_revisit = EXCLUDED.needs_revisit,
                   metadata = browser_media_candidates.metadata || EXCLUDED.metadata,
+                  attempts = browser_media_candidates.attempts + 1,
                   last_seen = now()
                 WHERE browser_media_candidates.outcome IS DISTINCT FROM 'stored'
-                  AND EXCLUDED.outcome = 'stored'
+                   OR EXCLUDED.outcome = 'stored'
                 """,
                 platform,
                 content_id,
