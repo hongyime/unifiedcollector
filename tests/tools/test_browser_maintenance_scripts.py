@@ -37,6 +37,9 @@ def test_chrome_cdp_launcher_uses_robust_startup_flags():
     assert "if ($CloseExistingCdpProfile -and $scraperProfileProcesses.Count -gt 0)" in script
     assert "$profileProcesses = @(Get-ScraperProfileChromeProcesses -UserDataDir $UserDataDir)" in script
     assert "A failed Chrome startup can keep the scraper profile open" in script
+    assert "UC_CHROME_OPEN_TARGET_TIMEOUT_SECONDS" in script
+    assert "UC_CHROME_OPEN_EXPANDED_PLATFORM_TABS" in script
+    assert "$delayMs = 1200" in script
 
 
 def test_chrome_cdp_launcher_prefers_extension_capable_chromium():
@@ -54,8 +57,10 @@ def test_chrome_cdp_launcher_prefers_dedicated_automation_profile():
     assert "ChromeCdpRecoveredProfile" in script
     assert "ChromeCdpAutomationProfile" in script
     assert script.index("ChromeCdpAutomationProfile") < script.index("ChromeCdpRecoveredProfile")
-    assert "Sort-Object -Descending" in script
-    assert 'Join-Path $_ "Default\\Network\\Cookies"' in script
+    resolver = script[script.index("function Resolve-UserDataDir") : script.index("function Test-CdpAvailable")]
+    assert "Sort-Object -Descending" not in resolver
+    assert "if (Test-Path -LiteralPath $automation)" in resolver
+    assert "if (Test-Path -LiteralPath $recovered)" in resolver
     assert 'return $automation' in script
     assert "incompatible with Chrome-for-Testing / Playwright Chromium" in script
 
@@ -103,6 +108,8 @@ def test_chrome_cdp_launcher_cleans_stale_debug_port_owner():
     assert 'Start-Process -FilePath "$env:SystemRoot\\System32\\taskkill.exe"' not in script
     assert '$taskkillOutput = & "$env:SystemRoot\\System32\\taskkill.exe"' in script
     assert "$taskkillExitCode = $LASTEXITCODE" in script
+    assert '$previousErrorActionPreference = $ErrorActionPreference' in script
+    assert "Ignoring stale Chrome WMI rows after taskkill" in script
     assert "taskkill failed for PID ${processId} with exit code ${taskkillExitCode}" in script
 
 
@@ -126,6 +133,19 @@ def test_chrome_cdp_launcher_discovers_extension_id_from_cdp():
     assert "chrome-extension://$extensionId/$TabsUrlPath" in script
     assert "Opened extension control page" in script
     assert "Chrome CDP is already reachable" in script
+
+
+def test_chrome_cdp_launcher_defaults_to_one_startup_tab_per_platform():
+    script = _read_script("start-scraper-chrome-cdp.ps1")
+    launch_section = script[script.index("function Get-PlatformLaunchUrls") : script.index("function Get-ChromeProcesses")]
+
+    assert 'UC_CHROME_OPEN_EXPANDED_PLATFORM_TABS") -eq "1"' in launch_section
+    assert '"https://www.tiktok.com/foryou"' in launch_section
+    assert '"https://www.tiktok.com/following"' in launch_section
+    assert '"https://www.lemon8-app.com/topic/singapore?region=sg"' in launch_section
+    assert '"https://www.lemon8-app.com/topic/food?region=sg"' in launch_section
+    assert 'tiktok = if ($expandedPlatformTabs)' in launch_section
+    assert 'lemon8 = if ($expandedPlatformTabs)' in launch_section
 
 
 def test_browser_tab_audit_accepts_dynamic_extension_worlds():
@@ -293,6 +313,8 @@ def test_browser_maintenance_repairs_missing_chrome():
     assert "chrome_unsafe_visible_window_count" in script
     assert "chrome-extension://.*tabs\\.html" in script
     assert "\\\\UnifiedCollector\\\\ChromeCdp" in script
+    assert "--remote-debugging-port(?:=|\\s+)$script:CdpPort\\b" in script
+    assert "--user-data-dir(?:=|\\s+).*\\\\UnifiedCollector\\\\ChromeCdp" in script
     assert "-CloseExistingCdpProfile -CloseExistingIfNoVisibleWindows" in script
     assert "collector-controlled unreachable CDP Chrome" in script
     assert "-FallbackOpenControlIfCleanupBlocked" not in script

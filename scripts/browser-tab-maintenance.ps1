@@ -37,7 +37,12 @@ function Get-ChromeCdpDiagnostics {
     foreach ($window in $visibleWindows) {
         $proc = $processById[[int]$window.Id]
         $cmd = if ($proc) { [string]$proc.CommandLine } else { "" }
-        if ($cmd -match "chrome-extension://.*tabs\.html" -or $cmd -match "\\UnifiedCollector\\ChromeCdp") {
+        $isCollectorControlled =
+            $cmd -match "chrome-extension://.*tabs\.html" -or
+            $cmd -match "\\UnifiedCollector\\ChromeCdp" -or
+            $cmd -match "--remote-debugging-port(?:=|\s+)$script:CdpPort\b" -or
+            $cmd -match "--user-data-dir(?:=|\s+).*\\UnifiedCollector\\ChromeCdp"
+        if ($isCollectorControlled) {
             $visibleControlWindows += $window
         } else {
             $unsafeVisibleWindows += $window

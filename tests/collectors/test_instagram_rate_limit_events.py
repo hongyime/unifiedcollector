@@ -52,6 +52,7 @@ def _bare_collector():
     coll._daily_quota_exhausted_keys = set()
     coll._daily_quota_warned_keys = set()
     coll._account_username_aliases = {}
+    coll._last_source_health_heartbeat = None
     coll.rate_limiter = object()
     coll.account_pool = MagicMock()
     coll.account_pool._accounts = []
@@ -218,6 +219,9 @@ async def test_upsert_profile_archives_raw_payload(monkeypatch):
     assert calls[0]["payload"] == profile
     assert calls[0]["target_tables"] == ["instagram_profiles"]
     assert calls[0]["metadata"]["collection_account"] == "acct1"
+    health_execute = coll.pool.acquire.return_value.__aenter__.return_value.execute.await_args_list[-1]
+    assert "source_health" in health_execute.args[0]
+    assert health_execute.args[1] == "instagram"
 
 
 @pytest.mark.asyncio

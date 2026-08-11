@@ -2064,6 +2064,7 @@ class InstagramCollector(BaseCollector):
                 "ingest_path": self.INGEST_PATH,
             },
         )
+        await self.heartbeat_source_health(min_interval_seconds=60)
 
     # _spider_followers is now defined in the F-B section below — wired to
     # src/core/spider_discover.SpiderDiscover with read-only follower BFS.

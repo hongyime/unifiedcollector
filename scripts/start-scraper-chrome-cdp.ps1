@@ -60,32 +60,14 @@ function Resolve-UserDataDir {
     # older profile folders may have been created by branded Chrome and can be
     # incompatible with Chrome-for-Testing / Playwright Chromium.
     $base = Join-Path $env:LOCALAPPDATA "UnifiedCollector"
-    $profileCandidates = @(
-        (Join-Path $base "ChromeCdpAutomationProfile"),
-        (Join-Path $base "ChromeCdpRecoveredProfile")
-    )
-    $existingProfiles = @($profileCandidates | Where-Object { Test-Path -LiteralPath $_ })
-    if ($existingProfiles.Count -gt 0) {
-        return @($existingProfiles | Sort-Object -Descending -Property @{
-            Expression = {
-                $stateFiles = @(
-                    (Join-Path $_ "Default\Network\Cookies"),
-                    (Join-Path $_ "Default\Cookies"),
-                    (Join-Path $_ "Default\Preferences"),
-                    $_
-                )
-                $freshest = Get-Date -Date "1970-01-01"
-                foreach ($stateFile in $stateFiles) {
-                    $item = Get-Item -LiteralPath $stateFile -ErrorAction SilentlyContinue
-                    if ($item -and $item.LastWriteTime -gt $freshest) {
-                        $freshest = $item.LastWriteTime
-                    }
-                }
-                $freshest
-            }
-        } | Select-Object -First 1)
-    }
     $automation = Join-Path $base "ChromeCdpAutomationProfile"
+    if (Test-Path -LiteralPath $automation) {
+        return $automation
+    }
+    $recovered = Join-Path $base "ChromeCdpRecoveredProfile"
+    if (Test-Path -LiteralPath $recovered) {
+        return $recovered
+    }
     return $automation
 }
 
@@ -266,15 +248,21 @@ function Get-PrimaryKnownExtensionId {
 }
 
 function Open-CdpTarget {
-    param([int]$Port, [string]$Url)
+    param([int]$Port, [string]$Url, [int]$TimeoutSeconds = 5)
     $encoded = [uri]::EscapeDataString($Url)
-    Invoke-WebRequest -Uri "http://127.0.0.1:$Port/json/new?$encoded" -Method Put -UseBasicParsing -TimeoutSec 10 | Out-Null
+    Invoke-WebRequest -Uri "http://127.0.0.1:$Port/json/new?$encoded" -Method Put -UseBasicParsing -TimeoutSec $TimeoutSeconds | Out-Null
 }
 
 function Try-OpenCdpTarget {
     param([int]$Port, [string]$Url)
     try {
-        Open-CdpTarget -Port $Port -Url $Url
+        $targetTimeout = 5
+        $rawTargetTimeout = [Environment]::GetEnvironmentVariable("UC_CHROME_OPEN_TARGET_TIMEOUT_SECONDS")
+        $parsedTargetTimeout = 0
+        if ([int]::TryParse($rawTargetTimeout, [ref]$parsedTargetTimeout) -and $parsedTargetTimeout -ge 2) {
+            $targetTimeout = $parsedTargetTimeout
+        }
+        Open-CdpTarget -Port $Port -Url $Url -TimeoutSeconds $targetTimeout
         return $true
     } catch {
         Write-Warning "Could not open CDP target ${Url}: $($_.Exception.Message)"
@@ -309,22 +297,27 @@ function Open-ExtensionControlPage {
 
 function Get-PlatformLaunchUrls {
     param([string[]]$Ids, [bool]$All)
+    $expandedPlatformTabs = [Environment]::GetEnvironmentVariable("UC_CHROME_OPEN_EXPANDED_PLATFORM_TABS") -eq "1"
     $platforms = [ordered]@{
         instagram = "https://www.instagram.com/"
-        # TikTok often serves a transient "Try again" or half-initialized shell
-        # on one feed after a cold browser/profile restart. Open a small spread
-        # so the extension has at least one healthy same-origin tab to resume
-        # collection without requiring manual intervention.
-        tiktok = @(
-            "https://www.tiktok.com/foryou",
-            "https://www.tiktok.com/following",
-            "https://www.tiktok.com/explore"
-        )
-        lemon8 = @(
-            "https://www.lemon8-app.com/topic/food?region=sg",
-            "https://www.lemon8-app.com/topic/travel?region=sg",
+        tiktok = if ($expandedPlatformTabs) {
+            @(
+                "https://www.tiktok.com/foryou",
+                "https://www.tiktok.com/following",
+                "https://www.tiktok.com/explore"
+            )
+        } else {
+            "https://www.tiktok.com/foryou"
+        }
+        lemon8 = if ($expandedPlatformTabs) {
+            @(
+                "https://www.lemon8-app.com/topic/food?region=sg",
+                "https://www.lemon8-app.com/topic/travel?region=sg",
+                "https://www.lemon8-app.com/topic/singapore?region=sg"
+            )
+        } else {
             "https://www.lemon8-app.com/topic/singapore?region=sg"
-        )
+        }
         x = "https://x.com/home"
         threads = "https://www.threads.com/"
         facebook = "https://www.facebook.com/"
@@ -406,13 +399,35 @@ function Stop-ChromeProcessTree {
     if ($remaining.Count -eq 0) {
         return
     }
-    $taskkillOutput = & "$env:SystemRoot\System32\taskkill.exe" /IM chrome.exe /F /T 2>&1
-    $taskkillExitCode = $LASTEXITCODE
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $taskkillOutput = & "$env:SystemRoot\System32\taskkill.exe" /IM chrome.exe /F /T 2>&1
+        $taskkillExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
     Start-Sleep -Seconds 2
     $remaining = @(Get-ChromeProcesses)
     if ($remaining.Count -gt 0) {
         $ids = ($remaining | Select-Object -ExpandProperty ProcessId) -join ", "
         $detail = (($taskkillOutput | Select-Object -First 3) -join " ").Trim()
+        $staleOnly = $true
+        $taskkillText = ($taskkillOutput -join "`n")
+        foreach ($proc in $remaining) {
+            $pidText = [string]$proc.ProcessId
+            if (
+                $taskkillText -notmatch "PID $pidText\b" -or
+                $taskkillText -notmatch "no running instance"
+            ) {
+                $staleOnly = $false
+                break
+            }
+        }
+        if ($staleOnly) {
+            Write-Warning "Ignoring stale Chrome WMI rows after taskkill: $ids"
+            return
+        }
         throw "Chrome is still running after repair attempt; taskkill exit code ${taskkillExitCode}; remaining PIDs: $ids; $detail"
     }
 }
@@ -519,10 +534,10 @@ $fallbackTabsUrl = "chrome-extension://$(Get-PrimaryKnownExtensionId)/$tabsUrlPa
 
 function Open-RequestedPlatformTabs {
     param([int]$Port, [string[]]$Ids, [bool]$All)
-    $delayMs = 5000
+    $delayMs = 1200
     $rawDelay = [Environment]::GetEnvironmentVariable("UC_CHROME_OPEN_TAB_DELAY_MS")
     $parsedDelay = 0
-    if ([int]::TryParse($rawDelay, [ref]$parsedDelay) -and $parsedDelay -ge 500) {
+    if ([int]::TryParse($rawDelay, [ref]$parsedDelay) -and $parsedDelay -ge 250) {
         $delayMs = $parsedDelay
     }
     foreach ($url in @(Get-PlatformLaunchUrls -Ids $Ids -All $All)) {
