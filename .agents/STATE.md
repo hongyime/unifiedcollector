@@ -1,8 +1,8 @@
 # UnifiedCollector Agent State
 
-Updated: 2026-08-11 16:11 SGT
+Updated: 2026-08-11 16:14 SGT
 
-Current task: complete SpiderFoot recon operational setup safely.
+Current task: SpiderFoot recon operational setup completed safely; continue broader collector monitoring as needed.
 
 Recent completed work:
 - SpiderFoot recon sidecar is live and verified under the `recon` Compose profile.
@@ -33,9 +33,10 @@ Current evidence:
 - Recon observation storage now uses `value_hash` for idempotent SpiderFoot upserts; live DB migration `20260811_fix_recon_observation_value_hash.sql` is applied with checksum `f37e6c38e7ae`.
 - Collector-derived username recon targets are scoped to `RECON_USERNAME_MODULES` (`sfp_accounts` by default) so username targets do not run DNS/WHOIS modules.
 - Live SpiderFoot sidecar processed a target after the value-hash migration and wrote 44 observations.
+- Committed and pushed `54c69a7e fix: harden spiderfoot recon observations`.
+- Final live check: worktree clean, `unifiedcollector_spiderfoot` healthy, `/health?include_sources=true` status `ok` with 0 source issues, and all 106 recon observations had `value_hash` populated.
 
 Next steps:
-1. Commit and push the completed SpiderFoot recon value-hash/module-scope changes.
-2. Continue broader collector robustness audit from current live health.
-3. Facebook browser content was the latest remaining source issue after the WhatsApp fix; inspect extension/browser collection before suppressing anything.
-4. Watch DB lock pressure from long GitHub COPY/backfill work; recon commands may log deferred base-schema migration while backup/backfill holds locks, but runtime recon operations still complete.
+1. Continue broader collector robustness audit from current live health.
+2. Facebook browser content was the latest remaining source issue after the WhatsApp fix; inspect extension/browser collection before suppressing anything.
+3. Watch DB lock pressure from long GitHub COPY/backfill work; recon commands may log deferred base-schema migration while backup/backfill holds locks, but runtime recon operations still complete.
