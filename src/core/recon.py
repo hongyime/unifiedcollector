@@ -43,6 +43,14 @@ async def queue_recon_target(
             priority = LEAST(recon_targets.priority, EXCLUDED.priority),
             source = EXCLUDED.source,
             scope_json = recon_targets.scope_json || EXCLUDED.scope_json,
+            status = CASE
+                WHEN recon_targets.status = 'in_progress' THEN recon_targets.status
+                ELSE 'pending'
+            END,
+            error = CASE
+                WHEN recon_targets.status = 'in_progress' THEN recon_targets.error
+                ELSE NULL
+            END,
             updated_at = NOW()
         RETURNING id::text, target_type, target_value, source, priority, status
         """,

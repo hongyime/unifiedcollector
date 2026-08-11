@@ -76,6 +76,32 @@ def test_queue_recon_target_persists_scope_json():
     assert row["target_value"] == "example.com"
 
 
+def test_queue_recon_target_requeues_existing_non_running_rows():
+    class Conn:
+        async def fetchrow(self, sql, *args):
+            assert "status = CASE" in sql
+            assert "ELSE 'pending'" in sql
+            assert "error = CASE" in sql
+            return {
+                "id": "00000000-0000-0000-0000-000000000001",
+                "target_type": args[0],
+                "target_value": args[1],
+                "source": args[2],
+                "priority": args[3],
+                "status": "pending",
+            }
+
+    row = asyncio.run(queue_recon_target(
+        Conn(),
+        target_type="domain",
+        target_value="example.com",
+        source="retry",
+        scope={"allowlist": ["example.com"]},
+    ))
+
+    assert row["status"] == "pending"
+
+
 def test_spiderfoot_scope_modules_and_observation_normalization(monkeypatch):
     monkeypatch.delenv("SPIDERFOOT_MODULES", raising=False)
     monkeypatch.delenv("SPIDERFOOT_ALLOW_INTRUSIVE", raising=False)
