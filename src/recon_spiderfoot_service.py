@@ -37,9 +37,9 @@ async def _run(args) -> None:
             async with pool.acquire() as conn:
                 report = await recon_spiderfoot.run_spiderfoot_once(conn, dry_run=args.dry_run)
             if args.json:
-                print(json.dumps(report, indent=2, sort_keys=True, default=str))
+                print(json.dumps(report, indent=2, sort_keys=True, default=str), flush=True)
             else:
-                print(report)
+                print(report, flush=True)
             if args.once:
                 break
             await asyncio.sleep(args.poll_interval)
