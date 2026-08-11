@@ -476,6 +476,34 @@ def _browser_extension_apply_ingest_health(payload: dict, ingest_items: list[dic
                 issue["detail"] = detail
 
 
+_OPTIONAL_BROWSER_DIAGNOSTIC_SECTIONS = {
+    'browser_content_gap',
+    'browser_media_candidates',
+    'browser_media_revisit_queue',
+    'tiktok_browser_media_candidates',
+    'tiktok_browser_revisit_queue',
+}
+
+
+def _browser_extension_suppress_optional_diagnostics_when_active(payload: dict | None) -> dict | None:
+    if not isinstance(payload, dict):
+        return payload
+    health = payload.get("ingest_health") or {}
+    if not health.get("content_active"):
+        return payload
+    errors = payload.get("diagnostic_errors")
+    if not isinstance(errors, list):
+        return payload
+    payload["diagnostic_errors"] = [
+        item for item in errors
+        if not (
+            isinstance(item, dict)
+            and item.get("section") in _OPTIONAL_BROWSER_DIAGNOSTIC_SECTIONS
+        )
+    ]
+    return payload
+
+
 async def _browser_extension_fallback_payload_with_fast_ingest(reason: str) -> dict:
     payload = _browser_extension_fallback_payload(reason)
     pool = None
@@ -3254,17 +3282,25 @@ async def _browser_extension_payload(conn) -> dict:
                 _record_diagnostic_error(label, exc)
             return None
 
-    async def _fetch_or_empty(label: str, query: str, *args, max_timeout: float | None = None):
+    async def _fetch_or_empty(
+        label: str,
+        query: str,
+        *args,
+        max_timeout: float | None = None,
+        record_error: bool = True,
+    ):
         timeout = _remaining_timeout(max_timeout)
         if timeout is None:
-            _record_diagnostic_error(label)
+            if record_error:
+                _record_diagnostic_error(label)
             return []
         try:
             return await conn.fetch(query, *args, timeout=timeout)
         except AssertionError:
             raise
         except Exception as exc:  # noqa: BLE001 - dashboard diagnostics are best-effort
-            _record_diagnostic_error(label, exc)
+            if record_error:
+                _record_diagnostic_error(label, exc)
             return []
 
     async def _fetchrow_or_none(label: str, query: str, *args, max_timeout: float | None = None):
@@ -3536,6 +3572,7 @@ async def _browser_extension_payload(conn) -> dict:
             """,
             max(300, stale_seconds),
             ["instagram", "tiktok", "lemon8", "threads", "facebook", "x"],
+            record_error=not bool((payload.get("ingest_health") or {}).get("content_active")),
         )
         for row in content_gap_rows:
             raw = dict(row)
@@ -3895,6 +3932,7 @@ async def health(include_sources: bool = False, include_storage: bool = False):
                     logger.debug("source liveness health section failed: %s", exc)
                 try:
                     browser_extension = await _browser_extension_payload(conn)
+                    _browser_extension_suppress_optional_diagnostics_when_active(browser_extension)
                 except Exception as exc:
                     logger.debug("browser extension health section failed: %s", exc)
         db_status = "healthy"

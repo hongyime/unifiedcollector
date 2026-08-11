@@ -16,6 +16,7 @@ from src.dashboard.api import (
     _browser_extension_fallback_payload,
     _browser_ingest_health_from_items,
     _browser_extension_payload,
+    _browser_extension_suppress_optional_diagnostics_when_active,
     _browser_tab_maintenance_payload,
     _extension_versions_match,
 )
@@ -56,6 +57,34 @@ def test_browser_ingest_health_from_items_marks_content_active(monkeypatch):
     assert health["content_active"] is True
     assert health["active_platforms"] == ["instagram", "tiktok"]
     assert health["content_platforms"] == ["instagram"]
+
+
+def test_browser_extension_suppresses_optional_diagnostics_only_when_content_active():
+    payload = {
+        "ingest_health": {"content_active": True},
+        "diagnostic_errors": [
+            {"section": "browser_media_candidates", "error": "TimeoutError"},
+            {"section": "browser_content_gap", "error": "TimeoutError"},
+            {"section": "dm_hook_heartbeat", "error": "TimeoutError"},
+        ],
+    }
+
+    _browser_extension_suppress_optional_diagnostics_when_active(payload)
+
+    assert payload["diagnostic_errors"] == [
+        {"section": "dm_hook_heartbeat", "error": "TimeoutError"},
+    ]
+
+    inactive = {
+        "ingest_health": {"content_active": False},
+        "diagnostic_errors": [{"section": "browser_media_candidates", "error": "TimeoutError"}],
+    }
+
+    _browser_extension_suppress_optional_diagnostics_when_active(inactive)
+
+    assert inactive["diagnostic_errors"] == [
+        {"section": "browser_media_candidates", "error": "TimeoutError"},
+    ]
 
 
 def test_browser_tab_maintenance_payload_reads_host_status(tmp_path):
@@ -687,6 +716,53 @@ async def test_browser_extension_payload_content_gap_ignores_manual_backend_prob
     assert seen_content_gap_query is not None
     assert "manual_backend_probe" in seen_content_gap_query
     assert "forced_recovery_started" in seen_content_gap_query
+
+
+@pytest.mark.asyncio
+async def test_browser_extension_payload_suppresses_content_gap_timeout_when_content_active(monkeypatch):
+    monkeypatch.setenv("UC_EXTENSION_EXPECTED_VERSION", "1.22.7")
+
+    class FakeConn:
+        async def fetchval(self, query: str, timeout: int | None = None):
+            if "dm_hook_heartbeat" in query:
+                return None
+            if "browser_ingest_events" in query:
+                return "browser_ingest_events"
+            if "tiktok_browser_media_candidates" in query:
+                return None
+            if "tiktok_browser_revisit_queue" in query:
+                return None
+            if "browser_media_candidates" in query:
+                return None
+            if "browser_media_revisit_queue" in query:
+                return None
+            raise AssertionError(query)
+
+        async def fetch(self, query: str, *args, timeout: int | None = None):
+            if "WITH selected(platform) AS" in query:
+                raise TimeoutError()
+            if "FROM browser_ingest_events" in query:
+                return [
+                    {
+                        "platform": "instagram",
+                        "endpoint": "media",
+                        "requests": 1,
+                        "observed_count": 4,
+                        "stored_count": 2,
+                        "last_seen_at": datetime(2026, 7, 31, 22, 35, tzinfo=timezone.utc),
+                        "age_seconds": 5,
+                        "extension_version": "1.22.7",
+                    }
+                ]
+            raise AssertionError(query)
+
+    payload = await _browser_extension_payload(FakeConn())
+
+    assert payload["ingest_health"]["content_active"] is True
+    assert not [
+        item for item in payload["diagnostic_errors"]
+        if item["section"] == "browser_content_gap"
+    ]
 
 
 @pytest.mark.asyncio
