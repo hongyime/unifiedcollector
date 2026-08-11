@@ -19,11 +19,13 @@ RUN wget -q -O /tmp/spiderfoot.tar.gz "https://github.com/smicallef/spiderfoot/a
  && /opt/spiderfoot-venv/bin/pip install --no-cache-dir "pip<25" "setuptools<70" wheel "Cython<3" \
  && /opt/spiderfoot-venv/bin/pip install --no-cache-dir --no-build-isolation "PyYAML==5.4.1" \
  && /opt/spiderfoot-venv/bin/pip install --no-cache-dir -r /opt/spiderfoot/requirements.txt \
+ && printf '#!/bin/sh\nexec /opt/spiderfoot-venv/bin/python /opt/spiderfoot/sf.py "$@"\n' > /usr/local/bin/spiderfoot-cli \
+ && chmod +x /usr/local/bin/spiderfoot-cli \
  && rm -f /tmp/spiderfoot.tar.gz
 
 COPY src/ src/
 COPY config/ config/
 
-ENV SPIDERFOOT_CLI="/opt/spiderfoot-venv/bin/python /opt/spiderfoot/sf.py"
+ENV SPIDERFOOT_CLI="/usr/local/bin/spiderfoot-cli"
 
 CMD ["python", "-m", "src.recon_spiderfoot_service"]

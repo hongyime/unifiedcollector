@@ -10,6 +10,7 @@ from src.core import recon_spiderfoot
 from src.core.recon_spiderfoot import (
     allowed_modules,
     normalize_observation,
+    parse_spiderfoot_stdout,
     normalize_spiderfoot_payload,
     run_spiderfoot_once,
     spiderfoot_max_threads,
@@ -248,6 +249,18 @@ def test_spiderfoot_module_guardrails_and_payload_shapes(monkeypatch):
     assert normalize_spiderfoot_payload({"events": [{"module": "a"}, "skip"]}) == [{"module": "a"}]
     assert normalize_spiderfoot_payload({"data": [{"module": "b"}]}) == [{"module": "b"}]
     assert normalize_spiderfoot_payload("not-json") == []
+
+
+def test_spiderfoot_parser_tolerates_mixed_stdout():
+    stdout = (
+        b'[{"module":"sfp_dnsresolve","type":"DOMAIN_NAME","data":"example.com"}]'
+        b'non-json progress text'
+        b'{"module":"sfp_whois","type":"WHOIS_REGISTRAR","data":"Example Registrar"}'
+    )
+
+    rows = parse_spiderfoot_stdout(stdout)
+
+    assert [row["module"] for row in rows] == ["sfp_dnsresolve", "sfp_whois"]
 
 
 def test_run_spiderfoot_once_stores_observations(monkeypatch):

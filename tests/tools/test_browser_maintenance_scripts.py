@@ -120,7 +120,11 @@ def test_chrome_cdp_launcher_discovers_extension_id_from_cdp():
     assert "function Get-KnownExtensionIds" in script
     assert "function Open-ExtensionControlPage" in script
     assert "function Open-CdpTarget" in script
+    assert "function Find-ExistingCdpTarget" in script
+    assert "function Activate-CdpTarget" in script
     assert "function Try-OpenCdpTarget" in script
+    assert "$existingTargetId = Find-ExistingCdpTarget" in script
+    assert "json/activate/$TargetId" in script
     assert "Could not open CDP target" in script
     assert "$knownIds = @(Get-KnownExtensionIds)" in script
     assert "function Get-PrimaryKnownExtensionId" in script

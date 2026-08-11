@@ -101,7 +101,7 @@ services:
       RECON_COLLECTOR_TARGET_TYPES: "${RECON_COLLECTOR_TARGET_TYPES:-domain,username}"
       RECON_ALLOWED_DOMAIN_SUFFIXES: "${RECON_ALLOWED_DOMAIN_SUFFIXES:-}"
       RECON_USERNAME_MODULES: "${RECON_USERNAME_MODULES:-sfp_accounts}"
-      SPIDERFOOT_CLI: "${SPIDERFOOT_CLI:-/opt/spiderfoot-venv/bin/python /opt/spiderfoot/sf.py}"
+      SPIDERFOOT_CLI: "${SPIDERFOOT_CLI:-/usr/local/bin/spiderfoot-cli}"
       SPIDERFOOT_MODULES: "${SPIDERFOOT_MODULES:-sfp_dnsresolve,sfp_whois,sfp_names}"
       SPIDERFOOT_MAX_MODULES: "${SPIDERFOOT_MAX_MODULES:-10}"
       SPIDERFOOT_MAX_THREADS: "${SPIDERFOOT_MAX_THREADS:-2}"

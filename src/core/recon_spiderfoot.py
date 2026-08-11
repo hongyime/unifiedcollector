@@ -160,6 +160,36 @@ def spiderfoot_max_threads() -> int:
         return 4
 
 
+def _extract_json_objects(text: str) -> list[dict[str, Any]]:
+    decoder = json.JSONDecoder()
+    rows: list[dict[str, Any]] = []
+    position = 0
+    while position < len(text):
+        next_object = text.find("{", position)
+        if next_object < 0:
+            break
+        try:
+            value, end = decoder.raw_decode(text[next_object:])
+        except json.JSONDecodeError:
+            position = next_object + 1
+            continue
+        if isinstance(value, dict):
+            rows.append(value)
+        position = next_object + max(end, 1)
+    return rows
+
+
+def parse_spiderfoot_stdout(stdout: bytes) -> list[dict[str, Any]]:
+    text = stdout.decode("utf-8", errors="replace")
+    try:
+        return normalize_spiderfoot_payload(json.loads(text))
+    except json.JSONDecodeError as exc:
+        rows = _extract_json_objects(text)
+        if rows:
+            return rows
+        raise RuntimeError(f"SpiderFoot returned malformed JSON output at byte {exc.pos}") from exc
+
+
 async def _mark_source_health(conn, status: str, error: str | None = None, *, success: bool = False) -> None:
     await conn.execute(
         """
@@ -300,7 +330,7 @@ async def _run_spiderfoot_cli(target: dict[str, Any], modules: list[str], timeou
         raise RuntimeError(f"SpiderFoot timed out after {timeout_seconds}s")
     if proc.returncode != 0:
         raise RuntimeError((stderr or stdout).decode("utf-8", errors="replace")[:500])
-    return normalize_spiderfoot_payload(json.loads(stdout.decode("utf-8")))
+    return parse_spiderfoot_stdout(stdout)
 
 
 def normalize_spiderfoot_payload(payload: Any) -> list[dict[str, Any]]:

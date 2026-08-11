@@ -253,9 +253,45 @@ function Open-CdpTarget {
     Invoke-WebRequest -Uri "http://127.0.0.1:$Port/json/new?$encoded" -Method Put -UseBasicParsing -TimeoutSec $TimeoutSeconds | Out-Null
 }
 
+function Find-ExistingCdpTarget {
+    param([int]$Port, [string]$Url)
+    try {
+        $targets = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/json/list" -Method Get -TimeoutSec 5
+        foreach ($target in @($targets)) {
+            if ([string]$target.type -ne "page") {
+                continue
+            }
+            if ([string]$target.url -eq $Url) {
+                return [string]$target.id
+            }
+        }
+    } catch {
+        return ""
+    }
+    return ""
+}
+
+function Activate-CdpTarget {
+    param([int]$Port, [string]$TargetId, [int]$TimeoutSeconds = 5)
+    if (-not $TargetId) {
+        return $false
+    }
+    try {
+        Invoke-WebRequest -Uri "http://127.0.0.1:$Port/json/activate/$TargetId" -UseBasicParsing -TimeoutSec $TimeoutSeconds | Out-Null
+        return $true
+    } catch {
+        return $false
+    }
+}
+
 function Try-OpenCdpTarget {
     param([int]$Port, [string]$Url)
     try {
+        $existingTargetId = Find-ExistingCdpTarget -Port $Port -Url $Url
+        if ($existingTargetId) {
+            Activate-CdpTarget -Port $Port -TargetId $existingTargetId | Out-Null
+            return $true
+        }
         $targetTimeout = 5
         $rawTargetTimeout = [Environment]::GetEnvironmentVariable("UC_CHROME_OPEN_TARGET_TIMEOUT_SECONDS")
         $parsedTargetTimeout = 0
