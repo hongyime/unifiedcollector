@@ -489,6 +489,10 @@ function Test-AuditHealthNeedsProfileRestart($AuditHealth) {
     if ($null -eq $AuditHealth -or $AuditHealth.ok) {
         return $false
     }
+    if ([Environment]::GetEnvironmentVariable("UC_BROWSER_PROFILE_RESTART_ON_TAB_HEALTH") -ne "1") {
+        Write-Log "browser tab maintenance degraded: profile restart on tab-health failure is disabled by default"
+        return $false
+    }
     $minUnhealthyForRestart = Get-PositiveIntEnv "UC_BROWSER_PROFILE_RESTART_MIN_UNHEALTHY_PLATFORMS" 3
     $unhealthyCount = [int]$AuditHealth.unhealthy_count
     if ($unhealthyCount -lt $minUnhealthyForRestart) {

@@ -261,15 +261,24 @@ def _hard_reopen_repeated_tabs(platform: str, plans: list[dict]) -> list[dict]:
         results.append({**p, "action": "hard_reopen_close", "status": "ok" if ok else "fail", "detail": msg})
         print(f"  close  {platform:10} {p['target_id'][:12]} ... {'OK' if ok else 'FAIL'}: {msg[:160]}")
         time.sleep(0.5)
-    for p in plans:
-        url = p.get("url") or HARD_REOPEN_URLS.get(platform, ["about:blank"])[0]
+    reopen_urls = list(dict.fromkeys(
+        str(p.get("url") or "").strip() or HARD_REOPEN_URLS.get(platform, ["about:blank"])[0]
+        for p in plans
+    ))
+    for url in reopen_urls:
         ok, msg = _open_url(url)
         results.append({
-            **p,
+            "platform": platform,
             "target_id": None,
+            "url": url,
             "ws": None,
             "reason": "reopen repeated stuck tab after prior soft reload",
             "action": "hard_reopen_open",
+            "auth_wall": False,
+            "heap_mb": None,
+            "cs": None,
+            "cs_version": None,
+            "responsive_main": None,
             "status": "ok" if ok else "fail",
             "detail": msg,
         })

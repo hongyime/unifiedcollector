@@ -223,6 +223,7 @@ def test_browser_tab_reload_hard_reopens_individual_repeated_stuck_tabs():
     assert "reopen repeated stuck tab after prior soft reload" in script
     assert "_previous_reload_for_url(previous_plan, platform" in script
     assert "hard_reopen_tabs.add" in script
+    assert "reopen_urls = list(dict.fromkeys" in script
     assert '"page health:" in text' in script
     assert '"recoverable_error_shell" in text' in script
 
@@ -242,11 +243,11 @@ def test_chrome_cdp_launcher_opens_requested_platform_urls_directly():
     assert "function Get-PlatformLaunchUrls" in script
     assert 'instagram = "https://www.instagram.com/"' in script
     assert 'UC_CHROME_OPEN_EXPANDED_PLATFORM_TABS") -eq "1"' in script
-    assert "tiktok = @(" in script
+    assert "tiktok = if ($expandedPlatformTabs)" in script
     assert '"https://www.tiktok.com/foryou"' in script
     assert '"https://www.tiktok.com/following"' in script
     assert '"https://www.tiktok.com/explore"' in script
-    assert "lemon8 = @(" in script
+    assert "lemon8 = if ($expandedPlatformTabs)" in script
     assert '"https://www.lemon8-app.com/topic/food?region=sg"' in script
     assert '"https://www.lemon8-app.com/topic/travel?region=sg"' in script
     assert '"https://www.lemon8-app.com/topic/singapore?region=sg"' in script
@@ -386,6 +387,8 @@ def test_browser_maintenance_restarts_dedicated_profile_when_tabs_stay_unhealthy
     assert "browser tab audit health after second reload" in script
     assert "browser tab audit still unhealthy after second reload" in script
     assert "function Test-AuditHealthNeedsProfileRestart" in script
+    assert "UC_BROWSER_PROFILE_RESTART_ON_TAB_HEALTH" in script
+    assert "profile restart on tab-health failure is disabled by default" in script
     assert "UC_BROWSER_PROFILE_RESTART_MIN_UNHEALTHY_PLATFORMS" in script
     assert 'Get-PositiveIntEnv "UC_BROWSER_PROFILE_RESTART_MIN_UNHEALTHY_PLATFORMS" 3' in script
     assert "below profile restart threshold" in script
