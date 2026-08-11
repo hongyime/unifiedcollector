@@ -10,8 +10,10 @@ from src.core.recon_spiderfoot import (
     normalize_spiderfoot_payload,
     run_spiderfoot_once,
     spiderfoot_max_threads,
+    target_allowed_by_policy,
     target_in_scope,
 )
+from src.core.recon_seed import seed_recon_targets_from_collector
 
 
 def test_normalize_recon_target_validates_domain_and_email():
@@ -136,6 +138,87 @@ def test_spiderfoot_requires_scope_unless_explicitly_allowed(monkeypatch):
     assert target_in_scope("example.com")
 
 
+def test_recon_policy_allows_collector_derived_without_static_allowlist(monkeypatch):
+    monkeypatch.delenv("RECON_ALLOWLIST", raising=False)
+    monkeypatch.delenv("RECON_ALLOW_UNSCOPED", raising=False)
+    monkeypatch.delenv("RECON_ALLOWED_DOMAIN_SUFFIXES", raising=False)
+    monkeypatch.setenv("RECON_ALLOWED_SOURCES", "telegram")
+
+    allowed, reason = target_allowed_by_policy({
+        "target_type": "username",
+        "target_value": "alice",
+        "source": "collector:social_users",
+        "scope_json": {
+            "collector_derived": True,
+            "collector_source": "telegram",
+        },
+    })
+
+    assert allowed
+    assert "collector-derived" in reason
+
+
+def test_recon_policy_blocks_manual_without_allowlist(monkeypatch):
+    monkeypatch.delenv("RECON_ALLOWLIST", raising=False)
+    monkeypatch.delenv("RECON_ALLOW_UNSCOPED", raising=False)
+
+    allowed, reason = target_allowed_by_policy({
+        "target_type": "domain",
+        "target_value": "example.com",
+        "source": "manual",
+        "scope_json": {},
+    })
+
+    assert not allowed
+    assert reason == "manual target outside RECON_ALLOWLIST"
+
+
+def test_recon_policy_honors_domain_suffix_for_collector_urls(monkeypatch):
+    monkeypatch.delenv("RECON_ALLOWLIST", raising=False)
+    monkeypatch.delenv("RECON_ALLOW_UNSCOPED", raising=False)
+    monkeypatch.setenv("RECON_ALLOWED_SOURCES", "telegram")
+    monkeypatch.setenv("RECON_COLLECTOR_TARGET_TYPES", "domain,url,username")
+    monkeypatch.setenv("RECON_ALLOWED_DOMAIN_SUFFIXES", "example.com")
+
+    allowed, _reason = target_allowed_by_policy({
+        "target_type": "url",
+        "target_value": "https://sub.example.com/path",
+        "source": "collector:discovered_links",
+        "scope_json": {"collector_derived": True, "collector_source": "telegram"},
+    })
+    blocked, reason = target_allowed_by_policy({
+        "target_type": "url",
+        "target_value": "https://other.net/path",
+        "source": "collector:discovered_links",
+        "scope_json": {"collector_derived": True, "collector_source": "telegram"},
+    })
+
+    assert allowed
+    assert not blocked
+    assert reason == "collector-derived target outside RECON_ALLOWED_DOMAIN_SUFFIXES"
+
+
+def test_recon_policy_blocks_unapproved_collector_source_table(monkeypatch):
+    monkeypatch.delenv("RECON_ALLOWLIST", raising=False)
+    monkeypatch.delenv("RECON_ALLOW_UNSCOPED", raising=False)
+    monkeypatch.setenv("RECON_ALLOWED_SOURCES", "telegram")
+    monkeypatch.setenv("RECON_ALLOWED_SOURCE_TABLES", "discovered_links")
+
+    allowed, reason = target_allowed_by_policy({
+        "target_type": "username",
+        "target_value": "alice",
+        "source": "collector:raw_messages",
+        "scope_json": {
+            "collector_derived": True,
+            "collector_source": "telegram",
+            "source_table": "raw_messages",
+        },
+    })
+
+    assert not allowed
+    assert reason == "collector source table not allowed: raw_messages"
+
+
 def test_spiderfoot_max_threads_is_bounded(monkeypatch):
     monkeypatch.delenv("SPIDERFOOT_MAX_THREADS", raising=False)
     assert spiderfoot_max_threads() == 4
@@ -231,6 +314,53 @@ def test_run_spiderfoot_once_stores_observations(monkeypatch):
     assert conn.health[-1][1] == "running"
 
 
+def test_recon_seed_dry_run_builds_collector_candidates():
+    class Conn:
+        async def fetchval(self, sql, *args):
+            assert "to_regclass" in sql
+            return True
+
+        async def fetch(self, sql, *args):
+            if "NULLIF(domain, '')" in sql:
+                return [{
+                    "source_record_id": "link-domain-1",
+                    "collector_source": "telegram",
+                    "target_value": "example.com",
+                    "seen_at": None,
+                }]
+            if "NULLIF(url, '')" in sql:
+                return [{
+                    "source_record_id": "link-url-1",
+                    "collector_source": "telegram",
+                    "target_value": "https://example.com/post",
+                    "seen_at": None,
+                }]
+            if "FROM social_users" in sql:
+                return [{
+                    "source_record_id": "telegram:alice",
+                    "collector_source": "telegram",
+                    "target_value": "alice",
+                    "seen_at": None,
+                }]
+            return []
+
+    report = asyncio.run(seed_recon_targets_from_collector(
+        Conn(),
+        include_urls=True,
+        per_source_limit=3,
+        total_limit=10,
+        dry_run=True,
+    ))
+
+    assert report["dry_run"] is True
+    assert report["candidates"] == 3
+    assert report["queued"] == 0
+    assert report["sources"] == ["telegram"]
+    assert report["types"] == {"domain": 1, "url": 1, "username": 1}
+    assert "target_value" not in report["sample"][0]
+    assert "target_hash" in report["sample"][0]
+
+
 def test_run_spiderfoot_once_blocks_unscoped_target_by_default(monkeypatch):
     target_id = "00000000-0000-0000-0000-000000000002"
 
@@ -269,4 +399,4 @@ def test_run_spiderfoot_once_blocks_unscoped_target_by_default(monkeypatch):
     report = asyncio.run(run_spiderfoot_once(conn))
 
     assert report["status"] == "blocked"
-    assert any("target outside RECON_ALLOWLIST" in args for _sql, args in conn.updates)
+    assert any("manual target outside RECON_ALLOWLIST" in str(args) for _sql, args in conn.updates)

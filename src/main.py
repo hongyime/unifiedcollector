@@ -83,6 +83,17 @@ def main():
     rs.add_argument("--dry-run", action="store_true")
     rs.add_argument("--poll-interval", type=float, default=60.0)
     rs.add_argument("--json", action="store_true")
+    rseed = sub.add_parser("recon-seed", help="Queue collector-derived recon targets")
+    rseed.add_argument("--source", default=None, help="Comma-separated collector sources/platforms")
+    rseed.add_argument("--no-domains", action="store_true")
+    rseed.add_argument("--include-urls", action="store_true", help="Opt in to raw URL targets; paths may contain secrets")
+    rseed.add_argument("--no-urls", action="store_true", help=argparse.SUPPRESS)
+    rseed.add_argument("--no-usernames", action="store_true")
+    rseed.add_argument("--per-source-limit", type=int, default=25)
+    rseed.add_argument("--limit", type=int, default=200)
+    rseed.add_argument("--priority", type=int, default=7)
+    rseed.add_argument("--dry-run", action="store_true")
+    rseed.add_argument("--json", action="store_true")
 
     # rebuild-report
     rp = sub.add_parser("rebuild-report", help="Dry-run rebuild coverage from vault sidecars")
@@ -246,6 +257,8 @@ def main():
         asyncio.run(_cmd_recon_queue(args))
     elif args.command == "recon-spiderfoot":
         asyncio.run(_cmd_recon_spiderfoot(args))
+    elif args.command == "recon-seed":
+        asyncio.run(_cmd_recon_seed(args))
     elif args.command == "rebuild-report":
         asyncio.run(_cmd_rebuild_report(
             args.vault_root,
@@ -432,6 +445,34 @@ async def _cmd_recon_queue(args):
         print(json.dumps(result, indent=2, sort_keys=True, default=str))
     else:
         print(f"queued {result['target_type']} {result['target_value']} ({result['status']})")
+
+
+async def _cmd_recon_seed(args):
+    from src.core.recon_seed import seed_recon_targets_from_collector
+
+    sources = [item.strip() for item in args.source.split(",") if item.strip()] if args.source else None
+    pool = await get_pool()
+    await init_db(pool)
+    async with pool.acquire() as conn:
+        result = await seed_recon_targets_from_collector(
+            conn,
+            sources=sources,
+            include_domains=not args.no_domains,
+            include_urls=args.include_urls and not args.no_urls,
+            include_usernames=not args.no_usernames,
+            per_source_limit=args.per_source_limit,
+            total_limit=args.limit,
+            priority=args.priority,
+            dry_run=args.dry_run,
+        )
+    await close_pool()
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True, default=str))
+    else:
+        print(
+            f"recon seed: candidates={result['candidates']} "
+            f"queued={result['queued']} dry_run={result['dry_run']}"
+        )
 
 
 async def _cmd_recon_spiderfoot(args):

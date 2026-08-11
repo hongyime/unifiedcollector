@@ -18,6 +18,24 @@ DEFAULT_INTRUSIVE_MODULES = {
     "sfp_shodan",
     "sfp_censys",
 }
+DEFAULT_COLLECTOR_SOURCES = {
+    "beeper",
+    "facebook",
+    "github",
+    "instagram",
+    "lemon8",
+    "search",
+    "strava",
+    "telegram",
+    "threads",
+    "tiktok",
+    "website",
+    "whatsapp",
+    "x",
+    "youtube",
+}
+DEFAULT_COLLECTOR_TARGET_TYPES = {"domain", "username"}
+DEFAULT_COLLECTOR_SOURCE_TABLES = {"discovered_links", "social_users"}
 
 
 def _json_dict(value: Any) -> dict[str, Any]:
@@ -62,6 +80,69 @@ def target_in_scope(target_value: str, allowlist: str | None = None) -> bool:
     if "@" in value:
         candidates.add(value.split("@", 1)[1])
     return any(candidate == item or candidate.endswith("." + item) for candidate in candidates for item in allowed)
+
+
+def _csv_set(name: str, default: set[str]) -> set[str]:
+    raw = os.getenv(name, "")
+    values = {item.strip().lower() for item in raw.split(",") if item.strip()}
+    return values or set(default)
+
+
+def _target_domain(target_value: str) -> str:
+    value = (target_value or "").strip().lower()
+    parsed = urlparse(value if "://" in value else f"//{value}")
+    if parsed.hostname:
+        return parsed.hostname.strip(".")
+    if "@" in value:
+        return value.split("@", 1)[1].strip(".")
+    return value.strip(".")
+
+
+def _suffix_allowed(target_value: str, suffixes: str | None = None) -> bool:
+    raw = suffixes if suffixes is not None else os.getenv("RECON_ALLOWED_DOMAIN_SUFFIXES", "")
+    allowed = [item.strip().lower().strip(".") for item in raw.split(",") if item.strip()]
+    if not allowed:
+        return True
+    host = _target_domain(target_value)
+    return any(host == suffix or host.endswith("." + suffix) for suffix in allowed)
+
+
+def target_allowed_by_policy(target: dict[str, Any], scope: dict[str, Any] | None = None) -> tuple[bool, str]:
+    scope = scope or _json_dict(target.get("scope_json"))
+    target_type = str(target.get("target_type") or "").lower()
+    target_value = str(target.get("target_value") or "")
+    scope_allowlist = scope.get("allowlist")
+    if isinstance(scope_allowlist, list):
+        scope_allowlist = ",".join(str(item) for item in scope_allowlist)
+    if target_in_scope(target_value, scope_allowlist):
+        return True, "target matched per-target allowlist"
+    if target_in_scope(target_value):
+        return True, "target matched RECON_ALLOWLIST"
+
+    collector_derived = bool(scope.get("collector_derived")) or str(target.get("source") or "").startswith("collector:")
+    if not collector_derived:
+        return False, "manual target outside RECON_ALLOWLIST"
+
+    allowed_types = _csv_set("RECON_COLLECTOR_TARGET_TYPES", DEFAULT_COLLECTOR_TARGET_TYPES)
+    if target_type not in allowed_types:
+        return False, f"collector-derived target type not allowed: {target_type}"
+
+    collector_source = str(scope.get("collector_source") or scope.get("platform") or "").lower()
+    allowed_sources = _csv_set("RECON_ALLOWED_SOURCES", DEFAULT_COLLECTOR_SOURCES)
+    if collector_source and collector_source not in allowed_sources:
+        return False, f"collector source not allowed: {collector_source}"
+
+    source_table = str(scope.get("source_table") or "").lower()
+    if not source_table and str(target.get("source") or "").startswith("collector:"):
+        source_table = str(target.get("source") or "").split(":", 1)[1].lower()
+    allowed_tables = _csv_set("RECON_ALLOWED_SOURCE_TABLES", DEFAULT_COLLECTOR_SOURCE_TABLES)
+    if source_table and source_table not in allowed_tables:
+        return False, f"collector source table not allowed: {source_table}"
+
+    if target_type in {"domain", "url", "email"} and not _suffix_allowed(target_value):
+        return False, "collector-derived target outside RECON_ALLOWED_DOMAIN_SUFFIXES"
+
+    return True, "collector-derived target matched source/type policy"
 
 
 def stale_target_minutes() -> int:
@@ -236,17 +317,15 @@ async def run_spiderfoot_once(conn, *, dry_run: bool = False) -> dict[str, Any]:
         await _mark_source_health(conn, "running", None, success=True)
         return {"status": "idle", "target": None, "observations": 0, "dry_run": dry_run}
     scope = _json_dict(target.get("scope_json"))
-    scope_allowlist = scope.get("allowlist")
-    if isinstance(scope_allowlist, list):
-        scope_allowlist = ",".join(str(item) for item in scope_allowlist)
-    if not target_in_scope(target["target_value"], scope_allowlist):
+    allowed, reason = target_allowed_by_policy(target, scope)
+    if not allowed:
         await conn.execute(
             "UPDATE recon_targets SET status = 'blocked', error = $2, updated_at = NOW() WHERE id = $1::uuid",
             target["id"],
-            "target outside RECON_ALLOWLIST",
+            reason,
         )
         await _mark_source_health(conn, "running", None, success=True)
-        return {"status": "blocked", "target": target, "observations": 0, "dry_run": dry_run}
+        return {"status": "blocked", "target": target, "observations": 0, "error": reason, "dry_run": dry_run}
 
     module_override = scope.get("modules")
     if isinstance(module_override, list):

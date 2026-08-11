@@ -87,6 +87,8 @@ sessions/*.session
 # AI / editor dot directories (managed via sourcerepo)
 .*
 !.github/
+!.agents/
+!.agents/**
 !.gitignore
 !.gitattributes
 !.gitmodules
