@@ -171,9 +171,9 @@ export const api = {
     post(`/targets${force ? "?force=true" : ""}`, { source, target, priority }),
   deleteTarget: (id: number) => del(`/targets/${id}`),
   reconTargets: () => get<{ targets: ReconTarget[]; total: number }>("/recon/targets"),
-  reconObservations: (opts: { targetId?: string; limit?: number } = {}) => {
+  reconObservations: (opts: { target_id?: string; limit?: number } = {}) => {
     const params = new URLSearchParams({ limit: String(opts.limit ?? 100) });
-    if (opts.targetId) params.set("target_id", opts.targetId);
+    if (opts.target_id) params.set("target_id", opts.target_id);
     return get<{ observations: ReconObservation[]; total: number; limit: number }>(`/recon/observations?${params}`);
   },
 
