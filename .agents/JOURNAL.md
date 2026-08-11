@@ -4,3 +4,4 @@
 - 2026-08-11 15:24 SGT: Kept SpiderFoot on `src.recon_spiderfoot_service` instead of `src.main` because the sidecar image intentionally has a slim dependency set; CLI commands belong in the full collector image.
 - 2026-08-11 15:31 SGT: Allowed `.agents/` through the blanket dotfile ignore because AGENTS.md now requires committed cross-agent handoff state.
 - 2026-08-11 15:41 SGT: Kept recon seed dry-run output redacted by default so operator logs can show counts, source types, target hosts, and stable hashes without leaking full raw URLs or usernames.
+- 2026-08-11 15:45 SGT: Suppressed optional browser diagnostic timeouts only when useful browser content is already active; source failures and stale content still remain visible.

@@ -1,12 +1,14 @@
 # UnifiedCollector Agent State
 
-Updated: 2026-08-11 15:41 SGT
+Updated: 2026-08-11 15:45 SGT
 
 Current task: continue hardening UnifiedCollector toward robust collection/recon operations.
 
 Recent completed work:
 - SpiderFoot recon sidecar is live and verified under the `recon` Compose profile.
 - Dashboard browser-health optional timeout noise was fixed, tested, rebuilt, deployed, committed, and pushed as `0ec39ea0 fix: suppress optional browser health noise`.
+- Additional browser optional diagnostic suppression was committed and pushed as `531298f7 fix: suppress optional browser diagnostics`.
+- Collector-derived recon seeding was committed and pushed as `70212a23 feat: seed collector recon targets`.
 
 In-progress work:
 - Completing dirty recon changes that add collector-derived recon seeding:
@@ -26,8 +28,8 @@ Current evidence:
 - `python -m pytest tests/dashboard/test_extension_health.py tests/dashboard/test_source_matrix.py -q` passed after browser optional diagnostic suppression.
 - Dashboard was rebuilt/restarted and live `/health?include_sources=true` returned `status=ok`, `source_issues=0`, no browser diagnostic errors, and active browser content.
 - `src.recon_seed_service` works as an optional one-shot entrypoint and redacts dry-run samples.
+- Final live check after push: dashboard/spiderfoot/postgres/realtime_feed/watchdog and collector services are healthy; `/health?include_sources=true` returned `status=ok`, `source_issues=0`, and no browser diagnostic errors.
 
 Next steps:
-1. Commit and push the dashboard health-noise fix.
-2. Commit and push the collector-derived recon seed work.
-3. Re-check git cleanliness and core service health.
+1. Continue broader collector robustness audit from current live health.
+2. Watch DB lock pressure from long GitHub COPY/backfill work; recon commands may log deferred base-schema migration while backup/backfill holds locks, but runtime recon operations still complete.
