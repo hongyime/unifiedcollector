@@ -14,6 +14,7 @@ import type {
   DLQItem,
   Target,
   ReconTarget,
+  ReconObservation,
   Schedule,
   Run,
   GraphData,
@@ -170,6 +171,11 @@ export const api = {
     post(`/targets${force ? "?force=true" : ""}`, { source, target, priority }),
   deleteTarget: (id: number) => del(`/targets/${id}`),
   reconTargets: () => get<{ targets: ReconTarget[]; total: number }>("/recon/targets"),
+  reconObservations: (opts: { targetId?: string; limit?: number } = {}) => {
+    const params = new URLSearchParams({ limit: String(opts.limit ?? 100) });
+    if (opts.targetId) params.set("target_id", opts.targetId);
+    return get<{ observations: ReconObservation[]; total: number; limit: number }>(`/recon/observations?${params}`);
+  },
 
   schedules: () => get<Schedule[]>("/schedules"),
   updateSchedule: (source: string, interval_hours: number, enabled: boolean) =>

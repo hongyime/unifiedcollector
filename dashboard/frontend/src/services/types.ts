@@ -411,6 +411,19 @@ export interface ReconTarget {
   updated_at: string | null;
 }
 
+export interface ReconObservation {
+  id: string;
+  target_id: string;
+  target_type: string;
+  target_value: string;
+  module: string;
+  observation_type: string;
+  value: string;
+  confidence: number;
+  first_seen_at: string | null;
+  last_seen_at: string | null;
+}
+
 export interface Schedule {
   source: string;
   interval_hours: number;

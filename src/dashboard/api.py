@@ -9662,6 +9662,37 @@ async def recon_targets(_user: dict = Depends(require_role("viewer"))):
     return {"targets": [dict(row) for row in rows], "total": len(rows)}
 
 
+@app.get("/recon/observations")
+async def recon_observations(
+    target_id: str | None = None,
+    limit: int = Query(100, ge=1, le=500),
+    _user: dict = Depends(require_role("viewer")),
+):
+    parsed_target_id = None
+    if target_id:
+        try:
+            parsed_target_id = str(_uuid.UUID(target_id))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="invalid target_id") from exc
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT o.id::text, o.target_id::text, t.target_type, t.target_value,
+                   o.module, o.observation_type, o.value, o.confidence,
+                   o.first_seen_at, o.last_seen_at
+            FROM recon_observations o
+            JOIN recon_targets t ON t.id = o.target_id
+            WHERE ($1::uuid IS NULL OR o.target_id = $1::uuid)
+            ORDER BY o.last_seen_at DESC
+            LIMIT $2
+            """,
+            parsed_target_id,
+            limit,
+        )
+    return {"observations": [dict(row) for row in rows], "total": len(rows), "limit": limit}
+
+
 if DIST_DIR.is_dir():
     app.mount("/assets", StaticFiles(directory=str(DIST_DIR / "assets")), name="assets")
 
