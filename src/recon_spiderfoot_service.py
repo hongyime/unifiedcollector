@@ -28,6 +28,21 @@ def _load_recon_spiderfoot():
     return module
 
 
+def format_report(report: dict) -> str:
+    status = str(report.get("status") or "unknown")
+    target = report.get("target") if isinstance(report.get("target"), dict) else {}
+    target_type = target.get("target_type") or "none"
+    observations = int(report.get("observations") or 0)
+    dry_run = " dry_run" if report.get("dry_run") else ""
+    modules = report.get("modules")
+    module_text = ""
+    if isinstance(modules, list) and modules:
+        module_text = " modules=" + ",".join(str(item) for item in modules[:8])
+    error = str(report.get("error") or "")[:160]
+    error_text = f" error={error}" if error else ""
+    return f"spiderfoot status={status} target_type={target_type} observations={observations}{module_text}{dry_run}{error_text}"
+
+
 async def _run(args) -> None:
     recon_spiderfoot = _load_recon_spiderfoot()
     pool = await get_pool()
@@ -39,7 +54,7 @@ async def _run(args) -> None:
             if args.json:
                 print(json.dumps(report, indent=2, sort_keys=True, default=str), flush=True)
             else:
-                print(report, flush=True)
+                print(format_report(report), flush=True)
             if args.once:
                 break
             await asyncio.sleep(args.poll_interval)
