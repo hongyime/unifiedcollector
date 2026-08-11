@@ -11,7 +11,9 @@ param(
     [int]$RecentIngestionMinutes = 60,
     [int]$DlqBacklogGraceMinutes = 360,
     [int]$DlqPendingThreshold = 100,
-    [int]$TimeoutSeconds = 8
+    [int]$TimeoutSeconds = 8,
+    [int]$DockerTimeoutSeconds = 20,
+    [int]$DefaultQueryTimeoutSeconds = 8
 )
 
 $ErrorActionPreference = "Stop"
@@ -39,6 +41,53 @@ function Invoke-JsonGet {
     } finally {
         $ProgressPreference = $oldProgress
     }
+}
+
+function Quote-ExternalArgument {
+    param([string]$Argument)
+    if ($null -eq $Argument) {
+        return '""'
+    }
+    if ($Argument -notmatch '[\s"]') {
+        return $Argument
+    }
+    return '"' + ($Argument -replace '"', '\"') + '"'
+}
+
+function Invoke-ExternalText {
+    param(
+        [string]$FilePath,
+        [string[]]$ArgumentList = @(),
+        [int]$CommandTimeoutSeconds = 20,
+        [string]$InputText = $null
+    )
+    $argLine = (@($ArgumentList) | ForEach-Object { Quote-ExternalArgument ([string]$_) }) -join " "
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $FilePath
+    $psi.Arguments = $argLine
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.RedirectStandardInput = $null -ne $InputText
+    $proc = [System.Diagnostics.Process]::new()
+    $proc.StartInfo = $psi
+    $null = $proc.Start()
+    if ($null -ne $InputText) {
+        $proc.StandardInput.Write($InputText)
+        $proc.StandardInput.Close()
+    }
+    if (-not $proc.WaitForExit([Math]::Max(1, $CommandTimeoutSeconds) * 1000)) {
+        try { $proc.Kill() } catch {}
+        throw "$FilePath timed out after ${CommandTimeoutSeconds}s"
+    }
+    $stdoutText = $proc.StandardOutput.ReadToEnd()
+    $stderrText = $proc.StandardError.ReadToEnd()
+    if ($proc.ExitCode -ne 0) {
+        $detail = if ($stderrText) { $stderrText.Trim() } else { "exit code $($proc.ExitCode)" }
+        throw "$FilePath exited $($proc.ExitCode): $detail"
+    }
+    return @($stdoutText -split "`r?`n" | Where-Object { $_ -ne "" })
 }
 
 function Test-WhatsAppBridgeReady {
@@ -146,13 +195,15 @@ function Get-AuditTabWallDetail {
 function Invoke-PostgresText {
     param(
         [string]$Sql,
-        [int]$QueryTimeoutSeconds = 20
+        [int]$QueryTimeoutSeconds = 0
     )
-    return docker exec -e PGPASSWORD=collectorpass unifiedcollector_postgres psql `
-        -U collector `
-        -d unifiedcollector `
-        -v ON_ERROR_STOP=1 `
-        -Atc $Sql 2>$null
+    if ($QueryTimeoutSeconds -le 0) {
+        $QueryTimeoutSeconds = $DefaultQueryTimeoutSeconds
+    }
+    return Invoke-ExternalText -FilePath "docker" `
+        -ArgumentList @("exec", "-i", "-e", "PGPASSWORD=collectorpass", "unifiedcollector_postgres", "psql", "-U", "collector", "-d", "unifiedcollector", "-v", "ON_ERROR_STOP=1", "-At") `
+        -InputText $Sql `
+        -CommandTimeoutSeconds $QueryTimeoutSeconds
 }
 
 $checks = [System.Collections.Generic.List[object]]::new()
@@ -175,11 +226,36 @@ foreach ($name in $startupNames) {
 }
 
 try {
-    $psRows = docker compose -f $composePath ps --format json 2>$null
     $services = @()
-    foreach ($row in $psRows) {
-        if (-not $row) { continue }
-        $services += ($row | ConvertFrom-Json)
+    try {
+        $psRows = Invoke-ExternalText -FilePath "docker" `
+            -ArgumentList @("compose", "-f", $composePath, "ps", "--format", "json") `
+            -CommandTimeoutSeconds $DockerTimeoutSeconds
+        foreach ($row in $psRows) {
+            if (-not $row) { continue }
+            $services += ($row | ConvertFrom-Json)
+        }
+        Add-Check $checks "docker service inventory" $true "compose ps returned $($services.Count) service(s)"
+    } catch {
+        $fallbackRows = Invoke-ExternalText -FilePath "docker" `
+            -ArgumentList @("ps", "--format", "{{.Names}}|{{.Status}}") `
+            -CommandTimeoutSeconds $DockerTimeoutSeconds
+        foreach ($line in $fallbackRows) {
+            $parts = ([string]$line).Split("|", 2)
+            if ($parts.Count -lt 2) { continue }
+            $name = $parts[0]
+            $status = $parts[1]
+            $service = $name -replace "^unifiedcollector_", ""
+            $health = if ($status -match "\(unhealthy\)") { "unhealthy" } elseif ($status -match "\(healthy\)") { "healthy" } else { "" }
+            $services += [pscustomobject]@{
+                Service = $service
+                Name = $name
+                Status = $status
+                State = if ($status -match "^Up\b") { "running" } else { "not_running" }
+                Health = $health
+            }
+        }
+        Add-Check $checks "docker service inventory" ($services.Count -gt 0) "compose unavailable: $($_.Exception.Message); docker ps fallback returned $($services.Count) container(s)"
     }
     $required = @(
         "postgres",
@@ -202,7 +278,7 @@ try {
         Add-Check $checks "service: $svc" $ok $detail
     }
 } catch {
-    Add-Check $checks "docker compose ps" $false $_.Exception.Message
+    Add-Check $checks "docker service inventory" $false $_.Exception.Message
 }
 
 try {
@@ -346,7 +422,7 @@ CREATE TEMP TABLE IF NOT EXISTS uc_recent_ingestion_counts (
     source_name text NOT NULL,
     label text NOT NULL,
     row_count bigint NOT NULL
-) ON COMMIT DROP;
+);
 TRUNCATE uc_recent_ingestion_counts;
 DO $$
 DECLARE

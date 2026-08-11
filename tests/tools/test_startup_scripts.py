@@ -54,7 +54,17 @@ def test_boot_verifier_checks_reboot_critical_surfaces():
     assert "UnifiedCollectorBrowserMaintenance.cmd" in script
     assert "UnifiedCollectorDockerWatchdog.cmd" in script
     assert "UnifiedCollectorBrowserCookieVault.cmd" in script
-    assert "docker compose -f $composePath ps --format json" in script
+    assert "function Invoke-ExternalText" in script
+    assert "RedirectStandardInput" in script
+    assert "$proc.Kill()" in script
+    assert "timed out after ${CommandTimeoutSeconds}s" in script
+    assert 'Invoke-ExternalText -FilePath "docker"' in script
+    assert '-ArgumentList @("compose", "-f", $composePath, "ps", "--format", "json")' in script
+    assert '-ArgumentList @("ps", "--format", "{{.Names}}|{{.Status}}")' in script
+    assert "docker ps fallback returned" in script
+    assert "docker service inventory" in script
+    assert "DockerTimeoutSeconds" in script
+    assert "CommandTimeoutSeconds $DockerTimeoutSeconds" in script
     assert "http://127.0.0.1:8700/health" in script
     assert "WhatsAppBridgeHealthUrls" in script
     assert "http://127.0.0.1:3011/health" in script
@@ -70,7 +80,11 @@ def test_boot_verifier_checks_reboot_critical_surfaces():
     assert "MaintenanceStatusFreshMinutes" in script
     assert "DefaultSourceFreshMinutes" in script
     assert "source_health" in script
+    assert '"exec", "-i", "-e", "PGPASSWORD=collectorpass"' in script
+    assert "-InputText $Sql" in script
     assert "RecentIngestionMinutes" in script
+    assert "DefaultQueryTimeoutSeconds" in script
+    assert "$QueryTimeoutSeconds = $DefaultQueryTimeoutSeconds" in script
     assert "rate limits and quotas" in script
     assert "FROM rate_limit_events" in script
     assert "FROM account_quota_usage" in script
@@ -78,6 +92,7 @@ def test_boot_verifier_checks_reboot_critical_surfaces():
     assert "recent quota counters:" in script
     assert "recent ingestion window" in script
     assert "telegram_messages" in script
+    assert "ON COMMIT DROP" not in script
     assert "media_items" in script
     assert "last ${RecentIngestionMinutes}m" in script
     assert "recent vault artifact health" in script
