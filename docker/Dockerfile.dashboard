@@ -1,10 +1,8 @@
-FROM python:3.14-slim
+# Reuse the proven collector runtime instead of reinstalling the full shared
+# dependency lockfile for the API-only dashboard image.
+FROM unifiedcollector-collector:latest
 
 WORKDIR /app
-
-COPY requirements.txt requirements.lock ./
-# P1-3: reproducible install from lockfile.
-RUN pip install --no-cache-dir -r requirements.lock
 
 COPY src/ src/
 COPY dashboard/frontend/dist/ dashboard/frontend/dist/
