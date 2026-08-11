@@ -118,6 +118,27 @@ def test_download_headers_include_platform_referers():
     assert ig_ingest._download_headers("x", "https://pbs.twimg.com/media/x.jpg", {})["Referer"] == "https://x.com/"
 
 
+def test_startup_db_prep_mutates_holder_not_frozen_app_keys(monkeypatch):
+    pool = _FakePool()
+
+    async def fake_get_pool():
+        return pool
+
+    monkeypatch.setattr(ig_ingest, "get_pool", fake_get_pool)
+    app = {
+        "pool": ig_ingest._PoolRef(),
+        "startup_state": {"error": "pending", "pending": True},
+    }
+
+    asyncio.run(ig_ingest._prepare_db_pool_and_schema(app))
+
+    assert app["pool"].pool is pool
+    assert app["startup_state"] == {"error": None, "pending": False}
+    assert "startup_error" not in app
+    assert "startup_pending" not in app
+    assert any("CREATE TABLE IF NOT EXISTS tiktok_browser_media_candidates" in q for q, _args in pool.conn.executes)
+
+
 def test_tiktok_browser_classifier_queues_short_lived_video_revisit():
     item = {
         "content_type": "video",

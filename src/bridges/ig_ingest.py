@@ -635,12 +635,55 @@ async def request_timeout_middleware(request, handler):
         ))
 
 
+class _PoolRef:
+    """Mutable DB-pool holder.
+
+    aiohttp freezes top-level app state after startup. The ingest bridge prepares
+    DB schema in a background task so browser tabs are not blocked on boot; keep
+    the top-level key stable and mutate this holder instead.
+    """
+
+    def __init__(self):
+        self.pool = None
+
+    def __bool__(self):
+        return self.pool is not None
+
+    def acquire(self):
+        if self.pool is None:
+            raise RuntimeError("db_pool_not_ready")
+        return self.pool.acquire()
+
+
+def _startup_state(app):
+    state = app.get("startup_state")
+    if isinstance(state, dict):
+        return state
+    return {"error": app.get("startup_error"), "pending": bool(app.get("startup_pending"))}
+
+
+def _set_startup_error(app, value) -> None:
+    _startup_state(app)["error"] = value
+
+
+def _set_startup_pending(app, value: bool) -> None:
+    _startup_state(app)["pending"] = bool(value)
+
+
 async def _ensure_app_pool(app):
-    if app.get("pool") is not None:
-        return app["pool"]
+    holder = app.get("pool")
+    if isinstance(holder, _PoolRef):
+        if holder.pool is not None:
+            return holder
+        async with asyncio.timeout(SOCIAL_INGEST_DB_INIT_TIMEOUT_SECONDS):
+            holder.pool = await get_pool()
+        _set_startup_error(app, None)
+        return holder
+    if holder is not None:
+        return holder
     async with asyncio.timeout(SOCIAL_INGEST_DB_INIT_TIMEOUT_SECONDS):
         app["pool"] = await get_pool()
-    app["startup_error"] = None
+    _set_startup_error(app, None)
     return app["pool"]
 
 
@@ -670,7 +713,7 @@ async def db_pool_middleware(request, handler):
     try:
         await _ensure_app_pool(request.app)
     except TimeoutError:
-        request.app["startup_error"] = "db_pool_lazy_timeout"
+        _set_startup_error(request.app, "db_pool_lazy_timeout")
         logger.warning(
             "social ingest lazy DB pool init timed out after %.2fs path=%s",
             SOCIAL_INGEST_DB_INIT_TIMEOUT_SECONDS,
@@ -685,7 +728,7 @@ async def db_pool_middleware(request, handler):
             status=503,
         ))
     except Exception as exc:
-        request.app["startup_error"] = f"db_pool_lazy_error:{exc.__class__.__name__}"
+        _set_startup_error(request.app, f"db_pool_lazy_error:{exc.__class__.__name__}")
         logger.exception("social ingest lazy DB pool init failed path=%s", request.path)
         return _cors(web.json_response(
             {
@@ -5446,40 +5489,47 @@ async def _safe_json(request):
 
 
 async def health(request):
+    state = _startup_state(request.app)
     return _cors(web.json_response({
         "ok": True,
-        "db_pool": request.app.get("pool") is not None,
-        "startup_error": request.app.get("startup_error"),
-        "startup_pending": bool(request.app.get("startup_pending")),
+        "db_pool": bool(request.app.get("pool")),
+        "startup_error": state.get("error"),
+        "startup_pending": bool(state.get("pending")),
     }))
 
 
 async def _prepare_db_pool_and_schema(app):
+    holder = app.get("pool")
     try:
         async with asyncio.timeout(10):
-            app["pool"] = await get_pool()
+            pool = await get_pool()
+            if isinstance(holder, _PoolRef):
+                holder.pool = pool
+            else:
+                app["pool"] = pool
     except TimeoutError:
-        app["startup_error"] = "db_pool_timeout"
+        _set_startup_error(app, "db_pool_timeout")
         logger.exception("startup DB pool timed out")
     except Exception as exc:
-        app["startup_error"] = f"db_pool_error:{exc.__class__.__name__}"
+        _set_startup_error(app, f"db_pool_error:{exc.__class__.__name__}")
         logger.exception("startup DB pool failed")
-    if app.get("pool") is not None:
+    pool = app.get("pool")
+    if pool:
         try:
             async with asyncio.timeout(SOCIAL_INGEST_STARTUP_DDL_TIMEOUT_SECONDS):
-                async with app["pool"].acquire() as conn:
+                async with pool.acquire() as conn:
                     await conn.execute(_SPIDER_DDL)
                     await _execute_ddl_script(conn, _X_TARGETS_DDL)
                     await _execute_ddl_script(conn, _TIKTOK_BROWSER_MEDIA_DDL)
                     await _execute_ddl_script(conn, _BROWSER_MEDIA_CANDIDATES_DDL)
-            app["startup_error"] = None
+            _set_startup_error(app, None)
         except TimeoutError:
-            app["startup_error"] = "startup_ddl_timeout"
+            _set_startup_error(app, "startup_ddl_timeout")
             logger.exception("startup DDL timed out")
         except Exception as exc:
-            app["startup_error"] = f"startup_ddl_error:{exc.__class__.__name__}"
+            _set_startup_error(app, f"startup_ddl_error:{exc.__class__.__name__}")
             logger.exception("startup DDL failed")
-    app["startup_pending"] = False
+    _set_startup_pending(app, False)
 
 
 async def _on_startup(app):
@@ -5498,9 +5548,8 @@ async def _on_startup(app):
             loop.default_exception_handler(context)
 
     loop.set_exception_handler(_connection_lost_exception_handler)
-    app["pool"] = None
-    app["startup_error"] = None
-    app["startup_pending"] = True
+    app["pool"] = _PoolRef()
+    app["startup_state"] = {"error": None, "pending": True}
     app["tasks"] = set()
     app["sem"] = asyncio.Semaphore(DL_CONCURRENCY)
     app["upload_sem"] = asyncio.Semaphore(SOCIAL_INGEST_UPLOAD_CONCURRENCY)
@@ -5514,8 +5563,8 @@ async def _on_startup(app):
         app["tasks"].add(task)
         task.add_done_callback(app["tasks"].discard)
     else:
-        app["startup_pending"] = False
-        app["startup_error"] = "db_lazy_init"
+        _set_startup_pending(app, False)
+        _set_startup_error(app, "db_lazy_init")
 
 
 async def _on_cleanup(app):
