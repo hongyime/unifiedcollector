@@ -66,11 +66,11 @@ function Get-ChromeCdpDiagnostics {
     if ($withCdp.Count -gt 0) {
         $reason = "chrome_cdp_available"
         $hint = "Chrome CDP is reachable. If browser heartbeats are stale, reload platform tabs or the UnifiedCollector extension control page."
-        $repairCommand = "powershell -ExecutionPolicy Bypass -File scripts\start-scraper-chrome-cdp.ps1 -RemoteDebuggingPort $script:CdpPort -NoOpenAll -OpenIds instagram,tiktok,x,threads,facebook,strava -NoTest"
+        $repairCommand = "powershell -ExecutionPolicy Bypass -File scripts\start-scraper-chrome-cdp.ps1 -RemoteDebuggingPort $script:CdpPort -IsolateExtensions -NoOpenAll -OpenIds instagram,tiktok,x,threads,facebook,strava -NoTest"
         if ($script:LastCdpError) {
             $reason = "chrome_cdp_process_unreachable"
             if ($unsafeVisibleWindows.Count -eq 0) {
-                $repairCommand = "powershell -ExecutionPolicy Bypass -File scripts\start-scraper-chrome-cdp.ps1 -RemoteDebuggingPort $script:CdpPort -CloseExistingCdpProfile -CloseExistingIfNoVisibleWindows -NoOpenAll -OpenIds instagram,tiktok,x,threads,facebook,strava -NoTest"
+                $repairCommand = "powershell -ExecutionPolicy Bypass -File scripts\start-scraper-chrome-cdp.ps1 -RemoteDebuggingPort $script:CdpPort -IsolateExtensions -CloseExistingCdpProfile -CloseExistingIfNoVisibleWindows -NoOpenAll -OpenIds instagram,tiktok,x,threads,facebook,strava -NoTest"
                 $hint = "Chrome has no unsafe visible windows and the CDP socket is unreachable. The maintenance task can close collector-controlled Chrome windows/processes and relaunch Chrome with CDP."
             } else {
                 $hint = "Chrome has a CDP command line, but the CDP socket is unreachable. Save/finish visible browser work, close Chrome normally, then run scripts\start-scraper-chrome-cdp.ps1."
@@ -78,12 +78,12 @@ function Get-ChromeCdpDiagnostics {
         }
     } elseif ($processes.Count -eq 0) {
         $reason = "chrome_not_running"
-        $repairCommand = "powershell -ExecutionPolicy Bypass -File scripts\start-scraper-chrome-cdp.ps1 -RemoteDebuggingPort $script:CdpPort -NoOpenAll -OpenIds instagram,tiktok,x,threads,facebook,strava -NoTest"
+        $repairCommand = "powershell -ExecutionPolicy Bypass -File scripts\start-scraper-chrome-cdp.ps1 -RemoteDebuggingPort $script:CdpPort -IsolateExtensions -NoOpenAll -OpenIds instagram,tiktok,x,threads,facebook,strava -NoTest"
         $hint = "Chrome is not running. The maintenance task can relaunch scraper Chrome with CDP and the UnifiedCollector extension."
     } elseif ($withCdp.Count -eq 0) {
         $reason = "chrome_running_without_cdp"
         if ($unsafeVisibleWindows.Count -eq 0) {
-            $repairCommand = "powershell -ExecutionPolicy Bypass -File scripts\start-scraper-chrome-cdp.ps1 -RemoteDebuggingPort $script:CdpPort -CloseExistingIfNoVisibleWindows -NoOpenAll -OpenIds instagram,tiktok,x,threads,facebook,strava -NoTest"
+            $repairCommand = "powershell -ExecutionPolicy Bypass -File scripts\start-scraper-chrome-cdp.ps1 -RemoteDebuggingPort $script:CdpPort -IsolateExtensions -CloseExistingIfNoVisibleWindows -NoOpenAll -OpenIds instagram,tiktok,x,threads,facebook,strava -NoTest"
             $hint = "Chrome has no unsafe visible windows and no CDP. The maintenance task can close collector-controlled Chrome windows/processes and relaunch scraper Chrome with CDP."
         } else {
             $hint = "Chrome has visible windows but was not launched with --remote-debugging-port=$script:CdpPort. Do not use -CloseExistingIfNoVisibleWindows; save/finish browser work, close Chrome normally, then run scripts\start-scraper-chrome-cdp.ps1 so tab maintenance and cookie backup can reconnect."
@@ -229,6 +229,20 @@ function Get-CdpPageTargets {
     }
 }
 
+function Test-BlockedExtensionControlTab {
+    $targets = @(Get-CdpPageTargets | Where-Object {
+        $_.type -eq "page" -and [string]$_.url -match "^chrome-extension://[^/]+/tabs\.html(?:[?#].*)?$"
+    })
+    foreach ($target in $targets) {
+        $title = [string]$target.title
+        $url = [string]$target.url
+        if ($title -eq $url) {
+            return $true
+        }
+    }
+    return $false
+}
+
 function Remove-DuplicateCdpPageTargets {
     $targets = @(Get-CdpPageTargets | Where-Object { $_.type -eq "page" -and -not [string]::IsNullOrWhiteSpace([string]$_.url) })
     $groups = $targets | Group-Object -Property url | Where-Object { $_.Count -gt 1 }
@@ -294,6 +308,22 @@ function Remove-BlankStartupTabs {
     }
 }
 
+function Invoke-CdpPageTargetCleanup {
+    param(
+        [int]$Passes = 2,
+        [int]$DelaySeconds = 1
+    )
+    $boundedPasses = [Math]::Max(1, [Math]::Min($Passes, 5))
+    for ($i = 0; $i -lt $boundedPasses; $i++) {
+        Remove-DuplicateCdpPageTargets
+        Remove-DuplicateExtensionControlTabs
+        Remove-BlankStartupTabs
+        if ($i -lt ($boundedPasses - 1) -and $DelaySeconds -gt 0) {
+            Start-Sleep -Seconds $DelaySeconds
+        }
+    }
+}
+
 function Test-ExtensionControlTab {
     foreach ($target in @(Get-CdpPageTargets)) {
         $url = [string]$target.url
@@ -317,10 +347,9 @@ function Open-CdpTargetUrl {
 }
 
 function Ensure-ExtensionControlTab {
-    Remove-DuplicateCdpPageTargets
-    Remove-DuplicateExtensionControlTabs
-    if (Test-ExtensionControlTab) {
-        Remove-BlankStartupTabs
+    Invoke-CdpPageTargetCleanup -Passes 2 -DelaySeconds 1
+    if ((Test-ExtensionControlTab) -and -not (Test-BlockedExtensionControlTab)) {
+        Invoke-CdpPageTargetCleanup -Passes 2 -DelaySeconds 1
         return $true
     }
     $knownIds = @(
@@ -331,10 +360,8 @@ function Ensure-ExtensionControlTab {
         $url = "chrome-extension://$extensionId/tabs.html"
         if (Open-CdpTargetUrl -Url $url) {
             Start-Sleep -Seconds 2
-            if (Test-ExtensionControlTab) {
-                Remove-DuplicateCdpPageTargets
-                Remove-DuplicateExtensionControlTabs
-                Remove-BlankStartupTabs
+            if ((Test-ExtensionControlTab) -and -not (Test-BlockedExtensionControlTab)) {
+                Invoke-CdpPageTargetCleanup -Passes 3 -DelaySeconds 1
                 Write-Log "opened missing extension control tab: $url"
                 return $true
             }
@@ -342,6 +369,14 @@ function Ensure-ExtensionControlTab {
     }
     Write-Log "extension control tab is still missing after CDP open attempts"
     return $false
+}
+
+function Test-ExtensionDisabledOrCorrupted {
+    if (-not (Test-BlockedExtensionControlTab)) {
+        return $false
+    }
+    Write-Log "UnifiedCollector extension control page is blocked; open chrome://extensions/?id=pkmdmcklnjdeocoeigmlakhomhhcpafb, enable Developer mode, reload UnifiedCollector Bridge, then reopen tabs.html"
+    return $true
 }
 
 function Invoke-ChromeCdpRepair {
@@ -354,7 +389,7 @@ function Invoke-ChromeCdpRepair {
     }
     if ($reason -eq "chrome_not_running") {
         Write-Log "Chrome CDP repair: relaunching scraper Chrome because Chrome is not running"
-        & powershell.exe -ExecutionPolicy Bypass -File $launcher -RemoteDebuggingPort $script:CdpPort -NoOpenAll -OpenIds instagram,tiktok,x,threads,facebook,strava -NoTest
+        & powershell.exe -ExecutionPolicy Bypass -File $launcher -RemoteDebuggingPort $script:CdpPort -IsolateExtensions -NoOpenAll -OpenIds instagram,tiktok,x,threads,facebook,strava -NoTest
         return (Test-CdpAvailable)
     }
     $unsafeVisibleWindowCount = 0
@@ -365,12 +400,12 @@ function Invoke-ChromeCdpRepair {
     }
     if ($reason -eq "chrome_running_without_cdp" -and $unsafeVisibleWindowCount -eq 0) {
         Write-Log "Chrome CDP repair: closing collector-controlled Chrome and relaunching scraper Chrome with CDP"
-        & powershell.exe -ExecutionPolicy Bypass -File $launcher -RemoteDebuggingPort $script:CdpPort -CloseExistingCdpProfile -CloseExistingIfNoVisibleWindows -NoOpenAll -OpenIds instagram,tiktok,x,threads,facebook,strava -NoTest
+        & powershell.exe -ExecutionPolicy Bypass -File $launcher -RemoteDebuggingPort $script:CdpPort -IsolateExtensions -CloseExistingCdpProfile -CloseExistingIfNoVisibleWindows -NoOpenAll -OpenIds instagram,tiktok,x,threads,facebook,strava -NoTest
         return (Test-CdpAvailable)
     }
     if ($reason -eq "chrome_cdp_process_unreachable" -and $unsafeVisibleWindowCount -eq 0) {
         Write-Log "Chrome CDP repair: closing collector-controlled unreachable CDP Chrome and relaunching scraper Chrome"
-        & powershell.exe -ExecutionPolicy Bypass -File $launcher -RemoteDebuggingPort $script:CdpPort -CloseExistingCdpProfile -CloseExistingIfNoVisibleWindows -NoOpenAll -OpenIds instagram,tiktok,x,threads,facebook,strava -NoTest
+        & powershell.exe -ExecutionPolicy Bypass -File $launcher -RemoteDebuggingPort $script:CdpPort -IsolateExtensions -CloseExistingCdpProfile -CloseExistingIfNoVisibleWindows -NoOpenAll -OpenIds instagram,tiktok,x,threads,facebook,strava -NoTest
         return (Test-CdpAvailable)
     }
     Write-Log "Chrome CDP repair skipped for reason=$reason visible_windows=$($Diagnostics.chrome_visible_window_count)"
@@ -604,7 +639,7 @@ function Invoke-ScraperChromeProfileRestart {
     $launcher = Join-Path $repo "scripts\start-scraper-chrome-cdp.ps1"
     Write-Log "browser tab maintenance escalation: restarting dedicated scraper Chrome profile"
     try {
-        & powershell.exe -ExecutionPolicy Bypass -File $launcher -RemoteDebuggingPort $script:CdpPort -CloseExistingCdpProfile -CloseExistingIfNoVisibleWindows -NoOpenAll -OpenIds instagram,tiktok,x,threads,facebook,strava -NoTest
+        & powershell.exe -ExecutionPolicy Bypass -File $launcher -RemoteDebuggingPort $script:CdpPort -IsolateExtensions -CloseExistingCdpProfile -CloseExistingIfNoVisibleWindows -NoOpenAll -OpenIds instagram,tiktok,x,threads,facebook,strava -NoTest
     } catch {
         Write-Log ("dedicated scraper Chrome profile restart command failed: " + $_.Exception.Message)
     }
@@ -654,7 +689,11 @@ try {
         }
     }
     $python = Resolve-Python
-    Remove-DuplicateCdpPageTargets
+    Invoke-CdpPageTargetCleanup -Passes 2 -DelaySeconds 1
+    if (Test-ExtensionDisabledOrCorrupted) {
+        Write-Status "degraded" "UnifiedCollector extension is disabled or corrupted in Chrome profile; enable Developer mode and reload the extension"
+        exit 4
+    }
     $auditTimeout = Get-PositiveIntEnv "UC_BROWSER_AUDIT_TIMEOUT_SECONDS" 240
     $reloadTimeout = Get-PositiveIntEnv "UC_BROWSER_RELOAD_TIMEOUT_SECONDS" 180
     $settleSeconds = Get-PositiveIntEnv "UC_BROWSER_POST_RELOAD_SETTLE_SECONDS" 30
@@ -689,14 +728,14 @@ try {
         Write-Log ("browser tab audit still unhealthy after second reload: " + (($auditHealth.unhealthy) -join " | "))
         if (Test-AuditHealthNeedsManualAuth $auditHealth) {
             Ensure-ExtensionControlTab | Out-Null
-            Remove-DuplicateCdpPageTargets
+            Invoke-CdpPageTargetCleanup -Passes 3 -DelaySeconds 1
             Write-Log "browser tab maintenance degraded: manual platform auth is required; skipping profile restart"
             Write-Status "degraded" "browser tab requires manual platform auth"
             exit 4
         }
         if (-not (Test-AuditHealthNeedsProfileRestart $auditHealth)) {
             Ensure-ExtensionControlTab | Out-Null
-            Remove-DuplicateCdpPageTargets
+            Invoke-CdpPageTargetCleanup -Passes 3 -DelaySeconds 1
             Write-Status "degraded" "browser extension tabs unhealthy after targeted reload; skipped profile restart"
             exit 4
         }
@@ -713,7 +752,7 @@ try {
         exit 4
     }
     Ensure-ExtensionControlTab | Out-Null
-    Remove-DuplicateCdpPageTargets
+    Invoke-CdpPageTargetCleanup -Passes 3 -DelaySeconds 1
     Write-Log "browser tab maintenance complete"
     Write-Status "ok" "audit and reload completed"
 } catch {

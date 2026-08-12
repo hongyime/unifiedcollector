@@ -63,7 +63,7 @@ SOURCE_MODES = {
     "beeper": "messaging bridge",
     "instagram": "chrome extension + headless",
     "tiktok": "chrome extension + headless",
-    "lemon8": "chrome extension + headless",
+    "lemon8": "headless/backend + optional extension probes",
     "threads": "chrome extension",
     "facebook": "chrome extension",
     "x": "chrome extension",

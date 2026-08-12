@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import html
 import io
 import json
@@ -24,6 +25,7 @@ from src.backup.db_backup import backup_status
 from src.db.connection import get_pool
 from src.dashboard.websocket import health_ws
 from src.core.strava_route_queue import fetch_strava_route_capture_queue
+from src.core.collection_coverage import build_collection_coverage_snapshot
 from src.core.vault import VAULT_ROOT, vault_artifact_counts, vault_health
 from src.core.whatsapp_bridge_health import (
     fetch_whatsapp_bridge_health,
@@ -79,6 +81,7 @@ _SOURCE_MATRIX_PAYLOAD_CACHE_PATH = os.getenv(
     "SOURCE_MATRIX_PAYLOAD_CACHE_PATH",
     "/app/tmp/source_matrix_payload_cache.json",
 )
+_COVERAGE_SNAPSHOT_STALE_SECONDS = int(os.getenv("COVERAGE_SNAPSHOT_STALE_SECONDS", "3600"))
 _INGESTION_HOURLY_CACHE: dict[int, dict[str, object]] = {}
 _COLLECTORS_LIVE_CACHE: dict[str, object] = {"ts": 0.0, "payload": None}
 _COLLECTORS_LIVE_CACHE_TTL_SECONDS = int(os.getenv("COLLECTORS_LIVE_CACHE_TTL_SECONDS", "15"))
@@ -5558,6 +5561,58 @@ async def media_stats(_user: dict = Depends(require_role("viewer"))):
     return out
 
 
+async def _realtime_feed_status_from_redis() -> dict:
+    try:
+        import redis.asyncio as aioredis
+        from src.notifications import realtime_feed
+    except Exception as exc:  # noqa: BLE001 - Redis is optional for dashboard visibility.
+        return {"available": False, "error": exc.__class__.__name__}
+
+    client = None
+    try:
+        client = aioredis.from_url(
+            realtime_feed._redis_url(),  # noqa: SLF001 - shared env parsing, no secrets returned.
+            decode_responses=True,
+            socket_timeout=1.5,
+            socket_connect_timeout=1.5,
+        )
+        await client.ping()
+        queue_depth = int(await client.llen(realtime_feed._queue_key()) or 0)  # noqa: SLF001
+        skipped_burst = int(await client.get(realtime_feed.SKIPPED_KEY_DEFAULT) or 0)
+        failed_depth = int(await client.llen(realtime_feed.FAILED_KEY_DEFAULT) or 0)
+        local_fallback_total = int(await client.get(realtime_feed.LOCAL_FALLBACK_TOTAL_KEY) or 0)
+        raw_by_source = await client.hgetall(realtime_feed.LOCAL_FALLBACK_BY_SOURCE_KEY)
+        by_source = {
+            str(source): int(count or 0)
+            for source, count in (raw_by_source or {}).items()
+        }
+        last_raw = await client.get(realtime_feed.LOCAL_FALLBACK_LAST_KEY)
+        try:
+            last = json.loads(last_raw) if last_raw else None
+        except json.JSONDecodeError:
+            last = None
+        return {
+            "available": True,
+            "queue_depth": queue_depth,
+            "skipped_burst": skipped_burst,
+            "failed_depth": failed_depth,
+            "local_fallback_total": local_fallback_total,
+            "local_fallback_by_source": by_source,
+            "local_fallback_last": last,
+        }
+    except Exception as exc:  # noqa: BLE001 - dashboard should degrade, not fail.
+        return {"available": False, "error": exc.__class__.__name__}
+    finally:
+        if client is not None:
+            with contextlib.suppress(Exception):
+                await client.aclose()
+
+
+@app.get("/media/realtime-feed/status")
+async def media_realtime_feed_status(_user: dict = Depends(require_role("viewer"))):
+    return await _realtime_feed_status_from_redis()
+
+
 @app.get("/media/artifact-audit")
 async def media_artifact_audit(
     source: str | None = None,
@@ -9662,16 +9717,36 @@ async def beeper_chat_detail(chat_id: str, limit: int = 200, _user: dict = Depen
 async def collectors_coverage(_user: dict = Depends(require_role("viewer"))):
     pool = await get_pool()
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT DISTINCT ON (source)
-                   source, expected_cadence::text, latest_data_at, latest_run_at,
-                   status, rows_24h, media_24h, errors_24h, rate_limits_24h,
-                   private_access_failures, stale_targets, created_at
-            FROM collection_coverage_snapshots
-            ORDER BY source, created_at DESC
-            """
-        )
+        async def fetch_latest():
+            return await conn.fetch(
+                """
+                SELECT DISTINCT ON (source)
+                       source, expected_cadence::text, latest_data_at, latest_run_at,
+                       status, rows_24h, media_24h, errors_24h, rate_limits_24h,
+                       private_access_failures, stale_targets, created_at
+                FROM collection_coverage_snapshots
+                ORDER BY source, created_at DESC
+                """
+            )
+
+        rows = await fetch_latest()
+        latest_created_at = max((row["created_at"] for row in rows if row["created_at"]), default=None)
+        snapshot_age_seconds = None
+        if latest_created_at:
+            snapshot_age_seconds = int((datetime.now(timezone.utc) - latest_created_at.astimezone(timezone.utc)).total_seconds())
+        refresh_attempted = False
+        refresh_error = None
+        if not rows or snapshot_age_seconds is None or snapshot_age_seconds > _COVERAGE_SNAPSHOT_STALE_SECONDS:
+            refresh_attempted = True
+            try:
+                await build_collection_coverage_snapshot(conn)
+                rows = await fetch_latest()
+                latest_created_at = max((row["created_at"] for row in rows if row["created_at"]), default=None)
+                if latest_created_at:
+                    snapshot_age_seconds = int((datetime.now(timezone.utc) - latest_created_at.astimezone(timezone.utc)).total_seconds())
+            except Exception as exc:  # noqa: BLE001 - dashboard should still serve cached rows.
+                refresh_error = str(exc)[:300]
+                logger.warning("coverage snapshot refresh failed: %s", refresh_error)
     payload = []
     for row in rows:
         payload.append({
@@ -9688,7 +9763,20 @@ async def collectors_coverage(_user: dict = Depends(require_role("viewer"))):
             "stale_targets": row["stale_targets"],
             "created_at": row["created_at"].isoformat() if row["created_at"] else None,
         })
-    return {"sources": payload, "total": len(payload)}
+    fresh = sum(1 for row in payload if row["status"] == "fresh")
+    degraded = sum(1 for row in payload if row["status"] == "degraded")
+    stale = sum(1 for row in payload if row["status"] == "stale")
+    unknown = sum(1 for row in payload if row["status"] not in {"fresh", "degraded", "stale"})
+    return {
+        "sources": payload,
+        "total": len(payload),
+        "summary": {"total": len(payload), "fresh": fresh, "degraded": degraded, "stale": stale, "unknown": unknown},
+        "snapshot_created_at": latest_created_at.isoformat() if latest_created_at else None,
+        "snapshot_age_seconds": snapshot_age_seconds,
+        "snapshot_stale": bool(snapshot_age_seconds is not None and snapshot_age_seconds > _COVERAGE_SNAPSHOT_STALE_SECONDS),
+        "refresh_attempted": refresh_attempted,
+        "refresh_error": refresh_error,
+    }
 
 
 @app.get("/recon/targets")

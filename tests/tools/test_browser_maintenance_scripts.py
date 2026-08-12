@@ -20,6 +20,7 @@ def test_chrome_cdp_launcher_uses_robust_startup_flags():
     assert "--enable-extensions" in script
     assert "--disable-extensions-except=$extension" in script
     assert "[switch]$IsolateExtensions" in script
+    assert "UC_CHROME_ISOLATE_EXTENSIONS" in script
     assert "if ($IsolateExtensions)" in script
     assert "--disable-background-mode" in script
     assert "--disable-background-timer-throttling" in script
@@ -204,6 +205,9 @@ def test_browser_tab_maintenance_closes_duplicate_cdp_page_targets():
     assert "function Remove-DuplicateCdpPageTargets" in script
     assert "function Remove-DuplicateExtensionControlTabs" in script
     assert "function Remove-BlankStartupTabs" in script
+    assert "function Invoke-CdpPageTargetCleanup" in script
+    assert "function Test-BlockedExtensionControlTab" in script
+    assert "function Test-ExtensionDisabledOrCorrupted" in script
     assert "^chrome-extension://[^/]+/tabs\\.html(?:[?#].*)?$" in script
     assert "Invoke-WebRequest -Uri \"http://127.0.0.1:$script:CdpPort/json/list\"" in script
     assert "return @($response.Content | ConvertFrom-Json)" in script
@@ -214,12 +218,14 @@ def test_browser_tab_maintenance_closes_duplicate_cdp_page_targets():
     assert "closed blank Chrome startup tab" in script
     assert '$_.type -eq "page" -and [string]$_.url -eq "about:blank"' in script
     assert '[string]$_.url -eq "chrome-extension://$primaryId/tabs.html"' in script
-    assert "Remove-DuplicateCdpPageTargets" in script
-    assert "function Ensure-ExtensionControlTab {\n    Remove-DuplicateCdpPageTargets" in script
-    assert "Remove-DuplicateExtensionControlTabs" in script
+    assert "Invoke-CdpPageTargetCleanup -Passes 2 -DelaySeconds 1" in script
+    assert "Invoke-CdpPageTargetCleanup -Passes 3 -DelaySeconds 1" in script
+    assert "function Ensure-ExtensionControlTab {\n    Invoke-CdpPageTargetCleanup" in script
+    assert "(Test-ExtensionControlTab) -and -not (Test-BlockedExtensionControlTab)" in script
+    assert "UnifiedCollector extension is disabled or corrupted in Chrome profile" in script
     assert "Remove-BlankStartupTabs" in script
-    assert "Ensure-ExtensionControlTab | Out-Null\n            Remove-DuplicateCdpPageTargets" in script
-    assert "Ensure-ExtensionControlTab | Out-Null\n    Remove-DuplicateCdpPageTargets" in script
+    assert "Ensure-ExtensionControlTab | Out-Null\n            Invoke-CdpPageTargetCleanup" in script
+    assert "Ensure-ExtensionControlTab | Out-Null\n    Invoke-CdpPageTargetCleanup" in script
 
 
 def test_browser_tab_reload_hard_reopens_repeatedly_stuck_tiktok_tabs():
@@ -335,6 +341,18 @@ def test_browser_maintenance_loop_refuses_duplicate_direct_start():
     assert "Get-Process -Id $parsedPid" in script
 
 
+def test_browser_maintenance_loop_bounds_child_pass_runtime():
+    script = _read_script("browser-tab-maintenance-loop.ps1")
+
+    assert "UC_BROWSER_MAINTENANCE_PASS_TIMEOUT_SECONDS" in script
+    assert 'Start-Process -FilePath "powershell.exe"' in script
+    assert "-WindowStyle Hidden -PassThru" in script
+    assert "$child.WaitForExit($timeoutMilliseconds)" in script
+    assert "maintenance pass timed out after ${passTimeoutSeconds}s" in script
+    assert "Stop-Process -Id $child.Id -Force" in script
+    assert 'Write-LoopStatus "failed" "maintenance pass timed out after ${passTimeoutSeconds}s" $child.Id' in script
+
+
 def test_browser_maintenance_repairs_missing_chrome():
     script = _read_script("browser-tab-maintenance.ps1")
 
@@ -350,6 +368,7 @@ def test_browser_maintenance_repairs_missing_chrome():
     assert "-CloseExistingCdpProfile -CloseExistingIfNoVisibleWindows" in script
     assert "collector-controlled unreachable CDP Chrome" in script
     assert "-FallbackOpenControlIfCleanupBlocked" not in script
+    assert "-IsolateExtensions" in script
     assert "-OpenIds instagram,tiktok,x,threads,facebook,strava" in script
     assert "Chrome CDP repair succeeded; continuing maintenance pass" in script
     assert "chrome_cdp_available" in script

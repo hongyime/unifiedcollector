@@ -18,6 +18,13 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+if (-not $PSBoundParameters.ContainsKey("IsolateExtensions")) {
+    $isolateDefault = [Environment]::GetEnvironmentVariable("UC_CHROME_ISOLATE_EXTENSIONS")
+    if ([string]::IsNullOrWhiteSpace($isolateDefault) -or $isolateDefault.Trim().ToLowerInvariant() -notin @("0", "false", "no", "off")) {
+        $IsolateExtensions = $true
+    }
+}
+
 function Resolve-ChromePath {
     param([string]$Requested)
     if ($Requested -and (Test-Path -LiteralPath $Requested)) {

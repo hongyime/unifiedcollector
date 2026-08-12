@@ -7,6 +7,7 @@ import type {
   SourceCollectionMatrix,
   MediaItem,
   MediaStats,
+  RealtimeFeedStatus,
   HourlyIngestionRow,
   RateLimitSummary,
   MediaBrowseResult,
@@ -128,6 +129,7 @@ export const api = {
     return get<MediaItem[]>(`/media?${params}`);
   },
   mediaStats: () => get<MediaStats[]>("/media/stats"),
+  realtimeFeedStatus: () => get<RealtimeFeedStatus>("/media/realtime-feed/status"),
   hourlyIngestion: (hours = 12) => get<HourlyIngestionRow[]>(`/ingestion/hourly?hours=${hours}`),
   rateLimits: (hours = 24, limit = 100) =>
     get<RateLimitSummary>(`/rate-limits/recent?hours=${hours}&limit=${limit}`),

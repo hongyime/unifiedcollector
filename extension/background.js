@@ -816,7 +816,7 @@ async function fetchJsonWithTimeout(url, timeoutMs = 12000) {
 
 // ---- watchdog + AUTO-TABS (open + refresh) --------------------------------
 // The 83h-stall problem: a closed/orphaned tab = no scraping. So the worker now
-// auto-OPENS every scraper tab (pinned, background) and auto-REFRESHES them
+// auto-OPENS every scraper tab (background, unpinned by default) and auto-REFRESHES them
 // hourly — reloading respawns the content script + loop AND pulls fresh content,
 // so it can never silently die again.
 const ALARM_REFRESH = "uc-refresh";

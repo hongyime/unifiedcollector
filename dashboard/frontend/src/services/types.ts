@@ -320,6 +320,22 @@ export interface MediaStats {
   stats_error?: string | null;
 }
 
+export interface RealtimeFeedStatus {
+  available: boolean;
+  error?: string;
+  queue_depth?: number;
+  skipped_burst?: number;
+  failed_depth?: number;
+  local_fallback_total?: number;
+  local_fallback_by_source?: Record<string, number>;
+  local_fallback_last?: {
+    at?: number;
+    source?: string;
+    content_id?: string | null;
+    target_name?: string | null;
+  } | null;
+}
+
 export interface HourlyIngestionRow {
   source: string;
   hour: string;

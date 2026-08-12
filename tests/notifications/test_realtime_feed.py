@@ -21,6 +21,7 @@ class FakeRedis:
     def __init__(self) -> None:
         self.strings: dict[str, str] = {}
         self.lists: dict[str, list[str]] = {}
+        self.hashes: dict[str, dict[str, str]] = {}
         self.expiries: dict[str, float] = {}
         self.closed = False
 
@@ -82,6 +83,15 @@ class FakeRedis:
         v = int(self.strings.get(key, 0) or 0) + 1
         self.strings[key] = str(v)
         return v
+
+    async def hincrby(self, key: str, field: str, amount: int = 1) -> int:
+        h = self.hashes.setdefault(key, {})
+        v = int(h.get(field, 0) or 0) + amount
+        h[field] = str(v)
+        return v
+
+    async def hgetall(self, key: str):
+        return dict(self.hashes.get(key, {}))
 
     async def decr(self, key: str) -> int:
         v = int(self.strings.get(key, 0) or 0) - 1
@@ -589,6 +599,8 @@ async def test_drain_falls_back_to_text_when_local_media_upload_fails(
     assert len(telegram_stub["send"]) == 1
     assert "stored locally in the Collector vault" in telegram_stub["send"][0]["text"]
     assert local_video.name in telegram_stub["send"][0]["text"]
+    assert fake_redis.strings["uc:realtime_post_feed:local_fallback_total"] == "1"
+    assert fake_redis.hashes["uc:realtime_post_feed:local_fallback_by_source"]["youtube"] == "1"
     assert str(local_video) not in telegram_stub["send"][0]["text"]
 
 

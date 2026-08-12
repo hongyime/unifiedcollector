@@ -9,6 +9,7 @@ $repo = "C:\unifiedcollector"
 $tmp = Join-Path $repo "tmp"
 $pidPath = Join-Path $tmp "browser_tab_maintenance_loop.pid"
 $log = Join-Path $tmp "browser_tab_maintenance_loop.log"
+$statusPath = Join-Path $tmp "browser_tab_maintenance_status.json"
 $maintenance = Join-Path $repo "scripts\browser-tab-maintenance.ps1"
 
 if (-not (Test-Path $tmp)) {
@@ -18,6 +19,46 @@ if (-not (Test-Path $tmp)) {
 function Write-LoopLog($message) {
     $stamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     Add-Content -LiteralPath $log -Value "[$stamp] $message"
+}
+
+function Get-LoopPositiveIntEnv {
+    param(
+        [string]$Name,
+        [int]$Default
+    )
+    $raw = [Environment]::GetEnvironmentVariable($Name)
+    $parsed = 0
+    if ([int]::TryParse([string]$raw, [ref]$parsed) -and $parsed -gt 0) {
+        return $parsed
+    }
+    return $Default
+}
+
+function Write-LoopStatus {
+    param(
+        [string]$State,
+        [string]$Detail,
+        [int]$ChildPid
+    )
+    $status = [ordered]@{
+        checked_at = (Get-Date).ToString("o")
+        state = $State
+        detail = $Detail
+        cdp_url = "http://127.0.0.1:9333"
+        pid = $ChildPid
+        last_terminal_state = $State
+        loop = [ordered]@{
+            pid_path = $pidPath
+            pid = $PID
+            alive = $true
+            detail = "maintenance loop is running"
+        }
+    }
+    try {
+        $status | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $statusPath
+    } catch {
+        Write-LoopLog ("could not write maintenance loop status: " + $_.Exception.Message)
+    }
 }
 
 if (Test-Path -LiteralPath $pidPath) {
@@ -36,6 +77,7 @@ Set-Content -LiteralPath $pidPath -Value $PID
 Write-LoopLog "loop start pid=$PID interval=${IntervalMinutes}m initial_delay=${InitialDelaySeconds}s"
 
 try {
+    $passTimeoutSeconds = Get-LoopPositiveIntEnv "UC_BROWSER_MAINTENANCE_PASS_TIMEOUT_SECONDS" 1200
     if ($InitialDelaySeconds -gt 0) {
         Write-LoopLog "sleeping initial delay ${InitialDelaySeconds}s"
         Start-Sleep -Seconds $InitialDelaySeconds
@@ -43,13 +85,28 @@ try {
     while ($true) {
         try {
             Write-LoopLog "maintenance pass start"
-            & powershell.exe -ExecutionPolicy Bypass -File $maintenance
-            if ($LASTEXITCODE -eq 0) {
+            $child = Start-Process -FilePath "powershell.exe" -ArgumentList @(
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                $maintenance
+            ) -WindowStyle Hidden -PassThru
+            Write-LoopLog "maintenance pass pid=$($child.Id) timeout=${passTimeoutSeconds}s"
+            $timeoutMilliseconds = [Math]::Max(60000, $passTimeoutSeconds * 1000)
+            if (-not $child.WaitForExit($timeoutMilliseconds)) {
+                Write-LoopLog "maintenance pass timed out after ${passTimeoutSeconds}s; terminating pid=$($child.Id)"
+                Stop-Process -Id $child.Id -Force -ErrorAction SilentlyContinue
+                Write-LoopStatus "failed" "maintenance pass timed out after ${passTimeoutSeconds}s" $child.Id
+                Start-Sleep -Seconds ([Math]::Max(60, $IntervalMinutes * 60))
+                continue
+            }
+            $exitCode = $child.ExitCode
+            if ($exitCode -eq 0) {
                 Write-LoopLog "maintenance pass exit=0"
-            } elseif ($LASTEXITCODE -eq 3) {
+            } elseif ($exitCode -eq 3) {
                 Write-LoopLog "maintenance pass degraded: Chrome CDP unavailable"
             } else {
-                Write-LoopLog "maintenance pass exit=$LASTEXITCODE"
+                Write-LoopLog "maintenance pass exit=$exitCode"
             }
         } catch {
             Write-LoopLog ("maintenance pass failed: " + $_.Exception.Message)

@@ -104,7 +104,7 @@ async function render() {
   const scrapers = platforms.filter((p) => p.scraper).map((p) => p.label).join(", ") || "none yet";
   $("note").innerHTML =
     `<b>Scrapers active:</b> ${scrapers}. Other platforms open for login now and will scrape ` +
-    `automatically once their scraper is added. Tabs open <b>pinned</b> so they persist; ` +
+    `automatically once their scraper is added. Auto-opened scraper tabs are unpinned by default; ` +
     `keep them logged in. The bridge runs a scrape cycle on a timer (see the popup).`;
   maybeAutoProbe(backgroundError);
 }

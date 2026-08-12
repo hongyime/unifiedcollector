@@ -48,6 +48,9 @@ QUEUE_KEY_DEFAULT = "uc:realtime_post_feed"
 SEEN_SHA_KEY_DEFAULT = "uc:realtime_post_feed:seen_sha"
 SKIPPED_KEY_DEFAULT = "uc:realtime_post_feed:skipped_burst"
 FAILED_KEY_DEFAULT = "uc:realtime_post_feed:failed"
+LOCAL_FALLBACK_TOTAL_KEY = "uc:realtime_post_feed:local_fallback_total"
+LOCAL_FALLBACK_BY_SOURCE_KEY = "uc:realtime_post_feed:local_fallback_by_source"
+LOCAL_FALLBACK_LAST_KEY = "uc:realtime_post_feed:local_fallback_last"
 LAST_BURST_REPORT_KEY = "uc:realtime_post_feed:last_burst_report"
 
 ALLOWED_KINDS = frozenset({"image", "video", "post", "photo"})
@@ -363,6 +366,22 @@ async def _record_failed_delivery(client, payload: dict, raw: str) -> None:
         await client.rpush(FAILED_KEY_DEFAULT, json.dumps(failure, default=str))
 
 
+async def _record_local_media_fallback(client, payload: dict, target: str | None) -> None:
+    source = str(payload.get("source") or "unknown").strip().lower() or "unknown"
+    record = {
+        "at": time.time(),
+        "source": source,
+        "content_id": payload.get("content_id"),
+        "target_name": Path(str(target)).name if target else None,
+    }
+    with contextlib.suppress(Exception):
+        await client.incr(LOCAL_FALLBACK_TOTAL_KEY)
+    with contextlib.suppress(Exception):
+        await client.hincrby(LOCAL_FALLBACK_BY_SOURCE_KEY, source, 1)
+    with contextlib.suppress(Exception):
+        await client.set(LOCAL_FALLBACK_LAST_KEY, json.dumps(record, default=str))
+
+
 async def _dedupe_seen(client, sha: str, *, ttl_days: int) -> bool:
     """Return True if we've seen this occurrence recently."""
     if not sha:
@@ -516,8 +535,8 @@ async def _flush_skip_summary(client) -> None:
         logger.debug("realtime_feed burst summary send failed", exc_info=True)
 
 
-async def _deliver_one(payload: dict) -> tuple[bool, int]:
-    """Send one queued payload. Returns (delivered, retry_after_seconds)."""
+async def _deliver_one(payload: dict) -> tuple[bool, int, str, str | None]:
+    """Send one queued payload. Returns (delivered, retry_after, outcome, target)."""
     from src.notifications import telegram
 
     caption = format_caption(payload)
@@ -536,22 +555,22 @@ async def _deliver_one(payload: dict) -> tuple[bool, int]:
     if target is None:
         # No media accessible; still surface the post as text.
         ok = await telegram.send(caption)
-        return bool(ok), 0
+        return bool(ok), 0, "text_only", None
 
     if _looks_like_video(payload):
         ok, retry_after = await telegram.send_video(target, caption=caption)
     else:
         ok, retry_after = await telegram.send_photo(target, caption=caption)
     if ok or retry_after > 0:
-        return ok, retry_after
+        return ok, retry_after, "media", target
     if not used_source_url_target:
         text_ok = await telegram.send(_local_media_text_fallback(caption, target))
-        return bool(text_ok), 0
+        return bool(text_ok), 0, "local_media_text_fallback", target
     # Remote source_url targets are often post pages or signed URLs Telegram
     # cannot fetch directly. Preserve the operator signal as text instead of
     # silently logging ok=False and dropping the row.
     text_ok = await telegram.send(caption)
-    return bool(text_ok), 0
+    return bool(text_ok), 0, "remote_text_fallback", target
 
 
 class RealtimeFeedDrain:
@@ -639,7 +658,7 @@ class RealtimeFeedDrain:
             await _flush_skip_summary(client)
             return
 
-        delivered, retry_after = await _deliver_one(payload)
+        delivered, retry_after, delivery_outcome, delivery_target = await _deliver_one(payload)
         # One-line outcome log so operators can see whether individual posts
         # actually reached Telegram. Kept at INFO so `docker logs` shows it
         # without turning on debug noise. Format: `sent to telegram: ok=<bool>
@@ -654,6 +673,8 @@ class RealtimeFeedDrain:
             )
         except Exception:
             logger.debug("realtime_feed outcome log failed", exc_info=True)
+        if delivery_outcome == "local_media_text_fallback":
+            await _record_local_media_fallback(client, payload, delivery_target)
         if not delivered and retry_after > 0:
             # 429: back off and requeue this item at the head so we don't lose it.
             with contextlib.suppress(Exception):

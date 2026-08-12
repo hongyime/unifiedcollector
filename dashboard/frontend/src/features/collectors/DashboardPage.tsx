@@ -7,7 +7,7 @@ import { LoadingSpinner } from "../../components/ui/LoadingSpinner";
 import { ErrorState } from "../../components/ui/ErrorState";
 import { api } from "../../services/api";
 import { formatBytes, formatDuration, formatNumber, relativeTime } from "../../utils/formatters";
-import { Archive, Database, HardDrive, Activity, AlertCircle, Clock3, ShieldAlert, Puzzle } from "lucide-react";
+import { Archive, Database, HardDrive, Activity, AlertCircle, Clock3, ShieldAlert, Puzzle, Send } from "lucide-react";
 import type { ColumnDef } from "@tanstack/react-table";
 import type {
   HourlyIngestionRow,
@@ -482,6 +482,12 @@ export function DashboardPage() {
     refetchInterval: 60_000,
   });
 
+  const { data: realtimeFeed } = useQuery({
+    queryKey: ["realtime-feed-status"],
+    queryFn: api.realtimeFeedStatus,
+    refetchInterval: 60_000,
+  });
+
   if (hLoading && sLoading) return <LoadingSpinner />;
   if (error) return <ErrorState message={String(error)} onRetry={() => refetch()} />;
 
@@ -534,6 +540,15 @@ export function DashboardPage() {
   const vaultWarnings = vaultIssues + vaultRecentMissingSidecarRows;
   const backups = health?.backups;
   const extension = health?.browser_extension;
+  const realtimeFallbackTotal = Number(realtimeFeed?.local_fallback_total ?? 0);
+  const realtimeFallbackSources = Object.entries(realtimeFeed?.local_fallback_by_source ?? {})
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([source, count]) => `${source} ${formatNumber(count)}`)
+    .join(" · ");
+  const realtimeLastFallback = realtimeFeed?.local_fallback_last?.target_name
+    ? `last ${realtimeFeed.local_fallback_last.source ?? "unknown"} ${realtimeFeed.local_fallback_last.target_name}`
+    : null;
   const extensionIssues = extension?.issues ?? [];
   const extensionHooks = extension?.hooks ?? [];
   const extensionIngest = extension?.ingest ?? [];
@@ -637,6 +652,23 @@ export function DashboardPage() {
           }
           status={activeRateLimits || recentRecordedRateLimitEvents || recentAccessEvents ? "warning" : "success"}
           icon={<ShieldAlert className="w-5 h-5" />}
+        />
+        <MetricCard
+          label="Telegram Media"
+          value={
+            realtimeFeed?.available === false
+              ? "Unknown"
+              : realtimeFallbackTotal
+                ? `${formatNumber(realtimeFallbackTotal)} fallbacks`
+                : "Direct"
+          }
+          sublabel={
+            realtimeFeed?.available === false
+              ? `Redis unavailable: ${realtimeFeed.error ?? "unknown"}`
+              : realtimeFallbackSources || realtimeLastFallback || `${formatNumber(realtimeFeed?.queue_depth ?? 0)} queued · ${formatNumber(realtimeFeed?.failed_depth ?? 0)} failed`
+          }
+          status={realtimeFeed?.available === false ? "idle" : realtimeFallbackTotal ? "warning" : "success"}
+          icon={<Send className="w-5 h-5" />}
         />
         <MetricCard
           label="Chrome Extension"

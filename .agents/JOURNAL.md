@@ -12,3 +12,4 @@
 - 2026-08-12 08:09 SGT: Added exact-URL duplicate CDP page cleanup to browser maintenance because duplicate extension control or platform tabs waste resources but do not require a full Chrome profile restart.
 - 2026-08-12 09:05 SGT: Classified X capture as an external live-page/session blocker after tab reopen, alternate host, click/nudge, and profile restart still returned X's "Try again" shell with the content script attached.
 - 2026-08-12 11:42 SGT: Browser scraper tabs are now unpinned by default, Lemon8 stays off the visible scraper-tab set, and X recovery stays on x.com with longer backoff to preserve cookies and reduce resource churn.
+- 2026-08-12 18:36 SGT: Treat disabled/corrupted UnifiedCollector Bridge in Chrome as an explicit operator/developer-mode state instead of opening repeated blocked `tabs.html` pages; browser maintenance now bounds child runtime and reports this state clearly.

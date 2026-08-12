@@ -1,8 +1,8 @@
 # UnifiedCollector Agent State
 
-Updated: 2026-08-12 11:42 SGT
+Updated: 2026-08-12 18:36 SGT
 
-Current task: browser resource cleanup and Telegram media fallback hardening are implemented, tested, and live-verified; X and Facebook browser content progress remain the only degraded live sources.
+Current task: dashboard coverage/realtime media status, browser resource cleanup, and Telegram media fallback hardening are implemented, tested, and live-verified; X and Facebook browser content progress remain the only degraded live sources.
 
 Recent completed work:
 - SpiderFoot recon sidecar is live and verified under the `recon` Compose profile.
@@ -15,6 +15,14 @@ In-progress work:
 - Facebook browser content progress is stale in `/health?include_sources=true`; the page/tab is open, but accepted content progress has not advanced inside the freshness window.
 
 Current evidence:
+- Current follow-up added stale coverage snapshot refresh in `/coverage/collectors`, Telegram local-media fallback counters in `/media/realtime-feed/status`, dashboard "Telegram Media" visibility, extension expected version `1.23.61`, bounded browser-maintenance child timeout, repeated duplicate extension-control cleanup, and blocked/corrupted extension detection.
+- Live Chrome profile had UnifiedCollector Bridge disabled/corrupted in `chrome://extensions`; Developer mode was enabled and the extension reloaded. Current `tools/browser_tab_audit.py` shows content scripts attached with `cs_version=1.23.61` on Instagram, TikTok, Threads, X, and Facebook.
+- Live CDP target list is clean: no duplicate page URLs, no `about:blank`, no Lemon8 browser tabs, and one UnifiedCollector options tab.
+- Live Collector health after recovery is degraded only for Facebook and X content progress; Instagram, TikTok, Threads, Lemon8, Telegram, WhatsApp, Beeper, YouTube, Website, GitHub/Search infrastructure, and realtime feed are otherwise running.
+- Live `/media/realtime-feed/status` returned queue_depth=0, failed_depth=0, and local_fallback_total=0.
+- Focused tests passed: `python -m pytest tests\extension\test_extension_bundle_static.py tests\tools\test_browser_maintenance_scripts.py tests\notifications\test_realtime_feed.py tests\dashboard\test_coverage_api.py tests\dashboard\test_extension_health.py tests\test_collection_coverage.py -q`.
+- Final focused browser script tests passed after the loop/extension fixes: `python -m pytest tests\tools\test_browser_maintenance_scripts.py tests\extension\test_extension_bundle_static.py -q`.
+- Dashboard frontend build passed with `npm run build`; dashboard/realtime_feed/scheduler/ig_ingest were recreated earlier in this pass.
 - `python -m pytest tests/test_recon.py tests/test_recon_spiderfoot_service.py -q` passed with 17 tests.
 - Live Docker core services checked recently: dashboard, spiderfoot, postgres, realtime_feed, watchdog are up/healthy.
 - `docker exec unifiedcollector_collector python -m src.main recon-seed --dry-run --json --limit 20 --per-source-limit 5` worked against live DB and returned 20 candidates.
