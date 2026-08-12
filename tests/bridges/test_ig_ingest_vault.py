@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from src.bridges import ig_ingest
 
 
@@ -528,7 +530,11 @@ def test_tiktok_revisit_target_reclaims_stale_claimed(monkeypatch):
 
 
 def test_extension_ingest_pauses_media_download_when_vault_unavailable(monkeypatch, tmp_path):
+    from src.notifications import realtime_feed
+
     pool = _FakePool()
+    enqueued = []
+    monkeypatch.setattr(realtime_feed, "enqueue_from_insert", lambda **kwargs: enqueued.append(kwargs))
     monkeypatch.setattr(
         ig_ingest,
         "assert_media_write_allowed",
@@ -546,6 +552,7 @@ def test_extension_ingest_pauses_media_download_when_vault_unavailable(monkeypat
     )
 
     assert saved is False
+    assert enqueued == []
     assert len(pool.conn.executes) == 1
     query, args = pool.conn.executes[0]
     assert "dead_letter_queue" in query
@@ -553,8 +560,12 @@ def test_extension_ingest_pauses_media_download_when_vault_unavailable(monkeypat
     assert "vault/media unavailable before extension media write" in args[3]
 
 
-def test_extension_ingest_writes_media_to_vault_blob(monkeypatch, tmp_path):
+@pytest.mark.parametrize("platform", ["instagram", "threads"])
+def test_extension_ingest_writes_media_to_vault_blob(monkeypatch, tmp_path, platform):
+    from src.notifications import realtime_feed
+
     pool = _FakePool()
+    enqueued = []
     vault_root = tmp_path / "vault"
     media_root = tmp_path / "media"
     vault_root.mkdir()
@@ -565,6 +576,11 @@ def test_extension_ingest_writes_media_to_vault_blob(monkeypatch, tmp_path):
         ig_ingest,
         "write_media_sidecar",
         lambda **kwargs: SimpleNamespace(enabled=True, ok=True, relative_path="sidecars/media.json", error=None),
+    )
+    monkeypatch.setattr(
+        realtime_feed,
+        "enqueue_from_insert",
+        lambda **kwargs: enqueued.append(kwargs) or {"status": "enqueued", "reason": None},
     )
     data = b"\xff\xd8\xff" + (b"a" * 21000)
     digest = hashlib.sha256(data).hexdigest()
@@ -585,7 +601,7 @@ def test_extension_ingest_writes_media_to_vault_blob(monkeypatch, tmp_path):
         ig_ingest._download_and_save(
             pool,
             _DownloadSession(data),
-            "instagram",
+            platform,
             "bryan",
             {
                 "content_id": "abc123",
@@ -599,8 +615,9 @@ def test_extension_ingest_writes_media_to_vault_blob(monkeypatch, tmp_path):
 
     assert saved is True
     assert blob.read_bytes() == data
-    assert not (media_root / "instagram").exists()
+    assert not (media_root / platform).exists()
     media_args = next(args for query, args in pool.conn.executes if "INSERT INTO media_items" in query)
+    assert media_args[0] == platform
     assert media_args[4] == "story_abc123"
     assert Path(media_args[6]) == blob
     metadata = json.loads(media_args[10])
@@ -614,10 +631,37 @@ def test_extension_ingest_writes_media_to_vault_blob(monkeypatch, tmp_path):
         if "vault_artifact_db_consistency" in query or any("vault_artifact_db_consistency" in str(arg) for arg in args)
     ]
     assert consistency_updates
-    sidecar = next((vault_root / "sidecars" / "artifacts" / "instagram").rglob("*.json"))
+    sidecar = next((vault_root / "sidecars" / "artifacts" / platform).rglob("*.json"))
     payload = json.loads(sidecar.read_text(encoding="utf-8"))
     assert payload["metadata"]["ingest_path"] == "extension"
     assert payload["metadata"]["legacy_path"].endswith("story_abc123.jpg")
+    assert enqueued
+    assert enqueued[0]["source"] == platform
+    assert enqueued[0]["content_id"] == "story_abc123"
+    assert enqueued[0]["file_path"] == str(blob)
+    assert enqueued[0]["file_size"] == len(data)
+
+
+def test_extension_ingest_duplicate_content_id_does_not_enqueue(monkeypatch):
+    from src.notifications import realtime_feed
+
+    pool = _FakePool()
+    pool.conn.fetchval_result = 1
+    enqueued = []
+    monkeypatch.setattr(realtime_feed, "enqueue_from_insert", lambda **kwargs: enqueued.append(kwargs))
+
+    saved = asyncio.run(
+        ig_ingest._download_and_save(
+            pool,
+            _NoDownloadSession(),
+            "instagram",
+            "bryan",
+            {"content_id": "abc123", "url": "https://example.test/image.jpg"},
+        )
+    )
+
+    assert saved is False
+    assert enqueued == []
 
 
 def test_extension_ingest_accepts_browser_uploaded_media(monkeypatch, tmp_path):
@@ -814,7 +858,7 @@ def test_record_browser_ingest_event_does_not_mark_heartbeat_success():
     assert args[:5] == ("threads", "browser_heartbeat", "tab-1", 1, 0)
 
 
-def test_record_browser_ingest_event_marks_empty_probe_success():
+def test_record_browser_ingest_event_does_not_mark_empty_x_probe_success():
     pool = _FakePool()
 
     asyncio.run(
@@ -832,13 +876,10 @@ def test_record_browser_ingest_event_marks_empty_probe_success():
         )
     )
 
-    assert len(pool.conn.executes) == 2
+    assert len(pool.conn.executes) == 1
     query, args = pool.conn.executes[0]
     assert "browser_ingest_events" in query
     assert args[:5] == ("x", "media", "timeline", 0, 0)
-    health_query, health_args = pool.conn.executes[1]
-    assert "source_health" in health_query
-    assert health_args == ("x",)
 
 
 def test_browser_upload_duplicate_counts_as_accepted(monkeypatch):
@@ -1027,6 +1068,13 @@ def test_empty_media_probe_marks_browser_content_progress():
     )
     assert ig_ingest._browser_event_marks_source_success(
         "facebook",
+        "media",
+        0,
+        0,
+        {"probe_reason": "no_dom_media_candidates"},
+    )
+    assert not ig_ingest._browser_event_marks_source_success(
+        "x",
         "media",
         0,
         0,
@@ -1606,7 +1654,7 @@ def test_browser_heartbeat_handler_requests_forced_cycle_when_content_stale(monk
     assert "forced_recovery_started" in query
     assert "recoverable_error_shell" in query
     assert "ORDER BY created_at DESC" in query
-    assert args == ("x",)
+    assert args == ("x", sorted(ig_ingest.X_ZERO_PROGRESS_PROBES))
 
 
 def test_recoverable_error_shell_probe_does_not_mark_source_success():
@@ -1623,7 +1671,7 @@ def test_recoverable_error_shell_probe_does_not_mark_source_success():
         0,
         0,
         {"probe_reason": "no_dom_media_candidates"},
-    ) is True
+    ) is False
 
 
 def test_browser_heartbeat_handler_fails_active_when_content_hint_is_slow(monkeypatch):

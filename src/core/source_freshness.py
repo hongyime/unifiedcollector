@@ -22,6 +22,12 @@ _BROWSER_HEARTBEAT_SOURCES = ("instagram", "tiktok", "lemon8", "threads", "faceb
 _BROWSER_CONTENT_PROGRESS_SOURCES = ("instagram", "tiktok", "lemon8", "threads", "facebook", "x")
 _BROWSER_REQUIRED_SOURCES = ("threads", "facebook", "x")
 _BROWSER_HYBRID_SOURCES = ("instagram", "tiktok", "lemon8")
+_X_ZERO_PROGRESS_PROBES = (
+    "no_dom_media_candidates",
+    "try_again_empty_state",
+    "x_blank_spa_shell",
+    "x_no_status_links",
+)
 
 STRAVA_PROGRESS_QUERY = """
 SELECT extract(epoch FROM now()-max(ts))
@@ -245,11 +251,10 @@ async def _latest_browser_content_progress(conn, timeout: float) -> dict[str, di
     """Return newest useful browser-ingest progress per browser-driven platform.
 
     Browser-assisted collectors can make real progress without immediately writing
-    a source table row: for example a TikTok/X page can report an empty scrape
-    probe or a candidate queue event. Those events are still the browser proving
-    it ran the content cycle. Login/error-shell recovery probes are deliberately
-    excluded: they prove the loop is awake, but not that useful collection is
-    flowing.
+    a source table row: for example a TikTok page can report an empty scrape probe
+    or a candidate queue event. Those events are still the browser proving it ran
+    the content cycle. X shell/empty probes are deliberately excluded because the
+    current X failure mode can keep emitting them without useful collection.
     """
     query_timeout = min(3.0, max(0.75, timeout))
     try:
@@ -282,6 +287,12 @@ async def _latest_browser_content_progress(conn, timeout: float) -> dict[str, di
                             'forced_recovery_started',
                             'recoverable_error_shell'
                           )
+                      AND NOT (
+                        wanted.platform = 'x'
+                        AND observed_count <= 0
+                        AND stored_count <= 0
+                        AND COALESCE(metadata->>'probe_reason', '') = ANY($2::text[])
+                      )
                       )
                   )
                 ORDER BY created_at DESC
@@ -289,6 +300,7 @@ async def _latest_browser_content_progress(conn, timeout: float) -> dict[str, di
             ) latest ON true
             """,
             list(_BROWSER_CONTENT_PROGRESS_SOURCES),
+            list(_X_ZERO_PROGRESS_PROBES),
             timeout=query_timeout,
         )
         return {

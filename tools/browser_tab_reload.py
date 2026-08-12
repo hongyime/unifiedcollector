@@ -85,6 +85,10 @@ def _open_url(url: str) -> tuple[bool, str]:
 
 
 def _decide_reload(tab: dict, target_version: str) -> tuple[bool, str]:
+    platform = str(tab.get("platform") or "").lower()
+    url = str(tab.get("url") or tab.get("url_snapshot") or "")
+    if platform == "x" and not _is_canonical_x_recovery_url(url):
+        return True, "x non-canonical recovery URL"
     if tab.get("page_health_status") == "recoverable_error_shell":
         reason = tab.get("page_health_reason") or "recoverable_error_shell"
         return True, f"page health: {reason}"
@@ -100,6 +104,16 @@ def _decide_reload(tab: dict, target_version: str) -> tuple[bool, str]:
     if tab.get("heap_mb") is not None and tab["heap_mb"] > 300:
         return True, f"heap {tab['heap_mb']}MB > 300MB"
     return False, "healthy"
+
+
+def _is_canonical_x_recovery_url(url: str) -> bool:
+    try:
+        parsed = urllib.parse.urlparse(str(url or ""))
+    except Exception:
+        return False
+    host = parsed.netloc.lower().split(":", 1)[0]
+    path = parsed.path.rstrip("/") or "/"
+    return host in {"x.com", "www.x.com"} and path in {"/home", "/explore"}
 
 
 def _is_auth_wall(url: str) -> bool:
@@ -212,6 +226,7 @@ def _is_stuck_tab_reason(reason: str) -> bool:
         or "no content script attached" in text
         or "page health:" in text
         or "recoverable_error_shell" in text
+        or "non-canonical recovery url" in text
     )
 
 
@@ -363,7 +378,11 @@ def main():
         if platform in HARD_REOPEN_URLS:
             shell_tabs = [
                 p for p in platform_plans
-                if p["action"] == "reload" and "page health:" in str(p["reason"]).lower()
+                if p["action"] == "reload"
+                and (
+                    "page health:" in str(p["reason"]).lower()
+                    or "non-canonical recovery url" in str(p["reason"]).lower()
+                )
             ]
             if shell_tabs:
                 hard_reopen_tabs.update(str(p["target_id"]) for p in shell_tabs)

@@ -467,6 +467,65 @@ async def test_enqueue_accepts_new_collector_sources(fake_redis, monkeypatch):
     assert fake_redis.lists.get("uc:realtime_post_feed")
 
 
+def test_enqueue_returns_profile_photo_skip(monkeypatch):
+    from src.notifications import realtime_feed
+
+    monkeypatch.setenv("REALTIME_POST_FEED_ENABLED", "1")
+    monkeypatch.delenv("REALTIME_POST_FEED_INCLUDE_PROFILES", raising=False)
+
+    result = realtime_feed.enqueue_from_insert(
+        source="instagram", entity_name="alice", content_id="pfp",
+        file_path="/vault/blobs/pfp.jpg", source_url=None,
+        sha256="a" * 64, metadata={}, kind="image",
+        content_type="profile_photo",
+    )
+
+    assert result == {"status": "skipped", "reason": "profile_photo_skipped"}
+
+
+def test_delivery_status_marks_too_large_photo():
+    from src.notifications import realtime_feed
+
+    status, reason = realtime_feed._delivery_status(  # noqa: SLF001 - unit helper
+        {"kind": "image", "content_type": "post_image", "file_size": 11 * 1024 * 1024},
+        delivered=True,
+        retry_after=0,
+        outcome="local_media_text_fallback",
+        target="/vault/big.jpg",
+    )
+
+    assert status == "too_large"
+    assert reason == "telegram_too_large"
+
+
+@pytest.mark.asyncio
+async def test_drain_records_delivery_ledger_success(fake_redis, telegram_stub, monkeypatch):
+    from src.notifications import realtime_delivery, realtime_feed
+
+    captured: list[dict] = []
+
+    async def fake_record(payload, **kwargs):
+        captured.append({"payload": payload, **kwargs})
+
+    monkeypatch.setenv("REALTIME_POST_FEED_MAX_PER_MINUTE", "10")
+    monkeypatch.setattr(realtime_delivery, "record_from_payload", fake_record)
+    payload = realtime_feed.build_payload(
+        source="youtube", entity_name="channel", content_id="video_abc",
+        file_path=None, source_url="https://youtube.example/video.mp4",
+        sha256="a" * 64, metadata={"caption": "clip"}, kind="video",
+        content_type="video", file_size=1024,
+    )
+    await fake_redis.rpush("uc:realtime_post_feed", json.dumps(payload))
+
+    drain = realtime_feed.RealtimeFeedDrain()
+    await drain._tick(fake_redis)
+
+    assert captured
+    assert captured[-1]["status"] == "delivered"
+    assert captured[-1]["reason"] == "media"
+    assert captured[-1]["dedupe_key"]
+
+
 # -- Drain loop happy path -----------------------------------------------
 
 @pytest.mark.asyncio

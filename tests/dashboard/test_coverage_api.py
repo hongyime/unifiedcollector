@@ -122,10 +122,20 @@ async def test_media_realtime_feed_status_returns_safe_counts(monkeypatch):
             "local_fallback_last": {"source": "youtube", "target_name": "big.mp4"},
         }
 
+    async def fake_ledger():
+        return {
+            "available": True,
+            "status_counts": {"delivered": 2, "too_large": 1},
+            "by_source": [{"source": "youtube", "too_large": 1}],
+            "latest": [],
+        }
+
     monkeypatch.setattr(dashboard_api, "_realtime_feed_status_from_redis", fake_status)
+    monkeypatch.setattr(dashboard_api, "_realtime_delivery_ledger_status", fake_ledger)
 
     result = await dashboard_api.media_realtime_feed_status(_user={})
 
     assert result["local_fallback_total"] == 3
     assert result["local_fallback_by_source"]["youtube"] == 2
     assert result["local_fallback_last"]["target_name"] == "big.mp4"
+    assert result["delivery_ledger"]["status_counts"]["too_large"] == 1

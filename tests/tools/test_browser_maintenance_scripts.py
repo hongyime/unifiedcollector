@@ -215,8 +215,10 @@ def test_browser_tab_maintenance_closes_duplicate_cdp_page_targets():
     assert "Select-Object -Skip 1" in script
     assert "closed duplicate CDP page target" in script
     assert "closed duplicate extension control tab" in script
-    assert "closed blank Chrome startup tab" in script
-    assert '$_.type -eq "page" -and [string]$_.url -eq "about:blank"' in script
+    assert "closed blank/newtab Chrome startup tab" in script
+    assert '[string]$_.url -eq "about:blank"' in script
+    assert '[string]$_.url -eq "chrome://newtab/"' in script
+    assert "minimal tab cleanup while waiting for mutex failed" in script
     assert '[string]$_.url -eq "chrome-extension://$primaryId/tabs.html"' in script
     assert "Invoke-CdpPageTargetCleanup -Passes 2 -DelaySeconds 1" in script
     assert "Invoke-CdpPageTargetCleanup -Passes 3 -DelaySeconds 1" in script
@@ -241,6 +243,8 @@ def test_browser_tab_reload_hard_reopens_repeatedly_stuck_tiktok_tabs():
     hard_reopen_block = script.split("HARD_REOPEN_URLS = {", 1)[1].split("def _target_version", 1)[0]
     assert '"lemon8": [' not in hard_reopen_block
     assert "def _platform_had_previous_unresponsive_reload" in script
+    assert "def _is_canonical_x_recovery_url" in script
+    assert '"x non-canonical recovery URL"' in script
     assert "def _hard_reopen_platform" in script
     assert "reopen_urls = HARD_REOPEN_URLS.get(platform)" in script
     assert "dict.fromkeys" in script
@@ -248,6 +252,7 @@ def test_browser_tab_reload_hard_reopens_repeatedly_stuck_tiktok_tabs():
     assert "hard_reopen_open" in script
     assert "shell_tabs = [" in script
     assert '"page health:" in str(p["reason"]).lower()' in script
+    assert '"non-canonical recovery url" in str(p["reason"]).lower()' in script
     assert "hard_reopen_tabs.update" in script
 
 
@@ -261,6 +266,7 @@ def test_browser_tab_reload_hard_reopens_individual_repeated_stuck_tabs():
     assert "reopen_urls = list(dict.fromkeys" in script
     assert '"page health:" in text' in script
     assert '"recoverable_error_shell" in text' in script
+    assert '"non-canonical recovery url" in text' in script
 
 
 def test_chrome_cdp_launcher_dry_run_skips_live_probes():

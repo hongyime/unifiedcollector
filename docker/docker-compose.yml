@@ -146,9 +146,9 @@ services:
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
       COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
-      YOUTUBE_ENRICH_BATCH_LIMIT: "5"
-      YOUTUBE_MAX_CONCURRENT_DOWNLOADS: "2"
-      YOUTUBE_VIDEO_BACKFILL_BATCH_SIZE: "12"
+      YOUTUBE_ENRICH_BATCH_LIMIT: "8"
+      YOUTUBE_MAX_CONCURRENT_DOWNLOADS: "3"
+      YOUTUBE_VIDEO_BACKFILL_BATCH_SIZE: "18"
       YOUTUBE_VIDEO_BACKFILL_MAX_PASSES: "2"
       YOUTUBE_VIDEO_BACKFILL_FAILED_RETRY_HOURS: "24"
       YOUTUBE_VIDEO_BACKFILL_SCAN_LIMIT: "10000"
@@ -403,7 +403,7 @@ services:
       # Concurrency drives REAL RSS (each task holds a page + parse tree). After
       # the host OOM, dialled 10 -> 6 to lower website's memory peak — a real RSS
       # cut (unlike a mem_limit cap), minor throughput cost across 421 sites.
-      WEBSITE_MAX_CONCURRENT_TASKS: "10"
+      WEBSITE_MAX_CONCURRENT_TASKS: "12"
       # CPU hygiene (A#4): website crawls are multi-hour; idle longer between cycles.
       COLLECTOR_CYCLE_SLEEP_WEBSITE: "600"
       # Conn-budget hygiene (P2 review §5): default 10 -> 6. Kept above lowrisk/main
@@ -515,8 +515,8 @@ services:
       # More aggressive but below the old 250/30s/200 setting that saturated the
       # Z media drive. Live capture is unaffected by these backfill knobs.
       TELEGRAM_BACKFILL_MSG_PER_SEC: "120"
-      TELEGRAM_BACKFILL_DRAIN_INTERVAL: "90"
-      TELEGRAM_SPIDER_MAX_PER_CYCLE: "75"
+      TELEGRAM_BACKFILL_DRAIN_INTERVAL: "60"
+      TELEGRAM_SPIDER_MAX_PER_CYCLE: "100"
       # Get ALL historical chats: raise the enqueue cap so every dialog across all
       # 4 accounts is queued (user: "ensure we get ALL historical chats").
       TELEGRAM_SPIDER_QUEUE_MAX: "20000"
@@ -570,7 +570,7 @@ services:
       COLLECTOR_HANG_TIMEOUT_SECONDS: "5400"
       # Wider room coverage + bounded history per cycle. Keep cycles completing
       # frequently so live message freshness wins over historical drain.
-      BEEPER_MAX_CHATS_PER_CYCLE: "75"
+      BEEPER_MAX_CHATS_PER_CYCLE: "100"
       BEEPER_BACKFILL_PAGES_PER_CYCLE: "4"
       BEEPER_BACKFILL_CANDIDATE_MESSAGES: "1000"
       BEEPER_BACKFILL_QUERY_TIMEOUT: "30"
@@ -631,8 +631,8 @@ services:
       # Throughput push (2026-07-29): 24 req/min with 100-message batches.
       # Monitor session-risk/history progress; tune down if WhatsApp throttles.
       WHATSAPP_BACKFILL_REQ_PER_MIN: "24"
-      WHATSAPP_BACKFILL_BATCH_SIZE: "100"
-      WHATSAPP_MEDIA_ARCHIVAL_BATCH_SIZE: "100"
+      WHATSAPP_BACKFILL_BATCH_SIZE: "150"
+      WHATSAPP_MEDIA_ARCHIVAL_BATCH_SIZE: "150"
       # WhatsApp is event-driven: collector.run() blocks in the RabbitMQ
       # consumer loop until messages arrive. The default 1800s watchdog kills
       # it during quiet periods (e.g. overnight). 86400s = 24h gives it room
@@ -694,7 +694,7 @@ services:
       # extension remains the sole IG discovery path (it uses its own IG_SPIDER_MAX_HOP,
       # unaffected by this flag — read only at instagram/__init__.py:1071).
       INSTA_SPIDER_FOLLOWERS: "false"
-      COLLECTOR_CYCLE_SLEEP_INSTAGRAM: "1800"
+      COLLECTOR_CYCLE_SLEEP_INSTAGRAM: "1200"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     cap_add:
@@ -803,7 +803,7 @@ services:
       TIKTOK_FOLLOW_OWNER_FALLBACK: ${TIKTOK_FOLLOW_OWNER_FALLBACK:-hongyime}
       SOCIAL_INGEST_PREP_DB_ON_STARTUP: "true"
       BROWSER_CONTENT_HINT_RESPONSE_TIMEOUT_SECONDS: "2.0"
-      UC_EXTENSION_EXPECTED_VERSION: "1.23.61"
+      UC_EXTENSION_EXPECTED_VERSION: "1.23.63"
     volumes:
       - z:/unifiedcollector/media:/media
       - z:/unifiedcollector:/vault
@@ -831,7 +831,7 @@ services:
       DB_POOL_MAX_SIZE: "4"
       # Operator status compares live Chrome hook heartbeats against this repo
       # extension build. Update with extension/manifest.json version bumps.
-      UC_EXTENSION_EXPECTED_VERSION: "1.23.61"
+      UC_EXTENSION_EXPECTED_VERSION: "1.23.63"
     volumes:
       - z:/unifiedcollector/media:/media
       - z:/unifiedcollector:/vault
@@ -880,7 +880,7 @@ services:
   # Real-time post feed drain. Reads uc:realtime_post_feed off Redis (produced by
   # every successful media_items insert across the collectors) and posts a
   # small per-post Telegram message via send_photo / send_video. Rate-limited
-  # (REALTIME_POST_FEED_MAX_PER_MINUTE, default 6) with a token bucket in
+  # (REALTIME_POST_FEED_MAX_PER_MINUTE, default 12) with a token bucket in
   # Redis + a rolling sha256 dedupe so a re-scraped post never posts twice.
   # A 15-min "skipped N burst" summary is emitted when the cap kicks in.
   realtime_feed:
@@ -898,7 +898,7 @@ services:
       REDIS_URL: "redis://:${REDIS_PASSWORD:-localdevredis123}@redis:6379/0"
       # 1 = on, 0 = off. Default on so a fresh deploy posts realtime by default.
       REALTIME_POST_FEED_ENABLED: "${REALTIME_POST_FEED_ENABLED:-1}"
-      REALTIME_POST_FEED_MAX_PER_MINUTE: "${REALTIME_POST_FEED_MAX_PER_MINUTE:-6}"
+      REALTIME_POST_FEED_MAX_PER_MINUTE: "${REALTIME_POST_FEED_MAX_PER_MINUTE:-12}"
       REALTIME_POST_FEED_DEDUPE_TTL_DAYS: "${REALTIME_POST_FEED_DEDUPE_TTL_DAYS:-7}"
       REALTIME_POST_FEED_INCLUDE_PROFILES: "${REALTIME_POST_FEED_INCLUDE_PROFILES:-0}"
       REALTIME_POST_FEED_BURST_SUMMARY: "${REALTIME_POST_FEED_BURST_SUMMARY:-1}"
@@ -941,7 +941,7 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
-      UC_EXTENSION_EXPECTED_VERSION: "1.23.61"
+      UC_EXTENSION_EXPECTED_VERSION: "1.23.63"
       YOUTUBE_MAX_VIDEO_DURATION_MINUTES: "0"
       STRAVA_ROUTE_STREAM_SHARED_COOLDOWN: "true"
       STRAVA_BROWSER_ROUTE_QUEUE_CANDIDATE_LIMIT: "50"

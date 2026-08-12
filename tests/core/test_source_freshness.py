@@ -641,6 +641,8 @@ async def test_recoverable_error_shell_probe_does_not_mask_stale_browser_content
                 ]
             if "endpoint <> 'browser_heartbeat'" in query:
                 assert "recoverable_error_shell" in query
+                assert "ANY($2::text[])" in query
+                assert args[1] == list(source_freshness._X_ZERO_PROGRESS_PROBES)
                 return []
             raise AssertionError(query)
 

@@ -591,11 +591,18 @@ async function reportRecoverablePageShell(p, shell) {
   }).catch(() => null);
 }
 
-function findRecoverablePageActionButton() {
+function recoverablePageActionIsSafe(platformId, el) {
+  if (platformId !== "x") return true;
+  if (!el || !el.matches || !el.matches("a[href]")) return true;
+  return false;
+}
+
+function findRecoverablePageActionButton(platformId) {
   const candidates = [
     ...document.querySelectorAll('button, [role="button"], a[href]'),
   ];
   return candidates.find((el) => {
+    if (!recoverablePageActionIsSafe(platformId, el)) return false;
     const text = String(el.innerText || el.textContent || el.getAttribute("aria-label") || "")
       .replace(/\s+/g, " ")
       .trim();
@@ -659,13 +666,28 @@ async function attemptRecoverablePageInteraction(platformId, shell) {
   if (platformId === "x") {
     if (last && Date.now() - last < 15000) return false;
     lsSet(key, String(Date.now()));
+    const xButtonKey = `uc_recover_x_button_${shell.reason || "shell"}`;
+    const lastXButton = lsNum(xButtonKey);
+    const button = findRecoverablePageActionButton(platformId);
+    if (button && (!lastXButton || Date.now() - lastXButton > 2 * 60000)) {
+      lsSet(xButtonKey, String(Date.now()));
+      try {
+        button.scrollIntoView({ block: "center", inline: "center" });
+      } catch (e) {}
+      await sleep(jitter(700));
+      try {
+        button.click();
+        clog("warn", `x page shell action clicked (${shell.reason || "recoverable"})`, "x");
+        return true;
+      } catch (e) {}
+    }
     if (switchXHostForRecoverableShell(shell)) return true;
-    // X's native "Try again" shell often re-renders the same empty SPA. Avoid
-    // clicking it repeatedly; the scheduled page recovery will hard-navigate.
+    // X's native shell often re-renders the same empty SPA. Keep clicks bounded;
+    // the scheduled page recovery will hard-navigate when the click does not work.
     return false;
   }
   if (last && Date.now() - last < 60000) return false;
-  const button = findRecoverablePageActionButton();
+  const button = findRecoverablePageActionButton(platformId);
   if (!button) {
     if (platformId === "x" && switchXHostForRecoverableShell(shell)) return true;
     return false;
@@ -2319,6 +2341,21 @@ function xProgressSample() {
   }
 }
 
+function xStatusLinkCount() {
+  try {
+    const seen = new Set();
+    document.querySelectorAll('a[href*="/status/"]').forEach((a) => {
+      const href = (a.getAttribute("href") || "")
+        .replace(/^https?:\/\/(?:www\.)?(?:x\.com|twitter\.com)/i, "")
+        .split("?")[0];
+      if (/^\/[A-Za-z0-9_]{1,20}\/status\/\d+/.test(href)) seen.add(href);
+    });
+    return seen.size;
+  } catch (e) {
+    return 0;
+  }
+}
+
 function xBumpZeroProgress() {
   const key = xProgressKey();
   const value = lsNum(key) + 1;
@@ -2498,9 +2535,14 @@ const x = {
       );
     }
     const profileSeen = entity !== "timeline" && !xIsStatusPage() && !!scrapeXProfile(entity);
+    const tweetRoots = xTweetRoots();
     const progressCounts = {
       feed,
       entity,
+      owner: owner || null,
+      url_path: location.pathname || "/",
+      tweet_roots: tweetRoots.length,
+      status_links: xStatusLinkCount(),
       posts: xposts.length,
       media_candidates: sink.items.length,
       users: xu.length,

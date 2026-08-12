@@ -20,7 +20,7 @@ Design points:
 Env knobs (all optional; safe defaults):
   REALTIME_POST_FEED_ENABLED           default "1"
   REALTIME_POST_FEED_QUEUE_KEY         default "uc:realtime_post_feed"
-  REALTIME_POST_FEED_MAX_PER_MINUTE    default "6"
+  REALTIME_POST_FEED_MAX_PER_MINUTE    default "12"
   REALTIME_POST_FEED_DEDUPE_TTL_DAYS   default "7"
   REALTIME_POST_FEED_INCLUDE_PROFILES  default "0"  (skip profile updates)
   REDIS_URL / REDIS_HOST / REDIS_PASSWORD  (same pattern as io_pacer)
@@ -101,7 +101,8 @@ def _metadata_text(meta: dict | None, *keys: str) -> str | None:
 def build_payload(*, source: str, entity_name: str, content_id: str,
                   file_path: str | None, source_url: str | None,
                   sha256: str | None, metadata: dict | None,
-                  kind: str | None, content_type: str | None) -> dict:
+                  kind: str | None, content_type: str | None,
+                  file_size: int | None = None) -> dict:
     """Build the JSON payload the drain consumes.
 
     Kept side-effect-free so ``enqueue_from_insert`` can call it from the
@@ -128,6 +129,7 @@ def build_payload(*, source: str, entity_name: str, content_id: str,
         "vault_path": str(vault_path or "") or None,
         "source_url": str(source_url or "") or None,
         "sha256": str(sha256 or "") or None,
+        "file_size": file_size,
         "caption": caption,
         "sender_id": _metadata_text(
             meta,
@@ -145,25 +147,28 @@ def build_payload(*, source: str, entity_name: str, content_id: str,
 def enqueue_from_insert(*, source: str, entity_name: str, content_id: str,
                         file_path: str | None, source_url: str | None,
                         sha256: str | None, metadata: dict | None,
-                        kind: str | None, content_type: str | None) -> None:
+                        kind: str | None, content_type: str | None,
+                        file_size: int | None = None) -> dict[str, str | None]:
     """Best-effort fire-and-forget enqueue from inside a running event loop.
 
     Never raises. Never blocks. If Redis or the feed is disabled/unavailable
     it silently no-ops so the collector's insertion path is unaffected.
     """
     if not _flag("REALTIME_POST_FEED_ENABLED", "1"):
-        return
+        return {"status": "stored_only", "reason": "realtime_feed_disabled"}
     try:
         payload = build_payload(
             source=source, entity_name=entity_name, content_id=content_id,
             file_path=file_path, source_url=source_url, sha256=sha256,
             metadata=metadata, kind=kind, content_type=content_type,
+            file_size=file_size,
         )
     except Exception:
         logger.debug("realtime_feed build_payload failed", exc_info=True)
-        return
-    if not _passes_filter(payload):
-        return
+        return {"status": "stored_only", "reason": "build_payload_failed"}
+    skip_reason = _skip_reason(payload)
+    if skip_reason:
+        return {"status": "skipped", "reason": skip_reason}
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
@@ -173,8 +178,10 @@ def enqueue_from_insert(*, source: str, entity_name: str, content_id: str,
             asyncio.run(_enqueue(payload))
         except Exception:
             logger.debug("realtime_feed sync enqueue failed", exc_info=True)
-        return
+            return {"status": "stored_only", "reason": "redis_unavailable"}
+        return {"status": "enqueued", "reason": None}
     loop.create_task(_enqueue(payload))
+    return {"status": "enqueued", "reason": None}
 
 
 def _logs_chat_id() -> int | None:
@@ -256,23 +263,27 @@ def _passes_filter(payload: dict) -> bool:
     * We need either a caption or a downloadable file to make a useful message.
     * Profile updates are opt-in via REALTIME_POST_FEED_INCLUDE_PROFILES.
     """
+    return _skip_reason(payload) is None
+
+
+def _skip_reason(payload: dict) -> str | None:
     if _is_own_logs_chat_telegram(payload):
-        return False
+        return "filtered_by_policy"
     include_profiles = _flag("REALTIME_POST_FEED_INCLUDE_PROFILES", "0")
     content_type = (payload.get("content_type") or "").lower()
     if content_type == "profile_photo" and not include_profiles:
-        return False
+        return "profile_photo_skipped"
     kind = (payload.get("kind") or "").lower()
     if kind not in ALLOWED_KINDS and content_type not in ALLOWED_KINDS:
         # Unknown media kinds still get through if they at least look like a
         # post (have a source_url) — but pure metadata rows are dropped.
         if not payload.get("source_url"):
-            return False
+            return "filtered_by_policy"
     caption = (payload.get("caption") or "").strip()
     file_path = payload.get("file_path") or payload.get("vault_path")
     if not caption and not file_path and not payload.get("source_url"):
-        return False
-    return True
+        return "missing_file_or_url"
+    return None
 
 
 async def _redis_client():
@@ -300,11 +311,23 @@ async def _redis_client():
 async def _enqueue(payload: dict) -> None:
     client = await _redis_client()
     if client is None:
+        from src.notifications import realtime_delivery
+        await realtime_delivery.record_from_payload(
+            payload,
+            status="stored_only",
+            reason="redis_unavailable",
+        )
         return
     try:
         await client.rpush(_queue_key(), json.dumps(payload, default=str))
     except Exception:
         logger.debug("realtime_feed enqueue rpush failed", exc_info=True)
+        from src.notifications import realtime_delivery
+        await realtime_delivery.record_from_payload(
+            payload,
+            status="stored_only",
+            reason="redis_unavailable",
+        )
     finally:
         with contextlib.suppress(Exception):
             await client.aclose()
@@ -502,6 +525,47 @@ def _looks_like_video(payload: dict) -> bool:
     return False
 
 
+def _payload_file_size(payload: dict, target: str | None = None) -> int | None:
+    try:
+        value = payload.get("file_size")
+        if value not in {None, ""}:
+            return int(value)
+    except (TypeError, ValueError):
+        pass
+    if target and not str(target).startswith(("http://", "https://")):
+        try:
+            return Path(str(target)).stat().st_size
+        except OSError:
+            return None
+    return None
+
+
+def _telegram_media_cap(payload: dict) -> int:
+    if _looks_like_video(payload):
+        return 45 * 1024 * 1024
+    return 10 * 1024 * 1024
+
+
+def _delivery_status(
+    payload: dict,
+    *,
+    delivered: bool,
+    retry_after: int,
+    outcome: str,
+    target: str | None,
+) -> tuple[str, str | None]:
+    if outcome == "local_media_text_fallback":
+        size = _payload_file_size(payload, target)
+        if size is not None and size > _telegram_media_cap(payload):
+            return "too_large", "telegram_too_large"
+        return "delivered", "local_media_text_fallback"
+    if delivered:
+        return "delivered", outcome
+    if retry_after > 0:
+        return "enqueued", "telegram_retry_after"
+    return "failed", "telegram_send_failed"
+
+
 async def _flush_skip_summary(client) -> None:
     """Send a 'skipped N burst' summary if the last flush was >15 min ago."""
     if not _flag("REALTIME_POST_FEED_BURST_SUMMARY", "1"):
@@ -529,7 +593,7 @@ async def _flush_skip_summary(client) -> None:
             f"🌀 <b>Realtime feed burst</b>\n"
             f"Skipped {skipped_n:,} posts in the last "
             f"{_int('REALTIME_POST_FEED_BURST_SUMMARY_SECONDS', 900, min_value=60) // 60} min "
-            f"(over {_int('REALTIME_POST_FEED_MAX_PER_MINUTE', 6, min_value=1)}/min cap)."
+            f"(over {_int('REALTIME_POST_FEED_MAX_PER_MINUTE', 12, min_value=1)}/min cap)."
         )
     except Exception:
         logger.debug("realtime_feed burst summary send failed", exc_info=True)
@@ -639,7 +703,14 @@ class RealtimeFeedDrain:
         except Exception:
             logger.warning("realtime_feed: dropped malformed payload")
             return
-        if not _passes_filter(payload):
+        skip_reason = _skip_reason(payload)
+        if skip_reason:
+            from src.notifications import realtime_delivery
+            await realtime_delivery.record_from_payload(
+                payload,
+                status="skipped",
+                reason=skip_reason,
+            )
             return
 
         # Dedup exact source occurrences, not global physical files. The vault
@@ -649,16 +720,50 @@ class RealtimeFeedDrain:
         dedupe_key = _dedupe_key(payload)
         if await _dedupe_seen(client, dedupe_key, ttl_days=ttl_days):
             logger.debug("realtime_feed: dedup skip key=%s", dedupe_key[:24])
+            from src.notifications import realtime_delivery
+            await realtime_delivery.record_from_payload(
+                payload,
+                status="deduped",
+                reason="duplicate_suppressed",
+                dedupe_key=dedupe_key,
+            )
             return
 
         # Rate-limit.
-        capacity = _int("REALTIME_POST_FEED_MAX_PER_MINUTE", 6, min_value=1)
+        capacity = _int("REALTIME_POST_FEED_MAX_PER_MINUTE", 12, min_value=1)
         if not await _acquire_token(client, capacity=capacity):
             await _record_skip(client)
+            from src.notifications import realtime_delivery
+            await realtime_delivery.record_from_payload(
+                payload,
+                status="skipped",
+                reason="rate_cap_dropped",
+                dedupe_key=dedupe_key,
+            )
             await _flush_skip_summary(client)
             return
 
         delivered, retry_after, delivery_outcome, delivery_target = await _deliver_one(payload)
+        ledger_status, ledger_reason = _delivery_status(
+            payload,
+            delivered=bool(delivered),
+            retry_after=int(retry_after or 0),
+            outcome=delivery_outcome,
+            target=delivery_target,
+        )
+        from src.notifications import realtime_delivery
+        await realtime_delivery.record_from_payload(
+            payload,
+            status=ledger_status,
+            reason=ledger_reason,
+            dedupe_key=dedupe_key,
+            telegram_result={
+                "delivered": bool(delivered),
+                "retry_after": int(retry_after or 0),
+                "outcome": delivery_outcome,
+            },
+            target=delivery_target,
+        )
         # One-line outcome log so operators can see whether individual posts
         # actually reached Telegram. Kept at INFO so `docker logs` shows it
         # without turning on debug noise. Format: `sent to telegram: ok=<bool>

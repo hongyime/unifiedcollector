@@ -640,6 +640,24 @@ class BaseCollector(ABC):
                     )
                     if dup:
                         _unlink_duplicate_media_file(file_path)
+                        try:
+                            from src.notifications import realtime_delivery
+                            await realtime_delivery.record_with_conn(
+                                conn,
+                                source=self.SOURCE_NAME,
+                                content_id=content_id,
+                                status="deduped",
+                                reason="duplicate_suppressed",
+                                file_size=file_size,
+                                content_type=content_type,
+                            )
+                        except Exception:
+                            logger.debug(
+                                "realtime delivery duplicate ledger failed for %s/%s",
+                                self.SOURCE_NAME,
+                                content_id,
+                                exc_info=True,
+                            )
                         logger.debug("cross-collector dup skipped: %s sha=%s", self.SOURCE_NAME, sha256[:12])
                         return False
                 except Exception:
@@ -793,13 +811,36 @@ class BaseCollector(ABC):
                         content_id,
                         exc_info=True,
                     )
+            else:
+                try:
+                    from src.notifications import realtime_delivery
+                    await realtime_delivery.record_with_conn(
+                        conn,
+                        source=self.SOURCE_NAME,
+                        content_id=content_id,
+                        status="deduped",
+                        reason="duplicate_suppressed",
+                        file_size=file_size,
+                        content_type=content_type,
+                    )
+                except Exception:
+                    logger.debug(
+                        "realtime delivery duplicate ledger failed for %s/%s",
+                        self.SOURCE_NAME,
+                        content_id,
+                        exc_info=True,
+                    )
+                logger.debug("Duplicate skipped (content_id or sha256): %s/%s", self.SOURCE_NAME, content_id)
+                return False
+
             self._progress_count += 1
             # Real-time post feed: fire-and-forget enqueue. Never raises, never
             # blocks. Disabled/no-Redis is a silent no-op. See
             # src/notifications/realtime_feed.py.
+            enqueue_result = {"status": "stored_only", "reason": "enqueue_not_attempted"}
             try:
                 from src.notifications import realtime_feed
-                realtime_feed.enqueue_from_insert(
+                enqueue_result = realtime_feed.enqueue_from_insert(
                     source=self.SOURCE_NAME,
                     entity_name=entity_name,
                     content_id=content_id,
@@ -809,11 +850,31 @@ class BaseCollector(ABC):
                     metadata=metadata,
                     kind=kind,
                     content_type=content_type,
+                    file_size=file_size,
                 )
             except Exception:
                 logger.debug(
                     "realtime_feed enqueue failed for %s/%s",
                     self.SOURCE_NAME, content_id, exc_info=True,
+                )
+                enqueue_result = {"status": "stored_only", "reason": "enqueue_failed"}
+            try:
+                from src.notifications import realtime_delivery
+                await realtime_delivery.record_with_conn(
+                    conn,
+                    source=self.SOURCE_NAME,
+                    content_id=content_id,
+                    status=str(enqueue_result.get("status") or "stored_only"),
+                    reason=enqueue_result.get("reason"),
+                    file_size=file_size,
+                    content_type=content_type,
+                )
+            except Exception:
+                logger.debug(
+                    "realtime delivery enqueue ledger failed for %s/%s",
+                    self.SOURCE_NAME,
+                    content_id,
+                    exc_info=True,
                 )
             return True
         logger.debug("Duplicate skipped (content_id or sha256): %s/%s", self.SOURCE_NAME, content_id)

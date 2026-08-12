@@ -180,6 +180,7 @@ def test_extension_auto_reload_is_immediate_with_alarm_backup():
 def test_recoverable_page_shells_recover_without_waiting_on_x_native_retry():
     content = _read("extension/content.js")
 
+    assert "function recoverablePageActionIsSafe" in content
     assert "function findRecoverablePageActionButton" in content
     assert "async function attemptRecoverablePageInteraction" in content
     assert "await attemptRecoverablePageInteraction(p.id, shell)" in content
@@ -190,6 +191,15 @@ def test_recoverable_page_shells_recover_without_waiting_on_x_native_retry():
     recover_block = content.split("async function attemptRecoverablePageInteraction", 1)[1].split(
         "// Capture is ALWAYS ON", 1
     )[0]
+    safety_block = content.split("function recoverablePageActionIsSafe", 1)[1].split(
+        "function findRecoverablePageActionButton", 1
+    )[0]
+    find_button_block = content.split("function findRecoverablePageActionButton", 1)[1].split(
+        "function switchXHostForRecoverableShell", 1
+    )[0]
+    assert 'platformId !== "x"' in safety_block
+    assert 'el.matches("a[href]")' in safety_block
+    assert "recoverablePageActionIsSafe(platformId, el)" in find_button_block
     assert "platformId === \"x\"" in recover_block
     assert "Date.now() - last < 15000" in recover_block
     assert "switchXHostForRecoverableShell(shell)" in recover_block

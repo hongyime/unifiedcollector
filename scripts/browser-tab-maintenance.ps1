@@ -295,13 +295,16 @@ function Remove-BlankStartupTabs {
         return
     }
     $targets = @(Get-CdpPageTargets | Where-Object {
-        $_.type -eq "page" -and [string]$_.url -eq "about:blank"
+        $_.type -eq "page" -and (
+            [string]$_.url -eq "about:blank" -or
+            [string]$_.url -eq "chrome://newtab/"
+        )
     })
     foreach ($target in $targets) {
         try {
             $encodedId = [uri]::EscapeDataString([string]$target.id)
             Invoke-WebRequest -Uri "http://127.0.0.1:$script:CdpPort/json/close/$encodedId" -UseBasicParsing -TimeoutSec 5 | Out-Null
-            Write-Log "closed blank Chrome startup tab"
+            Write-Log "closed blank/newtab Chrome startup tab"
         } catch {
             Write-Log ("could not close blank Chrome startup tab $($target.id): " + $_.Exception.Message)
         }
@@ -664,6 +667,11 @@ try {
 }
 if (-not $haveMutex) {
     Write-Log "browser tab maintenance skipped because another pass is already running"
+    try {
+        Invoke-CdpPageTargetCleanup -Passes 1 -DelaySeconds 0
+    } catch {
+        Write-Log ("minimal tab cleanup while waiting for mutex failed: " + $_.Exception.Message)
+    }
     Write-Status "running" "another maintenance pass is already running"
     exit 0
 }

@@ -189,6 +189,12 @@ try:
 except (TypeError, ValueError):
     BROWSER_CONTENT_HINT_RESPONSE_TIMEOUT_SECONDS = 0.75
 UC_EXTENSION_EXPECTED_VERSION = os.getenv("UC_EXTENSION_EXPECTED_VERSION", "").strip()
+X_ZERO_PROGRESS_PROBES = {
+    "no_dom_media_candidates",
+    "try_again_empty_state",
+    "x_blank_spa_shell",
+    "x_no_status_links",
+}
 try:
     SOCIAL_INGEST_STARTUP_DDL_TIMEOUT_SECONDS = max(
         15.0,
@@ -2208,6 +2214,51 @@ async def _download_and_save(pool, session, platform, username, item, reject_sta
                     store_cid,
                     f"vault sidecar write failed: {sidecar.error}",
                 )
+            try:
+                metadata_payload = json.loads(meta_json) if isinstance(meta_json, str) else meta_json
+            except Exception:
+                metadata_payload = {}
+            enqueue_result = {"status": "stored_only", "reason": "enqueue_not_attempted"}
+            try:
+                from src.notifications import realtime_feed
+                enqueue_result = realtime_feed.enqueue_from_insert(
+                    source=platform,
+                    entity_name=item.get("entity_name") or username,
+                    content_id=store_cid,
+                    file_path=str(stored_path),
+                    source_url=url,
+                    sha256=sha,
+                    metadata=metadata_payload if isinstance(metadata_payload, dict) else {},
+                    kind=media_kind,
+                    content_type=ctype,
+                    file_size=len(data),
+                )
+            except Exception:
+                logger.debug(
+                    "realtime_feed enqueue failed for extension media %s/%s",
+                    platform,
+                    store_cid,
+                    exc_info=True,
+                )
+                enqueue_result = {"status": "stored_only", "reason": "enqueue_failed"}
+            try:
+                from src.notifications import realtime_delivery
+                await realtime_delivery.record_with_conn(
+                    conn,
+                    source=platform,
+                    content_id=store_cid,
+                    status=str(enqueue_result.get("status") or "stored_only"),
+                    reason=enqueue_result.get("reason"),
+                    file_size=len(data),
+                    content_type=ctype,
+                )
+            except Exception:
+                logger.debug(
+                    "realtime delivery enqueue ledger failed for extension media %s/%s",
+                    platform,
+                    store_cid,
+                    exc_info=True,
+                )
         try:
             async with pool.acquire() as conn:
                 consistency = await verify_media_item_db_consistency(
@@ -2440,6 +2491,13 @@ def _browser_event_marks_source_success(
         "forced_recovery_started",
         "recoverable_error_shell",
     }
+    if (
+        platform == "x"
+        and observed_count <= 0
+        and stored_count <= 0
+        and probe_reason in X_ZERO_PROGRESS_PROBES
+    ):
+        return False
     return bool(probe_reason and probe_reason not in non_progress_probes)
 
 
@@ -5079,6 +5137,12 @@ async def _browser_content_recovery_hint(pool, platform: str) -> dict:
                           metadata ? 'probe_reason'
                           AND COALESCE(metadata->>'probe_reason', '')
                               NOT IN ('manual_backend_probe', 'forced_recovery_started', 'recoverable_error_shell')
+                          AND NOT (
+                            $1 = 'x'
+                            AND observed_count <= 0
+                            AND stored_count <= 0
+                            AND COALESCE(metadata->>'probe_reason', '') = ANY($2::text[])
+                          )
                         )
                       )
                       AND (
@@ -5088,12 +5152,19 @@ async def _browser_content_recovery_hint(pool, platform: str) -> dict:
                           metadata ? 'probe_reason'
                           AND COALESCE(metadata->>'probe_reason', '')
                               NOT IN ('manual_backend_probe', 'forced_recovery_started', 'recoverable_error_shell')
+                          AND NOT (
+                            $1 = 'x'
+                            AND observed_count <= 0
+                            AND stored_count <= 0
+                            AND COALESCE(metadata->>'probe_reason', '') = ANY($2::text[])
+                          )
                         )
                       )
                     ORDER BY created_at DESC
                     LIMIT 1
                     """,
                     platform,
+                    sorted(X_ZERO_PROGRESS_PROBES),
                 )
         age = row["age_seconds"] if row else None
         if age is None or int(age) > BROWSER_CONTENT_STALE_SECONDS:

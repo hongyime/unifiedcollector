@@ -5608,9 +5608,107 @@ async def _realtime_feed_status_from_redis() -> dict:
                 await client.aclose()
 
 
+async def _realtime_delivery_ledger_status() -> dict:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        exists = await conn.fetchval("SELECT to_regclass('public.realtime_media_deliveries')")
+        if not exists:
+            return {"available": False, "reason": "table_missing"}
+        status_rows = await conn.fetch(
+            """
+            SELECT status, count(*)::int AS count
+            FROM realtime_media_deliveries
+            WHERE updated_at >= NOW() - INTERVAL '24 hours'
+            GROUP BY status
+            ORDER BY status
+            """,
+            timeout=3,
+        )
+        source_rows = await conn.fetch(
+            """
+            SELECT source,
+                   count(*)::int AS total,
+                   count(*) FILTER (WHERE status = 'enqueued')::int AS enqueued,
+                   count(*) FILTER (WHERE status = 'delivered')::int AS delivered,
+                   count(*) FILTER (WHERE status = 'skipped')::int AS skipped,
+                   count(*) FILTER (WHERE status = 'deduped')::int AS deduped,
+                   count(*) FILTER (WHERE status = 'too_large')::int AS too_large,
+                   count(*) FILTER (WHERE status = 'failed')::int AS failed,
+                   max(updated_at) AS latest_at
+            FROM realtime_media_deliveries
+            WHERE updated_at >= NOW() - INTERVAL '24 hours'
+            GROUP BY source
+            ORDER BY latest_at DESC NULLS LAST
+            LIMIT 30
+            """,
+            timeout=3,
+        )
+        latest_rows = await conn.fetch(
+            """
+            SELECT source, content_id, status, reason, file_size, content_type,
+                   target_name, updated_at
+            FROM realtime_media_deliveries
+            ORDER BY updated_at DESC
+            LIMIT 10
+            """,
+            timeout=3,
+        )
+    return {
+        "available": True,
+        "window_hours": 24,
+        "status_counts": {row["status"]: int(row["count"] or 0) for row in status_rows},
+        "by_source": [dict(row) for row in source_rows],
+        "latest": [dict(row) for row in latest_rows],
+    }
+
+
 @app.get("/media/realtime-feed/status")
 async def media_realtime_feed_status(_user: dict = Depends(require_role("viewer"))):
-    return await _realtime_feed_status_from_redis()
+    payload = await _realtime_feed_status_from_redis()
+    try:
+        payload["delivery_ledger"] = await _realtime_delivery_ledger_status()
+    except Exception as exc:  # noqa: BLE001 - dashboard visibility must degrade.
+        payload["delivery_ledger"] = {"available": False, "error": exc.__class__.__name__}
+    return payload
+
+
+@app.get("/media/realtime-feed/deliveries")
+async def media_realtime_feed_deliveries(
+    source: str | None = None,
+    status: str | None = None,
+    limit: int = Query(100, ge=1, le=500),
+    _user: dict = Depends(require_role("viewer")),
+):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        exists = await conn.fetchval("SELECT to_regclass('public.realtime_media_deliveries')")
+        if not exists:
+            return {"available": False, "items": []}
+        clauses = []
+        args = []
+        if source:
+            args.append(source.strip().lower())
+            clauses.append(f"source = ${len(args)}")
+        if status:
+            args.append(status.strip().lower())
+            clauses.append(f"status = ${len(args)}")
+        args.append(limit)
+        where = "WHERE " + " AND ".join(clauses) if clauses else ""
+        rows = await conn.fetch(
+            f"""
+            SELECT id::text, media_item_id::text, source, content_id, status,
+                   reason, file_size, content_type, target_name, queued_at,
+                   sent_at, created_at, updated_at
+            FROM realtime_media_deliveries
+            {where}
+            ORDER BY updated_at DESC
+            LIMIT ${len(args)}
+            """,
+            *args,
+            timeout=5,
+        )
+    return {"available": True, "items": [dict(row) for row in rows]}
+
 
 
 @app.get("/media/artifact-audit")

@@ -1,10 +1,16 @@
 # UnifiedCollector Agent State
 
-Updated: 2026-08-12 18:36 SGT
+Updated: 2026-08-12 23:01 SGT
 
-Current task: dashboard coverage/realtime media status, browser resource cleanup, and Telegram media fallback hardening are implemented, tested, and live-verified; X and Facebook browser content progress remain the only degraded live sources.
+Current task: realtime Telegram media delivery ledger, browser-bridge media enqueue coverage, X recovery hardening, tab cleanup, and safe rate tuning are implemented, tested, deployed, and live-verified. X remains the only degraded live source because X still serves a stale/no-progress shell despite canonical `/home` recovery and extension `1.23.63`.
 
 Recent completed work:
+- Realtime media deliveries now have a durable Postgres ledger (`realtime_media_deliveries`) and dashboard/API visibility under `/media/realtime-feed/status` and `/media/realtime-feed/deliveries`; live status shows delivered/enqueued/deduped rows for Telegram, WhatsApp, Instagram, and Search.
+- Browser extension direct media ingest now enqueues Instagram/Threads-style browser-saved media into the realtime feed, while duplicate/profile-photo/skipped rows are explicitly recorded instead of silently disappearing.
+- X zero-result/shell probes no longer count as source success or browser content progress; X recovery avoids unsafe anchor clicks, hard-reopens non-canonical X URLs back to `https://x.com/home`, and keeps all recovery on `x.com`.
+- Extension bundle bumped and live-reloaded to `1.23.63`; browser audit showed Instagram, Threads, TikTok, X, Facebook, and most scraper tabs on `1.23.63`, with X canonical at `https://x.com/home`.
+- Duplicate extension control tabs were cleaned up live; maintenance now also closes `chrome://newtab/` startup tabs and performs minimal cleanup even when the background loop holds the full maintenance mutex.
+- Safe throughput knobs were raised for Telegram, WhatsApp, Beeper, YouTube, Website, Instagram cycle sleep, and realtime feed max-per-minute without adding new brokers or risky unbounded concurrency.
 - SpiderFoot recon sidecar is live and verified under the `recon` Compose profile.
 - Dashboard browser-health optional timeout noise was fixed, tested, rebuilt, deployed, committed, and pushed as `0ec39ea0 fix: suppress optional browser health noise`.
 - Additional browser optional diagnostic suppression was committed and pushed as `531298f7 fix: suppress optional browser diagnostics`.
@@ -70,6 +76,6 @@ Current evidence:
 - Final post-cleanup tests passed: `python -m pytest tests\extension\test_extension_bundle_static.py tests\tools\test_browser_maintenance_scripts.py -q` -> 64 passed.
 
 Next steps:
-1. Let X sit on `x.com/home` long enough for the less aggressive recovery path, then verify whether `x_posts` or X media rows advance.
-2. Investigate Facebook browser content progress if it remains stale after the next maintenance cycle.
+1. Let X sit on canonical `https://x.com/home` with the `1.23.63` content script, then verify whether `x_posts` or X media rows advance; if it stays on the X "Try again" shell, this is still a platform/session state issue.
+2. Watch dashboard `browser_extension.ingest` for fresh non-heartbeat browser content from Instagram/TikTok/Threads/Facebook after the reload; current overall source health is live except X.
 3. Watch DB lock pressure from long GitHub COPY/backfill work; broad media/source rollup queries may time out while backup/backfill holds locks, but live source health and realtime feed continue operating.
