@@ -1,8 +1,8 @@
 # UnifiedCollector Agent State
 
-Updated: 2026-08-12 00:00 SGT
+Updated: 2026-08-12 08:09 SGT
 
-Current task: complete production-readiness work with Analyzer integration; Collector is currently in verification/hardening mode.
+Current task: production-readiness slice with Analyzer integration is implemented, committed/pushed where complete, and live-verified; latest local work hardens duplicate CDP tab cleanup.
 
 Recent completed work:
 - SpiderFoot recon sidecar is live and verified under the `recon` Compose profile.
@@ -11,7 +11,7 @@ Recent completed work:
 - Collector-derived recon seeding was committed and pushed as `70212a23 feat: seed collector recon targets`.
 
 In-progress work:
-- Browser media revisit backlog visibility: separate pending throughput pressure from stale/stuck claims in the dashboard.
+- Commit and push the duplicate CDP page-target cleanup hardening after final checks.
 
 Current evidence:
 - `python -m pytest tests/test_recon.py tests/test_recon_spiderfoot_service.py -q` passed with 17 tests.
@@ -36,8 +36,13 @@ Current evidence:
 - `python -m pytest tests/bridges/test_ig_ingest_vault.py tests/dashboard/test_extension_health.py -q` passed with 82 tests.
 - Media revisit stale-claim fix was committed and pushed as `423fbbf3 fix: expire exhausted media revisit claims`.
 - Fresh read-only audit on 2026-08-12 found tracked worktree clean, `unifiedcollector_spiderfoot` healthy, recon targets `completed=24 failed=0`, `recon_observations=128`, all observations have `value_hash`, `/health?include_sources=true` status `ok` with `source_issues=0`, live CDP `page_targets=9`, and `duplicate_url_groups=0`.
+- Browser media revisit queue visibility was committed and pushed as `05b76522 feat: show browser media revisit queue health`.
+- Live Collector dashboard health returned `status=ok`, `source_issues=0`, browser ingest active, all configured sources live, and WhatsApp bridge partial state correctly shown as one ready slot plus one optional QR slot.
+- Live SpiderFoot sidecar is healthy and idle, with no repeated malformed-JSON target failures in the latest log window.
+- Live CDP duplicate tab cleanup closed duplicate extension control pages and duplicate Lemon8 topic tabs; follow-up check returned `PAGE_TARGETS=13` and `DUPLICATE_URL_GROUPS=0`.
+- Focused tests passed: `python -m pytest tests/tools/test_browser_maintenance_scripts.py -q` -> 32 passed; `python -m pytest tests/dashboard/test_extension_health.py -q` -> 18 passed.
 
 Next steps:
-1. Build/test the dashboard queue-health visibility change and commit it.
-2. Continue broader collector robustness audit from current live health.
+1. Commit and push duplicate CDP page-target cleanup hardening.
+2. Continue watching browser maintenance after the next scheduled pass; exact duplicate URLs should be closed automatically.
 3. Watch DB lock pressure from long GitHub COPY/backfill work; recon commands may log deferred base-schema migration while backup/backfill holds locks, but runtime recon operations still complete.

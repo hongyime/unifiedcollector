@@ -219,6 +219,23 @@ function Get-CdpPageTargets {
     }
 }
 
+function Remove-DuplicateCdpPageTargets {
+    $targets = @(Get-CdpPageTargets | Where-Object { $_.type -eq "page" -and -not [string]::IsNullOrWhiteSpace([string]$_.url) })
+    $groups = $targets | Group-Object -Property url | Where-Object { $_.Count -gt 1 }
+    foreach ($group in $groups) {
+        $dupes = @($group.Group | Sort-Object -Property id | Select-Object -Skip 1)
+        foreach ($target in $dupes) {
+            try {
+                $encodedId = [uri]::EscapeDataString([string]$target.id)
+                Invoke-WebRequest -Uri "http://127.0.0.1:$script:CdpPort/json/close/$encodedId" -UseBasicParsing -TimeoutSec 5 | Out-Null
+                Write-Log "closed duplicate CDP page target: $($target.url)"
+            } catch {
+                Write-Log ("could not close duplicate CDP page target $($target.id): " + $_.Exception.Message)
+            }
+        }
+    }
+}
+
 function Test-ExtensionControlTab {
     foreach ($target in @(Get-CdpPageTargets)) {
         $url = [string]$target.url
@@ -573,6 +590,7 @@ try {
         }
     }
     $python = Resolve-Python
+    Remove-DuplicateCdpPageTargets
     $auditTimeout = Get-PositiveIntEnv "UC_BROWSER_AUDIT_TIMEOUT_SECONDS" 240
     $reloadTimeout = Get-PositiveIntEnv "UC_BROWSER_RELOAD_TIMEOUT_SECONDS" 180
     $settleSeconds = Get-PositiveIntEnv "UC_BROWSER_POST_RELOAD_SETTLE_SECONDS" 30

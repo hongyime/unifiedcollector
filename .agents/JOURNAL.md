@@ -9,3 +9,4 @@
 - 2026-08-11 16:11 SGT: Kept SpiderFoot observation dedupe on a SHA-256 `value_hash` unique index because raw observation values can be long or volatile; restored the applied migration body to match the live ledger instead of editing an already-applied migration.
 - 2026-08-11 16:19 SGT: Browser media revisit queues now expire stale exhausted claimed rows to failed audit state instead of leaving them permanently claimed; this preserves evidence while keeping media recovery queues drainable.
 - 2026-08-12 00:00 SGT: Added browser media revisit queue health to the Collector dashboard so pending backlog is separated from stale claimed rows; this keeps operator attention on throughput without mislabeling healthy backlog as deadlock.
+- 2026-08-12 08:09 SGT: Added exact-URL duplicate CDP page cleanup to browser maintenance because duplicate extension control or platform tabs waste resources but do not require a full Chrome profile restart.

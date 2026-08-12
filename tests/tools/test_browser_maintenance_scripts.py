@@ -196,6 +196,16 @@ def test_browser_tab_reload_recovers_dom_error_shells_and_stale_auth_duplicates(
     assert "if str(p[\"target_id\"]) in stale_auth_wall_close_tabs:" in script
 
 
+def test_browser_tab_maintenance_closes_duplicate_cdp_page_targets():
+    script = (REPO_ROOT / "scripts" / "browser-tab-maintenance.ps1").read_text(encoding="utf-8")
+
+    assert "function Remove-DuplicateCdpPageTargets" in script
+    assert "Group-Object -Property url" in script
+    assert "Select-Object -Skip 1" in script
+    assert "closed duplicate CDP page target" in script
+    assert "Remove-DuplicateCdpPageTargets" in script
+
+
 def test_browser_tab_reload_hard_reopens_repeatedly_stuck_tiktok_tabs():
     script = (REPO_ROOT / "tools" / "browser_tab_reload.py").read_text(encoding="utf-8")
 
