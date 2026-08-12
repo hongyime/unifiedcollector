@@ -1,8 +1,8 @@
 # UnifiedCollector Agent State
 
-Updated: 2026-08-12 09:05 SGT
+Updated: 2026-08-12 11:42 SGT
 
-Current task: production-readiness slice with Analyzer integration is implemented and live-verified except for X browser capture, which is blocked by the live X page/session returning a recoverable "Try again" shell.
+Current task: browser resource cleanup and Telegram media fallback hardening are implemented, tested, and live-verified; X and Facebook browser content progress remain the only degraded live sources.
 
 Recent completed work:
 - SpiderFoot recon sidecar is live and verified under the `recon` Compose profile.
@@ -11,7 +11,8 @@ Recent completed work:
 - Collector-derived recon seeding was committed and pushed as `70212a23 feat: seed collector recon targets`.
 
 In-progress work:
-- X browser capture needs manual account/page recovery; code recovery attempted tab reopen, alternate host, click/nudge, and dedicated scraper Chrome profile restart, but X still returns the same shell.
+- X browser capture is loaded on `https://x.com/home` with cookies preserved, but accepted X content progress has not advanced since `x_posts` max `2026-08-11 23:11:08+00`; recovery is now less aggressive and stays on `x.com` only.
+- Facebook browser content progress is stale in `/health?include_sources=true`; the page/tab is open, but accepted content progress has not advanced inside the freshness window.
 
 Current evidence:
 - `python -m pytest tests/test_recon.py tests/test_recon_spiderfoot_service.py -q` passed with 17 tests.
@@ -45,8 +46,22 @@ Current evidence:
 - WhatsApp recovered after `collector_whatsapp` restart: bridge 2/session_2 is ready and bridge 1/session_1 remains an optional QR slot.
 - Browser CDP was recovered after scraper Chrome profile restart attempt; browser ingest is active and maintenance status returned `ok`.
 - Live X audit showed the content script attached and responsive on `https://x.com/home`, but page health is `recoverable_error_shell` with reason `try_again_empty_state`; `/health?include_sources=true` still reports X as the only degraded source.
+- Follow-up audit after manual X login still found Collector health degraded only for X: `browser content progress is ~2.4h old (>3600s)`, while Instagram, TikTok, Lemon8, Threads, Facebook, Strava, Telegram, WhatsApp, Beeper, YouTube, Website, GitHub, and Search were live.
+- Live CDP page targets showed one exact duplicate group: two `https://x.com/home` tabs. There were also two extension control tabs from different extension IDs, so browser resource cleanup needs extension-side dedupe plus old-control-tab cleanup.
+- Realtime Telegram feed is healthy and sending messages. Large local files are archived in Collector first; if Telegram upload is too large or rejected, `src.notifications.realtime_feed` sends a concise text fallback without the full local path by default.
+- Browser extension refresh/loop code now closes canonical duplicate scraper tabs during normal operation.
+- Auto-opened scraper tabs are unpinned by default; optional local storage key `ucPinScraperTabs=true` can re-enable pinning.
+- Lemon8 is no longer an active browser scraper tab by default; Collector health still shows Lemon8 live through backend/headless collection freshness.
+- Browser maintenance now parses CDP target lists from raw JSON, closes duplicate extension control pages including query-string variants, and closes the blank startup tab once the extension control page exists.
+- X hard recovery no longer bounces to `twitter.com`; X shell recovery stays on `x.com` and waits 5 minutes before another Try Again navigation.
+- Telegram local-media fallback text no longer prints the full Collector vault path by default. It reports that media was stored in the Collector vault and includes only the basename unless `REALTIME_POST_FEED_INCLUDE_LOCAL_PATHS=1`.
+- Realtime feed container was restarted after the fallback wording change and continued sending Telegram messages.
+- Live CDP check after cleanup returned `PAGE_TARGETS=8`, `DUPLICATE_URL_GROUPS=0`, one extension control tab, no `about:blank`, and no Lemon8 browser tab.
+- Live `/health?include_sources=true` after cleanup returned Instagram, TikTok, Threads, Lemon8, and WhatsApp live; Facebook and X remained degraded for browser content progress.
+- Focused tests passed: `python -m pytest tests\extension\test_extension_bundle_static.py tests\tools\test_browser_maintenance_scripts.py tests\notifications\test_realtime_feed.py -q` -> 104 passed.
+- Final post-cleanup tests passed: `python -m pytest tests\extension\test_extension_bundle_static.py tests\tools\test_browser_maintenance_scripts.py -q` -> 64 passed.
 
 Next steps:
-1. Manually restore the X browser session/page if X capture is required: open the scraper Chrome X tab, clear the "Try again" shell or re-login, then wait for `x_posts.collected_at` to advance.
-2. Continue watching browser maintenance after the next scheduled pass; exact duplicate URLs should be closed automatically.
-3. Watch DB lock pressure from long GitHub COPY/backfill work; recon commands may log deferred base-schema migration while backup/backfill holds locks, but runtime recon operations still complete.
+1. Let X sit on `x.com/home` long enough for the less aggressive recovery path, then verify whether `x_posts` or X media rows advance.
+2. Investigate Facebook browser content progress if it remains stale after the next maintenance cycle.
+3. Watch DB lock pressure from long GitHub COPY/backfill work; broad media/source rollup queries may time out while backup/backfill holds locks, but live source health and realtime feed continue operating.

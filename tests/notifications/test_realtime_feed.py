@@ -587,8 +587,9 @@ async def test_drain_falls_back_to_text_when_local_media_upload_fails(
 
     assert len(telegram_stub["send_video"]) == 1
     assert len(telegram_stub["send"]) == 1
-    assert "stored locally" in telegram_stub["send"][0]["text"]
-    assert str(local_video) in telegram_stub["send"][0]["text"]
+    assert "stored locally in the Collector vault" in telegram_stub["send"][0]["text"]
+    assert local_video.name in telegram_stub["send"][0]["text"]
+    assert str(local_video) not in telegram_stub["send"][0]["text"]
 
 
 @pytest.mark.asyncio

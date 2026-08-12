@@ -123,6 +123,8 @@ def test_chrome_cdp_launcher_discovers_extension_id_from_cdp():
     assert "function Find-ExistingCdpTarget" in script
     assert "function Activate-CdpTarget" in script
     assert "function Try-OpenCdpTarget" in script
+    assert "Invoke-WebRequest -Uri \"http://127.0.0.1:$Port/json/list\"" in script
+    assert "$targets = @($response.Content | ConvertFrom-Json)" in script
     assert "$existingTargetId = Find-ExistingCdpTarget" in script
     assert "json/activate/$TargetId" in script
     assert "Could not open CDP target" in script
@@ -147,9 +149,9 @@ def test_chrome_cdp_launcher_defaults_to_one_startup_tab_per_platform():
     assert '"https://www.tiktok.com/foryou"' in launch_section
     assert '"https://www.tiktok.com/following"' in launch_section
     assert '"https://www.lemon8-app.com/topic/singapore?region=sg"' in launch_section
-    assert '"https://www.lemon8-app.com/topic/food?region=sg"' in launch_section
+    assert '"https://www.lemon8-app.com/topic/food?region=sg"' not in launch_section
     assert 'tiktok = if ($expandedPlatformTabs)' in launch_section
-    assert 'lemon8 = if ($expandedPlatformTabs)' in launch_section
+    assert 'lemon8 = "https://www.lemon8-app.com/topic/singapore?region=sg"' in launch_section
 
 
 def test_browser_tab_audit_accepts_dynamic_extension_worlds():
@@ -200,11 +202,22 @@ def test_browser_tab_maintenance_closes_duplicate_cdp_page_targets():
     script = (REPO_ROOT / "scripts" / "browser-tab-maintenance.ps1").read_text(encoding="utf-8")
 
     assert "function Remove-DuplicateCdpPageTargets" in script
+    assert "function Remove-DuplicateExtensionControlTabs" in script
+    assert "function Remove-BlankStartupTabs" in script
+    assert "^chrome-extension://[^/]+/tabs\\.html(?:[?#].*)?$" in script
+    assert "Invoke-WebRequest -Uri \"http://127.0.0.1:$script:CdpPort/json/list\"" in script
+    assert "return @($response.Content | ConvertFrom-Json)" in script
     assert "Group-Object -Property url" in script
     assert "Select-Object -Skip 1" in script
     assert "closed duplicate CDP page target" in script
+    assert "closed duplicate extension control tab" in script
+    assert "closed blank Chrome startup tab" in script
+    assert '$_.type -eq "page" -and [string]$_.url -eq "about:blank"' in script
+    assert '[string]$_.url -eq "chrome-extension://$primaryId/tabs.html"' in script
     assert "Remove-DuplicateCdpPageTargets" in script
     assert "function Ensure-ExtensionControlTab {\n    Remove-DuplicateCdpPageTargets" in script
+    assert "Remove-DuplicateExtensionControlTabs" in script
+    assert "Remove-BlankStartupTabs" in script
     assert "Ensure-ExtensionControlTab | Out-Null\n            Remove-DuplicateCdpPageTargets" in script
     assert "Ensure-ExtensionControlTab | Out-Null\n    Remove-DuplicateCdpPageTargets" in script
 
@@ -213,15 +226,14 @@ def test_browser_tab_reload_hard_reopens_repeatedly_stuck_tiktok_tabs():
     script = (REPO_ROOT / "tools" / "browser_tab_reload.py").read_text(encoding="utf-8")
 
     assert "UC_BROWSER_HARD_REOPEN_PLATFORMS" in script
-    assert '"instagram,threads,tiktok,lemon8,x,facebook,strava"' in script
+    assert '"instagram,threads,tiktok,x,facebook,strava"' in script
     assert '"https://www.tiktok.com/foryou"' in script
     assert '"https://www.tiktok.com/following"' in script
     assert '"https://www.tiktok.com/explore"' in script
     assert '"x": [' in script
     assert '"https://x.com/home"' in script
-    assert '"https://twitter.com/home"' in script
     hard_reopen_block = script.split("HARD_REOPEN_URLS = {", 1)[1].split("def _target_version", 1)[0]
-    assert '"https://www.lemon8-app.com/topic/food?region=sg"' in script
+    assert '"lemon8": [' not in hard_reopen_block
     assert "def _platform_had_previous_unresponsive_reload" in script
     assert "def _hard_reopen_platform" in script
     assert "reopen_urls = HARD_REOPEN_URLS.get(platform)" in script
@@ -264,9 +276,9 @@ def test_chrome_cdp_launcher_opens_requested_platform_urls_directly():
     assert '"https://www.tiktok.com/foryou"' in script
     assert '"https://www.tiktok.com/following"' in script
     assert '"https://www.tiktok.com/explore"' in script
-    assert "lemon8 = if ($expandedPlatformTabs)" in script
-    assert '"https://www.lemon8-app.com/topic/food?region=sg"' in script
-    assert '"https://www.lemon8-app.com/topic/travel?region=sg"' in script
+    assert "lemon8 = if ($expandedPlatformTabs)" not in script
+    assert '"https://www.lemon8-app.com/topic/food?region=sg"' not in script
+    assert '"https://www.lemon8-app.com/topic/travel?region=sg"' not in script
     assert '"https://www.lemon8-app.com/topic/singapore?region=sg"' in script
     assert "foreach ($url in @($platforms[$id]))" in script
     assert 'strava = "https://www.strava.com/dashboard"' in script
@@ -279,6 +291,8 @@ def test_chrome_cdp_launcher_directly_opens_requested_platforms_after_control():
 
     assert "$controlOpened = Open-ExtensionControlPage" in script
     assert "function Open-RequestedPlatformTabs" in script
+    assert "function Find-ExistingCdpTarget" in script
+    assert "$targets = @($response.Content | ConvertFrom-Json)" in script
     assert script.count("Open-RequestedPlatformTabs -Port $RemoteDebuggingPort") == 2
     assert "if ($OpenIds.Count -gt 0 -or ($OpenAll -and -not $NoOpenAll))" in script
     assert "UC_CHROME_OPEN_TAB_DELAY_MS" in script
@@ -336,7 +350,7 @@ def test_browser_maintenance_repairs_missing_chrome():
     assert "-CloseExistingCdpProfile -CloseExistingIfNoVisibleWindows" in script
     assert "collector-controlled unreachable CDP Chrome" in script
     assert "-FallbackOpenControlIfCleanupBlocked" not in script
-    assert "-OpenIds instagram,tiktok,lemon8,x,threads,facebook,strava" in script
+    assert "-OpenIds instagram,tiktok,x,threads,facebook,strava" in script
     assert "Chrome CDP repair succeeded; continuing maintenance pass" in script
     assert "chrome_cdp_available" in script
 

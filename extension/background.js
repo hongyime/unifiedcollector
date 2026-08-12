@@ -70,12 +70,9 @@ globalThis.UC_PLATFORMS = [
   { id: "threads",   label: "Threads",     url: "https://www.threads.com/",         host: "www.threads.com",    cookieUrl: "https://www.threads.com",        cookie: "sessionid",  scraper: true },
   { id: "tiktok",    label: "TikTok",      url: "https://www.tiktok.com/following", host: "www.tiktok.com",     cookieUrl: "https://www.tiktok.com",         cookie: "sessionid",  scraper: true, extraUrls: ["https://www.tiktok.com/foryou", "https://www.tiktok.com/explore"] },
   // Lemon8's SPA renders "Not found" for /feed/<cat> and legacy paths as of
-  // 2026-08-05 — single-segment paths (/foryou, /discover, /explore) get
-  // treated as usernames (redirected to /@handle) and 404 too. Verified
-  // working feed URLs are /topic/<slug>?region=<cc>. See platforms.js for
-  // the same override applied to popup/tabs UI. Keep this bounded to three
-  // topic tabs so Lemon8 gets diversity without creating a browser tab storm.
-  { id: "lemon8",    label: "Lemon8",      url: "https://www.lemon8-app.com/topic/food?region=sg", host: "www.lemon8-app.com", cookieUrl: "https://www.lemon8-app.com",     cookie: "sessionid",  scraper: true, noLogin: true, extraUrls: ["https://www.lemon8-app.com/topic/travel?region=sg", "https://www.lemon8-app.com/topic/singapore?region=sg"] },
+  // 2026-08-05. Keep one visible topic tab only; the headless Lemon8 collector
+  // handles broader coverage without pinning extra Chrome tabs.
+  { id: "lemon8",    label: "Lemon8",      url: "https://www.lemon8-app.com/topic/singapore?region=sg", host: "www.lemon8-app.com", cookieUrl: "https://www.lemon8-app.com",     cookie: "sessionid",  scraper: false, noLogin: true },
   { id: "x",         label: "Twitter / X", url: "https://x.com/home",               host: "x.com",              aliasHosts: ["twitter.com"], cookieUrl: "https://x.com",                  cookie: "auth_token", scraper: true },
   { id: "facebook",  label: "Facebook",    url: "https://www.facebook.com/",        host: "www.facebook.com",   cookieUrl: "https://www.facebook.com",       cookie: "c_user",     scraper: true },
   { id: "strava",    label: "Strava",      url: "https://www.strava.com/dashboard", host: "www.strava.com",     cookieUrl: "https://www.strava.com",         cookie: "_strava4_session", scraper: true },
@@ -378,13 +375,7 @@ function hardRefreshNavigationUrl(platform, currentUrl, now) {
   if (!platform || !HOME_NAV_HARD_REFRESH_PLATFORMS.has(platform.id)) return null;
   const current = String(currentUrl || "");
   if (platform.id === "x") {
-    try {
-      const u = new URL(current || platform.url || "https://x.com/home");
-      if (/twitter\.com$/i.test(u.hostname)) return "https://x.com/home";
-      return "https://twitter.com/home";
-    } catch (e) {
-      return "https://twitter.com/home";
-    }
+    return "https://x.com/home";
   }
   if (platform.id === "threads") {
     return `https://www.threads.com/?uc_recover=${Math.floor(now / 1000)}`;
@@ -886,11 +877,21 @@ async function mapLimit(items, limit, worker) {
   return out;
 }
 
-// Open exactly the missing scraper tabs — pinned, background, ONE at a time with a
+// Open exactly the missing scraper tabs in the background, ONE at a time with a
 // gap so we never spam tabs or spike CPU. Robust dedup by host+path-prefix means a
 // tab is never duplicated.
 const _tpath = (u) => { try { return new URL(u).pathname.split("?")[0].replace(/\/$/, "") || "/"; } catch (e) { return "/"; } };
 const _mainWorldHookHostRe = /(^|\.)((instagram|tiktok|strava)\.com|threads\.com|x\.com|twitter\.com|facebook\.com)$/i;
+const SCRAPER_TABS_PINNED_KEY = "ucPinScraperTabs";
+
+async function scraperTabsPinned() {
+  try {
+    const stored = await chrome.storage.local.get([SCRAPER_TABS_PINNED_KEY]);
+    return stored && stored[SCRAPER_TABS_PINNED_KEY] === true;
+  } catch (e) {
+    return false;
+  }
+}
 
 function scraperTabRows(tabs) {
   return (tabs || [])
@@ -933,6 +934,7 @@ function canonicalTabScore(row) {
 function selectCanonicalScraperTabRows(tabs) {
   const rows = scraperTabRows(tabs);
   const byKey = new Map();
+  const duplicateRows = [];
   let skipped = 0;
   for (const row of rows) {
     const key = canonicalTabKey(row);
@@ -947,7 +949,10 @@ function selectCanonicalScraperTabRows(tabs) {
     const rowId = Number(row.tab && row.tab.id);
     const curId = Number(cur.tab && cur.tab.id);
     if (rowScore > curScore || (rowScore === curScore && rowId < curId)) {
+      duplicateRows.push(cur);
       byKey.set(key, row);
+    } else {
+      duplicateRows.push(row);
     }
     skipped++;
   }
@@ -956,7 +961,26 @@ function selectCanonicalScraperTabRows(tabs) {
     const bk = canonicalTabKey(b) || "";
     return ak.localeCompare(bk);
   });
-  return { rows: selected, seen: rows.length, skipped };
+  return { rows: selected, seen: rows.length, skipped, duplicateRows };
+}
+
+async function closeDuplicateScraperTabRows(rows, reason) {
+  let closed = 0;
+  let errors = 0;
+  for (const row of rows || []) {
+    const id = Number(row && row.tab && row.tab.id);
+    if (!Number.isFinite(id)) continue;
+    try {
+      await chrome.tabs.remove(id);
+      closed++;
+    } catch (e) {
+      errors++;
+    }
+  }
+  if (closed || errors) {
+    await log("info", `closed ${closed} duplicate scraper tab(s), ${errors} close error(s) (${reason})`);
+  }
+  return { closed, errors };
 }
 
 function shouldNormalizeSingleFeedTab(p, tab, reason) {
@@ -1030,7 +1054,7 @@ async function createTabInSocialGroup(createOptions, hint) {
   return created;
 }
 
-// Keep exactly ONE tab per single-feed platform (instagram/threads/lemon8/x/facebook)
+// Keep exactly ONE tab per single-feed platform (instagram/threads/x/facebook)
 // and one per target path for multi-url platforms (tiktok = foryou + following).
 // Closes duplicates so the extension never piles up tabs (the old bug: when the
 // auto-opened tab navigated to a sub-path, the dedup missed it and opened another).
@@ -1042,13 +1066,14 @@ async function ensureScraperTabsOpen(reason, options = {}) {
   // Compute group hint once per sweep — cheap chrome.tabs.query, and reusing
   // it keeps every newly-opened tab pointed at the same group.
   const groupHint = await scraperGroupHint();
+  const pinScraperTabs = await scraperTabsPinned();
   try {
     for (const p of scraperPlatforms()) {
       const tabs = (await chrome.tabs.query({ url: platformUrlPatterns(p) })) || [];
       if (!(p.extraUrls && p.extraUrls.length)) {
         // single-feed: keep one tab on the host, close the rest
         if (tabs.length === 0) {
-          try { await createTabInSocialGroup({ url: p.url, pinned: true, active: false }, groupHint); opened++; await _sleep(_humanGap(3000)); } catch (e) {}
+          try { await createTabInSocialGroup({ url: p.url, pinned: pinScraperTabs, active: false }, groupHint); opened++; await _sleep(_humanGap(3000)); } catch (e) {}
         } else {
           if (shouldNormalizeSingleFeedTab(p, tabs[0], reason)) {
             try { await chrome.tabs.update(tabs[0].id, { url: p.url }); navigated++; await _sleep(_humanGap(3000)); } catch (e) {}
@@ -1066,7 +1091,7 @@ async function ensureScraperTabsOpen(reason, options = {}) {
           if (m) { if (kept.has(m)) { try { await chrome.tabs.remove(t.id); closed++; } catch (e) {} } else kept.add(m); }
         }
         for (let i = 0; i < targets.length; i++) {
-          if (!kept.has(wantPaths[i])) { try { await createTabInSocialGroup({ url: targets[i], pinned: true, active: false }, groupHint); opened++; await _sleep(_humanGap(3000)); } catch (e) {} }
+          if (!kept.has(wantPaths[i])) { try { await createTabInSocialGroup({ url: targets[i], pinned: pinScraperTabs, active: false }, groupHint); opened++; await _sleep(_humanGap(3000)); } catch (e) {} }
         }
       }
     }
@@ -1110,6 +1135,8 @@ async function refreshScraperTabs(options = {}) {
   try {
     const allTabs = await chrome.tabs.query({ url: scraperUrlPatterns() });
     const selection = selectCanonicalScraperTabRows(allTabs);
+    const closed = await closeDuplicateScraperTabRows(selection.duplicateRows, `refresh:${reason}`);
+    errors += closed.errors;
     const tabs = selection.rows.map((row) => row.tab);
     for (const t of tabs || []) {
       try {
@@ -1121,8 +1148,8 @@ async function refreshScraperTabs(options = {}) {
       }
     }
     const mode = bypassCache ? "hard-refreshed" : "auto-refreshed";
-    await log("info", `${mode} ${tabs ? tabs.length : 0}/${selection.seen} canonical scraper tab(s), skipped ${selection.skipped} duplicate(s), staggered ${gapMs}ms → loop respawns fresh (${reason})`);
-    return { ok: true, reloaded, errors, tabs: tabs ? tabs.length : 0, totalTabs: selection.seen, skippedDuplicates: selection.skipped };
+    await log("info", `${mode} ${tabs ? tabs.length : 0}/${selection.seen} canonical scraper tab(s), closed ${closed.closed}/${selection.skipped} duplicate(s), staggered ${gapMs}ms → loop respawns fresh (${reason})`);
+    return { ok: true, reloaded, errors, tabs: tabs ? tabs.length : 0, totalTabs: selection.seen, skippedDuplicates: selection.skipped, closedDuplicates: closed.closed };
   } finally { _tabsOpInProgress = false; }
 }
 
@@ -1688,6 +1715,7 @@ async function ensureLoops(reason) {
   const forceCycle = /browser_content_stale|manual|scrape|tabs_page|stale/i.test(reason || "");
   const allTabs = await chrome.tabs.query({ url: scraperUrlPatterns() });
   const selection = selectCanonicalScraperTabRows(allTabs);
+  await closeDuplicateScraperTabRows(selection.duplicateRows, `ensure_loops:${reason || "nudge"}`);
   const tabs = selection.rows.map((row) => row.tab);
   if (!selection.seen) {
     await log("warn", `no scraper tab open — paused (${reason}). Open one via 🗂 Manage social tabs.`);

@@ -612,13 +612,10 @@ function switchXHostForRecoverableShell(shell) {
   const navKey = `uc_x_shell_nav_${shell.reason || "shell"}`;
   const stepKey = "uc_x_shell_global_step";
   const lastNav = lsNum(navKey);
-  const minNavGapMs = /try_again/i.test(shell.reason || "") ? 30000 : 90000;
+  const minNavGapMs = /try_again/i.test(shell.reason || "") ? 5 * 60000 : 3 * 60000;
   if (lastNav && Date.now() - lastNav < minNavGapMs) return false;
   lsSet(navKey, String(Date.now()));
-  const host = String(location.hostname || "").toLowerCase();
   const stamp = Math.floor(Date.now() / 1000);
-  const onTwitterHost = host === "twitter.com" || host.endsWith(".twitter.com");
-  const alternateHost = onTwitterHost ? `https://x.com/home?uc_recover=${stamp}` : `https://twitter.com/home?uc_recover=${stamp}`;
   const owner = ownerFromStoredOrDom("x", xLoggedInOwner);
   const reason = String(shell.reason || "");
   const isGenericShell = /try_again|something_went_wrong|no_internet/i.test(reason);
@@ -626,12 +623,10 @@ function switchXHostForRecoverableShell(shell) {
     ? [
         `https://x.com/home?uc_recover=${stamp}`,
         `https://x.com/explore?uc_recover=${stamp}`,
-        alternateHost,
         `https://x.com/home?uc_recover=${stamp}`,
       ]
     : [
         `https://x.com/explore?uc_recover=${stamp}`,
-        alternateHost,
         `https://x.com/home?uc_recover=${stamp}`,
         ...(owner ? ["https://x.com/" + encodeURIComponent(owner) + "?uc_recover=" + stamp] : []),
       ];

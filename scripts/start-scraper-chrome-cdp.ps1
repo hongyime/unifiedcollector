@@ -77,7 +77,12 @@ function Test-CdpAvailable {
         $response = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/json/version" -UseBasicParsing -TimeoutSec 3
         return ($response.StatusCode -ge 200 -and $response.StatusCode -lt 300)
     } catch {
-        return $false
+        try {
+            $targets = @(Invoke-RestMethod -Uri "http://127.0.0.1:$Port/json/list" -Method Get -TimeoutSec 5)
+            return $targets.Count -ge 0
+        } catch {
+            return $false
+        }
     }
 }
 
@@ -208,7 +213,8 @@ function Get-ExtensionIdFromCdp {
     param([int]$Port)
     $knownIds = @(Get-KnownExtensionIds)
     try {
-        $targets = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/json/list" -Method Get -TimeoutSec 5
+        $response = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/json/list" -UseBasicParsing -TimeoutSec 5
+        $targets = @($response.Content | ConvertFrom-Json)
         foreach ($target in @($targets)) {
             $url = [string]($target.url)
             $targetType = [string]($target.type)
@@ -256,7 +262,8 @@ function Open-CdpTarget {
 function Find-ExistingCdpTarget {
     param([int]$Port, [string]$Url)
     try {
-        $targets = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/json/list" -Method Get -TimeoutSec 5
+        $response = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/json/list" -UseBasicParsing -TimeoutSec 5
+        $targets = @($response.Content | ConvertFrom-Json)
         foreach ($target in @($targets)) {
             if ([string]$target.type -ne "page") {
                 continue
@@ -345,15 +352,7 @@ function Get-PlatformLaunchUrls {
         } else {
             "https://www.tiktok.com/foryou"
         }
-        lemon8 = if ($expandedPlatformTabs) {
-            @(
-                "https://www.lemon8-app.com/topic/food?region=sg",
-                "https://www.lemon8-app.com/topic/travel?region=sg",
-                "https://www.lemon8-app.com/topic/singapore?region=sg"
-            )
-        } else {
-            "https://www.lemon8-app.com/topic/singapore?region=sg"
-        }
+        lemon8 = "https://www.lemon8-app.com/topic/singapore?region=sg"
         x = "https://x.com/home"
         threads = "https://www.threads.com/"
         facebook = "https://www.facebook.com/"

@@ -68,7 +68,6 @@ PLATFORMS = {
     "instagram": ["instagram.com"],
     "threads": ["threads.com", "threads.net"],
     "tiktok": ["tiktok.com"],
-    "lemon8": ["lemon8-app.com"],
     "x": ["x.com", "twitter.com"],
     "facebook": ["facebook.com"],
     "strava": ["strava.com"],

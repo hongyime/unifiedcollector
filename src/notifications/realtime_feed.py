@@ -447,11 +447,13 @@ def _local_media_text_fallback(caption: str, target: str) -> str:
     path = str(target or "").strip()
     note = (
         "\n\n"
-        "<i>Media was collected and stored locally, but Telegram could not upload "
-        "the full file here.</i>"
+        "<i>Media was stored locally in the Collector vault; Telegram could not "
+        "upload the full file here.</i>"
     )
     if path:
-        note += f"\n<code>{html.escape(path)}</code>"
+        label = path if _flag("REALTIME_POST_FEED_INCLUDE_LOCAL_PATHS", "0") else Path(path).name
+        if label:
+            note += f"\n<code>{html.escape(label)}</code>"
     text = f"{caption}{note}"
     max_len = 3800
     if len(text) > max_len:

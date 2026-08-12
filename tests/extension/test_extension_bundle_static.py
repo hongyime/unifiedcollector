@@ -43,16 +43,16 @@ def test_x_twitter_alias_is_registered_for_tabs_and_background():
     assert "platformHosts(p).includes(host)" in background
 
 
-def test_lemon8_uses_bounded_multi_topic_seed_tabs():
+def test_lemon8_defaults_to_headless_collector_not_visible_scraper_tab():
     background = _read("extension/background.js")
     platforms = _read("extension/platforms.js")
     content = _read("extension/content.js")
 
     for text in (background, platforms):
-        assert '"https://www.lemon8-app.com/topic/food?region=sg"' in text
-        assert '"https://www.lemon8-app.com/topic/travel?region=sg"' in text
         assert '"https://www.lemon8-app.com/topic/singapore?region=sg"' in text
-        assert "extraUrls" in text
+        lemon8_line = next(line for line in text.splitlines() if 'id: "lemon8"' in line)
+        assert "extraUrls" not in lemon8_line
+        assert "scraper: false" in lemon8_line
     assert "function lemon8TopicFromHref" in content
     assert 'return topic ? "topic_" + topic : "topic";' in content
 
@@ -337,13 +337,50 @@ def test_x_threads_hard_recovery_returns_to_home_feed():
     _hr_line = [line for line in background.splitlines() if "const HOME_NAV_HARD_REFRESH_PLATFORMS" in line][0]
     assert '"x"' in _hr_line and '"threads"' in _hr_line
     assert "function hardRefreshNavigationUrl" in background
-    assert "https://twitter.com/home" in background
+    assert "https://x.com/home" in background
+    assert "https://twitter.com/home" not in hard_refresh_block
     assert "uc_recover=" in background
     assert "recovery_nav" in hard_refresh_block
     assert '"recovery_nav": body.get("recovery_nav")' in ingest
     assert '"recovery_target_url": body.get("recovery_target_url")' in ingest
     assert "chrome.tabs.update(tab.id, { url: targetUrl })" in hard_refresh_block
     assert "chrome.tabs.reload(tab.id, { bypassCache: true })" in hard_refresh_block
+
+
+def test_scraper_refresh_and_loop_nudges_close_canonical_duplicate_tabs():
+    background = _read("extension/background.js")
+    refresh_block = background.split("async function refreshScraperTabs", 1)[1].split(
+        "async function fetchTabMemoryMetrics",
+        1,
+    )[0]
+    loop_block = background.split("async function ensureLoops", 1)[1].split(
+        "const lastKick = {};",
+        1,
+    )[0]
+
+    assert "const duplicateRows = []" in background
+    assert "duplicateRows.push(cur)" in background
+    assert "duplicateRows.push(row)" in background
+    assert "async function closeDuplicateScraperTabRows" in background
+    assert "await chrome.tabs.remove(id)" in background
+    assert "closeDuplicateScraperTabRows(selection.duplicateRows, `refresh:${reason}`)" in refresh_block
+    assert "closedDuplicates: closed.closed" in refresh_block
+    assert "closeDuplicateScraperTabRows(selection.duplicateRows, `ensure_loops:${reason || \"nudge\"}`)" in loop_block
+
+
+def test_auto_opened_scraper_tabs_are_unpinned_by_default():
+    background = _read("extension/background.js")
+    ensure_block = background.split("async function ensureScraperTabsOpen", 1)[1].split(
+        "async function refreshScraperTabs",
+        1,
+    )[0]
+
+    assert 'const SCRAPER_TABS_PINNED_KEY = "ucPinScraperTabs"' in background
+    assert "async function scraperTabsPinned()" in background
+    assert "return stored && stored[SCRAPER_TABS_PINNED_KEY] === true" in background
+    assert "const pinScraperTabs = await scraperTabsPinned();" in ensure_block
+    assert "pinned: pinScraperTabs" in ensure_block
+    assert "pinned: true" not in ensure_block
 
 
 def test_post_reload_scrape_nudge_waits_and_retries_for_heavy_tabs():
@@ -468,7 +505,7 @@ def test_forced_recovery_probe_does_not_block_scrape_cycle():
     assert "return null;" in probe_block
 
 
-def test_x_error_shell_can_switch_host_when_native_retry_is_missing():
+def test_x_error_shell_uses_x_only_recovery_with_longer_backoff():
     content = _read("extension/content.js")
     recover_block = content.split("async function attemptRecoverablePageInteraction", 1)[1].split(
         "// Capture is ALWAYS ON", 1
@@ -479,8 +516,10 @@ def test_x_error_shell_can_switch_host_when_native_retry_is_missing():
 
     assert "function switchXHostForRecoverableShell" in content
     assert "uc_x_shell_nav_" in switch_block
-    assert "https://twitter.com/home?uc_recover=" in switch_block
+    assert "https://twitter.com/home?uc_recover=" not in switch_block
     assert "https://x.com/home?uc_recover=" in switch_block
+    assert "https://x.com/explore?uc_recover=" in switch_block
+    assert "5 * 60000" in switch_block
     assert "navigating to ${target}" in switch_block
     assert "uc_x_shell_global_step" in switch_block
     assert "https://x.com/i/flow/login?redirect_after_login=%2Fhome" not in switch_block
