@@ -259,6 +259,7 @@ function Open-CdpTargetUrl {
 }
 
 function Ensure-ExtensionControlTab {
+    Remove-DuplicateCdpPageTargets
     if (Test-ExtensionControlTab) {
         return $true
     }
@@ -625,12 +626,14 @@ try {
         Write-Log ("browser tab audit still unhealthy after second reload: " + (($auditHealth.unhealthy) -join " | "))
         if (Test-AuditHealthNeedsManualAuth $auditHealth) {
             Ensure-ExtensionControlTab | Out-Null
+            Remove-DuplicateCdpPageTargets
             Write-Log "browser tab maintenance degraded: manual platform auth is required; skipping profile restart"
             Write-Status "degraded" "browser tab requires manual platform auth"
             exit 4
         }
         if (-not (Test-AuditHealthNeedsProfileRestart $auditHealth)) {
             Ensure-ExtensionControlTab | Out-Null
+            Remove-DuplicateCdpPageTargets
             Write-Status "degraded" "browser extension tabs unhealthy after targeted reload; skipped profile restart"
             exit 4
         }
@@ -647,6 +650,7 @@ try {
         exit 4
     }
     Ensure-ExtensionControlTab | Out-Null
+    Remove-DuplicateCdpPageTargets
     Write-Log "browser tab maintenance complete"
     Write-Status "ok" "audit and reload completed"
 } catch {

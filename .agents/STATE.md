@@ -1,8 +1,8 @@
 # UnifiedCollector Agent State
 
-Updated: 2026-08-12 08:09 SGT
+Updated: 2026-08-12 09:05 SGT
 
-Current task: production-readiness slice with Analyzer integration is implemented, committed/pushed where complete, and live-verified; latest local work hardens duplicate CDP tab cleanup.
+Current task: production-readiness slice with Analyzer integration is implemented and live-verified except for X browser capture, which is blocked by the live X page/session returning a recoverable "Try again" shell.
 
 Recent completed work:
 - SpiderFoot recon sidecar is live and verified under the `recon` Compose profile.
@@ -11,7 +11,7 @@ Recent completed work:
 - Collector-derived recon seeding was committed and pushed as `70212a23 feat: seed collector recon targets`.
 
 In-progress work:
-- Commit and push the duplicate CDP page-target cleanup hardening after final checks.
+- X browser capture needs manual account/page recovery; code recovery attempted tab reopen, alternate host, click/nudge, and dedicated scraper Chrome profile restart, but X still returns the same shell.
 
 Current evidence:
 - `python -m pytest tests/test_recon.py tests/test_recon_spiderfoot_service.py -q` passed with 17 tests.
@@ -41,8 +41,12 @@ Current evidence:
 - Live SpiderFoot sidecar is healthy and idle, with no repeated malformed-JSON target failures in the latest log window.
 - Live CDP duplicate tab cleanup closed duplicate extension control pages and duplicate Lemon8 topic tabs; follow-up check returned `PAGE_TARGETS=13` and `DUPLICATE_URL_GROUPS=0`.
 - Focused tests passed: `python -m pytest tests/tools/test_browser_maintenance_scripts.py -q` -> 32 passed; `python -m pytest tests/dashboard/test_extension_health.py -q` -> 18 passed.
+- Stronger duplicate control-page cleanup now runs inside `Ensure-ExtensionControlTab` and after degraded/successful maintenance exits.
+- WhatsApp recovered after `collector_whatsapp` restart: bridge 2/session_2 is ready and bridge 1/session_1 remains an optional QR slot.
+- Browser CDP was recovered after scraper Chrome profile restart attempt; browser ingest is active and maintenance status returned `ok`.
+- Live X audit showed the content script attached and responsive on `https://x.com/home`, but page health is `recoverable_error_shell` with reason `try_again_empty_state`; `/health?include_sources=true` still reports X as the only degraded source.
 
 Next steps:
-1. Commit and push duplicate CDP page-target cleanup hardening.
+1. Manually restore the X browser session/page if X capture is required: open the scraper Chrome X tab, clear the "Try again" shell or re-login, then wait for `x_posts.collected_at` to advance.
 2. Continue watching browser maintenance after the next scheduled pass; exact duplicate URLs should be closed automatically.
 3. Watch DB lock pressure from long GitHub COPY/backfill work; recon commands may log deferred base-schema migration while backup/backfill holds locks, but runtime recon operations still complete.

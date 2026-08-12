@@ -204,6 +204,9 @@ def test_browser_tab_maintenance_closes_duplicate_cdp_page_targets():
     assert "Select-Object -Skip 1" in script
     assert "closed duplicate CDP page target" in script
     assert "Remove-DuplicateCdpPageTargets" in script
+    assert "function Ensure-ExtensionControlTab {\n    Remove-DuplicateCdpPageTargets" in script
+    assert "Ensure-ExtensionControlTab | Out-Null\n            Remove-DuplicateCdpPageTargets" in script
+    assert "Ensure-ExtensionControlTab | Out-Null\n    Remove-DuplicateCdpPageTargets" in script
 
 
 def test_browser_tab_reload_hard_reopens_repeatedly_stuck_tiktok_tabs():
