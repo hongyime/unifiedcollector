@@ -353,6 +353,8 @@ def main():
     print("# Reload plan\n")
     plan: list[dict] = []
     for plat, tabs in audit.items():
+        if str(plat).startswith("_") or not isinstance(tabs, list):
+            continue
         for tab in tabs:
             need, reason = _decide_reload(tab, target_version)
             url_for_check = tab.get("url") or tab.get("url_snapshot") or ""

@@ -113,6 +113,10 @@ WEBSITE_TARGET_RETRY_BACKOFF_MAX_SECONDS
 WEBSITE_RESPECT_ROBOTS          '0' to ignore robots.txt (default '1').
 WEBSITE_FOLLOW_EXTERNAL         '1' to follow links off the seed domain
                                 (default 0; same-host BFS).
+WEBSITE_MAX_ACTIVE_DOMAINS      Max concurrently active crawl domains (default 4).
+WEBSITE_MAX_REQUESTS_PER_DOMAIN Per-domain in-flight request cap (default 2).
+WEBSITE_DOMAIN_DELAY_SECONDS    Base delay before each domain-paced request.
+WEBSITE_DOMAIN_JITTER_SECONDS   Additional random request delay.
 WEBSITE_DOWNLOAD_IMAGES         '1' to download discovered images (default 1).
 WEBSITE_DOWNLOAD_PDFS           '1' to download/rasterise PDFs (default 1).
 WEBSITE_MIN_IMAGE_BYTES         Reject images smaller than N bytes (default 1024).
@@ -139,6 +143,7 @@ from urllib.parse import urljoin, urlparse, urlunparse
 import httpx
 
 from src.core.base_collector import BaseCollector
+from src.core.domain_pacing import DomainPacer, record_domain_pacing_event
 from src.core.vault import (
     VAULT_ROOT,
     assert_media_write_allowed,
@@ -471,6 +476,14 @@ class WebsiteCollector(BaseCollector):
         self._max_pages = int(os.getenv("WEBSITE_MAX_PAGES", "500"))
         self._max_concurrent = int(os.getenv("WEBSITE_MAX_CONCURRENT_TASKS", "5"))
         self._sem = asyncio.Semaphore(self._max_concurrent)
+        self._domain_pacing = DomainPacer(
+            self.SOURCE_NAME,
+            env_prefix="WEBSITE",
+            max_active_domains=4,
+            max_per_domain=2,
+            delay_seconds=1.5,
+            jitter_seconds=2.0,
+        )
         # HTTP
         self._timeout = httpx.Timeout(float(os.getenv("WEBSITE_TIMEOUT", "30")), connect=10.0)
         self._target_timeout = float(os.getenv("WEBSITE_TARGET_TIMEOUT_SECONDS", "1500"))
@@ -523,11 +536,38 @@ class WebsiteCollector(BaseCollector):
         path.mkdir(parents=True, exist_ok=True)
         return path
 
+    async def _record_domain_pacing_event(
+        self,
+        event_type: str,
+        url: str,
+        *,
+        status_code: int | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        await record_domain_pacing_event(
+            self.pool,
+            source=self.SOURCE_NAME,
+            event_type=event_type,
+            url=url,
+            status_code=status_code,
+            metadata=metadata,
+        )
+
     async def collect(self, targets: list[str]) -> None:
-        for url in targets:
+        seed_pairs: list[tuple[str, str]] = [
+            (url, url if url.startswith(("http://", "https://")) else f"https://{url}")
+            for url in targets
+        ]
+        by_seed: dict[str, list[tuple[str, str]]] = {}
+        for pair in seed_pairs:
+            by_seed.setdefault(pair[1], []).append(pair)
+        ordered_pairs: list[tuple[str, str]] = []
+        for seed in self._domain_pacing.order(seed for _url, seed in seed_pairs):
+            ordered_pairs.append(by_seed[seed].pop(0))
+
+        async def _collect_one(url: str, seed: str) -> None:
             if self._stop.is_set():
-                break
-            seed = url if url.startswith(("http://", "https://")) else f"https://{url}"
+                return
             backoff_left = await self._target_backoff_left(url, seed)
             if backoff_left > 0:
                 logger.info(
@@ -535,8 +575,14 @@ class WebsiteCollector(BaseCollector):
                     seed,
                     backoff_left,
                 )
+                self._domain_pacing.count("retry_backoff")
+                await self._record_domain_pacing_event(
+                    "retry_backoff",
+                    seed,
+                    metadata={"backoff_seconds_remaining": round(backoff_left, 1)},
+                )
                 await self.checkpoint.save_progress(seed)
-                continue
+                return
             logger.info("Collecting website/%s", seed)
             try:
                 stats = await asyncio.wait_for(
@@ -558,6 +604,30 @@ class WebsiteCollector(BaseCollector):
                     await self.send_to_dlq(seed, seed, str(e))
                 except Exception:
                     pass
+
+        if ordered_pairs:
+            workers = min(
+                len(ordered_pairs),
+                max(1, int(os.getenv("WEBSITE_TARGET_CONCURRENCY", str(self._domain_pacing.max_active_domains)))),
+                self._domain_pacing.max_active_domains,
+            )
+            if workers <= 1:
+                for url, seed in ordered_pairs:
+                    await _collect_one(url, seed)
+            else:
+                queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
+                for pair in ordered_pairs:
+                    queue.put_nowait(pair)
+
+                async def _worker() -> None:
+                    while not queue.empty() and not self._stop.is_set():
+                        pair = await queue.get()
+                        try:
+                            await _collect_one(*pair)
+                        finally:
+                            queue.task_done()
+
+                await asyncio.gather(*(_worker() for _ in range(workers)))
 
         # Broad discovery runs after explicit targets so it cannot starve root
         # crawls when the discovered frontier is large.
@@ -619,10 +689,17 @@ class WebsiteCollector(BaseCollector):
             await self._robots.load(url, client) if self._respect_robots else None
             if self._respect_robots and not self._robots.is_allowed(url):
                 logger.debug("robots.txt disallows %s", url)
+                self._domain_pacing.count("robots_blocked")
+                await self._record_domain_pacing_event("robots_blocked", url)
                 return None
-            await self.wait_rate_limit(domain)
-            async with self._sem:
-                resp = await client.get(url)
+            async with self._domain_pacing.slot(url):
+                await self.wait_rate_limit(domain)
+                async with self._sem:
+                    resp = await client.get(url)
+            if resp.status_code in (403, 429):
+                event = f"http_{resp.status_code}"
+                self._domain_pacing.count(event)
+                await self._record_domain_pacing_event(event, url, status_code=resp.status_code)
             if self._use_playwright and resp.status_code == 200 and "text/html" in resp.headers.get("content-type", ""):
                 rendered = await self._render_html(url)
                 if rendered:
@@ -654,7 +731,8 @@ class WebsiteCollector(BaseCollector):
         visited: set[str] = set()
         queue: list[tuple[str, int]] = [(seed_url, 0)]
         stats = {"pages": 0, "images": 0, "pdfs": 0, "docs": 0, "videos": 0,
-                 "errors": 0, "skipped": 0}
+                 "errors": 0, "skipped": 0, "robots_blocked": 0,
+                 "http_403": 0, "http_429": 0}
 
         client = self._build_client(domain)
         try:
@@ -679,6 +757,9 @@ class WebsiteCollector(BaseCollector):
                     continue
                 if self._respect_robots and not self._robots.is_allowed(url):
                     stats["skipped"] += 1
+                    stats["robots_blocked"] += 1
+                    self._domain_pacing.count("robots_blocked")
+                    await self._record_domain_pacing_event("robots_blocked", url)
                     continue
 
                 # Videos are streamed to disk (no cap) — detect by extension and
@@ -687,20 +768,33 @@ class WebsiteCollector(BaseCollector):
                 if self._download_videos and _is_video_url(url):
                     if url not in self._seen_media:
                         self._seen_media.add(url)
-                        await self.wait_rate_limit(domain)
                         try:
-                            async with self._sem:
-                                if await self._stream_video(client, url, domain):
-                                    stats["videos"] += 1
+                            async with self._domain_pacing.slot(url):
+                                await self.wait_rate_limit(domain)
+                                async with self._sem:
+                                    if await self._stream_video(client, url, domain):
+                                        self._domain_pacing.count("videos_found")
+                                        stats["videos"] += 1
+                        except RuntimeError as e:
+                            text = str(e)
+                            if "status 403" in text or "status 429" in text:
+                                code = 429 if "status 429" in text else 403
+                                key = f"http_{code}"
+                                stats[key] += 1
+                                self._domain_pacing.count(key)
+                                await self._record_domain_pacing_event(key, url, status_code=code)
+                            logger.debug("video stream failed %s: %s", url, e)
+                            stats["errors"] += 1
                         except Exception as e:
                             logger.debug("video stream failed %s: %s", url, e)
                             stats["errors"] += 1
                     continue
 
-                await self.wait_rate_limit(domain)
                 try:
-                    async with self._sem:
-                        resp = await client.get(url)
+                    async with self._domain_pacing.slot(url):
+                        await self.wait_rate_limit(domain)
+                        async with self._sem:
+                            resp = await client.get(url)
                 except Exception as e:
                     logger.debug("GET %s failed: %s", url, e)
                     stats["errors"] += 1
@@ -709,6 +803,11 @@ class WebsiteCollector(BaseCollector):
 
                 if resp.status_code != 200:
                     stats["errors"] += 1
+                    if resp.status_code in (403, 429):
+                        key = f"http_{resp.status_code}"
+                        stats[key] += 1
+                        self._domain_pacing.count(key)
+                        await self._record_domain_pacing_event(key, url, status_code=resp.status_code)
                     continue
                 ct = resp.headers.get("content-type", "").lower()
 
@@ -716,6 +815,7 @@ class WebsiteCollector(BaseCollector):
                 if "application/pdf" in ct or _is_pdf_url(url):
                     if self._download_pdfs:
                         await self._handle_pdf(resp.content, url, domain)
+                        self._domain_pacing.count("pdfs_found")
                         stats["pdfs"] += 1
                     continue
 
@@ -726,6 +826,7 @@ class WebsiteCollector(BaseCollector):
                     _is_document_url(url) or _is_document_content_type(ct)
                 ):
                     await self._handle_document(resp.content, url, domain)
+                    self._domain_pacing.count("docs_found")
                     stats["docs"] += 1
                     continue
 
@@ -776,6 +877,7 @@ class WebsiteCollector(BaseCollector):
                                 alt=img.get("alt", ""),
                                 client=client,
                             )
+                            self._domain_pacing.count("media_found")
                             stats["images"] += 1
                         except Exception as e:
                             logger.debug("image download failed %s: %s", img_url, e)
@@ -808,6 +910,14 @@ class WebsiteCollector(BaseCollector):
             "errors=%d skipped=%d",
             domain, stats["pages"], stats["images"], stats["pdfs"],
             stats["docs"], stats["videos"], stats["errors"], stats["skipped"],
+        )
+        await self._record_domain_pacing_event(
+            "crawl_summary",
+            seed_url,
+            metadata={
+                **stats,
+                "domain_pacing": self._domain_pacing.snapshot().as_dict(),
+            },
         )
         return stats
 
@@ -1013,9 +1123,14 @@ class WebsiteCollector(BaseCollector):
     ) -> None:
         """Fetch + parse a sitemap, enqueue same-domain URLs at depth 0."""
         try:
-            await self.wait_rate_limit(seed_domain)
-            resp = await client.get(sitemap_url)
+            async with self._domain_pacing.slot(sitemap_url):
+                await self.wait_rate_limit(seed_domain)
+                resp = await client.get(sitemap_url)
             if resp.status_code != 200:
+                if resp.status_code in (403, 429):
+                    event = f"http_{resp.status_code}"
+                    self._domain_pacing.count(event)
+                    await self._record_domain_pacing_event(event, sitemap_url, status_code=resp.status_code)
                 return
             ct = resp.headers.get("content-type", "").lower()
             if "xml" not in ct and "text/plain" not in ct:
@@ -1103,9 +1218,16 @@ class WebsiteCollector(BaseCollector):
         """Quality-gated image download mirroring photo_scraper.download_image."""
         if not self._url_filter.is_allowed(img_url)[0]:
             return
+        img_domain = urlparse(img_url).netloc or entity_id
         # HEAD first to short-circuit oversized downloads.
         try:
-            head = await client.head(img_url, timeout=15.0)
+            async with self._domain_pacing.slot(img_url):
+                await self.wait_rate_limit(img_domain)
+                head = await client.head(img_url, timeout=15.0)
+            if head.status_code in (403, 429):
+                event = f"http_{head.status_code}"
+                self._domain_pacing.count(event)
+                await self._record_domain_pacing_event(event, img_url, status_code=head.status_code)
             cl = head.headers.get("content-length")
             if cl and int(cl) > self._max_image_bytes:
                 logger.debug("img too large by HEAD: %s (%s)", img_url, cl)
@@ -1118,11 +1240,17 @@ class WebsiteCollector(BaseCollector):
             pass
 
         try:
-            resp = await client.get(img_url, timeout=30.0)
+            async with self._domain_pacing.slot(img_url):
+                await self.wait_rate_limit(img_domain)
+                resp = await client.get(img_url, timeout=30.0)
         except Exception as e:
             logger.debug("img GET failed %s: %s", img_url, e)
             return
         if resp.status_code != 200:
+            if resp.status_code in (403, 429):
+                event = f"http_{resp.status_code}"
+                self._domain_pacing.count(event)
+                await self._record_domain_pacing_event(event, img_url, status_code=resp.status_code)
             return
         data = resp.content
         if len(data) < self._min_image_bytes:

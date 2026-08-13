@@ -52,6 +52,12 @@ const lsGet = (k, d) => { try { const v = localStorage.getItem(k); return v == n
 const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} };
 const lsNum = (k) => { const n = parseInt(lsGet(k, "0"), 10); return Number.isFinite(n) ? n : 0; };
 const lsBump = (k) => { const n = lsNum(k) + 1; lsSet(k, String(n)); return n; };
+function lsBoundedInt(key, fallback, min, max) {
+  const raw = lsGet(key, "");
+  const n = raw === "" ? fallback : parseInt(raw, 10);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
+}
 
 // PERSISTENT throttle wall (anti-ban). Store by platform + visible owner where
 // possible, with the old platform-only key as a legacy fallback.
@@ -119,6 +125,9 @@ const DEFAULT_THROTTLE_BACKOFF_MINS = {
   default: 35,
 };
 async function throttleBackoffMins(platform, fallback = DEFAULT_THROTTLE_BACKOFF_MINS.default) {
+  if (platform === "instagram" && lsGet("ucIg429CooldownMinutes", "") !== "") {
+    return lsBoundedInt("ucIg429CooldownMinutes", DEFAULT_THROTTLE_BACKOFF_MINS.instagram, 45, 180);
+  }
   try {
     const { ucThrottleBackoffMins = {} } = await chrome.storage.local.get("ucThrottleBackoffMins");
     const raw = ucThrottleBackoffMins[platform] ?? ucThrottleBackoffMins.default;
@@ -1043,13 +1052,36 @@ async function maybeSweepFollowGraph({ platform, owner, urls, homeUrl }) {
 // Instagram (same-origin API; full media + 2-hop spider)
 // ===========================================================================
 const IG_APP_ID = "936619743392459";
-const SPIDER_FAMOUS_CAP = 3000;   // skip accounts > 3k followers (focus on close network)
 const SPIDER_FOLLOWS_PER_SIDE = 35;     // fewer graph calls per profile
 const IG_MAX_ITEMS = 180;               // cap media pages per profile
+// Bounded local knobs. Override from the Instagram tab DevTools console with
+// localStorage.setItem("ucIgStorySweepCap", "8"), etc. Bounds are deliberate:
+// one visible tab, human-paced cycles, and no throughput increase while 429 /
+// checkpoint signals are active.
+function igStorySweepCap() { return lsBoundedInt("ucIgStorySweepCap", 6, 5, 8); }
+function igDeepProfileCap() { return lsBoundedInt("ucIgDeepProfileCap", 3, 2, 5); }
+function igRestWindowMs() { return lsBoundedInt("ucIgRestWindowMinutes", 10, 8, 22) * 60000; }
+function igFamousFollowerCap() { return lsBoundedInt("ucIgFamousFollowerCap", 3000, 1000, 5000); }
+function igRevisitHourlyCap() { return lsBoundedInt("ucIgRevisitHourlyCap", 1, 0, 3); }
 // Per-cycle target budget: a human checks a HANDFUL of profiles, not 257.
 // Randomised each cycle; the rest are picked up on later cycles (round-robin).
-function igTargetBudget() { return 2 + ((Math.random() * 3) | 0); } // 2-4 deep profiles/cycle
-const IG_STORY_SWEEP = 5;   // profiles to grab EXPIRING stories/highlights from, first, each cycle
+function igTargetBudget() {
+  const cap = igDeepProfileCap();
+  return Math.max(2, Math.min(cap, 2 + ((Math.random() * Math.max(1, cap - 1)) | 0)));
+}
+function consumeInstagramRevisitBudget() {
+  const cap = igRevisitHourlyCap();
+  if (cap <= 0) return false;
+  const key = "ucIgRevisitHourlyBudget";
+  const bucket = Math.floor(Date.now() / 3600000);
+  let state = null;
+  try { state = JSON.parse(localStorage.getItem(key) || "null"); } catch (e) {}
+  if (!state || state.bucket !== bucket) state = { bucket, count: 0 };
+  if (state.count >= cap) return false;
+  state.count += 1;
+  lsSet(key, JSON.stringify(state));
+  return true;
+}
 const IG_SEEDED_ACCOUNTS = new Set();  // ds_user_ids self-seeded this session (re-seeds on account switch)
 
 const instagram = {
@@ -1378,7 +1410,7 @@ const instagram = {
     const left = wallLeftMs("instagram", igOwner);
     if (left > 0) {
       clog("warn", `IG throttled — resting, ${Math.ceil(left / 60000)}m left (not touching IG)`, "instagram");
-      await sleep(Math.min(left, human(600000))); // re-check roughly every 8-22m
+      await sleep(Math.min(left, human(igRestWindowMs()))); // re-check inside the bounded rest window
       return { targets: 0, saved: 0, discovered: 0, walled: true };
     }
     // Per-account self-seed: capture EACH account's own graph as you switch to it.
@@ -1396,7 +1428,7 @@ const instagram = {
     if (!pool.length) return { targets: 0, saved: 0, discovered: 0 };
     const cache = new Map();
     const getUser = async (u) => { if (cache.has(u)) return cache.get(u); const p = await this.getProfile(u); cache.set(u, p); return p; };
-    const okProfile = (user) => user && ((user.edge_followed_by && user.edge_followed_by.count) || 0) <= SPIDER_FAMOUS_CAP;
+    const okProfile = (user) => user && ((user.edge_followed_by && user.edge_followed_by.count) || 0) <= igFamousFollowerCap();
     let saved = 0, discovered = 0, visited = 0;
 
     // PASS 0 — WHOLE STORY TRAY. One reels_tray call captures every followed
@@ -1416,7 +1448,7 @@ const instagram = {
 
     // PASS 1 — EXPIRING FIRST. The server orders seeds (hop 0) at the front, so we
     // sweep stories/highlights for your seed profiles + early network every cycle.
-    const sweep = pool.slice(0, IG_STORY_SWEEP);
+    const sweep = pool.slice(0, igStorySweepCap());
     clog("info", `expiring-first: stories/highlights sweep of ${sweep.length} profile(s)`, "instagram");
     for (const t of sweep) {
       try {
@@ -1686,6 +1718,9 @@ async function maybeStartBrowserMediaRevisit(platform, owner) {
   ).catch(() => null);
   const target = reply && reply.target;
   if (!target || !target.content_id) return null;
+  if (platform === "instagram" && !consumeInstagramRevisitBudget()) {
+    return null;
+  }
   const url = target.post_url || target.source_url;
   if (!browserMediaRevisitUrlOk(platform, url)) {
     await send({

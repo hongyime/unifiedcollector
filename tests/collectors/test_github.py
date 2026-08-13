@@ -238,6 +238,8 @@ def test_get_rate_limit_status_snapshot():
     assert snap["reset_time"]  # iso-rendered
     assert snap["requests_made"] == 7
     assert snap["pat_count"] == 0
+    assert snap["used"] == 4901
+    assert snap["target"] == 4250
 
 
 # ── high-level GET wrappers ───────────────────────────────────────────────
@@ -414,6 +416,47 @@ async def test_api_get_records_github_quota_as_rate_limit_and_sleeps(monkeypatch
     assert events[0]["cooldown_seconds"] == 125
     assert events[0]["metadata"]["http_status_code"] == 403
     assert events[0]["metadata"]["rate_limit_remaining"] == 0
+
+
+@pytest.mark.asyncio
+async def test_api_get_records_quota_snapshot_and_adaptive_delay(monkeypatch):
+    coll = _new_collector()
+    coll._api_delay = 0
+    coll._api_quota_target_ratio = 0.85
+    coll._quota.consume = AsyncMock()
+    monkeypatch.setattr(github_mod.time, "time", lambda: 1_000)
+    sleeps = []
+    snapshots = []
+
+    async def sleep_event(seconds):
+        sleeps.append(seconds)
+
+    async def snapshot_event(pool, **kwargs):
+        snapshots.append(kwargs)
+
+    monkeypatch.setattr(github_mod, "sleep_rate_limit", sleep_event)
+    monkeypatch.setattr(github_mod, "upsert_api_quota_snapshot", snapshot_event)
+    http = MagicMock()
+    http.get = AsyncMock(return_value=_make_response(
+        status=200,
+        headers={
+            "X-RateLimit-Remaining": "100",
+            "X-RateLimit-Reset": "1900",
+            "X-RateLimit-Limit": "1000",
+        },
+        json_body={"ok": True},
+    ))
+
+    out = await coll._api_get(http, "https://api.github.com/repos/a/b/commits")
+
+    assert out is not None
+    assert sleeps == [pytest.approx(9.0)]
+    assert snapshots[0]["service"] == "github"
+    assert snapshots[0]["bucket"] == "core_hour"
+    assert snapshots[0]["used_units"] == 900
+    assert snapshots[0]["remaining_units"] == 100
+    assert snapshots[0]["target_ratio"] == 0.85
+    assert snapshots[0]["metadata"]["adaptive_delay_seconds"] == pytest.approx(9.0)
 
 
 @pytest.mark.asyncio

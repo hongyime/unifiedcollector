@@ -31,6 +31,7 @@ from src.core.seen_targets import (
     refresh_seen_targets_from_sources,
     seen_target_summary_by_source,
 )
+from src.core.optional_rollout import optional_rollout_report
 from src.core.vault import VAULT_ROOT, vault_artifact_counts, vault_health
 from src.core.whatsapp_bridge_health import (
     fetch_whatsapp_bridge_health,
@@ -158,6 +159,29 @@ def _row_get(row, key: str, default=None):
         if isinstance(row, dict):
             return row.get(key, default)
         return default
+
+
+def _iso_or_none(value) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
+
+
+def _safe_row(row, keys: list[str]) -> dict | None:
+    if not row:
+        return None
+    out = {}
+    for key in keys:
+        value = _row_get(row, key)
+        if isinstance(value, datetime):
+            out[key] = value.isoformat()
+        elif isinstance(value, _uuid.UUID):
+            out[key] = str(value)
+        else:
+            out[key] = value
+    return out
 
 
 def _strava_route_status(row: dict) -> dict[str, str | None]:
@@ -5600,6 +5624,8 @@ async def _realtime_feed_status_from_redis() -> dict:
             str(source): int(count or 0)
             for source, count in (raw_by_source or {}).items()
         }
+        raw_source_counters = await client.hgetall(realtime_feed.SOURCE_COUNTER_TOTALS_KEY)
+        source_counters = realtime_feed.source_counters_from_hash(raw_source_counters)
         last_raw = await client.get(realtime_feed.LOCAL_FALLBACK_LAST_KEY)
         try:
             last = json.loads(last_raw) if last_raw else None
@@ -5614,6 +5640,7 @@ async def _realtime_feed_status_from_redis() -> dict:
             "local_fallback_total": local_fallback_total,
             "local_fallback_by_source": by_source,
             "local_fallback_last": last,
+            "source_counters": source_counters,
         }
     except Exception as exc:  # noqa: BLE001 - dashboard should degrade, not fail.
         return {"available": False, "error": exc.__class__.__name__}
@@ -5723,6 +5750,372 @@ async def media_realtime_feed_deliveries(
             timeout=5,
         )
     return {"available": True, "items": [dict(row) for row in rows]}
+
+
+def _derive_instagram_stuck_stage(report: dict) -> str:
+    cooldown = report.get("cooldown") or {}
+    if cooldown.get("active"):
+        return "cooldown"
+    if not report.get("latest_browser_ingest"):
+        return "login_or_browser"
+    targets = report.get("targets") or {}
+    pending_targets = int(targets.get("pending") or targets.get("active") or 0)
+    if pending_targets <= 0 and int(targets.get("total") or 0) <= 0:
+        return "targets"
+    if not report.get("latest_profile"):
+        return "profile_api"
+    if not report.get("latest_post"):
+        return "posts"
+    if not report.get("latest_media"):
+        return "media_download"
+    vault = report.get("vault") or {}
+    if vault.get("available") is False or vault.get("writable") is False:
+        return "vault"
+    realtime = report.get("realtime_delivery") or {}
+    if realtime.get("available") is False:
+        return "realtime_feed"
+    status_counts = realtime.get("status_counts") or {}
+    delivered = int(status_counts.get("delivered") or status_counts.get("sent") or 0)
+    failed = int(status_counts.get("failed") or 0) + int(status_counts.get("too_large") or 0)
+    enqueued = int(status_counts.get("enqueued") or status_counts.get("deferred") or 0)
+    if delivered <= 0 and (failed > 0 or enqueued > 0):
+        return "telegram_upload"
+    return "ok"
+
+
+@app.get("/instagram/health")
+async def instagram_health(_user: dict = Depends(require_role("viewer"))):
+    """Operational Instagram stuck-point report without raw private bodies."""
+    pool = await get_pool()
+    report = {
+        "source": "instagram",
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "tuning": {
+            "one_browser_tab": True,
+            "story_sweep_cap": {"key": "ucIgStorySweepCap", "default": 6, "min": 5, "max": 8},
+            "deep_profile_cap": {"key": "ucIgDeepProfileCap", "default": 3, "min": 2, "max": 5},
+            "rest_window_minutes": {"key": "ucIgRestWindowMinutes", "default": 10, "min": 8, "max": 22},
+            "browser_revisit_hourly_cap": {"key": "ucIgRevisitHourlyCap", "default": 1, "min": 0, "max": 3},
+            "cooldown_minutes_429": {"key": "ucIg429CooldownMinutes", "default": 75, "min": 45, "max": 180},
+            "famous_account_skip_cap": {"key": "ucIgFamousFollowerCap", "default": 3000, "min": 1000, "max": 5000},
+        },
+        "tables": {},
+        "section_errors": {},
+        "targets": {"total": 0},
+        "spider_targets": {"total": 0},
+        "latest_profile": None,
+        "latest_post": None,
+        "latest_media": None,
+        "latest_browser_ingest": None,
+        "browser_ingest_24h": {},
+        "revisit_queue": {"available": False},
+        "realtime_delivery": {"available": False},
+        "cooldown": {"active": False},
+        "source_health": None,
+        "vault": _vault_payload(),
+    }
+    expected_tables = [
+        "collection_targets",
+        "instagram_spider_targets",
+        "instagram_profiles",
+        "instagram_posts",
+        "media_items",
+        "browser_ingest_events",
+        "browser_media_revisit_queue",
+        "realtime_media_deliveries",
+        "rate_limit_events",
+        "source_health",
+    ]
+    async with pool.acquire() as conn:
+        tables = await _existing_public_tables(conn, expected_tables, timeout=3)
+        report["tables"] = {name: name in tables for name in expected_tables}
+
+        if "collection_targets" in tables:
+            rows = await conn.fetch(
+                """
+                SELECT COALESCE(status, 'unknown') AS status, count(*)::int AS count
+                FROM collection_targets
+                WHERE source = 'instagram'
+                GROUP BY status
+                """,
+                timeout=3,
+            )
+            counts = {str(row["status"]): int(row["count"] or 0) for row in rows}
+            counts["total"] = sum(counts.values())
+            report["targets"] = counts
+
+        if "instagram_spider_targets" in tables:
+            rows = await conn.fetch(
+                """
+                SELECT COALESCE(status, 'unknown') AS status, count(*)::int AS count
+                FROM instagram_spider_targets
+                GROUP BY status
+                """,
+                timeout=3,
+            )
+            counts = {str(row["status"]): int(row["count"] or 0) for row in rows}
+            counts["total"] = sum(counts.values())
+            report["spider_targets"] = counts
+
+        if "instagram_profiles" in tables:
+            try:
+                row = await conn.fetchrow(
+                    """
+                    SELECT id, platform_user_id, username, followers_count, following_count,
+                           posts_count, is_private, is_verified, updated_at, collected_at
+                    FROM instagram_profiles
+                    ORDER BY updated_at DESC NULLS LAST, collected_at DESC NULLS LAST
+                    LIMIT 1
+                    """,
+                    timeout=8,
+                )
+                report["latest_profile"] = _safe_row(row, [
+                    "id", "platform_user_id", "username", "followers_count", "following_count",
+                    "posts_count", "is_private", "is_verified", "updated_at", "collected_at",
+                ])
+            except Exception as exc:
+                logger.warning("instagram health latest_profile lookup skipped: %s", exc.__class__.__name__)
+                report["section_errors"]["latest_profile"] = exc.__class__.__name__
+
+        if "instagram_posts" in tables:
+            try:
+                row = await conn.fetchrow(
+                    """
+                    WITH latest_post AS (
+                        SELECT id, profile_id, platform_post_id, media_type,
+                               likes_count, comments_count, platform_created_at, collected_at
+                        FROM instagram_posts
+                        ORDER BY collected_at DESC NULLS LAST
+                        LIMIT 1
+                    )
+                    SELECT p.id, p.platform_post_id, ip.username, p.media_type,
+                           p.likes_count, p.comments_count, p.platform_created_at, p.collected_at
+                    FROM latest_post p
+                    LEFT JOIN instagram_profiles ip ON ip.id = p.profile_id
+                    """,
+                    timeout=8,
+                )
+                report["latest_post"] = _safe_row(row, [
+                    "id", "platform_post_id", "username", "media_type", "likes_count",
+                    "comments_count", "platform_created_at", "collected_at",
+                ])
+            except Exception as exc:
+                logger.warning("instagram health latest_post lookup skipped: %s", exc.__class__.__name__)
+                report["section_errors"]["latest_post"] = exc.__class__.__name__
+
+        if "media_items" in tables:
+            try:
+                row = await conn.fetchrow(
+                    """
+                    SELECT id, entity_name, content_type, content_id, file_size,
+                           collected_at, source_url,
+                           (COALESCE(metadata, '{}'::jsonb) ? 'vault_artifact') AS has_vault_artifact,
+                           (COALESCE(metadata, '{}'::jsonb) ? 'vault_sidecar') AS has_vault_sidecar,
+                           (COALESCE(metadata, '{}'::jsonb) ? 'raw_payload'
+                            OR COALESCE(metadata, '{}'::jsonb) ? 'raw_payload_refs') AS has_raw_payload_ref,
+                           metadata->'vault_artifact'->>'ok' AS vault_artifact_ok
+                    FROM media_items
+                    WHERE source = 'instagram'
+                    ORDER BY collected_at DESC NULLS LAST
+                    LIMIT 1
+                    """,
+                    timeout=8,
+                )
+                report["latest_media"] = _safe_row(row, [
+                    "id", "entity_name", "content_type", "content_id", "file_size",
+                    "collected_at", "source_url", "has_vault_artifact", "has_vault_sidecar",
+                    "has_raw_payload_ref", "vault_artifact_ok",
+                ])
+            except Exception as exc:
+                logger.warning("instagram health latest_media lookup skipped: %s", exc.__class__.__name__)
+                report["section_errors"]["latest_media"] = exc.__class__.__name__
+                report["latest_media"] = None
+
+        if "browser_ingest_events" in tables:
+            row = await conn.fetchrow(
+                """
+                SELECT platform, endpoint, subject, observed_count, stored_count,
+                       metadata->>'extension_version' AS extension_version,
+                       metadata->>'message_type' AS message_type,
+                       metadata->>'health_status' AS health_status,
+                       metadata->>'health_reason' AS health_reason,
+                       created_at
+                FROM browser_ingest_events
+                WHERE platform = 'instagram'
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                timeout=3,
+            )
+            report["latest_browser_ingest"] = _safe_row(row, [
+                "platform", "endpoint", "subject", "observed_count", "stored_count",
+                "extension_version", "message_type", "health_status", "health_reason",
+                "created_at",
+            ])
+            try:
+                rows = await conn.fetch(
+                    """
+                    SELECT endpoint,
+                           count(*)::int AS events,
+                           COALESCE(sum(observed_count), 0)::int AS observed,
+                           COALESCE(sum(stored_count), 0)::int AS stored,
+                           max(created_at) AS latest_at
+                    FROM browser_ingest_events
+                    WHERE platform = 'instagram'
+                      AND created_at >= NOW() - INTERVAL '24 hours'
+                    GROUP BY endpoint
+                    ORDER BY latest_at DESC
+                    """,
+                    timeout=5,
+                )
+                report["browser_ingest_24h"] = {
+                    str(row["endpoint"]): {
+                        "events": int(row["events"] or 0),
+                        "observed": int(row["observed"] or 0),
+                        "stored": int(row["stored"] or 0),
+                        "latest_at": _iso_or_none(row["latest_at"]),
+                    }
+                    for row in rows
+                }
+            except Exception as exc:
+                logger.warning("instagram health browser_ingest_24h lookup skipped: %s", exc.__class__.__name__)
+                report["section_errors"]["browser_ingest_24h"] = exc.__class__.__name__
+
+        if "browser_media_revisit_queue" in tables:
+            rows = await conn.fetch(
+                """
+                SELECT COALESCE(status, 'unknown') AS status,
+                       count(*)::int AS count,
+                       count(*) FILTER (WHERE next_visit_at <= NOW())::int AS due,
+                       count(*) FILTER (
+                         WHERE status = 'claimed'
+                           AND COALESCE(last_attempt_at, updated_at) < NOW() - INTERVAL '30 minutes'
+                       )::int AS stale_claimed,
+                       max(updated_at) AS latest_at
+                FROM browser_media_revisit_queue
+                WHERE platform = 'instagram'
+                GROUP BY status
+                ORDER BY status
+                """,
+                timeout=3,
+            )
+            by_status = {
+                str(row["status"]): {
+                    "count": int(row["count"] or 0),
+                    "due": int(row["due"] or 0),
+                    "stale_claimed": int(row["stale_claimed"] or 0),
+                    "latest_at": _iso_or_none(row["latest_at"]),
+                }
+                for row in rows
+            }
+            report["revisit_queue"] = {
+                "available": True,
+                "by_status": by_status,
+                "total": sum(item["count"] for item in by_status.values()),
+                "due": sum(item["due"] for item in by_status.values()),
+                "stale_claimed": sum(item["stale_claimed"] for item in by_status.values()),
+            }
+
+        if "realtime_media_deliveries" in tables:
+            rows = await conn.fetch(
+                """
+                SELECT status, count(*)::int AS count
+                FROM realtime_media_deliveries
+                WHERE source = 'instagram'
+                  AND updated_at >= NOW() - INTERVAL '24 hours'
+                GROUP BY status
+                ORDER BY status
+                """,
+                timeout=3,
+            )
+            latest = await conn.fetchrow(
+                """
+                SELECT content_id, status, reason, file_size, content_type,
+                       target_name, queued_at, sent_at, updated_at
+                FROM realtime_media_deliveries
+                WHERE source = 'instagram'
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                timeout=3,
+            )
+            report["realtime_delivery"] = {
+                "available": True,
+                "window_hours": 24,
+                "status_counts": {str(row["status"]): int(row["count"] or 0) for row in rows},
+                "latest": _safe_row(latest, [
+                    "content_id", "status", "reason", "file_size", "content_type",
+                    "target_name", "queued_at", "sent_at", "updated_at",
+                ]),
+            }
+
+        if "rate_limit_events" in tables:
+            has_cleared_by_success = bool(await conn.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = 'rate_limit_events'
+                      AND column_name = 'cleared_by_success'
+                )
+                """,
+                timeout=3,
+            ))
+            cleared_predicate = "AND NOT COALESCE(cleared_by_success, false)" if has_cleared_by_success else ""
+            active = await conn.fetchrow(
+                f"""
+                SELECT source, account, scope, status_code, reason, cooldown_seconds,
+                       created_at,
+                       created_at + COALESCE(cooldown_seconds, 0) * INTERVAL '1 second' AS active_until
+                FROM rate_limit_events
+                WHERE source = 'instagram'
+                  AND COALESCE(cooldown_seconds, 0) > 0
+                  AND created_at + COALESCE(cooldown_seconds, 0) * INTERVAL '1 second' > NOW()
+                  {cleared_predicate}
+                ORDER BY active_until DESC
+                LIMIT 1
+                """,
+                timeout=3,
+            )
+            latest = await conn.fetchrow(
+                """
+                SELECT source, account, scope, status_code, reason, cooldown_seconds, created_at
+                FROM rate_limit_events
+                WHERE source = 'instagram'
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                timeout=3,
+            )
+            report["cooldown"] = {
+                "active": active is not None,
+                "active_event": _safe_row(active, [
+                    "source", "account", "scope", "status_code", "reason",
+                    "cooldown_seconds", "created_at", "active_until",
+                ]),
+                "latest_event": _safe_row(latest, [
+                    "source", "account", "scope", "status_code", "reason",
+                    "cooldown_seconds", "created_at",
+                ]),
+            }
+
+        if "source_health" in tables:
+            row = await conn.fetchrow(
+                """
+                SELECT source, status, last_success_at, last_error, updated_at
+                FROM source_health
+                WHERE source = 'instagram'
+                LIMIT 1
+                """,
+                timeout=3,
+            )
+            report["source_health"] = _safe_row(row, [
+                "source", "status", "last_success_at", "last_error", "updated_at",
+            ])
+
+    report["stuck_stage"] = _derive_instagram_stuck_stage(report)
+    return report
 
 
 
@@ -5990,6 +6383,326 @@ async def recent_rate_limits(hours: int = 24, limit: int = 100,
         "payload": _copy_cache_value(payload),
     }
     return payload
+
+
+def _jsonish(value):
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except Exception:
+            return {}
+    return value if isinstance(value, dict) else {}
+
+
+@app.get("/domain-pacing/status")
+async def domain_pacing_status(source: str | None = None, hours: int = 24, limit: int = 50,
+                               _user: dict = Depends(require_role("viewer"))):
+    hours = max(1, min(hours, 168))
+    limit = max(1, min(limit, 250))
+    source_filter = (source or "").strip().lower() or None
+    if source_filter and source_filter not in {"website", "search"}:
+        return {"available": False, "error": "unsupported_source", "sources": []}
+
+    pool = await get_pool()
+    conn = None
+    try:
+        conn = await _acquire_dashboard_conn(pool)
+        table_exists = bool(await conn.fetchval(
+            "SELECT to_regclass('public.collector_domain_pacing_events') IS NOT NULL",
+            timeout=8,
+        ))
+        if not table_exists:
+            return {
+                "available": False,
+                "error": "collector_domain_pacing_events_missing",
+                "sources": [],
+                "domains": [],
+                "events": [],
+            }
+
+        summary_args: list[object] = [str(hours)]
+        summary_source_sql = ""
+        if source_filter:
+            summary_args.append(source_filter)
+            summary_source_sql = f"AND source = ${len(summary_args)}"
+        summary_rows = [dict(r) for r in await conn.fetch(
+            f"""
+            SELECT source,
+                   COUNT(DISTINCT registrable_domain)::int AS domains_seen,
+                   COUNT(DISTINCT registrable_domain) FILTER (
+                       WHERE created_at >= now() - interval '15 minutes'
+                   )::int AS recently_active_domains,
+                   COUNT(*) FILTER (WHERE event_type = 'robots_blocked')::int AS robots_blocked,
+                   COUNT(*) FILTER (WHERE event_type = 'retry_backoff')::int AS retry_backoff,
+                   COUNT(*) FILTER (WHERE status_code = 403)::int AS http_403,
+                   COUNT(*) FILTER (WHERE status_code = 429)::int AS http_429,
+                   COALESCE(SUM((metadata->>'images')::int) FILTER (WHERE event_type = 'crawl_summary'), 0)::int AS media_found,
+                   COALESCE(SUM((metadata->>'pdfs')::int) FILTER (WHERE event_type = 'crawl_summary'), 0)::int AS pdfs_found,
+                   COALESCE(SUM((metadata->>'docs')::int) FILTER (WHERE event_type = 'crawl_summary'), 0)::int AS docs_found,
+                   COALESCE(SUM((metadata->>'videos')::int) FILTER (WHERE event_type = 'crawl_summary'), 0)::int AS videos_found,
+                   MAX(created_at) AS latest_event_at
+            FROM collector_domain_pacing_events
+            WHERE created_at >= now() - ($1 || ' hours')::interval
+              {summary_source_sql}
+            GROUP BY source
+            ORDER BY source
+            """,
+            *summary_args,
+            timeout=15,
+        )]
+        paged_args: list[object] = [str(hours), limit]
+        paged_source_sql = ""
+        if source_filter:
+            paged_args.append(source_filter)
+            paged_source_sql = f"AND source = ${len(paged_args)}"
+        domain_rows = [dict(r) for r in await conn.fetch(
+            f"""
+            SELECT source, registrable_domain,
+                   COUNT(*)::int AS events,
+                   COUNT(*) FILTER (WHERE event_type = 'robots_blocked')::int AS robots_blocked,
+                   COUNT(*) FILTER (WHERE event_type = 'retry_backoff')::int AS retry_backoff,
+                   COUNT(*) FILTER (WHERE status_code = 403)::int AS http_403,
+                   COUNT(*) FILTER (WHERE status_code = 429)::int AS http_429,
+                   COALESCE(SUM((metadata->>'images')::int) FILTER (WHERE event_type = 'crawl_summary'), 0)::int AS media_found,
+                   COALESCE(SUM((metadata->>'pdfs')::int) FILTER (WHERE event_type = 'crawl_summary'), 0)::int AS pdfs_found,
+                   COALESCE(SUM((metadata->>'docs')::int) FILTER (WHERE event_type = 'crawl_summary'), 0)::int AS docs_found,
+                   COALESCE(SUM((metadata->>'videos')::int) FILTER (WHERE event_type = 'crawl_summary'), 0)::int AS videos_found,
+                   MAX(created_at) AS latest_event_at
+            FROM collector_domain_pacing_events
+            WHERE created_at >= now() - ($1 || ' hours')::interval
+              {paged_source_sql}
+            GROUP BY source, registrable_domain
+            ORDER BY latest_event_at DESC
+            LIMIT $2
+            """,
+            *paged_args,
+            timeout=15,
+        )]
+        event_rows = [dict(r) for r in await conn.fetch(
+            f"""
+            SELECT source, registrable_domain, host, event_type, url, status_code,
+                   metadata, created_at
+            FROM collector_domain_pacing_events
+            WHERE created_at >= now() - ($1 || ' hours')::interval
+              {paged_source_sql}
+            ORDER BY created_at DESC
+            LIMIT $2
+            """,
+            *paged_args,
+            timeout=15,
+        )]
+        snapshot_source_sql = "AND source = $1" if source_filter else ""
+        snapshot_args: list[object] = [source_filter] if source_filter else []
+        snapshot_rows = [dict(r) for r in await conn.fetch(
+            f"""
+            SELECT DISTINCT ON (source) source, metadata, created_at
+            FROM collector_domain_pacing_events
+            WHERE event_type = 'crawl_summary'
+              {snapshot_source_sql}
+            ORDER BY source, created_at DESC
+            """,
+            *snapshot_args,
+            timeout=15,
+        )]
+    finally:
+        if conn is not None:
+            await _release_dashboard_conn(pool, conn, "domain pacing")
+
+    latest_snapshots = {}
+    for row in snapshot_rows:
+        meta = _jsonish(row.get("metadata"))
+        pacing = _jsonish(meta.get("domain_pacing"))
+        latest_snapshots[row["source"]] = {
+            "created_at": _iso_or_none(row.get("created_at")),
+            "active_domains": int(pacing.get("active_domains") or 0),
+            "per_domain_inflight": pacing.get("per_domain_inflight") or {},
+            "max_active_domains": pacing.get("max_active_domains"),
+            "max_per_domain": pacing.get("max_per_domain"),
+            "delay_seconds": pacing.get("delay_seconds"),
+            "jitter_seconds": pacing.get("jitter_seconds"),
+            "counters": pacing.get("counters") or {},
+        }
+    for rows in (summary_rows, domain_rows, event_rows):
+        for row in rows:
+            if "created_at" in row:
+                row["created_at"] = _iso_or_none(row["created_at"])
+            if "latest_event_at" in row:
+                row["latest_event_at"] = _iso_or_none(row["latest_event_at"])
+            if "metadata" in row:
+                row["metadata"] = _jsonish(row["metadata"])
+    return {
+        "available": True,
+        "hours": hours,
+        "source": source_filter,
+        "sources": summary_rows,
+        "domains": domain_rows,
+        "events": event_rows,
+        "latest_snapshots": latest_snapshots,
+    }
+
+
+@app.get("/api-quotas/status")
+async def api_quotas_status(service: str | None = None, limit: int = 100,
+                            _user: dict = Depends(require_role("viewer"))):
+    limit = max(1, min(limit, 250))
+    service_filter = (service or "").strip().lower() or None
+    if service_filter and service_filter not in {"github", "youtube"}:
+        return {"available": False, "error": "unsupported_service", "snapshots": []}
+
+    pool = await get_pool()
+    conn = None
+    try:
+        conn = await _acquire_dashboard_conn(pool)
+        table_names = [
+            "collector_api_quota_snapshots",
+            "account_quota_usage",
+            "github_spider_queue",
+            "github_users",
+            "github_repos",
+            "github_commits",
+            "github_issues",
+            "github_issue_comments",
+            "github_pr_reviews",
+            "github_pr_review_comments",
+            "github_edges",
+            "media_items",
+            "youtube_spider_queue",
+            "youtube_profile_queue",
+            "youtube_videos",
+        ]
+        tables = await _existing_public_tables(conn, table_names)
+        snapshots = []
+        if "collector_api_quota_snapshots" in tables:
+            service_sql = "WHERE service = $2" if service_filter else ""
+            snapshot_args: list[object] = [limit]
+            if service_filter:
+                snapshot_args.append(service_filter)
+            snapshots = [dict(r) for r in await conn.fetch(
+                f"""
+                SELECT service, account, bucket, quota_date, reset_at,
+                       used_units, remaining_units, quota_units, target_units,
+                       target_ratio, paused, metadata, updated_at
+                FROM collector_api_quota_snapshots
+                {service_sql}
+                ORDER BY updated_at DESC
+                LIMIT $1
+                """,
+                *snapshot_args,
+                timeout=15,
+            )]
+        quota_usage = []
+        if "account_quota_usage" in tables:
+            service_sql = "AND platform = $2" if service_filter else ""
+            usage_args: list[object] = [limit]
+            if service_filter:
+                usage_args.append(service_filter)
+            quota_usage = [dict(r) for r in await conn.fetch(
+                f"""
+                SELECT platform AS service, account, day, requests_today,
+                       requests_hour, hour_bucket, requests_week, updated_at
+                FROM account_quota_usage
+                WHERE platform IN ('github', 'youtube')
+                  {service_sql}
+                ORDER BY updated_at DESC
+                LIMIT $1
+                """,
+                *usage_args,
+                timeout=15,
+            )]
+
+        async def _table_count(table: str, where: str = "") -> int:
+            if table not in tables:
+                return 0
+            try:
+                if not where:
+                    return await _safe_estimated_table_rows(conn, table)
+                return int(await conn.fetchval(f"SELECT COUNT(*)::bigint FROM {table} {where}", timeout=3) or 0)
+            except Exception:
+                return 0
+
+        async def _status_counts(table: str, column: str = "status") -> dict[str, int]:
+            if table not in tables:
+                return {}
+            try:
+                rows = await conn.fetch(
+                    f"SELECT COALESCE({column}::text, 'unknown') AS status, COUNT(*)::bigint AS count FROM {table} GROUP BY 1",
+                    timeout=3,
+                )
+                return {str(r["status"]): int(r["count"] or 0) for r in rows}
+            except Exception:
+                return {}
+
+        progress = {}
+        if service_filter in {None, "github"}:
+            progress["github"] = {
+                "capabilities": {
+                    "sequential_profile_order": True,
+                    "branch_commits_enabled": True,
+                    "commits_enabled": True,
+                    "issues_enabled": True,
+                    "pr_reviews_enabled": True,
+                    "pr_review_comments_enabled": True,
+                    "contributors_enabled": True,
+                    "followers_following_queue_enabled": os.getenv("GITHUB_SPIDER_ENABLED", "true").lower() == "true",
+                    "releases_assets_enabled": True,
+                },
+                "queues": {
+                    "spider": await _status_counts("github_spider_queue"),
+                },
+                "tables": {
+                    "users": await _table_count("github_users"),
+                    "repos": await _table_count("github_repos"),
+                    "commits": await _table_count("github_commits"),
+                    "issues": await _table_count("github_issues"),
+                    "pull_requests": await _table_count("github_issues", "WHERE is_pull_request = true"),
+                    "issue_comments": await _table_count("github_issue_comments"),
+                    "pr_reviews": await _table_count("github_pr_reviews"),
+                    "pr_review_comments": await _table_count("github_pr_review_comments"),
+                    "contributor_edges": await _table_count("github_edges", "WHERE edge_type = 'repo_contributor'"),
+                    "release_assets": await _table_count(
+                        "media_items",
+                        "WHERE source = 'github' AND content_type IN ('release', 'release_asset')",
+                    ),
+                },
+            }
+        if service_filter in {None, "youtube"}:
+            progress["youtube"] = {
+                "capabilities": {
+                    "daily_quota_budget_controller": True,
+                    "midnight_pt_reset": True,
+                    "search_bucket_units": int(os.getenv("YOUTUBE_SEARCH_DAILY_QUOTA_UNITS", "1000")),
+                    "data_api_low_cost_first": True,
+                    "search_list_guarded": True,
+                },
+                "queues": {
+                    "spider": await _status_counts("youtube_spider_queue"),
+                    "profile": await _status_counts("youtube_profile_queue"),
+                },
+                "videos": {
+                    "media_status": await _status_counts("youtube_videos", "media_status"),
+                    "transcript_status": await _status_counts("youtube_videos", "transcript_status"),
+                    "comments_status": await _status_counts("youtube_videos", "comments_status"),
+                    "total": await _table_count("youtube_videos"),
+                },
+            }
+    finally:
+        if conn is not None:
+            await _release_dashboard_conn(pool, conn, "api quotas")
+
+    for rows in (snapshots, quota_usage):
+        for row in rows:
+            for key in ("quota_date", "day", "reset_at", "updated_at"):
+                if key in row:
+                    row[key] = _iso_or_none(row[key])
+            if "metadata" in row:
+                row["metadata"] = _jsonish(row["metadata"])
+    return {
+        "available": bool(snapshots or quota_usage or progress),
+        "service": service_filter,
+        "snapshots": snapshots,
+        "account_quota_usage": quota_usage,
+        "progress": progress,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -9924,6 +10637,25 @@ async def seen_targets(
         "summary": summary,
         "refresh": refresh_report,
     }
+
+
+@app.get("/optional-rollout/status")
+async def optional_rollout_status(
+    feature: str = Query("spiderfoot", pattern="^(spiderfoot|recon|lemon8|browser-heavy)$"),
+    stage: str = Query("dry-run", pattern="^(dry-run|five|daily25)$"),
+    window_hours: int = Query(24, ge=1, le=168),
+    limit: int | None = Query(None, ge=0, le=500),
+    _user: dict = Depends(require_role("viewer")),
+):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        return await optional_rollout_report(
+            conn,
+            feature=feature,
+            stage=stage,
+            window_hours=window_hours,
+            limit=limit,
+        )
 
 
 @app.get("/recon/targets")

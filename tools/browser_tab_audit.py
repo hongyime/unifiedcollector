@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 import urllib.request
@@ -35,6 +36,7 @@ CDP_HOST = os.getenv(
 EXT_ID = os.getenv("UC_EXTENSION_ID", "pkmdmcklnjdeocoeigmlakhomhhcpafb")
 REPO_ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_PATH = REPO_ROOT / "tmp" / "browser_tab_audit_result.json"
+EXTENSION_CONTROL_RE = re.compile(r"^chrome-extension://[^/]+/tabs\.html(?:[?#].*)?$")
 
 
 def _float_env(name: str, default: float) -> float:
@@ -96,6 +98,70 @@ def _classify(url: str) -> str | None:
             if f"//{d}" in url or f".{d}" in url:
                 return plat
     return None
+
+
+def _bool_env(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+def _cdp_tab_budget(pages: list[dict], grouped: dict[str, list[dict]]) -> dict:
+    """CDP-visible tab budget check.
+
+    Chrome's /json/list output does not expose pinned state; pinned social and
+    control tabs are asserted by the extension service worker through chrome.tabs.
+    """
+    max_tabs = _int_env("UC_TAB_AUDIT_MAX_TABS_PER_PLATFORM", 1)
+    controls = [
+        p for p in pages
+        if EXTENSION_CONTROL_RE.match(str(p.get("url") or ""))
+    ]
+    blanks = [
+        p for p in pages
+        if str(p.get("url") or "") in {"", "about:blank", "chrome://newtab/"}
+    ]
+    violations = []
+    if len(controls) != 1:
+        violations.append({
+            "kind": "extension_control_tab_count",
+            "count": len(controls),
+            "expected": 1,
+        })
+    for platform, tabs in sorted(grouped.items()):
+        if len(tabs) > max_tabs:
+            violations.append({
+                "kind": "platform_tab_budget_exceeded",
+                "platform": platform,
+                "count": len(tabs),
+                "allowed": max_tabs,
+            })
+    if blanks:
+        violations.append({
+            "kind": "blank_startup_tabs",
+            "count": len(blanks),
+            "allowed": 0,
+        })
+    return {
+        "ok": not violations,
+        "violations": violations,
+        "counts": {
+            "pages": len(pages),
+            "extension_control_tabs": len(controls),
+            "blank_tabs": len(blanks),
+            "per_platform": {platform: len(tabs) for platform, tabs in sorted(grouped.items())},
+        },
+        "max_tabs_per_platform": max_tabs,
+        "pinned_checked_by_extension": False,
+    }
 
 
 class CDP:
@@ -286,8 +352,10 @@ def audit_tab(target: dict, main_timeout=MAIN_TIMEOUT, iso_timeout=ISO_TIMEOUT) 
             out["elapsed_s_main"] = round(time.time() - t0, 3)
             out["error"] = f"main Runtime.evaluate failed: {exc}"
 
-        # Now find isolated world contexts
-        iso_ctx = None
+        # Now find isolated world contexts. Chrome can leave more than one
+        # extension isolated world after an unpacked-extension reload; evaluate
+        # all matching worlds and prefer the one with the active content marker.
+        iso_ctx_ids: list[int] = []
         for ev in cdp.events:
             if ev.get("method") != "Runtime.executionContextCreated":
                 continue
@@ -306,41 +374,54 @@ def audit_tab(target: dict, main_timeout=MAIN_TIMEOUT, iso_timeout=ISO_TIMEOUT) 
             name = ctx.get("name") or ""
             is_extension_world = origin.startswith("chrome-extension://")
             if EXT_ID in origin or "UnifiedCollector" in name or is_extension_world or aux.get("type") == "isolated":
-                if iso_ctx is None:
-                    iso_ctx = ctx.get("id")
+                ctx_id = ctx.get("id")
+                if isinstance(ctx_id, int):
+                    iso_ctx_ids.append(ctx_id)
 
-        if iso_ctx is not None:
+        if iso_ctx_ids:
             out["iso_context_found"] = True
             t1 = time.time()
-            try:
-                r = cdp.send(
-                    "Runtime.evaluate",
-                    {
-                        "expression": CONTENT_EVAL_JS,
-                        "returnByValue": True,
-                        "awaitPromise": False,
-                        "contextId": iso_ctx,
-                    },
-                    timeout=iso_timeout,
-                )
-                out["elapsed_s_iso"] = round(time.time() - t1, 3)
-                val = (r.get("result") or {}).get("result", {}).get("value")
-                if isinstance(val, str):
-                    p = json.loads(val)
-                    out["cs"] = p.get("cs")
-                    out["cs_version"] = p.get("cs_version")
-                    out["cs_running"] = p.get("cs_running")
-                    out["install_id"] = p.get("install")
-                    out["cs_installed_at"] = p.get("cs_installed_at")
-                    if p.get("url"):
-                        out["url"] = out["url"] or p.get("url")
-                else:
-                    exc = (r.get("result") or {}).get("exceptionDetails")
-                    if exc:
-                        out["error"] = (out["error"] or "") + f" | iso eval exc: {exc.get('text','?')}"
-            except CDP_TRANSIENT_EXCEPTIONS as exc:
-                out["elapsed_s_iso"] = round(time.time() - t1, 3)
-                out["error"] = (out["error"] or "") + f" | iso eval failed: {exc}"
+            best = None
+            iso_errors = []
+            for iso_ctx in iso_ctx_ids:
+                try:
+                    r = cdp.send(
+                        "Runtime.evaluate",
+                        {
+                            "expression": CONTENT_EVAL_JS,
+                            "returnByValue": True,
+                            "awaitPromise": False,
+                            "contextId": iso_ctx,
+                        },
+                        timeout=iso_timeout,
+                    )
+                    val = (r.get("result") or {}).get("result", {}).get("value")
+                    if isinstance(val, str):
+                        p = json.loads(val)
+                        p["_context_id"] = iso_ctx
+                        if p.get("cs") is True:
+                            best = p
+                            break
+                        if best is None:
+                            best = p
+                    else:
+                        exc = (r.get("result") or {}).get("exceptionDetails")
+                        if exc:
+                            iso_errors.append(f"context {iso_ctx}: {exc.get('text','?')}")
+                except CDP_TRANSIENT_EXCEPTIONS as exc:
+                    iso_errors.append(f"context {iso_ctx}: {exc}")
+            out["elapsed_s_iso"] = round(time.time() - t1, 3)
+            if best is not None:
+                out["cs"] = best.get("cs")
+                out["cs_version"] = best.get("cs_version")
+                out["cs_running"] = best.get("cs_running")
+                out["install_id"] = best.get("install")
+                out["cs_installed_at"] = best.get("cs_installed_at")
+                out["iso_context_id"] = best.get("_context_id")
+                if best.get("url"):
+                    out["url"] = out["url"] or best.get("url")
+            if best is None and iso_errors:
+                out["error"] = (out["error"] or "") + " | iso eval failed: " + "; ".join(iso_errors[:3])
 
         # Perf metrics
         try:
@@ -440,10 +521,18 @@ def main():
                 )
             time.sleep(TAB_PAUSE_SECONDS)
 
+    budget = _cdp_tab_budget(pages, grouped)
+    results["_tab_budget"] = budget
+    print("\n# Tab budget")
+    print(json.dumps(budget, indent=2, default=str))
+
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     with OUTPUT_PATH.open("w", encoding="utf-8") as f:
         json.dump(results, f, indent=2, default=str)
     print(f"\n# wrote {OUTPUT_PATH}")
+    if not budget["ok"] and _bool_env("UC_TAB_AUDIT_FAIL_ON_BUDGET", True):
+        print("# tab budget assertion failed")
+        sys.exit(2)
 
 
 if __name__ == "__main__":

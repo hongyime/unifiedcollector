@@ -66,6 +66,10 @@ SEARCH_CONCURRENT_DOWNLOADS    Parallel asset downloads (default 5).
 SEARCH_DOWNLOAD_IMAGES         '1' to download images for each result URL (default 1).
 SEARCH_SPIDER_PAGES            '1' to fetch HTML and extract embedded media
                                (default 0; opt-in because it amplifies traffic).
+SEARCH_MAX_ACTIVE_DOMAINS      Max concurrently active spider/download domains (default 4).
+SEARCH_MAX_REQUESTS_PER_DOMAIN Per-domain in-flight request cap (default 2).
+SEARCH_DOMAIN_DELAY_SECONDS    Base delay before each domain-paced request.
+SEARCH_DOMAIN_JITTER_SECONDS   Additional random request delay.
 SEARCH_BING_PAGES              Pages of Bing results to scrape (default 3).
 SEARCH_SERPER_THRESHOLD        Use Serper only when DDG+Bing < this many results
                                (default 5; conserves API credits).
@@ -90,6 +94,7 @@ from urllib.parse import quote_plus, urljoin, urlparse
 import httpx
 
 from src.core.base_collector import BaseCollector
+from src.core.domain_pacing import DomainPacer, record_domain_pacing_event
 from src.core.rate_limit_events import record_rate_limit_event
 from src.core.scrape_pacing import sleep_before_pre_cooldown_retry
 from src.collectors.search.parse import (
@@ -246,6 +251,14 @@ class SearchCollector(BaseCollector):
         self._concurrent_downloads = int(os.getenv("SEARCH_CONCURRENT_DOWNLOADS", "5"))
         self._serper_api_key = os.getenv("SERPER_API_KEY", "").strip()
         self._serper_quota = int(os.getenv("SERPER_DAILY_QUOTA", "2500"))
+        self._domain_pacing = DomainPacer(
+            self.SOURCE_NAME,
+            env_prefix="SEARCH",
+            max_active_domains=4,
+            max_per_domain=2,
+            delay_seconds=1.0,
+            jitter_seconds=2.0,
+        )
 
         # Sub-systems
         cache_dir = Path("data") / "search_cache"
@@ -269,6 +282,41 @@ class SearchCollector(BaseCollector):
 
         # Register Serper quota with the unified tracker if available.
         self._register_serper_quota()
+
+    async def _record_domain_pacing_event(
+        self,
+        event_type: str,
+        url: str,
+        *,
+        status_code: int | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        await record_domain_pacing_event(
+            self.pool,
+            source=self.SOURCE_NAME,
+            event_type=event_type,
+            url=url,
+            status_code=status_code,
+            metadata=metadata,
+        )
+
+    async def _record_domain_http_status(
+        self,
+        url: str,
+        status_code: int,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if status_code not in (403, 429):
+            return
+        event = f"http_{status_code}"
+        self._domain_pacing.count(event)
+        await self._record_domain_pacing_event(
+            event,
+            url,
+            status_code=status_code,
+            metadata=metadata,
+        )
 
     # ------------------------------------------------------------------ #
     # Tor / HTTP plumbing
@@ -650,7 +698,7 @@ class SearchCollector(BaseCollector):
         all_assets: list[dict] = []
         depth = int(os.getenv("SEARCH_SPIDER_DEPTH", "2"))   # recurse into sub-dirs/links
         async with self._make_client() as client:
-            for seed in seed_urls:
+            for seed in self._domain_pacing.order(seed_urls):
                 if self._stop.is_set():
                     break
                 try:
@@ -660,8 +708,6 @@ class SearchCollector(BaseCollector):
                         n = await self._crawl_seed(client, seed, max_depth=depth)
                         all_assets.append({"url": seed, "source_url": seed, "engine": "spider", "saved": n})
                     else:
-                        domain = urlparse(seed).netloc or "seed"
-                        await self.wait_rate_limit(domain)
                         discovered = await self._spider_page(client, seed)
                         for i, url in enumerate(sorted(discovered)):
                             all_assets.append({"url": url, "source_url": seed, "rank": i + 1, "engine": "spider"})
@@ -669,6 +715,15 @@ class SearchCollector(BaseCollector):
                                 await self._download_asset(query=seed, hit={"url": url, "rank": i + 1}, source_url=seed)
                 except Exception as e:
                     logger.warning("expand_paste_sites failed for %s: %s", seed, e)
+        await self._record_domain_pacing_event(
+            "crawl_summary",
+            seed_urls[0] if seed_urls else "search-spider",
+            metadata={
+                "seed_count": len(seed_urls),
+                "assets": len(all_assets),
+                "domain_pacing": self._domain_pacing.snapshot().as_dict(),
+            },
+        )
         return all_assets
 
     async def _extract_pdf_links(self, pdf_url: str) -> list[str]:
@@ -728,10 +783,10 @@ class SearchCollector(BaseCollector):
             if self._search_scope_cooling_down("spider", scope):
                 continue
             try:
-                await self.wait_rate_limit(scope)
-
                 async def _get_seed():
-                    return await client.get(url, headers=self._headers(urlparse(url).netloc))
+                    async with self._domain_pacing.slot(url):
+                        await self.wait_rate_limit(scope)
+                        return await client.get(url, headers=self._headers(urlparse(url).netloc))
 
                 resp = await _get_seed()
                 if resp.status_code == 429:
@@ -756,6 +811,11 @@ class SearchCollector(BaseCollector):
                         metadata={"url": url, "seed": seed},
                         response=resp,
                     )
+                await self._record_domain_http_status(
+                    url,
+                    resp.status_code,
+                    metadata={"engine": "spider", "seed": seed},
+                )
                 continue
             ctype = resp.headers.get("content-type", "").lower()
             # open bucket -> enumerate the whole thing
@@ -1172,7 +1232,9 @@ class SearchCollector(BaseCollector):
                     break
                 try:
                     async def _get_bucket():
-                        return await client.get(url, headers=self._headers(urlparse(url).netloc))
+                        async with self._domain_pacing.slot(url):
+                            await self.wait_rate_limit(scope)
+                            return await client.get(url, headers=self._headers(urlparse(url).netloc))
 
                     r = await _get_bucket()
                     if r.status_code == 429:
@@ -1195,6 +1257,11 @@ class SearchCollector(BaseCollector):
                                 metadata={"url": url, "root": root},
                                 response=r,
                             )
+                        await self._record_domain_http_status(
+                            url,
+                            r.status_code,
+                            metadata={"engine": "bucket", "root": root},
+                        )
                         break
                     body = r.text
                 except Exception as e:
@@ -1228,7 +1295,9 @@ class SearchCollector(BaseCollector):
             return discovered
         try:
             async def _get_spider_page():
-                return await client.get(page_url, headers=self._headers(urlparse(page_url).netloc))
+                async with self._domain_pacing.slot(page_url):
+                    await self.wait_rate_limit(scope)
+                    return await client.get(page_url, headers=self._headers(urlparse(page_url).netloc))
 
             resp = await _get_spider_page()
             if resp.status_code == 429:
@@ -1251,6 +1320,11 @@ class SearchCollector(BaseCollector):
                         metadata={"url": page_url},
                         response=resp,
                     )
+                await self._record_domain_http_status(
+                    page_url,
+                    resp.status_code,
+                    metadata={"engine": "spider"},
+                )
                 return discovered
             ctype = resp.headers.get("content-type", "").lower()
             if "html" not in ctype:
@@ -1341,7 +1415,10 @@ class SearchCollector(BaseCollector):
 
         # Videos: stream to disk (no cap) BEFORE buffering the body into memory.
         if self._download_videos and _ext in VIDEO_EXTENSIONS:
-            return await self._stream_video(query, cid, url, source_url or url)
+            saved = await self._stream_video(query, cid, url, source_url or url)
+            if saved:
+                self._domain_pacing.count("videos_found")
+            return saved
 
         engine = hit.get("engine") or "download"
         scope = urlparse(url).netloc or "download"
@@ -1352,7 +1429,9 @@ class SearchCollector(BaseCollector):
             try:
                 async with self._make_client(timeout=30.0) as client:
                     async def _get_asset():
-                        return await client.get(url, headers=self._headers(urlparse(url).netloc))
+                        async with self._domain_pacing.slot(url):
+                            await self.wait_rate_limit(scope)
+                            return await client.get(url, headers=self._headers(urlparse(url).netloc))
 
                     resp = await _get_asset()
                     if resp.status_code == 429:
@@ -1385,6 +1464,15 @@ class SearchCollector(BaseCollector):
                                 },
                                 response=resp,
                             )
+                        await self._record_domain_http_status(
+                            url,
+                            resp.status_code,
+                            metadata={
+                                "engine": engine,
+                                "query": query,
+                                "source_url": source_url,
+                            },
+                        )
                         return False
                     data = resp.content
                     ctype = resp.headers.get("content-type", "").lower()
@@ -1418,13 +1506,25 @@ class SearchCollector(BaseCollector):
         q_name = (query or "spider")[:50]
 
         if is_pdf:
-            return await self._save_pdf(q_slug, q_name, cid, data, source_url or url)
+            saved = await self._save_pdf(q_slug, q_name, cid, data, source_url or url)
+            if saved:
+                self._domain_pacing.count("pdfs_found")
+            return saved
         if is_doc:
-            return await self._save_document(q_slug, q_name, cid, data, source_url or url, ext)
+            saved = await self._save_document(q_slug, q_name, cid, data, source_url or url, ext)
+            if saved:
+                self._domain_pacing.count("docs_found")
+            return saved
         if is_image:
-            return await self._save_image(q_slug, q_name, cid, data, source_url or url)
+            saved = await self._save_image(q_slug, q_name, cid, data, source_url or url)
+            if saved:
+                self._domain_pacing.count("media_found")
+            return saved
         # Unknown content-type: try as image (PIL will reject if it's not).
-        return await self._save_image(q_slug, q_name, cid, data, source_url or url)
+        saved = await self._save_image(q_slug, q_name, cid, data, source_url or url)
+        if saved:
+            self._domain_pacing.count("media_found")
+        return saved
 
     async def _save_image(
         self,
@@ -1706,63 +1806,74 @@ class SearchCollector(BaseCollector):
                     async with self._make_client(timeout=120.0) as client:
                         retry_delay: float | None = None
                         for attempt in (1, 2):
-                            async with client.stream(
-                                "GET", url, headers=self._headers(urlparse(url).netloc)
-                            ) as resp:
-                                if resp.status_code == 429 and attempt == 1:
-                                    retry_delay = await sleep_before_pre_cooldown_retry(
-                                        "search",
-                                        scope,
-                                        status_code=429,
-                                        reason="video stream returned 429",
-                                    )
-                                    if retry_delay is not None:
-                                        continue
-                                if retry_delay is not None and resp.status_code != 429:
-                                    await self._record_search_rate_limit(
-                                        engine=engine,
-                                        scope=scope,
-                                        status_code=429,
-                                        cooldown_active=False,
-                                        reason=f"video stream returned 429; retry returned HTTP {resp.status_code}",
-                                        metadata={
-                                            "query": query,
-                                            "url": url,
-                                            "source_url": source_url,
-                                            "pre_cooldown_retry": True,
-                                            "retry_status_code": resp.status_code,
-                                            "retry_delay_seconds": retry_delay,
-                                        },
-                                    )
-                                    retry_delay = None
-                                if resp.status_code != 200:
-                                    if resp.status_code == 429:
+                            async with self._domain_pacing.slot(url):
+                                await self.wait_rate_limit(scope)
+                                async with client.stream(
+                                    "GET", url, headers=self._headers(urlparse(url).netloc)
+                                ) as resp:
+                                    if resp.status_code == 429 and attempt == 1:
+                                        retry_delay = await sleep_before_pre_cooldown_retry(
+                                            "search",
+                                            scope,
+                                            status_code=429,
+                                            reason="video stream returned 429",
+                                        )
+                                        if retry_delay is not None:
+                                            continue
+                                    if retry_delay is not None and resp.status_code != 429:
                                         await self._record_search_rate_limit(
                                             engine=engine,
                                             scope=scope,
                                             status_code=429,
-                                            reason="video stream returned 429",
+                                            cooldown_active=False,
+                                            reason=f"video stream returned 429; retry returned HTTP {resp.status_code}",
                                             metadata={
                                                 "query": query,
                                                 "url": url,
                                                 "source_url": source_url,
+                                                "pre_cooldown_retry": True,
+                                                "retry_status_code": resp.status_code,
+                                                "retry_delay_seconds": retry_delay,
                                             },
-                                            response=resp,
                                         )
-                                    raise RuntimeError(f"status {resp.status_code}")
-                                ct = resp.headers.get("content-type", "").lower()
-                                if ct and not (ct.startswith("video/")
-                                               or ct == "application/octet-stream"):
-                                    raise RuntimeError(f"non-video content-type {ct}")
-                                async for chunk in resp.aiter_bytes(self._video_chunk_bytes):
-                                    if not chunk:
-                                        continue
-                                    size += len(chunk)
-                                    if self._max_video_bytes and size > self._max_video_bytes:
-                                        raise RuntimeError("video exceeds cap")
-                                    f.write(chunk)
-                                    hasher.update(chunk)
-                                break
+                                        retry_delay = None
+                                    if resp.status_code != 200:
+                                        if resp.status_code == 429:
+                                            await self._record_search_rate_limit(
+                                                engine=engine,
+                                                scope=scope,
+                                                status_code=429,
+                                                reason="video stream returned 429",
+                                                metadata={
+                                                    "query": query,
+                                                    "url": url,
+                                                    "source_url": source_url,
+                                                },
+                                                response=resp,
+                                            )
+                                        await self._record_domain_http_status(
+                                            url,
+                                            resp.status_code,
+                                            metadata={
+                                                "engine": engine,
+                                                "query": query,
+                                                "source_url": source_url,
+                                            },
+                                        )
+                                        raise RuntimeError(f"status {resp.status_code}")
+                                    ct = resp.headers.get("content-type", "").lower()
+                                    if ct and not (ct.startswith("video/")
+                                                   or ct == "application/octet-stream"):
+                                        raise RuntimeError(f"non-video content-type {ct}")
+                                    async for chunk in resp.aiter_bytes(self._video_chunk_bytes):
+                                        if not chunk:
+                                            continue
+                                        size += len(chunk)
+                                        if self._max_video_bytes and size > self._max_video_bytes:
+                                            raise RuntimeError("video exceeds cap")
+                                        f.write(chunk)
+                                        hasher.update(chunk)
+                                    break
             if size < self._min_file_size:
                 raise RuntimeError("video too small")
         except Exception as e:

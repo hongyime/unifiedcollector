@@ -77,6 +77,9 @@ class FakeRedis:
             if key in self.lists:
                 del self.lists[key]
                 n += 1
+            if key in self.hashes:
+                del self.hashes[key]
+                n += 1
         return n
 
     async def incr(self, key: str) -> int:
@@ -675,10 +678,11 @@ async def test_drain_falls_back_to_text_when_local_media_upload_fails(
 
     assert len(telegram_stub["send_video"]) == 1
     assert len(telegram_stub["send"]) == 1
-    assert "stored locally in the Collector vault" in telegram_stub["send"][0]["text"]
+    assert "Telegram upload failed; media remains in Collector vault." in telegram_stub["send"][0]["text"]
     assert local_video.name in telegram_stub["send"][0]["text"]
     assert fake_redis.strings["uc:realtime_post_feed:local_fallback_total"] == "1"
     assert fake_redis.hashes["uc:realtime_post_feed:local_fallback_by_source"]["youtube"] == "1"
+    assert fake_redis.hashes["uc:realtime_post_feed:source_counters_total"]["youtube:local_fallback"] == "1"
     assert str(local_video) not in telegram_stub["send"][0]["text"]
 
 
@@ -798,6 +802,7 @@ async def test_drain_dedupes_same_source_url_without_sha(fake_redis, telegram_st
     from src.notifications import realtime_feed
 
     monkeypatch.setenv("REALTIME_POST_FEED_MAX_PER_MINUTE", "10")
+    monkeypatch.setenv("REALTIME_POST_FEED_SOURCE_SUMMARY", "0")
 
     for content_id in ("search_1", "search_2"):
         payload = realtime_feed.build_payload(
@@ -813,6 +818,33 @@ async def test_drain_dedupes_same_source_url_without_sha(fake_redis, telegram_st
     await drain._tick(fake_redis)
 
     assert len(telegram_stub["send_photo"]) == 1
+    assert fake_redis.hashes["uc:realtime_post_feed:source_counters_total"]["search:sent"] == "1"
+    assert fake_redis.hashes["uc:realtime_post_feed:source_counters_total"]["search:deduped"] == "1"
+
+
+@pytest.mark.asyncio
+async def test_source_counter_summary_sends_short_per_source_status(
+    fake_redis,
+    telegram_stub,
+    monkeypatch,
+):
+    from src.notifications import realtime_feed
+
+    monkeypatch.setenv("REALTIME_POST_FEED_SOURCE_SUMMARY_SECONDS", "60")
+    await fake_redis.hincrby(realtime_feed.SOURCE_COUNTER_WINDOW_KEY, "instagram:sent", 2)
+    await fake_redis.hincrby(realtime_feed.SOURCE_COUNTER_WINDOW_KEY, "threads:deferred", 1)
+    await fake_redis.hincrby(realtime_feed.SOURCE_COUNTER_TOTALS_KEY, "instagram:sent", 2)
+    await fake_redis.set(realtime_feed.LAST_SOURCE_REPORT_KEY, time.time() - 61)
+
+    await realtime_feed._flush_source_counter_summary(fake_redis)  # noqa: SLF001
+
+    assert len(telegram_stub["send"]) == 1
+    text = telegram_stub["send"][0]["text"]
+    assert "Instagram: media delivered 2" in text
+    assert "Threads: deferred 1" in text
+    assert "caption" not in text.lower()
+    assert realtime_feed.SOURCE_COUNTER_WINDOW_KEY not in fake_redis.hashes
+    assert fake_redis.hashes[realtime_feed.SOURCE_COUNTER_TOTALS_KEY]["instagram:sent"] == "2"
 
 
 @pytest.mark.asyncio

@@ -165,6 +165,9 @@ def test_browser_tab_audit_accepts_dynamic_extension_worlds():
     assert 'origin.startswith("chrome-extension://")' in script
     assert "UC_CHROME_CDP_PORT" in script
     assert "'9333'" in script
+    assert "iso_ctx_ids: list[int]" in script
+    assert "if p.get(\"cs\") is True:" in script
+    assert "out[\"iso_context_id\"]" in script
 
 
 def test_browser_tab_audit_uses_load_tolerant_default_deadlines():
@@ -172,6 +175,16 @@ def test_browser_tab_audit_uses_load_tolerant_default_deadlines():
 
     assert 'UC_TAB_AUDIT_RUNTIME_ENABLE_TIMEOUT_SECONDS", 4.0' in script
     assert 'UC_TAB_AUDIT_MAIN_TIMEOUT_SECONDS", 8.0' in script
+
+
+def test_browser_tab_audit_has_hard_tab_budget_assertion():
+    script = (REPO_ROOT / "tools" / "browser_tab_audit.py").read_text(encoding="utf-8")
+
+    assert "UC_TAB_AUDIT_FAIL_ON_BUDGET" in script
+    assert "extension_control_tab_count" in script
+    assert "platform_tab_budget_exceeded" in script
+    assert "blank_startup_tabs" in script
+    assert 'results["_tab_budget"]' in script
 
 
 def test_browser_tab_reload_treats_disappeared_targets_as_skips():
@@ -184,6 +197,13 @@ def test_browser_tab_reload_treats_disappeared_targets_as_skips():
     assert '"no such target" in text' in script
     assert '"target_disappeared"' in script
     assert "SKIP: target disappeared before reload" in script
+
+
+def test_browser_tab_reload_ignores_audit_metadata_sections():
+    script = (REPO_ROOT / "tools" / "browser_tab_reload.py").read_text(encoding="utf-8")
+
+    assert 'str(plat).startswith("_")' in script
+    assert "not isinstance(tabs, list)" in script
 
 
 def test_browser_tab_reload_recovers_dom_error_shells_and_stale_auth_duplicates():

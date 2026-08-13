@@ -429,6 +429,55 @@ async def test_record_api_request_sets_local_cooldown_on_403(monkeypatch):
     )
 
 
+@pytest.mark.asyncio
+async def test_record_api_request_counts_search_as_100_units(monkeypatch):
+    coll = _new_collector(monkeypatch, YOUTUBE_API_KEY="AIzaK")
+    snapshots = []
+
+    async def snapshot_event(pool, **kwargs):
+        snapshots.append(kwargs)
+
+    monkeypatch.setattr(youtube_mod, "upsert_api_quota_snapshot", snapshot_event)
+
+    await coll._record_api_request("search.list", status_code=200, metadata={"resolve": "alice"})
+
+    quota_date, _reset_at = coll._youtube_quota_window()
+    account = coll._youtube_quota_account()
+    assert coll._youtube_quota_used_units[(account, "search", str(quota_date))] == 100
+    assert coll.pool._conn.execute.await_args.args[2] == 100
+    assert snapshots[0]["service"] == "youtube"
+    assert snapshots[0]["bucket"] == "search"
+    assert snapshots[0]["used_units"] == 100
+    assert snapshots[0]["metadata"]["endpoint"] == "search.list"
+
+
+@pytest.mark.asyncio
+async def test_api_get_pauses_before_youtube_search_quota_target(monkeypatch):
+    coll = _new_collector(monkeypatch, YOUTUBE_API_KEY="AIzaK")
+    quota_date, _reset_at = coll._youtube_quota_window()
+    account = coll._youtube_quota_account()
+    coll._youtube_quota_used_units[(account, "search", str(quota_date))] = 850
+
+    class _NoClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def get(self, *_args, **_kwargs):  # pragma: no cover - should not call API
+            raise AssertionError("search.list should pause before making an API call")
+
+        async def aclose(self):
+            return None
+
+    monkeypatch.setattr(youtube_mod.httpx, "AsyncClient", _NoClient)
+
+    out = await coll._api_get("search", {"q": "alice"})
+
+    assert out == {}
+    calls = [call.args[0] for call in coll.pool._conn.execute.await_args_list]
+    assert any("collector_api_quota_snapshots" in sql for sql in calls)
+    assert any("rate_limit_events" in sql for sql in calls)
+
+
 # ── _upsert_channel ──────────────────────────────────────────────────────
 
 

@@ -1076,6 +1076,104 @@ async function closeDuplicateExtensionControlTabs(reason) {
   return { closed, unpinned, errors };
 }
 
+async function browserTabBudgetSnapshot() {
+  const pinScraperTabs = await scraperTabsPinned();
+  const expandedTabs = await expandedPlatformTabsEnabled();
+  const violations = [];
+  const counts = {
+    extension_control_tabs: 0,
+    blank_tabs: 0,
+    scraper_tabs: 0,
+    pinned_scraper_tabs: 0,
+    pinned_control_tabs: 0,
+    per_platform: {},
+  };
+  let tabs = [];
+  try {
+    tabs = (await chrome.tabs.query({})) || [];
+  } catch (e) {
+    return {
+      ok: false,
+      violations: [{ kind: "tab_query_failed", detail: String(e && e.message ? e.message : e) }],
+      counts,
+      pin_scraper_tabs: pinScraperTabs,
+      expanded_platform_tabs: expandedTabs,
+      extension_version: extensionVersion(),
+    };
+  }
+
+  const controls = tabs.filter((tab) => tab && tab.id != null && isExtensionControlTabUrl(tab.url));
+  const blanks = tabs.filter(isBlankStartupTab);
+  const rows = scraperTabRows(tabs);
+  const selection = selectCanonicalScraperTabRows(tabs);
+  counts.extension_control_tabs = controls.length;
+  counts.blank_tabs = blanks.length;
+  counts.scraper_tabs = rows.length;
+  for (const tab of controls) {
+    if (tab.pinned) counts.pinned_control_tabs++;
+  }
+  for (const row of rows) {
+    const pid = row.platform.id;
+    counts.per_platform[pid] = (counts.per_platform[pid] || 0) + 1;
+    if (row.tab && row.tab.pinned) counts.pinned_scraper_tabs++;
+  }
+
+  if (controls.length !== 1) {
+    violations.push({
+      kind: controls.length === 0 ? "extension_control_tab_missing" : "extension_control_tab_count",
+      count: controls.length,
+      expected: 1,
+    });
+  }
+  if (selection.duplicateRows.length) {
+    violations.push({
+      kind: "duplicate_scraper_tabs",
+      count: selection.duplicateRows.length,
+    });
+  }
+  for (const p of scraperPlatforms()) {
+    const count = counts.per_platform[p.id] || 0;
+    const allowed = expandedTabs ? Math.max(1, platformManagedUrls(p, true).length) : 1;
+    if (count > allowed) {
+      violations.push({
+        kind: "scraper_tab_budget_exceeded",
+        platform: p.id,
+        count,
+        allowed,
+      });
+    }
+  }
+  if (blanks.length) {
+    violations.push({ kind: "blank_startup_tabs", count: blanks.length, allowed: 0 });
+  }
+  if (!pinScraperTabs && counts.pinned_scraper_tabs) {
+    violations.push({
+      kind: "pinned_scraper_tabs_without_opt_in",
+      count: counts.pinned_scraper_tabs,
+      storage_key: SCRAPER_TABS_PINNED_KEY,
+    });
+  }
+  if (counts.pinned_control_tabs) {
+    violations.push({ kind: "pinned_extension_control_tabs", count: counts.pinned_control_tabs, allowed: 0 });
+  }
+  return {
+    ok: violations.length === 0,
+    violations,
+    counts,
+    pin_scraper_tabs: pinScraperTabs,
+    expanded_platform_tabs: expandedTabs,
+    extension_version: extensionVersion(),
+  };
+}
+
+async function assertBrowserTabBudget(reason) {
+  const snapshot = await browserTabBudgetSnapshot();
+  if (!snapshot.ok) {
+    await log("warn", `browser tab budget violation (${reason || "check"}): ${JSON.stringify(snapshot.violations.slice(0, 8))}`);
+  }
+  return snapshot;
+}
+
 function shouldNormalizeSingleFeedTab(p, tab, reason) {
   if (!p || !tab || !tab.url) return false;
   // Platforms where a wandering tab (user clicked into a profile, or the SPA
@@ -1209,6 +1307,7 @@ async function ensureScraperTabsOpen(reason, options = {}) {
       }
     }
     if (opened || closed || navigated) await log("info", `tabs: +${opened} opened, ${closed} dup(s) closed, ${navigated} canonicalized (${reason})`);
+    await assertBrowserTabBudget(`ensure:${reason || "tabs"}`).catch(() => {});
   } finally { _tabsOpInProgress = false; }
 }
 
@@ -1267,7 +1366,8 @@ async function refreshScraperTabs(options = {}) {
     }
     const mode = bypassCache ? "hard-refreshed" : "auto-refreshed";
     await log("info", `${mode} ${tabs ? tabs.length : 0}/${selection.seen} canonical scraper tab(s), closed ${closed.closed}/${selection.skipped} duplicate(s), normalized pin state on ${pinStateChanged}, staggered ${gapMs}ms → loop respawns fresh (${reason})`);
-    return { ok: true, reloaded, errors, tabs: tabs ? tabs.length : 0, totalTabs: selection.seen, skippedDuplicates: selection.skipped, closedDuplicates: closed.closed, pinStateChanged };
+    const tabBudget = await assertBrowserTabBudget(`refresh:${reason}`).catch(() => null);
+    return { ok: true, reloaded, errors, tabs: tabs ? tabs.length : 0, totalTabs: selection.seen, skippedDuplicates: selection.skipped, closedDuplicates: closed.closed, pinStateChanged, tabBudget };
   } finally { _tabsOpInProgress = false; }
 }
 
@@ -2762,6 +2862,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         break;
       case "getPlatforms":
         sendResponse(await platformStatuses());
+        break;
+      case "tabBudget":
+        sendResponse(await assertBrowserTabBudget(msg.reason || "diagnostics"));
         break;
       case "diagnostics": {
         const stored = await chrome.storage.local.get(["ucStatus", LOG_KEY, "ingestBase"]);

@@ -66,6 +66,9 @@ GITHUB_SPIDER_USER_DELAY     between-user politeness delay (default 2.0s).
 GITHUB_SPIDER_CONCURRENCY    spider drain workers (default 4).
 GITHUB_SPIDER_ENABLED        master-switch for queue draining (default true).
 GITHUB_API_DELAY             between-API-call polite delay (default 0.1s).
+GITHUB_API_QUOTA_TARGET_RATIO target REST core quota use before pacing harder
+                             (default 0.85).
+GITHUB_API_ADAPTIVE_MAX_DELAY_SECONDS max adaptive delay per request (default 30s).
 GITHUB_API_TRANSPORT_RETRIES retries for transient API disconnects (default 4).
 GITHUB_API_TRANSPORT_RETRY_MAX_DELAY_SECONDS max retry backoff (default 30s).
 GITHUB_API_TRANSPORT_EVENT_MIN_INTERVAL_SECONDS min duplicate event gap (default 900s).
@@ -97,6 +100,7 @@ from urllib.parse import quote, urlparse
 import httpx
 
 from src.core.account_quota import AccountQuotaTracker, QuotaConfig
+from src.core.api_quota import target_units, upsert_api_quota_snapshot
 from src.core.base_collector import BaseCollector
 from src.core.rate_limit_events import record_rate_limit_event
 from src.core.scrape_pacing import sleep_rate_limit
@@ -194,6 +198,13 @@ class GithubCollector(BaseCollector):
         self._spider_batch_size = int(os.getenv("GITHUB_SPIDER_BATCH_SIZE", "20"))
         self._spider_user_delay = float(os.getenv("GITHUB_SPIDER_USER_DELAY", "2.0"))
         self._api_delay = float(os.getenv("GITHUB_API_DELAY", "0.1"))
+        self._api_quota_target_ratio = self._env_float_range(
+            "GITHUB_API_QUOTA_TARGET_RATIO", "0.85", lower=0.5, upper=0.95
+        )
+        self._api_adaptive_max_delay = self._env_float_min(
+            "GITHUB_API_ADAPTIVE_MAX_DELAY_SECONDS", "30", lower=0.0
+        )
+        self._last_adaptive_api_delay = 0.0
         self._api_transport_retries = self._env_int_range(
             "GITHUB_API_TRANSPORT_RETRIES", "4", lower=0, upper=8
         )
@@ -277,6 +288,20 @@ class GithubCollector(BaseCollector):
         except (TypeError, ValueError):
             value = float(default)
         return max(lower, value)
+
+    @staticmethod
+    def _env_float_range(
+        name: str,
+        default: str,
+        *,
+        lower: float = 0.0,
+        upper: float = 1.0,
+    ) -> float:
+        try:
+            value = float(os.getenv(name, default))
+        except (TypeError, ValueError):
+            value = float(default)
+        return min(upper, max(lower, value))
 
     @staticmethod
     def _env_limit(name: str, default: str = "0") -> int | None:
@@ -427,6 +452,53 @@ class GithubCollector(BaseCollector):
                 "retry_after": resp.headers.get("Retry-After"),
             },
         )
+
+    async def _record_api_quota_snapshot(self, *, account: str, url: str) -> None:
+        if self.rate_limit_limit is None or self.rate_limit_remaining is None:
+            return
+        used = max(0, int(self.rate_limit_limit) - int(self.rate_limit_remaining))
+        reset_at = (
+            datetime.fromtimestamp(self.rate_limit_reset, tz=timezone.utc)
+            if self.rate_limit_reset
+            else None
+        )
+        await upsert_api_quota_snapshot(
+            self.pool,
+            service="github",
+            account=account,
+            bucket="core_hour",
+            quota_date=(reset_at or datetime.now(timezone.utc)).date(),
+            reset_at=reset_at,
+            used_units=used,
+            remaining_units=int(self.rate_limit_remaining),
+            quota_units=int(self.rate_limit_limit),
+            target_ratio=self._api_quota_target_ratio,
+            paused=bool(self.rate_limit_remaining <= self._rate_limit_buffer),
+            metadata={
+                "url": url,
+                "scope": self._rate_limit_scope(url),
+                "requests_made": self.requests_made,
+                "adaptive_delay_seconds": self._last_adaptive_api_delay,
+            },
+        )
+
+    def _adaptive_api_delay_seconds(self) -> float:
+        if (
+            self.rate_limit_limit is None
+            or self.rate_limit_remaining is None
+            or not self.rate_limit_reset
+            or self.rate_limit_limit <= 0
+            or self._api_adaptive_max_delay <= 0
+        ):
+            return 0.0
+        used = max(0, int(self.rate_limit_limit) - int(self.rate_limit_remaining))
+        target = target_units(int(self.rate_limit_limit), self._api_quota_target_ratio)
+        seconds_left = max(0, int(self.rate_limit_reset) - int(time.time()))
+        if seconds_left <= 0 or used < target:
+            return 0.0
+        remaining_to_reset = max(1, int(self.rate_limit_remaining))
+        desired_interval = seconds_left / remaining_to_reset
+        return min(self._api_adaptive_max_delay, max(0.0, desired_interval - self._api_delay))
 
     async def _record_transport_failure(
         self,
@@ -588,6 +660,9 @@ class GithubCollector(BaseCollector):
                     )
                 )
             )
+            adaptive_delay = 0.0 if is_rate_limited else self._adaptive_api_delay_seconds()
+            self._last_adaptive_api_delay = adaptive_delay
+            await self._record_api_quota_snapshot(account=pat_account, url=url)
             if is_rate_limited:
                 reset_wait = max(0, (self.rate_limit_reset or 0) - int(time.time()))
                 wait = max(retry_after or 0, reset_wait) + 5
@@ -619,6 +694,15 @@ class GithubCollector(BaseCollector):
                     )
                     await sleep_rate_limit(sleep_for)
                 return None
+            if adaptive_delay > 0:
+                logger.debug(
+                    "GitHub adaptive quota pacing %.2fs remaining=%s limit=%s target=%.2f",
+                    adaptive_delay,
+                    self.rate_limit_remaining,
+                    self.rate_limit_limit,
+                    self._api_quota_target_ratio,
+                )
+                await sleep_rate_limit(adaptive_delay)
             if (
                 self.rate_limit_remaining is not None
                 and self.rate_limit_remaining < self._rate_limit_buffer
@@ -660,6 +744,18 @@ class GithubCollector(BaseCollector):
             "requests_made": self.requests_made,
             "active_pat_idx": self._pat_idx,
             "pat_count": len(self._pats),
+            "used": (
+                max(0, self.rate_limit_limit - self.rate_limit_remaining)
+                if self.rate_limit_limit is not None and self.rate_limit_remaining is not None
+                else None
+            ),
+            "target": (
+                target_units(self.rate_limit_limit, self._api_quota_target_ratio)
+                if self.rate_limit_limit is not None
+                else None
+            ),
+            "target_ratio": self._api_quota_target_ratio,
+            "last_adaptive_delay_seconds": self._last_adaptive_api_delay,
         }
 
     async def _paginate(

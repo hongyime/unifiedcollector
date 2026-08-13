@@ -449,6 +449,16 @@ def test_auto_opened_scraper_tabs_are_unpinned_by_default():
     assert "pinned: true" not in ensure_block
 
 
+def test_extension_exposes_tab_budget_assertion():
+    background = _read("extension/background.js")
+    assert "async function browserTabBudgetSnapshot()" in background
+    assert "pinned_scraper_tabs_without_opt_in" in background
+    assert "scraper_tab_budget_exceeded" in background
+    assert 'case "tabBudget"' in background
+    assert 'assertBrowserTabBudget(`ensure:${reason || "tabs"}`)' in background
+    assert "assertBrowserTabBudget(`refresh:${reason}`)" in background
+
+
 def test_browser_upload_attempt_limits_prioritize_video_platforms():
     background = _read("extension/background.js")
     limits_block = background.split("const BROWSER_UPLOAD_ATTEMPT_LIMIT_BY_PLATFORM = {", 1)[1].split(
@@ -518,6 +528,19 @@ def test_instagram_browser_media_detail_revisit_is_enabled():
     assert "collectIgDetailDomMedia" in helper_block
     assert 'markBrowserMediaRevisitItems("instagram", detailSink, activeMediaRevisit)' in helper_block
     assert 'finishBrowserMediaRevisit(\n    "instagram",' in helper_block
+
+
+def test_instagram_tuning_knobs_are_bounded_and_explicit():
+    content = _read("extension/content.js")
+    assert 'lsBoundedInt("ucIgStorySweepCap", 6, 5, 8)' in content
+    assert 'lsBoundedInt("ucIgDeepProfileCap", 3, 2, 5)' in content
+    assert 'lsBoundedInt("ucIgRestWindowMinutes", 10, 8, 22)' in content
+    assert 'lsBoundedInt("ucIgFamousFollowerCap", 3000, 1000, 5000)' in content
+    assert 'lsBoundedInt("ucIgRevisitHourlyCap", 1, 0, 3)' in content
+    assert 'lsBoundedInt("ucIg429CooldownMinutes", DEFAULT_THROTTLE_BACKOFF_MINS.instagram, 45, 180)' in content
+    assert "consumeInstagramRevisitBudget()" in content
+    assert "pool.slice(0, igStorySweepCap())" in content
+    assert "slice(0, igTargetBudget())" in content
 
 
 def test_post_reload_scrape_nudge_waits_and_retries_for_heavy_tabs():

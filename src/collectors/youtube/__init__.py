@@ -59,11 +59,13 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 import httpx
 
+from src.core.api_quota import target_units, upsert_api_quota_snapshot
 from src.core.base_collector import BaseCollector
 from src.collectors.youtube.parse import (
     vtt_to_text as _parse_vtt_to_text,
@@ -194,6 +196,24 @@ class YoutubeCollector(BaseCollector):
         self._api_cooldown_until = 0.0
         self._api_cooldown_until_by_key: dict[str, float] = {}
         self._api_cooldown_restored = False
+        self._youtube_daily_quota_units = max(0, int(os.getenv("YOUTUBE_DAILY_QUOTA_UNITS", "10000")))
+        self._youtube_quota_target_ratio = min(
+            0.99,
+            max(0.1, float(os.getenv("YOUTUBE_QUOTA_TARGET_RATIO", "0.90"))),
+        )
+        default_search_quota = min(1000, self._youtube_daily_quota_units)
+        self._youtube_search_quota_units = max(
+            0,
+            int(os.getenv("YOUTUBE_SEARCH_DAILY_QUOTA_UNITS", str(default_search_quota))),
+        )
+        default_data_quota = max(0, self._youtube_daily_quota_units - self._youtube_search_quota_units)
+        self._youtube_data_quota_units = max(
+            0,
+            int(os.getenv("YOUTUBE_DATA_API_DAILY_QUOTA_UNITS", str(default_data_quota))),
+        )
+        self._youtube_quota_used_units: dict[tuple[str, str, str], int] = {}
+        self._youtube_quota_pause_until: dict[tuple[str, str], float] = {}
+        self._youtube_quota_snapshot_restored = False
         self._max_concurrent = int(os.getenv("YOUTUBE_MAX_CONCURRENT_DOWNLOADS", "3"))
         self._use_yt_dlp = self._check_yt_dlp()
         self._ffmpeg_available = check_tool("ffmpeg")
@@ -600,6 +620,159 @@ class YoutubeCollector(BaseCollector):
             accounts.append("oauth" if self._oauth_credentials else "anonymous")
         return list(dict.fromkeys(accounts))
 
+    @staticmethod
+    def _youtube_endpoint_name(endpoint: str) -> str:
+        value = (endpoint or "").strip().strip("/")
+        if not value:
+            return "unknown"
+        leaf = value.rsplit("/", 1)[-1]
+        if "." in leaf:
+            return leaf
+        mapping = {
+            "channels": "channels.list",
+            "playlistItems": "playlistItems.list",
+            "videos": "videos.list",
+            "search": "search.list",
+            "commentThreads": "commentThreads.list",
+        }
+        return mapping.get(leaf, leaf)
+
+    @staticmethod
+    def _youtube_quota_window(now: datetime | None = None) -> tuple[date, datetime]:
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        pt_now = current.astimezone(ZoneInfo("America/Los_Angeles"))
+        pt_start = pt_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        pt_reset = pt_start + timedelta(days=1)
+        return pt_start.date(), pt_reset.astimezone(timezone.utc)
+
+    def _youtube_quota_bucket(self, endpoint: str) -> str:
+        return "search" if self._youtube_endpoint_name(endpoint) == "search.list" else "data_api"
+
+    def _youtube_quota_units_for_bucket(self, bucket: str) -> int:
+        return self._youtube_search_quota_units if bucket == "search" else self._youtube_data_quota_units
+
+    def _youtube_api_unit_cost(self, endpoint: str, weight: int = 1) -> int:
+        base = 100 if self._youtube_endpoint_name(endpoint) == "search.list" else 1
+        return max(1, int(weight or 1)) * base
+
+    async def _restore_youtube_quota_budget(self) -> None:
+        if self._youtube_quota_snapshot_restored or self.pool is None:
+            return
+        self._youtube_quota_snapshot_restored = True
+        quota_date, reset_at = self._youtube_quota_window()
+        try:
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT account, bucket, used_units, paused, reset_at
+                    FROM collector_api_quota_snapshots
+                    WHERE service = 'youtube'
+                      AND quota_date = $1
+                      AND account = ANY($2::text[])
+                    """,
+                    quota_date,
+                    self._youtube_quota_accounts(),
+                )
+        except Exception:
+            logger.debug("youtube quota snapshot restore failed", exc_info=True)
+            return
+        now_ts = time.time()
+        for row in rows or []:
+            try:
+                account = row["account"]
+                bucket = row["bucket"]
+                used_units = int(row["used_units"] or 0)
+            except (KeyError, TypeError, ValueError):
+                continue
+            key = (account, bucket, str(quota_date))
+            self._youtube_quota_used_units[key] = max(
+                self._youtube_quota_used_units.get(key, 0),
+                used_units,
+            )
+            row_reset = row.get("reset_at") or reset_at
+            if row_reset and row_reset.tzinfo is None:
+                row_reset = row_reset.replace(tzinfo=timezone.utc)
+            reset_ts = (row_reset or reset_at).timestamp()
+            if row.get("paused") and reset_ts > now_ts:
+                self._youtube_quota_pause_until[(account, bucket)] = reset_ts
+
+    async def _youtube_quota_budget_exhausted(
+        self,
+        endpoint: str,
+        *,
+        weight: int = 1,
+        metadata: dict | None = None,
+    ) -> bool:
+        await self._restore_youtube_quota_budget()
+        account = self._youtube_quota_account()
+        endpoint_name = self._youtube_endpoint_name(endpoint)
+        bucket = self._youtube_quota_bucket(endpoint_name)
+        cost = self._youtube_api_unit_cost(endpoint_name, weight)
+        quota = self._youtube_quota_units_for_bucket(bucket)
+        if quota <= 0:
+            return False
+        quota_date, reset_at = self._youtube_quota_window()
+        key = (account, bucket, str(quota_date))
+        pause_key = (account, bucket)
+        now_ts = time.time()
+        if self._youtube_quota_pause_until.get(pause_key, 0.0) > now_ts:
+            return True
+        used = int(self._youtube_quota_used_units.get(key, 0))
+        target = target_units(quota, self._youtube_quota_target_ratio)
+        if used + cost <= target:
+            return False
+        cooldown_seconds = max(1, int(reset_at.timestamp() - now_ts))
+        self._youtube_quota_pause_until[pause_key] = reset_at.timestamp()
+        await upsert_api_quota_snapshot(
+            self.pool,
+            service="youtube",
+            account=account,
+            bucket=bucket,
+            quota_date=quota_date,
+            reset_at=reset_at,
+            used_units=used,
+            remaining_units=max(0, quota - used),
+            quota_units=quota,
+            target_ratio=self._youtube_quota_target_ratio,
+            paused=True,
+            metadata={
+                "endpoint": endpoint_name,
+                "cost_units": cost,
+                "target_units": target,
+                "reason": "target_budget_reached",
+                **(metadata or {}),
+            },
+        )
+        await record_rate_limit_event(
+            self.pool,
+            source="youtube",
+            account=account,
+            scope=endpoint_name,
+            status_code=429,
+            cooldown_seconds=cooldown_seconds,
+            reason="youtube_api_quota_budget_target_reached",
+            metadata={
+                "bucket": bucket,
+                "used_units": used,
+                "cost_units": cost,
+                "quota_units": quota,
+                "target_units": target,
+                "reset_at": reset_at.isoformat(),
+            },
+        )
+        logger.info(
+            "youtube: pausing %s bucket for %s until PT reset; used=%d cost=%d target=%d quota=%d",
+            bucket,
+            account,
+            used,
+            cost,
+            target,
+            quota,
+        )
+        return True
+
     def _select_youtube_api_key(self) -> bool:
         """Pick a non-cooled API key if one exists.
 
@@ -729,9 +902,19 @@ class YoutubeCollector(BaseCollector):
         weight: int = 1,
         metadata: dict | None = None,
     ) -> None:
+        endpoint_name = self._youtube_endpoint_name(endpoint)
+        bucket = self._youtube_quota_bucket(endpoint_name)
+        units = self._youtube_api_unit_cost(endpoint_name, weight)
+        account = self._youtube_quota_account()
+        quota_date, reset_at = self._youtube_quota_window()
+        key = (account, bucket, str(quota_date))
+        used = int(self._youtube_quota_used_units.get(key, 0)) + units
+        self._youtube_quota_used_units[key] = used
+        quota = self._youtube_quota_units_for_bucket(bucket)
+        target = target_units(quota, self._youtube_quota_target_ratio)
+        paused = bool(quota > 0 and used >= target)
         if self.pool is None:
             return
-        account = self._youtube_quota_account()
         try:
             async with self.pool.acquire() as conn:
                 await conn.execute(
@@ -762,10 +945,31 @@ class YoutubeCollector(BaseCollector):
                         updated_at = NOW()
                     """,
                     account,
-                    int(max(weight, 1)),
+                    units,
                 )
         except Exception:
             logger.debug("youtube quota usage update failed", exc_info=True)
+
+        await upsert_api_quota_snapshot(
+            self.pool,
+            service="youtube",
+            account=account,
+            bucket=bucket,
+            quota_date=quota_date,
+            reset_at=reset_at,
+            used_units=used,
+            remaining_units=max(0, quota - used) if quota else None,
+            quota_units=quota,
+            target_ratio=self._youtube_quota_target_ratio,
+            paused=paused,
+            metadata={
+                "endpoint": endpoint_name,
+                "status_code": status_code,
+                "cost_units": units,
+                "target_units": target,
+                **(metadata or {}),
+            },
+        )
 
         if status_code in (403, 429):
             cooldown_seconds = (
@@ -1418,7 +1622,15 @@ class YoutubeCollector(BaseCollector):
         snippet = {}
         statistics = {}
         uploads_playlist = None
-        if self._has_auth and allow_api and not await self._youtube_api_cooldown_active("channels.list", channel_id):
+        if (
+            self._has_auth
+            and allow_api
+            and not await self._youtube_api_cooldown_active("channels.list", channel_id)
+            and not await self._youtube_quota_budget_exhausted(
+                "channels.list",
+                metadata={"channel_id": channel_id, "part": "snippet,statistics,contentDetails"},
+            )
+        ):
             try:
                 headers, params = self._yt_auth({"part": "snippet,statistics,contentDetails", "id": channel_id})
                 async with httpx.AsyncClient(timeout=30, headers=headers) as client:
@@ -1800,14 +2012,29 @@ class YoutubeCollector(BaseCollector):
 
         async with httpx.AsyncClient(timeout=30) as client:
             if channel_input.startswith("UC"):
+                if await self._youtube_quota_budget_exhausted(
+                    "channels.list",
+                    metadata={"resolve": channel_input},
+                ):
+                    return channel_input, channel_input
                 headers, params = self._yt_auth({"part": "snippet", "id": channel_input})
                 resp = await client.get(f"{YT_API_BASE}/channels", params=params, headers=headers)
                 await self._record_api_request("channels.list", status_code=resp.status_code, metadata={"resolve": channel_input})
             elif channel_input.startswith("@"):
+                if await self._youtube_quota_budget_exhausted(
+                    "channels.list",
+                    metadata={"resolve": channel_input},
+                ):
+                    return channel_input, channel_input
                 headers, params = self._yt_auth({"part": "snippet", "forHandle": channel_input})
                 resp = await client.get(f"{YT_API_BASE}/channels", params=params, headers=headers)
                 await self._record_api_request("channels.list", status_code=resp.status_code, metadata={"resolve": channel_input})
             else:
+                if await self._youtube_quota_budget_exhausted(
+                    "search.list",
+                    metadata={"resolve": channel_input},
+                ):
+                    return channel_input, channel_input
                 headers, params = self._yt_auth({"part": "snippet", "q": channel_input, "type": "channel", "maxResults": 1})
                 resp = await client.get(f"{YT_API_BASE}/search", params=params, headers=headers)
                 await self._record_api_request("search.list", status_code=resp.status_code, metadata={"resolve": channel_input})
@@ -1830,6 +2057,11 @@ class YoutubeCollector(BaseCollector):
         page_token = ""
         async with httpx.AsyncClient(timeout=30) as client:
             while not self._stop.is_set():
+                if await self._youtube_quota_budget_exhausted(
+                    "playlistItems.list",
+                    metadata={"channel_id": channel_id, "playlist_id": uploads_playlist},
+                ):
+                    break
                 await asyncio.sleep(self._api_delay)
                 base_params = {"part": "snippet,contentDetails", "playlistId": uploads_playlist, "maxResults": 50}
                 if page_token: base_params["pageToken"] = page_token
@@ -1908,6 +2140,11 @@ class YoutubeCollector(BaseCollector):
             for i in range(0, len(video_ids), 50):
                 if self._stop.is_set(): break
                 chunk = video_ids[i:i + 50]
+                if await self._youtube_quota_budget_exhausted(
+                    "videos.list",
+                    metadata={"ids": len(chunk), "first_id": chunk[0] if chunk else None},
+                ):
+                    break
                 await asyncio.sleep(self._api_delay)
                 try:
                     headers, params = self._yt_auth({"part": "statistics,contentDetails", "id": ",".join(chunk)})
@@ -3016,6 +3253,11 @@ class YoutubeCollector(BaseCollector):
         Wraps existing _yt_auth() to keep auth logic uniform across new verbs.
         """
         if await self._youtube_api_cooldown_active(path, params.get("id") or params.get("playlistId")):
+            return {}
+        if await self._youtube_quota_budget_exhausted(
+            path,
+            metadata={"path": path, "id": params.get("id"), "playlist_id": params.get("playlistId")},
+        ):
             return {}
         headers, qparams = self._yt_auth(params)
         own_client = client is None

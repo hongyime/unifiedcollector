@@ -26,6 +26,7 @@ Env knobs (all optional; safe defaults):
   REALTIME_POST_FEED_INCLUDE_PROFILES  default "0"  (skip profile updates)
   REALTIME_POST_FEED_DEDUPE_BY_MEDIA   default "1"  (per-source sha/url dedupe)
   REALTIME_POST_FEED_SKIP_VIDEO_THUMBNAILS default "1"  (skip poster-only video rows)
+  REALTIME_POST_FEED_SOURCE_SUMMARY_SECONDS default "900" (per-source status digest)
   REDIS_URL / REDIS_HOST / REDIS_PASSWORD  (same pattern as io_pacer)
 """
 from __future__ import annotations
@@ -57,8 +58,19 @@ LOCAL_FALLBACK_TOTAL_KEY = "uc:realtime_post_feed:local_fallback_total"
 LOCAL_FALLBACK_BY_SOURCE_KEY = "uc:realtime_post_feed:local_fallback_by_source"
 LOCAL_FALLBACK_LAST_KEY = "uc:realtime_post_feed:local_fallback_last"
 LAST_BURST_REPORT_KEY = "uc:realtime_post_feed:last_burst_report"
+SOURCE_COUNTER_TOTALS_KEY = "uc:realtime_post_feed:source_counters_total"
+SOURCE_COUNTER_WINDOW_KEY = "uc:realtime_post_feed:source_counters_window"
+LAST_SOURCE_REPORT_KEY = "uc:realtime_post_feed:last_source_report"
 
 ALLOWED_KINDS = frozenset({"image", "video", "post", "photo"})
+SOURCE_COUNTER_OUTCOMES = frozenset({
+    "sent",
+    "deferred",
+    "deduped",
+    "too_large",
+    "local_fallback",
+    "failed",
+})
 
 
 # -- Env helpers ----------------------------------------------------------
@@ -459,6 +471,64 @@ async def _record_local_media_fallback(client, payload: dict, target: str | None
         await client.set(LOCAL_FALLBACK_LAST_KEY, json.dumps(record, default=str))
 
 
+def source_counters_from_hash(raw: dict[str, Any] | None) -> dict[str, dict[str, int]]:
+    counters: dict[str, dict[str, int]] = {}
+    if not raw:
+        return counters
+    for field, count in raw.items():
+        source, sep, outcome = str(field or "").partition(":")
+        if not sep or outcome not in SOURCE_COUNTER_OUTCOMES:
+            continue
+        source = source.strip().lower() or "unknown"
+        try:
+            value = int(count or 0)
+        except (TypeError, ValueError):
+            value = 0
+        counters.setdefault(source, {})[outcome] = value
+    return counters
+
+
+def _source_label(source: str) -> str:
+    source = str(source or "").strip().lower()
+    return _PLATFORM_LABEL.get(source, source.replace("_", " ").title() or "Unknown")
+
+
+def _source_counter_outcome(status: str, reason: str | None) -> str | None:
+    status = str(status or "").strip().lower()
+    reason = str(reason or "").strip().lower()
+    if status == "delivered":
+        if reason == "local_media_text_fallback":
+            return "local_fallback"
+        return "sent"
+    if status == "enqueued":
+        return "deferred"
+    if status == "deduped":
+        return "deduped"
+    if status == "too_large":
+        return "too_large"
+    if status == "failed":
+        return "failed"
+    return None
+
+
+async def _record_source_counter(
+    client,
+    payload: dict,
+    *,
+    status: str,
+    reason: str | None = None,
+) -> None:
+    outcome = _source_counter_outcome(status, reason)
+    if outcome is None:
+        return
+    source = str(payload.get("source") or "unknown").strip().lower() or "unknown"
+    field = f"{source}:{outcome}"
+    with contextlib.suppress(Exception):
+        await client.hincrby(SOURCE_COUNTER_TOTALS_KEY, field, 1)
+    with contextlib.suppress(Exception):
+        await client.hincrby(SOURCE_COUNTER_WINDOW_KEY, field, 1)
+
+
 async def _dedupe_seen(client, sha: str, *, ttl_days: int) -> bool:
     """Return True if we've seen this occurrence recently."""
     if not sha:
@@ -569,8 +639,7 @@ def _local_media_text_fallback(caption: str, target: str) -> str:
     path = str(target or "").strip()
     note = (
         "\n\n"
-        "<i>Media was stored locally in the Collector vault; Telegram could not "
-        "upload the full file here.</i>"
+        "<i>Telegram upload failed; media remains in Collector vault.</i>"
     )
     if path:
         label = path if _flag("REALTIME_POST_FEED_INCLUDE_LOCAL_PATHS", "0") else Path(path).name
@@ -670,14 +739,71 @@ async def _flush_deferred_summary(client) -> None:
     try:
         from src.notifications import telegram
         await telegram.send(
-            f"🌀 <b>Realtime feed burst</b>\n"
-            f"Deferred {deferred_n:,} posts in the last "
-            f"{_int('REALTIME_POST_FEED_BURST_SUMMARY_SECONDS', 900, min_value=60) // 60} min "
-            f"(over {_int('REALTIME_POST_FEED_MAX_PER_MINUTE', 12, min_value=1)}/min pacing). "
-            f"They remain queued for later delivery."
+            f"<b>Realtime feed</b>\n"
+            f"Deferred {deferred_n:,} posts "
+            f"({_int('REALTIME_POST_FEED_MAX_PER_MINUTE', 12, min_value=1)}/min cap). "
+            f"Queued for retry."
         )
     except Exception:
         logger.debug("realtime_feed burst summary send failed", exc_info=True)
+
+
+def _source_summary_lines(counters: dict[str, dict[str, int]], *, limit: int = 8) -> list[str]:
+    labels = {
+        "sent": "media delivered",
+        "deferred": "deferred",
+        "deduped": "deduped",
+        "too_large": "too large",
+        "local_fallback": "upload fallback",
+        "failed": "failed",
+    }
+    order = ("sent", "deferred", "deduped", "too_large", "local_fallback", "failed")
+    ranked = sorted(
+        counters.items(),
+        key=lambda item: sum(max(0, int(v or 0)) for v in item[1].values()),
+        reverse=True,
+    )
+    lines: list[str] = []
+    for source, values in ranked[:limit]:
+        parts = [
+            f"{labels[outcome]} {int(values[outcome]):,}"
+            for outcome in order
+            if int(values.get(outcome) or 0) > 0
+        ]
+        if parts:
+            lines.append(f"{html.escape(_source_label(source))}: {', '.join(parts)}")
+    if len(ranked) > limit:
+        lines.append(f"{len(ranked) - limit:,} more sources")
+    return lines
+
+
+async def _flush_source_counter_summary(client) -> None:
+    if not _flag("REALTIME_POST_FEED_SOURCE_SUMMARY", "1"):
+        return
+    try:
+        now = time.time()
+        last = await client.get(LAST_SOURCE_REPORT_KEY)
+        if not last:
+            await client.set(LAST_SOURCE_REPORT_KEY, now)
+            return
+        last_f = float(last)
+        interval = _int("REALTIME_POST_FEED_SOURCE_SUMMARY_SECONDS", 900, min_value=60)
+        if now - last_f < interval:
+            return
+        raw = await client.hgetall(SOURCE_COUNTER_WINDOW_KEY)
+        counters = source_counters_from_hash(raw)
+        lines = _source_summary_lines(counters)
+        await client.set(LAST_SOURCE_REPORT_KEY, now)
+        if not lines:
+            return
+        await client.delete(SOURCE_COUNTER_WINDOW_KEY)
+    except Exception:
+        return
+    try:
+        from src.notifications import telegram
+        await telegram.send("<b>Realtime media</b>\n" + "\n".join(lines))
+    except Exception:
+        logger.debug("realtime_feed source summary send failed", exc_info=True)
 
 
 async def _deliver_one(payload: dict) -> tuple[bool, int, str, str | None]:
@@ -776,6 +902,7 @@ class RealtimeFeedDrain:
         # No message this cycle — still run housekeeping.
         if not popped:
             await _flush_deferred_summary(client)
+            await _flush_source_counter_summary(client)
             return
 
         _, raw = popped
@@ -809,6 +936,13 @@ class RealtimeFeedDrain:
                 reason="duplicate_suppressed",
                 dedupe_key=dedupe_key,
             )
+            await _record_source_counter(
+                client,
+                payload,
+                status="deduped",
+                reason="duplicate_suppressed",
+            )
+            await _flush_source_counter_summary(client)
             return
 
         # Rate-limit.
@@ -822,10 +956,17 @@ class RealtimeFeedDrain:
                 reason="rate_cap_deferred",
                 dedupe_key=dedupe_key,
             )
+            await _record_source_counter(
+                client,
+                payload,
+                status="enqueued",
+                reason="rate_cap_deferred",
+            )
             with contextlib.suppress(Exception):
                 await client.lpush(_queue_key(), raw)
             self._backoff_seconds = _rate_limit_delay_seconds(capacity)
             await _flush_deferred_summary(client)
+            await _flush_source_counter_summary(client)
             return
 
         delivered, retry_after, delivery_outcome, delivery_target = await _deliver_one(payload)
@@ -848,6 +989,12 @@ class RealtimeFeedDrain:
                 "outcome": delivery_outcome,
             },
             target=delivery_target,
+        )
+        await _record_source_counter(
+            client,
+            payload,
+            status=ledger_status,
+            reason=ledger_reason,
         )
         # One-line outcome log so operators can see whether individual posts
         # actually reached Telegram. Kept at INFO so `docker logs` shows it
@@ -874,6 +1021,7 @@ class RealtimeFeedDrain:
                 "realtime_feed: telegram 429; sleeping %.1fs and retrying",
                 self._backoff_seconds,
             )
+            await _flush_source_counter_summary(client)
             return
 
         if not delivered:
@@ -883,11 +1031,13 @@ class RealtimeFeedDrain:
                 payload.get("source") or "?",
                 payload.get("content_id") or "?",
             )
+            await _flush_source_counter_summary(client)
             return
 
         await _mark_dedupe_seen(client, dedupe_key, ttl_days=ttl_days)
 
         await _flush_deferred_summary(client)
+        await _flush_source_counter_summary(client)
 
 
 def _hash_payload(payload: dict) -> str:

@@ -23,3 +23,5 @@
 2026-08-13 08:13 UTC - Instagram media revisit requires both extension claim/finish wiring and openable post URLs; CDN-only rows should be skipped or given synthesized post URLs from numeric media IDs.
 2026-08-13 12:58 UTC - Collector seen-target coverage reads the registry by default and refreshes it only by explicit operator action so normal coverage snapshots remain fast and scheduler-safe.
 2026-08-13 13:10 UTC - Collector seen-target registry implementation was pushed and live-verified through coverage snapshots and Analyzer pass-through counters.
+2026-08-13 13:40 UTC - Production completion slices keep optional expansion gated: browser-social tabs have a hard one-tab budget, Instagram tuning is bounded, Telegram reports source counters only, and SpiderFoot rollout advances from collector_seen_targets as weak passive leads with stop-or-rollback criteria.
+2026-08-13 16:24 UTC - Final production verification kept Instagram human-paced under active cooldown, left optional SpiderFoot in dry-run because stop criteria are present, and treated live CDP tab budget plus dashboard endpoints as the deployment proof.
