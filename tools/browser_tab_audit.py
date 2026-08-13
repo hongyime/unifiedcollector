@@ -74,6 +74,12 @@ PLATFORMS = {
 }
 FBSBX = "fbsbx.com"  # facebook iframe, not a real facebook page
 
+CDP_TRANSIENT_EXCEPTIONS = (
+    websocket.WebSocketException,
+    TimeoutError,
+    OSError,
+)
+
 
 def _list_targets() -> list[dict]:
     resp = urllib.request.urlopen(f"{CDP_HOST}/json/list", timeout=8)
@@ -275,10 +281,10 @@ def audit_tab(target: dict, main_timeout=MAIN_TIMEOUT, iso_timeout=ISO_TIMEOUT) 
                 exc = (r.get("result") or {}).get("exceptionDetails")
                 if exc:
                     out["error"] = f"main eval exc: {exc.get('text','?')}"
-        except (websocket.WebSocketTimeoutException, TimeoutError):
+        except CDP_TRANSIENT_EXCEPTIONS as exc:
             out["responsive_main"] = False
             out["elapsed_s_main"] = round(time.time() - t0, 3)
-            out["error"] = "main Runtime.evaluate timeout"
+            out["error"] = f"main Runtime.evaluate failed: {exc}"
 
         # Now find isolated world contexts
         iso_ctx = None
@@ -332,9 +338,9 @@ def audit_tab(target: dict, main_timeout=MAIN_TIMEOUT, iso_timeout=ISO_TIMEOUT) 
                     exc = (r.get("result") or {}).get("exceptionDetails")
                     if exc:
                         out["error"] = (out["error"] or "") + f" | iso eval exc: {exc.get('text','?')}"
-            except (websocket.WebSocketTimeoutException, TimeoutError):
+            except CDP_TRANSIENT_EXCEPTIONS as exc:
                 out["elapsed_s_iso"] = round(time.time() - t1, 3)
-                out["error"] = (out["error"] or "") + " | iso eval timeout"
+                out["error"] = (out["error"] or "") + f" | iso eval failed: {exc}"
 
         # Perf metrics
         try:
@@ -383,7 +389,39 @@ def main():
             continue
         for tgt in tabs:
             print(f"[{plat}] auditing {tgt.get('id','')[:12]}  {tgt.get('url','')[:80]}")
-            info = audit_tab(tgt)
+            try:
+                info = audit_tab(tgt)
+            except CDP_TRANSIENT_EXCEPTIONS as exc:
+                info = {
+                    "platform": plat,
+                    "target_id": tgt.get("id"),
+                    "url_snapshot": tgt.get("url"),
+                    "title": tgt.get("title"),
+                    "ws": tgt.get("webSocketDebuggerUrl"),
+                    "responsive_main": False,
+                    "elapsed_s_main": None,
+                    "elapsed_s_iso": None,
+                    "url": tgt.get("url"),
+                    "nodes": None,
+                    "heap_mb": None,
+                    "js_heap_used_bytes": None,
+                    "doc_ready": None,
+                    "hidden": None,
+                    "page_health_status": None,
+                    "page_health_reason": None,
+                    "page_health_sample": None,
+                    "page_content_counts": None,
+                    "cs": None,
+                    "cs_version": None,
+                    "cs_running": None,
+                    "install_id": None,
+                    "cs_installed_at": None,
+                    "iso_context_found": False,
+                    "isolated_worlds": [],
+                    "error": f"audit transient failure: {exc}",
+                    "perf_heap_mb": None,
+                    "perf_nodes": None,
+                }
             results[plat].append(info)
             print(
                 f"    -> main.responsive={info['responsive_main']}  main.elapsed={info['elapsed_s_main']}s  "

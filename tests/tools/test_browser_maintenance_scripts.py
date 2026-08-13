@@ -230,10 +230,23 @@ def test_browser_tab_maintenance_closes_duplicate_cdp_page_targets():
     assert "Ensure-ExtensionControlTab | Out-Null\n    Invoke-CdpPageTargetCleanup" in script
 
 
+def test_cleanup_ext_tabs_handles_cdp_list_timeout():
+    script = _read_script("cleanup_ext_tabs.py")
+
+    assert "except (TimeoutError, socket.timeout)" in script
+    assert "CDP target list timed out" in script
+    assert "if targets is None:" in script
+    assert "def is_blank_page" in script
+    assert "closed blank/newtab" in script
+
+
 def test_browser_tab_reload_hard_reopens_repeatedly_stuck_tiktok_tabs():
     script = (REPO_ROOT / "tools" / "browser_tab_reload.py").read_text(encoding="utf-8")
 
     assert "UC_BROWSER_HARD_REOPEN_PLATFORMS" in script
+    assert "EXPANDED_PLATFORM_TABS" in script
+    assert "UC_CHROME_OPEN_EXPANDED_PLATFORM_TABS" in script
+    assert "UC_BROWSER_EXPANDED_PLATFORM_TABS" in script
     assert '"instagram,threads,tiktok,x,facebook,strava"' in script
     assert '"https://www.tiktok.com/foryou"' in script
     assert '"https://www.tiktok.com/following"' in script
@@ -242,6 +255,11 @@ def test_browser_tab_reload_hard_reopens_repeatedly_stuck_tiktok_tabs():
     assert '"https://x.com/home"' in script
     hard_reopen_block = script.split("HARD_REOPEN_URLS = {", 1)[1].split("def _target_version", 1)[0]
     assert '"lemon8": [' not in hard_reopen_block
+    assert '"https://www.tiktok.com/following"' not in hard_reopen_block
+    assert '"https://www.tiktok.com/explore"' not in hard_reopen_block
+    expanded_block = script.split("if EXPANDED_PLATFORM_TABS:", 1)[1].split("HARD_REOPEN_URLS = {", 1)[0]
+    assert '"https://www.tiktok.com/following"' in expanded_block
+    assert '"https://www.tiktok.com/explore"' in expanded_block
     assert "def _platform_had_previous_unresponsive_reload" in script
     assert "def _is_canonical_x_recovery_url" in script
     assert '"x non-canonical recovery URL"' in script

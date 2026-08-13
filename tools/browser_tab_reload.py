@@ -38,12 +38,25 @@ HARD_REOPEN_PLATFORMS = {
     ).split(",")
     if p.strip()
 }
+EXPANDED_PLATFORM_TABS = os.getenv("UC_CHROME_OPEN_EXPANDED_PLATFORM_TABS", "0").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+} or os.getenv("UC_BROWSER_EXPANDED_PLATFORM_TABS", "0").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+}
+_TIKTOK_HARD_REOPEN_URLS = ["https://www.tiktok.com/foryou"]
+if EXPANDED_PLATFORM_TABS:
+    _TIKTOK_HARD_REOPEN_URLS.extend(
+        [
+            "https://www.tiktok.com/following",
+            "https://www.tiktok.com/explore",
+        ]
+    )
 HARD_REOPEN_URLS = {
-    "tiktok": [
-        "https://www.tiktok.com/foryou",
-        "https://www.tiktok.com/following",
-        "https://www.tiktok.com/explore",
-    ],
+    "tiktok": _TIKTOK_HARD_REOPEN_URLS,
     "x": [
         "https://x.com/home",
     ],

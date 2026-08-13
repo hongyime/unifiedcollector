@@ -240,6 +240,25 @@ def test_format_caption_escapes_html():
     assert "hello &amp; &lt;world&gt;" in text
 
 
+def test_format_caption_drops_oversized_source_link():
+    from src.notifications.realtime_feed import format_caption
+
+    long_url = "https://cdn.example.test/media?" + ("token=abc&" * 160)
+    payload = {
+        "source": "instagram",
+        "author": "story",
+        "caption": "hello <world> & friends " * 80,
+        "source_url": long_url,
+    }
+
+    text = format_caption(payload, max_len=1024)
+
+    assert len(text) <= 1024
+    assert "<a href=" not in text
+    assert "&lt;world&gt;" in text
+    assert text.count("<b>") == text.count("</b>")
+
+
 def test_format_caption_labels_newly_allowed_sources():
     from src.notifications.realtime_feed import format_caption
 

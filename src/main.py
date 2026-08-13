@@ -95,6 +95,21 @@ def main():
     rseed.add_argument("--dry-run", action="store_true")
     rseed.add_argument("--json", action="store_true")
 
+    rmb = sub.add_parser(
+        "realtime-media-backfill",
+        help="Replay a bounded set of stored media rows into the realtime Telegram feed",
+    )
+    rmb.add_argument("--source", required=True, help="Comma-separated explicit sources")
+    rmb.add_argument("--since-hours", type=int, default=36)
+    rmb.add_argument("--limit", type=int, default=12)
+    rmb.add_argument("--per-source-limit", type=int, default=4)
+    rmb.add_argument("--sleep-seconds", type=float, default=1.0)
+    rmb.add_argument("--include-profiles", action="store_true")
+    rmb.add_argument("--include-existing", action="store_true")
+    rmb.add_argument("--include-private", action="store_true")
+    rmb.add_argument("--dry-run", action="store_true")
+    rmb.add_argument("--json", action="store_true")
+
     # rebuild-report
     rp = sub.add_parser("rebuild-report", help="Dry-run rebuild coverage from vault sidecars")
     rp.add_argument("--vault-root", default=None, help="Vault root (default: COLLECTOR_VAULT_ROOT)")
@@ -259,6 +274,8 @@ def main():
         asyncio.run(_cmd_recon_spiderfoot(args))
     elif args.command == "recon-seed":
         asyncio.run(_cmd_recon_seed(args))
+    elif args.command == "realtime-media-backfill":
+        asyncio.run(_cmd_realtime_media_backfill(args))
     elif args.command == "rebuild-report":
         asyncio.run(_cmd_rebuild_report(
             args.vault_root,
@@ -493,6 +510,43 @@ async def _cmd_recon_spiderfoot(args):
             await asyncio.sleep(args.poll_interval)
     finally:
         await close_pool()
+
+
+async def _cmd_realtime_media_backfill(args):
+    from src.notifications.realtime_backfill import parse_sources, run_realtime_media_backfill
+
+    try:
+        sources = parse_sources(args.source, include_private=args.include_private)
+    except ValueError as exc:
+        logger.error("%s", exc)
+        sys.exit(2)
+    pool = await get_pool()
+    await init_db(pool)
+    try:
+        async with pool.acquire() as conn:
+            report = await run_realtime_media_backfill(
+                conn,
+                sources=sources,
+                since_hours=args.since_hours,
+                limit=args.limit,
+                per_source_limit=args.per_source_limit,
+                include_profiles=args.include_profiles,
+                include_existing=args.include_existing,
+                include_private=args.include_private,
+                dry_run=args.dry_run,
+                sleep_seconds=args.sleep_seconds,
+            )
+    finally:
+        await close_pool()
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True, default=str))
+    else:
+        print(
+            "realtime media backfill: "
+            f"selected={report['selected']} enqueued={report['enqueued']} "
+            f"skipped={report['skipped']} stored_only={report['stored_only']} "
+            f"dry_run={report['dry_run']}"
+        )
 
 
 async def _cmd_rebuild_report(

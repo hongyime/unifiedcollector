@@ -39,6 +39,8 @@
       .dot.ok { background: var(--ok); } .dot.bad { background: var(--err); } .dot.warn { background: var(--warn); }
       .pill { font-size: 10px; padding: 2px 7px; border-radius: 20px; border: 1px solid var(--border); color: var(--muted); }
       .pill.active { color: var(--ok); border-color: var(--ok); }
+      .toggle { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; font-weight: 600; }
+      .toggle input { width: 16px; height: 16px; accent-color: var(--accent); }
       .note { color: var(--muted); font-size: 12px; margin-top: 18px; line-height: 1.6; }
       .open { padding: 7px 14px; }
       .diag {
@@ -70,6 +72,7 @@
         <button id="refresh">Refresh status</button>
         <button id="reloadExtension">Reload extension</button>
         <button id="testIngest">Test ingest</button>
+        <label class="toggle"><input id="expandedTabs" type="checkbox" /> Expanded tabs</label>
         <div class="spacer"></div>
         <button id="scrape">Scrape now</button>
       </div>

@@ -1,8 +1,8 @@
 # UnifiedCollector Agent State
 
-Updated: 2026-08-12 23:01 SGT
+Updated: 2026-08-13 08:21 SGT
 
-Current task: realtime Telegram media delivery ledger, browser-bridge media enqueue coverage, X recovery hardening, tab cleanup, and safe rate tuning are implemented, tested, deployed, and live-verified. X remains the only degraded live source because X still serves a stale/no-progress shell despite canonical `/home` recovery and extension `1.23.63`.
+Current task: realtime Telegram media replay, browser-tab resource reduction, and safe non-browser rate tuning are being verified. X remains a live-page/session blocker when it serves the `Try again` shell; Instagram/Threads/Lemon8 realtime replay has been exercised, and expanded IG/TikTok browser tabs are now opt-in instead of default.
 
 Recent completed work:
 - Realtime media deliveries now have a durable Postgres ledger (`realtime_media_deliveries`) and dashboard/API visibility under `/media/realtime-feed/status` and `/media/realtime-feed/deliveries`; live status shows delivered/enqueued/deduped rows for Telegram, WhatsApp, Instagram, and Search.
@@ -15,8 +15,12 @@ Recent completed work:
 - Dashboard browser-health optional timeout noise was fixed, tested, rebuilt, deployed, committed, and pushed as `0ec39ea0 fix: suppress optional browser health noise`.
 - Additional browser optional diagnostic suppression was committed and pushed as `531298f7 fix: suppress optional browser diagnostics`.
 - Collector-derived recon seeding was committed and pushed as `70212a23 feat: seed collector recon targets`.
+- Visible scraper tabs now default to one primary route per social platform. Instagram `/direct/inbox/` and TikTok `/following`/`/explore` stay available only when `ucOpenExpandedPlatformTabs` is enabled from the extension control page.
 
 In-progress work:
+- 2026-08-13 follow-up added a new bounded `realtime-media-backfill` CLI and module to replay stored Instagram/Threads/Lemon8-style media into the realtime Telegram feed with explicit source selection, profile-photo skipping by default, private chat source guards, dry-run JSON, Redis enqueue, and delivery-ledger writes. Tests/deploy are still pending in this handoff state.
+- 2026-08-13 follow-up raised non-browser throughput knobs in Compose: YouTube enrich/download/backfill batches, search max results/download concurrency/query delay/cycle sleep, website concurrency, and realtime feed max-per-minute. Live services still need recreate/readback verification.
+- 2026-08-13 follow-up changed extension startup/watchdog/recovery scripts so expanded Instagram/TikTok browser coverage no longer reopens by default. Focused tests passed, the CDP scraper profile was relaunched, and live audit showed 7 page targets total: one extension control page plus one tab each for Instagram, Threads, TikTok, X, Facebook, and Strava, all on Bridge `1.23.64`.
 - X browser capture is loaded on `https://x.com/home` with cookies preserved, but accepted X content progress has not advanced since `x_posts` max `2026-08-11 23:11:08+00`; recovery is now less aggressive and stays on `x.com` only.
 - Facebook browser content progress is stale in `/health?include_sources=true`; the page/tab is open, but accepted content progress has not advanced inside the freshness window.
 
@@ -63,6 +67,7 @@ Current evidence:
 - Follow-up audit after manual X login still found Collector health degraded only for X: `browser content progress is ~2.4h old (>3600s)`, while Instagram, TikTok, Lemon8, Threads, Facebook, Strava, Telegram, WhatsApp, Beeper, YouTube, Website, GitHub, and Search were live.
 - Live CDP page targets showed one exact duplicate group: two `https://x.com/home` tabs. There were also two extension control tabs from different extension IDs, so browser resource cleanup needs extension-side dedupe plus old-control-tab cleanup.
 - Realtime Telegram feed is healthy and sending messages. Large local files are archived in Collector first; if Telegram upload is too large or rejected, `src.notifications.realtime_feed` sends a concise text fallback without the full local path by default.
+- Current realtime media status after redeploy: feed is actively posting, with rate-cap skips protecting Telegram from floods; recent delivery ledger rows include Instagram/Threads/Lemon8/TikTok/Telegram/WhatsApp/YouTube/Website/Search outcomes. Health is degraded only for X content progress; X browser heartbeat is fresh but current X media probes are zero-observed/zero-stored.
 - Browser extension refresh/loop code now closes canonical duplicate scraper tabs during normal operation.
 - Auto-opened scraper tabs are unpinned by default; optional local storage key `ucPinScraperTabs=true` can re-enable pinning.
 - Lemon8 is no longer an active browser scraper tab by default; Collector health still shows Lemon8 live through backend/headless collection freshness.

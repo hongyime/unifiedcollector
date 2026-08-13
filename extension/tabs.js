@@ -1,8 +1,10 @@
 const $ = (id) => document.getElementById(id);
+const EXPANDED_PLATFORM_TABS_KEY = "ucOpenExpandedPlatformTabs";
 let lastDiag = null;
 let lastProbe = null;
 let lastAutoProbeAt = 0;
 let autoProbeInFlight = false;
+let expandedPlatformTabs = false;
 
 function escapeHtml(s) {
   return String(s == null ? "" : s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
@@ -61,6 +63,7 @@ function badge(label, state, text) {
 async function render() {
   let platforms = [];
   let backgroundError = null;
+  await loadSettings();
   try {
     platforms = (await sendMessage({ type: "getPlatforms" })) || [];
     lastDiag = await sendMessage({ type: "diagnostics" });
@@ -68,6 +71,7 @@ async function render() {
     backgroundError = runtimeErrorText(e);
   }
   renderDiagnostics(backgroundError);
+  renderSettings();
   const list = $("list");
   list.innerHTML = platforms
     .map((p) => {
@@ -105,8 +109,22 @@ async function render() {
   $("note").innerHTML =
     `<b>Scrapers active:</b> ${scrapers}. Other platforms open for login now and will scrape ` +
     `automatically once their scraper is added. Auto-opened scraper tabs are unpinned by default; ` +
-    `keep them logged in. The bridge runs a scrape cycle on a timer (see the popup).`;
+    `keep them logged in. Expanded tabs are ${expandedPlatformTabs ? "on" : "off"}.`;
   maybeAutoProbe(backgroundError);
+}
+
+async function loadSettings() {
+  try {
+    const stored = await chrome.storage.local.get([EXPANDED_PLATFORM_TABS_KEY]);
+    expandedPlatformTabs = stored && stored[EXPANDED_PLATFORM_TABS_KEY] === true;
+  } catch (e) {
+    expandedPlatformTabs = false;
+  }
+}
+
+function renderSettings() {
+  const box = $("expandedTabs");
+  if (box) box.checked = expandedPlatformTabs;
 }
 
 function renderDiagnostics(backgroundError) {
@@ -190,6 +208,13 @@ $("testIngest").addEventListener("click", async () => {
     lastProbe = { ok: false, error: runtimeErrorText(e), auto: false, t: Date.now() };
   }
   await render();
+});
+$("expandedTabs").addEventListener("change", async (event) => {
+  const enabled = !!(event && event.target && event.target.checked);
+  expandedPlatformTabs = enabled;
+  await chrome.storage.local.set({ [EXPANDED_PLATFORM_TABS_KEY]: enabled });
+  await sendMessage({ type: "refreshScraperTabs", reason: "expanded_tabs_toggle" });
+  setTimeout(render, 1000);
 });
 
 async function reloadExtension(options = {}) {

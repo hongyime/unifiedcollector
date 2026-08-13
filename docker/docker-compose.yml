@@ -146,9 +146,9 @@ services:
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
       COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
-      YOUTUBE_ENRICH_BATCH_LIMIT: "8"
-      YOUTUBE_MAX_CONCURRENT_DOWNLOADS: "3"
-      YOUTUBE_VIDEO_BACKFILL_BATCH_SIZE: "18"
+      YOUTUBE_ENRICH_BATCH_LIMIT: "10"
+      YOUTUBE_MAX_CONCURRENT_DOWNLOADS: "2"
+      YOUTUBE_VIDEO_BACKFILL_BATCH_SIZE: "20"
       YOUTUBE_VIDEO_BACKFILL_MAX_PASSES: "2"
       YOUTUBE_VIDEO_BACKFILL_FAILED_RETRY_HOURS: "24"
       YOUTUBE_VIDEO_BACKFILL_SCAN_LIMIT: "10000"
@@ -156,7 +156,7 @@ services:
       YOUTUBE_VIDEO_DOWNLOAD_TIMEOUT: "1200"
       YOUTUBE_YTDLP_FORMAT: "best[height<=720][vcodec!=none][acodec!=none]/best[height<=480][vcodec!=none][acodec!=none]/best[height<=720]/best[height<=480]/worst"
       YOUTUBE_MAX_FILESIZE: "900M"
-      YOUTUBE_DOWNLOAD_DELAY: "3.0"
+      YOUTUBE_DOWNLOAD_DELAY: "6.0"
       # Media-first policy: do not permanently exclude longer videos. Backfill
       # remains bounded by batch size, failed-retry delay, and yt-dlp timeout.
       YOUTUBE_MAX_VIDEO_DURATION_MINUTES: "0"
@@ -285,6 +285,10 @@ services:
       # Keep history moving, but cap per-cycle DB churn.
       STRAVA_PAGE_SCRAPE_BATCH: "20"
       SEARCH_SPIDER_PAGES: "1"
+      SEARCH_MAX_RESULTS: "75"
+      SEARCH_CONCURRENT_DOWNLOADS: "8"
+      SEARCH_QUERY_DELAY_SECONDS: "1.5"
+      SEARCH_BING_PAGES: "4"
       # Strava athlete spider (kudos/comments/followers/clubs) — paced for I/O.
       STRAVA_SPIDER_ENABLED: "true"
       STRAVA_FOLLOW_SCRAPE_ENABLED: "true"
@@ -321,7 +325,7 @@ services:
       GITHUB_API_TRANSPORT_RETRIES: "2"
       COLLECTOR_CYCLE_SLEEP_GITHUB: "900"
       COLLECTOR_CYCLE_SLEEP_STRAVA: "600"
-      COLLECTOR_CYCLE_SLEEP_SEARCH: "600"
+      COLLECTOR_CYCLE_SLEEP_SEARCH: "300"
       # Conn-budget hygiene (P2 review §5): low-volume, long-cycle sources — a
       # small pool is plenty. Default 10 -> 4.
       DB_POOL_MAX_SIZE: "4"
@@ -403,7 +407,7 @@ services:
       # Concurrency drives REAL RSS (each task holds a page + parse tree). After
       # the host OOM, dialled 10 -> 6 to lower website's memory peak — a real RSS
       # cut (unlike a mem_limit cap), minor throughput cost across 421 sites.
-      WEBSITE_MAX_CONCURRENT_TASKS: "12"
+      WEBSITE_MAX_CONCURRENT_TASKS: "14"
       # CPU hygiene (A#4): website crawls are multi-hour; idle longer between cycles.
       COLLECTOR_CYCLE_SLEEP_WEBSITE: "600"
       # Conn-budget hygiene (P2 review §5): default 10 -> 6. Kept above lowrisk/main
@@ -803,7 +807,7 @@ services:
       TIKTOK_FOLLOW_OWNER_FALLBACK: ${TIKTOK_FOLLOW_OWNER_FALLBACK:-hongyime}
       SOCIAL_INGEST_PREP_DB_ON_STARTUP: "true"
       BROWSER_CONTENT_HINT_RESPONSE_TIMEOUT_SECONDS: "2.0"
-      UC_EXTENSION_EXPECTED_VERSION: "1.23.63"
+      UC_EXTENSION_EXPECTED_VERSION: "1.23.64"
     volumes:
       - z:/unifiedcollector/media:/media
       - z:/unifiedcollector:/vault
@@ -831,7 +835,7 @@ services:
       DB_POOL_MAX_SIZE: "4"
       # Operator status compares live Chrome hook heartbeats against this repo
       # extension build. Update with extension/manifest.json version bumps.
-      UC_EXTENSION_EXPECTED_VERSION: "1.23.63"
+      UC_EXTENSION_EXPECTED_VERSION: "1.23.64"
     volumes:
       - z:/unifiedcollector/media:/media
       - z:/unifiedcollector:/vault
@@ -898,7 +902,7 @@ services:
       REDIS_URL: "redis://:${REDIS_PASSWORD:-localdevredis123}@redis:6379/0"
       # 1 = on, 0 = off. Default on so a fresh deploy posts realtime by default.
       REALTIME_POST_FEED_ENABLED: "${REALTIME_POST_FEED_ENABLED:-1}"
-      REALTIME_POST_FEED_MAX_PER_MINUTE: "${REALTIME_POST_FEED_MAX_PER_MINUTE:-12}"
+      REALTIME_POST_FEED_MAX_PER_MINUTE: "${REALTIME_POST_FEED_MAX_PER_MINUTE:-18}"
       REALTIME_POST_FEED_DEDUPE_TTL_DAYS: "${REALTIME_POST_FEED_DEDUPE_TTL_DAYS:-7}"
       REALTIME_POST_FEED_INCLUDE_PROFILES: "${REALTIME_POST_FEED_INCLUDE_PROFILES:-0}"
       REALTIME_POST_FEED_BURST_SUMMARY: "${REALTIME_POST_FEED_BURST_SUMMARY:-1}"
@@ -941,7 +945,7 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
-      UC_EXTENSION_EXPECTED_VERSION: "1.23.63"
+      UC_EXTENSION_EXPECTED_VERSION: "1.23.64"
       YOUTUBE_MAX_VIDEO_DURATION_MINUTES: "0"
       STRAVA_ROUTE_STREAM_SHARED_COOLDOWN: "true"
       STRAVA_BROWSER_ROUTE_QUEUE_CANDIDATE_LIMIT: "50"

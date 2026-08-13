@@ -57,6 +57,33 @@ def test_lemon8_defaults_to_headless_collector_not_visible_scraper_tab():
     assert 'return topic ? "topic_" + topic : "topic";' in content
 
 
+def test_expanded_social_tabs_are_opt_in():
+    background = _read("extension/background.js")
+    platforms = _read("extension/platforms.js")
+    tabs_html = _read("extension/tabs.html")
+    tabs_js = _read("extension/tabs.js")
+
+    for text in (background, platforms):
+        instagram_line = next(line for line in text.splitlines() if 'id: "instagram"' in line)
+        tiktok_line = next(line for line in text.splitlines() if 'id: "tiktok"' in line)
+        assert 'url: "https://www.instagram.com/"' in instagram_line
+        assert 'optionalExtraUrls: ["https://www.instagram.com/direct/inbox/"]' in instagram_line
+        assert 'url: "https://www.tiktok.com/foryou"' in tiktok_line
+        assert 'optionalExtraUrls: ["https://www.tiktok.com/following", "https://www.tiktok.com/explore"]' in tiktok_line
+
+    assert 'const EXPANDED_PLATFORM_TABS_KEY = "ucOpenExpandedPlatformTabs"' in background
+    assert "async function expandedPlatformTabsEnabled()" in background
+    ensure_block = background.split("async function ensureScraperTabsOpen", 1)[1].split(
+        "async function refreshScraperTabs",
+        1,
+    )[0]
+    assert "const expandedTabs = await expandedPlatformTabsEnabled();" in ensure_block
+    assert "const targets = platformManagedUrls(p, expandedTabs);" in ensure_block
+    assert "[p.url, ...p.extraUrls]" not in ensure_block
+    assert 'id="expandedTabs"' in tabs_html
+    assert "ucOpenExpandedPlatformTabs" in tabs_js
+
+
 def test_x_failed_script_url_is_canonicalized():
     background = _read("extension/background.js")
     content = _read("extension/content.js")

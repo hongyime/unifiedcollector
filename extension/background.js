@@ -66,9 +66,9 @@ function _reportSwCrash(detail) {
 // background worker owns its platform registry directly. Popup/tabs pages still
 // load platforms.js for browser UI.
 globalThis.UC_PLATFORMS = [
-  { id: "instagram", label: "Instagram",   url: "https://www.instagram.com/",       host: "www.instagram.com",  cookieUrl: "https://www.instagram.com",      cookie: "sessionid",  scraper: true, extraUrls: ["https://www.instagram.com/direct/inbox/"] },
+  { id: "instagram", label: "Instagram",   url: "https://www.instagram.com/",       host: "www.instagram.com",  cookieUrl: "https://www.instagram.com",      cookie: "sessionid",  scraper: true, optionalExtraUrls: ["https://www.instagram.com/direct/inbox/"] },
   { id: "threads",   label: "Threads",     url: "https://www.threads.com/",         host: "www.threads.com",    cookieUrl: "https://www.threads.com",        cookie: "sessionid",  scraper: true },
-  { id: "tiktok",    label: "TikTok",      url: "https://www.tiktok.com/following", host: "www.tiktok.com",     cookieUrl: "https://www.tiktok.com",         cookie: "sessionid",  scraper: true, extraUrls: ["https://www.tiktok.com/foryou", "https://www.tiktok.com/explore"] },
+  { id: "tiktok",    label: "TikTok",      url: "https://www.tiktok.com/foryou",    host: "www.tiktok.com",     cookieUrl: "https://www.tiktok.com",         cookie: "sessionid",  scraper: true, optionalExtraUrls: ["https://www.tiktok.com/following", "https://www.tiktok.com/explore"] },
   // Lemon8's SPA renders "Not found" for /feed/<cat> and legacy paths as of
   // 2026-08-05. Keep one visible topic tab only; the headless Lemon8 collector
   // handles broader coverage without pinning extra Chrome tabs.
@@ -883,11 +883,21 @@ async function mapLimit(items, limit, worker) {
 const _tpath = (u) => { try { return new URL(u).pathname.split("?")[0].replace(/\/$/, "") || "/"; } catch (e) { return "/"; } };
 const _mainWorldHookHostRe = /(^|\.)((instagram|tiktok|strava)\.com|threads\.com|x\.com|twitter\.com|facebook\.com)$/i;
 const SCRAPER_TABS_PINNED_KEY = "ucPinScraperTabs";
+const EXPANDED_PLATFORM_TABS_KEY = "ucOpenExpandedPlatformTabs";
 
 async function scraperTabsPinned() {
   try {
     const stored = await chrome.storage.local.get([SCRAPER_TABS_PINNED_KEY]);
     return stored && stored[SCRAPER_TABS_PINNED_KEY] === true;
+  } catch (e) {
+    return false;
+  }
+}
+
+async function expandedPlatformTabsEnabled() {
+  try {
+    const stored = await chrome.storage.local.get([EXPANDED_PLATFORM_TABS_KEY]);
+    return stored && stored[EXPANDED_PLATFORM_TABS_KEY] === true;
   } catch (e) {
     return false;
   }
@@ -901,9 +911,22 @@ function scraperTabRows(tabs) {
 
 function platformTargetPaths(platform) {
   if (!platform) return [];
-  return [platform.url, ...((platform.extraUrls || []))]
+  return [
+    platform.url,
+    ...((platform.extraUrls || [])),
+    ...((platform.optionalExtraUrls || [])),
+  ]
     .filter(Boolean)
     .map(_tpath);
+}
+
+function platformManagedUrls(platform, expanded) {
+  if (!platform) return [];
+  return [
+    platform.url,
+    ...((platform.extraUrls || [])),
+    ...((expanded ? platform.optionalExtraUrls || [] : [])),
+  ].filter(Boolean);
 }
 
 function canonicalTabKey(row) {
@@ -1054,8 +1077,8 @@ async function createTabInSocialGroup(createOptions, hint) {
   return created;
 }
 
-// Keep exactly ONE tab per single-feed platform (instagram/threads/x/facebook)
-// and one per target path for multi-url platforms (tiktok = foryou + following).
+// Keep exactly ONE tab per platform by default. Optional expanded tabs can be
+// enabled from storage when broader browser coverage is worth the extra memory.
 // Closes duplicates so the extension never piles up tabs (the old bug: when the
 // auto-opened tab navigated to a sub-path, the dedup missed it and opened another).
 async function ensureScraperTabsOpen(reason, options = {}) {
@@ -1067,10 +1090,13 @@ async function ensureScraperTabsOpen(reason, options = {}) {
   // it keeps every newly-opened tab pointed at the same group.
   const groupHint = await scraperGroupHint();
   const pinScraperTabs = await scraperTabsPinned();
+  const expandedTabs = await expandedPlatformTabsEnabled();
   try {
     for (const p of scraperPlatforms()) {
       const tabs = (await chrome.tabs.query({ url: platformUrlPatterns(p) })) || [];
-      if (!(p.extraUrls && p.extraUrls.length)) {
+      const targets = platformManagedUrls(p, expandedTabs);
+      const wantPaths = targets.map(_tpath);
+      if (targets.length <= 1) {
         // single-feed: keep one tab on the host, close the rest
         if (tabs.length === 0) {
           try { await createTabInSocialGroup({ url: p.url, pinned: pinScraperTabs, active: false }, groupHint); opened++; await _sleep(_humanGap(3000)); } catch (e) {}
@@ -1081,9 +1107,7 @@ async function ensureScraperTabsOpen(reason, options = {}) {
           for (let i = 1; i < tabs.length; i++) { try { await chrome.tabs.remove(tabs[i].id); closed++; } catch (e) {} }
         }
       } else {
-        // multi-url (tiktok): one tab per target path; close path-duplicates
-        const targets = [p.url, ...p.extraUrls];
-        const wantPaths = targets.map(_tpath);
+        // expanded: one tab per managed target path; close path-duplicates
         const kept = new Set();
         for (const t of tabs) {
           const tp = _tpath(t.url);

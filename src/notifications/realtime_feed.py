@@ -455,6 +455,31 @@ _PLATFORM_LABEL = {
 }
 
 
+def _source_anchor(source_url: str, *, max_len: int) -> str:
+    if not source_url:
+        return ""
+    link = f'<a href="{html.escape(source_url, quote=True)}">source</a>'
+    # Some social CDN/story URLs are extremely long. Keeping that link can make
+    # Telegram's final caption trim cut inside the href and break HTML parsing.
+    if len(link) > max_len:
+        return ""
+    return link
+
+
+def _escape_body_for_room(body: str, room: int) -> str:
+    if room <= 0 or not body:
+        return ""
+    escaped = html.escape(body)
+    if len(escaped) <= room:
+        return escaped
+    suffix = "…"
+    room = max(0, room - len(suffix))
+    candidate = body[:room]
+    while candidate and len(html.escape(candidate)) > room:
+        candidate = candidate[:-1]
+    return html.escape(candidate).rstrip() + suffix if candidate else suffix
+
+
 def format_caption(payload: dict, *, max_len: int | None = None) -> str:
     from src.notifications.telegram import MAX_CAPTION_CHARS
     limit = int(max_len or MAX_CAPTION_CHARS)
@@ -463,24 +488,25 @@ def format_caption(payload: dict, *, max_len: int | None = None) -> str:
     body = (payload.get("caption") or "").strip()
     source_url = payload.get("source_url") or ""
     header = f"<b>{html.escape(platform)}</b> — <b>{html.escape(author)}</b>"
+    source_part = _source_anchor(str(source_url), max_len=max(160, limit // 3))
     parts = [header]
     if body:
         parts.append(html.escape(body))
-    if source_url:
-        parts.append(f'<a href="{html.escape(source_url, quote=True)}">source</a>')
+    if source_part:
+        parts.append(source_part)
     text = "\n".join(parts)
     if len(text) > limit:
         # Trim body, keep header + URL intact.
-        overhead = len(header) + (len(parts[-1]) if source_url else 0) + 4
+        if source_part and len(header) + len(source_part) + 4 >= limit:
+            source_part = ""
+        overhead = len(header) + (len(source_part) if source_part else 0) + 4
         room = max(20, limit - overhead - 1)
-        body_short = html.escape(body)
-        if len(body_short) > room:
-            body_short = body_short[:room].rstrip() + "…"
+        body_short = _escape_body_for_room(body, room)
         parts = [header]
         if body_short:
             parts.append(body_short)
-        if source_url:
-            parts.append(f'<a href="{html.escape(source_url, quote=True)}">source</a>')
+        if source_part:
+            parts.append(source_part)
         text = "\n".join(parts)
     return text
 
