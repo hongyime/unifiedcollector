@@ -6,13 +6,14 @@ Chrome re-reads the manifest from disk.
 """
 import json
 import time
-import urllib.request
 
 import websocket  # type: ignore
 
+from cdp_ext_tabs import close_duplicate_control_tabs, open_or_activate_control_tab, read_json
+
 
 def _find_tabs_html():
-    tabs = json.loads(urllib.request.urlopen("http://127.0.0.1:9333/json/list").read())
+    tabs = read_json("/json/list")
     return next(
         (t for t in tabs if t.get("type") == "page" and "pkmdmc" in t.get("url", "") and "tabs.html" in t.get("url", "")),
         None,
@@ -50,12 +51,8 @@ time.sleep(10)
 
 opt2 = _find_tabs_html()
 if not opt2:
-    print("no tabs.html after reload — opening one")
-    req = urllib.request.Request(
-        "http://127.0.0.1:9333/json/new?chrome-extension://pkmdmcklnjdeocoeigmlakhomhhcpafb/tabs.html",
-        method="PUT",
-    )
-    urllib.request.urlopen(req).read()
+    print("no tabs.html after reload — opening/reusing one")
+    open_or_activate_control_tab(settle_seconds=0)
     time.sleep(6)
     opt2 = _find_tabs_html()
 
@@ -91,3 +88,4 @@ ping_expr = """
 p = call2(2, "Runtime.evaluate", {"expression": ping_expr, "returnByValue": True, "awaitPromise": True})
 print("SW ping:", json.dumps(p.get("result", {}).get("result", {}).get("value"), indent=2))
 ws2.close()
+close_duplicate_control_tabs()

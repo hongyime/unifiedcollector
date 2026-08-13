@@ -264,7 +264,7 @@ function Remove-DuplicateExtensionControlTabs {
     $targets = @(Get-CdpPageTargets | Where-Object {
         $_.type -eq "page" -and [string]$_.url -match "^chrome-extension://[^/]+/tabs\.html(?:[?#].*)?$"
     })
-    if ($targets.Count -le 1) {
+    if ($targets.Count -eq 0) {
         return
     }
     $primaryId = "pkmdmcklnjdeocoeigmlakhomhhcpafb"
@@ -272,12 +272,9 @@ function Remove-DuplicateExtensionControlTabs {
     if ($keep.Count -eq 0) {
         $keep = @($targets | Where-Object { [string]$_.url -like "chrome-extension://$primaryId/tabs.html*" } | Sort-Object -Property id | Select-Object -First 1)
     }
-    if ($keep.Count -eq 0) {
-        $keep = @($targets | Sort-Object -Property id | Select-Object -First 1)
-    }
-    $keepId = [string]$keep[0].id
+    $keepId = if ($keep.Count -gt 0) { [string]$keep[0].id } else { "" }
     foreach ($target in $targets) {
-        if ([string]$target.id -eq $keepId) {
+        if ($keepId -and [string]$target.id -eq $keepId) {
             continue
         }
         try {
@@ -296,6 +293,7 @@ function Remove-BlankStartupTabs {
     }
     $targets = @(Get-CdpPageTargets | Where-Object {
         $_.type -eq "page" -and (
+            [string]::IsNullOrWhiteSpace([string]$_.url) -or
             [string]$_.url -eq "about:blank" -or
             [string]$_.url -eq "chrome://newtab/"
         )
@@ -330,7 +328,7 @@ function Invoke-CdpPageTargetCleanup {
 function Test-ExtensionControlTab {
     foreach ($target in @(Get-CdpPageTargets)) {
         $url = [string]$target.url
-        if ($url -match "^chrome-extension://[a-p]{32}/tabs\.html") {
+        if ($url -match "^chrome-extension://pkmdmcklnjdeocoeigmlakhomhhcpafb/tabs\.html") {
             return $true
         }
     }

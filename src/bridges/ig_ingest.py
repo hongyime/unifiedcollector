@@ -1715,6 +1715,11 @@ def _browser_candidate_post_url(platform: str, item: dict | None, username: str 
                 or path.startswith("/story.php")
             ):
                 return value
+    if platform == "instagram":
+        content_id = str((item or {}).get("content_id") or "").strip()
+        media_id = re.split(r"[_:/-]", content_id, maxsplit=1)[0]
+        if media_id.isdigit():
+            return _verify_url("instagram", media_id)
     if platform == "x":
         meta_post_id = str(meta.get("post_id") or (item or {}).get("post_id") or "").strip()
         author = str(meta.get("author_username") or username or "").strip().lstrip("@")
@@ -1958,6 +1963,8 @@ async def _record_browser_media_candidate(
 
     if needs_revisit and platform != "tiktok":
         post_url = _browser_candidate_post_url(platform, item, username)
+        if not post_url:
+            return
         priority = _browser_revisit_priority(platform, item, outcome)
         try:
             async with pool.acquire() as conn:
@@ -2933,6 +2940,34 @@ async def browser_revisit_target(request):
                 target["metadata"] = {"raw": target["metadata"]}
         if target.get("metadata") is None:
             target["metadata"] = {}
+        if platform == "instagram" and not target.get("post_url"):
+            fallback_post_url = _verify_url("instagram", target.get("content_id"))
+            if fallback_post_url:
+                target["post_url"] = fallback_post_url
+                try:
+                    async with request.app["pool"].acquire() as conn:
+                        await conn.execute(
+                            """
+                            UPDATE browser_media_revisit_queue
+                            SET post_url = COALESCE(post_url, $3),
+                                metadata = metadata || jsonb_build_object(
+                                  'post_url_synthesized_from_content_id', true
+                                ),
+                                updated_at = now()
+                            WHERE platform = $1
+                              AND content_id = $2
+                            """,
+                            platform,
+                            target.get("content_id"),
+                            fallback_post_url,
+                        )
+                except Exception:
+                    logger.debug(
+                        "browser media revisit post_url fallback persist failed platform=%s content_id=%s",
+                        platform,
+                        target.get("content_id"),
+                        exc_info=True,
+                    )
         return _cors(web.json_response({"ok": True, "target": target}, dumps=lambda v: json.dumps(v, default=str)))
     except Exception as exc:
         logger.debug("browser media revisit target claim failed platform=%s", platform, exc_info=True)

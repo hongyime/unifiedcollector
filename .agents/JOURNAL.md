@@ -19,3 +19,5 @@
 - 2026-08-13 12:54 SGT: Kept full media occurrence collection in Postgres/vault while deduping Telegram operator delivery per source by sha/source URL and skipping poster-only video thumbnails by default; this reduces chat floods without throwing away evidence.
 2026-08-13 05:15 UTC - Decision: X and Threads should default to Following-only collection for resource use and relevance; For You/trending discovery is retained as an explicit localStorage opt-in instead of a scheduled default rotation.
 - 2026-08-13 15:20 SGT: Realtime Telegram feed over-cap handling now requeues/deferred items instead of dropping them; operator chat pacing must not become media notification loss, and dashboard wording should say deferred rather than skipped.
+2026-08-13 08:13 UTC - Browser tab duplication must be fixed across normal maintenance, extension service-worker cleanup, and manual CDP helper scripts; old extension IDs are not valid control pages.
+2026-08-13 08:13 UTC - Instagram media revisit requires both extension claim/finish wiring and openable post URLs; CDN-only rows should be skipped or given synthesized post URLs from numeric media IDs.

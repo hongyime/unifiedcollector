@@ -1,123 +1,29 @@
 # UnifiedCollector Agent State
 
-Updated: 2026-08-13 07:20 UTC / 15:20 SGT
+Updated: 2026-08-13 08:13 UTC / 16:13 SGT
 
-Current follow-up complete pending commit/push: realtime Telegram burst delivery now defers/requeues over-cap posts instead of dropping them, browser video extraction is hardened for TikTok/Instagram/Threads/Facebook, Instagram is enabled in the generic browser media revisit queue, the missing `urlparse` import in generic revisit post-URL derivation is fixed, and extension tab hygiene now also runs inside the service worker for duplicate extension-control pages, blank startup tabs, and refresh-time pin normalization. Extension manifest and Compose expected version are `1.23.67`.
+Current task complete pending commit/push: browser tab hygiene and Instagram media revisit draining were hardened.
 
-Latest verification:
-- Focused tests passed: `python -m pytest tests\notifications\test_realtime_feed.py tests\extension\test_extension_bundle_static.py tests\tools\test_browser_maintenance_scripts.py tests\bridges\test_ig_ingest_vault.py tests\dashboard\test_coverage_api.py tests\dashboard\test_extension_health.py -q`.
-- Frontend build passed: `npm run build` in `dashboard/frontend`; Compose config passed.
-- Recreated `realtime_feed`, `ig_ingest`, `dashboard`, and `scheduler`; health returned `status=ok` and `source_issues=[]`.
-- Reloaded the unpacked Chrome extension to `1.23.67`; final tab audit showed exactly 7 page targets: one extension control page plus Instagram, Threads, TikTok, X, Facebook, and Strava. All six platform content scripts reported `1.23.67`.
-- Direct extension tab query showed all listed scraper/control tabs `pinned=false` and no `about:blank`/duplicate page targets.
-- Realtime media ledger after 07:00 UTC showed no new `rate_cap_dropped` rows. A bounded replay backfilled 38 previously undelivered Instagram/Threads/TikTok/Facebook rows; all 38 delivered and Redis queue depth returned to 0.
+What changed:
+- Added `scripts/cdp_ext_tabs.py` so manual/debug extension helpers reuse the primary `pkmdmcklnjdeocoeigmlakhomhhcpafb/tabs.html` control tab instead of spawning duplicate extension tabs.
+- Updated extension helper scripts to use the control-tab helper.
+- Hardened cleanup to close stale old-ID extension control pages, duplicate `tabs.html` pages, `about:blank`, `chrome://newtab/`, and empty-url loading tabs.
+- Fixed `browser-tab-maintenance.ps1` so only the primary extension ID is considered a valid control tab; old extension IDs are closed instead of kept.
+- Wired Instagram into the generic browser media revisit flow in `extension/content.js`.
+- Added Instagram detail-page DOM media harvesting with post-url tagging for `/p`, `/reel`, `/reels`, `/tv`, and `/stories` URLs.
+- Added backend fallback for Instagram revisit rows: synthesize an openable post URL from numeric media IDs and skip queueing CDN-only items that still have no openable post URL.
+- Bumped extension manifest and Compose expected version to `1.23.69`.
 
-Current task: realtime Telegram media noise reduction, duplicate Chrome control-tab fix, Following-first scraper defaults, and safe search/website rate tuning are implemented, live-verified, committed, and pushed. Follow-up 1.23.66 disables default X/Threads "For You" rotation; broader For You passes are opt-in only.
-
-Current implementation notes:
-- Realtime feed now dedupes operator Telegram delivery per source by sha256 first, then canonical source URL, then content ID fallback. Cross-source sightings are still allowed.
-- Realtime feed now skips poster/cover thumbnail rows for video posts by default (`REALTIME_POST_FEED_SKIP_VIDEO_THUMBNAILS=1`) while preserving real video delivery.
-- TikTok visible scraper defaults back to `https://www.tiktok.com/following`; `/foryou` and `/explore` are expanded-tab opt-ins.
-- X and Threads visible scrapers now default to Following-only. Optional discovery can be enabled locally with `uc_allow_for_you_feed=1`, `uc_x_allow_for_you_feed=1`, or `uc_threads_allow_for_you_feed=1`.
-- The Chrome CDP launcher canonicalizes extension `tabs.html` URLs so `tabs.html?scrape=1` reuses an existing `tabs.html` page instead of opening duplicates.
-- The extension options page self-closes duplicate `chrome-extension://*/tabs.html` pages and the popup focuses an existing control page instead of creating a new one.
-- Existing scraper tabs are unpinned by default unless the local `ucPinScraperTabs=true` setting is explicitly enabled.
-- Search low-risk tuning has been raised to 100 results, 5 Bing pages, 10 parallel downloads, 1s query delay, and a 240s cycle sleep. Website concurrency is now 16.
-- Extension manifest and Compose expected version are bumped to `1.23.66`.
-
-Verification in this pass:
-- `python -m pytest tests\notifications\test_realtime_feed.py tests\extension\test_extension_bundle_static.py tests\tools\test_browser_maintenance_scripts.py -q` passed.
-- `docker compose -f docker\docker-compose.yml config --quiet` passed.
-- `python -m compileall -q src\notifications\realtime_feed.py tools\browser_tab_reload.py` passed.
-- `python -m pytest tests\extension\test_extension_bundle_static.py tests\tools\test_browser_maintenance_scripts.py tests\notifications\test_realtime_feed.py -q` passed again after the 1.23.66 Following-only follow-up.
-- PowerShell parse check passed for `scripts\start-scraper-chrome-cdp.ps1` and `scripts\browser-tab-maintenance.ps1`.
-- Rebuilt `unifiedcollector-collector:latest` and recreated `realtime_feed`, `collector_lowrisk`, `collector_website`, `ig_ingest`, `dashboard`, and `scheduler`.
-- Runtime env readback confirmed realtime dedupe/thumbnail skip enabled, search max/results/concurrency/delay as configured, website concurrency 16, and expected extension `1.23.66`.
-- Runtime env readback also confirmed `ig_ingest`, `dashboard`, and `scheduler` expect extension `1.23.66`.
-- Final `/health?include_sources=true` returned `status=ok`, `source_issues=[]`, expected browser extension `1.23.66`, active browser content for Instagram, TikTok, Threads, Facebook, X, and Strava, and no browser extension issues.
-- Final Chrome audit returned exactly seven page targets: one extension control page plus Instagram, Threads, TikTok, X, Facebook, and Strava. All seven were unpinned. All six platform content scripts reported `1.23.66`; TikTok was on `/following`, X on `/home`, Strava on `/dashboard`.
-- X content health recovered in the live readback: `x_posts` had 46 rows in the last 2h, and `/health?include_sources=true` showed fresh X `posts` and `media` ingest with stored media.
-- Telegram account readback showed 4 active Telegram accounts, all 4 with session strings, 0 active accounts with last_error; `unifiedcollector_collector_telegram` Docker health was healthy with failing streak 0.
-- Large local media fallback was confirmed as a Telegram Bot API upload-size fallback, not a duplicate WSL copy: `/vault/media/...` and `/media/...` map to the same `z:/unifiedcollector` storage and the checked file had the same device/inode through both paths.
-- Main implementation pushed to `origin/main` as `ec2faaf1 fix: reduce media noise and browser tab churn` after a clean rebase over remote `48cb1476`.
-
-Recent completed work:
-- Realtime media deliveries now have a durable Postgres ledger (`realtime_media_deliveries`) and dashboard/API visibility under `/media/realtime-feed/status` and `/media/realtime-feed/deliveries`; live status shows delivered/enqueued/deduped rows for Telegram, WhatsApp, Instagram, and Search.
-- Browser extension direct media ingest now enqueues Instagram/Threads-style browser-saved media into the realtime feed, while duplicate/profile-photo/skipped rows are explicitly recorded instead of silently disappearing.
-- X zero-result/shell probes no longer count as source success or browser content progress; X recovery avoids unsafe anchor clicks, hard-reopens non-canonical X URLs back to `https://x.com/home`, and keeps all recovery on `x.com`.
-- Extension bundle bumped and live-reloaded to `1.23.63`; browser audit showed Instagram, Threads, TikTok, X, Facebook, and most scraper tabs on `1.23.63`, with X canonical at `https://x.com/home`.
-- Duplicate extension control tabs were cleaned up live; maintenance now also closes `chrome://newtab/` startup tabs and performs minimal cleanup even when the background loop holds the full maintenance mutex.
-- Safe throughput knobs were raised for Telegram, WhatsApp, Beeper, YouTube, Website, Instagram cycle sleep, and realtime feed max-per-minute without adding new brokers or risky unbounded concurrency.
-- SpiderFoot recon sidecar is live and verified under the `recon` Compose profile.
-- Dashboard browser-health optional timeout noise was fixed, tested, rebuilt, deployed, committed, and pushed as `0ec39ea0 fix: suppress optional browser health noise`.
-- Additional browser optional diagnostic suppression was committed and pushed as `531298f7 fix: suppress optional browser diagnostics`.
-- Collector-derived recon seeding was committed and pushed as `70212a23 feat: seed collector recon targets`.
-- Visible scraper tabs now default to one primary route per social platform. Instagram `/direct/inbox/` and TikTok `/following`/`/explore` stay available only when `ucOpenExpandedPlatformTabs` is enabled from the extension control page.
-
-In-progress work:
-- 2026-08-13 follow-up added a new bounded `realtime-media-backfill` CLI and module to replay stored Instagram/Threads/Lemon8-style media into the realtime Telegram feed with explicit source selection, profile-photo skipping by default, private chat source guards, dry-run JSON, Redis enqueue, and delivery-ledger writes. Tests/deploy are still pending in this handoff state.
-- 2026-08-13 follow-up raised non-browser throughput knobs in Compose: YouTube enrich/download/backfill batches, search max results/download concurrency/query delay/cycle sleep, website concurrency, and realtime feed max-per-minute. Live services still need recreate/readback verification.
-- 2026-08-13 follow-up changed extension startup/watchdog/recovery scripts so expanded Instagram/TikTok browser coverage no longer reopens by default. Focused tests passed, the CDP scraper profile was relaunched, and live audit showed 7 page targets total: one extension control page plus one tab each for Instagram, Threads, TikTok, X, Facebook, and Strava, all on Bridge `1.23.64`.
-- X browser capture is loaded on `https://x.com/home` with cookies preserved, but accepted X content progress has not advanced since `x_posts` max `2026-08-11 23:11:08+00`; recovery is now less aggressive and stays on `x.com` only.
-- Facebook browser content progress is stale in `/health?include_sources=true`; the page/tab is open, but accepted content progress has not advanced inside the freshness window.
-
-Current evidence:
-- Current follow-up added stale coverage snapshot refresh in `/coverage/collectors`, Telegram local-media fallback counters in `/media/realtime-feed/status`, dashboard "Telegram Media" visibility, extension expected version `1.23.61`, bounded browser-maintenance child timeout, repeated duplicate extension-control cleanup, and blocked/corrupted extension detection.
-- Live Chrome profile had UnifiedCollector Bridge disabled/corrupted in `chrome://extensions`; Developer mode was enabled and the extension reloaded. Current `tools/browser_tab_audit.py` shows content scripts attached with `cs_version=1.23.61` on Instagram, TikTok, Threads, X, and Facebook.
-- Live CDP target list is clean: no duplicate page URLs, no `about:blank`, no Lemon8 browser tabs, and one UnifiedCollector options tab.
-- Live Collector health after recovery is degraded only for Facebook and X content progress; Instagram, TikTok, Threads, Lemon8, Telegram, WhatsApp, Beeper, YouTube, Website, GitHub/Search infrastructure, and realtime feed are otherwise running.
-- Live `/media/realtime-feed/status` returned queue_depth=0, failed_depth=0, and local_fallback_total=0.
-- Focused tests passed: `python -m pytest tests\extension\test_extension_bundle_static.py tests\tools\test_browser_maintenance_scripts.py tests\notifications\test_realtime_feed.py tests\dashboard\test_coverage_api.py tests\dashboard\test_extension_health.py tests\test_collection_coverage.py -q`.
-- Final focused browser script tests passed after the loop/extension fixes: `python -m pytest tests\tools\test_browser_maintenance_scripts.py tests\extension\test_extension_bundle_static.py -q`.
-- Dashboard frontend build passed with `npm run build`; dashboard/realtime_feed/scheduler/ig_ingest were recreated earlier in this pass.
-- `python -m pytest tests/test_recon.py tests/test_recon_spiderfoot_service.py -q` passed with 17 tests.
-- Live Docker core services checked recently: dashboard, spiderfoot, postgres, realtime_feed, watchdog are up/healthy.
-- `docker exec unifiedcollector_collector python -m src.main recon-seed --dry-run --json --limit 20 --per-source-limit 5` worked against live DB and returned 20 candidates.
-- A broken dirty Docker change was found and corrected: SpiderFoot must use `src.recon_spiderfoot_service`, not `src.main`, because the slim SpiderFoot image does not install full collector dependencies.
-- `.gitignore` now allows `.agents/` so this state can be committed as required by AGENTS.md.
-- Lazy `src.core` exports were verified with `from src.core import check_drive, ProfilePhotoTracker`.
-- `python -m pytest tests/test_recon.py tests/test_recon_spiderfoot_service.py tests/dashboard/test_recon_api.py tests/verify_clean_boot.py -q` passed with 19 tests.
-- `python -m pytest tests/dashboard/test_extension_health.py tests/dashboard/test_source_matrix.py -q` passed after browser optional diagnostic suppression.
-- Dashboard was rebuilt/restarted and live `/health?include_sources=true` returned `status=ok`, `source_issues=0`, no browser diagnostic errors, and active browser content.
-- `src.recon_seed_service` works as an optional one-shot entrypoint and redacts dry-run samples.
-- Final live check after push: dashboard/spiderfoot/postgres/realtime_feed/watchdog and collector services are healthy; `/health?include_sources=true` returned `status=ok`, `source_issues=0`, and no browser diagnostic errors.
-- WhatsApp partial bridge health was patched so one ready bridge plus one optional empty QR slot keeps WhatsApp source status `live` instead of making `/health` degraded.
-- Recon observation storage now uses `value_hash` for idempotent SpiderFoot upserts; live DB migration `20260811_fix_recon_observation_value_hash.sql` is applied with checksum `f37e6c38e7ae`.
-- Collector-derived username recon targets are scoped to `RECON_USERNAME_MODULES` (`sfp_accounts` by default) so username targets do not run DNS/WHOIS modules.
-- Live SpiderFoot sidecar processed a target after the value-hash migration and wrote 44 observations.
-- Committed and pushed `54c69a7e fix: harden spiderfoot recon observations`.
-- Final live check: worktree clean, `unifiedcollector_spiderfoot` healthy, `/health?include_sources=true` status `ok` with 0 source issues, and all 106 recon observations had `value_hash` populated.
-- Browser media revisit endpoints now expire stale exhausted `claimed`/`pending` rows to `failed` audit state before claiming new work.
-- Live Threads media revisit queue recovered old stuck claims: 42 claimed rows fell to 2 claimed rows, with the remaining attempt-5 row still inside the configured 30-minute claim timeout at verification.
-- `python -m pytest tests/bridges/test_ig_ingest_vault.py tests/dashboard/test_extension_health.py -q` passed with 82 tests.
-- Media revisit stale-claim fix was committed and pushed as `423fbbf3 fix: expire exhausted media revisit claims`.
-- Fresh read-only audit on 2026-08-12 found tracked worktree clean, `unifiedcollector_spiderfoot` healthy, recon targets `completed=24 failed=0`, `recon_observations=128`, all observations have `value_hash`, `/health?include_sources=true` status `ok` with `source_issues=0`, live CDP `page_targets=9`, and `duplicate_url_groups=0`.
-- Browser media revisit queue visibility was committed and pushed as `05b76522 feat: show browser media revisit queue health`.
-- Live Collector dashboard health returned `status=ok`, `source_issues=0`, browser ingest active, all configured sources live, and WhatsApp bridge partial state correctly shown as one ready slot plus one optional QR slot.
-- Live SpiderFoot sidecar is healthy and idle, with no repeated malformed-JSON target failures in the latest log window.
-- Live CDP duplicate tab cleanup closed duplicate extension control pages and duplicate Lemon8 topic tabs; follow-up check returned `PAGE_TARGETS=13` and `DUPLICATE_URL_GROUPS=0`.
-- Focused tests passed: `python -m pytest tests/tools/test_browser_maintenance_scripts.py -q` -> 32 passed; `python -m pytest tests/dashboard/test_extension_health.py -q` -> 18 passed.
-- Stronger duplicate control-page cleanup now runs inside `Ensure-ExtensionControlTab` and after degraded/successful maintenance exits.
-- WhatsApp recovered after `collector_whatsapp` restart: bridge 2/session_2 is ready and bridge 1/session_1 remains an optional QR slot.
-- Browser CDP was recovered after scraper Chrome profile restart attempt; browser ingest is active and maintenance status returned `ok`.
-- Live X audit showed the content script attached and responsive on `https://x.com/home`, but page health is `recoverable_error_shell` with reason `try_again_empty_state`; `/health?include_sources=true` still reports X as the only degraded source.
-- Follow-up audit after manual X login still found Collector health degraded only for X: `browser content progress is ~2.4h old (>3600s)`, while Instagram, TikTok, Lemon8, Threads, Facebook, Strava, Telegram, WhatsApp, Beeper, YouTube, Website, GitHub, and Search were live.
-- Live CDP page targets showed one exact duplicate group: two `https://x.com/home` tabs. There were also two extension control tabs from different extension IDs, so browser resource cleanup needs extension-side dedupe plus old-control-tab cleanup.
-- Realtime Telegram feed is healthy and sending messages. Large local files are archived in Collector first; if Telegram upload is too large or rejected, `src.notifications.realtime_feed` sends a concise text fallback without the full local path by default.
-- Current realtime media status after redeploy: feed is actively posting, with rate-cap skips protecting Telegram from floods; recent delivery ledger rows include Instagram/Threads/Lemon8/TikTok/Telegram/WhatsApp/YouTube/Website/Search outcomes. Health is degraded only for X content progress; X browser heartbeat is fresh but current X media probes are zero-observed/zero-stored.
-- Browser extension refresh/loop code now closes canonical duplicate scraper tabs during normal operation.
-- Auto-opened scraper tabs are unpinned by default; optional local storage key `ucPinScraperTabs=true` can re-enable pinning.
-- Lemon8 is no longer an active browser scraper tab by default; Collector health still shows Lemon8 live through backend/headless collection freshness.
-- Browser maintenance now parses CDP target lists from raw JSON, closes duplicate extension control pages including query-string variants, and closes the blank startup tab once the extension control page exists.
-- X hard recovery no longer bounces to `twitter.com`; X shell recovery stays on `x.com` and waits 5 minutes before another Try Again navigation.
-- Telegram local-media fallback text no longer prints the full Collector vault path by default. It reports that media was stored in the Collector vault and includes only the basename unless `REALTIME_POST_FEED_INCLUDE_LOCAL_PATHS=1`.
-- Realtime feed container was restarted after the fallback wording change and continued sending Telegram messages.
-- Live CDP check after cleanup returned `PAGE_TARGETS=8`, `DUPLICATE_URL_GROUPS=0`, one extension control tab, no `about:blank`, and no Lemon8 browser tab.
-- Live `/health?include_sources=true` after cleanup returned Instagram, TikTok, Threads, Lemon8, and WhatsApp live; Facebook and X remained degraded for browser content progress.
-- Focused tests passed: `python -m pytest tests\extension\test_extension_bundle_static.py tests\tools\test_browser_maintenance_scripts.py tests\notifications\test_realtime_feed.py -q` -> 104 passed.
-- Final post-cleanup tests passed: `python -m pytest tests\extension\test_extension_bundle_static.py tests\tools\test_browser_maintenance_scripts.py -q` -> 64 passed.
+Verification:
+- Focused tests passed: `python -m pytest tests\extension\test_extension_bundle_static.py tests\tools\test_browser_maintenance_scripts.py tests\bridges\test_ig_ingest_vault.py -q`.
+- Syntax/config passed: `node --check extension\content.js`, `node --check extension\background.js`, Python `py_compile` for touched helpers and `src\bridges\ig_ingest.py`, and `docker compose -f docker\docker-compose.yml config --quiet`.
+- Rebuilt/recreated `ig_ingest`, `dashboard`, and `scheduler`.
+- Hard-reloaded extension; post-reload manifest and service-worker ping confirmed `1.23.69`.
+- Live dashboard health returned `status=ok`, `source_issues=[]`, expected extension `1.23.69`, browser issues `[]`, and active/content platforms included Instagram, Threads, TikTok, Facebook, X, Strava.
+- Live CDP page target readback showed exactly seven page targets: one extension control page plus Instagram, Threads, TikTok, X, Facebook, and Strava; duplicate URL groups were empty.
+- Live Chrome tab readback showed all tabs unpinned and no persistent blank/about:blank tab.
+- Instagram media ingest after reload wrote fresh `1.23.69` media events. Revisit queue is no longer all-pending; invalid rows started failing as `missing_revisit_url`, and new code prevents/synthesizes those cases going forward.
 
 Next steps:
-1. Let X sit on canonical `https://x.com/home` with the `1.23.63` content script, then verify whether `x_posts` or X media rows advance; if it stays on the X "Try again" shell, this is still a platform/session state issue.
-2. Watch dashboard `browser_extension.ingest` for fresh non-heartbeat browser content from Instagram/TikTok/Threads/Facebook after the reload; current overall source health is live except X.
-3. Watch DB lock pressure from long GitHub COPY/backfill work; broad media/source rollup queries may time out while backup/backfill holds locks, but live source health and realtime feed continue operating.
+1. Commit and push focused changes.
+2. Continue watching the old Instagram/Threads revisit backlog drain over time; the backlog is large and will not finish instantly.

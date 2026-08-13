@@ -477,6 +477,10 @@ def test_dom_video_harvest_uses_all_video_source_urls():
         "const threads = {",
         1,
     )[0]
+    post_url_block = content.split("function domPostUrlForElement", 1)[1].split(
+        "function harvestDom",
+        1,
+    )[0]
 
     assert "add(video.currentSrc)" in helper_block
     assert "add(video.src)" in helper_block
@@ -485,6 +489,9 @@ def test_dom_video_harvest_uses_all_video_source_urls():
     assert "videoUrlsFromElement(v).forEach((u, sourceIndex)" in tiktok_block
     assert '"dom_video_" + urlId(u) + "_" + sourceIndex' in tiktok_block
     assert "videoUrlsFromElement(v).forEach((u)" in dom_block
+    assert 'platform === "instagram"' in post_url_block
+    assert "location.pathname || \"\"" in post_url_block
+    assert "new URL(location.pathname, location.origin).href" in post_url_block
 
 
 def test_instagram_browser_media_detail_revisit_is_enabled():
@@ -497,6 +504,20 @@ def test_instagram_browser_media_detail_revisit_is_enabled():
     assert 'new Set(["instagram", "x", "threads", "facebook", "lemon8"])' in content
     assert 'platform === "instagram"' in revisit_block
     assert re.search(r"\?:p\|reel\|reels\|tv\|stories", revisit_block)
+    instagram_block = content.split("const instagram = {", 1)[1].split(
+        "const tiktok = {",
+        1,
+    )[0]
+    assert 'maybeStartBrowserMediaRevisit("instagram", igOwner)' in instagram_block
+    assert "mediaRevisit && mediaRevisit.navigating" in instagram_block
+    assert "finishInstagramBrowserMediaRevisit(mediaRevisit, igOwner)" in instagram_block
+    helper_block = content.split("async function finishInstagramBrowserMediaRevisit", 1)[1].split(
+        "function collectIgDetailDomMedia",
+        1,
+    )[0]
+    assert "collectIgDetailDomMedia" in helper_block
+    assert 'markBrowserMediaRevisitItems("instagram", detailSink, activeMediaRevisit)' in helper_block
+    assert 'finishBrowserMediaRevisit(\n    "instagram",' in helper_block
 
 
 def test_post_reload_scrape_nudge_waits_and_retries_for_heavy_tabs():

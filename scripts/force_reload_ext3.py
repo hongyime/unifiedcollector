@@ -11,6 +11,8 @@ import urllib.request
 
 import websocket  # type: ignore
 
+from cdp_ext_tabs import close_duplicate_control_tabs, open_or_activate_control_tab
+
 
 EXT_ID = "pkmdmcklnjdeocoeigmlakhomhhcpafb"
 
@@ -39,9 +41,9 @@ def main():
                 return d
         return {"error": {"message": "no reply"}}
 
-    # Wake the SW by opening the tabs.html — this forces Chrome to spin up the SW
-    # if it was inactive. Silent no-op if the tab already exists.
-    call("Target.createTarget", {"url": f"chrome-extension://{EXT_ID}/tabs.html"})
+    # Wake the SW through the existing tabs.html when possible. Creating a new
+    # CDP target every probe was the source of duplicate extension tabs.
+    open_or_activate_control_tab()
     time.sleep(3)
 
     targets = call("Target.getTargets")["result"]["targetInfos"]
@@ -80,8 +82,8 @@ def main():
     print("reload issued; waiting 6s for the new SW to be built...")
     time.sleep(6)
 
-    # Wake the new SW and re-attach
-    call("Target.createTarget", {"url": f"chrome-extension://{EXT_ID}/tabs.html?ver_check=1"})
+    # Wake the new SW and re-attach without opening a second control page.
+    open_or_activate_control_tab()
     time.sleep(4)
     targets = call("Target.getTargets")["result"]["targetInfos"]
     sw2 = next(
@@ -100,6 +102,7 @@ def main():
     v2 = call("Runtime.evaluate", {"expression": "chrome.runtime.getManifest().version", "returnByValue": True}, session_id=session2)
     post = v2.get("result", {}).get("result", {}).get("value")
     print("post-reload version:", post)
+    close_duplicate_control_tabs()
     ws.close()
 
 

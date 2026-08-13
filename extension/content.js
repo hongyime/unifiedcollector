@@ -1355,10 +1355,16 @@ const instagram = {
     if (/^\/direct(?:\/|$)/.test(location.pathname || "")) {
       return { targets: 0, saved: 0, discovered: 0, dm_tab: true };
     }
+    const igOwner = instagramLoggedInOwner();
+    const mediaRevisit = await maybeStartBrowserMediaRevisit("instagram", igOwner);
+    if (mediaRevisit && mediaRevisit.navigating) return { targets: 1, saved: 0, discovered: 0 };
+    if (mediaRevisit && mediaRevisit.content_id) {
+      const result = await finishInstagramBrowserMediaRevisit(mediaRevisit, igOwner);
+      return { targets: 1, saved: result.observed, discovered: 0, media_revisit: true };
+    }
     // ANTI-BAN (cooperative): the HEADLESS collector shares this IG account. If it's
     // in a 429 cooldown, the extension must rest too — adopt its remaining time as
     // our own wall so we don't probe a flagged account from the other side.
-    const igOwner = instagramLoggedInOwner();
     try {
       const cd = await send({ type: "igCooldown", account: igOwner });
       if (cd && cd.cooling && cd.secs_left > 0) {
@@ -1455,6 +1461,43 @@ const instagram = {
     return { targets: visited, saved, discovered };
   },
 };
+
+async function finishInstagramBrowserMediaRevisit(activeMediaRevisit, igOwner) {
+  const username = activeMediaRevisit.username || igOwner || "instagram";
+  await reportBrowserRecoveryProbe("instagram", username, {
+    mode: "detail_revisit",
+    revisit_content_id: activeMediaRevisit.content_id,
+  });
+  await autoScroll(3, 900, 1100, { maxPauseMs: 1800 });
+  const detailSink = makeSink();
+  collectIgDetailDomMedia(detailSink, username);
+  markBrowserMediaRevisitItems("instagram", detailSink, activeMediaRevisit);
+  const ingestResponse = await send({
+    type: "ingest",
+    platform: "instagram",
+    username,
+    items: detailSink.items,
+    record_empty: true,
+    probe_reason: detailSink.items.length ? "detail_revisit_dom_media" : "detail_revisit_no_dom_media",
+    probe_meta: { revisit_content_id: activeMediaRevisit.content_id },
+  }, { timeoutMs: 45000 });
+  await finishBrowserMediaRevisit(
+    "instagram",
+    activeMediaRevisit,
+    ingestResponse,
+    detailSink.items.length,
+    username
+  );
+  return { observed: detailSink.items.length };
+}
+
+function collectIgDetailDomMedia(sink, username) {
+  harvestDom(username || "instagram", {
+    imgRe: /(cdninstagram\.com|fbcdn\.net)/i,
+    junkRe: /profile|s\d+x\d+|emoji|sprite|static/i,
+    platform: "instagram",
+  }).items.forEach((item) => sink.add(item));
+}
 
 // ===========================================================================
 // TikTok — read the page's embedded state (SIGI_STATE / __UNIVERSAL_DATA__).
@@ -1627,7 +1670,16 @@ async function maybeStartBrowserMediaRevisit(platform, owner) {
   if (!BROWSER_MEDIA_REVISIT_PLATFORMS.has(platform)) return null;
   if (deferBrowserMediaRevisitForForcedRecovery(platform)) return null;
   const active = currentBrowserMediaRevisit(platform);
-  if (active) return active;
+  if (active) {
+    const activeUrl = active.url || active.post_url || active.source_url;
+    if (browserMediaRevisitUrlOk(platform, activeUrl) && location.href !== activeUrl) {
+      clog("info", `${platform.toUpperCase()} detail revisit resuming for ${active.content_id}`, platform);
+      await sleep(jitter(900));
+      location.href = activeUrl;
+      return { ...active, url: activeUrl, navigating: true };
+    }
+    return active;
+  }
   const reply = await send(
     { type: "getBrowserMediaRevisitTarget", platform, owner: owner || null },
     { retries: 0, timeoutMs: 8000 }
@@ -2650,7 +2702,13 @@ function domPostUrlForElement(el, platform) {
     const root = el && (el.closest('[role="article"], article, [data-pressable-container], [data-testid]') || el.parentElement);
     const links = root ? [...root.querySelectorAll("a[href]")] : [];
     let href = "";
-    if (platform === "threads") {
+    if (platform === "instagram") {
+      if (/^\/(?:p|reel|reels|tv|stories)\//.test(location.pathname || "")) {
+        return new URL(location.pathname, location.origin).href;
+      }
+      const link = links.find((a) => /^\/(?:p|reel|reels|tv|stories)\//.test(a.getAttribute("href") || ""));
+      href = link && (link.getAttribute("href") || link.href || "");
+    } else if (platform === "threads") {
       const link = links.find((a) => /\/@[^/]+\/post\//.test(a.getAttribute("href") || ""));
       href = link && (link.getAttribute("href") || link.href || "");
     } else if (platform === "facebook") {

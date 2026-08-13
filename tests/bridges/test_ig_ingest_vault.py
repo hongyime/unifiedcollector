@@ -478,6 +478,74 @@ def test_browser_media_candidates_queues_instagram_video_revisit():
     )
 
 
+def test_browser_media_candidates_synthesizes_instagram_revisit_url_from_media_id():
+    pool = _FakePool()
+    response = asyncio.run(
+        ig_ingest.browser_media_candidates(
+            _FakeRequest(
+                {"pool": pool},
+                {
+                    "platform": "instagram",
+                    "username": "alice",
+                    "extension_version": "1.23.68",
+                    "items": [
+                        {
+                            "ingest_mode": "browser_upload",
+                            "item": {
+                                "content_id": "3953923014190275071",
+                                "content_type": "video",
+                                "url": "https://scontent.cdninstagram.com/o1/v/t16/f2/m86/video.mp4",
+                                "meta": {"dom_asset_role": "video"},
+                            },
+                            "result": {"reason": "timeout", "reject_stats": {"timeout": 1}},
+                        }
+                    ],
+                },
+            )
+        )
+    )
+    payload = json.loads(response.text)
+
+    assert payload == {"ok": True, "queued": 1, "platform": "instagram"}
+    queue_args = next(args for query, args in pool.conn.executes if "browser_media_revisit_queue" in query)
+    assert queue_args[0] == "instagram"
+    assert queue_args[1] == "3953923014190275071"
+    assert queue_args[3].startswith("https://instagram.com/p/")
+
+
+def test_browser_media_candidates_skips_unopenable_instagram_revisit():
+    pool = _FakePool()
+    response = asyncio.run(
+        ig_ingest.browser_media_candidates(
+            _FakeRequest(
+                {"pool": pool},
+                {
+                    "platform": "instagram",
+                    "username": "alice",
+                    "extension_version": "1.23.68",
+                    "items": [
+                        {
+                            "ingest_mode": "browser_upload",
+                            "item": {
+                                "content_id": "ig_dom_video_hash",
+                                "content_type": "video",
+                                "url": "https://scontent.cdninstagram.com/o1/v/t16/f2/m86/video.mp4",
+                                "meta": {"dom_asset_role": "video"},
+                            },
+                            "result": {"reason": "timeout", "reject_stats": {"timeout": 1}},
+                        }
+                    ],
+                },
+            )
+        )
+    )
+    payload = json.loads(response.text)
+
+    assert payload == {"ok": True, "queued": 1, "platform": "instagram"}
+    assert any("browser_media_candidates" in query for query, _args in pool.conn.executes)
+    assert not any("browser_media_revisit_queue" in query for query, _args in pool.conn.executes)
+
+
 def test_browser_revisit_target_reclaims_stale_claimed(monkeypatch):
     pool = _FakePool()
     pool.conn.fetchrow_result = {
@@ -513,6 +581,37 @@ def test_browser_revisit_target_reclaims_stale_claimed(monkeypatch):
     assert "platform = $1" in query
     assert "previous_status" in query
     assert args == ("x", 7, 120, 60)
+
+
+def test_browser_revisit_target_synthesizes_instagram_post_url(monkeypatch):
+    pool = _FakePool()
+    pool.conn.fetchrow_result = {
+        "platform": "instagram",
+        "content_id": "3953923014190275071",
+        "username": "alice",
+        "post_url": None,
+        "source_url": "https://instagram.fsin10-1.fna.fbcdn.net/o1/v/t2/f2/m78/video.mp4",
+        "reason": "timeout",
+        "priority": 90,
+        "attempts": 1,
+        "previous_status": "pending",
+        "metadata": "{}",
+    }
+    monkeypatch.setenv("BROWSER_MEDIA_REVISIT_MAX_ATTEMPTS", "7")
+    monkeypatch.setattr(ig_ingest, "TIKTOK_BROWSER_REVISIT_CLAIM_TIMEOUT_SECONDS", 120)
+    monkeypatch.setattr(ig_ingest, "TIKTOK_BROWSER_REVISIT_CLAIM_HOLD_SECONDS", 60)
+
+    response = asyncio.run(
+        ig_ingest.browser_revisit_target(_FakeRequest({"pool": pool}, {}, query={"platform": "instagram"}))
+    )
+    payload = json.loads(response.text)
+
+    assert payload["ok"] is True
+    assert payload["target"]["post_url"].startswith("https://instagram.com/p/")
+    persist_args = pool.conn.executes[-1][1]
+    assert persist_args[0] == "instagram"
+    assert persist_args[1] == "3953923014190275071"
+    assert persist_args[2].startswith("https://instagram.com/p/")
 
 
 def test_browser_revisit_result_scopes_update_by_platform():

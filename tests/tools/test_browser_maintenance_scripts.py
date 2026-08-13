@@ -220,9 +220,12 @@ def test_browser_tab_maintenance_closes_duplicate_cdp_page_targets():
     assert "closed duplicate extension control tab" in script
     assert "closed blank/newtab Chrome startup tab" in script
     assert '[string]$_.url -eq "about:blank"' in script
+    assert '[string]::IsNullOrWhiteSpace([string]$_.url)' in script
     assert '[string]$_.url -eq "chrome://newtab/"' in script
     assert "minimal tab cleanup while waiting for mutex failed" in script
     assert '[string]$_.url -eq "chrome-extension://$primaryId/tabs.html"' in script
+    assert '$keepId = if ($keep.Count -gt 0)' in script
+    assert '^chrome-extension://pkmdmcklnjdeocoeigmlakhomhhcpafb/tabs\\.html' in script
     assert "Invoke-CdpPageTargetCleanup -Passes 2 -DelaySeconds 1" in script
     assert "Invoke-CdpPageTargetCleanup -Passes 3 -DelaySeconds 1" in script
     assert "function Ensure-ExtensionControlTab {\n    Invoke-CdpPageTargetCleanup" in script
@@ -240,7 +243,31 @@ def test_cleanup_ext_tabs_handles_cdp_list_timeout():
     assert "CDP target list timed out" in script
     assert "if targets is None:" in script
     assert "def is_blank_page" in script
+    assert 'url in {"", "about:blank", "chrome://newtab/"}' in script
     assert "closed blank/newtab" in script
+    assert "to_close = [t for t in tabs if not keep_id or t.get(\"id\") != keep_id]" in script
+
+
+def test_manual_extension_helpers_reuse_control_tab_instead_of_spawning_duplicates():
+    helper = _read_script("cdp_ext_tabs.py")
+    assert "def open_or_activate_control_tab" in helper
+    assert "def close_duplicate_control_tabs" in helper
+    assert "def primary_control_tab_targets" in helper
+    assert "preferred_control_tab" in helper
+    assert "preferred_control_tab(primary_only=True)" in helper
+    assert "/json/new?" in helper
+
+    for name in [
+        "hard_reload_ext.py",
+        "force_reload_ext3.py",
+        "force_normalize_tabs.py",
+        "test_normalize_call.py",
+        "threads_sw_log.py",
+    ]:
+        script = _read_script(name)
+        assert "open_or_activate_control_tab" in script
+        assert "/json/new?chrome-extension://" not in script
+        assert "Target.createTarget" not in script or "tabs.html" not in script
 
 
 def test_browser_tab_reload_hard_reopens_repeatedly_stuck_tiktok_tabs():
