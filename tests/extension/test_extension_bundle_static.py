@@ -361,6 +361,25 @@ def test_x_scraper_accepts_modern_timeline_cells():
     assert "xTweetRoots().forEach((art)" in x_block
 
 
+def test_x_threads_following_feed_is_default_and_for_you_is_opt_in():
+    content = _read("extension/content.js")
+    x_block = content.split("const x = {", 1)[1].split(
+        "const threads = {",
+        1,
+    )[0]
+    threads_block = content.split("const threads = {", 1)[1].split(
+        "function facebookHandleFromHref",
+        1,
+    )[0]
+
+    assert "function allowForYouFeedPass" in content
+    assert 'lsGet("uc_allow_for_you_feed", "0") === "1"' in content
+    assert 'allowForYouFeedPass("x") && cycle % 4 === 0' in x_block
+    assert 'else feed = (await xSelectTab("Following")) ? "home/following" : "home";' in x_block
+    assert 'allowForYouFeedPass("threads") && c % 4 === 0' in threads_block
+    assert '((await threadsSelectFeed("Following")) ? "following" : "feed")' in threads_block
+
+
 def test_x_threads_hard_recovery_returns_to_home_feed():
     background = _read("extension/background.js")
     ingest = _read("src/bridges/ig_ingest.py")

@@ -2119,8 +2119,17 @@ function harvestXPosts(entity, feed) {
   return posts;
 }
 
-// Click a named home-timeline tab ("Following" or "For you"). Following is primary;
-// For-You runs as the occasional secondary pass (see rotation in runCycle).
+function allowForYouFeedPass(platform) {
+  try {
+    return lsGet("uc_allow_for_you_feed", "0") === "1"
+      || lsGet("uc_" + platform + "_allow_for_you_feed", "0") === "1";
+  } catch (e) {
+    return false;
+  }
+}
+
+// Click a named home-timeline tab ("Following" or "For you"). Following is the
+// default; For You passes are opt-in via localStorage.
 async function xSelectTab(name) {
   try {
     const tab = [...document.querySelectorAll('[role="tab"], a[role="tab"]')]
@@ -2447,11 +2456,10 @@ const x = {
       location.href = "https://x.com/home";
       return { targets: 1, saved: 0, discovered: 0 };
     }
-    // following-PRIMARY, for-you SECONDARY: most cycles read Following; every 4th
-    // cycle take a For-You pass so we still capture trending/outside-graph tweets.
+    // Following-only by default. A For You pass is opt-in for broader discovery.
     let feed = entity;
     if (/^\/home/.test(location.pathname)) {
-      if (cycle % 4 === 0) feed = (await xSelectTab("For you")) ? "home/foryou" : "home";
+      if (allowForYouFeedPass("x") && cycle % 4 === 0) feed = (await xSelectTab("For you")) ? "home/foryou" : "home";
       else feed = (await xSelectTab("Following")) ? "home/following" : "home";
     }
     clog("info", `X cycle on ${feed} — scrolling for tweets`, "x");
@@ -2738,9 +2746,10 @@ function collectPermalinkAuthors(re, skip) {
   return [...set].map((u) => ({ username: u }));
 }
 
-// Switch the Threads home feed to a named tab ("Following" primary, "For you"
-// secondary). The switcher is a dropdown behind the top button, so: open it (the
-// button shows the *other* feed's name), then click the wanted item. Idempotent.
+// Switch the Threads home feed to a named tab. Following is the default; For You
+// passes are opt-in. The switcher is a dropdown behind the top button, so: open
+// it (the button shows the other feed's name), then click the wanted item.
+// Idempotent.
 const THREADS_IMG = { imgRe: /(cdninstagram|fbcdn)\.net/, junkRe: /s150x150|s320x320|profile_pic|rsrc\.php/ };
 async function threadsSelectFeed(want) {
   try {
@@ -2900,9 +2909,9 @@ const threads = {
       return { targets: 1, saved: 0, posts: 0, discovered: 0 };
     }
 
-    // FEED: Following primary; For-You every 4th cycle (secondary).
+    // FEED: Following-only by default; For You is an explicit opt-in.
     const c = lsBump("uc_th_cyc");
-    const feed = (c % 4 === 0)
+    const feed = (allowForYouFeedPass("threads") && c % 4 === 0)
       ? ((await threadsSelectFeed("For you")) ? "foryou" : "feed")
       : ((await threadsSelectFeed("Following")) ? "following" : "feed");
     clog("info", `Threads cycle on ${feed} — scrolling`, "threads");

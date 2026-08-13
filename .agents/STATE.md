@@ -1,28 +1,32 @@
 # UnifiedCollector Agent State
 
-Updated: 2026-08-13 13:18 SGT
+Updated: 2026-08-13 05:15 UTC / 13:15 SGT
 
-Current task: realtime Telegram media noise reduction, duplicate Chrome control-tab fix, Following-first scraper defaults, and safe search/website rate tuning are implemented, live-verified, committed, and pushed.
+Current task: realtime Telegram media noise reduction, duplicate Chrome control-tab fix, Following-first scraper defaults, and safe search/website rate tuning are implemented, live-verified, committed, and pushed. Follow-up 1.23.66 disables default X/Threads "For You" rotation; broader For You passes are opt-in only.
 
 Current implementation notes:
 - Realtime feed now dedupes operator Telegram delivery per source by sha256 first, then canonical source URL, then content ID fallback. Cross-source sightings are still allowed.
 - Realtime feed now skips poster/cover thumbnail rows for video posts by default (`REALTIME_POST_FEED_SKIP_VIDEO_THUMBNAILS=1`) while preserving real video delivery.
 - TikTok visible scraper defaults back to `https://www.tiktok.com/following`; `/foryou` and `/explore` are expanded-tab opt-ins.
+- X and Threads visible scrapers now default to Following-only. Optional discovery can be enabled locally with `uc_allow_for_you_feed=1`, `uc_x_allow_for_you_feed=1`, or `uc_threads_allow_for_you_feed=1`.
 - The Chrome CDP launcher canonicalizes extension `tabs.html` URLs so `tabs.html?scrape=1` reuses an existing `tabs.html` page instead of opening duplicates.
 - The extension options page self-closes duplicate `chrome-extension://*/tabs.html` pages and the popup focuses an existing control page instead of creating a new one.
 - Existing scraper tabs are unpinned by default unless the local `ucPinScraperTabs=true` setting is explicitly enabled.
 - Search low-risk tuning has been raised to 100 results, 5 Bing pages, 10 parallel downloads, 1s query delay, and a 240s cycle sleep. Website concurrency is now 16.
-- Extension manifest and Compose expected version are bumped to `1.23.65`.
+- Extension manifest and Compose expected version are bumped to `1.23.66`.
 
 Verification in this pass:
 - `python -m pytest tests\notifications\test_realtime_feed.py tests\extension\test_extension_bundle_static.py tests\tools\test_browser_maintenance_scripts.py -q` passed.
 - `docker compose -f docker\docker-compose.yml config --quiet` passed.
 - `python -m compileall -q src\notifications\realtime_feed.py tools\browser_tab_reload.py` passed.
+- `python -m pytest tests\extension\test_extension_bundle_static.py tests\tools\test_browser_maintenance_scripts.py tests\notifications\test_realtime_feed.py -q` passed again after the 1.23.66 Following-only follow-up.
 - PowerShell parse check passed for `scripts\start-scraper-chrome-cdp.ps1` and `scripts\browser-tab-maintenance.ps1`.
 - Rebuilt `unifiedcollector-collector:latest` and recreated `realtime_feed`, `collector_lowrisk`, `collector_website`, `ig_ingest`, `dashboard`, and `scheduler`.
-- Runtime env readback confirmed realtime dedupe/thumbnail skip enabled, search max/results/concurrency/delay as configured, website concurrency 16, and expected extension `1.23.65`.
-- Final `/health?include_sources=true` returned `status=ok`, `source_issues=[]`, expected browser extension `1.23.65`, and no browser extension issues.
-- Final Chrome audit returned exactly seven page targets: one extension control page plus Instagram, Threads, TikTok, X, Facebook, and Strava. All seven were unpinned. All six platform content scripts reported `1.23.65`; TikTok was on `/following`, X on `/home`, Strava on `/dashboard`.
+- Runtime env readback confirmed realtime dedupe/thumbnail skip enabled, search max/results/concurrency/delay as configured, website concurrency 16, and expected extension `1.23.66`.
+- Runtime env readback also confirmed `ig_ingest`, `dashboard`, and `scheduler` expect extension `1.23.66`.
+- Final `/health?include_sources=true` returned `status=ok`, `source_issues=[]`, expected browser extension `1.23.66`, active browser content for Instagram, TikTok, Threads, Facebook, X, and Strava, and no browser extension issues.
+- Final Chrome audit returned exactly seven page targets: one extension control page plus Instagram, Threads, TikTok, X, Facebook, and Strava. All seven were unpinned. All six platform content scripts reported `1.23.66`; TikTok was on `/following`, X on `/home`, Strava on `/dashboard`.
+- X content health recovered in the live readback: `x_posts` had 46 rows in the last 2h, and `/health?include_sources=true` showed fresh X `posts` and `media` ingest with stored media.
 - Telegram account readback showed 4 active Telegram accounts, all 4 with session strings, 0 active accounts with last_error; `unifiedcollector_collector_telegram` Docker health was healthy with failing streak 0.
 - Large local media fallback was confirmed as a Telegram Bot API upload-size fallback, not a duplicate WSL copy: `/vault/media/...` and `/media/...` map to the same `z:/unifiedcollector` storage and the checked file had the same device/inode through both paths.
 - Main implementation pushed to `origin/main` as `ec2faaf1 fix: reduce media noise and browser tab churn` after a clean rebase over remote `48cb1476`.
