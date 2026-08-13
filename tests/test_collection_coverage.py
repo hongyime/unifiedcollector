@@ -31,6 +31,17 @@ class Conn:
             return [{"source": "telegram", "status": "running"}]
         if "FROM rate_limit_events" in sql:
             return [{"source": "telegram", "rate_limits_24h": 1}]
+        if "FROM collector_seen_targets" in sql:
+            return [{
+                "source": "telegram",
+                "total": 5,
+                "backfilled": 3,
+                "pending": 2,
+                "fresh": 2,
+                "stale": 1,
+                "failed": 0,
+                "newly_discovered": 1,
+            }]
         return []
 
     async def fetchrow(self, sql, *args):
@@ -52,6 +63,7 @@ def test_collection_coverage_snapshot_writes_digest():
 
     assert report["summary"]["fresh"] == 1
     assert report["summary"]["digest"].startswith("Coverage: 1/1 sources fresh")
+    assert report["summary"]["seen_targets_total"] == 5
     assert len(conn.inserted) == 1
 
 

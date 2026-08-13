@@ -53,6 +53,12 @@ def _row(source: str, status: str, created_at: datetime):
         "rate_limits_24h": 0,
         "private_access_failures": 0,
         "stale_targets": [],
+        "seen_targets_total": 0,
+        "seen_targets_backfilled": 0,
+        "seen_targets_pending": 0,
+        "seen_targets_fresh": 0,
+        "seen_targets_stale": 0,
+        "seen_targets_newly_discovered": 0,
         "created_at": created_at,
     }
 
@@ -84,6 +90,7 @@ async def test_collectors_coverage_refreshes_stale_snapshot(monkeypatch):
     assert result["summary"]["fresh"] == 1
     assert result["snapshot_stale"] is False
     assert result["refresh_attempted"] is True
+    assert result["sources"][0]["seen_targets_total"] == 0
 
 
 @pytest.mark.asyncio
@@ -139,3 +146,30 @@ async def test_media_realtime_feed_status_returns_safe_counts(monkeypatch):
     assert result["local_fallback_by_source"]["youtube"] == 2
     assert result["local_fallback_last"]["target_name"] == "big.mp4"
     assert result["delivery_ledger"]["status_counts"]["too_large"] == 1
+
+
+@pytest.mark.asyncio
+async def test_seen_targets_endpoint_returns_summary_and_rows(monkeypatch):
+    conn = _FakeConn([])
+
+    async def fake_get_pool():
+        return _Pool(conn)
+
+    async def fake_summary(summary_conn, source=None):
+        assert summary_conn is conn
+        assert source == "instagram"
+        return {"instagram": {"total": 10, "backfilled": 6, "pending": 4, "fresh": 5, "stale": 1, "newly_discovered": 2}}
+
+    async def fake_list(list_conn, *, source=None, status=None, target_type=None, limit=200):
+        assert list_conn is conn
+        assert (source, status, target_type, limit) == ("instagram", "pending", "user", 25)
+        return [{"source": "instagram", "target_type": "user", "target_key": "alice", "status": "pending"}]
+
+    monkeypatch.setattr(dashboard_api, "get_pool", fake_get_pool)
+    monkeypatch.setattr(dashboard_api, "seen_target_summary_by_source", fake_summary)
+    monkeypatch.setattr(dashboard_api, "list_seen_targets", fake_list)
+
+    result = await dashboard_api.seen_targets(source="instagram", status="pending", target_type="user", limit=25, _user={})
+
+    assert result["summary"]["instagram"]["total"] == 10
+    assert result["targets"][0]["target_key"] == "alice"

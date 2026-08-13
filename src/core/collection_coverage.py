@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import os
 from datetime import timedelta
 from typing import Any
+
+from src.core.seen_targets import refresh_seen_targets_from_sources, seen_target_summary_by_source
 
 
 async def _table_exists(conn, table: str) -> bool:
@@ -131,6 +134,22 @@ async def build_collection_coverage_snapshot(
         )
         rate_limits = {str(row["source"]): int(row["rate_limits_24h"] or 0) for row in rows}
 
+    seen_targets: dict[str, dict[str, int]] = {}
+    await _add_sources_from_table(conn, sources, "collector_seen_targets", "platform", source)
+    if os.getenv("COLLECTOR_SEEN_TARGETS_REFRESH_ON_COVERAGE", "false").lower() in {"1", "true", "yes", "on"}:
+        try:
+            limit = int(os.getenv("COLLECTOR_SEEN_TARGETS_REFRESH_LIMIT", "5000"))
+            await refresh_seen_targets_from_sources(conn, source=source, limit_per_source=limit)
+        except Exception:
+            # Coverage snapshots must keep working even if an optional source table
+            # has drifted. The dashboard will show zero seen-target counts.
+            pass
+    try:
+        seen_targets = await seen_target_summary_by_source(conn, source=source)
+        sources.update(seen_targets)
+    except Exception:
+        seen_targets = {}
+
     snapshots = []
     for item_source in sorted(sources):
         recent = media_recent.get(item_source, {})
@@ -142,6 +161,7 @@ async def build_collection_coverage_snapshot(
         errors_24h = int(run.get("errors_24h") or 0)
         source_status = source_health.get(item_source)
         rate_limits_24h = rate_limits.get(item_source, 0)
+        seen = seen_targets.get(item_source, {})
 
         status = _status(latest_data_at, latest_run_at, source_status, expected)
         snapshot = {
@@ -156,6 +176,12 @@ async def build_collection_coverage_snapshot(
             "rate_limits_24h": rate_limits_24h,
             "private_access_failures": 0,
             "stale_targets": [],
+            "seen_targets_total": int(seen.get("total", 0) or 0),
+            "seen_targets_backfilled": int(seen.get("backfilled", 0) or 0),
+            "seen_targets_pending": int(seen.get("pending", 0) or 0),
+            "seen_targets_fresh": int(seen.get("fresh", 0) or 0),
+            "seen_targets_stale": int(seen.get("stale", 0) or 0),
+            "seen_targets_newly_discovered": int(seen.get("newly_discovered", 0) or 0),
         }
         snapshots.append(snapshot)
 
@@ -165,9 +191,15 @@ async def build_collection_coverage_snapshot(
             INSERT INTO collection_coverage_snapshots (
                 source, expected_cadence, latest_data_at, latest_run_at, status,
                 rows_24h, media_24h, errors_24h, rate_limits_24h,
-                private_access_failures, stale_targets, created_at
+                private_access_failures, stale_targets,
+                seen_targets_total, seen_targets_backfilled, seen_targets_pending,
+                seen_targets_fresh, seen_targets_stale, seen_targets_newly_discovered,
+                created_at
             )
-            VALUES ($1, $2::interval, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, NOW())
+            VALUES (
+                $1, $2::interval, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb,
+                $12, $13, $14, $15, $16, $17, NOW()
+            )
             """,
             [
                 (
@@ -175,6 +207,9 @@ async def build_collection_coverage_snapshot(
                     row["latest_run_at"], row["status"], row["rows_24h"],
                     row["media_24h"], row["errors_24h"], row["rate_limits_24h"],
                     row["private_access_failures"], "[]",
+                    row["seen_targets_total"], row["seen_targets_backfilled"],
+                    row["seen_targets_pending"], row["seen_targets_fresh"],
+                    row["seen_targets_stale"], row["seen_targets_newly_discovered"],
                 )
                 for row in snapshots
             ],
@@ -192,6 +227,9 @@ async def build_collection_coverage_snapshot(
             "stale": stale,
             "digest": f"Coverage: {fresh}/{len(snapshots)} sources fresh, {degraded} degraded, {stale} stale; "
                       f"{sum(row['media_24h'] for row in snapshots)} media rows 24h.",
+            "seen_targets_total": sum(row["seen_targets_total"] for row in snapshots),
+            "seen_targets_pending": sum(row["seen_targets_pending"] for row in snapshots),
+            "seen_targets_backfilled": sum(row["seen_targets_backfilled"] for row in snapshots),
         },
         "written": len(snapshots) if write else 0,
     }

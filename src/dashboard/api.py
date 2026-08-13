@@ -26,6 +26,11 @@ from src.db.connection import get_pool
 from src.dashboard.websocket import health_ws
 from src.core.strava_route_queue import fetch_strava_route_capture_queue
 from src.core.collection_coverage import build_collection_coverage_snapshot
+from src.core.seen_targets import (
+    list_seen_targets,
+    refresh_seen_targets_from_sources,
+    seen_target_summary_by_source,
+)
 from src.core.vault import VAULT_ROOT, vault_artifact_counts, vault_health
 from src.core.whatsapp_bridge_health import (
     fetch_whatsapp_bridge_health,
@@ -144,6 +149,15 @@ def _jsonb_points(value) -> list:
         except Exception:
             return []
     return value if isinstance(value, list) else []
+
+
+def _row_get(row, key: str, default=None):
+    try:
+        return row[key]
+    except (KeyError, TypeError):
+        if isinstance(row, dict):
+            return row.get(key, default)
+        return default
 
 
 def _strava_route_status(row: dict) -> dict[str, str | None]:
@@ -9820,9 +9834,7 @@ async def collectors_coverage(_user: dict = Depends(require_role("viewer"))):
             return await conn.fetch(
                 """
                 SELECT DISTINCT ON (source)
-                       source, expected_cadence::text, latest_data_at, latest_run_at,
-                       status, rows_24h, media_24h, errors_24h, rate_limits_24h,
-                       private_access_failures, stale_targets, created_at
+                       *, expected_cadence::text AS expected_cadence_text
                 FROM collection_coverage_snapshots
                 ORDER BY source, created_at DESC
                 """
@@ -9850,7 +9862,7 @@ async def collectors_coverage(_user: dict = Depends(require_role("viewer"))):
     for row in rows:
         payload.append({
             "source": row["source"],
-            "expected_cadence": row["expected_cadence"],
+            "expected_cadence": _row_get(row, "expected_cadence_text", row["expected_cadence"]),
             "latest_data_at": row["latest_data_at"].isoformat() if row["latest_data_at"] else None,
             "latest_run_at": row["latest_run_at"].isoformat() if row["latest_run_at"] else None,
             "status": row["status"],
@@ -9860,6 +9872,12 @@ async def collectors_coverage(_user: dict = Depends(require_role("viewer"))):
             "rate_limits_24h": row["rate_limits_24h"],
             "private_access_failures": row["private_access_failures"],
             "stale_targets": row["stale_targets"],
+            "seen_targets_total": int(_row_get(row, "seen_targets_total", 0) or 0),
+            "seen_targets_backfilled": int(_row_get(row, "seen_targets_backfilled", 0) or 0),
+            "seen_targets_pending": int(_row_get(row, "seen_targets_pending", 0) or 0),
+            "seen_targets_fresh": int(_row_get(row, "seen_targets_fresh", 0) or 0),
+            "seen_targets_stale": int(_row_get(row, "seen_targets_stale", 0) or 0),
+            "seen_targets_newly_discovered": int(_row_get(row, "seen_targets_newly_discovered", 0) or 0),
             "created_at": row["created_at"].isoformat() if row["created_at"] else None,
         })
     fresh = sum(1 for row in payload if row["status"] == "fresh")
@@ -9875,6 +9893,36 @@ async def collectors_coverage(_user: dict = Depends(require_role("viewer"))):
         "snapshot_stale": bool(snapshot_age_seconds is not None and snapshot_age_seconds > _COVERAGE_SNAPSHOT_STALE_SECONDS),
         "refresh_attempted": refresh_attempted,
         "refresh_error": refresh_error,
+    }
+
+
+@app.get("/seen/targets")
+async def seen_targets(
+    source: str | None = None,
+    status: str | None = None,
+    target_type: str | None = None,
+    limit: int = Query(200, ge=1, le=1000),
+    refresh: bool = False,
+    _user: dict = Depends(require_role("viewer")),
+):
+    pool = await get_pool()
+    refresh_report = None
+    async with pool.acquire() as conn:
+        if refresh:
+            refresh_report = await refresh_seen_targets_from_sources(conn, source=source)
+        summary = await seen_target_summary_by_source(conn, source=source)
+        rows = await list_seen_targets(
+            conn,
+            source=source,
+            status=status,
+            target_type=target_type,
+            limit=limit,
+        )
+    return {
+        "targets": rows,
+        "total": len(rows),
+        "summary": summary,
+        "refresh": refresh_report,
     }
 
 

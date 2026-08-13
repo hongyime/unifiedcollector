@@ -21,3 +21,4 @@
 - 2026-08-13 15:20 SGT: Realtime Telegram feed over-cap handling now requeues/deferred items instead of dropping them; operator chat pacing must not become media notification loss, and dashboard wording should say deferred rather than skipped.
 2026-08-13 08:13 UTC - Browser tab duplication must be fixed across normal maintenance, extension service-worker cleanup, and manual CDP helper scripts; old extension IDs are not valid control pages.
 2026-08-13 08:13 UTC - Instagram media revisit requires both extension claim/finish wiring and openable post URLs; CDN-only rows should be skipped or given synthesized post URLs from numeric media IDs.
+2026-08-13 12:58 UTC - Collector seen-target coverage reads the registry by default and refreshes it only by explicit operator action so normal coverage snapshots remain fast and scheduler-safe.
