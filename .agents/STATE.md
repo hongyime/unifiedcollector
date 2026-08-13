@@ -1,8 +1,8 @@
 # UnifiedCollector Agent State
 
-Updated: 2026-08-13 12:58 UTC / 20:58 SGT
+Updated: 2026-08-13 13:10 UTC / 21:10 SGT
 
-Current task complete pending commit/push: added the Collector seen-target registry and surfaced its counters through coverage/dashboard APIs.
+Current task complete and pushed: added the Collector seen-target registry and surfaced its counters through coverage/dashboard APIs.
 
 What changed:
 - Added `collector_seen_targets` migration with canonical `(platform, target_type, target_key)` registry rows, evidence counts, source provenance, first/last seen timestamps, backfill timestamps, next-backfill hints, and progress status.
@@ -18,7 +18,7 @@ Verification:
 - Live `/seen/targets?source=instagram&limit=3&refresh=true` wrote and reported 6,385 Instagram seen targets: 1,795 backfilled, 237 pending, 427 fresh, 1,368 stale, 183 newly discovered.
 - Live `coverage-snapshot --json` completed and wrote 32 snapshot rows; Instagram coverage includes the same seen counters.
 - Live `/coverage/collectors` returns the new seen counters, and dashboard/scheduler containers are healthy.
+- Implementation commit pushed: `0002f97e feat: add collector seen target registry`.
 
 Next steps:
-1. Commit and push focused changes.
-2. Populate additional platforms with explicit `/seen/targets?source=<platform>&refresh=true` refreshes or a bounded rollout job when desired.
+1. Populate additional platforms with explicit `/seen/targets?source=<platform>&refresh=true` refreshes or a bounded rollout job when desired.
