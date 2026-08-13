@@ -1,8 +1,8 @@
 # UnifiedCollector Agent State
 
-Updated: 2026-08-13 13:11 SGT
+Updated: 2026-08-13 13:18 SGT
 
-Current task: realtime Telegram media noise reduction, duplicate Chrome control-tab fix, Following-first scraper defaults, and safe search/website rate tuning are implemented and live-verified. Commit/push is next.
+Current task: realtime Telegram media noise reduction, duplicate Chrome control-tab fix, Following-first scraper defaults, and safe search/website rate tuning are implemented, live-verified, committed, and pushed.
 
 Current implementation notes:
 - Realtime feed now dedupes operator Telegram delivery per source by sha256 first, then canonical source URL, then content ID fallback. Cross-source sightings are still allowed.
@@ -25,6 +25,7 @@ Verification in this pass:
 - Final Chrome audit returned exactly seven page targets: one extension control page plus Instagram, Threads, TikTok, X, Facebook, and Strava. All seven were unpinned. All six platform content scripts reported `1.23.65`; TikTok was on `/following`, X on `/home`, Strava on `/dashboard`.
 - Telegram account readback showed 4 active Telegram accounts, all 4 with session strings, 0 active accounts with last_error; `unifiedcollector_collector_telegram` Docker health was healthy with failing streak 0.
 - Large local media fallback was confirmed as a Telegram Bot API upload-size fallback, not a duplicate WSL copy: `/vault/media/...` and `/media/...` map to the same `z:/unifiedcollector` storage and the checked file had the same device/inode through both paths.
+- Main implementation pushed to `origin/main` as `ec2faaf1 fix: reduce media noise and browser tab churn` after a clean rebase over remote `48cb1476`.
 
 Recent completed work:
 - Realtime media deliveries now have a durable Postgres ledger (`realtime_media_deliveries`) and dashboard/API visibility under `/media/realtime-feed/status` and `/media/realtime-feed/deliveries`; live status shows delivered/enqueued/deduped rows for Telegram, WhatsApp, Instagram, and Search.
