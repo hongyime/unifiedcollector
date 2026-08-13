@@ -5578,7 +5578,7 @@ async def _realtime_feed_status_from_redis() -> dict:
         )
         await client.ping()
         queue_depth = int(await client.llen(realtime_feed._queue_key()) or 0)  # noqa: SLF001
-        skipped_burst = int(await client.get(realtime_feed.SKIPPED_KEY_DEFAULT) or 0)
+        deferred_burst = int(await client.get(realtime_feed.DEFERRED_KEY_DEFAULT) or 0)
         failed_depth = int(await client.llen(realtime_feed.FAILED_KEY_DEFAULT) or 0)
         local_fallback_total = int(await client.get(realtime_feed.LOCAL_FALLBACK_TOTAL_KEY) or 0)
         raw_by_source = await client.hgetall(realtime_feed.LOCAL_FALLBACK_BY_SOURCE_KEY)
@@ -5594,7 +5594,8 @@ async def _realtime_feed_status_from_redis() -> dict:
         return {
             "available": True,
             "queue_depth": queue_depth,
-            "skipped_burst": skipped_burst,
+            "skipped_burst": deferred_burst,
+            "deferred_burst": deferred_burst,
             "failed_depth": failed_depth,
             "local_fallback_total": local_fallback_total,
             "local_fallback_by_source": by_source,

@@ -89,10 +89,10 @@ const BROWSER_UPLOAD_MAX_BYTES = 256 * 1024 * 1024;
 const BROWSER_UPLOAD_FETCH_TIMEOUT_MS = 45000;
 const BROWSER_UPLOAD_POST_TIMEOUT_MS = 30000;
 const BROWSER_UPLOAD_ATTEMPT_LIMIT_BY_PLATFORM = {
-  instagram: 3,
-  threads: 2,
-  tiktok: 1,
-  facebook: 1,
+  instagram: 4,
+  threads: 3,
+  tiktok: 2,
+  facebook: 2,
   x: 1,
   lemon8: 1,
 };
@@ -948,7 +948,6 @@ function canonicalTabScore(row) {
   if (tab.status === "complete") score += 50;
   if (!tab.discarded) score += 20;
   if (tab.active) score += 10;
-  if (tab.pinned) score += 5;
   if (targets.some((want) => path === want)) score += 8;
   else if (targets.some((want) => want !== "/" && path.startsWith(want))) score += 4;
   return score;
@@ -1004,6 +1003,77 @@ async function closeDuplicateScraperTabRows(rows, reason) {
     await log("info", `closed ${closed} duplicate scraper tab(s), ${errors} close error(s) (${reason})`);
   }
   return { closed, errors };
+}
+
+function isExtensionControlTabUrl(url) {
+  try {
+    const u = new URL(String(url || ""));
+    return u.protocol === "chrome-extension:" && u.pathname === "/tabs.html";
+  } catch (e) {
+    return false;
+  }
+}
+
+function isBlankStartupTab(tab) {
+  const url = String((tab && tab.url) || "");
+  return (url === "about:blank" || url === "chrome://newtab/") && !tab.active;
+}
+
+async function closeDuplicateExtensionControlTabs(reason) {
+  let closed = 0;
+  let unpinned = 0;
+  let errors = 0;
+  try {
+    const tabs = (await chrome.tabs.query({})) || [];
+    const controls = tabs
+      .filter((tab) => tab && tab.id != null && isExtensionControlTabUrl(tab.url))
+      .sort((a, b) => {
+        const aCurrent = String(a.url || "").startsWith(chrome.runtime.getURL("tabs.html"));
+        const bCurrent = String(b.url || "").startsWith(chrome.runtime.getURL("tabs.html"));
+        if (aCurrent !== bCurrent) return aCurrent ? -1 : 1;
+        const aExact = a.url === chrome.runtime.getURL("tabs.html");
+        const bExact = b.url === chrome.runtime.getURL("tabs.html");
+        if (aExact !== bExact) return aExact ? -1 : 1;
+        if (a.active !== b.active) return a.active ? -1 : 1;
+        return Number(a.id) - Number(b.id);
+      });
+    const keepId = controls.length ? controls[0].id : null;
+    for (const tab of controls) {
+      if (tab.id === keepId) {
+        if (tab.pinned) {
+          try {
+            await chrome.tabs.update(tab.id, { pinned: false });
+            unpinned++;
+          } catch (e) {
+            errors++;
+          }
+        }
+        continue;
+      }
+      try {
+        await chrome.tabs.remove(tab.id);
+        closed++;
+      } catch (e) {
+        errors++;
+      }
+    }
+    if (keepId != null) {
+      for (const tab of tabs.filter(isBlankStartupTab)) {
+        try {
+          await chrome.tabs.remove(tab.id);
+          closed++;
+        } catch (e) {
+          errors++;
+        }
+      }
+    }
+  } catch (e) {
+    errors++;
+  }
+  if (closed || unpinned || errors) {
+    await log("info", `extension control cleanup: ${closed} closed, ${unpinned} unpinned, ${errors} error(s) (${reason})`);
+  }
+  return { closed, unpinned, errors };
 }
 
 function shouldNormalizeSingleFeedTab(p, tab, reason) {
@@ -1102,6 +1172,7 @@ async function ensureScraperTabsOpen(reason, options = {}) {
   const pinScraperTabs = await scraperTabsPinned();
   const expandedTabs = await expandedPlatformTabsEnabled();
   try {
+    await closeDuplicateExtensionControlTabs(`ensure:${reason || "tabs"}`).catch(() => {});
     for (const p of scraperPlatforms()) {
       const tabs = (await chrome.tabs.query({ url: platformUrlPatterns(p) })) || [];
       const targets = platformManagedUrls(p, expandedTabs);
@@ -1172,9 +1243,13 @@ async function refreshScraperTabs(options = {}) {
   const reason = options.reason || "refresh";
   const requestedGapMs = Number(options.gapMs);
   const gapMs = Number.isFinite(requestedGapMs) && requestedGapMs >= 250 ? requestedGapMs : 8000;
+  const pinScraperTabs = await scraperTabsPinned();
   let reloaded = 0;
   let errors = 0;
+  let pinStateChanged = 0;
   try {
+    const controlCleanup = await closeDuplicateExtensionControlTabs(`refresh:${reason}`).catch(() => ({ errors: 1 }));
+    errors += Number(controlCleanup && controlCleanup.errors || 0);
     const allTabs = await chrome.tabs.query({ url: scraperUrlPatterns() });
     const selection = selectCanonicalScraperTabRows(allTabs);
     const closed = await closeDuplicateScraperTabRows(selection.duplicateRows, `refresh:${reason}`);
@@ -1182,6 +1257,7 @@ async function refreshScraperTabs(options = {}) {
     const tabs = selection.rows.map((row) => row.tab);
     for (const t of tabs || []) {
       try {
+        if (await setScraperTabPinnedState(t, pinScraperTabs)) pinStateChanged++;
         await chrome.tabs.reload(t.id, { bypassCache });
         reloaded++;
         await _sleep(_humanGap(gapMs));
@@ -1190,8 +1266,8 @@ async function refreshScraperTabs(options = {}) {
       }
     }
     const mode = bypassCache ? "hard-refreshed" : "auto-refreshed";
-    await log("info", `${mode} ${tabs ? tabs.length : 0}/${selection.seen} canonical scraper tab(s), closed ${closed.closed}/${selection.skipped} duplicate(s), staggered ${gapMs}ms → loop respawns fresh (${reason})`);
-    return { ok: true, reloaded, errors, tabs: tabs ? tabs.length : 0, totalTabs: selection.seen, skippedDuplicates: selection.skipped, closedDuplicates: closed.closed };
+    await log("info", `${mode} ${tabs ? tabs.length : 0}/${selection.seen} canonical scraper tab(s), closed ${closed.closed}/${selection.skipped} duplicate(s), normalized pin state on ${pinStateChanged}, staggered ${gapMs}ms → loop respawns fresh (${reason})`);
+    return { ok: true, reloaded, errors, tabs: tabs ? tabs.length : 0, totalTabs: selection.seen, skippedDuplicates: selection.skipped, closedDuplicates: closed.closed, pinStateChanged };
   } finally { _tabsOpInProgress = false; }
 }
 

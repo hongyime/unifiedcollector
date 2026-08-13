@@ -325,6 +325,7 @@ export interface RealtimeFeedStatus {
   error?: string;
   queue_depth?: number;
   skipped_burst?: number;
+  deferred_burst?: number;
   failed_depth?: number;
   local_fallback_total?: number;
   local_fallback_by_source?: Record<string, number>;

@@ -36,6 +36,7 @@ import time
 import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 import aiohttp
 from aiohttp import web
@@ -1694,6 +1695,9 @@ def _browser_candidate_post_url(platform: str, item: dict | None, username: str 
             continue
         host = parsed.netloc.lower()
         path = parsed.path or ""
+        if platform == "instagram" and host.endswith("instagram.com"):
+            if path.startswith(("/p/", "/reel/", "/reels/", "/tv/", "/stories/")):
+                return value
         if platform == "x" and host in {"x.com", "www.x.com", "twitter.com", "www.twitter.com"}:
             if re.match(r"^/[A-Za-z0-9_]{1,20}/status/\d+", path):
                 return value
@@ -2835,7 +2839,7 @@ async def tiktok_revisit_result(request):
 
 def _browser_revisit_platform(value: str | None) -> str | None:
     platform = _norm_platform(value)
-    if platform in {"x", "facebook", "threads", "lemon8"}:
+    if platform in {"instagram", "x", "facebook", "threads", "lemon8"}:
         return platform
     return None
 

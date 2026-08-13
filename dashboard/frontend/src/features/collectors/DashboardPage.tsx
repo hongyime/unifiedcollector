@@ -541,6 +541,7 @@ export function DashboardPage() {
   const backups = health?.backups;
   const extension = health?.browser_extension;
   const realtimeFallbackTotal = Number(realtimeFeed?.local_fallback_total ?? 0);
+  const realtimeDeferredTotal = Number(realtimeFeed?.deferred_burst ?? realtimeFeed?.skipped_burst ?? 0);
   const realtimeFallbackSources = Object.entries(realtimeFeed?.local_fallback_by_source ?? {})
     .sort((a, b) => b[1] - a[1])
     .slice(0, 3)
@@ -549,6 +550,7 @@ export function DashboardPage() {
   const realtimeLastFallback = realtimeFeed?.local_fallback_last?.target_name
     ? `last ${realtimeFeed.local_fallback_last.source ?? "unknown"} ${realtimeFeed.local_fallback_last.target_name}`
     : null;
+  const realtimeQueueStatus = `${formatNumber(realtimeFeed?.queue_depth ?? 0)} queued · ${formatNumber(realtimeDeferredTotal)} deferred · ${formatNumber(realtimeFeed?.failed_depth ?? 0)} failed`;
   const extensionIssues = extension?.issues ?? [];
   const extensionHooks = extension?.hooks ?? [];
   const extensionIngest = extension?.ingest ?? [];
@@ -665,7 +667,7 @@ export function DashboardPage() {
           sublabel={
             realtimeFeed?.available === false
               ? `Redis unavailable: ${realtimeFeed.error ?? "unknown"}`
-              : realtimeFallbackSources || realtimeLastFallback || `${formatNumber(realtimeFeed?.queue_depth ?? 0)} queued · ${formatNumber(realtimeFeed?.failed_depth ?? 0)} failed`
+              : realtimeFallbackSources || realtimeLastFallback || realtimeQueueStatus
           }
           status={realtimeFeed?.available === false ? "idle" : realtimeFallbackTotal ? "warning" : "success"}
           icon={<Send className="w-5 h-5" />}

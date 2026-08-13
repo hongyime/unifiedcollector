@@ -431,6 +431,53 @@ def test_browser_media_candidates_queues_x_video_revisit():
     )
 
 
+def test_browser_media_candidates_queues_instagram_video_revisit():
+    pool = _FakePool()
+    response = asyncio.run(
+        ig_ingest.browser_media_candidates(
+            _FakeRequest(
+                {"pool": pool},
+                {
+                    "platform": "instagram",
+                    "username": "alice",
+                    "extension_version": "1.23.67",
+                    "items": [
+                        {
+                            "ingest_mode": "browser_upload",
+                            "item": {
+                                "content_id": "ig_reel_video_1",
+                                "content_type": "video",
+                                "url": "https://scontent.cdninstagram.com/o1/v/t16/f2/m86/video.mp4",
+                                "meta": {
+                                    "dom_asset_role": "video",
+                                    "post_url": "https://www.instagram.com/reel/ABC123/",
+                                },
+                            },
+                            "result": {"reason": "timeout", "reject_stats": {"timeout": 1}},
+                        }
+                    ],
+                },
+            )
+        )
+    )
+    payload = json.loads(response.text)
+
+    assert payload == {"ok": True, "queued": 1, "platform": "instagram"}
+    queries = [query for query, _args in pool.conn.executes]
+    assert any("browser_media_candidates" in query for query in queries)
+    assert any("browser_media_revisit_queue" in query for query in queries)
+    queue_args = next(args for query, args in pool.conn.executes if "browser_media_revisit_queue" in query)
+    assert queue_args[:7] == (
+        "instagram",
+        "ig_reel_video_1",
+        "alice",
+        "https://www.instagram.com/reel/ABC123/",
+        "https://scontent.cdninstagram.com/o1/v/t16/f2/m86/video.mp4",
+        "timeout",
+        90,
+    )
+
+
 def test_browser_revisit_target_reclaims_stale_claimed(monkeypatch):
     pool = _FakePool()
     pool.conn.fetchrow_result = {

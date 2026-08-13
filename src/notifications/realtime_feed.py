@@ -9,9 +9,10 @@ downloads or resolves the media, and posts a small Telegram message via
 Design points:
   * The collector's insertion path never blocks or raises on this. If Redis is
     down, ``enqueue_from_insert`` silently no-ops.
-  * Rate-limit: token bucket in Redis at ``uc:realtime_post_feed:tokens`` with
-    a configurable per-minute cap. Bursts above the cap are dropped and their
-    count summarized via a scheduled ``sendMessage`` every 15 minutes.
+  * Rate-limit: token bucket in Redis with a configurable per-minute cap.
+    Bursts above the cap are requeued/deferred and summarized every 15 minutes;
+    stored media is not dropped just because Telegram notification pacing is
+    saturated.
   * Dedupe: per-source sha256/source-url keys seen in the last N days prevent
     repeated operator-chat posts without hiding cross-source sightings.
   * On Telegram 429: exponential backoff, respecting the ``retry_after``
@@ -49,7 +50,8 @@ logger = logging.getLogger(__name__)
 
 QUEUE_KEY_DEFAULT = "uc:realtime_post_feed"
 SEEN_SHA_KEY_DEFAULT = "uc:realtime_post_feed:seen_sha"
-SKIPPED_KEY_DEFAULT = "uc:realtime_post_feed:skipped_burst"
+DEFERRED_KEY_DEFAULT = "uc:realtime_post_feed:skipped_burst"  # legacy key name
+SKIPPED_KEY_DEFAULT = DEFERRED_KEY_DEFAULT  # compatibility for dashboard/tests
 FAILED_KEY_DEFAULT = "uc:realtime_post_feed:failed"
 LOCAL_FALLBACK_TOTAL_KEY = "uc:realtime_post_feed:local_fallback_total"
 LOCAL_FALLBACK_BY_SOURCE_KEY = "uc:realtime_post_feed:local_fallback_by_source"
@@ -421,9 +423,13 @@ async def _acquire_token(client, *, capacity: int) -> bool:
     return True
 
 
-async def _record_skip(client) -> None:
+def _rate_limit_delay_seconds(capacity: int) -> float:
+    return max(2.0, min(30.0, 60.0 / max(1, capacity)))
+
+
+async def _record_deferred(client) -> None:
     with contextlib.suppress(Exception):
-        await client.incr(SKIPPED_KEY_DEFAULT)
+        await client.incr(DEFERRED_KEY_DEFAULT)
 
 
 async def _record_failed_delivery(client, payload: dict, raw: str) -> None:
@@ -640,8 +646,8 @@ def _delivery_status(
     return "failed", "telegram_send_failed"
 
 
-async def _flush_skip_summary(client) -> None:
-    """Send a 'skipped N burst' summary if the last flush was >15 min ago."""
+async def _flush_deferred_summary(client) -> None:
+    """Send a 'deferred N burst' summary if the last flush was >15 min ago."""
     if not _flag("REALTIME_POST_FEED_BURST_SUMMARY", "1"):
         return
     try:
@@ -651,13 +657,13 @@ async def _flush_skip_summary(client) -> None:
         interval = _int("REALTIME_POST_FEED_BURST_SUMMARY_SECONDS", 900, min_value=60)
         if now - last_f < interval:
             return
-        skipped = await client.get(SKIPPED_KEY_DEFAULT)
-        skipped_n = int(skipped) if skipped else 0
-        if skipped_n <= 0:
+        deferred = await client.get(DEFERRED_KEY_DEFAULT)
+        deferred_n = int(deferred) if deferred else 0
+        if deferred_n <= 0:
             await client.set(LAST_BURST_REPORT_KEY, now)
             return
         # Reset first (race safe: worst case we double-report a couple).
-        await client.delete(SKIPPED_KEY_DEFAULT)
+        await client.delete(DEFERRED_KEY_DEFAULT)
         await client.set(LAST_BURST_REPORT_KEY, now)
     except Exception:
         return
@@ -665,9 +671,10 @@ async def _flush_skip_summary(client) -> None:
         from src.notifications import telegram
         await telegram.send(
             f"🌀 <b>Realtime feed burst</b>\n"
-            f"Skipped {skipped_n:,} posts in the last "
+            f"Deferred {deferred_n:,} posts in the last "
             f"{_int('REALTIME_POST_FEED_BURST_SUMMARY_SECONDS', 900, min_value=60) // 60} min "
-            f"(over {_int('REALTIME_POST_FEED_MAX_PER_MINUTE', 12, min_value=1)}/min cap)."
+            f"(over {_int('REALTIME_POST_FEED_MAX_PER_MINUTE', 12, min_value=1)}/min pacing). "
+            f"They remain queued for later delivery."
         )
     except Exception:
         logger.debug("realtime_feed burst summary send failed", exc_info=True)
@@ -768,7 +775,7 @@ class RealtimeFeedDrain:
 
         # No message this cycle — still run housekeeping.
         if not popped:
-            await _flush_skip_summary(client)
+            await _flush_deferred_summary(client)
             return
 
         _, raw = popped
@@ -807,15 +814,18 @@ class RealtimeFeedDrain:
         # Rate-limit.
         capacity = _int("REALTIME_POST_FEED_MAX_PER_MINUTE", 12, min_value=1)
         if not await _acquire_token(client, capacity=capacity):
-            await _record_skip(client)
+            await _record_deferred(client)
             from src.notifications import realtime_delivery
             await realtime_delivery.record_from_payload(
                 payload,
-                status="skipped",
-                reason="rate_cap_dropped",
+                status="enqueued",
+                reason="rate_cap_deferred",
                 dedupe_key=dedupe_key,
             )
-            await _flush_skip_summary(client)
+            with contextlib.suppress(Exception):
+                await client.lpush(_queue_key(), raw)
+            self._backoff_seconds = _rate_limit_delay_seconds(capacity)
+            await _flush_deferred_summary(client)
             return
 
         delivered, retry_after, delivery_outcome, delivery_target = await _deliver_one(payload)
@@ -877,7 +887,7 @@ class RealtimeFeedDrain:
 
         await _mark_dedupe_seen(client, dedupe_key, ttl_days=ttl_days)
 
-        await _flush_skip_summary(client)
+        await _flush_deferred_summary(client)
 
 
 def _hash_payload(payload: dict) -> str:

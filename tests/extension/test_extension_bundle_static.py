@@ -421,6 +421,13 @@ def test_scraper_refresh_and_loop_nudges_close_canonical_duplicate_tabs():
     assert "duplicateRows.push(row)" in background
     assert "async function closeDuplicateScraperTabRows" in background
     assert "await chrome.tabs.remove(id)" in background
+    assert "function isExtensionControlTabUrl" in background
+    assert 'u.protocol === "chrome-extension:" && u.pathname === "/tabs.html"' in background
+    assert "async function closeDuplicateExtensionControlTabs" in background
+    assert "isBlankStartupTab" in background
+    assert "closeDuplicateExtensionControlTabs(`refresh:${reason}`)" in refresh_block
+    assert "setScraperTabPinnedState(t, pinScraperTabs)" in refresh_block
+    assert "pinStateChanged" in refresh_block
     assert "closeDuplicateScraperTabRows(selection.duplicateRows, `refresh:${reason}`)" in refresh_block
     assert "closedDuplicates: closed.closed" in refresh_block
     assert "closeDuplicateScraperTabRows(selection.duplicateRows, `ensure_loops:${reason || \"nudge\"}`)" in loop_block
@@ -437,8 +444,59 @@ def test_auto_opened_scraper_tabs_are_unpinned_by_default():
     assert "async function scraperTabsPinned()" in background
     assert "return stored && stored[SCRAPER_TABS_PINNED_KEY] === true" in background
     assert "const pinScraperTabs = await scraperTabsPinned();" in ensure_block
+    assert "closeDuplicateExtensionControlTabs(`ensure:${reason || \"tabs\"}`)" in ensure_block
     assert "pinned: pinScraperTabs" in ensure_block
     assert "pinned: true" not in ensure_block
+
+
+def test_browser_upload_attempt_limits_prioritize_video_platforms():
+    background = _read("extension/background.js")
+    limits_block = background.split("const BROWSER_UPLOAD_ATTEMPT_LIMIT_BY_PLATFORM = {", 1)[1].split(
+        "};",
+        1,
+    )[0]
+
+    assert re.search(r"instagram:\s*4", limits_block)
+    assert re.search(r"threads:\s*3", limits_block)
+    assert re.search(r"tiktok:\s*2", limits_block)
+    assert re.search(r"facebook:\s*2", limits_block)
+    assert re.search(r"x:\s*1", limits_block)
+
+
+def test_dom_video_harvest_uses_all_video_source_urls():
+    content = _read("extension/content.js")
+    helper_block = content.split("function videoUrlsFromElement", 1)[1].split(
+        "function elementLooksTooSmall",
+        1,
+    )[0]
+    tiktok_block = content.split("const tiktok = {", 1)[1].split(
+        "function parsePostIdFromUrl",
+        1,
+    )[0]
+    dom_block = content.split("function harvestDom", 1)[1].split(
+        "const threads = {",
+        1,
+    )[0]
+
+    assert "add(video.currentSrc)" in helper_block
+    assert "add(video.src)" in helper_block
+    assert 'video.querySelectorAll("source[src]")' in helper_block
+    assert 'video.querySelectorAll("source[srcset]")' in helper_block
+    assert "videoUrlsFromElement(v).forEach((u, sourceIndex)" in tiktok_block
+    assert '"dom_video_" + urlId(u) + "_" + sourceIndex' in tiktok_block
+    assert "videoUrlsFromElement(v).forEach((u)" in dom_block
+
+
+def test_instagram_browser_media_detail_revisit_is_enabled():
+    content = _read("extension/content.js")
+    revisit_block = content.split("function browserMediaRevisitUrlOk", 1)[1].split(
+        "async function maybeStartBrowserMediaRevisit",
+        1,
+    )[0]
+
+    assert 'new Set(["instagram", "x", "threads", "facebook", "lemon8"])' in content
+    assert 'platform === "instagram"' in revisit_block
+    assert re.search(r"\?:p\|reel\|reels\|tv\|stories", revisit_block)
 
 
 def test_post_reload_scrape_nudge_waits_and_retries_for_heavy_tabs():

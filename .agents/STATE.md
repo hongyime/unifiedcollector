@@ -1,6 +1,16 @@
 # UnifiedCollector Agent State
 
-Updated: 2026-08-13 05:15 UTC / 13:15 SGT
+Updated: 2026-08-13 07:20 UTC / 15:20 SGT
+
+Current follow-up complete pending commit/push: realtime Telegram burst delivery now defers/requeues over-cap posts instead of dropping them, browser video extraction is hardened for TikTok/Instagram/Threads/Facebook, Instagram is enabled in the generic browser media revisit queue, the missing `urlparse` import in generic revisit post-URL derivation is fixed, and extension tab hygiene now also runs inside the service worker for duplicate extension-control pages, blank startup tabs, and refresh-time pin normalization. Extension manifest and Compose expected version are `1.23.67`.
+
+Latest verification:
+- Focused tests passed: `python -m pytest tests\notifications\test_realtime_feed.py tests\extension\test_extension_bundle_static.py tests\tools\test_browser_maintenance_scripts.py tests\bridges\test_ig_ingest_vault.py tests\dashboard\test_coverage_api.py tests\dashboard\test_extension_health.py -q`.
+- Frontend build passed: `npm run build` in `dashboard/frontend`; Compose config passed.
+- Recreated `realtime_feed`, `ig_ingest`, `dashboard`, and `scheduler`; health returned `status=ok` and `source_issues=[]`.
+- Reloaded the unpacked Chrome extension to `1.23.67`; final tab audit showed exactly 7 page targets: one extension control page plus Instagram, Threads, TikTok, X, Facebook, and Strava. All six platform content scripts reported `1.23.67`.
+- Direct extension tab query showed all listed scraper/control tabs `pinned=false` and no `about:blank`/duplicate page targets.
+- Realtime media ledger after 07:00 UTC showed no new `rate_cap_dropped` rows. A bounded replay backfilled 38 previously undelivered Instagram/Threads/TikTok/Facebook rows; all 38 delivered and Redis queue depth returned to 0.
 
 Current task: realtime Telegram media noise reduction, duplicate Chrome control-tab fix, Following-first scraper defaults, and safe search/website rate tuning are implemented, live-verified, committed, and pushed. Follow-up 1.23.66 disables default X/Threads "For You" rotation; broader For You passes are opt-in only.
 

@@ -837,7 +837,7 @@ async def test_drain_skips_video_thumbnail_rows_by_default(fake_redis, telegram_
 
 
 @pytest.mark.asyncio
-async def test_drain_rate_limits_and_records_skip(fake_redis, telegram_stub, monkeypatch):
+async def test_drain_rate_limits_and_defers_without_dropping(fake_redis, telegram_stub, monkeypatch):
     from src.notifications import realtime_feed
 
     monkeypatch.setenv("REALTIME_POST_FEED_MAX_PER_MINUTE", "2")
@@ -854,13 +854,15 @@ async def test_drain_rate_limits_and_records_skip(fake_redis, telegram_stub, mon
         await fake_redis.rpush("uc:realtime_post_feed", json.dumps(payload))
 
     drain = realtime_feed.RealtimeFeedDrain()
-    for _ in range(6):
+    for _ in range(3):
         await drain._tick(fake_redis)
 
     assert len(telegram_stub["send_photo"]) == 2
-    # 3 posts were dropped -> skipped counter records them.
-    skipped = int(fake_redis.strings.get("uc:realtime_post_feed:skipped_burst", "0"))
-    assert skipped == 3
+    # The third item hit the pacing cap, but it was requeued instead of dropped.
+    deferred = int(fake_redis.strings.get("uc:realtime_post_feed:skipped_burst", "0"))
+    assert deferred == 1
+    assert len(fake_redis.lists.get("uc:realtime_post_feed") or []) == 3
+    assert drain._backoff_seconds > 0
 
 
 @pytest.mark.asyncio

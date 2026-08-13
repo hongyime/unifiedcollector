@@ -788,6 +788,26 @@ function urlsFromCssValue(value) {
   return out;
 }
 
+function videoUrlsFromElement(video) {
+  const out = [];
+  const add = (u) => {
+    if (u && /^https?:/i.test(u) && !out.includes(u)) out.push(u);
+  };
+  try { add(video.currentSrc); } catch (e) {}
+  try { add(video.src); } catch (e) {}
+  try {
+    video.querySelectorAll("source[src]").forEach((source) => add(source.src || source.getAttribute("src")));
+  } catch (e) {}
+  try {
+    video.querySelectorAll("source[srcset]").forEach((source) => {
+      String(source.getAttribute("srcset") || "").split(",").forEach((part) => {
+        add(part.trim().split(/\s+/)[0]);
+      });
+    });
+  } catch (e) {}
+  return out;
+}
+
 function elementLooksTooSmall(el, min = 120) {
   try {
     const r = el.getBoundingClientRect && el.getBoundingClientRect();
@@ -1535,7 +1555,7 @@ async function tiktokReportPageHealth(status, reason, counts) {
   }).catch(() => null);
 }
 
-const BROWSER_MEDIA_REVISIT_PLATFORMS = new Set(["x", "threads", "facebook", "lemon8"]);
+const BROWSER_MEDIA_REVISIT_PLATFORMS = new Set(["instagram", "x", "threads", "facebook", "lemon8"]);
 function browserMediaRevisitKey(platform) { return "uc_browser_media_revisit_active_" + platform; }
 function currentBrowserMediaRevisit(platform) {
   try {
@@ -1586,6 +1606,10 @@ function browserMediaRevisitUrlOk(platform, url) {
     if (platform === "threads") {
       return /^(threads\.com|threads\.net)$/i.test(u.hostname.replace(/^www\./, "")) &&
         /^\/@[^/]+\/post\//.test(u.pathname);
+    }
+    if (platform === "instagram") {
+      return /(^|\.)instagram\.com$/i.test(u.hostname) &&
+        /^\/(?:p|reel|reels|tv|stories)\//.test(u.pathname);
     }
     if (platform === "facebook") {
       return /(^|\.)facebook\.com$/i.test(u.hostname) &&
@@ -1710,10 +1734,9 @@ const tiktok = {
     // short-lived/cookie-bound, so videos go through browser_upload_only while
     // posters/covers can still use normal URL ingest.
     document.querySelectorAll("video").forEach((v, i) => {
-      const u = v.src || (v.querySelector("source") && v.querySelector("source").src);
-      if (u && /^https?:/.test(u)) {
+      videoUrlsFromElement(v).forEach((u, sourceIndex) => {
         sink.add({
-          content_id: "dom_video_" + urlId(u),
+          content_id: "dom_video_" + urlId(u) + "_" + sourceIndex,
           content_type: "video",
           url: u,
           entity_name: entity,
@@ -1722,7 +1745,7 @@ const tiktok = {
           browser_upload_only: true,
           meta: { tiktok_asset_role: "dom_video", page_url: location.href },
         });
-      }
+      });
       const poster = v.getAttribute("poster") || v.poster;
       if (poster && /^https?:/.test(poster)) {
         sink.add({
@@ -2695,8 +2718,7 @@ function harvestDom(entity, { imgRe, junkRe, platform }) {
         kind: "post",
         meta: { dom_asset_role: "video_poster", post_url: domPostUrlForElement(v, platform) },
       });
-    const u = v.src || (v.querySelector("source") && v.querySelector("source").src);
-    if (u && /^https?:/.test(u) && !u.startsWith("blob:"))
+    videoUrlsFromElement(v).forEach((u) => {
       sink.add({
         content_id: "vid_" + urlId(u),
         content_type: "video",
@@ -2707,6 +2729,7 @@ function harvestDom(entity, { imgRe, junkRe, platform }) {
         browser_upload_only: true,
         meta: { dom_asset_role: "video", post_url: domPostUrlForElement(v, platform) },
       });
+    });
   });
   return sink;
 }
