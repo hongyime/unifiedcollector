@@ -260,6 +260,15 @@ function Get-PrimaryKnownExtensionId {
     return @(Get-KnownExtensionIds)[0]
 }
 
+function Normalize-CdpTargetUrlForReuse {
+    param([string]$Url)
+    $text = [string]$Url
+    if ($text -match '^chrome-extension://([a-p]{32})/tabs\.html(?:[?#].*)?$') {
+        return "chrome-extension://$($Matches[1])/tabs.html"
+    }
+    return $text
+}
+
 function Open-CdpTarget {
     param([int]$Port, [string]$Url, [int]$TimeoutSeconds = 5)
     $encoded = [uri]::EscapeDataString($Url)
@@ -269,13 +278,15 @@ function Open-CdpTarget {
 function Find-ExistingCdpTarget {
     param([int]$Port, [string]$Url)
     try {
+        $desiredUrl = Normalize-CdpTargetUrlForReuse -Url $Url
         $response = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/json/list" -UseBasicParsing -TimeoutSec 5
         $targets = @($response.Content | ConvertFrom-Json)
         foreach ($target in @($targets)) {
             if ([string]$target.type -ne "page") {
                 continue
             }
-            if ([string]$target.url -eq $Url) {
+            $targetUrl = Normalize-CdpTargetUrlForReuse -Url ([string]$target.url)
+            if ($targetUrl -eq $desiredUrl) {
                 return [string]$target.id
             }
         }
@@ -352,12 +363,12 @@ function Get-PlatformLaunchUrls {
         instagram = "https://www.instagram.com/"
         tiktok = if ($expandedPlatformTabs) {
             @(
-                "https://www.tiktok.com/foryou",
                 "https://www.tiktok.com/following",
+                "https://www.tiktok.com/foryou",
                 "https://www.tiktok.com/explore"
             )
         } else {
-            "https://www.tiktok.com/foryou"
+            "https://www.tiktok.com/following"
         }
         lemon8 = "https://www.lemon8-app.com/topic/singapore?region=sg"
         x = "https://x.com/home"

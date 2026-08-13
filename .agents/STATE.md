@@ -1,8 +1,30 @@
 # UnifiedCollector Agent State
 
-Updated: 2026-08-13 08:21 SGT
+Updated: 2026-08-13 13:11 SGT
 
-Current task: realtime Telegram media replay, browser-tab resource reduction, and safe non-browser rate tuning are being verified. X remains a live-page/session blocker when it serves the `Try again` shell; Instagram/Threads/Lemon8 realtime replay has been exercised, and expanded IG/TikTok browser tabs are now opt-in instead of default.
+Current task: realtime Telegram media noise reduction, duplicate Chrome control-tab fix, Following-first scraper defaults, and safe search/website rate tuning are implemented and live-verified. Commit/push is next.
+
+Current implementation notes:
+- Realtime feed now dedupes operator Telegram delivery per source by sha256 first, then canonical source URL, then content ID fallback. Cross-source sightings are still allowed.
+- Realtime feed now skips poster/cover thumbnail rows for video posts by default (`REALTIME_POST_FEED_SKIP_VIDEO_THUMBNAILS=1`) while preserving real video delivery.
+- TikTok visible scraper defaults back to `https://www.tiktok.com/following`; `/foryou` and `/explore` are expanded-tab opt-ins.
+- The Chrome CDP launcher canonicalizes extension `tabs.html` URLs so `tabs.html?scrape=1` reuses an existing `tabs.html` page instead of opening duplicates.
+- The extension options page self-closes duplicate `chrome-extension://*/tabs.html` pages and the popup focuses an existing control page instead of creating a new one.
+- Existing scraper tabs are unpinned by default unless the local `ucPinScraperTabs=true` setting is explicitly enabled.
+- Search low-risk tuning has been raised to 100 results, 5 Bing pages, 10 parallel downloads, 1s query delay, and a 240s cycle sleep. Website concurrency is now 16.
+- Extension manifest and Compose expected version are bumped to `1.23.65`.
+
+Verification in this pass:
+- `python -m pytest tests\notifications\test_realtime_feed.py tests\extension\test_extension_bundle_static.py tests\tools\test_browser_maintenance_scripts.py -q` passed.
+- `docker compose -f docker\docker-compose.yml config --quiet` passed.
+- `python -m compileall -q src\notifications\realtime_feed.py tools\browser_tab_reload.py` passed.
+- PowerShell parse check passed for `scripts\start-scraper-chrome-cdp.ps1` and `scripts\browser-tab-maintenance.ps1`.
+- Rebuilt `unifiedcollector-collector:latest` and recreated `realtime_feed`, `collector_lowrisk`, `collector_website`, `ig_ingest`, `dashboard`, and `scheduler`.
+- Runtime env readback confirmed realtime dedupe/thumbnail skip enabled, search max/results/concurrency/delay as configured, website concurrency 16, and expected extension `1.23.65`.
+- Final `/health?include_sources=true` returned `status=ok`, `source_issues=[]`, expected browser extension `1.23.65`, and no browser extension issues.
+- Final Chrome audit returned exactly seven page targets: one extension control page plus Instagram, Threads, TikTok, X, Facebook, and Strava. All seven were unpinned. All six platform content scripts reported `1.23.65`; TikTok was on `/following`, X on `/home`, Strava on `/dashboard`.
+- Telegram account readback showed 4 active Telegram accounts, all 4 with session strings, 0 active accounts with last_error; `unifiedcollector_collector_telegram` Docker health was healthy with failing streak 0.
+- Large local media fallback was confirmed as a Telegram Bot API upload-size fallback, not a duplicate WSL copy: `/vault/media/...` and `/media/...` map to the same `z:/unifiedcollector` storage and the checked file had the same device/inode through both paths.
 
 Recent completed work:
 - Realtime media deliveries now have a durable Postgres ledger (`realtime_media_deliveries`) and dashboard/API visibility under `/media/realtime-feed/status` and `/media/realtime-feed/deliveries`; live status shows delivered/enqueued/deduped rows for Telegram, WhatsApp, Instagram, and Search.

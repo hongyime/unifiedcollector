@@ -121,11 +121,14 @@ def test_chrome_cdp_launcher_discovers_extension_id_from_cdp():
     assert "function Get-KnownExtensionIds" in script
     assert "function Open-ExtensionControlPage" in script
     assert "function Open-CdpTarget" in script
+    assert "function Normalize-CdpTargetUrlForReuse" in script
     assert "function Find-ExistingCdpTarget" in script
     assert "function Activate-CdpTarget" in script
     assert "function Try-OpenCdpTarget" in script
     assert "Invoke-WebRequest -Uri \"http://127.0.0.1:$Port/json/list\"" in script
     assert "$targets = @($response.Content | ConvertFrom-Json)" in script
+    assert "$desiredUrl = Normalize-CdpTargetUrlForReuse -Url $Url" in script
+    assert "$targetUrl = Normalize-CdpTargetUrlForReuse -Url ([string]$target.url)" in script
     assert "$existingTargetId = Find-ExistingCdpTarget" in script
     assert "json/activate/$TargetId" in script
     assert "Could not open CDP target" in script
@@ -147,8 +150,8 @@ def test_chrome_cdp_launcher_defaults_to_one_startup_tab_per_platform():
     launch_section = script[script.index("function Get-PlatformLaunchUrls") : script.index("function Get-ChromeProcesses")]
 
     assert 'UC_CHROME_OPEN_EXPANDED_PLATFORM_TABS") -eq "1"' in launch_section
-    assert '"https://www.tiktok.com/foryou"' in launch_section
     assert '"https://www.tiktok.com/following"' in launch_section
+    assert '"https://www.tiktok.com/foryou"' in launch_section
     assert '"https://www.lemon8-app.com/topic/singapore?region=sg"' in launch_section
     assert '"https://www.lemon8-app.com/topic/food?region=sg"' not in launch_section
     assert 'tiktok = if ($expandedPlatformTabs)' in launch_section
@@ -248,21 +251,31 @@ def test_browser_tab_reload_hard_reopens_repeatedly_stuck_tiktok_tabs():
     assert "UC_CHROME_OPEN_EXPANDED_PLATFORM_TABS" in script
     assert "UC_BROWSER_EXPANDED_PLATFORM_TABS" in script
     assert '"instagram,threads,tiktok,x,facebook,strava"' in script
-    assert '"https://www.tiktok.com/foryou"' in script
     assert '"https://www.tiktok.com/following"' in script
+    assert '"https://www.tiktok.com/foryou"' in script
     assert '"https://www.tiktok.com/explore"' in script
+    assert '"instagram": [' in script
+    assert '"threads": [' in script
     assert '"x": [' in script
+    assert '"facebook": [' in script
+    assert '"strava": [' in script
+    assert '"https://www.instagram.com/"' in script
+    assert '"https://www.threads.com/"' in script
     assert '"https://x.com/home"' in script
+    assert '"https://www.facebook.com/"' in script
+    assert '"https://www.strava.com/dashboard"' in script
     hard_reopen_block = script.split("HARD_REOPEN_URLS = {", 1)[1].split("def _target_version", 1)[0]
     assert '"lemon8": [' not in hard_reopen_block
-    assert '"https://www.tiktok.com/following"' not in hard_reopen_block
+    assert '"https://www.tiktok.com/foryou"' not in hard_reopen_block
     assert '"https://www.tiktok.com/explore"' not in hard_reopen_block
     expanded_block = script.split("if EXPANDED_PLATFORM_TABS:", 1)[1].split("HARD_REOPEN_URLS = {", 1)[0]
-    assert '"https://www.tiktok.com/following"' in expanded_block
+    assert '"https://www.tiktok.com/foryou"' in expanded_block
     assert '"https://www.tiktok.com/explore"' in expanded_block
     assert "def _platform_had_previous_unresponsive_reload" in script
     assert "def _is_canonical_x_recovery_url" in script
+    assert "def _is_canonical_platform_url" in script
     assert '"x non-canonical recovery URL"' in script
+    assert 'f"{platform} non-canonical platform URL"' in script
     assert "def _hard_reopen_platform" in script
     assert "reopen_urls = HARD_REOPEN_URLS.get(platform)" in script
     assert "dict.fromkeys" in script
@@ -271,6 +284,7 @@ def test_browser_tab_reload_hard_reopens_repeatedly_stuck_tiktok_tabs():
     assert "shell_tabs = [" in script
     assert '"page health:" in str(p["reason"]).lower()' in script
     assert '"non-canonical recovery url" in str(p["reason"]).lower()' in script
+    assert '"non-canonical platform url" in str(p["reason"]).lower()' in script
     assert "hard_reopen_tabs.update" in script
 
 
@@ -281,10 +295,12 @@ def test_browser_tab_reload_hard_reopens_individual_repeated_stuck_tabs():
     assert "reopen repeated stuck tab after prior soft reload" in script
     assert "_previous_reload_for_url(previous_plan, platform" in script
     assert "hard_reopen_tabs.add" in script
+    assert "reopen_urls = HARD_REOPEN_URLS.get(platform)" in script
     assert "reopen_urls = list(dict.fromkeys" in script
     assert '"page health:" in text' in script
     assert '"recoverable_error_shell" in text' in script
     assert '"non-canonical recovery url" in text' in script
+    assert '"non-canonical platform url" in text' in script
 
 
 def test_chrome_cdp_launcher_dry_run_skips_live_probes():
@@ -303,8 +319,8 @@ def test_chrome_cdp_launcher_opens_requested_platform_urls_directly():
     assert 'instagram = "https://www.instagram.com/"' in script
     assert 'UC_CHROME_OPEN_EXPANDED_PLATFORM_TABS") -eq "1"' in script
     assert "tiktok = if ($expandedPlatformTabs)" in script
-    assert '"https://www.tiktok.com/foryou"' in script
     assert '"https://www.tiktok.com/following"' in script
+    assert '"https://www.tiktok.com/foryou"' in script
     assert '"https://www.tiktok.com/explore"' in script
     assert "lemon8 = if ($expandedPlatformTabs)" not in script
     assert '"https://www.lemon8-app.com/topic/food?region=sg"' not in script

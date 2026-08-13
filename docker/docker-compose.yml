@@ -285,10 +285,10 @@ services:
       # Keep history moving, but cap per-cycle DB churn.
       STRAVA_PAGE_SCRAPE_BATCH: "20"
       SEARCH_SPIDER_PAGES: "1"
-      SEARCH_MAX_RESULTS: "75"
-      SEARCH_CONCURRENT_DOWNLOADS: "8"
-      SEARCH_QUERY_DELAY_SECONDS: "1.5"
-      SEARCH_BING_PAGES: "4"
+      SEARCH_MAX_RESULTS: "100"
+      SEARCH_CONCURRENT_DOWNLOADS: "10"
+      SEARCH_QUERY_DELAY_SECONDS: "1.0"
+      SEARCH_BING_PAGES: "5"
       # Strava athlete spider (kudos/comments/followers/clubs) — paced for I/O.
       STRAVA_SPIDER_ENABLED: "true"
       STRAVA_FOLLOW_SCRAPE_ENABLED: "true"
@@ -325,7 +325,7 @@ services:
       GITHUB_API_TRANSPORT_RETRIES: "2"
       COLLECTOR_CYCLE_SLEEP_GITHUB: "900"
       COLLECTOR_CYCLE_SLEEP_STRAVA: "600"
-      COLLECTOR_CYCLE_SLEEP_SEARCH: "300"
+      COLLECTOR_CYCLE_SLEEP_SEARCH: "240"
       # Conn-budget hygiene (P2 review §5): low-volume, long-cycle sources — a
       # small pool is plenty. Default 10 -> 4.
       DB_POOL_MAX_SIZE: "4"
@@ -407,7 +407,7 @@ services:
       # Concurrency drives REAL RSS (each task holds a page + parse tree). After
       # the host OOM, dialled 10 -> 6 to lower website's memory peak — a real RSS
       # cut (unlike a mem_limit cap), minor throughput cost across 421 sites.
-      WEBSITE_MAX_CONCURRENT_TASKS: "14"
+      WEBSITE_MAX_CONCURRENT_TASKS: "16"
       # CPU hygiene (A#4): website crawls are multi-hour; idle longer between cycles.
       COLLECTOR_CYCLE_SLEEP_WEBSITE: "600"
       # Conn-budget hygiene (P2 review §5): default 10 -> 6. Kept above lowrisk/main
@@ -807,7 +807,7 @@ services:
       TIKTOK_FOLLOW_OWNER_FALLBACK: ${TIKTOK_FOLLOW_OWNER_FALLBACK:-hongyime}
       SOCIAL_INGEST_PREP_DB_ON_STARTUP: "true"
       BROWSER_CONTENT_HINT_RESPONSE_TIMEOUT_SECONDS: "2.0"
-      UC_EXTENSION_EXPECTED_VERSION: "1.23.64"
+      UC_EXTENSION_EXPECTED_VERSION: "1.23.65"
     volumes:
       - z:/unifiedcollector/media:/media
       - z:/unifiedcollector:/vault
@@ -835,7 +835,7 @@ services:
       DB_POOL_MAX_SIZE: "4"
       # Operator status compares live Chrome hook heartbeats against this repo
       # extension build. Update with extension/manifest.json version bumps.
-      UC_EXTENSION_EXPECTED_VERSION: "1.23.64"
+      UC_EXTENSION_EXPECTED_VERSION: "1.23.65"
     volumes:
       - z:/unifiedcollector/media:/media
       - z:/unifiedcollector:/vault
@@ -884,8 +884,9 @@ services:
   # Real-time post feed drain. Reads uc:realtime_post_feed off Redis (produced by
   # every successful media_items insert across the collectors) and posts a
   # small per-post Telegram message via send_photo / send_video. Rate-limited
-  # (REALTIME_POST_FEED_MAX_PER_MINUTE, default 12) with a token bucket in
-  # Redis + a rolling sha256 dedupe so a re-scraped post never posts twice.
+  # (REALTIME_POST_FEED_MAX_PER_MINUTE, default 18) with a token bucket in
+  # Redis + per-source sha/source-url dedupe so replayed media/URLs do not
+  # repeatedly hit the operator chat.
   # A 15-min "skipped N burst" summary is emitted when the cap kicks in.
   realtime_feed:
     image: unifiedcollector-collector:latest
@@ -905,6 +906,8 @@ services:
       REALTIME_POST_FEED_MAX_PER_MINUTE: "${REALTIME_POST_FEED_MAX_PER_MINUTE:-18}"
       REALTIME_POST_FEED_DEDUPE_TTL_DAYS: "${REALTIME_POST_FEED_DEDUPE_TTL_DAYS:-7}"
       REALTIME_POST_FEED_INCLUDE_PROFILES: "${REALTIME_POST_FEED_INCLUDE_PROFILES:-0}"
+      REALTIME_POST_FEED_DEDUPE_BY_MEDIA: "${REALTIME_POST_FEED_DEDUPE_BY_MEDIA:-1}"
+      REALTIME_POST_FEED_SKIP_VIDEO_THUMBNAILS: "${REALTIME_POST_FEED_SKIP_VIDEO_THUMBNAILS:-1}"
       REALTIME_POST_FEED_BURST_SUMMARY: "${REALTIME_POST_FEED_BURST_SUMMARY:-1}"
       REALTIME_POST_FEED_BURST_SUMMARY_SECONDS: "${REALTIME_POST_FEED_BURST_SUMMARY_SECONDS:-900}"
       LOG_LEVEL: info
@@ -945,7 +948,7 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
-      UC_EXTENSION_EXPECTED_VERSION: "1.23.64"
+      UC_EXTENSION_EXPECTED_VERSION: "1.23.65"
       YOUTUBE_MAX_VIDEO_DURATION_MINUTES: "0"
       STRAVA_ROUTE_STREAM_SHARED_COOLDOWN: "true"
       STRAVA_BROWSER_ROUTE_QUEUE_CANDIDATE_LIMIT: "50"

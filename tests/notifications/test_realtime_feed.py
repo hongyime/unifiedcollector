@@ -771,6 +771,72 @@ async def test_drain_allows_same_sha_from_different_sources(fake_redis, telegram
 
 
 @pytest.mark.asyncio
+async def test_drain_dedupes_same_source_different_content_ids_by_sha(fake_redis, telegram_stub, monkeypatch):
+    from src.notifications import realtime_feed
+
+    monkeypatch.setenv("REALTIME_POST_FEED_MAX_PER_MINUTE", "10")
+
+    same_sha = "e" * 64
+    for content_id in ("msg_1", "msg_2"):
+        payload = realtime_feed.build_payload(
+            source="telegram", entity_name="group", content_id=content_id,
+            file_path=None, source_url=f"https://t.me/file-{content_id}.jpg",
+            sha256=same_sha, metadata={"caption": "same image"}, kind="image",
+            content_type="post_image",
+        )
+        await fake_redis.rpush("uc:realtime_post_feed", json.dumps(payload))
+
+    drain = realtime_feed.RealtimeFeedDrain()
+    await drain._tick(fake_redis)
+    await drain._tick(fake_redis)
+
+    assert len(telegram_stub["send_photo"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_drain_dedupes_same_source_url_without_sha(fake_redis, telegram_stub, monkeypatch):
+    from src.notifications import realtime_feed
+
+    monkeypatch.setenv("REALTIME_POST_FEED_MAX_PER_MINUTE", "10")
+
+    for content_id in ("search_1", "search_2"):
+        payload = realtime_feed.build_payload(
+            source="search", entity_name="search", content_id=content_id,
+            file_path=None, source_url="https://example.com/page?utm_source=x",
+            sha256=None, metadata={"caption": "same page"}, kind="image",
+            content_type="post_image",
+        )
+        await fake_redis.rpush("uc:realtime_post_feed", json.dumps(payload))
+
+    drain = realtime_feed.RealtimeFeedDrain()
+    await drain._tick(fake_redis)
+    await drain._tick(fake_redis)
+
+    assert len(telegram_stub["send_photo"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_drain_skips_video_thumbnail_rows_by_default(fake_redis, telegram_stub, monkeypatch):
+    from src.notifications import realtime_feed
+
+    monkeypatch.setenv("REALTIME_POST_FEED_MAX_PER_MINUTE", "10")
+    monkeypatch.delenv("REALTIME_POST_FEED_SKIP_VIDEO_THUMBNAILS", raising=False)
+
+    payload = realtime_feed.build_payload(
+        source="tiktok", entity_name="alice", content_id="video_thumb",
+        file_path=None, source_url="https://p16-sign.tiktokcdn.com/cover.jpg",
+        sha256="f" * 64, metadata={"caption": "cover", "tiktok_asset_role": "cover"},
+        kind="image", content_type="photo",
+    )
+    await fake_redis.rpush("uc:realtime_post_feed", json.dumps(payload))
+
+    drain = realtime_feed.RealtimeFeedDrain()
+    await drain._tick(fake_redis)
+
+    assert telegram_stub["send_photo"] == []
+
+
+@pytest.mark.asyncio
 async def test_drain_rate_limits_and_records_skip(fake_redis, telegram_stub, monkeypatch):
     from src.notifications import realtime_feed
 

@@ -47,18 +47,30 @@ EXPANDED_PLATFORM_TABS = os.getenv("UC_CHROME_OPEN_EXPANDED_PLATFORM_TABS", "0")
     "true",
     "yes",
 }
-_TIKTOK_HARD_REOPEN_URLS = ["https://www.tiktok.com/foryou"]
+_TIKTOK_HARD_REOPEN_URLS = ["https://www.tiktok.com/following"]
 if EXPANDED_PLATFORM_TABS:
     _TIKTOK_HARD_REOPEN_URLS.extend(
         [
-            "https://www.tiktok.com/following",
+            "https://www.tiktok.com/foryou",
             "https://www.tiktok.com/explore",
         ]
     )
 HARD_REOPEN_URLS = {
+    "instagram": [
+        "https://www.instagram.com/",
+    ],
+    "threads": [
+        "https://www.threads.com/",
+    ],
     "tiktok": _TIKTOK_HARD_REOPEN_URLS,
     "x": [
         "https://x.com/home",
+    ],
+    "facebook": [
+        "https://www.facebook.com/",
+    ],
+    "strava": [
+        "https://www.strava.com/dashboard",
     ],
 }
 CLOSE_UNHEALTHY_DUPLICATES = os.getenv("UC_BROWSER_CLOSE_UNHEALTHY_DUPLICATES", "1").strip().lower() not in {
@@ -102,6 +114,8 @@ def _decide_reload(tab: dict, target_version: str) -> tuple[bool, str]:
     url = str(tab.get("url") or tab.get("url_snapshot") or "")
     if platform == "x" and not _is_canonical_x_recovery_url(url):
         return True, "x non-canonical recovery URL"
+    if platform != "x" and platform in HARD_REOPEN_URLS and not _is_canonical_platform_url(platform, url):
+        return True, f"{platform} non-canonical platform URL"
     if tab.get("page_health_status") == "recoverable_error_shell":
         reason = tab.get("page_health_reason") or "recoverable_error_shell"
         return True, f"page health: {reason}"
@@ -127,6 +141,24 @@ def _is_canonical_x_recovery_url(url: str) -> bool:
     host = parsed.netloc.lower().split(":", 1)[0]
     path = parsed.path.rstrip("/") or "/"
     return host in {"x.com", "www.x.com"} and path in {"/home", "/explore"}
+
+
+def _is_canonical_platform_url(platform: str, url: str) -> bool:
+    try:
+        parsed = urllib.parse.urlparse(str(url or ""))
+    except Exception:
+        return False
+    if parsed.query:
+        return False
+    host = parsed.netloc.lower().split(":", 1)[0]
+    path = parsed.path.rstrip("/") or "/"
+    for candidate in HARD_REOPEN_URLS.get(platform, []):
+        wanted = urllib.parse.urlparse(candidate)
+        wanted_host = wanted.netloc.lower().split(":", 1)[0]
+        wanted_path = wanted.path.rstrip("/") or "/"
+        if host == wanted_host and path == wanted_path:
+            return True
+    return False
 
 
 def _is_auth_wall(url: str) -> bool:
@@ -240,6 +272,7 @@ def _is_stuck_tab_reason(reason: str) -> bool:
         or "page health:" in text
         or "recoverable_error_shell" in text
         or "non-canonical recovery url" in text
+        or "non-canonical platform url" in text
     )
 
 
@@ -283,11 +316,10 @@ def _hard_reopen_repeated_tabs(platform: str, plans: list[dict]) -> list[dict]:
         results.append({**p, "action": "hard_reopen_close", "status": "ok" if ok else "fail", "detail": msg})
         print(f"  close  {platform:10} {p['target_id'][:12]} ... {'OK' if ok else 'FAIL'}: {msg[:160]}")
         time.sleep(0.5)
-    if platform == "x":
-        reopen_urls = HARD_REOPEN_URLS["x"]
-    else:
+    reopen_urls = HARD_REOPEN_URLS.get(platform)
+    if not reopen_urls:
         reopen_urls = list(dict.fromkeys(
-            str(p.get("url") or "").strip() or HARD_REOPEN_URLS.get(platform, ["about:blank"])[0]
+            str(p.get("url") or "").strip() or "about:blank"
             for p in plans
         ))
     for url in reopen_urls:
@@ -395,6 +427,7 @@ def main():
                 and (
                     "page health:" in str(p["reason"]).lower()
                     or "non-canonical recovery url" in str(p["reason"]).lower()
+                    or "non-canonical platform url" in str(p["reason"]).lower()
                 )
             ]
             if shell_tabs:

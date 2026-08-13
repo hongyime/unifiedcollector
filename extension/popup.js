@@ -109,8 +109,24 @@ $("copy").addEventListener("click", async () => {
   setTimeout(() => ($("copy").textContent = "copy"), 1500);
 });
 
+async function openControlTabsPage() {
+  const url = chrome.runtime.getURL("tabs.html");
+  try {
+    const tabs = await chrome.tabs.query({});
+    const existing = (tabs || []).find((tab) => String(tab.url || "").startsWith(url));
+    if (existing && existing.id != null) {
+      await chrome.tabs.update(existing.id, { active: true, pinned: false });
+      if (existing.windowId != null) {
+        await chrome.windows.update(existing.windowId, { focused: true }).catch(() => {});
+      }
+      return;
+    }
+  } catch (e) {}
+  await chrome.tabs.create({ url, pinned: false });
+}
+
 $("tabsBtn").addEventListener("click", () => {
-  chrome.tabs.create({ url: chrome.runtime.getURL("tabs.html") });
+  openControlTabsPage().catch(() => {});
 });
 
 load();

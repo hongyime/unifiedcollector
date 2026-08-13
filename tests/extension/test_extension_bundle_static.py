@@ -68,8 +68,8 @@ def test_expanded_social_tabs_are_opt_in():
         tiktok_line = next(line for line in text.splitlines() if 'id: "tiktok"' in line)
         assert 'url: "https://www.instagram.com/"' in instagram_line
         assert 'optionalExtraUrls: ["https://www.instagram.com/direct/inbox/"]' in instagram_line
-        assert 'url: "https://www.tiktok.com/foryou"' in tiktok_line
-        assert 'optionalExtraUrls: ["https://www.tiktok.com/following", "https://www.tiktok.com/explore"]' in tiktok_line
+        assert 'url: "https://www.tiktok.com/following"' in tiktok_line
+        assert 'optionalExtraUrls: ["https://www.tiktok.com/foryou", "https://www.tiktok.com/explore"]' in tiktok_line
 
     assert 'const EXPANDED_PLATFORM_TABS_KEY = "ucOpenExpandedPlatformTabs"' in background
     assert "async function expandedPlatformTabsEnabled()" in background
@@ -82,6 +82,8 @@ def test_expanded_social_tabs_are_opt_in():
     assert "[p.url, ...p.extraUrls]" not in ensure_block
     assert 'id="expandedTabs"' in tabs_html
     assert "ucOpenExpandedPlatformTabs" in tabs_js
+    assert "closeDuplicateControlTabs" in tabs_js
+    assert 'chrome.tabs.create({ url, pinned: false })' in _read("extension/popup.js")
 
 
 def test_x_failed_script_url_is_canonicalized():

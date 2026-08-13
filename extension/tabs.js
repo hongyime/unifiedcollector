@@ -6,6 +6,38 @@ let lastAutoProbeAt = 0;
 let autoProbeInFlight = false;
 let expandedPlatformTabs = false;
 
+function isControlTabsPage(url) {
+  try {
+    const u = new URL(String(url || ""));
+    return u.protocol === "chrome-extension:" && u.pathname === "/tabs.html";
+  } catch (e) {
+    return false;
+  }
+}
+
+async function closeDuplicateControlTabs() {
+  try {
+    const current = await chrome.tabs.getCurrent();
+    const tabs = await chrome.tabs.query({});
+    const controls = (tabs || [])
+      .filter((tab) => tab && tab.id != null && isControlTabsPage(tab.url))
+      .sort((a, b) => {
+        if (current && a.id === current.id) return -1;
+        if (current && b.id === current.id) return 1;
+        if (a.active !== b.active) return a.active ? -1 : 1;
+        return Number(a.id) - Number(b.id);
+      });
+    const keepId = controls.length ? controls[0].id : null;
+    for (const tab of controls) {
+      if (tab.id === keepId) {
+        if (tab.pinned) await chrome.tabs.update(tab.id, { pinned: false }).catch(() => {});
+        continue;
+      }
+      await chrome.tabs.remove(tab.id).catch(() => {});
+    }
+  } catch (e) {}
+}
+
 function escapeHtml(s) {
   return String(s == null ? "" : s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
 }
@@ -295,6 +327,7 @@ async function handleUrlActions() {
   setTimeout(render, 1000);
 }
 
+closeDuplicateControlTabs().catch(() => {});
 render();
 handleUrlActions();
 setInterval(render, 3000);

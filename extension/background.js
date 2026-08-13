@@ -68,7 +68,7 @@ function _reportSwCrash(detail) {
 globalThis.UC_PLATFORMS = [
   { id: "instagram", label: "Instagram",   url: "https://www.instagram.com/",       host: "www.instagram.com",  cookieUrl: "https://www.instagram.com",      cookie: "sessionid",  scraper: true, optionalExtraUrls: ["https://www.instagram.com/direct/inbox/"] },
   { id: "threads",   label: "Threads",     url: "https://www.threads.com/",         host: "www.threads.com",    cookieUrl: "https://www.threads.com",        cookie: "sessionid",  scraper: true },
-  { id: "tiktok",    label: "TikTok",      url: "https://www.tiktok.com/foryou",    host: "www.tiktok.com",     cookieUrl: "https://www.tiktok.com",         cookie: "sessionid",  scraper: true, optionalExtraUrls: ["https://www.tiktok.com/following", "https://www.tiktok.com/explore"] },
+  { id: "tiktok",    label: "TikTok",      url: "https://www.tiktok.com/following", host: "www.tiktok.com",     cookieUrl: "https://www.tiktok.com",         cookie: "sessionid",  scraper: true, optionalExtraUrls: ["https://www.tiktok.com/foryou", "https://www.tiktok.com/explore"] },
   // Lemon8's SPA renders "Not found" for /feed/<cat> and legacy paths as of
   // 2026-08-05. Keep one visible topic tab only; the headless Lemon8 collector
   // handles broader coverage without pinning extra Chrome tabs.
@@ -1014,7 +1014,7 @@ function shouldNormalizeSingleFeedTab(p, tab, reason) {
   // because failedScript URLs sit in that same "wandered off canonical" bucket;
   // lemon8 is included because the working /topic/<slug> feed is easy to
   // stray from into /@handle / /post/<id> subpaths that have lower yield.
-  const NORMALIZE_PLATFORMS = new Set(["x", "lemon8"]);
+  const NORMALIZE_PLATFORMS = new Set(["instagram", "threads", "tiktok", "x", "facebook", "strava", "lemon8"]);
   if (!NORMALIZE_PLATFORMS.has(p.id)) return false;
   try {
     const u = new URL(tab.url);
@@ -1077,6 +1077,16 @@ async function createTabInSocialGroup(createOptions, hint) {
   return created;
 }
 
+async function setScraperTabPinnedState(tab, shouldPin) {
+  if (!tab || tab.id == null || tab.pinned === shouldPin) return false;
+  try {
+    await chrome.tabs.update(tab.id, { pinned: shouldPin });
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
 // Keep exactly ONE tab per platform by default. Optional expanded tabs can be
 // enabled from storage when broader browser coverage is worth the extra memory.
 // Closes duplicates so the extension never piles up tabs (the old bug: when the
@@ -1101,6 +1111,7 @@ async function ensureScraperTabsOpen(reason, options = {}) {
         if (tabs.length === 0) {
           try { await createTabInSocialGroup({ url: p.url, pinned: pinScraperTabs, active: false }, groupHint); opened++; await _sleep(_humanGap(3000)); } catch (e) {}
         } else {
+          try { await setScraperTabPinnedState(tabs[0], pinScraperTabs); } catch (e) {}
           if (shouldNormalizeSingleFeedTab(p, tabs[0], reason)) {
             try { await chrome.tabs.update(tabs[0].id, { url: p.url }); navigated++; await _sleep(_humanGap(3000)); } catch (e) {}
           }
@@ -1112,7 +1123,14 @@ async function ensureScraperTabsOpen(reason, options = {}) {
         for (const t of tabs) {
           const tp = _tpath(t.url);
           const m = wantPaths.find((w) => tp === w || (w !== "/" && tp.startsWith(w)));
-          if (m) { if (kept.has(m)) { try { await chrome.tabs.remove(t.id); closed++; } catch (e) {} } else kept.add(m); }
+          if (m) {
+            if (kept.has(m)) {
+              try { await chrome.tabs.remove(t.id); closed++; } catch (e) {}
+            } else {
+              kept.add(m);
+              try { await setScraperTabPinnedState(t, pinScraperTabs); } catch (e) {}
+            }
+          }
         }
         for (let i = 0; i < targets.length; i++) {
           if (!kept.has(wantPaths[i])) { try { await createTabInSocialGroup({ url: targets[i], pinned: pinScraperTabs, active: false }, groupHint); opened++; await _sleep(_humanGap(3000)); } catch (e) {} }

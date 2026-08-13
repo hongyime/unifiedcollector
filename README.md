@@ -41,9 +41,10 @@ Everything runs as Docker Compose services sharing one Postgres DB. Code lives u
 - **`realtime_feed`** (`src/notifications/realtime_feed.py`) — every newly-inserted
   `media_items` row is fire-and-forget enqueued to Redis (`uc:realtime_post_feed`);
   this drain sends a per-post Telegram message with local-file multipart upload,
-  token-bucket rate-limit (default 6/min), and 7-day sha256 dedupe. `sent to
-  telegram: ok=<bool> ...` INFO line per item. Companion hourly digest lives in
-  `src/notifications/status.py`; 15-min delta in `status_delta.py`.
+  configurable token-bucket rate-limit, 7-day per-source sha256/source-url
+  dedupe, and poster/cover-thumbnail skipping for video posts by default. `sent
+  to telegram: ok=<bool> ...` INFO line per item. Companion hourly digest lives
+  in `src/notifications/status.py`; 15-min delta in `status_delta.py`.
 - **`browser_cookie_vault`** (`src/tools/browser_cookie_vault.py`, :8790) — snapshots
   every social cookie from host Chrome via CDP every 5 min (default), keeps 10
   rotating snapshots + a `latest.json`, and on container start (with

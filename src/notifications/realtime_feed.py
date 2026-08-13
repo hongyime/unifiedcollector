@@ -12,8 +12,8 @@ Design points:
   * Rate-limit: token bucket in Redis at ``uc:realtime_post_feed:tokens`` with
     a configurable per-minute cap. Bursts above the cap are dropped and their
     count summarized via a scheduled ``sendMessage`` every 15 minutes.
-  * Dedupe: a Redis set of sha256s seen in the last N days prevents re-posting
-    the same media twice (Instagram carousel resends, WhatsApp forwards, etc).
+  * Dedupe: per-source sha256/source-url keys seen in the last N days prevent
+    repeated operator-chat posts without hiding cross-source sightings.
   * On Telegram 429: exponential backoff, respecting the ``retry_after``
     parameter Telegram supplies.
 
@@ -23,6 +23,8 @@ Env knobs (all optional; safe defaults):
   REALTIME_POST_FEED_MAX_PER_MINUTE    default "12"
   REALTIME_POST_FEED_DEDUPE_TTL_DAYS   default "7"
   REALTIME_POST_FEED_INCLUDE_PROFILES  default "0"  (skip profile updates)
+  REALTIME_POST_FEED_DEDUPE_BY_MEDIA   default "1"  (per-source sha/url dedupe)
+  REALTIME_POST_FEED_SKIP_VIDEO_THUMBNAILS default "1"  (skip poster-only video rows)
   REDIS_URL / REDIS_HOST / REDIS_PASSWORD  (same pattern as io_pacer)
 """
 from __future__ import annotations
@@ -38,6 +40,7 @@ import signal
 import time
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +141,15 @@ def build_payload(*, source: str, entity_name: str, content_id: str,
             "sender_platform_id",
             "sender_id",
         ),
+        "media_role": _metadata_text(
+            meta,
+            "tiktok_asset_role",
+            "dom_asset_role",
+            "asset_role",
+            "media_role",
+            "x_asset_role",
+        ),
+        "is_video": bool(meta.get("is_video")) if isinstance(meta, dict) and "is_video" in meta else None,
         "kind": str(kind or "").strip().lower() or None,
         "content_type": str(content_type or "").strip().lower() or None,
         "enqueued_at": time.time(),
@@ -273,6 +285,11 @@ def _skip_reason(payload: dict) -> str | None:
     content_type = (payload.get("content_type") or "").lower()
     if content_type == "profile_photo" and not include_profiles:
         return "profile_photo_skipped"
+    if (
+        _flag("REALTIME_POST_FEED_SKIP_VIDEO_THUMBNAILS", "1")
+        and _looks_like_video_thumbnail(payload)
+    ):
+        return "video_thumbnail_skipped"
     kind = (payload.get("kind") or "").lower()
     if kind not in ALLOWED_KINDS and content_type not in ALLOWED_KINDS:
         # Unknown media kinds still get through if they at least look like a
@@ -284,6 +301,37 @@ def _skip_reason(payload: dict) -> str | None:
     if not caption and not file_path and not payload.get("source_url"):
         return "missing_file_or_url"
     return None
+
+
+def _payload_metadata(payload: dict) -> dict:
+    metadata = payload.get("metadata")
+    out = dict(metadata) if isinstance(metadata, dict) else {}
+    for key in ("media_role", "is_video"):
+        if payload.get(key) is not None:
+            out[key] = payload.get(key)
+    return out
+
+
+def _looks_like_video_thumbnail(payload: dict) -> bool:
+    """Detect poster/cover rows that are only thumbnails for a video post."""
+    content_type = str(payload.get("content_type") or "").strip().lower()
+    kind = str(payload.get("kind") or "").strip().lower()
+    if content_type == "video" or kind == "video":
+        return False
+    metadata = _payload_metadata(payload)
+    role_values = [
+        metadata.get("tiktok_asset_role"),
+        metadata.get("dom_asset_role"),
+        metadata.get("asset_role"),
+        metadata.get("media_role"),
+        metadata.get("x_asset_role"),
+    ]
+    role = " ".join(str(v or "").strip().lower() for v in role_values if v is not None)
+    if any(marker in role for marker in ("video_poster", "poster", "cover")):
+        return True
+    if metadata.get("is_video") is True and content_type in {"photo", "image", "post_image"}:
+        return True
+    return False
 
 
 async def _redis_client():
@@ -739,9 +787,10 @@ class RealtimeFeedDrain:
             )
             return
 
-        # Dedup exact source occurrences, not global physical files. The vault
-        # dedupes bytes by sha256; this feed should still surface that the same
-        # media appeared via another platform/source.
+        # Dedup per-source media files/URLs, not globally across platforms. The
+        # same file from WhatsApp and Telegram can still surface twice, but a
+        # burst of identical Telegram reposts or repeated search URL rows will
+        # not keep hitting the operator chat.
         ttl_days = _int("REALTIME_POST_FEED_DEDUPE_TTL_DAYS", 7, min_value=1)
         dedupe_key = _dedupe_key(payload)
         if await _dedupe_seen(client, dedupe_key, ttl_days=ttl_days):
@@ -832,21 +881,51 @@ class RealtimeFeedDrain:
 
 
 def _hash_payload(payload: dict) -> str:
-    """Fallback dedup key when the media has no sha256 (e.g. non-file rows)."""
+    """Fallback dedup key when stronger media keys are unavailable."""
     fingerprint = "|".join(str(payload.get(k) or "") for k in
                            ("source", "content_id", "source_url", "caption"))
     return hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()
 
 
-def _dedupe_key(payload: dict) -> str:
-    """Return a stable key for one source occurrence.
+def _canonical_url_for_dedupe(url: str) -> str:
+    try:
+        parsed = urlsplit(str(url or "").strip())
+    except Exception:
+        return ""
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    query = [
+        (k, v)
+        for k, v in parse_qsl(parsed.query, keep_blank_values=True)
+        if not k.lower().startswith("utm_")
+        and k.lower() not in {"fbclid", "gclid", "igshid", "mc_cid", "mc_eid"}
+    ]
+    return urlunsplit(
+        (
+            parsed.scheme.lower(),
+            parsed.netloc.lower(),
+            parsed.path.rstrip("/") or "/",
+            urlencode(query, doseq=True),
+            "",
+        )
+    )
 
-    The collector stores every source occurrence even when the blob hash is the
-    same. The realtime feed should mirror that: dedupe duplicate queue attempts
-    for the same platform/content_id, but do not hide a WhatsApp copy just
-    because Telegram already posted the same sha256.
+
+def _dedupe_key(payload: dict) -> str:
+    """Return a stable dedupe key for realtime operator notifications.
+
+    The Collector still stores every source occurrence. Telegram delivery is
+    noisier, so by default this suppresses repeated files/URLs within the same
+    source while preserving cross-source sightings.
     """
     source = str(payload.get("source") or "").strip().lower()
+    if _flag("REALTIME_POST_FEED_DEDUPE_BY_MEDIA", "1") and source:
+        sha = str(payload.get("sha256") or "").strip().lower()
+        if sha:
+            return hashlib.sha256(f"{source}|sha|{sha}".encode("utf-8")).hexdigest()
+        canonical_url = _canonical_url_for_dedupe(str(payload.get("source_url") or ""))
+        if canonical_url:
+            return hashlib.sha256(f"{source}|url|{canonical_url}".encode("utf-8")).hexdigest()
     content_id = str(payload.get("content_id") or "").strip()
     if source == "youtube" and content_id.startswith("video_"):
         content_id = content_id.removeprefix("video_")
