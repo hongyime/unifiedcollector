@@ -84,11 +84,22 @@ sessions/*.session
 /whatsapp_session/
 /telegramcollector/
 
+templates/
+.env.*
+.venv/
+venv/
+.next/
+coverage/
+
 # AI / editor dot directories (managed via sourcerepo)
 .*
 !.github/
 !.agents/
-!.agents/**
+.agents/*
+!.agents/STATE.md
+!.agents/JOURNAL.md
+!.agents/handoffs/
+!.agents/handoffs/**
 !.gitignore
 !.gitattributes
 !.gitmodules
@@ -114,9 +125,4 @@ sessions/*.session
 skills/
 skills-lock.json
 docs/
-templates/
-.env.*
-.venv/
-venv/
-.next/
-coverage/
+# End AI / editor dot directories (managed via sourcerepo)
