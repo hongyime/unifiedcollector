@@ -2,7 +2,7 @@
 
 Updated: 2026-08-14 02:28 UTC / 2026-08-14 10:28 SGT
 
-Current task status: Production-completion slice implemented, focused tests passed, touched Collector services recreated, and live dashboard/CDP checks completed. Changes are ready to commit.
+Current task status: Production-completion slice implemented, focused tests passed, touched Collector services recreated, live dashboard/CDP checks completed, and changes committed/pushed to `main` as `dae4b53e`.
 
 Implemented in this slice:
 - Added deterministic web/search request personas for User-Agent, Accept-Language, viewport width, Origin, and Referer so content-variance probes are deliberate and auditable.
