@@ -129,6 +129,8 @@ WEBSITE_MIN_IMAGE_DIM           Reject images with min(w,h) < N px (default 32).
 WEBSITE_MAX_PDF_BYTES           Reject PDFs larger than N bytes (default 50MB).
 WEBSITE_URL_ALLOW               Comma-separated wildcard allow patterns.
 WEBSITE_URL_BLOCK               Comma-separated wildcard block patterns.
+WEBSITE_URL_POLICY_FILE         Optional text policy file with allow/block lines;
+                                defaults to config/sources/website.url-policy.txt.
 """
 from __future__ import annotations
 
@@ -164,6 +166,10 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
+
+DEFAULT_URL_POLICY_FILE = (
+    Path(__file__).resolve().parents[3] / "config" / "sources" / "website.url-policy.txt"
+)
 
 IMAGE_EXTS = {
     ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg", ".avif",
@@ -536,7 +542,12 @@ class WebsiteCollector(BaseCollector):
         # Chunk size for streaming video to disk (default 1 MiB).
         self._video_chunk_bytes = int(os.getenv("WEBSITE_VIDEO_CHUNK_BYTES", str(1024 * 1024)))
         # URL filter (allow/block wildcard patterns)
-        self._url_filter = URLFilter.from_env("WEBSITE_URL_ALLOW", "WEBSITE_URL_BLOCK")
+        self._url_filter = URLFilter.from_env(
+            "WEBSITE_URL_ALLOW",
+            "WEBSITE_URL_BLOCK",
+            policy_file_var="WEBSITE_URL_POLICY_FILE",
+            policy_file_default=str(DEFAULT_URL_POLICY_FILE),
+        )
         # robots.txt cache
         self._robots = _RobotsCache()
         # Per-run dedup of media URLs we've already enqueued (cross-page).

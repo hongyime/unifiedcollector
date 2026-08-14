@@ -10642,7 +10642,7 @@ async def seen_targets(
 @app.get("/optional-rollout/status")
 async def optional_rollout_status(
     feature: str = Query("spiderfoot", pattern="^(spiderfoot|recon|lemon8|browser-heavy)$"),
-    stage: str = Query("dry-run", pattern="^(dry-run|five|daily25)$"),
+    stage: str = Query("dry-run", pattern="^(dry-run|five|daily25|daily100)$"),
     window_hours: int = Query(24, ge=1, le=168),
     limit: int | None = Query(None, ge=0, le=500),
     _user: dict = Depends(require_role("viewer")),

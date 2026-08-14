@@ -1,0 +1,11 @@
+# Website URL crawl policy.
+# Blank lines and # comments are ignored.
+# Use wildcard rules for normal cases:
+#   allow https://*.example.com
+#   block */login*
+# Raw regex is supported only when anchored to http(s):
+#   allow_regex:^https?://([^/]+\.)?example\.com(?:/.*)?$
+
+allow https://*.com.sg
+allow http://*.com.sg
+allow http://*.com

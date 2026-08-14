@@ -97,7 +97,7 @@ def main():
 
     opt = sub.add_parser("optional-rollout", help="Gate optional collector feature rollout")
     opt.add_argument("--feature", default="spiderfoot", choices=["spiderfoot", "recon", "lemon8", "browser-heavy"])
-    opt.add_argument("--stage", default="dry-run", choices=["dry-run", "five", "daily25"])
+    opt.add_argument("--stage", default="dry-run", choices=["dry-run", "five", "daily25", "daily100"])
     opt.add_argument("--window-hours", type=int, default=24)
     opt.add_argument("--limit", type=int, default=None)
     opt.add_argument("--apply", action="store_true", help="Apply the gated action for supported features")

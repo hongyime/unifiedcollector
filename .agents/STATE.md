@@ -1,28 +1,26 @@
 # UnifiedCollector Agent State
 
-Updated: 2026-08-14 02:28 UTC / 2026-08-14 10:28 SGT
+Updated: 2026-08-14 10:02 UTC / 2026-08-14 18:02 SGT
 
-Current task status: Production-completion slice implemented, focused tests passed, touched Collector services recreated, live dashboard/CDP checks completed, and changes committed/pushed to `main` as `dae4b53e`.
+Current task status: Website URL allow policy support is implemented, the user-provided allow list is present in local ignored `.env`, and focused tests pass. SpiderFoot optional rollout was checked but not applied because the latest live rollout reports had active stop criteria; Docker Desktop is currently not responding well enough for a fresh container recreate or live dashboard readback.
 
 Implemented in this slice:
-- Added deterministic web/search request personas for User-Agent, Accept-Language, viewport width, Origin, and Referer so content-variance probes are deliberate and auditable.
-- Added `WEBSITE_ROBOTS_POLICY=allowlist_override` plus `WEBSITE_ROBOTS_OVERRIDE_DOMAINS`; robots remain respected by default except explicit owned/authorized domains, with `robots_override` domain-pacing events.
-- Broadened SpiderFoot rollout intake from `collector_seen_targets` to domain, URL, email, phone, IPv4/IP, user, username, and channel labels; queue aliases normalize to SpiderFoot target types and the new `daily100` stage is available.
-- Added operation-scope helper for rate-limit events and made YouTube API cooldowns endpoint-scoped by API key, so `playlistItems.list` cooldowns do not stop `videos.list` or other known-video work.
-- Updated compose defaults for controlled ramp: GitHub concurrency/quota target raised first, web/search active domain families raised, Telegram spidering uses all four configured accounts, YouTube cheap backfill/enrichment batches increased with search quota kept small, and dashboard DB acquire timeout raised.
-- Aligned `UC_EXTENSION_EXPECTED_VERSION` in compose to live version `1.23.70`.
+- Added checked-in `config/sources/website.url-policy.txt` with `allow https://*.com.sg`, `allow http://*.com.sg`, and `allow http://*.com`.
+- Added `WEBSITE_URL_ALLOW`, `WEBSITE_URL_BLOCK`, and `WEBSITE_URL_POLICY_FILE` pass-through/defaults to the website service in Compose.
+- Extended `URLFilter` with policy-file parsing, `allow`/`block` actions, `allow_regex`/`block_regex` anchored regex actions, `!pattern` block shorthand, and raw `regex:`/`re:` support.
+- Host-only URL wildcard rules like `https://*.com.sg` now match all paths on matching hosts without suffix bleed.
+- Block rules are evaluated before allow rules, so broad allowlists do not override explicit sensitive-path blocks.
+- Website collector now loads `config/sources/website.url-policy.txt` by default when `WEBSITE_URL_POLICY_FILE` is unset.
+- Added `daily100` as an accepted optional-rollout stage in the CLI and dashboard API.
 
 Verification completed:
-- Passed focused Collector tests for request personas, website robots override, optional rollout, recon aliases, YouTube scoped cooldowns, and existing website/search/GitHub/YouTube coverage.
-- Passed Python compile checks for touched Collector modules.
-- Passed `docker compose -f docker\docker-compose.yml config --quiet`.
-- Recreated `collector_spiderfoot`, `collector_lowrisk`, `collector_website`, `collector_telegram`, `collector_youtube`, `ig_ingest`, `scheduler`, and `dashboard`; all health-managed touched services reported healthy after recreate.
-- Chrome CDP audit showed 7 page tabs, exactly 1 extension control tab, 0 blank tabs, and 0 duplicate page URLs.
-- Instagram health showed active ingestion and realtime delivery, with current stuck stage `cooldown` caused by `daily_profile_view_quota`, not an HTTP 429 cooldown.
-- Quota dashboard showed current GitHub core snapshots at target ratio `0.90` with no paused GitHub/YouTube quota workers.
-- Realtime media status showed per-source delivery counters and local fallback totals.
+- Focused pytest suite passed for URL filter, website collector, optional rollout, and dashboard guarded rollout status.
+- Compile checks passed for touched Collector modules/tests.
+- `docker compose -f docker\docker-compose.yml config --quiet` passed.
+- Direct parser readback confirmed `WEBSITE_URL_ALLOW=https://*.com.sg,http://*.com.sg,http://*.com`, path matches are allowed, suffix bleed is blocked, and a policy-file `/admin/` block wins over the broad allowlist.
 
 Operational notes:
-- SpiderFoot remains a Collector sidecar/adapter and weak lead source only; truth promotion belongs to Analyzer.
-- Website robots override must remain empty unless the operator explicitly lists owned or authorized domains.
-- Optional SpiderFoot rollout remains deliberately blocked at dry-run because recent source-health/rate-limit stop criteria exist.
+- Text policy file format is line-based: blank/comment lines are ignored; use `allow <pattern>`, `block <pattern>`, `allow_regex:<anchored-regex>`, `block_regex:<anchored-regex>`, or `!<pattern>`.
+- Raw regex must be anchored to `^http://`, `^https://`, or `^https?://`; use wildcard lines for normal domains and paths.
+- Do not apply SpiderFoot rollout while recent source-health stop criteria remain. Prior live dry-run/five reports showed GitHub transport timeout, TikTok challenge/cooldowns, Lemon8 429, and YouTube quota/access cooldowns.
+- Next runtime step after Docker Desktop recovers: rebuild/recreate `collector_website` and `dashboard`, then verify `/health` and `/optional-rollout/status?feature=spiderfoot&stage=daily100`.
