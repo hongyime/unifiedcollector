@@ -96,6 +96,7 @@ import httpx
 from src.core.base_collector import BaseCollector
 from src.core.domain_pacing import DomainPacer, record_domain_pacing_event
 from src.core.rate_limit_events import record_rate_limit_event
+from src.core.request_persona import build_persona_headers
 from src.core.scrape_pacing import sleep_before_pre_cooldown_retry
 from src.collectors.search.parse import (
     is_content_url as _parse_is_content_url,
@@ -352,12 +353,15 @@ class SearchCollector(BaseCollector):
             if domain
             else self.user_agents.get_random()
         )
-        return {
+        headers = {
             "User-Agent": ua,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/*,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.9",
             "Accept-Encoding": "gzip, deflate, br",
         }
+        url = f"https://{domain}/" if domain else DEFAULT_DDG_DOMAIN
+        headers, _persona_metadata = build_persona_headers(headers, url, source=self.SOURCE_NAME)
+        return headers
 
     @staticmethod
     def _retry_after_seconds(resp: httpx.Response) -> int | None:

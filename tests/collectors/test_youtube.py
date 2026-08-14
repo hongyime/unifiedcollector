@@ -421,12 +421,45 @@ async def test_record_api_request_sets_local_cooldown_on_403(monkeypatch):
     await coll._record_api_request("channels.list", status_code=403)
 
     assert coll._youtube_api_cooldown_remaining() > 100
+    assert coll._youtube_api_cooldown_remaining("channels.list") > 100
+    assert coll._youtube_api_cooldown_remaining("videos.list") == 0
     calls = coll.pool._conn.execute.await_args_list
     assert any(
         "INSERT INTO rate_limit_events" in call.args[0]
         and call.args[5] == 123
         for call in calls
     )
+
+
+@pytest.mark.asyncio
+async def test_api_get_scoped_playlist_cooldown_does_not_block_videos(monkeypatch):
+    coll = _new_collector(monkeypatch, YOUTUBE_API_KEY="AIzaK")
+    coll.pool._conn.fetch = AsyncMock(return_value=[{
+        "account": coll._youtube_api_key_account("AIzaK"),
+        "scope": "playlistItems.list",
+        "cooldown_until": datetime.now(timezone.utc) + timedelta(seconds=90),
+    }])
+    seen_paths = []
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def get(self, url, params=None, headers=None):
+            seen_paths.append(url.rsplit("/", 1)[-1])
+            return _make_response(status=200, json_body={"ok": True})
+
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr(youtube_mod.httpx, "AsyncClient", _Client)
+
+    out = await coll._api_get("videos", {"id": "vid1"})
+
+    assert out == {"ok": True}
+    assert seen_paths == ["videos"]
+    assert coll._youtube_api_cooldown_remaining("playlistItems.list") > 0
+    assert coll._youtube_api_cooldown_remaining("videos.list") == 0
 
 
 @pytest.mark.asyncio

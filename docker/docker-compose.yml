@@ -97,8 +97,8 @@ services:
       RECON_ALLOWLIST: "${RECON_ALLOWLIST:-}"
       RECON_ALLOW_UNSCOPED: "${RECON_ALLOW_UNSCOPED:-0}"
       RECON_ALLOWED_SOURCES: "${RECON_ALLOWED_SOURCES:-beeper,facebook,github,instagram,lemon8,search,strava,telegram,threads,tiktok,website,whatsapp,x,youtube}"
-      RECON_ALLOWED_SOURCE_TABLES: "${RECON_ALLOWED_SOURCE_TABLES:-discovered_links,social_users}"
-      RECON_COLLECTOR_TARGET_TYPES: "${RECON_COLLECTOR_TARGET_TYPES:-domain,username}"
+      RECON_ALLOWED_SOURCE_TABLES: "${RECON_ALLOWED_SOURCE_TABLES:-collector_seen_targets,collection_targets,discovered_links,follow_edges,github_spider_queue,social_users,website_targets,youtube_profile_queue,youtube_spider_queue}"
+      RECON_COLLECTOR_TARGET_TYPES: "${RECON_COLLECTOR_TARGET_TYPES:-domain,url,email,phone,ip,ipv4,user,username,channel}"
       RECON_ALLOWED_DOMAIN_SUFFIXES: "${RECON_ALLOWED_DOMAIN_SUFFIXES:-}"
       RECON_USERNAME_MODULES: "${RECON_USERNAME_MODULES:-sfp_accounts}"
       SPIDERFOOT_CLI: "${SPIDERFOOT_CLI:-/usr/local/bin/spiderfoot-cli}"
@@ -146,17 +146,23 @@ services:
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
       COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
-      YOUTUBE_ENRICH_BATCH_LIMIT: "10"
-      YOUTUBE_MAX_CONCURRENT_DOWNLOADS: "2"
-      YOUTUBE_VIDEO_BACKFILL_BATCH_SIZE: "20"
+      YOUTUBE_ENRICH_BATCH_LIMIT: "25"
+      YOUTUBE_MAX_CONCURRENT_DOWNLOADS: "3"
+      YOUTUBE_VIDEO_BACKFILL_BATCH_SIZE: "75"
       YOUTUBE_VIDEO_BACKFILL_MAX_PASSES: "2"
       YOUTUBE_VIDEO_BACKFILL_FAILED_RETRY_HOURS: "24"
       YOUTUBE_VIDEO_BACKFILL_SCAN_LIMIT: "10000"
-      YOUTUBE_VIDEO_DOWNLOADS_PER_TARGET: "5"
+      YOUTUBE_VIDEO_DOWNLOADS_PER_TARGET: "8"
       YOUTUBE_VIDEO_DOWNLOAD_TIMEOUT: "1200"
       YOUTUBE_YTDLP_FORMAT: "best[height<=720][vcodec!=none][acodec!=none]/best[height<=480][vcodec!=none][acodec!=none]/best[height<=720]/best[height<=480]/worst"
       YOUTUBE_MAX_FILESIZE: "900M"
-      YOUTUBE_DOWNLOAD_DELAY: "6.0"
+      YOUTUBE_DOWNLOAD_DELAY: "4.0"
+      YOUTUBE_QUOTA_TARGET_RATIO: "0.90"
+      YOUTUBE_SEARCH_DAILY_QUOTA_UNITS: "500"
+      YOUTUBE_DATA_API_DAILY_QUOTA_UNITS: "9500"
+      YOUTUBE_PROFILE_QUEUE_BATCH: "40"
+      YOUTUBE_SPIDER_QUEUE_BATCH: "15"
+      YOUTUBE_MENTION_BACKFILL_BATCH: "500"
       # Media-first policy: do not permanently exclude longer videos. Backfill
       # remains bounded by batch size, failed-retry delay, and yt-dlp timeout.
       YOUTUBE_MAX_VIDEO_DURATION_MINUTES: "0"
@@ -287,8 +293,14 @@ services:
       SEARCH_SPIDER_PAGES: "1"
       SEARCH_MAX_RESULTS: "100"
       SEARCH_CONCURRENT_DOWNLOADS: "10"
+      SEARCH_MAX_ACTIVE_DOMAINS: "8"
+      SEARCH_MAX_REQUESTS_PER_DOMAIN: "2"
       SEARCH_QUERY_DELAY_SECONDS: "1.0"
       SEARCH_BING_PAGES: "5"
+      WEB_REQUEST_PERSONA_ENABLED: "${WEB_REQUEST_PERSONA_ENABLED:-1}"
+      WEB_REQUEST_PERSONA_MODE: "${WEB_REQUEST_PERSONA_MODE:-stable_by_domain}"
+      WEB_REQUEST_SEND_ORIGIN: "${WEB_REQUEST_SEND_ORIGIN:-1}"
+      WEB_REQUEST_ORIGIN_POOL: "${WEB_REQUEST_ORIGIN_POOL:-https://www.google.com/,https://www.bing.com/,https://duckduckgo.com/}"
       # Strava athlete spider (kudos/comments/followers/clubs) — paced for I/O.
       STRAVA_SPIDER_ENABLED: "true"
       STRAVA_FOLLOW_SCRAPE_ENABLED: "true"
@@ -309,11 +321,12 @@ services:
       # GitHub graph expansion: no hard caps on high-signal repo history.
       # Keep weak repo fanout bounded; stargazers/watchers are weaker evidence
       # and can explode far faster than commits/issues/contributors.
-      GITHUB_API_DELAY: "1.0"
-      GITHUB_MAX_CONCURRENT: "1"
-      GITHUB_TARGET_CONCURRENCY: "1"
-      GITHUB_SPIDER_CONCURRENCY: "1"
-      GITHUB_SPIDER_BATCH_SIZE: "25"
+      GITHUB_API_DELAY: "0.25"
+      GITHUB_MAX_CONCURRENT: "3"
+      GITHUB_TARGET_CONCURRENCY: "2"
+      GITHUB_SPIDER_CONCURRENCY: "3"
+      GITHUB_SPIDER_BATCH_SIZE: "100"
+      GITHUB_API_QUOTA_TARGET_RATIO: "0.90"
       GITHUB_MAX_COMMITS_PER_REPO: "0"
       GITHUB_MAX_ISSUES_PER_REPO: "0"
       GITHUB_MAX_CONTRIBUTORS_PER_REPO: "0"
@@ -323,7 +336,7 @@ services:
       # CPU hygiene (A#4): low-volume / API-ceiling sources idle longer between
       # cycles — fewer wakeups, lower steady-state CPU, zero data loss.
       GITHUB_API_TRANSPORT_RETRIES: "2"
-      COLLECTOR_CYCLE_SLEEP_GITHUB: "900"
+      COLLECTOR_CYCLE_SLEEP_GITHUB: "300"
       COLLECTOR_CYCLE_SLEEP_STRAVA: "600"
       COLLECTOR_CYCLE_SLEEP_SEARCH: "240"
       # Conn-budget hygiene (P2 review §5): low-volume, long-cycle sources — a
@@ -404,10 +417,18 @@ services:
       WEBSITE_TARGET_TIMEOUT_SECONDS: "45"
       WEBSITE_TARGET_RETRY_BACKOFF_SECONDS: "21600"
       WEBSITE_TARGET_RETRY_BACKOFF_MAX_SECONDS: "604800"
+      WEBSITE_ROBOTS_POLICY: "allowlist_override"
+      WEBSITE_ROBOTS_OVERRIDE_DOMAINS: "${WEBSITE_ROBOTS_OVERRIDE_DOMAINS:-}"
+      WEB_REQUEST_PERSONA_ENABLED: "${WEB_REQUEST_PERSONA_ENABLED:-1}"
+      WEB_REQUEST_PERSONA_MODE: "${WEB_REQUEST_PERSONA_MODE:-stable_by_domain}"
+      WEB_REQUEST_SEND_ORIGIN: "${WEB_REQUEST_SEND_ORIGIN:-1}"
+      WEB_REQUEST_ORIGIN_POOL: "${WEB_REQUEST_ORIGIN_POOL:-https://www.google.com/,https://www.bing.com/,https://duckduckgo.com/}"
       # Concurrency drives REAL RSS (each task holds a page + parse tree). After
       # the host OOM, dialled 10 -> 6 to lower website's memory peak — a real RSS
       # cut (unlike a mem_limit cap), minor throughput cost across 421 sites.
       WEBSITE_MAX_CONCURRENT_TASKS: "16"
+      WEBSITE_MAX_ACTIVE_DOMAINS: "8"
+      WEBSITE_MAX_REQUESTS_PER_DOMAIN: "2"
       # CPU hygiene (A#4): website crawls are multi-hour; idle longer between cycles.
       COLLECTOR_CYCLE_SLEEP_WEBSITE: "600"
       # Conn-budget hygiene (P2 review §5): default 10 -> 6. Kept above lowrisk/main
@@ -501,7 +522,7 @@ services:
       TELEGRAM_AUTO_BACKFILL_NEW_ACCOUNTS: "false"
       # Only these lower-risk accounts may process spider/join work. Other
       # Telegram accounts still collect existing dialogs and realtime messages.
-      TELEGRAM_SPIDER_ACCOUNTS: "oopspwned,johnfriend101"
+      TELEGRAM_SPIDER_ACCOUNTS: "bryanseah234,shotsbyseah234,oopspwned,johnfriend101"
       # Discussion groups: 0 means read all available history, not just the old
       # 2,000-message recent window. Member collection is already full-list when
       # Telegram allows participant enumeration.
@@ -520,7 +541,7 @@ services:
       # Z media drive. Live capture is unaffected by these backfill knobs.
       TELEGRAM_BACKFILL_MSG_PER_SEC: "120"
       TELEGRAM_BACKFILL_DRAIN_INTERVAL: "60"
-      TELEGRAM_SPIDER_MAX_PER_CYCLE: "100"
+      TELEGRAM_SPIDER_MAX_PER_CYCLE: "150"
       # Get ALL historical chats: raise the enqueue cap so every dialog across all
       # 4 accounts is queued (user: "ensure we get ALL historical chats").
       TELEGRAM_SPIDER_QUEUE_MAX: "20000"
@@ -807,7 +828,7 @@ services:
       TIKTOK_FOLLOW_OWNER_FALLBACK: ${TIKTOK_FOLLOW_OWNER_FALLBACK:-hongyime}
       SOCIAL_INGEST_PREP_DB_ON_STARTUP: "true"
       BROWSER_CONTENT_HINT_RESPONSE_TIMEOUT_SECONDS: "2.0"
-      UC_EXTENSION_EXPECTED_VERSION: "1.23.69"
+      UC_EXTENSION_EXPECTED_VERSION: "1.23.70"
     volumes:
       - z:/unifiedcollector/media:/media
       - z:/unifiedcollector:/vault
@@ -835,7 +856,7 @@ services:
       DB_POOL_MAX_SIZE: "4"
       # Operator status compares live Chrome hook heartbeats against this repo
       # extension build. Update with extension/manifest.json version bumps.
-      UC_EXTENSION_EXPECTED_VERSION: "1.23.69"
+      UC_EXTENSION_EXPECTED_VERSION: "1.23.70"
     volumes:
       - z:/unifiedcollector/media:/media
       - z:/unifiedcollector:/vault
@@ -948,7 +969,7 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
-      UC_EXTENSION_EXPECTED_VERSION: "1.23.69"
+      UC_EXTENSION_EXPECTED_VERSION: "1.23.70"
       YOUTUBE_MAX_VIDEO_DURATION_MINUTES: "0"
       STRAVA_ROUTE_STREAM_SHARED_COOLDOWN: "true"
       STRAVA_BROWSER_ROUTE_QUEUE_CANDIDATE_LIMIT: "50"
@@ -956,6 +977,7 @@ services:
       # Localhost-only single-user deployment: skip bearer-token auth so the
       # dashboard works without a login flow. Remove/false for network exposure.
       DASHBOARD_AUTH_DISABLED: "true"
+      DASHBOARD_DB_ACQUIRE_TIMEOUT_SECONDS: "8"
     volumes:
       - z:/unifiedcollector/media:/media
       - z:/unifiedcollector:/vault

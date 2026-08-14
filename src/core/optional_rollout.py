@@ -19,6 +19,7 @@ STAGE_CAPS = {
     "dry-run": 0,
     "five": 5,
     "daily25": 25,
+    "daily100": 100,
 }
 
 FEATURE_ALIASES = {
@@ -52,7 +53,7 @@ FEATURE_SOURCES = {
 }
 
 FEATURE_TARGET_TYPES = {
-    "spiderfoot": ("domain", "url", "email", "username", "user"),
+    "spiderfoot": ("domain", "url", "email", "phone", "ip", "ipv4", "username", "user", "channel"),
     "lemon8": ("user", "username", "url"),
     "browser-heavy": ("user", "username", "url"),
 }
@@ -414,6 +415,10 @@ def _seen_to_recon_type(target_type: str) -> str | None:
     value = str(target_type or "").strip().lower()
     if value in {"domain", "url", "email"}:
         return value
+    if value in {"ip", "ipv4"}:
+        return "ip"
+    if value == "phone":
+        return "phone"
     if value in {"user", "username", "channel"}:
         return "username"
     return None

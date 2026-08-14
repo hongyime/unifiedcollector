@@ -26,6 +26,8 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_normalize_recon_target_validates_domain_and_email():
     assert normalize_recon_target("domain", "Example.COM") == ("domain", "example.com")
     assert normalize_recon_target("email", "A@Example.COM") == ("email", "a@example.com")
+    assert normalize_recon_target("ipv4", "203.0.113.5") == ("ip", "203.0.113.5")
+    assert normalize_recon_target("channel", "ExampleChannel") == ("username", "ExampleChannel")
     with pytest.raises(ValueError):
         normalize_recon_target("domain", "not-a-domain")
     with pytest.raises(ValueError):

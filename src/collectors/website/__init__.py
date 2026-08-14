@@ -111,6 +111,10 @@ WEBSITE_TARGET_RETRY_BACKOFF_MAX_SECONDS
                                 Maximum exponential retry backoff for repeated
                                 wall-clock timeout targets (default 604800 = 7d).
 WEBSITE_RESPECT_ROBOTS          '0' to ignore robots.txt (default '1').
+WEBSITE_ROBOTS_POLICY           respect | allowlist_override (default respect).
+WEBSITE_ROBOTS_OVERRIDE_DOMAINS Comma-separated owned/authorized domains where
+                                robots.txt can be bypassed when policy is
+                                allowlist_override.
 WEBSITE_FOLLOW_EXTERNAL         '1' to follow links off the seed domain
                                 (default 0; same-host BFS).
 WEBSITE_MAX_ACTIVE_DOMAINS      Max concurrently active crawl domains (default 4).
@@ -144,6 +148,7 @@ import httpx
 
 from src.core.base_collector import BaseCollector
 from src.core.domain_pacing import DomainPacer, record_domain_pacing_event
+from src.core.request_persona import build_persona_headers
 from src.core.vault import (
     VAULT_ROOT,
     assert_media_write_allowed,
@@ -277,6 +282,22 @@ def _registrable_domain(host: str) -> str:
     if h.startswith("www."):
         h = h[4:]
     return h
+
+
+def _csv_domains(raw: str | None) -> set[str]:
+    return {
+        item.strip().lower().strip(".")
+        for item in (raw or "").split(",")
+        if item.strip()
+    }
+
+
+def _host_matches_suffix(host: str, suffixes: set[str]) -> str | None:
+    normalized = (host or "").lower().strip(".")
+    for suffix in sorted(suffixes, key=len, reverse=True):
+        if normalized == suffix or normalized.endswith("." + suffix):
+            return suffix
+    return None
 
 
 def _same_domain(url1: str, url2: str) -> bool:
@@ -491,6 +512,9 @@ class WebsiteCollector(BaseCollector):
         self._target_retry_backoff_max = float(os.getenv("WEBSITE_TARGET_RETRY_BACKOFF_MAX_SECONDS", "604800"))
         # Behaviour toggles
         self._respect_robots = os.getenv("WEBSITE_RESPECT_ROBOTS", "1") == "1"
+        self._robots_policy = os.getenv("WEBSITE_ROBOTS_POLICY", "respect").strip().lower() or "respect"
+        self._robots_override_domains = _csv_domains(os.getenv("WEBSITE_ROBOTS_OVERRIDE_DOMAINS"))
+        self._robots_override_seen: set[str] = set()
         self._follow_external = os.getenv("WEBSITE_FOLLOW_EXTERNAL", "0") == "1"
         self._download_images = os.getenv("WEBSITE_DOWNLOAD_IMAGES", "1") == "1"
         self._download_pdfs = os.getenv("WEBSITE_DOWNLOAD_PDFS", "1") == "1"
@@ -551,6 +575,39 @@ class WebsiteCollector(BaseCollector):
             url=url,
             status_code=status_code,
             metadata=metadata,
+        )
+
+    def _robots_override_match(self, url: str) -> str | None:
+        if self._robots_policy != "allowlist_override" or not self._robots_override_domains:
+            return None
+        host = urlparse(url).hostname or urlparse(url).netloc
+        return _host_matches_suffix(host, self._robots_override_domains)
+
+    def _should_respect_robots(self, url: str) -> bool:
+        if not self._respect_robots:
+            return False
+        if self._robots_override_match(url):
+            return False
+        return True
+
+    async def _record_robots_override(self, url: str) -> None:
+        matched = self._robots_override_match(url)
+        if not matched:
+            return
+        host = urlparse(url).hostname or urlparse(url).netloc or url
+        key = f"{host}:{matched}"
+        if key in self._robots_override_seen:
+            return
+        self._robots_override_seen.add(key)
+        self._domain_pacing.count("robots_override")
+        await self._record_domain_pacing_event(
+            "robots_override",
+            url,
+            metadata={
+                "policy": self._robots_policy,
+                "matched_domain": matched,
+                "reason": "explicit_owned_or_authorized_domain",
+            },
         )
 
     async def collect(self, targets: list[str]) -> None:
@@ -653,6 +710,7 @@ class WebsiteCollector(BaseCollector):
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.7",
         }
+        headers, _persona_metadata = build_persona_headers(headers, f"https://{domain or 'example.com'}/", source=self.SOURCE_NAME)
         if self._use_tor:
             try:
                 from src.core import tor_proxy
@@ -686,8 +744,12 @@ class WebsiteCollector(BaseCollector):
             return None
         client = self._build_client(domain)
         try:
-            await self._robots.load(url, client) if self._respect_robots else None
-            if self._respect_robots and not self._robots.is_allowed(url):
+            respect_robots = self._should_respect_robots(url)
+            if respect_robots:
+                await self._robots.load(url, client)
+            else:
+                await self._record_robots_override(url)
+            if respect_robots and not self._robots.is_allowed(url):
                 logger.debug("robots.txt disallows %s", url)
                 self._domain_pacing.count("robots_blocked")
                 await self._record_domain_pacing_event("robots_blocked", url)
@@ -732,15 +794,19 @@ class WebsiteCollector(BaseCollector):
         queue: list[tuple[str, int]] = [(seed_url, 0)]
         stats = {"pages": 0, "images": 0, "pdfs": 0, "docs": 0, "videos": 0,
                  "errors": 0, "skipped": 0, "robots_blocked": 0,
-                 "http_403": 0, "http_429": 0}
+                 "robots_override": 0, "http_403": 0, "http_429": 0}
 
         client = self._build_client(domain)
         try:
-            if self._respect_robots:
+            respect_seed_robots = self._should_respect_robots(seed_url)
+            if respect_seed_robots:
                 await self._robots.load(seed_url, client)
                 # Surface robots.txt-listed sitemaps for richer discovery.
                 for sm in self._robots.sitemaps_for(seed_url):
                     await self._ingest_sitemap(client, sm, queue, visited, domain)
+            else:
+                await self._record_robots_override(seed_url)
+                stats["robots_override"] += 1
 
             # Probe common sitemap locations for an extra seed bonus.
             for path in SITEMAP_PATHS:
@@ -755,7 +821,10 @@ class WebsiteCollector(BaseCollector):
                 if not self._url_filter.is_allowed(url)[0]:
                     stats["skipped"] += 1
                     continue
-                if self._respect_robots and not self._robots.is_allowed(url):
+                respect_url_robots = self._should_respect_robots(url)
+                if not respect_url_robots:
+                    await self._record_robots_override(url)
+                if respect_url_robots and not self._robots.is_allowed(url):
                     stats["skipped"] += 1
                     stats["robots_blocked"] += 1
                     self._domain_pacing.count("robots_blocked")

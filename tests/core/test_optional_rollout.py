@@ -86,6 +86,21 @@ async def test_optional_rollout_dry_run_reports_seen_registry_candidates():
 
 
 @pytest.mark.asyncio
+async def test_optional_rollout_daily100_accepts_indicator_target_types():
+    conn = FakeConn(candidates=[
+        _candidate(target_type="ip", target_key="203.0.113.5", source="website"),
+        _candidate(target_type="phone", target_key="+14155550123", source="telegram"),
+        _candidate(target_type="email", target_key="alice@example.com", source="github"),
+    ])
+
+    report = await optional_rollout_report(conn, feature="spiderfoot", stage="daily100")
+
+    assert report["target_cap"] == 100
+    assert report["candidate_count"] == 3
+    assert report["policy"]["target_cap"] == 100
+
+
+@pytest.mark.asyncio
 async def test_optional_rollout_stops_on_health_rate_and_malformed_events():
     conn = FakeConn(
         health=[{"source": "spiderfoot", "status": "degraded", "last_error": "timeout", "updated_at": None}],
@@ -145,3 +160,26 @@ async def test_apply_spiderfoot_rollout_queues_seen_registry_weak_leads(monkeypa
     assert queued[0]["scope"]["hard_identity_link"] is False
     assert queued[1]["target_type"] == "domain"
     assert any("collector_operational_events" in call[0] for call in conn.executed)
+
+
+@pytest.mark.asyncio
+async def test_apply_spiderfoot_rollout_maps_ipv4_and_channel_labels(monkeypatch):
+    from src.core import recon
+
+    queued = []
+
+    async def fake_queue_recon_target(conn, **kwargs):
+        queued.append(kwargs)
+        return {"status": "pending"}
+
+    monkeypatch.setattr(recon, "queue_recon_target", fake_queue_recon_target)
+    conn = FakeConn(candidates=[
+        _candidate(target_type="ipv4", target_key="203.0.113.5", source="website"),
+        _candidate(target_type="channel", target_key="demo-channel", source="youtube"),
+    ])
+
+    report = await apply_optional_rollout(conn, feature="spiderfoot", stage="five")
+
+    assert report["applied"]["queued"] == 2
+    assert queued[0]["target_type"] == "ip"
+    assert queued[1]["target_type"] == "username"

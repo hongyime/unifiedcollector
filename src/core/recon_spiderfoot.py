@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 DEFAULT_MODULES = ("sfp_dnsresolve", "sfp_whois", "sfp_names")
 SOURCE_HEALTH_NAME = "spiderfoot"
-SUPPORTED_TYPES = {"domain", "ip", "email", "username", "url", "phone"}
+SUPPORTED_TYPES = {"domain", "ip", "ipv4", "email", "username", "user", "url", "phone"}
 DEFAULT_INTRUSIVE_MODULES = {
     "sfp_portscan_tcp",
     "sfp_portscan_udp",
@@ -35,8 +35,18 @@ DEFAULT_COLLECTOR_SOURCES = {
     "x",
     "youtube",
 }
-DEFAULT_COLLECTOR_TARGET_TYPES = {"domain", "username"}
-DEFAULT_COLLECTOR_SOURCE_TABLES = {"discovered_links", "social_users"}
+DEFAULT_COLLECTOR_TARGET_TYPES = {"domain", "ip", "ipv4", "email", "phone", "url", "user", "username"}
+DEFAULT_COLLECTOR_SOURCE_TABLES = {
+    "collection_targets",
+    "collector_seen_targets",
+    "discovered_links",
+    "follow_edges",
+    "github_spider_queue",
+    "social_users",
+    "website_targets",
+    "youtube_profile_queue",
+    "youtube_spider_queue",
+}
 
 
 def _json_dict(value: Any) -> dict[str, Any]:

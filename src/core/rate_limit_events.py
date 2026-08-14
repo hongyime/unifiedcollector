@@ -8,6 +8,19 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def operation_scope(operation: str, target_scope: str | None = None) -> str:
+    """Build a stable cooldown scope for one source operation.
+
+    Use this when a source has independently movable parts: for example,
+    ``profile_view`` should not cool ``stories`` or ``media_revisit``.
+    """
+    op = (operation or "general").strip().lower().replace(" ", "_")
+    if not target_scope:
+        return op
+    scope = str(target_scope).strip().lower().replace(" ", "_")
+    return f"{op}:{scope}" if scope else op
+
+
 async def record_rate_limit_event(
     pool,
     *,

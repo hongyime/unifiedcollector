@@ -354,6 +354,15 @@ def test_constructor_honours_env_overrides(monkeypatch):
     assert c._download_pdfs is False
 
 
+def test_robots_policy_allowlist_matches_suffix(monkeypatch):
+    monkeypatch.setenv("WEBSITE_ROBOTS_POLICY", "allowlist_override")
+    monkeypatch.setenv("WEBSITE_ROBOTS_OVERRIDE_DOMAINS", "example.com")
+    c = WebsiteCollector()
+
+    assert c._should_respect_robots("https://sub.example.com/private") is False
+    assert c._should_respect_robots("https://not-example.net/private") is True
+
+
 # ── _extract_metadata / _extract_links / _extract_images ──────────────────
 
 
@@ -484,6 +493,37 @@ async def test_fetch_url_robots_disallow_returns_none(monkeypatch):
     # We must not have issued the GET — robots blocked us first.
     fake_client.get.assert_not_called()
     fake_client.aclose.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_fetch_url_robots_allowlist_override_fetches(monkeypatch):
+    monkeypatch.setenv("WEBSITE_ROBOTS_POLICY", "allowlist_override")
+    monkeypatch.setenv("WEBSITE_ROBOTS_OVERRIDE_DOMAINS", "example.com")
+    c = WebsiteCollector()
+    c._respect_robots = True
+    c._url_filter = MagicMock()
+    c._url_filter.is_allowed = MagicMock(return_value=(True, ""))
+    c._record_domain_pacing_event = AsyncMock()
+
+    resp = MagicMock(status_code=200)
+    resp.headers = {"content-type": "text/html"}
+    fake_client = MagicMock()
+    fake_client.get = AsyncMock(return_value=resp)
+    fake_client.aclose = AsyncMock()
+    monkeypatch.setattr(c, "_build_client", lambda domain: fake_client)
+    monkeypatch.setattr(c, "wait_rate_limit", AsyncMock())
+
+    c._robots = MagicMock()
+    c._robots.load = AsyncMock()
+    c._robots.is_allowed = MagicMock(return_value=False)
+
+    out = await c.fetch_url("https://example.com/blocked")
+
+    assert out is resp
+    c._robots.load.assert_not_awaited()
+    c._robots.is_allowed.assert_not_called()
+    fake_client.get.assert_awaited_once_with("https://example.com/blocked")
+    c._record_domain_pacing_event.assert_awaited()
 
 
 @pytest.mark.asyncio
