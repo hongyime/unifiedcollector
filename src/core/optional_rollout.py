@@ -52,6 +52,12 @@ FEATURE_SOURCES = {
     "browser-heavy": ("instagram", "threads", "tiktok", "lemon8", "x", "facebook"),
 }
 
+FEATURE_GATE_SOURCES = {
+    "spiderfoot": ("spiderfoot", "recon"),
+    "lemon8": FEATURE_SOURCES["lemon8"],
+    "browser-heavy": FEATURE_SOURCES["browser-heavy"],
+}
+
 FEATURE_TARGET_TYPES = {
     "spiderfoot": ("domain", "url", "email", "phone", "ip", "ipv4", "username", "user", "channel"),
     "lemon8": ("user", "username", "url"),
@@ -358,7 +364,7 @@ async def optional_rollout_report(
     normalized_feature = request.normalized_feature
     normalized_stage = request.normalized_stage
     target_cap = request.target_cap
-    sources = FEATURE_SOURCES[normalized_feature]
+    sources = FEATURE_GATE_SOURCES[normalized_feature]
     preview_limit = max(10, target_cap)
 
     stop_reasons: list[dict[str, Any]] = []
@@ -367,6 +373,7 @@ async def optional_rollout_report(
         "source_health": "checked",
         "collector_operational_events": "checked",
         "rate_limit_events": "checked",
+        "gate_sources": list(sources),
     }
     for fetcher in (
         _fetch_source_health_stops,

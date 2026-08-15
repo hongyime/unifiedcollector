@@ -4,8 +4,10 @@ import asyncio
 import hashlib
 import json
 import os
+import signal
 import shlex
 import shutil
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -42,6 +44,7 @@ DEFAULT_COLLECTOR_SOURCE_TABLES = {
     "discovered_links",
     "follow_edges",
     "github_spider_queue",
+    "instagram_spider_queue",
     "social_users",
     "website_targets",
     "youtube_profile_queue",
@@ -170,6 +173,30 @@ def spiderfoot_max_threads() -> int:
         return 4
 
 
+def _safe_worker_label(worker_label: int | str | None) -> str:
+    if worker_label is None:
+        return "default"
+    safe = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in str(worker_label))
+    return (safe or "default")[:32]
+
+
+def _spiderfoot_env(worker_label: int | str | None = None) -> dict[str, str]:
+    env = os.environ.copy()
+    state_root = Path(os.getenv("SPIDERFOOT_STATE_ROOT", "/tmp/spiderfoot-state"))
+    home = state_root / _safe_worker_label(worker_label)
+    home.mkdir(parents=True, exist_ok=True)
+    env["HOME"] = str(home)
+    return env
+
+
+def _is_target_level_failure(error: str) -> bool:
+    return (
+        error.startswith("SpiderFoot timed out after ")
+        or "Could not determine target type" in error
+        or "Invalid target" in error
+    )
+
+
 def _extract_json_objects(text: str) -> list[dict[str, Any]]:
     decoder = json.JSONDecoder()
     rows: list[dict[str, Any]] = []
@@ -260,7 +287,7 @@ async def _claim_target(conn) -> dict[str, Any] | None:
     row = await conn.fetchrow(
         """
         UPDATE recon_targets
-        SET status = 'in_progress', updated_at = NOW()
+        SET status = 'in_progress', error = NULL, updated_at = NOW()
         WHERE id = (
             SELECT id
             FROM recon_targets
@@ -309,7 +336,13 @@ async def _store_observations(conn, observations: list[dict[str, Any]]) -> int:
     return len(observations)
 
 
-async def _run_spiderfoot_cli(target: dict[str, Any], modules: list[str], timeout_seconds: int) -> list[dict[str, Any]]:
+async def _run_spiderfoot_cli(
+    target: dict[str, Any],
+    modules: list[str],
+    timeout_seconds: int,
+    *,
+    worker_label: int | str | None = None,
+) -> list[dict[str, Any]]:
     cli = os.getenv("SPIDERFOOT_CLI")
     if not cli:
         raise RuntimeError("SPIDERFOOT_CLI is not configured")
@@ -331,11 +364,16 @@ async def _run_spiderfoot_cli(target: dict[str, Any], modules: list[str], timeou
         str(spiderfoot_max_threads()),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=_spiderfoot_env(worker_label),
+        start_new_session=True,
     )
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_seconds)
     except asyncio.TimeoutError:
-        proc.kill()
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (AttributeError, ProcessLookupError):
+            proc.kill()
         await proc.communicate()
         raise RuntimeError(f"SpiderFoot timed out after {timeout_seconds}s")
     if proc.returncode != 0:
@@ -352,7 +390,12 @@ def normalize_spiderfoot_payload(payload: Any) -> list[dict[str, Any]]:
     return []
 
 
-async def run_spiderfoot_once(conn, *, dry_run: bool = False) -> dict[str, Any]:
+async def run_spiderfoot_once(
+    conn,
+    *,
+    dry_run: bool = False,
+    worker_label: int | str | None = None,
+) -> dict[str, Any]:
     async with conn.transaction():
         await _reclaim_stale_targets(conn)
         target = await _claim_target(conn)
@@ -392,6 +435,7 @@ async def run_spiderfoot_once(conn, *, dry_run: bool = False) -> dict[str, Any]:
             target,
             modules,
             int(os.getenv("SPIDERFOOT_TARGET_TIMEOUT_SECONDS", "300")),
+            worker_label=worker_label,
         )
         observations = [
             obs for raw in raw_rows
@@ -405,10 +449,14 @@ async def run_spiderfoot_once(conn, *, dry_run: bool = False) -> dict[str, Any]:
         await _mark_source_health(conn, "running", None, success=True)
         return {"status": "completed", "target": target, "modules": modules, "observations": written, "dry_run": False}
     except Exception as exc:  # noqa: BLE001
+        error = str(exc)[:500]
         await conn.execute(
             "UPDATE recon_targets SET status = 'failed', error = $2, updated_at = NOW() WHERE id = $1::uuid",
             target["id"],
-            str(exc)[:500],
+            error,
         )
-        await _mark_source_health(conn, "degraded", str(exc)[:500])
-        return {"status": "failed", "target": target, "modules": modules, "observations": 0, "error": str(exc)[:500], "dry_run": False}
+        if _is_target_level_failure(error):
+            await _mark_source_health(conn, "running", None, success=True)
+        else:
+            await _mark_source_health(conn, "degraded", error)
+        return {"status": "failed", "target": target, "modules": modules, "observations": 0, "error": error, "dry_run": False}

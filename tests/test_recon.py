@@ -8,6 +8,9 @@ import pytest
 from src.core.recon import normalize_recon_target, queue_recon_target
 from src.core import recon_spiderfoot
 from src.core.recon_spiderfoot import (
+    _is_target_level_failure,
+    _safe_worker_label,
+    _spiderfoot_env,
     allowed_modules,
     normalize_observation,
     parse_spiderfoot_stdout,
@@ -242,6 +245,85 @@ def test_spiderfoot_max_threads_is_bounded(monkeypatch):
     assert spiderfoot_max_threads() == 4
 
 
+def test_spiderfoot_allows_instagram_spider_queue_targets(monkeypatch):
+    monkeypatch.delenv("RECON_ALLOWLIST", raising=False)
+    monkeypatch.delenv("RECON_ALLOW_UNSCOPED", raising=False)
+    monkeypatch.delenv("RECON_ALLOWED_SOURCE_TABLES", raising=False)
+
+    allowed, reason = target_allowed_by_policy({
+        "target_type": "username",
+        "target_value": "alice",
+        "source": "collector:collector_seen_targets",
+        "scope_json": {
+            "collector_derived": True,
+            "collector_source": "instagram",
+            "source_table": "instagram_spider_queue",
+        },
+    })
+
+    assert allowed
+    assert reason == "collector-derived target matched source/type policy"
+
+
+def test_spiderfoot_env_isolates_worker_home(monkeypatch, tmp_path):
+    monkeypatch.setenv("SPIDERFOOT_STATE_ROOT", str(tmp_path))
+
+    env = _spiderfoot_env("worker:1")
+
+    assert _safe_worker_label("worker:1") == "worker_1"
+    assert env["HOME"] == str(tmp_path / "worker_1")
+    assert (tmp_path / "worker_1").is_dir()
+
+
+def test_spiderfoot_target_timeout_does_not_degrade_source(monkeypatch):
+    target_id = "00000000-0000-0000-0000-000000000003"
+
+    class Tx:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class Conn:
+        def __init__(self):
+            self.health = []
+            self.updates = []
+
+        def transaction(self):
+            return Tx()
+
+        async def fetchrow(self, sql, *args):
+            return {
+                "id": target_id,
+                "target_type": "domain",
+                "target_value": "example.com",
+                "source": "test",
+                "priority": 1,
+                "scope_json": {"allowlist": ["example.com"]},
+            }
+
+        async def execute(self, sql, *args):
+            if "source_health" in sql:
+                self.health.append(args)
+            elif "UPDATE recon_targets" in sql:
+                self.updates.append(args)
+            return "UPDATE 1"
+
+    async def fake_cli(*args, **kwargs):
+        raise RuntimeError("SpiderFoot timed out after 180s")
+
+    monkeypatch.setattr(recon_spiderfoot, "_run_spiderfoot_cli", fake_cli)
+    conn = Conn()
+
+    report = asyncio.run(run_spiderfoot_once(conn))
+
+    assert report["status"] == "failed"
+    assert _is_target_level_failure(report["error"])
+    assert conn.health[-1][1] == "running"
+    assert conn.health[-1][2] is None
+
+
 def test_spiderfoot_module_guardrails_and_payload_shapes(monkeypatch):
     monkeypatch.setenv("SPIDERFOOT_MODULES", "sfp_dnsresolve,sfp_portscan_tcp,sfp_whois,sfp_names")
     monkeypatch.setenv("SPIDERFOOT_MAX_MODULES", "2")
@@ -309,7 +391,7 @@ def test_run_spiderfoot_once_stores_observations(monkeypatch):
             assert "INSERT INTO recon_observations" in sql
             self.observation_batches.append(rows)
 
-    async def fake_cli(target, modules, timeout_seconds):
+    async def fake_cli(target, modules, timeout_seconds, **kwargs):
         assert modules == ["sfp_dnsresolve"]
         assert target["target_value"] == "example.com"
         assert timeout_seconds > 0

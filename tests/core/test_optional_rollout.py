@@ -32,11 +32,14 @@ class FakeConn:
 
     async def fetch(self, query, *args, **kwargs):
         if "FROM source_health" in query:
-            return list(self.health)
+            sources = set(args[0])
+            return [row for row in self.health if row.get("source") in sources]
         if "FROM collector_operational_events" in query:
-            return list(self.operational)
+            sources = set(args[1])
+            return [row for row in self.operational if row.get("source") in sources]
         if "FROM rate_limit_events" in query:
-            return list(self.rate_limits)
+            sources = set(args[1])
+            return [row for row in self.rate_limits if row.get("source") in sources]
         if "FROM collector_seen_targets" in query:
             return list(self.candidates[: args[-1]])
         raise AssertionError(query)
@@ -116,7 +119,7 @@ async def test_optional_rollout_stops_on_health_rate_and_malformed_events():
         ],
         rate_limits=[
             {
-                "source": "website",
+                "source": "spiderfoot",
                 "status_code": 429,
                 "reason": "cooldown",
                 "cooldown_seconds": 600,
@@ -132,6 +135,40 @@ async def test_optional_rollout_stops_on_health_rate_and_malformed_events():
     assert report["can_proceed"] is False
     kinds = {item["kind"] for item in report["stop_reasons"]}
     assert {"source_health", "collector_operational_events", "rate_limit_events"} <= kinds
+
+
+@pytest.mark.asyncio
+async def test_spiderfoot_rollout_ignores_unrelated_platform_cooldowns():
+    conn = FakeConn(
+        candidates=[_candidate(target_type="user", target_key="alice", source="instagram")],
+        operational=[
+            {
+                "source": "github",
+                "event_type": "api_transport_exhausted",
+                "severity": "warning",
+                "summary": "GitHub API timeout",
+                "metadata": {},
+                "created_at": None,
+            }
+        ],
+        rate_limits=[
+            {
+                "source": "tiktok",
+                "status_code": 429,
+                "reason": "challenge cooldown",
+                "cooldown_seconds": 1800,
+                "metadata": {},
+                "created_at": None,
+            }
+        ],
+    )
+
+    report = await optional_rollout_report(conn, feature="spiderfoot", stage="five")
+
+    assert report["can_proceed"] is True
+    assert report["recommended_action"] == "advance_stage"
+    assert report["checks"]["gate_sources"] == ["spiderfoot", "recon"]
+    assert report["candidate_count"] == 1
 
 
 @pytest.mark.asyncio
