@@ -5,6 +5,7 @@ Target.setAutoAttach so any newly spawned SW attaches; POST a wake
 message via /json/list; then eval chrome.runtime.reload() in the SW.
 """
 import json
+import os
 import sys
 import time
 import urllib.request
@@ -14,11 +15,16 @@ import websocket  # type: ignore
 from cdp_ext_tabs import close_duplicate_control_tabs, open_or_activate_control_tab
 
 
-EXT_ID = "pkmdmcklnjdeocoeigmlakhomhhcpafb"
+EXT_IDS = (
+    "pkmdmcklnjdeocoeigmlakhomhhcpafb",
+    "nkeimhogjdpnpccoofpliimaahmaaome",
+)
+CDP_PORT = os.getenv("UC_CHROME_CDP_PORT", "9333").strip() or "9333"
+CDP = os.getenv("UC_CHROME_CDP_URL", f"http://127.0.0.1:{CDP_PORT}").rstrip("/")
 
 
 def main():
-    ver = json.loads(urllib.request.urlopen("http://127.0.0.1:9333/json/version").read())
+    ver = json.loads(urllib.request.urlopen(f"{CDP}/json/version").read())
     ws = websocket.create_connection(ver["webSocketDebuggerUrl"], timeout=10)
     n = [0]
 
@@ -48,12 +54,52 @@ def main():
 
     targets = call("Target.getTargets")["result"]["targetInfos"]
     sw = next(
-        (t for t in targets if t.get("type") == "service_worker" and EXT_ID in t.get("url", "")),
+        (
+            t for t in targets
+            if t.get("type") == "service_worker"
+            and any(ext_id in t.get("url", "") for ext_id in EXT_IDS)
+        ),
         None,
     )
     if not sw:
-        print("no SW after wake attempt — bailing", file=sys.stderr)
-        return
+        control = next(
+            (
+                t for t in targets
+                if t.get("type") == "page"
+                and t.get("url", "").startswith("chrome-extension://")
+                and "/tabs.html" in t.get("url", "")
+            ),
+            None,
+        )
+        if not control:
+            print("no SW or control tab after wake attempt — bailing", file=sys.stderr)
+            return
+        attach_control = call("Target.attachToTarget", {"targetId": control["targetId"], "flatten": True}, timeout=12)
+        if "error" in attach_control:
+            print("control attach failed:", attach_control["error"], file=sys.stderr)
+            return
+        control_session = attach_control["result"]["sessionId"]
+        call("Runtime.enable", session_id=control_session, timeout=15)
+        print("no SW after wake attempt; reloading through control tab")
+        n[0] += 1
+        ws.send(json.dumps({
+            "id": n[0], "method": "Runtime.evaluate",
+            "params": {"expression": "chrome.runtime.reload()"},
+            "sessionId": control_session,
+        }))
+        time.sleep(6)
+        targets = call("Target.getTargets")["result"]["targetInfos"]
+        sw = next(
+            (
+                t for t in targets
+                if t.get("type") == "service_worker"
+                and any(ext_id in t.get("url", "") for ext_id in EXT_IDS)
+            ),
+            None,
+        )
+        if not sw:
+            print("no SW after control-tab reload", file=sys.stderr)
+            return
 
     attach = call("Target.attachToTarget", {"targetId": sw["targetId"], "flatten": True}, timeout=12)
     if "error" in attach:
@@ -87,7 +133,11 @@ def main():
     time.sleep(4)
     targets = call("Target.getTargets")["result"]["targetInfos"]
     sw2 = next(
-        (t for t in targets if t.get("type") == "service_worker" and EXT_ID in t.get("url", "")),
+        (
+            t for t in targets
+            if t.get("type") == "service_worker"
+            and any(ext_id in t.get("url", "") for ext_id in EXT_IDS)
+        ),
         None,
     )
     if not sw2:

@@ -13,8 +13,10 @@ Design points:
     Bursts above the cap are requeued/deferred and summarized every 15 minutes;
     stored media is not dropped just because Telegram notification pacing is
     saturated.
-  * Dedupe: per-source sha256/source-url keys seen in the last N days prevent
-    repeated operator-chat posts without hiding cross-source sightings.
+  * Dedupe: sha256/source-url keys seen in the last N days prevent repeated
+    operator-chat posts. Public/social sources dedupe globally so the same
+    photo from Threads/Lemon8 only posts once; private chat sources stay
+    source-scoped.
   * On Telegram 429: exponential backoff, respecting the ``retry_after``
     parameter Telegram supplies.
 
@@ -24,7 +26,9 @@ Env knobs (all optional; safe defaults):
   REALTIME_POST_FEED_MAX_PER_MINUTE    default "12"
   REALTIME_POST_FEED_DEDUPE_TTL_DAYS   default "7"
   REALTIME_POST_FEED_INCLUDE_PROFILES  default "0"  (skip profile updates)
-  REALTIME_POST_FEED_DEDUPE_BY_MEDIA   default "1"  (per-source sha/url dedupe)
+  REALTIME_POST_FEED_DEDUPE_BY_MEDIA   default "1"  (sha/url dedupe)
+  REALTIME_POST_FEED_GLOBAL_MEDIA_DEDUPE_SOURCES
+                                      default public/social sources
   REALTIME_POST_FEED_SKIP_VIDEO_THUMBNAILS default "1"  (skip poster-only video rows)
   REALTIME_POST_FEED_SOURCE_SUMMARY_SECONDS default "900" (per-source status digest)
   REDIS_URL / REDIS_HOST / REDIS_PASSWORD  (same pattern as io_pacer)
@@ -38,6 +42,7 @@ import html
 import json
 import logging
 import os
+import re
 import signal
 import time
 from pathlib import Path
@@ -63,6 +68,19 @@ SOURCE_COUNTER_WINDOW_KEY = "uc:realtime_post_feed:source_counters_window"
 LAST_SOURCE_REPORT_KEY = "uc:realtime_post_feed:last_source_report"
 
 ALLOWED_KINDS = frozenset({"image", "video", "post", "photo"})
+GLOBAL_MEDIA_DEDUPE_SOURCES_DEFAULT = frozenset({
+    "instagram",
+    "threads",
+    "tiktok",
+    "lemon8",
+    "facebook",
+    "x",
+    "twitter",
+    "youtube",
+    "website",
+    "search",
+    "github",
+})
 SOURCE_COUNTER_OUTCOMES = frozenset({
     "sent",
     "deferred",
@@ -89,6 +107,14 @@ def _int(name: str, default: int, *, min_value: int = 0) -> int:
 
 def _queue_key() -> str:
     return os.getenv("REALTIME_POST_FEED_QUEUE_KEY", QUEUE_KEY_DEFAULT).strip() or QUEUE_KEY_DEFAULT
+
+
+def _csv_set(name: str, default: frozenset[str]) -> frozenset[str]:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    values = frozenset(item.strip().lower() for item in raw.split(",") if item.strip())
+    return values or default
 
 
 def _redis_url() -> str:
@@ -145,6 +171,14 @@ def build_payload(*, source: str, entity_name: str, content_id: str,
         "file_path": str(file_path or "") or None,
         "vault_path": str(vault_path or "") or None,
         "source_url": str(source_url or "") or None,
+        "post_url": _metadata_text(
+            meta,
+            "post_url",
+            "page_url",
+            "canonical_url",
+            "verify_url",
+            "permalink",
+        ),
         "sha256": str(sha256 or "") or None,
         "file_size": file_size,
         "caption": caption,
@@ -541,6 +575,14 @@ async def _dedupe_seen(client, sha: str, *, ttl_days: int) -> bool:
     return bool(seen)
 
 
+async def _dedupe_seen_any(client, keys: list[str], *, ttl_days: int) -> str | None:
+    """Return the first recently seen dedupe key, if any."""
+    for key in keys:
+        if await _dedupe_seen(client, key, ttl_days=ttl_days):
+            return key
+    return None
+
+
 async def _mark_dedupe_seen(client, sha: str, *, ttl_days: int) -> None:
     """Record a delivered/non-retryable occurrence in the dedupe set.
 
@@ -553,6 +595,11 @@ async def _mark_dedupe_seen(client, sha: str, *, ttl_days: int) -> None:
     key = f"{SEEN_SHA_KEY_DEFAULT}:{sha}"
     with contextlib.suppress(Exception):
         await client.set(key, "1", ex=ttl)
+
+
+async def _mark_dedupe_seen_many(client, keys: list[str], *, ttl_days: int) -> None:
+    for key in keys:
+        await _mark_dedupe_seen(client, key, ttl_days=ttl_days)
 
 
 # -- Caption formatting ---------------------------------------------------
@@ -921,20 +968,21 @@ class RealtimeFeedDrain:
             )
             return
 
-        # Dedup per-source media files/URLs, not globally across platforms. The
-        # same file from WhatsApp and Telegram can still surface twice, but a
-        # burst of identical Telegram reposts or repeated search URL rows will
-        # not keep hitting the operator chat.
+        # Dedup public/social media globally so a Threads/Lemon8 duplicate photo
+        # does not hit the operator chat twice. Private chat sources remain
+        # source-scoped so independent private sightings are not hidden.
         ttl_days = _int("REALTIME_POST_FEED_DEDUPE_TTL_DAYS", 7, min_value=1)
-        dedupe_key = _dedupe_key(payload)
-        if await _dedupe_seen(client, dedupe_key, ttl_days=ttl_days):
-            logger.debug("realtime_feed: dedup skip key=%s", dedupe_key[:24])
+        dedupe_keys = _dedupe_keys(payload)
+        dedupe_key = dedupe_keys[0]
+        seen_dedupe_key = await _dedupe_seen_any(client, dedupe_keys, ttl_days=ttl_days)
+        if seen_dedupe_key:
+            logger.debug("realtime_feed: dedup skip key=%s", seen_dedupe_key[:24])
             from src.notifications import realtime_delivery
             await realtime_delivery.record_from_payload(
                 payload,
                 status="deduped",
                 reason="duplicate_suppressed",
-                dedupe_key=dedupe_key,
+                dedupe_key=seen_dedupe_key,
             )
             await _record_source_counter(
                 client,
@@ -1034,7 +1082,7 @@ class RealtimeFeedDrain:
             await _flush_source_counter_summary(client)
             return
 
-        await _mark_dedupe_seen(client, dedupe_key, ttl_days=ttl_days)
+        await _mark_dedupe_seen_many(client, dedupe_keys, ttl_days=ttl_days)
 
         await _flush_deferred_summary(client)
         await _flush_source_counter_summary(client)
@@ -1071,27 +1119,97 @@ def _canonical_url_for_dedupe(url: str) -> str:
     )
 
 
-def _dedupe_key(payload: dict) -> str:
-    """Return a stable dedupe key for realtime operator notifications.
+def _canonical_url_without_query(url: str) -> str:
+    try:
+        parsed = urlsplit(str(url or "").strip())
+    except Exception:
+        return ""
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    path = parsed.path.rstrip("/") or "/"
+    return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), path, "", ""))
 
-    The Collector still stores every source occurrence. Telegram delivery is
-    noisier, so by default this suppresses repeated files/URLs within the same
-    source while preserving cross-source sightings.
-    """
+
+def _public_media_family_url(payload: dict, source: str) -> str:
+    url = str(payload.get("source_url") or "").strip()
+    if not url:
+        return ""
+    try:
+        parsed = urlsplit(url)
+    except Exception:
+        return ""
+    host = parsed.netloc.lower()
+    path = parsed.path.lower()
+    source = source.strip().lower()
+    public_variant_sources = {"threads", "lemon8"}
+    cdn_markers = (
+        "cdn",
+        "fbcdn",
+        "tiktokcdn",
+        "byteimg",
+        "lemon8",
+        "threads",
+        "instagram",
+    )
+    media_exts = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".mp4", ".mov", ".webm", ".m4v")
+    if source not in public_variant_sources and not any(marker in host for marker in cdn_markers):
+        return ""
+    if not any(path.endswith(ext) for ext in media_exts) and "/image" not in path and "/video" not in path:
+        return ""
+    return _canonical_url_without_query(url)
+
+
+def _threads_synthetic_base(payload: dict) -> str:
+    if str(payload.get("source") or "").strip().lower() != "threads":
+        return ""
+    content_id = str(payload.get("content_id") or "").strip().lower()
+    if not content_id.startswith(("img_", "vid_")):
+        return ""
+    return re.sub(r"_[0-9a-f]{12}$", "", content_id)
+
+
+def _dedupe_keys(payload: dict) -> list[str]:
+    """Return ordered stable dedupe keys for realtime operator notifications."""
     source = str(payload.get("source") or "").strip().lower()
+    keys: list[str] = []
     if _flag("REALTIME_POST_FEED_DEDUPE_BY_MEDIA", "1") and source:
+        global_sources = _csv_set(
+            "REALTIME_POST_FEED_GLOBAL_MEDIA_DEDUPE_SOURCES",
+            GLOBAL_MEDIA_DEDUPE_SOURCES_DEFAULT,
+        )
+        scope = "global" if source in global_sources else source
         sha = str(payload.get("sha256") or "").strip().lower()
         if sha:
-            return hashlib.sha256(f"{source}|sha|{sha}".encode("utf-8")).hexdigest()
+            keys.append(hashlib.sha256(f"{scope}|sha|{sha}".encode("utf-8")).hexdigest())
         canonical_url = _canonical_url_for_dedupe(str(payload.get("source_url") or ""))
         if canonical_url:
-            return hashlib.sha256(f"{source}|url|{canonical_url}".encode("utf-8")).hexdigest()
+            keys.append(hashlib.sha256(f"{scope}|url|{canonical_url}".encode("utf-8")).hexdigest())
+        family_url = _public_media_family_url(payload, source)
+        if family_url:
+            keys.append(hashlib.sha256(f"{scope}|media_family_url|{family_url}".encode("utf-8")).hexdigest())
+        threads_base = _threads_synthetic_base(payload)
+        if threads_base:
+            post_url = _canonical_url_for_dedupe(
+                str(payload.get("post_url") or payload.get("source_url") or "")
+            )
+            if post_url:
+                keys.append(hashlib.sha256(f"global|threads_base|{post_url}|{threads_base}".encode("utf-8")).hexdigest())
     content_id = str(payload.get("content_id") or "").strip()
     if source == "youtube" and content_id.startswith("video_"):
         content_id = content_id.removeprefix("video_")
     if source and content_id:
-        return hashlib.sha256(f"{source}|{content_id}".encode("utf-8")).hexdigest()
-    return _hash_payload(payload)
+        keys.append(hashlib.sha256(f"{source}|{content_id}".encode("utf-8")).hexdigest())
+    keys.append(_hash_payload(payload))
+    out: list[str] = []
+    for key in keys:
+        if key and key not in out:
+            out.append(key)
+    return out
+
+
+def _dedupe_key(payload: dict) -> str:
+    """Return the primary dedupe key for compatibility with older callers."""
+    return _dedupe_keys(payload)[0]
 
 
 # -- Module entrypoint ----------------------------------------------------

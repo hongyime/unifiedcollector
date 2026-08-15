@@ -33,23 +33,36 @@ function Resolve-ChromePath {
     # Branded Chrome 137+ removed command-line unpacked extension loading.
     # Prefer Chrome-for-Testing/Playwright Chromium when available so the
     # UnifiedCollector MV3 extension can be restored automatically after reboot.
-    $playwrightChromes = @()
-    $playwrightRoot = Join-Path $env:LOCALAPPDATA "ms-playwright"
-    if (Test-Path -LiteralPath $playwrightRoot) {
-        $playwrightChromes = @(Get-ChildItem -LiteralPath $playwrightRoot -Recurse -Filter chrome.exe -ErrorAction SilentlyContinue |
-            Sort-Object LastWriteTime -Descending |
-            Select-Object -ExpandProperty FullName)
-    }
-    $candidates = @(
+    $extensionCapableCandidates = @(
         "$env:LOCALAPPDATA\Google\Chrome for Testing\Application\chrome.exe",
         "$env:ProgramFiles\Google\Chrome for Testing\Application\chrome.exe",
         "${env:ProgramFiles(x86)}\Google\Chrome for Testing\Application\chrome.exe"
-    ) + $playwrightChromes + @(
+    )
+    foreach ($candidate in $extensionCapableCandidates) {
+        if ($candidate -and (Test-Path -LiteralPath $candidate)) {
+            return $candidate
+        }
+    }
+    $playwrightRoot = Join-Path $env:LOCALAPPDATA "ms-playwright"
+    if (Test-Path -LiteralPath $playwrightRoot) {
+        $playwrightDirs = @(Get-ChildItem -LiteralPath $playwrightRoot -Directory -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 12)
+        foreach ($dir in $playwrightDirs) {
+            foreach ($relative in @("chrome-win64\chrome.exe", "chrome-win\chrome.exe", "chromium\chrome-win\chrome.exe", "chrome.exe")) {
+                $candidate = Join-Path $dir.FullName $relative
+                if (Test-Path -LiteralPath $candidate) {
+                    return $candidate
+                }
+            }
+        }
+    }
+    $fallbackCandidates = @(
         "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
         "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
         "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe"
     )
-    foreach ($candidate in $candidates) {
+    foreach ($candidate in $fallbackCandidates) {
         if ($candidate -and (Test-Path -LiteralPath $candidate)) {
             return $candidate
         }

@@ -3,9 +3,17 @@
 # Use wildcard rules for normal cases:
 #   allow https://*.example.com
 #   block */login*
+# Host-only wildcard rules include all paths/slugs on the matching host.
 # Raw regex is supported only when anchored to http(s):
 #   allow_regex:^https?://([^/]+\.)?example\.com(?:/.*)?$
 
 allow https://*.com.sg
 allow http://*.com.sg
+allow https://*.com
 allow http://*.com
+
+# Anchored equivalents for broad all-subdomain/all-path matching. These keep
+# host suffix-bleed blocked while allowing every normal URL path/query slug.
+allow_regex:^https?://[A-Za-z0-9.-]+\.com\.sg(?::[0-9]{1,5})?(?:/.*)?$
+allow_regex:^https?://[A-Za-z0-9.-]+\.com(?::[0-9]{1,5})?(?:/.*)?$
+

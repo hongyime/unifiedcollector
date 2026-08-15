@@ -20,6 +20,8 @@ STAGE_CAPS = {
     "five": 5,
     "daily25": 25,
     "daily100": 100,
+    "daily250": 250,
+    "daily500": 500,
 }
 
 FEATURE_ALIASES = {
@@ -102,7 +104,7 @@ class RolloutRequest:
     @property
     def target_cap(self) -> int:
         if self.limit is not None:
-            return max(0, min(int(self.limit), 500))
+            return max(0, min(int(self.limit), 1000))
         return STAGE_CAPS[self.normalized_stage]
 
 
@@ -306,7 +308,7 @@ async def _fetch_seen_candidates(
         list(FEATURE_TARGET_TYPES[feature]),
         ["new", "seen", "pending", "stale"],
         source_filter,
-        max(1, min(limit, 500)),
+        max(1, min(limit, 1000)),
         timeout=5,
     )
     return list(rows)

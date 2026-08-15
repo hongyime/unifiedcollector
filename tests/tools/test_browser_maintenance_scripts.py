@@ -50,6 +50,9 @@ def test_chrome_cdp_launcher_prefers_extension_capable_chromium():
     assert "Chrome for Testing" in script
     assert "ms-playwright" in script
     assert 'Sort-Object LastWriteTime -Descending' in script
+    assert "chrome-win64\\chrome.exe" in script
+    assert "-Recurse -Filter chrome.exe" not in script
+    assert "Select-Object -First 12" in script
 
 
 def test_chrome_cdp_launcher_prefers_dedicated_automation_profile():
@@ -473,9 +476,9 @@ def test_browser_maintenance_refuses_overlapping_passes():
 def test_browser_maintenance_uses_load_tolerant_wrapper_timeouts():
     script = _read_script("browser-tab-maintenance.ps1")
 
-    assert 'UC_BROWSER_AUDIT_TIMEOUT_SECONDS" 240' in script
-    assert 'UC_BROWSER_RELOAD_TIMEOUT_SECONDS" 180' in script
-    assert 'UC_BROWSER_PROFILE_RESTART_SETTLE_SECONDS" 90' in script
+    assert 'UC_BROWSER_AUDIT_TIMEOUT_SECONDS" 120' in script
+    assert 'UC_BROWSER_RELOAD_TIMEOUT_SECONDS" 120' in script
+    assert 'UC_BROWSER_PROFILE_RESTART_SETTLE_SECONDS" 60' in script
 
 
 def test_browser_maintenance_reaudits_after_reload():
@@ -517,6 +520,13 @@ def test_browser_maintenance_restarts_dedicated_profile_when_tabs_stay_unhealthy
     assert "-not (Test-AuthWallUrl (Get-AuditTabUrl $_))" in script
     assert "-not (Test-AuditTabContentWall $_)" in script
     assert "function Invoke-ScraperChromeProfileRestart" in script
+    assert "function Resolve-PreferredChromePath" in script
+    assert "chrome-win64\\chrome.exe" in script
+    assert "function Invoke-ChromeLauncher" in script
+    assert "-ChromePath" in script
+    assert "Chrome launcher timed out after" in script
+    assert "[int[]]$AllowedExitCodes = @(0)" in script
+    assert "-AllowedExitCodes @(0, 2)" in script
     assert "-CloseExistingCdpProfile" in script
     assert "-CloseExistingIfNoVisibleWindows" in script
     assert "dedicated scraper Chrome restart left CDP unavailable; fallback repair reason=" in script
@@ -525,9 +535,9 @@ def test_browser_maintenance_restarts_dedicated_profile_when_tabs_stay_unhealthy
     assert "browser tab audit still unhealthy after second reload" in script
     assert "function Test-AuditHealthNeedsProfileRestart" in script
     assert "UC_BROWSER_PROFILE_RESTART_ON_TAB_HEALTH" in script
-    assert "profile restart on tab-health failure is disabled by default" in script
+    assert "profile restart on tab-health failure is disabled by environment" in script
     assert "UC_BROWSER_PROFILE_RESTART_MIN_UNHEALTHY_PLATFORMS" in script
-    assert 'Get-PositiveIntEnv "UC_BROWSER_PROFILE_RESTART_MIN_UNHEALTHY_PLATFORMS" 3' in script
+    assert 'Get-PositiveIntEnv "UC_BROWSER_PROFILE_RESTART_MIN_UNHEALTHY_PLATFORMS" 1' in script
     assert "below profile restart threshold" in script
     assert "skipped profile restart" in script
     assert "Invoke-PostReloadSettle -seconds $profileRestartSettleSeconds" in script

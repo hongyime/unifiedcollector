@@ -1,33 +1,29 @@
 # UnifiedCollector Agent State
 
-Updated: 2026-08-15 14:25 UTC / 2026-08-15 22:25 SGT
+Updated: 2026-08-15 18:45 UTC / 2026-08-16 02:45 SGT
 
-Current task status: Docker recovered after reboot, website policy remains live, SpiderFoot `daily100` is applied and gate-clean, and the SpiderFoot sidecar is hardened for bounded parallel processing. Threads browser capture is the remaining blocker: the DB has recent historical Threads data, but the scraper Chrome/CDP profile is currently nonresponsive and source health is degraded.
+Current task status: website policy, SpiderFoot daily500, realtime public-media dedupe, Pi-hole nebula-sync, Docker healthchecks, and the scraper browser/Threads recovery are implemented and live-verified. The active scraper browser is Playwright Chromium on `127.0.0.1:9336`; stale duplicate recovery windows were closed, leaving one CDP listener.
 
 Implemented in this slice:
-- Scoped SpiderFoot optional-rollout gates to `spiderfoot,recon` only, so unrelated GitHub/TikTok/Lemon8/YouTube cooldowns no longer block SpiderFoot rollout.
-- Applied SpiderFoot `daily100` live; the gate returned `can_proceed=true`, `recommended_action=advance_stage`, and queued 100 weak-lead recon targets.
-- Added SpiderFoot sidecar workers with bounded count, per-worker SpiderFoot HOME/state isolation, process-group timeout cleanup, stale-claim reclaim tuning, and source-table policy support for `instagram_spider_queue`.
-- Kept target-level SpiderFoot failures, including timeouts and invalid target values, from marking the whole `spiderfoot` source degraded.
-- Raised Docker/WSL local resources outside git: WSL memory 10GB, swap 8GB, 8 CPUs, gradual memory reclaim; Docker Desktop Resource Saver disabled.
-- Set ignored runtime env for SpiderFoot to 2 workers, 3 SpiderFoot threads, 180s target timeout, 30m stale reclaim, and `/tmp/spiderfoot-state`.
+- Website URL policy now allows `https://*.com.sg`, `http://*.com.sg`, `https://*.com`, and `http://*.com`, with anchored `allow_regex:` equivalents in `config/sources/website.url-policy.txt`.
+- SpiderFoot optional rollout supports `daily250` and `daily500`, with CLI/API limit caps raised to 1000.
+- Applied SpiderFoot `daily500` live earlier in this slice; recon queue now shows completed 57, failed 22, in_progress 4, pending 441.
+- Loosened SpiderFoot/realtime healthcheck timeouts so Docker does not mark loaded-but-running containers unhealthy during CPU-heavy runs.
+- Realtime Telegram media dedupe is now global for public/social sources by sha/source URL/media-family keys while private chat sources remain source-scoped.
+- Browser recovery scripts prefer Chrome for Testing/Playwright Chromium without broad recursive scans, pass the selected Chrome path through maintenance, tolerate audit exit code 2, and default profile restart threshold to one unhealthy platform unless explicitly disabled.
+- Local runtime is on CDP port 9336; startup/cookie-vault env outside git were updated to use that port.
+- Pi-hole nebula-sync was moved into the main Pi-hole compose stack outside this repo; both `pihole` and `nebula-sync` are healthy and sync completed.
 
 Verification completed:
-- `python -m pytest tests\test_recon.py tests\test_recon_spiderfoot_service.py tests\core\test_optional_rollout.py tests\dashboard\test_coverage_api.py::test_optional_rollout_status_uses_guarded_monitor -q` passed 32 tests.
-- Compile checks passed for touched recon/rollout/sidecar modules and tests.
-- `docker compose -f docker\docker-compose.yml --profile recon config --quiet` passed.
-- `collector_spiderfoot` was recreated and read back `WORKERS=2`, `THREADS=3`, `TIMEOUT=180`; container is healthy.
-- Live optional-rollout status now returns `can_proceed=true`, `recommended_action=advance_stage`, `candidate_count=100`, `stop_reason_count=0`, `gate_sources=spiderfoot,recon`.
-- Live recon queue after bounded run: completed 49, failed timeout 19, failed invalid target 1, in_progress 2, pending 53.
-- Website allow rule still works in-container: `https://*.com.sg`, `http://*.com.sg`, and `http://*.com` allow expected paths; `https://*.com` is not allowed; `/admin/` and suffix-bleed hosts are blocked.
-- Docker is ready with 35 containers up; all listed containers were healthy except `nebula-sync` at last snapshot.
+- `python -m compileall src\core\optional_rollout.py src\dashboard\api.py src\main.py src\notifications\realtime_feed.py` passed.
+- `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -p pytest_asyncio.plugin tests\notifications\test_realtime_feed.py tests\core\test_url_filter.py tests\core\test_optional_rollout.py tests\tools\test_browser_maintenance_scripts.py -q` passed 100 tests.
+- Compose config validation passed for Collector recon profile, main Pi-hole compose, and legacy nebula-sync compose.
+- Live env readback: website allowlist includes `https://*.com`; realtime global dedupe sources include `threads,lemon8`; cookie vault points at `host.docker.internal:9336`.
+- `collector_spiderfoot` and `realtime_feed` were recreated and are healthy with the new healthcheck timeouts.
+- Browser audit on port 9336: 8 page targets, 1 control tab, no blank tabs, one tab per platform; Threads is responsive with content script `1.23.70` running.
+- Ingest bridge is alive under load: `/health` returned 200, browser heartbeats returned 200, and logs show a Threads ingest batch saving 38/55 plus later `/social/ingest` 200s.
 
-Threads status:
-- Live DB has `threads_posts=14142`, `threads_posts_24h=943`, `threads_posts_1h=21`, `threads media_items=38027`, and `threads media_items_24h=3479`.
-- Threads source health is degraded: browser capture progress was over 3600s stale.
-- Browser audit before Chrome repair showed one Threads tab, tab budget OK, but Threads main-world CDP eval timed out and no content-script isolated world was detected.
-- Reloading the Threads tab did not restart capture. Restarting standard and recovered scraper Chrome profiles caused hung CDP endpoints on ports 9333/9334; the bad Chrome trees were killed to keep the machine usable. Next recovery should be an OS/user-session-level Chrome profile repair or clean scraper-profile relaunch once Windows releases the stuck CDP state.
-
-Operational notes:
-- Website policy text file remains `config/sources/website.url-policy.txt`. Use wildcard rules for normal domains/paths; regex rules are supported only as anchored `allow_regex:` / `block_regex:`.
-- SpiderFoot remains weak-lead only. Do not promote recon observations to identity truth without independent hard corroboration.
+Known caveats:
+- `ig_ingest` still has timeout spikes under load, especially revisit/DM endpoints, although it continues accepting heartbeats and ingest.
+- X still shows a recoverable `Try again`/blank shell; Threads, Instagram, TikTok, and Facebook had active content scripts in the final audit.
+- SpiderFoot is intentionally weak-lead recon only; failed/timeout targets are expected and should not block the whole rollout by themselves.

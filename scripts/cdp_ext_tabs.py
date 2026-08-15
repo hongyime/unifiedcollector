@@ -11,6 +11,7 @@ from typing import Any
 
 
 PRIMARY_EXTENSION_ID = "pkmdmcklnjdeocoeigmlakhomhhcpafb"
+KNOWN_EXTENSION_IDS = (PRIMARY_EXTENSION_ID, "nkeimhogjdpnpccoofpliimaahmaaome")
 
 
 def cdp_base() -> str:
@@ -61,20 +62,20 @@ def control_tab_targets() -> list[dict[str, Any]]:
 
 
 def primary_control_tab_targets() -> list[dict[str, Any]]:
-    primary_base = f"chrome-extension://{PRIMARY_EXTENSION_ID}/tabs.html"
+    bases = tuple(f"chrome-extension://{ext_id}/tabs.html" for ext_id in KNOWN_EXTENSION_IDS)
     return [
         target
         for target in control_tab_targets()
-        if str(target.get("url") or "").startswith(primary_base)
+        if str(target.get("url") or "").startswith(bases)
     ]
 
 
 def _control_rank(target: dict[str, Any]) -> tuple[int, int, str]:
     url = str(target.get("url") or "")
-    primary_base = f"chrome-extension://{PRIMARY_EXTENSION_ID}/tabs.html"
-    if url == primary_base:
+    primary_bases = tuple(f"chrome-extension://{ext_id}/tabs.html" for ext_id in KNOWN_EXTENSION_IDS)
+    if url == primary_bases[0]:
         primary = 0
-    elif url.startswith(primary_base):
+    elif url.startswith(primary_bases):
         primary = 1
     elif is_control_tab_url(url):
         primary = 2
@@ -119,7 +120,7 @@ def close_duplicate_control_tabs(keep_id: str | None = None) -> int:
 
 
 def open_or_activate_control_tab(settle_seconds: float = 0.0) -> dict[str, Any] | None:
-    target = preferred_control_tab(primary_only=True)
+    target = preferred_control_tab(primary_only=True) or preferred_control_tab(primary_only=False)
     if target and target.get("id"):
         try:
             activate_target(str(target["id"]))

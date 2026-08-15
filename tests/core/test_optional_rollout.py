@@ -104,6 +104,20 @@ async def test_optional_rollout_daily100_accepts_indicator_target_types():
 
 
 @pytest.mark.asyncio
+async def test_optional_rollout_daily500_raises_spiderfoot_candidate_cap():
+    conn = FakeConn(candidates=[
+        _candidate(target_type="user", target_key=f"user{i}", source="instagram")
+        for i in range(600)
+    ])
+
+    report = await optional_rollout_report(conn, feature="spiderfoot", stage="daily500")
+
+    assert report["target_cap"] == 500
+    assert report["candidate_count"] == 500
+    assert report["policy"]["target_cap"] == 500
+
+
+@pytest.mark.asyncio
 async def test_optional_rollout_stops_on_health_rate_and_malformed_events():
     conn = FakeConn(
         health=[{"source": "spiderfoot", "status": "degraded", "last_error": "timeout", "updated_at": None}],

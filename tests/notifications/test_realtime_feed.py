@@ -775,6 +775,136 @@ async def test_drain_allows_same_sha_from_different_sources(fake_redis, telegram
 
 
 @pytest.mark.asyncio
+async def test_drain_dedupes_same_public_media_from_threads_and_lemon8(
+    fake_redis,
+    telegram_stub,
+    monkeypatch,
+):
+    from src.notifications import realtime_feed
+
+    monkeypatch.setenv("REALTIME_POST_FEED_MAX_PER_MINUTE", "10")
+    monkeypatch.setenv("REALTIME_POST_FEED_SOURCE_SUMMARY", "0")
+
+    same_sha = "d" * 64
+    first = realtime_feed.build_payload(
+        source="threads", entity_name="following", content_id="threads_1",
+        file_path=None, source_url="https://threads.example/media.jpg",
+        sha256=same_sha, metadata={"caption": "same image"}, kind="image",
+        content_type="post_image",
+    )
+    second = realtime_feed.build_payload(
+        source="lemon8", entity_name="feed", content_id="lemon8_1",
+        file_path=None, source_url="https://lemon8.example/media.jpg",
+        sha256=same_sha, metadata={"caption": "same image"}, kind="image",
+        content_type="post_image",
+    )
+    await fake_redis.rpush("uc:realtime_post_feed", json.dumps(first))
+    await fake_redis.rpush("uc:realtime_post_feed", json.dumps(second))
+
+    drain = realtime_feed.RealtimeFeedDrain()
+    await drain._tick(fake_redis)
+    await drain._tick(fake_redis)
+
+    assert len(telegram_stub["send_photo"]) == 1
+    assert fake_redis.hashes["uc:realtime_post_feed:source_counters_total"]["threads:sent"] == "1"
+    assert fake_redis.hashes["uc:realtime_post_feed:source_counters_total"]["lemon8:deduped"] == "1"
+
+
+@pytest.mark.asyncio
+async def test_drain_dedupes_threads_synthetic_base_variants(
+    fake_redis,
+    telegram_stub,
+    monkeypatch,
+):
+    from src.notifications import realtime_feed
+
+    monkeypatch.setenv("REALTIME_POST_FEED_MAX_PER_MINUTE", "10")
+    monkeypatch.setenv("REALTIME_POST_FEED_SOURCE_SUMMARY", "0")
+
+    post_url = "https://www.threads.com/@alice/post/ABC"
+    first = realtime_feed.build_payload(
+        source="threads", entity_name="following", content_id="img_abc_111111111111",
+        file_path=None, source_url="https://threads-cdn.example/media/a-1.jpg?sig=one",
+        sha256="1" * 64, metadata={"caption": "same", "post_url": post_url},
+        kind="image", content_type="post_image",
+    )
+    second = realtime_feed.build_payload(
+        source="threads", entity_name="following", content_id="img_abc_222222222222",
+        file_path=None, source_url="https://threads-cdn.example/media/a-2.jpg?sig=two",
+        sha256="2" * 64, metadata={"caption": "same", "post_url": post_url},
+        kind="image", content_type="post_image",
+    )
+    await fake_redis.rpush("uc:realtime_post_feed", json.dumps(first))
+    await fake_redis.rpush("uc:realtime_post_feed", json.dumps(second))
+
+    drain = realtime_feed.RealtimeFeedDrain()
+    await drain._tick(fake_redis)
+    await drain._tick(fake_redis)
+
+    assert len(telegram_stub["send_photo"]) == 1
+    assert fake_redis.hashes["uc:realtime_post_feed:source_counters_total"]["threads:sent"] == "1"
+    assert fake_redis.hashes["uc:realtime_post_feed:source_counters_total"]["threads:deduped"] == "1"
+
+
+@pytest.mark.asyncio
+async def test_drain_allows_distinct_threads_base_ids_in_same_post(
+    fake_redis,
+    telegram_stub,
+    monkeypatch,
+):
+    from src.notifications import realtime_feed
+
+    monkeypatch.setenv("REALTIME_POST_FEED_MAX_PER_MINUTE", "10")
+    monkeypatch.setenv("REALTIME_POST_FEED_SOURCE_SUMMARY", "0")
+
+    post_url = "https://www.threads.com/@alice/post/ABC"
+    for base, sha in (("img_abc", "1" * 64), ("img_def", "2" * 64)):
+        payload = realtime_feed.build_payload(
+            source="threads", entity_name="following", content_id=f"{base}_111111111111",
+            file_path=None, source_url=f"https://threads-cdn.example/media/{base}.jpg",
+            sha256=sha, metadata={"caption": "same", "post_url": post_url},
+            kind="image", content_type="post_image",
+        )
+        await fake_redis.rpush("uc:realtime_post_feed", json.dumps(payload))
+
+    drain = realtime_feed.RealtimeFeedDrain()
+    await drain._tick(fake_redis)
+    await drain._tick(fake_redis)
+
+    assert len(telegram_stub["send_photo"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_drain_dedupes_lemon8_cdn_query_variants_without_sha_match(
+    fake_redis,
+    telegram_stub,
+    monkeypatch,
+):
+    from src.notifications import realtime_feed
+
+    monkeypatch.setenv("REALTIME_POST_FEED_MAX_PER_MINUTE", "10")
+    monkeypatch.setenv("REALTIME_POST_FEED_SOURCE_SUMMARY", "0")
+
+    for cid, sha, token in (("l1", "1" * 64, "one"), ("l2", "2" * 64, "two")):
+        payload = realtime_feed.build_payload(
+            source="lemon8", entity_name="feed", content_id=cid,
+            file_path=None,
+            source_url=f"https://p16-lemon8-sign-va.ibyteimg.com/tos-maliva/image.jpg?token={token}",
+            sha256=sha, metadata={"caption": "same"}, kind="image",
+            content_type="post_image",
+        )
+        await fake_redis.rpush("uc:realtime_post_feed", json.dumps(payload))
+
+    drain = realtime_feed.RealtimeFeedDrain()
+    await drain._tick(fake_redis)
+    await drain._tick(fake_redis)
+
+    assert len(telegram_stub["send_photo"]) == 1
+    assert fake_redis.hashes["uc:realtime_post_feed:source_counters_total"]["lemon8:sent"] == "1"
+    assert fake_redis.hashes["uc:realtime_post_feed:source_counters_total"]["lemon8:deduped"] == "1"
+
+
+@pytest.mark.asyncio
 async def test_drain_dedupes_same_source_different_content_ids_by_sha(fake_redis, telegram_stub, monkeypatch):
     from src.notifications import realtime_feed
 

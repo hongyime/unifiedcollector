@@ -1,6 +1,7 @@
 """Read ucLog & ucStatus via tabs.html chrome.storage (SW may be dormant)."""
 import io
 import json
+import os
 import sys
 import urllib.request
 
@@ -8,6 +9,8 @@ import websocket
 
 # Force UTF-8 stdout on Windows
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+CDP_PORT = os.getenv("UC_CHROME_CDP_PORT", "9333").strip() or "9333"
+CDP = os.getenv("UC_CHROME_CDP_URL", f"http://127.0.0.1:{CDP_PORT}").rstrip("/")
 
 
 def rpc(ws, request_id, method, params=None):
@@ -22,12 +25,12 @@ def rpc(ws, request_id, method, params=None):
 
 
 def main():
-    ts = json.loads(urllib.request.urlopen("http://127.0.0.1:9333/json/list").read())
+    ts = json.loads(urllib.request.urlopen(f"{CDP}/json/list").read())
     tabs = [t for t in ts if "tabs.html" in t.get("url", "")]
     if not tabs:
-        print("no tabs.html found; open chrome-extension://pkmdmcklnjdeocoeigmlakhomhhcpafb/tabs.html first")
+        print("no tabs.html found; open the UnifiedCollector extension tabs.html first")
         return
-    ws = websocket.create_connection(tabs[0]["webSocketDebuggerUrl"], timeout=10, origin="http://127.0.0.1:9333")
+    ws = websocket.create_connection(tabs[0]["webSocketDebuggerUrl"], timeout=10, origin=CDP)
     try:
         rpc(ws, 1, "Runtime.enable")
         expr = (

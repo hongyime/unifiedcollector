@@ -44,7 +44,7 @@ function Write-LoopStatus {
         checked_at = (Get-Date).ToString("o")
         state = $State
         detail = $Detail
-        cdp_url = "http://127.0.0.1:9333"
+        cdp_url = Get-LoopCdpUrl
         pid = $ChildPid
         last_terminal_state = $State
         loop = [ordered]@{
@@ -59,6 +59,19 @@ function Write-LoopStatus {
     } catch {
         Write-LoopLog ("could not write maintenance loop status: " + $_.Exception.Message)
     }
+}
+
+function Get-LoopCdpUrl {
+    $rawUrl = [Environment]::GetEnvironmentVariable("CHROME_CDP_URL")
+    if (-not [string]::IsNullOrWhiteSpace($rawUrl)) {
+        return $rawUrl.Trim()
+    }
+    $rawPort = [Environment]::GetEnvironmentVariable("UC_CHROME_CDP_PORT")
+    $parsedPort = 0
+    if ([int]::TryParse([string]$rawPort, [ref]$parsedPort) -and $parsedPort -gt 0) {
+        return "http://127.0.0.1:$parsedPort"
+    }
+    return "http://127.0.0.1:9333"
 }
 
 if (Test-Path -LiteralPath $pidPath) {
@@ -77,7 +90,7 @@ Set-Content -LiteralPath $pidPath -Value $PID
 Write-LoopLog "loop start pid=$PID interval=${IntervalMinutes}m initial_delay=${InitialDelaySeconds}s"
 
 try {
-    $passTimeoutSeconds = Get-LoopPositiveIntEnv "UC_BROWSER_MAINTENANCE_PASS_TIMEOUT_SECONDS" 1200
+    $passTimeoutSeconds = Get-LoopPositiveIntEnv "UC_BROWSER_MAINTENANCE_PASS_TIMEOUT_SECONDS" 420
     if ($InitialDelaySeconds -gt 0) {
         Write-LoopLog "sleeping initial delay ${InitialDelaySeconds}s"
         Start-Sleep -Seconds $InitialDelaySeconds
