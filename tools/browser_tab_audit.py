@@ -114,6 +114,14 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
+def _csv_env(name: str, default: str) -> set[str]:
+    return {
+        item.strip().lower()
+        for item in os.getenv(name, default).split(",")
+        if item.strip()
+    }
+
+
 def _cdp_tab_budget(pages: list[dict], grouped: dict[str, list[dict]]) -> dict:
     """CDP-visible tab budget check.
 
@@ -121,6 +129,7 @@ def _cdp_tab_budget(pages: list[dict], grouped: dict[str, list[dict]]) -> dict:
     control tabs are asserted by the extension service worker through chrome.tabs.
     """
     max_tabs = _int_env("UC_TAB_AUDIT_MAX_TABS_PER_PLATFORM", 1)
+    excluded_platforms = _csv_env("UC_TAB_AUDIT_EXCLUDED_PLATFORMS", "x")
     controls = [
         p for p in pages
         if EXTENSION_CONTROL_RE.match(str(p.get("url") or ""))
@@ -137,12 +146,13 @@ def _cdp_tab_budget(pages: list[dict], grouped: dict[str, list[dict]]) -> dict:
             "expected": 1,
         })
     for platform, tabs in sorted(grouped.items()):
-        if len(tabs) > max_tabs:
+        allowed = 0 if platform in excluded_platforms else max_tabs
+        if len(tabs) > allowed:
             violations.append({
                 "kind": "platform_tab_budget_exceeded",
                 "platform": platform,
                 "count": len(tabs),
-                "allowed": max_tabs,
+                "allowed": allowed,
             })
     if blanks:
         violations.append({
@@ -160,6 +170,7 @@ def _cdp_tab_budget(pages: list[dict], grouped: dict[str, list[dict]]) -> dict:
             "per_platform": {platform: len(tabs) for platform, tabs in sorted(grouped.items())},
         },
         "max_tabs_per_platform": max_tabs,
+        "excluded_platforms": sorted(excluded_platforms),
         "pinned_checked_by_extension": False,
     }
 

@@ -288,10 +288,18 @@ async function handleUrlActions() {
   const shouldRefreshTabs = params.get("refreshTabs") === "1";
   const shouldScrape = params.get("scrape") === "1";
   const shouldTest = params.get("test") === "1";
+  const expandedOverride = params.get("expanded");
   if (!shouldReload && !shouldOpenAll && !openIds.length && !shouldRefreshTabs && !shouldScrape && !shouldTest) return;
   try {
     history.replaceState(null, "", location.pathname);
   } catch (e) {}
+  if (expandedOverride === "0" || expandedOverride === "false" || expandedOverride === "off") {
+    expandedPlatformTabs = false;
+    await chrome.storage.local.set({ [EXPANDED_PLATFORM_TABS_KEY]: false });
+  } else if (expandedOverride === "1" || expandedOverride === "true" || expandedOverride === "on") {
+    expandedPlatformTabs = true;
+    await chrome.storage.local.set({ [EXPANDED_PLATFORM_TABS_KEY]: true });
+  }
   if (shouldReload) {
     await reloadExtension({
       force_open_all: shouldOpenAll,

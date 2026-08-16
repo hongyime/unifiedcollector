@@ -73,7 +73,7 @@ globalThis.UC_PLATFORMS = [
   // 2026-08-05. Keep one visible topic tab only; the headless Lemon8 collector
   // handles broader coverage without pinning extra Chrome tabs.
   { id: "lemon8",    label: "Lemon8",      url: "https://www.lemon8-app.com/topic/singapore?region=sg", host: "www.lemon8-app.com", cookieUrl: "https://www.lemon8-app.com",     cookie: "sessionid",  scraper: false, noLogin: true },
-  { id: "x",         label: "Twitter / X", url: "https://x.com/home",               host: "x.com",              aliasHosts: ["twitter.com"], cookieUrl: "https://x.com",                  cookie: "auth_token", scraper: true },
+  { id: "x",         label: "Twitter / X", url: "https://x.com/home",               host: "x.com",              aliasHosts: ["twitter.com"], cookieUrl: "https://x.com",                  cookie: "auth_token", scraper: false },
   { id: "facebook",  label: "Facebook",    url: "https://www.facebook.com/",        host: "www.facebook.com",   cookieUrl: "https://www.facebook.com",       cookie: "c_user",     scraper: true },
   { id: "strava",    label: "Strava",      url: "https://www.strava.com/dashboard", host: "www.strava.com",     cookieUrl: "https://www.strava.com",         cookie: "_strava4_session", scraper: true },
 ];
@@ -884,6 +884,7 @@ const _tpath = (u) => { try { return new URL(u).pathname.split("?")[0].replace(/
 const _mainWorldHookHostRe = /(^|\.)((instagram|tiktok|strava)\.com|threads\.com|x\.com|twitter\.com|facebook\.com)$/i;
 const SCRAPER_TABS_PINNED_KEY = "ucPinScraperTabs";
 const EXPANDED_PLATFORM_TABS_KEY = "ucOpenExpandedPlatformTabs";
+const AUTO_SCRAPER_PLATFORM_IDS = new Set(["instagram", "threads", "tiktok", "facebook", "strava"]);
 
 async function scraperTabsPinned() {
   try {
@@ -1685,7 +1686,9 @@ chrome.alarms.onAlarm.addListener(async (a) => {
 });
 
 // scraper hosts that have a content-script scraper
-function scraperPlatforms() { return (globalThis.UC_PLATFORMS || []).filter((p) => p.scraper); }
+function scraperPlatforms() {
+  return (globalThis.UC_PLATFORMS || []).filter((p) => p.scraper && AUTO_SCRAPER_PLATFORM_IDS.has(p.id));
+}
 function platformHosts(p) {
   return [p && p.host, ...((p && p.aliasHosts) || [])].filter(Boolean);
 }
@@ -2895,7 +2898,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
       case "openAll": {
         let opened = 0, focused = 0, errors = 0, first = true;
-        for (const p of globalThis.UC_PLATFORMS || []) {
+        for (const p of scraperPlatforms()) {
           const r = await openOrFocus(p, { active: first }); // focus the first so it's visible
           first = false;
           if (r.opened) opened++; else if (r.focused) focused++; else errors++;
@@ -2960,7 +2963,7 @@ async function consumeReloadIntent() {
     (async () => {
       const openIds = Array.isArray(intent.open_ids) ? intent.open_ids.slice(0, 20) : [];
       for (const id of openIds) {
-        const p = (globalThis.UC_PLATFORMS || []).find((x) => x.id === id);
+        const p = platformById(id);
         if (p) {
           await openOrFocus(p, { active: false }).catch((e) => log("warn", `reload intent open ${id} failed: ${e && e.message ? e.message : e}`));
           await _sleep(900);

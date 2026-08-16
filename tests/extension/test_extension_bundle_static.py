@@ -38,9 +38,31 @@ def test_x_twitter_alias_is_registered_for_tabs_and_background():
 
     assert 'aliasHosts: ["twitter.com"]' in background
     assert 'aliasHosts: ["twitter.com"]' in platforms
+    assert 'id: "x",' in background
+    assert 'id: "x",' in platforms
+    assert next(line for line in background.splitlines() if 'id: "x"' in line).rstrip().endswith("scraper: false },")
+    assert next(line for line in platforms.splitlines() if 'id: "x"' in line).rstrip().endswith("scraper: false },")
     assert "function platformHosts(p)" in background
     assert "function platformUrlPatterns(p)" in background
     assert "platformHosts(p).includes(host)" in background
+
+
+def test_x_is_not_auto_opened_by_scraper_tab_recovery():
+    background = _read("extension/background.js")
+    tabs_js = _read("extension/tabs.js")
+
+    assert 'const AUTO_SCRAPER_PLATFORM_IDS = new Set(["instagram", "threads", "tiktok", "facebook", "strava"])' in background
+    assert "p.scraper && AUTO_SCRAPER_PLATFORM_IDS.has(p.id)" in background
+    open_all_block = background.split('case "openAll":', 1)[1].split('case "refreshScraperTabs":', 1)[0]
+    reload_intent_block = background.split("const openIds = Array.isArray(intent.open_ids)", 1)[1].split(
+        "await runStartupRecovery",
+        1,
+    )[0]
+    assert "for (const p of scraperPlatforms())" in open_all_block
+    assert "globalThis.UC_PLATFORMS" not in open_all_block
+    assert "const p = platformById(id);" in reload_intent_block
+    assert 'const expandedOverride = params.get("expanded")' in tabs_js
+    assert "[EXPANDED_PLATFORM_TABS_KEY]: false" in tabs_js
 
 
 def test_lemon8_defaults_to_headless_collector_not_visible_scraper_tab():

@@ -362,14 +362,24 @@ function Open-ExtensionControlPage {
         }
         return $false
     }
-    foreach ($knownId in @(Get-KnownExtensionIds)) {
+    $primaryId = Get-PrimaryKnownExtensionId
+    $candidateIds = @($primaryId) + @(Get-KnownExtensionIds | Where-Object { $_ -ne $primaryId })
+    foreach ($knownId in $candidateIds) {
         $tabsUrl = "chrome-extension://$knownId/$TabsUrlPath"
         if (Try-OpenCdpTarget -Port $Port -Url $tabsUrl) {
             Start-Sleep -Seconds 2
+            $existingTargetId = Find-ExistingCdpTarget -Port $Port -Url $tabsUrl
             $extensionId = Get-ExtensionIdFromCdp $Port
-            if ($extensionId) {
+            if ($knownId -eq $primaryId -and $existingTargetId) {
+                Write-Host "Opened primary known extension control page: $tabsUrl"
+                return $true
+            }
+            if ($extensionId -and $extensionId -eq $knownId -and $existingTargetId) {
                 Write-Host "Opened extension control page via known id: $tabsUrl"
                 return $true
+            }
+            if ($extensionId -and $extensionId -ne $knownId) {
+                Write-Warning "Known extension id $knownId opened a control URL, but active extension is $extensionId; continuing fallback search"
             }
         }
     }
@@ -629,9 +639,12 @@ if ($FallbackOpenControlIfCleanupBlocked -and $OpenIds.Count -eq 0 -and -not $Op
 if ($OpenAll -and -not $NoOpenAll -and $OpenIds.Count -eq 0) {
     $tabsParams.Add("openAll=1")
 }
-if ($OpenIds.Count -gt 0 -and $NoOpenAll -and $FallbackOpenControlIfCleanupBlocked) {
+if ($OpenIds.Count -gt 0) {
     $encodedIds = @($OpenIds | ForEach-Object { [uri]::EscapeDataString([string]$_) }) -join ","
     $tabsParams.Add("open=$encodedIds")
+    if ([Environment]::GetEnvironmentVariable("UC_CHROME_OPEN_EXPANDED_PLATFORM_TABS") -ne "1") {
+        $tabsParams.Add("expanded=0")
+    }
 }
 if (-not $NoScrape) {
     $tabsParams.Add("scrape=1")
@@ -723,8 +736,10 @@ if ($null -eq $launchLock) {
 }
 
 $scraperProfileProcesses = @(Get-ScraperProfileChromeProcesses -UserDataDir $profile)
-if ($CloseExistingCdpProfile -and $scraperProfileProcesses.Count -gt 0) {
-    Stop-CdpProfileChrome -UserDataDir $profile -Port $RemoteDebuggingPort
+if ($CloseExistingCdpProfile) {
+    if ($scraperProfileProcesses.Count -gt 0) {
+        Stop-CdpProfileChrome -UserDataDir $profile -Port $RemoteDebuggingPort
+    }
     Clear-ChromeSessionRestore -UserDataDir $profile
     Start-Sleep -Seconds 2
 }

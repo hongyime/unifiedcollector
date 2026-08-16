@@ -6,7 +6,9 @@ Reads tmp/browser_tab_audit_result.json, decides which tabs need reload, and iss
 Page.reload on each with ignoreCache=false (soft reload). Tabs already healthy
 (cs=True cs_version=<extension/manifest.json version>) are skipped.
 
-`x` is expected to be healthy and skipped. Everything else gets reloaded.
+`x` is excluded from automatic maintenance by default. It stays manually
+openable, but the scraper profile should not keep it alive while X is in an
+operator-auth/page-shell state.
 """
 
 from __future__ import annotations
@@ -34,9 +36,19 @@ HARD_REOPEN_PLATFORMS = {
     p.strip().lower()
     for p in os.getenv(
         "UC_BROWSER_HARD_REOPEN_PLATFORMS",
-        "instagram,threads,tiktok,x,facebook,strava",
+        "instagram,threads,tiktok,facebook,strava",
     ).split(",")
     if p.strip()
+}
+EXCLUDED_AUTO_PLATFORMS = {
+    p.strip().lower()
+    for p in os.getenv("UC_BROWSER_EXCLUDED_PLATFORMS", "x").split(",")
+    if p.strip()
+}
+CLOSE_EXCLUDED_AUTO_PLATFORMS = os.getenv("UC_BROWSER_CLOSE_EXCLUDED_PLATFORM_TABS", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
 }
 EXPANDED_PLATFORM_TABS = os.getenv("UC_CHROME_OPEN_EXPANDED_PLATFORM_TABS", "0").strip().lower() in {
     "1",
@@ -72,6 +84,9 @@ HARD_REOPEN_URLS = {
     "strava": [
         "https://www.strava.com/dashboard",
     ],
+}
+PLATFORM_ALIAS_HOSTS = {
+    "x": {"twitter.com", "www.twitter.com"},
 }
 CLOSE_UNHEALTHY_DUPLICATES = os.getenv("UC_BROWSER_CLOSE_UNHEALTHY_DUPLICATES", "1").strip().lower() not in {
     "0",
@@ -112,6 +127,8 @@ def _open_url(url: str) -> tuple[bool, str]:
 def _decide_reload(tab: dict, target_version: str) -> tuple[bool, str]:
     platform = str(tab.get("platform") or "").lower()
     url = str(tab.get("url") or tab.get("url_snapshot") or "")
+    if platform in EXCLUDED_AUTO_PLATFORMS:
+        return False, f"{platform} excluded from automatic tab reload"
     if platform == "x" and not _is_canonical_x_recovery_url(url):
         return True, "x non-canonical recovery URL"
     if platform != "x" and platform in HARD_REOPEN_URLS and not _is_canonical_platform_url(platform, url):
@@ -141,6 +158,31 @@ def _is_canonical_x_recovery_url(url: str) -> bool:
     host = parsed.netloc.lower().split(":", 1)[0]
     path = parsed.path.rstrip("/") or "/"
     return host in {"x.com", "www.x.com"} and path in {"/home", "/explore"}
+
+
+def _hosts_for_platform(platform: str) -> set[str]:
+    hosts: set[str] = set(PLATFORM_ALIAS_HOSTS.get(platform, set()))
+    for candidate in HARD_REOPEN_URLS.get(platform, []):
+        try:
+            host = urllib.parse.urlparse(candidate).netloc.lower().split(":", 1)[0]
+        except Exception:
+            host = ""
+        if host:
+            hosts.add(host)
+    return hosts
+
+
+def _excluded_platform_for_url(url: str) -> str | None:
+    try:
+        host = urllib.parse.urlparse(str(url or "")).netloc.lower().split(":", 1)[0]
+    except Exception:
+        return None
+    if not host:
+        return None
+    for platform in EXCLUDED_AUTO_PLATFORMS:
+        if host in _hosts_for_platform(platform):
+            return platform
+    return None
 
 
 def _is_canonical_platform_url(platform: str, url: str) -> bool:
@@ -276,6 +318,44 @@ def _is_stuck_tab_reason(reason: str) -> bool:
     )
 
 
+def _append_live_excluded_target_closures(plan: list[dict]) -> None:
+    if not CLOSE_EXCLUDED_AUTO_PLATFORMS or not EXCLUDED_AUTO_PLATFORMS:
+        return
+    planned_ids = {
+        str(p.get("target_id"))
+        for p in plan
+        if p.get("target_id") is not None
+    }
+    try:
+        targets = _list_targets()
+    except Exception as exc:
+        print(f"  [WARN  ] live excluded tab sweep skipped: {exc}")
+        return
+    for target in targets:
+        if target.get("type") != "page":
+            continue
+        target_id = str(target.get("id") or "")
+        if not target_id or target_id in planned_ids:
+            continue
+        url = str(target.get("url") or "")
+        platform = _excluded_platform_for_url(url)
+        if not platform or _is_auth_wall(url):
+            continue
+        plan.append({
+            "platform": platform,
+            "target_id": target_id,
+            "url": url,
+            "ws": target.get("webSocketDebuggerUrl"),
+            "reason": f"{platform} live CDP target excluded from automatic browser maintenance",
+            "action": "close_excluded",
+            "auth_wall": False,
+            "heap_mb": None,
+            "cs": None,
+            "cs_version": None,
+            "responsive_main": None,
+        })
+
+
 def _hard_reopen_platform(platform: str, plans: list[dict]) -> list[dict]:
     results: list[dict] = []
     for p in plans:
@@ -359,8 +439,17 @@ def main():
             need, reason = _decide_reload(tab, target_version)
             url_for_check = tab.get("url") or tab.get("url_snapshot") or ""
             auth_wall = _is_auth_wall(url_for_check)
+            action = "reload" if need else "skip"
+            if (
+                CLOSE_EXCLUDED_AUTO_PLATFORMS
+                and str(plat).lower() in EXCLUDED_AUTO_PLATFORMS
+                and not auth_wall
+            ):
+                action = "close_excluded"
+                reason = f"{plat} excluded from automatic browser maintenance"
             if auth_wall:
                 need = False
+                action = "skip"
                 reason = f"auth-wall URL, skipping ({reason})"
             plan.append({
                 "platform": plat,
@@ -368,13 +457,14 @@ def main():
                 "url": url_for_check,
                 "ws": tab["ws"],
                 "reason": reason,
-                "action": "reload" if need else "skip",
+                "action": action,
                 "auth_wall": auth_wall,
                 "heap_mb": tab.get("heap_mb"),
                 "cs": tab.get("cs"),
                 "cs_version": tab.get("cs_version"),
                 "responsive_main": tab.get("responsive_main"),
             })
+    _append_live_excluded_target_closures(plan)
 
     hard_reopen_platforms: set[str] = set()
     hard_reopen_tabs: set[str] = set()
@@ -450,6 +540,8 @@ def main():
                 hard_reopen_tabs.add(str(p["target_id"]))
 
     for p in plan:
+        if p["action"] == "close_excluded":
+            continue
         marker = "RELOAD" if p["action"] == "reload" else "skip"
         print(f"  [{marker:6}] {p['platform']:10} {p['target_id'][:12]}  cs={p['cs']}  ver={p['cs_version']}  resp={p['responsive_main']}  heap={p['heap_mb']}  reason={p['reason']}")
         print(f"           url={p['url'][:100]}")
@@ -457,6 +549,14 @@ def main():
 
     print("# Executing reloads sequentially...")
     results = []
+    for p in plan:
+        if p["action"] != "close_excluded":
+            continue
+        ok, msg = _close_target(p["target_id"])
+        results.append({**p, "action": "close_excluded", "status": "ok" if ok else "fail", "detail": msg})
+        print(f"  close  {p['platform']:10} {p['target_id'][:12]} ... {'OK' if ok else 'FAIL'}: {msg[:160]}")
+        time.sleep(0.5)
+
     for platform in sorted(hard_reopen_platforms):
         platform_plans = [p for p in plan if p["platform"] == platform and not p["auth_wall"]]
         if not platform_plans:
@@ -510,6 +610,8 @@ def main():
         if str(p["target_id"]) in stale_auth_wall_close_tabs:
             continue
         if str(p["target_id"]) in duplicate_healthy_close_tabs:
+            continue
+        if p["action"] == "close_excluded":
             continue
         if p["action"] != "reload":
             results.append({**p, "status": "skipped"})

@@ -1,35 +1,36 @@
 # UnifiedCollector Agent State
 
-Updated: 2026-08-16 05:04 UTC / 2026-08-16 13:04 SGT
+Updated: 2026-08-16 07:18 UTC / 2026-08-16 15:18 SGT
 
-Current task status: Collector runtime hardening, dashboard status cleanup, GitHub quota pusher, realtime fallback bucketing, WhatsApp bridge health, ig_ingest lane isolation, and scraper-browser Threads recovery are implemented and live-verified. Dashboard and affected Collector services were recreated; dashboard is healthy with a larger DB pool and longer healthcheck timeout.
+Current task status: Browser self-heal, X containment, SpiderFoot daily100 gate application, and post-reboot service verification are implemented and live-verified. Collector changes are ready to commit/push.
 
 Implemented in this slice:
-- Dashboard `/health` now reports explicit `database_status`, `drive_status`, `vault.status`, and normalized backup states instead of vague Database/Vault/DB backup labels.
-- Dashboard health uses bounded DB acquire plus optional source/browser timeouts, so heavy backup or source diagnostics should degrade the payload instead of wedging the whole dashboard.
-- GitHub lowrisk worker now has quota pusher support and live env: enabled, target ratio `0.80`, max concurrency `12`, batch size `250`, HTTP timeout `20s`.
-- Realtime Telegram fallback tracking now records future fallback reason buckets and source+reason buckets; existing Redis counters remain by source until new fallbacks occur.
-- `ig_ingest` now has lane isolation for heartbeat/write/revisit/DM sample paths: heartbeat 16, write 4, revisit 2, DM sample 1.
-- WhatsApp bridge health now probes fallback host URLs and treats one ready bridge plus one waiting QR slot as partial/live, not a hard source failure.
-- X is classified as `external_auth_or_page_shell` and removed from browser-required recovery/default maintenance open sets; maintenance no longer reopens X by default.
-- Scraper Chrome/CDP defaults are on port `9336`, with launcher lock/state files and current critical scripts/tests updated to match.
-- Analyzer ignored `.env` was updated with the supplied Supabase API key aliases and password; Analyzer `analyzer` and `scheduler` containers both read the Supabase env.
+- UnifiedCollector Bridge extension bumped to `1.23.72`; X remains in the registry for manual/login access but is no longer a scraper-managed platform.
+- Browser auto-open/reload intent paths now use the auto-managed scraper list only: Instagram, Threads, TikTok, Facebook, and Strava.
+- Browser tab audit enforces X as an excluded platform with allowed count `0` by default.
+- Browser reload planner sweeps live excluded CDP targets even when the preceding audit misses them.
+- Chrome launcher prefers the primary extension id before historical fallback ids, so stale `nke...` control tabs do not count as success.
+- Maintenance skips whole-profile restarts for tab-health failures unless `UC_BROWSER_PROFILE_RESTART_ON_TAB_HEALTH` is explicitly enabled.
+- Maintenance loop still kills timed-out child processes but now defaults to `UC_BROWSER_MAINTENANCE_PASS_TIMEOUT_SECONDS=600`; the prior 300s default was too low under backup/social-tab load.
+- `dashboard`, `ig_ingest`, and `scheduler` were recreated with `UC_EXTENSION_EXPECTED_VERSION=1.23.72`.
+- SpiderFoot `daily100` rollout gate was applied after the live gate returned `can_proceed=true` and `stop_reasons=[]`; apply queued 100 targets, skipped 0.
 
 Verification completed:
-- Python compile passed for `src\dashboard\api.py`; focused pytest passed for dashboard and browser-maintenance script coverage.
-- Earlier focused compile/pytest, frontend `tsc --noEmit`, and Vite build passed for the broader Collector changes in this slice.
-- Compose config validation passed after the dashboard DB pool/healthcheck edits.
-- Recreated Collector `dashboard`, `collector_lowrisk`, `ig_ingest`, `realtime_feed`, and `watchdog`; dashboard is healthy.
-- Live `/health?include_storage=1&include_sources=1` returned `database_status=ok`, `drive_status=ok`, `vault_status=degraded`, `backup_status=backup_running`, 14 sources, and only WhatsApp partial pairing plus X external shell as source issues.
-- Live `/api-quotas/status` shows GitHub quota pusher enabled with target `0.8`, concurrency `12`, batch `250`, no transport block, and reason `idle_no_work` because pending GitHub spider work is currently 0.
-- Live `/media/realtime-feed/status` shows queue depth 0 and 82 historical local fallbacks by source: telegram 39, search 26, youtube 10, instagram 4, website 1, x 1, threads 1. Reason buckets will populate for new fallback events.
-- Live `ig_ingest /health` returned `ok=true`, DB pool ready, heartbeat/write/revisit/DM lane concurrency `16/4/2/1`.
-- Browser audit on `127.0.0.1:9336` now has one current extension control tab, no blank tabs, and one tab each for Instagram, Threads, TikTok, Facebook, and Strava; Threads, Instagram, Facebook, and Strava had content script `1.23.70` running.
-- Analyzer service-to-service readback from the Docker network (`http://analyzer:8002`) returned healthy API and Supabase export status configured with `write_method=postgres_direct`, `mode=postgres_direct`.
+- Focused tests passed: `tests\tools\test_browser_maintenance_scripts.py` and `tests\extension\test_extension_bundle_static.py`.
+- Compile/syntax checks passed: `python -m compileall tools\browser_tab_audit.py tools\browser_tab_reload.py`, `node --check extension\background.js`, `node --check extension\tabs.js`.
+- `docker compose -f docker\docker-compose.yml config --quiet` passed.
+- Live CDP audit on `127.0.0.1:9336` reports exactly one extension control tab, no blank tabs, one each for Instagram/Threads/TikTok/Facebook/Strava, X missing, and content script `1.23.72` on all managed tabs.
+- Browser maintenance status is `ok`; loop PID `21912` is alive with 10-minute interval and 300-second initial delay.
+- Docker is broadly healthy: Collector/Analyzer/Musicstream/Pi-hole containers are up; `dashboard`, `scheduler`, `realtime_feed`, `collector_spiderfoot`, and source collectors are healthy where healthchecks exist.
+- Dashboard `/health` reports `database_status=ok`, `drive_status=ok`, all 14 sources live, and no `source_issues`.
+- `ig_ingest /health` reports DB pool ready and heartbeat/write/revisit/DM lane concurrency `16/4/2/1`.
+- Realtime feed is available with queue depth 0; 82 local fallbacks are historical by source, with no reason buckets yet for old events.
+- GitHub quota pusher is enabled with target ratio `0.8`, concurrency `12`, batch `250`, `transport_blocked=false`, and `pending=0`.
+- Analyzer host `/api/health` is ok, and Supabase export status is `postgres_direct`, compact normalized rows only, with `ready_to_export=112`.
 
 Known caveats:
-- The Windows host port proxy for Analyzer `127.0.0.1:8002` currently returns empty replies even though the Analyzer app is healthy inside the container and reachable from other Docker containers as `http://analyzer:8002`; this appears to be Docker Desktop/Windows port-proxy state, not Supabase or Analyzer app failure.
-- Collector backup is actively running, and Postgres is under heavy load; dashboard now stays bounded, but ledger-style optional queries may still show `TimeoutError` while the dump/COPY workload is active.
-- Vault is writable/available but dashboard marks it `degraded` because artifact sidecar counts are partial or slow, not because vault writes are blocked.
-- WhatsApp is live through bridge 2; bridge 1 is still waiting for QR/session pairing. Scan bridge 1 only if that second WhatsApp account/device is expected.
-- X is intentionally not reopened by default because it was producing external shell/worker churn; treat it as operator-auth/page-shell work, not a blocker for Threads/Facebook browser capture.
+- Dashboard overall status remains `degraded` only because vault sidecar counts are partial/slow and DB backup is actively running; this is not a DB/drive/source failure.
+- Realtime delivery ledger can still show `TimeoutError` during the active DB backup, but the realtime queue itself is available and empty.
+- Dashboard browser source rows may briefly show older `1.23.71` heartbeats until the extension posts fresh browser heartbeats; live CDP audit is the current source of truth for `1.23.72`.
+- WhatsApp is collecting through bridge 2; bridge 1 is waiting for QR/session pairing and only needs action if a second WhatsApp device is expected.
+- SpiderFoot remains weak-lead/passive only. A follow-up gate read after apply briefly timed out while backup load was active, then a retry returned `advance_stage` with no stop reasons.

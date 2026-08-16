@@ -625,6 +625,36 @@ function Get-AuditTabWallDetail($Tab) {
     return "page_health=recoverable_error_shell, reason=$reason, url=$url, sample=$sample"
 }
 
+function Get-RequiredAuditPlatforms {
+    $knownPlatforms = @("instagram", "threads", "tiktok", "x", "facebook", "strava")
+    $defaultPlatforms = @("instagram", "threads", "tiktok", "facebook", "strava")
+    $raw = [Environment]::GetEnvironmentVariable("UC_BROWSER_REQUIRED_PLATFORMS")
+    if ([string]::IsNullOrWhiteSpace($raw)) {
+        return $defaultPlatforms
+    }
+    $seen = @{}
+    $platforms = @()
+    foreach ($item in ($raw -split ",")) {
+        $platform = $item.Trim().ToLowerInvariant()
+        if (-not $platform) {
+            continue
+        }
+        if ($knownPlatforms -notcontains $platform) {
+            Write-Log "ignoring unknown browser required platform: $platform"
+            continue
+        }
+        if (-not $seen.ContainsKey($platform)) {
+            $seen[$platform] = $true
+            $platforms += $platform
+        }
+    }
+    if ($platforms.Count -eq 0) {
+        Write-Log "UC_BROWSER_REQUIRED_PLATFORMS did not contain any known platforms; using default required platforms"
+        return $defaultPlatforms
+    }
+    return $platforms
+}
+
 function Get-AuditHealth {
     $auditPath = Join-Path $tmp "browser_tab_audit_result.json"
     if (-not (Test-Path -LiteralPath $auditPath)) {
@@ -645,7 +675,7 @@ function Get-AuditHealth {
             unhealthy = @("could not parse audit result: $($_.Exception.Message)")
         }
     }
-    $platforms = @("instagram", "threads", "tiktok", "x", "facebook", "strava")
+    $platforms = @(Get-RequiredAuditPlatforms)
     $healthy = 0
     $total = 0
     $unhealthy = @()
@@ -685,6 +715,22 @@ function Get-AuditHealth {
             $unhealthy += "${platform}: $($good.Count)/$($tabs.Count) healthy; first_bad resp=$($sample.responsive_main), cs=$($sample.cs), running=$($sample.cs_running), $reason"
         }
     }
+    if ($auditJson.PSObject.Properties.Name -contains "_tab_budget") {
+        $budget = $auditJson._tab_budget
+        if ($null -ne $budget -and $budget.ok -eq $false) {
+            foreach ($violation in @($budget.violations)) {
+                $kind = [string]$violation.kind
+                $platform = [string]$violation.platform
+                $count = [string]$violation.count
+                $allowed = [string]$violation.allowed
+                $detail = "tab_budget: kind=$kind"
+                if ($platform) { $detail += ", platform=$platform" }
+                if ($count) { $detail += ", count=$count" }
+                if ($allowed) { $detail += ", allowed=$allowed" }
+                $unhealthy += $detail
+            }
+        }
+    }
     # Default to all expected platform groups. A lower env override is still
     # available for manual degraded operation, but normal boot/self-heal must
     # not report success while a collector tab is missing its content script.
@@ -704,8 +750,8 @@ function Test-AuditHealthNeedsProfileRestart($AuditHealth) {
         return $false
     }
     $restartSetting = [Environment]::GetEnvironmentVariable("UC_BROWSER_PROFILE_RESTART_ON_TAB_HEALTH")
-    if (-not [string]::IsNullOrWhiteSpace($restartSetting) -and $restartSetting.Trim().ToLowerInvariant() -in @("0", "false", "no", "off")) {
-        Write-Log "browser tab maintenance degraded: profile restart on tab-health failure is disabled by environment"
+    if ([string]::IsNullOrWhiteSpace($restartSetting) -or $restartSetting.Trim().ToLowerInvariant() -notin @("1", "true", "yes", "on")) {
+        Write-Log "browser tab maintenance degraded: profile restart on tab-health failure is not explicitly enabled"
         return $false
     }
     $minUnhealthyForRestart = Get-PositiveIntEnv "UC_BROWSER_PROFILE_RESTART_MIN_UNHEALTHY_PLATFORMS" 1
@@ -716,6 +762,13 @@ function Test-AuditHealthNeedsProfileRestart($AuditHealth) {
     }
     $items = @($AuditHealth.unhealthy)
     if ($items.Count -gt 0) {
+        $nonBudgetItems = @($items | Where-Object {
+            -not ([string]$_).StartsWith("tab_budget:")
+        })
+        if ($nonBudgetItems.Count -eq 0) {
+            Write-Log "browser tab maintenance degraded: tab budget is still violated after targeted cleanup; skipping profile restart"
+            return $false
+        }
         $nonXExternalShell = @($items | Where-Object {
             $text = [string]$_
             -not ($text -match "^x:" -and $text -match "page_health=recoverable_error_shell")

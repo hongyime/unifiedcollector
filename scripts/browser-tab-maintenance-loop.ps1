@@ -61,6 +61,68 @@ function Write-LoopStatus {
     }
 }
 
+function Set-StatusProperty {
+    param(
+        [object]$Status,
+        [string]$Name,
+        [object]$Value
+    )
+    if ($Status -is [System.Collections.IDictionary]) {
+        $Status[$Name] = $Value
+    } else {
+        $Status | Add-Member -NotePropertyName $Name -NotePropertyValue $Value -Force
+    }
+}
+
+function Update-LoopStatusMetadata {
+    param(
+        [string]$Detail,
+        [int]$ChildPid
+    )
+    try {
+        if (Test-Path -LiteralPath $statusPath) {
+            $status = Get-Content -LiteralPath $statusPath -Raw | ConvertFrom-Json
+        } else {
+            $status = [ordered]@{
+                checked_at = (Get-Date).ToString("o")
+                state = "running"
+                detail = $Detail
+                cdp_url = Get-LoopCdpUrl
+                pid = $ChildPid
+                last_terminal_state = "running"
+            }
+        }
+        Set-StatusProperty $status "checked_at" (Get-Date).ToString("o")
+        Set-StatusProperty $status "pid" $ChildPid
+        Set-StatusProperty $status "loop" ([ordered]@{
+            pid_path = $pidPath
+            pid = $PID
+            alive = $true
+            detail = $Detail
+        })
+        $status | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $statusPath
+    } catch {
+        Write-LoopLog ("could not update maintenance loop metadata: " + $_.Exception.Message)
+    }
+}
+
+function Stop-MaintenanceChildProcess {
+    param([int]$ChildPid)
+    if ($ChildPid -le 0) {
+        return
+    }
+    try {
+        $taskkillOutput = & "$env:SystemRoot\System32\taskkill.exe" /PID $ChildPid /F /T 2>&1
+        $taskkillExitCode = $LASTEXITCODE
+        if ($taskkillExitCode -ne 0) {
+            $detail = (($taskkillOutput | Select-Object -First 3) -join " ").Trim()
+            Write-LoopLog "taskkill failed for maintenance child pid=${ChildPid} exit=${taskkillExitCode}: $detail"
+        }
+    } catch {
+        Write-LoopLog ("taskkill failed for maintenance child pid=${ChildPid}: " + $_.Exception.Message)
+    }
+}
+
 function Get-LoopCdpUrl {
     $rawUrl = [Environment]::GetEnvironmentVariable("CHROME_CDP_URL")
     if (-not [string]::IsNullOrWhiteSpace($rawUrl)) {
@@ -88,9 +150,10 @@ if (Test-Path -LiteralPath $pidPath) {
 
 Set-Content -LiteralPath $pidPath -Value $PID
 Write-LoopLog "loop start pid=$PID interval=${IntervalMinutes}m initial_delay=${InitialDelaySeconds}s"
+Update-LoopStatusMetadata "maintenance loop is running" 0
 
 try {
-    $passTimeoutSeconds = Get-LoopPositiveIntEnv "UC_BROWSER_MAINTENANCE_PASS_TIMEOUT_SECONDS" 420
+    $passTimeoutSeconds = Get-LoopPositiveIntEnv "UC_BROWSER_MAINTENANCE_PASS_TIMEOUT_SECONDS" 600
     if ($InitialDelaySeconds -gt 0) {
         Write-LoopLog "sleeping initial delay ${InitialDelaySeconds}s"
         Start-Sleep -Seconds $InitialDelaySeconds
@@ -105,10 +168,12 @@ try {
                 $maintenance
             ) -WindowStyle Hidden -PassThru
             Write-LoopLog "maintenance pass pid=$($child.Id) timeout=${passTimeoutSeconds}s"
+            Update-LoopStatusMetadata "maintenance loop running child pass" $child.Id
             $timeoutMilliseconds = [Math]::Max(60000, $passTimeoutSeconds * 1000)
             if (-not $child.WaitForExit($timeoutMilliseconds)) {
                 Write-LoopLog "maintenance pass timed out after ${passTimeoutSeconds}s; terminating pid=$($child.Id)"
                 Stop-Process -Id $child.Id -Force -ErrorAction SilentlyContinue
+                Stop-MaintenanceChildProcess -ChildPid $child.Id
                 Write-LoopStatus "failed" "maintenance pass timed out after ${passTimeoutSeconds}s" $child.Id
                 Start-Sleep -Seconds ([Math]::Max(60, $IntervalMinutes * 60))
                 continue
@@ -116,10 +181,13 @@ try {
             $exitCode = $child.ExitCode
             if ($exitCode -eq 0) {
                 Write-LoopLog "maintenance pass exit=0"
+                Update-LoopStatusMetadata "maintenance loop sleeping after successful pass" $child.Id
             } elseif ($exitCode -eq 3) {
                 Write-LoopLog "maintenance pass degraded: Chrome CDP unavailable"
+                Update-LoopStatusMetadata "maintenance loop sleeping after CDP-unavailable pass" $child.Id
             } else {
                 Write-LoopLog "maintenance pass exit=$exitCode"
+                Update-LoopStatusMetadata "maintenance loop sleeping after nonzero pass" $child.Id
             }
         } catch {
             Write-LoopLog ("maintenance pass failed: " + $_.Exception.Message)

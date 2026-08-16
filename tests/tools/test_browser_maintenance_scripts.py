@@ -35,7 +35,8 @@ def test_chrome_cdp_launcher_uses_robust_startup_flags():
     assert "function Get-UnsafeVisibleChromeWindows" in script
     assert "only UnifiedCollector control windows are visible" in script
     assert "$scraperProfileProcesses = @(Get-ScraperProfileChromeProcesses -UserDataDir $profile)" in script
-    assert "if ($CloseExistingCdpProfile -and $scraperProfileProcesses.Count -gt 0)" in script
+    assert "if ($CloseExistingCdpProfile)" in script
+    assert "if ($scraperProfileProcesses.Count -gt 0)" in script
     assert "$profileProcesses = @(Get-ScraperProfileChromeProcesses -UserDataDir $UserDataDir)" in script
     assert "A failed Chrome startup can keep the scraper profile open" in script
     assert "UC_CHROME_OPEN_TARGET_TIMEOUT_SECONDS" in script
@@ -145,6 +146,8 @@ def test_chrome_cdp_launcher_discovers_extension_id_from_cdp():
     assert '$knownIds -contains $match.Groups[1].Value' in script
     assert "nkeimhogjdpnpccoofpliimaahmaaome" in script
     assert 'chrome-extension://$(Get-PrimaryKnownExtensionId)/$tabsUrlPath' in script
+    assert "Opened primary known extension control page" in script
+    assert "$extensionId -and $extensionId -eq $knownId -and $existingTargetId" in script
     assert '"about:blank"' in script
     assert "chrome-extension://$extensionId/$TabsUrlPath" in script
     assert "Opened extension control page" in script
@@ -187,10 +190,25 @@ def test_browser_tab_audit_has_hard_tab_budget_assertion():
     script = (REPO_ROOT / "tools" / "browser_tab_audit.py").read_text(encoding="utf-8")
 
     assert "UC_TAB_AUDIT_FAIL_ON_BUDGET" in script
+    assert "UC_TAB_AUDIT_EXCLUDED_PLATFORMS" in script
+    assert '_csv_env("UC_TAB_AUDIT_EXCLUDED_PLATFORMS", "x")' in script
+    assert '"allowed": allowed' in script
     assert "extension_control_tab_count" in script
     assert "platform_tab_budget_exceeded" in script
     assert "blank_startup_tabs" in script
     assert 'results["_tab_budget"]' in script
+
+
+def test_browser_tab_reload_sweeps_live_excluded_platform_targets():
+    script = (REPO_ROOT / "tools" / "browser_tab_reload.py").read_text(encoding="utf-8")
+
+    assert "PLATFORM_ALIAS_HOSTS" in script
+    assert '"x": {"twitter.com", "www.twitter.com"}' in script
+    assert "def _excluded_platform_for_url" in script
+    assert "def _append_live_excluded_target_closures" in script
+    assert "_append_live_excluded_target_closures(plan)" in script
+    assert '"action": "close_excluded"' in script
+    assert "live CDP target excluded from automatic browser maintenance" in script
 
 
 def test_browser_tab_reload_treats_disappeared_targets_as_skips():
@@ -302,10 +320,14 @@ def test_browser_tab_reload_hard_reopens_repeatedly_stuck_tiktok_tabs():
     script = (REPO_ROOT / "tools" / "browser_tab_reload.py").read_text(encoding="utf-8")
 
     assert "UC_BROWSER_HARD_REOPEN_PLATFORMS" in script
+    assert "UC_BROWSER_EXCLUDED_PLATFORMS" in script
+    assert "UC_BROWSER_CLOSE_EXCLUDED_PLATFORM_TABS" in script
     assert "EXPANDED_PLATFORM_TABS" in script
     assert "UC_CHROME_OPEN_EXPANDED_PLATFORM_TABS" in script
     assert "UC_BROWSER_EXPANDED_PLATFORM_TABS" in script
-    assert '"instagram,threads,tiktok,x,facebook,strava"' in script
+    assert '"instagram,threads,tiktok,facebook,strava"' in script
+    assert 'os.getenv("UC_BROWSER_EXCLUDED_PLATFORMS", "x")' in script
+    assert '"close_excluded"' in script
     assert '"https://www.tiktok.com/following"' in script
     assert '"https://www.tiktok.com/foryou"' in script
     assert '"https://www.tiktok.com/explore"' in script
@@ -385,6 +407,8 @@ def test_chrome_cdp_launcher_opens_requested_platform_urls_directly():
     assert 'strava = "https://www.strava.com/dashboard"' in script
     assert "$platforms.Keys -contains $id" in script
     assert "Open-RequestedPlatformTabs -Port $RemoteDebuggingPort" in script
+    assert '$tabsParams.Add("open=$encodedIds")' in script
+    assert '$tabsParams.Add("expanded=0")' in script
 
 
 def test_chrome_cdp_launcher_directly_opens_requested_platforms_after_control():
@@ -440,11 +464,15 @@ def test_browser_maintenance_loop_bounds_child_pass_runtime():
     script = _read_script("browser-tab-maintenance-loop.ps1")
 
     assert "UC_BROWSER_MAINTENANCE_PASS_TIMEOUT_SECONDS" in script
+    assert 'Get-LoopPositiveIntEnv "UC_BROWSER_MAINTENANCE_PASS_TIMEOUT_SECONDS" 600' in script
     assert 'Start-Process -FilePath "powershell.exe"' in script
     assert "-WindowStyle Hidden -PassThru" in script
     assert "$child.WaitForExit($timeoutMilliseconds)" in script
     assert "maintenance pass timed out after ${passTimeoutSeconds}s" in script
     assert "Stop-Process -Id $child.Id -Force" in script
+    assert "function Stop-MaintenanceChildProcess" in script
+    assert 'taskkill.exe" /PID $ChildPid /F /T' in script
+    assert "Update-LoopStatusMetadata" in script
     assert 'Write-LoopStatus "failed" "maintenance pass timed out after ${passTimeoutSeconds}s" $child.Id' in script
 
 
@@ -513,6 +541,10 @@ def test_browser_maintenance_restarts_dedicated_profile_when_tabs_stay_unhealthy
     script = _read_script("browser-tab-maintenance.ps1")
 
     assert "function Get-AuditHealth" in script
+    assert "function Get-RequiredAuditPlatforms" in script
+    assert '"UC_BROWSER_REQUIRED_PLATFORMS"' in script
+    assert '@("instagram", "threads", "tiktok", "facebook", "strava")' in script
+    assert '$knownPlatforms = @("instagram", "threads", "tiktok", "x", "facebook", "strava")' in script
     assert "UC_BROWSER_MIN_HEALTHY_PLATFORMS" in script
     assert 'Get-PositiveIntEnv "UC_BROWSER_MIN_HEALTHY_PLATFORMS" $platforms.Count' in script
     assert "function Test-AuthWallUrl" in script
@@ -520,6 +552,8 @@ def test_browser_maintenance_restarts_dedicated_profile_when_tabs_stay_unhealthy
     assert "function Test-AuditTabContentWall" in script
     assert "page_health_status" in script
     assert "recoverable_error_shell" in script
+    assert "tab_budget:" in script
+    assert "tab budget is still violated after targeted cleanup; skipping profile restart" in script
     assert "/i/flow/login" in script
     assert "redirect_after_login" in script
     assert "-not (Test-AuthWallUrl (Get-AuditTabUrl $_))" in script
@@ -540,7 +574,7 @@ def test_browser_maintenance_restarts_dedicated_profile_when_tabs_stay_unhealthy
     assert "browser tab audit still unhealthy after second reload" in script
     assert "function Test-AuditHealthNeedsProfileRestart" in script
     assert "UC_BROWSER_PROFILE_RESTART_ON_TAB_HEALTH" in script
-    assert "profile restart on tab-health failure is disabled by environment" in script
+    assert "profile restart on tab-health failure is not explicitly enabled" in script
     assert "UC_BROWSER_PROFILE_RESTART_MIN_UNHEALTHY_PLATFORMS" in script
     assert 'Get-PositiveIntEnv "UC_BROWSER_PROFILE_RESTART_MIN_UNHEALTHY_PLATFORMS" 1' in script
     assert "below profile restart threshold" in script
