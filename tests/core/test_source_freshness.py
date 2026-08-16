@@ -663,6 +663,7 @@ async def test_recoverable_error_shell_probe_does_not_mask_stale_browser_content
     assert rows[0]["status"] == "degraded"
     assert rows[0]["age_seconds"] == 9000
     assert rows[0]["browser_content_stale"] is True
+    assert rows[0]["browser_health_status"] == "external_auth_or_page_shell"
     assert rows[0]["browser_content_at"] is None
     assert "browser content progress is 9000s old" in rows[0]["detail"]
 

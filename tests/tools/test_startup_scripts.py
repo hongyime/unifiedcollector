@@ -73,7 +73,7 @@ def test_boot_verifier_checks_reboot_critical_surfaces():
     assert "function Test-WhatsAppBridgeWaitingForPairing" in script
     assert "whatsapp bridge readiness" in script
     assert "ready=$readyCount/$($bridgeStates.Count)" in script
-    assert "http://127.0.0.1:9333" in script
+    assert "http://127.0.0.1:9336" in script
     assert "Z:\\unifiedcollector\\backups\\db" in script
     assert "BackupFreshHours" in script
     assert "ActiveBackupFreshMinutes" in script

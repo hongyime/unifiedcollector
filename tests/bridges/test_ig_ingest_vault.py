@@ -120,6 +120,37 @@ def test_download_headers_include_platform_referers():
     assert ig_ingest._download_headers("x", "https://pbs.twimg.com/media/x.jpg", {})["Referer"] == "https://x.com/"
 
 
+def test_social_ingest_lanes_classify_fast_and_write_paths():
+    assert ig_ingest._social_ingest_lane_for_path("/health") is None
+    assert ig_ingest._social_ingest_lane_for_path("/social/browser-heartbeat") == "heartbeat"
+    assert ig_ingest._social_ingest_lane_for_path("/social/ingest") == "write"
+    assert ig_ingest._social_ingest_lane_for_path("/social/browser-revisit-target") == "revisit"
+    assert ig_ingest._social_ingest_lane_for_path("/social/dm-sample") == "dm_sample"
+
+
+@pytest.mark.asyncio
+async def test_social_ingest_lane_middleware_returns_busy_retry(monkeypatch):
+    monkeypatch.setattr(ig_ingest, "SOCIAL_INGEST_LANE_WAIT_SECONDS", 0.01)
+    sem = asyncio.Semaphore(1)
+    await sem.acquire()
+    request = SimpleNamespace(
+        method="POST",
+        path="/social/ingest",
+        app={"write_lane_sem": sem},
+    )
+
+    async def handler(_request):
+        raise AssertionError("handler should not run when lane is full")
+
+    response = await ig_ingest.lane_isolation_middleware(request, handler)
+    sem.release()
+    body = json.loads(response.text)
+
+    assert response.status == 503
+    assert body["error"] == "busy_retry"
+    assert body["lane"] == "write"
+
+
 def test_startup_db_prep_mutates_holder_not_frozen_app_keys(monkeypatch):
     pool = _FakePool()
 

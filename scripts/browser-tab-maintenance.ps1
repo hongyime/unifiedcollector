@@ -6,7 +6,7 @@ $log = Join-Path $tmp "browser_tab_maintenance.log"
 $statusPath = Join-Path $tmp "browser_tab_maintenance_status.json"
 $loopPidPath = Join-Path $tmp "browser_tab_maintenance_loop.pid"
 $script:LastCdpError = $null
-$script:CdpPort = 9333
+$script:CdpPort = 9336
 $envCdpPort = [Environment]::GetEnvironmentVariable("UC_CHROME_CDP_PORT")
 $parsedCdpPort = 0
 if ([int]::TryParse($envCdpPort, [ref]$parsedCdpPort) -and $parsedCdpPort -gt 0) {
@@ -116,11 +116,11 @@ function Get-ChromeCdpDiagnostics {
     if ($withCdp.Count -gt 0) {
         $reason = "chrome_cdp_available"
         $hint = "Chrome CDP is reachable. If browser heartbeats are stale, reload platform tabs or the UnifiedCollector extension control page."
-        $repairCommand = "$(Get-ChromeLauncherBaseCommand) -RemoteDebuggingPort $script:CdpPort -IsolateExtensions -NoOpenAll -OpenIds instagram,tiktok,x,threads,facebook,strava -NoTest"
+        $repairCommand = "$(Get-ChromeLauncherBaseCommand) -RemoteDebuggingPort $script:CdpPort -IsolateExtensions -NoOpenAll -OpenIds instagram,tiktok,threads,facebook,strava -NoTest"
         if ($script:LastCdpError) {
             $reason = "chrome_cdp_process_unreachable"
             if ($unsafeVisibleWindows.Count -eq 0) {
-                $repairCommand = "$(Get-ChromeLauncherBaseCommand) -RemoteDebuggingPort $script:CdpPort -IsolateExtensions -CloseExistingCdpProfile -CloseExistingIfNoVisibleWindows -NoOpenAll -OpenIds instagram,tiktok,x,threads,facebook,strava -NoTest"
+                $repairCommand = "$(Get-ChromeLauncherBaseCommand) -RemoteDebuggingPort $script:CdpPort -IsolateExtensions -CloseExistingCdpProfile -CloseExistingIfNoVisibleWindows -NoOpenAll -OpenIds instagram,tiktok,threads,facebook,strava -NoTest"
                 $hint = "Chrome has no unsafe visible windows and the CDP socket is unreachable. The maintenance task can close collector-controlled Chrome windows/processes and relaunch Chrome with CDP."
             } else {
                 $hint = "Chrome has a CDP command line, but the CDP socket is unreachable. Save/finish visible browser work, close Chrome normally, then run scripts\start-scraper-chrome-cdp.ps1."
@@ -128,12 +128,12 @@ function Get-ChromeCdpDiagnostics {
         }
     } elseif ($processes.Count -eq 0) {
         $reason = "chrome_not_running"
-        $repairCommand = "$(Get-ChromeLauncherBaseCommand) -RemoteDebuggingPort $script:CdpPort -IsolateExtensions -NoOpenAll -OpenIds instagram,tiktok,x,threads,facebook,strava -NoTest"
+        $repairCommand = "$(Get-ChromeLauncherBaseCommand) -RemoteDebuggingPort $script:CdpPort -IsolateExtensions -NoOpenAll -OpenIds instagram,tiktok,threads,facebook,strava -NoTest"
         $hint = "Chrome is not running. The maintenance task can relaunch scraper Chrome with CDP and the UnifiedCollector extension."
     } elseif ($withCdp.Count -eq 0) {
         $reason = "chrome_running_without_cdp"
         if ($unsafeVisibleWindows.Count -eq 0) {
-            $repairCommand = "$(Get-ChromeLauncherBaseCommand) -RemoteDebuggingPort $script:CdpPort -IsolateExtensions -CloseExistingIfNoVisibleWindows -NoOpenAll -OpenIds instagram,tiktok,x,threads,facebook,strava -NoTest"
+            $repairCommand = "$(Get-ChromeLauncherBaseCommand) -RemoteDebuggingPort $script:CdpPort -IsolateExtensions -CloseExistingIfNoVisibleWindows -NoOpenAll -OpenIds instagram,tiktok,threads,facebook,strava -NoTest"
             $hint = "Chrome has no unsafe visible windows and no CDP. The maintenance task can close collector-controlled Chrome windows/processes and relaunch scraper Chrome with CDP."
         } else {
             $hint = "Chrome has visible windows but was not launched with --remote-debugging-port=$script:CdpPort. Do not use -CloseExistingIfNoVisibleWindows; save/finish browser work, close Chrome normally, then run scripts\start-scraper-chrome-cdp.ps1 so tab maintenance and cookie backup can reconnect."
@@ -181,7 +181,7 @@ function Get-LoopStatus {
     }
 }
 
-function Write-Status([string]$state, [string]$detail = "", [object]$diagnostics = $null) {
+function Write-Status([string]$state, [string]$detail = "", [object]$diagnostics = $null, [string]$RepairAction = "") {
     if ($null -eq $diagnostics) {
         $diagnostics = Get-ChromeCdpDiagnostics
     }
@@ -222,15 +222,33 @@ function Write-Status([string]$state, [string]$detail = "", [object]$diagnostics
             $checkedAt
         }
     }
+    $lastRepairAction = if ($RepairAction) {
+        $RepairAction
+    } elseif ($previous -and $previous.last_repair_action) {
+        [string]$previous.last_repair_action
+    } else {
+        ""
+    }
+    $lastRepairAt = if ($RepairAction) {
+        $checkedAt
+    } elseif ($previous -and $previous.last_repair_at) {
+        [string]$previous.last_repair_at
+    } else {
+        $null
+    }
     $payload = [ordered]@{
         checked_at = $checkedAt
         state = $state
         detail = $detail
+        cdp_port = $script:CdpPort
         cdp_url = "http://127.0.0.1:$script:CdpPort"
         audit_result = (Join-Path $tmp "browser_tab_audit_result.json")
         reload_plan = (Join-Path $tmp "browser_tab_reload_plan.json")
+        scraper_chrome_state = (Join-Path $tmp "scraper_chrome_state.json")
         pid = $PID
         last_terminal_state = $terminalState
+        last_repair_action = $lastRepairAction
+        last_repair_at = $lastRepairAt
         consecutive_cdp_unavailable_count = $consecutiveCdpUnavailable
         cdp_unavailable_since = $cdpUnavailableSince
         loop = Get-LoopStatus
@@ -440,7 +458,7 @@ function Invoke-ChromeCdpRepair {
     }
     if ($reason -eq "chrome_not_running") {
         Write-Log "Chrome CDP repair: relaunching scraper Chrome because Chrome is not running"
-        Invoke-ChromeLauncher -Launcher $launcher -Arguments @("-RemoteDebuggingPort", "$script:CdpPort", "-IsolateExtensions", "-NoOpenAll", "-OpenIds", "instagram,tiktok,x,threads,facebook,strava", "-NoTest") | Out-Null
+        Invoke-ChromeLauncher -Launcher $launcher -Arguments @("-RemoteDebuggingPort", "$script:CdpPort", "-IsolateExtensions", "-NoOpenAll", "-OpenIds", "instagram,tiktok,threads,facebook,strava", "-NoTest") | Out-Null
         return (Test-CdpAvailable)
     }
     $unsafeVisibleWindowCount = 0
@@ -451,12 +469,12 @@ function Invoke-ChromeCdpRepair {
     }
     if ($reason -eq "chrome_running_without_cdp" -and $unsafeVisibleWindowCount -eq 0) {
         Write-Log "Chrome CDP repair: closing collector-controlled Chrome and relaunching scraper Chrome with CDP"
-        Invoke-ChromeLauncher -Launcher $launcher -Arguments @("-RemoteDebuggingPort", "$script:CdpPort", "-IsolateExtensions", "-CloseExistingCdpProfile", "-CloseExistingIfNoVisibleWindows", "-NoOpenAll", "-OpenIds", "instagram,tiktok,x,threads,facebook,strava", "-NoTest") | Out-Null
+        Invoke-ChromeLauncher -Launcher $launcher -Arguments @("-RemoteDebuggingPort", "$script:CdpPort", "-IsolateExtensions", "-CloseExistingCdpProfile", "-CloseExistingIfNoVisibleWindows", "-NoOpenAll", "-OpenIds", "instagram,tiktok,threads,facebook,strava", "-NoTest") | Out-Null
         return (Test-CdpAvailable)
     }
     if ($reason -eq "chrome_cdp_process_unreachable" -and $unsafeVisibleWindowCount -eq 0) {
         Write-Log "Chrome CDP repair: closing collector-controlled unreachable CDP Chrome and relaunching scraper Chrome"
-        Invoke-ChromeLauncher -Launcher $launcher -Arguments @("-RemoteDebuggingPort", "$script:CdpPort", "-IsolateExtensions", "-CloseExistingCdpProfile", "-CloseExistingIfNoVisibleWindows", "-NoOpenAll", "-OpenIds", "instagram,tiktok,x,threads,facebook,strava", "-NoTest") | Out-Null
+        Invoke-ChromeLauncher -Launcher $launcher -Arguments @("-RemoteDebuggingPort", "$script:CdpPort", "-IsolateExtensions", "-CloseExistingCdpProfile", "-CloseExistingIfNoVisibleWindows", "-NoOpenAll", "-OpenIds", "instagram,tiktok,threads,facebook,strava", "-NoTest") | Out-Null
         return (Test-CdpAvailable)
     }
     Write-Log "Chrome CDP repair skipped for reason=$reason visible_windows=$($Diagnostics.chrome_visible_window_count)"
@@ -696,6 +714,17 @@ function Test-AuditHealthNeedsProfileRestart($AuditHealth) {
         Write-Log "browser tab maintenance degraded: $unhealthyCount unhealthy platform(s), below profile restart threshold $minUnhealthyForRestart"
         return $false
     }
+    $items = @($AuditHealth.unhealthy)
+    if ($items.Count -gt 0) {
+        $nonXExternalShell = @($items | Where-Object {
+            $text = [string]$_
+            -not ($text -match "^x:" -and $text -match "page_health=recoverable_error_shell")
+        })
+        if ($nonXExternalShell.Count -eq 0) {
+            Write-Log "browser tab maintenance degraded: X external auth/page shell is contained; skipping profile restart"
+            return $false
+        }
+    }
     return $true
 }
 
@@ -720,7 +749,7 @@ function Invoke-ScraperChromeProfileRestart {
     $launcher = Join-Path $repo "scripts\start-scraper-chrome-cdp.ps1"
     Write-Log "browser tab maintenance escalation: restarting dedicated scraper Chrome profile"
     try {
-        Invoke-ChromeLauncher -Launcher $launcher -Arguments @("-RemoteDebuggingPort", "$script:CdpPort", "-IsolateExtensions", "-CloseExistingCdpProfile", "-CloseExistingIfNoVisibleWindows", "-NoOpenAll", "-OpenIds", "instagram,tiktok,x,threads,facebook,strava", "-NoTest") | Out-Null
+        Invoke-ChromeLauncher -Launcher $launcher -Arguments @("-RemoteDebuggingPort", "$script:CdpPort", "-IsolateExtensions", "-CloseExistingCdpProfile", "-CloseExistingIfNoVisibleWindows", "-NoOpenAll", "-OpenIds", "instagram,tiktok,threads,facebook,strava", "-NoTest") | Out-Null
     } catch {
         Write-Log ("dedicated scraper Chrome profile restart command failed: " + $_.Exception.Message)
     }
@@ -816,13 +845,13 @@ try {
             Ensure-ExtensionControlTab | Out-Null
             Invoke-CdpPageTargetCleanup -Passes 3 -DelaySeconds 1
             Write-Log "browser tab maintenance degraded: manual platform auth is required; skipping profile restart"
-            Write-Status "degraded" "browser tab requires manual platform auth"
+            Write-Status "degraded" "browser tab requires manual platform auth" $null "manual_auth_required"
             exit 4
         }
         if (-not (Test-AuditHealthNeedsProfileRestart $auditHealth)) {
             Ensure-ExtensionControlTab | Out-Null
             Invoke-CdpPageTargetCleanup -Passes 3 -DelaySeconds 1
-            Write-Status "degraded" "browser extension tabs unhealthy after targeted reload; skipped profile restart"
+            Write-Status "degraded" "browser extension tabs unhealthy after targeted reload; skipped profile restart" $null "targeted_reload"
             exit 4
         }
         if (Invoke-ScraperChromeProfileRestart) {
@@ -834,13 +863,13 @@ try {
     }
     if (-not $auditHealth.ok) {
         Write-Log ("browser tab maintenance degraded after profile restart: " + (($auditHealth.unhealthy) -join " | "))
-        Write-Status "degraded" "browser extension tabs unhealthy after reload/profile restart"
+        Write-Status "degraded" "browser extension tabs unhealthy after reload/profile restart" $null "profile_restart"
         exit 4
     }
     Ensure-ExtensionControlTab | Out-Null
     Invoke-CdpPageTargetCleanup -Passes 3 -DelaySeconds 1
     Write-Log "browser tab maintenance complete"
-    Write-Status "ok" "audit and reload completed"
+    Write-Status "ok" "audit and reload completed" $null "targeted_reload"
 } catch {
     Write-Log ("browser tab maintenance failed: " + $_.Exception.Message)
     Write-Status "failed" $_.Exception.Message

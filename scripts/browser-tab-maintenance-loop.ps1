@@ -71,7 +71,7 @@ function Get-LoopCdpUrl {
     if ([int]::TryParse([string]$rawPort, [ref]$parsedPort) -and $parsedPort -gt 0) {
         return "http://127.0.0.1:$parsedPort"
     }
-    return "http://127.0.0.1:9333"
+    return "http://127.0.0.1:9336"
 }
 
 if (Test-Path -LiteralPath $pidPath) {

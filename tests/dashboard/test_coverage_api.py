@@ -12,6 +12,27 @@ os.environ.setdefault("DASHBOARD_ADMIN_PASSWORD", "x")
 from src.dashboard import api as dashboard_api  # noqa: E402
 
 
+def test_health_normalizes_storage_skip_and_backup_states():
+    skipped = dashboard_api._normalize_backup_health_payload(  # noqa: SLF001
+        {"status": "skipped"},
+        include_storage=False,
+    )
+    missing = dashboard_api._normalize_backup_health_payload(  # noqa: SLF001
+        {"status": "missing", "in_progress": False},
+        include_storage=True,
+    )
+    running = dashboard_api._normalize_backup_health_payload(  # noqa: SLF001
+        {"status": "refreshing", "in_progress": True},
+        include_storage=True,
+    )
+
+    assert skipped["status"] == "skipped_by_config"
+    assert missing["status"] == "missing_restorable_dump"
+    assert running["status"] == "backup_running"
+    assert dashboard_api._vault_health_status({"available": False}, include_storage=True) == "blocked"  # noqa: SLF001
+    assert dashboard_api._vault_health_status({"available": True, "writable": True, "counts_error": "TimeoutError"}, include_storage=True) == "degraded"  # noqa: SLF001
+
+
 class _Acquire:
     def __init__(self, conn: "_FakeConn"):
         self.conn = conn
@@ -428,7 +449,8 @@ async def test_media_realtime_feed_status_returns_safe_counts(monkeypatch):
             "failed_depth": 0,
             "local_fallback_total": 3,
             "local_fallback_by_source": {"youtube": 2, "telegram": 1},
-            "local_fallback_last": {"source": "youtube", "target_name": "big.mp4"},
+            "local_fallback_by_reason": {"too_large": 2, "telegram_error": 1},
+            "local_fallback_last": {"source": "youtube", "target_name": "big.mp4", "reason_bucket": "too_large"},
             "source_counters": {"youtube": {"sent": 4, "local_fallback": 2}},
         }
 
@@ -436,6 +458,7 @@ async def test_media_realtime_feed_status_returns_safe_counts(monkeypatch):
         return {
             "available": True,
             "status_counts": {"delivered": 2, "too_large": 1},
+            "reason_counts": {"too_large": 2},
             "by_source": [{"source": "youtube", "too_large": 1}],
             "latest": [],
         }
@@ -447,9 +470,11 @@ async def test_media_realtime_feed_status_returns_safe_counts(monkeypatch):
 
     assert result["local_fallback_total"] == 3
     assert result["local_fallback_by_source"]["youtube"] == 2
+    assert result["local_fallback_by_reason"]["too_large"] == 2
     assert result["local_fallback_last"]["target_name"] == "big.mp4"
     assert result["source_counters"]["youtube"]["local_fallback"] == 2
     assert result["delivery_ledger"]["status_counts"]["too_large"] == 1
+    assert result["delivery_ledger"]["reason_counts"]["too_large"] == 2
 
 
 @pytest.mark.asyncio
@@ -615,6 +640,8 @@ async def test_api_quotas_status_reports_snapshots_and_progress(monkeypatch):
     assert result["snapshots"][0]["metadata"]["endpoint"] == "search.list"
     assert result["account_quota_usage"][0]["requests_today"] == 100
     assert result["progress"]["github"]["queues"]["spider"]["pending"] == 2
+    assert result["progress"]["github"]["quota_pusher"]["reason"] == "quota_fill_active"
+    assert result["progress"]["github"]["quota_pusher"]["batch_size"] == 250
     assert result["progress"]["github"]["tables"]["commits"] == 5
     assert result["progress"]["youtube"]["queues"]["profile"]["resolved"] == 4
     assert result["progress"]["youtube"]["videos"]["total"] == 12

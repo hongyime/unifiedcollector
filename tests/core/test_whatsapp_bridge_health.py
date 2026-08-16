@@ -75,6 +75,32 @@ def test_whatsapp_bridge_summary_reports_partial_if_only_some_slots_ready():
     assert "scan the waiting slot only if you expect another WhatsApp account/device" in summary["detail"]
 
 
+def test_whatsapp_bridge_summary_counts_empty_fresh_qr_slot_as_partial():
+    summary = summarize_whatsapp_bridge_health([
+        {
+            "bridge": "1",
+            "ok": True,
+            "status": "waiting_for_fresh_qr",
+            "whatsapp_ready": False,
+            "needs_scan": True,
+            "auth_state": {"note": "creds_json_empty_scan_required"},
+        },
+        {
+            "bridge": "2",
+            "ok": True,
+            "status": "ready",
+            "whatsapp_ready": True,
+            "connected": True,
+            "session_name": "session_2",
+        },
+    ])
+
+    assert summary["status"] == "partial"
+    assert summary["ready_count"] == 1
+    assert summary["waiting_count"] == 1
+    assert "empty slot" in summary["detail"]
+
+
 def test_whatsapp_bridge_summary_reports_paired_when_all_slots_ready():
     summary = summarize_whatsapp_bridge_health([
         {"bridge": "1", "ok": True, "status": "ready", "whatsapp_ready": True, "phone_number": "111"},

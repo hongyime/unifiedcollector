@@ -214,6 +214,22 @@ class GithubCollector(BaseCollector):
         self._api_transport_event_min_interval = self._env_float_min(
             "GITHUB_API_TRANSPORT_EVENT_MIN_INTERVAL_SECONDS", "900", lower=0.0
         )
+        self._api_timeout_seconds = self._env_float_min(
+            "GITHUB_HTTP_TIMEOUT_SECONDS", "20", lower=1.0
+        )
+        self._quota_pusher_enabled = self._env_bool("GITHUB_QUOTA_PUSHER_ENABLED", True)
+        self._quota_pusher_target_ratio = self._env_float_range(
+            "GITHUB_QUOTA_PUSHER_TARGET_RATIO", "0.80", lower=0.5, upper=0.95
+        )
+        self._quota_pusher_max_concurrent = self._env_int_range(
+            "GITHUB_QUOTA_PUSHER_MAX_CONCURRENT", "12", lower=1, upper=12
+        )
+        self._quota_pusher_batch_size = self._env_int_range(
+            "GITHUB_QUOTA_PUSHER_BATCH_SIZE", "250", lower=1, upper=1000
+        )
+        self._quota_pusher_transport_block_seconds = self._env_int_range(
+            "GITHUB_QUOTA_PUSHER_TRANSPORT_BLOCK_SECONDS", "900", lower=0, upper=86400
+        )
         self._transport_event_last: dict[str, float] = {}
         self._download_delay = float(os.getenv("GITHUB_DOWNLOAD_DELAY", "0.5"))
         # FAMOUS-FILTER (Bryan): skip repos at/above this star count and (optionally)
@@ -302,6 +318,13 @@ class GithubCollector(BaseCollector):
         except (TypeError, ValueError):
             value = float(default)
         return min(upper, max(lower, value))
+
+    @staticmethod
+    def _env_bool(name: str, default: bool) -> bool:
+        raw = os.getenv(name)
+        if raw is None:
+            return default
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
 
     @staticmethod
     def _env_limit(name: str, default: str = "0") -> int | None:
@@ -577,12 +600,12 @@ class GithubCollector(BaseCollector):
         """
         if self._use_tor:
             try:
-                proxied = tor_proxy.get_proxied_client("github", timeout=30.0)
+                proxied = tor_proxy.get_proxied_client("github", timeout=self._api_timeout_seconds)
                 # Return the underlying httpx.AsyncClient — context-manager-able.
                 return proxied.httpx_client
             except Exception:  # noqa: BLE001
                 logger.warning("tor proxy unavailable; falling back to direct", exc_info=True)
-        return httpx.AsyncClient(timeout=30, follow_redirects=True)
+        return httpx.AsyncClient(timeout=self._api_timeout_seconds, follow_redirects=True)
 
     # ---- low-level API -------------------------------------------------
 
@@ -1210,6 +1233,123 @@ class GithubCollector(BaseCollector):
             concurrency=int(os.getenv("GITHUB_SPIDER_CONCURRENCY", "4")),
         )
 
+    async def _github_spider_pending_count(self) -> int:
+        if self.pool is None:
+            return 0
+        try:
+            async with self.pool.acquire() as conn:
+                return int(await conn.fetchval(
+                    """
+                    SELECT COUNT(*)::bigint
+                    FROM github_spider_queue
+                    WHERE status = 'pending' AND priority <= $1
+                    """,
+                    self._spider_depth,
+                ) or 0)
+        except Exception:  # noqa: BLE001 - quota pusher must not break normal collection
+            logger.debug("github quota pusher pending-count lookup failed", exc_info=True)
+            return 0
+
+    async def _github_recent_transport_blocked(self) -> bool:
+        if self.pool is None or self._quota_pusher_transport_block_seconds <= 0:
+            return False
+        try:
+            async with self.pool.acquire() as conn:
+                return bool(await conn.fetchval(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM collector_operational_events
+                        WHERE source = 'github'
+                          AND event_type = 'api_transport_exhausted'
+                          AND created_at >= now() - ($1::int * interval '1 second')
+                    )
+                    """,
+                    self._quota_pusher_transport_block_seconds,
+                ))
+        except Exception:  # noqa: BLE001
+            return False
+
+    async def _quota_pusher_status(self) -> dict[str, Any]:
+        pending = await self._github_spider_pending_count()
+        status: dict[str, Any] = {
+            "enabled": self._quota_pusher_enabled,
+            "target_ratio": self._quota_pusher_target_ratio,
+            "max_concurrent": self._quota_pusher_max_concurrent,
+            "batch_size": self._quota_pusher_batch_size,
+            "pending": pending,
+            "reason": "disabled",
+        }
+        if not self._quota_pusher_enabled:
+            return status
+        if pending <= 0:
+            status["reason"] = "idle_no_work"
+            return status
+        if await self._github_recent_transport_blocked():
+            status["reason"] = "transport_blocked"
+            return status
+        rows = []
+        try:
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT DISTINCT ON (account)
+                           account, used_units, quota_units, target_units, paused, updated_at
+                    FROM collector_api_quota_snapshots
+                    WHERE service = 'github'
+                      AND bucket = 'core_hour'
+                      AND updated_at >= now() - interval '2 hours'
+                    ORDER BY account, updated_at DESC
+                    """,
+                )
+        except Exception:  # noqa: BLE001 - missing table means bootstrap with available work
+            rows = []
+        if not rows:
+            status["reason"] = "quota_fill_active"
+            return status
+        accounts = []
+        below_target = False
+        for row in rows:
+            quota_units = int(row["quota_units"] or 0)
+            used_units = int(row["used_units"] or 0)
+            target = max(1, int(quota_units * self._quota_pusher_target_ratio)) if quota_units > 0 else int(row["target_units"] or 0)
+            paused = bool(row["paused"])
+            accounts.append({
+                "account": row["account"],
+                "used_units": used_units,
+                "quota_units": quota_units,
+                "target_units": target,
+                "paused": paused,
+            })
+            if quota_units > 0 and not paused and used_units < target:
+                below_target = True
+        status["accounts"] = accounts
+        status["reason"] = "quota_fill_active" if below_target else "target_reached"
+        return status
+
+    async def _run_quota_pusher_spider(self) -> None:
+        status = await self._quota_pusher_status()
+        logger.info(
+            "github quota pusher status: reason=%s pending=%s target_ratio=%.2f batch=%d max_concurrent=%d",
+            status.get("reason"),
+            status.get("pending"),
+            self._quota_pusher_target_ratio,
+            self._quota_pusher_batch_size,
+            self._quota_pusher_max_concurrent,
+        )
+        if status.get("reason") != "quota_fill_active":
+            return
+        previous_sem = self._sem
+        self._sem = asyncio.Semaphore(self._quota_pusher_max_concurrent)
+        try:
+            await self._process_spider_queue(
+                batch_size=self._quota_pusher_batch_size,
+                concurrency=self._quota_pusher_max_concurrent,
+                mode="quota_pusher",
+            )
+        finally:
+            self._sem = previous_sem
+
     # ===================================================================
     # Original collector interface — preserved
     # ===================================================================
@@ -1244,8 +1384,15 @@ class GithubCollector(BaseCollector):
 
         if os.getenv("GITHUB_SPIDER_ENABLED", "true").lower() == "true":
             await self._process_spider_queue()
+            await self._run_quota_pusher_spider()
 
-    async def _process_spider_queue(self):
+    async def _process_spider_queue(
+        self,
+        *,
+        batch_size: int | None = None,
+        concurrency: int | None = None,
+        mode: str = "normal",
+    ):
         """Drain N pending rows from ``github_spider_queue`` per tick.
 
         Parallelised via ``GITHUB_SPIDER_CONCURRENCY`` workers racing on
@@ -1253,12 +1400,13 @@ class GithubCollector(BaseCollector):
         sleeps the per-user delay, then loops.
         """
         await refresh_account_proximity_cache(self.pool)
-        spider_concurrency = int(os.getenv("GITHUB_SPIDER_CONCURRENCY", "4"))
+        batch_limit = int(batch_size if batch_size is not None else self._spider_batch_size)
+        spider_concurrency = int(concurrency if concurrency is not None else os.getenv("GITHUB_SPIDER_CONCURRENCY", "4"))
         processed_counter = {"n": 0}
 
         async def _drain_worker(worker_id: int, client: httpx.AsyncClient):
             while (
-                processed_counter["n"] < self._spider_batch_size
+                processed_counter["n"] < batch_limit
                 and not self._stop.is_set()
             ):
                 async with self.pool.acquire() as conn:
@@ -1307,7 +1455,7 @@ class GithubCollector(BaseCollector):
                 logger.info(
                     "Spider drain w=%d: processing %s/%s (depth=%d, %d/%d)",
                     worker_id, ttype, tid, depth,
-                    slot, self._spider_batch_size,
+                    slot, batch_limit,
                 )
                 try:
                     if ttype == "user":
@@ -1352,8 +1500,8 @@ class GithubCollector(BaseCollector):
                 return_exceptions=True,
             )
             logger.info(
-                "Spider drain tick complete: processed=%d (workers=%d)",
-                processed_counter["n"], spider_concurrency,
+                "Spider drain tick complete: mode=%s processed=%d (workers=%d)",
+                mode, processed_counter["n"], spider_concurrency,
             )
 
     async def _enqueue_neighbors(

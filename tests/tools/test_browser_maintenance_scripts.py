@@ -11,7 +11,7 @@ def _read_script(name: str) -> str:
 def test_chrome_cdp_launcher_uses_robust_startup_flags():
     script = _read_script("start-scraper-chrome-cdp.ps1")
 
-    assert "[int]$RemoteDebuggingPort = 9333" in script
+    assert "[int]$RemoteDebuggingPort = 9336" in script
     assert "--disable-dev-shm-usage" in script
     assert "--remote-debugging-address=0.0.0.0" in script
     assert "--remote-allow-origins=*" in script
@@ -41,6 +41,9 @@ def test_chrome_cdp_launcher_uses_robust_startup_flags():
     assert "UC_CHROME_OPEN_TARGET_TIMEOUT_SECONDS" in script
     assert "UC_CHROME_OPEN_EXPANDED_PLATFORM_TABS" in script
     assert "$delayMs = 1200" in script
+    assert "scraper_chrome_launch.lock" in script
+    assert "scraper_chrome_state.json" in script
+    assert "launch_skipped_lock_busy_reused_cdp" in script
 
 
 def test_chrome_cdp_launcher_prefers_extension_capable_chromium():
@@ -167,7 +170,7 @@ def test_browser_tab_audit_accepts_dynamic_extension_worlds():
     assert 'os.getenv("UC_EXTENSION_ID"' in script
     assert 'origin.startswith("chrome-extension://")' in script
     assert "UC_CHROME_CDP_PORT" in script
-    assert "'9333'" in script
+    assert "'9336'" in script
     assert "iso_ctx_ids: list[int]" in script
     assert "if p.get(\"cs\") is True:" in script
     assert "out[\"iso_context_id\"]" in script
@@ -195,7 +198,7 @@ def test_browser_tab_reload_treats_disappeared_targets_as_skips():
 
     assert "import os" in script
     assert "UC_CHROME_CDP_PORT" in script
-    assert "'9333'" in script
+    assert "'9336'" in script
     assert "def _target_disappeared" in script
     assert '"no such target" in text' in script
     assert '"target_disappeared"' in script
@@ -246,6 +249,8 @@ def test_browser_tab_maintenance_closes_duplicate_cdp_page_targets():
     assert '[string]::IsNullOrWhiteSpace([string]$_.url)' in script
     assert '[string]$_.url -eq "chrome://newtab/"' in script
     assert "minimal tab cleanup while waiting for mutex failed" in script
+    assert "last_repair_action" in script
+    assert "X external auth/page shell is contained" in script
     assert '[string]$_.url -eq "chrome-extension://$primaryId/tabs.html"' in script
     assert '$keepId = if ($keep.Count -gt 0)' in script
     assert '^chrome-extension://pkmdmcklnjdeocoeigmlakhomhhcpafb/tabs\\.html' in script
@@ -459,7 +464,7 @@ def test_browser_maintenance_repairs_missing_chrome():
     assert "collector-controlled unreachable CDP Chrome" in script
     assert "-FallbackOpenControlIfCleanupBlocked" not in script
     assert "-IsolateExtensions" in script
-    assert "-OpenIds instagram,tiktok,x,threads,facebook,strava" in script
+    assert "-OpenIds instagram,tiktok,threads,facebook,strava" in script
     assert "Chrome CDP repair succeeded; continuing maintenance pass" in script
     assert "chrome_cdp_available" in script
 

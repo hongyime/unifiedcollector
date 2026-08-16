@@ -31,7 +31,7 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 CDP_HOST = os.getenv(
     "UC_CHROME_CDP_URL",
-    f"http://127.0.0.1:{os.getenv('UC_CHROME_CDP_PORT', '9333')}",
+    f"http://127.0.0.1:{os.getenv('UC_CHROME_CDP_PORT', '9336')}",
 )
 EXT_ID = os.getenv("UC_EXTENSION_ID", "pkmdmcklnjdeocoeigmlakhomhhcpafb")
 REPO_ROOT = Path(__file__).resolve().parents[1]

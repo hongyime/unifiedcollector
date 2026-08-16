@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 _DAY = 86400
 _BROWSER_HEARTBEAT_SOURCES = ("instagram", "tiktok", "lemon8", "threads", "facebook", "x", "strava")
 _BROWSER_CONTENT_PROGRESS_SOURCES = ("instagram", "tiktok", "lemon8", "threads", "facebook", "x")
-_BROWSER_REQUIRED_SOURCES = ("threads", "facebook", "x")
+_BROWSER_REQUIRED_SOURCES = ("threads", "facebook")
 _BROWSER_HYBRID_SOURCES = ("instagram", "tiktok", "lemon8")
 _X_ZERO_PROGRESS_PROBES = (
     "no_dom_media_candidates",
@@ -28,6 +28,14 @@ _X_ZERO_PROGRESS_PROBES = (
     "x_blank_spa_shell",
     "x_no_status_links",
 )
+_X_EXTERNAL_SHELL_REASONS = {
+    "try_again_empty_state",
+    "something_went_wrong",
+    "no_internet_connection",
+    "failed_script_url",
+    "x_blank_spa_shell",
+    "x_no_status_links",
+}
 
 STRAVA_PROGRESS_QUERY = """
 SELECT extract(epoch FROM now()-max(ts))
@@ -190,6 +198,26 @@ def _watchdog_marker(error: str | None) -> bool:
     return lowered.startswith("browser capture stalled:") and (
         "watchdog" in lowered or "browser media yield warning:" in lowered
     )
+
+
+def _x_external_auth_or_page_shell(
+    browser_url: str | None,
+    browser_health_status: str | None,
+    browser_health_reason: str | None,
+) -> bool:
+    url_lc = str(browser_url or "").lower()
+    if "x.com" not in url_lc and "twitter.com" not in url_lc:
+        return False
+    if (
+        "/i/flow/login" in url_lc
+        or "/i/jf/onboarding" in url_lc
+        or "mode=login" in url_lc
+        or "logout=" in url_lc
+    ):
+        return True
+    status_lc = str(browser_health_status or "").lower()
+    reason_lc = str(browser_health_reason or "").lower()
+    return status_lc == "recoverable_error_shell" and reason_lc in _X_EXTERNAL_SHELL_REASONS
 
 
 def _age_seconds(value, now: datetime) -> float | None:
@@ -561,6 +589,16 @@ async def compute_liveness(conn) -> list[dict]:
                 detail = yield_detail
             else:
                 detail = f"{detail}; {yield_detail}"
+        browser_url = browser_heartbeat.get("url") if browser_heartbeat else None
+        browser_health_status = browser_heartbeat.get("health_status") if browser_heartbeat else None
+        browser_health_reason = browser_heartbeat.get("health_reason") if browser_heartbeat else None
+        if name == "x" and _x_external_auth_or_page_shell(
+            browser_url,
+            browser_health_status,
+            browser_health_reason,
+        ):
+            browser_health_status = "external_auth_or_page_shell"
+            browser_health_reason = browser_health_reason or "x_external_auth_or_page_shell"
         out.append({
             "source": name,
             "status": status,
@@ -584,15 +622,9 @@ async def compute_liveness(conn) -> list[dict]:
             "browser_extension_version": (
                 browser_heartbeat.get("extension_version") if browser_heartbeat else None
             ),
-            "browser_url": (
-                browser_heartbeat.get("url") if browser_heartbeat else None
-            ),
-            "browser_health_status": (
-                browser_heartbeat.get("health_status") if browser_heartbeat else None
-            ),
-            "browser_health_reason": (
-                browser_heartbeat.get("health_reason") if browser_heartbeat else None
-            ),
+            "browser_url": browser_url,
+            "browser_health_status": browser_health_status,
+            "browser_health_reason": browser_health_reason,
             "browser_content_at": (
                 browser_content.get("last_content_at") if browser_content else None
             ),

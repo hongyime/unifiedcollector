@@ -93,6 +93,8 @@ _COLLECTORS_LIVE_CACHE: dict[str, object] = {"ts": 0.0, "payload": None}
 _COLLECTORS_LIVE_CACHE_TTL_SECONDS = int(os.getenv("COLLECTORS_LIVE_CACHE_TTL_SECONDS", "15"))
 _COLLECTORS_LIVE_STALE_SECONDS = int(os.getenv("COLLECTORS_LIVE_STALE_SECONDS", "300"))
 _DASHBOARD_DB_ACQUIRE_TIMEOUT_SECONDS = float(os.getenv("DASHBOARD_DB_ACQUIRE_TIMEOUT_SECONDS", "2.5"))
+_DASHBOARD_HEALTH_SOURCES_TIMEOUT_SECONDS = float(os.getenv("DASHBOARD_HEALTH_SOURCES_TIMEOUT_SECONDS", "10"))
+_DASHBOARD_HEALTH_BROWSER_TIMEOUT_SECONDS = float(os.getenv("DASHBOARD_HEALTH_BROWSER_TIMEOUT_SECONDS", "10"))
 _RATE_LIMITS_RECENT_CACHE: dict[tuple[int, int], dict[str, object]] = {}
 _RATE_LIMITS_RECENT_STALE_SECONDS = int(os.getenv("RATE_LIMITS_RECENT_STALE_SECONDS", "300"))
 _TELEGRAM_STATS_CACHE: dict[str, object] = {"ts": 0.0, "payload": None}
@@ -272,6 +274,57 @@ def _vault_payload() -> dict:
         "artifacts_missing_sidecar_estimated": False,
         "artifacts_missing_sidecar_recent_24h": 0,
     }
+
+
+def _backup_health_status(backups: dict, *, include_storage: bool) -> str:
+    if not include_storage:
+        return "skipped_by_config"
+    raw = str(backups.get("raw_status") or backups.get("status") or "").lower()
+    if raw in {"skipped", "disabled", "off", "backup_disabled"}:
+        return "backup_disabled"
+    if raw in {"refreshing", "running", "in_progress", "backup_running"} or backups.get("in_progress") is True:
+        return "backup_running"
+    if raw in {"missing", "missing_restorable_dump"}:
+        return "missing_restorable_dump"
+    if raw in {"stale", "backup_stale"}:
+        return "backup_stale"
+    if raw in {"ok", "healthy", "backup_ok"}:
+        return "backup_ok"
+    if raw == "error" or backups.get("error"):
+        return "error"
+    return "degraded"
+
+
+def _normalize_backup_health_payload(backups: dict, *, include_storage: bool) -> dict:
+    normalized = dict(backups)
+    raw_status = normalized.get("status")
+    health_status = _backup_health_status(normalized, include_storage=include_storage)
+    normalized["raw_status"] = raw_status
+    normalized["status"] = health_status
+    normalized["health_status"] = health_status
+    return normalized
+
+
+def _vault_health_status(vault: dict, *, include_storage: bool) -> str:
+    if not include_storage:
+        return "skipped_by_config"
+    if vault.get("mode") == "error" or vault.get("error"):
+        return "error"
+    if vault.get("available") is False or vault.get("writable") is False:
+        return "blocked"
+    if vault.get("available") is not True or vault.get("writable") is not True:
+        return "degraded"
+    if vault.get("counts_error") or vault.get("counts_partial"):
+        return "degraded"
+    if int(vault.get("artifacts_queued") or 0) > 0 or int(vault.get("artifacts_partial") or 0) > 0:
+        return "degraded"
+    return "ok"
+
+
+def _drive_health_status(drive_ok: bool, *, include_storage: bool) -> str:
+    if not include_storage:
+        return "skipped_by_config"
+    return "ok" if drive_ok else "blocked"
 
 
 def _expected_extension_version() -> str | None:
@@ -2391,6 +2444,8 @@ def _source_matrix_is_x_session_shell(
         return False
     status_lc = str(browser_health_status or "").lower()
     reason_lc = str(browser_health_reason or "").lower()
+    if status_lc == "external_auth_or_page_shell":
+        return True
     return (
         status_lc == "recoverable_error_shell"
         and reason_lc in {
@@ -2398,6 +2453,8 @@ def _source_matrix_is_x_session_shell(
             "something_went_wrong",
             "no_internet_connection",
             "failed_script_url",
+            "x_blank_spa_shell",
+            "x_no_status_links",
         }
     )
 
@@ -3801,9 +3858,9 @@ async def _with_bridge_overrides(sources: list[dict]) -> tuple[list[dict], dict 
     bridge_summary = None
     try:
         try:
-            bridge_timeout = max(0.25, float(os.getenv("WA_BRIDGE_HEALTH_TIMEOUT_SECONDS", "1.5")))
+            bridge_timeout = max(0.25, float(os.getenv("WA_BRIDGE_HEALTH_TIMEOUT_SECONDS", "5.0")))
         except (TypeError, ValueError):
-            bridge_timeout = 1.5
+            bridge_timeout = 5.0
         states = await fetch_whatsapp_bridge_health(timeout=bridge_timeout)
         bridge_summary = {
             "summary": summarize_whatsapp_bridge_health(states),
@@ -3948,19 +4005,22 @@ async def health(include_sources: bool = False, include_storage: bool = False):
     vault = {
         "available": None,
         "writable": None,
-        "mode": "skipped",
+        "mode": "skipped_by_config",
+        "status": "skipped_by_config",
     }
     backups = {
-        "status": "skipped",
-        "mode": "skipped",
+        "status": "skipped_by_config",
+        "mode": "skipped_by_config",
     }
     sources = []
     whatsapp_bridge_health = None
     browser_extension = None
     try:
-        pool = await asyncio.wait_for(get_pool(), timeout=3)
-        async with pool.acquire() as conn:
-            await asyncio.wait_for(conn.fetchval("SELECT 1"), timeout=3)
+        db_probe_timeout = max(5.0, _DASHBOARD_DB_ACQUIRE_TIMEOUT_SECONDS)
+        pool = await asyncio.wait_for(get_pool(), timeout=db_probe_timeout)
+        conn = await _acquire_dashboard_conn(pool)
+        try:
+            await asyncio.wait_for(conn.fetchval("SELECT 1"), timeout=min(db_probe_timeout, 10.0))
             if include_storage:
                 try:
                     vault = _vault_payload()
@@ -3975,19 +4035,30 @@ async def health(include_sources: bool = False, include_storage: bool = False):
             if include_sources:
                 try:
                     from src.core.source_freshness import compute_liveness
-                    sources = await compute_liveness(conn)
+                    sources = await asyncio.wait_for(
+                        compute_liveness(conn),
+                        timeout=_DASHBOARD_HEALTH_SOURCES_TIMEOUT_SECONDS,
+                    )
                 except Exception as exc:
                     logger.debug("source liveness health section failed: %s", exc)
                 try:
-                    browser_extension = await _browser_extension_payload(conn)
+                    browser_extension = await asyncio.wait_for(
+                        _browser_extension_payload(conn),
+                        timeout=_DASHBOARD_HEALTH_BROWSER_TIMEOUT_SECONDS,
+                    )
                     _browser_extension_suppress_optional_diagnostics_when_active(browser_extension)
                 except Exception as exc:
                     logger.debug("browser extension health section failed: %s", exc)
+        finally:
+            await pool.release(conn)
         db_status = "healthy"
+        db_health_status = "ok"
     except TimeoutError:
         db_status = "error: timeout"
+        db_health_status = "error"
     except Exception as e:
         db_status = f"error: {e}"
+        db_health_status = "error"
 
     if include_sources and sources:
         sources, whatsapp_bridge_health = await _with_bridge_overrides(sources)
@@ -3999,24 +4070,34 @@ async def health(include_sources: bool = False, include_storage: bool = False):
         from src.core.drive_check import check_drive
         drive_ok = check_drive()
         try:
-            backups = backup_status()
+            backups = _normalize_backup_health_payload(backup_status(), include_storage=True)
         except Exception as exc:
-            backups = {"status": "error", "error": exc.__class__.__name__}
-        vault_ok = (
-            vault.get("available") is True
-            and vault.get("writable") is True
-            and int(vault.get("artifacts_queued") or 0) == 0
-            and int(vault.get("artifacts_partial") or 0) == 0
-        )
-        backups_ok = backups.get("status") in {"ok", "refreshing"}
+            backups = _normalize_backup_health_payload(
+                {"status": "error", "error": exc.__class__.__name__},
+                include_storage=True,
+            )
+        vault["status"] = _vault_health_status(vault, include_storage=True)
+        vault_ok = vault["status"] == "ok"
+        backups_ok = backups.get("status") in {"backup_ok", "backup_running", "backup_disabled"}
+    else:
+        backups = _normalize_backup_health_payload(backups, include_storage=False)
+        vault["status"] = _vault_health_status(vault, include_storage=False)
     source_issues = [s for s in sources if s.get("status") not in {"live"}] if include_sources else []
+    drive_status = _drive_health_status(drive_ok, include_storage=include_storage)
+    health_status = "ok"
+    if db_health_status == "error" or backups.get("status") == "error":
+        health_status = "error"
+    elif vault.get("status") == "blocked" or drive_status == "blocked":
+        health_status = "blocked"
+    elif not (drive_ok and vault_ok and backups_ok) or source_issues:
+        health_status = "degraded"
 
     payload = {
-        "status": "ok" if (
-            db_status == "healthy" and drive_ok and vault_ok and backups_ok and not source_issues
-        ) else "degraded",
+        "status": health_status,
         "database": db_status,
         "drive": ("mounted" if drive_ok else "missing") if include_storage else "skipped",
+        "drive_status": drive_status,
+        "database_status": db_health_status,
         "vault": vault,
         "backups": backups,
     }
@@ -5624,6 +5705,18 @@ async def _realtime_feed_status_from_redis() -> dict:
             str(source): int(count or 0)
             for source, count in (raw_by_source or {}).items()
         }
+        raw_by_reason = await client.hgetall(realtime_feed.LOCAL_FALLBACK_BY_REASON_KEY)
+        by_reason = {
+            str(reason): int(count or 0)
+            for reason, count in (raw_by_reason or {}).items()
+        }
+        raw_by_source_reason = await client.hgetall(realtime_feed.LOCAL_FALLBACK_BY_SOURCE_REASON_KEY)
+        by_source_reason: dict[str, dict[str, int]] = {}
+        for field, count in (raw_by_source_reason or {}).items():
+            source_name, sep, reason = str(field or "").partition(":")
+            if not sep:
+                continue
+            by_source_reason.setdefault(source_name, {})[reason] = int(count or 0)
         raw_source_counters = await client.hgetall(realtime_feed.SOURCE_COUNTER_TOTALS_KEY)
         source_counters = realtime_feed.source_counters_from_hash(raw_source_counters)
         last_raw = await client.get(realtime_feed.LOCAL_FALLBACK_LAST_KEY)
@@ -5639,6 +5732,8 @@ async def _realtime_feed_status_from_redis() -> dict:
             "failed_depth": failed_depth,
             "local_fallback_total": local_fallback_total,
             "local_fallback_by_source": by_source,
+            "local_fallback_by_reason": by_reason,
+            "local_fallback_by_source_reason": by_source_reason,
             "local_fallback_last": last,
             "source_counters": source_counters,
         }
@@ -5695,10 +5790,26 @@ async def _realtime_delivery_ledger_status() -> dict:
             """,
             timeout=3,
         )
+        reason_rows = await conn.fetch(
+            """
+            SELECT COALESCE(telegram_result->>'fallback_bucket', reason, 'unknown') AS reason,
+                   count(*)::int AS count
+            FROM realtime_media_deliveries
+            WHERE updated_at >= NOW() - INTERVAL '24 hours'
+              AND (
+                telegram_result ? 'fallback_bucket'
+                OR reason IN ('local_media_text_fallback', 'telegram_too_large', 'telegram_send_failed')
+              )
+            GROUP BY 1
+            ORDER BY count DESC, reason
+            """,
+            timeout=3,
+        )
     return {
         "available": True,
         "window_hours": 24,
         "status_counts": {row["status"]: int(row["count"] or 0) for row in status_rows},
+        "reason_counts": {row["reason"]: int(row["count"] or 0) for row in reason_rows},
         "by_source": [dict(row) for row in source_rows],
         "latest": [dict(row) for row in latest_rows],
     }
@@ -6566,6 +6677,7 @@ async def api_quotas_status(service: str | None = None, limit: int = 100,
             "github_pr_review_comments",
             "github_edges",
             "media_items",
+            "collector_operational_events",
             "youtube_spider_queue",
             "youtube_profile_queue",
             "youtube_videos",
@@ -6632,8 +6744,81 @@ async def api_quotas_status(service: str | None = None, limit: int = 100,
             except Exception:
                 return {}
 
+        async def _github_recent_transport_blocked() -> bool:
+            if "collector_operational_events" not in tables:
+                return False
+            try:
+                return bool(await conn.fetchval(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM collector_operational_events
+                        WHERE source = 'github'
+                          AND event_type = 'api_transport_exhausted'
+                          AND created_at >= now() - interval '15 minutes'
+                    )
+                    """,
+                    timeout=3,
+                ))
+            except Exception:
+                return False
+
+        def _github_quota_pusher_status(spider_counts: dict[str, int], transport_blocked: bool) -> dict:
+            enabled = os.getenv("GITHUB_QUOTA_PUSHER_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+            try:
+                target_ratio = min(0.95, max(0.5, float(os.getenv("GITHUB_QUOTA_PUSHER_TARGET_RATIO", "0.80"))))
+            except (TypeError, ValueError):
+                target_ratio = 0.80
+            try:
+                max_concurrent = min(12, max(1, int(os.getenv("GITHUB_QUOTA_PUSHER_MAX_CONCURRENT", "12"))))
+            except (TypeError, ValueError):
+                max_concurrent = 12
+            try:
+                batch_size = max(1, int(os.getenv("GITHUB_QUOTA_PUSHER_BATCH_SIZE", "250")))
+            except (TypeError, ValueError):
+                batch_size = 250
+            pending = int(spider_counts.get("pending") or 0)
+            reason = "disabled"
+            github_snapshots = [
+                row for row in snapshots
+                if row.get("service") == "github" and row.get("bucket") == "core_hour"
+            ]
+            if enabled:
+                if pending <= 0:
+                    reason = "idle_no_work"
+                elif transport_blocked:
+                    reason = "transport_blocked"
+                elif not github_snapshots:
+                    reason = "quota_fill_active"
+                else:
+                    below_target = False
+                    for row in github_snapshots:
+                        quota_units = int(row.get("quota_units") or 0)
+                        used_units = int(row.get("used_units") or 0)
+                        paused = bool(row.get("paused"))
+                        target_units_value = (
+                            max(1, int(quota_units * target_ratio))
+                            if quota_units > 0
+                            else int(row.get("target_units") or 0)
+                        )
+                        if quota_units > 0 and not paused and used_units < target_units_value:
+                            below_target = True
+                            break
+                    reason = "quota_fill_active" if below_target else "target_reached"
+            return {
+                "enabled": enabled,
+                "target_ratio": target_ratio,
+                "max_concurrent": max_concurrent,
+                "batch_size": batch_size,
+                "pending": pending,
+                "transport_blocked": transport_blocked,
+                "reason": reason,
+            }
+
         progress = {}
         if service_filter in {None, "github"}:
+            github_spider_counts = await _status_counts("github_spider_queue")
+            github_transport_blocked = await _github_recent_transport_blocked()
             progress["github"] = {
                 "capabilities": {
                     "sequential_profile_order": True,
@@ -6647,8 +6832,12 @@ async def api_quotas_status(service: str | None = None, limit: int = 100,
                     "releases_assets_enabled": True,
                 },
                 "queues": {
-                    "spider": await _status_counts("github_spider_queue"),
+                    "spider": github_spider_counts,
                 },
+                "quota_pusher": _github_quota_pusher_status(
+                    github_spider_counts,
+                    github_transport_blocked,
+                ),
                 "tables": {
                     "users": await _table_count("github_users"),
                     "repos": await _table_count("github_repos"),
@@ -10647,15 +10836,40 @@ async def optional_rollout_status(
     limit: int | None = Query(None, ge=0, le=1000),
     _user: dict = Depends(require_role("viewer")),
 ):
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        return await optional_rollout_report(
-            conn,
-            feature=feature,
-            stage=stage,
-            window_hours=window_hours,
-            limit=limit,
+    acquire_cm = None
+    try:
+        pool = await asyncio.wait_for(get_pool(), timeout=1.5)
+        acquire_cm = pool.acquire()
+        conn = await asyncio.wait_for(acquire_cm.__aenter__(), timeout=1.5)
+    except TimeoutError:
+        return JSONResponse(
+            {"ok": False, "error": "db_busy_retry", "detail": "database connection timed out"},
+            status_code=503,
         )
+    except Exception as exc:  # noqa: BLE001 - status endpoint should fail soft
+        return JSONResponse(
+            {"ok": False, "error": "db_busy_retry", "detail": exc.__class__.__name__},
+            status_code=503,
+        )
+    try:
+        return await asyncio.wait_for(
+            optional_rollout_report(
+                conn,
+                feature=feature,
+                stage=stage,
+                window_hours=window_hours,
+                limit=limit,
+            ),
+            timeout=8,
+        )
+    except TimeoutError:
+        return JSONResponse(
+            {"ok": False, "error": "db_busy_retry", "detail": "rollout status read timed out"},
+            status_code=503,
+        )
+    finally:
+        if acquire_cm is not None and "conn" in locals():
+            await acquire_cm.__aexit__(None, None, None)
 
 
 @app.get("/recon/targets")

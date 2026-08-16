@@ -352,17 +352,22 @@ def _post_media(token: str, method: str, file_field: str,
     return ok, retry_after
 
 
-async def send_photo(url_or_path: str, caption: str = "",
-                     parse_mode: str = "HTML") -> tuple[bool, int]:
-    """Send a photo. ``url_or_path`` can be a public URL or local file path.
+def _coerce_media_result(result) -> tuple[bool, int, str, str]:
+    if isinstance(result, tuple):
+        if len(result) >= 4:
+            return bool(result[0]), int(result[1] or 0), str(result[2] or ""), str(result[3] or "")
+        if len(result) >= 2:
+            return bool(result[0]), int(result[1] or 0), "", ""
+    return False, 0, "invalid_result", str(result)
 
-    Returns (ok, retry_after_seconds). retry_after > 0 only on 429.
-    Never raises.
-    """
+
+async def send_document_detailed(url_or_path: str, caption: str = "",
+                                 parse_mode: str = "HTML") -> tuple[bool, int, str, str]:
+    """Send media as a document and keep bounded Telegram error detail."""
     token, chat_id, thread = _config()
     if not token or not chat_id:
-        logger.debug("telegram send_photo skipped: token/chat_id not set")
-        return False, 0
+        logger.debug("telegram send_document skipped: token/chat_id not set")
+        return False, 0, "config_missing", "token/chat_id not set"
     fields = {
         "chat_id": chat_id,
         "caption": _truncate_caption(caption),
@@ -374,18 +379,75 @@ async def send_photo(url_or_path: str, caption: str = "",
         except ValueError:
             logger.warning("invalid TELEGRAM_THREAD_ID=%r", thread)
     try:
-        ok, retry_after, error_code, description = await asyncio.to_thread(
+        result = await asyncio.to_thread(
+            _post_media_detailed, token, "sendDocument", "document", url_or_path, fields,
+        )
+        return _coerce_media_result(result)
+    except Exception as e:  # noqa: BLE001 - notifications must never raise
+        logger.warning("telegram send_document detailed error: %s", e)
+        try:
+            result = await asyncio.to_thread(
+                _post_media, token, "sendDocument", "document", url_or_path, fields,
+            )
+            ok, retry_after = result
+            return bool(ok), int(retry_after or 0), e.__class__.__name__, str(e)
+        except Exception as fallback_exc:  # noqa: BLE001
+            logger.warning("telegram send_document error: %s", fallback_exc)
+            return False, 0, fallback_exc.__class__.__name__, str(fallback_exc)
+
+
+async def send_photo_detailed(url_or_path: str, caption: str = "",
+                              parse_mode: str = "HTML") -> tuple[bool, int, str, str]:
+    """Send a photo and keep bounded Telegram error detail for fallback buckets."""
+    token, chat_id, thread = _config()
+    if not token or not chat_id:
+        logger.debug("telegram send_photo skipped: token/chat_id not set")
+        return False, 0, "config_missing", "token/chat_id not set"
+    fields = {
+        "chat_id": chat_id,
+        "caption": _truncate_caption(caption),
+        "parse_mode": parse_mode,
+    }
+    if thread:
+        try:
+            fields["message_thread_id"] = int(thread)
+        except ValueError:
+            logger.warning("invalid TELEGRAM_THREAD_ID=%r", thread)
+    try:
+        result = await asyncio.to_thread(
             _post_media_detailed, token, "sendPhoto", "photo", url_or_path, fields,
         )
+        ok, retry_after, error_code, description = _coerce_media_result(result)
         if ok or retry_after > 0:
-            return ok, retry_after
+            return ok, retry_after, error_code, description
         if "IMAGE_PROCESS_FAILED" in str(description):
-            return await send_document(url_or_path, caption=caption, parse_mode=parse_mode)
-        _ = error_code
-        return False, 0
+            doc_ok, doc_retry, doc_code, doc_description = await send_document_detailed(
+                url_or_path,
+                caption=caption,
+                parse_mode=parse_mode,
+            )
+            if doc_ok or doc_retry > 0:
+                return doc_ok, doc_retry, "document_fallback", doc_description
+            return False, 0, error_code, description
+        return False, 0, error_code, description
     except Exception as e:  # noqa: BLE001 - belt-and-suspenders
         logger.warning("telegram send_photo error: %s", e)
-        return False, 0
+        return False, 0, e.__class__.__name__, str(e)
+
+
+async def send_photo(url_or_path: str, caption: str = "",
+                     parse_mode: str = "HTML") -> tuple[bool, int]:
+    """Send a photo. ``url_or_path`` can be a public URL or local file path.
+
+    Returns (ok, retry_after_seconds). retry_after > 0 only on 429.
+    Never raises.
+    """
+    ok, retry_after, _error_code, _description = await send_photo_detailed(
+        url_or_path,
+        caption=caption,
+        parse_mode=parse_mode,
+    )
+    return ok, retry_after
 
 
 async def send_document(url_or_path: str, caption: str = "",
@@ -396,27 +458,54 @@ async def send_document(url_or_path: str, caption: str = "",
     instead of dropping the realtime feed item after ``sendPhoto`` returns
     IMAGE_PROCESS_FAILED.
     """
+    ok, retry_after, _error_code, _description = await send_document_detailed(
+        url_or_path,
+        caption=caption,
+        parse_mode=parse_mode,
+    )
+    return ok, retry_after
+
+
+async def send_video_detailed(url_or_path: str, caption: str = "",
+                              parse_mode: str = "HTML",
+                              thumbnail_path: str | None = None) -> tuple[bool, int, str, str]:
+    """Send a video and keep bounded Telegram error detail for fallback buckets."""
     token, chat_id, thread = _config()
     if not token or not chat_id:
-        logger.debug("telegram send_document skipped: token/chat_id not set")
-        return False, 0
+        logger.debug("telegram send_video skipped: token/chat_id not set")
+        return False, 0, "config_missing", "token/chat_id not set"
     fields = {
         "chat_id": chat_id,
         "caption": _truncate_caption(caption),
         "parse_mode": parse_mode,
+        "supports_streaming": "true",
     }
     if thread:
         try:
             fields["message_thread_id"] = int(thread)
         except ValueError:
             logger.warning("invalid TELEGRAM_THREAD_ID=%r", thread)
+    _ = thumbnail_path
     try:
-        return await asyncio.to_thread(
-            _post_media, token, "sendDocument", "document", url_or_path, fields,
+        result = await asyncio.to_thread(
+            _post_media_detailed, token, "sendVideo", "video", url_or_path, fields,
         )
-    except Exception as e:  # noqa: BLE001 - notifications must never raise
-        logger.warning("telegram send_document error: %s", e)
-        return False, 0
+        ok, retry_after, error_code, description = _coerce_media_result(result)
+        if ok or retry_after > 0:
+            return ok, retry_after, error_code, description
+        if error_code == "too_large" and not url_or_path.startswith(("http://", "https://")):
+            logger.info("telegram sendVideo too large; trying document fallback")
+            doc_ok, doc_retry, doc_code, doc_description = await send_document_detailed(
+                url_or_path,
+                caption=caption,
+                parse_mode=parse_mode,
+            )
+            if doc_ok or doc_retry > 0:
+                return doc_ok, doc_retry, "document_fallback", doc_description
+        return False, 0, error_code, description
+    except Exception as e:  # noqa: BLE001 - belt-and-suspenders
+        logger.warning("telegram send_video error: %s", e)
+        return False, 0, e.__class__.__name__, str(e)
 
 
 async def send_video(url_or_path: str, caption: str = "",
@@ -431,33 +520,10 @@ async def send_video(url_or_path: str, caption: str = "",
 
     Returns (ok, retry_after_seconds). Never raises.
     """
-    token, chat_id, thread = _config()
-    if not token or not chat_id:
-        logger.debug("telegram send_video skipped: token/chat_id not set")
-        return False, 0
-    fields = {
-        "chat_id": chat_id,
-        "caption": _truncate_caption(caption),
-        "parse_mode": parse_mode,
-        "supports_streaming": "true",
-    }
-    if thread:
-        try:
-            fields["message_thread_id"] = int(thread)
-        except ValueError:
-            logger.warning("invalid TELEGRAM_THREAD_ID=%r", thread)
-    _ = thumbnail_path  # reserved for future oversized-clip thumbnails.
-    try:
-        ok, retry_after, error_code, description = await asyncio.to_thread(
-            _post_media_detailed, token, "sendVideo", "video", url_or_path, fields,
-        )
-        if ok or retry_after > 0:
-            return ok, retry_after
-        if error_code == "too_large" and not url_or_path.startswith(("http://", "https://")):
-            logger.info("telegram sendVideo too large; trying document fallback")
-            return await send_document(url_or_path, caption=caption, parse_mode=parse_mode)
-        _ = description
-        return False, 0
-    except Exception as e:  # noqa: BLE001 - belt-and-suspenders
-        logger.warning("telegram send_video error: %s", e)
-        return False, 0
+    ok, retry_after, _error_code, _description = await send_video_detailed(
+        url_or_path,
+        caption=caption,
+        parse_mode=parse_mode,
+        thumbnail_path=thumbnail_path,
+    )
+    return ok, retry_after

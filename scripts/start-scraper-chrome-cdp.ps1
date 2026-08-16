@@ -2,7 +2,7 @@ param(
     [string]$ChromePath = "",
     [string]$UserDataDir = "",
     [string]$ExtensionPath = "C:\unifiedcollector\extension",
-    [int]$RemoteDebuggingPort = 9333,
+    [int]$RemoteDebuggingPort = 9336,
     [switch]$AllowWhileChromeRunning,
     [switch]$CloseExistingIfNoVisibleWindows,
     [switch]$CloseExistingCdpProfile,
@@ -17,6 +17,13 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$repo = "C:\unifiedcollector"
+$tmp = Join-Path $repo "tmp"
+$statePath = Join-Path $tmp "scraper_chrome_state.json"
+$lockPath = Join-Path $tmp "scraper_chrome_launch.lock"
+if (-not (Test-Path -LiteralPath $tmp)) {
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+}
 
 if (-not $PSBoundParameters.ContainsKey("IsolateExtensions")) {
     $isolateDefault = [Environment]::GetEnvironmentVariable("UC_CHROME_ISOLATE_EXTENSIONS")
@@ -565,6 +572,47 @@ function Quote-Argument {
     return '"' + $Value.Replace('"', '\"') + '"'
 }
 
+function Write-ScraperChromeState {
+    param(
+        [string]$State,
+        [string]$Detail = "",
+        [int]$RootPid = 0
+    )
+    $extensionId = ""
+    try {
+        if (Test-CdpAvailable $RemoteDebuggingPort) {
+            $extensionId = Get-ExtensionIdFromCdp $RemoteDebuggingPort
+        }
+    } catch {
+        $extensionId = ""
+    }
+    $payload = [ordered]@{
+        updated_at = (Get-Date).ToString("o")
+        state = $State
+        detail = $Detail
+        cdp_port = $RemoteDebuggingPort
+        cdp_url = "http://127.0.0.1:$RemoteDebuggingPort"
+        user_data_dir = $profile
+        root_pid = if ($RootPid -gt 0) { $RootPid } else { $null }
+        extension_id = $extensionId
+        extension_path = $extension
+        chrome_path = $chrome
+    }
+    try {
+        $payload | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $statePath -Encoding UTF8
+    } catch {
+        Write-Warning "Could not write scraper Chrome state: $($_.Exception.Message)"
+    }
+}
+
+function Acquire-ScraperChromeLaunchLock {
+    try {
+        return [System.IO.File]::Open($lockPath, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+    } catch {
+        return $null
+    }
+}
+
 $chrome = Resolve-ChromePath $ChromePath
 $profile = Resolve-UserDataDir $UserDataDir
 $defaultChromeProfile = "$env:LOCALAPPDATA\Google\Chrome\User Data"
@@ -663,6 +711,17 @@ if ($DryRun) {
     exit 0
 }
 
+$launchLock = Acquire-ScraperChromeLaunchLock
+if ($null -eq $launchLock) {
+    if (Test-CdpAvailable $RemoteDebuggingPort) {
+        Write-ScraperChromeState -State "launch_skipped_lock_busy_reused_cdp" -Detail "another launcher holds the single-instance lock; existing CDP is reachable"
+        Write-Host "Chrome CDP is already reachable while another launcher holds the lock on 127.0.0.1:$RemoteDebuggingPort."
+        exit 0
+    }
+    Write-ScraperChromeState -State "launch_lock_busy" -Detail "another scraper Chrome launcher is already running"
+    Write-Error "Another scraper Chrome launcher is already running; single-instance lock is busy at $lockPath."
+}
+
 $scraperProfileProcesses = @(Get-ScraperProfileChromeProcesses -UserDataDir $profile)
 if ($CloseExistingCdpProfile -and $scraperProfileProcesses.Count -gt 0) {
     Stop-CdpProfileChrome -UserDataDir $profile -Port $RemoteDebuggingPort
@@ -682,6 +741,7 @@ if ($cdpAlreadyUp) {
     if (-not $controlOpened) {
         Write-Warning "Chrome CDP is reachable, but the UnifiedCollector extension target was not visible."
     }
+    Write-ScraperChromeState -State "reused_cdp" -Detail "Chrome CDP was already reachable"
     Write-Host "Chrome CDP is already reachable on 127.0.0.1:$RemoteDebuggingPort."
     exit 0
 }
@@ -703,6 +763,7 @@ if ($chromeProcesses.Count -gt 0 -and -not $AllowWhileChromeRunning -and $CloseE
             Write-Warning ("Could not close hidden Chrome for CDP relaunch: " + $_.Exception.Message)
             Open-ControlInExistingChrome -ChromePath $chrome -Url $fallbackTabsUrl
             Write-Warning "CDP is still unavailable, but the extension control page was nudged in the existing Chrome session."
+            Write-ScraperChromeState -State "fallback_control_nudged" -Detail "hidden Chrome cleanup blocked; opened extension control in existing Chrome"
             exit 2
         }
         throw
@@ -737,6 +798,7 @@ if ($chromeProcesses.Count -gt 0 -and -not $AllowWhileChromeRunning) {
 
 Disable-ChromeBackgroundMode -UserDataDir $profile
 
+Write-ScraperChromeState -State "starting" -Detail "starting dedicated scraper Chrome profile"
 $proc = Start-Process -FilePath $chrome -ArgumentList $argumentLine -PassThru
 $deadline = (Get-Date).AddSeconds(20)
 do {
@@ -754,8 +816,10 @@ if (Test-CdpAvailable $RemoteDebuggingPort) {
     if (-not $controlOpened) {
         Write-Warning "CDP is reachable, but no loaded UnifiedCollector extension target was found yet; reload the unpacked extension from chrome://extensions if browser heartbeats stay stale."
     }
+    Write-ScraperChromeState -State "started" -Detail "Chrome CDP reachable after launch" -RootPid $proc.Id
     Write-Host "Started Chrome PID $($proc.Id); CDP is reachable on 127.0.0.1:$RemoteDebuggingPort."
     exit 0
 }
 
+Write-ScraperChromeState -State "cdp_unreachable_after_start" -Detail "Chrome started but CDP did not become reachable" -RootPid $proc.Id
 Write-Error "Chrome started as PID $($proc.Id), but CDP did not become reachable on 127.0.0.1:$RemoteDebuggingPort."

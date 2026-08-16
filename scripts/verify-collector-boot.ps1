@@ -1,7 +1,7 @@
 param(
     [string]$Repo = "C:\unifiedcollector",
     [string]$DashboardHealthUrl = "http://127.0.0.1:8700/health",
-    [string]$CdpUrl = "http://127.0.0.1:9333",
+    [string]$CdpUrl = "http://127.0.0.1:9336",
     [string[]]$WhatsAppBridgeHealthUrls = @("http://127.0.0.1:3011/health", "http://127.0.0.1:3012/health"),
     [string]$BackupDir = "Z:\unifiedcollector\backups\db",
     [int]$BackupFreshHours = 30,

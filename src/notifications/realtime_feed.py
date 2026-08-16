@@ -61,6 +61,8 @@ SKIPPED_KEY_DEFAULT = DEFERRED_KEY_DEFAULT  # compatibility for dashboard/tests
 FAILED_KEY_DEFAULT = "uc:realtime_post_feed:failed"
 LOCAL_FALLBACK_TOTAL_KEY = "uc:realtime_post_feed:local_fallback_total"
 LOCAL_FALLBACK_BY_SOURCE_KEY = "uc:realtime_post_feed:local_fallback_by_source"
+LOCAL_FALLBACK_BY_REASON_KEY = "uc:realtime_post_feed:local_fallback_by_reason"
+LOCAL_FALLBACK_BY_SOURCE_REASON_KEY = "uc:realtime_post_feed:local_fallback_by_source_reason"
 LOCAL_FALLBACK_LAST_KEY = "uc:realtime_post_feed:local_fallback_last"
 LAST_BURST_REPORT_KEY = "uc:realtime_post_feed:last_burst_report"
 SOURCE_COUNTER_TOTALS_KEY = "uc:realtime_post_feed:source_counters_total"
@@ -88,6 +90,13 @@ SOURCE_COUNTER_OUTCOMES = frozenset({
     "too_large",
     "local_fallback",
     "failed",
+})
+FALLBACK_REASON_BUCKETS = frozenset({
+    "remote_fetch_failed",
+    "local_missing",
+    "unsupported",
+    "telegram_error",
+    "too_large",
 })
 
 
@@ -489,18 +498,75 @@ async def _record_failed_delivery(client, payload: dict, raw: str) -> None:
         await client.rpush(FAILED_KEY_DEFAULT, json.dumps(failure, default=str))
 
 
-async def _record_local_media_fallback(client, payload: dict, target: str | None) -> None:
+def _declared_local_media_path(payload: dict) -> str | None:
+    for candidate in (payload.get("file_path"), payload.get("vault_path")):
+        text = str(candidate or "").strip()
+        if text and not text.startswith(("http://", "https://")):
+            return text
+    return None
+
+
+def _fallback_bucket_for(
+    payload: dict,
+    *,
+    outcome: str,
+    target: str | None,
+    ledger_status: str,
+    ledger_reason: str | None,
+    telegram_result: dict[str, Any],
+) -> str | None:
+    error_code = str(telegram_result.get("error_code") or "").lower()
+    description = str(telegram_result.get("description") or "").lower()
+    reason = str(ledger_reason or "").lower()
+    if ledger_status == "too_large" or reason == "telegram_too_large" or error_code == "too_large":
+        return "too_large"
+    if outcome == "remote_text_fallback":
+        return "remote_fetch_failed"
+    declared_local = _declared_local_media_path(payload)
+    if outcome == "text_only" and declared_local and not Path(declared_local).exists():
+        return "local_missing"
+    if target and not str(target).startswith(("http://", "https://")) and not Path(str(target)).exists():
+        return "local_missing"
+    unsupported_markers = (
+        "image_process_failed",
+        "wrong file identifier/http url specified",
+        "unsupported",
+        "can't parse",
+        "could not process",
+    )
+    if any(marker in error_code or marker in description for marker in unsupported_markers):
+        return "unsupported"
+    if outcome == "local_media_text_fallback" or (
+        ledger_status == "failed" and str(target or "").startswith(("http://", "https://"))
+    ):
+        return "telegram_error"
+    return None
+
+
+async def _record_local_media_fallback(
+    client,
+    payload: dict,
+    target: str | None,
+    *,
+    bucket: str | None = None,
+) -> None:
     source = str(payload.get("source") or "unknown").strip().lower() or "unknown"
+    bucket = bucket if bucket in FALLBACK_REASON_BUCKETS else "telegram_error"
     record = {
         "at": time.time(),
         "source": source,
         "content_id": payload.get("content_id"),
         "target_name": Path(str(target)).name if target else None,
+        "reason_bucket": bucket,
     }
     with contextlib.suppress(Exception):
         await client.incr(LOCAL_FALLBACK_TOTAL_KEY)
     with contextlib.suppress(Exception):
         await client.hincrby(LOCAL_FALLBACK_BY_SOURCE_KEY, source, 1)
+    with contextlib.suppress(Exception):
+        await client.hincrby(LOCAL_FALLBACK_BY_REASON_KEY, bucket, 1)
+    with contextlib.suppress(Exception):
+        await client.hincrby(LOCAL_FALLBACK_BY_SOURCE_REASON_KEY, f"{source}:{bucket}", 1)
     with contextlib.suppress(Exception):
         await client.set(LOCAL_FALLBACK_LAST_KEY, json.dumps(record, default=str))
 
@@ -853,8 +919,8 @@ async def _flush_source_counter_summary(client) -> None:
         logger.debug("realtime_feed source summary send failed", exc_info=True)
 
 
-async def _deliver_one(payload: dict) -> tuple[bool, int, str, str | None]:
-    """Send one queued payload. Returns (delivered, retry_after, outcome, target)."""
+async def _deliver_one(payload: dict) -> tuple[bool, int, str, str | None, dict[str, Any]]:
+    """Send one queued payload. Returns delivery state plus bounded Telegram detail."""
     from src.notifications import telegram
 
     caption = format_caption(payload)
@@ -873,22 +939,36 @@ async def _deliver_one(payload: dict) -> tuple[bool, int, str, str | None]:
     if target is None:
         # No media accessible; still surface the post as text.
         ok = await telegram.send(caption)
-        return bool(ok), 0, "text_only", None
+        return bool(ok), 0, "text_only", None, {}
 
     if _looks_like_video(payload):
-        ok, retry_after = await telegram.send_video(target, caption=caption)
+        detailed = getattr(telegram, "send_video_detailed", None)
+        if detailed:
+            ok, retry_after, error_code, description = await detailed(target, caption=caption)
+        else:
+            ok, retry_after = await telegram.send_video(target, caption=caption)
+            error_code, description = "", ""
     else:
-        ok, retry_after = await telegram.send_photo(target, caption=caption)
+        detailed = getattr(telegram, "send_photo_detailed", None)
+        if detailed:
+            ok, retry_after, error_code, description = await detailed(target, caption=caption)
+        else:
+            ok, retry_after = await telegram.send_photo(target, caption=caption)
+            error_code, description = "", ""
+    telegram_result = {
+        "error_code": str(error_code or "")[:120],
+        "description": str(description or "")[:400],
+    }
     if ok or retry_after > 0:
-        return ok, retry_after, "media", target
+        return ok, retry_after, "media", target, telegram_result
     if not used_source_url_target:
         text_ok = await telegram.send(_local_media_text_fallback(caption, target))
-        return bool(text_ok), 0, "local_media_text_fallback", target
+        return bool(text_ok), 0, "local_media_text_fallback", target, telegram_result
     # Remote source_url targets are often post pages or signed URLs Telegram
     # cannot fetch directly. Preserve the operator signal as text instead of
     # silently logging ok=False and dropping the row.
     text_ok = await telegram.send(caption)
-    return bool(text_ok), 0, "remote_text_fallback", target
+    return bool(text_ok), 0, "remote_text_fallback", target, telegram_result
 
 
 class RealtimeFeedDrain:
@@ -1017,7 +1097,7 @@ class RealtimeFeedDrain:
             await _flush_source_counter_summary(client)
             return
 
-        delivered, retry_after, delivery_outcome, delivery_target = await _deliver_one(payload)
+        delivered, retry_after, delivery_outcome, delivery_target, telegram_detail = await _deliver_one(payload)
         ledger_status, ledger_reason = _delivery_status(
             payload,
             delivered=bool(delivered),
@@ -1025,17 +1105,29 @@ class RealtimeFeedDrain:
             outcome=delivery_outcome,
             target=delivery_target,
         )
+        telegram_result = {
+            "delivered": bool(delivered),
+            "retry_after": int(retry_after or 0),
+            "outcome": delivery_outcome,
+            **telegram_detail,
+        }
+        fallback_bucket = _fallback_bucket_for(
+            payload,
+            outcome=delivery_outcome,
+            target=delivery_target,
+            ledger_status=ledger_status,
+            ledger_reason=ledger_reason,
+            telegram_result=telegram_result,
+        )
+        if fallback_bucket:
+            telegram_result["fallback_bucket"] = fallback_bucket
         from src.notifications import realtime_delivery
         await realtime_delivery.record_from_payload(
             payload,
             status=ledger_status,
             reason=ledger_reason,
             dedupe_key=dedupe_key,
-            telegram_result={
-                "delivered": bool(delivered),
-                "retry_after": int(retry_after or 0),
-                "outcome": delivery_outcome,
-            },
+            telegram_result=telegram_result,
             target=delivery_target,
         )
         await _record_source_counter(
@@ -1058,8 +1150,13 @@ class RealtimeFeedDrain:
             )
         except Exception:
             logger.debug("realtime_feed outcome log failed", exc_info=True)
-        if delivery_outcome == "local_media_text_fallback":
-            await _record_local_media_fallback(client, payload, delivery_target)
+        if fallback_bucket:
+            await _record_local_media_fallback(
+                client,
+                payload,
+                delivery_target,
+                bucket=fallback_bucket,
+            )
         if not delivered and retry_after > 0:
             # 429: back off and requeue this item at the head so we don't lose it.
             with contextlib.suppress(Exception):

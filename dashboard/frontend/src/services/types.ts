@@ -1,13 +1,16 @@
 export interface HealthStatus {
-  status: "ok" | "degraded";
+  status: "ok" | "degraded" | "skipped_by_config" | "blocked" | "error";
   database: string;
   drive: string;
+  drive_status?: "ok" | "skipped_by_config" | "blocked";
+  database_status?: "ok" | "error";
   vault?: {
     root: string;
     available: boolean;
     writable: boolean;
     free_bytes: number | null;
     total_bytes: number | null;
+    status?: "ok" | "degraded" | "skipped_by_config" | "blocked" | "error";
     error?: string | null;
     sidecar_failures: number;
     artifacts_queued: number;
@@ -18,7 +21,20 @@ export interface HealthStatus {
     counts_error?: string | null;
   };
   backups?: {
-    status: "ok" | "refreshing" | "stale" | "missing" | "error";
+    status:
+      | "ok"
+      | "refreshing"
+      | "stale"
+      | "missing"
+      | "backup_ok"
+      | "backup_running"
+      | "backup_stale"
+      | "backup_disabled"
+      | "missing_restorable_dump"
+      | "skipped_by_config"
+      | "error";
+    raw_status?: string | null;
+    health_status?: string | null;
     root: string;
     latest_path: string | null;
     latest_created_at: string | null;
@@ -329,12 +345,22 @@ export interface RealtimeFeedStatus {
   failed_depth?: number;
   local_fallback_total?: number;
   local_fallback_by_source?: Record<string, number>;
+  local_fallback_by_reason?: Record<string, number>;
+  local_fallback_by_source_reason?: Record<string, Record<string, number>>;
   local_fallback_last?: {
     at?: number;
     source?: string;
     content_id?: string | null;
     target_name?: string | null;
+    reason_bucket?: string | null;
   } | null;
+  source_counters?: Record<string, Record<string, number>>;
+  delivery_ledger?: {
+    available: boolean;
+    error?: string;
+    reason?: string;
+    reason_counts?: Record<string, number>;
+  };
 }
 
 export interface HourlyIngestionRow {

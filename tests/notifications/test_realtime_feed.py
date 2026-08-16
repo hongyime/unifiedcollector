@@ -137,6 +137,11 @@ def telegram_stub(monkeypatch):
         )
         return True, 0
 
+    async def fake_send_photo_detailed(url_or_path: str, caption: str = "",
+                                       parse_mode: str = "HTML"):
+        ok, retry_after = await fake_send_photo(url_or_path, caption=caption, parse_mode=parse_mode)
+        return ok, retry_after, "", ""
+
     async def fake_send_video(url_or_path: str, caption: str = "",
                               parse_mode: str = "HTML",
                               thumbnail_path: str | None = None):
@@ -146,9 +151,22 @@ def telegram_stub(monkeypatch):
         )
         return True, 0
 
+    async def fake_send_video_detailed(url_or_path: str, caption: str = "",
+                                       parse_mode: str = "HTML",
+                                       thumbnail_path: str | None = None):
+        ok, retry_after = await fake_send_video(
+            url_or_path,
+            caption=caption,
+            parse_mode=parse_mode,
+            thumbnail_path=thumbnail_path,
+        )
+        return ok, retry_after, "", ""
+
     monkeypatch.setattr(telegram, "send", fake_send)
     monkeypatch.setattr(telegram, "send_photo", fake_send_photo)
+    monkeypatch.setattr(telegram, "send_photo_detailed", fake_send_photo_detailed)
     monkeypatch.setattr(telegram, "send_video", fake_send_video)
+    monkeypatch.setattr(telegram, "send_video_detailed", fake_send_video_detailed)
     return sent
 
 
@@ -520,6 +538,31 @@ def test_delivery_status_marks_too_large_photo():
     assert reason == "telegram_too_large"
 
 
+def test_fallback_bucket_classifies_local_missing_and_unsupported(tmp_path):
+    from src.notifications import realtime_feed
+
+    missing = tmp_path / "missing.jpg"
+    local_bucket = realtime_feed._fallback_bucket_for(  # noqa: SLF001
+        {"file_path": str(missing), "kind": "image"},
+        outcome="text_only",
+        target=None,
+        ledger_status="delivered",
+        ledger_reason="text_only",
+        telegram_result={},
+    )
+    unsupported_bucket = realtime_feed._fallback_bucket_for(  # noqa: SLF001
+        {"source_url": "https://example.test/bad.jpg", "kind": "image"},
+        outcome="local_media_text_fallback",
+        target="https://example.test/bad.jpg",
+        ledger_status="delivered",
+        ledger_reason="local_media_text_fallback",
+        telegram_result={"description": "Bad Request: IMAGE_PROCESS_FAILED"},
+    )
+
+    assert local_bucket == "local_missing"
+    assert unsupported_bucket == "unsupported"
+
+
 @pytest.mark.asyncio
 async def test_drain_records_delivery_ledger_success(fake_redis, telegram_stub, monkeypatch):
     from src.notifications import realtime_delivery, realtime_feed
@@ -614,7 +657,17 @@ async def test_drain_falls_back_to_text_when_remote_source_url_media_fails(fake_
         )
         return False, 0
 
+    async def failing_send_video_detailed(target, caption="", parse_mode="HTML", thumbnail_path=None):
+        ok, retry_after = await failing_send_video(
+            target,
+            caption=caption,
+            parse_mode=parse_mode,
+            thumbnail_path=thumbnail_path,
+        )
+        return ok, retry_after, "HTTPError", "remote fetch failed"
+
     monkeypatch.setattr(telegram, "send_video", failing_send_video)
+    monkeypatch.setattr(telegram, "send_video_detailed", failing_send_video_detailed)
 
     payload = realtime_feed.build_payload(
         source="youtube", entity_name="PewDiePie", content_id="video_E5GJGLGse1o",
@@ -631,6 +684,8 @@ async def test_drain_falls_back_to_text_when_remote_source_url_media_fails(fake_
     assert len(telegram_stub["send"]) == 1
     assert "PewDiePie" in telegram_stub["send"][0]["text"]
     assert "youtube.com/watch" in telegram_stub["send"][0]["text"]
+    assert fake_redis.hashes["uc:realtime_post_feed:local_fallback_by_reason"]["remote_fetch_failed"] == "1"
+    assert fake_redis.hashes["uc:realtime_post_feed:local_fallback_by_source_reason"]["youtube:remote_fetch_failed"] == "1"
 
 
 @pytest.mark.asyncio
@@ -658,7 +713,17 @@ async def test_drain_falls_back_to_text_when_local_media_upload_fails(
         )
         return False, 0
 
+    async def failing_send_video_detailed(target, caption="", parse_mode="HTML", thumbnail_path=None):
+        ok, retry_after = await failing_send_video(
+            target,
+            caption=caption,
+            parse_mode=parse_mode,
+            thumbnail_path=thumbnail_path,
+        )
+        return ok, retry_after, "HTTPError", "telegram upload failed"
+
     monkeypatch.setattr(telegram, "send_video", failing_send_video)
+    monkeypatch.setattr(telegram, "send_video_detailed", failing_send_video_detailed)
 
     payload = realtime_feed.build_payload(
         source="youtube",
@@ -682,6 +747,8 @@ async def test_drain_falls_back_to_text_when_local_media_upload_fails(
     assert local_video.name in telegram_stub["send"][0]["text"]
     assert fake_redis.strings["uc:realtime_post_feed:local_fallback_total"] == "1"
     assert fake_redis.hashes["uc:realtime_post_feed:local_fallback_by_source"]["youtube"] == "1"
+    assert fake_redis.hashes["uc:realtime_post_feed:local_fallback_by_reason"]["telegram_error"] == "1"
+    assert fake_redis.hashes["uc:realtime_post_feed:local_fallback_by_source_reason"]["youtube:telegram_error"] == "1"
     assert fake_redis.hashes["uc:realtime_post_feed:source_counters_total"]["youtube:local_fallback"] == "1"
     assert str(local_video) not in telegram_stub["send"][0]["text"]
 
@@ -699,7 +766,12 @@ async def test_drain_does_not_text_fallback_on_remote_source_url_429(fake_redis,
         )
         return False, 7
 
+    async def rate_limited_send_photo_detailed(target, caption="", parse_mode="HTML"):
+        ok, retry_after = await rate_limited_send_photo(target, caption=caption, parse_mode=parse_mode)
+        return ok, retry_after, "429", "Too Many Requests"
+
     monkeypatch.setattr(telegram, "send_photo", rate_limited_send_photo)
+    monkeypatch.setattr(telegram, "send_photo_detailed", rate_limited_send_photo_detailed)
 
     payload = realtime_feed.build_payload(
         source="website", entity_name="example.com", content_id="remote-page",
@@ -1060,7 +1132,12 @@ async def test_drain_backs_off_on_429(fake_redis, telegram_stub, monkeypatch):
     async def flappy_send_photo(target, caption="", parse_mode="HTML"):
         return False, 5  # simulate 429 asking for 5s
 
+    async def flappy_send_photo_detailed(target, caption="", parse_mode="HTML"):
+        ok, retry_after = await flappy_send_photo(target, caption=caption, parse_mode=parse_mode)
+        return ok, retry_after, "429", "Too Many Requests"
+
     monkeypatch.setattr(telegram, "send_photo", flappy_send_photo)
+    monkeypatch.setattr(telegram, "send_photo_detailed", flappy_send_photo_detailed)
 
     payload = realtime_feed.build_payload(
         source="instagram", entity_name="alice", content_id="c1",
@@ -1097,7 +1174,12 @@ async def test_drain_retries_429_payload_without_dedupe_drop(fake_redis, telegra
         )
         return True, 0
 
+    async def flappy_send_photo_detailed(target, caption="", parse_mode="HTML"):
+        ok, retry_after = await flappy_send_photo(target, caption=caption, parse_mode=parse_mode)
+        return ok, retry_after, "429" if retry_after else "", "Too Many Requests" if retry_after else ""
+
     monkeypatch.setattr(telegram, "send_photo", flappy_send_photo)
+    monkeypatch.setattr(telegram, "send_photo_detailed", flappy_send_photo_detailed)
 
     payload = realtime_feed.build_payload(
         source="instagram", entity_name="alice", content_id="retry_after_429",
@@ -1132,8 +1214,13 @@ async def test_drain_preserves_non_429_delivery_failure(fake_redis, telegram_stu
     async def failed_send_photo(target, caption="", parse_mode="HTML"):
         return False, 0
 
+    async def failed_send_photo_detailed(target, caption="", parse_mode="HTML"):
+        ok, retry_after = await failed_send_photo(target, caption=caption, parse_mode=parse_mode)
+        return ok, retry_after, "HTTPError", "telegram send failed"
+
     monkeypatch.setattr(telegram, "send", failed_send)
     monkeypatch.setattr(telegram, "send_photo", failed_send_photo)
+    monkeypatch.setattr(telegram, "send_photo_detailed", failed_send_photo_detailed)
 
     payload = realtime_feed.build_payload(
         source="instagram", entity_name="alice", content_id="non_429_failure",
@@ -1344,7 +1431,7 @@ async def test_send_video_falls_back_to_document_when_local_upload_too_large(mon
         calls.append((method, file_field, url_or_path))
         if method == "sendVideo":
             return False, 0, "too_large", "exceeds video cap"
-        raise AssertionError("sendDocument should use _post_media")
+        return True, 0, "", ""
 
     def fake_post_media(token, method, file_field, url_or_path, fields):
         calls.append((method, file_field, url_or_path))

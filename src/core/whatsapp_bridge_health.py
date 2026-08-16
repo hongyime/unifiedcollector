@@ -16,34 +16,58 @@ def _bridge_base(bridge: str) -> str:
     return os.getenv(f"WA_BRIDGE_{bridge}_URL", f"http://wa-bridge-{bridge}:3001")
 
 
+def _bridge_bases(bridge: str) -> list[str]:
+    bases = [_bridge_base(bridge).rstrip("/")]
+    fallback = (
+        os.getenv(f"WA_BRIDGE_{bridge}_FALLBACK_URL")
+        or os.getenv(f"WA_BRIDGE_FALLBACK_{bridge}_URL")
+    )
+    if not fallback:
+        try:
+            fallback = f"http://host.docker.internal:{3010 + int(bridge)}"
+        except (TypeError, ValueError):
+            fallback = ""
+    if fallback:
+        fallback = fallback.rstrip("/")
+        if fallback not in bases:
+            bases.append(fallback)
+    return bases
+
+
 def _fetch_json(url: str, timeout: float) -> dict[str, Any]:
     with urllib.request.urlopen(url, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
 def _fetch_bridge_health(bridge: str, timeout: float) -> dict[str, Any]:
-    base = _bridge_base(bridge)
-    try:
-        body = _fetch_json(f"{base}/health", timeout)
-        return {"bridge": bridge, "ok": True, **body}
-    except Exception as health_exc:  # noqa: BLE001 - health must be best effort
+    last_health_exc: Exception | None = None
+    last_live_exc: Exception | None = None
+    for base in _bridge_bases(bridge):
         try:
-            livez = _fetch_json(f"{base}/livez", min(timeout, 2))
-            return {
-                "bridge": bridge,
-                "ok": True,
-                "status": "health_timeout_alive",
-                "error": str(health_exc),
-                **livez,
-            }
-        except Exception as live_exc:  # noqa: BLE001 - health must be best effort
-            return {
-                "bridge": bridge,
-                "ok": False,
-                "status": "unreachable",
-                "error": str(live_exc),
-                "health_error": str(health_exc),
-            }
+            body = _fetch_json(f"{base}/health", timeout)
+            return {"bridge": bridge, "ok": True, "bridge_url": base, **body}
+        except Exception as health_exc:  # noqa: BLE001 - health must be best effort
+            last_health_exc = health_exc
+            try:
+                livez = _fetch_json(f"{base}/livez", min(timeout, 2))
+                return {
+                    "bridge": bridge,
+                    "ok": True,
+                    "bridge_url": base,
+                    "status": "health_timeout_alive",
+                    "error": str(health_exc),
+                    **livez,
+                }
+            except Exception as live_exc:  # noqa: BLE001 - health must be best effort
+                last_live_exc = live_exc
+                continue
+    return {
+        "bridge": bridge,
+        "ok": False,
+        "status": "unreachable",
+        "error": str(last_live_exc or last_health_exc or "bridge unavailable"),
+        "health_error": str(last_health_exc) if last_health_exc else None,
+    }
 
 
 async def fetch_whatsapp_bridge_health(timeout: float = 5) -> list[dict[str, Any]]:
@@ -77,11 +101,20 @@ def summarize_whatsapp_bridge_health(states: list[dict[str, Any]]) -> dict[str, 
         "qr",
         "qr_expired",
         "refreshing_qr",
+        "waiting_for_fresh_qr",
+        "needs_scan",
+        "scan_required",
+        "unpaired",
     }
     qr_waiting = [
         s for s in reachable
         if s.get("qr_available") is True
+        or s.get("needs_scan") is True
         or str(s.get("status") or "").lower() in qr_waiting_statuses
+        or (
+            isinstance(s.get("auth_state"), dict)
+            and str(s["auth_state"].get("note") or "") == "creds_json_empty_scan_required"
+        )
         or "qr" in str(s.get("last_disconnect_reason") or "").lower()
     ]
     waiting_labels = [

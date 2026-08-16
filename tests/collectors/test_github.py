@@ -53,6 +53,7 @@ def _make_pool() -> MagicMock:
     conn = MagicMock()
     conn.execute = AsyncMock(return_value="INSERT 0 1")
     conn.fetch = AsyncMock(return_value=[])
+    conn.fetchval = AsyncMock(return_value=0)
     conn.fetchrow = AsyncMock(return_value=None)
 
     @asynccontextmanager
@@ -151,6 +152,39 @@ def test_constructor_defaults_no_pats():
     h = coll._headers()
     assert "Authorization" not in h
     assert "User-Agent" in h
+
+
+def test_constructor_defaults_quota_pusher_and_http_timeout(monkeypatch):
+    for key in (
+        "GITHUB_HTTP_TIMEOUT_SECONDS",
+        "GITHUB_QUOTA_PUSHER_ENABLED",
+        "GITHUB_QUOTA_PUSHER_TARGET_RATIO",
+        "GITHUB_QUOTA_PUSHER_MAX_CONCURRENT",
+        "GITHUB_QUOTA_PUSHER_BATCH_SIZE",
+        "GITHUB_API_TRANSPORT_RETRIES",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    coll = _new_collector(monkeypatch)
+
+    assert coll._api_timeout_seconds == 20
+    assert coll._api_transport_retries == 4
+    assert coll._quota_pusher_enabled is True
+    assert coll._quota_pusher_target_ratio == 0.80
+    assert coll._quota_pusher_max_concurrent == 12
+    assert coll._quota_pusher_batch_size == 250
+
+
+@pytest.mark.asyncio
+async def test_make_client_uses_configured_http_timeout(monkeypatch):
+    monkeypatch.setenv("GITHUB_HTTP_TIMEOUT_SECONDS", "7")
+    coll = _new_collector(monkeypatch)
+    client = coll._make_client()
+    try:
+        assert client.timeout.connect == 7
+        assert client.timeout.read == 7
+    finally:
+        await client.aclose()
 
 
 def test_constructor_loads_pats_from_env(monkeypatch):
@@ -626,6 +660,43 @@ async def test_collect_swallows_per_target_exceptions(monkeypatch, caplog):
 
     coll.send_to_dlq.assert_awaited_once()
     assert any("Failed github/octocat" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_quota_pusher_status_reports_idle_transport_and_active(monkeypatch):
+    coll = _new_collector(monkeypatch)
+    coll.pool._conn.fetchval = AsyncMock(side_effect=[0])
+
+    idle = await coll._quota_pusher_status()
+    assert idle["reason"] == "idle_no_work"
+
+    coll.pool._conn.fetchval = AsyncMock(side_effect=[3, True])
+    blocked = await coll._quota_pusher_status()
+    assert blocked["reason"] == "transport_blocked"
+
+    coll.pool._conn.fetchval = AsyncMock(side_effect=[3, False])
+    coll.pool._conn.fetch = AsyncMock(return_value=[])
+    active = await coll._quota_pusher_status()
+    assert active["reason"] == "quota_fill_active"
+    assert active["batch_size"] == 250
+
+
+@pytest.mark.asyncio
+async def test_quota_pusher_runs_spider_with_override_limits(monkeypatch):
+    coll = _new_collector(monkeypatch)
+    coll._quota_pusher_status = AsyncMock(return_value={  # type: ignore[method-assign]
+        "reason": "quota_fill_active",
+        "pending": 8,
+    })
+    coll._process_spider_queue = AsyncMock()  # type: ignore[method-assign]
+
+    await coll._run_quota_pusher_spider()
+
+    coll._process_spider_queue.assert_awaited_once_with(
+        batch_size=250,
+        concurrency=12,
+        mode="quota_pusher",
+    )
 
 
 # ── EdgeFetcher ──────────────────────────────────────────────────────────

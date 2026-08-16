@@ -323,11 +323,11 @@ services:
       # Keep weak repo fanout bounded; stargazers/watchers are weaker evidence
       # and can explode far faster than commits/issues/contributors.
       GITHUB_API_DELAY: "0.25"
-      GITHUB_MAX_CONCURRENT: "3"
+      GITHUB_MAX_CONCURRENT: "12"
       GITHUB_TARGET_CONCURRENCY: "2"
       GITHUB_SPIDER_CONCURRENCY: "3"
       GITHUB_SPIDER_BATCH_SIZE: "100"
-      GITHUB_API_QUOTA_TARGET_RATIO: "0.90"
+      GITHUB_API_QUOTA_TARGET_RATIO: "0.80"
       GITHUB_MAX_COMMITS_PER_REPO: "0"
       GITHUB_MAX_ISSUES_PER_REPO: "0"
       GITHUB_MAX_CONTRIBUTORS_PER_REPO: "0"
@@ -336,7 +336,12 @@ services:
       GITHUB_COLLECT_BRANCH_COMMITS: "true"
       # CPU hygiene (A#4): low-volume / API-ceiling sources idle longer between
       # cycles — fewer wakeups, lower steady-state CPU, zero data loss.
-      GITHUB_API_TRANSPORT_RETRIES: "2"
+      GITHUB_API_TRANSPORT_RETRIES: "4"
+      GITHUB_HTTP_TIMEOUT_SECONDS: "20"
+      GITHUB_QUOTA_PUSHER_ENABLED: "true"
+      GITHUB_QUOTA_PUSHER_TARGET_RATIO: "0.80"
+      GITHUB_QUOTA_PUSHER_MAX_CONCURRENT: "12"
+      GITHUB_QUOTA_PUSHER_BATCH_SIZE: "250"
       COLLECTOR_CYCLE_SLEEP_GITHUB: "300"
       COLLECTOR_CYCLE_SLEEP_STRAVA: "600"
       COLLECTOR_CYCLE_SLEEP_SEARCH: "240"
@@ -831,6 +836,11 @@ services:
       STRAVA_BROWSER_ROUTE_QUEUE_IMPORTANT_CANDIDATE_LIMIT: "100"
       TIKTOK_FOLLOW_OWNER_FALLBACK: ${TIKTOK_FOLLOW_OWNER_FALLBACK:-hongyime}
       SOCIAL_INGEST_PREP_DB_ON_STARTUP: "true"
+      SOCIAL_INGEST_HEARTBEAT_CONCURRENCY: "16"
+      SOCIAL_INGEST_WRITE_CONCURRENCY: "4"
+      SOCIAL_INGEST_REVISIT_CONCURRENCY: "2"
+      SOCIAL_INGEST_DM_SAMPLE_CONCURRENCY: "1"
+      SOCIAL_INGEST_LANE_WAIT_SECONDS: "0.25"
       BROWSER_CONTENT_HINT_RESPONSE_TIMEOUT_SECONDS: "2.0"
       UC_EXTENSION_EXPECTED_VERSION: "1.23.70"
     volumes:
@@ -983,7 +993,16 @@ services:
       # Localhost-only single-user deployment: skip bearer-token auth so the
       # dashboard works without a login flow. Remove/false for network exposure.
       DASHBOARD_AUTH_DISABLED: "true"
-      DASHBOARD_DB_ACQUIRE_TIMEOUT_SECONDS: "8"
+      DB_POOL_MIN_SIZE: "2"
+      DB_POOL_MAX_SIZE: "16"
+      DASHBOARD_DB_ACQUIRE_TIMEOUT_SECONDS: "15"
+      WA_BRIDGE_HEALTH_TIMEOUT_SECONDS: "5"
+      WA_BRIDGE_1_FALLBACK_URL: "http://host.docker.internal:3011"
+      WA_BRIDGE_2_FALLBACK_URL: "http://host.docker.internal:3012"
+      GITHUB_QUOTA_PUSHER_ENABLED: "true"
+      GITHUB_QUOTA_PUSHER_TARGET_RATIO: "0.80"
+      GITHUB_QUOTA_PUSHER_MAX_CONCURRENT: "12"
+      GITHUB_QUOTA_PUSHER_BATCH_SIZE: "250"
     volumes:
       - z:/unifiedcollector/media:/media
       - z:/unifiedcollector:/vault
@@ -995,9 +1014,9 @@ services:
     env_file:
       - ../.env
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8700/health', timeout=10)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8700/health', timeout=25)"]
       interval: 30s
-      timeout: 15s
+      timeout: 30s
       retries: 3
       start_period: 10s
     restart: unless-stopped

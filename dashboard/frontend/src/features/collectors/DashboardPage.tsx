@@ -547,8 +547,13 @@ export function DashboardPage() {
     .slice(0, 3)
     .map(([source, count]) => `${source} ${formatNumber(count)}`)
     .join(" · ");
+  const realtimeFallbackReasons = Object.entries(realtimeFeed?.local_fallback_by_reason ?? {})
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([reason, count]) => `${reason.split("_").join(" ")} ${formatNumber(count)}`)
+    .join(" · ");
   const realtimeLastFallback = realtimeFeed?.local_fallback_last?.target_name
-    ? `last ${realtimeFeed.local_fallback_last.source ?? "unknown"} ${realtimeFeed.local_fallback_last.target_name}`
+    ? `last ${realtimeFeed.local_fallback_last.reason_bucket ?? realtimeFeed.local_fallback_last.source ?? "unknown"} ${realtimeFeed.local_fallback_last.target_name}`
     : null;
   const realtimeQueueStatus = `${formatNumber(realtimeFeed?.queue_depth ?? 0)} queued · ${formatNumber(realtimeDeferredTotal)} deferred · ${formatNumber(realtimeFeed?.failed_depth ?? 0)} failed`;
   const extensionIssues = extension?.issues ?? [];
@@ -563,9 +568,10 @@ export function DashboardPage() {
   const tiktokMediaNeedsRevisit = tiktokMediaOutcomes.reduce((sum, row) => sum + (row.needs_revisit || 0), 0);
   const backupStatus = backups?.status ?? "missing";
   const backupValue =
-    backupStatus === "ok" ? "Fresh" :
-    backupStatus === "refreshing" ? "Refreshing" :
-    backupStatus === "stale" ? "Stale" :
+    backupStatus === "backup_ok" || backupStatus === "ok" ? "Fresh" :
+    backupStatus === "backup_running" || backupStatus === "refreshing" ? "Running" :
+    backupStatus === "backup_stale" || backupStatus === "stale" ? "Stale" :
+    backupStatus === "backup_disabled" || backupStatus === "skipped_by_config" ? "Disabled" :
     backupStatus === "error" ? "Error" :
     "Missing";
   const backupSublabel = backups?.latest_age_seconds != null
@@ -667,7 +673,7 @@ export function DashboardPage() {
           sublabel={
             realtimeFeed?.available === false
               ? `Redis unavailable: ${realtimeFeed.error ?? "unknown"}`
-              : realtimeFallbackSources || realtimeLastFallback || realtimeQueueStatus
+              : realtimeFallbackReasons || realtimeFallbackSources || realtimeLastFallback || realtimeQueueStatus
           }
           status={realtimeFeed?.available === false ? "idle" : realtimeFallbackTotal ? "warning" : "success"}
           icon={<Send className="w-5 h-5" />}

@@ -163,6 +163,41 @@ try:
     )
 except (TypeError, ValueError):
     SOCIAL_INGEST_DB_INIT_TIMEOUT_SECONDS = 4.0
+try:
+    SOCIAL_INGEST_HEARTBEAT_CONCURRENCY = max(
+        1,
+        int(os.getenv("SOCIAL_INGEST_HEARTBEAT_CONCURRENCY", "16")),
+    )
+except (TypeError, ValueError):
+    SOCIAL_INGEST_HEARTBEAT_CONCURRENCY = 16
+try:
+    SOCIAL_INGEST_WRITE_CONCURRENCY = max(
+        1,
+        int(os.getenv("SOCIAL_INGEST_WRITE_CONCURRENCY", "4")),
+    )
+except (TypeError, ValueError):
+    SOCIAL_INGEST_WRITE_CONCURRENCY = 4
+try:
+    SOCIAL_INGEST_REVISIT_CONCURRENCY = max(
+        1,
+        int(os.getenv("SOCIAL_INGEST_REVISIT_CONCURRENCY", "2")),
+    )
+except (TypeError, ValueError):
+    SOCIAL_INGEST_REVISIT_CONCURRENCY = 2
+try:
+    SOCIAL_INGEST_DM_SAMPLE_CONCURRENCY = max(
+        1,
+        int(os.getenv("SOCIAL_INGEST_DM_SAMPLE_CONCURRENCY", "1")),
+    )
+except (TypeError, ValueError):
+    SOCIAL_INGEST_DM_SAMPLE_CONCURRENCY = 1
+try:
+    SOCIAL_INGEST_LANE_WAIT_SECONDS = max(
+        0.0,
+        float(os.getenv("SOCIAL_INGEST_LANE_WAIT_SECONDS", "0.25")),
+    )
+except (TypeError, ValueError):
+    SOCIAL_INGEST_LANE_WAIT_SECONDS = 0.25
 SOCIAL_INGEST_PREP_DB_ON_STARTUP = os.getenv("SOCIAL_INGEST_PREP_DB_ON_STARTUP", "0").lower() in {
     "1",
     "true",
@@ -605,6 +640,68 @@ _STRUCTURED_CAPTURE_PATHS = {
 }
 
 
+_HEARTBEAT_LANE_PATHS = {
+    "/social/browser-heartbeat",
+    "/social/dm-heartbeat",
+}
+_REVISIT_LANE_PATHS = {
+    "/social/browser-revisit-target",
+    "/social/browser-revisit-result",
+    "/social/tiktok-revisit-target",
+    "/social/tiktok-revisit-result",
+    "/social/x-profile-target",
+    "/social/x-profile-target-result",
+}
+_DM_SAMPLE_LANE_PATHS = {
+    "/social/dm-sample",
+}
+_WRITE_LANE_PATHS = {
+    "/ig/discover",
+    "/ig/ingest",
+    "/social/browser-media-candidates",
+    "/social/comments",
+    "/social/cookies",
+    "/social/discover",
+    "/social/dm-decoded",
+    "/social/dm-frame",
+    "/social/dm-probe",
+    "/social/dms",
+    "/social/ingest",
+    "/social/ingest-upload",
+    "/social/ingest-upload-binary",
+    "/social/posts",
+    "/social/profile",
+    "/social/seed",
+    "/social/strava-route-visit",
+    "/social/strava-streams",
+    "/social/target-status",
+    "/social/users",
+}
+_FAST_LANE_PATHS = {
+    "/health",
+    "/metrics",
+    "/ready",
+    "/social/ig_cooldown",
+    "/social/strava-route-queue",
+    "/social/targets",
+    "/ig/targets",
+}
+
+
+def _social_ingest_lane_for_path(path: str) -> str | None:
+    if path in _HEARTBEAT_LANE_PATHS:
+        return "heartbeat"
+    if path in _DM_SAMPLE_LANE_PATHS:
+        return "dm_sample"
+    if path in _REVISIT_LANE_PATHS:
+        return "revisit"
+    if path in _WRITE_LANE_PATHS or path in _STRUCTURED_CAPTURE_PATHS:
+        return "write"
+    if path in _FAST_LANE_PATHS:
+        return None
+    return None
+
+
 def _request_timeout_seconds(path: str) -> float:
     if path in {"/social/ingest-upload", "/social/ingest-upload-binary"}:
         return SOCIAL_INGEST_UPLOAD_REQUEST_TIMEOUT_SECONDS
@@ -640,6 +737,36 @@ async def request_timeout_middleware(request, handler):
             },
             status=503,
         ))
+
+
+@web.middleware
+async def lane_isolation_middleware(request, handler):
+    if request.method == "OPTIONS":
+        return await handler(request)
+    lane = _social_ingest_lane_for_path(request.path)
+    if not lane:
+        return await handler(request)
+    sem = request.app.get(f"{lane}_lane_sem")
+    if sem is None:
+        return await handler(request)
+    try:
+        await asyncio.wait_for(sem.acquire(), timeout=SOCIAL_INGEST_LANE_WAIT_SECONDS)
+    except TimeoutError:
+        logger.warning("social ingest lane busy lane=%s path=%s", lane, request.path)
+        return _cors(web.json_response(
+            {
+                "ok": False,
+                "error": "busy_retry",
+                "lane": lane,
+                "path": request.path,
+                "retry_after": 1,
+            },
+            status=503,
+        ))
+    try:
+        return await handler(request)
+    finally:
+        sem.release()
 
 
 class _PoolRef:
@@ -5649,6 +5776,12 @@ async def health(request):
         "db_pool": bool(request.app.get("pool")),
         "startup_error": state.get("error"),
         "startup_pending": bool(state.get("pending")),
+        "lanes": {
+            "heartbeat": {"concurrency": SOCIAL_INGEST_HEARTBEAT_CONCURRENCY},
+            "write": {"concurrency": SOCIAL_INGEST_WRITE_CONCURRENCY},
+            "revisit": {"concurrency": SOCIAL_INGEST_REVISIT_CONCURRENCY},
+            "dm_sample": {"concurrency": SOCIAL_INGEST_DM_SAMPLE_CONCURRENCY},
+        },
     }))
 
 
@@ -5708,6 +5841,10 @@ async def _on_startup(app):
     app["sem"] = asyncio.Semaphore(DL_CONCURRENCY)
     app["upload_sem"] = asyncio.Semaphore(SOCIAL_INGEST_UPLOAD_CONCURRENCY)
     app["structured_sem"] = asyncio.Semaphore(SOCIAL_INGEST_STRUCTURED_BACKGROUND_CONCURRENCY)
+    app["heartbeat_lane_sem"] = asyncio.Semaphore(SOCIAL_INGEST_HEARTBEAT_CONCURRENCY)
+    app["write_lane_sem"] = asyncio.Semaphore(SOCIAL_INGEST_WRITE_CONCURRENCY)
+    app["revisit_lane_sem"] = asyncio.Semaphore(SOCIAL_INGEST_REVISIT_CONCURRENCY)
+    app["dm_sample_lane_sem"] = asyncio.Semaphore(SOCIAL_INGEST_DM_SAMPLE_CONCURRENCY)
     app["session"] = aiohttp.ClientSession(
         headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"}
@@ -5735,7 +5872,7 @@ async def _on_cleanup(app):
 def make_app():
     app = web.Application(
         client_max_size=SOCIAL_INGEST_CLIENT_MAX_MB * 1024 * 1024,
-        middlewares=[request_timeout_middleware, db_pool_middleware],
+        middlewares=[request_timeout_middleware, lane_isolation_middleware, db_pool_middleware],
     )
     app.router.add_route("OPTIONS", "/{tail:.*}", handle_options)
     # generic multi-platform
