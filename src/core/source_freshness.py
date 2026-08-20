@@ -182,6 +182,13 @@ def _env_int(name: str, default: int, *, min_value: int | None = None) -> int:
     return value
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _stale_watchdog_marker(error: str | None) -> bool:
     if not error:
         return False
@@ -599,6 +606,14 @@ async def compute_liveness(conn) -> list[dict]:
         ):
             browser_health_status = "external_auth_or_page_shell"
             browser_health_reason = browser_health_reason or "x_external_auth_or_page_shell"
+        if name == "x" and _env_bool("X_SOURCE_MANUAL_MODE", True):
+            status = "live"
+            detail = (
+                "X is in manual browser mode and excluded from automatic scraper recovery; "
+                "open X manually when you want collection, otherwise it will not affect system health"
+            )
+            browser_health_status = browser_health_status or "manual_browser_source"
+            browser_health_reason = browser_health_reason or "x_manual_mode"
         out.append({
             "source": name,
             "status": status,

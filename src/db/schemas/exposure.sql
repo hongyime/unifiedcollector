@@ -15,9 +15,14 @@ CREATE TABLE IF NOT EXISTS exposure_findings (
     UNIQUE (url, query)
 );
 
+ALTER TABLE exposure_findings
+    ADD COLUMN IF NOT EXISTS url_hash VARCHAR(64);
+
 CREATE INDEX IF NOT EXISTS idx_exposure_findings_collected
     ON exposure_findings (collected_at DESC);
 CREATE INDEX IF NOT EXISTS idx_exposure_findings_category
     ON exposure_findings (category, severity);
 CREATE INDEX IF NOT EXISTS idx_exposure_findings_domain
     ON exposure_findings (domain);
+CREATE INDEX IF NOT EXISTS idx_exposure_findings_url_hash
+    ON exposure_findings (url_hash);

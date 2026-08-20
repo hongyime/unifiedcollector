@@ -1,8 +1,8 @@
 # UnifiedCollector Agent State
 
-Updated: 2026-08-20 07:10 UTC / 2026-08-20 15:10 SGT
+Updated: 2026-08-20 07:49 UTC / 2026-08-20 15:49 SGT
 
-Current task status: Search target expansion, browser duplicate-tab cleanup, and the new gated `exposure` collector lane are implemented and pushed. Low-risk collector remains live on normal search/GitHub/Strava; `exposure` is now enabled by default in compose with broad operator-requested wildcard/regex gates.
+Current task status: Search target expansion, browser duplicate-tab cleanup, and the new gated `exposure` collector lane are implemented and pushed. Follow-up hardening is implemented locally: broad wildcard exposure is still enabled by default, now with explicit global-scope mode, Collector-output seeding, compact dork/query keys, redacted/hash-backed exposure metadata, and X treated as manual browser mode so it no longer degrades whole-system health.
 
 Implemented in this slice:
 - Added host-side duplicate extension-control-tab cleanup to `tools/browser_tab_reload.py`, including stale historical extension ids.
@@ -45,5 +45,9 @@ Known caveats:
 - WhatsApp bridge 2 remains paired. Bridge 1 still needs QR pairing; `/qr` currently reports `needs_scan=true` but `qr_available=false` after prior QR attempts expired.
 - `WEBSITE_URL_ALLOW` already includes `https://*.com` and `http://*.com` in runtime env and the text policy.
 - `exposure` is now intentionally broad per operator request. It redacts obvious secret assignments and does not download evidence by default (`EXPOSURE_FETCH_EVIDENCE=0`, `EXPOSURE_SPIDER_PAGES=0`).
+- `EXPOSURE_ALLOW_GLOBAL_SCOPE=1` and `EXPOSURE_EXPAND_WILDCARD_TARGETS=1` are deliberate: do not remove `*.*` / wildcard expansion without operator approval.
+- `exposure` consumes Collector outputs as bounded domain/url seeds; Analyzer remains responsible for interpretation, correlation, identity truth, severity, and Supabase export.
+- Dashboard/watchdog now treat X as manual by default (`X_SOURCE_MANUAL_MODE=1`), so stale X rows do not make `/health?include_sources=true` degraded.
 - Migration startup logged lock_timeout deferrals while backup/DB load was active; boot continues and schemas retry on next boot.
-- Dashboard source health still flags X stale/manual and Instagram degraded due active HTTP 429 cooldown/stale browser-content warning. Other checked sources are live/running.
+- Dashboard `/health?include_sources=true` returned `ok` after dashboard/watchdog recreate; `source_health` still records Instagram degraded because watchdog restarted after stale/cooldown, but computed system source liveness is live.
+- Live `exposure_findings` was growing after restart and no fatal `value too long` / JSONB metadata crash signatures were seen.

@@ -15,7 +15,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from src.collectors.search import SearchCollector
 
@@ -31,6 +31,9 @@ _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)\b(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key)"
     r"\b\s*[:=]\s*([^\s'\";&]{4,})"
 )
+_SENSITIVE_QUERY_KEY_RE = re.compile(
+    r"(?i)(pass|pwd|secret|token|key|sig|signature|auth|session|credential|jwt)"
+)
 
 
 @dataclass(frozen=True)
@@ -44,12 +47,52 @@ def _csv(value: str) -> list[str]:
     return [part.strip() for part in value.split(",") if part.strip()]
 
 
+def _bool_env(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _int_env(name: str, default: int, *, minimum: int = 1, maximum: int = 100_000) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        parsed = int(raw)
+    except ValueError:
+        logger.warning("exposure: invalid integer env %s=%r; using %d", name, raw, default)
+        return default
+    return max(minimum, min(maximum, parsed))
+
+
+def _float_env(name: str, default: float, *, minimum: float = 0.0, maximum: float = 3600.0) -> float:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        parsed = float(raw)
+    except ValueError:
+        logger.warning("exposure: invalid float env %s=%r; using %.3f", name, raw, default)
+        return default
+    return max(minimum, min(maximum, parsed))
+
+
 def _normalise_scope(scope: str) -> str:
     text = scope.strip().lower()
     if "://" in text:
         parsed = urlparse(text)
         text = parsed.netloc or parsed.path
     return text.strip().strip("/")
+
+
+def _is_regex_gate_scope(scope: str) -> bool:
+    text = scope.strip().lower()
+    return text.startswith("regex:")
+
+
+def _is_wildcard_scope(scope: str) -> bool:
+    return "*" in scope.strip()
 
 
 def _compile_regexes(values: list[str]) -> tuple[re.Pattern[str], ...]:
@@ -105,6 +148,26 @@ def redact_text(value: str | None) -> str | None:
     return _SECRET_ASSIGNMENT_RE.sub(lambda m: f"{m.group(1)}=[REDACTED]", value)
 
 
+def redact_url(value: str | None) -> str | None:
+    if not value:
+        return value
+    redacted = redact_text(value) or value
+    try:
+        parsed = urlparse(redacted)
+        if not parsed.query:
+            return redacted
+        query = urlencode(
+            [
+                (key, "[REDACTED]" if _SENSITIVE_QUERY_KEY_RE.search(key) else val)
+                for key, val in parse_qsl(parsed.query, keep_blank_values=True)
+            ],
+            doseq=True,
+        )
+        return urlunparse(parsed._replace(query=query))
+    except Exception:
+        return redacted
+
+
 def classify_exposure(query: str, hit: dict[str, Any]) -> tuple[str, str, float, bool]:
     text = " ".join(
         str(part or "")
@@ -138,7 +201,13 @@ class ExposureCollector(SearchCollector):
         self._download_videos = False
         self._spider_pages = os.getenv("EXPOSURE_SPIDER_PAGES", "0") == "1"
         self._dorks_file = Path(os.getenv("EXPOSURE_DORKS_FILE", str(DEFAULT_DORKS_FILE)))
-        self._max_queries = int(os.getenv("EXPOSURE_MAX_QUERIES_PER_CYCLE", "100"))
+        self._max_queries = _int_env("EXPOSURE_MAX_QUERIES_PER_CYCLE", 100, minimum=1, maximum=100_000)
+        self._max_scopes = _int_env("EXPOSURE_MAX_SCOPES_PER_CYCLE", 200, minimum=1, maximum=10_000)
+        self._seed_from_collector = _bool_env("EXPOSURE_SEED_FROM_COLLECTOR", True)
+        self._expand_wildcard_targets = _bool_env("EXPOSURE_EXPAND_WILDCARD_TARGETS", True)
+        self._allow_global_scope = _bool_env("EXPOSURE_ALLOW_GLOBAL_SCOPE", False)
+        self._query_scopes: dict[str, str] = {}
+        self._has_url_hash_column: bool | None = None
 
     def _load_dorks(self) -> list[str]:
         if not self._dorks_file.is_file():
@@ -161,14 +230,12 @@ class ExposureCollector(SearchCollector):
             logger.info("exposure disabled; set EXPOSURE_ENABLED=1 to run")
             return
         gate = build_gate(targets)
-        scopes = [
-            _normalise_scope(target)
-            for target in targets
-            if target.strip() and not target.strip().startswith("regex:")
-        ]
-        scopes = [scope for scope in scopes if is_scope_allowed(scope, gate)]
+        scopes = self._explicit_query_scopes(targets, gate)
+        if self._seed_from_collector and len(scopes) < self._max_scopes:
+            scopes.extend(await self._seed_scopes_from_collector(gate, limit=self._max_scopes - len(scopes)))
+        scopes = self._dedupe_scopes(scopes)[: self._max_scopes]
         if not scopes:
-            logger.warning("exposure has no concrete target scopes allowed by gates; skipping")
+            logger.warning("exposure has no concrete target scopes allowed by gates or collector seeds; skipping")
             return
 
         dorks = self._load_dorks()
@@ -177,14 +244,28 @@ class ExposureCollector(SearchCollector):
             return
 
         queries: list[str] = []
+        self._query_scopes = {}
+        if any(scope in {"*.*", "*"} for scope in scopes) or any(scope == ".*" for scope in _csv(os.getenv("EXPOSURE_ALLOWED_REGEX", ""))):
+            if not self._allow_global_scope:
+                scopes = [scope for scope in scopes if scope not in {"*.*", "*"}]
+                logger.warning("exposure: global wildcard scope skipped; set EXPOSURE_ALLOW_GLOBAL_SCOPE=1 to allow")
+            else:
+                logger.warning("exposure: global wildcard scope is enabled by explicit EXPOSURE_ALLOW_GLOBAL_SCOPE=1")
         for scope in scopes:
             for dork in dorks:
-                queries.append(dork.replace("[TARGET]", scope))
+                query = dork.replace("[TARGET]", scope)
+                queries.append(query)
+                self._query_scopes[query] = scope
                 if len(queries) >= self._max_queries:
                     break
             if len(queries) >= self._max_queries:
                 break
-        query_delay = float(os.getenv("EXPOSURE_QUERY_DELAY_SECONDS", os.getenv("SEARCH_QUERY_DELAY_SECONDS", "3")))
+        query_delay = _float_env(
+            "EXPOSURE_QUERY_DELAY_SECONDS",
+            _float_env("SEARCH_QUERY_DELAY_SECONDS", 3.0, minimum=0.0, maximum=3600.0),
+            minimum=0.0,
+            maximum=3600.0,
+        )
         for query in queries:
             if self._stop.is_set():
                 break
@@ -200,48 +281,199 @@ class ExposureCollector(SearchCollector):
             if query_delay > 0 and not self._stop.is_set():
                 await asyncio.sleep(query_delay)
 
+    def _explicit_query_scopes(self, targets: list[str], gate: ExposureGate) -> list[str]:
+        scopes: list[str] = []
+        for target in targets:
+            if not target.strip() or _is_regex_gate_scope(target):
+                continue
+            if _is_wildcard_scope(target) and not self._expand_wildcard_targets:
+                continue
+            scope = _normalise_scope(target)
+            if is_scope_allowed(scope, gate):
+                scopes.append(scope)
+        return scopes
+
+    @staticmethod
+    def _dedupe_scopes(scopes: list[str]) -> list[str]:
+        out: list[str] = []
+        seen: set[str] = set()
+        for scope in scopes:
+            scope = _normalise_scope(scope)
+            if not scope or scope in seen or _is_regex_gate_scope(scope):
+                continue
+            seen.add(scope)
+            out.append(scope)
+        return out
+
+    async def _seed_scopes_from_collector(self, gate: ExposureGate, *, limit: int) -> list[str]:
+        if self.pool is None or limit <= 0:
+            return []
+        rows: list[Any] = []
+        async with self.pool.acquire() as conn:
+            rows.extend(await self._fetch_seed_rows(conn, "website_targets", "domain", limit))
+            rows.extend(await self._fetch_seed_rows(conn, "discovered_links", "domain", limit))
+            rows.extend(await self._fetch_seed_rows(conn, "search_results", "domain", limit))
+            rows.extend(await self._fetch_seen_target_rows(conn, limit))
+        scopes: list[str] = []
+        for row in rows:
+            value = str(row.get("scope") or "").strip()
+            scope = _normalise_scope(value)
+            if scope and is_scope_allowed(scope, gate):
+                scopes.append(scope)
+        return scopes
+
+    @staticmethod
+    async def _table_exists(conn, table: str) -> bool:
+        return bool(await conn.fetchval("SELECT to_regclass($1) IS NOT NULL", f"public.{table}"))
+
+    async def _fetch_seed_rows(self, conn, table: str, column: str, limit: int) -> list[Any]:
+        if not await self._table_exists(conn, table):
+            return []
+        if table == "website_targets":
+            return await conn.fetch(
+                """
+                SELECT NULLIF(domain, '') AS scope
+                FROM website_targets
+                WHERE NULLIF(domain, '') IS NOT NULL
+                ORDER BY COALESCE(updated_at, collected_at) DESC NULLS LAST
+                LIMIT $1
+                """,
+                limit,
+            )
+        if table == "discovered_links":
+            return await conn.fetch(
+                """
+                SELECT NULLIF(domain, '') AS scope
+                FROM discovered_links
+                WHERE NULLIF(domain, '') IS NOT NULL
+                ORDER BY COALESCE(fetched_at, discovered_at) DESC NULLS LAST
+                LIMIT $1
+                """,
+                limit,
+            )
+        if table == "search_results":
+            return await conn.fetch(
+                """
+                SELECT NULLIF(domain, '') AS scope
+                FROM search_results
+                WHERE NULLIF(domain, '') IS NOT NULL
+                ORDER BY collected_at DESC NULLS LAST
+                LIMIT $1
+                """,
+                limit,
+            )
+        return []
+
+    async def _fetch_seen_target_rows(self, conn, limit: int) -> list[Any]:
+        if not await self._table_exists(conn, "collector_seen_targets"):
+            return []
+        return await conn.fetch(
+            """
+            SELECT target_key AS scope
+            FROM collector_seen_targets
+            WHERE target_type IN ('domain', 'url')
+              AND NULLIF(target_key, '') IS NOT NULL
+            ORDER BY last_seen_at DESC NULLS LAST
+            LIMIT $1
+            """,
+            limit,
+        )
+
+    @staticmethod
+    def _query_key(query: str) -> str:
+        return "exposure:" + hashlib.sha256(query.encode("utf-8")).hexdigest()[:24]
+
+    async def _upsert_query(self, query: str) -> None:
+        await super()._upsert_query(self._query_key(query))
+
     async def _upsert_result(self, query: str, hit: dict) -> bool:
         hit = dict(hit)
+        raw_url = hit.get("url")
+        redacted_url = redact_url(raw_url)
+        hit["url"] = redacted_url
         hit["title"] = redact_text(hit.get("title"))
         hit["snippet"] = redact_text(hit.get("snippet"))
-        inserted = await super()._upsert_result(query, hit)
+        inserted = await super()._upsert_result(self._query_key(query), hit)
         await self._upsert_exposure_finding(query, hit, inserted=inserted)
         return inserted
 
     async def _upsert_exposure_finding(self, query: str, hit: dict, *, inserted: bool) -> None:
         if self.pool is None or not hit.get("url"):
             return
+        hit = dict(hit)
+        hit["url"] = redact_url(hit.get("url"))
+        hit["title"] = redact_text(hit.get("title"))
+        hit["snippet"] = redact_text(hit.get("snippet"))
         category, severity, confidence, secret_like = classify_exposure(query, hit)
         domain = hit.get("domain") or urlparse(hit["url"]).netloc
-        target_scope = self._target_scope_for_query(query)
+        url_hash = hashlib.sha256(str(hit["url"]).encode("utf-8")).hexdigest()
+        target_scope = self._query_scopes.get(query) or self._target_scope_for_query(query)
+        has_url_hash = await self._exposure_has_url_hash_column()
         async with self.pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO exposure_findings
-                    (target_scope, query, url, domain, category, severity, confidence,
-                     title, snippet, detected_secret, metadata)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-                ON CONFLICT (url, query) DO UPDATE SET
-                    severity = EXCLUDED.severity,
-                    confidence = EXCLUDED.confidence,
-                    title = EXCLUDED.title,
-                    snippet = EXCLUDED.snippet,
-                    detected_secret = EXCLUDED.detected_secret,
-                    metadata = exposure_findings.metadata || EXCLUDED.metadata,
-                    collected_at = NOW()
-                """,
-                target_scope,
-                query,
-                hit["url"],
-                domain,
-                category,
-                severity,
-                confidence,
-                hit.get("title"),
-                hit.get("snippet"),
-                secret_like,
-                json.dumps({"engine": hit.get("engine"), "search_result_inserted": inserted}),
+            metadata = json.dumps({"engine": hit.get("engine"), "search_result_inserted": inserted, "url_hash": url_hash})
+            if has_url_hash:
+                await conn.execute(
+                    """
+                    INSERT INTO exposure_findings
+                        (target_scope, query, url, domain, category, severity, confidence,
+                         title, snippet, detected_secret, metadata, url_hash)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12)
+                    ON CONFLICT (url, query) DO UPDATE SET
+                        severity = EXCLUDED.severity,
+                        confidence = EXCLUDED.confidence,
+                        title = EXCLUDED.title,
+                        snippet = EXCLUDED.snippet,
+                        detected_secret = EXCLUDED.detected_secret,
+                        metadata = exposure_findings.metadata || EXCLUDED.metadata,
+                        url_hash = EXCLUDED.url_hash,
+                        collected_at = NOW()
+                    """,
+                    target_scope, query, hit["url"], domain, category, severity,
+                    confidence, hit.get("title"), hit.get("snippet"), secret_like,
+                    metadata, url_hash,
+                )
+            else:
+                await conn.execute(
+                    """
+                    INSERT INTO exposure_findings
+                        (target_scope, query, url, domain, category, severity, confidence,
+                         title, snippet, detected_secret, metadata)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb)
+                    ON CONFLICT (url, query) DO UPDATE SET
+                        severity = EXCLUDED.severity,
+                        confidence = EXCLUDED.confidence,
+                        title = EXCLUDED.title,
+                        snippet = EXCLUDED.snippet,
+                        detected_secret = EXCLUDED.detected_secret,
+                        metadata = exposure_findings.metadata || EXCLUDED.metadata,
+                        collected_at = NOW()
+                    """,
+                    target_scope, query, hit["url"], domain, category, severity,
+                    confidence, hit.get("title"), hit.get("snippet"), secret_like,
+                    metadata,
+                )
+
+    async def _exposure_has_url_hash_column(self) -> bool:
+        if self._has_url_hash_column is not None:
+            return self._has_url_hash_column
+        if self.pool is None:
+            self._has_url_hash_column = False
+            return False
+        async with self.pool.acquire() as conn:
+            self._has_url_hash_column = bool(
+                await conn.fetchval(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_schema='public'
+                          AND table_name='exposure_findings'
+                          AND column_name='url_hash'
+                    )
+                    """
+                )
             )
+        return self._has_url_hash_column
 
     @staticmethod
     def _target_scope_for_query(query: str) -> str | None:
@@ -256,5 +488,6 @@ __all__ = [
     "build_gate",
     "classify_exposure",
     "is_scope_allowed",
+    "redact_url",
     "redact_text",
 ]

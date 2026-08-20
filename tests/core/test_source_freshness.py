@@ -325,6 +325,7 @@ async def test_browser_source_degrades_when_content_progress_is_stale(monkeypatc
             return None
 
     monkeypatch.setenv("BROWSER_CONTENT_STALE_WARN_SECONDS", "3600")
+    monkeypatch.setenv("X_SOURCE_MANUAL_MODE", "0")
     monkeypatch.setattr(
         source_freshness,
         "FRESHNESS",
@@ -370,6 +371,7 @@ async def test_hybrid_browser_source_warns_when_browser_content_is_stale(monkeyp
             return None
 
     monkeypatch.setenv("BROWSER_CONTENT_STALE_WARN_SECONDS", "3600")
+    monkeypatch.setenv("X_SOURCE_MANUAL_MODE", "0")
     monkeypatch.setattr(
         source_freshness,
         "FRESHNESS",
@@ -435,6 +437,7 @@ async def test_browser_source_uses_fresh_browser_content_progress(monkeypatch):
             return None
 
     monkeypatch.setenv("BROWSER_CONTENT_STALE_WARN_SECONDS", "3600")
+    monkeypatch.setenv("X_SOURCE_MANUAL_MODE", "0")
     monkeypatch.setattr(
         source_freshness,
         "FRESHNESS",
@@ -652,6 +655,7 @@ async def test_recoverable_error_shell_probe_does_not_mask_stale_browser_content
             return None
 
     monkeypatch.setenv("BROWSER_CONTENT_STALE_WARN_SECONDS", "3600")
+    monkeypatch.setenv("X_SOURCE_MANUAL_MODE", "0")
     monkeypatch.setattr(
         source_freshness,
         "FRESHNESS",
@@ -666,6 +670,47 @@ async def test_recoverable_error_shell_probe_does_not_mask_stale_browser_content
     assert rows[0]["browser_health_status"] == "external_auth_or_page_shell"
     assert rows[0]["browser_content_at"] is None
     assert "browser content progress is 9000s old" in rows[0]["detail"]
+
+
+@pytest.mark.asyncio
+async def test_x_manual_mode_does_not_degrade_system_health(monkeypatch):
+    from src.core import source_freshness
+
+    class XManualConn:
+        async def fetch(self, query: str, *args, timeout: int = 8):
+            if "FROM source_health" in query:
+                return [
+                    {
+                        "source": "x",
+                        "status": "degraded",
+                        "last_error": "browser capture stalled: old watchdog marker",
+                        "last_success_at": datetime.now(timezone.utc) - timedelta(days=5),
+                        "updated_at": datetime.now(timezone.utc),
+                    }
+                ]
+            if "endpoint = 'browser_heartbeat'" in query:
+                return []
+            if "endpoint <> 'browser_heartbeat'" in query:
+                return []
+            raise AssertionError(query)
+
+        async def fetchval(self, query: str, *args, timeout: int = 8):
+            if "x_posts" in query:
+                return 9000
+            return None
+
+    monkeypatch.setenv("X_SOURCE_MANUAL_MODE", "1")
+    monkeypatch.setattr(
+        source_freshness,
+        "FRESHNESS",
+        [("x", "SELECT extract(epoch FROM now()-max(collected_at)) FROM x_posts", 3600)],
+    )
+
+    rows = await source_freshness.compute_liveness(XManualConn())
+
+    assert rows[0]["status"] == "live"
+    assert rows[0]["browser_health_status"] == "manual_browser_source"
+    assert "manual browser mode" in rows[0]["detail"]
 
 
 @pytest.mark.asyncio
@@ -686,6 +731,7 @@ async def test_browser_content_stale_does_not_depend_on_heartbeat_query(monkeypa
             return None
 
     monkeypatch.setenv("BROWSER_CONTENT_STALE_WARN_SECONDS", "3600")
+    monkeypatch.setenv("X_SOURCE_MANUAL_MODE", "0")
     monkeypatch.setattr(
         source_freshness,
         "FRESHNESS",
@@ -771,6 +817,8 @@ async def test_x_media_progress_clears_old_browser_watchdog_marker(monkeypatch):
             )
         ],
     )
+
+    monkeypatch.setenv("X_SOURCE_MANUAL_MODE", "0")
 
     rows = await source_freshness.compute_liveness(XMediaProgressConn())
 
