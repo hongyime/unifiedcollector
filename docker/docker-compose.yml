@@ -470,7 +470,6 @@ services:
   collector_exposure:
     image: unifiedcollector-collector:latest
     container_name: unifiedcollector_collector_exposure
-    profiles: ["exposure"]
     init: true
     command: python -m src.main worker --source exposure
     mem_limit: 768m
@@ -479,11 +478,11 @@ services:
       COLLECTOR_DRIVE_PATH: /media
       COLLECTOR_VAULT_ROOT: /vault
       COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
-      EXPOSURE_ENABLED: "${EXPOSURE_ENABLED:-0}"
-      EXPOSURE_ALLOWED_DOMAINS: "${EXPOSURE_ALLOWED_DOMAINS:-}"
-      EXPOSURE_ALLOWED_REGEX: "${EXPOSURE_ALLOWED_REGEX:-}"
+      EXPOSURE_ENABLED: "${EXPOSURE_ENABLED:-1}"
+      EXPOSURE_ALLOWED_DOMAINS: "${EXPOSURE_ALLOWED_DOMAINS:-*.edu.sg,*.sg,*.com,*.me,*.kr,*.*}"
+      EXPOSURE_ALLOWED_REGEX: "${EXPOSURE_ALLOWED_REGEX:-.*}"
       EXPOSURE_DORKS_FILE: "${EXPOSURE_DORKS_FILE:-/app/config/sources/exposure.dorks}"
-      EXPOSURE_MAX_QUERIES_PER_CYCLE: "${EXPOSURE_MAX_QUERIES_PER_CYCLE:-100}"
+      EXPOSURE_MAX_QUERIES_PER_CYCLE: "${EXPOSURE_MAX_QUERIES_PER_CYCLE:-9999}"
       EXPOSURE_FETCH_EVIDENCE: "${EXPOSURE_FETCH_EVIDENCE:-0}"
       EXPOSURE_SPIDER_PAGES: "${EXPOSURE_SPIDER_PAGES:-0}"
       SEARCH_MAX_RESULTS: "${EXPOSURE_SEARCH_MAX_RESULTS:-25}"

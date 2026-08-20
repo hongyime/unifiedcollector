@@ -66,6 +66,10 @@ async def test_collect_expands_only_allowed_scopes(monkeypatch, tmp_path):
         "site:example.edu.sg filename:.env",
         "site:example.edu.sg ext:sql",
     ]
+    saved = [call.args[0] for call in coll.checkpoint.save_progress.await_args_list]
+    assert len(saved) == 2
+    assert all(item.startswith("dork:") for item in saved)
+    assert all(len(item) < 100 for item in saved)
 
 
 @pytest.mark.asyncio
@@ -77,3 +81,42 @@ async def test_collect_disabled_does_not_search(monkeypatch):
     await coll.collect(["example.edu.sg"])
 
     coll.search_query.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_upsert_exposure_finding_serializes_metadata(monkeypatch):
+    coll = ExposureCollector()
+    calls = []
+
+    class Conn:
+        async def execute(self, *args):
+            calls.append(args)
+
+    class Acquire:
+        async def __aenter__(self):
+            return Conn()
+
+        async def __aexit__(self, *_exc):
+            return None
+
+    class Pool:
+        def acquire(self):
+            return Acquire()
+
+    coll.pool = Pool()
+
+    await coll._upsert_exposure_finding(
+        "site:example.edu.sg filename:.env",
+        {
+            "url": "https://example.edu.sg/.env",
+            "domain": "example.edu.sg",
+            "title": "password=hunter2",
+            "snippet": "token: abcdef",
+            "engine": "test",
+        },
+        inserted=True,
+    )
+
+    assert calls
+    assert isinstance(calls[0][-1], str)
+    assert '"search_result_inserted": true' in calls[0][-1]
