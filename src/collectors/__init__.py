@@ -8,6 +8,7 @@ from .lemon8 import Lemon8Collector
 from .strava import StravaCollector
 from .whatsapp import WhatsappCollector
 from .search import SearchCollector
+from .exposure import ExposureCollector
 from .beeper import BeeperCollector
 from .instagram_dm import InstagramDmCollector
 
@@ -22,6 +23,7 @@ COLLECTORS = {
     "strava": StravaCollector,
     "whatsapp": WhatsappCollector,
     "search": SearchCollector,
+    "exposure": ExposureCollector,
     "beeper": BeeperCollector,
     "instagram_dm": InstagramDmCollector,
 }

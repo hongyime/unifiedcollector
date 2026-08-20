@@ -48,7 +48,7 @@ services:
       # The main collector disables ALL sources and effectively idles --
       # it remains only as the canonical image builder + safety net.
       # Re-enable a source HERE only if you also remove its dedicated container.
-      COLLECTOR_DISABLED_SOURCES: "youtube,tiktok,instagram,search,website,lemon8,telegram,github,strava,beeper,whatsapp"
+      COLLECTOR_DISABLED_SOURCES: "youtube,tiktok,instagram,search,exposure,website,lemon8,telegram,github,strava,beeper,whatsapp"
       # Conn-budget hygiene (P2 review §5): this main worker idles (all sources
       # disabled), so it needs almost no DB connections. Shrink its pool from the
       # default 10 to free headroom under postgres max_connections=200 (14 pools ×
@@ -443,6 +443,61 @@ services:
       # Conn-budget hygiene (P2 review §5): default 10 -> 6. Kept above lowrisk/main
       # because up to WEBSITE_MAX_CONCURRENT_TASKS pages may write concurrently.
       DB_POOL_MAX_SIZE: "6"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    cap_add:
+      - SYS_PTRACE
+    volumes:
+      - z:/unifiedcollector/media:/media
+      - z:/unifiedcollector:/vault
+      - ../credentials:/app/credentials
+      - sessions_data:/app/sessions
+      - ../config/sources:/app/config/sources:ro
+      - ../src:/app/src
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - ../.env
+    healthcheck:
+      test: ["CMD", "python", "-m", "src.core.health"]
+      interval: 60s
+      timeout: 45s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  collector_exposure:
+    image: unifiedcollector-collector:latest
+    container_name: unifiedcollector_collector_exposure
+    profiles: ["exposure"]
+    init: true
+    command: python -m src.main worker --source exposure
+    mem_limit: 768m
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
+      COLLECTOR_DRIVE_PATH: /media
+      COLLECTOR_VAULT_ROOT: /vault
+      COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
+      EXPOSURE_ENABLED: "${EXPOSURE_ENABLED:-0}"
+      EXPOSURE_ALLOWED_DOMAINS: "${EXPOSURE_ALLOWED_DOMAINS:-}"
+      EXPOSURE_ALLOWED_REGEX: "${EXPOSURE_ALLOWED_REGEX:-}"
+      EXPOSURE_DORKS_FILE: "${EXPOSURE_DORKS_FILE:-/app/config/sources/exposure.dorks}"
+      EXPOSURE_MAX_QUERIES_PER_CYCLE: "${EXPOSURE_MAX_QUERIES_PER_CYCLE:-100}"
+      EXPOSURE_FETCH_EVIDENCE: "${EXPOSURE_FETCH_EVIDENCE:-0}"
+      EXPOSURE_SPIDER_PAGES: "${EXPOSURE_SPIDER_PAGES:-0}"
+      SEARCH_MAX_RESULTS: "${EXPOSURE_SEARCH_MAX_RESULTS:-25}"
+      SEARCH_CONCURRENT_DOWNLOADS: "${EXPOSURE_SEARCH_CONCURRENT_DOWNLOADS:-2}"
+      SEARCH_MAX_ACTIVE_DOMAINS: "${EXPOSURE_SEARCH_MAX_ACTIVE_DOMAINS:-2}"
+      SEARCH_MAX_REQUESTS_PER_DOMAIN: "${EXPOSURE_SEARCH_MAX_REQUESTS_PER_DOMAIN:-1}"
+      SEARCH_QUERY_DELAY_SECONDS: "${EXPOSURE_SEARCH_QUERY_DELAY_SECONDS:-5.0}"
+      SEARCH_BING_PAGES: "${EXPOSURE_SEARCH_BING_PAGES:-2}"
+      WEB_REQUEST_PERSONA_ENABLED: "${WEB_REQUEST_PERSONA_ENABLED:-1}"
+      WEB_REQUEST_PERSONA_MODE: "${WEB_REQUEST_PERSONA_MODE:-stable_by_domain}"
+      WEB_REQUEST_SEND_ORIGIN: "${WEB_REQUEST_SEND_ORIGIN:-1}"
+      WEB_REQUEST_ORIGIN_POOL: "${WEB_REQUEST_ORIGIN_POOL:-https://www.google.com/,https://www.bing.com/,https://duckduckgo.com/}"
+      COLLECTOR_CYCLE_SLEEP_EXPOSURE: "${COLLECTOR_CYCLE_SLEEP_EXPOSURE:-21600}"
+      DB_POOL_MAX_SIZE: "3"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     cap_add:

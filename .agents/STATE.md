@@ -1,13 +1,17 @@
 # UnifiedCollector Agent State
 
-Updated: 2026-08-20 04:08 UTC / 2026-08-20 12:08 SGT
+Updated: 2026-08-20 05:31 UTC / 2026-08-20 13:31 SGT
 
-Current task status: Search target expansion and browser duplicate-tab cleanup are implemented and live-verified. Low-risk collector was recreated and is actively running the expanded search/GitHub/Strava workload.
+Current task status: Search target expansion, browser duplicate-tab cleanup, and the new gated `exposure` collector lane are implemented locally. Low-risk collector remains live on normal search/GitHub/Strava; `exposure` is a separate Docker profile and is disabled unless explicitly enabled with allowed scope gates.
 
 Implemented in this slice:
 - Added host-side duplicate extension-control-tab cleanup to `tools/browser_tab_reload.py`, including stale historical extension ids.
 - Expanded `config/sources/search.targets` with public faculty/staff profile dorks, safe public document/media dorks, CJC year/month archive seeds for 2021-2026 through 2026-08, `https://www.vcebhopal.ac.in/a/-/-/`, and Classicle-style student gallery discovery terms.
-- Deliberately did not add credential, database dump, exposed `.git`, key, token, or exploit dorks to the normal collector query list.
+- Added `exposure` as a separate defensive audit source for credential, database dump, exposed `.git`, key, token, backup, config, open-directory, and service dorks. These are not in normal `search.targets`.
+- Generated `config/sources/exposure.dorks` from upstream `spekulatius/infosec-dorks` with 322 active `[TARGET]` templates.
+- Added `config/sources/exposure.targets` for concrete authorized scopes plus `regex:<pattern>` gate-only lines; env gates also support `EXPOSURE_ALLOWED_DOMAINS` and `EXPOSURE_ALLOWED_REGEX`.
+- Added `exposure_findings` schema for redacted findings and registered `ExposureCollector`.
+- Added `collector_exposure` Docker service under the `exposure` compose profile, default disabled with `EXPOSURE_ENABLED=0`.
 - Recreated `collector_lowrisk`; it loaded 505 search targets and is crawling 72 direct seed URLs.
 - Verified GitHub is not empty/blocked: live DB has 1,637,160 pending `github_spider_queue` rows and recent low-risk logs show `Collecting github/...` and spider-neighbor work.
 - Cleaned 128 duplicate primary extension control tabs, later closed duplicate stale `nke...` control tabs through the reload helper.
@@ -16,6 +20,10 @@ Implemented in this slice:
 Verification completed:
 - `python -m compileall tools\browser_tab_reload.py` passed.
 - `python -m pytest tests\tools\test_browser_maintenance_scripts.py -q` passed 38 tests.
+- `python -m pytest tests\collectors\test_exposure.py tests\core\test_source_config.py -q` passed 9 tests.
+- `python -m compileall src\collectors\exposure src\collectors\__init__.py src\core\source_config.py` passed.
+- `docker compose -f docker\docker-compose.yml config --quiet` passed.
+- `python -m src.main list` shows `exposure`; `config/sources/exposure.dorks` has 322 active dork templates.
 - `python tools\browser_tab_audit.py --cdp http://127.0.0.1:9336 --json` on the fresh profile reports 6 page targets, exactly 1 extension control tab, no blank tabs, one each for Instagram/Threads/TikTok/Facebook/Strava, X missing, and tab budget `ok=true`.
 - Content script `1.23.72` is active on the fresh-profile managed tabs in the latest audit.
 - Collector Docker services are up/healthy where healthchecks exist; `collector_lowrisk` is healthy after recreate.
@@ -27,4 +35,5 @@ Known caveats:
 - Old scraper Chrome profile likely has extension/CDP corruption. Do not switch back without first repairing or replacing its extension state.
 - WhatsApp bridge 2 remains paired. Bridge 1 still needs QR pairing; `/qr` currently reports `needs_scan=true` but `qr_available=false` after prior QR attempts expired.
 - `WEBSITE_URL_ALLOW` already includes `https://*.com` and `http://*.com` in runtime env and the text policy.
-- Normal collector search list intentionally excludes credential-leak/exploit dorks; build a separate authorized defensive audit lane if those are required.
+- `exposure` should only be run for owned/authorized domains. It redacts obvious secret assignments and does not download evidence by default (`EXPOSURE_FETCH_EVIDENCE=0`, `EXPOSURE_SPIDER_PAGES=0`).
+- To enable ad hoc: set `EXPOSURE_ENABLED=1`, configure `EXPOSURE_ALLOWED_DOMAINS` / `EXPOSURE_ALLOWED_REGEX`, add concrete domains to `config/sources/exposure.targets`, then start with `docker compose -f docker\docker-compose.yml --profile exposure up -d collector_exposure`.
