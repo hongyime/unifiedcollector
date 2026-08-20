@@ -545,3 +545,60 @@ site:*.edu.sg "student gallery"
 site:*.edu.sg "our students"
 site:*.moe.edu.sg "student leaders" "photo"
 site:*.moe.edu.sg "CCA leaders" "photo"
+
+# School site archive/profile pattern expansion.
+inurl:/news/2026/1/ site:edu.sg
+inurl:/news/2026/2/ site:edu.sg
+inurl:/news/2026/3/ site:edu.sg
+inurl:/news/2026/4/ site:edu.sg
+inurl:/news/2026/5/ site:edu.sg
+inurl:/news/2026/6/ site:edu.sg
+inurl:/news/2026/7/ site:edu.sg
+inurl:/news/2026/8/ site:edu.sg
+inurl:/news/2025/1/ site:edu.sg
+inurl:/news/2025/4/ site:edu.sg
+inurl:/news/2025/8/ site:edu.sg
+inurl:/news/2025/12/ site:edu.sg
+inurl:/news/2024/1/ site:edu.sg
+inurl:/news/2024/4/ site:edu.sg
+inurl:/news/2024/8/ site:edu.sg
+inurl:/news/2024/12/ site:edu.sg
+inurl:/news/2023/1/ site:edu.sg
+inurl:/news/2023/4/ site:edu.sg
+inurl:/news/2023/8/ site:edu.sg
+inurl:/news/2023/12/ site:edu.sg
+inurl:/news/2022/1/ site:edu.sg
+inurl:/news/2022/4/ site:edu.sg
+inurl:/news/2022/8/ site:edu.sg
+inurl:/news/2022/12/ site:edu.sg
+inurl:/news/2021/1/ site:edu.sg
+inurl:/news/2021/4/ site:edu.sg
+inurl:/news/2021/8/ site:edu.sg
+inurl:/news/2021/12/ site:edu.sg
+inurl:/news/2026/1/ site:moe.edu.sg
+inurl:/news/2026/4/ site:moe.edu.sg
+inurl:/news/2026/8/ site:moe.edu.sg
+inurl:/news/2025/1/ site:moe.edu.sg
+inurl:/news/2025/4/ site:moe.edu.sg
+inurl:/news/2025/8/ site:moe.edu.sg
+inurl:/news/2025/12/ site:moe.edu.sg
+inurl:/news/2024/1/ site:moe.edu.sg
+inurl:/news/2024/4/ site:moe.edu.sg
+inurl:/news/2024/8/ site:moe.edu.sg
+inurl:/news/2024/12/ site:moe.edu.sg
+inurl:/news-and-events/ site:edu.sg "students"
+inurl:/latest-news/ site:edu.sg "students"
+inurl:/announcements/ site:edu.sg "students"
+inurl:/achievements/ site:edu.sg "students"
+inurl:/student-achievements site:edu.sg
+inurl:/student-achievements site:moe.edu.sg
+inurl:/student-excellence site:edu.sg
+inurl:/student-awards site:edu.sg
+inurl:/our-students site:edu.sg
+inurl:/our-students site:com.sg
+inurl:/our-students site:sg "tuition"
+inurl:/meet-our-students site:sg
+inurl:/student-gallery site:sg
+inurl:/student-showcase site:sg
+inurl:/student-leaders site:moe.edu.sg
+inurl:/cca-leaders site:moe.edu.sg

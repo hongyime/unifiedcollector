@@ -1,10 +1,15 @@
 # UnifiedCollector Agent State
 
-Updated: 2026-08-20 09:27 UTC / 2026-08-20 17:27 SGT
+Updated: 2026-08-20 11:01 UTC / 2026-08-20 19:01 SGT
 
-Current task status: Browser/exposure defaults were loosened per operator request and the live X/Instagram blockers were recovered. X is managed by default again, not manual-quarantined. Website allow policy includes both `https://*.com` and `http://*.com`, plus `.com.sg` variants. Exposure remains intentionally broad with wildcard domains and regex allow-all.
+Current task status: Browser/exposure defaults were loosened per operator request and the live X/Instagram blockers were recovered. X is managed by default again, not manual-quarantined. Website allow policy includes both `https://*.com` and `http://*.com`, plus `.com.sg` variants. Exposure remains intentionally broad with wildcard domains and regex allow-all. School website seed expansion for CJC monthly news archives and Classicle-style student pages is staged in config.
 
 Latest update:
+- Added direct website crawl seeds for Catholic Junior College `https://www.cjc.edu.sg/news/` plus monthly `/news/YYYY/M/` archive URLs from 2021-01 through 2026-08, and `https://classicle.club/our-students`.
+- Expanded `search.targets` with school archive/profile discovery dorks for `/news/YYYY/M/`, `/news-and-events/`, `/latest-news/`, `/student-achievements`, `/our-students`, `/student-gallery`, `/student-showcase`, and student/CCA leader pages across `edu.sg`, `moe.edu.sg`, `com.sg`, and `sg`.
+- Validation: `python -m compileall src\core\source_config.py`, `python -m pytest tests\core\test_source_config.py -q`, and `git diff --check` passed. A broader `tests\test_worker_target_priority_refresh.py` command timed out before returning.
+
+Previous update:
 - Fixed Strava browser auth-wall maintenance caveat. Existing Strava Netscape cookie files in `credentials/strava/` contained `_strava4_session`; injected both Strava cookie jars into the active extension-capable Chrome profile on CDP port 9336 and navigated Strava to `https://www.strava.com/dashboard`.
 - Strava tab now audits as `Dashboard | Strava`, URL `https://www.strava.com/dashboard`, content script `1.23.72` active, tab budget ok.
 - Browser maintenance status is now `state=ok`, `detail=audit and reload completed`; Strava `source_health` is `running`.

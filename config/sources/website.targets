@@ -473,3 +473,78 @@ https://www.tp.edu.sg/schools-and-courses | Temasek Poly Schools | 5
 https://www.nyp.edu.sg/schools.html | Nanyang Poly Schools | 5
 https://www.rp.edu.sg/schools-of-study | Republic Poly Schools | 5
 https://www.ite.edu.sg/ | Institute of Technical Education | 5
+
+# --- School news archives + public student galleries (Bryan 2026-08-20) ---
+# Direct crawl seeds for year/month archive pages and Classicle-style student
+# gallery pages. Similar pages across other schools are discovered by
+# config/sources/search.targets so this file stays bounded to confirmed seeds.
+https://www.cjc.edu.sg/news/ | Catholic Junior College News | 5
+https://www.cjc.edu.sg/news/2021/1/ | Catholic Junior College News Archive 2021-01 | 5
+https://www.cjc.edu.sg/news/2021/2/ | Catholic Junior College News Archive 2021-02 | 5
+https://www.cjc.edu.sg/news/2021/3/ | Catholic Junior College News Archive 2021-03 | 5
+https://www.cjc.edu.sg/news/2021/4/ | Catholic Junior College News Archive 2021-04 | 5
+https://www.cjc.edu.sg/news/2021/5/ | Catholic Junior College News Archive 2021-05 | 5
+https://www.cjc.edu.sg/news/2021/6/ | Catholic Junior College News Archive 2021-06 | 5
+https://www.cjc.edu.sg/news/2021/7/ | Catholic Junior College News Archive 2021-07 | 5
+https://www.cjc.edu.sg/news/2021/8/ | Catholic Junior College News Archive 2021-08 | 5
+https://www.cjc.edu.sg/news/2021/9/ | Catholic Junior College News Archive 2021-09 | 5
+https://www.cjc.edu.sg/news/2021/10/ | Catholic Junior College News Archive 2021-10 | 5
+https://www.cjc.edu.sg/news/2021/11/ | Catholic Junior College News Archive 2021-11 | 5
+https://www.cjc.edu.sg/news/2021/12/ | Catholic Junior College News Archive 2021-12 | 5
+https://www.cjc.edu.sg/news/2022/1/ | Catholic Junior College News Archive 2022-01 | 5
+https://www.cjc.edu.sg/news/2022/2/ | Catholic Junior College News Archive 2022-02 | 5
+https://www.cjc.edu.sg/news/2022/3/ | Catholic Junior College News Archive 2022-03 | 5
+https://www.cjc.edu.sg/news/2022/4/ | Catholic Junior College News Archive 2022-04 | 5
+https://www.cjc.edu.sg/news/2022/5/ | Catholic Junior College News Archive 2022-05 | 5
+https://www.cjc.edu.sg/news/2022/6/ | Catholic Junior College News Archive 2022-06 | 5
+https://www.cjc.edu.sg/news/2022/7/ | Catholic Junior College News Archive 2022-07 | 5
+https://www.cjc.edu.sg/news/2022/8/ | Catholic Junior College News Archive 2022-08 | 5
+https://www.cjc.edu.sg/news/2022/9/ | Catholic Junior College News Archive 2022-09 | 5
+https://www.cjc.edu.sg/news/2022/10/ | Catholic Junior College News Archive 2022-10 | 5
+https://www.cjc.edu.sg/news/2022/11/ | Catholic Junior College News Archive 2022-11 | 5
+https://www.cjc.edu.sg/news/2022/12/ | Catholic Junior College News Archive 2022-12 | 5
+https://www.cjc.edu.sg/news/2023/1/ | Catholic Junior College News Archive 2023-01 | 5
+https://www.cjc.edu.sg/news/2023/2/ | Catholic Junior College News Archive 2023-02 | 5
+https://www.cjc.edu.sg/news/2023/3/ | Catholic Junior College News Archive 2023-03 | 5
+https://www.cjc.edu.sg/news/2023/4/ | Catholic Junior College News Archive 2023-04 | 5
+https://www.cjc.edu.sg/news/2023/5/ | Catholic Junior College News Archive 2023-05 | 5
+https://www.cjc.edu.sg/news/2023/6/ | Catholic Junior College News Archive 2023-06 | 5
+https://www.cjc.edu.sg/news/2023/7/ | Catholic Junior College News Archive 2023-07 | 5
+https://www.cjc.edu.sg/news/2023/8/ | Catholic Junior College News Archive 2023-08 | 5
+https://www.cjc.edu.sg/news/2023/9/ | Catholic Junior College News Archive 2023-09 | 5
+https://www.cjc.edu.sg/news/2023/10/ | Catholic Junior College News Archive 2023-10 | 5
+https://www.cjc.edu.sg/news/2023/11/ | Catholic Junior College News Archive 2023-11 | 5
+https://www.cjc.edu.sg/news/2023/12/ | Catholic Junior College News Archive 2023-12 | 5
+https://www.cjc.edu.sg/news/2024/1/ | Catholic Junior College News Archive 2024-01 | 5
+https://www.cjc.edu.sg/news/2024/2/ | Catholic Junior College News Archive 2024-02 | 5
+https://www.cjc.edu.sg/news/2024/3/ | Catholic Junior College News Archive 2024-03 | 5
+https://www.cjc.edu.sg/news/2024/4/ | Catholic Junior College News Archive 2024-04 | 5
+https://www.cjc.edu.sg/news/2024/5/ | Catholic Junior College News Archive 2024-05 | 5
+https://www.cjc.edu.sg/news/2024/6/ | Catholic Junior College News Archive 2024-06 | 5
+https://www.cjc.edu.sg/news/2024/7/ | Catholic Junior College News Archive 2024-07 | 5
+https://www.cjc.edu.sg/news/2024/8/ | Catholic Junior College News Archive 2024-08 | 5
+https://www.cjc.edu.sg/news/2024/9/ | Catholic Junior College News Archive 2024-09 | 5
+https://www.cjc.edu.sg/news/2024/10/ | Catholic Junior College News Archive 2024-10 | 5
+https://www.cjc.edu.sg/news/2024/11/ | Catholic Junior College News Archive 2024-11 | 5
+https://www.cjc.edu.sg/news/2024/12/ | Catholic Junior College News Archive 2024-12 | 5
+https://www.cjc.edu.sg/news/2025/1/ | Catholic Junior College News Archive 2025-01 | 5
+https://www.cjc.edu.sg/news/2025/2/ | Catholic Junior College News Archive 2025-02 | 5
+https://www.cjc.edu.sg/news/2025/3/ | Catholic Junior College News Archive 2025-03 | 5
+https://www.cjc.edu.sg/news/2025/4/ | Catholic Junior College News Archive 2025-04 | 5
+https://www.cjc.edu.sg/news/2025/5/ | Catholic Junior College News Archive 2025-05 | 5
+https://www.cjc.edu.sg/news/2025/6/ | Catholic Junior College News Archive 2025-06 | 5
+https://www.cjc.edu.sg/news/2025/7/ | Catholic Junior College News Archive 2025-07 | 5
+https://www.cjc.edu.sg/news/2025/8/ | Catholic Junior College News Archive 2025-08 | 5
+https://www.cjc.edu.sg/news/2025/9/ | Catholic Junior College News Archive 2025-09 | 5
+https://www.cjc.edu.sg/news/2025/10/ | Catholic Junior College News Archive 2025-10 | 5
+https://www.cjc.edu.sg/news/2025/11/ | Catholic Junior College News Archive 2025-11 | 5
+https://www.cjc.edu.sg/news/2025/12/ | Catholic Junior College News Archive 2025-12 | 5
+https://www.cjc.edu.sg/news/2026/1/ | Catholic Junior College News Archive 2026-01 | 5
+https://www.cjc.edu.sg/news/2026/2/ | Catholic Junior College News Archive 2026-02 | 5
+https://www.cjc.edu.sg/news/2026/3/ | Catholic Junior College News Archive 2026-03 | 5
+https://www.cjc.edu.sg/news/2026/4/ | Catholic Junior College News Archive 2026-04 | 5
+https://www.cjc.edu.sg/news/2026/5/ | Catholic Junior College News Archive 2026-05 | 5
+https://www.cjc.edu.sg/news/2026/6/ | Catholic Junior College News Archive 2026-06 | 5
+https://www.cjc.edu.sg/news/2026/7/ | Catholic Junior College News Archive 2026-07 | 5
+https://www.cjc.edu.sg/news/2026/8/ | Catholic Junior College News Archive 2026-08 | 5
+https://classicle.club/our-students | Classicle Club Our Students | 5
