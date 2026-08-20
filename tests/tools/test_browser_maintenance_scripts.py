@@ -322,6 +322,9 @@ def test_browser_tab_reload_hard_reopens_repeatedly_stuck_tiktok_tabs():
     assert "UC_BROWSER_HARD_REOPEN_PLATFORMS" in script
     assert "UC_BROWSER_EXCLUDED_PLATFORMS" in script
     assert "UC_BROWSER_CLOSE_EXCLUDED_PLATFORM_TABS" in script
+    assert "def _append_duplicate_control_tab_closures" in script
+    assert "close_duplicate_control_tab" in script
+    assert "duplicate extension control tab" in script
     assert "EXPANDED_PLATFORM_TABS" in script
     assert "UC_CHROME_OPEN_EXPANDED_PLATFORM_TABS" in script
     assert "UC_BROWSER_EXPANDED_PLATFORM_TABS" in script

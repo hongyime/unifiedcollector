@@ -387,3 +387,161 @@ Singapore secondary school staff directory photo
 Singapore primary school staff directory
 NAFA LASALLE faculty staff
 Singapore university adjunct faculty profile
+
+# --- Public profile/news/gallery expansion (Bryan 2026-08-20) ---
+# Public-person and school-site discovery only. Deliberately excludes credential,
+# database dump, exposed .git, and exploit dorks from generic infosec lists.
+site:mysmu.edu/faculty/
+inurl:mysmu.edu/faculty/
+site:mysmu.edu/faculty/ "Computer Science"
+site:mysmu.edu/faculty/ "Economics"
+site:mysmu.edu/faculty/ "Law"
+site:mysmu.edu/faculty/ "Business"
+site:mysmu.edu/faculty/ "Accounting"
+site:mysmu.edu/faculty/ "Social Sciences"
+site:comp.nus.edu.sg "faculty"
+site:comp.nus.edu.sg "people"
+site:nus.edu.sg inurl:/faculty/ "Professor"
+site:nus.edu.sg inurl:/people/ "Professor"
+site:ntu.edu.sg inurl:/faculty "Professor"
+site:ntu.edu.sg inurl:/staff "Professor"
+site:sutd.edu.sg inurl:/people "Faculty"
+site:sutd.edu.sg inurl:/faculty "Professor"
+site:suss.edu.sg inurl:/faculty "Professor"
+site:singaporetech.edu.sg inurl:/faculty "Professor"
+site:sp.edu.sg "lecturer" "staff"
+site:np.edu.sg "lecturer" "staff"
+site:nyp.edu.sg "lecturer" "staff"
+site:tp.edu.sg "lecturer" "staff"
+site:rp.edu.sg "lecturer" "staff"
+site:ite.edu.sg "lecturer" "staff"
+site:edu.sg inurl:/staff "photo"
+site:edu.sg inurl:/faculty "profile"
+site:edu.sg inurl:/people "profile photo"
+site:edu.sg intitle:"People" "Professor"
+site:edu.sg intitle:"Faculty" "Professor"
+site:edu.sg "adjunct faculty"
+site:edu.sg "visiting professor"
+site:edu.sg "research fellow"
+
+# Public document/media dorks adapted from OSINT and infosec-dork catalogues.
+site:edu.sg filetype:pdf "faculty"
+site:edu.sg filetype:pdf "staff directory"
+site:edu.sg filetype:pdf "annual report" "students"
+site:edu.sg filetype:pdf "prize winners"
+site:edu.sg filetype:pdf "graduation"
+site:edu.sg filetype:pdf "commencement"
+site:edu.sg filetype:pdf "honour roll"
+site:moe.edu.sg filetype:pdf "school magazine"
+site:moe.edu.sg filetype:pdf "speech day"
+site:moe.edu.sg filetype:pdf "graduation"
+site:edu.sg filetype:ppt OR filetype:pptx "student"
+site:edu.sg filetype:doc OR filetype:docx "student"
+site:edu.sg filetype:xls OR filetype:xlsx "CCA"
+site:edu.sg inurl:/wp-content/uploads "students"
+site:edu.sg inurl:/wp-content/uploads "staff"
+site:edu.sg intitle:"Index of" "yearbook" "pdf"
+site:edu.sg intitle:"Index of" "students" "jpg"
+site:moe.edu.sg intitle:"Index of" "photos"
+
+# Year/month news archive discovery and direct CJC archive seeds.
+site:edu.sg inurl:/news/2026/
+site:edu.sg inurl:/news/2025/
+site:edu.sg inurl:/news/2024/
+site:edu.sg inurl:/news/2023/
+site:edu.sg inurl:/news/2022/
+site:edu.sg inurl:/news/2021/
+site:moe.edu.sg inurl:/news/2026/
+site:moe.edu.sg inurl:/news/2025/
+site:moe.edu.sg inurl:/news/2024/
+site:moe.edu.sg inurl:/news/2023/
+site:moe.edu.sg inurl:/news/2022/
+site:moe.edu.sg inurl:/news/2021/
+site:edu.sg inurl:/news/2022/4/
+site:edu.sg inurl:/news/2023/4/
+site:edu.sg inurl:/news/2024/4/
+site:edu.sg inurl:/news/2025/4/
+site:moe.edu.sg inurl:/news/2022/4/
+site:moe.edu.sg inurl:/news/2023/4/
+site:moe.edu.sg inurl:/news/2024/4/
+site:moe.edu.sg inurl:/news/2025/4/
+https://www.cjc.edu.sg/news/2021/1/
+https://www.cjc.edu.sg/news/2021/2/
+https://www.cjc.edu.sg/news/2021/3/
+https://www.cjc.edu.sg/news/2021/4/
+https://www.cjc.edu.sg/news/2021/5/
+https://www.cjc.edu.sg/news/2021/6/
+https://www.cjc.edu.sg/news/2021/7/
+https://www.cjc.edu.sg/news/2021/8/
+https://www.cjc.edu.sg/news/2021/9/
+https://www.cjc.edu.sg/news/2021/10/
+https://www.cjc.edu.sg/news/2021/11/
+https://www.cjc.edu.sg/news/2021/12/
+https://www.cjc.edu.sg/news/2022/1/
+https://www.cjc.edu.sg/news/2022/2/
+https://www.cjc.edu.sg/news/2022/3/
+https://www.cjc.edu.sg/news/2022/4/
+https://www.cjc.edu.sg/news/2022/5/
+https://www.cjc.edu.sg/news/2022/6/
+https://www.cjc.edu.sg/news/2022/7/
+https://www.cjc.edu.sg/news/2022/8/
+https://www.cjc.edu.sg/news/2022/9/
+https://www.cjc.edu.sg/news/2022/10/
+https://www.cjc.edu.sg/news/2022/11/
+https://www.cjc.edu.sg/news/2022/12/
+https://www.cjc.edu.sg/news/2023/1/
+https://www.cjc.edu.sg/news/2023/2/
+https://www.cjc.edu.sg/news/2023/3/
+https://www.cjc.edu.sg/news/2023/4/
+https://www.cjc.edu.sg/news/2023/5/
+https://www.cjc.edu.sg/news/2023/6/
+https://www.cjc.edu.sg/news/2023/7/
+https://www.cjc.edu.sg/news/2023/8/
+https://www.cjc.edu.sg/news/2023/9/
+https://www.cjc.edu.sg/news/2023/10/
+https://www.cjc.edu.sg/news/2023/11/
+https://www.cjc.edu.sg/news/2023/12/
+https://www.cjc.edu.sg/news/2024/1/
+https://www.cjc.edu.sg/news/2024/2/
+https://www.cjc.edu.sg/news/2024/3/
+https://www.cjc.edu.sg/news/2024/4/
+https://www.cjc.edu.sg/news/2024/5/
+https://www.cjc.edu.sg/news/2024/6/
+https://www.cjc.edu.sg/news/2024/7/
+https://www.cjc.edu.sg/news/2024/8/
+https://www.cjc.edu.sg/news/2024/9/
+https://www.cjc.edu.sg/news/2024/10/
+https://www.cjc.edu.sg/news/2024/11/
+https://www.cjc.edu.sg/news/2024/12/
+https://www.cjc.edu.sg/news/2025/1/
+https://www.cjc.edu.sg/news/2025/2/
+https://www.cjc.edu.sg/news/2025/3/
+https://www.cjc.edu.sg/news/2025/4/
+https://www.cjc.edu.sg/news/2025/5/
+https://www.cjc.edu.sg/news/2025/6/
+https://www.cjc.edu.sg/news/2025/7/
+https://www.cjc.edu.sg/news/2025/8/
+https://www.cjc.edu.sg/news/2025/9/
+https://www.cjc.edu.sg/news/2025/10/
+https://www.cjc.edu.sg/news/2025/11/
+https://www.cjc.edu.sg/news/2025/12/
+https://www.cjc.edu.sg/news/2026/1/
+https://www.cjc.edu.sg/news/2026/2/
+https://www.cjc.edu.sg/news/2026/3/
+https://www.cjc.edu.sg/news/2026/4/
+https://www.cjc.edu.sg/news/2026/5/
+https://www.cjc.edu.sg/news/2026/6/
+https://www.cjc.edu.sg/news/2026/7/
+https://www.cjc.edu.sg/news/2026/8/
+
+# Student gallery / tuition / private education public pages.
+https://www.vcebhopal.ac.in/a/-/-/
+site:squarespace.com "our students" "Singapore" "tuition"
+site:wixsite.com "our students" "Singapore" "tuition"
+site:*.com.sg "our students" "tuition"
+site:*.com.sg "student gallery" "tuition"
+site:*.com.sg "life as a student" "tuition"
+site:*.edu.sg "student gallery"
+site:*.edu.sg "our students"
+site:*.moe.edu.sg "student leaders" "photo"
+site:*.moe.edu.sg "CCA leaders" "photo"

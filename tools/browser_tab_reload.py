@@ -356,6 +356,55 @@ def _append_live_excluded_target_closures(plan: list[dict]) -> None:
         })
 
 
+def _append_duplicate_control_tab_closures(plan: list[dict]) -> None:
+    planned_ids = {
+        str(p.get("target_id"))
+        for p in plan
+        if p.get("target_id") is not None
+    }
+    try:
+        targets = _list_targets()
+    except Exception as exc:
+        print(f"  [WARN  ] live extension control tab sweep skipped: {exc}")
+        return
+    primary_id = os.getenv("UC_EXTENSION_ID", "pkmdmcklnjdeocoeigmlakhomhhcpafb")
+    def is_control_tab(target: dict) -> bool:
+        if target.get("type") != "page":
+            return False
+        try:
+            parsed = urllib.parse.urlparse(str(target.get("url") or ""))
+        except Exception:
+            return False
+        return parsed.scheme == "chrome-extension" and parsed.path == "/tabs.html"
+
+    controls = [target for target in targets if is_control_tab(target)]
+    if len(controls) <= 1:
+        return
+    controls.sort(key=lambda target: (
+        0 if str(target.get("url") or "") == f"chrome-extension://{primary_id}/tabs.html" else 1,
+        1 if str(target.get("url") or "").startswith(f"chrome-extension://{primary_id}/tabs.html") else 2,
+        str(target.get("id") or ""),
+    ))
+    keep_id = str(controls[0].get("id") or "")
+    for target in controls[1:]:
+        target_id = str(target.get("id") or "")
+        if not target_id or target_id in planned_ids:
+            continue
+        plan.append({
+            "platform": "extension",
+            "target_id": target_id,
+            "url": str(target.get("url") or ""),
+            "ws": target.get("webSocketDebuggerUrl"),
+            "reason": f"duplicate extension control tab; keeping {keep_id[:12]}",
+            "action": "close_duplicate_control_tab",
+            "auth_wall": False,
+            "heap_mb": None,
+            "cs": None,
+            "cs_version": None,
+            "responsive_main": None,
+        })
+
+
 def _hard_reopen_platform(platform: str, plans: list[dict]) -> list[dict]:
     results: list[dict] = []
     for p in plans:
@@ -465,6 +514,7 @@ def main():
                 "responsive_main": tab.get("responsive_main"),
             })
     _append_live_excluded_target_closures(plan)
+    _append_duplicate_control_tab_closures(plan)
 
     hard_reopen_platforms: set[str] = set()
     hard_reopen_tabs: set[str] = set()
@@ -550,10 +600,10 @@ def main():
     print("# Executing reloads sequentially...")
     results = []
     for p in plan:
-        if p["action"] != "close_excluded":
+        if p["action"] not in {"close_excluded", "close_duplicate_control_tab"}:
             continue
         ok, msg = _close_target(p["target_id"])
-        results.append({**p, "action": "close_excluded", "status": "ok" if ok else "fail", "detail": msg})
+        results.append({**p, "status": "ok" if ok else "fail", "detail": msg})
         print(f"  close  {p['platform']:10} {p['target_id'][:12]} ... {'OK' if ok else 'FAIL'}: {msg[:160]}")
         time.sleep(0.5)
 
@@ -611,7 +661,7 @@ def main():
             continue
         if str(p["target_id"]) in duplicate_healthy_close_tabs:
             continue
-        if p["action"] == "close_excluded":
+        if p["action"] in {"close_excluded", "close_duplicate_control_tab"}:
             continue
         if p["action"] != "reload":
             results.append({**p, "status": "skipped"})
