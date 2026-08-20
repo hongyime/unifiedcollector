@@ -1,10 +1,16 @@
 # UnifiedCollector Agent State
 
-Updated: 2026-08-20 11:01 UTC / 2026-08-20 19:01 SGT
+Updated: 2026-08-20 10:34 UTC / 2026-08-20 18:34 SGT
 
-Current task status: Browser/exposure defaults were loosened per operator request and the live X/Instagram blockers were recovered. X is managed by default again, not manual-quarantined. Website allow policy includes both `https://*.com` and `http://*.com`, plus `.com.sg` variants. Exposure remains intentionally broad with wildcard domains and regex allow-all. School website seed expansion for CJC monthly news archives and Classicle-style student pages is staged in config.
+Current task status: Browser/exposure defaults were loosened per operator request and the live Instagram stale-watchdog blocker is fixed. X is managed by default again, but currently has a separate browser-content-stale row. Website allow policy includes both `https://*.com` and `http://*.com`, plus `.com.sg` variants. Exposure remains intentionally broad with wildcard domains and regex allow-all. School website seed expansion for CJC monthly news archives and Classicle-style student pages is pushed.
 
 Latest update:
+- Fixed the Instagram stale-row blocker in code and runtime: watchdog now uses the same freshness basis as dashboard liveness (`instagram_profiles.updated_at` or Instagram media), clears stale-watchdog `source_health` rows for browser-managed sources when computed browser liveness is ok, and the dashboard source matrix suppresses generic `stale ... watchdog ...` degraded rows when computed status is live.
+- Added regression coverage in `tests/test_watchdog_freshness.py` and `tests/dashboard/test_source_matrix.py`; both focused suites passed.
+- Recreated patched dashboard/watchdog. Live watchdog now logs `instagram ok (newest ... ago)` instead of restarting from old media age, and `source_health.instagram` is `running` with `last_error=NULL`.
+- Live DB recovered from Postgres crash recovery after backup/DB load. All core containers checked healthy after recovery. Base dashboard health is ok; the heavy `include_sources=true` endpoint can still time out under DB load but later returned `status=ok` with `source_issues=[]` in the bounded retry path. Current separate caveat: `source_health.x` has a browser-content-stale watchdog row.
+
+Previous update:
 - Added direct website crawl seeds for Catholic Junior College `https://www.cjc.edu.sg/news/` plus monthly `/news/YYYY/M/` archive URLs from 2021-01 through 2026-08, and `https://classicle.club/our-students`.
 - Expanded `search.targets` with school archive/profile discovery dorks for `/news/YYYY/M/`, `/news-and-events/`, `/latest-news/`, `/student-achievements`, `/our-students`, `/student-gallery`, `/student-showcase`, and student/CCA leader pages across `edu.sg`, `moe.edu.sg`, `com.sg`, and `sg`.
 - Validation: `python -m compileall src\core\source_config.py`, `python -m pytest tests\core\test_source_config.py -q`, and `git diff --check` passed. A broader `tests\test_worker_target_priority_refresh.py` command timed out before returning.

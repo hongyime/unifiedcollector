@@ -387,6 +387,19 @@ def test_default_browser_source_watch_includes_hybrid_sources(monkeypatch):
     )
 
 
+def test_instagram_watchdog_freshness_counts_profile_progress(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgres://collector:collector@localhost/unifiedcollector")
+    import src.watchdog.freshness as freshness
+
+    freshness = importlib.reload(freshness)
+    query, _threshold, containers = freshness.CHECKS["instagram"]
+
+    assert "instagram_profiles" in query
+    assert "media_items" in query
+    assert "max(ts)" in query
+    assert containers == ["unifiedcollector_collector_instagram"]
+
+
 def test_clean_browser_source_detail_removes_nested_watchdog_prefixes():
     import src.watchdog.freshness as freshness
 
@@ -417,6 +430,7 @@ async def test_browser_source_tick_clears_recovered_browser_source(monkeypatch):
 
     degraded: list[tuple[str, str]] = []
     cleared: list[str] = []
+    stale_cleared: list[str] = []
 
     async def fake_compute_liveness(db):
         return [
@@ -435,14 +449,65 @@ async def test_browser_source_tick_clears_recovered_browser_source(monkeypatch):
     async def fake_mark_running(db, source: str) -> None:
         cleared.append(source)
 
+    async def fake_mark_stale_running(db, source: str) -> None:
+        stale_cleared.append(source)
+
     monkeypatch.setattr("src.core.source_freshness.compute_liveness", fake_compute_liveness)
     monkeypatch.setattr(freshness, "_mark_degraded_browser_source", fake_mark_degraded)
     monkeypatch.setattr(freshness, "_mark_running_if_browser_watchdog", fake_mark_running)
+    monkeypatch.setattr(freshness, "_mark_running_if_stale_watchdog", fake_mark_stale_running)
 
     await freshness._browser_source_tick(object())
 
     assert degraded == []
     assert cleared == ["facebook"]
+    assert stale_cleared == ["facebook"]
+
+
+@pytest.mark.asyncio
+async def test_browser_source_tick_clears_stale_watchdog_marker_for_live_instagram(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgres://collector:collector@localhost/unifiedcollector")
+    import src.watchdog.freshness as freshness
+
+    freshness = importlib.reload(freshness)
+    monkeypatch.setattr(freshness, "BROWSER_SOURCE_WATCH_SOURCES", {"instagram"})
+
+    degraded: list[tuple[str, str]] = []
+    browser_cleared: list[str] = []
+    stale_cleared: list[str] = []
+
+    async def fake_compute_liveness(db):
+        return [
+            {
+                "source": "instagram",
+                "status": "live",
+                "detail": "fresh browser content/probe event is inside the freshness window",
+                "source_health_status": "degraded",
+                "source_health_error": "stale 358883s — watchdog in cooldown",
+                "browser_heartbeat_age_seconds": 51,
+                "browser_content_stale": False,
+            }
+        ]
+
+    async def fake_mark_degraded(db, source: str, detail: str) -> None:
+        degraded.append((source, detail))
+
+    async def fake_mark_browser_running(db, source: str) -> None:
+        browser_cleared.append(source)
+
+    async def fake_mark_stale_running(db, source: str) -> None:
+        stale_cleared.append(source)
+
+    monkeypatch.setattr("src.core.source_freshness.compute_liveness", fake_compute_liveness)
+    monkeypatch.setattr(freshness, "_mark_degraded_browser_source", fake_mark_degraded)
+    monkeypatch.setattr(freshness, "_mark_running_if_browser_watchdog", fake_mark_browser_running)
+    monkeypatch.setattr(freshness, "_mark_running_if_stale_watchdog", fake_mark_stale_running)
+
+    await freshness._browser_source_tick(object())
+
+    assert degraded == []
+    assert browser_cleared == ["instagram"]
+    assert stale_cleared == ["instagram"]
 
 
 @pytest.mark.asyncio

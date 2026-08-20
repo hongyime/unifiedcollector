@@ -898,6 +898,25 @@ def test_source_matrix_blocker_suppresses_cooldown_when_browser_content_is_fresh
     assert blocker["severity"] == "ok"
 
 
+def test_source_matrix_blocker_suppresses_live_stale_watchdog_marker():
+    blocker = _source_matrix_blocker(
+        _source(
+            source="instagram",
+            status="live",
+            detail="fresh browser content/probe event is inside the freshness window",
+            source_health_status="degraded",
+            source_health_error="stale 358883s - watchdog active HTTP 429 cooldown 81s left; not restarted",
+            browser_content_stale=False,
+        ),
+        rate_row=None,
+        cursor_row=None,
+        extension_issues=[],
+    )
+
+    assert blocker["kind"] == "none"
+    assert blocker["severity"] == "ok"
+
+
 def test_source_matrix_blocker_does_not_block_live_source_for_rotated_auth_event():
     blocker = _source_matrix_blocker(
         _source(status="live"),

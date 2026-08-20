@@ -122,7 +122,14 @@ if os.getenv("WATCHDOG_HEADLESS_ENABLED", "1") == "1":
     _D = 86400  # 1 day, the generous baseline
     CHECKS.update({
         "instagram": (
-            "SELECT extract(epoch FROM now()-max(collected_at)) FROM media_items WHERE source='instagram'",
+            """
+            SELECT extract(epoch FROM now()-max(ts))
+            FROM (
+                SELECT max(updated_at) AS ts FROM instagram_profiles
+                UNION ALL
+                SELECT max(collected_at) AS ts FROM media_items WHERE source='instagram'
+            ) progress
+            """,
             int(os.getenv("WATCHDOG_STALE_INSTAGRAM", str(_D * 2))),   # 48h
             ["unifiedcollector_collector_instagram"],
         ),
@@ -683,6 +690,11 @@ async def _browser_source_tick(db: asyncpg.Connection) -> None:
                 )
         else:
             await _mark_running_if_browser_watchdog(db, source)
+            # Hybrid browser-managed sources can be live even when their older
+            # headless/media freshness query remains stale. When computed
+            # browser liveness says the source is ok, clear stale-watchdog rows
+            # too so dashboards do not keep reporting an expired 429/stale mark.
+            await _mark_running_if_stale_watchdog(db, source)
             if heartbeat_age is None:
                 log.info("%s browser source ok (no heartbeat requirement active)", source)
             else:

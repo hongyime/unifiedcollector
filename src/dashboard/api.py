@@ -2752,7 +2752,13 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
     stale_watchdog_degraded_cleared = (
         status == "live"
         and source_row.get("source_health_status") == "degraded"
-        and stale_browser_marker
+        and (
+            stale_browser_marker
+            or (
+                source_health_error_lc.startswith("stale ")
+                and "watchdog" in source_health_error_lc
+            )
+        )
     )
     if source_row.get("source_health_status") in {"dead", "auth_paused", "degraded"} and not stale_watchdog_degraded_cleared:
         return {
