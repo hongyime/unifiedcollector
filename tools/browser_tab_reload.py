@@ -6,9 +6,8 @@ Reads tmp/browser_tab_audit_result.json, decides which tabs need reload, and iss
 Page.reload on each with ignoreCache=false (soft reload). Tabs already healthy
 (cs=True cs_version=<extension/manifest.json version>) are skipped.
 
-`x` is excluded from automatic maintenance by default. It stays manually
-openable, but the scraper profile should not keep it alive while X is in an
-operator-auth/page-shell state.
+By default every browser-managed platform is eligible for maintenance. Set
+UC_BROWSER_EXCLUDED_PLATFORMS to temporarily quarantine a fragile platform.
 """
 
 from __future__ import annotations
@@ -36,13 +35,13 @@ HARD_REOPEN_PLATFORMS = {
     p.strip().lower()
     for p in os.getenv(
         "UC_BROWSER_HARD_REOPEN_PLATFORMS",
-        "instagram,threads,tiktok,facebook,strava",
+        "instagram,threads,tiktok,facebook,strava,x",
     ).split(",")
     if p.strip()
 }
 EXCLUDED_AUTO_PLATFORMS = {
     p.strip().lower()
-    for p in os.getenv("UC_BROWSER_EXCLUDED_PLATFORMS", "x").split(",")
+    for p in os.getenv("UC_BROWSER_EXCLUDED_PLATFORMS", "").split(",")
     if p.strip()
 }
 CLOSE_EXCLUDED_AUTO_PLATFORMS = os.getenv("UC_BROWSER_CLOSE_EXCLUDED_PLATFORM_TABS", "1").strip().lower() not in {

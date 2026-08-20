@@ -129,7 +129,7 @@ def _cdp_tab_budget(pages: list[dict], grouped: dict[str, list[dict]]) -> dict:
     control tabs are asserted by the extension service worker through chrome.tabs.
     """
     max_tabs = _int_env("UC_TAB_AUDIT_MAX_TABS_PER_PLATFORM", 1)
-    excluded_platforms = _csv_env("UC_TAB_AUDIT_EXCLUDED_PLATFORMS", "x")
+    excluded_platforms = _csv_env("UC_TAB_AUDIT_EXCLUDED_PLATFORMS", "")
     controls = [
         p for p in pages
         if EXTENSION_CONTROL_RE.match(str(p.get("url") or ""))

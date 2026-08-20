@@ -78,14 +78,13 @@ async def test_collect_expands_only_allowed_scopes(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_collect_expands_wildcards_when_global_scope_is_explicit(monkeypatch, tmp_path):
+async def test_collect_expands_wildcards_when_global_scope_is_allowed_by_default(monkeypatch, tmp_path):
     dorks = tmp_path / "exposure.dorks"
     dorks.write_text('site:[TARGET] filename:.env\nintext:[TARGET] password\n', encoding="utf-8")
     monkeypatch.setenv("EXPOSURE_ENABLED", "1")
     monkeypatch.setenv("EXPOSURE_DORKS_FILE", str(dorks))
     monkeypatch.setenv("EXPOSURE_ALLOWED_DOMAINS", "*.edu.sg,*.*")
     monkeypatch.setenv("EXPOSURE_ALLOWED_REGEX", ".*")
-    monkeypatch.setenv("EXPOSURE_ALLOW_GLOBAL_SCOPE", "1")
     monkeypatch.setenv("EXPOSURE_EXPAND_WILDCARD_TARGETS", "1")
     monkeypatch.setenv("EXPOSURE_MAX_QUERIES_PER_CYCLE", "10")
 

@@ -116,11 +116,11 @@ function Get-ChromeCdpDiagnostics {
     if ($withCdp.Count -gt 0) {
         $reason = "chrome_cdp_available"
         $hint = "Chrome CDP is reachable. If browser heartbeats are stale, reload platform tabs or the UnifiedCollector extension control page."
-        $repairCommand = "$(Get-ChromeLauncherBaseCommand) -RemoteDebuggingPort $script:CdpPort -IsolateExtensions -NoOpenAll -OpenIds instagram,tiktok,threads,facebook,strava -NoTest"
+        $repairCommand = "$(Get-ChromeLauncherBaseCommand) -RemoteDebuggingPort $script:CdpPort -IsolateExtensions -NoOpenAll -OpenIds instagram,tiktok,threads,facebook,strava,x -NoTest"
         if ($script:LastCdpError) {
             $reason = "chrome_cdp_process_unreachable"
             if ($unsafeVisibleWindows.Count -eq 0) {
-                $repairCommand = "$(Get-ChromeLauncherBaseCommand) -RemoteDebuggingPort $script:CdpPort -IsolateExtensions -CloseExistingCdpProfile -CloseExistingIfNoVisibleWindows -NoOpenAll -OpenIds instagram,tiktok,threads,facebook,strava -NoTest"
+                $repairCommand = "$(Get-ChromeLauncherBaseCommand) -RemoteDebuggingPort $script:CdpPort -IsolateExtensions -CloseExistingCdpProfile -CloseExistingIfNoVisibleWindows -NoOpenAll -OpenIds instagram,tiktok,threads,facebook,strava,x -NoTest"
                 $hint = "Chrome has no unsafe visible windows and the CDP socket is unreachable. The maintenance task can close collector-controlled Chrome windows/processes and relaunch Chrome with CDP."
             } else {
                 $hint = "Chrome has a CDP command line, but the CDP socket is unreachable. Save/finish visible browser work, close Chrome normally, then run scripts\start-scraper-chrome-cdp.ps1."
@@ -128,12 +128,12 @@ function Get-ChromeCdpDiagnostics {
         }
     } elseif ($processes.Count -eq 0) {
         $reason = "chrome_not_running"
-        $repairCommand = "$(Get-ChromeLauncherBaseCommand) -RemoteDebuggingPort $script:CdpPort -IsolateExtensions -NoOpenAll -OpenIds instagram,tiktok,threads,facebook,strava -NoTest"
+        $repairCommand = "$(Get-ChromeLauncherBaseCommand) -RemoteDebuggingPort $script:CdpPort -IsolateExtensions -NoOpenAll -OpenIds instagram,tiktok,threads,facebook,strava,x -NoTest"
         $hint = "Chrome is not running. The maintenance task can relaunch scraper Chrome with CDP and the UnifiedCollector extension."
     } elseif ($withCdp.Count -eq 0) {
         $reason = "chrome_running_without_cdp"
         if ($unsafeVisibleWindows.Count -eq 0) {
-            $repairCommand = "$(Get-ChromeLauncherBaseCommand) -RemoteDebuggingPort $script:CdpPort -IsolateExtensions -CloseExistingIfNoVisibleWindows -NoOpenAll -OpenIds instagram,tiktok,threads,facebook,strava -NoTest"
+            $repairCommand = "$(Get-ChromeLauncherBaseCommand) -RemoteDebuggingPort $script:CdpPort -IsolateExtensions -CloseExistingIfNoVisibleWindows -NoOpenAll -OpenIds instagram,tiktok,threads,facebook,strava,x -NoTest"
             $hint = "Chrome has no unsafe visible windows and no CDP. The maintenance task can close collector-controlled Chrome windows/processes and relaunch scraper Chrome with CDP."
         } else {
             $hint = "Chrome has visible windows but was not launched with --remote-debugging-port=$script:CdpPort. Do not use -CloseExistingIfNoVisibleWindows; save/finish browser work, close Chrome normally, then run scripts\start-scraper-chrome-cdp.ps1 so tab maintenance and cookie backup can reconnect."

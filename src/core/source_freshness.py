@@ -606,7 +606,7 @@ async def compute_liveness(conn) -> list[dict]:
         ):
             browser_health_status = "external_auth_or_page_shell"
             browser_health_reason = browser_health_reason or "x_external_auth_or_page_shell"
-        if name == "x" and _env_bool("X_SOURCE_MANUAL_MODE", True):
+        if name == "x" and _env_bool("X_SOURCE_MANUAL_MODE", False):
             status = "live"
             detail = (
                 "X is in manual browser mode and excluded from automatic scraper recovery; "

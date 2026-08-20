@@ -191,7 +191,7 @@ def test_browser_tab_audit_has_hard_tab_budget_assertion():
 
     assert "UC_TAB_AUDIT_FAIL_ON_BUDGET" in script
     assert "UC_TAB_AUDIT_EXCLUDED_PLATFORMS" in script
-    assert '_csv_env("UC_TAB_AUDIT_EXCLUDED_PLATFORMS", "x")' in script
+    assert '_csv_env("UC_TAB_AUDIT_EXCLUDED_PLATFORMS", "")' in script
     assert '"allowed": allowed' in script
     assert "extension_control_tab_count" in script
     assert "platform_tab_budget_exceeded" in script
@@ -328,8 +328,8 @@ def test_browser_tab_reload_hard_reopens_repeatedly_stuck_tiktok_tabs():
     assert "EXPANDED_PLATFORM_TABS" in script
     assert "UC_CHROME_OPEN_EXPANDED_PLATFORM_TABS" in script
     assert "UC_BROWSER_EXPANDED_PLATFORM_TABS" in script
-    assert '"instagram,threads,tiktok,facebook,strava"' in script
-    assert 'os.getenv("UC_BROWSER_EXCLUDED_PLATFORMS", "x")' in script
+    assert '"instagram,threads,tiktok,facebook,strava,x"' in script
+    assert 'os.getenv("UC_BROWSER_EXCLUDED_PLATFORMS", "")' in script
     assert '"close_excluded"' in script
     assert '"https://www.tiktok.com/following"' in script
     assert '"https://www.tiktok.com/foryou"' in script
@@ -495,7 +495,7 @@ def test_browser_maintenance_repairs_missing_chrome():
     assert "collector-controlled unreachable CDP Chrome" in script
     assert "-FallbackOpenControlIfCleanupBlocked" not in script
     assert "-IsolateExtensions" in script
-    assert "-OpenIds instagram,tiktok,threads,facebook,strava" in script
+    assert "-OpenIds instagram,tiktok,threads,facebook,strava,x" in script
     assert "Chrome CDP repair succeeded; continuing maintenance pass" in script
     assert "chrome_cdp_available" in script
 
