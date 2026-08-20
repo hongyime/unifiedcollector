@@ -1,8 +1,14 @@
 # UnifiedCollector Agent State
 
-Updated: 2026-08-20 09:08 UTC / 2026-08-20 17:08 SGT
+Updated: 2026-08-20 09:27 UTC / 2026-08-20 17:27 SGT
 
 Current task status: Browser/exposure defaults were loosened per operator request and the live X/Instagram blockers were recovered. X is managed by default again, not manual-quarantined. Website allow policy includes both `https://*.com` and `http://*.com`, plus `.com.sg` variants. Exposure remains intentionally broad with wildcard domains and regex allow-all.
+
+Latest update:
+- Fixed Strava browser auth-wall maintenance caveat. Existing Strava Netscape cookie files in `credentials/strava/` contained `_strava4_session`; injected both Strava cookie jars into the active extension-capable Chrome profile on CDP port 9336 and navigated Strava to `https://www.strava.com/dashboard`.
+- Strava tab now audits as `Dashboard | Strava`, URL `https://www.strava.com/dashboard`, content script `1.23.72` active, tab budget ok.
+- Browser maintenance status is now `state=ok`, `detail=audit and reload completed`; Strava `source_health` is `running`.
+- `/health?include_sources=true` returned `status=ok` with no `source_issues`; browser extension ingest is active.
 
 Implemented in this slice:
 - Changed browser tab audit/reload defaults so `x` is no longer excluded unless `UC_TAB_AUDIT_EXCLUDED_PLATFORMS` or `UC_BROWSER_EXCLUDED_PLATFORMS` explicitly says so.
@@ -27,6 +33,6 @@ Verification completed:
 Known caveats:
 - Desktop Chrome with the original cookie profile is still open on port 9338. It is useful for confirming old login state but does not have the UnifiedCollector content script injected.
 - Extension-capable Chrome profile is open on port 9336 and is the active managed collector profile.
-- Browser maintenance status may still mark degraded if Strava is on a login/auth wall, even when source health and tab budget are ok.
+- Instagram may still show a stored `source_health=degraded` row during active HTTP 429 cooldown, but computed health ignored the watchdog marker and returned no `source_issues` in the latest check.
 - WhatsApp bridge 2 remains paired; bridge 1 still needs QR pairing if a second WhatsApp device is required.
 - Do not delete or overwrite any Chrome profile folders. Original cookies are still on disk under `%LOCALAPPDATA%\UnifiedCollector\ChromeCdpAutomationProfile`.
