@@ -1,7 +1,8 @@
 # Exposure target scopes and optional regex gates.
 # Concrete domains here are expanded into config/sources/exposure.dorks templates.
-# Gate-only regex lines are supported with regex:<pattern>.
-# Keep real scope in local env or uncomment/add authorized domains only.
+# Wildcards and regex lines are broad allow-gates by default; they admit
+# Collector-discovered concrete domains without generating noisy site:* queries.
+# Set EXPOSURE_EXPAND_WILDCARD_TARGETS=1 only for an intentional broad sweep.
 *.edu.sg
 *.sg
 *.com

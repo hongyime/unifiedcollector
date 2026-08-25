@@ -204,7 +204,7 @@ class ExposureCollector(SearchCollector):
         self._max_queries = _int_env("EXPOSURE_MAX_QUERIES_PER_CYCLE", 100, minimum=1, maximum=100_000)
         self._max_scopes = _int_env("EXPOSURE_MAX_SCOPES_PER_CYCLE", 200, minimum=1, maximum=10_000)
         self._seed_from_collector = _bool_env("EXPOSURE_SEED_FROM_COLLECTOR", True)
-        self._expand_wildcard_targets = _bool_env("EXPOSURE_EXPAND_WILDCARD_TARGETS", True)
+        self._expand_wildcard_targets = _bool_env("EXPOSURE_EXPAND_WILDCARD_TARGETS", False)
         self._allow_global_scope = _bool_env("EXPOSURE_ALLOW_GLOBAL_SCOPE", True)
         self._query_scopes: dict[str, str] = {}
         self._has_url_hash_column: bool | None = None

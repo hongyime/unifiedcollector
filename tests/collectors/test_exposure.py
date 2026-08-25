@@ -78,7 +78,33 @@ async def test_collect_expands_only_allowed_scopes(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_collect_expands_wildcards_when_global_scope_is_allowed_by_default(monkeypatch, tmp_path):
+async def test_collect_treats_wildcards_as_gate_only_by_default(monkeypatch, tmp_path):
+    dorks = tmp_path / "exposure.dorks"
+    dorks.write_text('site:[TARGET] filename:.env\nintext:[TARGET] password\n', encoding="utf-8")
+    monkeypatch.setenv("EXPOSURE_ENABLED", "1")
+    monkeypatch.setenv("EXPOSURE_DORKS_FILE", str(dorks))
+    monkeypatch.setenv("EXPOSURE_ALLOWED_DOMAINS", "*.edu.sg,*.*")
+    monkeypatch.setenv("EXPOSURE_ALLOWED_REGEX", ".*")
+    monkeypatch.setenv("EXPOSURE_MAX_QUERIES_PER_CYCLE", "10")
+
+    coll = ExposureCollector()
+    coll.search_query = AsyncMock(return_value=[])
+    coll.checkpoint.save_progress = AsyncMock()
+    coll._seed_scopes_from_collector = AsyncMock(return_value=["smu.edu.sg", "nus.edu.sg"])
+
+    await coll.collect(["*.edu.sg", "*.*", "regex:.*"])
+
+    queries = [call.args[0] for call in coll.search_query.await_args_list]
+    assert queries == [
+        "site:smu.edu.sg filename:.env",
+        "intext:smu.edu.sg password",
+        "site:nus.edu.sg filename:.env",
+        "intext:nus.edu.sg password",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_collect_can_expand_wildcards_when_explicitly_enabled(monkeypatch, tmp_path):
     dorks = tmp_path / "exposure.dorks"
     dorks.write_text('site:[TARGET] filename:.env\nintext:[TARGET] password\n', encoding="utf-8")
     monkeypatch.setenv("EXPOSURE_ENABLED", "1")
@@ -91,21 +117,18 @@ async def test_collect_expands_wildcards_when_global_scope_is_allowed_by_default
     coll = ExposureCollector()
     coll.search_query = AsyncMock(return_value=[])
     coll.checkpoint.save_progress = AsyncMock()
-    coll._seed_scopes_from_collector = AsyncMock(return_value=["smu.edu.sg", "nus.edu.sg"])
+    coll._seed_scopes_from_collector = AsyncMock(return_value=["smu.edu.sg"])
 
     await coll.collect(["*.edu.sg", "*.*", "regex:.*"])
 
     queries = [call.args[0] for call in coll.search_query.await_args_list]
-    assert queries == [
+    assert queries[:4] == [
         "site:*.edu.sg filename:.env",
         "intext:*.edu.sg password",
         "site:*.* filename:.env",
         "intext:*.* password",
-        "site:smu.edu.sg filename:.env",
-        "intext:smu.edu.sg password",
-        "site:nus.edu.sg filename:.env",
-        "intext:nus.edu.sg password",
     ]
+    assert "site:smu.edu.sg filename:.env" in queries
 
 
 @pytest.mark.asyncio
