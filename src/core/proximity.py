@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 _LAST_REFRESH = 0.0
 _REFRESH_LOCK = None
 _DDL_READY = False
+_REFRESH_LOCK_KEY = "collector:account_proximity_cache_refresh"
 
 DDL = """
 CREATE TABLE IF NOT EXISTS account_proximity_cache (
@@ -97,6 +98,36 @@ async def _collector_cache_recent(pool, interval_seconds: int) -> bool:
     return age_seconds < interval_seconds
 
 
+async def _try_acquire_refresh_advisory_lock(pool):
+    conn = await pool.acquire()
+    try:
+        locked = await conn.fetchval(
+            "SELECT pg_try_advisory_lock(hashtext($1))",
+            _REFRESH_LOCK_KEY,
+            timeout=5,
+        )
+    except Exception:
+        await pool.release(conn)
+        raise
+    if not locked:
+        await pool.release(conn)
+        return None
+    return conn
+
+
+async def _release_refresh_advisory_lock(pool, conn) -> None:
+    if conn is None:
+        return
+    try:
+        await conn.execute(
+            "SELECT pg_advisory_unlock(hashtext($1))",
+            _REFRESH_LOCK_KEY,
+            timeout=5,
+        )
+    finally:
+        await pool.release(conn)
+
+
 async def refresh_account_proximity_cache(pool, *, force: bool = False) -> dict:
     """Best-effort sync from analyzer.account_proximity into collector cache."""
     if os.getenv("PROXIMITY_CACHE_ENABLED", "true").lower() != "true":
@@ -123,34 +154,44 @@ async def refresh_account_proximity_cache(pool, *, force: bool = False) -> dict:
         if not dsn:
             return {"skipped": "no_analyzer_dsn"}
 
-        try:
-            analyzer_conn = await asyncpg.connect(dsn, command_timeout=120)
-            try:
-                rows = await analyzer_conn.fetch("""
-                    SELECT platform, account_id, owner_account, tier, reasons, updated_at
-                    FROM account_proximity
-                """)
-            finally:
-                await analyzer_conn.close()
-        except Exception as exc:
-            logger.debug("proximity cache refresh: analyzer fetch failed: %s", exc, exc_info=True)
-            return {"error": str(exc)[:300]}
+        lock_conn = await _try_acquire_refresh_advisory_lock(pool)
+        if lock_conn is None:
+            return {"skipped": "refresh_in_progress"}
 
-        records = [
-            (
-                r["platform"],
-                r["account_id"],
-                r["owner_account"],
-                r["tier"],
-                json.dumps(r["reasons"] or [], default=str),
-                r["updated_at"],
-            )
-            for r in rows
-        ]
         try:
-            async with pool.acquire() as conn:
-                async with conn.transaction():
-                    await conn.execute("""
+            try:
+                analyzer_timeout = int(os.getenv("PROXIMITY_CACHE_ANALYZER_TIMEOUT_SECONDS", "45"))
+                analyzer_conn = await asyncpg.connect(dsn, command_timeout=analyzer_timeout)
+                try:
+                    rows = await analyzer_conn.fetch("""
+                        SELECT platform, account_id, owner_account, tier, reasons, updated_at
+                        FROM account_proximity
+                    """, timeout=analyzer_timeout)
+                finally:
+                    await analyzer_conn.close()
+            except Exception as exc:
+                logger.debug("proximity cache refresh: analyzer fetch failed: %s", exc, exc_info=True)
+                return {"error": str(exc)[:300]}
+
+            if not rows:
+                return {"skipped": "empty_analyzer_snapshot_preserved"}
+
+            records = [
+                (
+                    r["platform"],
+                    r["account_id"],
+                    r["owner_account"],
+                    r["tier"],
+                    json.dumps(r["reasons"] or [], default=str),
+                    r["updated_at"],
+                )
+                for r in rows
+            ]
+            try:
+                write_timeout = int(os.getenv("PROXIMITY_CACHE_WRITE_TIMEOUT_SECONDS", "60"))
+                async with lock_conn.transaction():
+                    sync_ts = await lock_conn.fetchval("SELECT clock_timestamp()", timeout=write_timeout)
+                    await lock_conn.execute("""
                         CREATE TEMP TABLE tmp_account_proximity_cache (
                             platform VARCHAR(30) NOT NULL,
                             account_id VARCHAR(255) NOT NULL,
@@ -159,39 +200,46 @@ async def refresh_account_proximity_cache(pool, *, force: bool = False) -> dict:
                             reasons JSONB NOT NULL,
                             updated_at TIMESTAMPTZ
                         ) ON COMMIT DROP
-                    """)
-                    if records:
-                        await conn.copy_records_to_table(
-                            "tmp_account_proximity_cache",
-                            records=records,
-                            columns=[
-                                "platform",
-                                "account_id",
-                                "owner_account",
-                                "tier",
-                                "reasons",
-                                "updated_at",
-                            ],
-                        )
-                    await conn.execute("DELETE FROM account_proximity_cache")
-                    if records:
-                        await conn.execute(
-                            """
-                            INSERT INTO account_proximity_cache
-                                (platform, account_id, owner_account, tier, reasons, updated_at, synced_at)
-                            SELECT platform, account_id, owner_account, tier, reasons, updated_at, NOW()
-                            FROM tmp_account_proximity_cache
-                            ON CONFLICT (platform, account_id, owner_account) DO UPDATE SET
-                                tier = EXCLUDED.tier,
-                                reasons = EXCLUDED.reasons,
-                                updated_at = EXCLUDED.updated_at,
-                                synced_at = NOW()
-                            """
-                        )
-                    await _enrich_cache_aliases(conn)
-        except Exception as exc:
-            logger.debug("proximity cache refresh: collector write failed: %s", exc, exc_info=True)
-            return {"error": str(exc)[:300]}
+                    """, timeout=write_timeout)
+                    await lock_conn.copy_records_to_table(
+                        "tmp_account_proximity_cache",
+                        records=records,
+                        columns=[
+                            "platform",
+                            "account_id",
+                            "owner_account",
+                            "tier",
+                            "reasons",
+                            "updated_at",
+                        ],
+                        timeout=write_timeout,
+                    )
+                    await lock_conn.execute(
+                        """
+                        INSERT INTO account_proximity_cache
+                            (platform, account_id, owner_account, tier, reasons, updated_at, synced_at)
+                        SELECT platform, account_id, owner_account, tier, reasons, updated_at, $1::timestamptz
+                        FROM tmp_account_proximity_cache
+                        ON CONFLICT (platform, account_id, owner_account) DO UPDATE SET
+                            tier = EXCLUDED.tier,
+                            reasons = EXCLUDED.reasons,
+                            updated_at = EXCLUDED.updated_at,
+                            synced_at = EXCLUDED.synced_at
+                        """,
+                        sync_ts,
+                        timeout=write_timeout,
+                    )
+                    await _enrich_cache_aliases(lock_conn)
+                    await lock_conn.execute(
+                        "DELETE FROM account_proximity_cache WHERE synced_at < $1::timestamptz",
+                        sync_ts,
+                        timeout=write_timeout,
+                    )
+            except Exception as exc:
+                logger.debug("proximity cache refresh: collector write failed: %s", exc, exc_info=True)
+                return {"error": str(exc)[:300]}
+        finally:
+            await _release_refresh_advisory_lock(pool, lock_conn)
 
         _LAST_REFRESH = time.monotonic()
         seeded = await seed_proximity_backfill_targets(pool)
