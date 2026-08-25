@@ -1,5 +1,6 @@
 # UnifiedCollector Agent Journal
 
+- 2026-08-25 14:20 UTC: Unit tests exercising no-cache fallbacks must force `_load_source_matrix_payload_cache` to None; the host-persisted source-matrix cache otherwise makes them machine-dependent and can silently satisfy liveness.
 - 2026-08-21 16:25 UTC: Action-queue sync must not derive durable target-starved actions from refreshing partial source-matrix payloads with timed-out/cancelled core sections. Browser-media source floors should count media/stored output, while website remains a slow useful-output source.
 - 2026-08-21 15:43 UTC: A visible "logged out tabs" report must be checked against the managed CDP profile before assuming cookie loss. The vault restored 88 cookies successfully, tab budget was repaired, and final Collector health was ok with source issues empty; remaining Lemon8 zero-yield is content/yield, not cookie loss.
 - 2026-08-21 14:15 UTC: Action-queue sync must force a fresh source-matrix build after browser repair; stale cached maintenance evidence can otherwise keep repaired CDP/browser states open as false operator actions. Browser maintenance profile restarts need a 300s launcher budget on this machine.

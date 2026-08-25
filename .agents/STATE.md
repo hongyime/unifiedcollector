@@ -1,3 +1,9 @@
+Updated: 2026-08-25 14:20 UTC / 22:20 SGT
+
+Current live update:
+- Resumed cross-repo work after the Codex usage-limit stop. Collector tree committed atomically: durable collection action queue (+ migration), health-liveness test isolation fix, managed-browser maintenance and cookie-vault hardening, proximity advisory-lock guard, exposure target expansion, and compose config tune (youtube quota ratio, exposure wildcard gate, vault autorestore default).
+- Fixed two environment-leaky health tests (`test_extension_health.py`): they assumed no persisted source-matrix cache existed, so a warm host-side cache silently satisfied liveness and the expected `source_liveness` diagnostic never appeared. Both tests now force `_load_source_matrix_payload_cache` to None to pin the no-cache fallback path deterministically; cache-reuse behavior stays covered by `test_health_include_sources_uses_source_matrix_cache_on_liveness_timeout`. Focused suite green.
+- Analyzer-side note: readiness now enforces a global deadline (`ANALYZER_READINESS_TOTAL_BUDGET_SECONDS`, default 40) across recovery chains; live probes 41.4s cold / 25.7s warm vs 55.6s baseline. Current real signals: Supabase backlog 17 rows pending drain; browser maintenance last terminal state degraded ("sleeping after nonzero pass") — worth a Collector-side look in the next maintenance pass.
 Updated: 2026-08-21 23:46 UTC / 2026-08-22 07:46 SGT
 
 Current live update:
