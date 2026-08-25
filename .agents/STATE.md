@@ -443,3 +443,11 @@ Known caveats:
 - Instagram may still show a stored `source_health=degraded` row during active HTTP 429 cooldown, but computed health ignored the watchdog marker and returned no `source_issues` in the latest check.
 - WhatsApp bridge 2 remains paired; bridge 1 still needs QR pairing if a second WhatsApp device is required.
 - Do not delete or overwrite any Chrome profile folders. Original cookies are still on disk under `%LOCALAPPDATA%\UnifiedCollector\ChromeCdpAutomationProfile`.
+
+Updated: 2026-08-26 01:35 SGT
+
+Current live update:
+- Cross-run completion from Analyzer green-light execution: Collector commit `3bab003a` shipped /domain-pacing/status + /instagram/health graceful TimeoutError payloads (no more HTTP 500 tracebacks under DB load), instagram http_429 reload cooldown guard with plan-history timestamps, X failedScript non-canonical repair-to-home, repeated X shell-churn escalation evidence, and covered_warning_notes in action-queue sync responses.
+- Live tab repairs executed: threads wedged renderer hard-reopened to canonical /following; X verified on x.com/home; IG refreshed on explore.
+- Post-repair scrape proof (rolling 60m stored): facebook 176 (prior capture stall cleared), instagram 288, threads 127, x 12; open action queue count=0; cookie vault ok.
+- Final gate clean: dashboard/watchdog logs zero Tracebacks in post-change window; analyzer readiness consuming this proof is critical-green with only the honest warning-level data-quality ledger.
