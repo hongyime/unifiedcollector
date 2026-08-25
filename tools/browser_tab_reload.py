@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import argparse
 import sys
 import time
 import urllib.request
@@ -35,7 +36,7 @@ HARD_REOPEN_PLATFORMS = {
     p.strip().lower()
     for p in os.getenv(
         "UC_BROWSER_HARD_REOPEN_PLATFORMS",
-        "instagram,threads,tiktok,facebook,strava,x",
+        "instagram,threads,tiktok,lemon8,facebook,strava,x",
     ).split(",")
     if p.strip()
 }
@@ -68,12 +69,15 @@ if EXPANDED_PLATFORM_TABS:
     )
 HARD_REOPEN_URLS = {
     "instagram": [
-        "https://www.instagram.com/",
+        "https://www.instagram.com/explore/",
     ],
     "threads": [
-        "https://www.threads.com/",
+        "https://www.threads.com/following",
     ],
     "tiktok": _TIKTOK_HARD_REOPEN_URLS,
+    "lemon8": [
+        "https://www.lemon8-app.com/topic/singapore?region=sg",
+    ],
     "x": [
         "https://x.com/home",
     ],
@@ -92,6 +96,11 @@ CLOSE_UNHEALTHY_DUPLICATES = os.getenv("UC_BROWSER_CLOSE_UNHEALTHY_DUPLICATES", 
     "false",
     "no",
 }
+DASHBOARD_HEALTH_URL = os.getenv(
+    "UC_DASHBOARD_HEALTH_URL",
+    "http://127.0.0.1:8001/health?include_sources=true",
+)
+DASHBOARD_HEALTH_TIMEOUT_SECONDS = float(os.getenv("UC_DASHBOARD_HEALTH_TIMEOUT_SECONDS", "20"))
 
 
 def _target_version() -> str:
@@ -123,7 +132,42 @@ def _open_url(url: str) -> tuple[bool, str]:
     return _cdp_request(f"/json/new?{urllib.parse.quote(url, safe='')}", timeout=8.0, method="PUT")
 
 
-def _decide_reload(tab: dict, target_version: str) -> tuple[bool, str]:
+def _stale_browser_issue_platforms(platform_filter: set[str] | None = None) -> set[str]:
+    """Return browser platforms currently degraded by stale content.
+
+    Tab-local health can be green while the extension is no longer producing
+    posts/media events. The dashboard source matrix is the canonical liveness
+    view, so feed its stale-browser issues back into maintenance.
+    """
+    if not DASHBOARD_HEALTH_URL:
+        return set()
+    try:
+        with urllib.request.urlopen(DASHBOARD_HEALTH_URL, timeout=DASHBOARD_HEALTH_TIMEOUT_SECONDS) as resp:
+            payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except Exception as exc:
+        print(f"  [WARN  ] dashboard stale-source check skipped: {exc}")
+        return set()
+    stale: set[str] = set()
+    rows = list(payload.get("source_issues") or [])
+    rows.extend(payload.get("sources") or [])
+    for issue in rows:
+        if not isinstance(issue, dict):
+            continue
+        source = str(issue.get("source") or issue.get("platform") or "").lower()
+        if source not in HARD_REOPEN_PLATFORMS or source in EXCLUDED_AUTO_PLATFORMS:
+            continue
+        if platform_filter is not None and source not in platform_filter:
+            continue
+        detail = " ".join(
+            str(issue.get(key) or "")
+            for key in ("kind", "detail", "source_health_error", "browser_health_reason", "status_label")
+        ).lower()
+        if issue.get("browser_content_stale") is True or "browser content progress is" in detail:
+            stale.add(source)
+    return stale
+
+
+def _decide_reload(tab: dict, target_version: str, stale_platforms: set[str] | None = None) -> tuple[bool, str]:
     platform = str(tab.get("platform") or "").lower()
     url = str(tab.get("url") or tab.get("url_snapshot") or "")
     if platform in EXCLUDED_AUTO_PLATFORMS:
@@ -146,6 +190,8 @@ def _decide_reload(tab: dict, target_version: str) -> tuple[bool, str]:
     # Memory exceeded 300MB
     if tab.get("heap_mb") is not None and tab["heap_mb"] > 300:
         return True, f"heap {tab['heap_mb']}MB > 300MB"
+    if platform in (stale_platforms or set()):
+        return True, "source health: stale browser content"
     return False, "healthy"
 
 
@@ -189,7 +235,11 @@ def _is_canonical_platform_url(platform: str, url: str) -> bool:
         parsed = urllib.parse.urlparse(str(url or ""))
     except Exception:
         return False
-    if parsed.query:
+    allowed_queries = {
+        urllib.parse.urlparse(candidate).query
+        for candidate in HARD_REOPEN_URLS.get(platform, [])
+    }
+    if parsed.query and parsed.query not in allowed_queries:
         return False
     host = parsed.netloc.lower().split(":", 1)[0]
     path = parsed.path.rstrip("/") or "/"
@@ -271,7 +321,13 @@ def send_reload(ws_url: str, target_id: str, ignore_cache: bool = False, timeout
 
 def _target_disappeared(message: str) -> bool:
     text = (message or "").lower()
-    return "no such target" in text or "target closed" in text or "target detached" in text
+    return (
+        "no such target" in text
+        or "target closed" in text
+        or "target detached" in text
+        or "http error 404" in text
+        or "404: not found" in text
+    )
 
 
 def _load_previous_plan() -> list[dict]:
@@ -314,10 +370,11 @@ def _is_stuck_tab_reason(reason: str) -> bool:
         or "recoverable_error_shell" in text
         or "non-canonical recovery url" in text
         or "non-canonical platform url" in text
+        or "stale browser content" in text
     )
 
 
-def _append_live_excluded_target_closures(plan: list[dict]) -> None:
+def _append_live_excluded_target_closures(plan: list[dict], platform_filter: set[str] | None = None) -> None:
     if not CLOSE_EXCLUDED_AUTO_PLATFORMS or not EXCLUDED_AUTO_PLATFORMS:
         return
     planned_ids = {
@@ -340,6 +397,8 @@ def _append_live_excluded_target_closures(plan: list[dict]) -> None:
         platform = _excluded_platform_for_url(url)
         if not platform or _is_auth_wall(url):
             continue
+        if platform_filter is not None and platform not in platform_filter:
+            continue
         plan.append({
             "platform": platform,
             "target_id": target_id,
@@ -347,6 +406,42 @@ def _append_live_excluded_target_closures(plan: list[dict]) -> None:
             "ws": target.get("webSocketDebuggerUrl"),
             "reason": f"{platform} live CDP target excluded from automatic browser maintenance",
             "action": "close_excluded",
+            "auth_wall": False,
+            "heap_mb": None,
+            "cs": None,
+            "cs_version": None,
+            "responsive_main": None,
+        })
+
+
+def _append_missing_stale_platform_opens(
+    plan: list[dict],
+    stale_platforms: set[str],
+    platform_filter: set[str] | None = None,
+) -> None:
+    """Open a canonical tab when source liveness says a browser platform is stale.
+
+    The normal reload path only sees tabs present in the audit file. If a
+    managed platform has no tab at all, stale browser-content issues would stay
+    open until a full Chrome restart. Opening the canonical tab is cheaper and
+    lets the extension resume capture in place.
+    """
+    planned_platforms = {str(item.get("platform") or "").lower() for item in plan}
+    for platform in sorted(stale_platforms):
+        if platform_filter is not None and platform not in platform_filter:
+            continue
+        if platform in planned_platforms or platform in EXCLUDED_AUTO_PLATFORMS:
+            continue
+        urls = HARD_REOPEN_URLS.get(platform) or []
+        if not urls:
+            continue
+        plan.append({
+            "platform": platform,
+            "target_id": "",
+            "url": urls[0],
+            "ws": None,
+            "reason": "source health: stale browser content and no tab open",
+            "action": "open_missing",
             "auth_wall": False,
             "heap_mb": None,
             "cs": None,
@@ -408,6 +503,9 @@ def _hard_reopen_platform(platform: str, plans: list[dict]) -> list[dict]:
     results: list[dict] = []
     for p in plans:
         ok, msg = _close_target(p["target_id"])
+        if not ok and _target_disappeared(msg):
+            ok = True
+            msg = f"target already disappeared before close ({msg})"
         results.append({**p, "action": "hard_reopen_close", "status": "ok" if ok else "fail", "detail": msg})
         print(f"  close  {platform:10} {p['target_id'][:12]} ... {'OK' if ok else 'FAIL'}: {msg[:160]}")
         time.sleep(0.5)
@@ -441,6 +539,9 @@ def _hard_reopen_repeated_tabs(platform: str, plans: list[dict]) -> list[dict]:
     results: list[dict] = []
     for p in plans:
         ok, msg = _close_target(p["target_id"])
+        if not ok and _target_disappeared(msg):
+            ok = True
+            msg = f"target already disappeared before close ({msg})"
         results.append({**p, "action": "hard_reopen_close", "status": "ok" if ok else "fail", "detail": msg})
         print(f"  close  {platform:10} {p['target_id'][:12]} ... {'OK' if ok else 'FAIL'}: {msg[:160]}")
         time.sleep(0.5)
@@ -472,9 +573,43 @@ def _hard_reopen_repeated_tabs(platform: str, plans: list[dict]) -> list[dict]:
     return results
 
 
-def main():
+def _parse_platform_filter(raw: str | None) -> set[str] | None:
+    if raw is None:
+        return None
+    platforms = {
+        item.strip().lower()
+        for item in str(raw).split(",")
+        if item.strip()
+    }
+    unknown = platforms - set(HARD_REOPEN_URLS)
+    if unknown:
+        raise SystemExit(f"unknown --platforms value(s): {', '.join(sorted(unknown))}")
+    return platforms
+
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Reload unhealthy Collector browser tabs via CDP.")
+    parser.add_argument(
+        "--platforms",
+        help="Comma-separated platform filter. When set, only those platform tabs are repaired.",
+    )
+    parser.add_argument(
+        "--hard-reopen",
+        action="store_true",
+        help="Compatibility flag; hard reopen decisions are still made from audit health.",
+    )
+    parser.add_argument("--json", action="store_true", help="Compatibility flag; output remains text plus plan JSON file.")
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None):
+    args = _parse_args(argv)
+    platform_filter = _parse_platform_filter(args.platforms)
     target_version = _target_version()
     previous_plan = _load_previous_plan()
+    stale_platforms = _stale_browser_issue_platforms(platform_filter)
+    if stale_platforms:
+        print("# Dashboard stale browser sources: " + ", ".join(sorted(stale_platforms)))
     with AUDIT_PATH.open(encoding="utf-8") as f:
         audit = json.load(f)
 
@@ -483,8 +618,11 @@ def main():
     for plat, tabs in audit.items():
         if str(plat).startswith("_") or not isinstance(tabs, list):
             continue
+        platform = str(plat).lower()
+        if platform_filter is not None and platform not in platform_filter:
+            continue
         for tab in tabs:
-            need, reason = _decide_reload(tab, target_version)
+            need, reason = _decide_reload(tab, target_version, stale_platforms)
             url_for_check = tab.get("url") or tab.get("url_snapshot") or ""
             auth_wall = _is_auth_wall(url_for_check)
             action = "reload" if need else "skip"
@@ -512,7 +650,8 @@ def main():
                 "cs_version": tab.get("cs_version"),
                 "responsive_main": tab.get("responsive_main"),
             })
-    _append_live_excluded_target_closures(plan)
+    _append_live_excluded_target_closures(plan, platform_filter)
+    _append_missing_stale_platform_opens(plan, stale_platforms, platform_filter)
     _append_duplicate_control_tab_closures(plan)
 
     hard_reopen_platforms: set[str] = set()
@@ -599,6 +738,14 @@ def main():
     print("# Executing reloads sequentially...")
     results = []
     for p in plan:
+        if p["action"] != "open_missing":
+            continue
+        ok, msg = _open_url(str(p["url"]))
+        results.append({**p, "status": "ok" if ok else "fail", "detail": msg})
+        print(f"  open   {p['platform']:10} {str(p['url'])[:80]} ... {'OK' if ok else 'FAIL'}: {msg[:160]}")
+        time.sleep(1.0)
+
+    for p in plan:
         if p["action"] not in {"close_excluded", "close_duplicate_control_tab"}:
             continue
         ok, msg = _close_target(p["target_id"])
@@ -660,7 +807,7 @@ def main():
             continue
         if str(p["target_id"]) in duplicate_healthy_close_tabs:
             continue
-        if p["action"] in {"close_excluded", "close_duplicate_control_tab"}:
+        if p["action"] in {"close_excluded", "close_duplicate_control_tab", "open_missing"}:
             continue
         if p["action"] != "reload":
             results.append({**p, "status": "skipped"})

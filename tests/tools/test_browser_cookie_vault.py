@@ -19,8 +19,11 @@ from src.tools import browser_cookie_vault as vault_mod
 from src.tools.browser_cookie_vault import (
     CDPUnreachable,
     CookieVault,
+    _auth_quality_score,
+    _default_backup_dir,
     _sanitize_for_set,
     filter_social_cookies,
+    summarize_auth_markers,
 )
 
 
@@ -186,6 +189,29 @@ def test_sanitize_drops_invalid_samesite():
     assert "sameSite" not in _sanitize_for_set(c)
 
 
+def test_auth_marker_summary_and_quality_never_need_values():
+    jar = [
+        _mk_cookie("sessionid", ".instagram.com", value="secret_a"),
+        _mk_cookie("c_user", ".facebook.com", value="secret_b"),
+        _mk_cookie("xs", ".facebook.com", value="secret_c"),
+        _mk_cookie("auth_token", ".x.com", value="secret_d"),
+        _mk_cookie("ct0", ".x.com", value="secret_e"),
+        _mk_cookie("track", ".facebook.com", value="not_auth"),
+    ]
+
+    summary = summarize_auth_markers(jar)
+
+    assert summary == {
+        "facebook": ["c_user", "xs"],
+        "instagram": ["sessionid"],
+        "x": ["auth_token", "ct0"],
+    }
+    assert "secret" not in json.dumps(summary)
+    assert _auth_quality_score({"cookies": jar, "cookie_count": len(jar)}) > _auth_quality_score(
+        {"cookies": [_mk_cookie("track", ".facebook.com")], "cookie_count": 1}
+    )
+
+
 # ─── Backup / restore round-trip via fake Chrome ────────────────────────────
 
 
@@ -206,6 +232,14 @@ async def test_backup_writes_latest_json_with_expected_shape(tmp_path: Path):
     assert disk["cookie_count"] == 8
     assert disk["total_seen"] == 12
     assert disk["cdp_url"] == cdp_url
+    assert disk["auth_summary"] == {
+        "facebook": ["c_user"],
+        "instagram": ["sessionid"],
+        "strava": ["_strava4_session"],
+        "tiktok": ["sessionid"],
+        "x": ["auth_token"],
+    }
+    assert disk["quality_score"] > 0
     assert isinstance(disk["ts"], str) and disk["ts"].endswith("Z")
     assert len(disk["cookies"]) == 8
     # And a timestamped snapshot is written alongside.
@@ -215,6 +249,94 @@ async def test_backup_writes_latest_json_with_expected_shape(tmp_path: Path):
     assert vault.last_backup_count == 8
     assert vault.last_error is None
     assert payload == disk
+
+
+async def test_backup_preserves_better_latest_when_new_snapshot_loses_auth(tmp_path: Path):
+    old_snapshot = {
+        "ts": "2026-01-01T00:00:00Z",
+        "cdp_url": "http://old",
+        "cookie_count": 5,
+        "total_seen": 5,
+        "cookies": [
+            _mk_cookie("sessionid", ".instagram.com"),
+            _mk_cookie("c_user", ".facebook.com"),
+            _mk_cookie("xs", ".facebook.com"),
+            _mk_cookie("auth_token", ".x.com"),
+            _mk_cookie("ct0", ".x.com"),
+        ],
+    }
+    old_snapshot["auth_summary"] = summarize_auth_markers(old_snapshot["cookies"])
+    old_snapshot["quality_score"] = _auth_quality_score(old_snapshot)
+    latest = tmp_path / "latest.json"
+    latest.write_text(json.dumps(old_snapshot), encoding="utf-8")
+
+    fake = FakeChrome([_mk_cookie("datr", ".facebook.com"), _mk_cookie("guest_id", ".x.com")])
+    cdp_url = await fake.start()
+    try:
+        vault = CookieVault(cdp_url=cdp_url, backup_dir=tmp_path, keep_snapshots=10)
+        async with aiohttp.ClientSession() as session:
+            new_payload = await vault.backup(session)
+    finally:
+        await fake.stop()
+
+    preserved = json.loads(latest.read_text(encoding="utf-8"))
+    assert preserved["ts"] == old_snapshot["ts"]
+    assert new_payload["quality_score"] < old_snapshot["quality_score"]
+    assert vault.last_latest_preserved is True
+    assert vault.last_preservation_reason == "new_snapshot_lower_auth_quality"
+    latest_status = vault.latest_snapshot_status()
+    assert latest_status["restorable"] is True
+    assert latest_status["quality_score"] == old_snapshot["quality_score"]
+    assert latest_status["auth_summary"] == old_snapshot["auth_summary"]
+    snapshots = list(tmp_path.glob("snapshot_*.json"))
+    assert len(snapshots) == 1
+
+
+def test_latest_snapshot_status_reports_unusable_latest(tmp_path: Path):
+    vault = CookieVault(cdp_url="http://127.0.0.1:1", backup_dir=tmp_path)
+
+    missing = vault.latest_snapshot_status()
+    assert missing["exists"] is False
+    assert missing["restorable"] is False
+    assert missing["error"] == "missing_latest_snapshot"
+
+    (tmp_path / "latest.json").write_text(json.dumps({"cookies": []}), encoding="utf-8")
+    empty = vault.latest_snapshot_status()
+    assert empty["exists"] is True
+    assert empty["restorable"] is False
+    assert empty["quality_score"] == 0
+
+
+def test_tiktok_ttwid_only_scores_lower_than_session_snapshot():
+    weak = [
+        _mk_cookie("ttwid", ".tiktok.com"),
+    ]
+    strong = [
+        _mk_cookie("ttwid", ".tiktok.com"),
+        _mk_cookie("sessionid", ".tiktok.com"),
+    ]
+
+    assert summarize_auth_markers(weak) == {"tiktok": ["ttwid"]}
+    assert summarize_auth_markers(strong) == {"tiktok": ["sessionid", "ttwid"]}
+    assert _auth_quality_score({"cookies": strong, "cookie_count": len(strong)}) > _auth_quality_score(
+        {"cookies": weak, "cookie_count": len(weak)}
+    )
+
+
+def test_default_backup_dir_prefers_repo_local_cookie_vault(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    repo_vault = tmp_path / "credentials" / "browser_cookies"
+    repo_vault.mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("BROWSER_COOKIE_VAULT_DIR", raising=False)
+
+    assert _default_backup_dir() == repo_vault
+
+
+def test_default_backup_dir_honors_explicit_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    configured = tmp_path / "custom" / "vault"
+    monkeypatch.setenv("BROWSER_COOKIE_VAULT_DIR", str(configured))
+
+    assert _default_backup_dir() == configured
 
 
 async def test_restore_pushes_each_cookie_via_set_cookies(tmp_path: Path):
@@ -362,3 +484,6 @@ async def test_health_endpoint_reports_last_backup(tmp_path: Path, aiohttp_unuse
     assert data["error"] is None
     assert data["last_backup"] is not None
     assert data["cdp_url"] == cdp_url
+    assert data["effective_latest"]["restorable"] is True
+    assert data["effective_latest"]["quality_score"] > 0
+    assert data["effective_latest"]["auth_summary"] == data["auth_summary"]

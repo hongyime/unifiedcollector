@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import hashlib
+import inspect
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -2176,6 +2177,15 @@ def test_owner_account_for_follow_uses_tiktok_fallback(monkeypatch):
     assert ig_ingest._owner_account_for_follow(
         "tiktok", "seen", None
     ) == (None, None)
+
+
+def test_threads_facebook_post_upsert_backfills_blank_author():
+    source = inspect.getsource(ig_ingest._save_posts)
+
+    assert (
+        "author_username=COALESCE(NULLIF(EXCLUDED.author_username, ''), "
+        "{table}.author_username)"
+    ) in source
 
 
 def test_archive_browser_capture_failure_records_dlq(monkeypatch):

@@ -40,18 +40,18 @@ def test_x_twitter_alias_is_registered_for_tabs_and_background():
     assert 'aliasHosts: ["twitter.com"]' in platforms
     assert 'id: "x",' in background
     assert 'id: "x",' in platforms
-    assert next(line for line in background.splitlines() if 'id: "x"' in line).rstrip().endswith("scraper: false },")
-    assert next(line for line in platforms.splitlines() if 'id: "x"' in line).rstrip().endswith("scraper: false },")
+    assert next(line for line in background.splitlines() if 'id: "x"' in line).rstrip().endswith("scraper: true },")
+    assert next(line for line in platforms.splitlines() if 'id: "x"' in line).rstrip().endswith("scraper: true },")
     assert "function platformHosts(p)" in background
     assert "function platformUrlPatterns(p)" in background
     assert "platformHosts(p).includes(host)" in background
 
 
-def test_x_is_not_auto_opened_by_scraper_tab_recovery():
+def test_x_is_auto_managed_by_scraper_tab_recovery():
     background = _read("extension/background.js")
     tabs_js = _read("extension/tabs.js")
 
-    assert 'const AUTO_SCRAPER_PLATFORM_IDS = new Set(["instagram", "threads", "tiktok", "facebook", "strava"])' in background
+    assert 'const AUTO_SCRAPER_PLATFORM_IDS = new Set(["instagram", "threads", "tiktok", "x", "facebook", "strava"])' in background
     assert "p.scraper && AUTO_SCRAPER_PLATFORM_IDS.has(p.id)" in background
     open_all_block = background.split('case "openAll":', 1)[1].split('case "refreshScraperTabs":', 1)[0]
     reload_intent_block = background.split("const openIds = Array.isArray(intent.open_ids)", 1)[1].split(
@@ -595,6 +595,8 @@ def test_facebook_has_post_text_fallback_when_permalink_ids_are_missing():
 
     assert "function facebookPostIdFromHref" in content
     assert "function facebookAuthorFromArticle" in content
+    assert "url.searchParams.get(\"id\")" in content
+    assert "/^\\/people\\//i.test(path)" in content
     assert "fbdom_" in facebook_block
     assert 'metadata: {' in facebook_block
     assert 'source: linkId ? "facebook_dom_article" : "facebook_dom_article_fallback"' in facebook_block
@@ -620,7 +622,9 @@ def test_stalled_scrape_passes_are_force_cleared_on_timeout():
     timeout_table = content.split("const TIMEOUT_RELOAD_STREAK_BY_PLATFORM = {", 1)[1].split("};", 1)[0]
 
     assert "function forceClearScrapePass()" in content
-    assert 'const PAGE_RECOVERY_ENABLED = new Set(["lemon8", "tiktok", "threads", "x"])' in content
+    assert 'const PAGE_RECOVERY_ENABLED = new Set(["facebook", "instagram", "lemon8", "tiktok", "threads", "x"])' in content
+    assert "log\\s*in\\s+to\\s+facebook" in content
+    assert "log\\s*in\\s+to\\s+instagram" in content
     assert "feed_empty_state" in content
     assert "forceClearScrapePass();" in content
     assert "scrape_pass_forced_clear: true" in content

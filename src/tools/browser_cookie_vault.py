@@ -74,7 +74,27 @@ CHROME_CDP_URL: str = os.getenv(
 ).rstrip("/")
 
 _DEFAULT_BACKUP_DIR = "/app/credentials/browser_cookies"
-BACKUP_DIR: Path = Path(os.getenv("BROWSER_COOKIE_VAULT_DIR", _DEFAULT_BACKUP_DIR))
+
+
+def _default_backup_dir() -> Path:
+    """Return the cookie-vault directory for the current runtime.
+
+    Containers run from ``/app`` and should use the mounted ``/app/credentials``
+    path. Host-side one-shot commands on Windows run from the repository root;
+    there, ``/app`` resolves to ``C:\\app`` and can point at an old local copy.
+    Prefer the repo-local credentials directory when it exists and the operator
+    did not set an explicit override.
+    """
+    configured = os.getenv("BROWSER_COOKIE_VAULT_DIR")
+    if configured:
+        return Path(configured)
+    repo_local = Path.cwd() / "credentials" / "browser_cookies"
+    if repo_local.is_dir():
+        return repo_local
+    return Path(_DEFAULT_BACKUP_DIR)
+
+
+BACKUP_DIR: Path = _default_backup_dir()
 
 INTERVAL_SECONDS: int = int(os.getenv("BROWSER_COOKIE_VAULT_INTERVAL_SECONDS", "300"))
 KEEP_SNAPSHOTS: int = int(os.getenv("BROWSER_COOKIE_VAULT_KEEP_SNAPSHOTS", "10"))
@@ -120,6 +140,26 @@ SOCIAL_COOKIE_DOMAINS: tuple[str, ...] = (
     "ttwstatic.com",
 )
 
+# Auth markers are deliberately names only. Values are never logged or exposed.
+AUTH_COOKIE_MARKERS: dict[str, tuple[str, ...]] = {
+    "instagram": ("sessionid",),
+    "facebook": ("c_user", "xs"),
+    "x": ("auth_token", "ct0"),
+    "strava": ("_strava4_session",),
+    # `ttwid` is useful device state but can exist on logged-out/challenge pages.
+    # Require a session-bearing marker too so weak TikTok snapshots do not replace
+    # a restore point that can actually pass the login wall.
+    "tiktok": ("ttwid", "sessionid"),
+}
+
+AUTH_COOKIE_DOMAIN_ROOTS: dict[str, tuple[str, ...]] = {
+    "instagram": ("instagram.com",),
+    "facebook": ("facebook.com",),
+    "x": ("x.com", "twitter.com"),
+    "strava": ("strava.com",),
+    "tiktok": ("tiktok.com",),
+}
+
 # Fields Storage.setCookies rejects (they're read-only on the write side).
 _READONLY_COOKIE_FIELDS = frozenset({"size", "session"})
 
@@ -156,6 +196,41 @@ def _matches_social(domain: str) -> bool:
 def filter_social_cookies(cookies: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     """Keep only cookies whose ``domain`` maps onto a known social platform."""
     return [c for c in cookies if _matches_social(str(c.get("domain", "")))]
+
+
+def _domain_matches_roots(domain: str, roots: Iterable[str]) -> bool:
+    canon = domain.lstrip(".").lower()
+    return any(canon == root or canon.endswith("." + root) for root in roots)
+
+
+def summarize_auth_markers(cookies: Iterable[dict[str, Any]]) -> dict[str, list[str]]:
+    """Return auth-cookie names present per platform, never values."""
+    found: dict[str, set[str]] = {}
+    for cookie in cookies:
+        name = str(cookie.get("name", ""))
+        domain = str(cookie.get("domain", ""))
+        for platform, marker_names in AUTH_COOKIE_MARKERS.items():
+            if name not in marker_names:
+                continue
+            if _domain_matches_roots(domain, AUTH_COOKIE_DOMAIN_ROOTS[platform]):
+                found.setdefault(platform, set()).add(name)
+    return {platform: sorted(names) for platform, names in sorted(found.items())}
+
+
+def _auth_quality_score(payload: dict[str, Any]) -> int:
+    """Score snapshot usefulness for preserving logged-in sessions."""
+    summary = payload.get("auth_summary")
+    if not isinstance(summary, dict):
+        summary = summarize_auth_markers(payload.get("cookies") or [])
+    complete_platforms = 0
+    marker_count = 0
+    for platform, required in AUTH_COOKIE_MARKERS.items():
+        names = set(summary.get(platform) or [])
+        marker_count += len(names)
+        if all(name in names for name in required):
+            complete_platforms += 1
+    cookie_count = int(payload.get("cookie_count") or len(payload.get("cookies") or []))
+    return complete_platforms * 1000 + marker_count * 10 + min(cookie_count, 999)
 
 
 def _sanitize_for_set(cookie: dict[str, Any]) -> dict[str, Any]:
@@ -307,6 +382,10 @@ class CookieVault:
         self.last_backup_count: int = 0
         self.last_error: str | None = None
         self.consecutive_failures: int = 0
+        self.last_auth_summary: dict[str, list[str]] = {}
+        self.last_quality_score: int = 0
+        self.last_latest_preserved: bool = False
+        self.last_preservation_reason: str | None = None
 
     # ── on-disk helpers ─────────────────────────────────────────────────────
 
@@ -361,32 +440,107 @@ class CookieVault:
         social = filter_social_cookies(all_cookies)
 
         ts = _now_iso()
+        auth_summary = summarize_auth_markers(social)
         payload = {
             "ts": ts,
             "cdp_url": self.cdp_url,
             "cookie_count": len(social),
             "total_seen": len(all_cookies),
+            "auth_summary": auth_summary,
             "cookies": social,
         }
+        payload["quality_score"] = _auth_quality_score(payload)
 
-        self._atomic_write(self.latest_path(), payload)
         self._atomic_write(self.backup_dir / _snapshot_name(ts), payload)
+        latest_preserved = self._should_preserve_latest(payload)
+        if latest_preserved:
+            logger.warning(
+                "cookie backup: preserved existing latest snapshot because new auth quality is lower "
+                "(new_score=%s auth=%s)",
+                payload["quality_score"],
+                auth_summary,
+            )
+        else:
+            self._atomic_write(self.latest_path(), payload)
         self._prune_snapshots()
 
         self.last_backup_ts = ts
         self.last_backup_count = len(social)
         self.last_error = None
         self.consecutive_failures = 0
+        self.last_auth_summary = auth_summary
+        self.last_quality_score = int(payload["quality_score"])
+        self.last_latest_preserved = latest_preserved
+        self.last_preservation_reason = "new_snapshot_lower_auth_quality" if latest_preserved else None
 
         # Per-domain summary keeps ops visibility high without dumping raw values.
         summary = self._summarize_by_domain(social)
         logger.info(
-            "cookie backup: wrote %d social cookies (from %d total) domains=%s",
+            "cookie backup: wrote %d social cookies (from %d total) domains=%s auth=%s latest_preserved=%s",
             len(social),
             len(all_cookies),
             summary,
+            auth_summary,
+            latest_preserved,
         )
         return payload
+
+    def _should_preserve_latest(self, candidate: dict[str, Any]) -> bool:
+        """Keep a better logged-in latest.json when Chrome reports a weaker jar."""
+        latest = self.latest_path()
+        if not latest.is_file():
+            return False
+        try:
+            existing = json.loads(latest.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return False
+        existing_score = _auth_quality_score(existing)
+        candidate_score = _auth_quality_score(candidate)
+        if existing_score <= 0:
+            return False
+        return candidate_score < existing_score
+
+    def latest_snapshot_status(self) -> dict[str, Any]:
+        """Return safe metadata for the effective restore snapshot."""
+        latest = self.latest_path()
+        if not latest.is_file():
+            return {
+                "exists": False,
+                "auth_summary": {},
+                "quality_score": 0,
+                "cookie_count": 0,
+                "ts": None,
+                "restorable": False,
+                "error": "missing_latest_snapshot",
+            }
+        try:
+            payload = json.loads(latest.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return {
+                "exists": True,
+                "auth_summary": {},
+                "quality_score": 0,
+                "cookie_count": 0,
+                "ts": None,
+                "restorable": False,
+                "error": f"unreadable_latest_snapshot:{type(exc).__name__}",
+            }
+
+        cookies = payload.get("cookies") or []
+        auth_summary = payload.get("auth_summary")
+        if not isinstance(auth_summary, dict):
+            auth_summary = summarize_auth_markers(cookies)
+        quality_score = _auth_quality_score(payload)
+        cookie_count = int(payload.get("cookie_count") or len(cookies))
+        return {
+            "exists": True,
+            "auth_summary": auth_summary,
+            "quality_score": quality_score,
+            "cookie_count": cookie_count,
+            "ts": payload.get("ts"),
+            "restorable": bool(cookies) and quality_score > 0,
+            "error": None,
+        }
 
     def _summarize_by_domain(self, cookies: list[dict[str, Any]]) -> dict[str, int]:
         buckets: dict[str, int] = {}
@@ -437,11 +591,22 @@ class CookieVault:
 
 def _build_health_app(vault: CookieVault) -> web.Application:
     async def health(_request: web.Request) -> web.Response:
+        latest_status = vault.latest_snapshot_status()
+        ok = (
+            vault.last_error is None
+            and vault.last_backup_ts is not None
+            and bool(latest_status.get("restorable"))
+        )
         return web.json_response(
             {
-                "ok": vault.last_error is None and vault.last_backup_ts is not None,
+                "ok": ok,
                 "last_backup": vault.last_backup_ts,
                 "count": vault.last_backup_count,
+                "auth_summary": vault.last_auth_summary,
+                "quality_score": vault.last_quality_score,
+                "latest_preserved": vault.last_latest_preserved,
+                "preservation_reason": vault.last_preservation_reason,
+                "effective_latest": latest_status,
                 "error": vault.last_error,
                 "consecutive_failures": vault.consecutive_failures,
                 "cdp_url": vault.cdp_url,

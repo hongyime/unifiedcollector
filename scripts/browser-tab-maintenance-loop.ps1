@@ -93,6 +93,8 @@ function Update-LoopStatusMetadata {
             }
         }
         Set-StatusProperty $status "checked_at" (Get-Date).ToString("o")
+        Set-StatusProperty $status "state" "running"
+        Set-StatusProperty $status "detail" $Detail
         Set-StatusProperty $status "pid" $ChildPid
         Set-StatusProperty $status "loop" ([ordered]@{
             pid_path = $pidPath
@@ -103,6 +105,49 @@ function Update-LoopStatusMetadata {
         $status | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $statusPath
     } catch {
         Write-LoopLog ("could not update maintenance loop metadata: " + $_.Exception.Message)
+    }
+}
+
+function Complete-LoopStatusMetadata {
+    param(
+        [string]$Detail,
+        [int]$ChildPid,
+        [string]$FallbackState
+    )
+    try {
+        if (Test-Path -LiteralPath $statusPath) {
+            $status = Get-Content -LiteralPath $statusPath -Raw | ConvertFrom-Json
+        } else {
+            $status = [ordered]@{
+                checked_at = (Get-Date).ToString("o")
+                state = $FallbackState
+                detail = $Detail
+                cdp_url = Get-LoopCdpUrl
+                pid = 0
+                last_terminal_state = $FallbackState
+            }
+        }
+        $currentState = [string]$status.state
+        $terminalState = if ($currentState -eq "running" -or [string]::IsNullOrWhiteSpace($currentState)) {
+            $FallbackState
+        } else {
+            $currentState
+        }
+        Set-StatusProperty $status "checked_at" (Get-Date).ToString("o")
+        Set-StatusProperty $status "state" $terminalState
+        Set-StatusProperty $status "detail" $Detail
+        Set-StatusProperty $status "pid" 0
+        Set-StatusProperty $status "last_terminal_state" $terminalState
+        Set-StatusProperty $status "loop" ([ordered]@{
+            pid_path = $pidPath
+            pid = $PID
+            alive = $true
+            detail = $Detail
+            child_pid = $ChildPid
+        })
+        $status | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $statusPath
+    } catch {
+        Write-LoopLog ("could not complete maintenance loop metadata: " + $_.Exception.Message)
     }
 }
 
@@ -153,7 +198,7 @@ Write-LoopLog "loop start pid=$PID interval=${IntervalMinutes}m initial_delay=${
 Update-LoopStatusMetadata "maintenance loop is running" 0
 
 try {
-    $passTimeoutSeconds = Get-LoopPositiveIntEnv "UC_BROWSER_MAINTENANCE_PASS_TIMEOUT_SECONDS" 600
+    $passTimeoutSeconds = Get-LoopPositiveIntEnv "UC_BROWSER_MAINTENANCE_PASS_TIMEOUT_SECONDS" 1800
     if ($InitialDelaySeconds -gt 0) {
         Write-LoopLog "sleeping initial delay ${InitialDelaySeconds}s"
         Start-Sleep -Seconds $InitialDelaySeconds
@@ -181,13 +226,13 @@ try {
             $exitCode = $child.ExitCode
             if ($exitCode -eq 0) {
                 Write-LoopLog "maintenance pass exit=0"
-                Update-LoopStatusMetadata "maintenance loop sleeping after successful pass" $child.Id
+                Complete-LoopStatusMetadata "maintenance loop sleeping after successful pass" $child.Id "ok"
             } elseif ($exitCode -eq 3) {
                 Write-LoopLog "maintenance pass degraded: Chrome CDP unavailable"
-                Update-LoopStatusMetadata "maintenance loop sleeping after CDP-unavailable pass" $child.Id
+                Complete-LoopStatusMetadata "maintenance loop sleeping after CDP-unavailable pass" $child.Id "cdp_unavailable"
             } else {
                 Write-LoopLog "maintenance pass exit=$exitCode"
-                Update-LoopStatusMetadata "maintenance loop sleeping after nonzero pass" $child.Id
+                Complete-LoopStatusMetadata "maintenance loop sleeping after nonzero pass" $child.Id "degraded"
             }
         } catch {
             Write-LoopLog ("maintenance pass failed: " + $_.Exception.Message)

@@ -70,6 +70,7 @@ PLATFORMS = {
     "instagram": ["instagram.com"],
     "threads": ["threads.com", "threads.net"],
     "tiktok": ["tiktok.com"],
+    "lemon8": ["lemon8-app.com"],
     "x": ["x.com", "twitter.com"],
     "facebook": ["facebook.com"],
     "strava": ["strava.com"],
@@ -81,6 +82,11 @@ CDP_TRANSIENT_EXCEPTIONS = (
     TimeoutError,
     OSError,
 )
+
+
+def _target_disappeared(exc: BaseException | str) -> bool:
+    text = str(exc).lower()
+    return "no such target id" in text or "404: not found" in text
 
 
 def _list_targets() -> list[dict]:
@@ -250,13 +256,17 @@ MAIN_EVAL_JS = (
     "const compact=text.replace(/\\s+/g,' ').trim().slice(0,260);"
     "const low=(counts.articles+counts.videos+counts.images)<4&&counts.links<40;"
     "let health_status='ok',health_reason='';"
-    "if(location.href.includes('/?logout=')||(low&&document.querySelector('iframe[src*=\"recaptcha\"]'))){health_status='recoverable_error_shell';health_reason='auth_challenge';}"
+    "if(/http\\s+error\\s+429/i.test(text)){health_status='recoverable_error_shell';health_reason='http_429';}"
+    "else if(location.href.includes('/?logout=')||(low&&document.querySelector('iframe[src*=\"recaptcha\"]'))){health_status='recoverable_error_shell';health_reason='auth_challenge';}"
+    "else if(location.hostname.endsWith('threads.com')&&location.search.includes('error=invalid_post')){health_status='recoverable_error_shell';health_reason='threads_invalid_post';}"
+    "else if(location.hostname.endsWith('threads.com')&&/\\bpost\\s+unavailable\\b/i.test(text)){health_status='recoverable_error_shell';health_reason='threads_post_unavailable';}"
     "else if(/sorry,?\\s*we\\s+couldn(?:'|\\u2019)?t\\s+show\\s+that\\s+page/i.test(text)){health_status='recoverable_error_shell';health_reason='sorry_could_not_show_page';}"
     "else if(/couldn(?:'|\\u2019)?t\\s+show\\s+(?:this|that)\\s+page/i.test(text)){health_status='recoverable_error_shell';health_reason='could_not_show_page';}"
     "else if(/this\\s+page\\s+isn(?:'|\\u2019)?t\\s+available|page\\s+not\\s+found/i.test(text)){health_status='recoverable_error_shell';health_reason='page_not_available';}"
     "else if(low&&/\\btry\\s+again\\b/i.test(text)){health_status='recoverable_error_shell';health_reason='try_again_empty_state';}"
     "else if(low&&/something\\s+went\\s+wrong/i.test(text)){health_status='recoverable_error_shell';health_reason='something_went_wrong';}"
-    "else if(/sign\\s+in\\s+to\\s+x|log\\s+in\\s+to\\s+x|log\\s+in\\s+to\\s+instagram|log\\s+in\\s+to\\s+tiktok/i.test(text)){health_status='recoverable_error_shell';health_reason='login_wall_text';}"
+    "else if(document.querySelector('input[type=\"password\"]')||/sign\\s+in\\s+to\\s+x|log\\s+in\\s+to\\s+x|log\\s+in\\s+to\\s+instagram|log\\s+in\\s+to\\s+tiktok|log\\s+in\\s+to\\s+facebook|log\\s+in\\s+to\\s+threads|threads\\s+log\\s+in/i.test(text)){health_status='recoverable_error_shell';health_reason='login_wall_text';}"
+    "else if(low&&/\\bcontinue\\b[\\s\\S]{0,120}\\buse\\s+another\\s+profile\\b[\\s\\S]{0,120}\\bcreate\\s+new\\s+account\\b/i.test(text)){health_status='recoverable_error_shell';health_reason='account_chooser';}"
     "return {url:location.href,nodes:document.querySelectorAll('*').length,"
     "heap_mb:Math.round((performance.memory?performance.memory.usedJSHeapSize:0)/1024/1024),"
     "heap_bytes:performance.memory?performance.memory.usedJSHeapSize:0,docReady:document.readyState,hidden:document.hidden,"
@@ -295,6 +305,7 @@ def audit_tab(target: dict, main_timeout=MAIN_TIMEOUT, iso_timeout=ISO_TIMEOUT) 
         "iso_context_found": False,
         "isolated_worlds": [],
         "error": None,
+        "target_disappeared": False,
         "perf_heap_mb": None,
         "perf_nodes": None,
     }
@@ -312,6 +323,11 @@ def audit_tab(target: dict, main_timeout=MAIN_TIMEOUT, iso_timeout=ISO_TIMEOUT) 
     try:
         cdp = CDP(ws_url, timeout=CONNECT_TIMEOUT)
     except Exception as e:
+        if _target_disappeared(e):
+            out["target_disappeared"] = True
+            out["responsive_main"] = None
+            out["error"] = f"target disappeared before audit: {e}"
+            return out
         out["error"] = f"connect failed: {e}"
         return out
 

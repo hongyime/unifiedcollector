@@ -62,13 +62,22 @@ def test_chrome_cdp_launcher_prefers_extension_capable_chromium():
 def test_chrome_cdp_launcher_prefers_dedicated_automation_profile():
     script = _read_script("start-scraper-chrome-cdp.ps1")
 
+    assert "ChromeCdpAutomationProfile_recover_x" in script
     assert "ChromeCdpRecoveredProfile" in script
     assert "ChromeCdpAutomationProfile" in script
-    assert script.index("ChromeCdpAutomationProfile") < script.index("ChromeCdpRecoveredProfile")
     resolver = script[script.index("function Resolve-UserDataDir") : script.index("function Test-CdpAvailable")]
+    assert "$state.user_data_dir" in resolver
+    assert "Could not reuse last scraper Chrome profile from state" in resolver
+    assert resolver.index("$state.user_data_dir") < resolver.index('"ChromeCdpAutomationProfile_recover_x"')
+    assert resolver.index('"ChromeCdpAutomationProfile_recover_x"') < resolver.index('"ChromeCdpAutomationProfile"')
+    assert resolver.index('"ChromeCdpAutomationProfile"') < resolver.index('"ChromeCdpRecoveredProfile"')
     assert "Sort-Object -Descending" not in resolver
+    assert "Test-Path -LiteralPath $script:statePath" in resolver
+    assert "return $lastProfile" in resolver
+    assert "if (Test-Path -LiteralPath $recoverX)" in resolver
     assert "if (Test-Path -LiteralPath $automation)" in resolver
     assert "if (Test-Path -LiteralPath $recovered)" in resolver
+    assert 'return $recoverX' in script
     assert 'return $automation' in script
     assert "incompatible with Chrome-for-Testing / Playwright Chromium" in script
 
@@ -132,6 +141,8 @@ def test_chrome_cdp_launcher_discovers_extension_id_from_cdp():
     assert "function Find-ExistingCdpTarget" in script
     assert "function Activate-CdpTarget" in script
     assert "function Try-OpenCdpTarget" in script
+    assert "function Test-ExtensionControlTargetUsable" in script
+    assert "--disable-features=DisableLoadExtensionCommandLineSwitch" in script
     assert "Invoke-WebRequest -Uri \"http://127.0.0.1:$Port/json/list\"" in script
     assert "$targets = @($response.Content | ConvertFrom-Json)" in script
     assert "$desiredUrl = Normalize-CdpTargetUrlForReuse -Url $Url" in script
@@ -147,6 +158,7 @@ def test_chrome_cdp_launcher_discovers_extension_id_from_cdp():
     assert "nkeimhogjdpnpccoofpliimaahmaaome" in script
     assert 'chrome-extension://$(Get-PrimaryKnownExtensionId)/$tabsUrlPath' in script
     assert "Opened primary known extension control page" in script
+    assert "Test-ExtensionControlTargetUsable -Port $Port -ExtensionId $knownId" in script
     assert "$extensionId -and $extensionId -eq $knownId -and $existingTargetId" in script
     assert '"about:blank"' in script
     assert "chrome-extension://$extensionId/$TabsUrlPath" in script
@@ -186,6 +198,22 @@ def test_browser_tab_audit_uses_load_tolerant_default_deadlines():
     assert 'UC_TAB_AUDIT_MAIN_TIMEOUT_SECONDS", 8.0' in script
 
 
+def test_browser_tab_audit_detects_meta_login_walls():
+    script = (REPO_ROOT / "tools" / "browser_tab_audit.py").read_text(encoding="utf-8")
+
+    assert 'input[type=\\"password\\"]' in script
+    assert "log\\\\s+in\\\\s+to\\\\s+facebook" in script
+    assert "log\\\\s+in\\\\s+to\\\\s+threads" in script
+    assert "threads\\\\s+log\\\\s+in" in script
+    assert "health_reason='login_wall_text'" in script
+    assert "use\\\\s+another\\\\s+profile" in script
+    assert "health_reason='account_chooser'" in script
+    assert "error=invalid_post" in script
+    assert "health_reason='threads_invalid_post'" in script
+    assert "\\\\bpost\\\\s+unavailable\\\\b" in script
+    assert "health_reason='threads_post_unavailable'" in script
+
+
 def test_browser_tab_audit_has_hard_tab_budget_assertion():
     script = (REPO_ROOT / "tools" / "browser_tab_audit.py").read_text(encoding="utf-8")
 
@@ -206,7 +234,7 @@ def test_browser_tab_reload_sweeps_live_excluded_platform_targets():
     assert '"x": {"twitter.com", "www.twitter.com"}' in script
     assert "def _excluded_platform_for_url" in script
     assert "def _append_live_excluded_target_closures" in script
-    assert "_append_live_excluded_target_closures(plan)" in script
+    assert "_append_live_excluded_target_closures(plan, platform_filter)" in script
     assert '"action": "close_excluded"' in script
     assert "live CDP target excluded from automatic browser maintenance" in script
 
@@ -219,8 +247,10 @@ def test_browser_tab_reload_treats_disappeared_targets_as_skips():
     assert "'9336'" in script
     assert "def _target_disappeared" in script
     assert '"no such target" in text' in script
+    assert '"404: not found" in text' in script
     assert '"target_disappeared"' in script
     assert "SKIP: target disappeared before reload" in script
+    assert "target already disappeared before close" in script
 
 
 def test_browser_tab_reload_ignores_audit_metadata_sections():
@@ -262,6 +292,9 @@ def test_browser_tab_maintenance_closes_duplicate_cdp_page_targets():
     assert "Select-Object -Skip 1" in script
     assert "closed duplicate CDP page target" in script
     assert "closed duplicate extension control tab" in script
+    assert '$title -match "^chrome-extension://"' in script
+    assert '$title -match "^chrome-error://"' in script
+    assert "$usableTargets = @($targets | Where-Object" in script
     assert "closed blank/newtab Chrome startup tab" in script
     assert '[string]$_.url -eq "about:blank"' in script
     assert '[string]::IsNullOrWhiteSpace([string]$_.url)' in script
@@ -285,12 +318,20 @@ def test_browser_tab_maintenance_closes_duplicate_cdp_page_targets():
 def test_cleanup_ext_tabs_handles_cdp_list_timeout():
     script = _read_script("cleanup_ext_tabs.py")
 
+    assert "UC_CHROME_CDP_URL" in script
+    assert "UC_CHROME_CDP_PORT" in script
+    assert "'9336'" in script
     assert "except (TimeoutError, socket.timeout)" in script
     assert "CDP target list timed out" in script
     assert "if targets is None:" in script
+    assert 'parsed.scheme == "chrome-extension" and parsed.path == "/tabs.html"' in script
     assert "def is_blank_page" in script
+    assert "def is_blocked_control_page" in script
+    assert "title.startswith(\"chrome-extension://\")" in script
     assert 'url in {"", "about:blank", "chrome://newtab/"}' in script
     assert "closed blank/newtab" in script
+    assert "blank_tabs = [t for t in targets if is_blank_page(t)]" in script
+    assert "primary or known or usable" in script
     assert "to_close = [t for t in tabs if not keep_id or t.get(\"id\") != keep_id]" in script
 
 
@@ -328,24 +369,26 @@ def test_browser_tab_reload_hard_reopens_repeatedly_stuck_tiktok_tabs():
     assert "EXPANDED_PLATFORM_TABS" in script
     assert "UC_CHROME_OPEN_EXPANDED_PLATFORM_TABS" in script
     assert "UC_BROWSER_EXPANDED_PLATFORM_TABS" in script
-    assert '"instagram,threads,tiktok,facebook,strava,x"' in script
+    assert '"instagram,threads,tiktok,lemon8,facebook,strava,x"' in script
     assert 'os.getenv("UC_BROWSER_EXCLUDED_PLATFORMS", "")' in script
     assert '"close_excluded"' in script
     assert '"https://www.tiktok.com/following"' in script
     assert '"https://www.tiktok.com/foryou"' in script
     assert '"https://www.tiktok.com/explore"' in script
+    assert '"lemon8": [' in script
+    assert '"https://www.lemon8-app.com/topic/singapore?region=sg"' in script
     assert '"instagram": [' in script
     assert '"threads": [' in script
     assert '"x": [' in script
     assert '"facebook": [' in script
     assert '"strava": [' in script
-    assert '"https://www.instagram.com/"' in script
-    assert '"https://www.threads.com/"' in script
+    assert '"https://www.instagram.com/explore/"' in script
+    assert '"https://www.threads.com/following"' in script
     assert '"https://x.com/home"' in script
     assert '"https://www.facebook.com/"' in script
     assert '"https://www.strava.com/dashboard"' in script
     hard_reopen_block = script.split("HARD_REOPEN_URLS = {", 1)[1].split("def _target_version", 1)[0]
-    assert '"lemon8": [' not in hard_reopen_block
+    assert '"lemon8": [' in hard_reopen_block
     assert '"https://www.tiktok.com/foryou"' not in hard_reopen_block
     assert '"https://www.tiktok.com/explore"' not in hard_reopen_block
     expanded_block = script.split("if EXPANDED_PLATFORM_TABS:", 1)[1].split("HARD_REOPEN_URLS = {", 1)[0]
@@ -381,6 +424,42 @@ def test_browser_tab_reload_hard_reopens_individual_repeated_stuck_tabs():
     assert '"recoverable_error_shell" in text' in script
     assert '"non-canonical recovery url" in text' in script
     assert '"non-canonical platform url" in text' in script
+
+
+def test_browser_tab_reload_uses_dashboard_stale_browser_issues():
+    script = (REPO_ROOT / "tools" / "browser_tab_reload.py").read_text(encoding="utf-8")
+
+    assert "UC_DASHBOARD_HEALTH_URL" in script
+    assert "def _stale_browser_issue_platforms" in script
+    assert "payload.get(\"source_issues\")" in script
+    assert "payload.get(\"sources\")" in script
+    assert 'issue.get("source") or issue.get("platform")' in script
+    assert "issue.get(\"browser_content_stale\") is True" in script
+    assert "def _append_missing_stale_platform_opens" in script
+    assert '"source health: stale browser content and no tab open"' in script
+    assert '"open_missing"' in script
+    assert '"source health: stale browser content"' in script
+    assert '"stale browser content" in text' in script
+
+
+def test_browser_tab_reload_uses_stable_instagram_threads_recovery_urls():
+    script = (REPO_ROOT / "tools" / "browser_tab_reload.py").read_text(encoding="utf-8")
+
+    assert '"https://www.instagram.com/explore/"' in script
+    assert '"https://www.threads.com/following"' in script
+
+
+def test_browser_tab_reload_honors_platform_filter():
+    script = (REPO_ROOT / "tools" / "browser_tab_reload.py").read_text(encoding="utf-8")
+
+    assert "argparse.ArgumentParser" in script
+    assert '"--platforms"' in script
+    assert "def _parse_platform_filter" in script
+    assert "platform_filter = _parse_platform_filter(args.platforms)" in script
+    assert "if platform_filter is not None and platform not in platform_filter:" in script
+    assert "_stale_browser_issue_platforms(platform_filter)" in script
+    assert "_append_live_excluded_target_closures(plan, platform_filter)" in script
+    assert "_append_missing_stale_platform_opens(plan, stale_platforms, platform_filter)" in script
 
 
 def test_chrome_cdp_launcher_dry_run_skips_live_probes():
@@ -467,7 +546,7 @@ def test_browser_maintenance_loop_bounds_child_pass_runtime():
     script = _read_script("browser-tab-maintenance-loop.ps1")
 
     assert "UC_BROWSER_MAINTENANCE_PASS_TIMEOUT_SECONDS" in script
-    assert 'Get-LoopPositiveIntEnv "UC_BROWSER_MAINTENANCE_PASS_TIMEOUT_SECONDS" 600' in script
+    assert 'Get-LoopPositiveIntEnv "UC_BROWSER_MAINTENANCE_PASS_TIMEOUT_SECONDS" 1800' in script
     assert 'Start-Process -FilePath "powershell.exe"' in script
     assert "-WindowStyle Hidden -PassThru" in script
     assert "$child.WaitForExit($timeoutMilliseconds)" in script
@@ -476,7 +555,12 @@ def test_browser_maintenance_loop_bounds_child_pass_runtime():
     assert "function Stop-MaintenanceChildProcess" in script
     assert 'taskkill.exe" /PID $ChildPid /F /T' in script
     assert "Update-LoopStatusMetadata" in script
+    assert 'Set-StatusProperty $status "state" "running"' in script
+    assert "Complete-LoopStatusMetadata" in script
     assert 'Write-LoopStatus "failed" "maintenance pass timed out after ${passTimeoutSeconds}s" $child.Id' in script
+    assert 'Complete-LoopStatusMetadata "maintenance loop sleeping after successful pass" $child.Id "ok"' in script
+    assert 'Complete-LoopStatusMetadata "maintenance loop sleeping after CDP-unavailable pass" $child.Id "cdp_unavailable"' in script
+    assert 'Complete-LoopStatusMetadata "maintenance loop sleeping after nonzero pass" $child.Id "degraded"' in script
 
 
 def test_browser_maintenance_repairs_missing_chrome():
@@ -492,12 +576,16 @@ def test_browser_maintenance_repairs_missing_chrome():
     assert "--remote-debugging-port(?:=|\\s+)$script:CdpPort\\b" in script
     assert "--user-data-dir(?:=|\\s+).*\\\\UnifiedCollector\\\\ChromeCdp" in script
     assert "-CloseExistingCdpProfile -CloseExistingIfNoVisibleWindows" in script
+    assert "-TimeoutSeconds 300" in script
     assert "collector-controlled unreachable CDP Chrome" in script
     assert "-FallbackOpenControlIfCleanupBlocked" not in script
     assert "-IsolateExtensions" in script
-    assert "-OpenIds instagram,tiktok,threads,facebook,strava,x" in script
+    assert "-OpenIds instagram,tiktok,lemon8,threads,facebook,strava,x" in script
+    assert '"instagram,tiktok,threads,facebook,strava", "-NoTest"' not in script
     assert "Chrome CDP repair succeeded; continuing maintenance pass" in script
     assert "chrome_cdp_available" in script
+    assert "browser tab maintenance final CDP repair before degrade" in script
+    assert '"final_cdp_repair"' in script
 
 
 def test_browser_maintenance_refuses_overlapping_passes():
@@ -506,6 +594,10 @@ def test_browser_maintenance_refuses_overlapping_passes():
     assert "Global\\UnifiedCollectorBrowserTabMaintenance" in script
     assert "$mutex.WaitOne(0)" in script
     assert "another pass is already running" in script
+    assert "another maintenance pass is already running; previous terminal state retained" in script
+    assert 'Write-Status "overlap_skipped"' in script
+    assert 'Write-Status "ok" "another maintenance pass is already running' not in script
+    assert '"overlap_skipped"' in script
     assert "$mutex.ReleaseMutex()" in script
 
 
@@ -537,6 +629,7 @@ def test_browser_maintenance_uses_short_live_audit_probes():
     assert 'Set-DefaultEnv "UC_TAB_AUDIT_MAIN_TIMEOUT_SECONDS" "4.0"' in script
     assert 'Set-DefaultEnv "UC_TAB_AUDIT_ISO_TIMEOUT_SECONDS" "2.0"' in script
     assert 'Set-DefaultEnv "UC_TAB_AUDIT_PERF_TIMEOUT_SECONDS" "0.5"' in script
+    assert 'Set-DefaultEnv "UC_DASHBOARD_HEALTH_TIMEOUT_SECONDS" "5"' in script
     assert "without pinning the machine" in script
 
 
@@ -546,17 +639,28 @@ def test_browser_maintenance_restarts_dedicated_profile_when_tabs_stay_unhealthy
     assert "function Get-AuditHealth" in script
     assert "function Get-RequiredAuditPlatforms" in script
     assert '"UC_BROWSER_REQUIRED_PLATFORMS"' in script
-    assert '@("instagram", "threads", "tiktok", "facebook", "strava")' in script
+    assert '@("instagram", "threads", "tiktok", "x", "facebook", "strava")' in script
     assert '$knownPlatforms = @("instagram", "threads", "tiktok", "x", "facebook", "strava")' in script
     assert "UC_BROWSER_MIN_HEALTHY_PLATFORMS" in script
     assert 'Get-PositiveIntEnv "UC_BROWSER_MIN_HEALTHY_PLATFORMS" $platforms.Count' in script
     assert "function Test-AuthWallUrl" in script
     assert "function Get-AuditTabUrl" in script
     assert "function Test-AuditTabContentWall" in script
+    assert "function Test-AuditHealthCoveredBySourceLiveness" in script
     assert "page_health_status" in script
     assert "recoverable_error_shell" in script
+    assert "missing_or_stopped_content_script" in script
+    assert "source-liveness fallback rejected: browser tab is missing or stopped content script" in script
+    assert "source-liveness fallback rejected: browser tab is on an auth/login shell" in script
+    assert "function Test-AuditHealthItemIsSoftRecoverableShell" in script
+    assert "function Test-AuditHealthItemIsTargetedRepairOnly" in script
+    assert "reason=try_again_empty_state" in script
+    assert "tab-local browser shell covered by fresh source liveness" in script
+    assert "source_liveness_fallback" in script
+    assert "browser_content_stale -eq $true" in script
     assert "tab_budget:" in script
     assert "tab budget is still violated after targeted cleanup; skipping profile restart" in script
+    assert "targeted tab/extension repairs are contained; skipping profile restart" in script
     assert "/i/flow/login" in script
     assert "redirect_after_login" in script
     assert "-not (Test-AuthWallUrl (Get-AuditTabUrl $_))" in script
@@ -577,7 +681,7 @@ def test_browser_maintenance_restarts_dedicated_profile_when_tabs_stay_unhealthy
     assert "browser tab audit still unhealthy after second reload" in script
     assert "function Test-AuditHealthNeedsProfileRestart" in script
     assert "UC_BROWSER_PROFILE_RESTART_ON_TAB_HEALTH" in script
-    assert "profile restart on tab-health failure is not explicitly enabled" in script
+    assert "profile restart on tab-health failure is disabled unless UC_BROWSER_PROFILE_RESTART_ON_TAB_HEALTH=1" in script
     assert "UC_BROWSER_PROFILE_RESTART_MIN_UNHEALTHY_PLATFORMS" in script
     assert 'Get-PositiveIntEnv "UC_BROWSER_PROFILE_RESTART_MIN_UNHEALTHY_PLATFORMS" 1' in script
     assert "below profile restart threshold" in script
@@ -602,7 +706,8 @@ def test_browser_maintenance_does_not_profile_restart_for_manual_auth():
     script = _read_script("browser-tab-maintenance.ps1")
 
     assert "function Test-AuditHealthNeedsManualAuth" in script
-    assert "auth_challenge|logout=" in script
+    assert "auth_challenge|logout=|login_wall_text|account_chooser" in script
+    assert "Test-AuditHealthItemIsSoftRecoverableShell $text" in script
     assert "manual platform auth is required; skipping profile restart" in script
     assert 'Write-Status "degraded" "browser tab requires manual platform auth"' in script
 
@@ -616,6 +721,21 @@ def test_browser_audit_reports_dom_level_error_shells():
     assert 'ISO_TIMEOUT = _float_env("UC_TAB_AUDIT_ISO_TIMEOUT_SECONDS", 2.0)' in script
     assert "recoverable_error_shell" in script
     assert "try_again_empty_state" in script
+    assert "http_429" in script
+    assert "http\\\\s+error\\\\s+429" in script
+    assert "threads_invalid_post" in script
+    assert "threads_post_unavailable" in script
     assert "auth_challenge" in script
     assert "recaptcha" in script
     assert 'low&&document.querySelector(\'iframe[src*=\\"recaptcha\\"]\')' in script
+
+
+def test_browser_audit_marks_disappeared_cdp_targets_as_transient():
+    script = (REPO_ROOT / "tools" / "browser_tab_audit.py").read_text(encoding="utf-8")
+
+    assert "def _target_disappeared" in script
+    assert '"no such target id" in text' in script
+    assert '"404: not found" in text' in script
+    assert '"target_disappeared": False' in script
+    assert 'out["target_disappeared"] = True' in script
+    assert "target disappeared before audit" in script

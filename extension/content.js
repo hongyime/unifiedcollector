@@ -470,8 +470,14 @@ const PAGE_HEALTH_REPORT_GAP_MS = 60000;
 const WALL_LOG_GAP_MS = 10 * 60000;
 const LAST_PAGE_HEALTH_REPORT = {};
 const LAST_WALL_LOG_AT = {};
-const PAGE_RECOVERY_ENABLED = new Set(["lemon8", "tiktok", "threads", "x"]);
+const PAGE_RECOVERY_ENABLED = new Set(["facebook", "instagram", "lemon8", "tiktok", "threads", "x"]);
 const RECOVERABLE_PAGE_SHELL_PATTERNS = {
+  facebook: [
+    { reason: "login_shell", re: /\b(log\s*in\s+to\s+facebook|email\s+address\s+or\s+mobile\s+number|forgotten\s+password|create\s+new\s+account)\b/i, lowContent: true },
+  ],
+  instagram: [
+    { reason: "login_shell", re: /\b(log\s*in\s+to\s+instagram|mobile\s+number,\s*username\s+or\s+email|log\s*in\s+with\s+facebook|create\s+new\s+account)\b/i, lowContent: true },
+  ],
   tiktok: [
     { reason: "sorry_could_not_show_page", re: /sorry,?\s*we\s+couldn(?:'|\u2019)?t\s+show\s+that\s+page/i },
     { reason: "could_not_show_page", re: /couldn(?:'|\u2019)?t\s+show\s+(?:this|that)\s+page/i },
@@ -3156,9 +3162,21 @@ function facebookPostIdFromHref(href) {
 function facebookAuthorFromArticle(art, fallback) {
   try {
     const link = [...art.querySelectorAll("a[href]")]
-      .map((a) => a.getAttribute("href") || "")
-      .map((href) => href.replace(/^https?:\/\/(?:www\.)?facebook\.com/i, "").split(/[?#]/)[0])
-      .map((path) => (path.match(/^\/([A-Za-z0-9.]{5,40})(?:\/|$)/) || [])[1])
+      .map((a) => {
+        const raw = a.getAttribute("href") || "";
+        let url;
+        try { url = new URL(raw, location.origin); } catch (e) { return null; }
+        if (!/(^|\.)facebook\.com$/i.test(url.hostname)) return null;
+        const path = url.pathname || "";
+        if (/^\/profile\.php$/i.test(path)) {
+          return url.searchParams.get("id");
+        }
+        if (/^\/people\//i.test(path)) {
+          const parts = path.split("/").filter(Boolean);
+          return parts[parts.length - 1] || null;
+        }
+        return (path.match(/^\/([A-Za-z0-9.]{5,80})(?:\/|$)/) || [])[1] || null;
+      })
       .find((name) => name && !/^(home|watch|marketplace|groups|friends|notifications|messages|reels|events|gaming|bookmarks|stories|pages|story|permalink|profile|sharer|login|policies)$/i.test(name));
     return link || fallback || null;
   } catch (e) {

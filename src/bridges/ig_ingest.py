@@ -3645,6 +3645,7 @@ async def _save_posts(pool, platform, posts) -> int:
                            platform_created_at, collected_at, metadata)
                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,to_timestamp($10),now(),$11::jsonb)
                         ON CONFLICT (platform_post_id) DO UPDATE SET
+                           author_username=COALESCE(NULLIF(EXCLUDED.author_username, ''), {table}.author_username),
                            caption=EXCLUDED.caption, likes_count=EXCLUDED.likes_count,
                            comments_count=EXCLUDED.comments_count,
                            {extra_col}=EXCLUDED.{extra_col}, collected_at=now(),

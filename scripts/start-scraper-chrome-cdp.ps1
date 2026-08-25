@@ -87,6 +87,21 @@ function Resolve-UserDataDir {
     # older profile folders may have been created by branded Chrome and can be
     # incompatible with Chrome-for-Testing / Playwright Chromium.
     $base = Join-Path $env:LOCALAPPDATA "UnifiedCollector"
+    if (Test-Path -LiteralPath $script:statePath) {
+        try {
+            $state = Get-Content -LiteralPath $script:statePath -Raw -ErrorAction Stop | ConvertFrom-Json
+            $lastProfile = [string]$state.user_data_dir
+            if ($lastProfile -and (Test-Path -LiteralPath $lastProfile)) {
+                return $lastProfile
+            }
+        } catch {
+            Write-Warning "Could not reuse last scraper Chrome profile from state: $($_.Exception.Message)"
+        }
+    }
+    $recoverX = Join-Path $base "ChromeCdpAutomationProfile_recover_x"
+    if (Test-Path -LiteralPath $recoverX) {
+        return $recoverX
+    }
     $automation = Join-Path $base "ChromeCdpAutomationProfile"
     if (Test-Path -LiteralPath $automation) {
         return $automation
@@ -295,6 +310,28 @@ function Open-CdpTarget {
     Invoke-WebRequest -Uri "http://127.0.0.1:$Port/json/new?$encoded" -Method Put -UseBasicParsing -TimeoutSec $TimeoutSeconds | Out-Null
 }
 
+function Test-ExtensionControlTargetUsable {
+    param([int]$Port, [string]$ExtensionId)
+    try {
+        $response = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/json/list" -UseBasicParsing -TimeoutSec 5
+        $targets = @($response.Content | ConvertFrom-Json)
+        foreach ($target in @($targets)) {
+            $url = [string]$target.url
+            if ([string]$target.type -ne "page" -or $url -notmatch "^chrome-extension://$ExtensionId/tabs\.html(?:[?#].*)?$") {
+                continue
+            }
+            $title = [string]$target.title
+            if ($title -match "^chrome-extension://" -or $title -match "^chrome-error://") {
+                continue
+            }
+            return $true
+        }
+    } catch {
+        return $false
+    }
+    return $false
+}
+
 function Find-ExistingCdpTarget {
     param([int]$Port, [string]$Url)
     try {
@@ -370,12 +407,8 @@ function Open-ExtensionControlPage {
             Start-Sleep -Seconds 2
             $existingTargetId = Find-ExistingCdpTarget -Port $Port -Url $tabsUrl
             $extensionId = Get-ExtensionIdFromCdp $Port
-            if ($knownId -eq $primaryId -and $existingTargetId) {
+            if ($extensionId -and $extensionId -eq $knownId -and $existingTargetId -and (Test-ExtensionControlTargetUsable -Port $Port -ExtensionId $knownId)) {
                 Write-Host "Opened primary known extension control page: $tabsUrl"
-                return $true
-            }
-            if ($extensionId -and $extensionId -eq $knownId -and $existingTargetId) {
-                Write-Host "Opened extension control page via known id: $tabsUrl"
                 return $true
             }
             if ($extensionId -and $extensionId -ne $knownId) {
@@ -684,6 +717,7 @@ $args = @(
     "--remote-allow-origins=*",
     "--user-data-dir=$profile",
     "--enable-extensions",
+    "--disable-features=DisableLoadExtensionCommandLineSwitch",
     "--load-extension=$extension",
     "--no-first-run",
     "--no-default-browser-check",
