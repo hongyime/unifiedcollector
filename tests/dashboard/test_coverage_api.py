@@ -276,6 +276,24 @@ class _InstagramHealthTimeoutConn(_InstagramHealthConn):
         return await super().fetchrow(query, *args, **kwargs)
 
 
+class _DomainPacingTimeoutConn(_DomainPacingConn):
+    async def fetch(self, query, *args, **kwargs):
+        if "FROM collector_domain_pacing_events" in query:
+            raise TimeoutError()
+        return await super().fetch(query, *args, **kwargs)
+
+
+class _InstagramHealthHardTimeoutConn(_InstagramHealthConn):
+    """Every DB call times out — models peak-load dashboard pressure."""
+
+    async def fetchval(self, query, *args, **kwargs):
+        raise TimeoutError()
+
+    async def fetch(self, query, *args, **kwargs):
+        raise TimeoutError()
+
+    async def fetchrow(self, query, *args, **kwargs):
+        raise TimeoutError()
 class _ApiQuotaConn:
     def __init__(self):
         self.now = datetime.now(timezone.utc)
@@ -621,6 +639,44 @@ async def test_domain_pacing_status_without_source_uses_query_specific_args(monk
     assert result["available"] is True
     assert result["source"] is None
     assert pool.released is True
+
+
+@pytest.mark.asyncio
+async def test_domain_pacing_status_returns_graceful_payload_on_timeout(monkeypatch):
+    """DB-load timeouts must degrade to an explicit unavailable payload, not a 500."""
+    pool = _DashboardAcquirePool(_DomainPacingTimeoutConn())
+
+    async def fake_get_pool():
+        return pool
+
+    monkeypatch.setattr(dashboard_api, "get_pool", fake_get_pool)
+
+    result = await dashboard_api.domain_pacing_status(source="website", _user={})
+
+    assert result["available"] is False
+    assert result["error"] == "timeout"
+    assert result["stats_unavailable"] is True
+    assert result["sources"] == []
+    assert result["latest_snapshots"] == {}
+    assert pool.released is True
+
+
+@pytest.mark.asyncio
+async def test_instagram_health_returns_degraded_report_on_hard_timeout(monkeypatch):
+    """When every Instagram-health query times out, still return a report skeleton."""
+
+    async def fake_get_pool():
+        return _Pool(_InstagramHealthHardTimeoutConn())
+
+    monkeypatch.setattr(dashboard_api, "get_pool", fake_get_pool)
+    monkeypatch.setattr(dashboard_api, "_vault_payload", lambda: {"available": True})
+
+    result = await dashboard_api.instagram_health(_user={})
+
+    assert result["degraded"] is True
+    assert result["error"] == "timeout"
+    assert result["tables"] == {}
+    assert result["cooldown"] == {"active": False}
 
 
 @pytest.mark.asyncio

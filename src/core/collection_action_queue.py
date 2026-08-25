@@ -515,6 +515,33 @@ def derive_collection_actions(
     return actions
 
 
+def covered_warning_notes(source_matrix: dict[str, Any]) -> list[dict[str, Any]]:
+    """Warning blockers suppressed by fresh evidence, surfaced for operators.
+
+    derive_collection_actions skips these rows so no durable action opens;
+    this companion view explains WHY (fresh extension content covers them).
+    """
+    browser_extension = source_matrix.get("browser_extension") or {}
+    notes: list[dict[str, Any]] = []
+    for row in source_matrix.get("sources") or []:
+        if not isinstance(row, dict):
+            continue
+        source = str(row.get("source") or "").strip().lower()
+        if not source or _quiet_informational_row(row):
+            continue
+        blocker = row.get("blocker") or {}
+        if _cooldown_expired(row, blocker):
+            continue
+        if _covered_warning_blocker(row, blocker, browser_extension):
+            notes.append({
+                "source": source,
+                "kind": str(blocker.get("kind") or ""),
+                "severity": "warning",
+                "coverage": "fresh extension content evidence; no durable action required",
+            })
+    return notes
+
+
 async def ensure_collection_action_queue(conn) -> None:
     await conn.execute(ACTION_QUEUE_DDL)
 
@@ -620,6 +647,7 @@ async def sync_collection_action_queue(
         "derived": len(actions),
         "open": len(rows),
         "resolved": int(resolved or 0),
+        "covered": covered_warning_notes(source_matrix),
         "actions": [dict(row) for row in rows],
     }
 

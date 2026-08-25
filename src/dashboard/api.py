@@ -6424,6 +6424,34 @@ def _derive_instagram_stuck_stage(report: dict) -> str:
 @app.get("/instagram/health")
 async def instagram_health(_user: dict = Depends(require_role("viewer"))):
     """Operational Instagram stuck-point report without raw private bodies."""
+    # Peak DB load previously escaped TimeoutError from section queries as HTTP
+    
+    try:
+        return await _instagram_health_impl(_user)
+    except asyncio.TimeoutError:
+        return {
+            "source": "instagram",
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+            "degraded": True,
+            "error": "timeout",
+            "tables": {},
+            "section_errors": {"report": "TimeoutError"},
+            "targets": {"total": 0},
+            "spider_targets": {"total": 0},
+            "latest_profile": None,
+            "latest_post": None,
+            "latest_media": None,
+            "browser_ingest_24h": {},
+            "revisit_queue": {"available": False},
+            "realtime_delivery": {"available": False},
+            "cooldown": {"active": False},
+            "source_health": None,
+            "vault": _vault_payload(),
+        }
+
+
+async def _instagram_health_impl(_user: dict = Depends(require_role("viewer"))):
+    """Operational Instagram stuck-point report without raw private bodies."""
     pool = await get_pool()
     report = {
         "source": "instagram",
@@ -7035,6 +7063,24 @@ def _jsonish(value):
 @app.get("/domain-pacing/status")
 async def domain_pacing_status(source: str | None = None, hours: int = 24, limit: int = 50,
                                _user: dict = Depends(require_role("viewer"))):
+    # Graceful degradation under DB load: asyncpg per-query timeouts must never
+    # escape as HTTP 500 tracebacks.
+    try:
+        return await _domain_pacing_status_impl(source=source, hours=hours, limit=limit, _user=_user)
+    except asyncio.TimeoutError:
+        return {
+            "available": False,
+            "error": "timeout",
+            "stats_unavailable": True,
+            "sources": [],
+            "domains": [],
+            "events": [],
+            "latest_snapshots": {},
+        }
+
+
+async def _domain_pacing_status_impl(source: str | None = None, hours: int = 24, limit: int = 50,
+                                     _user: dict = Depends(require_role("viewer"))):
     hours = max(1, min(hours, 168))
     limit = max(1, min(limit, 250))
     source_filter = (source or "").strip().lower() or None

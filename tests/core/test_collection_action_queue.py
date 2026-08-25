@@ -628,3 +628,60 @@ def test_direct_health_cleanup_resolves_stale_browser_timeout_and_capture_action
     assert "reason ILIKE 'maintenance pass timed out%'" in queries
     assert "source_health returned to running after stale browser-capture action" in queries
     assert "sh.updated_at > q.last_seen_at" in queries
+
+def test_covered_warning_notes_reports_fresh_content_coverage():
+    """Suppressed stalled-warnings must surface as operator-visible coverage notes."""
+    source_matrix = {
+        "sources": [
+            {
+                "source": "facebook",
+                "status": "live",
+                "blocker": {"kind": "browser_capture_stalled", "severity": "warning"},
+            },
+            {
+                "source": "x",
+                "status": "live",
+                "blocker": {"kind": "none", "severity": "ok"},
+            },
+        ],
+        "browser_extension": {
+            "issues": [],
+            "ingest": [
+                {
+                    "platform": "facebook",
+                    "endpoint": "posts",
+                    "age_seconds": 60,
+                    "fresh_after_seconds": 600,
+                    "stored": 7,
+                    "observed": 9,
+                }
+            ],
+        },
+    }
+
+    notes = _caq_module().covered_warning_notes(source_matrix)
+
+    assert [n["source"] for n in notes] == ["facebook"]
+    assert notes[0]["kind"] == "browser_capture_stalled"
+    assert "fresh" in notes[0]["coverage"]
+
+
+def test_covered_warning_notes_empty_when_nothing_covered():
+    source_matrix = {
+        "sources": [
+            {
+                "source": "facebook",
+                "status": "degraded",
+                "blocker": {"kind": "browser_capture_stalled", "severity": "warning"},
+            }
+        ],
+        "browser_extension": {"issues": []},
+    }
+
+    assert _caq_module().covered_warning_notes(source_matrix) == []
+
+
+def _caq_module():
+    from src.core import collection_action_queue as mod
+
+    return mod

@@ -167,11 +167,74 @@ def _stale_browser_issue_platforms(platform_filter: set[str] | None = None) -> s
     return stale
 
 
-def _decide_reload(tab: dict, target_version: str, stale_platforms: set[str] | None = None) -> tuple[bool, str]:
+def _reload_cooldown_seconds() -> float:
+    try:
+        minutes = float(os.getenv("UC_TAB_RELOAD_429_COOLDOWN_MINUTES", "75"))
+    except (TypeError, ValueError):
+        minutes = 75.0
+    return max(0.0, minutes * 60.0)
+
+
+def _within_reload_cooldown(previous_reloads: list[dict], platform: str, now: float | None = None) -> bool:
+    """True while a prior same-platform shell reload is inside its cooldown window."""
+    cooldown = _reload_cooldown_seconds()
+    if cooldown <= 0:
+        return False
+    now = time.time() if now is None else now
+    latest = 0.0
+    for entry in previous_reloads:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("platform") or "").lower() != platform:
+            continue
+        text = str(entry.get("reason") or "")
+        if "http_429" not in text and "non-canonical" not in text:
+            continue
+        try:
+            ts = float(entry.get("ts") or 0)
+        except (TypeError, ValueError):
+            continue
+        latest = max(latest, ts)
+    if latest <= 0:
+        return False
+    return (now - latest) < cooldown
+
+
+def _consecutive_shell_cycles(previous_plan: list[dict], platform: str) -> int:
+    """Count trailing same-platform reload cycles whose reason was a page shell."""
+    count = 0
+    for entry in reversed(previous_plan or []):
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("platform") or "").lower() != platform:
+            continue
+        if str(entry.get("action") or "") != "reload":
+            continue
+        if _is_stuck_tab_reason(str(entry.get("reason") or "")):
+            count += 1
+        else:
+            break
+    return count
+
+
+def _decide_reload(
+    tab: dict,
+    target_version: str,
+    stale_platforms: set[str] | None = None,
+    previous_reloads: list[dict] | None = None,
+) -> tuple[bool, str]:
     platform = str(tab.get("platform") or "").lower()
     url = str(tab.get("url") or tab.get("url_snapshot") or "")
     if platform in EXCLUDED_AUTO_PLATFORMS:
         return False, f"{platform} excluded from automatic tab reload"
+    if (
+        platform == "instagram"
+        and str(tab.get("page_health_reason") or "").lower() == "http_429"
+        and _within_reload_cooldown(previous_reloads or [], "instagram")
+    ):
+        # Reopening into an active 429 wall just churns the tab and deepens the
+        # rate-limit; wait out the cooldown before touching it again.
+        return False, "instagram http_429 reload cooldown active"
     if platform == "x" and not _is_canonical_x_recovery_url(url):
         return True, "x non-canonical recovery URL"
     if platform != "x" and platform in HARD_REOPEN_URLS and not _is_canonical_platform_url(platform, url):
@@ -201,8 +264,15 @@ def _is_canonical_x_recovery_url(url: str) -> bool:
     except Exception:
         return False
     host = parsed.netloc.lower().split(":", 1)[0]
+    if host not in {"x.com", "www.x.com"}:
+        return False
+    query_text = (parsed.query or "").lower()
+    if "failedscript" in query_text:
+        # failedScript marks X's own crash-recovery shell, not a usable feed.
+        # parse_qs drops blank values, so inspect the raw query string.
+        return False
     path = parsed.path.rstrip("/") or "/"
-    return host in {"x.com", "www.x.com"} and path in {"/home", "/explore"}
+    return path in {"/home", "/explore"}
 
 
 def _hosts_for_platform(platform: str) -> set[str]:
@@ -622,7 +692,16 @@ def main(argv: list[str] | None = None):
         if platform_filter is not None and platform not in platform_filter:
             continue
         for tab in tabs:
-            need, reason = _decide_reload(tab, target_version, stale_platforms)
+            previous_reload_entries = [
+                e for e in previous_plan
+                if isinstance(e, dict) and e.get("action") == "reload"
+            ]
+            need, reason = _decide_reload(
+                tab,
+                target_version,
+                stale_platforms,
+                previous_reloads=previous_reload_entries,
+            )
             url_for_check = tab.get("url") or tab.get("url_snapshot") or ""
             auth_wall = _is_auth_wall(url_for_check)
             action = "reload" if need else "skip"
@@ -650,6 +729,19 @@ def main(argv: list[str] | None = None):
                 "cs_version": tab.get("cs_version"),
                 "responsive_main": tab.get("responsive_main"),
             })
+            if platform == "x" and action == "reload" and "non-canonical" in reason:
+                cycles = _consecutive_shell_cycles(previous_plan, "x")
+                if cycles >= 2:
+                    plan[-1]["escalation"] = {
+                        "level": cycles + 1,
+                        "message": (
+                            f"x page-shell churn across {cycles} prior cycles - "
+                            "verify X session/auth manually"
+                        ),
+                    }
+                    print(
+                        f"  ESCALATION: x repeated page-shell ({cycles} cycles) - manual auth check recommended"
+                    )
     _append_live_excluded_target_closures(plan, platform_filter)
     _append_missing_stale_platform_opens(plan, stale_platforms, platform_filter)
     _append_duplicate_control_tab_closures(plan)
@@ -824,8 +916,11 @@ def main(argv: list[str] | None = None):
         time.sleep(1.5)
 
     PLAN_PATH.parent.mkdir(parents=True, exist_ok=True)
+    # Stamp wall-clock ts on every result so the next cycle can apply
+    # cooldown windows (e.g. instagram http_429) without extra state.
+    stamped_results = [{**r, "ts": r.get("ts") or time.time()} for r in results]
     with PLAN_PATH.open("w", encoding="utf-8") as f:
-        json.dump(results, f, indent=2, default=str)
+        json.dump(stamped_results, f, indent=2, default=str)
     print(f"\n# wrote {PLAN_PATH}")
     print(f"# reloaded {sum(1 for r in results if r['status']=='ok')} tab(s), "
           f"failed {sum(1 for r in results if r['status']=='fail')}, "

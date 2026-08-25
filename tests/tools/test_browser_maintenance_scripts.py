@@ -739,3 +739,63 @@ def test_browser_audit_marks_disappeared_cdp_targets_as_transient():
     assert '"target_disappeared": False' in script
     assert 'out["target_disappeared"] = True' in script
     assert "target disappeared before audit" in script
+
+# --- A3a/A3b functional tests (importlib: tools/ is not a package) ---
+
+def _load_tab_reload_module():
+    import importlib.util
+
+    path = REPO_ROOT / "tools" / "browser_tab_reload.py"
+    spec = importlib.util.spec_from_file_location("_tab_reload_under_test", str(path))
+    mod = importlib.util.module_from_spec(spec)
+    assert spec is not None and spec.loader is not None
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_x_failed_script_query_is_non_canonical():
+    mod = _load_tab_reload_module()
+    assert not mod._is_canonical_x_recovery_url("https://x.com/explore?failedScript=")
+    assert not mod._is_canonical_x_recovery_url("https://x.com/oopspwned?uc_recover=1787674742")
+    assert mod._is_canonical_x_recovery_url("https://x.com/home")
+    assert mod._is_canonical_x_recovery_url("https://x.com/explore")
+
+
+def test_instagram_429_reload_respects_cooldown(monkeypatch):
+    import time as _time
+
+    mod = _load_tab_reload_module()
+    monkeypatch.setenv("UC_TAB_RELOAD_429_COOLDOWN_MINUTES", "75")
+    tab = {
+        "platform": "instagram",
+        "url": "https://www.instagram.com/p/ABC123/",
+        "page_health_status": "recoverable_error_shell",
+        "page_health_reason": "http_429",
+    }
+    recent = [{
+        "platform": "instagram",
+        "action": "reload",
+        "reason": "page health: http_429",
+        "ts": _time.time() - 300,
+    }]
+    need, why = mod._decide_reload(tab, "1.23.72", None, previous_reloads=recent)
+    assert need is False
+    assert "cooldown" in why
+
+    stale = [{**recent[0], "ts": _time.time() - 80 * 60}]
+    need2, why2 = mod._decide_reload(tab, "1.23.72", None, previous_reloads=stale)
+    assert need2 is True
+    assert "cooldown" not in why2
+
+
+def test_consecutive_shell_cycles_counts_recent_stale_reloads():
+    mod = _load_tab_reload_module()
+    previous = [
+        {"platform": "x", "action": "reload", "reason": "x non-canonical recovery URL", "status": "ok"},
+        {"platform": "x", "action": "reload", "reason": "x non-canonical recovery URL", "status": "fail"},
+        {"platform": "instagram", "action": "reload", "reason": "page health: http_429", "status": "ok"},
+        {"platform": "x", "action": "skip", "reason": "healthy"},
+    ]
+    assert mod._consecutive_shell_cycles(previous, "x") == 2
+    assert mod._consecutive_shell_cycles(previous, "instagram") == 1
+    assert mod._consecutive_shell_cycles([], "x") == 0
