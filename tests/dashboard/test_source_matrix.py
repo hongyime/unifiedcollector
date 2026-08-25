@@ -969,6 +969,33 @@ def test_source_matrix_row_counts_and_live_blocker():
     assert row["blocker"]["kind"] == "none"
 
 
+def test_source_matrix_row_exposes_rolling_content_for_action_queue():
+    row = _source_matrix_row(
+        {
+            "source": "threads",
+            "status": "live",
+            "detail": "newest row is inside the freshness window",
+        },
+        {"records": 6, "media_items": 1},
+        {"rate_limits": 0, "access_errors": 0},
+        {"records": 22, "media_items": 2},
+        {"rate_limits": 0, "access_errors": 0},
+        {},
+        {},
+        [],
+        rolling_content={
+            "records": 52,
+            "media_items": 45,
+            "latest_record_at": datetime(2026, 8, 21, 20, 17, tzinfo=timezone.utc),
+        },
+    )
+
+    assert row["stored_rolling_60m"] == 45
+    assert row["observed_rolling_60m"] == 52
+    assert row["requests_rolling_60m"] == 52
+    assert row["latest_content_rolling_60m_at"] == datetime(2026, 8, 21, 20, 17, tzinfo=timezone.utc)
+
+
 def test_source_matrix_row_uses_liveness_floor_when_24h_rollup_missing():
     now = datetime(2026, 8, 9, 3, 0, tzinfo=timezone.utc)
 
@@ -1255,6 +1282,41 @@ def test_source_matrix_row_uses_active_rate_payload_identity():
     assert row["rate_limit"]["latest_scope"] == "daily_profile_view_quota"
     assert row["rate_limit"]["latest_status_code"] is None
     assert row["rate_limit"]["latest_reason"] == "daily profile_view quota hit (60)"
+
+
+def test_source_matrix_row_recomputes_expired_rate_limit_inactive():
+    now = datetime(2026, 8, 9, 0, 0, tzinfo=timezone.utc)
+    expired_until = now - timedelta(minutes=1)
+    row = _source_matrix_row(
+        _source(source="tiktok"),
+        current_content={"records": 0, "messages": 0, "media_items": 0},
+        current_rate={"rate_limits": 0, "access_errors": 0},
+        day_content={"records": 10, "messages": 0, "media_items": 0},
+        day_rate={
+            "active_now": True,
+            "active_until": expired_until,
+            "active_account": "tiktok_theprawnorganisation",
+            "active_scope": "profile_metadata",
+            "active_status_code": 429,
+            "active_reason": "TikTok profile metadata challenge wall: captcha",
+            "latest_account": "tiktok_theprawnorganisation",
+            "latest_scope": "profile_metadata",
+            "latest_status_code": 429,
+            "latest_reason": "TikTok profile metadata challenge wall: captcha",
+            "rate_limits": 1,
+            "access_errors": 0,
+        },
+        media_total={"total_media_items": 26085},
+        cursor_row=None,
+        extension_issues=[],
+        now=now,
+    )
+
+    assert row["rate_limit"]["active_now"] is False
+    assert row["rate_limit"]["active_until"] == expired_until
+    assert row["rate_limit"]["latest_account"] == "tiktok_theprawnorganisation"
+    assert row["rate_limit"]["latest_scope"] == "profile_metadata"
+    assert row["rate_limit"]["latest_status_code"] == 429
 
 
 def test_source_matrix_row_keeps_strava_gps_cooldown_even_with_activity_rows():
@@ -2169,6 +2231,214 @@ async def test_collectors_source_matrix_uses_persisted_payload_after_restart(mon
     except asyncio.CancelledError:
         pass
     dashboard_api._SOURCE_MATRIX_PAYLOAD_BUILD_TASK = None
+
+
+@pytest.mark.asyncio
+async def test_action_queue_sync_forces_fresh_source_matrix(monkeypatch):
+    dashboard_api._SOURCE_MATRIX_PAYLOAD_BUILD_TASK = None
+    _SOURCE_MATRIX_PAYLOAD_CACHE.update({
+        "ts": dashboard_api.time.time(),
+        "payload": {
+            "generated_at": datetime(2026, 8, 8, tzinfo=timezone.utc),
+            "sources": [{"source": "website", "status": "live"}],
+            "browser_extension": {"issues": []},
+            "errors": [],
+        },
+    })
+
+    async def fresh_build():
+        return {
+            "generated_at": datetime(2026, 8, 8, 0, 1, tzinfo=timezone.utc),
+            "sources": [{"source": "website", "status": "live", "fresh": True}],
+            "browser_extension": {"issues": []},
+            "errors": [],
+        }
+
+    class FakeConn:
+        pass
+
+    async def get_pool():
+        return object()
+
+    async def acquire_conn(_pool):
+        return FakeConn()
+
+    async def release_conn(_pool, _conn, _label):
+        return None
+
+    async def fake_sync(_conn, source_matrix):
+        assert source_matrix["sources"] == [{"source": "website", "status": "live", "fresh": True}]
+        return {"generated_at": source_matrix.get("generated_at"), "derived": 0, "open": 0, "resolved": 0, "actions": []}
+
+    async def fake_resolve(_conn, *, browser_extension=None):
+        return 0
+
+    import src.core.collection_action_queue as action_queue
+
+    monkeypatch.setattr(dashboard_api, "_collectors_source_matrix_payload", fresh_build)
+    monkeypatch.setattr(dashboard_api, "get_pool", get_pool)
+    monkeypatch.setattr(dashboard_api, "_acquire_dashboard_conn", acquire_conn)
+    monkeypatch.setattr(dashboard_api, "_release_dashboard_conn", release_conn)
+    monkeypatch.setattr(action_queue, "sync_collection_action_queue", fake_sync)
+    monkeypatch.setattr(action_queue, "resolve_stale_actions_from_direct_health", fake_resolve)
+
+    out = await dashboard_api.collectors_action_queue_sync(_user={})
+
+    assert out["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_action_queue_sync_skips_timeout_fast_fallback(monkeypatch):
+    dashboard_api._SOURCE_MATRIX_PAYLOAD_BUILD_TASK = None
+
+    async def fallback_source_matrix(_user=None, force_refresh=False):
+        assert force_refresh is True
+        return {
+            "generated_at": datetime(2026, 8, 8, 0, 1, tzinfo=timezone.utc),
+            "cache": {"status": "unavailable"},
+            "errors": [{"section": "source_matrix", "error": "TimeoutError"}],
+            "sources": [
+                {
+                    "source": "facebook",
+                    "status": "degraded",
+                    "blocker": {
+                        "kind": "browser_capture_stalled",
+                        "severity": "warning",
+                        "summary": "browser content progress is stale",
+                    },
+                }
+            ],
+            "browser_extension": {"issues": []},
+        }
+
+    async def get_pool():
+        raise AssertionError("sync should not acquire a DB connection for non-evidentiary fallback")
+
+    import src.core.collection_action_queue as action_queue
+
+    async def fake_sync(_conn, _source_matrix):
+        raise AssertionError("sync should not run for non-evidentiary source-matrix fallback")
+
+    monkeypatch.setattr(dashboard_api, "collectors_source_matrix", fallback_source_matrix)
+    monkeypatch.setattr(dashboard_api, "get_pool", get_pool)
+    monkeypatch.setattr(action_queue, "sync_collection_action_queue", fake_sync)
+
+    out = await dashboard_api.collectors_action_queue_sync(_user={})
+
+    assert out["status"] == "skipped"
+    assert out["reason"] == "source_matrix_unavailable"
+    assert out["open"] is None
+    assert out["derived"] == 0
+
+
+@pytest.mark.asyncio
+async def test_action_queue_sync_skips_db_acquire_skeleton_payload(monkeypatch):
+    async def db_acquire_skeleton_source_matrix(_user=None, force_refresh=False):
+        assert force_refresh is True
+        return {
+            "generated_at": datetime(2026, 8, 22, 0, 1, tzinfo=timezone.utc),
+            "cache": {"status": "rebuilt", "age_seconds": 0},
+            "errors": [{"section": "db_acquire", "error": "TimeoutError"}],
+            "sources": [
+                {
+                    "source": "facebook",
+                    "status": "unknown",
+                    "detail": (
+                        "source matrix could not acquire a DB connection quickly; "
+                        "showing known source skeleton until load drops"
+                    ),
+                    "blocker": {
+                        "kind": "unknown",
+                        "severity": "warning",
+                        "summary": (
+                            "source matrix could not acquire a DB connection quickly; "
+                            "showing known source skeleton until load drops"
+                        ),
+                    },
+                },
+                {
+                    "source": "x",
+                    "status": "unknown",
+                    "source_health_error": (
+                        "source matrix could not acquire a DB connection quickly; "
+                        "showing known source skeleton until load drops"
+                    ),
+                    "blocker": {
+                        "kind": "unknown",
+                        "severity": "warning",
+                        "summary": (
+                            "source matrix could not acquire a DB connection quickly; "
+                            "showing known source skeleton until load drops"
+                        ),
+                    },
+                },
+            ],
+            "browser_extension": {"issues": []},
+        }
+
+    async def get_pool():
+        raise AssertionError("sync should not acquire DB for db_acquire skeleton payload")
+
+    import src.core.collection_action_queue as action_queue
+
+    async def fake_sync(_conn, _source_matrix):
+        raise AssertionError("sync should not derive actions from db_acquire skeleton payload")
+
+    monkeypatch.setattr(dashboard_api, "collectors_source_matrix", db_acquire_skeleton_source_matrix)
+    monkeypatch.setattr(dashboard_api, "get_pool", get_pool)
+    monkeypatch.setattr(action_queue, "sync_collection_action_queue", fake_sync)
+
+    out = await dashboard_api.collectors_action_queue_sync(_user={})
+
+    assert out["status"] == "skipped"
+    assert out["reason"] == "source_matrix_unavailable"
+    assert out["open"] is None
+    assert out["derived"] == 0
+    assert out["resolved"] == 0
+
+
+@pytest.mark.asyncio
+async def test_action_queue_sync_skips_refreshing_partial_matrix(monkeypatch):
+    async def refreshing_source_matrix(_user=None, force_refresh=False):
+        assert force_refresh is True
+        return {
+            "generated_at": datetime(2026, 8, 8, 0, 1, tzinfo=timezone.utc),
+            "cache": {"status": "refreshing"},
+            "errors": [
+                {"section": "current_content", "error": "TimeoutError"},
+                {"section": "previous_hour_content", "error": "CancelledError"},
+                {"section": "media_totals", "error": "CancelledError"},
+            ],
+            "sources": [
+                {
+                    "source": "facebook",
+                    "status": "live",
+                    "blocker": {"kind": "none", "severity": "ok"},
+                    "current_hour": {"records": 0, "media_items": 0},
+                    "last_complete_hour": {"records": 0, "media_items": 0},
+                }
+            ],
+            "browser_extension": {"issues": []},
+        }
+
+    async def get_pool():
+        raise AssertionError("sync should not acquire a DB connection for partial source-matrix payload")
+
+    import src.core.collection_action_queue as action_queue
+
+    async def fake_sync(_conn, _source_matrix):
+        raise AssertionError("sync should not run for partial source-matrix payload")
+
+    monkeypatch.setattr(dashboard_api, "collectors_source_matrix", refreshing_source_matrix)
+    monkeypatch.setattr(dashboard_api, "get_pool", get_pool)
+    monkeypatch.setattr(action_queue, "sync_collection_action_queue", fake_sync)
+
+    out = await dashboard_api.collectors_action_queue_sync(_user={})
+
+    assert out["status"] == "skipped"
+    assert out["reason"] == "source_matrix_unavailable"
+    assert out["open"] is None
+    assert out["derived"] == 0
 
 
 def test_source_matrix_persisted_payload_expiry(monkeypatch, tmp_path):

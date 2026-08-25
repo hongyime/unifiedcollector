@@ -71,10 +71,17 @@ _BROWSER_TAB_MAINTENANCE_STATUS_PATH = os.getenv(
     "BROWSER_TAB_MAINTENANCE_STATUS_PATH",
     "/app/tmp/browser_tab_maintenance_status.json",
 )
+_BROWSER_TAB_AUDIT_RESULT_PATH = os.getenv(
+    "BROWSER_TAB_AUDIT_RESULT_PATH",
+    "/app/tmp/browser_tab_audit_result.json",
+)
 _SOURCE_CONTENT_PART_TIMEOUT_SECONDS = float(os.getenv("SOURCE_CONTENT_PART_TIMEOUT_SECONDS", "0.75"))
 _SOURCE_CONTENT_MEDIA_TIMEOUT_SECONDS = float(os.getenv("SOURCE_CONTENT_MEDIA_TIMEOUT_SECONDS", "1.25"))
 _SOURCE_CONTENT_SUMMARY_BUDGET_SECONDS = float(os.getenv("SOURCE_CONTENT_SUMMARY_BUDGET_SECONDS", "2.5"))
 _BROWSER_TAB_MAINTENANCE_STALE_SECONDS = int(os.getenv("BROWSER_TAB_MAINTENANCE_STALE_SECONDS", "2700"))
+_BROWSER_TAB_MAINTENANCE_RUNNING_STALLED_SECONDS = int(
+    os.getenv("BROWSER_TAB_MAINTENANCE_RUNNING_STALLED_SECONDS", "900")
+)
 _SOURCE_MATRIX_SECTION_CACHE: dict[str, dict[str, object]] = {}
 _SOURCE_MATRIX_SECTION_CACHE_TTL_SECONDS = int(os.getenv("SOURCE_MATRIX_SECTION_CACHE_TTL_SECONDS", "30"))
 _SOURCE_MATRIX_SECTION_STALE_SECONDS = int(os.getenv("SOURCE_MATRIX_SECTION_STALE_SECONDS", "900"))
@@ -399,13 +406,37 @@ def _browser_tab_maintenance_payload(
         and _BROWSER_TAB_MAINTENANCE_STALE_SECONDS > 0
         and age_seconds > _BROWSER_TAB_MAINTENANCE_STALE_SECONDS
     )
+    state = str(raw.get("state") or "unknown")
+    loop = raw.get("loop") if isinstance(raw.get("loop"), dict) else None
+    loop_detail = str((loop or {}).get("detail") or "").lower()
+    running_without_active_pass = bool(
+        state == "running"
+        and (
+            "sleeping after nonzero pass" in loop_detail
+            or "sleeping after successful pass" in loop_detail
+        )
+    )
+    running_stalled = bool(
+        state == "running"
+        and (
+            running_without_active_pass
+            or (
+                age_seconds is not None
+                and _BROWSER_TAB_MAINTENANCE_RUNNING_STALLED_SECONDS > 0
+                and age_seconds > _BROWSER_TAB_MAINTENANCE_RUNNING_STALLED_SECONDS
+            )
+        )
+    )
     return {
-        "state": str(raw.get("state") or "unknown"),
+        "state": state,
         "detail": raw.get("detail"),
         "checked_at": raw.get("checked_at"),
         "age_seconds": age_seconds,
         "stale": stale,
         "stale_after_seconds": _BROWSER_TAB_MAINTENANCE_STALE_SECONDS,
+        "running_stalled": running_stalled,
+        "running_without_active_pass": running_without_active_pass,
+        "running_stalled_after_seconds": _BROWSER_TAB_MAINTENANCE_RUNNING_STALLED_SECONDS,
         "cdp_url": raw.get("cdp_url"),
         "audit_result": raw.get("audit_result"),
         "reload_plan": raw.get("reload_plan"),
@@ -413,10 +444,187 @@ def _browser_tab_maintenance_payload(
         "last_terminal_state": raw.get("last_terminal_state"),
         "consecutive_cdp_unavailable_count": raw.get("consecutive_cdp_unavailable_count"),
         "cdp_unavailable_since": raw.get("cdp_unavailable_since"),
-        "loop": raw.get("loop") if isinstance(raw.get("loop"), dict) else None,
+        "loop": loop,
         "diagnostics": raw.get("diagnostics") if isinstance(raw.get("diagnostics"), dict) else None,
         "status_path": str(path),
     }
+
+
+def _browser_tab_audit_platforms(audit_path: object) -> list[str]:
+    if not audit_path:
+        return []
+    raw_path = str(audit_path)
+    try:
+        path = Path(raw_path)
+        if not path.is_file() and ("\\" in raw_path or ":" in raw_path):
+            path = Path(_BROWSER_TAB_MAINTENANCE_STATUS_PATH).parent / re.split(r"[\\/]", raw_path)[-1]
+        raw = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return []
+    if not isinstance(raw, dict):
+        return []
+    budget = raw.get("tab_budget") or raw.get("_tab_budget")
+    if not isinstance(budget, dict) or budget.get("ok") is not True:
+        return []
+    counts = budget.get("counts")
+    if not isinstance(counts, dict):
+        return []
+    per_platform = counts.get("per_platform")
+    if not isinstance(per_platform, dict):
+        return []
+    return sorted(
+        str(platform)
+        for platform, count in per_platform.items()
+        if platform and int(count or 0) > 0
+    )
+
+
+def _browser_tab_audit_age_seconds(audit_path: object) -> int | None:
+    if not audit_path:
+        return None
+    raw_path = str(audit_path)
+    try:
+        path = Path(raw_path)
+        if not path.is_file() and ("\\" in raw_path or ":" in raw_path):
+            path = Path(_BROWSER_TAB_MAINTENANCE_STATUS_PATH).parent / re.split(r"[\\/]", raw_path)[-1]
+        return max(0, int(time.time() - path.stat().st_mtime))
+    except Exception:
+        return None
+
+
+def _browser_tab_audit_page_errors(
+    audit_path: object,
+    *,
+    max_age_seconds: int | None = None,
+) -> list[dict]:
+    if not audit_path:
+        return []
+    raw_path = str(audit_path)
+    try:
+        path = Path(raw_path)
+        if not path.is_file() and ("\\" in raw_path or ":" in raw_path):
+            path = Path(_BROWSER_TAB_MAINTENANCE_STATUS_PATH).parent / re.split(r"[\\/]", raw_path)[-1]
+        if not path.is_file():
+            return []
+        age_seconds = max(0, int(time.time() - path.stat().st_mtime))
+        if max_age_seconds is not None and max_age_seconds > 0 and age_seconds > max_age_seconds:
+            return []
+        raw = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return []
+    if not isinstance(raw, dict):
+        return []
+    budget = raw.get("tab_budget") or raw.get("_tab_budget")
+    if isinstance(budget, dict) and budget.get("ok") is not True:
+        return []
+    issues = []
+    for platform, entries in raw.items():
+        if str(platform).startswith("_"):
+            continue
+        if not isinstance(entries, list):
+            continue
+        for item in entries:
+            if not isinstance(item, dict):
+                continue
+            health_status = str(item.get("page_health_status") or "")
+            if health_status != "recoverable_error_shell":
+                continue
+            platform_name = str(item.get("platform") or platform or "").lower()
+            if not platform_name:
+                continue
+            health_reason = item.get("page_health_reason") or "recoverable error shell"
+            issues.append({
+                "platform": platform_name,
+                "kind": "browser_page_error",
+                "severity": "warning",
+                "detail": (
+                    "Fresh browser tab audit reports a recoverable page shell instead of usable content."
+                ),
+                "url": item.get("url"),
+                "health_status": health_status,
+                "health_reason": health_reason,
+                "extension_version": item.get("cs_version") or item.get("extension_version"),
+                "content_counts": item.get("content_counts"),
+                "tab_audit_age_seconds": age_seconds,
+                "audit_source": "browser_tab_audit_result",
+            })
+    return issues
+
+
+def _browser_extension_add_tab_audit_page_errors(payload: dict) -> dict:
+    maintenance = payload.get("maintenance") if isinstance(payload.get("maintenance"), dict) else {}
+    audit_path = (maintenance or {}).get("audit_result") or _BROWSER_TAB_AUDIT_RESULT_PATH
+    try:
+        max_age = int((maintenance or {}).get("stale_after_seconds") or _BROWSER_TAB_MAINTENANCE_STALE_SECONDS)
+    except (TypeError, ValueError):
+        max_age = _BROWSER_TAB_MAINTENANCE_STALE_SECONDS
+    existing = {
+        (
+            str(issue.get("platform") or "").lower(),
+            str(issue.get("kind") or ""),
+            str(issue.get("health_reason") or ""),
+            str(issue.get("url") or ""),
+        )
+        for issue in payload.get("issues", [])
+        if isinstance(issue, dict)
+    }
+    for issue in _browser_tab_audit_page_errors(audit_path, max_age_seconds=max_age):
+        key = (
+            str(issue.get("platform") or "").lower(),
+            str(issue.get("kind") or ""),
+            str(issue.get("health_reason") or ""),
+            str(issue.get("url") or ""),
+        )
+        if key in existing:
+            continue
+        payload.setdefault("issues", []).append(issue)
+        existing.add(key)
+    return payload
+
+
+def _browser_extension_apply_maintenance_ingest_fallback(payload: dict) -> dict:
+    maintenance = payload.get("maintenance")
+    if not isinstance(maintenance, dict):
+        return payload
+    state = str(maintenance.get("state") or "")
+    last_terminal_state = str(maintenance.get("last_terminal_state") or "")
+    if maintenance.get("stale"):
+        return payload
+    platforms = _browser_tab_audit_platforms(maintenance.get("audit_result"))
+    if not platforms:
+        return payload
+    audit_age_seconds = _browser_tab_audit_age_seconds(maintenance.get("audit_result"))
+    stale_after_seconds = maintenance.get("stale_after_seconds")
+    try:
+        audit_is_fresh = (
+            audit_age_seconds is not None
+            and int(stale_after_seconds or 0) > 0
+            and audit_age_seconds <= int(stale_after_seconds or 0)
+        )
+    except (TypeError, ValueError):
+        audit_is_fresh = False
+    maintenance_ok = state == "ok" or (state == "running" and last_terminal_state == "ok")
+    if not maintenance_ok and not audit_is_fresh:
+        return payload
+    payload["ingest_health"] = {
+        "state": "active_via_maintenance",
+        "active": True,
+        "heartbeat_active": True,
+        "content_active": False,
+        "last_seen_at": maintenance.get("checked_at"),
+        "last_content_at": None,
+        "last_seen_age_seconds": maintenance.get("age_seconds"),
+        "last_content_age_seconds": None,
+        "fresh_after_seconds": maintenance.get("stale_after_seconds"),
+        "active_platforms": platforms,
+        "content_platforms": [],
+        "note": (
+            "Browser ingest DB diagnostics were unavailable, but fresh tab maintenance "
+            "verified responsive extension tabs."
+        ),
+    }
+    payload["maintenance_ingest_fallback"] = True
+    return payload
 
 
 def _browser_extension_fallback_payload(reason: str = "unavailable") -> dict:
@@ -424,7 +632,21 @@ def _browser_extension_fallback_payload(reason: str = "unavailable") -> dict:
     issues = []
     if maintenance:
         state = str(maintenance.get("state") or "")
-        if state in {"cdp_unavailable", "unreadable", "invalid"}:
+        if maintenance.get("running_stalled"):
+            issues.append({
+                "platform": "browser",
+                "kind": "browser_maintenance_stalled",
+                "detail": (
+                    "Browser tab maintenance has been running longer than its wall-clock "
+                    f"limit; ingest diagnostics were not available because the source matrix "
+                    f"section returned {reason}."
+                ),
+                "age_seconds": maintenance.get("age_seconds"),
+                "stalled_after_seconds": maintenance.get("running_stalled_after_seconds"),
+                "checked_at": maintenance.get("checked_at"),
+                "ingest_diagnostics_unavailable": True,
+            })
+        elif state in {"cdp_unavailable", "unreadable", "invalid"}:
             diagnostics = maintenance.get("diagnostics") or {}
             detail = maintenance.get("detail") or "Browser tab maintenance cannot reach Chrome CDP."
             diag_reason = diagnostics.get("reason")
@@ -459,7 +681,7 @@ def _browser_extension_fallback_payload(reason: str = "unavailable") -> dict:
                 "checked_at": maintenance.get("checked_at"),
                 "ingest_diagnostics_unavailable": True,
             })
-    return {
+    payload = {
         "expected_version": _expected_extension_version(),
         "extension_id": None,
         "reload_url": None,
@@ -479,6 +701,7 @@ def _browser_extension_fallback_payload(reason: str = "unavailable") -> dict:
         "issues": issues,
         "diagnostic_errors": [{"section": "source_matrix_browser_extension", "error": reason}],
     }
+    return _browser_extension_apply_maintenance_ingest_fallback(payload)
 
 
 def _browser_ingest_health_from_items(ingest_items: list[dict]) -> dict:
@@ -1048,6 +1271,49 @@ async def _source_content_summary(
             ))
         except Exception as exc:  # noqa: BLE001 - dashboard should degrade, not 500
             logger.warning("beeper sub-source content summary failed: %s", exc)
+    return out
+
+
+async def _source_rolling_content_summary(conn) -> dict[str, dict]:
+    out = await _source_content_summary(conn, "now() - interval '1 hour'")
+    existing = await _existing_public_tables(conn, ["browser_ingest_events"])
+    if "browser_ingest_events" not in existing:
+        return out
+    rows = await conn.fetch(
+        """
+        SELECT platform AS source,
+               count(*)::bigint AS requests,
+               sum(observed_count)::bigint AS observed_count,
+               sum(stored_count)::bigint AS stored_count,
+               max(created_at) AS latest_record_at
+        FROM browser_ingest_events
+        WHERE created_at >= now() - interval '1 hour'
+          AND endpoint <> 'browser_heartbeat'
+        GROUP BY platform
+        """,
+        timeout=max(1.0, _SOURCE_CONTENT_SUMMARY_BUDGET_SECONDS),
+    )
+    for row in rows:
+        source = str(row["source"] or "")
+        if not source:
+            continue
+        target = out.setdefault(source, {
+            "source": source,
+            "records": 0,
+            "messages": 0,
+            "media_items": 0,
+            "latest_record_at": None,
+            "latest_media_at": None,
+            "media_stats_unavailable": False,
+        })
+        target["records"] = max(int(target.get("records") or 0), int(row["observed_count"] or 0))
+        target["media_items"] = max(int(target.get("media_items") or 0), int(row["stored_count"] or 0))
+        target["requests"] = int(row["requests"] or 0)
+        latest = row["latest_record_at"]
+        if latest and (
+            not target.get("latest_record_at") or latest > target["latest_record_at"]
+        ):
+            target["latest_record_at"] = latest
     return out
 
 
@@ -2969,7 +3235,8 @@ def _source_operator_status(source_row: dict, blocker: dict) -> dict:
 def _source_matrix_row(source_row: dict, current_content: dict | None, current_rate: dict | None,
                        day_content: dict | None, day_rate: dict | None, media_total: dict | None,
                        cursor_row: dict | None, extension_issues: list[dict],
-                       now: datetime | None = None, media_backlog: dict | None = None) -> dict:
+                       now: datetime | None = None, media_backlog: dict | None = None,
+                       rolling_content: dict | None = None) -> dict:
     source = source_row.get("source")
     total_media = media_total or {}
     current_window = _merge_source_window(current_content, current_rate)
@@ -3049,12 +3316,15 @@ def _source_matrix_row(source_row: dict, current_content: dict | None, current_r
         }
     day_rate = day_rate or {}
     cursor_row = cursor_row or {}
-    rate_active = bool(cursor_row.get("active_now") or day_rate.get("active_now"))
+    rate_active_until = cursor_row.get("active_until") or day_rate.get("active_until")
+    active_until_dt = _dt_for_compare(rate_active_until)
+    ref_now = now or datetime.now(timezone.utc)
+    rate_active = bool(active_until_dt and active_until_dt > ref_now)
     day_rate_has_active_fields = any(
         key in day_rate
         for key in ("active_account", "active_scope", "active_status_code", "active_reason")
     )
-    if day_rate.get("active_now") and day_rate_has_active_fields:
+    if rate_active and day_rate.get("active_now") and day_rate_has_active_fields:
         latest_status_code = day_rate.get("active_status_code")
         latest_account = day_rate.get("active_account") or day_rate.get("latest_account")
         latest_scope = day_rate.get("active_scope") or day_rate.get("latest_scope")
@@ -3069,6 +3339,7 @@ def _source_matrix_row(source_row: dict, current_content: dict | None, current_r
         latest_account = day_rate.get("latest_account")
         latest_scope = day_rate.get("latest_scope")
         latest_reason = day_rate.get("latest_reason")
+    rolling_window = rolling_content or {}
     return {
         "source": source,
         "display_name": source_row.get("display_name"),
@@ -3091,6 +3362,12 @@ def _source_matrix_row(source_row: dict, current_content: dict | None, current_r
         "bridge_status": source_row.get("bridge_status"),
         "bridge_detail": source_row.get("bridge_detail"),
         "current_hour": current_window,
+        "stored_rolling_60m": int(rolling_window.get("media_items") or 0),
+        "observed_rolling_60m": int(rolling_window.get("records") or 0),
+        "requests_rolling_60m": int(rolling_window.get("requests") or rolling_window.get("records") or 0),
+        "latest_content_rolling_60m_at": (
+            rolling_window.get("latest_media_at") or rolling_window.get("latest_record_at")
+        ),
         "last_24h": day_window,
         "total_media_items": int(total_media.get("total_media_items") or 0),
         "total_media_bytes": int(total_media.get("total_media_bytes") or 0),
@@ -3101,7 +3378,7 @@ def _source_matrix_row(source_row: dict, current_content: dict | None, current_r
         "media_backlog": backlog,
         "rate_limit": {
             "active_now": rate_active,
-            "active_until": cursor_row.get("active_until") or day_rate.get("active_until"),
+            "active_until": rate_active_until,
             "streak": cursor_row.get("streak"),
             "latest_status_code": latest_status_code,
             "latest_account": latest_account,
@@ -3317,7 +3594,19 @@ async def _browser_extension_payload(conn) -> dict:
     if maintenance:
         payload["maintenance"] = maintenance
         state = str(maintenance.get("state") or "")
-        if maintenance.get("stale"):
+        if maintenance.get("running_stalled"):
+            payload["issues"].append({
+                "platform": "browser",
+                "kind": "browser_maintenance_stalled",
+                "detail": (
+                    "Browser tab maintenance has been running longer than its wall-clock "
+                    "limit; tab reload/audit automation may be wedged."
+                ),
+                "age_seconds": maintenance.get("age_seconds"),
+                "stalled_after_seconds": maintenance.get("running_stalled_after_seconds"),
+                "checked_at": maintenance.get("checked_at"),
+            })
+        elif maintenance.get("stale"):
             payload["issues"].append({
                 "platform": "browser",
                 "kind": "browser_maintenance_stale",
@@ -3724,6 +4013,8 @@ async def _browser_extension_payload(conn) -> dict:
             issue["extension_id"] = payload.get("extension_id")
             issue["reload_url"] = payload.get("reload_url")
 
+    _browser_extension_add_tab_audit_page_errors(payload)
+
     if await _fetchval_or_none("browser_media_candidates_table", "SELECT to_regclass('browser_media_candidates')") is not None:
         rows = await _fetch_or_empty(
             "browser_media_candidates",
@@ -4021,6 +4312,7 @@ async def health(include_sources: bool = False, include_storage: bool = False):
     sources = []
     whatsapp_bridge_health = None
     browser_extension = None
+    health_section_errors = []
     try:
         db_probe_timeout = max(5.0, _DASHBOARD_DB_ACQUIRE_TIMEOUT_SECONDS)
         pool = await asyncio.wait_for(get_pool(), timeout=db_probe_timeout)
@@ -4045,18 +4337,58 @@ async def health(include_sources: bool = False, include_storage: bool = False):
                         compute_liveness(conn),
                         timeout=_DASHBOARD_HEALTH_SOURCES_TIMEOUT_SECONDS,
                     )
+                except asyncio.CancelledError as exc:
+                    logger.debug("source liveness health section cancelled: %s", exc.__class__.__name__)
+                    cached_matrix = _load_source_matrix_payload_cache()
+                    if cached_matrix is not None:
+                        _cached_ts, cached_payload = cached_matrix
+                        sources = cached_payload.get("sources") or []
+                        whatsapp_bridge_health = cached_payload.get("whatsapp_bridge_health")
+                    else:
+                        health_section_errors.append({
+                            "source": "source_liveness",
+                            "status": "unknown",
+                            "message": f"source liveness unavailable: {exc.__class__.__name__}",
+                        })
                 except Exception as exc:
                     logger.debug("source liveness health section failed: %s", exc)
+                    cached_matrix = _load_source_matrix_payload_cache()
+                    if cached_matrix is not None:
+                        _cached_ts, cached_payload = cached_matrix
+                        sources = cached_payload.get("sources") or []
+                        whatsapp_bridge_health = cached_payload.get("whatsapp_bridge_health")
+                    else:
+                        health_section_errors.append({
+                            "source": "source_liveness",
+                            "status": "unknown",
+                            "message": f"source liveness unavailable: {exc.__class__.__name__}",
+                        })
                 try:
                     browser_extension = await asyncio.wait_for(
                         _browser_extension_payload(conn),
                         timeout=_DASHBOARD_HEALTH_BROWSER_TIMEOUT_SECONDS,
                     )
                     _browser_extension_suppress_optional_diagnostics_when_active(browser_extension)
+                except asyncio.CancelledError as exc:
+                    logger.debug("browser extension health section cancelled: %s", exc.__class__.__name__)
+                    browser_extension = _browser_extension_fallback_payload(exc.__class__.__name__)
+                    if not browser_extension.get("maintenance_ingest_fallback"):
+                        health_section_errors.append({
+                            "source": "browser_extension",
+                            "status": "unknown",
+                            "message": f"browser extension diagnostics unavailable: {exc.__class__.__name__}",
+                        })
                 except Exception as exc:
                     logger.debug("browser extension health section failed: %s", exc)
+                    browser_extension = _browser_extension_fallback_payload(exc.__class__.__name__)
+                    if not browser_extension.get("maintenance_ingest_fallback"):
+                        health_section_errors.append({
+                            "source": "browser_extension",
+                            "status": "unknown",
+                            "message": f"browser extension diagnostics unavailable: {exc.__class__.__name__}",
+                        })
         finally:
-            await pool.release(conn)
+            await _release_dashboard_conn(pool, conn, "health")
         db_status = "healthy"
         db_health_status = "ok"
     except TimeoutError:
@@ -4066,7 +4398,7 @@ async def health(include_sources: bool = False, include_storage: bool = False):
         db_status = f"error: {e}"
         db_health_status = "error"
 
-    if include_sources and sources:
+    if include_sources and sources and whatsapp_bridge_health is None:
         sources, whatsapp_bridge_health = await _with_bridge_overrides(sources)
 
     drive_ok = True
@@ -4089,13 +4421,33 @@ async def health(include_sources: bool = False, include_storage: bool = False):
         backups = _normalize_backup_health_payload(backups, include_storage=False)
         vault["status"] = _vault_health_status(vault, include_storage=False)
     source_issues = [s for s in sources if s.get("status") not in {"live"}] if include_sources else []
+    if include_sources:
+        source_issues.extend(health_section_errors)
+    browser_ingest = {}
+    if isinstance(browser_extension, dict):
+        browser_ingest = browser_extension.get("ingest_health") or {}
+    browser_ingest_active = bool(browser_ingest.get("active")) or bool(
+        browser_ingest.get("active_platforms")
+    )
+    browser_extension_issues = []
+    if isinstance(browser_extension, dict):
+        browser_extension_issues = [
+            issue for issue in (browser_extension.get("issues") or [])
+            if str((issue or {}).get("severity") or "error").lower() not in {"ok", "info", "warning"}
+        ]
+    health_degrading_source_issues = source_issues
+    if browser_ingest_active:
+        health_degrading_source_issues = [
+            issue for issue in source_issues
+            if str(issue.get("source") or "") != "source_liveness"
+        ]
     drive_status = _drive_health_status(drive_ok, include_storage=include_storage)
     health_status = "ok"
     if db_health_status == "error" or backups.get("status") == "error":
         health_status = "error"
     elif vault.get("status") == "blocked" or drive_status == "blocked":
         health_status = "blocked"
-    elif not (drive_ok and vault_ok and backups_ok) or source_issues:
+    elif not (drive_ok and vault_ok and backups_ok) or health_degrading_source_issues or browser_extension_issues:
         health_status = "degraded"
 
     payload = {
@@ -4681,6 +5033,15 @@ def _source_matrix_payload_stale_limit_seconds() -> float:
     return max(_SOURCE_MATRIX_PAYLOAD_CACHE_TTL_SECONDS, _SOURCE_MATRIX_PAYLOAD_STALE_SECONDS)
 
 
+def _load_source_matrix_payload_cache(now: float | None = None) -> tuple[float, dict] | None:
+    now = time.time() if now is None else now
+    cached_payload = _SOURCE_MATRIX_PAYLOAD_CACHE.get("payload")
+    cached_ts = float(_SOURCE_MATRIX_PAYLOAD_CACHE.get("ts") or 0.0)
+    if cached_payload is not None and now - cached_ts <= _source_matrix_payload_stale_limit_seconds():
+        return cached_ts, _copy_cache_value(cached_payload)
+    return _load_persisted_source_matrix_payload(now)
+
+
 def _load_persisted_source_matrix_payload(now: float | None = None) -> tuple[float, dict] | None:
     now = time.time() if now is None else now
     path = Path(_SOURCE_MATRIX_PAYLOAD_CACHE_PATH)
@@ -4720,16 +5081,21 @@ def _persist_source_matrix_payload(ts: float, payload: dict) -> None:
 
 
 @app.get("/collectors/source-matrix")
-async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))):
+async def collectors_source_matrix(
+    _user: dict = Depends(require_role("viewer")),
+    force_refresh: bool = False,
+):
     global _SOURCE_MATRIX_PAYLOAD_BUILD_TASK
     now = time.time()
     cached_payload = _SOURCE_MATRIX_PAYLOAD_CACHE.get("payload")
     cached_ts = float(_SOURCE_MATRIX_PAYLOAD_CACHE.get("ts") or 0.0)
-    if cached_payload is None:
+    if cached_payload is None and not force_refresh:
         persisted = _load_persisted_source_matrix_payload(now)
         if persisted is not None:
             cached_ts, cached_payload = persisted
     if (
+        not force_refresh
+        and
         cached_payload is not None
         and _SOURCE_MATRIX_PAYLOAD_CACHE_TTL_SECONDS > 0
         and now - cached_ts <= _SOURCE_MATRIX_PAYLOAD_CACHE_TTL_SECONDS
@@ -4759,7 +5125,11 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
         _background_build_done(active_task)
         active_task = None
     if active_task is not None:
-        if cached_payload is not None and now - cached_ts <= _source_matrix_payload_stale_limit_seconds():
+        if (
+            not force_refresh
+            and cached_payload is not None
+            and now - cached_ts <= _source_matrix_payload_stale_limit_seconds()
+        ):
             payload = _copy_cache_value(cached_payload)
             payload["cache"] = {
                 "status": "refreshing",
@@ -4769,7 +5139,11 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
             return payload
         return await _source_matrix_unavailable_payload_with_fast_health("BuildInProgress")
 
-    if cached_payload is not None and now - cached_ts <= _source_matrix_payload_stale_limit_seconds():
+    if (
+        not force_refresh
+        and cached_payload is not None
+        and now - cached_ts <= _source_matrix_payload_stale_limit_seconds()
+    ):
         build_task = asyncio.create_task(_collectors_source_matrix_payload())
         _SOURCE_MATRIX_PAYLOAD_BUILD_TASK = build_task
         build_task.add_done_callback(_background_build_done)
@@ -4835,6 +5209,138 @@ async def collectors_source_matrix(_user: dict = Depends(require_role("viewer"))
     return payload
 
 
+@app.post("/collectors/action-queue/sync")
+async def collectors_action_queue_sync(_user: dict = Depends(require_role("operator"))):
+    from src.core.collection_action_queue import (
+        resolve_stale_actions_from_direct_health,
+        sync_collection_action_queue,
+    )
+
+    source_matrix = await collectors_source_matrix(_user={}, force_refresh=True)
+    cache = source_matrix.get("cache") if isinstance(source_matrix, dict) else None
+    errors = source_matrix.get("errors") if isinstance(source_matrix, dict) else None
+    non_evidentiary_sections = {
+        "source_matrix",
+        "current_content",
+        "current_rate",
+        "rolling_content",
+        "previous_hour_content",
+        "previous_hour_rate",
+        "day_content",
+        "day_rate",
+        "media_totals",
+        "active_cursors",
+        "browser_extension",
+        "db_acquire",
+    }
+    non_evidentiary_errors = any(
+        isinstance(item, dict)
+        and item.get("section") in non_evidentiary_sections
+        and item.get("error") in {"TimeoutError", "CancelledError", "BuildInProgress", "Timeout", "PoolTimeout"}
+        for item in (errors or [])
+    )
+    non_evidentiary_fallback = (
+        isinstance(cache, dict)
+        and cache.get("status") in {"unavailable", "refreshing"}
+        and non_evidentiary_errors
+    )
+    source_matrix_db_acquire_failed = any(
+        isinstance(item, dict)
+        and item.get("section") == "db_acquire"
+        for item in (errors or [])
+    )
+    skeleton_detail = "source matrix could not acquire a db connection quickly"
+    skeleton_sources = [
+        row for row in (source_matrix.get("sources") if isinstance(source_matrix, dict) else []) or []
+        if skeleton_detail in str(row.get("detail") or row.get("source_health_error") or "").lower()
+    ]
+    skeleton_only_payload = bool(skeleton_sources) and len(skeleton_sources) == len(
+        (source_matrix.get("sources") if isinstance(source_matrix, dict) else []) or []
+    )
+    if source_matrix_db_acquire_failed or skeleton_only_payload:
+        non_evidentiary_fallback = True
+    if non_evidentiary_fallback:
+        return {
+            "status": "skipped",
+            "generated_at": source_matrix.get("generated_at"),
+            "derived": 0,
+            "open": None,
+            "resolved": 0,
+            "actions": [],
+            "reason": "source_matrix_unavailable",
+            "detail": "Skipped action-queue derivation because source-matrix returned a non-evidentiary fallback during DB/source-matrix pressure.",
+        }
+    pool = await get_pool()
+    conn = await _acquire_dashboard_conn(pool)
+    try:
+        result = await sync_collection_action_queue(conn, source_matrix)
+        direct_resolved = await resolve_stale_actions_from_direct_health(
+            conn,
+            browser_extension=source_matrix.get("browser_extension") if isinstance(source_matrix, dict) else None,
+        )
+        if direct_resolved:
+            result["resolved"] = int(result.get("resolved") or 0) + int(direct_resolved)
+            result["open"] = max(0, int(result.get("open") or 0) - int(direct_resolved))
+    finally:
+        await _release_dashboard_conn(pool, conn, "collection action queue sync")
+    return {
+        "status": "ok",
+        "generated_at": source_matrix.get("generated_at"),
+        **result,
+    }
+
+
+@app.get("/collectors/action-queue")
+async def collectors_action_queue(
+    status: str = "open",
+    limit: int = 50,
+    _user: dict = Depends(require_role("viewer")),
+):
+    from src.core.collection_action_queue import ensure_collection_action_queue
+
+    normalized_status = str(status or "open").strip().lower()
+    if normalized_status not in {"open", "resolved", "all"}:
+        normalized_status = "open"
+    bounded_limit = min(max(int(limit or 50), 1), 200)
+    pool = await get_pool()
+    conn = await _acquire_dashboard_conn(pool)
+    try:
+        await ensure_collection_action_queue(conn)
+        if normalized_status == "all":
+            rows = await conn.fetch(
+                """
+                SELECT source, action_type, scope_key, status, priority, reason,
+                       evidence, first_seen_at, last_seen_at, resolved_at
+                FROM collection_action_queue
+                ORDER BY status ASC, priority ASC, last_seen_at DESC
+                LIMIT $1
+                """,
+                bounded_limit,
+            )
+        else:
+            rows = await conn.fetch(
+                """
+                SELECT source, action_type, scope_key, status, priority, reason,
+                       evidence, first_seen_at, last_seen_at, resolved_at
+                FROM collection_action_queue
+                WHERE status = $1
+                ORDER BY priority ASC, last_seen_at DESC
+                LIMIT $2
+                """,
+                normalized_status,
+                bounded_limit,
+            )
+    finally:
+        await _release_dashboard_conn(pool, conn, "collection action queue list")
+    return {
+        "status": "ok",
+        "filter": normalized_status,
+        "limit": bounded_limit,
+        "count": len(rows),
+        "actions": [dict(row) for row in rows],
+    }
+
+
 async def _collectors_source_matrix_payload():
     """Operator matrix: source status, collection method, volume, and blocker."""
     from src.core.source_freshness import compute_liveness
@@ -4853,6 +5359,7 @@ async def _collectors_source_matrix_payload():
         beeper_subsources = []
         current_content = {}
         current_rate = {}
+        rolling_content = {}
         previous_content = {}
         previous_rate = {}
         day_content = {}
@@ -4908,6 +5415,7 @@ async def _collectors_source_matrix_payload():
             beeper_subsources = []
             current_content = {}
             current_rate = {}
+            rolling_content = {}
             previous_content = {}
             previous_rate = {}
             day_content = {}
@@ -4943,6 +5451,16 @@ async def _collectors_source_matrix_payload():
                 fallback={},
                 awaitable=_source_rate_summary(conn, "date_trunc('hour', now())"),
                 cache_key="current_rate",
+                cache_ttl=15,
+                timeout=3,
+            )
+            rolling_content = await _source_matrix_section(
+                section="rolling_content",
+                label="rolling content summary",
+                errors=errors,
+                fallback={},
+                awaitable=_source_rolling_content_summary(conn),
+                cache_key="rolling_content",
                 cache_ttl=15,
                 timeout=3,
             )
@@ -5056,6 +5574,8 @@ async def _collectors_source_matrix_payload():
         fast_browser_extension = await _browser_extension_fallback_payload_with_fast_ingest("TimeoutError")
         if (fast_browser_extension.get("ingest_health") or {}).get("active"):
             browser_extension = fast_browser_extension
+        else:
+            browser_extension = _browser_extension_apply_maintenance_ingest_fallback(browser_extension)
 
     generated_at = datetime.now(timezone.utc)
     live_sources = [*live_sources, *beeper_subsources]
@@ -5096,6 +5616,7 @@ async def _collectors_source_matrix_payload():
             extension_by_source.get(source_row["source"], []),
             generated_at,
             youtube_media_backlog if source_row["source"] == "youtube" else None,
+            rolling_content.get(source_row["source"]),
         )
         for source_row in live_sources
     ]
