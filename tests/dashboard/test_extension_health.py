@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 import json
 import os
@@ -12,6 +13,7 @@ os.environ.setdefault("DASHBOARD_ADMIN_PASSWORD", "x")
 
 from src.dashboard import api as dashboard_api
 from src.dashboard.api import (
+    _browser_tab_audit_page_errors,
     _browser_extension_fallback_payload_with_fast_ingest,
     _browser_extension_fallback_payload,
     _browser_ingest_health_from_items,
@@ -22,11 +24,227 @@ from src.dashboard.api import (
 )
 
 
+class _HealthFakeConn:
+    async def fetchval(self, *_args, **_kwargs):
+        return 1
+
+
+class _HealthFakePool:
+    def __init__(self, *, cancel_release: bool = False):
+        self.cancel_release = cancel_release
+
+    async def release(self, _conn):
+        if self.cancel_release:
+            raise asyncio.CancelledError()
+        return None
+
+
 def test_extension_versions_match_ignores_v_prefix():
     assert _extension_versions_match("1.21.32", "v1.21.32")
     assert _extension_versions_match("v1.21.32", "1.21.32")
     assert _extension_versions_match("1.21.33", "1.21.32")
     assert not _extension_versions_match("1.21.28", "1.21.32")
+
+
+@pytest.mark.asyncio
+async def test_health_include_sources_degrades_when_diagnostics_fail(monkeypatch):
+    from src.core import source_freshness
+
+    async def broken_liveness(_conn):
+        raise TimeoutError("source query timed out")
+
+    async def broken_extension(_conn):
+        raise TimeoutError("extension query timed out")
+
+    async def acquire_conn(_pool):
+        return conn
+
+    async def get_pool():
+        return _HealthFakePool()
+
+    conn = _HealthFakeConn()
+    monkeypatch.setattr(dashboard_api, "get_pool", get_pool)
+    monkeypatch.setattr(dashboard_api, "_acquire_dashboard_conn", acquire_conn)
+    # Isolate from host state: a fresh persisted source-matrix cache must not
+    # silently satisfy liveness here — this test pins the NO-cache fallback path.
+    monkeypatch.setattr(
+        dashboard_api,
+        "_load_source_matrix_payload_cache",
+        lambda now=None: None,
+    )
+    monkeypatch.setattr(source_freshness, "compute_liveness", broken_liveness)
+    monkeypatch.setattr(dashboard_api, "_browser_extension_payload", broken_extension)
+
+    payload = await dashboard_api.health(include_sources=True)
+
+    assert payload["status"] == "degraded"
+    assert {issue["source"] for issue in payload["source_issues"]} == {
+        "source_liveness",
+        "browser_extension",
+    }
+    assert payload["browser_extension"]["ingest_health"]["state"] == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_health_include_sources_softens_source_liveness_timeout_when_browser_ingest_active(monkeypatch):
+    from src.core import source_freshness
+
+    async def broken_liveness(_conn):
+        raise TimeoutError("source query timed out")
+
+    async def active_extension(_conn):
+        return {
+            "issues": [],
+            "ingest_health": {
+                "state": "active",
+                "active": True,
+                "active_platforms": ["instagram", "x"],
+            },
+        }
+
+    async def acquire_conn(_pool):
+        return conn
+
+    async def get_pool():
+        return _HealthFakePool()
+
+    conn = _HealthFakeConn()
+    monkeypatch.setattr(dashboard_api, "get_pool", get_pool)
+    monkeypatch.setattr(dashboard_api, "_acquire_dashboard_conn", acquire_conn)
+    # Isolate from host state: pin the no-cache path so the expected diagnostic
+    # row is emitted deterministically even on machines with a warm cache file.
+    monkeypatch.setattr(
+        dashboard_api,
+        "_load_source_matrix_payload_cache",
+        lambda now=None: None,
+    )
+    monkeypatch.setattr(source_freshness, "compute_liveness", broken_liveness)
+    monkeypatch.setattr(dashboard_api, "_browser_extension_payload", active_extension)
+
+    payload = await dashboard_api.health(include_sources=True)
+
+    assert payload["status"] == "ok"
+    assert payload["source_issues"] == [
+        {
+            "source": "source_liveness",
+            "status": "unknown",
+            "message": "source liveness unavailable: TimeoutError",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_health_include_sources_uses_source_matrix_cache_on_liveness_timeout(monkeypatch):
+    from src.core import source_freshness
+
+    async def broken_liveness(_conn):
+        raise TimeoutError("source query timed out")
+
+    async def active_extension(_conn):
+        return {
+            "issues": [],
+            "ingest_health": {
+                "state": "active",
+                "active": True,
+                "active_platforms": ["instagram"],
+            },
+        }
+
+    async def acquire_conn(_pool):
+        return conn
+
+    async def get_pool():
+        return _HealthFakePool()
+
+    conn = _HealthFakeConn()
+    dashboard_api._SOURCE_MATRIX_PAYLOAD_CACHE.update({
+        "ts": dashboard_api.time.time(),
+        "payload": {
+            "sources": [{"source": "instagram", "status": "live"}],
+            "whatsapp_bridge_health": {},
+        },
+    })
+    monkeypatch.setattr(dashboard_api, "get_pool", get_pool)
+    monkeypatch.setattr(dashboard_api, "_acquire_dashboard_conn", acquire_conn)
+    monkeypatch.setattr(source_freshness, "compute_liveness", broken_liveness)
+    monkeypatch.setattr(dashboard_api, "_browser_extension_payload", active_extension)
+
+    payload = await dashboard_api.health(include_sources=True)
+
+    assert payload["status"] == "ok"
+    assert payload["sources"] == [{"source": "instagram", "status": "live"}]
+    assert payload["source_issues"] == []
+
+
+@pytest.mark.asyncio
+async def test_health_include_sources_degrades_on_browser_extension_issue_even_when_ingest_active(monkeypatch):
+    from src.core import source_freshness
+
+    async def no_sources(_conn):
+        return []
+
+    async def active_extension_with_issue(_conn):
+        return {
+            "issues": [
+                {
+                    "kind": "browser_maintenance_stalled",
+                    "source": "browser_extension",
+                    "severity": "error",
+                    "message": "browser maintenance pass is stalled",
+                }
+            ],
+            "ingest_health": {
+                "state": "active",
+                "active": True,
+                "active_platforms": ["instagram", "x"],
+            },
+        }
+
+    async def acquire_conn(_pool):
+        return conn
+
+    async def get_pool():
+        return _HealthFakePool()
+
+    conn = _HealthFakeConn()
+    monkeypatch.setattr(dashboard_api, "get_pool", get_pool)
+    monkeypatch.setattr(dashboard_api, "_acquire_dashboard_conn", acquire_conn)
+    monkeypatch.setattr(source_freshness, "compute_liveness", no_sources)
+    monkeypatch.setattr(dashboard_api, "_browser_extension_payload", active_extension_with_issue)
+
+    payload = await dashboard_api.health(include_sources=True)
+
+    assert payload["status"] == "degraded"
+    assert payload["source_issues"] == []
+    assert payload["browser_extension"]["issues"][0]["kind"] == "browser_maintenance_stalled"
+
+
+@pytest.mark.asyncio
+async def test_health_tolerates_cancelled_db_release(monkeypatch):
+    from src.core import source_freshness
+
+    async def no_sources(_conn):
+        return []
+
+    async def extension_payload(_conn):
+        return {"issues": [], "ingest_health": {"state": "active"}}
+
+    async def acquire_conn(_pool):
+        return conn
+
+    async def get_pool():
+        return _HealthFakePool(cancel_release=True)
+
+    conn = _HealthFakeConn()
+    monkeypatch.setattr(dashboard_api, "get_pool", get_pool)
+    monkeypatch.setattr(dashboard_api, "_acquire_dashboard_conn", acquire_conn)
+    monkeypatch.setattr(source_freshness, "compute_liveness", no_sources)
+    monkeypatch.setattr(dashboard_api, "_browser_extension_payload", extension_payload)
+
+    payload = await dashboard_api.health(include_sources=True)
+
+    assert payload["database_status"] == "ok"
+    assert payload["sources"] == []
 
 
 def test_browser_ingest_health_from_items_marks_content_active(monkeypatch):
@@ -139,6 +357,59 @@ def test_browser_tab_maintenance_payload_ignores_missing_status(tmp_path):
     assert _browser_tab_maintenance_payload(tmp_path / "missing.json") is None
 
 
+def test_browser_tab_audit_page_errors_reads_fresh_recoverable_shell(tmp_path):
+    audit = tmp_path / "browser_tab_audit_result.json"
+    audit.write_text(
+        json.dumps({
+            "_tab_budget": {
+                "ok": True,
+                "counts": {"per_platform": {"x": 1}},
+            },
+            "x": [
+                {
+                    "platform": "x",
+                    "url": "https://x.com/home",
+                    "page_health_status": "recoverable_error_shell",
+                    "page_health_reason": "try_again_empty_state",
+                    "cs_version": "1.23.72",
+                }
+            ],
+        }),
+        encoding="utf-8",
+    )
+
+    issues = _browser_tab_audit_page_errors(audit, max_age_seconds=60)
+
+    assert len(issues) == 1
+    assert issues[0]["platform"] == "x"
+    assert issues[0]["kind"] == "browser_page_error"
+    assert issues[0]["severity"] == "warning"
+    assert issues[0]["url"] == "https://x.com/home"
+    assert issues[0]["health_reason"] == "try_again_empty_state"
+    assert issues[0]["extension_version"] == "1.23.72"
+    assert issues[0]["audit_source"] == "browser_tab_audit_result"
+    assert 0 <= issues[0]["tab_audit_age_seconds"] <= 60
+
+
+def test_browser_tab_audit_page_errors_ignores_stale_or_bad_budget(tmp_path):
+    audit = tmp_path / "browser_tab_audit_result.json"
+    audit.write_text(
+        json.dumps({
+            "_tab_budget": {"ok": False},
+            "x": [
+                {
+                    "url": "https://x.com/home",
+                    "page_health_status": "recoverable_error_shell",
+                    "page_health_reason": "try_again_empty_state",
+                }
+            ],
+        }),
+        encoding="utf-8",
+    )
+
+    assert _browser_tab_audit_page_errors(audit, max_age_seconds=60) == []
+
+
 def test_browser_extension_fallback_keeps_cdp_issue_when_ingest_times_out(monkeypatch, tmp_path):
     status = tmp_path / "browser_tab_maintenance_status.json"
     status.write_text(
@@ -163,6 +434,113 @@ def test_browser_extension_fallback_keeps_cdp_issue_when_ingest_times_out(monkey
     assert payload["issues"][0]["kind"] == "browser_maintenance_cdp_unavailable"
     assert payload["issues"][0]["ingest_diagnostics_unavailable"] is True
     assert "TimeoutError" in payload["issues"][0]["detail"]
+
+
+def test_browser_extension_fallback_uses_fresh_ok_maintenance_audit(monkeypatch, tmp_path):
+    audit = tmp_path / "browser_tab_audit_result.json"
+    audit.write_text(
+        json.dumps({
+            "tab_budget": {
+                "ok": True,
+                "counts": {
+                    "per_platform": {
+                        "instagram": 1,
+                        "x": 1,
+                        "facebook": 1,
+                    },
+                },
+            },
+        }),
+        encoding="utf-8",
+    )
+    status = tmp_path / "browser_tab_maintenance_status.json"
+    status.write_text(
+        json.dumps({
+            "state": "ok",
+            "detail": "audit and reload completed",
+            "checked_at": "2026-08-21T05:38:48+08:00",
+            "audit_result": str(audit),
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(dashboard_api, "_BROWSER_TAB_MAINTENANCE_STATUS_PATH", str(status))
+
+    payload = _browser_extension_fallback_payload("TimeoutError")
+
+    assert payload["maintenance_ingest_fallback"] is True
+    assert payload["ingest_health"]["state"] == "active_via_maintenance"
+    assert payload["ingest_health"]["active"] is True
+    assert payload["ingest_health"]["active_platforms"] == ["facebook", "instagram", "x"]
+    assert payload["issues"] == []
+
+
+def test_browser_extension_fallback_uses_fresh_clean_audit_when_status_degraded(monkeypatch, tmp_path):
+    audit = tmp_path / "browser_tab_audit_result.json"
+    audit.write_text(
+        json.dumps({
+            "_tab_budget": {
+                "ok": True,
+                "counts": {
+                    "per_platform": {
+                        "instagram": 1,
+                        "threads": 1,
+                        "tiktok": 1,
+                        "x": 1,
+                    },
+                },
+            },
+        }),
+        encoding="utf-8",
+    )
+    status = tmp_path / "browser_tab_maintenance_status.json"
+    status.write_text(
+        json.dumps({
+            "state": "running",
+            "detail": "maintenance pass started",
+            "checked_at": "2026-08-21T07:42:11+08:00",
+            "audit_result": str(audit),
+            "last_terminal_state": "degraded",
+            "stale_after_seconds": 2700,
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(dashboard_api, "_BROWSER_TAB_MAINTENANCE_STATUS_PATH", str(status))
+
+    payload = _browser_extension_fallback_payload("TimeoutError")
+
+    assert payload["maintenance_ingest_fallback"] is True
+    assert payload["ingest_health"]["state"] == "active_via_maintenance"
+    assert payload["ingest_health"]["active_platforms"] == ["instagram", "threads", "tiktok", "x"]
+    assert payload["issues"] == []
+
+
+def test_browser_extension_fallback_rejects_failed_audit_even_when_maintenance_ok(monkeypatch, tmp_path):
+    audit = tmp_path / "browser_tab_audit_result.json"
+    audit.write_text(
+        json.dumps({
+            "tab_budget": {
+                "ok": False,
+                "counts": {"per_platform": {"instagram": 1}},
+            },
+        }),
+        encoding="utf-8",
+    )
+    status = tmp_path / "browser_tab_maintenance_status.json"
+    status.write_text(
+        json.dumps({
+            "state": "ok",
+            "detail": "audit and reload completed",
+            "checked_at": "2026-08-21T05:38:48+08:00",
+            "audit_result": str(audit),
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(dashboard_api, "_BROWSER_TAB_MAINTENANCE_STATUS_PATH", str(status))
+
+    payload = _browser_extension_fallback_payload("TimeoutError")
+
+    assert "maintenance_ingest_fallback" not in payload
+    assert payload["ingest_health"]["state"] == "unknown"
 
 
 @pytest.mark.asyncio
@@ -564,6 +942,130 @@ async def test_browser_extension_payload_flags_stale_browser_maintenance(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_browser_extension_payload_flags_stalled_running_browser_maintenance(monkeypatch, tmp_path):
+    status = tmp_path / "browser_tab_maintenance_status.json"
+    status.write_text(
+        json.dumps({
+            "state": "running",
+            "detail": "maintenance pass started",
+            "checked_at": "2026-08-21T08:00:00+08:00",
+            "last_terminal_state": "ok",
+        }),
+        encoding="utf-8",
+    )
+    old = time.time() - 1200
+    os.utime(status, (old, old))
+    monkeypatch.setattr(dashboard_api, "_BROWSER_TAB_MAINTENANCE_STATUS_PATH", str(status))
+    monkeypatch.setattr(dashboard_api, "_BROWSER_TAB_MAINTENANCE_STALE_SECONDS", 2700)
+    monkeypatch.setattr(dashboard_api, "_BROWSER_TAB_MAINTENANCE_RUNNING_STALLED_SECONDS", 900)
+
+    class FakeConn:
+        async def fetchval(self, query: str, timeout: int | None = None):
+            if "dm_hook_heartbeat" in query:
+                return None
+            if "browser_ingest_events" in query:
+                return None
+            if "tiktok_browser_media_candidates" in query:
+                return None
+            if "tiktok_browser_revisit_queue" in query:
+                return None
+            if "browser_media_candidates" in query:
+                return None
+            if "browser_media_revisit_queue" in query:
+                return None
+            raise AssertionError(query)
+
+        async def fetch(self, query: str, *args, timeout: int | None = None):
+            raise AssertionError(query)
+
+    payload = await _browser_extension_payload(FakeConn())
+
+    assert payload["maintenance"]["state"] == "running"
+    assert payload["maintenance"]["running_stalled"] is True
+    assert payload["maintenance"]["running_stalled_after_seconds"] == 900
+    assert payload["maintenance"]["stale"] is False
+    assert payload["issues"][0]["kind"] == "browser_maintenance_stalled"
+    assert payload["issues"][0]["stalled_after_seconds"] == 900
+
+
+def test_browser_extension_fallback_flags_stalled_running_browser_maintenance(monkeypatch, tmp_path):
+    status = tmp_path / "browser_tab_maintenance_status.json"
+    status.write_text(
+        json.dumps({
+            "state": "running",
+            "detail": "maintenance pass started",
+            "checked_at": "2026-08-21T08:00:00+08:00",
+            "last_terminal_state": "ok",
+        }),
+        encoding="utf-8",
+    )
+    old = time.time() - 1200
+    os.utime(status, (old, old))
+    monkeypatch.setattr(dashboard_api, "_BROWSER_TAB_MAINTENANCE_STATUS_PATH", str(status))
+    monkeypatch.setattr(dashboard_api, "_BROWSER_TAB_MAINTENANCE_STALE_SECONDS", 2700)
+    monkeypatch.setattr(dashboard_api, "_BROWSER_TAB_MAINTENANCE_RUNNING_STALLED_SECONDS", 900)
+
+    payload = dashboard_api._browser_extension_fallback_payload("timeout")
+
+    assert payload["maintenance"]["running_stalled"] is True
+    assert payload["issues"][0]["kind"] == "browser_maintenance_stalled"
+    assert payload["issues"][0]["ingest_diagnostics_unavailable"] is True
+
+
+def test_browser_extension_fallback_flags_running_status_with_sleeping_loop(monkeypatch, tmp_path):
+    status = tmp_path / "browser_tab_maintenance_status.json"
+    status.write_text(
+        json.dumps({
+            "state": "running",
+            "detail": "maintenance pass started",
+            "checked_at": "2026-08-21T09:53:24+08:00",
+            "pid": 16612,
+            "last_terminal_state": "ok",
+            "loop": {
+                "pid": 21912,
+                "alive": True,
+                "detail": "maintenance loop sleeping after nonzero pass",
+            },
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(dashboard_api, "_BROWSER_TAB_MAINTENANCE_STATUS_PATH", str(status))
+    monkeypatch.setattr(dashboard_api, "_BROWSER_TAB_MAINTENANCE_RUNNING_STALLED_SECONDS", 900)
+
+    payload = dashboard_api._browser_extension_fallback_payload("timeout")
+
+    assert payload["maintenance"]["running_stalled"] is True
+    assert payload["maintenance"]["running_without_active_pass"] is True
+    assert payload["issues"][0]["kind"] == "browser_maintenance_stalled"
+
+
+def test_browser_extension_fallback_flags_running_status_with_success_sleeping_loop(monkeypatch, tmp_path):
+    status = tmp_path / "browser_tab_maintenance_status.json"
+    status.write_text(
+        json.dumps({
+            "state": "running",
+            "detail": "another maintenance pass is already running",
+            "checked_at": "2026-08-21T10:03:47+08:00",
+            "pid": 10428,
+            "last_terminal_state": "ok",
+            "loop": {
+                "pid": 21912,
+                "alive": True,
+                "detail": "maintenance loop sleeping after successful pass",
+            },
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(dashboard_api, "_BROWSER_TAB_MAINTENANCE_STATUS_PATH", str(status))
+
+    payload = dashboard_api._browser_extension_fallback_payload("timeout")
+
+    assert payload["maintenance"]["running_stalled"] is True
+    assert payload["maintenance"]["running_without_active_pass"] is True
+    assert payload["issues"][0]["kind"] == "browser_maintenance_stalled"
+
+
+@pytest.mark.asyncio
 async def test_browser_extension_payload_suppresses_old_endpoint_after_newer_current_signal(monkeypatch):
     monkeypatch.setenv("UC_EXTENSION_EXPECTED_VERSION", "1.21.33")
 
@@ -817,6 +1319,74 @@ async def test_browser_extension_payload_promotes_recoverable_shell_to_page_erro
     assert page_errors[0]["platform"] == "x"
     assert page_errors[0]["health_reason"] == "try_again_empty_state"
     assert page_errors[0]["content_counts"] == {"links": 0, "images": 1, "videos": 0, "articles": 0}
+
+
+@pytest.mark.asyncio
+async def test_browser_extension_payload_surfaces_fresh_tab_audit_page_error(monkeypatch, tmp_path):
+    monkeypatch.setenv("UC_EXTENSION_EXPECTED_VERSION", "1.23.72")
+    audit = tmp_path / "browser_tab_audit_result.json"
+    audit.write_text(
+        json.dumps({
+            "_tab_budget": {
+                "ok": True,
+                "counts": {"per_platform": {"x": 1}},
+            },
+            "x": [
+                {
+                    "platform": "x",
+                    "url": "https://x.com/home",
+                    "page_health_status": "recoverable_error_shell",
+                    "page_health_reason": "try_again_empty_state",
+                    "cs_version": "1.23.72",
+                }
+            ],
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(dashboard_api, "_BROWSER_TAB_AUDIT_RESULT_PATH", str(audit))
+
+    class FakeConn:
+        async def fetchval(self, query: str, timeout: int | None = None):
+            if "dm_hook_heartbeat" in query:
+                return None
+            if "browser_ingest_events" in query:
+                return "browser_ingest_events"
+            if "tiktok_browser_media_candidates" in query:
+                return None
+            if "tiktok_browser_revisit_queue" in query:
+                return None
+            if "browser_media_candidates" in query:
+                return None
+            if "browser_media_revisit_queue" in query:
+                return None
+            raise AssertionError(query)
+
+        async def fetch(self, query: str, *args, timeout: int | None = None):
+            if "WITH selected(platform) AS" in query:
+                return []
+            if "FROM browser_ingest_events" in query:
+                return [
+                    {
+                        "platform": "x",
+                        "endpoint": "browser_heartbeat",
+                        "requests": 1,
+                        "observed_count": 1,
+                        "stored_count": 0,
+                        "last_seen_at": datetime(2026, 8, 21, tzinfo=timezone.utc),
+                        "age_seconds": 10,
+                        "extension_version": "1.23.72",
+                    }
+                ]
+            raise AssertionError(query)
+
+    payload = await _browser_extension_payload(FakeConn())
+
+    page_errors = [issue for issue in payload["issues"] if issue["kind"] == "browser_page_error"]
+    assert len(page_errors) == 1
+    assert page_errors[0]["platform"] == "x"
+    assert page_errors[0]["severity"] == "warning"
+    assert page_errors[0]["audit_source"] == "browser_tab_audit_result"
+    assert page_errors[0]["health_reason"] == "try_again_empty_state"
 
 
 @pytest.mark.asyncio
