@@ -602,3 +602,47 @@ inurl:/student-gallery site:sg
 inurl:/student-showcase site:sg
 inurl:/student-leaders site:moe.edu.sg
 inurl:/cca-leaders site:moe.edu.sg
+
+# ============================================================
+# Faculty/staff directory dorks - Bryan 2026-08-26 (SMU pattern applied SG-wide)
+# ddgs-backed; site:/inurl: operators supported. ! to disable a line.
+# ------------------------------------------------------------
+# Universities - faculty/profile directory structures
+site:mysmu.edu/faculty/
+inurl:mysmu.edu/faculty/
+site:mysmu.edu/faculty/ "Computer Science"
+site:nus.edu.sg inurl:profile
+inurl:nus.edu.sg/~
+site:discovery.nus.edu.sg
+site:dr.ntu.edu.sg
+inurl:dr.ntu.edu.sg
+site:ntu.edu.sg inurl:staff
+site:sutd.edu.sg inurl:profile
+site:singaporetech.edu.sg inurl:faculty
+site:suss.edu.sg inurl:profile
+site:smu.edu.sg inurl:faculty-profile
+# Polytechnics
+site:np.edu.sg inurl:staff
+site:sp.edu.sg inurl:staff
+site:tp.edu.sg inurl:staff
+site:nyp.edu.sg inurl:staff
+site:rp.edu.sg inurl:staff
+# Cross-institution field-specific (repeat per discipline as needed)
+site:mysmu.edu/faculty/ "Information Systems"
+site:dr.ntu.edu.sg "Computer Science"
+site:nus.edu.sg inurl:profile "School of Computing"
+# ------------------------------------------------------------
+# File-discovery dorks (infosec-dorks style) - expand analyzer scrape scope
+# beyond PDF/images -> docs, sheets, slides, open directories
+site:edu.sg filetype:pdf
+site:edu.sg filetype:xlsx
+site:edu.sg filetype:xls
+site:edu.sg filetype:docx
+site:edu.sg filetype:pptx
+site:edu.sg filetype:csv
+intitle:"index of" site:edu.sg
+intitle:"index of" "faculty" site:edu.sg
+inurl:faculty filetype:pdf site:edu.sg
+site:gov.sg filetype:pdf
+intitle:"index of" "backup" site:sg
+inurl:"/a/-/-" site:ac.in
