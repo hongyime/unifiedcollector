@@ -325,3 +325,31 @@ site:linkedin.com employees [TARGET]
 site:onedrive.live.com [TARGET]
 site:sharepoint.com [TARGET]
 site:stackoverflow.com AND intext:"[TARGET]"
+
+# --- SC2 gap-fill 2026-08-28: canonical infosec-dorks filetype/exposed-file family ---
+# Missing from the 2026-08-20 import; [TARGET] scoped by exposure gates. Throttle-safe additions.
+site:[TARGET] filetype:env
+site:[TARGET] ext:env intext:DB_PASSWORD
+site:[TARGET] filetype:sql intext:password
+site:[TARGET] filetype:sql "INSERT INTO"
+site:[TARGET] filetype:log intext:password
+site:[TARGET] filetype:log intext:error
+site:[TARGET] filetype:bak
+site:[TARGET] filetype:bak inurl:php
+site:[TARGET] ext:pem intext:"PRIVATE KEY"
+site:[TARGET] filetype:json intext:api_key
+site:[TARGET] filetype:json intext:client_secret
+site:[TARGET] filetype:xml intext:password
+site:[TARGET] inurl:.htpasswd
+site:[TARGET] inurl:WEB-INF/web.xml
+site:[TARGET] inurl:.git/config
+site:[TARGET] inurl:.git/HEAD
+site:[TARGET] filetype:ini intext:password
+site:[TARGET] filetype:yml intext:password
+site:[TARGET] filetype:yaml intext:secret
+site:[TARGET] filetype:conf intext:password
+site:[TARGET] ext:cfg intext:password
+site:[TARGET] filetype:properties intext:password
+site:[TARGET] intitle:"index of" "backup"
+site:[TARGET] intitle:"index of" ".sql"
+site:[TARGET] intitle:"index of" ".env"
