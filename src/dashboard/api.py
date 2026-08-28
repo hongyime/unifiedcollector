@@ -7537,6 +7537,40 @@ async def social_users_list(platform: str | None = None, q: str | None = None,
     return [dict(r) for r in rows]
 
 
+@app.get("/social/scrape-config")
+async def social_scrape_config():
+    """Per-platform scrape enable state for the browser extension (rotator control).
+
+    The activity rotator writes collection_schedules.enabled for the browser
+    group; the extension polls this to skip scraping paused platforms so the
+    shared CDP Chrome never drives more than the rotation width at once. Reads
+    fail OPEN (all enabled) so a config error never silently halts collection.
+    """
+    browser_platforms = ["x", "instagram", "facebook", "threads", "tiktok", "lemon8", "strava"]
+    enabled_map = {p: True for p in browser_platforms}
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT source, enabled FROM collection_schedules WHERE source = ANY($1::text[])",
+                browser_platforms,
+            )
+        for r in rows:
+            enabled_map[str(r["source"])] = bool(r["enabled"])
+    except Exception as exc:  # noqa: BLE001 - fail open: never block scraping on config read error
+        return {
+            "enabled": browser_platforms,
+            "disabled": [],
+            "fail_open": True,
+            "error": exc.__class__.__name__,
+        }
+    return {
+        "enabled": sorted([p for p, on in enabled_map.items() if on]),
+        "disabled": sorted([p for p, on in enabled_map.items() if not on]),
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 @app.get("/social", response_class=HTMLResponse)
 async def social_page():
     return HTMLResponse(_SOCIAL_HTML)

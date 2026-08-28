@@ -702,3 +702,38 @@ async def test_api_quotas_status_reports_snapshots_and_progress(monkeypatch):
     assert result["progress"]["youtube"]["queues"]["profile"]["resolved"] == 4
     assert result["progress"]["youtube"]["videos"]["total"] == 12
     assert pool.released is True
+
+
+@pytest.mark.asyncio
+async def test_social_scrape_config_reports_disabled(monkeypatch):
+    class _Conn:
+        async def fetch(self, *_a, **_k):
+            return [
+                {"source": "x", "enabled": True},
+                {"source": "facebook", "enabled": False},
+                {"source": "threads", "enabled": False},
+            ]
+
+    pool = _Pool(_Conn())
+
+    async def fake_get_pool():
+        return pool
+
+    monkeypatch.setattr(dashboard_api, "get_pool", fake_get_pool)
+    res = await dashboard_api.social_scrape_config()
+    assert set(["facebook", "threads"]).issubset(set(res["disabled"]))
+    assert "x" in res["enabled"]
+    assert "instagram" in res["enabled"]  # default-true when not present
+
+
+@pytest.mark.asyncio
+async def test_social_scrape_config_fails_open(monkeypatch):
+    async def fake_get_pool():
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(dashboard_api, "get_pool", fake_get_pool)
+    res = await dashboard_api.social_scrape_config()
+    assert res["fail_open"] is True
+    assert res["disabled"] == []
+    assert "x" in res["enabled"]
+
