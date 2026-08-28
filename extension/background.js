@@ -166,6 +166,46 @@ try {
     if (changes.controlBase) _cachedControlBase = changes.controlBase.newValue || DEFAULT_CONTROL;
   });
 } catch (e) { /* addListener unavailable in some contexts */ }
+
+// ---- rotator scrape-config gate (plan G3-wire) ---------------------------
+// The activity rotator disables browser platforms in collection_schedules so
+// the shared Chrome never scrapes more than the rotation width at once. The SW
+// polls /social/scrape-config and skips forcing cycles for disabled platforms.
+// Fail-open: any fetch/parse error leaves the platform enabled (never silently
+// stop collection on a transient control-plane blip).
+let _scrapeConfigDisabled = new Set();
+let _scrapeConfigFetchedAt = 0;
+const SCRAPE_CONFIG_TTL_MS = 60000;
+async function refreshScrapeConfig(base) {
+  const now = Date.now();
+  if (now - _scrapeConfigFetchedAt < SCRAPE_CONFIG_TTL_MS) return;
+  _scrapeConfigFetchedAt = now;
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 5000);
+    let r;
+    try {
+      r = await fetch(base + "/social/scrape-config", { signal: ctrl.signal });
+    } finally {
+      clearTimeout(timer);
+    }
+    if (!r || !r.ok) return;
+    const cfg = await r.json();
+    if (cfg && Array.isArray(cfg.disabled)) {
+      _scrapeConfigDisabled = new Set(cfg.disabled.map((s) => String(s).toLowerCase()));
+    }
+  } catch (e) {
+    /* fail-open: keep previous set; never block scraping on a config blip */
+  }
+}
+async function platformScrapeDisabled(platform, base) {
+  const id = platform && (platform.id || platform.label);
+  if (!id) return false;
+  try {
+    await refreshScrapeConfig(base || (await controlBase()));
+  } catch (e) { return false; }
+  return _scrapeConfigDisabled.has(String(id).toLowerCase());
+}
 function extensionVersion() {
   return (chrome.runtime.getManifest && chrome.runtime.getManifest().version) || null;
 }
@@ -644,6 +684,11 @@ async function maybeAutoReloadExtension(base, tab, platform, body, reason) {
 async function maybeForceScrapeCycle(tab, platform, responseBody, reason, base = null) {
   const body = parseHeartbeatResponseBody(responseBody);
   if (!body) return;
+  // G3-wire: honor the rotator. If this platform is rotated off, do not force a
+  // scrape cycle for it (reduces shared-Chrome contention). Fail-open on error.
+  if (await platformScrapeDisabled(platform, base)) {
+    return;
+  }
   const reloadScheduled = await maybeAutoReloadExtension(base, tab, platform, body, reason);
   if (reloadScheduled || body.force_cycle !== true || !tab || !tab.id) return;
   const now = Date.now();
