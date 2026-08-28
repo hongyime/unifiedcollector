@@ -118,7 +118,7 @@ function setWall(platform, mins, identity) {
 const DEFAULT_THROTTLE_BACKOFF_MINS = {
   instagram: 75,
   threads: 20,
-  x: 20,
+  x: 40,
   tiktok: 30,
   facebook: 30,
   lemon8: 30,
