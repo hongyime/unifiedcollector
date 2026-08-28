@@ -649,6 +649,25 @@ async def _tick(db: asyncpg.Connection) -> None:
             log.info("%s ok (newest %.0fs ago)", src, age)
 
 
+async def _rotator_paused_sources(db: asyncpg.Connection) -> set[str]:
+    """Browser sources the activity rotator has paused (collection_schedules.enabled=false).
+
+    S2: while a platform is rotated off, its tab intentionally goes quiet, so a
+    'browser capture stalled' alert would be a false positive. Fail-open: on any
+    error return an empty set so genuine stalls are still surfaced.
+    """
+    try:
+        rows = await db.fetch(
+            "SELECT source FROM collection_schedules "
+            "WHERE enabled = false AND source = ANY($1::text[])",
+            list(BROWSER_SOURCE_WATCH_SOURCES),
+        )
+        return {str(r["source"]) for r in rows}
+    except Exception as e:  # noqa: BLE001 - never let config read suppress real stalls
+        log.debug("rotator-paused lookup failed (fail-open): %s", e)
+        return set()
+
+
 async def _browser_source_tick(db: asyncpg.Connection) -> None:
     """Surface stalled Chrome-extension sources as operator-actionable state.
 
@@ -659,6 +678,7 @@ async def _browser_source_tick(db: asyncpg.Connection) -> None:
     if not BROWSER_SOURCE_WATCH_SOURCES:
         return
     now = time.time()
+    paused = await _rotator_paused_sources(db)
     try:
         from src.core.source_freshness import compute_liveness
 
@@ -670,6 +690,10 @@ async def _browser_source_tick(db: asyncpg.Connection) -> None:
     for row in rows:
         source = str(row.get("source") or "")
         if source not in BROWSER_SOURCE_WATCH_SOURCES:
+            continue
+        if source in paused:
+            # Rotated off by the activity rotator: quiet is expected, not a stall.
+            log.info("%s browser source rotator-paused; skipping stall check", source)
             continue
         status = row.get("status")
         heartbeat_age = row.get("browser_heartbeat_age_seconds")
