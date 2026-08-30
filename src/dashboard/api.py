@@ -6168,6 +6168,10 @@ async def media_stats(_user: dict = Depends(require_role("viewer"))):
         now = datetime.now(timezone.utc)
         for source in sorted(set(media_totals) | set(live)):
             stats = media_totals.get(source, {})
+            if not isinstance(stats, dict):
+                # _source_media_totals can yield a non-dict (e.g. bool) for a
+                # source; degrade to empty rather than 500 the whole dashboard.
+                stats = {}
             d = {
                 "source": source,
                 "display_name": stats.get("display_name"),
