@@ -2,8 +2,11 @@
 
 @theme {
   --color-background: #0a0a0a;
-  --color-surface: #111111;
-  --color-border: #1e1e1e;
+  --color-surface: #141418;
+  --color-border: #282830;
+  --color-hover: #212128;
+  --color-surface-2: #1c1c22;
+  --color-border-strong: #34343d;
   --color-text-primary: #ffffff;
   --color-text-secondary: #a0a0a0;
   --color-text-muted: #606060;
@@ -26,3 +29,7 @@ body {
 ::-webkit-scrollbar-track { background: var(--color-background); }
 ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.2); border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.3); }
+
+/* Browser surfaces carry the design too: theme selection + focus. */
+::selection { background: rgba(59,130,246,0.32); color: #fff; }
+:focus-visible { outline: 2px solid var(--color-info); outline-offset: 2px; }

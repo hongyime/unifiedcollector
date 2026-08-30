@@ -17,20 +17,29 @@ const dots: Record<string, string> = {
   idle: "bg-text-muted",
 };
 
+const valueTone: Record<string, string> = {
+  success: "text-text-primary",
+  error: "text-error",
+  warning: "text-warning",
+  info: "text-text-primary",
+  idle: "text-text-primary",
+};
+
 export function MetricCard({ label, value, sublabel, icon, status }: MetricCardProps) {
   return (
-    <div className="bg-surface rounded-lg border border-border p-4">
-      <div className="flex items-start justify-between">
-        <div>
-          <p className="text-xs uppercase tracking-wider text-text-muted">{label}</p>
-          <p className="mt-1 text-2xl font-semibold font-mono">{value}</p>
-          {sublabel && <p className="mt-1 text-xs text-text-muted">{sublabel}</p>}
-        </div>
+    <div className="group relative overflow-hidden rounded-xl border border-border-strong bg-surface-2 p-4 transition-colors hover:border-white/20">
+      {status && <span className={clsx("absolute inset-x-0 top-0 h-0.5", dots[status])} />}
+      <div className="flex items-start justify-between gap-2">
+        <p className="text-[0.7rem] font-medium uppercase tracking-widest text-text-secondary">{label}</p>
         <div className="flex items-center gap-2">
-          {status && <div className={clsx("w-2 h-2 rounded-full", dots[status])} />}
-          {icon && <div className="text-text-secondary">{icon}</div>}
+          {status && <div className={clsx("h-2 w-2 rounded-full", dots[status])} />}
+          {icon && <div className="text-text-muted">{icon}</div>}
         </div>
       </div>
+      <p className={clsx("mt-2 font-mono text-3xl font-semibold leading-none tabular-nums", status ? valueTone[status] : "text-text-primary")}>
+        {value}
+      </p>
+      {sublabel && <p className="mt-1.5 text-xs text-text-muted">{sublabel}</p>}
     </div>
   );
 }
