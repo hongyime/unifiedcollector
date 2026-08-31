@@ -211,41 +211,45 @@ function PostCard({ post }: { post: ThreadsPost }) {
 
   return (
     <div className="bg-surface rounded-lg border border-border overflow-hidden flex flex-col">
-      <a
-        href={post.post_url}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="block relative aspect-[3/4] bg-background overflow-hidden group"
-        title="Open on Threads"
-      >
-        {post.media_item_id ? (
-          <AuthImage
-            src={api.thumbnailUrl(post.media_item_id)}
-            alt=""
-            className="w-full h-full object-cover transition-transform group-hover:scale-105"
-            fallbackLabel={post.media_content_type || post.media_type || "media"}
+      <div className="relative aspect-[3/4] bg-background overflow-hidden group">
+        {post.media_item_id && !isPhoto ? (
+          <video
+            src={api.fileUrl(post.media_item_id)}
+            poster={api.thumbnailUrl(post.media_item_id)}
+            controls
+            preload="none"
+            playsInline
+            className="w-full h-full object-contain bg-black"
           />
+        ) : post.media_item_id ? (
+          <a href={post.post_url} target="_blank" rel="noopener noreferrer" className="block w-full h-full" title="Open on Threads">
+            <AuthImage
+              src={api.thumbnailUrl(post.media_item_id)}
+              alt=""
+              className="w-full h-full object-cover transition-transform group-hover:scale-105"
+              fallbackLabel={post.media_content_type || post.media_type || "media"}
+            />
+          </a>
         ) : (
           <div className="w-full h-full flex items-center justify-center text-text-muted text-xs">
             no thumbnail
           </div>
         )}
-        {/* corner badges: content kind */}
-        <div className="absolute top-1.5 left-1.5 bg-black/60 text-white text-[10px] px-1.5 py-0.5 rounded uppercase tracking-wide">
+        <div className="absolute top-1.5 left-1.5 bg-black/60 text-white text-[10px] px-1.5 py-0.5 rounded uppercase tracking-wide pointer-events-none">
           {isPhoto ? "photo" : "video"}
         </div>
-        
-        {/* hover overlay → view count */}
         {post.likes_count != null && (
-          <div className="absolute bottom-1.5 left-1.5 bg-black/60 text-white text-[10px] px-1.5 py-0.5 rounded flex items-center gap-1">
+          <div className="absolute bottom-1.5 left-1.5 bg-black/60 text-white text-[10px] px-1.5 py-0.5 rounded flex items-center gap-1 pointer-events-none">
             <Play className="w-3 h-3" />
             <span className="tabular-nums">{compactCount(post.likes_count)}</span>
           </div>
         )}
-        <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 bg-black/30 transition-opacity">
-          <ExternalLink className="w-6 h-6 text-white" />
-        </div>
-      </a>
+        {post.media_item_id && !isPhoto && (
+          <a href={post.post_url} target="_blank" rel="noopener noreferrer" className="absolute top-1.5 right-1.5 bg-black/60 text-white rounded p-1" title="Open on Threads">
+            <ExternalLink className="w-3.5 h-3.5" />
+          </a>
+        )}
+      </div>
       <div className="p-2.5 flex flex-col gap-1.5 flex-1">
         {desc && (
           <p
