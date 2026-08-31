@@ -24,6 +24,7 @@ import { registerMessagesHandler } from './event_handlers/messages';
 import { getHistoryProgress, registerHistoryHandler } from './event_handlers/history';
 import { registerContactsHandler } from './event_handlers/contacts';
 import { registerGroupsHandler } from './event_handlers/groups';
+import { probeNumber } from './device_intel';
 
 process.on('uncaughtException', (err) => {
     console.error('[FATAL] Uncaught exception:', err);
@@ -314,6 +315,24 @@ app.get('/qr', (_req, res) => {
 // Returns 200 always; `connected=false` when not paired yet.
 app.get('/session', (_req, res) => {
     res.status(200).json(bridgeState());
+});
+
+// GET /devices/:number — READ-ONLY device + existence intelligence for a phone
+// number. Uses onWhatsApp + getUSyncDevices ONLY (server queries); sends NOTHING
+// to the target (no message/reaction/call). Consumed by the collector's
+// device-intel sweep. Requires a paired socket. Fully guarded: never throws
+// into the bridge, so it cannot affect message collection.
+app.get('/devices/:number', async (req, res) => {
+    if (!activeSock || !serviceHealthy) {
+        res.status(503).json({ error: 'bridge not connected/paired', session_name: process.env.SESSION_NAME || 'default' });
+        return;
+    }
+    try {
+        const result = await probeNumber(activeSock, req.params.number);
+        res.status(200).json({ ...result, session_name: process.env.SESSION_NAME || 'default' });
+    } catch (err: any) {
+        res.status(500).json({ error: err?.message || 'probe failed' });
+    }
 });
 
 // POST /disconnect — unpair THIS device (logout): removes it from the phone's
