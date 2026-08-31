@@ -110,9 +110,50 @@ async def _persist(conn: asyncpg.Connection, phone_jid: str, probed_by: str, res
         )
 
 
-async def run(limit: int, dry_run: bool) -> None:
+# Adaptive cadence: probe faster when there's a big backlog, back off as
+# coverage saturates. Re-probe each number every REFRESH_DAYS to catch device
+# changes. The scheduled task fires hourly; the gate below decides if it's due.
+REFRESH_DAYS = int(os.getenv("WA_SWEEP_REFRESH_DAYS", "14"))
+INTERVAL_HIGH_BACKLOG = int(os.getenv("WA_SWEEP_BACKLOG_HIGH", "1000"))
+INTERVAL_LOW_BACKLOG = int(os.getenv("WA_SWEEP_BACKLOG_LOW", "200"))
+
+
+async def _adaptive_gate(conn) -> tuple[bool, int, int, float]:
+    """Return (should_run, backlog, interval_hours, mins_since_last).
+
+    backlog = whatsapp contacts never probed OR last probed > REFRESH_DAYS ago.
+    Interval scales with backlog: >=HIGH -> 1h, >=LOW -> 2h, else 4h. Effective
+    cadence self-adjusts from hourly (lots to do) out to every 4h."""
+    from datetime import datetime, timezone
+    backlog = await conn.fetchval(
+        "SELECT count(*) FROM whatsapp_lid_map m "
+        "WHERE m.phone_jid LIKE '%@s.whatsapp.net' "
+        "  AND NOT EXISTS (SELECT 1 FROM wa_device_observations o "
+        "                  WHERE o.phone_jid = m.phone_jid "
+        "                    AND o.observed_at > now() - ($1 || ' days')::interval)",
+        str(REFRESH_DAYS),
+    ) or 0
+    interval_h = 1 if backlog >= INTERVAL_HIGH_BACKLOG else 2 if backlog >= INTERVAL_LOW_BACKLOG else 4
+    last = await conn.fetchval("SELECT max(observed_at) FROM wa_device_observations")
+    if last is None:
+        return True, backlog, interval_h, 1e9
+    mins = (datetime.now(timezone.utc) - last).total_seconds() / 60.0
+    return (mins >= interval_h * 60 - 5), backlog, interval_h, mins
+
+
+async def run(limit: int, dry_run: bool, force: bool = False) -> None:
     conn = await asyncpg.connect(_dsn(), command_timeout=120)
     try:
+        if not force and not dry_run:
+            gate = await asyncpg.connect(_dsn(), command_timeout=30)
+            try:
+                should, backlog, interval_h, mins = await _adaptive_gate(gate)
+            finally:
+                await gate.close()
+            print(f"[wa_sweep] backlog={backlog} interval={interval_h}h since_last={mins:.0f}m")
+            if not should:
+                print(f"[wa_sweep] skip: not due yet (adaptive interval {interval_h}h)")
+                return
         async with httpx.AsyncClient() as client:
             ready = await _ready_bridges(client)
             if not ready:
@@ -146,8 +187,9 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Read-only WhatsApp device-intel sweep")
     ap.add_argument("--limit", type=int, default=BATCH)
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--force", action="store_true", help="bypass the adaptive interval gate")
     args = ap.parse_args()
-    asyncio.run(run(args.limit, args.dry_run))
+    asyncio.run(run(args.limit, args.dry_run, args.force))
 
 
 if __name__ == "__main__":
