@@ -6,6 +6,8 @@ import json
 import os
 import signal
 import tempfile
+import secrets
+import string
 import shlex
 import shutil
 from pathlib import Path
@@ -360,16 +362,64 @@ def _maigret_selected(target_type: str, modules: list[str]) -> bool:
     return engine == "maigret"
 
 
+def _generate_control_username() -> str:
+    """Random 16-char alphanumeric username used to detect universal-200 sites.
+
+    Any site that reports "Claimed" for this random handle is a false-positive
+    site that returns 200/success for any input — we exclude those from the
+    real target's observations (same technique SpiderFoot's sfp_accounts uses).
+    """
+    alphabet = string.ascii_lowercase + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(16))
+
+
+def _claimed_sitenames(rows: list[dict[str, Any]]) -> set[str]:
+    """Return lowercase site names maigret reported as ``status: Claimed``.
+
+    maigret 0.5.x nests the verdict under an inner ``status`` dict:
+        {"sitename": "GitHub", "status": {"status": "Claimed", "site_name": ...}}
+    Older formats put it at the top level. Handle both defensively.
+    """
+    names: set[str] = set()
+    for entry in rows:
+        if not isinstance(entry, dict):
+            continue
+        status_field = entry.get("status")
+        if isinstance(status_field, dict):
+            status_str = str(status_field.get("status") or "").strip().lower()
+            inner_name = status_field.get("site_name")
+        else:
+            status_str = str(status_field or "").strip().lower()
+            inner_name = None
+        if "claimed" not in status_str or "not" in status_str:
+            continue
+        name = entry.get("sitename") or entry.get("site_name") or inner_name
+        if name:
+            names.add(str(name).strip().lower())
+    return names
+
+
 def _maigret_rows_to_observations(
     target_id: str,
     rows: list[dict[str, Any]],
+    *,
+    exclude_sitenames: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Normalize maigret site entries into recon_observations rows.
 
-    Only entries with a Claimed status and a real profile URL are kept. The
-    per-row confidence is a HTTP-only heuristic: top-500 sites -> 0.7, else 0.5.
-    Both remain <=0.5 after the analyzer bridge caps for cross_platform_link.
+    Only entries with a Claimed status and a real profile URL are kept. Any
+    sitename appearing in ``exclude_sitenames`` (typically the control-
+    username's Claimed set — universal-200 FP sites like xvideos/roblox/op.gg
+    that return 200 for ANY input) is dropped: they carry zero identity signal.
+
+    Per-row confidence is a HTTP-only heuristic: top-500 site rank -> 0.7,
+    else 0.5. The analyzer bridge caps cross_platform_link at 0.5 downstream.
     """
+    exclude = {
+        str(name).strip().lower()
+        for name in (exclude_sitenames or set())
+        if name
+    }
     observations: list[dict[str, Any]] = []
     for entry in rows:
         if not isinstance(entry, dict):
@@ -377,12 +427,18 @@ def _maigret_rows_to_observations(
         status_field = entry.get("status")
         if isinstance(status_field, dict):
             status_str = str(status_field.get("status") or "").strip().lower()
+            inner_name = status_field.get("site_name")
         else:
             status_str = str(status_field or "").strip().lower()
+            inner_name = None
         # Skip everything except an explicit Claimed hit. maigret emits
         # "claimed", "not claimed", "unknown", "illegal", "available" — only
         # "claimed" is evidence of an actual account.
         if "claimed" not in status_str or "not" in status_str:
+            continue
+        sitename = entry.get("sitename") or entry.get("site_name") or inner_name
+        if sitename and str(sitename).strip().lower() in exclude:
+            # Universal-200 false-positive site — control also "matched" here.
             continue
         url = (
             entry.get("url_user")
@@ -453,13 +509,19 @@ def _parse_maigret_report_dir(report_dir: Path) -> list[dict[str, Any]]:
     return rows
 
 
-async def _run_maigret_cli(
-    target: dict[str, Any],
+async def _run_maigret_subprocess(
+    username: str,
     timeout_seconds: int,
     *,
     worker_label: int | str | None = None,
+    keep_dir: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Run maigret HTTP-only against a username target. Returns normalized obs."""
+    """Run maigret ONCE against a username; return raw ndjson site entries.
+
+    HTTP-only by design: no --cloudflare-bypass, no browser. Bounded via the
+    MAIGRET_TOP_SITES / MAIGRET_NUM_REQUESTS / MAIGRET_HTTP_TIMEOUT_SECONDS env.
+    On per-target timeout, SIGKILL the whole process group and raise.
+    """
     executable = os.getenv("MAIGRET_CLI", "maigret")
     if shutil.which(executable) is None and not os.path.exists(executable):
         raise RuntimeError(f"MAIGRET_CLI executable not found: {executable}")
@@ -468,11 +530,10 @@ async def _run_maigret_cli(
     http_timeout = os.getenv(
         "MAIGRET_HTTP_TIMEOUT_SECONDS", DEFAULT_MAIGRET_HTTP_TIMEOUT_SECONDS
     )
-    keep_dir = (os.getenv("MAIGRET_REPORT_KEEPDIR", "") or "").strip()
     with tempfile.TemporaryDirectory(prefix="maigret-") as tmpdir:
         cmd = [
             executable,
-            str(target["target_value"]),
+            username,
             "--top-sites", str(top_sites),
             "--timeout", str(http_timeout),
             "-n", str(num_requests),
@@ -497,9 +558,11 @@ async def _run_maigret_cli(
             except (AttributeError, ProcessLookupError):
                 proc.kill()
             await proc.communicate()
-            raise RuntimeError(f"maigret timed out after {timeout_seconds}s")
-        # maigret exits non-zero when zero sites match; we still parse the report
-        # dir. Only a missing report dir is a real failure.
+            raise RuntimeError(
+                f"maigret timed out after {timeout_seconds}s for {username}"
+            )
+        # maigret exits non-zero when zero sites match; we still parse the
+        # report dir. Only a missing report dir is a real failure.
         raw_rows = _parse_maigret_report_dir(Path(tmpdir))
         if keep_dir:
             try:
@@ -513,10 +576,56 @@ async def _run_maigret_cli(
             except OSError:
                 pass  # never let keepdir failures break the pipeline
         if not raw_rows and proc.returncode not in (0, 1):
-            # No parseable output AND non-normal exit -> propagate stderr
             err_text = (stderr or stdout).decode("utf-8", errors="replace")[:500]
-            raise RuntimeError(f"maigret failed (exit={proc.returncode}): {err_text}")
-    return _maigret_rows_to_observations(str(target["id"]), raw_rows)
+            raise RuntimeError(
+                f"maigret failed for {username} "
+                f"(exit={proc.returncode}): {err_text}"
+            )
+    return raw_rows
+
+
+async def _run_maigret_cli(
+    target: dict[str, Any],
+    timeout_seconds: int,
+    *,
+    worker_label: int | str | None = None,
+) -> list[dict[str, Any]]:
+    """Run maigret with control-username subtraction as the false-positive filter.
+
+    For each target, runs maigret twice IN PARALLEL:
+      1. the real ``target_value`` (what we care about)
+      2. a random 16-char alphanumeric CONTROL that cannot own a real account
+    Any sitename the CONTROL is "Claimed" on is a universal-200 false-positive
+    site (returns 200/OK for any input) — dropped from the target's observations.
+    Same technique SpiderFoot's sfp_accounts uses. HTTP-only, still RAM-cheap:
+    two bounded subprocesses, ~50-100 MiB each.
+    """
+    keep_dir = (os.getenv("MAIGRET_REPORT_KEEPDIR", "") or "").strip() or None
+    control_username = _generate_control_username()
+    target_username = str(target["target_value"])
+    # Parallel target + control. asyncio.gather propagates the first exception;
+    # either side's timeout aborts the whole target run (correct behaviour: we
+    # can't filter without a control, and we can't emit without target rows).
+    target_rows, control_rows = await asyncio.gather(
+        _run_maigret_subprocess(
+            target_username,
+            timeout_seconds,
+            worker_label=worker_label,
+            keep_dir=keep_dir,
+        ),
+        _run_maigret_subprocess(
+            control_username,
+            timeout_seconds,
+            worker_label=worker_label,
+            keep_dir=None,  # control reports are throwaway
+        ),
+    )
+    control_fp_sites = _claimed_sitenames(control_rows)
+    return _maigret_rows_to_observations(
+        str(target["id"]),
+        target_rows,
+        exclude_sitenames=control_fp_sites,
+    )
 
 
 
