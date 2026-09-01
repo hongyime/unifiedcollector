@@ -109,6 +109,20 @@ services:
       SPIDERFOOT_TARGET_TIMEOUT_SECONDS: "${SPIDERFOOT_TARGET_TIMEOUT_SECONDS:-180}"
       SPIDERFOOT_STALE_TARGET_MINUTES: "${SPIDERFOOT_STALE_TARGET_MINUTES:-30}"
       SPIDERFOOT_STATE_ROOT: "${SPIDERFOOT_STATE_ROOT:-/tmp/spiderfoot-state}"
+      # maigret: HTTP-only OSS account-enumeration engine (MIT), replaces the
+      # DEAD sfp_accounts module for username targets. Left OFF by default at the
+      # env-level; the pilot activates it PER-TARGET via scope_json.modules=['maigret'].
+      # FULL-SCALE SWITCH (leave OFF here — do NOT flip without re-reading the
+      # rollout notes in AGENTS.md / .agents/STATE.md):
+      #   RECON_USERNAME_ENGINE=maigret   -> route every username target to maigret
+      #   RECON_USERNAME_MODULES=maigret  -> new seed rows get scope.modules=[maigret]
+      RECON_USERNAME_ENGINE: "${RECON_USERNAME_ENGINE:-}"
+      MAIGRET_CLI: "${MAIGRET_CLI:-maigret}"
+      MAIGRET_TOP_SITES: "${MAIGRET_TOP_SITES:-300}"
+      MAIGRET_NUM_REQUESTS: "${MAIGRET_NUM_REQUESTS:-20}"
+      MAIGRET_HTTP_TIMEOUT_SECONDS: "${MAIGRET_HTTP_TIMEOUT_SECONDS:-10}"
+      MAIGRET_TARGET_TIMEOUT_SECONDS: "${MAIGRET_TARGET_TIMEOUT_SECONDS:-420}"
+      MAIGRET_REPORT_KEEPDIR: "${MAIGRET_REPORT_KEEPDIR:-}"
       DB_POOL_MAX_SIZE: "6"
       PYTHONUNBUFFERED: "1"
     volumes:

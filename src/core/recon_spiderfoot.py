@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import signal
+import tempfile
 import shlex
 import shutil
 from pathlib import Path
@@ -12,6 +13,17 @@ from typing import Any
 from urllib.parse import urlparse
 
 DEFAULT_MODULES = ("sfp_dnsresolve", "sfp_whois", "sfp_names")
+
+# maigret: HTTP-only OSS account-enumeration engine (MIT). Replaces the DEAD
+# sfp_accounts module for username targets. Routed here when a target's scope
+# has `modules=['maigret']` (per-target opt-in, used by the pilot) OR when the
+# RECON_USERNAME_ENGINE env is set to "maigret" globally.
+MAIGRET_MODULE = "maigret"
+MAIGRET_SOURCE_HEALTH_NAME = "maigret"
+DEFAULT_MAIGRET_TOP_SITES = "300"
+DEFAULT_MAIGRET_NUM_REQUESTS = "20"
+DEFAULT_MAIGRET_HTTP_TIMEOUT_SECONDS = "10"
+DEFAULT_MAIGRET_TARGET_TIMEOUT_SECONDS = "420"
 SOURCE_HEALTH_NAME = "spiderfoot"
 SUPPORTED_TYPES = {"domain", "ip", "ipv4", "email", "username", "user", "url", "phone"}
 DEFAULT_INTRUSIVE_MODULES = {
@@ -336,6 +348,178 @@ async def _store_observations(conn, observations: list[dict[str, Any]]) -> int:
     return len(observations)
 
 
+def _maigret_selected(target_type: str, modules: list[str]) -> bool:
+    """Return True when this target should run through maigret, not SpiderFoot."""
+    if (target_type or "").lower() != "username":
+        return False
+    if modules == [MAIGRET_MODULE]:
+        return True
+    if MAIGRET_MODULE in modules and len(modules) == 1:
+        return True
+    engine = os.getenv("RECON_USERNAME_ENGINE", "").strip().lower()
+    return engine == "maigret"
+
+
+def _maigret_rows_to_observations(
+    target_id: str,
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Normalize maigret site entries into recon_observations rows.
+
+    Only entries with a Claimed status and a real profile URL are kept. The
+    per-row confidence is a HTTP-only heuristic: top-500 sites -> 0.7, else 0.5.
+    Both remain <=0.5 after the analyzer bridge caps for cross_platform_link.
+    """
+    observations: list[dict[str, Any]] = []
+    for entry in rows:
+        if not isinstance(entry, dict):
+            continue
+        status_field = entry.get("status")
+        if isinstance(status_field, dict):
+            status_str = str(status_field.get("status") or "").strip().lower()
+        else:
+            status_str = str(status_field or "").strip().lower()
+        # Skip everything except an explicit Claimed hit. maigret emits
+        # "claimed", "not claimed", "unknown", "illegal", "available" — only
+        # "claimed" is evidence of an actual account.
+        if "claimed" not in status_str or "not" in status_str:
+            continue
+        url = (
+            entry.get("url_user")
+            or entry.get("url")
+            or entry.get("profile_url")
+            or entry.get("link")
+        )
+        if not url:
+            continue
+        rank_val = entry.get("rank") or entry.get("alexa_rank") or 0
+        try:
+            rank = int(rank_val)
+        except (TypeError, ValueError):
+            rank = 0
+        confidence = 0.7 if 0 < rank <= 500 else 0.5
+        observations.append(
+            {
+                "target_id": target_id,
+                "module": MAIGRET_MODULE,
+                "observation_type": "ACCOUNT_EXTERNAL_OWNED",
+                "value": str(url),
+                "confidence": confidence,
+                "raw_json": entry,
+            }
+        )
+    return observations
+
+
+def _parse_maigret_report_dir(report_dir: Path) -> list[dict[str, Any]]:
+    """Read the maigret output folder and return raw site entries."""
+    rows: list[dict[str, Any]] = []
+    # maigret 0.5.x writes `report_<username>_ndjson.json` when invoked with
+    # `-J ndjson -fo <dir>` (one JSON object per line). Older builds used
+    # `report_<username>.ndjson` — accept both to stay forward/backward safe.
+    ndjson_paths = sorted(report_dir.glob("report_*_ndjson.json")) + sorted(
+        report_dir.glob("report_*.ndjson")
+    )
+    for path in ndjson_paths:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict):
+                rows.append(obj)
+    if rows:
+        return rows
+    # Fallback: simple JSON summary (dict keyed by sitename)
+    for path in sorted(report_dir.glob("report_*_simple.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict):
+            for site_name, entry in payload.items():
+                if isinstance(entry, dict):
+                    entry.setdefault("sitename", site_name)
+                    rows.append(entry)
+        elif isinstance(payload, list):
+            rows.extend(item for item in payload if isinstance(item, dict))
+    return rows
+
+
+async def _run_maigret_cli(
+    target: dict[str, Any],
+    timeout_seconds: int,
+    *,
+    worker_label: int | str | None = None,
+) -> list[dict[str, Any]]:
+    """Run maigret HTTP-only against a username target. Returns normalized obs."""
+    executable = os.getenv("MAIGRET_CLI", "maigret")
+    if shutil.which(executable) is None and not os.path.exists(executable):
+        raise RuntimeError(f"MAIGRET_CLI executable not found: {executable}")
+    top_sites = os.getenv("MAIGRET_TOP_SITES", DEFAULT_MAIGRET_TOP_SITES)
+    num_requests = os.getenv("MAIGRET_NUM_REQUESTS", DEFAULT_MAIGRET_NUM_REQUESTS)
+    http_timeout = os.getenv(
+        "MAIGRET_HTTP_TIMEOUT_SECONDS", DEFAULT_MAIGRET_HTTP_TIMEOUT_SECONDS
+    )
+    keep_dir = (os.getenv("MAIGRET_REPORT_KEEPDIR", "") or "").strip()
+    with tempfile.TemporaryDirectory(prefix="maigret-") as tmpdir:
+        cmd = [
+            executable,
+            str(target["target_value"]),
+            "--top-sites", str(top_sites),
+            "--timeout", str(http_timeout),
+            "-n", str(num_requests),
+            "--no-progressbar",
+            "-J", "ndjson",
+            "-fo", tmpdir,
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=_spiderfoot_env(worker_label),
+            start_new_session=True,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout_seconds
+            )
+        except asyncio.TimeoutError:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (AttributeError, ProcessLookupError):
+                proc.kill()
+            await proc.communicate()
+            raise RuntimeError(f"maigret timed out after {timeout_seconds}s")
+        # maigret exits non-zero when zero sites match; we still parse the report
+        # dir. Only a missing report dir is a real failure.
+        raw_rows = _parse_maigret_report_dir(Path(tmpdir))
+        if keep_dir:
+            try:
+                dst_root = Path(keep_dir)
+                dst_root.mkdir(parents=True, exist_ok=True)
+                for path in Path(tmpdir).glob("report_*"):
+                    try:
+                        shutil.copy2(path, dst_root / path.name)
+                    except OSError:
+                        pass
+            except OSError:
+                pass  # never let keepdir failures break the pipeline
+        if not raw_rows and proc.returncode not in (0, 1):
+            # No parseable output AND non-normal exit -> propagate stderr
+            err_text = (stderr or stdout).decode("utf-8", errors="replace")[:500]
+            raise RuntimeError(f"maigret failed (exit={proc.returncode}): {err_text}")
+    return _maigret_rows_to_observations(str(target["id"]), raw_rows)
+
+
+
 async def _run_spiderfoot_cli(
     target: dict[str, Any],
     modules: list[str],
@@ -429,6 +613,52 @@ async def run_spiderfoot_once(
         await conn.execute("UPDATE recon_targets SET status = 'pending', updated_at = NOW() WHERE id = $1::uuid", target["id"])
         await _mark_source_health(conn, "running", None, success=True)
         return {"status": "dry_run", "target": target, "modules": modules, "observations": 0, "dry_run": True}
+
+    if _maigret_selected(target["target_type"], modules):
+        try:
+            observations = await _run_maigret_cli(
+                target,
+                int(os.getenv(
+                    "MAIGRET_TARGET_TIMEOUT_SECONDS",
+                    DEFAULT_MAIGRET_TARGET_TIMEOUT_SECONDS,
+                )),
+                worker_label=worker_label,
+            )
+            written = await _store_observations(conn, observations)
+            await conn.execute(
+                "UPDATE recon_targets SET status = 'completed', error = NULL, updated_at = NOW() WHERE id = $1::uuid",
+                target["id"],
+            )
+            await _mark_source_health(conn, "running", None, success=True)
+            return {
+                "status": "completed",
+                "target": target,
+                "modules": modules,
+                "engine": MAIGRET_MODULE,
+                "observations": written,
+                "dry_run": False,
+            }
+        except Exception as exc:  # noqa: BLE001
+            error = str(exc)[:500]
+            await conn.execute(
+                "UPDATE recon_targets SET status = 'failed', error = $2, updated_at = NOW() WHERE id = $1::uuid",
+                target["id"],
+                error,
+            )
+            # maigret timeouts are target-level; keep the recon service green.
+            if "maigret timed out" in error or _is_target_level_failure(error):
+                await _mark_source_health(conn, "running", None, success=True)
+            else:
+                await _mark_source_health(conn, "degraded", error)
+            return {
+                "status": "failed",
+                "target": target,
+                "modules": modules,
+                "engine": MAIGRET_MODULE,
+                "observations": 0,
+                "error": error,
+                "dry_run": False,
+            }
 
     try:
         raw_rows = await _run_spiderfoot_cli(
