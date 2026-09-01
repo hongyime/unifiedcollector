@@ -64,3 +64,8 @@ matrix-nio[e2e]>=0.26.0
 
 # Telegram Bot API for onboarding bot (/startcollector)
 python-telegram-bot>=22.8
+
+# Offline phone-number OSINT enrichment (region, carrier, line-type, timezone)
+# for WhatsApp contacts — pure-Python, ships with an offline dataset, NO network.
+# Consumed by src/core/wa_phone_intel.py. Enrichment-only; NEVER used for identity linking.
+phonenumbers>=8.13.0
