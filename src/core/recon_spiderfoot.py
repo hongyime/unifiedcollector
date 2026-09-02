@@ -404,13 +404,15 @@ def _maigret_rows_to_observations(
     rows: list[dict[str, Any]],
     *,
     exclude_sitenames: set[str] | None = None,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], set[str]]:
     """Normalize maigret site entries into recon_observations rows.
 
-    Only entries with a Claimed status and a real profile URL are kept. Any
-    sitename appearing in ``exclude_sitenames`` (typically the control-
-    username's Claimed set — universal-200 FP sites like xvideos/roblox/op.gg
-    that return 200 for ANY input) is dropped: they carry zero identity signal.
+    Returns ``(observations, blocked_sitenames)``. Only entries with a Claimed
+    status and a real profile URL become observations. Any sitename appearing
+    in ``exclude_sitenames`` (the cached universal-200 FP blocklist — xvideos,
+    roblox, op.gg, twitchtracker, ...) is dropped, and the site name is added
+    to ``blocked_sitenames`` so the caller can update ``hit_count`` for the
+    ``recon_maigret_fp_sites`` audit trail.
 
     Per-row confidence is a HTTP-only heuristic: top-500 site rank -> 0.7,
     else 0.5. The analyzer bridge caps cross_platform_link at 0.5 downstream.
@@ -421,6 +423,7 @@ def _maigret_rows_to_observations(
         if name
     }
     observations: list[dict[str, Any]] = []
+    blocked: set[str] = set()
     for entry in rows:
         if not isinstance(entry, dict):
             continue
@@ -437,8 +440,10 @@ def _maigret_rows_to_observations(
         if "claimed" not in status_str or "not" in status_str:
             continue
         sitename = entry.get("sitename") or entry.get("site_name") or inner_name
-        if sitename and str(sitename).strip().lower() in exclude:
-            # Universal-200 false-positive site — control also "matched" here.
+        sitename_lc = str(sitename).strip().lower() if sitename else ""
+        if sitename_lc and sitename_lc in exclude:
+            # Universal-200 false-positive site — recorded for hit tracking.
+            blocked.add(sitename_lc)
             continue
         url = (
             entry.get("url_user")
@@ -464,7 +469,7 @@ def _maigret_rows_to_observations(
                 "raw_json": entry,
             }
         )
-    return observations
+    return observations, blocked
 
 
 def _parse_maigret_report_dir(report_dir: Path) -> list[dict[str, Any]]:
@@ -584,47 +589,218 @@ async def _run_maigret_subprocess(
     return raw_rows
 
 
+# ---------------------------------------------------------------------------
+# maigret false-positive-site cached blocklist
+# ---------------------------------------------------------------------------
+# The previous revision ran a random 16-char control username IN PARALLEL
+# with every real target so it could subtract universal-200 sites (xvideos,
+# roblox, op.gg, ...) from the target's Claimed hits. That cut FPs from
+# ~76% to ~10%, but doubled maigret subprocess count for every backfill
+# target AND still let intermittent-200 sites slip through when a random
+# control happened to miss them.
+#
+# Upgrade: build the FP-site set ONCE from N=5 random controls, persist it in
+# `recon_maigret_fp_sites` with a TTL, and per REAL target run maigret
+# EXACTLY ONCE, dropping any Claimed site whose sitename is in the cached
+# blocklist. Backfill stays at 1 real run/target; precision reflects the
+# multi-control union. Refresh is a manual/cron operation:
+#     docker exec unifiedcollector_spiderfoot \
+#         python -m src.recon_maigret_fp_refresh --force --controls 5
+_MAIGRET_FP_TABLE_DDL = """
+CREATE TABLE IF NOT EXISTS recon_maigret_fp_sites (
+    sitename          TEXT PRIMARY KEY,
+    sample_url        TEXT,
+    sample_control    TEXT,
+    controls_seen     INTEGER NOT NULL DEFAULT 1,
+    hit_count         BIGINT  NOT NULL DEFAULT 0,
+    first_seen_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_refreshed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_recon_maigret_fp_last_refreshed
+    ON recon_maigret_fp_sites (last_refreshed_at DESC);
+"""
+
+# Random 64-bit constant; every worker uses the same key so concurrent
+# refresh attempts serialize on this pg_advisory_lock slot.
+MAIGRET_FP_REFRESH_LOCK_KEY = -8834912738475629487
+DEFAULT_MAIGRET_FP_TTL_DAYS = "7"
+DEFAULT_MAIGRET_FP_NUM_CONTROLS = "5"
+
+_maigret_fp_table_ready = False
+
+
+async def _ensure_maigret_fp_table(conn) -> None:
+    """Idempotent CREATE TABLE for the FP-site cache. No-op after first call."""
+    global _maigret_fp_table_ready
+    if _maigret_fp_table_ready:
+        return
+    await conn.execute(_MAIGRET_FP_TABLE_DDL)
+    _maigret_fp_table_ready = True
+
+
+async def load_maigret_fp_blocklist(conn) -> set[str]:
+    """Return the cached set of universal-200 FP sitenames (lowercase)."""
+    await _ensure_maigret_fp_table(conn)
+    rows = await conn.fetch("SELECT sitename FROM recon_maigret_fp_sites")
+    return {row["sitename"] for row in rows}
+
+
+async def bump_maigret_fp_hits(conn, sitenames: set[str]) -> None:
+    """Increment ``hit_count`` for each blocklisted sitename we filtered."""
+    if not sitenames:
+        return
+    await _ensure_maigret_fp_table(conn)
+    await conn.execute(
+        """
+        UPDATE recon_maigret_fp_sites
+           SET hit_count = hit_count + 1
+         WHERE sitename = ANY($1::text[])
+        """,
+        list(sitenames),
+    )
+
+
+async def refresh_maigret_fp_blocklist(
+    conn,
+    *,
+    num_controls: int = 5,
+    worker_label: int | str | None = None,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Refresh the cached FP-site blocklist by running maigret on N controls.
+
+    A site claimed by ANY of the N random controls is a universal-200 FP.
+    Serialized via ``pg_advisory_lock`` so concurrent refresh attempts are
+    safe. ``force=True`` truncates the existing table before repopulating (used
+    by the manual bootstrap CLI). Control runs are SEQUENTIAL to keep RAM
+    bounded to a single maigret process at a time.
+    """
+    await _ensure_maigret_fp_table(conn)
+    lock_key = MAIGRET_FP_REFRESH_LOCK_KEY
+    if force:
+        await conn.execute("SELECT pg_advisory_lock($1::bigint)", lock_key)
+        got_lock = True
+    else:
+        got_lock = bool(
+            await conn.fetchval("SELECT pg_try_advisory_lock($1::bigint)", lock_key)
+        )
+    if not got_lock:
+        return {"status": "skipped_locked", "controls_run": 0, "sites": 0}
+    try:
+        if force:
+            await conn.execute("TRUNCATE TABLE recon_maigret_fp_sites")
+        timeout = int(
+            os.getenv(
+                "MAIGRET_TARGET_TIMEOUT_SECONDS",
+                DEFAULT_MAIGRET_TARGET_TIMEOUT_SECONDS,
+            )
+        )
+        num_controls = max(1, int(num_controls))
+        aggregate: dict[str, dict[str, Any]] = {}
+        controls_run = 0
+        controls_failed = 0
+        for _ in range(num_controls):
+            control = _generate_control_username()
+            try:
+                rows = await _run_maigret_subprocess(
+                    control, timeout, worker_label=worker_label
+                )
+            except RuntimeError:
+                controls_failed += 1
+                continue
+            controls_run += 1
+            for entry in rows:
+                if not isinstance(entry, dict):
+                    continue
+                status_field = entry.get("status")
+                if isinstance(status_field, dict):
+                    status_str = str(status_field.get("status") or "").strip().lower()
+                    inner_name = status_field.get("site_name")
+                else:
+                    status_str = str(status_field or "").strip().lower()
+                    inner_name = None
+                if "claimed" not in status_str or "not" in status_str:
+                    continue
+                name = entry.get("sitename") or entry.get("site_name") or inner_name
+                if not name:
+                    continue
+                key = str(name).strip().lower()
+                url = (
+                    entry.get("url_user")
+                    or entry.get("url")
+                    or entry.get("profile_url")
+                    or ""
+                )
+                bucket = aggregate.setdefault(
+                    key,
+                    {
+                        "sample_url": str(url) or None,
+                        "sample_control": control,
+                        "controls": 0,
+                    },
+                )
+                bucket["controls"] += 1
+        if aggregate:
+            await conn.executemany(
+                """
+                INSERT INTO recon_maigret_fp_sites
+                    (sitename, sample_url, sample_control, controls_seen, last_refreshed_at)
+                VALUES ($1, $2, $3, $4, NOW())
+                ON CONFLICT (sitename) DO UPDATE SET
+                    controls_seen     = GREATEST(
+                        recon_maigret_fp_sites.controls_seen, EXCLUDED.controls_seen
+                    ),
+                    sample_url        = COALESCE(
+                        recon_maigret_fp_sites.sample_url, EXCLUDED.sample_url
+                    ),
+                    sample_control    = COALESCE(
+                        recon_maigret_fp_sites.sample_control, EXCLUDED.sample_control
+                    ),
+                    last_refreshed_at = NOW()
+                """,
+                [
+                    (key, info["sample_url"], info["sample_control"], info["controls"])
+                    for key, info in aggregate.items()
+                ],
+            )
+        return {
+            "status": "refreshed",
+            "controls_requested": num_controls,
+            "controls_run": controls_run,
+            "controls_failed": controls_failed,
+            "sites": len(aggregate),
+            "forced": force,
+        }
+    finally:
+        await conn.execute("SELECT pg_advisory_unlock($1::bigint)", lock_key)
+
+
 async def _run_maigret_cli(
     target: dict[str, Any],
     timeout_seconds: int,
     *,
     worker_label: int | str | None = None,
-) -> list[dict[str, Any]]:
-    """Run maigret with control-username subtraction as the false-positive filter.
+    fp_blocklist: set[str] | None = None,
+) -> tuple[list[dict[str, Any]], set[str]]:
+    """Run maigret HTTP-only against a target, filter via the cached FP blocklist.
 
-    For each target, runs maigret twice IN PARALLEL:
-      1. the real ``target_value`` (what we care about)
-      2. a random 16-char alphanumeric CONTROL that cannot own a real account
-    Any sitename the CONTROL is "Claimed" on is a universal-200 false-positive
-    site (returns 200/OK for any input) — dropped from the target's observations.
-    Same technique SpiderFoot's sfp_accounts uses. HTTP-only, still RAM-cheap:
-    two bounded subprocesses, ~50-100 MiB each.
+    Returns ``(observations, blocked_sitenames)`` so the caller can
+    ``bump_maigret_fp_hits`` for the blocklisted sites we just filtered.
+    Backfill-friendly: exactly ONE maigret subprocess per target. The
+    per-target control from the previous revision is REMOVED — the cached
+    multi-control blocklist supersedes it.
     """
     keep_dir = (os.getenv("MAIGRET_REPORT_KEEPDIR", "") or "").strip() or None
-    control_username = _generate_control_username()
-    target_username = str(target["target_value"])
-    # Parallel target + control. asyncio.gather propagates the first exception;
-    # either side's timeout aborts the whole target run (correct behaviour: we
-    # can't filter without a control, and we can't emit without target rows).
-    target_rows, control_rows = await asyncio.gather(
-        _run_maigret_subprocess(
-            target_username,
-            timeout_seconds,
-            worker_label=worker_label,
-            keep_dir=keep_dir,
-        ),
-        _run_maigret_subprocess(
-            control_username,
-            timeout_seconds,
-            worker_label=worker_label,
-            keep_dir=None,  # control reports are throwaway
-        ),
+    target_rows = await _run_maigret_subprocess(
+        str(target["target_value"]),
+        timeout_seconds,
+        worker_label=worker_label,
+        keep_dir=keep_dir,
     )
-    control_fp_sites = _claimed_sitenames(control_rows)
     return _maigret_rows_to_observations(
         str(target["id"]),
         target_rows,
-        exclude_sitenames=control_fp_sites,
+        exclude_sitenames=fp_blocklist or set(),
     )
 
 
@@ -725,15 +901,19 @@ async def run_spiderfoot_once(
 
     if _maigret_selected(target["target_type"], modules):
         try:
-            observations = await _run_maigret_cli(
+            fp_blocklist = await load_maigret_fp_blocklist(conn)
+            observations, blocked_fp_sitenames = await _run_maigret_cli(
                 target,
                 int(os.getenv(
                     "MAIGRET_TARGET_TIMEOUT_SECONDS",
                     DEFAULT_MAIGRET_TARGET_TIMEOUT_SECONDS,
                 )),
                 worker_label=worker_label,
+                fp_blocklist=fp_blocklist,
             )
             written = await _store_observations(conn, observations)
+            if blocked_fp_sitenames:
+                await bump_maigret_fp_hits(conn, blocked_fp_sitenames)
             await conn.execute(
                 "UPDATE recon_targets SET status = 'completed', error = NULL, updated_at = NOW() WHERE id = $1::uuid",
                 target["id"],
@@ -745,6 +925,8 @@ async def run_spiderfoot_once(
                 "modules": modules,
                 "engine": MAIGRET_MODULE,
                 "observations": written,
+                "fp_blocklist_size": len(fp_blocklist),
+                "fp_filtered": len(blocked_fp_sitenames),
                 "dry_run": False,
             }
         except Exception as exc:  # noqa: BLE001
