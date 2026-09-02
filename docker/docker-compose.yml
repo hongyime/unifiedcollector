@@ -90,7 +90,8 @@ services:
     profiles: ["recon"]
     init: true
     command: python -m src.recon_spiderfoot_service --poll-interval ${RECON_SPIDERFOOT_POLL_INTERVAL:-10} --workers ${RECON_SPIDERFOOT_WORKERS:-2}
-    mem_limit: 2g
+    mem_limit: ${RECON_SPIDERFOOT_MEM:-2g}
+    cpus: "${RECON_SPIDERFOOT_CPUS:-2.0}"
     pids_limit: 256
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
@@ -932,6 +933,11 @@ services:
       dockerfile: docker/Dockerfile
     container_name: unifiedcollector_scheduler
     command: python -m src.main scheduler
+    # Dynamic (env-tunable) resource caps — enrichment ticks are light; keep the
+    # scheduler bounded so seed/phone ticks never starve collectors. Live-applied
+    # via `docker update`; these make them durable across recreate.
+    mem_limit: ${COLLECTOR_SCHED_MEM:-512m}
+    cpus: "${COLLECTOR_SCHED_CPUS:-1.0}"
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
