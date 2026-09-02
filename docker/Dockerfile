@@ -39,4 +39,10 @@ COPY src/ src/
 # baked copy is just a fallback if the mount is ever absent.
 COPY config/ config/
 
+# phonenumbers: consumed by the offline phone-OSINT enrichment tick
+# (src/core/wa_phone_intel.py). Omitted from requirements.lock, so the lock
+# install above never baked it. Placed LAST (after the heavy cached layers) so
+# it bakes on a fast incremental rebuild. Pure-python, no deps.
+RUN pip install --no-cache-dir "phonenumbers==9.0.38"
+
 CMD ["python", "-m", "src.main"]
