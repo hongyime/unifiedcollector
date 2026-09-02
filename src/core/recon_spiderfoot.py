@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import os
+import random
 import signal
 import tempfile
 import secrets
@@ -22,6 +23,8 @@ DEFAULT_MODULES = ("sfp_dnsresolve", "sfp_whois", "sfp_names")
 # RECON_USERNAME_ENGINE env is set to "maigret" globally.
 MAIGRET_MODULE = "maigret"
 MAIGRET_SOURCE_HEALTH_NAME = "maigret"
+GHUNT_MODULE = "ghunt"
+GHUNT_OBSERVATION_TYPE = "GOOGLE_ACCOUNT"
 DEFAULT_MAIGRET_TOP_SITES = "300"
 DEFAULT_MAIGRET_NUM_REQUESTS = "20"
 DEFAULT_MAIGRET_HTTP_TIMEOUT_SECONDS = "10"
@@ -350,6 +353,173 @@ async def _store_observations(conn, observations: list[dict[str, Any]]) -> int:
     return len(observations)
 
 
+
+# ---------------------------------------------------------------------------
+# GHunt: email -> Google account enrichment
+# ---------------------------------------------------------------------------
+# Runs in its own ISOLATED venv (/opt/ghunt-venv, baked in Dockerfile.spiderfoot).
+# The recon worker shells out via src.core.ghunt_enrich.run_lookup, which honours
+# GHUNT_BIN + GHUNT_CREDS. This handler:
+#   * gates on ghunt_enrich.is_configured() (no-op if creds absent),
+#   * rate-limits to concurrency 1 with jitter (Google anti-abuse is real),
+#   * normalizes the ghunt JSON into RECON observations only — no strong
+#     identity_signals here; a Google display name is weak evidence and the
+#     analyzer bridge decides linking policy separately.
+_GHUNT_RATE_LOCK = asyncio.Lock()
+
+
+def _ghunt_flatten_profile(email: str, data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Turn one ghunt JSON dump into a small list of observation dicts.
+
+    Actual ghunt 2.3.4 --json shape (verified against a real lookup):
+        {
+          "PROFILE_CONTAINER": {
+            "profile": {
+              "personId": "<gaia>",
+              "names":    {"PROFILE": {"fullname": "...", ...}, ...},
+              "emails":   {"ACCOUNT|CONTACT|PROFILE": {"value": "..."}},
+              "profilePhotos": {"PROFILE": {"url": "...", "isDefault": bool}},
+              "coverPhotos":   {"PROFILE": {...}},
+              ...
+            },
+            "maps": {...}, "calendar": {...}, "play_games": {...}
+          }
+        }
+
+    Conservative: one primary GOOGLE_ACCOUNT row (raw_json = full dump) plus
+    weak side-observations (gaia id, human name, non-default avatar) when
+    present. Downstream identity linking is left to the analyzer bridge; a
+    Google display name is not strong evidence on its own."""
+    email = (email or "").strip().lower()
+    if not email:
+        return []
+    container = data.get("PROFILE_CONTAINER") if isinstance(data.get("PROFILE_CONTAINER"), dict) else data
+    container = container if isinstance(container, dict) else {}
+    profile = container.get("profile") if isinstance(container.get("profile"), dict) else {}
+
+    gaia_id: str | None = None
+    if isinstance(profile.get("personId"), (str, int)):
+        gaia_id = str(profile["personId"]).strip() or None
+
+    display_name: str | None = None
+    names = profile.get("names")
+    # names is dict keyed by container ("PROFILE", ...) with {fullname, firstName, lastName}.
+    if isinstance(names, dict):
+        preferred = names.get("PROFILE") if isinstance(names.get("PROFILE"), dict) else None
+        candidate_dicts = [preferred] if preferred else [v for v in names.values() if isinstance(v, dict)]
+        for cand in candidate_dicts:
+            for key in ("fullname", "firstName", "first_name", "lastName"):
+                val = cand.get(key)
+                if isinstance(val, str) and val.strip():
+                    display_name = val.strip()
+                    break
+            if display_name:
+                break
+    elif isinstance(names, list) and names:
+        first = names[0] if isinstance(names[0], dict) else {}
+        display_name = first.get("fullname") or first.get("firstName") or first.get("first_name")
+
+    photo_url: str | None = None
+    photo_is_default: bool | None = None
+    photos = profile.get("profilePhotos")
+    # profilePhotos is dict keyed by container; each entry has {url, isDefault, ...}.
+    if isinstance(photos, dict):
+        preferred = photos.get("PROFILE") if isinstance(photos.get("PROFILE"), dict) else None
+        candidate_dicts = [preferred] if preferred else [v for v in photos.values() if isinstance(v, dict)]
+        for cand in candidate_dicts:
+            url = cand.get("url")
+            if isinstance(url, str) and url.strip():
+                photo_url = url
+                photo_is_default = bool(cand.get("isDefault"))
+                break
+    elif isinstance(photos, list) and photos:
+        first = photos[0] if isinstance(photos[0], dict) else {}
+        if isinstance(first.get("url"), str):
+            photo_url = first["url"]
+            photo_is_default = bool(first.get("isDefault"))
+
+    rows: list[dict[str, Any]] = []
+    # Primary row: this email is a real Google account. Confidence is moderate;
+    # the analyzer decides whether to bind it to a stronger identity.
+    rows.append({
+        "module": GHUNT_MODULE,
+        "observation_type": GHUNT_OBSERVATION_TYPE,
+        "value": email,
+        "confidence": 0.6,
+        "raw_json": data,
+    })
+    if gaia_id:
+        rows.append({
+            "module": GHUNT_MODULE,
+            "observation_type": "GAIA_ID",
+            "value": gaia_id,
+            "confidence": 0.6,
+            "raw_json": {"email": email, "gaia_id": gaia_id},
+        })
+    if display_name:
+        rows.append({
+            "module": GHUNT_MODULE,
+            "observation_type": "HUMAN_NAME",
+            "value": display_name,
+            # Weak: Google display names are attacker-controlled.
+            "confidence": 0.3,
+            "raw_json": {"email": email, "display_name": display_name},
+        })
+    # Only emit the avatar observation when it's NOT the default silhouette.
+    # A default avatar carries no identifying signal.
+    if photo_url and photo_is_default is False:
+        rows.append({
+            "module": GHUNT_MODULE,
+            "observation_type": "AVATAR",
+            "value": photo_url,
+            "confidence": 0.4,
+            "raw_json": {"email": email, "photo_url": photo_url, "is_default": photo_is_default},
+        })
+    return rows
+
+
+async def _run_ghunt_cli(
+    target: dict[str, Any],
+    *,
+    worker_label: int | str | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Run ghunt against ONE email target. Returns (observations, meta).
+
+    Serialized via a process-wide asyncio.Lock (concurrency=1) with a small
+    jittered sleep between calls so we don't dogpile Google's unofficial
+    endpoints. On any error / skip, returns ([], meta) so the caller can
+    still update recon_targets.status without crashing the worker loop.
+    """
+    # Imported lazily so the module still imports when ghunt_enrich is absent.
+    from src.core import ghunt_enrich  # type: ignore
+
+    ready, reason = ghunt_enrich.is_configured()
+    if not ready:
+        return [], {"status": "skipped", "reason": reason}
+
+    email = str(target.get("target_value") or "").strip().lower()
+    if not email or "@" not in email:
+        return [], {"status": "error", "reason": f"not an email: {email!r}"}
+
+    timeout = float(os.getenv("GHUNT_TARGET_TIMEOUT_SECONDS", "90"))
+    min_delay = float(os.getenv("GHUNT_MIN_DELAY_SECONDS", "8"))
+    max_jitter = float(os.getenv("GHUNT_MAX_JITTER_SECONDS", "6"))
+    async with _GHUNT_RATE_LOCK:
+        # Jittered pre-call delay so consecutive lookups don't hit Google in a
+        # tight loop. Bounded so a full pilot of ~10 emails takes ~2 minutes.
+        await asyncio.sleep(min_delay + random.uniform(0.0, max(0.0, max_jitter)))
+        result = await ghunt_enrich.run_lookup(email, timeout=timeout)
+    status = str(result.get("status") or "error")
+    if status != "ok":
+        return [], {"status": status, "reason": str(result.get("reason") or "")}
+    data = result.get("data")
+    if not isinstance(data, dict):
+        return [], {"status": "error", "reason": "ghunt returned non-dict JSON"}
+    rows = _ghunt_flatten_profile(email, data)
+    for row in rows:
+        row["target_id"] = target["id"]
+    return rows, {"status": "ok", "rows": len(rows)}
+
 def _maigret_selected(target_type: str, modules: list[str]) -> bool:
     """Return True when this target should run through maigret, not SpiderFoot."""
     if (target_type or "").lower() != "username":
@@ -360,6 +530,22 @@ def _maigret_selected(target_type: str, modules: list[str]) -> bool:
         return True
     engine = os.getenv("RECON_USERNAME_ENGINE", "").strip().lower()
     return engine == "maigret"
+
+def _ghunt_selected(target_type: str, scope_modules: list[str] | None) -> bool:
+    """Return True when this target should run through ghunt.
+
+    Explicit opt-in only: target must be an email AND either
+      (a) scope.modules contains 'ghunt' as the sole engine, OR
+      (b) RECON_EMAIL_ENGINE env is 'ghunt'.
+    Never runs on non-email targets — ghunt only understands Google accounts."""
+    if (target_type or "").lower() != "email":
+        return False
+    mods = [m.strip().lower() for m in (scope_modules or []) if isinstance(m, str)]
+    if mods and GHUNT_MODULE in mods and all(m == GHUNT_MODULE for m in mods):
+        return True
+    engine = os.getenv("RECON_EMAIL_ENGINE", "").strip().lower()
+    return engine == GHUNT_MODULE
+
 
 
 def _generate_control_username() -> str:
@@ -881,6 +1067,61 @@ async def run_spiderfoot_once(
         )
         await _mark_source_health(conn, "running", None, success=True)
         return {"status": "blocked", "target": target, "observations": 0, "error": reason, "dry_run": dry_run}
+
+    # GHunt: intercept email targets tagged with scope.modules=['ghunt'] (or when
+    # RECON_EMAIL_ENGINE=ghunt) BEFORE SpiderFoot module resolution. GHunt does not
+    # use sfp_* modules, so passing it through allowed_modules() would either return
+    # DEFAULT_MODULES (wrong — SpiderFoot would then run sfp_dnsresolve on an email)
+    # or an empty list (target incorrectly blocked). Handle it here as a first-class
+    # engine, same pattern as maigret but placed earlier because ghunt scope.modules
+    # is never a subset of the SpiderFoot module set.
+    scope_modules_raw = scope.get("modules")
+    scope_modules_list = scope_modules_raw if isinstance(scope_modules_raw, list) else []
+    if _ghunt_selected(target["target_type"], scope_modules_list):
+        if dry_run:
+            await conn.execute("UPDATE recon_targets SET status = 'pending', updated_at = NOW() WHERE id = $1::uuid", target["id"])
+            await _mark_source_health(conn, "running", None, success=True)
+            return {"status": "dry_run", "target": target, "engine": GHUNT_MODULE, "observations": 0, "dry_run": True}
+        try:
+            rows, meta = await _run_ghunt_cli(target, worker_label=worker_label)
+            status = str(meta.get("status") or "error")
+            if status == "skipped":
+                # GHunt is disabled (no creds, no bin). Return the target to pending
+                # so a later run can retry when creds are mounted; do NOT mark failed.
+                await conn.execute(
+                    "UPDATE recon_targets SET status = 'pending', error = $2, updated_at = NOW() WHERE id = $1::uuid",
+                    target["id"],
+                    f"ghunt skipped: {meta.get('reason','')[:200]}",
+                )
+                await _mark_source_health(conn, "running", None, success=True)
+                return {"status": "skipped", "target": target, "engine": GHUNT_MODULE, "observations": 0, "reason": meta.get("reason"), "dry_run": False}
+            if status != "ok":
+                reason = str(meta.get("reason") or "")[:500]
+                await conn.execute(
+                    "UPDATE recon_targets SET status = 'failed', error = $2, updated_at = NOW() WHERE id = $1::uuid",
+                    target["id"],
+                    reason,
+                )
+                # ghunt error (e.g. account not found, creds rotated) is target-level.
+                await _mark_source_health(conn, "running", None, success=True)
+                return {"status": "failed", "target": target, "engine": GHUNT_MODULE, "observations": 0, "error": reason, "dry_run": False}
+            written = await _store_observations(conn, rows)
+            await conn.execute(
+                "UPDATE recon_targets SET status = 'completed', error = NULL, updated_at = NOW() WHERE id = $1::uuid",
+                target["id"],
+            )
+            await _mark_source_health(conn, "running", None, success=True)
+            return {"status": "completed", "target": target, "engine": GHUNT_MODULE, "observations": written, "dry_run": False}
+        except Exception as exc:  # noqa: BLE001
+            error = str(exc)[:500]
+            await conn.execute(
+                "UPDATE recon_targets SET status = 'failed', error = $2, updated_at = NOW() WHERE id = $1::uuid",
+                target["id"],
+                error,
+            )
+            await _mark_source_health(conn, "degraded", error)
+            return {"status": "failed", "target": target, "engine": GHUNT_MODULE, "observations": 0, "error": error, "dry_run": False}
+
 
     module_override = scope.get("modules")
     if isinstance(module_override, list):

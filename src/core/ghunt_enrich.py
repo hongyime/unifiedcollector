@@ -126,6 +126,26 @@ async def run_lookup(email: str, *, timeout: float = _DEFAULT_TIMEOUT_S) -> dict
 
     binp = _resolve_bin()
     assert binp is not None  # is_configured() proved this
+    creds = _creds_path()
+    assert creds is not None  # is_configured() proved this
+
+    # ghunt hardcodes `Path().home() / '.malfrats/ghunt/creds.m'` in
+    # ghunt/objects/base.py — there is NO env var to point it at a custom path.
+    # AND ghunt REWRITES creds.m after every auth (rotating web tokens), so we
+    # cannot symlink at a read-only bind mount — ghunt would EROFS on
+    # save_creds(). Instead we COPY the operator's creds into a per-call HOME,
+    # let ghunt refresh its in-memory tokens there, and DISCARD the writable
+    # copy at the end. The authoritative creds.m stays on the host, read-only
+    # bind-mounted, and untouched. When it eventually expires operator runs
+    # `ghunt login` again to regenerate — same operational contract as before.
+    import shutil as _sh
+    staged_home = tempfile.mkdtemp(prefix="ghunt-home-")
+    staged_dir = os.path.join(staged_home, ".malfrats", "ghunt")
+    os.makedirs(staged_dir, exist_ok=True)
+    staged_creds = os.path.join(staged_dir, "creds.m")
+    _sh.copyfile(creds, staged_creds)
+    env = os.environ.copy()
+    env["HOME"] = staged_home
 
     # ghunt writes JSON to a path; use a tempfile per call.
     with tempfile.NamedTemporaryFile("r", suffix=".json", delete=False) as tf:
@@ -135,6 +155,7 @@ async def run_lookup(email: str, *, timeout: float = _DEFAULT_TIMEOUT_S) -> dict
             binp, "email", email, "--json", out_path,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=env,
         )
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
@@ -159,7 +180,12 @@ async def run_lookup(email: str, *, timeout: float = _DEFAULT_TIMEOUT_S) -> dict
             os.unlink(out_path)
         except OSError:
             pass
-
+        # Clean the staged HOME (symlink + parent dirs).
+        try:
+            import shutil as _sh
+            _sh.rmtree(staged_home, ignore_errors=True)
+        except Exception:
+            pass
 
 def main() -> None:
     """CLI shim for smoke-testing the gate. Never invokes ghunt without creds.

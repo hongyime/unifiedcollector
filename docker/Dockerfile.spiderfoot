@@ -19,6 +19,34 @@ RUN pip install --no-cache-dir asyncpg==0.31.0
 # HTTP-only by design: no --cloudflare-bypass, no browser, no headless anything.
 RUN pip install --no-cache-dir maigret==0.5.0
 
+# GHunt: email -> Google account (Gaia ID, display name, photo) OSINT.
+# Installed into a DEDICATED venv so it CANNOT downgrade the container's main
+# python site-packages. GHunt's httpx/pillow/protobuf pins have historically
+# clobbered torch/tensorflow/etc in the shared interpreter — a real breakage
+# that already happened once on the host. Keep it strictly isolated here.
+# The recon worker (system python) shells out to /opt/ghunt-venv/bin/ghunt
+# via src.core.ghunt_enrich (GHUNT_BIN env). NEVER `pip install ghunt` at the
+# top level of this image.
+RUN python -m venv /opt/ghunt-venv \
+ && /opt/ghunt-venv/bin/pip install --no-cache-dir --upgrade pip \
+ && /opt/ghunt-venv/bin/pip install --no-cache-dir ghunt==2.3.4 \
+ && /opt/ghunt-venv/bin/ghunt --help >/dev/null
+
+# GHunt upstream bugs (present in 2.3.4) that a real lookup trips over:
+#   1) parsers/people.py:_scrape crashes with KeyError: 'container' when a
+#      cover-photo response omits metadata.container (hits every profile we
+#      tried — defensive .get() guard around ONLY that key lookup).
+#   2) modules/email.py --json path references undefined `photos`/`reviews`
+#      names left over from an older gmaps API shape (NameError before any
+#      JSON is written).
+# Both are trivial defensive fixes applied INSIDE the isolated /opt/ghunt-venv;
+# they never touch the container's system python. Idempotent patchers.
+COPY docker/patches/ghunt_cover_photo_patch.py /tmp/ghunt_cover_photo_patch.py
+COPY docker/patches/ghunt_email_json_patch.py /tmp/ghunt_email_json_patch.py
+RUN python /tmp/ghunt_cover_photo_patch.py \
+ && python /tmp/ghunt_email_json_patch.py \
+ && rm -f /tmp/ghunt_cover_photo_patch.py /tmp/ghunt_email_json_patch.py
+
 RUN wget -q -O /tmp/spiderfoot.tar.gz "https://github.com/smicallef/spiderfoot/archive/v${SPIDERFOOT_VERSION}.tar.gz" \
  && tar -xzf /tmp/spiderfoot.tar.gz -C /opt \
  && mv "/opt/spiderfoot-${SPIDERFOOT_VERSION}" /opt/spiderfoot \

@@ -222,3 +222,164 @@ async def seed_recon_targets_from_collector(
             for target_type in ("domain", "url", "username")
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# Email seeding (ghunt engine)
+# ---------------------------------------------------------------------------
+# Emails are enriched via GHunt (email -> Google account). We ONLY seed
+# @gmail.com / @googlemail.com addresses because ghunt only understands Google
+# accounts; other domains would just fail every lookup and waste creds. Seeded
+# rows carry scope.modules=['ghunt'] so the recon worker routes them to the
+# ghunt handler (recon_spiderfoot._ghunt_selected).
+GHUNT_ENGINE = "ghunt"
+_GOOGLE_EMAIL_SQL = "(LOWER(%s) LIKE '%%@gmail.com' OR LOWER(%s) LIKE '%%@googlemail.com')"
+
+
+async def _seed_from_github_users(conn, per_source_limit: int) -> list[dict[str, Any]]:
+    """Pull @gmail/@googlemail addresses from github_users (public API-supplied)."""
+    if not await _table_exists(conn, "github_users"):
+        return []
+    rows = await conn.fetch(
+        """
+        SELECT id::text AS source_record_id,
+               'github' AS collector_source,
+               LOWER(email) AS target_value,
+               COALESCE(collected_at, NOW()) AS seen_at
+        FROM github_users
+        WHERE email IS NOT NULL
+          AND (LOWER(email) LIKE '%@gmail.com' OR LOWER(email) LIKE '%@googlemail.com')
+          AND email !~ '\\+.*@'  -- skip plus-addressed variants for the pilot
+        ORDER BY collected_at DESC NULLS LAST
+        LIMIT $1
+        """,
+        per_source_limit,
+    )
+    return [
+        {
+            "target_type": "email",
+            "target_value": row["target_value"],
+            "collector_source": row["collector_source"],
+            "source_table": "github_users",
+            "source_record_id": row["source_record_id"],
+            "seen_at": row["seen_at"],
+        }
+        for row in rows
+    ]
+
+
+async def _seed_from_github_commits(conn, per_source_limit: int) -> list[dict[str, Any]]:
+    """Pull @gmail/@googlemail addresses from github_commits.author_email.
+
+    github_commits has ~8M rows; unbounded aggregation exceeds our timeouts.
+    We use a small LIMIT + ORDER BY date DESC (indexed) and dedupe in-python.
+    Bounded set is fine — the scheduler runs this repeatedly."""
+    if not await _table_exists(conn, "github_commits"):
+        return []
+    # Cap the raw scan at 10x per_source_limit so we can dedupe in-python without
+    # blowing a huge window through Postgres. The date column is indexed.
+    scan_limit = max(per_source_limit * 10, 50)
+    rows = await conn.fetch(
+        """
+        SELECT sha AS source_record_id,
+               'github' AS collector_source,
+               LOWER(author_email) AS target_value,
+               date AS seen_at
+        FROM github_commits
+        WHERE author_email IS NOT NULL
+          AND (LOWER(author_email) LIKE '%@gmail.com' OR LOWER(author_email) LIKE '%@googlemail.com')
+          AND author_email NOT ILIKE '%noreply%'
+          AND author_email NOT ILIKE '%users.noreply%'
+          AND author_email !~ '\\+.*@'
+        ORDER BY date DESC NULLS LAST
+        LIMIT $1
+        """,
+        scan_limit,
+    )
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        email = str(row["target_value"]).strip().lower()
+        if not email or email in seen:
+            continue
+        seen.add(email)
+        out.append({
+            "target_type": "email",
+            "target_value": email,
+            "collector_source": row["collector_source"],
+            "source_table": "github_commits",
+            "source_record_id": str(row["source_record_id"]),
+            "seen_at": row["seen_at"],
+        })
+        if len(out) >= per_source_limit:
+            break
+    return out
+
+
+async def seed_email_targets_for_ghunt(
+    conn,
+    *,
+    per_source_limit: int = 25,
+    total_limit: int = 50,
+    priority: int = 7,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Seed recon_targets(target_type='email', scope.modules=['ghunt']) from Gmail-ish
+    addresses across the collector's tables.
+
+    Idempotent: queue_recon_target de-duplicates via (target_type, target_value)
+    on the DB side (see src/core/recon.py) so re-running is safe. Only fields
+    tagged @gmail.com / @googlemail.com are pulled — ghunt on non-Google
+    addresses is a wasted lookup."""
+    per_source_limit = max(1, per_source_limit)
+    total_limit = max(1, total_limit)
+    candidates: list[dict[str, Any]] = []
+    candidates.extend(await _seed_from_github_users(conn, per_source_limit))
+    candidates.extend(await _seed_from_github_commits(conn, per_source_limit))
+
+    # Dedupe across sources (github_users email may also appear in commits).
+    deduped: dict[str, dict[str, Any]] = {}
+    for row in candidates:
+        key = str(row["target_value"]).strip().lower()
+        if key and key not in deduped:
+            deduped[key] = row
+    candidates = list(deduped.values())[:total_limit]
+
+    if dry_run:
+        return {
+            "dry_run": True,
+            "candidates": len(candidates),
+            "queued": 0,
+            "sample": [_sample_preview(row) for row in candidates[:10]],
+        }
+
+    queued = 0
+    skipped = 0
+    for row in candidates:
+        scope = {
+            "collector_derived": True,
+            "collector_source": row["collector_source"],
+            "source_table": row["source_table"],
+            "source_record_id": row["source_record_id"],
+            "seen_at": row["seen_at"].isoformat() if row.get("seen_at") else None,
+            "modules": [GHUNT_ENGINE],
+        }
+        try:
+            await queue_recon_target(
+                conn,
+                target_type="email",
+                target_value=row["target_value"],
+                source=f"collector:{row['source_table']}",
+                priority=priority,
+                scope=scope,
+            )
+            queued += 1
+        except ValueError:
+            skipped += 1
+    return {
+        "dry_run": False,
+        "candidates": len(candidates),
+        "queued": queued,
+        "skipped": skipped,
+        "engine": GHUNT_ENGINE,
+    }
