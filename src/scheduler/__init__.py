@@ -1490,6 +1490,15 @@ class Scheduler:
         await self._gc_collection_runs()
         # Build social graph edges from WhatsApp co-group/DM data (self-gated to 30 min).
         await self._build_graph_edges()
+        # OSS enrichment automation (self-gated, env-tunable intervals).
+        # Each is idempotent and best-effort — failures are logged but never
+        # disturb the main schedule loop.
+        await self._maybe_seed_recon_targets()
+        await self._maybe_run_phone_intel()
+        # NOTE: maigret FP-blocklist refresh runs INSIDE the recon worker
+        # (src/recon_spiderfoot_service.py::_fp_blocklist_refresh_loop) because
+        # this scheduler container does not have the ``maigret`` binary on
+        # PATH.  See that module for the periodic loop.
 
     async def _build_graph_edges(self):
         """Compute social graph edges from messaging membership into graph_edges.
@@ -1680,6 +1689,70 @@ class Scheduler:
             )
         except Exception:
             logger.warning("graph_edges build failed", exc_info=True)
+
+    # ---- OSS-enrichment automation ticks (self-gated) ----
+
+    async def _maybe_seed_recon_targets(self):
+        """Periodically enqueue username targets from social_users -> recon_targets.
+
+        The recon worker (unifiedcollector_spiderfoot) continuously drains
+        recon_targets and, when scope.modules=['maigret'] (or
+        RECON_USERNAME_ENGINE=maigret env), runs maigret against each. So all
+        we need here is to keep the queue fed. Idempotent by design: the
+        underlying seed path relies on ``queue_recon_target`` dedupe.
+
+        Default cadence 6h. Bound per-cycle so the queue fills gradually
+        rather than one giant dump.
+        """
+        import time as _time
+        now = _time.monotonic()
+        interval = env_int("RECON_SEED_INTERVAL_SECONDS", 21600, min_value=300)
+        per_source = env_int("RECON_SEED_PER_SOURCE_LIMIT", 200, min_value=1)
+        total = env_int("RECON_SEED_TOTAL_LIMIT", 2000, min_value=1)
+        if now - getattr(self, "_last_recon_seed", 0) < interval:
+            return
+        self._last_recon_seed = now
+        try:
+            from src.core.recon_seed import seed_recon_targets_from_collector
+            async with self.pool.acquire() as conn:
+                report = await seed_recon_targets_from_collector(
+                    conn,
+                    include_domains=False,
+                    include_urls=False,
+                    include_usernames=True,
+                    per_source_limit=per_source,
+                    total_limit=total,
+                    priority=7,
+                    dry_run=False,
+                )
+            logger.info(
+                "recon_seed tick: candidates=%s queued=%s skipped=%s",
+                report.get("candidates"), report.get("queued"), report.get("skipped"),
+            )
+        except Exception:
+            logger.warning("recon_seed tick failed", exc_info=True)
+
+    async def _maybe_run_phone_intel(self):
+        """Periodically enrich WhatsApp phone JIDs via offline phonenumbers lib.
+
+        Enrichment-only — rows land in ``wa_phone_intel`` and are NEVER
+        promoted to identity_signals (carrier/region do not identify people).
+        Default cadence 12h; bounded batch per cycle.
+        """
+        import time as _time
+        now = _time.monotonic()
+        interval = env_int("WA_PHONE_INTEL_INTERVAL_SECONDS", 43200, min_value=300)
+        batch = env_int("WA_PHONE_INTEL_TICK_LIMIT", 500, min_value=1)
+        if now - getattr(self, "_last_phone_intel", 0) < interval:
+            return
+        self._last_phone_intel = now
+        try:
+            from src.core.wa_phone_intel import run as wa_phone_intel_run
+            stats = await wa_phone_intel_run(batch, dry_run=False)
+            logger.info("wa_phone_intel tick: %s", stats)
+        except Exception:
+            logger.warning("wa_phone_intel tick failed", exc_info=True)
+
 
     async def add_schedule(self, source: str, interval_hours: int = 24):
         if self.pool is None:

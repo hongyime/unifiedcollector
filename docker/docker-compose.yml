@@ -100,7 +100,7 @@ services:
       RECON_ALLOWED_SOURCE_TABLES: "${RECON_ALLOWED_SOURCE_TABLES:-collector_seen_targets,collection_targets,discovered_links,follow_edges,github_spider_queue,instagram_spider_queue,social_users,website_targets,youtube_profile_queue,youtube_spider_queue}"
       RECON_COLLECTOR_TARGET_TYPES: "${RECON_COLLECTOR_TARGET_TYPES:-domain,url,email,phone,ip,ipv4,user,username,channel}"
       RECON_ALLOWED_DOMAIN_SUFFIXES: "${RECON_ALLOWED_DOMAIN_SUFFIXES:-}"
-      RECON_USERNAME_MODULES: "${RECON_USERNAME_MODULES:-sfp_accounts}"
+      RECON_USERNAME_MODULES: "${RECON_USERNAME_MODULES:-maigret}"
       SPIDERFOOT_CLI: "${SPIDERFOOT_CLI:-/usr/local/bin/spiderfoot-cli}"
       SPIDERFOOT_MODULES: "${SPIDERFOOT_MODULES:-sfp_dnsresolve,sfp_whois,sfp_names}"
       SPIDERFOOT_MAX_MODULES: "${SPIDERFOOT_MAX_MODULES:-10}"
@@ -110,13 +110,13 @@ services:
       SPIDERFOOT_STALE_TARGET_MINUTES: "${SPIDERFOOT_STALE_TARGET_MINUTES:-30}"
       SPIDERFOOT_STATE_ROOT: "${SPIDERFOOT_STATE_ROOT:-/tmp/spiderfoot-state}"
       # maigret: HTTP-only OSS account-enumeration engine (MIT), replaces the
-      # DEAD sfp_accounts module for username targets. Left OFF by default at the
-      # env-level; the pilot activates it PER-TARGET via scope_json.modules=['maigret'].
-      # FULL-SCALE SWITCH (leave OFF here — do NOT flip without re-reading the
-      # rollout notes in AGENTS.md / .agents/STATE.md):
-      #   RECON_USERNAME_ENGINE=maigret   -> route every username target to maigret
-      #   RECON_USERNAME_MODULES=maigret  -> new seed rows get scope.modules=[maigret]
-      RECON_USERNAME_ENGINE: "${RECON_USERNAME_ENGINE:-}"
+      # DEAD sfp_accounts module for username targets.
+      #
+      # FULL-SCALE DEFAULT (auto-enabled): both env vars default to "maigret" so
+      # the recon worker routes every username target through maigret and new
+      # seed rows carry scope.modules=['maigret']. Override to "" or "sfp_accounts"
+      # only to disable the OSS engine — see AGENTS.md rollout notes.
+      RECON_USERNAME_ENGINE: "${RECON_USERNAME_ENGINE:-maigret}"
       MAIGRET_CLI: "${MAIGRET_CLI:-maigret}"
       MAIGRET_TOP_SITES: "${MAIGRET_TOP_SITES:-300}"
       MAIGRET_NUM_REQUESTS: "${MAIGRET_NUM_REQUESTS:-20}"
@@ -942,6 +942,12 @@ services:
       # Operator status compares live Chrome hook heartbeats against this repo
       # extension build. Update with extension/manifest.json version bumps.
       UC_EXTENSION_EXPECTED_VERSION: "1.23.75"
+      # OSS-enrichment automation defaults: the scheduler seeds recon_targets
+      # from social_users and tags scope.modules from RECON_USERNAME_MODULES.
+      # Default "maigret" so newly-seeded username targets are routed through
+      # the maigret HTTP-only engine automatically.
+      RECON_USERNAME_MODULES: "${RECON_USERNAME_MODULES:-maigret}"
+      RECON_USERNAME_ENGINE: "${RECON_USERNAME_ENGINE:-maigret}"
     volumes:
       - z:/unifiedcollector/media:/media
       - z:/unifiedcollector:/vault
