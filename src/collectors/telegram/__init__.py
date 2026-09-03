@@ -165,6 +165,26 @@ def _parse_optional_int_env(name: str, default: str | None) -> int | None:
         return None
 
 
+def _parse_int_set_env(name: str, default: str) -> frozenset[int]:
+    """Read a comma/space-separated int list from env `name`.
+
+    Empty/malformed entries are silently dropped so a bad operator override
+    cannot disable ingestion. Falls back to `default` when env is unset.
+    """
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        raw = default
+    out: set[int] = set()
+    for tok in raw.replace(";", ",").replace(" ", ",").split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            out.add(int(tok))
+        except (TypeError, ValueError):
+            logger.warning("invalid int in env %s=%r; ignoring token %r", name, raw, tok)
+    return frozenset(out)
+
 def _telethon_payload(obj) -> dict:
     if hasattr(obj, "to_dict"):
         try:
@@ -645,6 +665,14 @@ class TelegramCollector(BaseCollector):
         )
         self._notify_bot_user_id_lock: asyncio.Lock | None = None
         self._notify_bot_resolve_attempted = False
+        # SHIP #2: extra sender ids to skip on ingest (defence-in-depth for the
+        # self-bot loop, and any additional collector-owned bots that should
+        # never be ingested as sources). Default seeds the known notify bot id
+        # 8953242118 (@unifiedcollector234bot) so a fresh deploy is safe even
+        # before /getMe resolution completes.
+        self._ignore_sender_ids: frozenset[int] = _parse_int_set_env(
+            "COLLECTOR_TELEGRAM_IGNORE_SENDER_IDS", "8953242118",
+        )
         try:
             self._realtime_write_attempts = max(
                 1,
@@ -4247,14 +4275,38 @@ class TelegramCollector(BaseCollector):
     def _should_skip_self_bot_message(self, chat_id, message) -> str | None:
         """Return a reason string if this realtime message should be skipped
         because it originated from our own realtime-feed bot, else None.
+
+        Checks, in order:
+          1. sender_id matches the resolved notify bot user_id (Layer 1).
+          2. sender_id or via_bot_id is in COLLECTOR_TELEGRAM_IGNORE_SENDER_IDS
+             (defence-in-depth: catches messages our notify bot authored
+             directly AND messages routed via_bot through it).
+          3. chat_id equals TELEGRAM_LOGS_CHAT_ID and the bot uid is unresolved
+             (Layer 2 fallback).
         """
         sender_id = getattr(message, "sender_id", None)
-        
+        via_bot_id = getattr(message, "via_bot_id", None)
+
         # Layer 1: sender_id match (bot_uid resolved from token)
         bot_uid = self._notify_bot_user_id
         if bot_uid is not None and sender_id is not None and int(sender_id) == int(bot_uid):
             return "notify_bot"
-            
+
+        # Layer 1b (SHIP #2): configurable ignore set — covers sender_id AND
+        # via_bot_id so inline-bot echoes cannot loop either.
+        ignore = self._ignore_sender_ids
+        if ignore:
+            try:
+                if sender_id is not None and int(sender_id) in ignore:
+                    return "ignore_sender_id"
+            except (TypeError, ValueError):
+                pass
+            try:
+                if via_bot_id is not None and int(via_bot_id) in ignore:
+                    return "ignore_via_bot_id"
+            except (TypeError, ValueError):
+                pass
+
         # Layer 2: fallback if we couldn't resolve the bot's UID (e.g. network failure on boot).
         # To avoid a catastrophic loop, we must skip the bot's messages in the logs chat.
         # But if we know the bot's UID and it didn't match above, it's a human message!
@@ -4262,7 +4314,7 @@ class TelegramCollector(BaseCollector):
         if self._logs_chat_id is not None and chat_id == self._logs_chat_id:
             if bot_uid is None:
                 return "logs_chat_unresolved_bot"
-                
+
         return None
 
     async def _write_realtime_message_with_retry(

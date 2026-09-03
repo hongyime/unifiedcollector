@@ -47,9 +47,11 @@ def _make_collector(monkeypatch, **env):
     return coll
 
 
-def _fake_event(*, chat_id, sender_id, msg_id=42):
+def _fake_event(*, chat_id, sender_id, msg_id=42, via_bot_id=None):
     """Minimal Telethon-shaped event: has chat_id and message with id/sender_id."""
-    message = SimpleNamespace(id=msg_id, sender_id=sender_id, media=None)
+    message = SimpleNamespace(
+        id=msg_id, sender_id=sender_id, via_bot_id=via_bot_id, media=None,
+    )
     return SimpleNamespace(
         chat_id=chat_id,
         message=message,
@@ -415,3 +417,129 @@ async def test_ensure_notify_bot_user_id_survives_getme_failure(monkeypatch):
     # Second call must not re-attempt (gate flipped).
     assert coll._notify_bot_resolve_attempted is True
     assert await coll._ensure_notify_bot_user_id() is None
+
+
+
+# ── SHIP #2: COLLECTOR_TELEGRAM_IGNORE_SENDER_IDS + via_bot_id checks ────
+
+
+def test_ignore_sender_ids_default_seeds_notify_bot(monkeypatch):
+    """Default env value must include the known notify bot id 8953242118 so a
+    fresh deploy is safe even before /getMe resolution completes."""
+    monkeypatch.delenv("COLLECTOR_TELEGRAM_IGNORE_SENDER_IDS", raising=False)
+    coll = _make_collector(monkeypatch, UC_NOTIFY_BOT_USER_ID=None)
+    assert 8953242118 in coll._ignore_sender_ids
+
+
+def test_ignore_sender_ids_env_override_parses_list(monkeypatch):
+    coll = _make_collector(
+        monkeypatch,
+        UC_NOTIFY_BOT_USER_ID=None,
+        COLLECTOR_TELEGRAM_IGNORE_SENDER_IDS="111, 222; 333 444",
+    )
+    assert coll._ignore_sender_ids == frozenset({111, 222, 333, 444})
+
+
+def test_ignore_sender_ids_env_override_replaces_default(monkeypatch):
+    """Explicit override wins over the default — no implicit merge with 8953242118."""
+    coll = _make_collector(
+        monkeypatch,
+        UC_NOTIFY_BOT_USER_ID=None,
+        COLLECTOR_TELEGRAM_IGNORE_SENDER_IDS="12345",
+    )
+    assert coll._ignore_sender_ids == frozenset({12345})
+
+
+def test_ignore_sender_ids_ignores_garbage_tokens(monkeypatch):
+    coll = _make_collector(
+        monkeypatch,
+        UC_NOTIFY_BOT_USER_ID=None,
+        COLLECTOR_TELEGRAM_IGNORE_SENDER_IDS="111,not-int,222",
+    )
+    assert coll._ignore_sender_ids == frozenset({111, 222})
+
+
+def test_skip_by_ignore_sender_id_default_notify_bot(monkeypatch):
+    """Default seeded id 8953242118 skips even when UC_NOTIFY_BOT_USER_ID is unset
+    (Layer 1 bot_uid resolution not yet done — defence-in-depth)."""
+    monkeypatch.delenv("COLLECTOR_TELEGRAM_IGNORE_SENDER_IDS", raising=False)
+    coll = _make_collector(
+        monkeypatch,
+        UC_NOTIFY_BOT_USER_ID=None,
+        TELEGRAM_LOGS_CHAT_ID=None,
+        TELEGRAM_CHAT_ID=None,
+        NOTIFY_TELEGRAM_CHAT_ID=None,
+    )
+    msg = SimpleNamespace(id=1, sender_id=8953242118, via_bot_id=None)
+    assert coll._should_skip_self_bot_message(-42, msg) == "ignore_sender_id"
+
+
+def test_skip_by_via_bot_id(monkeypatch):
+    """Message routed via_bot through our notify bot must also be skipped."""
+    coll = _make_collector(
+        monkeypatch,
+        UC_NOTIFY_BOT_USER_ID=None,
+        TELEGRAM_LOGS_CHAT_ID=None,
+        TELEGRAM_CHAT_ID=None,
+        NOTIFY_TELEGRAM_CHAT_ID=None,
+        COLLECTOR_TELEGRAM_IGNORE_SENDER_IDS="8953242118",
+    )
+    msg = SimpleNamespace(id=1, sender_id=99, via_bot_id=8953242118)
+    assert coll._should_skip_self_bot_message(-42, msg) == "ignore_via_bot_id"
+
+
+def test_no_skip_for_normal_sender_when_ignore_set(monkeypatch):
+    """Normal user messages must still be ingested even when the ignore set is populated."""
+    coll = _make_collector(
+        monkeypatch,
+        UC_NOTIFY_BOT_USER_ID=None,
+        TELEGRAM_LOGS_CHAT_ID=None,
+        TELEGRAM_CHAT_ID=None,
+        NOTIFY_TELEGRAM_CHAT_ID=None,
+        COLLECTOR_TELEGRAM_IGNORE_SENDER_IDS="8953242118",
+    )
+    msg = SimpleNamespace(id=1, sender_id=424242, via_bot_id=None)
+    assert coll._should_skip_self_bot_message(-42, msg) is None
+
+
+def test_ignore_sender_id_tolerates_bad_message_fields(monkeypatch):
+    """A message missing via_bot_id/sender_id must not raise (Telethon may omit them)."""
+    coll = _make_collector(
+        monkeypatch,
+        UC_NOTIFY_BOT_USER_ID=None,
+        TELEGRAM_LOGS_CHAT_ID=None,
+        TELEGRAM_CHAT_ID=None,
+        NOTIFY_TELEGRAM_CHAT_ID=None,
+        COLLECTOR_TELEGRAM_IGNORE_SENDER_IDS="8953242118",
+    )
+    msg = SimpleNamespace(id=1)  # no sender_id, no via_bot_id
+    assert coll._should_skip_self_bot_message(-42, msg) is None
+
+
+@pytest.mark.asyncio
+async def test_on_new_message_skips_notify_bot_via_ignore_set_only(monkeypatch):
+    """End-to-end: with only COLLECTOR_TELEGRAM_IGNORE_SENDER_IDS set (bot_uid
+    unresolved, no logs chat), a message from the notify bot must NOT be
+    persisted while a normal-sender message IS persisted."""
+    coll = _make_collector(
+        monkeypatch,
+        UC_NOTIFY_BOT_USER_ID=None,
+        TELEGRAM_LOGS_CHAT_ID=None,
+        TELEGRAM_CHAT_ID=None,
+        NOTIFY_TELEGRAM_CHAT_ID=None,
+        COLLECTOR_TELEGRAM_IGNORE_SENDER_IDS="8953242118",
+    )
+    write = AsyncMock()
+    coll._write_realtime_message_with_retry = write
+    coll._upsert_user_full = AsyncMock()
+    worker = MagicMock()
+
+    # Notify bot: MUST be skipped.
+    bot_event = _fake_event(chat_id=-1003849817923, sender_id=8953242118)
+    await coll._on_new_message(worker, bot_event)
+    write.assert_not_awaited()
+
+    # Normal user: MUST be ingested.
+    human_event = _fake_event(chat_id=-1003849817923, sender_id=424242)
+    await coll._on_new_message(worker, human_event)
+    write.assert_awaited_once()

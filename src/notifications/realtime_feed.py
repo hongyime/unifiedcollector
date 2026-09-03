@@ -941,19 +941,29 @@ async def _deliver_one(payload: dict) -> tuple[bool, int, str, str | None, dict[
         ok = await telegram.send(caption)
         return bool(ok), 0, "text_only", None, {}
 
+    # SHIP #1: media reposts are silent — Telegram won't ping phones for
+    # these. Decision cards and alerts (sent via telegram.send()) still ping.
     if _looks_like_video(payload):
         detailed = getattr(telegram, "send_video_detailed", None)
         if detailed:
-            ok, retry_after, error_code, description = await detailed(target, caption=caption)
+            ok, retry_after, error_code, description = await detailed(
+                target, caption=caption, disable_notification=True,
+            )
         else:
-            ok, retry_after = await telegram.send_video(target, caption=caption)
+            ok, retry_after = await telegram.send_video(
+                target, caption=caption, disable_notification=True,
+            )
             error_code, description = "", ""
     else:
         detailed = getattr(telegram, "send_photo_detailed", None)
         if detailed:
-            ok, retry_after, error_code, description = await detailed(target, caption=caption)
+            ok, retry_after, error_code, description = await detailed(
+                target, caption=caption, disable_notification=True,
+            )
         else:
-            ok, retry_after = await telegram.send_photo(target, caption=caption)
+            ok, retry_after = await telegram.send_photo(
+                target, caption=caption, disable_notification=True,
+            )
             error_code, description = "", ""
     telegram_result = {
         "error_code": str(error_code or "")[:120],

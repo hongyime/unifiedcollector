@@ -397,7 +397,8 @@ async def send_document_detailed(url_or_path: str, caption: str = "",
 
 
 async def send_photo_detailed(url_or_path: str, caption: str = "",
-                              parse_mode: str = "HTML") -> tuple[bool, int, str, str]:
+                              parse_mode: str = "HTML",
+                              disable_notification: bool = False) -> tuple[bool, int, str, str]:
     """Send a photo and keep bounded Telegram error detail for fallback buckets."""
     token, chat_id, thread = _config()
     if not token or not chat_id:
@@ -408,6 +409,8 @@ async def send_photo_detailed(url_or_path: str, caption: str = "",
         "caption": _truncate_caption(caption),
         "parse_mode": parse_mode,
     }
+    if disable_notification:
+        fields["disable_notification"] = "true"
     if thread:
         try:
             fields["message_thread_id"] = int(thread)
@@ -436,7 +439,8 @@ async def send_photo_detailed(url_or_path: str, caption: str = "",
 
 
 async def send_photo(url_or_path: str, caption: str = "",
-                     parse_mode: str = "HTML") -> tuple[bool, int]:
+                     parse_mode: str = "HTML",
+                     disable_notification: bool = False) -> tuple[bool, int]:
     """Send a photo. ``url_or_path`` can be a public URL or local file path.
 
     Returns (ok, retry_after_seconds). retry_after > 0 only on 429.
@@ -446,6 +450,7 @@ async def send_photo(url_or_path: str, caption: str = "",
         url_or_path,
         caption=caption,
         parse_mode=parse_mode,
+        disable_notification=disable_notification,
     )
     return ok, retry_after
 
@@ -468,7 +473,8 @@ async def send_document(url_or_path: str, caption: str = "",
 
 async def send_video_detailed(url_or_path: str, caption: str = "",
                               parse_mode: str = "HTML",
-                              thumbnail_path: str | None = None) -> tuple[bool, int, str, str]:
+                              thumbnail_path: str | None = None,
+                              disable_notification: bool = False) -> tuple[bool, int, str, str]:
     """Send a video and keep bounded Telegram error detail for fallback buckets."""
     token, chat_id, thread = _config()
     if not token or not chat_id:
@@ -480,6 +486,8 @@ async def send_video_detailed(url_or_path: str, caption: str = "",
         "parse_mode": parse_mode,
         "supports_streaming": "true",
     }
+    if disable_notification:
+        fields["disable_notification"] = "true"
     if thread:
         try:
             fields["message_thread_id"] = int(thread)
@@ -510,7 +518,8 @@ async def send_video_detailed(url_or_path: str, caption: str = "",
 
 async def send_video(url_or_path: str, caption: str = "",
                      parse_mode: str = "HTML",
-                     thumbnail_path: str | None = None) -> tuple[bool, int]:
+                     thumbnail_path: str | None = None,
+                     disable_notification: bool = False) -> tuple[bool, int]:
     """Send a video. ``url_or_path`` can be a public URL or local file path.
 
     ``thumbnail_path`` is currently informational: multipart upload of an extra
@@ -525,6 +534,7 @@ async def send_video(url_or_path: str, caption: str = "",
         caption=caption,
         parse_mode=parse_mode,
         thumbnail_path=thumbnail_path,
+        disable_notification=disable_notification,
     )
     return ok, retry_after
 
