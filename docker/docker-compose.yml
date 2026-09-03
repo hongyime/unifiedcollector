@@ -977,10 +977,10 @@ services:
       # long-poll task (single asyncio.Task; safe because the analyzer's merge_bot
       # uses a DIFFERENT bot token). Uses NOTIFY_TELEGRAM_BOT_TOKEN from ../.env.
       COLLECTOR_TELEGRAM_BOT_ENABLED: "${COLLECTOR_TELEGRAM_BOT_ENABLED:-1}"
-      # Authorized-user allowlist for button presses. Comma-separated Telegram
-      # user ids (ints). Empty allowlist => every press is rejected but the
-      # presser's id is echoed back so the operator can self-discover + add it.
-      TELEGRAM_ALLOWED_USER_IDS: "${TELEGRAM_ALLOWED_USER_IDS:-}"
+      # Authorized-user allowlist (comma-separated Telegram user ids) for button
+      # presses. Sourced from env_file ../.env and deliberately NOT overridden
+      # here: a compose "${..}" override reads docker/.env for substitution and
+      # would shadow env_file with an empty default (that bug bit us once).
       # Reduced-spam defaults (was 6h digest + 15min delta). See scheduler/__init__.py.
       STATUS_HEARTBEAT_INTERVAL_HOURS: "${STATUS_HEARTBEAT_INTERVAL_HOURS:-24}"
       STATUS_DELTA_INTERVAL_MINUTES: "${STATUS_DELTA_INTERVAL_MINUTES:-0}"
