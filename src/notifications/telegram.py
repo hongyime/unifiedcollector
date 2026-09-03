@@ -527,3 +527,168 @@ async def send_video(url_or_path: str, caption: str = "",
         thumbnail_path=thumbnail_path,
     )
     return ok, retry_after
+
+
+# --- Callback / inline-keyboard helpers ----------------------------------
+#
+# The collector historically ran send-only. The "base of operations" overhaul
+# (see src/notifications/collector_bot.py) adds a getUpdates long-poll bot on
+# the SAME NOTIFY_TELEGRAM_BOT_TOKEN so operators can press [Restart]/[Ignore]
+# on decision cards. These helpers are sync (called via asyncio.to_thread by
+# the poller) and NEVER raise on network/HTTP error — they return dicts so the
+# caller can decide whether to retry or fall through.
+#
+# NB the analyzer uses a DIFFERENT bot token (see .env sha comparison), so
+# running a poller on the collector token cannot conflict with the analyzer's
+# merge_bot poller. Only ONE poller per token is safe (getUpdates otherwise
+# returns 409 Conflict).
+
+def send_with_keyboard_sync(text: str, keyboard: list[list[dict]],
+                            parse_mode: str = "HTML") -> dict:
+    """Send a message with an inline_keyboard and return the parsed Bot API response.
+
+    Returns the full parsed JSON so the caller can read result.message_id. On
+    failure returns {"ok": False, "error": "..."}. Never raises.
+
+    ``keyboard`` is a list-of-rows; each row is a list of {"text":..,"callback_data":..}
+    dicts (Telegram InlineKeyboardButton shape). callback_data MUST be <= 64 bytes.
+    """
+    token, chat_id, thread = _config()
+    if not token or not chat_id:
+        return {"ok": False, "error": "telegram_not_configured"}
+    payload: dict = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": parse_mode,
+        "disable_web_page_preview": True,
+        "reply_markup": {"inline_keyboard": keyboard},
+    }
+    if thread:
+        try:
+            payload["message_thread_id"] = int(thread)
+        except ValueError:
+            pass
+    url = f"{_API}/bot{token}/sendMessage"
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=data, headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = resp.read().decode("utf-8", "replace")
+            try:
+                return json.loads(body)
+            except json.JSONDecodeError:
+                return {"ok": False, "error": "invalid_json", "body": body[:200]}
+    except HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode("utf-8", "replace")[:300]
+        except Exception:
+            pass
+        logger.warning("telegram send_with_keyboard failed: %s %s", e.code, body)
+        return {"ok": False, "error": f"{e.code} {body}"}
+    except Exception as exc:  # noqa: BLE001 - notifications must never raise
+        logger.warning("telegram send_with_keyboard error: %s", exc)
+        return {"ok": False, "error": str(exc)}
+
+
+async def send_with_keyboard(text: str, keyboard: list[list[dict]],
+                             parse_mode: str = "HTML") -> dict:
+    """Async wrapper around send_with_keyboard_sync (asyncio.to_thread)."""
+    return await asyncio.to_thread(send_with_keyboard_sync, text, keyboard, parse_mode)
+
+
+def _bot_post(method: str, payload: dict, *, timeout: int = 15) -> dict:
+    """POST to a Telegram Bot API method; return parsed JSON. Never raises."""
+    token, _chat_id, _thread = _config()
+    if not token:
+        return {"ok": False, "error": "telegram_not_configured"}
+    url = f"{_API}/bot{token}/{method}"
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=data, headers={"Content-Type": "application/json"},
+    )
+    try:
+        resp = urllib.request.urlopen(req, timeout=timeout)
+        return json.loads(resp.read().decode("utf-8", "replace"))
+    except HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode("utf-8", "replace")[:300]
+        except Exception:
+            pass
+        logger.warning("telegram %s failed: %s %s", method, e.code, body)
+        return {"ok": False, "error": f"{e.code} {body}"}
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("telegram %s error", method, exc_info=True)
+        return {"ok": False, "error": str(exc)}
+
+
+def _bot_get(method: str, params: dict | None = None, *, timeout: int = 35) -> dict:
+    """GET a Telegram Bot API method (getUpdates uses long-poll, needs > timeout)."""
+    import urllib.parse
+    token, _chat_id, _thread = _config()
+    if not token:
+        return {"ok": False, "error": "telegram_not_configured"}
+    base = f"{_API}/bot{token}/{method}"
+    if params:
+        base = f"{base}?{urllib.parse.urlencode(params)}"
+    req = urllib.request.Request(base, headers={"Accept": "application/json"})
+    try:
+        resp = urllib.request.urlopen(req, timeout=timeout)
+        return json.loads(resp.read().decode("utf-8", "replace"))
+    except HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode("utf-8", "replace")[:300]
+        except Exception:
+            pass
+        logger.warning("telegram %s GET failed: %s %s", method, e.code, body)
+        return {"ok": False, "error": f"{e.code} {body}"}
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("telegram %s GET error", method, exc_info=True)
+        return {"ok": False, "error": str(exc)}
+
+
+def answer_callback_query(callback_query_id: str, text: str = "", *,
+                          show_alert: bool = False) -> dict:
+    """Acknowledge a callback query (clears the tapped button's spinner)."""
+    return _bot_post("answerCallbackQuery", {
+        "callback_query_id": callback_query_id,
+        "text": text[:200] if text else "",
+        "show_alert": bool(show_alert),
+    })
+
+
+def edit_message_text(chat_id, message_id: int, text: str,
+                      parse_mode: str = "HTML") -> dict:
+    """Replace the text of a sent message (also removes any inline keyboard)."""
+    return _bot_post("editMessageText", {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text[:4096],
+        "parse_mode": parse_mode,
+    })
+
+
+def get_updates(offset: int = 0, timeout: int = 25) -> dict:
+    """Long-poll getUpdates; requests callback_query updates only."""
+    params: dict = {
+        "allowed_updates": json.dumps(["callback_query"]),
+        "timeout": timeout,
+    }
+    if offset:
+        params["offset"] = offset
+    return _bot_get("getUpdates", params, timeout=timeout + 10)
+
+
+def get_webhook_info() -> dict:
+    """Return current webhook info (result.url empty when none set)."""
+    return _bot_get("getWebhookInfo", timeout=15)
+
+
+def delete_webhook() -> dict:
+    """Remove any set webhook so getUpdates long-polling works."""
+    return _bot_post("deleteWebhook", {"drop_pending_updates": False})
+

@@ -416,6 +416,12 @@ services:
       WATCHDOG_STALE_WHATSAPP: "14400"
       WATCHDOG_STALE_BEEPER: "10800"
       X_SOURCE_MANUAL_MODE: "${X_SOURCE_MANUAL_MODE:-0}"
+      # Notify-with-buttons instead of instant auto-restart. Grace window in
+      # seconds; if operator does not press [Restart]/[Ignore] within grace,
+      # the historical auto-restart safety net still fires. Set BUTTONS_ENABLED=0
+      # to revert to instant-restart behaviour.
+      WATCHDOG_DECISION_BUTTONS_ENABLED: "${WATCHDOG_DECISION_BUTTONS_ENABLED:-1}"
+      WATCHDOG_DECISION_GRACE_SECONDS: "${WATCHDOG_DECISION_GRACE_SECONDS:-600}"
     volumes:
       - ../src:/app/src
       - /var/run/docker.sock:/var/run/docker.sock
@@ -966,6 +972,18 @@ services:
       # the maigret HTTP-only engine automatically.
       RECON_USERNAME_MODULES: "${RECON_USERNAME_MODULES:-maigret}"
       RECON_USERNAME_ENGINE: "${RECON_USERNAME_ENGINE:-maigret}"
+      # "Base of operations" Telegram overhaul --------------------------------
+      # See src/notifications/collector_bot.py. The scheduler hosts the getUpdates
+      # long-poll task (single asyncio.Task; safe because the analyzer's merge_bot
+      # uses a DIFFERENT bot token). Uses NOTIFY_TELEGRAM_BOT_TOKEN from ../.env.
+      COLLECTOR_TELEGRAM_BOT_ENABLED: "${COLLECTOR_TELEGRAM_BOT_ENABLED:-1}"
+      # Authorized-user allowlist for button presses. Comma-separated Telegram
+      # user ids (ints). Empty allowlist => every press is rejected but the
+      # presser's id is echoed back so the operator can self-discover + add it.
+      TELEGRAM_ALLOWED_USER_IDS: "${TELEGRAM_ALLOWED_USER_IDS:-}"
+      # Reduced-spam defaults (was 6h digest + 15min delta). See scheduler/__init__.py.
+      STATUS_HEARTBEAT_INTERVAL_HOURS: "${STATUS_HEARTBEAT_INTERVAL_HOURS:-24}"
+      STATUS_DELTA_INTERVAL_MINUTES: "${STATUS_DELTA_INTERVAL_MINUTES:-0}"
     volumes:
       - z:/unifiedcollector/media:/media
       - z:/unifiedcollector:/vault

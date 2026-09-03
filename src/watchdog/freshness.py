@@ -173,6 +173,17 @@ if os.getenv("WATCHDOG_HEADLESS_ENABLED", "1") == "1":
 _last_restart: dict[str, float] = {}
 _last_cooldown_stale_alert: dict[str, float] = {}
 
+# Decision-card grace tracking for the notify-with-buttons path (see _tick).
+# Maps a stall key ("<source>|<comma-containers>") -> {token, decided_after, message_id}.
+# Cleared when the source recovers OR the grace elapses and auto-restart fires.
+_pending_decision_cards: dict[str, dict] = {}
+
+
+def telegram_module():
+    """Lazy accessor for src.notifications.telegram (avoid import at module load)."""
+    from src.notifications import telegram as _tg
+    return _tg
+
 
 # Browser-only / browser-primary source monitoring. The normal CHECKS above can
 # restart containers, but these sources live in Chrome. Restarting a container
@@ -626,6 +637,88 @@ async def _tick(db: asyncpg.Connection) -> None:
                     )
                 continue
 
+            # --- Decision-button grace window --------------------------------
+            # Historically: stale => auto-restart immediately (loud, no operator
+            # say). New default: emit a Telegram card with [Restart]/[Ignore],
+            # give the operator DECISION_GRACE_SECONDS to press, and only then
+            # auto-restart if nobody said anything. The safety net stays intact
+            # (silence => auto-restart) but a live operator can now intervene.
+            #
+            # Set WATCHDOG_DECISION_BUTTONS_ENABLED=0 to revert to instant-restart.
+            buttons_enabled = os.getenv("WATCHDOG_DECISION_BUTTONS_ENABLED", "1") == "1"
+            grace = int(os.getenv("WATCHDOG_DECISION_GRACE_SECONDS", "600"))  # 10 min
+
+            def _card_key(src_name: str, cont_list: list) -> str:
+                return f"{src_name}|{','.join(cont_list)}"
+
+            if buttons_enabled:
+                # Lazy imports so a broken bot module can't kill the watchdog loop.
+                try:
+                    from src.notifications import collector_bot as _cb
+                except Exception:
+                    _cb = None  # type: ignore[assignment]
+                key = _card_key(src, containers)
+                pending = _pending_decision_cards.get(key)
+                token_from_pending = pending["token"] if pending else None
+                if pending is None:
+                    # First stale detection in this stall — push a card, do NOT restart yet.
+                    if _cb is not None:
+                        try:
+                            token = _cb.make_watchdog_card_token(src, containers, age, thresh)
+                            keyboard = _cb.build_watchdog_keyboard(token, containers)
+                            text = (
+                                f"⚠️ <b>watchdog: {src} stale</b>\n"
+                                f"newest row {age:.0f}s ago (&gt; {thresh}s).\n"
+                                f"Containers: <code>{', '.join(containers)}</code>\n"
+                                f"Auto-restart in {grace}s unless you press below."
+                            )
+                            resp = await asyncio.to_thread(
+                                telegram_module().send_with_keyboard_sync, text, keyboard,
+                            )
+                            if resp.get("ok"):
+                                _pending_decision_cards[key] = {
+                                    "token": token,
+                                    "decided_after": now + grace,
+                                    "message_id": (resp.get("result") or {}).get("message_id"),
+                                }
+                                log.warning(
+                                    "%s STALE (%.0fs > %ds) — posted decision card token=%s; "
+                                    "auto-restart in %ds if no response",
+                                    src, age, thresh, token, grace,
+                                )
+                                await _mark_degraded(
+                                    db, src, age, False,
+                                    f"posted decision card; auto-restart in {grace}s if unresponded",
+                                )
+                                continue  # do NOT restart on this tick
+                            else:
+                                log.warning(
+                                    "%s STALE but failed to post decision card: %s — falling through to auto-restart",
+                                    src, resp,
+                                )
+                        except Exception:
+                            log.exception("decision card post failed; falling through to auto-restart")
+                else:
+                    # A card exists for this stall. Was it Ignored, and is the grace window still open?
+                    if _cb is not None and token_from_pending and _cb.is_token_ignored(token_from_pending, within_seconds=grace * 2):
+                        log.info("%s STALE but operator pressed Ignore — skipping auto-restart", src)
+                        await _mark_degraded(db, src, age, False, "operator pressed Ignore; auto-restart suppressed")
+                        continue
+                    if now < pending.get("decided_after", 0):
+                        # Still inside grace window — keep waiting, don't spam.
+                        log.info(
+                            "%s STALE but grace window not yet elapsed (%.0fs left) — waiting for operator",
+                            src, pending["decided_after"] - now,
+                        )
+                        await _mark_degraded(db, src, age, False, "awaiting operator decision")
+                        continue
+                    # Grace elapsed with no press — fall through to auto-restart below.
+                    log.warning(
+                        "%s STALE and grace window elapsed with no response — auto-restarting",
+                        src,
+                    )
+                    _pending_decision_cards.pop(key, None)  # single-shot per stall
+
             restarted_any = False
             for c in containers:
                 if now - _last_restart.get(c, 0) < COOLDOWN:
@@ -646,6 +739,9 @@ async def _tick(db: asyncpg.Connection) -> None:
                 )
         else:
             await _mark_running_if_stale_watchdog(db, src)
+            # Source recovered — drop any pending decision card so a future stall
+            # posts a fresh card instead of reusing a stale token.
+            _pending_decision_cards.pop(f"{src}|{','.join(containers)}", None)
             log.info("%s ok (newest %.0fs ago)", src, age)
 
 

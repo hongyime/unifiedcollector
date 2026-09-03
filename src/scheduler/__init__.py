@@ -203,11 +203,15 @@ class Scheduler:
 
         # Telegram notifications (best-effort; never block/raise the scheduler).
         await self._notify_startup_safe()
-        self._heartbeat_hours = env_int("STATUS_HEARTBEAT_INTERVAL_HOURS", 6, min_value=0)
+        # "Base of operations" defaults: previously 6h digest + 15min delta ==
+        # constant text spam. New defaults: 24h digest, delta OFF. Override via
+        # env if a busier cadence is wanted.
+        self._heartbeat_hours = env_int("STATUS_HEARTBEAT_INTERVAL_HOURS", 24, min_value=0)
         self._last_status = 0.0  # monotonic; 0 forces a heartbeat on first tick
         # 15-minute delta status update (Feature 2). Independent of the hourly
         # digest so it can be disabled with STATUS_DELTA_INTERVAL_MINUTES=0.
-        self._status_delta_minutes = env_int("STATUS_DELTA_INTERVAL_MINUTES", 15, min_value=0)
+        # NEW DEFAULT: 0 (disabled) — was 15. The hourly digest already covers it.
+        self._status_delta_minutes = env_int("STATUS_DELTA_INTERVAL_MINUTES", 0, min_value=0)
         self._last_status_delta = 0.0  # monotonic; 0 forces on first tick
         # Identity reconciliation cadence (P2 review §3). 0 disables.
         self._reconcile_hours = env_int("RECONCILE_INTERVAL_HOURS", 12, min_value=0)
@@ -215,6 +219,27 @@ class Scheduler:
         # Cookie-health check cadence (no untested cookies). 0 disables.
         self._cookie_check_hours = env_int("COOKIE_CHECK_INTERVAL_HOURS", 6, min_value=0)
         self._last_cookie_check = 0.0  # 0 forces a check on first tick
+
+        # Collector callback bot: getUpdates long-poll for [Restart]/[Ignore]
+        # decision-card buttons. Runs as a single asyncio Task piggybacking on
+        # this scheduler loop (mirrors analyzer merge_bot pattern). Only starts
+        # if a bot token is configured; safe to leave off in dev.
+        self._collector_bot_task = None
+        if os.getenv("COLLECTOR_TELEGRAM_BOT_ENABLED", "1") == "1":
+            _tok = os.getenv("NOTIFY_TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
+            if _tok:
+                try:
+                    from src.notifications.collector_bot import run_callback_poller
+                    self._collector_bot_task = asyncio.create_task(
+                        run_callback_poller(), name="collector_bot_poller",
+                    )
+                    logger.info("collector-bot: callback poller task created (COLLECTOR_TELEGRAM_BOT_ENABLED=1)")
+                except Exception:
+                    logger.exception("collector-bot: failed to start callback poller (non-fatal)")
+            else:
+                logger.info("collector-bot: no bot token configured — poller disabled")
+        else:
+            logger.info("collector-bot: COLLECTOR_TELEGRAM_BOT_ENABLED=0 — poller disabled")
 
         while not self._stop.is_set():
             try:
@@ -236,6 +261,14 @@ class Scheduler:
                 pass
 
         await self._notify_shutdown_safe()
+        # Cancel the collector-bot poller before closing the DB pool so the
+        # long-poll HTTP is torn down cleanly (mirrors analyzer merge_bot).
+        if getattr(self, "_collector_bot_task", None) is not None:
+            try:
+                self._collector_bot_task.cancel()
+                await asyncio.gather(self._collector_bot_task, return_exceptions=True)
+            except Exception:
+                logger.debug("collector-bot: task cancel/await failed (non-fatal)", exc_info=True)
         await close_pool()
         logger.info("Scheduler stopped")
 
