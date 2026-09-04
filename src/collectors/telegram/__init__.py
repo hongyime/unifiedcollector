@@ -646,7 +646,20 @@ class TelegramCollector(BaseCollector):
         # Realtime listener state — populated by collect_realtime()
         self._realtime_running = False
         self._realtime_handler_clients: set[tuple[int, int]] = set()
-        self._hub_group_id: int | None = None
+        # Hub-group loop guard: our own collector accounts populate this group,
+        # so ingesting it would loop our own data back in. TELEGRAM_HUB_GROUP_ID
+        # is the bare platform_chat_id (e.g. 5233855517); we match every Telethon
+        # event.chat_id marking (basic group -X, supergroup -100X, marked input).
+        self._hub_group_ids: frozenset[int] = frozenset()
+        _hub_raw = _parse_optional_int_env("TELEGRAM_HUB_GROUP_ID", None)
+        if _hub_raw is not None:
+            _bare = abs(_hub_raw)
+            _s = str(_bare)
+            if _s.startswith("100") and len(_s) >= 13:
+                _bare = int(_s[3:])
+            self._hub_group_ids = frozenset(
+                {_hub_raw, _bare, -_bare, int(f"-100{_bare}")}
+            )
         # Self-bot skip filter — prevents circular loop where the realtime-feed
         # bot posts to a Telegram log group we also monitor via Telethon. Two
         # complementary layers:
@@ -4284,6 +4297,11 @@ class TelegramCollector(BaseCollector):
           3. chat_id equals TELEGRAM_LOGS_CHAT_ID and the bot uid is unresolved
              (Layer 2 fallback).
         """
+        # Hub-group loop guard: our own collector accounts populate this group,
+        # so its messages must never be ingested, regardless of sender.
+        if self._hub_group_ids and chat_id in self._hub_group_ids:
+            return "hub_group"
+
         sender_id = getattr(message, "sender_id", None)
         via_bot_id = getattr(message, "via_bot_id", None)
 
@@ -4349,8 +4367,6 @@ class TelegramCollector(BaseCollector):
     async def _on_new_message(self, worker: "TelegramWorker", event):
         try:
             chat_id = event.chat_id
-            if self._hub_group_id is not None and chat_id == self._hub_group_id:
-                return  # discard hub-group messages
             message = event.message
             # Circular-loop guard: skip messages authored by our own realtime-feed
             # bot in the logs chat. Without this, the bot's per-post notifications

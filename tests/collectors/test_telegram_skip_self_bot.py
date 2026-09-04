@@ -543,3 +543,77 @@ async def test_on_new_message_skips_notify_bot_via_ignore_set_only(monkeypatch):
     human_event = _fake_event(chat_id=-1003849817923, sender_id=424242)
     await coll._on_new_message(worker, human_event)
     write.assert_awaited_once()
+
+
+# ── hub-group exclusion (TELEGRAM_HUB_GROUP_ID) ─────────────────────
+# Our own collector accounts sit in "The Prawn Collector" (bare id 5233855517).
+# Ingesting it loops our own data back in, so it must be discarded regardless of
+# sender, in both the new-message and edited-message paths.
+
+
+def _hub_collector(monkeypatch, hub_id):
+    return _make_collector(
+        monkeypatch,
+        UC_NOTIFY_BOT_USER_ID=None,
+        TELEGRAM_LOGS_CHAT_ID=None,
+        TELEGRAM_CHAT_ID=None,
+        NOTIFY_TELEGRAM_CHAT_ID=None,
+        TELEGRAM_HUB_GROUP_ID=hub_id,
+    )
+
+
+def test_hub_group_skipped_basic_group_form(monkeypatch):
+    coll = _hub_collector(monkeypatch, "5233855517")
+    msg = SimpleNamespace(id=1, sender_id=424242, via_bot_id=None)
+    # basic group: event.chat_id == -bare
+    assert coll._should_skip_self_bot_message(-5233855517, msg) == "hub_group"
+
+
+def test_hub_group_skipped_supergroup_form(monkeypatch):
+    coll = _hub_collector(monkeypatch, "5233855517")
+    msg = SimpleNamespace(id=1, sender_id=424242, via_bot_id=None)
+    # if migrated to a supergroup: event.chat_id == -100<bare>
+    assert coll._should_skip_self_bot_message(-1005233855517, msg) == "hub_group"
+
+
+def test_hub_group_accepts_marked_env_value(monkeypatch):
+    coll = _hub_collector(monkeypatch, "-1005233855517")
+    msg = SimpleNamespace(id=1, sender_id=424242, via_bot_id=None)
+    assert coll._should_skip_self_bot_message(-5233855517, msg) == "hub_group"
+    assert coll._should_skip_self_bot_message(-1005233855517, msg) == "hub_group"
+
+
+def test_hub_group_other_chat_not_skipped(monkeypatch):
+    coll = _hub_collector(monkeypatch, "5233855517")
+    msg = SimpleNamespace(id=1, sender_id=424242, via_bot_id=None)
+    assert coll._should_skip_self_bot_message(-999, msg) is None
+
+
+def test_hub_group_unset_no_skip(monkeypatch):
+    coll = _hub_collector(monkeypatch, None)
+    msg = SimpleNamespace(id=1, sender_id=424242, via_bot_id=None)
+    assert coll._should_skip_self_bot_message(-5233855517, msg) is None
+
+
+@pytest.mark.asyncio
+async def test_on_new_message_skips_hub_group(monkeypatch):
+    coll = _hub_collector(monkeypatch, "5233855517")
+    write = AsyncMock()
+    coll._write_realtime_message_with_retry = write
+    coll._upsert_user_full = AsyncMock()
+    worker = MagicMock()
+    event = _fake_event(chat_id=-5233855517, sender_id=424242)
+    await coll._on_new_message(worker, event)
+    write.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_on_message_edited_skips_hub_group(monkeypatch):
+    coll = _hub_collector(monkeypatch, "5233855517")
+    write = AsyncMock()
+    coll._write_realtime_message_with_retry = write
+    coll._upsert_user_full = AsyncMock()
+    worker = MagicMock()
+    event = _fake_event(chat_id=-5233855517, sender_id=424242)
+    await coll._on_message_edited(worker, event)
+    write.assert_not_awaited()
