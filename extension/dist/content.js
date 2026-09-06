@@ -91,10 +91,10 @@
     return wallMins;
   }
 
-  // src/shared/cooldown.js
+  // src/shared/cooldown.ts
   function instagramLoggedInOwner() {
     try {
-      const username = window._sharedData && window._sharedData.config && window._sharedData.config.viewer && window._sharedData.config.viewer.username;
+      const username = window._sharedData?.config?.viewer?.username;
       if (username) return String(username).trim().replace(/^@/, "");
     } catch (e) {
     }
@@ -114,12 +114,12 @@
       document.querySelector('[data-testid="SideNav_AccountSwitcher_Button"]'),
       document.querySelector('a[data-testid="AppTabBar_Profile_Link"]'),
       ...document.querySelectorAll('a[href^="/"][aria-label*="Profile" i]')
-    ].filter(Boolean);
+    ].filter((el) => el != null);
     for (const el of sources) {
       const txt = el.innerText || el.getAttribute("aria-label") || "";
       const m = txt.match(/@([A-Za-z0-9_]{1,20})/);
       if (m) return m[1];
-      const href = el.getAttribute && (el.getAttribute("href") || "");
+      const href = el.getAttribute && el.getAttribute("href") || "";
       const h = href.match(/^\/([A-Za-z0-9_]{1,20})\/?$/);
       if (h && !/^(home|explore|notifications|messages|i|search)$/i.test(h[1])) return h[1];
     }
@@ -134,7 +134,7 @@
       const txt = el.innerText || el.getAttribute("aria-label") || "";
       const m = txt.match(/@([A-Za-z0-9._]{1,30})/);
       if (m) return m[1];
-      const href = el.getAttribute && (el.getAttribute("href") || "");
+      const href = el.getAttribute && el.getAttribute("href") || "";
       const h = href.match(/^\/@([A-Za-z0-9._]{1,30})\/?$/);
       if (h) return h[1];
     }
@@ -176,7 +176,7 @@
     return "";
   }
 
-  // src/content.js
+  // src/content.ts
   (() => {
     const UC_CONTENT_VERSION = (() => {
       try {
