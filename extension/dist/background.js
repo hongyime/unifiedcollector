@@ -1,6 +1,6 @@
 "use strict";
 (() => {
-  // background.js
+  // src/background.js
   self.addEventListener("error", (event) => {
     const detail = {
       kind: "sw_error_event",
