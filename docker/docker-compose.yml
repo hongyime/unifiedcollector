@@ -1131,6 +1131,7 @@ services:
       - ../.env
       - ./env/common.env
       - ./env/telegram_notify.env
+      - ./env/realtime_feed.env
     healthcheck:
       # Lightweight import check — the drain has no HTTP port. Failure here
       # means the module doesn't even import (i.e. code broke).
@@ -1185,6 +1186,7 @@ services:
     env_file:
       - ../.env
       - ./env/common.env
+      - ./env/dashboard.env
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8700/health', timeout=25)"]
       interval: 30s
@@ -1245,6 +1247,7 @@ services:
       - ../.env
       - ./env/common.env
       - ./env/telegram_notify.env
+      - ./env/backup.env
     volumes:
       - z:/unifiedcollector/backups/db:/zbackups
       - z:/unifiedcollector:/vault
@@ -1435,6 +1438,7 @@ services:
     env_file:
       - ../.env
       - ./env/common.env
+      - ./env/browser_cookie_vault.env
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8790/health',timeout=5).status==200 else 1)"]
       interval: 60s
