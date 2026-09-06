@@ -5,7 +5,7 @@ import signal
 from datetime import datetime, timedelta, timezone
 
 from src.db.connection import get_pool, close_pool
-from src.core.env import env_int
+from src.core.env import env_int, env_float
 from src.core.source_freshness import FRESHNESS as _CANONICAL_FRESHNESS
 
 # Status/heartbeat snapshot assembly is a pure reporting concern — moved to
@@ -45,11 +45,11 @@ class Scheduler:
 
         # Telegram notifications (best-effort; never block/raise the scheduler).
         await _startup.notify_startup_safe()
-        # "Base of operations" defaults: previously 6h digest + 15min delta ==
-        # constant text spam. New defaults: 24h digest, delta OFF. Override via
-        # env if a busier cadence is wanted.
-        self._heartbeat_hours = env_int("STATUS_HEARTBEAT_INTERVAL_HOURS", 24, min_value=0)
-        self._last_status = 0.0  # monotonic; 0 forces a heartbeat on first tick
+        # NOTE: Per-handler state (last-fire timestamps + interval env-reads) is
+        # now owned by the handler classes in `src/scheduler/handlers/`. Legacy
+        # `_maybe_*` shims that remain below still cache state on `self` — they
+        # will be extracted in follow-up steps (docs/plans/scheduler-refactor.md
+        # steps 6-15).
         # 15-minute delta status update (Feature 2). Independent of the hourly
         # digest so it can be disabled with STATUS_DELTA_INTERVAL_MINUTES=0.
         # NEW DEFAULT: 0 (disabled) — was 15. The hourly digest already covers it.
@@ -91,7 +91,10 @@ class Scheduler:
             except Exception as e:
                 logger.error("Scheduler tick error: %s", e)
 
-            await self._maybe_heartbeat()
+            # Registry-based dispatch for extracted handlers (LOGIC-005).
+            # Currently: HeartbeatHandler. Follow-up steps will move the
+            # remaining _maybe_* gates into this same registry.
+            await self._run_periodic_handlers()
             await self._maybe_status_delta()
             await self._maybe_reconcile_identities()
             await self._maybe_check_cookies()
@@ -124,22 +127,31 @@ class Scheduler:
         """Delegate to startup.notify_shutdown_safe; see startup.py."""
         await _startup.notify_shutdown_safe()
 
-    async def _maybe_heartbeat(self):
-        """Fire the status heartbeat on the first tick, then every N hours.
-        0 hours disables. Wrapped so a failure never disturbs scheduling."""
-        if getattr(self, "_heartbeat_hours", 0) <= 0:
-            return
-        import time as _time
-        now = _time.monotonic()
-        if now - self._last_status < self._heartbeat_hours * 3600:
-            return
-        self._last_status = now
-        try:
-            from src.notifications import alerts
-            snapshot = await self._build_status()
-            await alerts.notify_status(snapshot)
-        except Exception as e:
-            logger.warning("status heartbeat failed: %s", e)
+    async def _run_periodic_handlers(self):
+        """Registry-driven dispatch for extracted periodic handlers.
+
+        Iterates ``handlers.HANDLERS`` in order, calling ``should_run(ctx)`` then
+        ``run(ctx)``. Fault isolation: one failing handler must not stop the
+        others. Legacy ``_maybe_*`` methods on the class are still called
+        separately in ``start()`` until they are extracted in follow-up steps
+        (docs/plans/scheduler-refactor.md steps 6-15).
+        """
+        from src.scheduler.handlers import HANDLERS, SchedulerContext
+        from src.notifications import alerts as _notifier
+        ctx = SchedulerContext(
+            pool=self.pool,
+            now=datetime.now(timezone.utc),
+            notifier=_notifier,
+            stop_event=self._stop,
+            get_env_int=env_int,
+            get_env_float=env_float,
+        )
+        for handler in HANDLERS:
+            try:
+                if await handler.should_run(ctx):
+                    await handler.run(ctx)
+            except Exception as e:
+                logger.warning("periodic handler %s failed: %s", handler.name, e)
 
     async def _maybe_status_delta(self):
         """Fire the 15-minute delta status update (Feature 2).

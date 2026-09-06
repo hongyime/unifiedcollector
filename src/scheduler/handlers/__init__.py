@@ -24,7 +24,10 @@ TODO (follow-up sprint, docs/plans/scheduler-refactor.md steps 6-15):
 from __future__ import annotations
 
 from .base import PeriodicHandler, SchedulerContext
+from .heartbeat import HeartbeatHandler
 
-HANDLERS: list[PeriodicHandler] = []
+HANDLERS: list[PeriodicHandler] = [
+    HeartbeatHandler(),
+]
 
-__all__ = ["HANDLERS", "PeriodicHandler", "SchedulerContext"]
+__all__ = ["HANDLERS", "PeriodicHandler", "SchedulerContext", "HeartbeatHandler"]
