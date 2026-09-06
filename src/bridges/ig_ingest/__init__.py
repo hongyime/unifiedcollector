@@ -5955,5 +5955,12 @@ def make_app():
     return app
 
 
+# Module-level app instance so downstream code and tests can do
+# `from src.bridges.ig_ingest import app`. Route registration happens
+# eagerly at import time; startup hooks (DB pool bootstrap) only fire
+# when `web.run_app(app)` is actually called (see __main__.py).
+app = make_app()
+
+
 if __name__ == "__main__":
-    web.run_app(make_app(), host="0.0.0.0", port=PORT)
+    web.run_app(app, host="0.0.0.0", port=PORT)
