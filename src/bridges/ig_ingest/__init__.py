@@ -4094,51 +4094,10 @@ async def _on_cleanup(app):
 
 
 def make_app():
-    app = web.Application(
-        client_max_size=SOCIAL_INGEST_CLIENT_MAX_MB * 1024 * 1024,
-        middlewares=[request_timeout_middleware, lane_isolation_middleware, db_pool_middleware],
-    )
-    app.router.add_route("OPTIONS", "/{tail:.*}", handle_options)
-    # generic multi-platform
-    app.router.add_get("/social/targets", get_targets)
-    app.router.add_get("/social/ig_cooldown", ig_cooldown)
-    app.router.add_post("/social/ingest", ingest)
-    app.router.add_post("/social/ingest-upload", ingest_upload)
-    app.router.add_post("/social/ingest-upload-binary", ingest_upload_binary)
-    app.router.add_post("/social/browser-media-candidates", browser_media_candidates)
-    app.router.add_post("/social/discover", discover)
-    app.router.add_post("/social/target-status", target_status_handler)
-    app.router.add_post("/social/posts", posts_handler)
-    app.router.add_post("/social/comments", comments_handler)
-    app.router.add_post("/social/users", users_handler)
-    app.router.add_post("/social/profile", profile_handler)
-    app.router.add_post("/social/seed", seed_handler)
-    app.router.add_post("/social/dms", dms_handler)
-    app.router.add_post("/social/cookies", cookies_handler)
-    app.router.add_post("/social/dm-frame", dm_frame_handler)
-    app.router.add_post("/social/dm-sample", dm_sample_handler)
-    app.router.add_post("/social/dm-probe", dm_probe_handler)
-    app.router.add_post("/social/dm-heartbeat", dm_hook_heartbeat_handler)
-    app.router.add_post("/social/dm-decoded", dm_decoded_handler)
-    app.router.add_get("/social/x-profile-target", x_profile_target_next)
-    app.router.add_post("/social/x-profile-target-result", x_profile_target_result)
-    app.router.add_get("/social/browser-revisit-target", browser_revisit_target)
-    app.router.add_post("/social/browser-revisit-result", browser_revisit_result)
-    app.router.add_get("/social/tiktok-revisit-target", tiktok_revisit_target)
-    app.router.add_post("/social/tiktok-revisit-result", tiktok_revisit_result)
-    app.router.add_get("/social/strava-route-queue", strava_route_queue_handler)
-    app.router.add_post("/social/strava-route-visit", strava_route_visit_handler)
-    app.router.add_post("/social/strava-streams", strava_streams_handler)
-    app.router.add_post("/social/browser-heartbeat", browser_heartbeat_handler)
-    app.router.add_post("/social/sw-crash", sw_crash_handler)
-    # instagram back-compat aliases
-    app.router.add_get("/ig/targets", get_targets_ig)
-    app.router.add_post("/ig/ingest", ingest_ig)
-    app.router.add_post("/ig/discover", discover_ig)
-    app.router.add_get("/health", health)
-    app.on_startup.append(_on_startup)
-    app.on_cleanup.append(_on_cleanup)
-    return app
+    """Back-compat shim — the factory now lives in ``.app``. Import there to
+    keep touches to ``__init__.py`` small."""
+    from .app import build_app
+    return build_app()
 
 
 # Module-level app instance so downstream code and tests can do
