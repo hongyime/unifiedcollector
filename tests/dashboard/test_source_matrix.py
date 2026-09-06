@@ -1342,7 +1342,11 @@ def test_source_matrix_row_keeps_strava_gps_cooldown_even_with_activity_rows():
 
 
 def test_browser_extension_content_gap_query_excludes_strava_route_capture():
-    source = Path(dashboard_api.__file__).read_text(encoding="utf-8")
+    # The ``browser_content_gap`` query lives in ``src/dashboard/api/browser.py``
+    # after PERF-002 4A step 5 (package split). Read the browser module directly
+    # so this structural check keeps working across the refactor.
+    from src.dashboard.api import browser as _browser_mod
+    source = Path(_browser_mod.__file__).read_text(encoding="utf-8")
     section = source[source.index('"browser_content_gap"'):source.index('if payload.get("reload_url")')]
 
     assert '["instagram", "tiktok", "lemon8", "threads", "facebook", "x"]' in section

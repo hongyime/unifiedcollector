@@ -6,16 +6,23 @@ private (underscore-prefixed); ``__init__.py`` re-exports them for back-compat
 so ``from src.dashboard.api import _foo`` and internal call sites keep working.
 
 Not moved: ``_SOURCE_MATRIX_PAYLOAD_BUILD_TASK`` (mutated via ``global`` in
-callers — moving would break rebind semantics). Not moved: constants belonging
-to browser / source_matrix content / coverage / rate_limits / dashboard-health
-route slices; those follow in later sub-steps 5–12.
+callers — moving would break rebind semantics).
+
+Step 5 (browser.py) additions: DB pool acquire/release helpers and
+``_dt_for_compare`` were promoted to this leaf module so domain-specific
+submodules (browser, source_matrix, telegram_ops, ...) can depend on helpers
+without a circular ``src.dashboard.api`` import.
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import os
 import uuid as _uuid
 from datetime import datetime, timezone
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Caches and TTL / timeout config
@@ -207,3 +214,39 @@ async def _estimated_table_rows(conn, table: str) -> int:
         table,
     )
     return int(value or 0)
+
+
+# ---------------------------------------------------------------------------
+# Shared DB-pool acquire/release helpers.
+#
+# Promoted from ``__init__.py`` during PERF-002 4A step 5 (browser.py split).
+# Domain submodules import these instead of reaching back into
+# ``src.dashboard.api``. ``__init__.py`` re-exports them so existing routes and
+# tests keep working.
+# ---------------------------------------------------------------------------
+
+_DASHBOARD_DB_ACQUIRE_TIMEOUT_SECONDS = float(os.getenv("DASHBOARD_DB_ACQUIRE_TIMEOUT_SECONDS", "2.5"))
+
+
+async def _acquire_dashboard_conn(pool):
+    return await asyncio.wait_for(pool.acquire(), timeout=_DASHBOARD_DB_ACQUIRE_TIMEOUT_SECONDS)
+
+
+async def _release_dashboard_conn(pool, conn, label: str = "dashboard") -> None:
+    try:
+        await asyncio.shield(pool.release(conn))
+    except asyncio.CancelledError:
+        logger.warning("%s DB release cancelled; continuing with degraded response", label)
+    except Exception as exc:  # noqa: BLE001 - release failures should not 500 dashboards
+        logger.warning("%s DB release failed: %s", label, exc.__class__.__name__)
+
+
+def _dt_for_compare(value) -> datetime | None:
+    """Normalize a datetime-like value to timezone-aware UTC, or None."""
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    return None
