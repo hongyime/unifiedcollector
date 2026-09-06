@@ -569,10 +569,12 @@ async def test_handle_flood_wait_can_pin_without_sleep(monkeypatch):
 
 
 def test_collect_chat_checkpoints_seen_messages_not_only_media():
-    source = Path(tg_mod.__file__).read_text(encoding="utf-8")
-    block = source.split("async def _collect_chat", 1)[1].split(
-        "# Per-chat membership snapshot", 1
-    )[0]
+    # After PERF-004 sub-plan 4C step 10 the ``_collect_chat`` body lives in
+    # ``src/collectors/telegram/collector.py`` rather than ``__init__.py``.
+    # ``inspect.getsource`` resolves the method wherever it currently lives,
+    # so this regression check no longer depends on a fixed file layout.
+    import inspect
+    block = inspect.getsource(tg_mod.TelegramCollector._collect_chat)
 
     assert "seen_count += 1" in block
     assert "last_seen_message_id = int(message.id)" in block
