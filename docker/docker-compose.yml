@@ -865,6 +865,7 @@ services:
     env_file:
       - ../.env
       - ./env/common.env
+      - ./env/instagram.env
     healthcheck:
       test: ["CMD", "python", "-m", "src.core.health"]
       interval: 60s
@@ -923,6 +924,7 @@ services:
     env_file:
       - ../.env
       - ./env/common.env
+      - ./env/instagram.env
     healthcheck:
       test: ["CMD", "python", "-m", "src.core.health"]
       interval: 60s
@@ -975,6 +977,7 @@ services:
     env_file:
       - ../.env
       - ./env/common.env
+      - ./env/instagram.env
     restart: unless-stopped
 
   scheduler:
