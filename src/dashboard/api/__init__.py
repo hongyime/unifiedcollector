@@ -299,6 +299,12 @@ from src.dashboard.api.media import (  # noqa: E402,F401
     media_file,
 )
 
+# Rate-limits routes extracted to api/rate_limits.py during PERF-002 sub-plan 4A step 12.
+from src.dashboard.api.rate_limits import (  # noqa: E402,F401
+    router as _rate_limits_router,
+    recent_rate_limits,
+)
+
 
 
 _INGESTION_CONTENT_PARTS = [
@@ -2996,6 +3002,7 @@ app.include_router(_youtube_router)          # step 9 — /youtube/*
 app.include_router(_whatsapp_router)         # step 10 — /whatsapp/*
 app.include_router(_coverage_router)         # step 11 — /coverage/*
 app.include_router(_media_router)            # step 11 — /media/*
+app.include_router(_rate_limits_router)      # step 12 — /rate-limits/*
 
 
 @app.exception_handler(Exception)
@@ -5443,102 +5450,6 @@ async def hourly_ingestion(hours: int = 12, _user: dict = Depends(require_role("
     _INGESTION_HOURLY_CACHE[hours] = {"ts": time.time(), "rows": [dict(row) for row in out]}
     return out
 
-
-@app.get("/rate-limits/recent")
-async def recent_rate_limits(hours: int = 24, limit: int = 100,
-                             _user: dict = Depends(require_role("viewer"))):
-    hours = max(1, min(hours, 168))
-    limit = max(1, min(limit, 500))
-    pool = await get_pool()
-    conn = None
-    try:
-        conn = await _acquire_dashboard_conn(pool)
-        table_exists = bool(await conn.fetchval("SELECT to_regclass('public.rate_limit_events') IS NOT NULL", timeout=8))
-        if table_exists:
-            events = [dict(r) for r in await conn.fetch(
-                """
-                SELECT id, source, account, scope, status_code, cooldown_seconds,
-                       reason, metadata, created_at
-                FROM rate_limit_events
-                WHERE created_at >= now() - ($1 || ' hours')::interval
-                ORDER BY created_at DESC
-                LIMIT $2
-                """,
-                str(hours), limit,
-                timeout=15,
-            )]
-            for event in events:
-                if isinstance(event.get("metadata"), str):
-                    try:
-                        event["metadata"] = json.loads(event["metadata"])
-                    except Exception:
-                        event["metadata"] = {}
-            recent_summary = [dict(r) for r in await conn.fetch(
-                """
-                SELECT source, account, scope,
-                       (array_agg(status_code ORDER BY created_at DESC))[1]::int AS status_code,
-                       count(*)::int AS count,
-                       (array_agg(cooldown_seconds ORDER BY created_at DESC))[1]::int AS cooldown_seconds,
-                       (array_agg(reason ORDER BY created_at DESC))[1] AS reason,
-                       min(created_at) AS first_seen_at,
-                       max(created_at) AS last_seen_at,
-                       max(created_at + COALESCE(cooldown_seconds, 0) * interval '1 second') AS active_until
-                FROM rate_limit_events
-                WHERE created_at >= now() - ($1 || ' hours')::interval
-                GROUP BY source, account, scope
-                ORDER BY last_seen_at DESC
-                LIMIT 24
-                """,
-                str(hours),
-                timeout=15,
-            )]
-            now_utc = datetime.now(timezone.utc)
-            for row in recent_summary:
-                active_until = row.get("active_until")
-                row["active_now"] = bool(active_until and active_until > now_utc)
-        else:
-            events = []
-            recent_summary = []
-        active_event_summary = [row for row in recent_summary if row.get("active_now")]
-        active = []
-        cursor_history = []
-        try:
-            now_utc = datetime.now(timezone.utc)
-            for r in await conn.fetch(
-                """
-                SELECT service, last_processed_id, last_processed_at, status
-                FROM service_cursors
-                WHERE service ILIKE '%rate_limit'
-                   OR service ILIKE '%ratelimit'
-                ORDER BY last_processed_at DESC NULLS LAST
-                """,
-                timeout=8,
-            ):
-                d = _rate_limit_cursor_payload(r, now_utc)
-                cursor_history.append(d)
-                if d["active_now"] or (d.get("status") == "blocked" and not d.get("active_until")):
-                    active.append(d)
-        except Exception:
-            active = []
-            cursor_history = []
-    except Exception as exc:  # noqa: BLE001 - dashboard status panels must fail soft
-        logger.warning("recent rate limits failed: %s", exc.__class__.__name__)
-        return _rate_limits_recent_fallback_payload(hours, limit, exc)
-    finally:
-        if conn is not None:
-            await _release_dashboard_conn(pool, conn, "operational events")
-    payload = {
-        "events": events,
-        "active": active,
-        "active_event_summary": active_event_summary,
-        "cursor_history": cursor_history,
-        "recent_summary": recent_summary,
-    }
-    _RATE_LIMITS_RECENT_CACHE[(hours, limit)] = {
-        "ts": time.time(),
-        "payload": _copy_cache_value(payload),
-    }
-    return payload
 
 
 def _jsonish(value):
