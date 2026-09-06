@@ -1327,7 +1327,7 @@ services:
       retries: 3
 
   # Chrome cookie vault: keeps a rolling on-disk backup of the social-platform
-  # cookie jar via CDP (host-side Chrome on :9333 by default). Historically, Chrome
+  # cookie jar via CDP (host-side Chrome on :9336 by default). Historically, Chrome
   # restarts / profile-SQLite rewrites have silently killed sessionid /
   # c_user / auth_token cookies and stranded whole collectors until a human
   # noticed. This service snapshots every 5 min so a restore is one command,

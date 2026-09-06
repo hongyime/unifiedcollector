@@ -112,3 +112,37 @@ actionable residue). Update or strike items as they're fixed.
   realtime source every 5min and restarts the owning container(s) via the docker
   socket when stale (telegram 2h / whatsapp 4h / beeper 3h), cooldown-guarded.
   (2026-07-02)
+
+
+- **Telegram `is_bot` column and capture (audit DATA-004 correction)** — DONE
+  (superseded the "not implemented" note in `docs/audits/SYNC_PROGRESS.md`).
+  Migration `add_telegram_is_bot.sql` is in the applied ledger; `_upsert_user_full`
+  in `src/collectors/telegram/__init__.py:2350` sets `is_bot` from Telethon
+  `User.bot`. Live DB has 553 bots + 35,410 non-bots + 139,424 NULL (users
+  seen once before the column was added and never re-encountered). A one-shot
+  backfill migration (`20260906_backfill_telegram_is_bot_from_username.sql`)
+  promotes any `%bot`-suffixed NULLs on clean-volume rebuild — Telegram enforces
+  the bot username suffix so this is safe. (2026-09-06)
+
+- **Silent extension outage detection (audit REL-001/002 follow-up)** — the
+  browser extension write path is now health-honesty: `ig_ingest` `/health`
+  returns 503 when its DB pool never came up and startup has given up,
+  instead of the previous "ok: true" that masked the failure. Startup pool
+  init retries with backoff up to 5 min (env
+  `SOCIAL_INGEST_STARTUP_POOL_BUDGET_SECONDS`) to survive a Postgres
+  slow-start race. See commit `656be92c`. (2026-09-06)
+
+- **WhatsApp consumer DB timeout / bridge-unpaired visibility (audit
+  INTR-002 / LOGIC-001 / PERF-001)** — DONE. Per-message handler timeout
+  in the RabbitMQ consumer prevents a 60s pool command_timeout from pinning
+  the contacts backlog. New scheduler tick alerts on `bridge_unpaired` HTTP
+  503 events past a threshold so re-pair is not invisible. Related ticks
+  for the realtime-feed failed queue and the watchdog "still stale"
+  escalation land at the same time. See commit `37e49ff1`. (2026-09-06)
+
+- **`CHROME_CDP_URL` port drift** — DONE. `.env.example` and the
+  `docker-compose.yml` comment previously showed `:9333`; the actual live
+  compose default is `:9336`. Both fixed. Standalone helper scripts under
+  `scripts/` still hardcode `:9333` in many places — leave those alone
+  unless they are ever put back into rotation; the canonical env is now
+  correct. (2026-09-06)

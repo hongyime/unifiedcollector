@@ -1,8 +1,10 @@
 # unifiedcollector
 
-Unified ingestion plane for **11 source platforms** — github, youtube, strava,
-search, website, tiktok, lemon8, whatsapp, telegram, instagram, and
-beeper/matrix. Read-only by design. Feeds a downstream **unifiedanalyzer** that
+Unified ingestion plane for **13 collectors** across 15 platform surfaces —
+github, youtube, strava, search, website, tiktok, lemon8, whatsapp, telegram,
+instagram, beeper/matrix, plus browser-extension-only paths for threads,
+facebook, and x, plus a search-based `exposure` dorking collector. Read-only by
+design. Feeds a downstream **unifiedanalyzer** that
 does identity resolution, face clustering, timelines, co-presence, and
 change-tracking.
 
@@ -679,8 +681,10 @@ originated from a real user or from automation, and materially raises the blast
 radius of any bug or credential leak.
 
 If outbound is needed for a specific use-case, build it as a **separate service
-that consumes the unified DB**. Original outbound implementations are archived
-under `archive/` for reference.
+that consumes the unified DB**. Original outbound implementations lived under an
+`archive/` tree that has since been removed from this repo; a git-log lookup on
+files like `shared/media_uploader.py` will surface the last known good
+implementations if you need them.
 
 ---
 
