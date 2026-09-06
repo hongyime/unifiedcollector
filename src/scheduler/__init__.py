@@ -1528,6 +1528,12 @@ class Scheduler:
         # disturb the main schedule loop.
         await self._maybe_seed_recon_targets()
         await self._maybe_run_phone_intel()
+        # Health-alert ticks (INTR-002, REL-004, REL-005 / INTR-003).
+        # Each is self-gated and idempotent; a failure is logged and never
+        # disturbs the main schedule loop.
+        await self._maybe_alert_bridge_unpaired()
+        await self._maybe_alert_realtime_feed_failed()
+        await self._maybe_alert_watchdog_stale()
         # NOTE: maigret FP-blocklist refresh runs INSIDE the recon worker
         # (src/recon_spiderfoot_service.py::_fp_blocklist_refresh_loop) because
         # this scheduler container does not have the ``maigret`` binary on
@@ -1785,6 +1791,162 @@ class Scheduler:
             logger.info("wa_phone_intel tick: %s", stats)
         except Exception:
             logger.warning("wa_phone_intel tick failed", exc_info=True)
+
+    # ---- Health-alert self-gated ticks (INTR-002, REL-004, REL-005 / INTR-003) ----
+
+    async def _maybe_alert_bridge_unpaired(self):
+        """Alert when the WhatsApp bridge has been logging bridge_unpaired 503s.
+
+        `_record_http_event(scope='media_decrypt', status_code=503, ...)` is
+        already stamped by ``src/collectors/whatsapp/__init__.py`` on every
+        deferred decrypt with a ``bridge_unpaired`` error code. Encrypted
+        history messages sit in the DLQ-like deferral state until the bridge
+        is re-paired; nothing self-heals, so a scheduler alert is the only
+        way the operator sees this without eyeballing container logs.
+
+        Self-gated to `WA_BRIDGE_UNPAIRED_ALERT_INTERVAL_SECONDS` (default 1h)
+        so a persistent outage triggers at most one alert per interval.
+        """
+        import time as _time
+        now = _time.monotonic()
+        interval = env_int("WA_BRIDGE_UNPAIRED_ALERT_INTERVAL_SECONDS", 3600, min_value=300)
+        threshold = env_int("WA_BRIDGE_UNPAIRED_ALERT_THRESHOLD", 20, min_value=1)
+        window_minutes = env_int("WA_BRIDGE_UNPAIRED_ALERT_WINDOW_MINUTES", 30, min_value=5)
+        if now - getattr(self, "_last_bridge_unpaired_alert", 0) < interval:
+            return
+        try:
+            async with self.pool.acquire() as conn:
+                count = await conn.fetchval(
+                    """
+                    SELECT count(*)
+                    FROM rate_limit_events
+                    WHERE source = 'whatsapp'
+                      AND status_code = 503
+                      AND metadata->>'error_code' = 'bridge_unpaired'
+                      AND created_at > NOW() - ($1 || ' minutes')::interval
+                    """,
+                    str(window_minutes),
+                ) or 0
+        except Exception:
+            logger.debug("bridge_unpaired probe query failed", exc_info=True)
+            return
+        if count < threshold:
+            return
+        self._last_bridge_unpaired_alert = now
+        try:
+            from src.notifications import telegram as tg
+            await tg.send(
+                f"⚠️ <b>WhatsApp bridge unpaired</b>\n"
+                f"{count} decrypt-deferred events in the last {window_minutes} min "
+                f"(HTTP 503 bridge_unpaired).\n"
+                f"Encrypted history is not landing. Re-pair the affected bridge "
+                f"(<code>docker logs unifiedcollector_wa_bridge_1</code> for the QR)."
+            )
+            logger.info("bridge_unpaired alert sent (count=%d, window=%dm)", count, window_minutes)
+        except Exception:
+            logger.warning("bridge_unpaired alert send failed", exc_info=True)
+
+    async def _maybe_alert_realtime_feed_failed(self):
+        """Alert when the realtime post-feed's failed queue is non-empty.
+
+        Currently 14 items sit in ``uc:realtime_post_feed:failed`` with no
+        automatic drainer. Left alone that queue grows unboundedly with each
+        Telegram send failure and the operator has no visibility. Alert at
+        threshold; drain remains a manual operator step for now.
+
+        Self-gated to `REALTIME_FAILED_ALERT_INTERVAL_SECONDS` (default 6h).
+        """
+        import time as _time
+        now = _time.monotonic()
+        interval = env_int("REALTIME_FAILED_ALERT_INTERVAL_SECONDS", 21600, min_value=300)
+        threshold = env_int("REALTIME_FAILED_ALERT_THRESHOLD", 10, min_value=1)
+        if now - getattr(self, "_last_realtime_failed_alert", 0) < interval:
+            return
+        try:
+            from src.notifications import realtime_feed
+            client = await realtime_feed._redis_client()
+            if client is None:
+                return
+            try:
+                depth = await client.llen(realtime_feed.FAILED_KEY_DEFAULT)
+            finally:
+                try:
+                    await client.aclose()
+                except Exception:
+                    pass
+        except Exception:
+            logger.debug("realtime_feed failed-queue probe failed", exc_info=True)
+            return
+        if not depth or depth < threshold:
+            return
+        self._last_realtime_failed_alert = now
+        try:
+            from src.notifications import telegram as tg
+            await tg.send(
+                f"⚠️ <b>Realtime post-feed: {depth} failed items</b>\n"
+                f"<code>uc:realtime_post_feed:failed</code> has {depth} unsent items. "
+                f"Inspect and drain manually if needed."
+            )
+            logger.info("realtime_failed alert sent (depth=%d)", depth)
+        except Exception:
+            logger.warning("realtime_failed alert send failed", exc_info=True)
+
+    async def _maybe_alert_watchdog_stale(self):
+        """Escalate persistently-stale sources past the watchdog's own cooldown.
+
+        The freshness watchdog restarts stale realtime containers on a 30-min
+        cooldown, and only alerts on the first cycle after entering 'stale'.
+        Once its alert cooldown ticks, a persistent failure becomes invisible
+        (audit evidence: DM hook stale 35h with 'alert in cooldown' log line).
+        This tick catches that class by reading source_health directly and
+        emitting a distinct "still stale" alert.
+
+        Self-gated to `WATCHDOG_STALE_ALERT_INTERVAL_SECONDS` (default 6h).
+        Uses `updated_at` age > threshold (default 12h) as the escalation gate.
+        """
+        import time as _time
+        now = _time.monotonic()
+        interval = env_int("WATCHDOG_STALE_ALERT_INTERVAL_SECONDS", 21600, min_value=300)
+        threshold_hours = env_int("WATCHDOG_STALE_ALERT_THRESHOLD_HOURS", 12, min_value=1)
+        if now - getattr(self, "_last_stale_alert", 0) < interval:
+            return
+        try:
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT source, status, EXTRACT(EPOCH FROM (NOW() - updated_at))/3600 AS age_hours
+                    FROM source_health
+                    WHERE status IN ('degraded', 'stale', 'unhealthy')
+                       OR updated_at < NOW() - ($1 || ' hours')::interval
+                    ORDER BY updated_at ASC
+                    """,
+                    str(threshold_hours),
+                )
+        except Exception:
+            logger.debug("watchdog_stale probe query failed", exc_info=True)
+            return
+        stale = [
+            r for r in rows
+            if (r["status"] in ("degraded", "stale", "unhealthy"))
+            or (r["age_hours"] and r["age_hours"] > threshold_hours)
+        ]
+        if not stale:
+            return
+        self._last_stale_alert = now
+        try:
+            from src.notifications import telegram as tg
+            lines = [f"⚠️ <b>Watchdog still-stale escalation</b>"]
+            for r in stale[:10]:
+                lines.append(
+                    f"• <code>{r['source']}</code>: {r['status']} "
+                    f"(age {r['age_hours']:.1f}h)"
+                )
+            if len(stale) > 10:
+                lines.append(f"… and {len(stale) - 10} more.")
+            await tg.send("\n".join(lines))
+            logger.info("watchdog_stale escalation alert sent (n=%d)", len(stale))
+        except Exception:
+            logger.warning("watchdog_stale escalation alert send failed", exc_info=True)
 
 
     async def add_schedule(self, source: str, interval_hours: int = 24):

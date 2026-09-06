@@ -418,6 +418,14 @@ class WhatsappCollector(BaseCollector):
         )
         await session_queue.bind(exchange, routing_key="session.#")
 
+        # Per-message handler timeout (LOGIC-001 fix). Under DB load the raw
+        # asyncpg fetch in handlers can hit the pool's 60s command_timeout,
+        # which blocks a consumer callback for a full minute and pins the
+        # contacts backlog. A tighter per-handler timeout fails fast, causes
+        # message.process() to nack+requeue, and lets the consumer move on.
+        # A subsequent retry after DB recovery drains the queue in-order.
+        _handler_timeout = float(os.getenv("WA_CONSUMER_HANDLER_TIMEOUT_SECONDS", "15"))
+
         async def _consume_contacts():
             async with contact_queue.iterator() as qi:
                 async for message in qi:
@@ -426,7 +434,16 @@ class WhatsappCollector(BaseCollector):
                     async with message.process():
                         try:
                             body = json.loads(message.body.decode())
-                            await self._handle_contact_event(body)
+                            async with asyncio.timeout(_handler_timeout):
+                                await self._handle_contact_event(body)
+                        except asyncio.TimeoutError:
+                            # Surface at WARNING so operator sees the DB stall.
+                            # message.process() will nack + requeue on re-raise.
+                            logger.warning(
+                                "Contact event handler timeout after %.1fs; requeueing",
+                                _handler_timeout,
+                            )
+                            raise
                         except Exception as e:
                             logger.debug("Contact event processing failed: %s", e)
 
@@ -438,7 +455,14 @@ class WhatsappCollector(BaseCollector):
                     async with message.process():
                         try:
                             body = json.loads(message.body.decode())
-                            await self._handle_group_event(body)
+                            async with asyncio.timeout(_handler_timeout):
+                                await self._handle_group_event(body)
+                        except asyncio.TimeoutError:
+                            logger.warning(
+                                "Group event handler timeout after %.1fs; requeueing",
+                                _handler_timeout,
+                            )
+                            raise
                         except Exception as e:
                             logger.debug("Group event processing failed: %s", e)
 
@@ -450,7 +474,14 @@ class WhatsappCollector(BaseCollector):
                     async with message.process():
                         try:
                             body = json.loads(message.body.decode())
-                            await self._handle_session_event(body)
+                            async with asyncio.timeout(_handler_timeout):
+                                await self._handle_session_event(body)
+                        except asyncio.TimeoutError:
+                            logger.warning(
+                                "Session event handler timeout after %.1fs; requeueing",
+                                _handler_timeout,
+                            )
+                            raise
                         except Exception as e:
                             logger.debug("Session event processing failed: %s", e)
 
@@ -466,16 +497,30 @@ class WhatsappCollector(BaseCollector):
                             #  - single live message (flat: message_id/chat_jid/...)
                             #  - history-sync batch: {sync_type, session_name, messages:[...]}
                             # Unpack the batch so each historical message is ingested.
+                            # A batch may legitimately take longer than a single event,
+                            # so scale the timeout by the batch size (bounded).
                             if isinstance(body, dict) and isinstance(body.get("messages"), list):
                                 batch_session = body.get("session_name")
-                                for m in body["messages"]:
-                                    if self._stop.is_set():
-                                        break
-                                    if batch_session and "session_name" not in m:
-                                        m["session_name"] = batch_session
-                                    await self._handle_message_event(m, targets)
+                                batch_msgs = body["messages"]
+                                batch_timeout = min(
+                                    max(_handler_timeout, _handler_timeout * len(batch_msgs) / 4),
+                                    float(os.getenv("WA_CONSUMER_BATCH_TIMEOUT_MAX_SECONDS", "120")),
+                                )
+                                async with asyncio.timeout(batch_timeout):
+                                    for m in batch_msgs:
+                                        if self._stop.is_set():
+                                            break
+                                        if batch_session and "session_name" not in m:
+                                            m["session_name"] = batch_session
+                                        await self._handle_message_event(m, targets)
                             else:
-                                await self._handle_message_event(body, targets)
+                                async with asyncio.timeout(_handler_timeout):
+                                    await self._handle_message_event(body, targets)
+                        except asyncio.TimeoutError:
+                            logger.warning(
+                                "Message event handler timeout; requeueing",
+                            )
+                            raise
                         except Exception as e:
                             logger.error("Broker message processing failed: %s", e)
 
