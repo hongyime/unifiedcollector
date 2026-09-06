@@ -1,0 +1,15 @@
+{
+  "name": "unifiedcollector-extension",
+  "private": true,
+  "version": "1.23.75",
+  "description": "Chrome MV3 extension bundler for UnifiedCollector Bridge.",
+  "type": "module",
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "watch": "node esbuild.config.mjs --watch"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "typescript": "^7.0.2"
+  }
+}
