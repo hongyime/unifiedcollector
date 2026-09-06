@@ -173,3 +173,68 @@ The migration is **additive-first, subtractive-last** so containers never lose a
 - **4–6 dev days.** Confidence: **MEDIUM-HIGH**.
 - The mechanical work is easy. The risk is *missing an env reference* in a dark corner of the codebase — e.g., a helper module reads `os.getenv("FOO")` from within a service that historically had FOO free from the monolith.
 - Mitigations: step 20's static check catches most cases; step 21's dry-run in staging + `verify-collector-boot.ps1` catches boot-time misses; keeping `.env.legacy.bak` accessible catches runtime misses in the first 24–48 h.
+
+
+---
+
+## Step 21 deferral (added by env_split_wiring_and_subtractive sprint)
+
+Steps 7–20 completed under the `env_split_wiring_and_subtractive` sprint:
+
+- **7–19: additive wiring.** Every service's `env_file:` list in
+  `docker/docker-compose.yml` now sources both `../.env` (legacy monolith,
+  intact) AND the appropriate `docker/env/<service>.env` file(s). Because
+  every service still dual-sources `../.env`, no container can lose access to
+  any variable during this phase — the additive property is preserved.
+- **20: static check.** `scripts/verify_env_split.py` was added and iterated
+  against. The script now reports `OK: every referenced env var is either
+  sourced or documented in an env.example`. Along the way, ~466 previously-
+  undocumented env keys referenced in code were added to their appropriate
+  per-service `.env.example` templates. The script is NOT wired into CI yet
+  (see plan step 20).
+
+**Step 21 (subtractive removal of `../.env` from every `env_file:` list) is
+deliberately deferred** to a distinct, operator-scheduled sprint because it
+is the one irreversible-until-rollback step in this plan and needs:
+
+1. **Operator go-ahead** with a staged validation window per service.
+2. **`docker/env/<service>.env` populated with real values** on the operator
+   host (`docker/.gitignore` already blocks these files from being committed).
+   The operator confirmed on 2026-09-06 that `docker/env/instagram.env` and
+   the other `docker/env/*.env` files exist on disk, but the removal step
+   should still be staged per-service, not all-at-once.
+3. **Per-service boot verification.** Suggested order (least → most blast
+   radius):
+   1. `browser_cookie_vault`, `postgres`, `rabbitmq`, `redis` (support
+      infra; a bad boot is trivially reversed by re-adding `../.env`).
+   2. `dashboard`, `watchdog`, `backup` (ops-only; no user data loss on
+      failure).
+   3. `collector_spiderfoot` (recon-only; security-critical win, isolated).
+   4. `collector_youtube`, `collector_tiktok`, `collector_lemon8`,
+      `collector_website`, `collector_exposure` (headless collectors,
+      medium ban-risk).
+   5. `collector_lowrisk` (github + strava + search merged worker).
+   6. `collector_beeper`, `collector_telegram`, `collector_whatsapp` (realtime
+      messaging — parked-listener services, hardest to detect a silent
+      credential-miss).
+   7. `collector_instagram`, `collector_instagram_dm`, `ig_ingest` (Meta
+      properties — highest ban risk if a wrong env slips in mid-window).
+   8. `scheduler`, `onboard_bot`, `realtime_feed` (last; they consume from
+      the DB the other services fill).
+4. **Rollback tooling ready.** In each per-service window: on failure,
+   revert the single-service `../.env` removal, `docker compose up -d
+   <service>`, and re-check `/health` before proceeding.
+5. **Static-analysis re-check post-removal.** After each per-service
+   subtractive commit, rerun `python scripts/verify_env_split.py` — the
+   sourced-key count for that service will drop (loses `../.env`'s 225 keys)
+   and any newly-exposed genuine gap will show as `MISSING` instead of the
+   soft `cross-service` category.
+
+Until step 21 lands, the security property from plan §2 (limit
+`collector_spiderfoot`'s credential exposure) is only ASPIRATIONALLY
+enforced: the code path that would leak IG passwords into a maigret run does
+not exist, but `../.env` still hands the raw credentials to every container.
+Step 21 is what converts the aspirational property into an enforced one.
+
+**Steps 22–23** (docs / `scripts/migrate_env.py` update) also stay
+deferred until after step 21 lands.
