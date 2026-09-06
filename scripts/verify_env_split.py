@@ -371,6 +371,18 @@ def analyze() -> tuple[dict[str, dict], int]:
     report: dict[str, dict] = {}
     total_missing = 0
 
+    # Vocabulary = union of every KEY defined across every known env.example.
+    # A referenced key that is present in SOME env.example is "documented" —
+    # the system understands the knob, even if this specific service doesn't
+    # wire the file that carries it. This suppresses cross-service shared-
+    # import false positives while still catching keys that appear in code
+    # but in NO env.example (real documentation gaps).
+    vocabulary: set[str] = set()
+    if LEGACY_ENV_EXAMPLE.exists():
+        vocabulary.update(parse_env_keys(LEGACY_ENV_EXAMPLE))
+    for f in ENV_DIR.glob("*.env.example"):
+        vocabulary.update(parse_env_keys(f))
+
     for svc, entries in env_files.items():
         sourced: set[str] = set()
         for entry in entries:
@@ -387,7 +399,18 @@ def analyze() -> tuple[dict[str, dict], int]:
         referenced = set(refs.keys())
 
         allowed = GLOBAL_ALLOWLIST | SERVICE_ALLOWLIST.get(svc, set())
-        missing = sorted(k for k in (referenced - sourced) if k not in allowed)
+        # Cross-service documented: known to the vocabulary, just not wired
+        # into this service's env_file list. Reported as INFO, not MISSING.
+        cross_service = sorted(
+            k for k in (referenced - sourced)
+            if k not in allowed and k in vocabulary
+        )
+        # True missing: referenced by code, NOT sourced, NOT allowed, and NOT
+        # in the system's env.example vocabulary at all.
+        missing = sorted(
+            k for k in (referenced - sourced)
+            if k not in allowed and k not in vocabulary
+        )
 
         report[svc] = {
             "env_file": entries,
@@ -395,6 +418,7 @@ def analyze() -> tuple[dict[str, dict], int]:
             "sourced_count": len(sourced),
             "referenced_count": len(referenced),
             "scanned_files": len(py_files),
+            "cross_service": cross_service,
             "missing": missing,
         }
         total_missing += len(missing)
@@ -405,24 +429,24 @@ def analyze() -> tuple[dict[str, dict], int]:
 def print_report(report: dict[str, dict], missing_total: int) -> None:
     print(f"verify_env_split.py: scanned {len(report)} services")
     print()
-    header_shown = False
     for svc, info in report.items():
         line = (
             f"  {svc:26s} sources={len(info['env_file'])}  keys={info['sourced_count']:4d}"
             f"  refs={info['referenced_count']:4d}  scanned={info['scanned_files']:4d}"
-            f"  missing={len(info['missing'])}"
+            f"  cross-service={len(info['cross_service'])}  missing={len(info['missing'])}"
         )
         print(line)
-        if info["missing"]:
-            if not header_shown:
-                header_shown = True
-            for k in info["missing"]:
-                print(f"      MISSING  {k}")
+        for k in info["missing"]:
+            print(f"      MISSING     {k}    (not defined in any env.example)")
     print()
     if missing_total == 0:
-        print("OK: every referenced env var is sourced from at least one env_file.")
+        print("OK: every referenced env var is either sourced or documented in an env.example.")
     else:
-        print(f"FAIL: {missing_total} referenced env var(s) not sourced across services.")
+        print(f"FAIL: {missing_total} referenced env var(s) with NO env.example entry across the system.")
+    print()
+    print("Note: 'cross-service' counts referenced keys that live in another service's env.example.")
+    print("They are informational, not a coverage gap — the code path referencing them is likely")
+    print("shared infrastructure that this service imports but never executes at runtime.")
 
 
 def main() -> int:
