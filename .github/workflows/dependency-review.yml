@@ -4,7 +4,8 @@ on:
   pull_request:
     branches: [main, master]
 
-permissions: read-all
+permissions:
+  contents: read
 
 jobs:
   dependency-review:

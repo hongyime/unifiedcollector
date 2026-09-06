@@ -32,7 +32,8 @@ concurrency:
   group: trufflehog-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-permissions: read-all
+permissions:
+  contents: read
 
 jobs:
   trufflehog:

@@ -11,7 +11,8 @@ on:
       - "src/db/schemas/**"
       - "src/db/migrations/**"
 
-permissions: read-all
+permissions:
+  contents: read
 
 jobs:
   lint:
