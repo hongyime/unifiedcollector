@@ -10,7 +10,6 @@ so adding a new periodic job is a pure additive change: one new file, one
 import, no edits to a monolithic ``_tick``.
 
 TODO (follow-up sprint, docs/plans/scheduler-refactor.md steps 6-15):
-  - BridgeUnpairedAlertHandler       (`_maybe_alert_bridge_unpaired`)
   - RealtimeFeedAlertHandler         (`_maybe_alert_realtime_feed_failed`)
   - WatchdogStaleAlertHandler        (`_maybe_alert_watchdog_stale`)
   - Then step 15: reduce Scheduler to __init__/start/stop/_tick + schedules CRUD.
@@ -18,6 +17,7 @@ TODO (follow-up sprint, docs/plans/scheduler-refactor.md steps 6-15):
 from __future__ import annotations
 
 from .base import PeriodicHandler, SchedulerContext
+from .bridge_unpaired_alert import BridgeUnpairedAlertHandler
 from .cookie_check import CookieCheckHandler
 from .gc_collection_runs import GcCollectionRunsHandler
 from .graph_edges import BuildGraphEdgesHandler
@@ -36,6 +36,7 @@ HANDLERS: list[PeriodicHandler] = [
     ReconSeedHandler(),
     PhoneIntelHandler(),
     BuildGraphEdgesHandler(),
+    BridgeUnpairedAlertHandler(),
 ]
 
 __all__ = [
@@ -50,4 +51,5 @@ __all__ = [
     "ReconSeedHandler",
     "PhoneIntelHandler",
     "BuildGraphEdgesHandler",
+    "BridgeUnpairedAlertHandler",
 ]

@@ -257,7 +257,6 @@ class Scheduler:
         # Health-alert ticks (INTR-002, REL-004, REL-005 / INTR-003).
         # Each is self-gated and idempotent; a failure is logged and never
         # disturbs the main schedule loop.
-        await self._maybe_alert_bridge_unpaired()
         await self._maybe_alert_realtime_feed_failed()
         await self._maybe_alert_watchdog_stale()
         # NOTE: maigret FP-blocklist refresh runs INSIDE the recon worker
@@ -268,58 +267,6 @@ class Scheduler:
     # ---- OSS-enrichment automation ticks (self-gated) ----
 
     # ---- Health-alert self-gated ticks (INTR-002, REL-004, REL-005 / INTR-003) ----
-
-    async def _maybe_alert_bridge_unpaired(self):
-        """Alert when the WhatsApp bridge has been logging bridge_unpaired 503s.
-
-        `_record_http_event(scope='media_decrypt', status_code=503, ...)` is
-        already stamped by ``src/collectors/whatsapp/__init__.py`` on every
-        deferred decrypt with a ``bridge_unpaired`` error code. Encrypted
-        history messages sit in the DLQ-like deferral state until the bridge
-        is re-paired; nothing self-heals, so a scheduler alert is the only
-        way the operator sees this without eyeballing container logs.
-
-        Self-gated to `WA_BRIDGE_UNPAIRED_ALERT_INTERVAL_SECONDS` (default 1h)
-        so a persistent outage triggers at most one alert per interval.
-        """
-        import time as _time
-        now = _time.monotonic()
-        interval = env_int("WA_BRIDGE_UNPAIRED_ALERT_INTERVAL_SECONDS", 3600, min_value=300)
-        threshold = env_int("WA_BRIDGE_UNPAIRED_ALERT_THRESHOLD", 20, min_value=1)
-        window_minutes = env_int("WA_BRIDGE_UNPAIRED_ALERT_WINDOW_MINUTES", 30, min_value=5)
-        if now - getattr(self, "_last_bridge_unpaired_alert", 0) < interval:
-            return
-        try:
-            async with self.pool.acquire() as conn:
-                count = await conn.fetchval(
-                    """
-                    SELECT count(*)
-                    FROM rate_limit_events
-                    WHERE source = 'whatsapp'
-                      AND status_code = 503
-                      AND metadata->>'error_code' = 'bridge_unpaired'
-                      AND created_at > NOW() - ($1 || ' minutes')::interval
-                    """,
-                    str(window_minutes),
-                ) or 0
-        except Exception:
-            logger.debug("bridge_unpaired probe query failed", exc_info=True)
-            return
-        if count < threshold:
-            return
-        self._last_bridge_unpaired_alert = now
-        try:
-            from src.notifications import telegram as tg
-            await tg.send(
-                f"⚠️ <b>WhatsApp bridge unpaired</b>\n"
-                f"{count} decrypt-deferred events in the last {window_minutes} min "
-                f"(HTTP 503 bridge_unpaired).\n"
-                f"Encrypted history is not landing. Re-pair the affected bridge "
-                f"(<code>docker logs unifiedcollector_wa_bridge_1</code> for the QR)."
-            )
-            logger.info("bridge_unpaired alert sent (count=%d, window=%dm)", count, window_minutes)
-        except Exception:
-            logger.warning("bridge_unpaired alert send failed", exc_info=True)
 
     async def _maybe_alert_realtime_feed_failed(self):
         """Alert when the realtime post-feed's failed queue is non-empty.
