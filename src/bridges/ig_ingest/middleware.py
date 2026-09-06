@@ -195,10 +195,10 @@ async def lane_isolation_middleware(request, handler):
 
 @web.middleware
 async def db_pool_middleware(request, handler):
-    # Lazy import to avoid a circular during startup — the pool bootstrap
-    # helpers live in ``__init__.py`` until step 3 of the split plan moves
-    # them to ``pool.py``. Import-at-call-time keeps this file leaf-friendly.
-    from . import _ensure_app_pool, _set_startup_error
+    # ``_ensure_app_pool`` / ``_set_startup_error`` live in ``.pool`` (extracted
+    # in split step 3). Direct top-level import is safe since ``.pool`` only
+    # depends on ``.constants`` — no cycle.
+    from .pool import _ensure_app_pool, _set_startup_error
 
     if request.method == "OPTIONS" or request.path in {
         "/health",
