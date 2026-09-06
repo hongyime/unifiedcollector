@@ -8,19 +8,30 @@
 // Kept storage-backed on purpose: the MV3 service worker sleeps after ~30s
 // idle, so the log has to survive worker respawn to be useful to the operator.
 
+// Chrome extension API globals — see shared/throttle.ts for rationale.
+declare const chrome: any;
+
 export const LOG_KEY = "ucLog";
 export const LOG_MAX = 200;
+
+/** Standard log severity levels used across the extension. */
+export type LogLevel = "info" | "warn" | "error" | string;
+
+/** Shape of one entry in the persistent ring buffer. */
+export interface LogEntry {
+  /** ms since epoch */
+  t: number;
+  level: LogLevel;
+  msg: string;
+}
 
 /**
  * Append one entry to the ring buffer. `console.log` is preserved so the
  * chrome://extensions "Errors" panel keeps its stream even when storage
  * writes race with worker shutdown.
- *
- * @param {"info"|"warn"|"error"|string} level
- * @param {string} msg
  */
-export async function log(level, msg) {
-  const entry = { t: Date.now(), level, msg };
+export async function log(level: LogLevel, msg: string): Promise<void> {
+  const entry: LogEntry = { t: Date.now(), level, msg };
   try {
     const { [LOG_KEY]: cur = [] } = await chrome.storage.local.get(LOG_KEY);
     cur.push(entry);
@@ -33,10 +44,8 @@ export async function log(level, msg) {
 /**
  * Read the current log ring buffer. Returns `[]` if storage is unavailable
  * or the key has never been written.
- *
- * @returns {Promise<Array<{t: number, level: string, msg: string}>>}
  */
-export async function readLog() {
+export async function readLog(): Promise<LogEntry[]> {
   try {
     const { [LOG_KEY]: cur = [] } = await chrome.storage.local.get(LOG_KEY);
     return Array.isArray(cur) ? cur : [];
@@ -46,7 +55,7 @@ export async function readLog() {
 }
 
 /** Clear the log ring buffer. */
-export async function clearLog() {
+export async function clearLog(): Promise<void> {
   try {
     await chrome.storage.local.set({ [LOG_KEY]: [] });
   } catch (e) { /* storage may be unavailable */ }
