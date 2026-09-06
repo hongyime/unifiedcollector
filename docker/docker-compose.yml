@@ -289,6 +289,7 @@ services:
     env_file:
       - ../.env
       - ./env/common.env
+      - ./env/tiktok.env
     healthcheck:
       test: ["CMD", "python", "-m", "src.core.health"]
       interval: 60s
@@ -620,6 +621,7 @@ services:
     env_file:
       - ../.env
       - ./env/common.env
+      - ./env/lemon8.env
     healthcheck:
       test: ["CMD", "python", "-m", "src.core.health"]
       interval: 60s
