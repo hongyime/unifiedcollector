@@ -1,3 +1,8 @@
+// @ts-nocheck — tabs.ts backs the extension options page (tabs.html) with
+// ~300 LOC of chrome.tabs / chrome.runtime messaging. Per
+// docs/plans/extension-bundler.md step 15 we keep bodies unchecked at the
+// initial TS conversion; a follow-up pass will remove @ts-nocheck.
+
 const $ = (id) => document.getElementById(id);
 const EXPANDED_PLATFORM_TABS_KEY = "ucOpenExpandedPlatformTabs";
 let lastDiag = null;
