@@ -13,27 +13,51 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# PERF-002 sub-plan 4A — package split status.
+# PERF-002 sub-plan 4A — dashboard/api package split status.
 #
-# Completed sub-steps (this sprint):
-#   1. api/__init__.py package skeleton (git mv)
-#   2. api/helpers.py — module-level caches + pure helpers
-#   3. api/health_helpers.py — vault/backup/drive health payloads
-#   4. api/auth.py — JWT/bcrypt/login (router-mounted)
+# Sub-plan 4A steps 1–12 have landed. See docs/plans/perf-file-splits.md.
 #
-# TODO — remaining sub-steps for the next sprint
-# (see docs/plans/perf-file-splits.md sub-plan 4A steps 5–13):
-#   5.  api/browser.py       — _extension_* / _browser_tab_* / _browser_extension_*
-#                              / _browser_ingest_health_* helpers + routes
-#   6.  api/source_matrix.py — /api/source_matrix routes + _SOURCE_MATRIX_* callers
-#   7.  api/telegram_ops.py  — /api/telegram/* routes
-#   8.  api/strava.py        — /api/strava/* routes
-#   9.  api/youtube.py       — /api/youtube/* routes
-#   10. api/whatsapp.py      — /api/whatsapp/* routes
-#   11. api/coverage.py + api/media.py — /api/coverage + /api/media
-#   12. api/rate_limits.py   — /api/rate-limits/*
-#   13. Reduce this file to app assembly (<300 LOC): FastAPI() + middleware
-#       + include_router calls + shared Depends glue.
+#   1.  api/__init__.py package skeleton (git mv)
+#   2.  api/helpers.py — module-level caches, pure helpers, DB pool helpers,
+#                        row/cache copy utilities, _dt_for_compare
+#   3.  api/health_helpers.py — vault/backup/drive health payload builders
+#   4.  api/auth.py — JWT/bcrypt + /auth/* routes
+#   5.  api/browser.py — Chrome extension + browser-tab diagnostics used by
+#                        the /health and /collectors/source-matrix payloads
+#   6.  api/source_matrix.py — payload cache helpers + unavailable-payload
+#                              builders (the huge _collectors_source_matrix_payload
+#                              builder still lives here — see module docstring)
+#   7.  api/telegram_ops.py — /api/telegram/* onboarding-ops routes
+#   8.  api/strava.py — /strava/* routes
+#   9.  api/youtube.py — /youtube/* routes
+#   10. api/whatsapp.py — /whatsapp/* routes + link filter constants
+#   11. api/coverage.py — /coverage/collectors
+#       api/media.py — /media, /media/stats, /media/browse, /media/{id}/thumbnail,
+#                       /media/{id}/file, /media/realtime-feed/*, /media/artifact-audit
+#   12. api/rate_limits.py — /rate-limits/recent
+#
+# Sibling sub-plans (separate work):
+#   PERF-003 sub-plan 4B — bridges/ig_ingest.py package split
+#   PERF-004 sub-plan 4C — collectors/telegram/__init__.py mixin split
+#
+# What remains in this file:
+# * The FastAPI app object + CORS/static/router assembly.
+# * Many domain routes that weren't in a step-5-12 slice (/health, /metrics,
+#   /collectors, /collectors/live, /collectors/source-matrix, /collectors/action-queue,
+#   /platform/{name}/summary, /social/*, /accounts, /dlq, /graph, /messaging/coverage,
+#   /instagram/*, /tiktok/*, /threads/*, /facebook/*, /github/*, /lemon8/*,
+#   /beeper/*, /telegram/chats, /telegram/chat/{chat_id}, /api/matrix/*,
+#   /worker/health, /schedules, /targets, /runs, /domain-pacing/status,
+#   /api-quotas/status, /instagram/dms/*, /tiktok/dms/*, /dm/telemetry,
+#   /stories/overview, /ingestion/hourly, /seen/targets, /optional-rollout/status,
+#   /recon/*).
+# * The huge _collectors_source_matrix_payload builder + row/blocker/section
+#   helpers (still tightly coupled to test monkey-patch surface).
+# * Miscellaneous DB query helpers still used across those routes.
+#
+# The <300 LOC target for this file is aspirational — it requires moving all
+# remaining routes into per-domain modules following the same pattern. That is
+# future work.
 # ---------------------------------------------------------------------------
 
 import bcrypt
