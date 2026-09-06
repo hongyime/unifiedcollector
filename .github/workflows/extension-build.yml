@@ -1,0 +1,65 @@
+name: Extension Build Check
+
+# Fails PRs that leave extension/dist/ stale.
+# The extension convention is that dist/ is committed alongside src/ so
+# Chrome Web Store submissions are reproducible and reviewers on GitHub
+# can see exactly what ships. This job rebuilds the bundle inside CI and
+# fails if `git diff --exit-code dist/` reports any drift.
+#
+# See docs/plans/extension-bundler.md step 16.
+
+on:
+  pull_request:
+    branches: [main, master]
+    paths:
+      - "extension/**"
+      - ".github/workflows/extension-build.yml"
+  push:
+    branches: [main, master]
+    paths:
+      - "extension/**"
+
+concurrency:
+  group: extension-build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  extension-build:
+    name: Extension bundle is reproducible
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # Full history so `git diff` can compare committed dist/ against
+          # the just-rebuilt dist/.
+          fetch-depth: 1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: extension/package-lock.json
+
+      - name: Install extension deps
+        working-directory: extension
+        run: npm ci
+
+      - name: Build extension bundle
+        working-directory: extension
+        run: npm run build
+
+      - name: Fail if dist/ is stale
+        working-directory: extension
+        run: |
+          if ! git diff --exit-code dist/; then
+            echo "::error::extension/dist/ is stale. Run 'cd extension && npm run build' locally and commit the result."
+            exit 1
+          fi
