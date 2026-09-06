@@ -1,3 +1,9 @@
+// @ts-nocheck — inject.ts runs in the PAGE's MAIN-world JS context. Per
+// docs/plans/extension-bundler.md step 15 we keep bodies unchecked at the
+// initial TS conversion so import shapes are strictly typed without
+// blocking the rollout on a full-strict pass. A follow-up pass will
+// remove @ts-nocheck file-by-file.
+
 // MAIN-world network hook. Runs in the PAGE's JS context (not the isolated
 // content-script world) so it can wrap window.fetch + XMLHttpRequest and read the
 // JSON the page already fetches from Meta's own APIs. This is the robust, ban-safe

@@ -1,6 +1,6 @@
 "use strict";
 (() => {
-  // src/inject.js
+  // src/inject.ts
   (function() {
     const UC_INJECT_VERSION = "1.21.59";
     const existingHook = window.__UC_HOOKED__;
