@@ -1,5 +1,22 @@
 "use strict";
 (() => {
+  // src/shared/log.js
+  var LOG_KEY = "ucLog";
+  async function readLog() {
+    try {
+      const { [LOG_KEY]: cur = [] } = await chrome.storage.local.get(LOG_KEY);
+      return Array.isArray(cur) ? cur : [];
+    } catch (e) {
+      return [];
+    }
+  }
+  async function clearLog() {
+    try {
+      await chrome.storage.local.set({ [LOG_KEY]: [] });
+    } catch (e) {
+    }
+  }
+
   // src/popup.js
   var $ = (id) => document.getElementById(id);
   var DEFAULT_INGEST = "http://127.0.0.1:8765";
@@ -55,7 +72,7 @@
     $("keepalive").textContent = "Scraping runs continuously inside your open, logged-in social tabs (rate-limited + jittered). It starts on its own and pauses when no tab is open \u2014 nothing to press.";
   }
   async function renderLog() {
-    const { ucLog = [] } = await chrome.storage.local.get("ucLog");
+    const ucLog = await readLog();
     const el = $("log");
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
     el.innerHTML = ucLog.slice(-120).map((e) => `<div class="line"><span class="t">${hhmmss(e.t)}</span> <span class="${e.level}">${escapeHtml(e.msg)}</span></div>`).join("");
@@ -79,11 +96,11 @@
     refresh();
   });
   $("clear").addEventListener("click", async () => {
-    await chrome.storage.local.set({ ucLog: [] });
+    await clearLog();
     renderLog();
   });
   $("copy").addEventListener("click", async () => {
-    const { ucLog = [] } = await chrome.storage.local.get("ucLog");
+    const ucLog = await readLog();
     const text = ucLog.map((e) => `${hhmmss(e.t)} [${e.level}] ${e.msg}`).join("\n");
     try {
       await navigator.clipboard.writeText(text);

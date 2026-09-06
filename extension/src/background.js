@@ -11,6 +11,7 @@
 // shows recent activity even after the worker slept and respawned.
 
 import { UC_PLATFORMS } from "./shared/platforms.js";
+import { LOG_KEY, LOG_MAX, log } from "./shared/log.js";
 
 // Global crash sinks: if any listener throws async or the top-level IIFE below
 // rejects, MV3 logs "Service worker went to a bad state unexpectedly" and gives
@@ -74,8 +75,8 @@ globalThis.UC_PLATFORMS = UC_PLATFORMS;
 const ALARM = "uc-scrape";
 const DEFAULT_INGEST = "http://127.0.0.1:8765";
 const DEFAULT_CONTROL = "http://127.0.0.1:8700";
-const LOG_KEY = "ucLog";
-const LOG_MAX = 200;
+// LOG_KEY / LOG_MAX / log(level, msg) live in src/shared/log.js and are
+// imported at the top of this file.
 const WATCHDOG_MIN = 7;          // re-nudge any open scraper tab whose loop died
 const KICK_DEBOUNCE_MS = 30000;  // don't re-nudge the same tab more often than this
 const BROWSER_UPLOAD_MAX_BYTES = 256 * 1024 * 1024;
@@ -110,16 +111,8 @@ const PAGE_RECOVERY_DELAY_WINDOWS_MS = [
 const HOME_NAV_HARD_REFRESH_PLATFORMS = new Set(["x", "threads", "lemon8"]);
 
 // ---- persistent logging --------------------------------------------------
-async function log(level, msg) {
-  const entry = { t: Date.now(), level, msg };
-  try {
-    const { [LOG_KEY]: cur = [] } = await chrome.storage.local.get(LOG_KEY);
-    cur.push(entry);
-    while (cur.length > LOG_MAX) cur.shift();
-    await chrome.storage.local.set({ [LOG_KEY]: cur });
-  } catch (e) {}
-  console.log(`[UC ${level}] ${msg}`);
-}
+// `log(level, msg)`, `LOG_KEY`, and `LOG_MAX` are imported from
+// src/shared/log.js — see the module for docstrings + rationale.
 async function setStatus(patch) {
   const { ucStatus = {} } = await chrome.storage.local.get("ucStatus");
   await chrome.storage.local.set({ ucStatus: { ...ucStatus, ...patch } });

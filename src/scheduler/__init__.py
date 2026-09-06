@@ -254,10 +254,8 @@ class Scheduler:
         # work stays inline here.
         # OSS enrichment automation runs via the handler registry
         # (see src/scheduler/handlers/recon_seed.py, phone_intel.py).
-        # Health-alert ticks (INTR-002, REL-004, REL-005 / INTR-003).
-        # Each is self-gated and idempotent; a failure is logged and never
-        # disturbs the main schedule loop.
-        await self._maybe_alert_watchdog_stale()
+        # Health-alert ticks (INTR-002, REL-004, REL-005 / INTR-003) now run
+        # via the handler registry (see src/scheduler/handlers/).
         # NOTE: maigret FP-blocklist refresh runs INSIDE the recon worker
         # (src/recon_spiderfoot_service.py::_fp_blocklist_refresh_loop) because
         # this scheduler container does not have the ``maigret`` binary on
@@ -266,64 +264,6 @@ class Scheduler:
     # ---- OSS-enrichment automation ticks (self-gated) ----
 
     # ---- Health-alert self-gated ticks (INTR-002, REL-004, REL-005 / INTR-003) ----
-
-    async def _maybe_alert_watchdog_stale(self):
-        """Escalate persistently-stale sources past the watchdog's own cooldown.
-
-        The freshness watchdog restarts stale realtime containers on a 30-min
-        cooldown, and only alerts on the first cycle after entering 'stale'.
-        Once its alert cooldown ticks, a persistent failure becomes invisible
-        (audit evidence: DM hook stale 35h with 'alert in cooldown' log line).
-        This tick catches that class by reading source_health directly and
-        emitting a distinct "still stale" alert.
-
-        Self-gated to `WATCHDOG_STALE_ALERT_INTERVAL_SECONDS` (default 6h).
-        Uses `updated_at` age > threshold (default 12h) as the escalation gate.
-        """
-        import time as _time
-        now = _time.monotonic()
-        interval = env_int("WATCHDOG_STALE_ALERT_INTERVAL_SECONDS", 21600, min_value=300)
-        threshold_hours = env_int("WATCHDOG_STALE_ALERT_THRESHOLD_HOURS", 12, min_value=1)
-        if now - getattr(self, "_last_stale_alert", 0) < interval:
-            return
-        try:
-            async with self.pool.acquire() as conn:
-                rows = await conn.fetch(
-                    """
-                    SELECT source, status, EXTRACT(EPOCH FROM (NOW() - updated_at))/3600 AS age_hours
-                    FROM source_health
-                    WHERE status IN ('degraded', 'stale', 'unhealthy')
-                       OR updated_at < NOW() - ($1 || ' hours')::interval
-                    ORDER BY updated_at ASC
-                    """,
-                    str(threshold_hours),
-                )
-        except Exception:
-            logger.debug("watchdog_stale probe query failed", exc_info=True)
-            return
-        stale = [
-            r for r in rows
-            if (r["status"] in ("degraded", "stale", "unhealthy"))
-            or (r["age_hours"] and r["age_hours"] > threshold_hours)
-        ]
-        if not stale:
-            return
-        self._last_stale_alert = now
-        try:
-            from src.notifications import telegram as tg
-            lines = [f"⚠️ <b>Watchdog still-stale escalation</b>"]
-            for r in stale[:10]:
-                lines.append(
-                    f"• <code>{r['source']}</code>: {r['status']} "
-                    f"(age {r['age_hours']:.1f}h)"
-                )
-            if len(stale) > 10:
-                lines.append(f"… and {len(stale) - 10} more.")
-            await tg.send("\n".join(lines))
-            logger.info("watchdog_stale escalation alert sent (n=%d)", len(stale))
-        except Exception:
-            logger.warning("watchdog_stale escalation alert send failed", exc_info=True)
-
 
     async def add_schedule(self, source: str, interval_hours: int = 24):
         if self.pool is None:

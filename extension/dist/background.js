@@ -18,6 +18,21 @@
     { id: "strava", label: "Strava", url: "https://www.strava.com/dashboard", host: "www.strava.com", cookieUrl: "https://www.strava.com", cookie: "_strava4_session", scraper: true }
   ];
 
+  // src/shared/log.js
+  var LOG_KEY = "ucLog";
+  var LOG_MAX = 200;
+  async function log(level, msg) {
+    const entry = { t: Date.now(), level, msg };
+    try {
+      const { [LOG_KEY]: cur = [] } = await chrome.storage.local.get(LOG_KEY);
+      cur.push(entry);
+      while (cur.length > LOG_MAX) cur.shift();
+      await chrome.storage.local.set({ [LOG_KEY]: cur });
+    } catch (e) {
+    }
+    console.log(`[UC ${level}] ${msg}`);
+  }
+
   // src/background.js
   self.addEventListener("error", (event) => {
     const detail = {
@@ -83,8 +98,6 @@
   var ALARM = "uc-scrape";
   var DEFAULT_INGEST = "http://127.0.0.1:8765";
   var DEFAULT_CONTROL = "http://127.0.0.1:8700";
-  var LOG_KEY = "ucLog";
-  var LOG_MAX = 200;
   var WATCHDOG_MIN = 7;
   var KICK_DEBOUNCE_MS = 3e4;
   var BROWSER_UPLOAD_MAX_BYTES = 256 * 1024 * 1024;
@@ -117,17 +130,6 @@
     [72e4, 12e5]
   ];
   var HOME_NAV_HARD_REFRESH_PLATFORMS = /* @__PURE__ */ new Set(["x", "threads", "lemon8"]);
-  async function log(level, msg) {
-    const entry = { t: Date.now(), level, msg };
-    try {
-      const { [LOG_KEY]: cur = [] } = await chrome.storage.local.get(LOG_KEY);
-      cur.push(entry);
-      while (cur.length > LOG_MAX) cur.shift();
-      await chrome.storage.local.set({ [LOG_KEY]: cur });
-    } catch (e) {
-    }
-    console.log(`[UC ${level}] ${msg}`);
-  }
   async function setStatus(patch) {
     const { ucStatus = {} } = await chrome.storage.local.get("ucStatus");
     await chrome.storage.local.set({ ucStatus: { ...ucStatus, ...patch } });

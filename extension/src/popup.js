@@ -1,3 +1,5 @@
+import { clearLog, readLog } from "./shared/log.js";
+
 const $ = (id) => document.getElementById(id);
 const DEFAULT_INGEST = "http://127.0.0.1:8765";
 const SCRAPER_URLS = [
@@ -63,7 +65,7 @@ async function renderStatus() {
 }
 
 async function renderLog() {
-  const { ucLog = [] } = await chrome.storage.local.get("ucLog");
+  const ucLog = await readLog();
   const el = $("log");
   const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
   el.innerHTML = ucLog
@@ -89,12 +91,12 @@ $("save").addEventListener("click", async () => {
 });
 
 $("clear").addEventListener("click", async () => {
-  await chrome.storage.local.set({ ucLog: [] });
+  await clearLog();
   renderLog();
 });
 
 $("copy").addEventListener("click", async () => {
-  const { ucLog = [] } = await chrome.storage.local.get("ucLog");
+  const ucLog = await readLog();
   const text = ucLog.map((e) => `${hhmmss(e.t)} [${e.level}] ${e.msg}`).join("\n");
   try {
     await navigator.clipboard.writeText(text);
