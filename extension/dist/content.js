@@ -1,5 +1,36 @@
 "use strict";
 (() => {
+  // src/shared/storage_helpers.js
+  var lsGet = (k, d) => {
+    try {
+      const v = localStorage.getItem(k);
+      return v == null ? d : v;
+    } catch (e) {
+      return d;
+    }
+  };
+  var lsSet = (k, v) => {
+    try {
+      localStorage.setItem(k, v);
+    } catch (e) {
+    }
+  };
+  var lsNum = (k) => {
+    const n = parseInt(lsGet(k, "0"), 10);
+    return Number.isFinite(n) ? n : 0;
+  };
+  var lsBump = (k) => {
+    const n = lsNum(k) + 1;
+    lsSet(k, String(n));
+    return n;
+  };
+  function lsBoundedInt(key, fallback, min, max) {
+    const raw = lsGet(key, "");
+    const n = raw === "" ? fallback : parseInt(raw, 10);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.max(min, Math.min(max, n));
+  }
+
   // src/shared/throttle.js
   var DEFAULT_THROTTLE_BACKOFF_MINS = {
     instagram: 75,
@@ -17,7 +48,7 @@
   function _requireDeps() {
     if (!_deps) {
       throw new Error(
-        "shared/throttle: initThrottle({ lsGet, lsSet, lsNum, lsBoundedInt, cooldownIdentity, send }) must be called before use."
+        "shared/throttle: initThrottle({ cooldownIdentity, send }) must be called before use."
       );
     }
     return _deps;
@@ -29,19 +60,16 @@
     return "uc_wall_" + platform + "_" + ident;
   }
   function wallLeftMs(platform, identity) {
-    const deps = _requireDeps();
-    const keyed = deps.lsNum(wallKey(platform, identity));
-    const legacy = deps.lsNum("uc_wall_" + platform);
+    const keyed = lsNum(wallKey(platform, identity));
+    const legacy = lsNum("uc_wall_" + platform);
     return Math.max(0, Math.max(keyed, legacy) - Date.now());
   }
   function setWall(platform, mins, identity) {
-    const deps = _requireDeps();
-    deps.lsSet(wallKey(platform, identity), String(Date.now() + mins * 6e4));
+    lsSet(wallKey(platform, identity), String(Date.now() + mins * 6e4));
   }
   async function throttleBackoffMins(platform, fallback = DEFAULT_THROTTLE_BACKOFF_MINS.default) {
-    const deps = _requireDeps();
-    if (platform === "instagram" && deps.lsGet("ucIg429CooldownMinutes", "") !== "") {
-      return deps.lsBoundedInt("ucIg429CooldownMinutes", DEFAULT_THROTTLE_BACKOFF_MINS.instagram, 45, 180);
+    if (platform === "instagram" && lsGet("ucIg429CooldownMinutes", "") !== "") {
+      return lsBoundedInt("ucIg429CooldownMinutes", DEFAULT_THROTTLE_BACKOFF_MINS.instagram, 45, 180);
     }
     try {
       const { ucThrottleBackoffMins = {} } = await chrome.storage.local.get("ucThrottleBackoffMins");
@@ -180,43 +208,10 @@
     }
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const jitter = (base) => base + Math.random() * base;
-    const lsGet = (k, d) => {
-      try {
-        const v = localStorage.getItem(k);
-        return v == null ? d : v;
-      } catch (e) {
-        return d;
-      }
-    };
-    const lsSet = (k, v) => {
-      try {
-        localStorage.setItem(k, v);
-      } catch (e) {
-      }
-    };
-    const lsNum = (k) => {
-      const n = parseInt(lsGet(k, "0"), 10);
-      return Number.isFinite(n) ? n : 0;
-    };
-    const lsBump = (k) => {
-      const n = lsNum(k) + 1;
-      lsSet(k, String(n));
-      return n;
-    };
-    function lsBoundedInt(key, fallback, min, max) {
-      const raw = lsGet(key, "");
-      const n = raw === "" ? fallback : parseInt(raw, 10);
-      if (!Number.isFinite(n)) return fallback;
-      return Math.max(min, Math.min(max, n));
-    }
     function cooldownIdentity2(platform) {
       return cooldownIdentity(platform, { strava: stravaLoggedInOwner });
     }
     initThrottle({
-      lsGet,
-      lsSet,
-      lsNum,
-      lsBoundedInt,
       cooldownIdentity: cooldownIdentity2,
       send: (msg) => send(msg)
     });

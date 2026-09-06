@@ -16,6 +16,13 @@ import {
   threadsLoggedInOwner,
   xLoggedInOwner,
 } from "./shared/cooldown.js";
+import {
+  lsBoundedInt,
+  lsBump,
+  lsGet,
+  lsNum,
+  lsSet,
+} from "./shared/storage_helpers.js";
 
 (() => {
 const UC_CONTENT_VERSION = (() => {
@@ -66,19 +73,12 @@ function ucContentScriptCurrent() {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const jitter = (base) => base + Math.random() * base;
 
-// Per-origin persisted state. Our following/foryou rotation + profile-visit queue
-// need to survive the page reloads that navigation causes, so we stash counters in
-// localStorage (scoped to the platform's origin, so no cross-talk between sites).
-const lsGet = (k, d) => { try { const v = localStorage.getItem(k); return v == null ? d : v; } catch (e) { return d; } };
-const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} };
-const lsNum = (k) => { const n = parseInt(lsGet(k, "0"), 10); return Number.isFinite(n) ? n : 0; };
-const lsBump = (k) => { const n = lsNum(k) + 1; lsSet(k, String(n)); return n; };
-function lsBoundedInt(key, fallback, min, max) {
-  const raw = lsGet(key, "");
-  const n = raw === "" ? fallback : parseInt(raw, 10);
-  if (!Number.isFinite(n)) return fallback;
-  return Math.max(min, Math.min(max, n));
-}
+// lsGet / lsSet / lsNum / lsBump / lsBoundedInt live in
+// src/shared/storage_helpers.js — imported at the top of this file.
+// They're the per-origin persisted state helpers: our following/foryou
+// rotation + profile-visit queue survive the page reloads that navigation
+// causes, so counters go through these (scoped to the platform's origin,
+// so no cross-talk between sites).
 
 // PERSISTENT throttle wall (anti-ban). Store by platform + visible owner where
 // possible, with the old platform-only key as a legacy fallback.
@@ -92,12 +92,10 @@ function cooldownIdentity(platform) {
 }
 // setWall / wallLeftMs / applyThrottleWall / DEFAULT_THROTTLE_BACKOFF_MINS
 // now live in src/shared/throttle.js. initThrottle wires them to this file's
-// storage + identity + send primitives at content-script boot.
+// identity resolver + send client at content-script boot. Storage helpers
+// (lsGet / lsSet / lsNum / lsBoundedInt) are imported directly by
+// shared/throttle.js from shared/storage_helpers.js.
 initThrottle({
-  lsGet,
-  lsSet,
-  lsNum,
-  lsBoundedInt,
   cooldownIdentity,
   send: (msg) => send(msg),
 });

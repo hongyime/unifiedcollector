@@ -6,12 +6,14 @@
 // While Date.now() < wall, the content script pauses that platform's
 // scrape cycle. Walls survive tab reloads and full browser restarts.
 //
-// Dependencies (localStorage helpers, cooldown-identity resolver, and the
-// runtime-message `send` client) are injected via `initThrottle` because
-// steps 9-12 of the bundler rollout have not yet landed at the point this
-// module was extracted — see docs/plans/extension-bundler.md. Once
-// shared/storage_helpers and shared/cooldown ship, this module can import
-// them directly and drop the injected-deps pattern.
+// Storage helpers now come from shared/storage_helpers.js (extracted in
+// step 12 of docs/plans/extension-bundler.md). The `cooldownIdentity` and
+// runtime-message `send` dependencies remain injected via `initThrottle`
+// because they still live in content.js — the cooldown module exposes
+// `cooldownIdentity`, but Strava's identity walk depends on a
+// content-script utility, so content.js supplies a bound closure.
+
+import { lsBoundedInt, lsGet, lsNum, lsSet } from "./storage_helpers.js";
 
 export const DEFAULT_THROTTLE_BACKOFF_MINS = {
   instagram: 75,
@@ -26,15 +28,11 @@ export const DEFAULT_THROTTLE_BACKOFF_MINS = {
 let _deps = null;
 
 /**
- * Provide the localStorage helpers, the platform → account resolver, and
- * the runtime-message send client that the throttle primitives call into.
- * Must be invoked before any of the exported functions are used.
+ * Provide the platform → account resolver and the runtime-message send
+ * client that the throttle primitives call into. Must be invoked before
+ * any of the exported functions are used.
  *
  * @param {{
- *   lsGet: (k: string, d: string) => string,
- *   lsSet: (k: string, v: string) => void,
- *   lsNum: (k: string) => number,
- *   lsBoundedInt: (k: string, fallback: number, min: number, max: number) => number,
  *   cooldownIdentity: (platform: string) => string,
  *   send: (msg: object) => Promise<any>,
  * }} deps
@@ -46,7 +44,7 @@ export function initThrottle(deps) {
 function _requireDeps() {
   if (!_deps) {
     throw new Error(
-      "shared/throttle: initThrottle({ lsGet, lsSet, lsNum, lsBoundedInt, cooldownIdentity, send }) must be called before use.",
+      "shared/throttle: initThrottle({ cooldownIdentity, send }) must be called before use.",
     );
   }
   return _deps;
@@ -64,15 +62,13 @@ export function wallKey(platform, identity) {
 }
 
 export function wallLeftMs(platform, identity) {
-  const deps = _requireDeps();
-  const keyed = deps.lsNum(wallKey(platform, identity));
-  const legacy = deps.lsNum("uc_wall_" + platform);
+  const keyed = lsNum(wallKey(platform, identity));
+  const legacy = lsNum("uc_wall_" + platform);
   return Math.max(0, Math.max(keyed, legacy) - Date.now());
 }
 
 export function setWall(platform, mins, identity) {
-  const deps = _requireDeps();
-  deps.lsSet(wallKey(platform, identity), String(Date.now() + mins * 60000));
+  lsSet(wallKey(platform, identity), String(Date.now() + mins * 60000));
 }
 
 // Config-driven throttle walls. Override from DevTools / options with:
@@ -80,9 +76,8 @@ export function setWall(platform, mins, identity) {
 // Instagram stays deliberately cautious at 75m by default; shortening it
 // aggressively re-extends the account/IP throttle window and raises ban risk.
 async function throttleBackoffMins(platform, fallback = DEFAULT_THROTTLE_BACKOFF_MINS.default) {
-  const deps = _requireDeps();
-  if (platform === "instagram" && deps.lsGet("ucIg429CooldownMinutes", "") !== "") {
-    return deps.lsBoundedInt("ucIg429CooldownMinutes", DEFAULT_THROTTLE_BACKOFF_MINS.instagram, 45, 180);
+  if (platform === "instagram" && lsGet("ucIg429CooldownMinutes", "") !== "") {
+    return lsBoundedInt("ucIg429CooldownMinutes", DEFAULT_THROTTLE_BACKOFF_MINS.instagram, 45, 180);
   }
   try {
     const { ucThrottleBackoffMins = {} } = await chrome.storage.local.get("ucThrottleBackoffMins");
