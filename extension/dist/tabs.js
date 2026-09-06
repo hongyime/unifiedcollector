@@ -1,6 +1,6 @@
 "use strict";
 (() => {
-  // tabs.js
+  // src/tabs.js
   var $ = (id) => document.getElementById(id);
   var EXPANDED_PLATFORM_TABS_KEY = "ucOpenExpandedPlatformTabs";
   var lastDiag = null;

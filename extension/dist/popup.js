@@ -1,6 +1,6 @@
 "use strict";
 (() => {
-  // popup.js
+  // src/popup.js
   var $ = (id) => document.getElementById(id);
   var DEFAULT_INGEST = "http://127.0.0.1:8765";
   var SCRAPER_URLS = [

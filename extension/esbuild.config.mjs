@@ -36,9 +36,15 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const entries = [
   { name: "content", entry: resolve(__dirname, "src/content.js"), sourcemap: "linked" },
   { name: "background", entry: resolve(__dirname, "src/background.js"), sourcemap: "linked" },
-  { name: "inject", entry: resolve(__dirname, "inject.js"), sourcemap: false },
-  { name: "popup", entry: resolve(__dirname, "popup.js"), sourcemap: false },
-  { name: "tabs", entry: resolve(__dirname, "tabs.js"), sourcemap: false },
+  { name: "inject", entry: resolve(__dirname, "src/inject.js"), sourcemap: false },
+  { name: "popup", entry: resolve(__dirname, "src/popup.js"), sourcemap: false },
+  { name: "tabs", entry: resolve(__dirname, "src/tabs.js"), sourcemap: false },
+  // platforms.js is loaded standalone by tabs.html via <script src=...>. It
+  // sets globalThis.UC_PLATFORMS and has no imports today. A step 7 refactor
+  // will fold it into src/shared/ and bundle it into tabs; until then it needs
+  // its own dist output so tabs.html can reference dist/platforms.js after the
+  // top-level file is deleted.
+  { name: "platforms", entry: resolve(__dirname, "src/platforms.js"), sourcemap: false },
 ];
 
 const watch = process.argv.includes("--watch");
