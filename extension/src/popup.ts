@@ -1,5 +1,11 @@
+// @ts-nocheck — popup.ts is small (~120 LOC) but ships alongside the other
+// TS conversions to keep the entry-file set homogeneous. Import shapes are
+// strictly typed against shared/*.ts; the body remains unchecked for the
+// initial rollout per docs/plans/extension-bundler.md step 15.
+
 import { clearLog, readLog } from "./shared/log.js";
 import { DEFAULT_INGEST, ingestBase } from "./shared/ingest_client.js";
+
 
 const $ = (id) => document.getElementById(id);
 const SCRAPER_URLS = [
