@@ -453,6 +453,7 @@ services:
     env_file:
       - ../.env
       - ./env/common.env
+      - ./env/telegram_notify.env
     depends_on:
       postgres:
         condition: service_healthy
@@ -1036,6 +1037,7 @@ services:
     env_file:
       - ../.env
       - ./env/common.env
+      - ./env/telegram_notify.env
     healthcheck:
       test: ["CMD", "python", "-m", "src.core.health"]
       interval: 60s
@@ -1115,6 +1117,7 @@ services:
     env_file:
       - ../.env
       - ./env/common.env
+      - ./env/telegram_notify.env
     healthcheck:
       # Lightweight import check — the drain has no HTTP port. Failure here
       # means the module doesn't even import (i.e. code broke).
@@ -1228,6 +1231,7 @@ services:
     env_file:
       - ../.env
       - ./env/common.env
+      - ./env/telegram_notify.env
     volumes:
       - z:/unifiedcollector/backups/db:/zbackups
       - z:/unifiedcollector:/vault
