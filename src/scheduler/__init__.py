@@ -257,7 +257,6 @@ class Scheduler:
         # OSS enrichment automation (self-gated, env-tunable intervals).
         # Each is idempotent and best-effort — failures are logged but never
         # disturb the main schedule loop.
-        await self._maybe_seed_recon_targets()
         await self._maybe_run_phone_intel()
         # Health-alert ticks (INTR-002, REL-004, REL-005 / INTR-003).
         # Each is self-gated and idempotent; a failure is logged and never
@@ -461,46 +460,6 @@ class Scheduler:
             logger.warning("graph_edges build failed", exc_info=True)
 
     # ---- OSS-enrichment automation ticks (self-gated) ----
-
-    async def _maybe_seed_recon_targets(self):
-        """Periodically enqueue username targets from social_users -> recon_targets.
-
-        The recon worker (unifiedcollector_spiderfoot) continuously drains
-        recon_targets and, when scope.modules=['maigret'] (or
-        RECON_USERNAME_ENGINE=maigret env), runs maigret against each. So all
-        we need here is to keep the queue fed. Idempotent by design: the
-        underlying seed path relies on ``queue_recon_target`` dedupe.
-
-        Default cadence 6h. Bound per-cycle so the queue fills gradually
-        rather than one giant dump.
-        """
-        import time as _time
-        now = _time.monotonic()
-        interval = env_int("RECON_SEED_INTERVAL_SECONDS", 21600, min_value=300)
-        per_source = env_int("RECON_SEED_PER_SOURCE_LIMIT", 200, min_value=1)
-        total = env_int("RECON_SEED_TOTAL_LIMIT", 2000, min_value=1)
-        if now - getattr(self, "_last_recon_seed", 0) < interval:
-            return
-        self._last_recon_seed = now
-        try:
-            from src.core.recon_seed import seed_recon_targets_from_collector
-            async with self.pool.acquire() as conn:
-                report = await seed_recon_targets_from_collector(
-                    conn,
-                    include_domains=False,
-                    include_urls=False,
-                    include_usernames=True,
-                    per_source_limit=per_source,
-                    total_limit=total,
-                    priority=7,
-                    dry_run=False,
-                )
-            logger.info(
-                "recon_seed tick: candidates=%s queued=%s skipped=%s",
-                report.get("candidates"), report.get("queued"), report.get("skipped"),
-            )
-        except Exception:
-            logger.warning("recon_seed tick failed", exc_info=True)
 
     async def _maybe_run_phone_intel(self):
         """Periodically enrich WhatsApp phone JIDs via offline phonenumbers lib.

@@ -11,7 +11,6 @@ import, no edits to a monolithic ``_tick``.
 
 TODO (follow-up sprint, docs/plans/scheduler-refactor.md steps 6-15):
   - BuildGraphEdgesHandler           (`_build_graph_edges`)
-  - ReconSeedHandler                 (`_maybe_seed_recon_targets`)
   - PhoneIntelHandler                (`_maybe_run_phone_intel`)
   - BridgeUnpairedAlertHandler       (`_maybe_alert_bridge_unpaired`)
   - RealtimeFeedAlertHandler         (`_maybe_alert_realtime_feed_failed`)
@@ -24,6 +23,7 @@ from .base import PeriodicHandler, SchedulerContext
 from .cookie_check import CookieCheckHandler
 from .gc_collection_runs import GcCollectionRunsHandler
 from .heartbeat import HeartbeatHandler
+from .recon_seed import ReconSeedHandler
 from .reconcile_identities import ReconcileIdentitiesHandler
 from .status_delta import StatusDeltaHandler
 
@@ -33,6 +33,7 @@ HANDLERS: list[PeriodicHandler] = [
     ReconcileIdentitiesHandler(),
     CookieCheckHandler(),
     GcCollectionRunsHandler(),
+    ReconSeedHandler(),
 ]
 
 __all__ = [
@@ -44,4 +45,5 @@ __all__ = [
     "ReconcileIdentitiesHandler",
     "CookieCheckHandler",
     "GcCollectionRunsHandler",
+    "ReconSeedHandler",
 ]
