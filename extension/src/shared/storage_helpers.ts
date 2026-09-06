@@ -7,7 +7,7 @@
 // storage is blocked (private-mode Facebook, some Instagram edge shells).
 
 /** Get a string from localStorage, returning `d` if absent or unreadable. */
-export const lsGet = (k, d) => {
+export const lsGet = (k: string, d: string): string => {
   try {
     const v = localStorage.getItem(k);
     return v == null ? d : v;
@@ -17,20 +17,20 @@ export const lsGet = (k, d) => {
 };
 
 /** Set a string in localStorage, silently no-op on quota / block. */
-export const lsSet = (k, v) => {
+export const lsSet = (k: string, v: string): void => {
   try {
     localStorage.setItem(k, v);
   } catch (e) { /* quota / blocked */ }
 };
 
 /** Parse an integer stored under `k`, defaulting to 0. */
-export const lsNum = (k) => {
+export const lsNum = (k: string): number => {
   const n = parseInt(lsGet(k, "0"), 10);
   return Number.isFinite(n) ? n : 0;
 };
 
 /** Increment the integer stored under `k` by 1 and return the new value. */
-export const lsBump = (k) => {
+export const lsBump = (k: string): number => {
   const n = lsNum(k) + 1;
   lsSet(k, String(n));
   return n;
@@ -40,7 +40,7 @@ export const lsBump = (k) => {
  * Read an integer from localStorage, clamping to `[min, max]` and falling
  * back to `fallback` when the key is missing or unparsable.
  */
-export function lsBoundedInt(key, fallback, min, max) {
+export function lsBoundedInt(key: string, fallback: number, min: number, max: number): number {
   const raw = lsGet(key, "");
   const n = raw === "" ? fallback : parseInt(raw, 10);
   if (!Number.isFinite(n)) return fallback;
