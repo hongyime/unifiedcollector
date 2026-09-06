@@ -106,6 +106,7 @@ from src.collectors.telegram.session import (  # noqa: E402,F401 — re-export
 # inheritance so the pre-split public method surface is preserved.
 # ──────────────────────────────────────────────────────────────────────────
 from src.collectors.telegram.mixins.backfill import BackfillMixin
+from src.collectors.telegram.mixins.dialogs import DialogsMixin
 from src.collectors.telegram.mixins.realtime import RealtimeMixin
 
 
@@ -114,7 +115,7 @@ from src.collectors.telegram.mixins.realtime import RealtimeMixin
 # ──────────────────────────────────────────────────────────────────────────
 
 
-class TelegramCollector(BackfillMixin, RealtimeMixin, BaseCollector):
+class TelegramCollector(BackfillMixin, RealtimeMixin, DialogsMixin, BaseCollector):
     SOURCE_NAME = "telegram"
     INGEST_PATH = "messaging"  # realtime messaging path (P2 review §3 provenance)
 
@@ -4051,65 +4052,6 @@ class TelegramCollector(BackfillMixin, RealtimeMixin, BaseCollector):
         downloadable media.
         """
         return _parse_extract_file_info(message)
-
-    # ==================================================================
-    # Dialog enumeration — cherry-picked from
-    # telegramtoolkit/src/core/scan_targets.py (iter_dialogs pattern)
-    # ==================================================================
-
-    async def collect_dialogs(self) -> list[dict]:
-        """Enumerate joined dialogs across all workers and upsert telegram_chats.
-
-        Returns a deduplicated list of {platform_chat_id, title, type} dicts.
-        Workers running in parallel will see the same shared chats; we
-        dedupe by platform_chat_id so we only INSERT each one once.
-        """
-        if not self._workers:
-            self._workers = await self._spawn_workers()
-        if not self._workers:
-            logger.error("collect_dialogs: no Telegram workers — bailing")
-            return []
-
-        seen: dict[str, dict] = {}
-        for worker in self._workers:
-            if self._stop.is_set():
-                break
-            try:
-                async for dialog in worker.client.iter_dialogs():
-                    entity = getattr(dialog, "entity", None)
-                    if entity is None:
-                        continue
-                    cid = str(getattr(entity, "id", ""))
-                    if not cid or cid in seen:
-                        continue
-                    # Upsert into telegram_chats.
-                    try:
-                        await self._upsert_chat(entity)
-                    except Exception as exc:
-                        logger.debug("upsert_chat failed for %s: %s", cid, exc)
-                    if getattr(entity, "broadcast", False):
-                        chat_type = "channel"
-                    elif getattr(entity, "megagroup", False):
-                        chat_type = "supergroup"
-                    elif hasattr(entity, "title"):
-                        chat_type = "group"
-                    else:
-                        chat_type = "private"
-                    seen[cid] = {
-                        "platform_chat_id": cid,
-                        "title": getattr(entity, "title", None)
-                                 or getattr(entity, "username", None)
-                                 or cid,
-                        "type": chat_type,
-                    }
-            except Exception as exc:
-                logger.error(
-                    "[worker=%d account=%s] collect_dialogs failed: %s",
-                    worker.worker_id, worker.account.name, exc,
-                )
-
-        logger.info("collect_dialogs: %d unique dialog(s)", len(seen))
-        return list(seen.values())
 
     # ==================================================================
     # Common-chat / chat-members refresh — daily 03:00 SGT cron
