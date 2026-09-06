@@ -1,6 +1,6 @@
 "use strict";
 (() => {
-  // src/shared/storage_helpers.js
+  // src/shared/storage_helpers.ts
   var lsGet = (k, d) => {
     try {
       const v = localStorage.getItem(k);
@@ -31,7 +31,7 @@
     return Math.max(min, Math.min(max, n));
   }
 
-  // src/shared/throttle.js
+  // src/shared/throttle.ts
   var DEFAULT_THROTTLE_BACKOFF_MINS = {
     instagram: 75,
     threads: 20,

@@ -6,7 +6,7 @@
 // While Date.now() < wall, the content script pauses that platform's
 // scrape cycle. Walls survive tab reloads and full browser restarts.
 //
-// Storage helpers now come from shared/storage_helpers.js (extracted in
+// Storage helpers now come from shared/storage_helpers.ts (extracted in
 // step 12 of docs/plans/extension-bundler.md). The `cooldownIdentity` and
 // runtime-message `send` dependencies remain injected via `initThrottle`
 // because they still live in content.js — the cooldown module exposes
@@ -15,7 +15,25 @@
 
 import { lsBoundedInt, lsGet, lsNum, lsSet } from "./storage_helpers.js";
 
-export const DEFAULT_THROTTLE_BACKOFF_MINS = {
+// Chrome extension API globals — full typings would pull in @types/chrome
+// (~2 MiB dep). The pilot uses `any` here so the module compiles cleanly
+// under strict mode; step 15 files (background/content/inject/popup/tabs)
+// will keep `// @ts-nocheck` initially per the plan.
+declare const chrome: any;
+
+/** Per-platform backoff (in minutes) applied on a soft 429 or throttle signal. */
+export interface ThrottleBackoffTable {
+  readonly instagram: number;
+  readonly threads: number;
+  readonly x: number;
+  readonly tiktok: number;
+  readonly facebook: number;
+  readonly lemon8: number;
+  readonly default: number;
+  readonly [platform: string]: number;
+}
+
+export const DEFAULT_THROTTLE_BACKOFF_MINS: ThrottleBackoffTable = {
   instagram: 75,
   threads: 20,
   x: 40,
@@ -25,23 +43,25 @@ export const DEFAULT_THROTTLE_BACKOFF_MINS = {
   default: 35,
 };
 
-let _deps = null;
+export interface ThrottleDeps {
+  /** Returns the current per-platform account identity, or "" if unknown. */
+  cooldownIdentity: (platform: string) => string;
+  /** Runtime-message send client (matches content.js's send()). */
+  send: (msg: object) => Promise<unknown>;
+}
+
+let _deps: ThrottleDeps | null = null;
 
 /**
  * Provide the platform → account resolver and the runtime-message send
  * client that the throttle primitives call into. Must be invoked before
  * any of the exported functions are used.
- *
- * @param {{
- *   cooldownIdentity: (platform: string) => string,
- *   send: (msg: object) => Promise<any>,
- * }} deps
  */
-export function initThrottle(deps) {
+export function initThrottle(deps: ThrottleDeps): void {
   _deps = deps;
 }
 
-function _requireDeps() {
+function _requireDeps(): ThrottleDeps {
   if (!_deps) {
     throw new Error(
       "shared/throttle: initThrottle({ cooldownIdentity, send }) must be called before use.",
@@ -50,7 +70,7 @@ function _requireDeps() {
   return _deps;
 }
 
-export function wallKey(platform, identity) {
+export function wallKey(platform: string, identity?: string | null): string {
   const deps = _requireDeps();
   const raw = identity || (deps.cooldownIdentity && deps.cooldownIdentity(platform)) || "global";
   const ident = String(raw)
@@ -61,13 +81,13 @@ export function wallKey(platform, identity) {
   return "uc_wall_" + platform + "_" + ident;
 }
 
-export function wallLeftMs(platform, identity) {
+export function wallLeftMs(platform: string, identity?: string | null): number {
   const keyed = lsNum(wallKey(platform, identity));
   const legacy = lsNum("uc_wall_" + platform);
   return Math.max(0, Math.max(keyed, legacy) - Date.now());
 }
 
-export function setWall(platform, mins, identity) {
+export function setWall(platform: string, mins: number, identity?: string | null): void {
   lsSet(wallKey(platform, identity), String(Date.now() + mins * 60000));
 }
 
@@ -75,7 +95,7 @@ export function setWall(platform, mins, identity) {
 //   chrome.storage.local.set({ ucThrottleBackoffMins: { x: 12, threads: 12 } })
 // Instagram stays deliberately cautious at 75m by default; shortening it
 // aggressively re-extends the account/IP throttle window and raises ban risk.
-async function throttleBackoffMins(platform, fallback = DEFAULT_THROTTLE_BACKOFF_MINS.default) {
+async function throttleBackoffMins(platform: string, fallback: number = DEFAULT_THROTTLE_BACKOFF_MINS.default): Promise<number> {
   if (platform === "instagram" && lsGet("ucIg429CooldownMinutes", "") !== "") {
     return lsBoundedInt("ucIg429CooldownMinutes", DEFAULT_THROTTLE_BACKOFF_MINS.instagram, 45, 180);
   }
@@ -88,7 +108,7 @@ async function throttleBackoffMins(platform, fallback = DEFAULT_THROTTLE_BACKOFF
   return DEFAULT_THROTTLE_BACKOFF_MINS[platform] || fallback;
 }
 
-export async function applyThrottleWall(platform, reason) {
+export async function applyThrottleWall(platform: string, reason: string): Promise<number> {
   const deps = _requireDeps();
   const mins = await throttleBackoffMins(platform);
   const wallMins = Math.max(1, Math.round(mins * (0.85 + Math.random() * 0.45)));
