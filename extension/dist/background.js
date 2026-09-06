@@ -18,7 +18,7 @@
     { id: "strava", label: "Strava", url: "https://www.strava.com/dashboard", host: "www.strava.com", cookieUrl: "https://www.strava.com", cookie: "_strava4_session", scraper: true }
   ];
 
-  // src/shared/log.js
+  // src/shared/log.ts
   var LOG_KEY = "ucLog";
   var LOG_MAX = 200;
   async function log(level, msg) {
@@ -33,7 +33,7 @@
     console.log(`[UC ${level}] ${msg}`);
   }
 
-  // src/shared/ingest_client.js
+  // src/shared/ingest_client.ts
   var DEFAULT_INGEST = "http://127.0.0.1:8765";
   var DEFAULT_CONTROL = "http://127.0.0.1:8700";
   var _cachedIngestBase = null;
@@ -90,7 +90,7 @@
     }
   }
 
-  // src/background.js
+  // src/background.ts
   self.addEventListener("error", (event) => {
     const detail = {
       kind: "sw_error_event",

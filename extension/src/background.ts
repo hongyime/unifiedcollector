@@ -1,3 +1,9 @@
+// @ts-nocheck — background.ts is the second-largest bundle entry (~2900
+// LOC). Per docs/plans/extension-bundler.md step 15 we keep bodies
+// unchecked at the initial TS conversion so import shapes are strictly
+// typed (validated by shared/*.ts) without blocking the rollout on a
+// full-strict pass. A follow-up pass will remove @ts-nocheck file-by-file.
+
 // UnifiedCollector Social Bridge — background service worker (MV3).
 //
 // MV3 service workers are EPHEMERAL: Chrome sleeps them after ~30s idle. So we
