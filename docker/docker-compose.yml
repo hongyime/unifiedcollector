@@ -1,5 +1,19 @@
 name: unifiedcollector
 
+# SECURITY NOTE (SEC-004): several collector services carry `cap_add: SYS_PTRACE`
+# to allow py-spy attach for the SIGCHLD-wedge diagnostics documented in
+# collector_youtube/collector_tiktok comments. This broadens the container's
+# capability set slightly. It is retained deliberately because:
+#   - the rig is single-tenant on the operator's host,
+#   - py-spy is the only tool that has successfully caught the WSL2 SIGCHLD
+#     wedges (see git-log for the freeze fix commits), and
+#   - Docker Compose does not support conditional cap_add without a full
+#     override-file split.
+# To disable PTRACE across the stack: remove every `SYS_PTRACE` line below,
+# then `docker compose up -d`. To split into a security-hardened base + a
+# debug overlay, create docker-compose.debug.yml with the cap_add blocks and
+# strip them from this file. Track under SEC-004.
+
 services:
   postgres:
     image: pgvector/pgvector:pg16

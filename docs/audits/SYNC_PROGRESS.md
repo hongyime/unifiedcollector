@@ -44,3 +44,15 @@ Deploy analyzer: `docker compose -f C:\unifiedanalyzer\docker\docker-compose.yml
 - #38 media tombstone: IN PROGRESS. Host sweep (beu2ff5t2) checking 529,626 media_items file_paths against Z:\unifiedcollector\media (root ONLINE, so misses=genuinely gone). Missing ids -> tmp/media_missing_ids.txt. THEN batch UPDATE media_items SET metadata||{'missing_at':now} (NO status col; metadata-based, no migration). lemon8 NOT blanket-gone (34k files exist, old rows point at deleted files -> per-file sweep needed).
 - #38 media tombstone: DONE. collector 35f14f0 (scripts/tombstone_missing_media.py). Swept 529,626 paths -> 99,083 gone -> tagged metadata.missing_at (idempotent). Per-source missing: search41%/website47%/youtube39%/beeper77%/tiktok37.5%/lemon75%; telegram/instagram/github/whatsapp/strava/threads/x = 0% (fully intact = root online + sweep accurate). Reusable script committed.
 - STATUS: ALL 12 SYNC TASKS DONE (#30-#41). Collector<->analyzer harmonization complete.
+
+
+- CORRECTION (2026-09-06 audit): the "#40 identity contract: ... telegram is_bot
+  capture documented as known-gap (NOT implemented)" line below is stale. The
+  live DB confirms `telegram_users.is_bot` column IS present (via applied
+  migration `add_telegram_is_bot.sql`) and `_upsert_user_full` in
+  `src/collectors/telegram/__init__.py:2350` DOES set it from Telethon
+  `User.bot`. Live counts at audit time: 553 bots, 35,410 not-bots, 139,424
+  NULL (users seen once before the column existed). Defensive backfill
+  migration `20260906_backfill_telegram_is_bot_from_username.sql` added for
+  clean-volume rebuilds. `docs/contracts/IDENTITY_KEYS.md` already documents
+  the column correctly.

@@ -1,9 +1,16 @@
 # requirements.lock — exact pins for reproducible builds (P1-3)
 #
 # Generated from the versions actually installed in the known-good running
-# collector container (2026-05-30). These are PROVEN versions the system runs
-# on. requirements.txt remains the human-readable source with >= ranges; this
+# collector container. These are PROVEN versions the system runs on.
+# requirements.txt remains the human-readable source with >= ranges; this
 # lock is what the Docker image and CI install for reproducibility.
+#
+# Verification history:
+#   - 2026-05-30: initial pins from live container
+#   - 2026-09-06: PERF-005 audit sweep — spot-checked direct pins against a
+#     fresh `pip freeze` inside unifiedcollector_collector; all 30 direct pins
+#     below match the live container. No drift; no updates required. Transitive
+#     dependencies not pinned here by design (kept human-readable).
 #
 # To refresh after an intentional upgrade:
 #   docker exec unifiedcollector_collector pip freeze > /tmp/freeze.txt
