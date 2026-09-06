@@ -12,6 +12,30 @@ import uuid as _uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+# ---------------------------------------------------------------------------
+# PERF-002 sub-plan 4A — package split status.
+#
+# Completed sub-steps (this sprint):
+#   1. api/__init__.py package skeleton (git mv)
+#   2. api/helpers.py — module-level caches + pure helpers
+#   3. api/health_helpers.py — vault/backup/drive health payloads
+#   4. api/auth.py — JWT/bcrypt/login (router-mounted)
+#
+# TODO — remaining sub-steps for the next sprint
+# (see docs/plans/perf-file-splits.md sub-plan 4A steps 5–13):
+#   5.  api/browser.py       — _extension_* / _browser_tab_* / _browser_extension_*
+#                              / _browser_ingest_health_* helpers + routes
+#   6.  api/source_matrix.py — /api/source_matrix routes + _SOURCE_MATRIX_* callers
+#   7.  api/telegram_ops.py  — /api/telegram/* routes
+#   8.  api/strava.py        — /api/strava/* routes
+#   9.  api/youtube.py       — /api/youtube/* routes
+#   10. api/whatsapp.py      — /api/whatsapp/* routes
+#   11. api/coverage.py + api/media.py — /api/coverage + /api/media
+#   12. api/rate_limits.py   — /api/rate-limits/*
+#   13. Reduce this file to app assembly (<300 LOC): FastAPI() + middleware
+#       + include_router calls + shared Depends glue.
+# ---------------------------------------------------------------------------
+
 import bcrypt
 import jwt
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
@@ -4028,26 +4052,24 @@ app.add_middleware(
 
 DIST_DIR = Path(__file__).resolve().parent.parent.parent / "dashboard" / "frontend" / "dist"
 
-JWT_SECRET = os.getenv("DASHBOARD_JWT_SECRET", "")
-if not JWT_SECRET or JWT_SECRET == "changeme-in-production":
-    # Fail closed: never allow the dashboard to run with a known/empty signing key.
-    raise RuntimeError(
-        "DASHBOARD_JWT_SECRET env var is not set (or still default). "
-        "Generate one: python -c 'import secrets;print(secrets.token_urlsafe(48))'"
-    )
-JWT_EXPIRY_HOURS = int(os.getenv("DASHBOARD_JWT_EXPIRY_HOURS", "8"))
-ADMIN_USERNAME = os.getenv("DASHBOARD_ADMIN_USERNAME", "admin")
-ADMIN_PASSWORD = os.getenv("DASHBOARD_ADMIN_PASSWORD", "")
+# Auth (JWT / bcrypt / /auth routes) extracted to api/auth.py during PERF-002
+# sub-plan 4A step 4. Re-import public names for back-compat with tests and
+# route sites that reference Depends(require_role(...)).
+from src.dashboard.api.auth import (  # noqa: E402,F401
+    JWT_SECRET,
+    JWT_EXPIRY_HOURS,
+    ADMIN_USERNAME,
+    ADMIN_PASSWORD,
+    security,
+    _ROLE_RANK,
+    _AUTH_DISABLED,
+    get_current_user,
+    require_role,
+    LoginRequest,
+    router as _auth_router,
+)
 
-security = HTTPBearer(auto_error=False)
-
-_ROLE_RANK = {"viewer": 0, "operator": 1, "admin": 2}
-
-# Localhost convenience: when DASHBOARD_AUTH_DISABLED is truthy, every request is
-# treated as an authenticated admin. Intended for single-user localhost-only
-# deployments where prompting for a bearer token is pure friction. Leave UNSET
-# (or false) for any network-exposed deployment -- the JWT flow stays fully intact.
-_AUTH_DISABLED = os.getenv("DASHBOARD_AUTH_DISABLED", "").lower() in ("1", "true", "yes", "on")
+app.include_router(_auth_router)
 
 
 @app.exception_handler(Exception)
@@ -4081,36 +4103,6 @@ async def verbose_exception_handler(request: Request, exc: Exception):
             },
         )
     return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
-
-
-async def get_current_user(creds: HTTPAuthorizationCredentials = Depends(security)) -> dict:
-    if _AUTH_DISABLED:
-        return {"username": "localhost", "role": "admin"}
-    if creds is None or not creds.credentials:
-        raise HTTPException(status_code=401, detail="Missing bearer token")
-    try:
-        payload = jwt.decode(creds.credentials, JWT_SECRET, algorithms=["HS256"])
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token expired")
-    except jwt.InvalidTokenError:
-        raise HTTPException(status_code=401, detail="Invalid token")
-    username = payload.get("sub")
-    role = payload.get("role", "viewer")
-    if not username or role not in _ROLE_RANK:
-        raise HTTPException(status_code=401, detail="Malformed token")
-    return {"username": username, "role": role}
-
-
-def require_role(min_role: str):
-    if min_role not in _ROLE_RANK:
-        raise ValueError(f"Unknown role: {min_role}")
-    threshold = _ROLE_RANK[min_role]
-
-    async def check(user: dict = Depends(get_current_user)):
-        if _ROLE_RANK.get(user["role"], -1) < threshold:
-            raise HTTPException(status_code=403, detail="Insufficient role")
-        return user
-    return check
 
 
 @app.get("/health")
@@ -7452,61 +7444,7 @@ class TargetRequest(BaseModel):
     priority: int = 0
 
 
-class LoginRequest(BaseModel):
-    username: str
-    password: str
-
-
-# ── Auth ──
-
-@app.post("/auth/login")
-async def login(req: LoginRequest):
-    import secrets as _secrets
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT password_hash, role FROM dashboard_users WHERE username = $1",
-            req.username,
-        )
-
-    role = None
-    if row:
-        try:
-            stored_hash = row["password_hash"]
-            if isinstance(stored_hash, str):
-                stored_hash = stored_hash.encode()
-            if bcrypt.checkpw(req.password.encode(), stored_hash):
-                role = row["role"]
-        except (ValueError, TypeError):
-            role = None
-    elif (
-        ADMIN_PASSWORD
-        and req.username == ADMIN_USERNAME
-        and _secrets.compare_digest(req.password, ADMIN_PASSWORD)
-    ):
-        role = "admin"
-
-    if role is None:
-        # Constant-ish failure path — sleep a bit so success/fail paths are similar.
-        import asyncio as _asyncio
-        await _asyncio.sleep(0.25)
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-
-    token = jwt.encode(
-        {
-            "sub": req.username,
-            "role": role,
-            "exp": datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRY_HOURS),
-        },
-        JWT_SECRET,
-        algorithm="HS256",
-    )
-    return {"token": token, "username": req.username, "role": role}
-
-
-@app.get("/auth/me")
-async def auth_me(user: dict = Depends(require_role("viewer"))):
-    return user
+# LoginRequest, /auth/login, /auth/me moved to api/auth.py (step 4A step 4).
 
 
 # ── Targets CRUD ──
