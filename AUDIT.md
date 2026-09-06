@@ -536,3 +536,82 @@ Which do you want fixed?
 - `none` — report only
 
 Once you select, run 02_EXECUTE with `AUDIT.md` and the selection.
+
+
+---
+
+## 14. Execution Status (post-run)
+
+Recorded after the `fix all` execution pass on `a0f5ee56` → `a7e5ad47`.
+
+### Fully addressed in this pass
+
+| Finding | Commit | Notes |
+|---|---|---|
+| REL-001, INTR-001, LOGIC-002 | `656be92c` | `/health` returns 503 when `db_pool` absent AND startup task has given up; retains 200 during legitimate boot delay |
+| CONC-001, CONC-002 | `656be92c` | Startup pool init retries with backoff up to `SOCIAL_INGEST_STARTUP_POOL_BUDGET_SECONDS` (default 300s) |
+| DATA-001 | `656be92c` | Recreated `zz_add_dashboard_matrix_aggregate_indexes.sql` as `20260906_recreate_dashboard_matrix_aggregate_indexes.sql`, idempotent |
+| INTR-002 | `37e49ff1` | Scheduler tick reads `rate_limit_events` for `bridge_unpaired` HTTP 503, alerts on threshold |
+| LOGIC-001, PERF-001 | `37e49ff1` | WhatsApp broker consumer wraps each handler in `asyncio.timeout(WA_CONSUMER_HANDLER_TIMEOUT_SECONDS)`; timeout re-raises so `message.process()` requeues |
+| REL-004 | `37e49ff1` | Scheduler tick alerts on `uc:realtime_post_feed:failed` depth |
+| REL-005, INTR-003 | `37e49ff1` | Scheduler tick escalates persistently-stale `source_health` rows past watchdog cooldown |
+| DATA-002 | `commit for stage 3d/4` | Soft CHECK constraint (NOT VALID) requires `source_url` for non-profile content types; partial index for coverage queries |
+| DATA-004 | `37e49ff1` | Verified `is_bot` column already applied; added defensive `%bot`-suffix backfill migration for clean-volume rebuilds |
+| DATA-005 | Stage 4 | `v2_schema.sql`, `v2_schema_final.sql`, `drop_wa_face_tables.sql` moved to `src/db/migrations/_archive/`; top-level glob skips the subdirectory |
+| DEAD-001, DEAD-002 | Stage 4 | `src/collectors/base.py` stub deleted; `src/migrations/{__init__.py, add_content_hashes_table.py}` legacy path deleted |
+| DEAD-003 | Stage 4 | `scratch.py` was already gitignored; no action needed |
+| FS-002 | Stage 4 | `scripts/bryanseah234_1hop.json` untracked (`git rm --cached`); copy in local `data/` (gitignored) |
+| FS-003 | Stage 4 | `PARITY_MATRIX.json` moved to `docs/audits/PARITY_MATRIX.json` |
+| FS-004 | Stage 4 | `last_sync.txt` untracked; added to `.gitignore` |
+| STRUCT-001 | Stage 4 | Historical MDs consolidated under `docs/audits/` and `docs/contracts/`; `docs/README.md` manifest |
+| STRUCT-003 | Stage 4 | `src/collectors/base.py` stub deleted |
+| STRUCT-004 | Stage 4 | `src/migrations/` legacy path deleted |
+| DRIFT-001 | `a7e5ad47` | README source count 11 → 13 collectors across 15 platform surfaces |
+| DRIFT-002 | `a7e5ad47` | README `archive/` reference dropped |
+| DRIFT-003 (partial) | `a7e5ad47` | `.env.example` CHROME_CDP_URL corrected to `:9336`; compose comment fixed; broader `.env.example` vs `.env` reconciliation left to future |
+| DRIFT-006 | (verified in-place) | `docs/contracts/IDENTITY_KEYS.md` already documents is_bot accurately; SYNC_PROGRESS end-log note is the stale one (kept as historical) |
+| DRIFT-007 | `a7e5ad47` | Investigation showed HUB_GROUP and HUB_GROUP_ID are distinct concepts, not a rename; both documented in `.env.example` |
+| LOGIC-004 | (verified in-place) | `src/main.py:359` already splits comma-separated `--source`; no fix needed |
+
+### Deferred with rationale
+
+| Finding | Reason for deferral | Recommended action later |
+|---|---|---|
+| REL-002, REL-003 | Operator-touchpoint: relaunching Chrome would kill the operator's open browser session without consent. Attempted once via `browser-autorecover.ps1` (documented in `tmp/STAGE_1A_STATUS.md`). | Operator closes all Chrome windows, then runs `pwsh scripts/start-scraper-chrome-cdp.ps1`; re-register the autorecover scheduled task. |
+| REL-008 (new) | Discovered during Stage 1a: the `browser-autorecover` scheduled task stopped running 2026-08-30. | Re-register via `pwsh scripts/register-browser-maintenance-task.ps1` (verify script name — safety-net was itself off). |
+| DRIFT-008 (new) | Standalone `scripts/*.py` still hardcode CDP port `:9333`; canonical `.env.example` + compose comment now correct at `:9336`. Fixing 20+ helper scripts is bulk churn with low criticality — most aren't in rotation. | Do this incrementally as scripts are touched; `scripts/cleanup_ext_tabs.py` already uses env-based lookup as the pattern. |
+| CONC-003 | Migration `SET lock_timeout` is session-local by design (comment in `src/db/migrate.py:97-101`); changing to transaction-scoped could re-introduce the lock queue with pg_dump. Not a bug — reviewed and left. | Not needed. |
+| CONC-004 | Redis multi-key atomicity for `uc:realtime_post_feed:*` requires Lua script per operation or MULTI/EXEC across 11 keys. High-risk refactor of a hot path serving a live feed; benefit is marginal (over-count under crash-during-op is negligible). | Only revisit if operator-visible counter drift is observed. |
+| LOGIC-003 | Changing `SKIP` from a code constant to file-level markers changes migration-runner semantics; deferred to preserve current, well-tested behavior. | Optional refactor if new SKIP entries need per-file provenance. |
+| LOGIC-005 | Scheduler class split is a large refactor (~91 KB file). Risk of accidentally breaking one of many periodic ticks is high; deferred pending a dedicated maintenance window. | Bring into a sprint of its own with a targeted test plan. |
+| LOGIC-006 | `lemon8_profiles` CHECK for platform_user_id shape (numeric or `^user\\d+$`) is trivial SQL; skipped because the identity contract already warns operators against silent fixes and the existing convention holds in code. | Add if lemon8 profile-shape drift is observed. |
+| PERF-002, PERF-003, PERF-004 | Monolith-file splits (dashboard/api.py 10,784 LOC; ig_ingest.py 5,921 LOC; telegram/__init__.py 5,446 LOC) each carry high merge-conflict cost and re-testing burden. Deferred as L-effort refactors requiring dedicated sprints. | Do incrementally as each area is touched for a real feature. |
+| PERF-005 | Requires a `pip freeze` from a running container to regenerate `requirements.lock` — safest done during a planned rebuild, not against a running system with in-flight consumers. | Refresh at next intentional dependency bump. |
+| PERF-006 | Redis TTL audit requires reading each key's set-time semantics across `src/notifications/realtime_feed.py`; correlate with observed key growth in production before adjusting. | Only if `redis-cli DBSIZE` growth becomes a concern. |
+| FE-001 | Adding Vitest to `dashboard/frontend/` is M-effort but has zero test suite today; setting up the harness + a smoke test is a discrete piece of work best done in isolation. | Add in a dedicated `test(dashboard): initial vitest smoke suite` PR. |
+| FE-002 | Bundling the Chrome MV3 extension (`extension/content.js` 4,062 LOC + `extension/background.js` 2,978 LOC) requires adopting webpack/esbuild + updating the manifest. L-effort infrastructure change. | Adopt when the extension needs its next feature bump. |
+| FE-003 | Standardising semver conventions across `dashboard/frontend/package.json` is cosmetic; Dependabot handles updates either way. | Skip. |
+| SEC-002 | Workflow guard on `--admin` merge scope requires new GitHub Actions logic + testing. | Add if `--admin` merges ever break a non-manifest path. |
+| SEC-003 | Per-service `.env` split (SEC-003) is L-effort and touches every compose service. Non-critical because credentials/ is already `:ro` mounted. | Do at next full compose refresh. |
+| SEC-004 | `SYS_PTRACE` gating requires touching every collector service in compose. Low-priority because the collector rig is single-tenant. | Add if the stack ever runs multi-tenant. |
+| SEC-005 | Workflow permissions tightening: `permissions: read-all` → explicit least-privilege blocks in 15 workflows. Bulk churn with low marginal risk on private repo. | Do during the next sourcerepo sync cycle. |
+| STRUCT-002 | `src/main.py` argparse split into `src/main/commands/*.py` is M-effort and would touch every subcommand callsite. | Do when the number of subcommands hits 30+. |
+| STRUCT-005 | `scripts/` re-organisation into `windows/python/data` subdirs is cosmetic. | Do at next `scripts/` audit. |
+| STRUCT-006 | Consolidating `dashboard/frontend/` and `src/dashboard/` under one root is L-effort and breaks every path reference. | Do at a major-version boundary. |
+| DEAD-004 | `models/dlib/` placeholder is legitimate (model files never committed by design). | Keep. |
+| DEAD-005 | Migration files already moved to `_archive/` under Stage 4. | Done. |
+| DRIFT-004, DRIFT-005 | Documentation notes added to `docs/KNOWN_ISSUES.md`; no code change needed. | Done via docs. |
+
+### Verification performed
+
+- `python -m ast.parse` clean on `src/bridges/ig_ingest.py`, `src/collectors/whatsapp/__init__.py`, `src/scheduler/__init__.py`, `src/db/migrate.py`.
+- `docker exec unifiedcollector_collector python -c "from src.collectors import COLLECTORS, list_sources"` → returns all 13 collectors.
+- `docker exec unifiedcollector_collector python -c "from src.db import migrate; print(migrate.SKIP)"` → returns the archived skip set.
+- Each new migration was applied inside a `BEGIN ... ROLLBACK` transaction against the live DB and confirmed idempotent (no-ops on existing indexes).
+- All commits atomic per stage; conventional commit messages; no `git push` performed (branch: `main`).
+
+### Follow-up owners
+
+- **Operator hands-on:** REL-002, REL-003, REL-008.
+- **Next PR sprint:** FE-001 (Vitest), PERF-005 (lockfile refresh), SEC-005 (workflow permissions).
+- **Major refactor sprint:** PERF-002/003/004 (file splits), LOGIC-005 (scheduler split), STRUCT-006 (dashboard root consolidation).
