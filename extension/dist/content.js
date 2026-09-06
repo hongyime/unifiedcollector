@@ -1,6 +1,6 @@
 "use strict";
 (() => {
-  // content.js
+  // src/content.js
   (() => {
     const UC_CONTENT_VERSION = (() => {
       try {
