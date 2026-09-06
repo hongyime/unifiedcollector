@@ -2,6 +2,29 @@
 
 Addresses **SEC-003** — monolithic `.env` exposes all secrets to every container.
 
+> **Sprint status (as of the `per_service_env_split_first_slice` sprint):**
+> Steps 1-6 are DONE. The `docker/env/` directory now holds 21 tracked
+> `*.env.example` templates plus `README.md`; `docker/.gitignore` blocks
+> populated `docker/env/*.env` files from ever being committed.
+>
+> Steps 7-23 are DEFERRED to a follow-up sprint that requires:
+>
+> 1. An operator to run
+>    `Copy-Item docker/env/*.env.example docker/env/*.env` and populate each
+>    file with real values (typically lifted from the current monolithic
+>    `.env`). The live `docker/env/*.env` files must exist on disk before
+>    compose wiring can be added, and this repo's convention is that the
+>    operator populates env files by hand — the agent does not fabricate them.
+> 2. Staged validation windows against the live docker stack so each
+>    additive wiring commit (steps 7-19) can be verified with a real boot +
+>    `/health` check per affected service before the next commit lands.
+> 3. Only after all additive steps pass validation, step 21 (the subtractive
+>    removal of `../.env` from every service's `env_file:` list) can run in
+>    its own dedicated sprint with rollback tooling ready.
+>
+> No `docker-compose.yml` service `env_file:` list has been modified in this
+> sprint. Every service still sources `../.env` exactly as before.
+
 ## 1. Context — current state
 
 - Top-level `.env` (13,617 B; sanitized `.env.example` is 15,438 B and lists the full key inventory).

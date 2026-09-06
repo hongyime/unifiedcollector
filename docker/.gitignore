@@ -1,0 +1,10 @@
+# docker/.gitignore
+# Per-service env split (SEC-003): keep templates tracked, hide populated secrets.
+# See docker/env/README.md and docs/plans/per-service-env-split.md.
+
+# Ignore populated per-service env files (secrets)
+env/*.env
+
+# Keep templates
+!env/*.env.example
+!env/README.md
