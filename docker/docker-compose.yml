@@ -818,6 +818,8 @@ services:
     env_file:
       - ../.env
       - ./env/common.env
+      - ./env/whatsapp.env
+      - ./env/broker.env
     healthcheck:
       test: ["CMD", "python", "-m", "src.core.health"]
       interval: 60s
@@ -1284,6 +1286,7 @@ services:
     env_file:
       - ../.env
       - ./env/common.env
+      - ./env/broker.env
     healthcheck:
       # `rabbitmq-diagnostics ping` can hang under WSL2/Docker host load and
       # burn CPU while collection is otherwise flowing. For this local broker,
@@ -1305,6 +1308,7 @@ services:
     env_file:
       - ../.env
       - ./env/common.env
+      - ./env/broker.env
     healthcheck:
       test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-localdevredis123}", "ping"]
       interval: 10s
