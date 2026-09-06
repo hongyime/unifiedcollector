@@ -471,6 +471,16 @@ from .revisit import (  # noqa: E402,F401
 )
 
 
+# DM hook handlers moved to .dm per split step 7.
+from .dm import (  # noqa: E402,F401
+    dm_hook_heartbeat_handler,
+    dm_probe_handler,
+    dm_sample_handler,
+    dm_frame_handler,
+    dm_decoded_handler,
+)
+
+
 # Targets endpoints moved to .targets per split step 4.
 
 
@@ -2868,227 +2878,7 @@ async def _dm_probe_log_write(pool, platform, event_type, body, frame_size=None)
         logger.debug("dm_probe_log write failed", exc_info=True)
 
 
-async def dm_hook_heartbeat_handler(request):
-    """Heartbeat from the browser extension's DM WebSocket hook (P1.3).
-
-    The hook lives inside inject.js and is passive/send-nothing (see #35/#38).
-    If Instagram or TikTok update their bundle and break the wrapper we have
-    no server-side signal today — samples just stop arriving and it's
-    indistinguishable from "user isn't DMing". This endpoint records a beat
-    per (platform, owner) so:
-      (a) src/watchdog/freshness.py can alert on Telegram if the newest
-          heartbeat per platform goes stale (no container restart possible —
-          the hook lives in the browser), and
-      (b) the dashboard telemetry panel can show extension_version and
-          time-since-last-beat.
-    Best-effort — failures are logged at DEBUG and don't affect return.
-    """
-    body = await _safe_json(request)
-    platform = (body.get("platform") or "").strip()
-    if not platform:
-        return _cors(web.json_response({"ok": False, "error": "no_platform"}, status=400))
-    owner = (body.get("owner") or body.get("owner_account") or "").strip()
-    try:
-        probes = int(body.get("probes_sent") or 0)
-    except (TypeError, ValueError):
-        probes = 0
-    try:
-        samples = int(body.get("samples_shipped") or 0)
-    except (TypeError, ValueError):
-        samples = 0
-    ext_version = (body.get("extension_version") or None)
-    ua = request.headers.get("User-Agent") or None
-
-    pool = request.app.get("pool")
-    if not pool:
-        return _cors(web.json_response({"ok": True, "recorded": False, "telemetry_degraded": True}))
-    try:
-        async with asyncio.timeout(DM_HOOK_HEARTBEAT_WRITE_TIMEOUT_SECONDS):
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    """
-                    INSERT INTO dm_hook_heartbeat
-                        (platform, owner_account, last_seen, probes_sent,
-                         samples_shipped, extension_version, user_agent)
-                    VALUES ($1, $2, now(), $3, $4, $5, $6)
-                    ON CONFLICT (platform, owner_account) DO UPDATE SET
-                        last_seen         = now(),
-                        probes_sent       = EXCLUDED.probes_sent,
-                        samples_shipped   = EXCLUDED.samples_shipped,
-                        extension_version = COALESCE(EXCLUDED.extension_version,
-                                                     dm_hook_heartbeat.extension_version),
-                        user_agent        = COALESCE(EXCLUDED.user_agent,
-                                                     dm_hook_heartbeat.user_agent)
-                    """,
-                    platform[:64], owner[:128], probes, samples, ext_version, ua,
-                )
-    except TimeoutError:
-        logger.info(
-            "dm_hook_heartbeat write timed out after %.2fs platform=%s owner=%s",
-            DM_HOOK_HEARTBEAT_WRITE_TIMEOUT_SECONDS,
-            platform,
-            owner,
-        )
-        return _cors(web.json_response({
-            "ok": True,
-            "recorded": False,
-            "telemetry_degraded": True,
-            "reason": "db_write_timeout",
-        }))
-    except Exception:
-        logger.debug("dm_hook_heartbeat upsert failed", exc_info=True)
-        return _cors(web.json_response({
-            "ok": True,
-            "recorded": False,
-            "telemetry_degraded": True,
-            "reason": "db_write_failed",
-        }))
-    return _cors(web.json_response({"ok": True, "recorded": True}))
-
-
-async def dm_probe_handler(request):
-    """One-time investigation probe (#38): the extension's observe-only hooks
-    report the transport + format of each platform's DM channel so we can confirm
-    the wire format before committing to a decoder/schema. Logged to stderr and
-    (P1.2) to dm_probe_log for the dashboard telemetry panel.
-    Confirmed so far: TikTok = binary protobuf over wss://im-ws-…/ws/v2; IG is
-    binary MQTT over wss://edge-chat.instagram.com/chat — both reasons the
-    fetch/XHR JSON observation path can't capture them.
-    """
-    body = await _safe_json(request)
-    logger.info(
-        "DM probe: platform=%s transport=%s kind=%s size=%s url=%s",
-        body.get("platform"), body.get("transport"), body.get("frame_kind"),
-        body.get("frame_size"), body.get("url"),
-    )
-    pool = request.app.get("pool")
-    platform = body.get("platform") or "unknown"
-    _schedule_app_task(
-        request.app,
-        _dm_probe_log_write(pool, platform, "probe", body),
-        "dm_probe_log",
-    )
-    _schedule_app_task(
-        request.app,
-        _archive_browser_capture(pool, platform, "dm_probe", body),
-        "dm_probe_archive",
-    )
-    return _cors(web.json_response({"ok": True}))
-
-
-async def dm_sample_handler(request):
-    """Save a raw DM-socket frame sample (base64) for decoder development (#35).
-    Observe-only: these are bytes the page already received; we send nothing to
-    the platform. Written to /tmp/dm_samples/<platform>_<n>.bin so the exact
-    MQTT (IG) / protobuf (TikTok) payloads can be inspected offline.
-
-    Rotation (P1.1): after each successful write we prune to the newest
-    DM_SAMPLE_CAP_PER_PLATFORM files per platform (by mtime), so this dir
-    can't grow unbounded on high-traffic sockets (TikTok emitted +6/hour in
-    passive tests). The filename index is derived from `max existing index +
-    1`, NOT the file count, so pruning never causes a fresh write to reuse
-    an index that still exists on disk. Concurrent writes race-safe via
-    O_EXCL retry loop.
-    """
-    body = await _safe_json(request)
-    platform = (body.get("platform") or "unknown").replace("/", "_")[:20]
-    b64 = body.get("b64") or ""
-    try:
-        raw = base64.b64decode(b64)
-    except Exception:
-        return _cors(web.json_response({"ok": False, "error": "bad_b64"}, status=400))
-    d = DM_SAMPLE_DIR
-    os.makedirs(d, exist_ok=True)
-    import glob as _glob
-    existing = _glob.glob(f"{d}/{platform}_*.bin")
-    # Derive next index from the max existing index across BOTH old 3-digit
-    # (`_NNN.bin`) and new 6-digit (`_NNNNNN.bin`) naming — the regex matches
-    # any run of digits before `.bin`, so we don't lose track when the format
-    # widens.
-    max_idx = -1
-    _idx_re = re.compile(rf"{re.escape(platform)}_(\d+)\.bin$")
-    for p in existing:
-        m = _idx_re.search(p)
-        if m:
-            try:
-                max_idx = max(max_idx, int(m.group(1)))
-            except ValueError:
-                pass
-    n = max_idx + 1
-    path = None
-    for _ in range(5):
-        candidate = f"{d}/{platform}_{n:06d}.bin"
-        try:
-            fd = os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-        except FileExistsError:
-            n += 1
-            continue
-        except Exception:
-            logger.exception("dm sample open failed")
-            break
-        try:
-            os.write(fd, raw)
-            path = candidate
-        except Exception:
-            logger.exception("dm sample write failed")
-        finally:
-            os.close(fd)
-        break
-    if path is None:
-        return _cors(web.json_response({"ok": False, "error": "write_failed"}, status=500))
-    logger.info("DM sample saved: %s (%d bytes) url=%s", path, len(raw), body.get("url"))
-    archive_body = dict(body)
-    archive_body["decoded_bytes"] = len(raw)
-    archive_body["debug_sample_path"] = path
-    await _archive_browser_capture(
-        request.app.get("pool"), platform, "dm_sample", archive_body,
-    )
-    # Telemetry (P1.2): record the sample event so the dashboard panel can
-    # count IG-vs-TikTok samples per 24h and surface last-seen timestamps.
-    await _dm_probe_log_write(
-        request.app.get("pool"), platform, "sample", body, frame_size=len(raw),
-    )
-    # Rotate: keep newest DM_SAMPLE_CAP_PER_PLATFORM files per platform by
-    # mtime. Uses a fresh glob so we count the file we just wrote.
-    try:
-        files = sorted(
-            _glob.glob(f"{d}/{platform}_*.bin"),
-            key=lambda p: os.path.getmtime(p),
-        )
-        excess = len(files) - DM_SAMPLE_CAP_PER_PLATFORM
-        if excess > 0:
-            pruned = 0
-            for old in files[:excess]:
-                try:
-                    os.unlink(old)
-                    pruned += 1
-                except OSError:
-                    pass
-            if pruned:
-                logger.info(
-                    "DM sample rotated: pruned %d old %s samples (cap=%d)",
-                    pruned, platform, DM_SAMPLE_CAP_PER_PLATFORM,
-                )
-    except Exception:
-        logger.exception("dm sample rotation failed")
-    return _cors(web.json_response({"ok": True, "bytes": len(raw)}))
-
-
-async def dm_frame_handler(request):
-    """Capture a DM JSON frame if one is ever observed over a WS (#35). These
-    channels almost always send protobuf/MQTT, so this is a best-effort path:
-    log the raw frame so it can be inspected. No dedicated table yet — a schema
-    is added once the frame shape is confirmed via the probe above.
-    """
-    body = await _safe_json(request)
-    try:
-        logger.info("DM JSON frame (%s): %s", body.get("platform"), json.dumps(body.get("frame"))[:1000])
-    except Exception:
-        logger.info("DM frame observed (unserializable)")
-    await _archive_browser_capture(
-        request.app.get("pool"), body.get("platform") or "unknown", "dm_frame", body,
-    )
-    return _cors(web.json_response({"ok": True}))
+# dm_hook_heartbeat_handler moved to .dm per split step 7.
 
 
 def _parse_ts_ms(v):
@@ -3142,55 +2932,7 @@ def _bool_or_none(v):
     return None
 
 
-async def dm_decoded_handler(request):
-    """Client-decoded DM payload from the extension (Option B of #39).
-
-    The extension's WS hook uses a minimal in-tab protobuf parser to walk
-    TikTok frontier frames on wss://im-ws-sg.tiktok.com/ws/v2 (see
-    extension/inject.js `_ttDecode`). When it identifies a real message
-    frame (method=5, inner has field 500 → field 5 with content JSON), it
-    extracts the structured payload and POSTs here. Raw sample capture
-    continues in parallel via /social/dm-sample as a schema-drift canary.
-
-    Body shape:
-      {
-        "platform": "tiktok",
-        "owner":    "<owner_uid_or_empty>",
-        "threads":  [ {conversation_id, conversation_type, participants,
-                       last_activity_ms} ],
-        "messages": [ {message_id, conversation_id, sender_uid, sender_secuid,
-                       text, aweType, message_type, create_time_ms,
-                       client_message_id, is_stranger, raw_content} ]
-      }
-
-    Message upsert keyed on message_id (idempotent — the TikTok frontier
-    pushes each message ~6× across topic subscriptions).
-    """
-    body = await _safe_json(request)
-    platform = (body.get("platform") or "").strip().lower()
-    if platform not in ("tiktok", "instagram"):
-        return _cors(web.json_response(
-            {"ok": False, "error": "unsupported_platform"}, status=400,
-        ))
-    owner = (body.get("owner") or "").strip()
-    threads = body.get("threads") or []
-    messages = body.get("messages") or []
-    if not isinstance(threads, list) or not isinstance(messages, list):
-        return _cors(web.json_response(
-            {"ok": False, "error": "bad_shape"}, status=400,
-        ))
-
-    pool = request.app.get("pool")
-    if not pool:
-        return _cors(web.json_response({"ok": True, "recorded": 0}))
-    await _archive_browser_capture(pool, platform, "dm_decoded", body)
-    if platform == "tiktok":
-        thread_n, msg_n = await _upsert_tt_decoded(pool, owner, threads, messages)
-    else:
-        thread_n, msg_n = await _upsert_ig_decoded(pool, owner, threads, messages)
-    if thread_n or msg_n:
-        logger.info("DM decoded[%s]: %d threads, %d messages", platform, thread_n, msg_n)
-    return _cors(web.json_response({"ok": True, "threads": thread_n, "messages": msg_n}))
+# dm_decoded_handler moved to .dm per split step 7.
 
 
 async def _upsert_tt_decoded(pool, owner, threads, messages):
