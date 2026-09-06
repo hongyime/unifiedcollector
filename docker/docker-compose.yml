@@ -523,6 +523,7 @@ services:
     env_file:
       - ../.env
       - ./env/common.env
+      - ./env/website.env
     healthcheck:
       test: ["CMD", "python", "-m", "src.core.health"]
       interval: 60s
@@ -580,6 +581,7 @@ services:
     env_file:
       - ../.env
       - ./env/common.env
+      - ./env/exposure.env
     healthcheck:
       test: ["CMD", "python", "-m", "src.core.health"]
       interval: 60s
