@@ -50,9 +50,6 @@ class Scheduler:
         # `_maybe_*` shims that remain below still cache state on `self` — they
         # will be extracted in follow-up steps (docs/plans/scheduler-refactor.md
         # steps 6-15).
-        # Identity reconciliation cadence (P2 review §3). 0 disables.
-        self._reconcile_hours = env_int("RECONCILE_INTERVAL_HOURS", 12, min_value=0)
-        self._last_reconcile = 0.0  # monotonic; 0 forces a run on first tick
         # Cookie-health check cadence (no untested cookies). 0 disables.
         self._cookie_check_hours = env_int("COOKIE_CHECK_INTERVAL_HOURS", 6, min_value=0)
         self._last_cookie_check = 0.0  # 0 forces a check on first tick
@@ -90,7 +87,6 @@ class Scheduler:
             # Currently: HeartbeatHandler, StatusDeltaHandler. Follow-up steps
             # will move the remaining _maybe_* gates into this same registry.
             await self._run_periodic_handlers()
-            await self._maybe_reconcile_identities()
             await self._maybe_check_cookies()
 
             try:
@@ -147,34 +143,12 @@ class Scheduler:
             except Exception as e:
                 logger.warning("periodic handler %s failed: %s", handler.name, e)
 
-    async def _maybe_reconcile_identities(self):
-        """Merge fragmented social_users rows (username-keyed -> id-keyed) on the
-        first tick, then every N hours. 0 disables. Fail-soft: never disturbs
-        scheduling. See src/core/identity_reconcile.py."""
-        if getattr(self, "_reconcile_hours", 0) <= 0:
-            return
-        import time as _time
-        now = _time.monotonic()
-        if now - self._last_reconcile < self._reconcile_hours * 3600:
-            return
-        self._last_reconcile = now
-        try:
-            from src.core.identity_reconcile import reconcile_social_users
-            await reconcile_social_users(self.pool)
-        except Exception as e:
-            logger.warning("identity reconcile failed: %s", e)
-
     # Per-source newest-activity freshness — the ACCURATE liveness signal, read
     # from the real data tables. Delegates to the canonical FRESHNESS table in
     # src.core.source_freshness so scheduler alerts, watchdog restarts, and the
-    # dashboard freshness UI all read the SAME per-source query set. Previously
-    # this was a hand-maintained duplicate that could drift: e.g. this file used
-    # to check only `media_items` for instagram/tiktok/lemon8, so a fresh
-    # profile-metadata sweep with no new media would still look stale in the
-    # Telegram heartbeat while the dashboard (which already used compute_liveness)
-    # reported it live. Text-heavy realtime sources (whatsapp/beeper/telegram)
-    # are unchanged — they read their per-source message tables, never
-    # media_items.
+    # dashboard freshness UI all read the SAME per-source query set. Retained
+    # as a class attribute for the ``_build_status`` delegate; handlers should
+    # import ``FRESHNESS`` directly from ``src.core.source_freshness``.
     _FRESHNESS: list[tuple[str, str, int]] = _CANONICAL_FRESHNESS
 
     async def _maybe_check_cookies(self):
