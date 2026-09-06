@@ -199,6 +199,16 @@ from src.dashboard.api.browser import (  # noqa: E402,F401
     _browser_extension_payload,
 )
 
+# Source-matrix payload cache + fallback payload helpers extracted to
+# api/source_matrix.py during PERF-002 sub-plan 4A step 6. Router is currently
+# empty; the /collectors/source-matrix route still lives in __init__.py this
+# iteration (see source_matrix.py module docstring for rationale). Re-imports
+# below keep the public ``dashboard_api._X`` surface intact for tests and
+# for the /health route which reaches for _load_source_matrix_payload_cache.
+from src.dashboard.api.source_matrix import (  # noqa: E402,F401
+    router as _source_matrix_router,
+)
+
 
 
 _INGESTION_CONTENT_PARTS = [
@@ -272,22 +282,20 @@ def _source_collection_methods(source: str | None) -> list[str]:
     return _SOURCE_METHODS.get(source or "", [])
 
 
+def _copy_cache_value(value):
+    # Body moved to api/helpers.py in PERF-002 4A step 6. Re-exported below.
+    from src.dashboard.api.helpers import _copy_cache_value as _impl
+    return _impl(value)
+
+
 def _copy_row_map(rows: dict[str, dict]) -> dict[str, dict]:
-    return {key: dict(value) for key, value in rows.items()}
+    from src.dashboard.api.helpers import _copy_row_map as _impl
+    return _impl(rows)
 
 
 def _copy_row_list(rows: list[dict]) -> list[dict]:
-    return [dict(row) for row in rows]
-
-
-def _copy_cache_value(value):
-    if isinstance(value, dict):
-        return {key: _copy_cache_value(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_copy_cache_value(item) for item in value]
-    if isinstance(value, tuple):
-        return tuple(_copy_cache_value(item) for item in value)
-    return value
+    from src.dashboard.api.helpers import _copy_row_list as _impl
+    return _impl(rows)
 
 
 _MEDIA_PRIMARY_SOURCES = {
@@ -3581,130 +3589,37 @@ async def collectors_live(_user: dict = Depends(require_role("viewer"))):
     return payload
 
 
-def _source_matrix_unavailable_payload(
-    error: str,
-    live_sources: list[dict] | None = None,
-    browser_extension: dict | None = None,
-) -> dict:
-    generated_at = datetime.now(timezone.utc)
-    current_hour_started_at = generated_at.replace(minute=0, second=0, microsecond=0)
-    previous_hour_started_at = current_hour_started_at - timedelta(hours=1)
-    if live_sources is None:
-        live_sources = _source_matrix_fallback_liveness_rows(
-            "source matrix build timed out before a cache was available; showing known source skeleton"
-        )
-    if browser_extension is None:
-        browser_extension = _browser_extension_fallback_payload(error)
-    rows = [
-        _source_matrix_row(
-            source_row,
-            None,
-            None,
-            None,
-            None,
-            {"stats_unavailable": True, "stats_error": error},
-            None,
-            [],
-            generated_at,
-            None,
-        )
-        for source_row in live_sources
-    ]
-    return {
-        "generated_at": generated_at,
-        "current_hour_started_at": current_hour_started_at,
-        "last_complete_hour_started_at": previous_hour_started_at,
-        "summary": {
-            "current_hour": {
-                **_source_window_totals(rows, "current_hour"),
-                "started_at": current_hour_started_at,
-                "elapsed_seconds": int((generated_at - current_hour_started_at).total_seconds()),
-            },
-            "last_complete_hour": {
-                **_source_window_totals(rows, "last_complete_hour"),
-                "started_at": previous_hour_started_at,
-                "elapsed_seconds": 3600,
-            },
-            "last_24h": {
-                **_source_window_totals(rows, "last_24h"),
-                "started_at": generated_at - timedelta(hours=24),
-                "elapsed_seconds": 86400,
-            },
-        },
-        "sources": rows,
-        "whatsapp_bridge_health": None,
-        "browser_extension": {
-            "expected_version": browser_extension.get("expected_version"),
-            "extension_id": None,
-            "reload_url": None,
-            "maintenance": browser_extension.get("maintenance"),
-            "ingest_health": browser_extension.get("ingest_health"),
-            "issues": browser_extension.get("issues", []),
-        },
-        "errors": [{"section": "source_matrix", "error": error}],
-        "cache": {"status": "unavailable"},
-    }
+def _source_matrix_unavailable_payload(*args, **kwargs):
+    # Body moved to src/dashboard/api/source_matrix.py during PERF-002 4A step 6.
+    # Import lazily to break the circular dependency; source_matrix.py imports
+    # __init__.py names via _cfg() when it needs them at call time.
+    from src.dashboard.api.source_matrix import _source_matrix_unavailable_payload as _impl
+    return _impl(*args, **kwargs)
 
 
-async def _source_matrix_unavailable_payload_with_fast_health(error: str) -> dict:
-    detail = (
-        "source matrix build timed out before a cache was available; "
-        "showing fast source_health fallback"
-    )
-    live_sources = await _source_matrix_fallback_liveness_rows_with_source_health(detail)
-    browser_extension = await _browser_extension_fallback_payload_with_fast_ingest(error)
-    return _source_matrix_unavailable_payload(error, live_sources, browser_extension)
+async def _source_matrix_unavailable_payload_with_fast_health(*args, **kwargs):
+    from src.dashboard.api.source_matrix import _source_matrix_unavailable_payload_with_fast_health as _impl
+    return await _impl(*args, **kwargs)
 
 
 def _source_matrix_payload_stale_limit_seconds() -> float:
-    return max(_SOURCE_MATRIX_PAYLOAD_CACHE_TTL_SECONDS, _SOURCE_MATRIX_PAYLOAD_STALE_SECONDS)
+    from src.dashboard.api.source_matrix import _source_matrix_payload_stale_limit_seconds as _impl
+    return _impl()
 
 
-def _load_source_matrix_payload_cache(now: float | None = None) -> tuple[float, dict] | None:
-    now = time.time() if now is None else now
-    cached_payload = _SOURCE_MATRIX_PAYLOAD_CACHE.get("payload")
-    cached_ts = float(_SOURCE_MATRIX_PAYLOAD_CACHE.get("ts") or 0.0)
-    if cached_payload is not None and now - cached_ts <= _source_matrix_payload_stale_limit_seconds():
-        return cached_ts, _copy_cache_value(cached_payload)
-    return _load_persisted_source_matrix_payload(now)
+def _load_source_matrix_payload_cache(now: float | None = None):
+    from src.dashboard.api.source_matrix import _load_source_matrix_payload_cache as _impl
+    return _impl(now)
 
 
-def _load_persisted_source_matrix_payload(now: float | None = None) -> tuple[float, dict] | None:
-    now = time.time() if now is None else now
-    path = Path(_SOURCE_MATRIX_PAYLOAD_CACHE_PATH)
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return None
-    except Exception as exc:  # noqa: BLE001 - corrupt cache should not break dashboard
-        logger.info("source matrix persisted cache ignored: %s", exc.__class__.__name__)
-        return None
-
-    try:
-        ts = float(raw.get("ts") or 0.0)
-    except (TypeError, ValueError):
-        return None
-    payload = raw.get("payload")
-    if not isinstance(payload, dict) or ts <= 0:
-        return None
-    if now - ts > _source_matrix_payload_stale_limit_seconds():
-        return None
-    _SOURCE_MATRIX_PAYLOAD_CACHE.update({"ts": ts, "payload": _copy_cache_value(payload)})
-    return ts, _copy_cache_value(payload)
+def _load_persisted_source_matrix_payload(now: float | None = None):
+    from src.dashboard.api.source_matrix import _load_persisted_source_matrix_payload as _impl
+    return _impl(now)
 
 
 def _persist_source_matrix_payload(ts: float, payload: dict) -> None:
-    path = Path(_SOURCE_MATRIX_PAYLOAD_CACHE_PATH)
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(
-            json.dumps({"ts": ts, "payload": payload}, default=str, separators=(",", ":")),
-            encoding="utf-8",
-        )
-        tmp.replace(path)
-    except Exception as exc:  # noqa: BLE001 - cache persistence is best-effort
-        logger.info("source matrix persisted cache write skipped: %s", exc.__class__.__name__)
+    from src.dashboard.api.source_matrix import _persist_source_matrix_payload as _impl
+    return _impl(ts, payload)
 
 
 @app.get("/collectors/source-matrix")

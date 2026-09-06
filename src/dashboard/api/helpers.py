@@ -217,6 +217,32 @@ async def _estimated_table_rows(conn, table: str) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Row/cache copy helpers.
+#
+# Small pure copies used by dashboard cache write/read paths. Promoted here
+# from ``__init__.py`` during PERF-002 4A step 6 so ``source_matrix.py`` can
+# depend on the leaf helpers module for its cache read/write cycle.
+# ---------------------------------------------------------------------------
+
+def _copy_row_map(rows: dict[str, dict]) -> dict[str, dict]:
+    return {key: dict(value) for key, value in rows.items()}
+
+
+def _copy_row_list(rows: list[dict]) -> list[dict]:
+    return [dict(row) for row in rows]
+
+
+def _copy_cache_value(value):
+    if isinstance(value, dict):
+        return {key: _copy_cache_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_copy_cache_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_copy_cache_value(item) for item in value)
+    return value
+
+
+# ---------------------------------------------------------------------------
 # Shared DB-pool acquire/release helpers.
 #
 # Promoted from ``__init__.py`` during PERF-002 4A step 5 (browser.py split).
