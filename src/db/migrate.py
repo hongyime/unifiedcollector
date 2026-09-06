@@ -46,10 +46,14 @@ SCHEMAS_DIR = _DB_DIR / "schemas"
 MIGRATIONS_DIR = _DB_DIR / "migrations"
 
 # Migration filenames that must NOT be auto-applied by the runner.
+# Files listed here are ALSO physically moved to migrations/_archive/ (which the
+# top-level `MIGRATIONS_DIR.glob("*.sql")` does not descend into), so this SKIP
+# set is defence-in-depth: even if someone accidentally moves an archived file
+# back to the top level, the runner refuses to apply it.
 SKIP: frozenset[str] = frozenset({
-    "v2_schema.sql",          # superseded full-schema dump (pre-2026-05-26)
-    "v2_schema_final.sql",    # superseded adjustment dump
-    "drop_wa_face_tables.sql",  # destructive DROP — apply by hand if needed
+    "v2_schema.sql",          # superseded full-schema dump (pre-2026-05-26); archived
+    "v2_schema_final.sql",    # superseded adjustment dump; archived
+    "drop_wa_face_tables.sql",  # destructive DROP — archived; apply by hand if needed
 })
 
 _LEDGER_DDL = """

@@ -6,6 +6,11 @@ credentials/
 # Local scratch / one-off audit scripts (kept on disk, not tracked)
 tmp/
 scratch.py
+last_sync.txt
+
+# Personal social-graph seeds (operator-local; must never be tracked)
+scripts/*_1hop.json
+data/
 
 # Large model files
 models/dlib/*.dat
@@ -127,5 +132,4 @@ coverage/
 !.deepsource.toml
 skills/
 skills-lock.json
-docs/
 # End AI / editor dot directories (managed via sourcerepo)
