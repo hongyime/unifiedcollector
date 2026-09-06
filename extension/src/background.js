@@ -12,6 +12,13 @@
 
 import { UC_PLATFORMS } from "./shared/platforms.js";
 import { LOG_KEY, LOG_MAX, log } from "./shared/log.js";
+import {
+  DEFAULT_CONTROL,
+  DEFAULT_INGEST,
+  controlBase,
+  ingestBase,
+  postJsonWithTimeout,
+} from "./shared/ingest_client.js";
 
 // Global crash sinks: if any listener throws async or the top-level IIFE below
 // rejects, MV3 logs "Service worker went to a bad state unexpectedly" and gives
@@ -73,8 +80,9 @@ function _reportSwCrash(detail) {
 globalThis.UC_PLATFORMS = UC_PLATFORMS;
 
 const ALARM = "uc-scrape";
-const DEFAULT_INGEST = "http://127.0.0.1:8765";
-const DEFAULT_CONTROL = "http://127.0.0.1:8700";
+// DEFAULT_INGEST / DEFAULT_CONTROL / ingestBase() / controlBase() /
+// postJsonWithTimeout() live in src/shared/ingest_client.js — imported at
+// the top of this file.
 // LOG_KEY / LOG_MAX / log(level, msg) live in src/shared/log.js and are
 // imported at the top of this file.
 const WATCHDOG_MIN = 7;          // re-nudge any open scraper tab whose loop died
@@ -129,29 +137,9 @@ async function getStatus() {
 // storage.local — the SW frequently could not reply within the content
 // script's 15 s loopStatus / 10 s log budget and content fell back to
 // content_direct. Reading from a module-scope cache eliminates that hop.
-// The values are only writable via popup.js (chrome.storage.local.set), so
-// a storage.onChanged listener keeps the cache honest.
-let _cachedIngestBase = null;
-let _cachedControlBase = null;
-async function ingestBase() {
-  if (_cachedIngestBase) return _cachedIngestBase;
-  const { ingestBase } = await chrome.storage.local.get("ingestBase");
-  _cachedIngestBase = ingestBase || DEFAULT_INGEST;
-  return _cachedIngestBase;
-}
-async function controlBase() {
-  if (_cachedControlBase) return _cachedControlBase;
-  const { controlBase } = await chrome.storage.local.get("controlBase");
-  _cachedControlBase = controlBase || DEFAULT_CONTROL;
-  return _cachedControlBase;
-}
-try {
-  chrome.storage.onChanged.addListener((changes, area) => {
-    if (area !== "local") return;
-    if (changes.ingestBase) _cachedIngestBase = changes.ingestBase.newValue || DEFAULT_INGEST;
-    if (changes.controlBase) _cachedControlBase = changes.controlBase.newValue || DEFAULT_CONTROL;
-  });
-} catch (e) { /* addListener unavailable in some contexts */ }
+// The values are only writable via popup.js (chrome.storage.local.set);
+// shared/ingest_client attaches a storage.onChanged listener at module load
+// to keep its cache honest.
 
 // ---- rotator scrape-config gate (plan G3-wire) ---------------------------
 // The activity rotator disables browser platforms in collection_schedules so
@@ -198,23 +186,8 @@ function extensionVersion() {
 function withExtensionVersion(payload) {
   return { ...payload, extension_version: extensionVersion() };
 }
-async function postJsonWithTimeout(url, payload, timeoutMs = 10000) {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-  try {
-    const r = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-      signal: ctrl.signal,
-    });
-    const body = await r.text().catch(() => "");
-    if (!r.ok) throw new Error(`HTTP ${r.status}${body ? ": " + body.slice(0, 180) : ""}`);
-    return { response: r, body };
-  } finally {
-    clearTimeout(timer);
-  }
-}
+// postJsonWithTimeout(url, payload, timeoutMs) lives in
+// src/shared/ingest_client.js and is imported at the top of this file.
 async function reportBridgeHeartbeat(reason) {
   const base = await ingestBase();
   const payload = withExtensionVersion({

@@ -1,7 +1,7 @@
 import { clearLog, readLog } from "./shared/log.js";
+import { DEFAULT_INGEST, ingestBase } from "./shared/ingest_client.js";
 
 const $ = (id) => document.getElementById(id);
-const DEFAULT_INGEST = "http://127.0.0.1:8765";
 const SCRAPER_URLS = [
   "https://www.instagram.com/*", "https://www.tiktok.com/*", "https://www.lemon8-app.com/*",
   "https://x.com/*", "https://www.threads.com/*", "https://www.facebook.com/*",
@@ -16,10 +16,7 @@ function ago(ts) {
 }
 function hhmmss(ts) { return new Date(ts).toLocaleTimeString([], { hour12: false }); }
 
-async function ingestBase() {
-  const { ingestBase } = await chrome.storage.local.get("ingestBase");
-  return ingestBase || DEFAULT_INGEST;
-}
+// ingestBase() lives in src/shared/ingest_client.js — imported at top.
 
 async function renderStatus() {
   const { ucStatus = {} } = await chrome.storage.local.get("ucStatus");

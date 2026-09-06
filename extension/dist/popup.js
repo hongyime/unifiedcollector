@@ -17,9 +17,38 @@
     }
   }
 
+  // src/shared/ingest_client.js
+  var DEFAULT_INGEST = "http://127.0.0.1:8765";
+  var DEFAULT_CONTROL = "http://127.0.0.1:8700";
+  var _cachedIngestBase = null;
+  var _cachedControlBase = null;
+  var _cacheListenerAttached = false;
+  function _attachCacheListener() {
+    if (_cacheListenerAttached) return;
+    try {
+      chrome.storage.onChanged.addListener((changes, area) => {
+        if (area !== "local") return;
+        if (changes.ingestBase) _cachedIngestBase = changes.ingestBase.newValue || DEFAULT_INGEST;
+        if (changes.controlBase) _cachedControlBase = changes.controlBase.newValue || DEFAULT_CONTROL;
+      });
+      _cacheListenerAttached = true;
+    } catch (e) {
+    }
+  }
+  _attachCacheListener();
+  async function ingestBase() {
+    if (_cachedIngestBase) return _cachedIngestBase;
+    try {
+      const { ingestBase: ingestBase2 } = await chrome.storage.local.get("ingestBase");
+      _cachedIngestBase = ingestBase2 || DEFAULT_INGEST;
+    } catch (e) {
+      _cachedIngestBase = DEFAULT_INGEST;
+    }
+    return _cachedIngestBase;
+  }
+
   // src/popup.js
   var $ = (id) => document.getElementById(id);
-  var DEFAULT_INGEST = "http://127.0.0.1:8765";
   var SCRAPER_URLS = [
     "https://www.instagram.com/*",
     "https://www.tiktok.com/*",
@@ -37,10 +66,6 @@
   }
   function hhmmss(ts) {
     return new Date(ts).toLocaleTimeString([], { hour12: false });
-  }
-  async function ingestBase() {
-    const { ingestBase: ingestBase2 } = await chrome.storage.local.get("ingestBase");
-    return ingestBase2 || DEFAULT_INGEST;
   }
   async function renderStatus() {
     const { ucStatus = {} } = await chrome.storage.local.get("ucStatus");

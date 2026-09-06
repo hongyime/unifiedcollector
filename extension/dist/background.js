@@ -33,6 +33,63 @@
     console.log(`[UC ${level}] ${msg}`);
   }
 
+  // src/shared/ingest_client.js
+  var DEFAULT_INGEST = "http://127.0.0.1:8765";
+  var DEFAULT_CONTROL = "http://127.0.0.1:8700";
+  var _cachedIngestBase = null;
+  var _cachedControlBase = null;
+  var _cacheListenerAttached = false;
+  function _attachCacheListener() {
+    if (_cacheListenerAttached) return;
+    try {
+      chrome.storage.onChanged.addListener((changes, area) => {
+        if (area !== "local") return;
+        if (changes.ingestBase) _cachedIngestBase = changes.ingestBase.newValue || DEFAULT_INGEST;
+        if (changes.controlBase) _cachedControlBase = changes.controlBase.newValue || DEFAULT_CONTROL;
+      });
+      _cacheListenerAttached = true;
+    } catch (e) {
+    }
+  }
+  _attachCacheListener();
+  async function ingestBase() {
+    if (_cachedIngestBase) return _cachedIngestBase;
+    try {
+      const { ingestBase: ingestBase2 } = await chrome.storage.local.get("ingestBase");
+      _cachedIngestBase = ingestBase2 || DEFAULT_INGEST;
+    } catch (e) {
+      _cachedIngestBase = DEFAULT_INGEST;
+    }
+    return _cachedIngestBase;
+  }
+  async function controlBase() {
+    if (_cachedControlBase) return _cachedControlBase;
+    try {
+      const { controlBase: controlBase2 } = await chrome.storage.local.get("controlBase");
+      _cachedControlBase = controlBase2 || DEFAULT_CONTROL;
+    } catch (e) {
+      _cachedControlBase = DEFAULT_CONTROL;
+    }
+    return _cachedControlBase;
+  }
+  async function postJsonWithTimeout(url, payload, timeoutMs = 1e4) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const r = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        signal: ctrl.signal
+      });
+      const body = await r.text().catch(() => "");
+      if (!r.ok) throw new Error(`HTTP ${r.status}${body ? ": " + body.slice(0, 180) : ""}`);
+      return { response: r, body };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   // src/background.js
   self.addEventListener("error", (event) => {
     const detail = {
@@ -96,8 +153,6 @@
   }
   globalThis.UC_PLATFORMS = UC_PLATFORMS;
   var ALARM = "uc-scrape";
-  var DEFAULT_INGEST = "http://127.0.0.1:8765";
-  var DEFAULT_CONTROL = "http://127.0.0.1:8700";
   var WATCHDOG_MIN = 7;
   var KICK_DEBOUNCE_MS = 3e4;
   var BROWSER_UPLOAD_MAX_BYTES = 256 * 1024 * 1024;
@@ -138,28 +193,6 @@
     const { ucStatus = {} } = await chrome.storage.local.get("ucStatus");
     return ucStatus;
   }
-  var _cachedIngestBase = null;
-  var _cachedControlBase = null;
-  async function ingestBase() {
-    if (_cachedIngestBase) return _cachedIngestBase;
-    const { ingestBase: ingestBase2 } = await chrome.storage.local.get("ingestBase");
-    _cachedIngestBase = ingestBase2 || DEFAULT_INGEST;
-    return _cachedIngestBase;
-  }
-  async function controlBase() {
-    if (_cachedControlBase) return _cachedControlBase;
-    const { controlBase: controlBase2 } = await chrome.storage.local.get("controlBase");
-    _cachedControlBase = controlBase2 || DEFAULT_CONTROL;
-    return _cachedControlBase;
-  }
-  try {
-    chrome.storage.onChanged.addListener((changes, area) => {
-      if (area !== "local") return;
-      if (changes.ingestBase) _cachedIngestBase = changes.ingestBase.newValue || DEFAULT_INGEST;
-      if (changes.controlBase) _cachedControlBase = changes.controlBase.newValue || DEFAULT_CONTROL;
-    });
-  } catch (e) {
-  }
   var _scrapeConfigDisabled = /* @__PURE__ */ new Set();
   var _scrapeConfigFetchedAt = 0;
   var SCRAPE_CONFIG_TTL_MS = 6e4;
@@ -199,23 +232,6 @@
   }
   function withExtensionVersion(payload) {
     return { ...payload, extension_version: extensionVersion() };
-  }
-  async function postJsonWithTimeout(url, payload, timeoutMs = 1e4) {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-    try {
-      const r = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-        signal: ctrl.signal
-      });
-      const body = await r.text().catch(() => "");
-      if (!r.ok) throw new Error(`HTTP ${r.status}${body ? ": " + body.slice(0, 180) : ""}`);
-      return { response: r, body };
-    } finally {
-      clearTimeout(timer);
-    }
   }
   async function reportBridgeHeartbeat(reason) {
     const base = await ingestBase();
