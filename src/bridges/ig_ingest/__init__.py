@@ -450,6 +450,16 @@ from .targets import (  # noqa: E402,F401
 from .discover import _discover, discover, discover_ig  # noqa: E402,F401
 
 
+# Ingest + upload handlers moved to .ingest per split step 5.
+from .ingest import (  # noqa: E402,F401
+    ingest,
+    ingest_upload,
+    ingest_upload_binary,
+    ingest_ig,
+    browser_media_candidates,
+)
+
+
 # Targets endpoints moved to .targets per split step 4.
 
 
@@ -2069,28 +2079,7 @@ async def _record_browser_media_candidate_batch(app, platform, username, raw_ite
         logger.info("browser media candidate ledger[%s] %s: recorded=%d", platform, username, recorded)
 
 
-async def browser_media_candidates(request):
-    body = await _safe_json(request)
-    platform = _norm_platform(body.get("platform"))
-    username = body.get("username") or "unknown"
-    extension_version = body.get("extension_version")
-    raw_items = body.get("items") or []
-    if not isinstance(raw_items, list):
-        raw_items = []
-    queued = min(len(raw_items), 500)
-    if queued:
-        _schedule_app_task(
-            request.app,
-            _record_browser_media_candidate_batch(
-                request.app,
-                platform,
-                username,
-                raw_items,
-                extension_version,
-            ),
-            "browser_media_candidate_batch",
-        )
-    return _cors(web.json_response({"ok": True, "queued": queued, "platform": platform}))
+# browser_media_candidates moved to .ingest per split step 5.
 
 
 async def tiktok_revisit_target(request):
@@ -4907,79 +4896,7 @@ async def comments_handler(request):
     return _cors(web.json_response({"saved": n}))
 
 
-async def ingest(request):
-    body = await _safe_json(request)
-    platform = _norm_platform(body.get("platform"))
-    return _cors(web.json_response(await _ingest(request.app, platform, body)))
-
-
-async def ingest_upload(request):
-    body = await _safe_json(request)
-    platform = _norm_platform(body.get("platform"))
-    _schedule_app_task(
-        request.app,
-        _ingest_uploaded_media(request.app, platform, body),
-        "browser_upload_ingest",
-    )
-    return _cors(web.json_response(_queued_browser_upload_response(platform, body)))
-
-
-async def ingest_upload_binary(request):
-    body: dict = {}
-    file_bytes: bytes | None = None
-    file_mime: str | None = None
-    file_name: str | None = None
-    try:
-        reader = await request.multipart()
-        async for part in reader:
-            if part.name == "metadata":
-                try:
-                    parsed = json.loads(await part.text())
-                except Exception:
-                    parsed = {}
-                if isinstance(parsed, dict):
-                    body = parsed
-            elif part.name == "file":
-                file_name = part.filename
-                file_mime = part.headers.get("Content-Type")
-                file_bytes = await part.read(decode=False)
-    except Exception as exc:
-        logger.warning("browser multipart upload parse failed: %s", exc.__class__.__name__)
-        return _cors(web.json_response({"ok": False, "error": "bad_multipart"}, status=400))
-
-    if not isinstance(body, dict):
-        body = {}
-    platform = _norm_platform(body.get("platform"))
-    item = body.get("item") if isinstance(body.get("item"), dict) else {}
-    item = dict(item)
-    if not file_bytes:
-        return _cors(web.json_response({"ok": False, "error": "missing_file", "platform": platform}, status=400))
-
-    item["data_bytes"] = file_bytes
-    if file_mime and not item.get("mime_type"):
-        item["mime_type"] = file_mime
-    meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
-    item["meta"] = {
-        **meta,
-        "browser_upload_transport": "multipart",
-        "browser_upload_filename": file_name,
-    }
-    body["item"] = item
-    body["file_size"] = len(file_bytes)
-    if file_mime and not body.get("mime_type"):
-        body["mime_type"] = file_mime
-
-    _schedule_app_task(
-        request.app,
-        _ingest_uploaded_media(request.app, platform, body),
-        "browser_upload_binary_ingest",
-    )
-    return _cors(web.json_response(_queued_browser_upload_response(platform, body)))
-
-
-async def ingest_ig(request):  # /ig/ingest alias
-    body = await _safe_json(request)
-    return _cors(web.json_response(await _ingest(request.app, "instagram", body)))
+# ingest moved to .ingest per split step 5.
 
 
 async def sw_crash_handler(request):
