@@ -164,6 +164,7 @@ services:
     env_file:
       - ../.env
       - ./env/common.env
+      - ./env/recon.env
     healthcheck:
       test: ["CMD-SHELL", "/opt/spiderfoot-venv/bin/python /opt/spiderfoot/sf.py -V >/dev/null 2>&1"]
       interval: 90s
