@@ -63,6 +63,91 @@
     return wallMins;
   }
 
+  // src/shared/cooldown.js
+  function instagramLoggedInOwner() {
+    try {
+      const username = window._sharedData && window._sharedData.config && window._sharedData.config.viewer && window._sharedData.config.viewer.username;
+      if (username) return String(username).trim().replace(/^@/, "");
+    } catch (e) {
+    }
+    const m = document.cookie.match(/ds_user_id=(\d+)/);
+    return m ? m[1] : "";
+  }
+  function facebookLoggedInOwner() {
+    try {
+      const m = document.cookie.match(/c_user=(\d+)/);
+      if (m) return m[1];
+    } catch (e) {
+    }
+    return "";
+  }
+  function xLoggedInOwner() {
+    const sources = [
+      document.querySelector('[data-testid="SideNav_AccountSwitcher_Button"]'),
+      document.querySelector('a[data-testid="AppTabBar_Profile_Link"]'),
+      ...document.querySelectorAll('a[href^="/"][aria-label*="Profile" i]')
+    ].filter(Boolean);
+    for (const el of sources) {
+      const txt = el.innerText || el.getAttribute("aria-label") || "";
+      const m = txt.match(/@([A-Za-z0-9_]{1,20})/);
+      if (m) return m[1];
+      const href = el.getAttribute && (el.getAttribute("href") || "");
+      const h = href.match(/^\/([A-Za-z0-9_]{1,20})\/?$/);
+      if (h && !/^(home|explore|notifications|messages|i|search)$/i.test(h[1])) return h[1];
+    }
+    return "";
+  }
+  function threadsLoggedInOwner() {
+    const sources = [
+      ...document.querySelectorAll('a[href^="/@"][aria-label*="Profile" i]'),
+      ...document.querySelectorAll('a[href^="/@"]')
+    ];
+    for (const el of sources) {
+      const txt = el.innerText || el.getAttribute("aria-label") || "";
+      const m = txt.match(/@([A-Za-z0-9._]{1,30})/);
+      if (m) return m[1];
+      const href = el.getAttribute && (el.getAttribute("href") || "");
+      const h = href.match(/^\/@([A-Za-z0-9._]{1,30})\/?$/);
+      if (h) return h[1];
+    }
+    return "";
+  }
+  function ownerFromStoredOrDom(platform, domFn) {
+    const k = "uc_owner_" + platform;
+    let owner = "";
+    try {
+      owner = (localStorage.getItem(k) || "").trim().replace(/^@/, "");
+    } catch (e) {
+    }
+    if (!owner && typeof domFn === "function") {
+      try {
+        owner = (domFn() || "").trim().replace(/^@/, "");
+      } catch (e) {
+      }
+    }
+    if (owner) {
+      try {
+        localStorage.setItem(k, owner);
+      } catch (e) {
+      }
+    }
+    return owner || "";
+  }
+  function cooldownIdentity(platform, extra = {}) {
+    if (platform === "instagram") return instagramLoggedInOwner();
+    if (platform === "tiktok") {
+      return ownerFromStoredOrDom("tiktok", () => {
+        const m = location.pathname.match(/^\/@([^/?#]+)/);
+        return m && m[1] ? m[1] : "";
+      });
+    }
+    if (platform === "x") return ownerFromStoredOrDom("x", xLoggedInOwner);
+    if (platform === "threads") return ownerFromStoredOrDom("threads", threadsLoggedInOwner);
+    if (platform === "facebook") return ownerFromStoredOrDom("facebook", facebookLoggedInOwner);
+    if (platform === "strava" && typeof extra.strava === "function") return extra.strava();
+    return "";
+  }
+
   // src/content.js
   (() => {
     const UC_CONTENT_VERSION = (() => {
@@ -124,43 +209,15 @@
       if (!Number.isFinite(n)) return fallback;
       return Math.max(min, Math.min(max, n));
     }
-    function instagramLoggedInOwner() {
-      try {
-        const username = window._sharedData && window._sharedData.config && window._sharedData.config.viewer && window._sharedData.config.viewer.username;
-        if (username) return String(username).trim().replace(/^@/, "");
-      } catch (e) {
-      }
-      const m = document.cookie.match(/ds_user_id=(\d+)/);
-      return m ? m[1] : "";
-    }
-    function facebookLoggedInOwner() {
-      try {
-        const m = document.cookie.match(/c_user=(\d+)/);
-        if (m) return m[1];
-      } catch (e) {
-      }
-      return "";
-    }
-    function cooldownIdentity(platform) {
-      if (platform === "instagram") return instagramLoggedInOwner();
-      if (platform === "tiktok") {
-        return ownerFromStoredOrDom("tiktok", () => {
-          const m = location.pathname.match(/^\/@([^/?#]+)/);
-          return m && m[1] ? m[1] : "";
-        });
-      }
-      if (platform === "x") return ownerFromStoredOrDom("x", xLoggedInOwner);
-      if (platform === "threads") return ownerFromStoredOrDom("threads", threadsLoggedInOwner);
-      if (platform === "facebook") return ownerFromStoredOrDom("facebook", facebookLoggedInOwner);
-      if (platform === "strava") return stravaLoggedInOwner();
-      return "";
+    function cooldownIdentity2(platform) {
+      return cooldownIdentity(platform, { strava: stravaLoggedInOwner });
     }
     initThrottle({
       lsGet,
       lsSet,
       lsNum,
       lsBoundedInt,
-      cooldownIdentity,
+      cooldownIdentity: cooldownIdentity2,
       send: (msg) => send(msg)
     });
     function human(base) {
@@ -910,27 +967,6 @@
       }
     }
     const FOLLOW_SWEEP_TTL_MS = 12 * 60 * 60 * 1e3;
-    function ownerFromStoredOrDom(platform, domFn) {
-      const k = "uc_owner_" + platform;
-      let owner = "";
-      try {
-        owner = (localStorage.getItem(k) || "").trim().replace(/^@/, "");
-      } catch (e) {
-      }
-      if (!owner && typeof domFn === "function") {
-        try {
-          owner = (domFn() || "").trim().replace(/^@/, "");
-        } catch (e) {
-        }
-      }
-      if (owner) {
-        try {
-          localStorage.setItem(k, owner);
-        } catch (e) {
-        }
-      }
-      return owner || "";
-    }
     function collectFollowHandlesFromDom(platform, owner) {
       const users = [];
       const seen = /* @__PURE__ */ new Set();
@@ -2247,22 +2283,6 @@
       }
       return false;
     }
-    function xLoggedInOwner() {
-      const sources = [
-        document.querySelector('[data-testid="SideNav_AccountSwitcher_Button"]'),
-        document.querySelector('a[data-testid="AppTabBar_Profile_Link"]'),
-        ...document.querySelectorAll('a[href^="/"][aria-label*="Profile" i]')
-      ].filter(Boolean);
-      for (const el of sources) {
-        const txt = el.innerText || el.getAttribute("aria-label") || "";
-        const m = txt.match(/@([A-Za-z0-9_]{1,20})/);
-        if (m) return m[1];
-        const href = el.getAttribute && (el.getAttribute("href") || "");
-        const h = href.match(/^\/([A-Za-z0-9_]{1,20})\/?$/);
-        if (h && !/^(home|explore|notifications|messages|i|search)$/i.test(h[1])) return h[1];
-      }
-      return "";
-    }
     function compactCount(s) {
       const m = String(s || "").replace(/,/g, "").match(/([\d.]+)\s*([KMB])?/i);
       if (!m) return null;
@@ -2850,21 +2870,6 @@
       } catch (e) {
       }
       return false;
-    }
-    function threadsLoggedInOwner() {
-      const sources = [
-        ...document.querySelectorAll('a[href^="/@"][aria-label*="Profile" i]'),
-        ...document.querySelectorAll('a[href^="/@"]')
-      ];
-      for (const el of sources) {
-        const txt = el.innerText || el.getAttribute("aria-label") || "";
-        const m = txt.match(/@([A-Za-z0-9._]{1,30})/);
-        if (m) return m[1];
-        const href = el.getAttribute && (el.getAttribute("href") || "");
-        const h = href.match(/^\/@([A-Za-z0-9._]{1,30})\/?$/);
-        if (h) return h[1];
-      }
-      return "";
     }
     const thNoAcct = () => new Set(lsGet("uc_th_noacct", "").split(",").filter(Boolean));
     function thMarkNoAcct(user) {

@@ -8,6 +8,14 @@ import {
   setWall,
   wallLeftMs,
 } from "./shared/throttle.js";
+import {
+  cooldownIdentity as _sharedCooldownIdentity,
+  facebookLoggedInOwner,
+  instagramLoggedInOwner,
+  ownerFromStoredOrDom,
+  threadsLoggedInOwner,
+  xLoggedInOwner,
+} from "./shared/cooldown.js";
 
 (() => {
 const UC_CONTENT_VERSION = (() => {
@@ -74,38 +82,13 @@ function lsBoundedInt(key, fallback, min, max) {
 
 // PERSISTENT throttle wall (anti-ban). Store by platform + visible owner where
 // possible, with the old platform-only key as a legacy fallback.
-function instagramLoggedInOwner() {
-  try {
-    const username =
-      window._sharedData &&
-      window._sharedData.config &&
-      window._sharedData.config.viewer &&
-      window._sharedData.config.viewer.username;
-    if (username) return String(username).trim().replace(/^@/, "");
-  } catch (e) {}
-  const m = document.cookie.match(/ds_user_id=(\d+)/);
-  return m ? m[1] : "";
-}
-function facebookLoggedInOwner() {
-  try {
-    const m = document.cookie.match(/c_user=(\d+)/);
-    if (m) return m[1];
-  } catch (e) {}
-  return "";
-}
+// instagramLoggedInOwner / facebookLoggedInOwner / xLoggedInOwner /
+// threadsLoggedInOwner / ownerFromStoredOrDom live in src/shared/cooldown.js
+// and are imported at the top of this file. `cooldownIdentity` below wraps
+// the shared implementation so Strava's DOM walk (which depends on this
+// file's `stravaLoggedInOwner`) can still be plugged in.
 function cooldownIdentity(platform) {
-  if (platform === "instagram") return instagramLoggedInOwner();
-  if (platform === "tiktok") {
-    return ownerFromStoredOrDom("tiktok", () => {
-      const m = location.pathname.match(/^\/@([^/?#]+)/);
-      return m && m[1] ? m[1] : "";
-    });
-  }
-  if (platform === "x") return ownerFromStoredOrDom("x", xLoggedInOwner);
-  if (platform === "threads") return ownerFromStoredOrDom("threads", threadsLoggedInOwner);
-  if (platform === "facebook") return ownerFromStoredOrDom("facebook", facebookLoggedInOwner);
-  if (platform === "strava") return stravaLoggedInOwner();
-  return "";
+  return _sharedCooldownIdentity(platform, { strava: stravaLoggedInOwner });
 }
 // setWall / wallLeftMs / applyThrottleWall / DEFAULT_THROTTLE_BACKOFF_MINS
 // now live in src/shared/throttle.js. initThrottle wires them to this file's
@@ -939,18 +922,8 @@ async function autoScroll(times = 8, dist = 1400, pause = 1800, options = {}) {
 
 const FOLLOW_SWEEP_TTL_MS = 12 * 60 * 60 * 1000;
 
-function ownerFromStoredOrDom(platform, domFn) {
-  const k = "uc_owner_" + platform;
-  let owner = "";
-  try { owner = (localStorage.getItem(k) || "").trim().replace(/^@/, ""); } catch (e) {}
-  if (!owner && typeof domFn === "function") {
-    try { owner = (domFn() || "").trim().replace(/^@/, ""); } catch (e) {}
-  }
-  if (owner) {
-    try { localStorage.setItem(k, owner); } catch (e) {}
-  }
-  return owner || "";
-}
+// ownerFromStoredOrDom lives in src/shared/cooldown.js — imported at the
+// top of this file.
 
 function collectFollowHandlesFromDom(platform, owner) {
   const users = [];
@@ -2232,22 +2205,8 @@ async function xSelectTab(name) {
   return false;
 }
 
-function xLoggedInOwner() {
-  const sources = [
-    document.querySelector('[data-testid="SideNav_AccountSwitcher_Button"]'),
-    document.querySelector('a[data-testid="AppTabBar_Profile_Link"]'),
-    ...document.querySelectorAll('a[href^="/"][aria-label*="Profile" i]'),
-  ].filter(Boolean);
-  for (const el of sources) {
-    const txt = el.innerText || el.getAttribute("aria-label") || "";
-    const m = txt.match(/@([A-Za-z0-9_]{1,20})/);
-    if (m) return m[1];
-    const href = el.getAttribute && (el.getAttribute("href") || "");
-    const h = href.match(/^\/([A-Za-z0-9_]{1,20})\/?$/);
-    if (h && !/^(home|explore|notifications|messages|i|search)$/i.test(h[1])) return h[1];
-  }
-  return "";
-}
+// xLoggedInOwner lives in src/shared/cooldown.js — imported at the top of
+// this file.
 
 function compactCount(s) {
   const m = String(s || "").replace(/,/g, "").match(/([\d.]+)\s*([KMB])?/i);
@@ -2859,21 +2818,8 @@ async function threadsSelectFeed(want) {
   return false;
 }
 
-function threadsLoggedInOwner() {
-  const sources = [
-    ...document.querySelectorAll('a[href^="/@"][aria-label*="Profile" i]'),
-    ...document.querySelectorAll('a[href^="/@"]'),
-  ];
-  for (const el of sources) {
-    const txt = el.innerText || el.getAttribute("aria-label") || "";
-    const m = txt.match(/@([A-Za-z0-9._]{1,30})/);
-    if (m) return m[1];
-    const href = el.getAttribute && (el.getAttribute("href") || "");
-    const h = href.match(/^\/@([A-Za-z0-9._]{1,30})\/?$/);
-    if (h) return h[1];
-  }
-  return "";
-}
+// threadsLoggedInOwner lives in src/shared/cooldown.js — imported at the
+// top of this file.
 
 // NOTE: a Threads handle == the same Meta account's Instagram handle, but NOT every
 // Instagram user has activated Threads. So some IG handles 404 on Threads. We detect
