@@ -295,7 +295,11 @@ async def test_compare_db_media_artifacts_times_out_db_fetch_and_returns_report(
 
 @pytest.mark.asyncio
 async def test_rebuild_report_command_reports_compare_timeout(monkeypatch, tmp_path, capsys):
-    from src import main as cli
+    # STRUCT-002: _cmd_rebuild_report and its _attach_* helper moved out of
+    # src.main and into src.cli.commands.rebuild. Patch there so the coroutine
+    # inside _cmd_rebuild_report picks up the substitute via LOAD_GLOBAL in
+    # the rebuild-command module's own namespace.
+    from src.cli.commands import rebuild as cli
     import src.core.rebuild_report as rebuild_report
 
     async def slow_compare(*_args):
