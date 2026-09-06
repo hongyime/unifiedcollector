@@ -7,17 +7,17 @@
 - Working tree: no modifications (0 modified, 0 untracked)
 - PR data source: gh (authenticated as `bryanseah234`)
 - Agent capability: shell
-- Not analyzed: bytecode caches under `__pycache__/`, image binaries under `extension/icons/` and `dashboard/frontend/public/`, the `archive/` directory referenced in `README.md` but not tracked here, the two large sync/state markdowns (`2026-05-30-unifiedanalyzer-strategy.md`, `collector_audit.md`) beyond first pass. Deep-dive sections capped at MAX_MODULES_DEEP=10.
+- Not analyzed: bytecode caches under `__pycache__/`, image binaries under `extension/icons/` and `src/dashboard/frontend/public/`, the `archive/` directory referenced in `README.md` but not tracked here, the two large sync/state markdowns (`2026-05-30-unifiedanalyzer-strategy.md`, `collector_audit.md`) beyond first pass. Deep-dive sections capped at MAX_MODULES_DEEP=10.
 
 ## 2. What this repository is
-A Python-plus-TypeScript ingestion service that collects public and semi-public content from 11 named source platforms (github, youtube, strava, search, website, tiktok, lemon8, whatsapp, telegram, instagram, beeper/matrix) and writes them into one shared Postgres database (`pgvector/pgvector:pg16`, `docker/docker-compose.yml:5`). Collection runs entirely inside Docker Compose services defined in `docker/docker-compose.yml` (24 services declared). The primary artifacts written are rows in `media_items`, `social_users`, and per-source tables under `src/db/schemas/` and `src/db/migrations/`, along with binary media files placed under the mounted `z:/unifiedcollector` vault. A React 19 + Vite operations dashboard (`dashboard/frontend/`, backend at `src/dashboard/api.py:8700`) surfaces status. An enrichment pipeline (`docker/Dockerfile.spiderfoot`, `src/recon_spiderfoot_service.py`, `src/core/recon_spiderfoot.py`) processes queued OSINT targets via SpiderFoot, maigret, and GHunt when enabled under compose profile `recon`. There is no outbound-messaging capability in this repo.
+A Python-plus-TypeScript ingestion service that collects public and semi-public content from 11 named source platforms (github, youtube, strava, search, website, tiktok, lemon8, whatsapp, telegram, instagram, beeper/matrix) and writes them into one shared Postgres database (`pgvector/pgvector:pg16`, `docker/docker-compose.yml:5`). Collection runs entirely inside Docker Compose services defined in `docker/docker-compose.yml` (24 services declared). The primary artifacts written are rows in `media_items`, `social_users`, and per-source tables under `src/db/schemas/` and `src/db/migrations/`, along with binary media files placed under the mounted `z:/unifiedcollector` vault. A React 19 + Vite operations dashboard (`src/dashboard/frontend/`, backend at `src/dashboard/api.py:8700`) surfaces status. An enrichment pipeline (`docker/Dockerfile.spiderfoot`, `src/recon_spiderfoot_service.py`, `src/core/recon_spiderfoot.py`) processes queued OSINT targets via SpiderFoot, maigret, and GHunt when enabled under compose profile `recon`. There is no outbound-messaging capability in this repo.
 
 ## 3. Quick facts
 | Field | Value |
 |---|---|
 | Primary language(s) | Python (301 files, `.py`), TypeScript/TSX (75 files: 54 `.tsx` + 21 `.ts`), SQL (136 files), JavaScript (6 files including `extension/`), PowerShell (15 files under `scripts/`) |
 | Runtime / version constraint | Python 3.12 (`docker/Dockerfile:3` `FROM python:3.12-slim`; `pyproject.toml:16` `target-version = "py312"`). CI uses Python 3.12 (`.github/workflows/python-ci.yml:22`). Node 20 (`docker/Dockerfile:11` `nodesource setup_20.x`) for the WhatsApp bridge; `src/bridges/whatsapp/package.json` declares dev dep `typescript ^7.0.2`. Postgres 16 with pgvector (`docker/docker-compose.yml:5`). |
-| Package manager | pip (`requirements.txt`, `requirements.lock`); npm (dashboard `dashboard/frontend/package.json`, whatsapp bridge `src/bridges/whatsapp/package.json`, both with `package-lock.json`) |
+| Package manager | pip (`requirements.txt`, `requirements.lock`); npm (dashboard `src/dashboard/frontend/package.json`, whatsapp bridge `src/bridges/whatsapp/package.json`, both with `package-lock.json`) |
 | Tracked files | 644 |
 | Total lines (tracked) | 167,416 across text files inventoried |
 | Deployment artifact | Docker Compose stack (`docker/docker-compose.yml`, 24 services); container images built from `docker/Dockerfile`, `docker/Dockerfile.dashboard`, `docker/Dockerfile.spiderfoot`, `docker/Dockerfile.backup`, `src/bridges/whatsapp/Dockerfile` |
@@ -43,7 +43,7 @@ Entry points table:
 | `python -m src.tools.browser_cookie_vault` | `src/tools/browser_cookie_vault.py` | `docker/docker-compose.yml:1336` service `browser_cookie_vault`, port 8790 (`src/tools/browser_cookie_vault.py`, README ref) | Chrome cookie snapshot loop |
 | `python -m src.backup.db_backup run` | `src/backup/db_backup.py` | `docker/docker-compose.yml:1138` service `backup` | Daily pg_dump with atomic rename + retention (`src/backup/db_backup.py`) |
 | `node build/index.js` (WhatsApp bridge) | `src/bridges/whatsapp/package.json:5` | `docker/docker-compose.yml:1254` and `:1293` services `wa-bridge-1` / `wa-bridge-2` | Baileys TypeScript bridge publishing to RabbitMQ (`src/bridges/whatsapp/src/index.ts:1200 lines`) |
-| React dev/build | `dashboard/frontend/package.json` scripts `dev`, `build`, `preview` | Bundle served static from `dashboard/frontend/dist/` by dashboard image (`docker/Dockerfile.dashboard:6`) | React 19 SPA (`dashboard/frontend/src/App.tsx:1`) |
+| React dev/build | `src/dashboard/frontend/package.json` scripts `dev`, `build`, `preview` | Bundle served static from `src/dashboard/frontend/dist/` by dashboard image (`docker/Dockerfile.dashboard:6`) | React 19 SPA (`src/dashboard/frontend/src/App.tsx:1`) |
 | Chrome MV3 extension | `extension/manifest.json`, `extension/background.js`, `extension/content.js` | Installed manually into the operator's Chrome | POSTs to `ig_ingest:8765` (routes in Section 9) |
 
 Install and run (from `README.md` procedure, verified against `docker/docker-compose.yml`):
@@ -135,7 +135,7 @@ Depth-capped directory summary (Python-first, then bridges, dashboard, config, t
 | `.github/workflows/` | 15 | CI/CD workflows (list in Section 12) |
 | `.github/` | 5 non-workflow | Dependabot, labels, funding, ISSUE_TEMPLATE (bug/feature), PR template |
 | `config/` | 20 | `seed_sg_schools.sql`, `sg_schools.csv`, and per-source `.targets` / `.env` / `.dorks` files under `config/sources/` |
-| `dashboard/frontend/` | 40 | React 19 + Vite SPA; `App.tsx` router with 34 routes (`dashboard/frontend/src/App.tsx:58`) |
+| `src/dashboard/frontend/` | 40 | React 19 + Vite SPA; `App.tsx` router with 34 routes (`src/dashboard/frontend/src/App.tsx:58`) |
 | `docker/` | 6 | Compose file (`docker-compose.yml` 1,345 lines), five Dockerfiles, `postgres/postgres.conf`, `rabbitmq.conf`, 3 patch scripts under `docker/patches/` |
 | `docs/` | 1 | `enrichment.md` (referenced by README `# 91ff90c6 docs: full README rewrite + enrichment.md`) |
 | `extension/` | 10 | Chrome MV3 extension source: `manifest.json`, `background.js` (2,978 LOC), `content.js` (4,062 LOC), `inject.js`, `popup.html/js`, `tabs.html/js`, `platforms.js`, `README.md`, `icons/{16,48,128}.png` |
@@ -163,7 +163,7 @@ Depth-capped directory summary (Python-first, then bridges, dashboard, config, t
 | `tests/` | 15 top + 8 subdirs (110 files total) | pytest suite mirrored to source layout — see Section 12 |
 | `tools/` | 6 | `browser_tab_audit.py`, `browser_tab_reload.py`, `optional_rollout_monitor.py`, `telegram_login.py`, `telegram_relogin.py`, `TELEGRAM_LOGIN_README.md` |
 
-Total tracked files: 644. Full sorted inventory retrieved via `git ls-files | sort` — the top-40 directories by file count are documented above and account for the observed distribution. Truncated below MAX_FILES_LISTED for the migration list; the complete migration set is enumerable in-tree at `src/db/migrations/`. Generated files: `dashboard/frontend/package-lock.json`, `src/bridges/whatsapp/package-lock.json` (both large lockfiles, tracked). Vendored files: none in-tree — Python deps installed at image build, JS deps installed at image build. Untracked-but-not-ignored files: none observed.
+Total tracked files: 644. Full sorted inventory retrieved via `git ls-files | sort` — the top-40 directories by file count are documented above and account for the observed distribution. Truncated below MAX_FILES_LISTED for the migration list; the complete migration set is enumerable in-tree at `src/db/migrations/`. Generated files: `src/dashboard/frontend/package-lock.json`, `src/bridges/whatsapp/package-lock.json` (both large lockfiles, tracked). Vendored files: none in-tree — Python deps installed at image build, JS deps installed at image build. Untracked-but-not-ignored files: none observed.
 
 ## 8. Key modules in depth
 
@@ -218,7 +218,7 @@ Total tracked files: 644. Full sorted inventory retrieved via `git ls-files | so
 - Responsibility: FastAPI operations dashboard; 103 HTTP route decorators + 1 websocket route (`src/dashboard/websocket.py`, 5,153 bytes).
 - Endpoint samples (each from `^@app\.(get|post)`): `/health` (`:4300`), `/metrics` (`:4472`), `/collectors` (`:4888`), `/collectors/live` (`:4899`), `/collectors/source-matrix` (`:5083`), `/collectors/action-queue/sync` (`:5212`), `/media` (`:6124`), `/media/stats` (`:6145`), `/media/realtime-feed/status` (`:6349`), `/media/realtime-feed/deliveries` (`:6359`), `/instagram/health` (`:6428`), `/media/artifact-audit` (`:6792`), `/ingestion/hourly` (`:6814`), `/rate-limits/recent` (`:6961`), `/domain-pacing/status` (`:7067`), `/api-quotas/status` (`:7232`), `/social/stats` (`:7477`), `/social/network` (`:7498`), `/social/users` (`:7523`), `/social/scrape-config` (`:7544`), `/dlq` (`:7608`), `/auth/login` (`:7646`), `/auth/me` (`:7691`), `/targets` (`:7737`), and 79 additional routes.
 - Depends on: FastAPI, `src.db.connection`, many `src.core.*` reads.
-- Depended on by: `dashboard/frontend/src/services/api.ts` (React SPA client, 16,747 bytes).
+- Depended on by: `src/dashboard/frontend/src/services/api.ts` (React SPA client, 16,747 bytes).
 - Notable behavior: `DASHBOARD_JWT_SECRET`, `DASHBOARD_ADMIN_USERNAME`, `DASHBOARD_ADMIN_PASSWORD` for auth (`.env.example:378-380`); `_SOURCE_MATRIX_*` env-tuned timeouts (`src/dashboard/api.py:54-92`).
 - Tests: `tests/dashboard/*.py` — 11 files including `test_source_matrix.py` (88,927 bytes), `test_extension_health.py` (58,077 bytes), `test_coverage_api.py`.
 
@@ -450,7 +450,7 @@ Grouped by observed use (imports checked in `src/`):
 Lockfile status: `requirements.lock` present, header at `requirements.lock:1-14` notes it is generated from the live container and used by `docker/Dockerfile:26` (`pip install --no-cache-dir -r requirements.lock`). `requirements.txt` uses `>=` floors; `requirements.lock` uses `==`. Drift between the two indicated in the table (nine or more packages).
 
 ### Node dependencies
-- `dashboard/frontend/package.json` runtime: `react@^19.2.6`, `react-dom@^19.2.6`, `react-router@^8.3.0`, `@tanstack/react-query@^5.101.4`, `@tanstack/react-table@9.0.1`, `clsx@^2.1.1`, `date-fns@^4.4.0`, `lucide-react@^1.30.0`. Dev: `vite@^8.2.1`, `typescript@~7.0.2`, `@vitejs/plugin-react@^6.0.5`, `tailwindcss@^4.3.0` + `@tailwindcss/vite@^4.3.3`, `@types/react@^19.2.18`, `@types/react-dom@^19.2.4`. Lockfile: `dashboard/frontend/package-lock.json`.
+- `src/dashboard/frontend/package.json` runtime: `react@^19.2.6`, `react-dom@^19.2.6`, `react-router@^8.3.0`, `@tanstack/react-query@^5.101.4`, `@tanstack/react-table@9.0.1`, `clsx@^2.1.1`, `date-fns@^4.4.0`, `lucide-react@^1.30.0`. Dev: `vite@^8.2.1`, `typescript@~7.0.2`, `@vitejs/plugin-react@^6.0.5`, `tailwindcss@^4.3.0` + `@tailwindcss/vite@^4.3.3`, `@types/react@^19.2.18`, `@types/react-dom@^19.2.4`. Lockfile: `src/dashboard/frontend/package-lock.json`.
 - `src/bridges/whatsapp/package.json` runtime: `@whiskeysockets/baileys@^7.0.0-rc14`, `amqplib@^2.0.1`, `express@^5.2.1`, `pino@^10.3.1`, `@hapi/boom@^10.0.1`, `qrcode-terminal@^0.12.0`. Dev: `typescript@^7.0.2`, `ts-node@^10.9.2`, `@types/*`. Explicit `overrides` for `axios`, `body-parser`, `follow-redirects`, `protobufjs`, `sharp` (`src/bridges/whatsapp/package.json:35-42`). Lockfile: `src/bridges/whatsapp/package-lock.json`.
 
 ### System packages installed in images
@@ -631,8 +631,8 @@ Capabilities present in code but not covered by top-level `README.md`:
 - `.env` is present on disk with 13,617 bytes but is not tracked; whether the tracked `.env.example` is authoritative for the full set of consumed env names is contradicted by Section 10's variable count (749 `os.getenv/environ.get` in source vs ~200 names in `.env.example`).
 - The `archive/` directory referenced in `README.md` ("Outbound functionality — intentionally absent" section and rationale for archived implementations) is not present in the working tree or tracked file list.
 - `NOTICE` file states `Copyright 2026 The Prawn Organisation`; no other author attribution or contributor list is present.
-- No test framework declaration for the React SPA (`dashboard/frontend/`); no `jest.config`, `vitest.config`, or equivalent found in the inventory. The React build is validated by `.github/workflows/ci.yml` doing `npm run build` only.
+- No test framework declaration for the React SPA (`src/dashboard/frontend/`); no `jest.config`, `vitest.config`, or equivalent found in the inventory. The React build is validated by `.github/workflows/ci.yml` doing `npm run build` only.
 - No tests found for `src/bridges/whatsapp/src/*.ts` in the inventory; the WhatsApp bridge has no per-package test target.
 - `src/scheduler/__init__.py` is 91,375 bytes with one main `Scheduler` class; the granular tick logic (which sub-scheduler owns recon-seed vs phone-OSINT vs browser-maintenance) is not enumerated in code comments visible from the top-level symbol listing.
 - Migration files `v2_schema.sql` and `v2_schema_final.sql` remain in the tree but are on the `SKIP` list (`src/db/migrate.py:47`); no in-code comment indicates when they can be safely removed.
-- `dashboard/frontend/tsconfig.json` and `dashboard/frontend/vite.config.ts` inspection was not performed in this run — the exact TS build target is not verified.
+- `src/dashboard/frontend/tsconfig.json` and `src/dashboard/frontend/vite.config.ts` inspection was not performed in this run — the exact TS build target is not verified.

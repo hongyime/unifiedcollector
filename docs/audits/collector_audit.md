@@ -64,7 +64,7 @@ were found and fixed, one matrix cell corrected. All 12 collectors are `Up
 ### Task 1 — stale health-alert dashboard URL :8002 → :8700 — ✅ already clean
 No `:8002` exists anywhere in the repo. The dashboard is uniformly `:8700`
 (`docker/docker-compose.yml:563`, `docker/Dockerfile.dashboard:12`,
-`dashboard/frontend/vite.config.ts:10-11`, `src/dashboard/api.py:26`). No
+`src/dashboard/frontend/vite.config.ts:10-11`, `src/dashboard/api.py:26`). No
 external alert/prometheus/alertmanager config exists. Fixed in a prior commit;
 nothing to change.
 

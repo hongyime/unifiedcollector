@@ -51,7 +51,7 @@ what's blocked.
 
 ### 3.1 #37 — Dashboard IG DM view ✅
 
-- **Frontend:** `dashboard/frontend/src/features/instagram/InstagramDmPage.tsx`
+- **Frontend:** `src/dashboard/frontend/src/features/instagram/InstagramDmPage.tsx`
   (wired in `App.tsx`).
 - **Backend endpoints (FastAPI):** `src/dashboard/api.py`
   - `GET /instagram/dms/threads` (line 1204)
@@ -282,7 +282,7 @@ separate cookie jar and a distinct proxy egress if available.
 | Extension background/routing | `extension/background.js` (search `dm`)                         |
 | Extension content bridge     | `extension/content.js` (postMessage relay to background)        |
 | Extension manifest           | `extension/manifest.json` (version, host permissions)           |
-| Dashboard IG DM UI           | `dashboard/frontend/src/features/instagram/InstagramDmPage.tsx` |
+| Dashboard IG DM UI           | `src/dashboard/frontend/src/features/instagram/InstagramDmPage.tsx` |
 | Dashboard API                | `src/dashboard/api.py` (search `instagram_dm`)                  |
 | Schema                       | `src/db/migrations/add_instagram_dm.sql` (applied — do not edit)|
 

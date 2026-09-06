@@ -9,7 +9,7 @@
 | Commit SHA | `a0f5ee56960ab4e07c52902bb37cd1e21cf3baf8` |
 | Working tree | no modifications |
 | REPO_MAP.md used | yes — treated as hypothesis, verified against source |
-| Paths excluded | `__pycache__/`, `extension/icons/*.png`, `dashboard/frontend/public/*.svg`, container mounts (`credentials/`, `sessions/`, `.env`) |
+| Paths excluded | `__pycache__/`, `extension/icons/*.png`, `src/dashboard/frontend/public/*.svg`, container mounts (`credentials/`, `sessions/`, `.env`) |
 | Phases completed | 0, 1, 2, 3, 4, 5, 6, 7, 8 |
 | Findings by severity | P0=5, P1=13, P2=17, P3=11 → **46 total** |
 | Stack state at probe time | 26 of 26 compose services running; container ages 2h–35h |
@@ -299,9 +299,9 @@ Format: `ID | SEVERITY | CONFIDENCE | FILE:LINE | ISSUE | FIX | EFFORT`
 - `REL-007` | P3 | POTENTIAL | `docker/Dockerfile:39` | phonenumbers pinned at `==9.0.38` via a trailing `RUN pip install` (after the lockfile install layer). Not in `requirements.lock`. If Docker layer caching is invalidated for the earlier steps, this pin can silently drift. | Move `phonenumbers==9.0.38` into `requirements.lock` and remove the dedicated RUN | S
 
 ### FE — Frontend / client systems
-- `FE-001` | P2 | CONFIRMED | `dashboard/frontend/tsconfig.json` (not inspected in this run) + no test files under `dashboard/frontend/src/` | No test runner declared (`jest.config`, `vitest.config` absent); CI only runs `npm run build` (`.github/workflows/ci.yml:87`). React 19 SPA with 34 route pages ships un-unit-tested | Add Vitest + a minimum smoke test for `AppShell` rendering with a mock router | M
+- `FE-001` | P2 | CONFIRMED | `src/dashboard/frontend/tsconfig.json` (not inspected in this run) + no test files under `src/dashboard/frontend/src/` | No test runner declared (`jest.config`, `vitest.config` absent); CI only runs `npm run build` (`.github/workflows/ci.yml:87`). React 19 SPA with 34 route pages ships un-unit-tested | Add Vitest + a minimum smoke test for `AppShell` rendering with a mock router | M
 - `FE-002` | P3 | POTENTIAL | `extension/content.js` (4,062 LOC, 178 KB) + `extension/background.js` (2,978 LOC, 134 KB) | Two very large single-file JS bundles; no bundler visible in tracked files (no `webpack.config`, no `esbuild.config`), so this is likely hand-authored and manually loaded | Introduce a bundler + build step; ensures diff review sees real changes not concatenated blobs | L
-- `FE-003` | P3 | POTENTIAL | `dashboard/frontend/package.json` | `@tanstack/react-table@9.0.1` is pinned at 9.0.1 while `@tanstack/react-query` uses `^5.101.4` — inconsistent semver conventions | Standardise on `^` or exact pins across all deps | S
+- `FE-003` | P3 | POTENTIAL | `src/dashboard/frontend/package.json` | `@tanstack/react-table@9.0.1` is pinned at 9.0.1 while `@tanstack/react-query` uses `^5.101.4` — inconsistent semver conventions | Standardise on `^` or exact pins across all deps | S
 
 ### FS — Filesystem
 - `FS-001` | P3 | CONFIRMED | `scratch.py` (802 B, root) | One-off debug script committed at repo root | Delete or move to `scripts/` and gitignore | S
@@ -324,7 +324,7 @@ Format: `ID | SEVERITY | CONFIDENCE | FILE:LINE | ISSUE | FIX | EFFORT`
 - `STRUCT-003` | P3 | CONFIRMED | `src/collectors/base.py` | 81-byte stub file with only an import | Remove; consolidate on `src.core.base_collector` | S
 - `STRUCT-004` | P3 | CONFIRMED | `src/migrations/` vs `src/db/migrations/` | Two parallel migration directories (see DATA-006) | Delete `src/migrations/` if unused; document if used | S
 - `STRUCT-005` | P3 | CONFIRMED | `scripts/` (51 files, mixed) | PowerShell startup scripts, Python one-offs, JSON dumps mixed in one directory | Split into `scripts/windows/`, `scripts/python/`, `scripts/data/` | M
-- `STRUCT-006` | P3 | POTENTIAL | `dashboard/frontend/` vs `src/dashboard/` | Frontend at top-level `dashboard/`, backend at `src/dashboard/` — different roots, easy to confuse | Consolidate under one root: either `dashboard/{frontend,backend}` or `src/dashboard/{api,frontend}` | L
+- `STRUCT-006` | P3 | RESOLVED | `src/dashboard/frontend/` and `src/dashboard/` (both under `src/dashboard/`) | Frontend was at top-level `dashboard/frontend/`, backend at `src/dashboard/` — different roots, easy to confuse | RESOLVED: consolidated under `src/dashboard/{frontend,api,...}` via `docs/plans/dashboard-root-consolidation.md` | L
 
 ### DEAD — Dead weight
 - `DEAD-001` | P3 | CONFIRMED | `src/collectors/base.py` (81 B) | Stub file — see STRUCT-003 | Delete | S
@@ -377,7 +377,7 @@ Stateful paths and what happens if interrupted mid-execution.
 ├── scratch.py ← FS-001
 ├── pyproject.toml, requirements.txt, requirements.lock
 ├── config/ (seed_sg_schools.sql, sources/{<source>.env,<source>.targets})
-├── dashboard/frontend/
+├── src/dashboard/frontend/
 ├── docker/ (docker-compose.yml, Dockerfile*, patches/, postgres/, rabbitmq.conf)
 ├── docs/ (enrichment.md)
 ├── extension/ (manifest.json, content.js, background.js, ...)
@@ -512,7 +512,7 @@ Ordered execution sequence. Each row is a discrete unit of work.
 | 11 | DRIFT-001..007 | Documentation reconciliation: README source count, `archive/` reference, `.env.example` drift, `is_bot` note, hub-group name | Documentation says what code doesn't do; misleads future contributors | `README.md`, `KNOWN_ISSUES.md`, `IDENTITY_KEYS.md`, `.env.example` | M |
 | 12 | CONC-001..004, LOGIC-003..006 | P2 concurrency/logic hardening (advisory lock scoping, atomic Redis ops, subcommand splitter, lemon8 handle constraint) | Quality improvements; defense-in-depth | multiple | M–L |
 | 13 | PERF-002..006 | Monolith-file splits (dashboard/api.py, ig_ingest.py, telegram/__init__.py), requirements.lock refresh | Long-term maintainability | multiple | L |
-| 14 | FE-001..003 | Add Vitest smoke tests for the SPA; consider a bundler for the extension; standardise semver conventions | Currently the SPA has zero unit tests and the extension is hand-authored monolith JS | `dashboard/frontend/`, `extension/` | M |
+| 14 | FE-001..003 | Add Vitest smoke tests for the SPA; consider a bundler for the extension; standardise semver conventions | Currently the SPA has zero unit tests and the extension is hand-authored monolith JS | `src/dashboard/frontend/`, `extension/` | M |
 | 15 | SEC-001..005 | Per-service env files; workflow permission tightening; PTRACE gating | Defense-in-depth security hardening | `.env`, `docker/docker-compose.yml`, `.github/workflows/*.yml` | L |
 | 16 | FS-001..004, DEAD-001..005 | Cleanup: scratch.py, personal graph seed, historical MDs, stub base.py, legacy migrations | Removes distraction; enforces conventions | root files + `src/` | S |
 
@@ -588,16 +588,16 @@ Recorded after the `fix all` execution pass on `a0f5ee56` → `a7e5ad47`.
 | PERF-002, PERF-003, PERF-004 | Monolith-file splits (dashboard/api.py 10,784 LOC; ig_ingest.py 5,921 LOC; telegram/__init__.py 5,446 LOC) each carry high merge-conflict cost and re-testing burden. Deferred as L-effort refactors requiring dedicated sprints. | Do incrementally as each area is touched for a real feature. |
 | PERF-005 | Requires a `pip freeze` from a running container to regenerate `requirements.lock` — safest done during a planned rebuild, not against a running system with in-flight consumers. | Refresh at next intentional dependency bump. |
 | PERF-006 | Redis TTL audit requires reading each key's set-time semantics across `src/notifications/realtime_feed.py`; correlate with observed key growth in production before adjusting. | Only if `redis-cli DBSIZE` growth becomes a concern. |
-| FE-001 | Adding Vitest to `dashboard/frontend/` is M-effort but has zero test suite today; setting up the harness + a smoke test is a discrete piece of work best done in isolation. | Add in a dedicated `test(dashboard): initial vitest smoke suite` PR. |
+| FE-001 | Adding Vitest to `src/dashboard/frontend/` is M-effort but has zero test suite today; setting up the harness + a smoke test is a discrete piece of work best done in isolation. | Add in a dedicated `test(dashboard): initial vitest smoke suite` PR. |
 | FE-002 | Bundling the Chrome MV3 extension (`extension/content.js` 4,062 LOC + `extension/background.js` 2,978 LOC) requires adopting webpack/esbuild + updating the manifest. L-effort infrastructure change. | Adopt when the extension needs its next feature bump. |
-| FE-003 | Standardising semver conventions across `dashboard/frontend/package.json` is cosmetic; Dependabot handles updates either way. | Skip. |
+| FE-003 | Standardising semver conventions across `src/dashboard/frontend/package.json` is cosmetic; Dependabot handles updates either way. | Skip. |
 | SEC-002 | Workflow guard on `--admin` merge scope requires new GitHub Actions logic + testing. | Add if `--admin` merges ever break a non-manifest path. |
 | SEC-003 | Per-service `.env` split (SEC-003) is L-effort and touches every compose service. Non-critical because credentials/ is already `:ro` mounted. | Do at next full compose refresh. |
 | SEC-004 | `SYS_PTRACE` gating requires touching every collector service in compose. Low-priority because the collector rig is single-tenant. | Add if the stack ever runs multi-tenant. |
 | SEC-005 | Workflow permissions tightening: `permissions: read-all` → explicit least-privilege blocks in 15 workflows. Bulk churn with low marginal risk on private repo. | Do during the next sourcerepo sync cycle. |
 | STRUCT-002 | `src/main.py` argparse split into `src/main/commands/*.py` is M-effort and would touch every subcommand callsite. | Do when the number of subcommands hits 30+. |
 | STRUCT-005 | `scripts/` re-organisation into `windows/python/data` subdirs is cosmetic. | Do at next `scripts/` audit. |
-| STRUCT-006 | Consolidating `dashboard/frontend/` and `src/dashboard/` under one root is L-effort and breaks every path reference. | Do at a major-version boundary. |
+| STRUCT-006 | RESOLVED. Consolidated `src/dashboard/frontend/` and `src/dashboard/` under one root via `docs/plans/dashboard-root-consolidation.md`. | Done. |
 | DEAD-004 | `models/dlib/` placeholder is legitimate (model files never committed by design). | Keep. |
 | DEAD-005 | Migration files already moved to `_archive/` under Stage 4. | Done. |
 | DRIFT-004, DRIFT-005 | Documentation notes added to `docs/KNOWN_ISSUES.md`; no code change needed. | Done via docs. |
