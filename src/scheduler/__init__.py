@@ -257,7 +257,6 @@ class Scheduler:
         # Health-alert ticks (INTR-002, REL-004, REL-005 / INTR-003).
         # Each is self-gated and idempotent; a failure is logged and never
         # disturbs the main schedule loop.
-        await self._maybe_alert_realtime_feed_failed()
         await self._maybe_alert_watchdog_stale()
         # NOTE: maigret FP-blocklist refresh runs INSIDE the recon worker
         # (src/recon_spiderfoot_service.py::_fp_blocklist_refresh_loop) because
@@ -267,51 +266,6 @@ class Scheduler:
     # ---- OSS-enrichment automation ticks (self-gated) ----
 
     # ---- Health-alert self-gated ticks (INTR-002, REL-004, REL-005 / INTR-003) ----
-
-    async def _maybe_alert_realtime_feed_failed(self):
-        """Alert when the realtime post-feed's failed queue is non-empty.
-
-        Currently 14 items sit in ``uc:realtime_post_feed:failed`` with no
-        automatic drainer. Left alone that queue grows unboundedly with each
-        Telegram send failure and the operator has no visibility. Alert at
-        threshold; drain remains a manual operator step for now.
-
-        Self-gated to `REALTIME_FAILED_ALERT_INTERVAL_SECONDS` (default 6h).
-        """
-        import time as _time
-        now = _time.monotonic()
-        interval = env_int("REALTIME_FAILED_ALERT_INTERVAL_SECONDS", 21600, min_value=300)
-        threshold = env_int("REALTIME_FAILED_ALERT_THRESHOLD", 10, min_value=1)
-        if now - getattr(self, "_last_realtime_failed_alert", 0) < interval:
-            return
-        try:
-            from src.notifications import realtime_feed
-            client = await realtime_feed._redis_client()
-            if client is None:
-                return
-            try:
-                depth = await client.llen(realtime_feed.FAILED_KEY_DEFAULT)
-            finally:
-                try:
-                    await client.aclose()
-                except Exception:
-                    pass
-        except Exception:
-            logger.debug("realtime_feed failed-queue probe failed", exc_info=True)
-            return
-        if not depth or depth < threshold:
-            return
-        self._last_realtime_failed_alert = now
-        try:
-            from src.notifications import telegram as tg
-            await tg.send(
-                f"⚠️ <b>Realtime post-feed: {depth} failed items</b>\n"
-                f"<code>uc:realtime_post_feed:failed</code> has {depth} unsent items. "
-                f"Inspect and drain manually if needed."
-            )
-            logger.info("realtime_failed alert sent (depth=%d)", depth)
-        except Exception:
-            logger.warning("realtime_failed alert send failed", exc_info=True)
 
     async def _maybe_alert_watchdog_stale(self):
         """Escalate persistently-stale sources past the watchdog's own cooldown.
