@@ -1,9 +1,9 @@
 "use strict";
 (() => {
-  // src/platforms.js
-  globalThis.UC_PLATFORMS = [
+  // src/shared/platforms.js
+  var UC_PLATFORMS = [
     { id: "instagram", label: "Instagram", url: "https://www.instagram.com/", host: "www.instagram.com", cookieUrl: "https://www.instagram.com", cookie: "sessionid", scraper: true, optionalExtraUrls: ["https://www.instagram.com/direct/inbox/"] },
-    // Threads moved threads.net -> threads.com in Apr 2025 (.net just redirects).
+    // Threads moved threads.net → threads.com in Apr 2025 (.net just redirects).
     { id: "threads", label: "Threads", url: "https://www.threads.com/", host: "www.threads.com", cookieUrl: "https://www.threads.com", cookie: "sessionid", scraper: true },
     // Optional expanded coverage: /foryou and /explore add broader discovery.
     // Keep one visible /following tab by default to prioritize subscribed feeds
@@ -17,5 +17,8 @@
     { id: "facebook", label: "Facebook", url: "https://www.facebook.com/", host: "www.facebook.com", cookieUrl: "https://www.facebook.com", cookie: "c_user", scraper: true },
     { id: "strava", label: "Strava", url: "https://www.strava.com/dashboard", host: "www.strava.com", cookieUrl: "https://www.strava.com", cookie: "_strava4_session", scraper: true }
   ];
-  if (typeof window !== "undefined") window.UC_PLATFORMS = globalThis.UC_PLATFORMS;
+
+  // src/platforms.js
+  globalThis.UC_PLATFORMS = UC_PLATFORMS;
+  if (typeof window !== "undefined") window.UC_PLATFORMS = UC_PLATFORMS;
 })();

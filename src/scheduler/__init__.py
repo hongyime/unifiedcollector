@@ -254,10 +254,8 @@ class Scheduler:
         # work stays inline here.
         # Build social graph edges from WhatsApp co-group/DM data (self-gated to 30 min).
         await self._build_graph_edges()
-        # OSS enrichment automation (self-gated, env-tunable intervals).
-        # Each is idempotent and best-effort — failures are logged but never
-        # disturb the main schedule loop.
-        await self._maybe_run_phone_intel()
+        # OSS enrichment automation runs via the handler registry
+        # (see src/scheduler/handlers/recon_seed.py, phone_intel.py).
         # Health-alert ticks (INTR-002, REL-004, REL-005 / INTR-003).
         # Each is self-gated and idempotent; a failure is logged and never
         # disturbs the main schedule loop.
@@ -460,27 +458,6 @@ class Scheduler:
             logger.warning("graph_edges build failed", exc_info=True)
 
     # ---- OSS-enrichment automation ticks (self-gated) ----
-
-    async def _maybe_run_phone_intel(self):
-        """Periodically enrich WhatsApp phone JIDs via offline phonenumbers lib.
-
-        Enrichment-only — rows land in ``wa_phone_intel`` and are NEVER
-        promoted to identity_signals (carrier/region do not identify people).
-        Default cadence 12h; bounded batch per cycle.
-        """
-        import time as _time
-        now = _time.monotonic()
-        interval = env_int("WA_PHONE_INTEL_INTERVAL_SECONDS", 43200, min_value=300)
-        batch = env_int("WA_PHONE_INTEL_TICK_LIMIT", 500, min_value=1)
-        if now - getattr(self, "_last_phone_intel", 0) < interval:
-            return
-        self._last_phone_intel = now
-        try:
-            from src.core.wa_phone_intel import run as wa_phone_intel_run
-            stats = await wa_phone_intel_run(batch, dry_run=False)
-            logger.info("wa_phone_intel tick: %s", stats)
-        except Exception:
-            logger.warning("wa_phone_intel tick failed", exc_info=True)
 
     # ---- Health-alert self-gated ticks (INTR-002, REL-004, REL-005 / INTR-003) ----
 

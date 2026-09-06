@@ -1,5 +1,23 @@
 "use strict";
 (() => {
+  // src/shared/platforms.js
+  var UC_PLATFORMS = [
+    { id: "instagram", label: "Instagram", url: "https://www.instagram.com/", host: "www.instagram.com", cookieUrl: "https://www.instagram.com", cookie: "sessionid", scraper: true, optionalExtraUrls: ["https://www.instagram.com/direct/inbox/"] },
+    // Threads moved threads.net → threads.com in Apr 2025 (.net just redirects).
+    { id: "threads", label: "Threads", url: "https://www.threads.com/", host: "www.threads.com", cookieUrl: "https://www.threads.com", cookie: "sessionid", scraper: true },
+    // Optional expanded coverage: /foryou and /explore add broader discovery.
+    // Keep one visible /following tab by default to prioritize subscribed feeds
+    // and avoid browser memory spikes.
+    { id: "tiktok", label: "TikTok", url: "https://www.tiktok.com/following", host: "www.tiktok.com", cookieUrl: "https://www.tiktok.com", cookie: "sessionid", scraper: true, optionalExtraUrls: ["https://www.tiktok.com/foryou", "https://www.tiktok.com/explore"] },
+    // Lemon8's SPA renders "Not found" for /feed/<cat> and legacy paths as of
+    // 2026-08-05. Keep one visible topic tab only; the headless Lemon8 collector
+    // handles broader coverage without pinning extra Chrome tabs.
+    { id: "lemon8", label: "Lemon8", url: "https://www.lemon8-app.com/topic/singapore?region=sg", host: "www.lemon8-app.com", cookieUrl: "https://www.lemon8-app.com", cookie: "sessionid", scraper: false, noLogin: true },
+    { id: "x", label: "Twitter / X", url: "https://x.com/home", host: "x.com", aliasHosts: ["twitter.com"], cookieUrl: "https://x.com", cookie: "auth_token", scraper: true },
+    { id: "facebook", label: "Facebook", url: "https://www.facebook.com/", host: "www.facebook.com", cookieUrl: "https://www.facebook.com", cookie: "c_user", scraper: true },
+    { id: "strava", label: "Strava", url: "https://www.strava.com/dashboard", host: "www.strava.com", cookieUrl: "https://www.strava.com", cookie: "_strava4_session", scraper: true }
+  ];
+
   // src/background.js
   self.addEventListener("error", (event) => {
     const detail = {
@@ -61,18 +79,7 @@
     } catch (_) {
     }
   }
-  globalThis.UC_PLATFORMS = [
-    { id: "instagram", label: "Instagram", url: "https://www.instagram.com/", host: "www.instagram.com", cookieUrl: "https://www.instagram.com", cookie: "sessionid", scraper: true, optionalExtraUrls: ["https://www.instagram.com/direct/inbox/"] },
-    { id: "threads", label: "Threads", url: "https://www.threads.com/", host: "www.threads.com", cookieUrl: "https://www.threads.com", cookie: "sessionid", scraper: true },
-    { id: "tiktok", label: "TikTok", url: "https://www.tiktok.com/following", host: "www.tiktok.com", cookieUrl: "https://www.tiktok.com", cookie: "sessionid", scraper: true, optionalExtraUrls: ["https://www.tiktok.com/foryou", "https://www.tiktok.com/explore"] },
-    // Lemon8's SPA renders "Not found" for /feed/<cat> and legacy paths as of
-    // 2026-08-05. Keep one visible topic tab only; the headless Lemon8 collector
-    // handles broader coverage without pinning extra Chrome tabs.
-    { id: "lemon8", label: "Lemon8", url: "https://www.lemon8-app.com/topic/singapore?region=sg", host: "www.lemon8-app.com", cookieUrl: "https://www.lemon8-app.com", cookie: "sessionid", scraper: false, noLogin: true },
-    { id: "x", label: "Twitter / X", url: "https://x.com/home", host: "x.com", aliasHosts: ["twitter.com"], cookieUrl: "https://x.com", cookie: "auth_token", scraper: true },
-    { id: "facebook", label: "Facebook", url: "https://www.facebook.com/", host: "www.facebook.com", cookieUrl: "https://www.facebook.com", cookie: "c_user", scraper: true },
-    { id: "strava", label: "Strava", url: "https://www.strava.com/dashboard", host: "www.strava.com", cookieUrl: "https://www.strava.com", cookie: "_strava4_session", scraper: true }
-  ];
+  globalThis.UC_PLATFORMS = UC_PLATFORMS;
   var ALARM = "uc-scrape";
   var DEFAULT_INGEST = "http://127.0.0.1:8765";
   var DEFAULT_CONTROL = "http://127.0.0.1:8700";

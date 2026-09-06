@@ -1,3 +1,14 @@
+// Bundled by esbuild (docs/plans/extension-bundler.md). ES-module imports
+// live at the true top of the module — the outer IIFE below preserves the
+// content-script install-guard idiom that the pre-bundler file used.
+import {
+  DEFAULT_THROTTLE_BACKOFF_MINS,
+  applyThrottleWall,
+  initThrottle,
+  setWall,
+  wallLeftMs,
+} from "./shared/throttle.js";
+
 (() => {
 const UC_CONTENT_VERSION = (() => {
   try {
@@ -41,6 +52,8 @@ function ucContentScriptCurrent() {
 // `runCycle()` returning {targets, saved, discovered}. Remember to also add its
 // host to manifest content_scripts + host_permissions + platforms.js, and a
 // matching ingest endpoint (the generic /social/* endpoints already cover it).
+
+
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const jitter = (base) => base + Math.random() * base;
@@ -94,56 +107,17 @@ function cooldownIdentity(platform) {
   if (platform === "strava") return stravaLoggedInOwner();
   return "";
 }
-function wallKey(platform, identity) {
-  const ident = String(identity || cooldownIdentity(platform) || "global")
-    .trim()
-    .replace(/^@/, "")
-    .replace(/[^A-Za-z0-9_.-]/g, "_")
-    .slice(0, 80) || "global";
-  return "uc_wall_" + platform + "_" + ident;
-}
-function wallLeftMs(platform, identity) {
-  const keyed = lsNum(wallKey(platform, identity));
-  const legacy = lsNum("uc_wall_" + platform);
-  return Math.max(0, Math.max(keyed, legacy) - Date.now());
-}
-function setWall(platform, mins, identity) {
-  lsSet(wallKey(platform, identity), String(Date.now() + mins * 60000));
-}
-
-// Config-driven throttle walls. Override from DevTools/options with:
-//   chrome.storage.local.set({ ucThrottleBackoffMins: { x: 12, threads: 12 } })
-// Instagram stays deliberately cautious at 45m by default; shortening it
-// aggressively re-extends the account/IP throttle window and raises ban risk.
-const DEFAULT_THROTTLE_BACKOFF_MINS = {
-  instagram: 75,
-  threads: 20,
-  x: 40,
-  tiktok: 30,
-  facebook: 30,
-  lemon8: 30,
-  default: 35,
-};
-async function throttleBackoffMins(platform, fallback = DEFAULT_THROTTLE_BACKOFF_MINS.default) {
-  if (platform === "instagram" && lsGet("ucIg429CooldownMinutes", "") !== "") {
-    return lsBoundedInt("ucIg429CooldownMinutes", DEFAULT_THROTTLE_BACKOFF_MINS.instagram, 45, 180);
-  }
-  try {
-    const { ucThrottleBackoffMins = {} } = await chrome.storage.local.get("ucThrottleBackoffMins");
-    const raw = ucThrottleBackoffMins[platform] ?? ucThrottleBackoffMins.default;
-    const n = Number(raw);
-    if (Number.isFinite(n) && n >= 1) return Math.round(n);
-  } catch (e) {}
-  return DEFAULT_THROTTLE_BACKOFF_MINS[platform] || fallback;
-}
-async function applyThrottleWall(platform, reason) {
-  const mins = await throttleBackoffMins(platform);
-  const wallMins = Math.max(1, Math.round(mins * (0.85 + Math.random() * 0.45)));
-  const identity = cooldownIdentity(platform);
-  setWall(platform, wallMins, identity);
-  await send({ type: "wall", platform, mins: wallMins, account: identity || null, reason }).catch(() => {});
-  return wallMins;
-}
+// setWall / wallLeftMs / applyThrottleWall / DEFAULT_THROTTLE_BACKOFF_MINS
+// now live in src/shared/throttle.js. initThrottle wires them to this file's
+// storage + identity + send primitives at content-script boot.
+initThrottle({
+  lsGet,
+  lsSet,
+  lsNum,
+  lsBoundedInt,
+  cooldownIdentity,
+  send: (msg) => send(msg),
+});
 
 // ---------------------------------------------------------------------------
 // HUMAN PACING. A real person browsing is slow, irregular, and takes breaks.

@@ -1,5 +1,68 @@
 "use strict";
 (() => {
+  // src/shared/throttle.js
+  var DEFAULT_THROTTLE_BACKOFF_MINS = {
+    instagram: 75,
+    threads: 20,
+    x: 40,
+    tiktok: 30,
+    facebook: 30,
+    lemon8: 30,
+    default: 35
+  };
+  var _deps = null;
+  function initThrottle(deps) {
+    _deps = deps;
+  }
+  function _requireDeps() {
+    if (!_deps) {
+      throw new Error(
+        "shared/throttle: initThrottle({ lsGet, lsSet, lsNum, lsBoundedInt, cooldownIdentity, send }) must be called before use."
+      );
+    }
+    return _deps;
+  }
+  function wallKey(platform, identity) {
+    const deps = _requireDeps();
+    const raw = identity || deps.cooldownIdentity && deps.cooldownIdentity(platform) || "global";
+    const ident = String(raw).trim().replace(/^@/, "").replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 80) || "global";
+    return "uc_wall_" + platform + "_" + ident;
+  }
+  function wallLeftMs(platform, identity) {
+    const deps = _requireDeps();
+    const keyed = deps.lsNum(wallKey(platform, identity));
+    const legacy = deps.lsNum("uc_wall_" + platform);
+    return Math.max(0, Math.max(keyed, legacy) - Date.now());
+  }
+  function setWall(platform, mins, identity) {
+    const deps = _requireDeps();
+    deps.lsSet(wallKey(platform, identity), String(Date.now() + mins * 6e4));
+  }
+  async function throttleBackoffMins(platform, fallback = DEFAULT_THROTTLE_BACKOFF_MINS.default) {
+    const deps = _requireDeps();
+    if (platform === "instagram" && deps.lsGet("ucIg429CooldownMinutes", "") !== "") {
+      return deps.lsBoundedInt("ucIg429CooldownMinutes", DEFAULT_THROTTLE_BACKOFF_MINS.instagram, 45, 180);
+    }
+    try {
+      const { ucThrottleBackoffMins = {} } = await chrome.storage.local.get("ucThrottleBackoffMins");
+      const raw = ucThrottleBackoffMins[platform] ?? ucThrottleBackoffMins.default;
+      const n = Number(raw);
+      if (Number.isFinite(n) && n >= 1) return Math.round(n);
+    } catch (e) {
+    }
+    return DEFAULT_THROTTLE_BACKOFF_MINS[platform] || fallback;
+  }
+  async function applyThrottleWall(platform, reason) {
+    const deps = _requireDeps();
+    const mins = await throttleBackoffMins(platform);
+    const wallMins = Math.max(1, Math.round(mins * (0.85 + Math.random() * 0.45)));
+    const identity = deps.cooldownIdentity(platform);
+    setWall(platform, wallMins, identity);
+    await deps.send({ type: "wall", platform, mins: wallMins, account: identity || null, reason }).catch(() => {
+    });
+    return wallMins;
+  }
+
   // src/content.js
   (() => {
     const UC_CONTENT_VERSION = (() => {
@@ -92,49 +155,14 @@
       if (platform === "strava") return stravaLoggedInOwner();
       return "";
     }
-    function wallKey(platform, identity) {
-      const ident = String(identity || cooldownIdentity(platform) || "global").trim().replace(/^@/, "").replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 80) || "global";
-      return "uc_wall_" + platform + "_" + ident;
-    }
-    function wallLeftMs(platform, identity) {
-      const keyed = lsNum(wallKey(platform, identity));
-      const legacy = lsNum("uc_wall_" + platform);
-      return Math.max(0, Math.max(keyed, legacy) - Date.now());
-    }
-    function setWall(platform, mins, identity) {
-      lsSet(wallKey(platform, identity), String(Date.now() + mins * 6e4));
-    }
-    const DEFAULT_THROTTLE_BACKOFF_MINS = {
-      instagram: 75,
-      threads: 20,
-      x: 40,
-      tiktok: 30,
-      facebook: 30,
-      lemon8: 30,
-      default: 35
-    };
-    async function throttleBackoffMins(platform, fallback = DEFAULT_THROTTLE_BACKOFF_MINS.default) {
-      if (platform === "instagram" && lsGet("ucIg429CooldownMinutes", "") !== "") {
-        return lsBoundedInt("ucIg429CooldownMinutes", DEFAULT_THROTTLE_BACKOFF_MINS.instagram, 45, 180);
-      }
-      try {
-        const { ucThrottleBackoffMins = {} } = await chrome.storage.local.get("ucThrottleBackoffMins");
-        const raw = ucThrottleBackoffMins[platform] ?? ucThrottleBackoffMins.default;
-        const n = Number(raw);
-        if (Number.isFinite(n) && n >= 1) return Math.round(n);
-      } catch (e) {
-      }
-      return DEFAULT_THROTTLE_BACKOFF_MINS[platform] || fallback;
-    }
-    async function applyThrottleWall(platform, reason) {
-      const mins = await throttleBackoffMins(platform);
-      const wallMins = Math.max(1, Math.round(mins * (0.85 + Math.random() * 0.45)));
-      const identity = cooldownIdentity(platform);
-      setWall(platform, wallMins, identity);
-      await send({ type: "wall", platform, mins: wallMins, account: identity || null, reason }).catch(() => {
-      });
-      return wallMins;
-    }
+    initThrottle({
+      lsGet,
+      lsSet,
+      lsNum,
+      lsBoundedInt,
+      cooldownIdentity,
+      send: (msg) => send(msg)
+    });
     function human(base) {
       let ms = base * (0.8 + Math.random() * 1.4);
       if (Math.random() < 0.18) ms += 5e3 + Math.random() * 15e3;
