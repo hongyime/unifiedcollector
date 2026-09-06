@@ -1,10 +1,17 @@
+"""Source-level assertions on the WhatsApp/Telegram graph-edge builder SQL.
+
+Historically these assertions ran against ``Scheduler._build_graph_edges``.
+LOGIC-005 (``docs/plans/scheduler-refactor.md`` step 11) extracted that method
+to ``src.scheduler.handlers.graph_edges.BuildGraphEdgesHandler.run``; the
+assertions still target the SQL text, only the inspection target moved.
+"""
 import inspect
 
-from src.scheduler import Scheduler
+from src.scheduler.handlers.graph_edges import BuildGraphEdgesHandler
 
 
 def _graph_edge_builder_source() -> str:
-    return inspect.getsource(Scheduler._build_graph_edges)
+    return inspect.getsource(BuildGraphEdgesHandler.run)
 
 
 def test_graph_edge_builder_caps_large_whatsapp_groups():
