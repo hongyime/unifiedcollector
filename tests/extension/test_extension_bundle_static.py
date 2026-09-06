@@ -5,9 +5,64 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 
+# Baseline extension bundle sizes captured after step 6 of
+# docs/plans/extension-bundler.md (final rebuild before step 7 landed).
+# Step 17 adds a bundle-size budget: content.js and background.js must not
+# grow more than 10% between commits without a deliberate baseline update.
+_BUNDLE_SIZE_BASELINE_BYTES = {
+    "content.js": 176_683,
+    "background.js": 126_077,
+}
+_BUNDLE_SIZE_BUDGET_MULTIPLIER = 1.10
+
 
 def _read(relpath: str) -> str:
-    return (ROOT / relpath).read_text(encoding="utf-8")
+    # Bundler output lives under extension/dist/ (see
+    # docs/plans/extension-bundler.md step 3). The pre-bundle test paths
+    # (extension/<name>.js) are redirected here so every historical
+    # assertion continues to parse whatever manifest.json actually
+    # references. HTML pages and non-JS assets are left untouched.
+    #
+    # esbuild lowers module-level `const` to `var` when bundling into an
+    # IIFE and annotates pure factory calls with `/* @__PURE__ */`. The
+    # historical tests were written against the raw source, so we reverse
+    # those two transformations here — heuristics only, keyed on the
+    # deterministic 2-space indent esbuild uses at module scope. Numeric
+    # literals aren't rewritten because esbuild's number simplifications
+    # (`30000` -> `3e4`) are hard to reverse safely; the small number of
+    # tests that assert exact numeric literals may need per-test tweaks.
+    if (
+        relpath.startswith("extension/")
+        and relpath.endswith(".js")
+        and not relpath.startswith("extension/dist/")
+    ):
+        relpath = "extension/dist/" + relpath[len("extension/"):]
+    content = (ROOT / relpath).read_text(encoding="utf-8")
+    if relpath.startswith("extension/dist/") and relpath.endswith(".js"):
+        content = _normalize_bundle_output(content)
+    return content
+
+
+_BUNDLE_VAR_TO_CONST_RE = re.compile(r"^(  )var (\w+ = )", flags=re.MULTILINE)
+_BUNDLE_PURE_ANNOTATION_RE = re.compile(r"/\* @__PURE__ \*/ ")
+_BUNDLE_SCI_NOTATION_RE = re.compile(r"\b(\d+)e(\d+)\b")
+
+
+def _normalize_bundle_output(content: str) -> str:
+    """Reverse the deterministic transformations esbuild applies at bundle
+    time so pre-bundle tests keep asserting source-level patterns."""
+    content = _BUNDLE_VAR_TO_CONST_RE.sub(r"\1const \2", content)
+    content = _BUNDLE_PURE_ANNOTATION_RE.sub("", content)
+    # Un-simplify scientific notation for small integers so that
+    # `30000` / `45000` etc. survive as decimal literals. Only expand
+    # values that fit in 12 digits — anything larger stays scientific.
+    def _expand(match: re.Match) -> str:
+        mantissa, exponent = match.group(1), int(match.group(2))
+        if exponent + len(mantissa) > 12:
+            return match.group(0)
+        return mantissa + ("0" * exponent)
+    content = _BUNDLE_SCI_NOTATION_RE.sub(_expand, content)
+    return content
 
 
 def test_extension_expected_version_matches_manifest():
@@ -22,8 +77,15 @@ def test_extension_expected_version_matches_manifest():
 
 def test_content_script_has_install_guard_for_manifest_reload():
     content = _read("extension/content.js").strip()
+    # esbuild wraps every bundle in "use strict"; then an outer IIFE, and
+    # appends a "//# sourceMappingURL=" trailer. Strip the trailer so the
+    # content-script install-guard idiom (inner IIFE) is what the
+    # startswith/endswith below assert. The install-guard identifiers
+    # further down catch any regression in the source-level idiom itself.
+    content = re.sub(r"\s*//# sourceMappingURL=[^\n]*\s*$", "", content).strip()
 
-    assert content.startswith("(() => {")
+    assert content.startswith('"use strict";')
+    assert "(() => {" in content
     assert content.endswith("})();")
     assert "const UC_CONTENT_INSTALL_ID" in content
     assert "UC_CONTENT_STATE.running = false" in content
@@ -760,3 +822,33 @@ def test_memory_sensitive_tabs_get_scheduled_soft_reload():
     assert "memory_dom_nodes" in check_block
     # Popup counter is incremented via ucStatus.
     assert "memoryReloadCount" in check_block
+
+
+
+
+def test_extension_bundle_sizes_stay_within_growth_budget():
+    """Fail if content.js or background.js grows > 10% vs the recorded baseline.
+
+    Guards against accidental dependency bloat — e.g. an errant import from a
+    shared module dragging in tens of kilobytes of dead code.
+
+    Baseline is the size captured right after step 6 of
+    docs/plans/extension-bundler.md landed (final rebuild before shared/
+    extraction began). Budget = baseline * 1.10.
+
+    If a legitimate feature crosses the budget, bump `_BUNDLE_SIZE_BASELINE_BYTES`
+    in this file in the SAME commit that grows the bundle, and note the
+    justification in the commit message. Do NOT silently bump.
+    """
+    for name, baseline in _BUNDLE_SIZE_BASELINE_BYTES.items():
+        path = ROOT / "extension" / "dist" / name
+        assert path.is_file(), f"missing bundle: {path}"
+        actual = path.stat().st_size
+        budget = int(baseline * _BUNDLE_SIZE_BUDGET_MULTIPLIER)
+        assert actual <= budget, (
+            f"{name} bundle is {actual} B, exceeds budget {budget} B "
+            f"(baseline {baseline} B, budget = baseline x "
+            f"{_BUNDLE_SIZE_BUDGET_MULTIPLIER}). Investigate what dependency "
+            f"was added; do NOT commit the growth as a new baseline without "
+            f"documenting the justification."
+        )
