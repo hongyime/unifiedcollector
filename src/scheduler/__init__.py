@@ -13,6 +13,10 @@ from src.core.source_freshness import FRESHNESS as _CANONICAL_FRESHNESS
 # Scheduler._build_status / _build_status_delta / _delta_* remain as thin
 # instance-method delegates so existing callers and tests keep working.
 from src.scheduler import status_builder as _status_builder
+# Startup / shutdown lifecycle helpers (DB init, conditional collector
+# registration, Telegram notifications) live in startup.py. Same delegate
+# pattern: instance methods on Scheduler forward here.
+from src.scheduler import startup as _startup
 
 logger = logging.getLogger(__name__)
 
@@ -28,9 +32,9 @@ class Scheduler:
     async def start(self):
         logger.info("Scheduler starting")
         self.pool = await get_pool()
-        await self._init_db()
-        await self._register_beeper_if_enabled()
-        await self._register_strava_feed_if_enabled()
+        await _startup.init_db(self.pool)
+        await _startup.register_beeper_if_enabled(self)
+        await _startup.register_strava_feed_if_enabled(self)
 
         loop = asyncio.get_event_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
@@ -40,7 +44,7 @@ class Scheduler:
                 signal.signal(sig, lambda *_: self._stop.set())
 
         # Telegram notifications (best-effort; never block/raise the scheduler).
-        await self._notify_startup_safe()
+        await _startup.notify_startup_safe()
         # "Base of operations" defaults: previously 6h digest + 15min delta ==
         # constant text spam. New defaults: 24h digest, delta OFF. Override via
         # env if a busier cadence is wanted.
@@ -98,7 +102,7 @@ class Scheduler:
             except asyncio.TimeoutError:
                 pass
 
-        await self._notify_shutdown_safe()
+        await _startup.notify_shutdown_safe()
         # Cancel the collector-bot poller before closing the DB pool so the
         # long-poll HTTP is torn down cleanly (mirrors analyzer merge_bot).
         if getattr(self, "_collector_bot_task", None) is not None:
@@ -113,18 +117,12 @@ class Scheduler:
     # --- Telegram status notifications (additive, fail-safe) ---
 
     async def _notify_startup_safe(self):
-        try:
-            from src.notifications import alerts
-            await alerts.notify_startup()
-        except Exception as e:
-            logger.warning("notify_startup failed: %s", e)
+        """Delegate to startup.notify_startup_safe; see startup.py."""
+        await _startup.notify_startup_safe()
 
     async def _notify_shutdown_safe(self):
-        try:
-            from src.notifications import alerts
-            await alerts.notify_shutdown()
-        except Exception as e:
-            logger.warning("notify_shutdown failed: %s", e)
+        """Delegate to startup.notify_shutdown_safe; see startup.py."""
+        await _startup.notify_shutdown_safe()
 
     async def _maybe_heartbeat(self):
         """Fire the status heartbeat on the first tick, then every N hours.
@@ -249,11 +247,8 @@ class Scheduler:
 
 
     async def _init_db(self):
-        # P0-1/P0-2: ledger-backed runner applies schemas/ + migrations/.
-        from src.db.migrate import apply_all
-        from src.core.maintenance import run_collector_maintenance
-        await apply_all(self.pool)
-        await run_collector_maintenance(self.pool)
+        """Delegate to startup.init_db; see startup.py."""
+        await _startup.init_db(self.pool)
 
     async def _gc_collection_runs(self):
         """P3-7: retention GC for collection_runs.
@@ -284,63 +279,12 @@ class Scheduler:
             logger.warning("collection_runs GC failed", exc_info=True)
 
     async def _register_beeper_if_enabled(self):
-        """Register the polymorphic Beeper Desktop Local API collector.
-
-        Gated on `BEEPER_COLLECTOR_ENABLED` + presence of `BEEPER_DESKTOP_API_TOKEN`.
-        When both are set, we ensure a `collection_schedules` row exists for
-        source='beeper' on a 5-minute cadence — short enough that incremental
-        tail catches new messages quickly, long enough not to thrash the
-        local API.
-
-        Replaces the prior `_register_matrix_if_enabled` / `_register_matrix_backfill_if_enabled`
-        pair from Wave 1 (matrix-nio path). The new Beeper Desktop Local API
-        on 127.0.0.1:23373 spans every connected network in one collector,
-        so a single schedule replaces the matrix + matrix_backfill duo.
-        """
-        try:
-            from src.collectors.beeper import is_enabled as beeper_enabled
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.warning("Beeper collector module unavailable: %s", exc)
-            return
-
-        if not beeper_enabled():
-            logger.info(
-                "Beeper collector disabled (BEEPER_COLLECTOR_ENABLED unset or no token); "
-                "skipping schedule registration"
-            )
-            return
-
-        try:
-            # Use 5-minute cadence (interval_hours=1/12 ≈ 5 min). Reuse the
-            # existing add_schedule helper which currently takes hours; the
-            # collector caps per-cycle work via BEEPER_MAX_CHATS_PER_CYCLE.
-            await self.add_schedule("beeper", interval_hours=1)
-            logger.info("Beeper collector registered on schedule (every 1h)")
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.error("Failed to register beeper schedule: %s", exc)
+        """Delegate to startup.register_beeper_if_enabled; see startup.py."""
+        await _startup.register_beeper_if_enabled(self)
 
     async def _register_strava_feed_if_enabled(self):
-        """Register a weekly Strava following-feed backfill schedule.
-
-        Gated on STRAVA_FEED_BACKFILL_ENABLED. The collector reads cookies
-        and walks /dashboard/feed for `STRAVA_FEED_BACKFILL_DAYS` (default 30)
-        days back, upserting any newly-discovered activities into
-        strava_activities. Cadence is weekly (168h) — long enough to avoid
-        hammering the cookie session; short enough to keep recent feed
-        history fresh.
-        """
-        val = os.environ.get("STRAVA_FEED_BACKFILL_ENABLED", "").strip().lower()
-        if val not in {"1", "true", "yes", "on"}:
-            logger.info(
-                "Strava feed backfill disabled (STRAVA_FEED_BACKFILL_ENABLED unset); "
-                "skipping schedule registration"
-            )
-            return
-        try:
-            await self.add_schedule("strava_feed_backfill", interval_hours=168)
-            logger.info("Strava feed backfill registered on schedule (every 168h)")
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.error("Failed to register strava_feed_backfill schedule: %s", exc)
+        """Delegate to startup.register_strava_feed_if_enabled; see startup.py."""
+        await _startup.register_strava_feed_if_enabled(self)
 
     async def _tick(self):
         now = datetime.now(timezone.utc)
