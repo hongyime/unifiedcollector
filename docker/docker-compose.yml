@@ -768,6 +768,7 @@ services:
     env_file:
       - ../.env
       - ./env/common.env
+      - ./env/beeper.env
     healthcheck:
       test: ["CMD", "python", "-m", "src.core.health"]
       interval: 60s
