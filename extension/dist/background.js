@@ -1,6 +1,6 @@
 "use strict";
 (() => {
-  // src/shared/platforms.js
+  // src/shared/platforms.ts
   var UC_PLATFORMS = [
     { id: "instagram", label: "Instagram", url: "https://www.instagram.com/", host: "www.instagram.com", cookieUrl: "https://www.instagram.com", cookie: "sessionid", scraper: true, optionalExtraUrls: ["https://www.instagram.com/direct/inbox/"] },
     // Threads moved threads.net → threads.com in Apr 2025 (.net just redirects).

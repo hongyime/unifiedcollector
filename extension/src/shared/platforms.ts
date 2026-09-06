@@ -10,12 +10,53 @@
 // with no runtime module loader / no importScripts call — which is exactly
 // what MV3 CSP requires and what the historical inline copy was avoiding.
 //
-// `scraper: true` → a content-script scraper exists (see content.js
-// PLATFORMS registry). `cookie` is the auth cookie used to detect login;
-// `noLogin: true` → the platform is scrapeable without logging in
-// (e.g. Lemon8 For-You), so the launcher shows "no login needed" instead
-// of a red "not logged in" badge.
-export const UC_PLATFORMS = [
+// TypeScript pilot: this is the first file in extension/src/shared/ to
+// carry static types (see docs/plans/extension-bundler.md step 13). The
+// rest of shared/ follows in step 14; the four large entry files
+// (content / background / inject / popup / tabs) follow in step 15.
+
+/** Public shape of one entry in the platform registry. */
+export interface Platform {
+  /** Short slug used for keys, ingest routing, ban walls, etc. */
+  readonly id: string;
+  /** Human-readable label rendered in the popup and options page. */
+  readonly label: string;
+  /** Canonical URL opened by "Open all tabs". */
+  readonly url: string;
+  /** Canonical hostname used for cookie / tab matching. */
+  readonly host: string;
+  /**
+   * Additional hostnames that resolve to the same platform (e.g. the
+   * `twitter.com` legacy hostname for `x`). Used by tab-matching helpers.
+   */
+  readonly aliasHosts?: readonly string[];
+  /** Origin used for `chrome.cookies.get()` lookups. */
+  readonly cookieUrl: string;
+  /** Cookie name whose presence indicates a logged-in session. */
+  readonly cookie: string;
+  /** `true` if a content-script scraper exists (see content.js PLATFORMS). */
+  readonly scraper: boolean;
+  /**
+   * `true` if the platform is scrapeable without logging in (e.g. Lemon8
+   * For-You). The launcher renders "no login needed" instead of a red
+   * "not logged in" badge.
+   */
+  readonly noLogin?: boolean;
+  /**
+   * Extra URLs that "expanded tabs" mode opens for broader coverage
+   * (e.g. Instagram DM inbox, TikTok /foryou + /explore).
+   */
+  readonly optionalExtraUrls?: readonly string[];
+}
+
+/**
+ * `scraper: true` → a content-script scraper exists (see content.js
+ * PLATFORMS registry). `cookie` is the auth cookie used to detect login;
+ * `noLogin: true` → the platform is scrapeable without logging in
+ * (e.g. Lemon8 For-You), so the launcher shows "no login needed" instead
+ * of a red "not logged in" badge.
+ */
+export const UC_PLATFORMS: readonly Platform[] = [
   { id: "instagram", label: "Instagram",   url: "https://www.instagram.com/",       host: "www.instagram.com",  cookieUrl: "https://www.instagram.com",      cookie: "sessionid",  scraper: true, optionalExtraUrls: ["https://www.instagram.com/direct/inbox/"] },
   // Threads moved threads.net → threads.com in Apr 2025 (.net just redirects).
   { id: "threads",   label: "Threads",     url: "https://www.threads.com/",         host: "www.threads.com",    cookieUrl: "https://www.threads.com",        cookie: "sessionid",  scraper: true },
