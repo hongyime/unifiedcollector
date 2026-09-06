@@ -10,7 +10,6 @@ so adding a new periodic job is a pure additive change: one new file, one
 import, no edits to a monolithic ``_tick``.
 
 TODO (follow-up sprint, docs/plans/scheduler-refactor.md steps 6-15):
-  - GcCollectionRunsHandler          (`_gc_collection_runs`)
   - BuildGraphEdgesHandler           (`_build_graph_edges`)
   - ReconSeedHandler                 (`_maybe_seed_recon_targets`)
   - PhoneIntelHandler                (`_maybe_run_phone_intel`)
@@ -23,6 +22,7 @@ from __future__ import annotations
 
 from .base import PeriodicHandler, SchedulerContext
 from .cookie_check import CookieCheckHandler
+from .gc_collection_runs import GcCollectionRunsHandler
 from .heartbeat import HeartbeatHandler
 from .reconcile_identities import ReconcileIdentitiesHandler
 from .status_delta import StatusDeltaHandler
@@ -32,6 +32,7 @@ HANDLERS: list[PeriodicHandler] = [
     StatusDeltaHandler(),
     ReconcileIdentitiesHandler(),
     CookieCheckHandler(),
+    GcCollectionRunsHandler(),
 ]
 
 __all__ = [
@@ -42,4 +43,5 @@ __all__ = [
     "StatusDeltaHandler",
     "ReconcileIdentitiesHandler",
     "CookieCheckHandler",
+    "GcCollectionRunsHandler",
 ]

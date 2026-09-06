@@ -182,34 +182,6 @@ class Scheduler:
         """Delegate to startup.init_db; see startup.py."""
         await _startup.init_db(self.pool)
 
-    async def _gc_collection_runs(self):
-        """P3-7: retention GC for collection_runs.
-
-        The table has no consumer and grew unbounded (307+ aborted rows). Keep
-        recent history for the dashboard run-view but prune anything older than
-        the retention window. Runs at most hourly (gated by _last_gc).
-        """
-        import time as _time
-        now = _time.monotonic()
-        if now - getattr(self, "_last_gc", 0) < 3600:
-            return
-        self._last_gc = now
-        retention_days = env_int("COLLECTION_RUNS_RETENTION_DAYS", 7, min_value=1)
-        try:
-            async with self.pool.acquire() as conn:
-                deleted = await conn.fetchval(
-                    "WITH d AS (DELETE FROM collection_runs "
-                    "WHERE COALESCE(completed_at, started_at) "
-                    "      < NOW() - ($1 || ' days')::interval "
-                    "RETURNING 1) SELECT COUNT(*) FROM d",
-                    str(retention_days),
-                )
-            if deleted:
-                logger.info("collection_runs GC: pruned %d rows older than %dd",
-                            deleted, retention_days)
-        except Exception:
-            logger.warning("collection_runs GC failed", exc_info=True)
-
     async def _register_beeper_if_enabled(self):
         """Delegate to startup.register_beeper_if_enabled; see startup.py."""
         await _startup.register_beeper_if_enabled(self)
@@ -277,8 +249,9 @@ class Scheduler:
                     logger.info("Next run for %s at %s (re-armed %d targets)",
                                 source, next_run.isoformat(), rearmed or 0)
 
-        # P3-7: prune old collection_runs (self-gated to hourly).
-        await self._gc_collection_runs()
+        # P3-7: collection_runs GC + graph_edges build now run via the handler
+        # registry (see src/scheduler/handlers/). Only schedule-tick-specific
+        # work stays inline here.
         # Build social graph edges from WhatsApp co-group/DM data (self-gated to 30 min).
         await self._build_graph_edges()
         # OSS enrichment automation (self-gated, env-tunable intervals).
