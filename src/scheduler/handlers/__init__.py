@@ -25,9 +25,17 @@ from __future__ import annotations
 
 from .base import PeriodicHandler, SchedulerContext
 from .heartbeat import HeartbeatHandler
+from .status_delta import StatusDeltaHandler
 
 HANDLERS: list[PeriodicHandler] = [
     HeartbeatHandler(),
+    StatusDeltaHandler(),
 ]
 
-__all__ = ["HANDLERS", "PeriodicHandler", "SchedulerContext", "HeartbeatHandler"]
+__all__ = [
+    "HANDLERS",
+    "PeriodicHandler",
+    "SchedulerContext",
+    "HeartbeatHandler",
+    "StatusDeltaHandler",
+]

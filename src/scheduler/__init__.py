@@ -50,11 +50,6 @@ class Scheduler:
         # `_maybe_*` shims that remain below still cache state on `self` — they
         # will be extracted in follow-up steps (docs/plans/scheduler-refactor.md
         # steps 6-15).
-        # 15-minute delta status update (Feature 2). Independent of the hourly
-        # digest so it can be disabled with STATUS_DELTA_INTERVAL_MINUTES=0.
-        # NEW DEFAULT: 0 (disabled) — was 15. The hourly digest already covers it.
-        self._status_delta_minutes = env_int("STATUS_DELTA_INTERVAL_MINUTES", 0, min_value=0)
-        self._last_status_delta = 0.0  # monotonic; 0 forces on first tick
         # Identity reconciliation cadence (P2 review §3). 0 disables.
         self._reconcile_hours = env_int("RECONCILE_INTERVAL_HOURS", 12, min_value=0)
         self._last_reconcile = 0.0  # monotonic; 0 forces a run on first tick
@@ -92,10 +87,9 @@ class Scheduler:
                 logger.error("Scheduler tick error: %s", e)
 
             # Registry-based dispatch for extracted handlers (LOGIC-005).
-            # Currently: HeartbeatHandler. Follow-up steps will move the
-            # remaining _maybe_* gates into this same registry.
+            # Currently: HeartbeatHandler, StatusDeltaHandler. Follow-up steps
+            # will move the remaining _maybe_* gates into this same registry.
             await self._run_periodic_handlers()
-            await self._maybe_status_delta()
             await self._maybe_reconcile_identities()
             await self._maybe_check_cookies()
 
@@ -152,33 +146,6 @@ class Scheduler:
                     await handler.run(ctx)
             except Exception as e:
                 logger.warning("periodic handler %s failed: %s", handler.name, e)
-
-    async def _maybe_status_delta(self):
-        """Fire the 15-minute delta status update (Feature 2).
-
-        Independent from _maybe_heartbeat: the hourly digest keeps its
-        cadence and content; this is a smaller supplementary tick that
-        reports only what changed since the previous delta. Persists the
-        last-tick timestamp in service_cursors so a scheduler restart
-        won't double-send. 0 minutes disables the feature entirely.
-        Wrapped so a failure never disturbs scheduling.
-        """
-        interval_minutes = getattr(self, "_status_delta_minutes", 0)
-        if interval_minutes <= 0:
-            return
-        import time as _time
-        now = _time.monotonic()
-        if now - self._last_status_delta < interval_minutes * 60:
-            return
-        self._last_status_delta = now
-        try:
-            from src.notifications import alerts
-            snapshot = await self._build_status_delta(interval_minutes)
-            if snapshot is None:
-                return  # not yet due per persisted cursor
-            await alerts.notify_status_delta(snapshot)
-        except Exception as e:
-            logger.warning("status delta failed: %s", e)
 
     async def _maybe_reconcile_identities(self):
         """Merge fragmented social_users rows (username-keyed -> id-keyed) on the
