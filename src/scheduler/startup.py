@@ -121,10 +121,39 @@ async def notify_shutdown_safe() -> None:
         logger.warning("notify_shutdown failed: %s", e)
 
 
+async def maybe_start_collector_bot() -> "asyncio.Task | None":
+    """Start the collector callback bot poller as a piggyback asyncio task.
+
+    Gated on ``COLLECTOR_TELEGRAM_BOT_ENABLED`` (default ``1``) plus one of
+    ``NOTIFY_TELEGRAM_BOT_TOKEN`` / ``TELEGRAM_BOT_TOKEN``. When both are
+    satisfied, returns the ``asyncio.Task`` running
+    ``src.notifications.collector_bot.run_callback_poller``; caller must
+    cancel it on shutdown. Any failure returns ``None`` and logs — the
+    scheduler must never fail to start because the poller couldn't.
+    """
+    import asyncio
+    if os.getenv("COLLECTOR_TELEGRAM_BOT_ENABLED", "1") != "1":
+        logger.info("collector-bot: COLLECTOR_TELEGRAM_BOT_ENABLED=0 — poller disabled")
+        return None
+    token = os.getenv("NOTIFY_TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
+    if not token:
+        logger.info("collector-bot: no bot token configured — poller disabled")
+        return None
+    try:
+        from src.notifications.collector_bot import run_callback_poller
+        task = asyncio.create_task(run_callback_poller(), name="collector_bot_poller")
+        logger.info("collector-bot: callback poller task created")
+        return task
+    except Exception:
+        logger.exception("collector-bot: failed to start callback poller (non-fatal)")
+        return None
+
+
 __all__ = [
     "init_db",
     "register_beeper_if_enabled",
     "register_strava_feed_if_enabled",
     "notify_startup_safe",
     "notify_shutdown_safe",
+    "maybe_start_collector_bot",
 ]

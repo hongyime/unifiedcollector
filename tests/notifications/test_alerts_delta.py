@@ -1,7 +1,7 @@
 """Tests for the 15-min delta status update (Feature 2).
 
 Focused on the message builder in alerts.notify_status_delta and the delta
-snapshot shape produced by Scheduler._build_status_delta. The DB path is
+snapshot shape produced by status_builder.build_status_delta. The DB path is
 exercised via a fake connection so no Postgres is needed.
 """
 from __future__ import annotations
@@ -184,7 +184,7 @@ def test_extension_summary_marks_stale():
     assert "stale on TikTok" in line
 
 
-# -- _build_status_delta shape (Scheduler) -------------------------------
+# -- build_status_delta shape (status_builder) ---------------------------
 
 class FakeConn:
     """Minimal fake asyncpg Connection for _build_status_delta.
@@ -268,14 +268,12 @@ class FakePool:
 
 @pytest.mark.asyncio
 async def test_build_status_delta_snapshot_shape():
-    from src.scheduler import Scheduler
+    from src.scheduler import status_builder
 
     conn = FakeConn()
     conn.cursor_row = {"last_processed_at": datetime.now(timezone.utc) - timedelta(minutes=30)}
-    scheduler = Scheduler.__new__(Scheduler)  # bypass __init__
-    scheduler.pool = FakePool(conn)
 
-    snapshot = await scheduler._build_status_delta(15)
+    snapshot = await status_builder.build_status_delta(FakePool(conn), 15)
 
     assert snapshot is not None
     assert "window_seconds" in snapshot
@@ -310,16 +308,14 @@ async def test_build_status_delta_snapshot_shape():
 @pytest.mark.asyncio
 async def test_build_status_delta_skips_when_cursor_recent():
     """A persisted cursor <90% of interval ago means another instance ticked."""
-    from src.scheduler import Scheduler
+    from src.scheduler import status_builder
 
     conn = FakeConn()
     conn.cursor_row = {
         "last_processed_at": datetime.now(timezone.utc) - timedelta(minutes=2),
     }
-    scheduler = Scheduler.__new__(Scheduler)
-    scheduler.pool = FakePool(conn)
 
-    snapshot = await scheduler._build_status_delta(15)
+    snapshot = await status_builder.build_status_delta(FakePool(conn), 15)
     assert snapshot is None
     # No cursor upsert since we did not tick.
     upserts = [c for c in conn.executed if c[0] == "execute"]
@@ -329,14 +325,12 @@ async def test_build_status_delta_skips_when_cursor_recent():
 @pytest.mark.asyncio
 async def test_build_status_delta_seeds_first_run():
     """First-ever run (no cursor row) still returns a snapshot."""
-    from src.scheduler import Scheduler
+    from src.scheduler import status_builder
 
     conn = FakeConn()
     conn.cursor_row = None
-    scheduler = Scheduler.__new__(Scheduler)
-    scheduler.pool = FakePool(conn)
 
-    snapshot = await scheduler._build_status_delta(15)
+    snapshot = await status_builder.build_status_delta(FakePool(conn), 15)
     assert snapshot is not None
     # Cursor is persisted so a restart won't double-send.
     upserts = [c for c in conn.executed if c[0] == "execute" and "service_cursors" in c[1][0]]

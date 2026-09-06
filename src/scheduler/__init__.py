@@ -1,21 +1,22 @@
+"""Thin ``Scheduler`` orchestrator (LOGIC-005 step 15).
+
+All periodic work lives in ``src/scheduler/handlers/``; lifecycle helpers
+(DB init, conditional collector registration, startup/shutdown Telegram
+notifications, collector-bot poller) in ``src/scheduler/startup.py``;
+status-snapshot reporting utilities in ``src/scheduler/status_builder.py``.
+
+``_tick`` processes due ``collection_schedules`` rows (schedule-driven work
+that must serialize across scheduler instances via ``FOR UPDATE SKIP
+LOCKED``) and then iterates the ``handlers.HANDLERS`` registry with a
+per-handler try/except so one bad tick cannot stop the others.
+"""
 import asyncio
 import logging
-import os
 import signal
 from datetime import datetime, timedelta, timezone
 
-from src.db.connection import get_pool, close_pool
 from src.core.env import env_int, env_float
-from src.core.source_freshness import FRESHNESS as _CANONICAL_FRESHNESS
-
-# Status/heartbeat snapshot assembly is a pure reporting concern — moved to
-# status_builder.py in the LOGIC-005 refactor (docs/plans/scheduler-refactor.md).
-# Scheduler._build_status / _build_status_delta / _delta_* remain as thin
-# instance-method delegates so existing callers and tests keep working.
-from src.scheduler import status_builder as _status_builder
-# Startup / shutdown lifecycle helpers (DB init, conditional collector
-# registration, Telegram notifications) live in startup.py. Same delegate
-# pattern: instance methods on Scheduler forward here.
+from src.db.connection import close_pool, get_pool
 from src.scheduler import startup as _startup
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,7 @@ class Scheduler:
         self.pool = None
         self._stop = asyncio.Event()
         self.check_interval = 60
+        self._collector_bot_task = None
 
     async def start(self):
         logger.info("Scheduler starting")
@@ -43,34 +45,8 @@ class Scheduler:
             except NotImplementedError:
                 signal.signal(sig, lambda *_: self._stop.set())
 
-        # Telegram notifications (best-effort; never block/raise the scheduler).
         await _startup.notify_startup_safe()
-        # NOTE: Per-handler state (last-fire timestamps + interval env-reads) is
-        # now owned by the handler classes in `src/scheduler/handlers/`. Legacy
-        # `_maybe_*` shims that remain below still cache state on `self` — they
-        # will be extracted in follow-up steps (docs/plans/scheduler-refactor.md
-        # steps 6-15).
-
-        # Collector callback bot: getUpdates long-poll for [Restart]/[Ignore]
-        # decision-card buttons. Runs as a single asyncio Task piggybacking on
-        # this scheduler loop (mirrors analyzer merge_bot pattern). Only starts
-        # if a bot token is configured; safe to leave off in dev.
-        self._collector_bot_task = None
-        if os.getenv("COLLECTOR_TELEGRAM_BOT_ENABLED", "1") == "1":
-            _tok = os.getenv("NOTIFY_TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
-            if _tok:
-                try:
-                    from src.notifications.collector_bot import run_callback_poller
-                    self._collector_bot_task = asyncio.create_task(
-                        run_callback_poller(), name="collector_bot_poller",
-                    )
-                    logger.info("collector-bot: callback poller task created (COLLECTOR_TELEGRAM_BOT_ENABLED=1)")
-                except Exception:
-                    logger.exception("collector-bot: failed to start callback poller (non-fatal)")
-            else:
-                logger.info("collector-bot: no bot token configured — poller disabled")
-        else:
-            logger.info("collector-bot: COLLECTOR_TELEGRAM_BOT_ENABLED=0 — poller disabled")
+        self._collector_bot_task = await _startup.maybe_start_collector_bot()
 
         while not self._stop.is_set():
             try:
@@ -80,21 +56,18 @@ class Scheduler:
             except Exception as e:
                 logger.error("Scheduler tick error: %s", e)
 
-            # Registry-based dispatch for extracted handlers (LOGIC-005).
-            # Currently: HeartbeatHandler, StatusDeltaHandler. Follow-up steps
-            # will move the remaining _maybe_* gates into this same registry.
-            await self._run_periodic_handlers()
-
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=self.check_interval)
                 break
             except asyncio.TimeoutError:
                 pass
 
+        await self.stop()
+
+    async def stop(self):
+        """Send Telegram shutdown notice, cancel bot poller, close pool."""
         await _startup.notify_shutdown_safe()
-        # Cancel the collector-bot poller before closing the DB pool so the
-        # long-poll HTTP is torn down cleanly (mirrors analyzer merge_bot).
-        if getattr(self, "_collector_bot_task", None) is not None:
+        if self._collector_bot_task is not None:
             try:
                 self._collector_bot_task.cancel()
                 await asyncio.gather(self._collector_bot_task, return_exceptions=True)
@@ -103,99 +76,14 @@ class Scheduler:
         await close_pool()
         logger.info("Scheduler stopped")
 
-    # --- Telegram status notifications (additive, fail-safe) ---
-
-    async def _notify_startup_safe(self):
-        """Delegate to startup.notify_startup_safe; see startup.py."""
-        await _startup.notify_startup_safe()
-
-    async def _notify_shutdown_safe(self):
-        """Delegate to startup.notify_shutdown_safe; see startup.py."""
-        await _startup.notify_shutdown_safe()
-
-    async def _run_periodic_handlers(self):
-        """Registry-driven dispatch for extracted periodic handlers.
-
-        Iterates ``handlers.HANDLERS`` in order, calling ``should_run(ctx)`` then
-        ``run(ctx)``. Fault isolation: one failing handler must not stop the
-        others. Legacy ``_maybe_*`` methods on the class are still called
-        separately in ``start()`` until they are extracted in follow-up steps
-        (docs/plans/scheduler-refactor.md steps 6-15).
-        """
-        from src.scheduler.handlers import HANDLERS, SchedulerContext
-        from src.notifications import alerts as _notifier
-        ctx = SchedulerContext(
-            pool=self.pool,
-            now=datetime.now(timezone.utc),
-            notifier=_notifier,
-            stop_event=self._stop,
-            get_env_int=env_int,
-            get_env_float=env_float,
-        )
-        for handler in HANDLERS:
-            try:
-                if await handler.should_run(ctx):
-                    await handler.run(ctx)
-            except Exception as e:
-                logger.warning("periodic handler %s failed: %s", handler.name, e)
-
-    # Per-source newest-activity freshness — the ACCURATE liveness signal, read
-    # from the real data tables. Delegates to the canonical FRESHNESS table in
-    # src.core.source_freshness so scheduler alerts, watchdog restarts, and the
-    # dashboard freshness UI all read the SAME per-source query set. Retained
-    # as a class attribute for the ``_build_status`` delegate; handlers should
-    # import ``FRESHNESS`` directly from ``src.core.source_freshness``.
-    _FRESHNESS: list[tuple[str, str, int]] = _CANONICAL_FRESHNESS
-
-    async def _build_status(self) -> dict:
-        """Delegate to status_builder.build_status; see status_builder.py.
-
-        Kept as an instance method so existing callers (``_maybe_heartbeat``)
-        and tests that instantiate ``Scheduler`` directly continue to work.
-        """
-        return await _status_builder.build_status(self.pool, self._FRESHNESS)
-
-    # --- 15-minute delta snapshot (Feature 2) -----------------------------
-
-    async def _build_status_delta(self, interval_minutes: int) -> dict | None:
-        """Delegate to status_builder.build_status_delta; see status_builder.py."""
-        return await _status_builder.build_status_delta(self.pool, interval_minutes)
-
-    async def _delta_per_source_counts(self, conn, since) -> dict[str, dict[str, int]]:
-        """Delegate to status_builder.delta_per_source_counts."""
-        return await _status_builder.delta_per_source_counts(conn, since)
-
-    async def _delta_new_cooldowns(self, conn, since) -> list[dict]:
-        """Delegate to status_builder.delta_new_cooldowns."""
-        return await _status_builder.delta_new_cooldowns(conn, since)
-
-    async def _delta_new_dead_sources(self, conn, since) -> list[str]:
-        """Delegate to status_builder.delta_new_dead_sources."""
-        return await _status_builder.delta_new_dead_sources(conn, since)
-
-    async def _delta_extension_hooks(self, conn) -> list[dict]:
-        """Delegate to status_builder.delta_extension_hooks."""
-        return await _status_builder.delta_extension_hooks(conn)
-
-
-    async def _init_db(self):
-        """Delegate to startup.init_db; see startup.py."""
-        await _startup.init_db(self.pool)
-
-    async def _register_beeper_if_enabled(self):
-        """Delegate to startup.register_beeper_if_enabled; see startup.py."""
-        await _startup.register_beeper_if_enabled(self)
-
-    async def _register_strava_feed_if_enabled(self):
-        """Delegate to startup.register_strava_feed_if_enabled; see startup.py."""
-        await _startup.register_strava_feed_if_enabled(self)
-
     async def _tick(self):
+        from src.notifications import alerts as _notifier
+        from src.scheduler.handlers import HANDLERS, SchedulerContext
+
         now = datetime.now(timezone.utc)
         async with self.pool.acquire() as conn:
-            # Serialize multiple scheduler instances per source via advisory lock.
-            # We claim each due row in its own transaction with FOR UPDATE SKIP LOCKED
-            # so a second scheduler running in parallel just skips the row.
+            # FOR UPDATE SKIP LOCKED serializes parallel scheduler instances:
+            # a second scheduler skips claimed rows rather than duplicating.
             async with conn.transaction():
                 due = await conn.fetch(
                     "SELECT id, source, interval_hours FROM collection_schedules "
@@ -208,22 +96,17 @@ class Scheduler:
                     interval = row["interval_hours"]
                     logger.info("Schedule triggered for %s", source)
 
-                    # P1-1: record the run through a real lifecycle instead of
-                    # leaving it stuck in 'queued' forever (292 dead rows found).
-                    # A schedule tick is a trigger event, not a long-lived job the
-                    # worker reports back on, so we open it 'running' and close it
-                    # 'completed' once targets are re-armed. completed_at gives the
-                    # dashboard a real run history + enables retention GC (P3-7).
+                    # P1-1: open the run 'running' + close 'completed' so
+                    # collection_runs has real lifecycle history (retention
+                    # GC prunes the tail — see GcCollectionRunsHandler).
                     run_id = await conn.fetchval(
                         "INSERT INTO collection_runs (source, status, started_at) "
                         "VALUES ($1, 'running', NOW()) RETURNING id",
                         source,
                     )
-                    # P1-1: only re-pend targets that are NOT actively being
-                    # collected. The old query flipped ALL completed/error rows to
-                    # pending every tick, which could yank a still-running collector
-                    # back to pending mid-cycle. Excluding rows touched within the
-                    # interval window protects in-flight work.
+                    # P1-1: only re-pend targets whose last_collection_at is
+                    # outside the interval window, so a still-running collector
+                    # isn't yanked back to pending mid-cycle.
                     rearmed = await conn.fetchval(
                         "WITH upd AS ("
                         "  UPDATE collection_targets SET status = 'pending' "
@@ -235,35 +118,36 @@ class Scheduler:
                         source, str(interval),
                     )
                     await conn.execute(
-                        "UPDATE collection_runs "
-                        "SET status = 'completed', completed_at = NOW(), "
-                        "    items_collected = $2 WHERE id = $1",
+                        "UPDATE collection_runs SET status = 'completed', completed_at = NOW(), "
+                        "items_collected = $2 WHERE id = $1",
                         run_id, rearmed or 0,
                     )
                     next_run = now + timedelta(hours=interval)
                     await conn.execute(
-                        "UPDATE collection_schedules "
-                        "SET last_run = $1, next_run = $2 WHERE id = $3",
+                        "UPDATE collection_schedules SET last_run = $1, next_run = $2 WHERE id = $3",
                         now, next_run, row["id"],
                     )
                     logger.info("Next run for %s at %s (re-armed %d targets)",
                                 source, next_run.isoformat(), rearmed or 0)
 
-        # P3-7: collection_runs GC + graph_edges build now run via the handler
-        # registry (see src/scheduler/handlers/). Only schedule-tick-specific
-        # work stays inline here.
-        # OSS enrichment automation runs via the handler registry
-        # (see src/scheduler/handlers/recon_seed.py, phone_intel.py).
-        # Health-alert ticks (INTR-002, REL-004, REL-005 / INTR-003) now run
-        # via the handler registry (see src/scheduler/handlers/).
-        # NOTE: maigret FP-blocklist refresh runs INSIDE the recon worker
-        # (src/recon_spiderfoot_service.py::_fp_blocklist_refresh_loop) because
-        # this scheduler container does not have the ``maigret`` binary on
-        # PATH.  See that module for the periodic loop.
-
-    # ---- OSS-enrichment automation ticks (self-gated) ----
-
-    # ---- Health-alert self-gated ticks (INTR-002, REL-004, REL-005 / INTR-003) ----
+        # Registry-driven periodic handlers. Fault-isolated per handler so a
+        # single bad tick cannot stop the others. Handlers own their own
+        # last-fire timestamps and env-var reads (PeriodicHandler contract:
+        # src/scheduler/handlers/base.py).
+        ctx = SchedulerContext(
+            pool=self.pool,
+            now=now,
+            notifier=_notifier,
+            stop_event=self._stop,
+            get_env_int=env_int,
+            get_env_float=env_float,
+        )
+        for handler in HANDLERS:
+            try:
+                if await handler.should_run(ctx):
+                    await handler.run(ctx)
+            except Exception as e:
+                logger.warning("periodic handler %s failed: %s", handler.name, e)
 
     async def add_schedule(self, source: str, interval_hours: int = 24):
         if self.pool is None:
@@ -284,17 +168,13 @@ class Scheduler:
         if self.pool is None:
             self.pool = await get_pool()
         async with self.pool.acquire() as conn:
-            await conn.execute(
-                "DELETE FROM collection_schedules WHERE source = $1", source,
-            )
+            await conn.execute("DELETE FROM collection_schedules WHERE source = $1", source)
 
     async def list_schedules(self) -> list[dict]:
         if self.pool is None:
             self.pool = await get_pool()
         async with self.pool.acquire() as conn:
-            rows = await conn.fetch(
-                "SELECT * FROM collection_schedules ORDER BY source"
-            )
+            rows = await conn.fetch("SELECT * FROM collection_schedules ORDER BY source")
         return [dict(r) for r in rows]
 
 
