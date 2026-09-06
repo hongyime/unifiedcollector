@@ -1063,6 +1063,7 @@ services:
       - ../.env
       - ./env/common.env
       - ./env/telegram.env
+      - ./env/telegram_onboard.env
     healthcheck:
       test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
       interval: 60s
