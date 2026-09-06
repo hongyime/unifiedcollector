@@ -10,6 +10,8 @@
 // This file also keeps a persistent, storage-backed LOG ring buffer so the popup
 // shows recent activity even after the worker slept and respawned.
 
+import { UC_PLATFORMS } from "./shared/platforms.js";
+
 // Global crash sinks: if any listener throws async or the top-level IIFE below
 // rejects, MV3 logs "Service worker went to a bad state unexpectedly" and gives
 // up. Capture both here so the next time it happens we have a stack in ucLog
@@ -61,22 +63,13 @@ function _reportSwCrash(detail) {
   } catch (_) {}
 }
 
-// Keep the service worker boot path self-contained. A failed importScripts()
-// during MV3 startup prevents every alarm/listener from registering, so the
-// background worker owns its platform registry directly. Popup/tabs pages still
-// load platforms.js for browser UI.
-globalThis.UC_PLATFORMS = [
-  { id: "instagram", label: "Instagram",   url: "https://www.instagram.com/",       host: "www.instagram.com",  cookieUrl: "https://www.instagram.com",      cookie: "sessionid",  scraper: true, optionalExtraUrls: ["https://www.instagram.com/direct/inbox/"] },
-  { id: "threads",   label: "Threads",     url: "https://www.threads.com/",         host: "www.threads.com",    cookieUrl: "https://www.threads.com",        cookie: "sessionid",  scraper: true },
-  { id: "tiktok",    label: "TikTok",      url: "https://www.tiktok.com/following", host: "www.tiktok.com",     cookieUrl: "https://www.tiktok.com",         cookie: "sessionid",  scraper: true, optionalExtraUrls: ["https://www.tiktok.com/foryou", "https://www.tiktok.com/explore"] },
-  // Lemon8's SPA renders "Not found" for /feed/<cat> and legacy paths as of
-  // 2026-08-05. Keep one visible topic tab only; the headless Lemon8 collector
-  // handles broader coverage without pinning extra Chrome tabs.
-  { id: "lemon8",    label: "Lemon8",      url: "https://www.lemon8-app.com/topic/singapore?region=sg", host: "www.lemon8-app.com", cookieUrl: "https://www.lemon8-app.com",     cookie: "sessionid",  scraper: false, noLogin: true },
-  { id: "x",         label: "Twitter / X", url: "https://x.com/home",               host: "x.com",              aliasHosts: ["twitter.com"], cookieUrl: "https://x.com",                  cookie: "auth_token", scraper: true },
-  { id: "facebook",  label: "Facebook",    url: "https://www.facebook.com/",        host: "www.facebook.com",   cookieUrl: "https://www.facebook.com",       cookie: "c_user",     scraper: true },
-  { id: "strava",    label: "Strava",      url: "https://www.strava.com/dashboard", host: "www.strava.com",     cookieUrl: "https://www.strava.com",         cookie: "_strava4_session", scraper: true },
-];
+// Assign to globalThis so existing call sites keep working unchanged. The
+// registry itself lives in src/shared/platforms.js — imported at build time
+// by esbuild, inlined into dist/background.js. No runtime importScripts /
+// dynamic module load ever runs, so the historical failure mode ("failed
+// importScripts prevents every alarm/listener from registering") is
+// structurally impossible with the bundler.
+globalThis.UC_PLATFORMS = UC_PLATFORMS;
 
 const ALARM = "uc-scrape";
 const DEFAULT_INGEST = "http://127.0.0.1:8765";
