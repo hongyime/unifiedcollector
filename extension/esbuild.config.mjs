@@ -34,7 +34,11 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /** @type {EntryConfig[]} */
 const entries = [
-  // Populated in step 2.
+  { name: "content", entry: resolve(__dirname, "content.js"), sourcemap: "linked" },
+  { name: "background", entry: resolve(__dirname, "background.js"), sourcemap: "linked" },
+  { name: "inject", entry: resolve(__dirname, "inject.js"), sourcemap: false },
+  { name: "popup", entry: resolve(__dirname, "popup.js"), sourcemap: false },
+  { name: "tabs", entry: resolve(__dirname, "tabs.js"), sourcemap: false },
 ];
 
 const watch = process.argv.includes("--watch");

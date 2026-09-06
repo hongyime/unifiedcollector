@@ -1,0 +1,8 @@
+# The root .gitignore ignores dist/ globally. This file overrides that for the
+# extension: dist/ is committed so Chrome Web Store submissions are
+# reproducible and GitHub reviewers see exactly what ships.
+node_modules/
+
+# Explicit un-ignore of dist/ (the root .gitignore has `dist/`).
+!dist/
+!dist/**
