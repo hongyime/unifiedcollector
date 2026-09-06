@@ -5772,51 +5772,88 @@ async def _safe_json(request):
 
 async def health(request):
     state = _startup_state(request.app)
+    pool_ready = bool(request.app.get("pool"))
+    pending = bool(state.get("pending"))
+    startup_error = state.get("error")
+    # Health honesty (REL-001 / INTR-001 / LOGIC-002 fix): a green /health while
+    # db_pool is absent AND the startup task has given up (pending=False) is
+    # what left this container running dark for 42h before manual detection.
+    # Report 503 in that hard-broken state so Docker's healthcheck flips the
+    # container to unhealthy and the watchdog / operator notices. If startup
+    # is still trying (pending=True), stay 200 to avoid restart storms during
+    # normal boot delays.
+    ok = pool_ready or pending
+    status = 200 if ok else 503
     return _cors(web.json_response({
-        "ok": True,
-        "db_pool": bool(request.app.get("pool")),
-        "startup_error": state.get("error"),
-        "startup_pending": bool(state.get("pending")),
+        "ok": ok,
+        "db_pool": pool_ready,
+        "startup_error": startup_error,
+        "startup_pending": pending,
         "lanes": {
             "heartbeat": {"concurrency": SOCIAL_INGEST_HEARTBEAT_CONCURRENCY},
             "write": {"concurrency": SOCIAL_INGEST_WRITE_CONCURRENCY},
             "revisit": {"concurrency": SOCIAL_INGEST_REVISIT_CONCURRENCY},
             "dm_sample": {"concurrency": SOCIAL_INGEST_DM_SAMPLE_CONCURRENCY},
         },
-    }))
+    }, status=status))
 
 
 async def _prepare_db_pool_and_schema(app):
+    # CONC-001 / REL-001 fix: retry the initial pool build on transient
+    # startup failures instead of giving up permanently. Postgres slow-start
+    # during host boot was the observed trigger: the first attempt raced the
+    # DB service_healthy signal and hit `CannotConnectNowError: the database
+    # system is starting up`, then TimeoutError from the async-with wrapper.
+    # We keep `startup_pending=True` for the whole retry window so the /health
+    # endpoint stays 200 during a legitimate startup delay and only flips to
+    # 503 after we truly give up.
     holder = app.get("pool")
-    try:
-        async with asyncio.timeout(10):
-            pool = await get_pool()
+    total_budget = float(os.getenv("SOCIAL_INGEST_STARTUP_POOL_BUDGET_SECONDS", "300"))
+    per_attempt = float(os.getenv("SOCIAL_INGEST_STARTUP_POOL_ATTEMPT_SECONDS", "10"))
+    backoff = 3.0
+    max_backoff = 30.0
+    deadline = time.monotonic() + total_budget
+    pool = None
+    _set_startup_pending(app, True)
+    last_error = None
+    while pool is None and time.monotonic() < deadline:
+        try:
+            async with asyncio.timeout(per_attempt):
+                pool = await get_pool()
             if isinstance(holder, _PoolRef):
                 holder.pool = pool
             else:
                 app["pool"] = pool
-    except TimeoutError:
-        _set_startup_error(app, "db_pool_timeout")
-        logger.exception("startup DB pool timed out")
-    except Exception as exc:
-        _set_startup_error(app, f"db_pool_error:{exc.__class__.__name__}")
-        logger.exception("startup DB pool failed")
-    pool = app.get("pool")
-    if pool:
-        try:
-            async with asyncio.timeout(SOCIAL_INGEST_STARTUP_DDL_TIMEOUT_SECONDS):
-                async with pool.acquire() as conn:
-                    await conn.execute(_SPIDER_DDL)
-                    await _execute_ddl_script(conn, _X_TARGETS_DDL)
-                    await _execute_ddl_script(conn, _TIKTOK_BROWSER_MEDIA_DDL)
-                    await _execute_ddl_script(conn, _BROWSER_MEDIA_CANDIDATES_DDL)
-            _set_startup_error(app, None)
-        except TimeoutError:
-            _set_startup_error(app, "startup_ddl_timeout")
-            logger.exception("startup DDL timed out")
+            break
+        except TimeoutError as exc:
+            last_error = "db_pool_timeout"
+            logger.warning("startup DB pool attempt timed out; retrying")
         except Exception as exc:
-            _set_startup_error(app, f"startup_ddl_error:{exc.__class__.__name__}")
-            logger.exception("startup DDL failed")
+            last_error = f"db_pool_error:{exc.__class__.__name__}"
+            logger.warning("startup DB pool attempt failed (%s); retrying", exc.__class__.__name__)
+        if pool is None:
+            sleep_for = min(backoff, max(1.0, deadline - time.monotonic()))
+            await asyncio.sleep(sleep_for)
+            backoff = min(backoff * 1.5, max_backoff)
+    if pool is None:
+        _set_startup_error(app, last_error or "db_pool_unavailable")
+        _set_startup_pending(app, False)
+        logger.error("startup DB pool gave up after %ss (last=%s)", total_budget, last_error)
+        return
+    try:
+        async with asyncio.timeout(SOCIAL_INGEST_STARTUP_DDL_TIMEOUT_SECONDS):
+            async with pool.acquire() as conn:
+                await conn.execute(_SPIDER_DDL)
+                await _execute_ddl_script(conn, _X_TARGETS_DDL)
+                await _execute_ddl_script(conn, _TIKTOK_BROWSER_MEDIA_DDL)
+                await _execute_ddl_script(conn, _BROWSER_MEDIA_CANDIDATES_DDL)
+        _set_startup_error(app, None)
+    except TimeoutError:
+        _set_startup_error(app, "startup_ddl_timeout")
+        logger.exception("startup DDL timed out")
+    except Exception as exc:
+        _set_startup_error(app, f"startup_ddl_error:{exc.__class__.__name__}")
+        logger.exception("startup DDL failed")
     _set_startup_pending(app, False)
 
 
