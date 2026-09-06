@@ -489,6 +489,11 @@ from .strava import (  # noqa: E402,F401
 )
 
 
+# Cookies + telemetry moved to .cookies / .telemetry per split step 9.
+from .cookies import cookies_handler  # noqa: E402,F401
+from .telemetry import browser_heartbeat_handler, sw_crash_handler  # noqa: E402,F401
+
+
 # Targets endpoints moved to .targets per split step 4.
 
 
@@ -3880,129 +3885,7 @@ def _extension_reload_hint(extension_version) -> dict:
     return hint
 
 
-async def browser_heartbeat_handler(request):
-    body = await _safe_json(request)
-    platform = _norm_platform(body.get("platform"), allow_diagnostics=True)
-    running = bool(body.get("running"))
-    url = body.get("url")
-    label = body.get("label")
-    subject = (
-        str(body.get("owner") or body.get("account") or body.get("tab_id") or platform)
-        .strip()[:128]
-    )
-    pool = request.app.get("pool")
-    telemetry_degraded = pool is None
-    try:
-        async with asyncio.timeout(BROWSER_CONTENT_HINT_RESPONSE_TIMEOUT_SECONDS):
-            recovery_hint = await _browser_content_recovery_hint(pool, platform)
-    except TimeoutError:
-        recovery_hint = _browser_content_timeout_hint(platform, "content_age_response_budget_exceeded")
-    _schedule_app_task(
-        request.app,
-        _record_browser_ingest_event(
-            pool,
-            platform,
-            "browser_heartbeat",
-            subject,
-            observed_count=1,
-            stored_count=0,
-            metadata={
-                "running": running,
-                "url": url,
-                "label": label,
-                "tab_id": body.get("tab_id"),
-                "extension_version": body.get("extension_version"),
-                "health_status": body.get("health_status"),
-                "health_reason": body.get("health_reason"),
-                "page_title": body.get("page_title"),
-                "text_sample": body.get("text_sample"),
-                "content_counts": body.get("content_counts"),
-                "cycle_reason": body.get("cycle_reason"),
-                "message_type": body.get("message_type"),
-                "cycle_targets": body.get("cycle_targets"),
-                "cycle_saved": body.get("cycle_saved"),
-                "cycle_discovered": body.get("cycle_discovered"),
-                "cycle_error": body.get("cycle_error"),
-                "cooldown_left_ms": body.get("cooldown_left_ms"),
-                "loop_running": body.get("loop_running"),
-                "one_shot_running": body.get("one_shot_running"),
-                "one_shot_age_ms": body.get("one_shot_age_ms"),
-                "scrape_pass_running": body.get("scrape_pass_running"),
-                "scrape_pass_age_ms": body.get("scrape_pass_age_ms"),
-                "scrape_pass_reason": body.get("scrape_pass_reason"),
-                "stale_after_ms": body.get("stale_after_ms"),
-                "one_shot_timeout": body.get("one_shot_timeout"),
-                "timeout_ms": body.get("timeout_ms"),
-                "service_worker_recovery": body.get("service_worker_recovery"),
-                "content_age_seconds": body.get("content_age_seconds"),
-                "forced_age_ms": body.get("forced_age_ms"),
-                "hard_reload_ms": body.get("hard_reload_ms"),
-                "revived_content_script": body.get("revived_content_script"),
-                "recovery_scheduled": body.get("recovery_scheduled"),
-                "recovery_pending": body.get("recovery_pending"),
-                "recovery_attempt": body.get("recovery_attempt"),
-                "recovery_delay_ms": body.get("recovery_delay_ms"),
-                "recovery_limit": body.get("recovery_limit"),
-                "recovery_nav": body.get("recovery_nav"),
-                "recovery_target_url": body.get("recovery_target_url"),
-                "scraper_tabs_seen": body.get("scraper_tabs_seen"),
-                "scraper_tabs_sent": body.get("scraper_tabs_sent"),
-                "scraper_tabs_failed": body.get("scraper_tabs_failed"),
-                "scraper_tabs_canonical": body.get("scraper_tabs_canonical"),
-                "scraper_tabs_skipped": body.get("scraper_tabs_skipped"),
-                "scraper_heartbeat_error": body.get("scraper_heartbeat_error"),
-            },
-        ),
-        "browser_heartbeat_telemetry",
-    )
-    return _cors(web.json_response({
-        "ok": True,
-        "platform": platform,
-        "running": running,
-        "telemetry_degraded": telemetry_degraded,
-        **recovery_hint,
-        **_extension_reload_hint(body.get("extension_version")),
-    }))
-
-
-# CREDENTIALS_ROOT moved to .constants (imported at top via `from .constants import *`).
-
-
-async def cookies_handler(request):
-    """Self-healing sessions: the extension pushes its LIVE logged-in cookies here,
-    and we write a Netscape cookies.txt the headless collector auto-discovers. So the
-    headless backup never runs on a dead/expired session (which causes 401 retry
-    storms that look bot-like). Only instagram for now."""
-    body = await _safe_json(request)
-    platform = _norm_platform(body.get("platform"))
-    if platform != "instagram":
-        return _cors(web.json_response({"ok": False, "reason": "unsupported"}))
-    cookies = body.get("cookies") or []
-    have = {c.get("name") for c in cookies if isinstance(c, dict)}
-    if "sessionid" not in have:  # not logged in — don't clobber a good file with junk
-        return _cors(web.json_response({"ok": False, "reason": "no sessionid"}))
-    account = re.sub(r"[^A-Za-z0-9_.-]", "_", str(body.get("account") or "extension_live"))[:60]
-    lines = ["# Netscape HTTP Cookie File", "# generated by the UnifiedCollector extension", ""]
-    for c in cookies:
-        if not isinstance(c, dict) or not c.get("name"):
-            continue
-        domain = c.get("domain") or ".instagram.com"
-        inc_sub = "TRUE" if domain.startswith(".") else "FALSE"
-        path = c.get("path") or "/"
-        secure = "TRUE" if c.get("secure") else "FALSE"
-        expiry = int(c.get("expirationDate") or 0)
-        lines.append(f"{domain}\t{inc_sub}\t{path}\t{secure}\t{expiry}\t{c['name']}\t{c.get('value','')}")
-    try:
-        d = Path(CREDENTIALS_ROOT) / "instagram"
-        d.mkdir(parents=True, exist_ok=True)
-        tmp = d / (account + ".txt.tmp")
-        tmp.write_text("\n".join(lines) + "\n")
-        os.replace(tmp, d / (account + ".txt"))
-        logger.info("cookies: wrote live session for instagram/%s (%d cookies)", account, len(cookies))
-    except Exception as e:
-        logger.warning("cookies write failed: %s", e)
-        return _cors(web.json_response({"ok": False, "error": str(e)}, status=500))
-    return _cors(web.json_response({"ok": True, "account": account}))
+# browser_heartbeat_handler moved to .cookies / .telemetry per split step 9.
 
 
 async def seed_handler(request):
@@ -4129,43 +4012,9 @@ async def comments_handler(request):
 # ingest moved to .ingest per split step 5.
 
 
-async def sw_crash_handler(request):
-    """Accept extension MV3 service-worker crash reports (companion to a014dc4).
-
-    background.js POSTs here from its self.addEventListener('error') and
-    'unhandledrejection' hooks. Persist to browser_ingest_events under the
-    'bridge' diagnostic platform so operators can query recent SW instability
-    (e.g. `SELECT metadata FROM browser_ingest_events WHERE endpoint='sw_crash'
-    ORDER BY created_at DESC`) and log at WARNING so it shows in docker logs.
-    Best-effort — never fails the request.
-    """
-    body = await _safe_json(request)
-    kind = str(body.get("kind") or "sw_crash")[:64]
-    message = str(body.get("message") or "")[:512]
-    ext_version = str(body.get("extension_version") or "unknown")[:32]
-    logger.warning(
-        "extension SW crash: kind=%s ext=%s msg=%s",
-        kind, ext_version, message,
-    )
-    pool = request.app.get("pool")
-    subject = ext_version[:128]
-    _schedule_app_task(
-        request.app,
-        _record_browser_ingest_event(
-            pool,
-            "bridge",
-            "sw_crash",
-            subject,
-            observed_count=1,
-            stored_count=0,
-            metadata=body if isinstance(body, dict) else None,
-        ),
-        label="sw_crash_record",
-    )
-    return _cors(web.json_response({"ok": True}, status=202))
+# sw_crash_handler moved to .cookies / .telemetry per split step 9.
 
 
-# ---------------------------------------------------------------------------
 async def _safe_json(request):
     if request.get("_json_cache") is not None:
         return request["_json_cache"]
