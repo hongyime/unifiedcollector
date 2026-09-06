@@ -50,9 +50,6 @@ class Scheduler:
         # `_maybe_*` shims that remain below still cache state on `self` — they
         # will be extracted in follow-up steps (docs/plans/scheduler-refactor.md
         # steps 6-15).
-        # Cookie-health check cadence (no untested cookies). 0 disables.
-        self._cookie_check_hours = env_int("COOKIE_CHECK_INTERVAL_HOURS", 6, min_value=0)
-        self._last_cookie_check = 0.0  # 0 forces a check on first tick
 
         # Collector callback bot: getUpdates long-poll for [Restart]/[Ignore]
         # decision-card buttons. Runs as a single asyncio Task piggybacking on
@@ -87,7 +84,6 @@ class Scheduler:
             # Currently: HeartbeatHandler, StatusDeltaHandler. Follow-up steps
             # will move the remaining _maybe_* gates into this same registry.
             await self._run_periodic_handlers()
-            await self._maybe_check_cookies()
 
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=self.check_interval)
@@ -150,23 +146,6 @@ class Scheduler:
     # as a class attribute for the ``_build_status`` delegate; handlers should
     # import ``FRESHNESS`` directly from ``src.core.source_freshness``.
     _FRESHNESS: list[tuple[str, str, int]] = _CANONICAL_FRESHNESS
-
-    async def _maybe_check_cookies(self):
-        """Actively test every cookie's validity on the first tick, then every N
-        hours, so the dashboard never shows 'untested'. Fail-soft. IG is gated off
-        inside the checker (collector-driven). See src/core/cookie_health.py."""
-        if getattr(self, "_cookie_check_hours", 0) <= 0:
-            return
-        import time as _time
-        now = _time.monotonic()
-        if now - self._last_cookie_check < self._cookie_check_hours * 3600:
-            return
-        self._last_cookie_check = now
-        try:
-            from src.core.cookie_health import check_all_cookies
-            await check_all_cookies(self.pool)
-        except Exception as e:
-            logger.warning("cookie health check failed: %s", e)
 
     async def _build_status(self) -> dict:
         """Delegate to status_builder.build_status; see status_builder.py.
