@@ -79,205 +79,36 @@ except Exception:  # pragma: no cover
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("social_ingest")
 
-MEDIA_ROOT = os.getenv("COLLECTOR_DRIVE_PATH", "/media")
-PORT = int(os.getenv("IG_INGEST_PORT", "8765"))
+# Config constants + CORS helper + middlewares live in dedicated modules
+# (PERF-003 split, docs/plans/perf-file-splits.md §4B). Re-export the full
+# constant surface here so tests and downstream imports that still reach for
+# ``src.bridges.ig_ingest.<CONSTANT>`` keep working.
+from .constants import *  # noqa: E402,F401,F403 -- re-export
+from .constants import (  # noqa: E402  -- explicit for the private names not in *
+    _SAFE,
+    _THREADS_SYNTHETIC_MEDIA_ID,
+    _BROWSER_CONTENT_HINT_FAIL_ACTIVE_PLATFORMS,
+)
+from .cors import _cors, handle_options  # noqa: E402,F401
+from .middleware import (  # noqa: E402,F401
+    _social_ingest_lane_for_path,
+    _request_timeout_seconds,
+    _STRUCTURED_CAPTURE_PATHS,
+    _HEARTBEAT_LANE_PATHS,
+    _REVISIT_LANE_PATHS,
+    _DM_SAMPLE_LANE_PATHS,
+    _WRITE_LANE_PATHS,
+    _FAST_LANE_PATHS,
+    request_timeout_middleware,
+    lane_isolation_middleware,
+    db_pool_middleware,
+)
 
-# DM raw-sample capture (#35). Files land in DM_SAMPLE_DIR as
-# <platform>_<n>.bin. n is a monotonically increasing index derived from the
-# max existing index (NOT a count), so pruning can't cause an old-index reuse
-# that would overwrite a not-yet-pruned file. Rotation keeps only the newest
-# DM_SAMPLE_CAP_PER_PLATFORM files per platform by mtime, so the directory
-# can't grow unbounded on active sockets (P1.1). Cap overridable via env.
-DM_SAMPLE_DIR = "/tmp/dm_samples"
-DM_SAMPLE_CAP_PER_PLATFORM = int(os.getenv("DM_SAMPLE_CAP", "200"))
-MIN_BYTES = int(os.getenv("IG_INGEST_MIN_BYTES", "1024"))
-DL_CONCURRENCY = int(os.getenv("SOCIAL_INGEST_CONCURRENCY", "4"))
-try:
-    SOCIAL_INGEST_UPLOAD_CONCURRENCY = max(
-        1,
-        int(os.getenv("SOCIAL_INGEST_UPLOAD_CONCURRENCY", "1")),
-    )
-except (TypeError, ValueError):
-    SOCIAL_INGEST_UPLOAD_CONCURRENCY = 1
-try:
-    SOCIAL_INGEST_STRUCTURED_BACKGROUND_CONCURRENCY = max(
-        1,
-        int(os.getenv("SOCIAL_INGEST_STRUCTURED_BACKGROUND_CONCURRENCY", "2")),
-    )
-except (TypeError, ValueError):
-    SOCIAL_INGEST_STRUCTURED_BACKGROUND_CONCURRENCY = 2
-SOCIAL_INGEST_CLIENT_MAX_MB = int(os.getenv("SOCIAL_INGEST_CLIENT_MAX_MB", "512"))
-try:
-    BROWSER_TELEMETRY_WRITE_TIMEOUT_SECONDS = max(
-        0.25,
-        float(os.getenv("BROWSER_TELEMETRY_WRITE_TIMEOUT_SECONDS", "8.0")),
-    )
-except (TypeError, ValueError):
-    BROWSER_TELEMETRY_WRITE_TIMEOUT_SECONDS = 8.0
-try:
-    DM_HOOK_HEARTBEAT_WRITE_TIMEOUT_SECONDS = max(
-        0.25,
-        float(os.getenv("DM_HOOK_HEARTBEAT_WRITE_TIMEOUT_SECONDS", "6.0")),
-    )
-except (TypeError, ValueError):
-    DM_HOOK_HEARTBEAT_WRITE_TIMEOUT_SECONDS = 6.0
-try:
-    IG_COOLDOWN_READ_TIMEOUT_SECONDS = max(
-        0.25,
-        float(os.getenv("IG_COOLDOWN_READ_TIMEOUT_SECONDS", "2.0")),
-    )
-except (TypeError, ValueError):
-    IG_COOLDOWN_READ_TIMEOUT_SECONDS = 2.0
-try:
-    SOCIAL_INGEST_REQUEST_TIMEOUT_SECONDS = max(
-        1.0,
-        float(os.getenv("SOCIAL_INGEST_REQUEST_TIMEOUT_SECONDS", "8.0")),
-    )
-except (TypeError, ValueError):
-    SOCIAL_INGEST_REQUEST_TIMEOUT_SECONDS = 8.0
-try:
-    SOCIAL_INGEST_HEARTBEAT_REQUEST_TIMEOUT_SECONDS = max(
-        SOCIAL_INGEST_REQUEST_TIMEOUT_SECONDS,
-        float(os.getenv("SOCIAL_INGEST_HEARTBEAT_REQUEST_TIMEOUT_SECONDS", "30.0")),
-    )
-except (TypeError, ValueError):
-    SOCIAL_INGEST_HEARTBEAT_REQUEST_TIMEOUT_SECONDS = 30.0
-try:
-    SOCIAL_INGEST_UPLOAD_REQUEST_TIMEOUT_SECONDS = max(
-        SOCIAL_INGEST_REQUEST_TIMEOUT_SECONDS,
-        float(os.getenv("SOCIAL_INGEST_UPLOAD_REQUEST_TIMEOUT_SECONDS", "60.0")),
-    )
-except (TypeError, ValueError):
-    SOCIAL_INGEST_UPLOAD_REQUEST_TIMEOUT_SECONDS = 60.0
-try:
-    SOCIAL_INGEST_STRUCTURED_REQUEST_TIMEOUT_SECONDS = max(
-        SOCIAL_INGEST_REQUEST_TIMEOUT_SECONDS,
-        float(os.getenv("SOCIAL_INGEST_STRUCTURED_REQUEST_TIMEOUT_SECONDS", "30.0")),
-    )
-except (TypeError, ValueError):
-    SOCIAL_INGEST_STRUCTURED_REQUEST_TIMEOUT_SECONDS = 30.0
-try:
-    SOCIAL_INGEST_DB_INIT_TIMEOUT_SECONDS = max(
-        1.0,
-        float(os.getenv("SOCIAL_INGEST_DB_INIT_TIMEOUT_SECONDS", "4.0")),
-    )
-except (TypeError, ValueError):
-    SOCIAL_INGEST_DB_INIT_TIMEOUT_SECONDS = 4.0
-try:
-    SOCIAL_INGEST_HEARTBEAT_CONCURRENCY = max(
-        1,
-        int(os.getenv("SOCIAL_INGEST_HEARTBEAT_CONCURRENCY", "16")),
-    )
-except (TypeError, ValueError):
-    SOCIAL_INGEST_HEARTBEAT_CONCURRENCY = 16
-try:
-    SOCIAL_INGEST_WRITE_CONCURRENCY = max(
-        1,
-        int(os.getenv("SOCIAL_INGEST_WRITE_CONCURRENCY", "4")),
-    )
-except (TypeError, ValueError):
-    SOCIAL_INGEST_WRITE_CONCURRENCY = 4
-try:
-    SOCIAL_INGEST_REVISIT_CONCURRENCY = max(
-        1,
-        int(os.getenv("SOCIAL_INGEST_REVISIT_CONCURRENCY", "2")),
-    )
-except (TypeError, ValueError):
-    SOCIAL_INGEST_REVISIT_CONCURRENCY = 2
-try:
-    SOCIAL_INGEST_DM_SAMPLE_CONCURRENCY = max(
-        1,
-        int(os.getenv("SOCIAL_INGEST_DM_SAMPLE_CONCURRENCY", "1")),
-    )
-except (TypeError, ValueError):
-    SOCIAL_INGEST_DM_SAMPLE_CONCURRENCY = 1
-try:
-    SOCIAL_INGEST_LANE_WAIT_SECONDS = max(
-        0.0,
-        float(os.getenv("SOCIAL_INGEST_LANE_WAIT_SECONDS", "0.25")),
-    )
-except (TypeError, ValueError):
-    SOCIAL_INGEST_LANE_WAIT_SECONDS = 0.25
-SOCIAL_INGEST_PREP_DB_ON_STARTUP = os.getenv("SOCIAL_INGEST_PREP_DB_ON_STARTUP", "0").lower() in {
-    "1",
-    "true",
-    "yes",
-}
-try:
-    BROWSER_CONTENT_STALE_SECONDS = max(
-        300,
-        int(os.getenv("BROWSER_CONTENT_STALE_SECONDS", "3600")),
-    )
-except (TypeError, ValueError):
-    BROWSER_CONTENT_STALE_SECONDS = 3600
-try:
-    BROWSER_CONTENT_HINT_TTL_SECONDS = max(
-        30,
-        int(os.getenv("BROWSER_CONTENT_HINT_TTL_SECONDS", "300")),
-    )
-except (TypeError, ValueError):
-    BROWSER_CONTENT_HINT_TTL_SECONDS = 300
-try:
-    BROWSER_CONTENT_HINT_RESPONSE_TIMEOUT_SECONDS = max(
-        0.05,
-        float(os.getenv("BROWSER_CONTENT_HINT_RESPONSE_TIMEOUT_SECONDS", "0.75")),
-    )
-except (TypeError, ValueError):
-    BROWSER_CONTENT_HINT_RESPONSE_TIMEOUT_SECONDS = 0.75
-UC_EXTENSION_EXPECTED_VERSION = os.getenv("UC_EXTENSION_EXPECTED_VERSION", "").strip()
-X_ZERO_PROGRESS_PROBES = {
-    "no_dom_media_candidates",
-    "try_again_empty_state",
-    "x_blank_spa_shell",
-    "x_no_status_links",
-}
-try:
-    SOCIAL_INGEST_STARTUP_DDL_TIMEOUT_SECONDS = max(
-        15.0,
-        float(os.getenv("SOCIAL_INGEST_STARTUP_DDL_TIMEOUT_SECONDS", "60.0")),
-    )
-except (TypeError, ValueError):
-    SOCIAL_INGEST_STARTUP_DDL_TIMEOUT_SECONDS = 60.0
-STRAVA_BROWSER_429_COOLDOWN_SECONDS = int(os.getenv("STRAVA_BROWSER_429_COOLDOWN_SECONDS", "1800"))
-try:
-    STRAVA_BROWSER_429_MAX_COOLDOWN_SECONDS = max(
-        STRAVA_BROWSER_429_COOLDOWN_SECONDS,
-        int(os.getenv("STRAVA_BROWSER_429_MAX_COOLDOWN_SECONDS", "21600")),
-    )
-except (TypeError, ValueError):
-    STRAVA_BROWSER_429_MAX_COOLDOWN_SECONDS = max(STRAVA_BROWSER_429_COOLDOWN_SECONDS, 21600)
-try:
-    STRAVA_BROWSER_429_MEMORY_SECONDS = max(
-        0,
-        int(os.getenv("STRAVA_BROWSER_429_MEMORY_SECONDS", "21600")),
-    )
-except (TypeError, ValueError):
-    STRAVA_BROWSER_429_MEMORY_SECONDS = 21600
-try:
-    TIKTOK_BROWSER_REVISIT_CLAIM_TIMEOUT_SECONDS = max(
-        60,
-        int(os.getenv("TIKTOK_BROWSER_REVISIT_CLAIM_TIMEOUT_SECONDS", "1800")),
-    )
-except (TypeError, ValueError):
-    TIKTOK_BROWSER_REVISIT_CLAIM_TIMEOUT_SECONDS = 1800
-try:
-    TIKTOK_BROWSER_REVISIT_CLAIM_HOLD_SECONDS = max(
-        60,
-        int(os.getenv("TIKTOK_BROWSER_REVISIT_CLAIM_HOLD_SECONDS", "900")),
-    )
-except (TypeError, ValueError):
-    TIKTOK_BROWSER_REVISIT_CLAIM_HOLD_SECONDS = 900
+# Mutable module state — must remain in __init__.py so that ``global``
+# reassignments in helpers still find these names. Tests reach for these
+# via ``ig_ingest._BROWSER_CONTENT_HINT_CACHE``, etc.
 _BROWSER_CONTENT_HINT_CACHE: dict[str, tuple[float, dict]] = {}
 _BROWSER_CONTENT_HINT_INFLIGHT: set[str] = set()
-_BROWSER_CONTENT_HINT_FAIL_ACTIVE_PLATFORMS = {"x", "facebook", "tiktok", "lemon8", "threads"}
-_SAFE = re.compile(r"[^A-Za-z0-9._-]")
-_THREADS_SYNTHETIC_MEDIA_ID = re.compile(r"^(?:img|vid)_[a-z0-9]+$", re.IGNORECASE)
-
-# Platforms the bridge may push. Each may carry its own famous-cap / hop config.
-# Only instagram currently spiders (followers/following graph); the others scrape
-# whatever the open page exposes, so they have no spider table.
-KNOWN_PLATFORMS = {"instagram", "tiktok", "lemon8", "x", "threads", "facebook", "strava"}
-BROWSER_DIAGNOSTIC_PLATFORMS = {"bridge"}
 _DM_PROBE_TARGET_TABLES = {platform: ["dm_probe_log"] for platform in KNOWN_PLATFORMS}
 
 _BROWSER_CAPTURE_TARGET_TABLES = {
@@ -316,20 +147,8 @@ _BROWSER_CAPTURE_COMPRESSED_ENDPOINTS = {"profile", "posts", "comments"}
 # discover; we store them at hop+1 in instagram_spider_targets (a channel SEPARATE
 # from collection_targets so the .targets file-sync never wipes them). Famous
 # accounts (follower_count > cap) are dropped — we want your network, not celebs.
-IG_SPIDER_MAX_HOP = int(os.getenv("INSTA_SPIDER_HOPS", "2"))
-IG_SPIDER_FAMOUS_CAP = int(os.getenv("INSTA_SPIDER_FAMOUS_CAP", "100000"))
-IG_SPIDER_TARGETS_LIMIT = int(os.getenv("IG_SPIDER_TARGETS_LIMIT", "250"))
-SOCIAL_TARGET_CACHE_REFRESH_ON_REQUEST = os.getenv("SOCIAL_TARGET_CACHE_REFRESH_ON_REQUEST", "0").strip().lower() in {"1", "true", "yes", "on"}
-SOCIAL_TARGET_CACHE_REFRESH_SECONDS = int(os.getenv("SOCIAL_TARGET_CACHE_REFRESH_SECONDS", "300"))
-SOCIAL_TARGET_CACHE_REFRESH_INLINE_BUDGET_SECONDS = float(os.getenv("SOCIAL_TARGET_CACHE_REFRESH_INLINE_BUDGET_SECONDS", "0.25"))
-SOCIAL_TARGET_RESPONSE_CACHE_SECONDS = float(os.getenv("SOCIAL_TARGET_RESPONSE_CACHE_SECONDS", "45.0"))
-SOCIAL_TARGET_QUERY_TIMEOUT_SECONDS = float(os.getenv("SOCIAL_TARGET_QUERY_TIMEOUT_SECONDS", "2.0"))
-SOCIAL_TARGET_STALE_RESPONSE_SECONDS = float(os.getenv("SOCIAL_TARGET_STALE_RESPONSE_SECONDS", "600.0"))
-X_PROFILE_TARGET_REVISIT_SECONDS = int(os.getenv("X_PROFILE_TARGET_REVISIT_SECONDS", str(12 * 60 * 60)))
-X_PROFILE_TARGET_RETRY_SECONDS = int(os.getenv("X_PROFILE_TARGET_RETRY_SECONDS", str(45 * 60)))
-TIKTOK_FOLLOW_OWNER_FALLBACK = (
-    os.getenv("TIKTOK_FOLLOW_OWNER_FALLBACK", "").strip().lstrip("@") or None
-)
+# NOTE: IG_SPIDER_*, SOCIAL_TARGET_*, X_PROFILE_TARGET_*, TIKTOK_FOLLOW_OWNER_FALLBACK,
+# STRAVA_ROUTE_QUEUE_RESPONSE_* — all moved to .constants (imported at top).
 _SOCIAL_TARGET_CACHE_REFRESH_LAST = 0.0
 _SOCIAL_TARGET_CACHE_REFRESH_LOCK: asyncio.Lock | None = None
 _SOCIAL_TARGET_CACHE_REFRESH_TASKS: set[asyncio.Task] = set()
@@ -337,9 +156,6 @@ _SOCIAL_TARGET_RESPONSE_CACHE: dict[str, tuple[float, list[dict]]] = {}
 _SOCIAL_TARGET_RESPONSE_LOCKS: dict[str, asyncio.Lock] = {}
 _STRAVA_ROUTE_QUEUE_RESPONSE_CACHE: dict[str, tuple[float, dict]] = {}
 _STRAVA_ROUTE_QUEUE_TIMEOUT_LOG_LAST: dict[str, float] = {}
-STRAVA_ROUTE_QUEUE_RESPONSE_CACHE_SECONDS = float(os.getenv("STRAVA_ROUTE_QUEUE_RESPONSE_CACHE_SECONDS", "30.0"))
-STRAVA_ROUTE_QUEUE_RESPONSE_TIMEOUT_SECONDS = float(os.getenv("STRAVA_ROUTE_QUEUE_RESPONSE_TIMEOUT_SECONDS", "2.0"))
-STRAVA_ROUTE_QUEUE_TIMEOUT_WARN_SECONDS = float(os.getenv("STRAVA_ROUTE_QUEUE_TIMEOUT_WARN_SECONDS", "600.0"))
 
 _SPIDER_DDL = """
 CREATE TABLE IF NOT EXISTS instagram_spider_targets (
@@ -602,171 +418,10 @@ def _norm_platform(p, *, allow_diagnostics: bool = False):
     return p if p in KNOWN_PLATFORMS else "instagram"
 
 
-def _cors(resp: web.Response) -> web.Response:
-    resp.headers["Access-Control-Allow-Origin"] = "*"
-    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
-    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-    # Chrome's Private Network Access (PNA) blocks HTTPS pages from fetching
-    # loopback (127.0.0.1) unless the server opts in with this header. Some
-    # origins (observed: https://www.lemon8-app.com) get PNA-enforced for
-    # extension content-script fetches even though the extension declares
-    # http://127.0.0.1/* in host_permissions — so the extension's direct-fetch
-    # heartbeat fallback fails silently with `ERR net::ERR_FAILED` /
-    # "Permission was denied for this request to access the `loopback` address
-    # space." Opting in unblocks lemon8 while remaining safe for other
-    # platforms (we never accept cross-origin credentialed requests: fetches
-    # from content.js don't send cookies).
-    resp.headers["Access-Control-Allow-Private-Network"] = "true"
-    return resp
-
-
-_STRUCTURED_CAPTURE_PATHS = {
-    "/social/browser-media-candidates",
-    "/social/comments",
-    "/social/discover",
-    "/social/dm-decoded",
-    "/social/dm-frame",
-    "/social/dm-probe",
-    "/social/dm-sample",
-    "/social/dms",
-    "/social/posts",
-    "/social/profile",
-    "/social/seed",
-    "/social/strava-route-visit",
-    "/social/strava-streams",
-    "/social/target-status",
-    "/social/users",
-    "/social/x-profile-target-result",
-}
-
-
-_HEARTBEAT_LANE_PATHS = {
-    "/social/browser-heartbeat",
-    "/social/dm-heartbeat",
-}
-_REVISIT_LANE_PATHS = {
-    "/social/browser-revisit-target",
-    "/social/browser-revisit-result",
-    "/social/tiktok-revisit-target",
-    "/social/tiktok-revisit-result",
-    "/social/x-profile-target",
-    "/social/x-profile-target-result",
-}
-_DM_SAMPLE_LANE_PATHS = {
-    "/social/dm-sample",
-}
-_WRITE_LANE_PATHS = {
-    "/ig/discover",
-    "/ig/ingest",
-    "/social/browser-media-candidates",
-    "/social/comments",
-    "/social/cookies",
-    "/social/discover",
-    "/social/dm-decoded",
-    "/social/dm-frame",
-    "/social/dm-probe",
-    "/social/dms",
-    "/social/ingest",
-    "/social/ingest-upload",
-    "/social/ingest-upload-binary",
-    "/social/posts",
-    "/social/profile",
-    "/social/seed",
-    "/social/strava-route-visit",
-    "/social/strava-streams",
-    "/social/target-status",
-    "/social/users",
-}
-_FAST_LANE_PATHS = {
-    "/health",
-    "/metrics",
-    "/ready",
-    "/social/ig_cooldown",
-    "/social/strava-route-queue",
-    "/social/targets",
-    "/ig/targets",
-}
-
-
-def _social_ingest_lane_for_path(path: str) -> str | None:
-    if path in _HEARTBEAT_LANE_PATHS:
-        return "heartbeat"
-    if path in _DM_SAMPLE_LANE_PATHS:
-        return "dm_sample"
-    if path in _REVISIT_LANE_PATHS:
-        return "revisit"
-    if path in _WRITE_LANE_PATHS or path in _STRUCTURED_CAPTURE_PATHS:
-        return "write"
-    if path in _FAST_LANE_PATHS:
-        return None
-    return None
-
-
-def _request_timeout_seconds(path: str) -> float:
-    if path in {"/social/ingest-upload", "/social/ingest-upload-binary"}:
-        return SOCIAL_INGEST_UPLOAD_REQUEST_TIMEOUT_SECONDS
-    if path == "/social/browser-heartbeat":
-        return SOCIAL_INGEST_HEARTBEAT_REQUEST_TIMEOUT_SECONDS
-    if path in _STRUCTURED_CAPTURE_PATHS:
-        return SOCIAL_INGEST_STRUCTURED_REQUEST_TIMEOUT_SECONDS
-    return SOCIAL_INGEST_REQUEST_TIMEOUT_SECONDS
-
-
-async def handle_options(request):
-    return _cors(web.Response(status=204))
-
-
-@web.middleware
-async def request_timeout_middleware(request, handler):
-    timeout_seconds = _request_timeout_seconds(request.path)
-    try:
-        async with asyncio.timeout(timeout_seconds):
-            return await handler(request)
-    except TimeoutError:
-        logger.warning(
-            "social ingest request timed out after %.2fs method=%s path=%s",
-            timeout_seconds,
-            request.method,
-            request.path,
-        )
-        return _cors(web.json_response(
-            {
-                "ok": False,
-                "error": "handler_timeout",
-                "path": request.path,
-            },
-            status=503,
-        ))
-
-
-@web.middleware
-async def lane_isolation_middleware(request, handler):
-    if request.method == "OPTIONS":
-        return await handler(request)
-    lane = _social_ingest_lane_for_path(request.path)
-    if not lane:
-        return await handler(request)
-    sem = request.app.get(f"{lane}_lane_sem")
-    if sem is None:
-        return await handler(request)
-    try:
-        await asyncio.wait_for(sem.acquire(), timeout=SOCIAL_INGEST_LANE_WAIT_SECONDS)
-    except TimeoutError:
-        logger.warning("social ingest lane busy lane=%s path=%s", lane, request.path)
-        return _cors(web.json_response(
-            {
-                "ok": False,
-                "error": "busy_retry",
-                "lane": lane,
-                "path": request.path,
-                "retry_after": 1,
-            },
-            status=503,
-        ))
-    try:
-        return await handler(request)
-    finally:
-        sem.release()
+# ---------------------------------------------------------------------------
+# CORS helpers moved to .cors (imported at top of module).
+# Middleware and path classifiers moved to .middleware (imported at top).
+# ---------------------------------------------------------------------------
 
 
 class _PoolRef:
@@ -836,43 +491,7 @@ def _schedule_app_task(app, coro, label: str) -> None:
     task.add_done_callback(app["tasks"].discard)
 
 
-@web.middleware
-async def db_pool_middleware(request, handler):
-    if request.method == "OPTIONS" or request.path in {
-        "/health",
-        "/social/browser-heartbeat",
-        "/social/dm-heartbeat",
-    }:
-        return await handler(request)
-    try:
-        await _ensure_app_pool(request.app)
-    except TimeoutError:
-        _set_startup_error(request.app, "db_pool_lazy_timeout")
-        logger.warning(
-            "social ingest lazy DB pool init timed out after %.2fs path=%s",
-            SOCIAL_INGEST_DB_INIT_TIMEOUT_SECONDS,
-            request.path,
-        )
-        return _cors(web.json_response(
-            {
-                "ok": False,
-                "error": "db_pool_timeout",
-                "path": request.path,
-            },
-            status=503,
-        ))
-    except Exception as exc:
-        _set_startup_error(request.app, f"db_pool_lazy_error:{exc.__class__.__name__}")
-        logger.exception("social ingest lazy DB pool init failed path=%s", request.path)
-        return _cors(web.json_response(
-            {
-                "ok": False,
-                "error": "db_pool_error",
-                "path": request.path,
-            },
-            status=503,
-        ))
-    return await handler(request)
+# db_pool_middleware moved to .middleware (imported at top of module).
 
 
 # ---------------------------------------------------------------------------
@@ -5486,7 +5105,7 @@ async def browser_heartbeat_handler(request):
     }))
 
 
-CREDENTIALS_ROOT = os.getenv("CREDENTIALS_ROOT", "/app/credentials")
+# CREDENTIALS_ROOT moved to .constants (imported at top via `from .constants import *`).
 
 
 async def cookies_handler(request):
