@@ -1,5 +1,6 @@
 """Ask the SW for the current threads tab health via ucLog scan."""
 import json
+import os
 import time
 import urllib.request
 
@@ -7,8 +8,10 @@ import websocket  # type: ignore
 
 from cdp_ext_tabs import open_or_activate_control_tab
 
+CDP = os.getenv("UC_CHROME_CDP_URL", f"http://127.0.0.1:{os.getenv('UC_CHROME_CDP_PORT', '9336')}").rstrip('/')
 
-ver = json.loads(urllib.request.urlopen("http://127.0.0.1:9333/json/version").read())
+
+ver = json.loads(urllib.request.urlopen(f"{CDP}/json/version").read())
 ws = websocket.create_connection(ver["webSocketDebuggerUrl"], timeout=15)
 n = [0]
 

@@ -1,9 +1,12 @@
 """Inspect the live threads tab: DOM content, login status, recoverable-shell probe."""
 import json
+import os
 import urllib.request
 from urllib.parse import urlparse
 
 import websocket  # type: ignore
+
+CDP = os.getenv("UC_CHROME_CDP_URL", f"http://127.0.0.1:{os.getenv('UC_CHROME_CDP_PORT', '9336')}").rstrip('/')
 
 
 def is_threads_url(url: str) -> bool:
@@ -11,7 +14,7 @@ def is_threads_url(url: str) -> bool:
     return host == "threads.com" or host.endswith(".threads.com")
 
 
-tabs = json.loads(urllib.request.urlopen("http://127.0.0.1:9333/json/list").read())
+tabs = json.loads(urllib.request.urlopen(f"{CDP}/json/list").read())
 th = next(
     (t for t in tabs if is_threads_url(t.get("url", "")) and t.get("type") == "page"),
     None,

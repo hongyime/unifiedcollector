@@ -1,12 +1,15 @@
 """Peek threads via browser-level CDP session (works even when tab is busy)."""
 import json
+import os
 import urllib.request
 from urllib.parse import urlparse
 
 import websocket  # type: ignore
 
+CDP = os.getenv("UC_CHROME_CDP_URL", f"http://127.0.0.1:{os.getenv('UC_CHROME_CDP_PORT', '9336')}").rstrip('/')
 
-ver = json.loads(urllib.request.urlopen("http://127.0.0.1:9333/json/version").read())
+
+ver = json.loads(urllib.request.urlopen(f"{CDP}/json/version").read())
 ws = websocket.create_connection(ver["webSocketDebuggerUrl"], timeout=25)
 n = [0]
 

@@ -1,13 +1,16 @@
 """Force-reload the extension by evaluating chrome.runtime.reload() in the SW."""
 import json
+import os
 import time
 import urllib.request
 
 import websocket
 
+CDP = os.getenv("UC_CHROME_CDP_URL", f"http://127.0.0.1:{os.getenv('UC_CHROME_CDP_PORT', '9336')}").rstrip('/')
+
 
 def get_sw():
-    targets = json.loads(urllib.request.urlopen("http://127.0.0.1:9333/json/list").read())
+    targets = json.loads(urllib.request.urlopen(f"{CDP}/json/list").read())
     for t in targets:
         if t["type"] == "service_worker" and "pkmd" in t["url"]:
             return t
@@ -31,7 +34,7 @@ def main():
         print("no SW target found; opening extension page to wake it")
         # Open a data: URL as a wake nudge
         return
-    ws = websocket.create_connection(sw["webSocketDebuggerUrl"], timeout=8, origin="http://127.0.0.1:9333")
+    ws = websocket.create_connection(sw["webSocketDebuggerUrl"], timeout=8, origin=CDP)
     rpc(ws, 1, "Runtime.enable")
     version = rpc(ws, 2, "Runtime.evaluate", {
         "expression": "chrome.runtime.getManifest().version",
@@ -55,7 +58,7 @@ def main():
     if not sw2:
         print("no SW target after reload; extension may need a page load to wake it")
         return
-    ws2 = websocket.create_connection(sw2["webSocketDebuggerUrl"], timeout=8, origin="http://127.0.0.1:9333")
+    ws2 = websocket.create_connection(sw2["webSocketDebuggerUrl"], timeout=8, origin=CDP)
     rpc(ws2, 1, "Runtime.enable")
     v = rpc(ws2, 2, "Runtime.evaluate", {
         "expression": "chrome.runtime.getManifest().version",

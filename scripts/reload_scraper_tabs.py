@@ -1,6 +1,7 @@
 """Reload all Chrome scraper tabs so the fresh extension content scripts get injected."""
 import io
 import json
+import os
 import sys
 import time
 import urllib.request
@@ -8,6 +9,8 @@ import urllib.request
 import websocket
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+
+CDP = os.getenv("UC_CHROME_CDP_URL", f"http://127.0.0.1:{os.getenv('UC_CHROME_CDP_PORT', '9336')}").rstrip('/')
 
 SCRAPER_HOSTS = (
     "www.instagram.com",
@@ -33,13 +36,13 @@ def rpc(ws, request_id, method, params=None):
 
 
 def main():
-    ts = json.loads(urllib.request.urlopen("http://127.0.0.1:9333/json/list").read())
+    ts = json.loads(urllib.request.urlopen(f"{CDP}/json/list").read())
     scraper_tabs = [t for t in ts if t.get("type") == "page" and any(h in t.get("url", "") for h in SCRAPER_HOSTS)]
     print(f"found {len(scraper_tabs)} scraper tabs")
     for t in scraper_tabs:
         url = t.get("url", "")[:70]
         try:
-            ws = websocket.create_connection(t["webSocketDebuggerUrl"], timeout=6, origin="http://127.0.0.1:9333")
+            ws = websocket.create_connection(t["webSocketDebuggerUrl"], timeout=6, origin=CDP)
             rpc(ws, 1, "Page.enable")
             rpc(ws, 2, "Page.reload", {"ignoreCache": False})
             ws.close()

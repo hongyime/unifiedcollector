@@ -1,10 +1,13 @@
 """Check version + ping SW from tabs.html option page."""
 import json
+import os
 import urllib.request
 
 import websocket  # type: ignore
 
-tabs = json.loads(urllib.request.urlopen("http://127.0.0.1:9333/json/list").read())
+CDP = os.getenv("UC_CHROME_CDP_URL", f"http://127.0.0.1:{os.getenv('UC_CHROME_CDP_PORT', '9336')}").rstrip('/')
+
+tabs = json.loads(urllib.request.urlopen(f"{CDP}/json/list").read())
 opt = next(
     t for t in tabs
     if "pkmdmc" in t.get("url", "") and "tabs.html" in t.get("url", "") and t.get("type") == "page"

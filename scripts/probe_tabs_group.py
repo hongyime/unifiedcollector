@@ -15,14 +15,17 @@ allowed, or throw a permission error.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import urllib.request
 
 import websocket  # type: ignore
 
+CDP = os.getenv("UC_CHROME_CDP_URL", f"http://127.0.0.1:{os.getenv('UC_CHROME_CDP_PORT', '9336')}").rstrip('/')
+
 
 def main() -> int:
-    ver = json.loads(urllib.request.urlopen("http://127.0.0.1:9333/json/version").read())
+    ver = json.loads(urllib.request.urlopen(f"{CDP}/json/version").read())
     ws = websocket.create_connection(ver["webSocketDebuggerUrl"])
 
     def _call(mid: int, method: str, params: dict | None = None, session_id: str | None = None):

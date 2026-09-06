@@ -1,6 +1,7 @@
 """Time a chrome.runtime.sendMessage log ping from tabs.html."""
 import io
 import json
+import os
 import sys
 import time
 import urllib.request
@@ -8,6 +9,8 @@ import urllib.request
 import websocket
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+
+CDP = os.getenv("UC_CHROME_CDP_URL", f"http://127.0.0.1:{os.getenv('UC_CHROME_CDP_PORT', '9336')}").rstrip('/')
 
 
 def rpc(ws, request_id, method, params=None):
@@ -22,12 +25,12 @@ def rpc(ws, request_id, method, params=None):
 
 
 def main():
-    ts = json.loads(urllib.request.urlopen("http://127.0.0.1:9333/json/list").read())
+    ts = json.loads(urllib.request.urlopen(f"{CDP}/json/list").read())
     tabs = [t for t in ts if "tabs.html" in t.get("url", "")]
     if not tabs:
         print("no tabs.html open; opening one")
         return
-    ws = websocket.create_connection(tabs[0]["webSocketDebuggerUrl"], timeout=25, origin="http://127.0.0.1:9333")
+    ws = websocket.create_connection(tabs[0]["webSocketDebuggerUrl"], timeout=25, origin=CDP)
     try:
         rpc(ws, 1, "Runtime.enable")
         for i in range(5):

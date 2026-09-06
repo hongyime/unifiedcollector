@@ -1,6 +1,7 @@
 """Time a chrome.runtime.sendMessage log from a content-script tab."""
 import io
 import json
+import os
 import sys
 import time
 import urllib.request
@@ -8,6 +9,8 @@ import urllib.request
 import websocket
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+
+CDP = os.getenv("UC_CHROME_CDP_URL", f"http://127.0.0.1:{os.getenv('UC_CHROME_CDP_PORT', '9336')}").rstrip('/')
 
 
 def rpc(ws, request_id, method, params=None, timeout=8):
@@ -23,7 +26,7 @@ def rpc(ws, request_id, method, params=None, timeout=8):
 
 
 def main():
-    ts = json.loads(urllib.request.urlopen("http://127.0.0.1:9333/json/list").read())
+    ts = json.loads(urllib.request.urlopen(f"{CDP}/json/list").read())
     # Pick a scraper page (not tabs.html)
     candidates = [t for t in ts if t.get("type") == "page" and (
         "instagram.com" in t.get("url", "") or "x.com" in t.get("url", "") or
@@ -33,7 +36,7 @@ def main():
         return
     t = candidates[0]
     print(f"target: {t.get('url','')[:80]}")
-    ws = websocket.create_connection(t["webSocketDebuggerUrl"], timeout=30, origin="http://127.0.0.1:9333")
+    ws = websocket.create_connection(t["webSocketDebuggerUrl"], timeout=30, origin=CDP)
     try:
         rpc(ws, 1, "Runtime.enable")
         # Get the isolated world (content script) execution contexts:

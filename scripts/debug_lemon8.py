@@ -9,14 +9,17 @@ the page is broken (login gate / bot detection).
 from __future__ import annotations
 
 import json
+import os
 import sys
 import urllib.request
 
 import websocket  # type: ignore
 
+CDP = os.getenv("UC_CHROME_CDP_URL", f"http://127.0.0.1:{os.getenv('UC_CHROME_CDP_PORT', '9336')}").rstrip('/')
+
 
 def main() -> int:
-    tabs = json.loads(urllib.request.urlopen("http://127.0.0.1:9333/json/list").read())
+    tabs = json.loads(urllib.request.urlopen(f"{CDP}/json/list").read())
     lemon = next((t for t in tabs if "lemon8" in t.get("url", "") and t.get("type") == "page"), None)
     if not lemon:
         print("no lemon8 tab")

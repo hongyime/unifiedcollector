@@ -1,9 +1,12 @@
 """Check the current state of the lemon8 tab."""
 import json
+import os
 import urllib.request
 import websocket  # type: ignore
 
-tabs = json.loads(urllib.request.urlopen("http://127.0.0.1:9333/json/list").read())
+CDP = os.getenv("UC_CHROME_CDP_URL", f"http://127.0.0.1:{os.getenv('UC_CHROME_CDP_PORT', '9336')}").rstrip('/')
+
+tabs = json.loads(urllib.request.urlopen(f"{CDP}/json/list").read())
 lemon = [t for t in tabs if "lemon8-app" in t.get("url", "") and t.get("type") == "page"]
 for t in lemon:
     ws = websocket.create_connection(t["webSocketDebuggerUrl"], timeout=5)

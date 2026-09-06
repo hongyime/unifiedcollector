@@ -9,7 +9,7 @@ import websocket
 
 # Force UTF-8 stdout on Windows
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-CDP_PORT = os.getenv("UC_CHROME_CDP_PORT", "9333").strip() or "9333"
+CDP_PORT = os.getenv("UC_CHROME_CDP_PORT", "9336").strip() or "9336"
 CDP = os.getenv("UC_CHROME_CDP_URL", f"http://127.0.0.1:{CDP_PORT}").rstrip("/")
 
 

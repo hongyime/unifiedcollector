@@ -12,11 +12,14 @@ Runs in three passes:
 from __future__ import annotations
 
 import json
+import os
 import sys
 import urllib.request
 from typing import Any
 
 import websocket  # type: ignore
+
+CDP = os.getenv("UC_CHROME_CDP_URL", f"http://127.0.0.1:{os.getenv('UC_CHROME_CDP_PORT', '9336')}").rstrip('/')
 
 
 def _ws_call(ws: websocket.WebSocket, msg_id: int, method: str, params: dict | None = None) -> Any:
@@ -32,7 +35,7 @@ def _ws_call(ws: websocket.WebSocket, msg_id: int, method: str, params: dict | N
 
 
 def main() -> int:
-    ver = json.loads(urllib.request.urlopen("http://127.0.0.1:9333/json/version").read())
+    ver = json.loads(urllib.request.urlopen(f"{CDP}/json/version").read())
     browser_ws = ver["webSocketDebuggerUrl"]
     ws = websocket.create_connection(browser_ws)
 

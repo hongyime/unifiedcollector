@@ -1,12 +1,15 @@
 """Print per-tab CDP performance metrics."""
 import io
 import json
+import os
 import sys
 import urllib.request
 
 import websocket
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+
+CDP = os.getenv("UC_CHROME_CDP_URL", f"http://127.0.0.1:{os.getenv('UC_CHROME_CDP_PORT', '9336')}").rstrip('/')
 
 
 def rpc(ws, request_id, method, params=None):
@@ -21,14 +24,14 @@ def rpc(ws, request_id, method, params=None):
 
 
 def main() -> None:
-    ts = json.loads(urllib.request.urlopen("http://127.0.0.1:9333/json/list").read())
+    ts = json.loads(urllib.request.urlopen(f"{CDP}/json/list").read())
     pages = [t for t in ts if t.get("type") == "page"]
     print(f"{'URL':<75}  {'JS MB':>7}  {'Docs':>5}  {'Nodes':>7}  {'Frames':>7}")
     total_heap = 0.0
     for t in pages:
         url = t.get("url", "")[:75]
         try:
-            ws = websocket.create_connection(t["webSocketDebuggerUrl"], timeout=5, origin="http://127.0.0.1:9333")
+            ws = websocket.create_connection(t["webSocketDebuggerUrl"], timeout=5, origin=CDP)
             rpc(ws, 1, "Performance.enable")
             r = rpc(ws, 2, "Performance.getMetrics")
             metrics = {m["name"]: m["value"] for m in r["result"]["metrics"]}

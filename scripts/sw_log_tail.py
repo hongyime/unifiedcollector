@@ -4,12 +4,15 @@ import io
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 import json
+import os
 import urllib.request
 
 import websocket  # type: ignore
 
+CDP = os.getenv("UC_CHROME_CDP_URL", f"http://127.0.0.1:{os.getenv('UC_CHROME_CDP_PORT', '9336')}").rstrip('/')
 
-ver = json.loads(urllib.request.urlopen("http://127.0.0.1:9333/json/version").read())
+
+ver = json.loads(urllib.request.urlopen(f"{CDP}/json/version").read())
 ws = websocket.create_connection(ver["webSocketDebuggerUrl"], timeout=10)
 ws.send(json.dumps({"id": 1, "method": "Target.getTargets"}))
 r = json.loads(ws.recv())

@@ -1,11 +1,14 @@
 """Wait longer for lemon8 SPA to hydrate at /foryou."""
 import json
+import os
 import time
 import urllib.request
 
 import websocket  # type: ignore
 
-tabs = json.loads(urllib.request.urlopen("http://127.0.0.1:9333/json/list").read())
+CDP = os.getenv("UC_CHROME_CDP_URL", f"http://127.0.0.1:{os.getenv('UC_CHROME_CDP_PORT', '9336')}").rstrip('/')
+
+tabs = json.loads(urllib.request.urlopen(f"{CDP}/json/list").read())
 lemon = next(t for t in tabs if "lemon8-app" in t.get("url", "") and t.get("type") == "page")
 ws = websocket.create_connection(lemon["webSocketDebuggerUrl"], timeout=8)
 n = [0]

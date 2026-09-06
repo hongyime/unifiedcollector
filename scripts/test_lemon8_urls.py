@@ -1,9 +1,12 @@
 """Test multiple lemon8 URL candidates for the actual feed page."""
 import json
+import os
 import time
 import urllib.request
 
 import websocket  # type: ignore
+
+CDP = os.getenv("UC_CHROME_CDP_URL", f"http://127.0.0.1:{os.getenv('UC_CHROME_CDP_PORT', '9336')}").rstrip('/')
 
 candidates = [
     "https://www.lemon8-app.com/topic/food",
@@ -17,7 +20,7 @@ candidates = [
     "https://www.lemon8-app.com/trending?region=sg",
 ]
 
-tabs = json.loads(urllib.request.urlopen("http://127.0.0.1:9333/json/list").read())
+tabs = json.loads(urllib.request.urlopen(f"{CDP}/json/list").read())
 lemon = next(t for t in tabs if "lemon8-app" in t.get("url", "") and t.get("type") == "page")
 ws = websocket.create_connection(lemon["webSocketDebuggerUrl"], timeout=8)
 

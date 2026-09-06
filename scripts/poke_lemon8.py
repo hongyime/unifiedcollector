@@ -6,11 +6,14 @@ its response and, importantly, the pageHealth message it sends should
 trigger recovery.
 """
 import json
+import os
 import urllib.request
 
 import websocket  # type: ignore
 
-tabs = json.loads(urllib.request.urlopen("http://127.0.0.1:9333/json/list").read())
+CDP = os.getenv("UC_CHROME_CDP_URL", f"http://127.0.0.1:{os.getenv('UC_CHROME_CDP_PORT', '9336')}").rstrip('/')
+
+tabs = json.loads(urllib.request.urlopen(f"{CDP}/json/list").read())
 lemon = next((t for t in tabs if "lemon8-app" in t.get("url", "") and t.get("type") == "page"), None)
 if not lemon:
     raise SystemExit("no lemon8 tab")
