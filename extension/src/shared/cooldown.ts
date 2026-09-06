@@ -1,6 +1,6 @@
 // Anti-ban cooldown coordination.
 //
-// The extension's throttle wall (see shared/throttle.js) is scoped by
+// The extension's throttle wall (see shared/throttle.ts) is scoped by
 // `platform + identity` so that a 429 that hits account A doesn't wall
 // account B when the user swaps profiles. This module exposes the
 // primitives that turn a live DOM / cookie / page state into a stable
@@ -11,20 +11,31 @@
 // (`document`, `location`, `window`, `localStorage`) — safe to run inside
 // any content-script context.
 
-export function instagramLoggedInOwner() {
+// A live Instagram page sometimes exposes `_sharedData` for legacy reasons.
+interface InstagramSharedData {
+  config?: {
+    viewer?: {
+      username?: string;
+    };
+  };
+}
+
+declare global {
+  interface Window {
+    _sharedData?: InstagramSharedData;
+  }
+}
+
+export function instagramLoggedInOwner(): string {
   try {
-    const username =
-      window._sharedData &&
-      window._sharedData.config &&
-      window._sharedData.config.viewer &&
-      window._sharedData.config.viewer.username;
+    const username = window._sharedData?.config?.viewer?.username;
     if (username) return String(username).trim().replace(/^@/, "");
   } catch (e) { /* window._sharedData may not exist */ }
   const m = document.cookie.match(/ds_user_id=(\d+)/);
   return m ? m[1] : "";
 }
 
-export function facebookLoggedInOwner() {
+export function facebookLoggedInOwner(): string {
   try {
     const m = document.cookie.match(/c_user=(\d+)/);
     if (m) return m[1];
@@ -32,33 +43,33 @@ export function facebookLoggedInOwner() {
   return "";
 }
 
-export function xLoggedInOwner() {
-  const sources = [
+export function xLoggedInOwner(): string {
+  const sources: Element[] = [
     document.querySelector('[data-testid="SideNav_AccountSwitcher_Button"]'),
     document.querySelector('a[data-testid="AppTabBar_Profile_Link"]'),
     ...document.querySelectorAll('a[href^="/"][aria-label*="Profile" i]'),
-  ].filter(Boolean);
+  ].filter((el): el is Element => el != null);
   for (const el of sources) {
-    const txt = el.innerText || el.getAttribute("aria-label") || "";
+    const txt = (el as HTMLElement).innerText || el.getAttribute("aria-label") || "";
     const m = txt.match(/@([A-Za-z0-9_]{1,20})/);
     if (m) return m[1];
-    const href = el.getAttribute && (el.getAttribute("href") || "");
+    const href = (el.getAttribute && el.getAttribute("href")) || "";
     const h = href.match(/^\/([A-Za-z0-9_]{1,20})\/?$/);
     if (h && !/^(home|explore|notifications|messages|i|search)$/i.test(h[1])) return h[1];
   }
   return "";
 }
 
-export function threadsLoggedInOwner() {
-  const sources = [
+export function threadsLoggedInOwner(): string {
+  const sources: Element[] = [
     ...document.querySelectorAll('a[href^="/@"][aria-label*="Profile" i]'),
     ...document.querySelectorAll('a[href^="/@"]'),
   ];
   for (const el of sources) {
-    const txt = el.innerText || el.getAttribute("aria-label") || "";
+    const txt = (el as HTMLElement).innerText || el.getAttribute("aria-label") || "";
     const m = txt.match(/@([A-Za-z0-9._]{1,30})/);
     if (m) return m[1];
-    const href = el.getAttribute && (el.getAttribute("href") || "");
+    const href = (el.getAttribute && el.getAttribute("href")) || "";
     const h = href.match(/^\/@([A-Za-z0-9._]{1,30})\/?$/);
     if (h) return h[1];
   }
@@ -70,12 +81,8 @@ export function threadsLoggedInOwner() {
  * `domFn()` when the cache is empty. On a fresh DOM hit the value is
  * persisted for next time. Owners are normalized (trimmed, `@` prefix
  * stripped).
- *
- * @param {string} platform
- * @param {() => string} domFn
- * @returns {string}
  */
-export function ownerFromStoredOrDom(platform, domFn) {
+export function ownerFromStoredOrDom(platform: string, domFn?: () => string): string {
   const k = "uc_owner_" + platform;
   let owner = "";
   try { owner = (localStorage.getItem(k) || "").trim().replace(/^@/, ""); } catch (e) { /* localStorage blocked */ }
@@ -88,6 +95,10 @@ export function ownerFromStoredOrDom(platform, domFn) {
   return owner || "";
 }
 
+export interface CooldownIdentityExtras {
+  strava?: () => string;
+}
+
 /**
  * Resolve the current cooldown identity for a given platform. Instagram and
  * Facebook read their owner ID from a cookie every call. TikTok / X /
@@ -96,12 +107,8 @@ export function ownerFromStoredOrDom(platform, domFn) {
  * supplies `extra.strava` because the Strava DOM walk depends on
  * content-script utilities that live outside shared/). Returns "" for
  * unknown platforms.
- *
- * @param {string} platform
- * @param {{ strava?: () => string }} [extra]
- * @returns {string}
  */
-export function cooldownIdentity(platform, extra = {}) {
+export function cooldownIdentity(platform: string, extra: CooldownIdentityExtras = {}): string {
   if (platform === "instagram") return instagramLoggedInOwner();
   if (platform === "tiktok") {
     return ownerFromStoredOrDom("tiktok", () => {
