@@ -7,8 +7,7 @@ on:
   pull_request:
     types: [opened]
 
-permissions:
-  contents: read
+permissions: read-all
 
 jobs:
   greet:

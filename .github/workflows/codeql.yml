@@ -47,8 +47,7 @@ concurrency:
   group: codeql-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-permissions:
-  contents: read
+permissions: read-all
 
 jobs:
   # Auto-detect languages present in the repo so we don't spin up a matrix leg

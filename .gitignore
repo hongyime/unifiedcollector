@@ -99,6 +99,7 @@ coverage/
 
 
 
+
 # AI / editor dot directories (managed via sourcerepo)
 .*
 !.github/
@@ -132,4 +133,5 @@ coverage/
 !.deepsource.toml
 skills/
 skills-lock.json
+docs/
 # End AI / editor dot directories (managed via sourcerepo)
