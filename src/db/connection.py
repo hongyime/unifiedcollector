@@ -120,8 +120,33 @@ async def get_pool() -> asyncpg.Pool:
             import os as _os
             _min = int(_os.getenv("DB_POOL_MIN_SIZE", "1"))
             _max = int(_os.getenv("DB_POOL_MAX_SIZE", "10"))
+            # Server-side session settings applied to every pooled connection:
+            #   idle_in_transaction_session_timeout: Postgres kills any session
+            #     that stays 'idle in transaction' longer than this. Protects
+            #     against pool leaks in downstream callers who forget to
+            #     rollback/commit on the exit path — the 6+ stuck sessions
+            #     the drain audit caught (2026-09-07) trace to an analyzer
+            #     cursor-loop that acquires a second pool while holding a
+            #     transaction open. Env-tunable; default 5 minutes.
+            #   application_name: named connection lets pg_stat_activity /
+            #     PostgresIdleTxnAlertHandler attribute leaks to a specific
+            #     service instead of showing blank strings.
+            _iit_timeout_ms = int(_os.getenv(
+                "DB_IDLE_IN_TRANSACTION_TIMEOUT_MS", "300000"
+            ))
+            _app_name = _os.getenv(
+                "DB_APPLICATION_NAME",
+                # Best-effort service tag from container hostname; falls back
+                # to a generic label so we never crash on unset $HOSTNAME.
+                _os.getenv("HOSTNAME", "unifiedcollector"),
+            )[:63]  # Postgres GUC hard cap
+            server_settings = {
+                "idle_in_transaction_session_timeout": str(_iit_timeout_ms),
+                "application_name": _app_name,
+            }
             kwargs = dict(min_size=_min, max_size=_max, command_timeout=60,
-                          max_inactive_connection_lifetime=300)
+                          max_inactive_connection_lifetime=300,
+                          server_settings=server_settings)
             if ssl is not None:
                 kwargs["ssl"] = ssl
             _pool = await _create_pool_with_retry(kwargs)

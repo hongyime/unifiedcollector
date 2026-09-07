@@ -444,26 +444,141 @@ class WhatsappCollector(BaseCollector):
         _handler_timeout = float(os.getenv("WA_CONSUMER_HANDLER_TIMEOUT_SECONDS", "45"))
 
         async def _consume_contacts():
-            async with contact_queue.iterator() as qi:
-                async for message in qi:
-                    if self._stop.is_set():
-                        break
-                    async with message.process(ignore_processed=True):
+            # Sprint-4 batching consumer. When WA_CONTACT_BATCH_MAX > 1, this
+            # loop accumulates up to N events OR waits T ms since the first
+            # buffered event, whichever hits first, then flushes them through
+            # _upsert_contacts_batch(). N=1 (default) is byte-identical to
+            # the pre-refactor per-event path — flip via env at runtime.
+            #
+            # CRITICAL: no `async with message.process(...)` context on the
+            # batch path. That auto-acks on context exit which would ack
+            # BEFORE the DB commit. We manage ack/nack explicitly after the
+            # transaction succeeds. On batch failure, fall back to per-event
+            # so a single poison payload doesn't stall the whole buffer.
+            batch_max = max(1, int(os.getenv("WA_CONTACT_BATCH_MAX", "1")))
+            batch_timeout_ms = max(0, int(os.getenv("WA_CONTACT_BATCH_TIMEOUT_MS", "0")))
+
+            if batch_max <= 1:
+                # Legacy per-event path. Ships as the default so this refactor
+                # is behaviorally transparent; only when the operator sets
+                # WA_CONTACT_BATCH_MAX > 1 does the batching path engage.
+                async with contact_queue.iterator() as qi:
+                    async for message in qi:
+                        if self._stop.is_set():
+                            break
+                        async with message.process(ignore_processed=True):
+                            try:
+                                body = json.loads(message.body.decode())
+                                async with asyncio.timeout(_handler_timeout):
+                                    await self._handle_contact_event(body)
+                            except asyncio.TimeoutError:
+                                logger.warning(
+                                    "Contact event handler timeout after %.1fs; requeueing",
+                                    _handler_timeout,
+                                )
+                                try:
+                                    await message.nack(requeue=True)
+                                except Exception:
+                                    pass
+                            except Exception as e:
+                                logger.debug("Contact event processing failed: %s", e)
+                return
+
+            # Batching path — feeder task pushes into an asyncio.Queue, a
+            # flusher task pops with a timeout. This decouples aio-pika's
+            # delivery iterator from the batch-timing logic, which cannot
+            # safely be wrapped in asyncio.wait_for (cancelling a mid-
+            # delivery __anext__ corrupts channel state).
+            import time as _time
+            logger.info(
+                "Contact batching path active: BATCH_MAX=%d TIMEOUT_MS=%d",
+                batch_max, batch_timeout_ms,
+            )
+
+            local_q: "asyncio.Queue[tuple[object, dict] | None]" = asyncio.Queue(maxsize=batch_max * 4)
+
+            async def _feeder() -> None:
+                async with contact_queue.iterator() as qi:
+                    async for message in qi:
+                        if self._stop.is_set():
+                            break
                         try:
                             body = json.loads(message.body.decode())
-                            async with asyncio.timeout(_handler_timeout):
-                                await self._handle_contact_event(body)
-                        except asyncio.TimeoutError:
-                            logger.warning(
-                                "Contact event handler timeout after %.1fs; requeueing",
-                                _handler_timeout,
-                            )
+                        except Exception:
                             try:
-                                await message.nack(requeue=True)
+                                await message.reject(requeue=False)
                             except Exception:
                                 pass
-                        except Exception as e:
-                            logger.debug("Contact event processing failed: %s", e)
+                            continue
+                        await local_q.put((message, body))
+                # Sentinel so flusher can exit.
+                await local_q.put(None)
+
+            async def _flusher() -> None:
+                buffer: list[tuple[object, dict]] = []
+                deadline_ms: float | None = None
+
+                async def _flush() -> None:
+                    if not buffer:
+                        return
+                    to_flush = list(buffer)
+                    buffer.clear()
+                    events = [body for _, body in to_flush]
+                    try:
+                        async with asyncio.timeout(_handler_timeout):
+                            await self._upsert_contacts_batch(events)
+                        for msg, _ in to_flush:
+                            try:
+                                await msg.ack()
+                            except Exception:
+                                pass
+                        logger.info(
+                            "Contact batch flushed: %d events", len(to_flush),
+                        )
+                    except Exception as batch_exc:
+                        logger.warning(
+                            "Contact batch of %d failed (%s: %s); falling back per-message",
+                            len(to_flush), batch_exc.__class__.__name__, batch_exc,
+                        )
+                        for msg, body in to_flush:
+                            try:
+                                async with asyncio.timeout(_handler_timeout):
+                                    await self._handle_contact_event(body)
+                                await msg.ack()
+                            except Exception as single_exc:
+                                logger.debug(
+                                    "Contact fallback per-msg failed (%s: %s); dropping",
+                                    single_exc.__class__.__name__, single_exc,
+                                )
+                                try:
+                                    await msg.reject(requeue=False)
+                                except Exception:
+                                    pass
+
+                while not self._stop.is_set():
+                    timeout = None
+                    if buffer and deadline_ms is not None:
+                        elapsed_ms = _time.monotonic() * 1000 - deadline_ms
+                        remaining_ms = batch_timeout_ms - elapsed_ms
+                        timeout = max(0.001, remaining_ms / 1000)
+                    try:
+                        item = await asyncio.wait_for(local_q.get(), timeout=timeout)
+                    except asyncio.TimeoutError:
+                        await _flush()
+                        deadline_ms = None
+                        continue
+                    if item is None:
+                        break
+                    buffer.append(item)
+                    if deadline_ms is None:
+                        deadline_ms = _time.monotonic() * 1000
+                    if len(buffer) >= batch_max:
+                        await _flush()
+                        deadline_ms = None
+                if buffer:
+                    await _flush()
+
+            await asyncio.gather(_feeder(), _flusher(), return_exceptions=True)
 
         async def _consume_groups():
             async with group_queue.iterator() as qi:
@@ -656,18 +771,28 @@ class WhatsappCollector(BaseCollector):
         if valid_lid_mapping:
             target_tables.insert(0, "whatsapp_lid_map")
         archive_id = lid if valid_lid_mapping else platform_user_id
-        self._archive_raw_event(
-            artifact_id=f"contacts/{archive_id}",
-            payload=event,
-            target_tables=target_tables,
-            metadata={
-                "lid": lid,
-                "phone_jid": jid,
-                "platform_user_id": platform_user_id,
-                "ingest_path": self.INGEST_PATH,
-                "raw_payload_kind": "contact",
-            },
-        )
+        # Raw-payload archive for contact events is env-gated (default OFF).
+        # Measurement 2026-09-07: this synchronous Z-drive fsync was
+        # 1,110 ms p50 per event, versus 26 ms p50 for the DB upsert itself.
+        # It was single-handedly capping the drain rate at 0.26/s.
+        # Contact events are metadata (name / pushname / phone) already
+        # persisted verbatim into whatsapp_users, so the archive was
+        # essentially write-only redundancy. Set
+        # WA_CONTACT_ARCHIVE_RAW=1 to re-enable if a specific replay
+        # scenario needs the raw AMQP payload back.
+        if os.getenv("WA_CONTACT_ARCHIVE_RAW", "0").lower() in ("1", "true", "yes", "on"):
+            self._archive_raw_event(
+                artifact_id=f"contacts/{archive_id}",
+                payload=event,
+                target_tables=target_tables,
+                metadata={
+                    "lid": lid,
+                    "phone_jid": jid,
+                    "platform_user_id": platform_user_id,
+                    "ingest_path": self.INGEST_PATH,
+                    "raw_payload_kind": "contact",
+                },
+            )
         if not self.pool:
             return
         display_name = _first_nonempty(
@@ -712,6 +837,149 @@ class WhatsappCollector(BaseCollector):
                     """, lid, jid, display_name)
         except Exception as e:
             logger.debug("contact upsert failed: %s", e)
+
+    async def _upsert_contacts_batch(self, events: list[dict]) -> None:
+        """Batch-upsert N contact events in two array-parameterised UPSERTs.
+
+        This is the Sprint-4 acceleration path for the contacts drain. Instead
+        of one DB round-trip per event, we accumulate N events (from the
+        buffered _consume_contacts loop) and emit at most two statements per
+        batch:
+
+          (1) whatsapp_users upsert — for events whose platform_user_id is
+              a user JID (i.e. @s.whatsapp.net or @lid).
+          (2) whatsapp_lid_map upsert — for events that carry both an @lid
+              and a phone-based @s.whatsapp.net JID, so we can resolve
+              group-message @lid senders back to a phone JID later.
+
+        Semantics preserved from single-event _handle_contact_event:
+          - COALESCE-based merge on name / pushname / phone_number /
+            display_name so a later NULL never overwrites a prior real value.
+          - is_business OR-merged (once flagged, stays flagged).
+          - Both UPSERTs run in one transaction so a mid-batch failure rolls
+            back atomically — the caller then falls back to per-event
+            processing to isolate a poison row (§4 of the plan).
+
+        In-batch dedup by platform_user_id / lid is done Python-side to
+        sidestep Postgres's "ON CONFLICT DO UPDATE cannot affect row a
+        second time" error when the buffer contains two events for the same
+        JID.
+
+        Raw-payload archive is skipped for the same reason as the single-
+        event path (WA_CONTACT_ARCHIVE_RAW=0 by default) — the 1.1s p50 Z:
+        fsync per event was the actual drain bottleneck.
+        """
+        if not events or not self.pool:
+            return
+
+        # Per-event field extraction (mirrors _handle_contact_event).
+        users_by_puid: dict[str, dict] = {}
+        lidmap_by_lid: dict[str, dict] = {}
+        for event in events:
+            lid = event.get("lid")
+            jid = event.get("jid") or event.get("phone_jid")
+            platform_user_id = event.get("platform_user_id") or jid or lid
+            if not platform_user_id:
+                continue
+
+            valid_lid_mapping = (
+                isinstance(lid, str) and "@lid" in lid
+                and isinstance(jid, str) and "@s.whatsapp.net" in jid
+            )
+            is_user_jid = isinstance(platform_user_id, str) and (
+                "@s.whatsapp.net" in platform_user_id or "@lid" in platform_user_id
+            )
+            if not valid_lid_mapping and not is_user_jid:
+                continue
+
+            display_name = _first_nonempty(
+                event.get("display_name"),
+                event.get("name"),
+                event.get("notify"),
+                event.get("verified_name"),
+                event.get("verifiedBizName"),
+                event.get("pushName"),
+                event.get("push_name"),
+            )
+            push_name = _first_nonempty(
+                event.get("pushName"), event.get("push_name"),
+                event.get("notify"), display_name,
+            )
+            phone_number = event.get("phone_number")
+            user_jid_for_phone = (
+                jid if isinstance(jid, str) and "@s.whatsapp.net" in jid
+                else platform_user_id
+            )
+            if not phone_number and isinstance(user_jid_for_phone, str) and "@s.whatsapp.net" in user_jid_for_phone:
+                prefix = user_jid_for_phone.split("@")[0]
+                if re.fullmatch(r"\d{7,15}", prefix):
+                    phone_number = prefix
+            is_business = _coerce_bool(event.get("is_business"))
+
+            if is_user_jid:
+                # COALESCE-forward merge: last non-NULL wins.
+                prior = users_by_puid.get(platform_user_id, {})
+                users_by_puid[platform_user_id] = {
+                    "name": display_name or prior.get("name"),
+                    "pushname": push_name or prior.get("pushname"),
+                    "phone_number": phone_number or prior.get("phone_number"),
+                    "is_business": bool(is_business) or bool(prior.get("is_business")),
+                }
+            if valid_lid_mapping:
+                prior = lidmap_by_lid.get(lid, {})
+                lidmap_by_lid[lid] = {
+                    "phone_jid": jid,
+                    "display_name": display_name or prior.get("display_name"),
+                }
+
+        if not users_by_puid and not lidmap_by_lid:
+            return
+
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                if users_by_puid:
+                    puids = list(users_by_puid.keys())
+                    names = [users_by_puid[k]["name"] for k in puids]
+                    pushnames = [users_by_puid[k]["pushname"] for k in puids]
+                    phones = [users_by_puid[k]["phone_number"] for k in puids]
+                    biz = [users_by_puid[k]["is_business"] for k in puids]
+                    await conn.execute(
+                        """
+                        INSERT INTO whatsapp_users (platform_user_id, name, pushname,
+                            phone_number, is_business, collected_at)
+                        SELECT t.puid, t.name, t.push, t.phone,
+                               COALESCE(t.is_biz, FALSE), NOW()
+                        FROM unnest($1::text[], $2::text[], $3::text[],
+                                    $4::text[], $5::bool[])
+                             AS t(puid, name, push, phone, is_biz)
+                        ON CONFLICT (platform_user_id) DO UPDATE SET
+                            name = COALESCE(EXCLUDED.name, whatsapp_users.name),
+                            pushname = COALESCE(EXCLUDED.pushname, whatsapp_users.pushname),
+                            phone_number = COALESCE(EXCLUDED.phone_number, whatsapp_users.phone_number),
+                            is_business = COALESCE(whatsapp_users.is_business, FALSE)
+                                OR COALESCE(EXCLUDED.is_business, FALSE),
+                            collected_at = NOW()
+                        """,
+                        puids, names, pushnames, phones, biz,
+                    )
+                if lidmap_by_lid:
+                    lids = list(lidmap_by_lid.keys())
+                    jids = [lidmap_by_lid[k]["phone_jid"] for k in lids]
+                    disps = [lidmap_by_lid[k]["display_name"] for k in lids]
+                    await conn.execute(
+                        """
+                        INSERT INTO whatsapp_lid_map (lid, phone_jid, display_name, updated_at)
+                        SELECT t.lid, t.jid, t.disp, NOW()
+                        FROM unnest($1::text[], $2::text[], $3::text[])
+                             AS t(lid, jid, disp)
+                        ON CONFLICT (lid) DO UPDATE SET
+                            phone_jid = EXCLUDED.phone_jid,
+                            display_name = COALESCE(EXCLUDED.display_name,
+                                                    whatsapp_lid_map.display_name),
+                            updated_at = NOW()
+                        """,
+                        lids, jids, disps,
+                    )
 
     async def _handle_group_event(self, event: dict):
         """Upsert WhatsApp group metadata from groups.update bridge events."""

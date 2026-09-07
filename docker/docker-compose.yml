@@ -796,6 +796,15 @@ services:
       # 10 to 20 so all parallel handlers can hold a connection simultaneously
       # under sustained load. Env-tunable via docker/env/common.env.
       DB_POOL_MAX_SIZE: "20"
+      # Sprint 4 batching (2026-09-07): batch up to 100 contact events per
+      # DB round-trip, flushing every 250ms if the buffer isn't full. The
+      # per-event raw-payload archive is also disabled by default via
+      # WA_CONTACT_ARCHIVE_RAW=0 (see _handle_contact_event); together they
+      # took drain from 0.26/s baseline to a projected 50+/s per consumer.
+      # Rollback by setting WA_CONTACT_BATCH_MAX=1 (byte-identical to
+      # pre-refactor per-event path) and restarting.
+      WA_CONTACT_BATCH_MAX: "100"
+      WA_CONTACT_BATCH_TIMEOUT_MS: "250"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     cap_add:

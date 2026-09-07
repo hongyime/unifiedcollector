@@ -21,6 +21,7 @@ from .gc_collection_runs import GcCollectionRunsHandler
 from .graph_edges import BuildGraphEdgesHandler
 from .heartbeat import HeartbeatHandler
 from .phone_intel import PhoneIntelHandler
+from .postgres_idle_txn_alert import PostgresIdleTxnAlertHandler
 from .realtime_feed_alert import RealtimeFeedAlertHandler
 from .recon_seed import ReconSeedHandler
 from .reconcile_identities import ReconcileIdentitiesHandler
@@ -39,6 +40,7 @@ HANDLERS: list[PeriodicHandler] = [
     BridgeUnpairedAlertHandler(),
     RealtimeFeedAlertHandler(),
     WatchdogStaleAlertHandler(),
+    PostgresIdleTxnAlertHandler(),
 ]
 
 __all__ = [
@@ -56,4 +58,5 @@ __all__ = [
     "BridgeUnpairedAlertHandler",
     "RealtimeFeedAlertHandler",
     "WatchdogStaleAlertHandler",
+    "PostgresIdleTxnAlertHandler",
 ]
