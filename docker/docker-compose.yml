@@ -791,6 +791,11 @@ services:
       # it during quiet periods (e.g. overnight). 86400s = 24h gives it room
       # to wait; Docker restart:unless-stopped recovers genuine OOM/crash.
       COLLECTOR_HANG_TIMEOUT_SECONDS: "86400"
+      # Throughput push (2026-09-07): 4 parallel consumer tasks per hot queue
+      # (contacts + messages) need more DB pool slots. Bumped from the default
+      # 10 to 20 so all parallel handlers can hold a connection simultaneously
+      # under sustained load. Env-tunable via docker/env/common.env.
+      DB_POOL_MAX_SIZE: "20"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     cap_add:

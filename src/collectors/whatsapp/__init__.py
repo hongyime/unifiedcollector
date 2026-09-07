@@ -342,7 +342,15 @@ class WhatsappCollector(BaseCollector):
             import aio_pika
             self._broker_conn = await aio_pika.connect_robust(self._rabbitmq_url)
             self._broker_channel = await self._broker_conn.channel()
-            await self._broker_channel.set_qos(prefetch_count=10)
+            await self._broker_channel.set_qos(
+                # Channel-wide prefetch: how many unacked messages this
+                # collector's channel holds across all its consumers.
+                # Raised from the historical 10 so parallel consumer tasks
+                # (see WA_CONSUMER_*_CONCURRENCY below) can each keep
+                # meaningful backlog work in flight without starving one
+                # queue by another.
+                prefetch_count=int(os.getenv("WA_BROKER_PREFETCH_COUNT", "64")),
+            )
             logger.info("WhatsApp RabbitMQ connected")
         except Exception as e:
             logger.warning("RabbitMQ unavailable, falling back to HTTP polling: %s", e)
@@ -543,12 +551,31 @@ class WhatsappCollector(BaseCollector):
                         except Exception as e:
                             logger.error("Broker message processing failed: %s", e)
 
-        tasks = [
-            asyncio.create_task(_consume_messages()),
-            asyncio.create_task(_consume_contacts()),
-            asyncio.create_task(_consume_groups()),
-            asyncio.create_task(_consume_sessions()),
-        ]
+        # Concurrency per queue. Each queue gets N independent consumer
+        # tasks, all iterating the same queue via aio-pika's queue.iterator().
+        # RabbitMQ fair-dispatches messages across the parallel consumers.
+        # Contacts is the throughput-critical queue (108k+ backlog observed
+        # 2026-09-07); message batch handler is compute-heavy per event so
+        # parallelism helps there too; groups/sessions are low-volume and
+        # stay at 1 to avoid unnecessary connections.
+        _c_contacts = max(1, int(os.getenv("WA_CONSUMER_CONTACTS_CONCURRENCY", "4")))
+        _c_messages = max(1, int(os.getenv("WA_CONSUMER_MESSAGES_CONCURRENCY", "4")))
+        _c_groups = max(1, int(os.getenv("WA_CONSUMER_GROUPS_CONCURRENCY", "1")))
+        _c_sessions = max(1, int(os.getenv("WA_CONSUMER_SESSIONS_CONCURRENCY", "1")))
+
+        tasks: list[asyncio.Task] = []
+        for _ in range(_c_messages):
+            tasks.append(asyncio.create_task(_consume_messages()))
+        for _ in range(_c_contacts):
+            tasks.append(asyncio.create_task(_consume_contacts()))
+        for _ in range(_c_groups):
+            tasks.append(asyncio.create_task(_consume_groups()))
+        for _ in range(_c_sessions):
+            tasks.append(asyncio.create_task(_consume_sessions()))
+        logger.info(
+            "WhatsApp broker consumers: messages=%d contacts=%d groups=%d sessions=%d (total=%d)",
+            _c_messages, _c_contacts, _c_groups, _c_sessions, len(tasks),
+        )
         try:
             done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
             first_error: BaseException | None = None
