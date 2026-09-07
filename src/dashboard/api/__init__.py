@@ -224,13 +224,15 @@ from src.dashboard.api.browser import (  # noqa: E402,F401
 )
 
 # Source-matrix payload cache + fallback payload helpers extracted to
-# api/source_matrix.py during PERF-002 sub-plan 4A step 6. Router is currently
-# empty; the /collectors/source-matrix route still lives in __init__.py this
-# iteration (see source_matrix.py module docstring for rationale). Re-imports
-# below keep the public ``dashboard_api._X`` surface intact for tests and
-# for the /health route which reaches for _load_source_matrix_payload_cache.
+# api/source_matrix.py during PERF-002 sub-plan 4A step 6.  Step 22 extended
+# it with the /collectors/source-matrix route itself; the huge
+# _collectors_source_matrix_payload builder + its helpers still live in
+# __init__.py and are looked up by source_matrix.py via ``_cfg()``.
 from src.dashboard.api.source_matrix import (  # noqa: E402,F401
     router as _source_matrix_router,
+    collectors_source_matrix,
+    _get_build_task,
+    _set_build_task,
 )
 
 # Telegram account ops routes extracted to api/telegram_ops.py during
@@ -3630,134 +3632,10 @@ def _persist_source_matrix_payload(ts: float, payload: dict) -> None:
     return _impl(ts, payload)
 
 
-@app.get("/collectors/source-matrix")
-async def collectors_source_matrix(
-    _user: dict = Depends(require_role("viewer")),
-    force_refresh: bool = False,
-):
-    global _SOURCE_MATRIX_PAYLOAD_BUILD_TASK
-    now = time.time()
-    cached_payload = _SOURCE_MATRIX_PAYLOAD_CACHE.get("payload")
-    cached_ts = float(_SOURCE_MATRIX_PAYLOAD_CACHE.get("ts") or 0.0)
-    if cached_payload is None and not force_refresh:
-        persisted = _load_persisted_source_matrix_payload(now)
-        if persisted is not None:
-            cached_ts, cached_payload = persisted
-    if (
-        not force_refresh
-        and
-        cached_payload is not None
-        and _SOURCE_MATRIX_PAYLOAD_CACHE_TTL_SECONDS > 0
-        and now - cached_ts <= _SOURCE_MATRIX_PAYLOAD_CACHE_TTL_SECONDS
-    ):
-        payload = _copy_cache_value(cached_payload)
-        payload["cache"] = {"status": "fresh", "age_seconds": int(now - cached_ts)}
-        return payload
-
-    def _background_build_done(task: asyncio.Task) -> None:
-        global _SOURCE_MATRIX_PAYLOAD_BUILD_TASK
-        if _SOURCE_MATRIX_PAYLOAD_BUILD_TASK is task:
-            _SOURCE_MATRIX_PAYLOAD_BUILD_TASK = None
-        try:
-            value = task.result()
-        except asyncio.CancelledError:
-            return
-        except Exception as exc:  # noqa: BLE001 - background cache refresh must fail soft
-            logger.warning("source matrix background build failed: %s", exc.__class__.__name__)
-            return
-        ts = time.time()
-        payload_copy = _copy_cache_value(value)
-        _SOURCE_MATRIX_PAYLOAD_CACHE.update({"ts": ts, "payload": payload_copy})
-        _persist_source_matrix_payload(ts, payload_copy)
-
-    active_task = _SOURCE_MATRIX_PAYLOAD_BUILD_TASK
-    if active_task is not None and active_task.done():
-        _background_build_done(active_task)
-        active_task = None
-    if active_task is not None:
-        if (
-            not force_refresh
-            and cached_payload is not None
-            and now - cached_ts <= _source_matrix_payload_stale_limit_seconds()
-        ):
-            payload = _copy_cache_value(cached_payload)
-            payload["cache"] = {
-                "status": "refreshing",
-                "age_seconds": int(now - cached_ts),
-                "refresh": "in_progress",
-            }
-            return payload
-        return await _source_matrix_unavailable_payload_with_fast_health("BuildInProgress")
-
-    if (
-        not force_refresh
-        and cached_payload is not None
-        and now - cached_ts <= _source_matrix_payload_stale_limit_seconds()
-    ):
-        build_task = asyncio.create_task(_collectors_source_matrix_payload())
-        _SOURCE_MATRIX_PAYLOAD_BUILD_TASK = build_task
-        build_task.add_done_callback(_background_build_done)
-        payload = _copy_cache_value(cached_payload)
-        payload["cache"] = {
-            "status": "refreshing",
-            "age_seconds": int(now - cached_ts),
-            "refresh": "started",
-        }
-        return payload
-
-    build_task = asyncio.create_task(_collectors_source_matrix_payload())
-    _SOURCE_MATRIX_PAYLOAD_BUILD_TASK = build_task
-    build_task.add_done_callback(_background_build_done)
-    try:
-        done, _pending = await asyncio.wait(
-            {build_task},
-            timeout=max(1.0, _SOURCE_MATRIX_PAYLOAD_BUILD_TIMEOUT_SECONDS),
-        )
-        if build_task not in done:
-            raise asyncio.TimeoutError
-        payload = build_task.result()
-    except asyncio.TimeoutError:
-        if cached_payload is not None and now - cached_ts <= _source_matrix_payload_stale_limit_seconds():
-            payload = _copy_cache_value(cached_payload)
-            payload.setdefault("errors", []).append({
-                "section": "source_matrix",
-                "error": "TimeoutError",
-                "stale_cache": True,
-                "cache_age_seconds": int(now - cached_ts),
-            })
-            payload["cache"] = {"status": "stale", "age_seconds": int(now - cached_ts)}
-            logger.warning(
-                "source matrix build timed out after %.1fs; serving stale payload age=%ds",
-                max(1.0, _SOURCE_MATRIX_PAYLOAD_BUILD_TIMEOUT_SECONDS),
-                int(now - cached_ts),
-            )
-            return payload
-        logger.warning(
-            "source matrix build timed out after %.1fs with no cache",
-            max(1.0, _SOURCE_MATRIX_PAYLOAD_BUILD_TIMEOUT_SECONDS),
-        )
-        return await _source_matrix_unavailable_payload_with_fast_health("TimeoutError")
-    except Exception as exc:  # noqa: BLE001 - route should not hard-fail during DB pressure
-        if _SOURCE_MATRIX_PAYLOAD_BUILD_TASK is build_task:
-            _SOURCE_MATRIX_PAYLOAD_BUILD_TASK = None
-        if cached_payload is not None and now - cached_ts <= _source_matrix_payload_stale_limit_seconds():
-            payload = _copy_cache_value(cached_payload)
-            payload.setdefault("errors", []).append({
-                "section": "source_matrix",
-                "error": exc.__class__.__name__,
-                "stale_cache": True,
-                "cache_age_seconds": int(now - cached_ts),
-            })
-            payload["cache"] = {"status": "stale", "age_seconds": int(now - cached_ts)}
-            return payload
-        return await _source_matrix_unavailable_payload_with_fast_health(exc.__class__.__name__)
-    ts = time.time()
-    payload_copy = _copy_cache_value(payload)
-    _SOURCE_MATRIX_PAYLOAD_CACHE.update({"ts": ts, "payload": payload_copy})
-    _persist_source_matrix_payload(ts, payload_copy)
-    payload["cache"] = {"status": "rebuilt", "age_seconds": 0}
-    return payload
-
+# /collectors/source-matrix route extracted to api/source_matrix.py during
+# PERF-002 4A step 22 (cluster 1). The huge _collectors_source_matrix_payload
+# builder + support helpers still live in this file (accessed by source_matrix.py
+# via _cfg lookup); moving the builder is a separate follow-up.
 
 # /collectors/action-queue routes extracted to api/collectors_core.py during
 # PERF-002 4A step 21 (cluster 2).

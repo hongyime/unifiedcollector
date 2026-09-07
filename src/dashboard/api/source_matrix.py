@@ -216,3 +216,169 @@ def _persist_source_matrix_payload(ts: float, payload: dict) -> None:
         tmp.replace(path)
     except Exception as exc:  # noqa: BLE001 - cache persistence is best-effort
         logger.info("source matrix persisted cache write skipped: %s", exc.__class__.__name__)
+
+
+
+
+# ---------------------------------------------------------------------------
+# /collectors/source-matrix route.
+#
+# The ``_SOURCE_MATRIX_PAYLOAD_BUILD_TASK`` module-level global stays in
+# ``__init__.py`` (tests assign to ``dashboard_api._SOURCE_MATRIX_PAYLOAD_BUILD_TASK``
+# and rebind it via ``global`` semantics). This module reads / writes that
+# global via ``sys.modules["src.dashboard.api"]`` so the write is visible to
+# both the caller module and the parent namespace.
+# ---------------------------------------------------------------------------
+
+from fastapi import Depends
+from src.dashboard.api.auth import require_role
+
+
+def _get_build_task():
+    root = sys.modules.get("src.dashboard.api")
+    return getattr(root, "_SOURCE_MATRIX_PAYLOAD_BUILD_TASK", None) if root else None
+
+
+def _set_build_task(task):
+    root = sys.modules.get("src.dashboard.api")
+    if root is not None:
+        setattr(root, "_SOURCE_MATRIX_PAYLOAD_BUILD_TASK", task)
+
+
+@router.get("/collectors/source-matrix")
+async def collectors_source_matrix(
+    _user: dict = Depends(require_role("viewer")),
+    force_refresh: bool = False,
+):
+    _copy = _cfg("_copy_cache_value", _copy_cache_value)
+    _payload_cache = _cfg("_SOURCE_MATRIX_PAYLOAD_CACHE", _SOURCE_MATRIX_PAYLOAD_CACHE)
+    _payload_ttl = _cfg("_SOURCE_MATRIX_PAYLOAD_CACHE_TTL_SECONDS", _SOURCE_MATRIX_PAYLOAD_CACHE_TTL_SECONDS)
+    _build_timeout = _cfg("_SOURCE_MATRIX_PAYLOAD_BUILD_TIMEOUT_SECONDS", 15.0)
+    _builder = _cfg("_collectors_source_matrix_payload", None)
+    _persist = _cfg("_persist_source_matrix_payload", _persist_source_matrix_payload)
+    _load_persisted = _cfg("_load_persisted_source_matrix_payload", _load_persisted_source_matrix_payload)
+    _stale_limit = _cfg("_source_matrix_payload_stale_limit_seconds", _source_matrix_payload_stale_limit_seconds)
+    _fast_health = _cfg(
+        "_source_matrix_unavailable_payload_with_fast_health",
+        _source_matrix_unavailable_payload_with_fast_health,
+    )
+
+    now = time.time()
+    cached_payload = _payload_cache.get("payload")
+    cached_ts = float(_payload_cache.get("ts") or 0.0)
+    if cached_payload is None and not force_refresh:
+        persisted = _load_persisted(now)
+        if persisted is not None:
+            cached_ts, cached_payload = persisted
+    if (
+        not force_refresh
+        and cached_payload is not None
+        and _payload_ttl > 0
+        and now - cached_ts <= _payload_ttl
+    ):
+        payload = _copy(cached_payload)
+        payload["cache"] = {"status": "fresh", "age_seconds": int(now - cached_ts)}
+        return payload
+
+    def _background_build_done(task: asyncio.Task) -> None:
+        if _get_build_task() is task:
+            _set_build_task(None)
+        try:
+            value = task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:  # noqa: BLE001 - background cache refresh must fail soft
+            logger.warning("source matrix background build failed: %s", exc.__class__.__name__)
+            return
+        ts = time.time()
+        payload_copy = _copy(value)
+        _payload_cache.update({"ts": ts, "payload": payload_copy})
+        _persist(ts, payload_copy)
+
+    active_task = _get_build_task()
+    if active_task is not None and active_task.done():
+        _background_build_done(active_task)
+        active_task = None
+    if active_task is not None:
+        if (
+            not force_refresh
+            and cached_payload is not None
+            and now - cached_ts <= _stale_limit()
+        ):
+            payload = _copy(cached_payload)
+            payload["cache"] = {
+                "status": "refreshing",
+                "age_seconds": int(now - cached_ts),
+                "refresh": "in_progress",
+            }
+            return payload
+        return await _fast_health("BuildInProgress")
+
+    if (
+        not force_refresh
+        and cached_payload is not None
+        and now - cached_ts <= _stale_limit()
+    ):
+        build_task = asyncio.create_task(_builder())
+        _set_build_task(build_task)
+        build_task.add_done_callback(_background_build_done)
+        payload = _copy(cached_payload)
+        payload["cache"] = {
+            "status": "refreshing",
+            "age_seconds": int(now - cached_ts),
+            "refresh": "started",
+        }
+        return payload
+
+    build_task = asyncio.create_task(_builder())
+    _set_build_task(build_task)
+    build_task.add_done_callback(_background_build_done)
+    try:
+        done, _pending = await asyncio.wait(
+            {build_task},
+            timeout=max(1.0, _build_timeout),
+        )
+        if build_task not in done:
+            raise asyncio.TimeoutError
+        payload = build_task.result()
+    except asyncio.TimeoutError:
+        if cached_payload is not None and now - cached_ts <= _stale_limit():
+            payload = _copy(cached_payload)
+            payload.setdefault("errors", []).append({
+                "section": "source_matrix",
+                "error": "TimeoutError",
+                "stale_cache": True,
+                "cache_age_seconds": int(now - cached_ts),
+            })
+            payload["cache"] = {"status": "stale", "age_seconds": int(now - cached_ts)}
+            logger.warning(
+                "source matrix build timed out after %.1fs; serving stale payload age=%ds",
+                max(1.0, _build_timeout),
+                int(now - cached_ts),
+            )
+            return payload
+        logger.warning(
+            "source matrix build timed out after %.1fs with no cache",
+            max(1.0, _build_timeout),
+        )
+        return await _fast_health("TimeoutError")
+    except Exception as exc:  # noqa: BLE001 - route should not hard-fail during DB pressure
+        if _get_build_task() is build_task:
+            _set_build_task(None)
+        if cached_payload is not None and now - cached_ts <= _stale_limit():
+            payload = _copy(cached_payload)
+            payload.setdefault("errors", []).append({
+                "section": "source_matrix",
+                "error": exc.__class__.__name__,
+                "stale_cache": True,
+                "cache_age_seconds": int(now - cached_ts),
+            })
+            payload["cache"] = {"status": "stale", "age_seconds": int(now - cached_ts)}
+            return payload
+        return await _fast_health(exc.__class__.__name__)
+    ts = time.time()
+    payload_copy = _copy(payload)
+    _payload_cache.update({"ts": ts, "payload": payload_copy})
+    _persist(ts, payload_copy)
+    payload["cache"] = {"status": "rebuilt", "age_seconds": 0}
+    return payload
