@@ -418,32 +418,42 @@ class WhatsappCollector(BaseCollector):
         )
         await session_queue.bind(exchange, routing_key="session.#")
 
-        # Per-message handler timeout (LOGIC-001 fix). Under DB load the raw
-        # asyncpg fetch in handlers can hit the pool's 60s command_timeout,
-        # which blocks a consumer callback for a full minute and pins the
-        # contacts backlog. A tighter per-handler timeout fails fast, causes
-        # message.process() to nack+requeue, and lets the consumer move on.
-        # A subsequent retry after DB recovery drains the queue in-order.
-        _handler_timeout = float(os.getenv("WA_CONSUMER_HANDLER_TIMEOUT_SECONDS", "15"))
+        # Per-message handler timeout (LOGIC-001 fix; refined post-live).
+        # Under DB load the raw asyncpg fetch in handlers can hit the pool's
+        # 60s command_timeout, which blocks a consumer callback for a full
+        # minute and pins the contacts backlog. A tighter per-handler timeout
+        # fails fast, requeues the message via explicit nack, and lets the
+        # consumer move on.
+        #
+        # IMPORTANT: do NOT re-raise the timeout out of `async with
+        # message.process():`. The first version of this fix re-raised, and
+        # aio-pika treated the exception as a channel-invalid signal, closing
+        # the channel and causing 60s reconnect cycles under sustained load.
+        # Now we explicitly `await message.nack(requeue=True)` inside the
+        # except block and swallow the exception so the for-loop keeps
+        # consuming and message.process()'s ack-on-success is not triggered.
+        # `ignore_processed=True` prevents double-processing errors.
+        _handler_timeout = float(os.getenv("WA_CONSUMER_HANDLER_TIMEOUT_SECONDS", "45"))
 
         async def _consume_contacts():
             async with contact_queue.iterator() as qi:
                 async for message in qi:
                     if self._stop.is_set():
                         break
-                    async with message.process():
+                    async with message.process(ignore_processed=True):
                         try:
                             body = json.loads(message.body.decode())
                             async with asyncio.timeout(_handler_timeout):
                                 await self._handle_contact_event(body)
                         except asyncio.TimeoutError:
-                            # Surface at WARNING so operator sees the DB stall.
-                            # message.process() will nack + requeue on re-raise.
                             logger.warning(
                                 "Contact event handler timeout after %.1fs; requeueing",
                                 _handler_timeout,
                             )
-                            raise
+                            try:
+                                await message.nack(requeue=True)
+                            except Exception:
+                                pass
                         except Exception as e:
                             logger.debug("Contact event processing failed: %s", e)
 
@@ -452,7 +462,7 @@ class WhatsappCollector(BaseCollector):
                 async for message in qi:
                     if self._stop.is_set():
                         break
-                    async with message.process():
+                    async with message.process(ignore_processed=True):
                         try:
                             body = json.loads(message.body.decode())
                             async with asyncio.timeout(_handler_timeout):
@@ -462,7 +472,10 @@ class WhatsappCollector(BaseCollector):
                                 "Group event handler timeout after %.1fs; requeueing",
                                 _handler_timeout,
                             )
-                            raise
+                            try:
+                                await message.nack(requeue=True)
+                            except Exception:
+                                pass
                         except Exception as e:
                             logger.debug("Group event processing failed: %s", e)
 
@@ -471,7 +484,7 @@ class WhatsappCollector(BaseCollector):
                 async for message in qi:
                     if self._stop.is_set():
                         break
-                    async with message.process():
+                    async with message.process(ignore_processed=True):
                         try:
                             body = json.loads(message.body.decode())
                             async with asyncio.timeout(_handler_timeout):
@@ -481,7 +494,10 @@ class WhatsappCollector(BaseCollector):
                                 "Session event handler timeout after %.1fs; requeueing",
                                 _handler_timeout,
                             )
-                            raise
+                            try:
+                                await message.nack(requeue=True)
+                            except Exception:
+                                pass
                         except Exception as e:
                             logger.debug("Session event processing failed: %s", e)
 
@@ -490,7 +506,7 @@ class WhatsappCollector(BaseCollector):
                 async for message in qi:
                     if self._stop.is_set():
                         break
-                    async with message.process():
+                    async with message.process(ignore_processed=True):
                         try:
                             body = json.loads(message.body.decode())
                             # Two payload shapes arrive on this queue:
@@ -520,7 +536,10 @@ class WhatsappCollector(BaseCollector):
                             logger.warning(
                                 "Message event handler timeout; requeueing",
                             )
-                            raise
+                            try:
+                                await message.nack(requeue=True)
+                            except Exception:
+                                pass
                         except Exception as e:
                             logger.error("Broker message processing failed: %s", e)
 
