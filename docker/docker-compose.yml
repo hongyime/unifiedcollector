@@ -34,7 +34,6 @@ services:
       - ./backups:/backups
     command: postgres -c config_file=/etc/postgresql/postgresql.conf
     env_file:
-      - ../.env
       - ./env/common.env
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-collector}"]
@@ -89,7 +88,6 @@ services:
       postgres:
         condition: service_healthy
     env_file:
-      - ../.env
       - ./env/common.env
     healthcheck:
       test: ["CMD", "python", "-m", "src.core.health"]
@@ -162,7 +160,6 @@ services:
       postgres:
         condition: service_healthy
     env_file:
-      - ../.env
       - ./env/common.env
       - ./env/recon.env
     healthcheck:
@@ -230,7 +227,6 @@ services:
       postgres:
         condition: service_healthy
     env_file:
-      - ../.env
       - ./env/common.env
       - ./env/youtube.env
     healthcheck:
@@ -288,7 +284,6 @@ services:
       postgres:
         condition: service_healthy
     env_file:
-      - ../.env
       - ./env/common.env
       - ./env/tiktok.env
     healthcheck:
@@ -414,7 +409,6 @@ services:
       postgres:
         condition: service_healthy
     env_file:
-      - ../.env
       - ./env/common.env
       - ./env/strava.env
       - ./env/github.env
@@ -457,7 +451,6 @@ services:
     # TELEGRAM_CHAT_ID) can alert on stale-source restarts. Without it the
     # notifier silently no-ops (send-only, fail-safe).
     env_file:
-      - ../.env
       - ./env/common.env
       - ./env/telegram_notify.env
     depends_on:
@@ -522,7 +515,6 @@ services:
       postgres:
         condition: service_healthy
     env_file:
-      - ../.env
       - ./env/common.env
       - ./env/website.env
     healthcheck:
@@ -580,7 +572,6 @@ services:
       postgres:
         condition: service_healthy
     env_file:
-      - ../.env
       - ./env/common.env
       - ./env/exposure.env
     healthcheck:
@@ -622,7 +613,6 @@ services:
       postgres:
         condition: service_healthy
     env_file:
-      - ../.env
       - ./env/common.env
       - ./env/lemon8.env
     healthcheck:
@@ -697,7 +687,6 @@ services:
       postgres:
         condition: service_healthy
     env_file:
-      - ../.env
       - ./env/common.env
       - ./env/telegram.env
       - ./env/telegram_notify.env
@@ -769,7 +758,6 @@ services:
       postgres:
         condition: service_healthy
     env_file:
-      - ../.env
       - ./env/common.env
       - ./env/beeper.env
     healthcheck:
@@ -820,7 +808,6 @@ services:
       rabbitmq:
         condition: service_started
     env_file:
-      - ../.env
       - ./env/common.env
       - ./env/whatsapp.env
       - ./env/broker.env
@@ -878,7 +865,6 @@ services:
       postgres:
         condition: service_healthy
     env_file:
-      - ../.env
       - ./env/common.env
       - ./env/instagram.env
     healthcheck:
@@ -937,7 +923,6 @@ services:
       postgres:
         condition: service_healthy
     env_file:
-      - ../.env
       - ./env/common.env
       - ./env/instagram.env
     healthcheck:
@@ -990,7 +975,6 @@ services:
       postgres:
         condition: service_healthy
     env_file:
-      - ../.env
       - ./env/common.env
       - ./env/instagram.env
     restart: unless-stopped
@@ -1047,7 +1031,6 @@ services:
       postgres:
         condition: service_healthy
     env_file:
-      - ../.env
       - ./env/common.env
       - ./env/telegram_notify.env
     healthcheck:
@@ -1072,7 +1055,6 @@ services:
       postgres:
         condition: service_healthy
     env_file:
-      - ../.env
       - ./env/common.env
       - ./env/telegram.env
       - ./env/telegram_onboard.env
@@ -1128,7 +1110,6 @@ services:
       postgres:
         condition: service_healthy
     env_file:
-      - ../.env
       - ./env/common.env
       - ./env/telegram_notify.env
       - ./env/realtime_feed.env
@@ -1184,7 +1165,6 @@ services:
       postgres:
         condition: service_healthy
     env_file:
-      - ../.env
       - ./env/common.env
       - ./env/dashboard.env
     healthcheck:
@@ -1244,7 +1224,6 @@ services:
     # Load ../.env for NOTIFY_TELEGRAM_BOT_TOKEN / TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID
     # so the Python backup runner can send a best-effort failure alert.
     env_file:
-      - ../.env
       - ./env/common.env
       - ./env/telegram_notify.env
       - ./env/backup.env
@@ -1291,7 +1270,6 @@ services:
       - rabbitmq_data:/var/lib/rabbitmq
       - ./rabbitmq.conf:/etc/rabbitmq/conf.d/20-unifiedcollector.conf:ro
     env_file:
-      - ../.env
       - ./env/common.env
       - ./env/broker.env
     healthcheck:
@@ -1313,7 +1291,6 @@ services:
     volumes:
       - redis_data:/data
     env_file:
-      - ../.env
       - ./env/common.env
       - ./env/broker.env
     healthcheck:
@@ -1356,7 +1333,6 @@ services:
       rabbitmq:
         condition: service_started
     env_file:
-      - ../.env
       - ./env/common.env
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3001/livez"]
@@ -1395,7 +1371,6 @@ services:
       rabbitmq:
         condition: service_started
     env_file:
-      - ../.env
       - ./env/common.env
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3001/livez"]
@@ -1436,7 +1411,6 @@ services:
       - ../src:/app/src
       - ../credentials/browser_cookies:/app/credentials/browser_cookies
     env_file:
-      - ../.env
       - ./env/common.env
       - ./env/browser_cookie_vault.env
     healthcheck:
