@@ -1,96 +1,67 @@
+"""FastAPI application assembly for the collector dashboard.
+
+This module is intentionally thin: it constructs the ``app`` object, wires
+middleware and static files, includes every per-domain router, and re-imports
+symbols from the split modules so test monkey-patches on ``dashboard_api.X``
+continue to work.
+
+All routes live in per-domain modules under ``src/dashboard/api/``. See
+``docs/plans/perf-file-splits.md`` for the PERF-002 sub-plan 4A history and
+``.agents/JOURNAL.md`` for the extraction log.
+
+Modules and what they contain:
+
+* ``auth.py`` — /auth/* routes, JWT/bcrypt config, ``require_role``.
+* ``browser.py`` — Chrome extension diagnostics used by /health + source-matrix.
+* ``source_matrix.py`` — /collectors/source-matrix route + payload cache.
+* ``telegram_ops.py`` — /api/telegram/* onboarding-ops routes.
+* ``strava.py`` — /strava/* routes.
+* ``youtube.py`` — /youtube/* routes.
+* ``whatsapp.py`` — /whatsapp/* routes.
+* ``coverage.py`` — /coverage/collectors.
+* ``media.py`` — /media, /media/browse, /media/{id}/*, /media/realtime-feed/*.
+* ``rate_limits.py`` — /rate-limits/recent.
+* ``ops.py`` — /dlq, /domain-pacing/*, /api-quotas/*.
+* ``social.py`` — /social/*.
+* ``dm.py`` — /instagram/dms/*, /tiktok/dms/*, /dm/telemetry.
+* ``targets.py`` — /targets/*.
+* ``schedules.py`` — /schedules/*, /runs/*.
+* ``accounts.py`` — /platform/{name}/summary, /accounts.
+* ``ingestion.py`` — /api/backfill-equilibrium, /instagram/health, /ingestion/hourly.
+* ``misc.py`` — /graph, /messaging/coverage, /stories/overview, /worker/health.
+* ``collectors_core.py`` — /collectors, /collectors/live, /collectors/action-queue*.
+* ``platform_content.py`` — /api/matrix/*, /telegram/chats, /tiktok/*, /threads/*,
+                              /github/*, /lemon8/*, /beeper/*, /seen/*, /recon/*.
+* ``observability.py`` — /health, /metrics, /ws/health + exception handler.
+* ``helpers.py`` — module-level caches, TTL config, pure utilities, DB pool helpers.
+* ``health_helpers.py`` — vault/backup/drive health payload builders.
+* ``_shared.py`` — big helper block (content/rate summaries, source-matrix helpers,
+                    builder, bridge-override merge, platform constants, cookie
+                    audit, realtime status, media resolution).
+
+The ``_SOURCE_MATRIX_PAYLOAD_BUILD_TASK`` module-level global stays here because
+tests bind to it and callers mutate it via ``global``. ``source_matrix.py``'s
+route accesses it through ``sys.modules["src.dashboard.api"]``.
+"""
+from __future__ import annotations
+
 import asyncio
-import contextlib
-import html
-import io
-import json
 import logging
-import os
-import re
-import time
-import traceback
-import uuid as _uuid
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-# ---------------------------------------------------------------------------
-# PERF-002 sub-plan 4A — dashboard/api package split status.
-#
-# Sub-plan 4A steps 1–12 have landed. See docs/plans/perf-file-splits.md.
-#
-#   1.  api/__init__.py package skeleton (git mv)
-#   2.  api/helpers.py — module-level caches, pure helpers, DB pool helpers,
-#                        row/cache copy utilities, _dt_for_compare
-#   3.  api/health_helpers.py — vault/backup/drive health payload builders
-#   4.  api/auth.py — JWT/bcrypt + /auth/* routes
-#   5.  api/browser.py — Chrome extension + browser-tab diagnostics used by
-#                        the /health and /collectors/source-matrix payloads
-#   6.  api/source_matrix.py — payload cache helpers + unavailable-payload
-#                              builders (the huge _collectors_source_matrix_payload
-#                              builder still lives here — see module docstring)
-#   7.  api/telegram_ops.py — /api/telegram/* onboarding-ops routes
-#   8.  api/strava.py — /strava/* routes
-#   9.  api/youtube.py — /youtube/* routes
-#   10. api/whatsapp.py — /whatsapp/* routes + link filter constants
-#   11. api/coverage.py — /coverage/collectors
-#       api/media.py — /media, /media/stats, /media/browse, /media/{id}/thumbnail,
-#                       /media/{id}/file, /media/realtime-feed/*, /media/artifact-audit
-#   12. api/rate_limits.py — /rate-limits/recent
-#
-# Sibling sub-plans (separate work):
-#   PERF-003 sub-plan 4B — bridges/ig_ingest.py package split
-#   PERF-004 sub-plan 4C — collectors/telegram/__init__.py mixin split
-#
-# What remains in this file:
-# * The FastAPI app object + CORS/static/router assembly.
-# * Many domain routes that weren't in a step-5-12 slice (/health, /metrics,
-#   /collectors, /collectors/live, /collectors/source-matrix, /collectors/action-queue,
-#   /platform/{name}/summary, /social/*, /accounts, /dlq, /graph, /messaging/coverage,
-#   /instagram/*, /tiktok/*, /threads/*, /facebook/*, /github/*, /lemon8/*,
-#   /beeper/*, /telegram/chats, /telegram/chat/{chat_id}, /api/matrix/*,
-#   /worker/health, /schedules, /targets, /runs, /domain-pacing/status,
-#   /api-quotas/status, /instagram/dms/*, /tiktok/dms/*, /dm/telemetry,
-#   /stories/overview, /ingestion/hourly, /seen/targets, /optional-rollout/status,
-#   /recon/*).
-# * The huge _collectors_source_matrix_payload builder + row/blocker/section
-#   helpers (still tightly coupled to test monkey-patch surface).
-# * Miscellaneous DB query helpers still used across those routes.
-#
-# The <300 LOC target for this file is aspirational — it requires moving all
-# remaining routes into per-domain modules following the same pattern. That is
-# future work.
-# ---------------------------------------------------------------------------
-
-import bcrypt
-import jwt
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
-
-from src.backup.db_backup import backup_status
-from src.db.connection import get_pool
-from src.dashboard.websocket import health_ws
-from src.core.strava_route_queue import fetch_strava_route_capture_queue
-from src.core.collection_coverage import build_collection_coverage_snapshot
-from src.core.seen_targets import (
-    list_seen_targets,
-    refresh_seen_targets_from_sources,
-    seen_target_summary_by_source,
-)
-from src.core.optional_rollout import optional_rollout_report
-from src.core.vault import VAULT_ROOT, vault_artifact_counts, vault_health
-from src.core.whatsapp_bridge_health import (
-    fetch_whatsapp_bridge_health,
-    summarize_whatsapp_bridge_health,
-)
 
 logger = logging.getLogger(__name__)
 
-# Caches, TTL config and small pure helpers extracted to api/helpers.py during
-# PERF-002 sub-plan 4A step 2. Re-imported here so private call sites and
-# tests that reference these names via `src.dashboard.api._foo` keep working.
+
+# ---------------------------------------------------------------------------
+# Re-imports of leaf helper modules — keeps ``dashboard_api._X`` a valid
+# monkey-patch target for tests written before the package split.
+# ---------------------------------------------------------------------------
+
 from src.dashboard.api.helpers import (  # noqa: E402,F401
     _MESSAGING_COVERAGE_CACHE,
     _SOURCE_MEDIA_TOTALS_CACHE,
@@ -144,37 +115,41 @@ from src.dashboard.api.helpers import (  # noqa: E402,F401
     _dt_for_compare,
 )
 
-# Constants moved to api/_shared.py during PERF-002 4A step 24.
-# Only the mutable ``_SOURCE_MATRIX_PAYLOAD_BUILD_TASK`` stays here because
-# callers rebind it via ``global`` and tests write to
-# ``dashboard_api._SOURCE_MATRIX_PAYLOAD_BUILD_TASK`` — the source_matrix.py
-# route accesses this attribute via ``sys.modules["src.dashboard.api"]``.
-_SOURCE_MATRIX_PAYLOAD_BUILD_TASK: asyncio.Task | None = None
+from src.core.vault import VAULT_ROOT, vault_health, vault_artifact_counts  # noqa: F401 - re-export for tests
+from src.core.whatsapp_bridge_health import (  # noqa: F401 - re-export for tests
+    fetch_whatsapp_bridge_health,
+    summarize_whatsapp_bridge_health,
+)
+from src.core.strava_route_queue import fetch_strava_route_capture_queue  # noqa: F401 - re-export for tests
+from src.core.collection_coverage import build_collection_coverage_snapshot  # noqa: F401 - re-export for tests
+from src.core.seen_targets import (  # noqa: F401 - re-export for tests
+    list_seen_targets,
+    refresh_seen_targets_from_sources,
+    seen_target_summary_by_source,
+)
+from src.core.optional_rollout import optional_rollout_report  # noqa: F401 - re-export for tests
+from src.backup.db_backup import backup_status  # noqa: F401 - re-export for tests
+from src.dashboard.websocket import health_ws  # noqa: F401 - re-export for tests
+from src.db.connection import get_pool  # noqa: F401 - re-export for tests
+
+# Mutable module-level task handle. Kept here because callers rebind via
+# ``global`` and tests set ``dashboard_api._SOURCE_MATRIX_PAYLOAD_BUILD_TASK = ...``.
+# ``source_matrix.py`` reads/writes this attribute via ``sys.modules``.
+_SOURCE_MATRIX_PAYLOAD_BUILD_TASK: "asyncio.Task | None" = None
 
 
-# Big helper block extracted to api/_shared.py during PERF-002 4A step 24.
-# Re-import all names into __init__.py's namespace so tests that patch
-# ``dashboard_api.X`` and route sites that reference ``_X`` keep working.
+# Bulk-imported helper block. ``_shared.py`` holds the big helper set
+# (content/rate summaries, source-matrix helpers + builder, cookie audit,
+# realtime redis/ledger, media path resolution). Copy every public and
+# private name into this module's namespace so tests can patch
+# ``dashboard_api._X`` transparently.
 from src.dashboard.api import _shared as _sh  # noqa: E402
 for _n in dir(_sh):
-    if not _n.startswith('__'):
+    if not _n.startswith("__"):
         globals()[_n] = getattr(_sh, _n)
 del _sh, _n
 
-app = FastAPI(title="UnifiedCollector Dashboard")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:8700"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-DIST_DIR = Path(__file__).resolve().parent.parent.parent / "dashboard" / "frontend" / "dist"
-
-# Auth (JWT / bcrypt / /auth routes) extracted to api/auth.py during PERF-002
-# sub-plan 4A step 4. Re-import public names for back-compat with tests and
-# route sites that reference Depends(require_role(...)).
+# Per-domain routers.
 from src.dashboard.api.auth import (  # noqa: E402,F401
     JWT_SECRET,
     JWT_EXPIRY_HOURS,
@@ -188,31 +163,220 @@ from src.dashboard.api.auth import (  # noqa: E402,F401
     LoginRequest,
     router as _auth_router,
 )
-
-app.include_router(_auth_router)
-# Package-split routers included as they become non-empty (PERF-002 4A).
-app.include_router(_browser_router)          # step 5 — currently empty placeholder
-app.include_router(_source_matrix_router)    # step 6 — currently empty placeholder
-app.include_router(_telegram_ops_router)     # step 7 — /api/telegram/*
-app.include_router(_strava_router)           # step 8 — /strava/*
-app.include_router(_youtube_router)          # step 9 — /youtube/*
-app.include_router(_whatsapp_router)         # step 10 — /whatsapp/*
-app.include_router(_coverage_router)         # step 11 — /coverage/*
-app.include_router(_media_router)            # step 11 — /media/*
-app.include_router(_rate_limits_router)      # step 12 — /rate-limits/*
-app.include_router(_ops_router)              # step 14 — /dlq, /domain-pacing/*, /api-quotas/*
-app.include_router(_social_router)           # step 15 — /social/*
-app.include_router(_dm_router)               # step 16 — /instagram/dms/*, /tiktok/dms/*, /dm/telemetry
-app.include_router(_targets_router)          # step 17 — /targets/*
-app.include_router(_schedules_router)        # step 17 — /schedules/*, /runs/*
-app.include_router(_accounts_router)         # step 18 — /platform/{name}/summary, /accounts
-app.include_router(_ingestion_router)        # step 19 — /api/backfill-equilibrium, /instagram/health, /ingestion/hourly
-app.include_router(_misc_router)             # step 20 — /graph, /messaging/coverage, /stories/overview, /worker/health
-app.include_router(_collectors_core_router)  # step 21 — /collectors, /collectors/live, /collectors/action-queue*, /collectors/{source}
-app.include_router(_platform_content_router) # step 23 — matrix/telegram/tiktok/threads/github/lemon8/beeper + seen/rollout/recon
-
-# Observability routes (/health, /metrics, /ws/health) + exception handler
-# moved to api/observability.py during PERF-002 4A step 26.
+from src.dashboard.api.browser import (  # noqa: E402,F401
+    router as _browser_router,
+    _BROWSER_EXTENSION_QUERY_TIMEOUT_SECONDS,
+    _BROWSER_EXTENSION_PAYLOAD_BUDGET_SECONDS,
+    _BROWSER_EXTENSION_INGEST_SUMMARY_HOURS,
+    _BROWSER_MEDIA_CANDIDATE_SUMMARY_HOURS,
+    _BROWSER_EXTENSION_OPTIONAL_QUERY_TIMEOUT_SECONDS,
+    _BROWSER_TAB_MAINTENANCE_STATUS_PATH,
+    _BROWSER_TAB_AUDIT_RESULT_PATH,
+    _BROWSER_TAB_MAINTENANCE_STALE_SECONDS,
+    _BROWSER_TAB_MAINTENANCE_RUNNING_STALLED_SECONDS,
+    _EXTENSION_RECENT_MISMATCH_SECONDS,
+    _OPTIONAL_BROWSER_DIAGNOSTIC_SECTIONS,
+    _expected_extension_version,
+    _extension_versions_match,
+    _extension_reload_target_from_url,
+    _extension_management_url,
+    _browser_tab_maintenance_payload,
+    _browser_tab_audit_platforms,
+    _browser_tab_audit_age_seconds,
+    _browser_tab_audit_page_errors,
+    _browser_extension_add_tab_audit_page_errors,
+    _browser_extension_apply_maintenance_ingest_fallback,
+    _browser_extension_fallback_payload,
+    _browser_ingest_health_from_items,
+    _browser_extension_apply_ingest_health,
+    _browser_extension_suppress_optional_diagnostics_when_active,
+    _browser_extension_fallback_payload_with_fast_ingest,
+    _extension_issues_by_source,
+    _fresh_current_extension_seen,
+    _suppress_shadowed_extension_mismatches,
+    _browser_extension_payload,
+)
+from src.dashboard.api.source_matrix import (  # noqa: E402,F401
+    router as _source_matrix_router,
+    collectors_source_matrix,
+    _get_build_task,
+    _set_build_task,
+)
+from src.dashboard.api.telegram_ops import (  # noqa: E402,F401
+    router as _telegram_ops_router,
+    TelegramAccountCreate,
+    TelegramAccountAuth,
+    _dashboard_auth_sessions,
+    list_telegram_accounts,
+    telegram_request_code,
+    telegram_verify_code,
+    delete_telegram_account,
+    disable_telegram_account,
+    enable_telegram_account,
+    telegram_stats,
+)
+from src.dashboard.api.strava import (  # noqa: E402,F401
+    router as _strava_router,
+    strava_list_athletes,
+    strava_feed_dates,
+    strava_feed_activities,
+    strava_feed_stats,
+    strava_route_capture_queue,
+)
+from src.dashboard.api.youtube import (  # noqa: E402,F401
+    router as _youtube_router,
+    youtube_completeness,
+    list_youtube_channels,
+    youtube_channel_detail,
+)
+from src.dashboard.api.whatsapp import (  # noqa: E402,F401
+    router as _whatsapp_router,
+    _wa_link_filter_values,
+    _wa_looks_like_url,
+    _wa_link_type_value,
+    _wa_link_payload,
+    _wa_bridge_base,
+    _wa_bridge_post,
+    _wa_bridge_get,
+    list_wa_users,
+    wa_user_history,
+    list_wa_chats,
+    wa_chat_messages,
+    list_wa_links,
+    wa_link_stats,
+    whatsapp_qr,
+    whatsapp_sessions,
+    whatsapp_disconnect,
+    whatsapp_reconnect,
+    whatsapp_fresh_qr,
+    whatsapp_pairing_code,
+    whatsapp_link_page,
+    _should_wait_for_fresh_wa_qr,
+    _WA_LINK_TYPE_FILTER_ALIASES,
+    _WA_LINK_STATUS_FILTER_ALIASES,
+    _WA_LINK_TYPE_VALUES,
+    _WA_LINK_TYPE_SQL_VALUES,
+    _WA_LINK_TYPE_EXPR,
+    _WA_LINK_STATS_TYPE_EXPR,
+)
+from src.dashboard.api.coverage import (  # noqa: E402,F401
+    router as _coverage_router,
+    collectors_coverage,
+)
+from src.dashboard.api.media import (  # noqa: E402,F401
+    router as _media_router,
+    list_media,
+    media_stats,
+    media_realtime_feed_status,
+    media_realtime_feed_deliveries,
+    media_artifact_audit,
+    browse_media,
+    media_thumbnail,
+    media_file,
+)
+from src.dashboard.api.rate_limits import (  # noqa: E402,F401
+    router as _rate_limits_router,
+    recent_rate_limits,
+)
+from src.dashboard.api.ops import (  # noqa: E402,F401
+    router as _ops_router,
+    list_dlq,
+    domain_pacing_status,
+    _domain_pacing_status_impl,
+    api_quotas_status,
+)
+from src.dashboard.api.social import (  # noqa: E402,F401
+    router as _social_router,
+    follow_edges_stats,
+    social_stats,
+    social_network,
+    social_users_list,
+    social_scrape_config,
+    social_page,
+    _SOCIAL_HTML,
+)
+from src.dashboard.api.dm import (  # noqa: E402,F401
+    router as _dm_router,
+    list_ig_dm_threads,
+    ig_dm_thread_messages,
+    list_tt_dm_threads,
+    tt_dm_thread_messages,
+    dm_telemetry,
+)
+from src.dashboard.api.targets import (  # noqa: E402,F401
+    router as _targets_router,
+    TargetRequest,
+    _target_already_known,
+    create_target,
+    delete_target,
+    list_targets,
+)
+from src.dashboard.api.schedules import (  # noqa: E402,F401
+    router as _schedules_router,
+    ScheduleRequest,
+    update_schedule,
+    get_run,
+    list_schedules,
+    create_schedule,
+    delete_schedule,
+    list_runs,
+)
+from src.dashboard.api.accounts import (  # noqa: E402,F401
+    router as _accounts_router,
+    platform_summary,
+    accounts_overview,
+)
+from src.dashboard.api.ingestion import (  # noqa: E402,F401
+    router as _ingestion_router,
+    backfill_equilibrium,
+    instagram_health,
+    _instagram_health_impl,
+    _derive_instagram_stuck_stage,
+    hourly_ingestion,
+)
+from src.dashboard.api.misc import (  # noqa: E402,F401
+    router as _misc_router,
+    social_graph,
+    messaging_coverage,
+    stories_overview,
+    worker_health,
+)
+from src.dashboard.api.collectors_core import (  # noqa: E402,F401
+    router as _collectors_core_router,
+    list_collectors,
+    collectors_live,
+    collectors_action_queue_sync,
+    collectors_action_queue,
+    collector_detail,
+)
+from src.dashboard.api.platform_content import (  # noqa: E402,F401
+    router as _platform_content_router,
+    _matrix_enabled,
+    _matrix_disabled_response,
+    matrix_sync_state,
+    matrix_backfill_state,
+    matrix_queue_depths,
+    matrix_coverage,
+    list_telegram_chats,
+    telegram_chat_detail,
+    list_tiktok_profiles,
+    tiktok_profile_detail,
+    list_threads_profiles,
+    threads_profile_detail,
+    list_github_profiles,
+    github_edge_stats,
+    github_profile_detail,
+    list_github_repos,
+    github_repo_detail,
+    list_lemon8_profiles,
+    lemon8_profile_detail,
+    list_beeper_chats,
+    beeper_chat_detail,
+    seen_targets,
+    optional_rollout_status,
+    recon_targets,
+    recon_observations,
+)
 from src.dashboard.api.observability import (  # noqa: E402,F401
     router as _observability_router,
     verbose_exception_handler,
@@ -220,35 +384,45 @@ from src.dashboard.api.observability import (  # noqa: E402,F401
     metrics,
     ws_health,
 )
-app.include_router(_observability_router)    # step 26 — /health, /metrics, /ws/health
+
+
+# ---------------------------------------------------------------------------
+# App assembly.
+# ---------------------------------------------------------------------------
+
+app = FastAPI(title="UnifiedCollector Dashboard")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://localhost:8700"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+DIST_DIR = Path(__file__).resolve().parent.parent.parent / "dashboard" / "frontend" / "dist"
+
+app.include_router(_auth_router)
+app.include_router(_browser_router)
+app.include_router(_source_matrix_router)
+app.include_router(_telegram_ops_router)
+app.include_router(_strava_router)
+app.include_router(_youtube_router)
+app.include_router(_whatsapp_router)
+app.include_router(_coverage_router)
+app.include_router(_media_router)
+app.include_router(_rate_limits_router)
+app.include_router(_ops_router)
+app.include_router(_social_router)
+app.include_router(_dm_router)
+app.include_router(_targets_router)
+app.include_router(_schedules_router)
+app.include_router(_accounts_router)
+app.include_router(_ingestion_router)
+app.include_router(_misc_router)
+app.include_router(_collectors_core_router)
+app.include_router(_platform_content_router)
+app.include_router(_observability_router)
 app.add_exception_handler(Exception, verbose_exception_handler)
 
-
-# /health, /metrics routes + verbose_exception_handler moved to
-# api/observability.py during PERF-002 4A step 26.
-
-# /api/backfill-equilibrium route extracted to api/ingestion.py during
-# PERF-002 4A step 19 (cluster 7).
-
-# /collectors, /collectors/live routes extracted to api/collectors_core.py
-# during PERF-002 4A step 21 (cluster 2).
-
-# Remaining helpers (source_matrix builder + shims, platform constants,
-# cookie audit, realtime status, media resolution) moved to api/_shared.py
-# during PERF-002 4A step 25.
-
-
-
-
-
-
-
-# /ws/health websocket route moved to api/observability.py during
-# PERF-002 4A step 26.
-
-# Matrix / Telegram / TikTok / Threads / GitHub / Lemon8 / Beeper content routes
-# plus /seen/targets, /optional-rollout/status, and /recon/* routes extracted to
-# api/platform_content.py during PERF-002 4A step 23 (clusters 11-14).
 
 if DIST_DIR.is_dir():
     app.mount("/assets", StaticFiles(directory=str(DIST_DIR / "assets")), name="assets")
