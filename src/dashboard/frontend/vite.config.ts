@@ -18,5 +18,8 @@ export default defineConfig({
     setupFiles: ["./src/setupTests.ts"],
     css: false,
     include: ["src/**/*.{test,spec}.{ts,tsx}"],
+    // 'forks' (default) times out reliably on Windows waiting for worker
+    // response; 'threads' is faster and stable across platforms.
+    pool: "threads",
   },
 });

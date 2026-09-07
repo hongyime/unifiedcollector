@@ -1,0 +1,50 @@
+name: Env Split Verify
+
+# Static verification for the per-service env split (SEC-003):
+# for each service in docker/docker-compose.yml, check that every env var
+# the code references is documented in some docker/env/<file>.env.example.
+# Runs on any PR that touches the layout, plus on push to main.
+#
+# See scripts/verify_env_split.py + docs/plans/per-service-env-split.md.
+
+on:
+  pull_request:
+    branches: [main, master]
+    paths:
+      - "docker/docker-compose.yml"
+      - "docker/env/**"
+      - "src/**/*.py"
+      - "scripts/verify_env_split.py"
+      - ".github/workflows/env-split-verify.yml"
+  push:
+    branches: [main, master]
+    paths:
+      - "docker/docker-compose.yml"
+      - "docker/env/**"
+      - "src/**/*.py"
+      - "scripts/verify_env_split.py"
+
+concurrency:
+  group: env-split-verify-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install PyYAML (compose parser dependency)
+        run: pip install pyyaml
+
+      - name: Run verify_env_split.py
+        run: python scripts/verify_env_split.py
