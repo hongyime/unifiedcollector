@@ -28,6 +28,8 @@ from src.core.whatsapp_bridge_health import (
     fetch_whatsapp_bridge_health,
     summarize_whatsapp_bridge_health,
 )
+from src.core.vault import VAULT_ROOT
+from fastapi import HTTPException, Response
 from src.dashboard.api.helpers import (
     _BEEPER_SUBSOURCE_CONTENT_CACHE,
     _BEEPER_SUBSOURCE_CONTENT_TTL_SECONDS,
@@ -3080,3 +3082,809 @@ async def _with_bridge_overrides(sources: list[dict]) -> tuple[list[dict], dict 
 
     return sources, bridge_summary
 
+
+
+# ---------------------------------------------------------------------------
+# Second pass (step 25): source-matrix builder + platform constants + cookie
+# audit + realtime status + media resolution helpers.
+# ---------------------------------------------------------------------------
+
+def _source_matrix_unavailable_payload(*args, **kwargs):
+    # Body moved to src/dashboard/api/source_matrix.py during PERF-002 4A step 6.
+    # Import lazily to break the circular dependency; source_matrix.py imports
+    # __init__.py names via _cfg() when it needs them at call time.
+    from src.dashboard.api.source_matrix import _source_matrix_unavailable_payload as _impl
+    return _impl(*args, **kwargs)
+
+
+async def _source_matrix_unavailable_payload_with_fast_health(*args, **kwargs):
+    from src.dashboard.api.source_matrix import _source_matrix_unavailable_payload_with_fast_health as _impl
+    return await _impl(*args, **kwargs)
+
+
+def _source_matrix_payload_stale_limit_seconds() -> float:
+    from src.dashboard.api.source_matrix import _source_matrix_payload_stale_limit_seconds as _impl
+    return _impl()
+
+
+def _load_source_matrix_payload_cache(now: float | None = None):
+    from src.dashboard.api.source_matrix import _load_source_matrix_payload_cache as _impl
+    return _impl(now)
+
+
+def _load_persisted_source_matrix_payload(now: float | None = None):
+    from src.dashboard.api.source_matrix import _load_persisted_source_matrix_payload as _impl
+    return _impl(now)
+
+
+def _persist_source_matrix_payload(ts: float, payload: dict) -> None:
+    from src.dashboard.api.source_matrix import _persist_source_matrix_payload as _impl
+    return _impl(ts, payload)
+
+
+# /collectors/source-matrix route extracted to api/source_matrix.py during
+# PERF-002 4A step 22 (cluster 1). The huge _collectors_source_matrix_payload
+# builder + support helpers still live in this file (accessed by source_matrix.py
+# via _cfg lookup); moving the builder is a separate follow-up.
+
+# /collectors/action-queue routes extracted to api/collectors_core.py during
+# PERF-002 4A step 21 (cluster 2).
+
+async def _collectors_source_matrix_payload():
+    """Operator matrix: source status, collection method, volume, and blocker."""
+    from src.core.source_freshness import compute_liveness
+    pool = await get_pool()
+    errors = []
+    conn = None
+    try:
+        conn = await _acquire_dashboard_conn(pool)
+    except Exception as exc:  # noqa: BLE001 - source matrix must stay usable during DB pressure
+        logger.warning("source matrix DB acquire failed: %s", exc.__class__.__name__)
+        errors.append({"section": "db_acquire", "error": exc.__class__.__name__})
+        live_sources = _source_matrix_fallback_liveness_rows(
+            "source matrix could not acquire a DB connection quickly; showing known source skeleton until load drops"
+        )
+        whatsapp_bridge_health = None
+        beeper_subsources = []
+        current_content = {}
+        current_rate = {}
+        rolling_content = {}
+        previous_content = {}
+        previous_rate = {}
+        day_content = {}
+        day_rate = {}
+        media_totals = {"__stats_unavailable__": True}
+        youtube_media_backlog = {}
+        active_cursors = {}
+        browser_extension = _browser_extension_fallback_payload("db_acquire_failed")
+    else:
+        liveness_fallback = _source_matrix_fallback_liveness_rows(
+            "source liveness query timed out; showing known source skeleton until DB load drops"
+        )
+        live_sources = await _source_matrix_section(
+            section="source_liveness",
+            label="source liveness",
+            errors=errors,
+            fallback=liveness_fallback,
+            awaitable=compute_liveness(conn),
+            cache_key="source_liveness",
+            timeout=_SOURCE_MATRIX_LIVENESS_TIMEOUT_SECONDS,
+        )
+        live_sources, whatsapp_bridge_health = await _source_matrix_section(
+            section="bridge_overrides",
+            label="bridge overrides",
+            errors=errors,
+            fallback=(live_sources, None),
+            awaitable=_with_bridge_overrides(live_sources),
+            cache_key="bridge_overrides",
+            cache_ttl=15,
+            timeout=3,
+        )
+        browser_platforms = [
+            str(row.get("source"))
+            for row in live_sources
+            if str(row.get("source") or "") in {"instagram", "tiktok", "lemon8", "threads", "facebook", "x", "strava"}
+            and row.get("status") != "live"
+        ]
+        browser_source_fields = await _source_matrix_section(
+            section="browser_source_fields",
+            label="browser source fields",
+            errors=errors,
+            fallback={},
+            awaitable=_source_matrix_browser_source_fields(conn, browser_platforms),
+            cache_key="browser_source_fields",
+            cache_ttl=15,
+            timeout=1.5,
+        )
+        _source_matrix_apply_browser_source_fields(live_sources, browser_source_fields)
+        if any(
+            error["section"] == "source_liveness" and not error.get("stale_cache")
+            for error in errors
+        ):
+            beeper_subsources = []
+            current_content = {}
+            current_rate = {}
+            rolling_content = {}
+            previous_content = {}
+            previous_rate = {}
+            day_content = {}
+            day_rate = {}
+            media_totals = {"__stats_unavailable__": True}
+            youtube_media_backlog = {}
+            active_cursors = {}
+            browser_extension = _browser_extension_fallback_payload("source_liveness_unavailable")
+        else:
+            beeper_subsources = await _source_matrix_section(
+                section="beeper_subsource_liveness",
+                label="beeper sub-source liveness",
+                errors=errors,
+                fallback=[],
+                awaitable=_beeper_subsource_liveness(conn),
+                cache_key="beeper_subsource_liveness",
+                timeout=3,
+            )
+            current_content = await _source_matrix_section(
+                section="current_content",
+                label="current content summary",
+                errors=errors,
+                fallback={},
+                awaitable=_source_content_summary(conn, "date_trunc('hour', now())"),
+                cache_key="current_content",
+                cache_ttl=15,
+                timeout=3,
+            )
+            current_rate = await _source_matrix_section(
+                section="current_rate",
+                label="current rate summary",
+                errors=errors,
+                fallback={},
+                awaitable=_source_rate_summary(conn, "date_trunc('hour', now())"),
+                cache_key="current_rate",
+                cache_ttl=15,
+                timeout=3,
+            )
+            rolling_content = await _source_matrix_section(
+                section="rolling_content",
+                label="rolling content summary",
+                errors=errors,
+                fallback={},
+                awaitable=_source_rolling_content_summary(conn),
+                cache_key="rolling_content",
+                cache_ttl=15,
+                timeout=3,
+            )
+            previous_content = await _source_matrix_section(
+                section="previous_hour_content",
+                label="previous-hour content summary",
+                errors=errors,
+                fallback={},
+                awaitable=_source_content_summary(
+                    conn,
+                    "date_trunc('hour', now()) - interval '1 hour'",
+                    "date_trunc('hour', now())",
+                ),
+                cache_key="previous_hour_content",
+                cache_ttl=60,
+                timeout=3,
+            )
+            previous_rate = await _source_matrix_section(
+                section="previous_hour_rate",
+                label="previous-hour rate summary",
+                errors=errors,
+                fallback={},
+                awaitable=_source_rate_summary(
+                    conn,
+                    "date_trunc('hour', now()) - interval '1 hour'",
+                    "date_trunc('hour', now())",
+                ),
+                cache_key="previous_hour_rate",
+                cache_ttl=60,
+                timeout=3,
+            )
+            day_content = await _source_matrix_section(
+                section="day_content",
+                label="24h content summary",
+                errors=errors,
+                fallback={},
+                awaitable=_source_content_summary(
+                    conn,
+                    "now() - interval '24 hours'",
+                    include_media=False,
+                ),
+                cache_key="day_content",
+                cache_ttl=120,
+                prefer_stale_cache=True,
+                timeout=_SOURCE_MATRIX_DAY_CONTENT_TIMEOUT_SECONDS,
+            )
+            day_rate = await _source_matrix_section(
+                section="day_rate",
+                label="24h rate summary",
+                errors=errors,
+                fallback={},
+                awaitable=_source_rate_summary(conn, "now() - interval '24 hours'"),
+                cache_key="day_rate",
+                cache_ttl=120,
+                timeout=3,
+            )
+            media_totals = await _source_matrix_section(
+                section="media_totals",
+                label="media totals",
+                errors=errors,
+                fallback={"__stats_unavailable__": True},
+                awaitable=_source_media_totals(conn),
+                cache_key="media_totals",
+                cache_ttl=120,
+                prefer_stale_cache=True,
+                timeout=_SOURCE_MATRIX_MEDIA_TOTALS_TIMEOUT_SECONDS,
+            )
+            if _SOURCE_MATRIX_ENABLE_YOUTUBE_BACKLOG:
+                youtube_media_backlog = await _source_matrix_section(
+                    section="youtube_media_backlog",
+                    label="youtube media backlog",
+                    errors=errors,
+                    fallback={},
+                    awaitable=_youtube_media_backlog(conn),
+                    cache_key="youtube_media_backlog",
+                    cache_ttl=300,
+                    timeout=_SOURCE_MATRIX_YOUTUBE_BACKLOG_TIMEOUT_SECONDS,
+                )
+            else:
+                cached_backlog = _YOUTUBE_MEDIA_BACKLOG_CACHE.get("row")
+                youtube_media_backlog = dict(cached_backlog) if isinstance(cached_backlog, dict) else {
+                    "stats_unavailable": True,
+                    "stats_error": "skipped_on_live_source_matrix",
+                }
+                youtube_media_backlog["stats_stale"] = True
+            active_cursors = await _source_matrix_section(
+                section="active_cursors",
+                label="active cursor summary",
+                errors=errors,
+                fallback={},
+                awaitable=_active_rate_limit_cursor_summary(conn),
+                cache_key="active_cursors",
+                cache_ttl=30,
+            )
+            browser_extension = await _source_matrix_section(
+                section="browser_extension",
+                label="browser extension summary",
+                errors=errors,
+                fallback=_browser_extension_fallback_payload("TimeoutError"),
+                awaitable=_browser_extension_payload(conn),
+                cache_key="browser_extension",
+                cache_ttl=15,
+                stale_ttl=3600,
+                timeout=_SOURCE_MATRIX_BROWSER_EXTENSION_TIMEOUT_SECONDS,
+            )
+    finally:
+        if conn is not None:
+            await _release_dashboard_conn(pool, conn, "source matrix")
+
+    if str((browser_extension.get("ingest_health") or {}).get("state") or "") == "unknown":
+        fast_browser_extension = await _browser_extension_fallback_payload_with_fast_ingest("TimeoutError")
+        if (fast_browser_extension.get("ingest_health") or {}).get("active"):
+            browser_extension = fast_browser_extension
+        else:
+            browser_extension = _browser_extension_apply_maintenance_ingest_fallback(browser_extension)
+
+    generated_at = datetime.now(timezone.utc)
+    live_sources = [*live_sources, *beeper_subsources]
+    media_totals_unavailable = bool(media_totals.get("__stats_unavailable__"))
+    media_total_unavailable_row = {
+        "stats_unavailable": True,
+        "stats_error": next(
+            (
+                error.get("error")
+                for error in errors
+                if error.get("section") in {"media_totals", "source_liveness"}
+            ),
+            "unavailable",
+        ),
+    }
+    extension_by_source = _extension_issues_by_source(browser_extension)
+    rows = [
+        _source_matrix_row(
+            source_row,
+            current_content.get(source_row["source"]),
+            current_rate.get(source_row["source"]),
+            day_content.get(source_row["source"]),
+            day_rate.get(source_row["source"]),
+            (
+                media_totals.get(source_row["source"])
+                or (
+                    {
+                        "stats_unavailable": True,
+                        "stats_error": "beeper_subsource_timeout",
+                    }
+                    if source_row.get("parent_source") == "beeper"
+                    and media_totals.get("__beeper_subsource_stats_unavailable__")
+                    else None
+                )
+                or (media_total_unavailable_row if media_totals_unavailable else None)
+            ),
+            active_cursors.get(source_row["source"]),
+            extension_by_source.get(source_row["source"], []),
+            generated_at,
+            youtube_media_backlog if source_row["source"] == "youtube" else None,
+            rolling_content.get(source_row["source"]),
+        )
+        for source_row in live_sources
+    ]
+    for row in rows:
+        source = row["source"]
+        row["last_complete_hour"] = _merge_source_window(
+            previous_content.get(source),
+            previous_rate.get(source),
+        )
+        row["last_24h"] = _apply_recent_media_floor_to_day_window(
+            row["last_24h"],
+            row["current_hour"],
+            row["last_complete_hour"],
+        )
+    severity_rank = {"error": 0, "warning": 1, "ok": 2}
+    rows.sort(key=lambda r: (
+        severity_rank.get((r.get("blocker") or {}).get("severity"), 3),
+        r.get("source") or "",
+    ))
+    current_hour_started_at = generated_at.replace(minute=0, second=0, microsecond=0)
+    previous_hour_started_at = current_hour_started_at - timedelta(hours=1)
+    return {
+        "generated_at": generated_at,
+        "current_hour_started_at": current_hour_started_at,
+        "last_complete_hour_started_at": previous_hour_started_at,
+        "summary": {
+            "current_hour": {
+                **_source_window_totals(rows, "current_hour"),
+                "started_at": current_hour_started_at,
+                "elapsed_seconds": int((generated_at - current_hour_started_at).total_seconds()),
+            },
+            "last_complete_hour": {
+                **_source_window_totals(rows, "last_complete_hour"),
+                "started_at": previous_hour_started_at,
+                "elapsed_seconds": 3600,
+            },
+            "last_24h": {
+                **_source_window_totals(rows, "last_24h"),
+                "started_at": generated_at - timedelta(hours=24),
+                "elapsed_seconds": 86400,
+            },
+        },
+        "sources": rows,
+        "whatsapp_bridge_health": whatsapp_bridge_health,
+        "browser_extension": {
+            "expected_version": browser_extension.get("expected_version"),
+            "extension_id": browser_extension.get("extension_id"),
+            "reload_url": browser_extension.get("reload_url"),
+            "maintenance": browser_extension.get("maintenance"),
+            "ingest_health": browser_extension.get("ingest_health"),
+            "issues": browser_extension.get("issues", []),
+        },
+        "errors": errors,
+    }
+
+
+_PLATFORM_POSTS = {
+    "instagram": "instagram_posts", "tiktok": "tiktok_posts", "lemon8": "lemon8_posts",
+    "youtube": "youtube_videos", "threads": "threads_posts", "facebook": "facebook_posts",
+    "x": "x_posts", "strava": "strava_activities", "search": "search_results",
+    "website": "website_pages", "github": "github_commits",
+}
+_PLATFORM_MESSAGES = {
+    "telegram": ("telegram_messages", "collected_at"),
+    "whatsapp": ("whatsapp_messages", "collected_at"),
+    "beeper": ("beeper_shadow_messages", "ingested_at"),
+}
+
+
+def _normalize_beeper_network(message_network: str | None, chat_network: str | None = None) -> str:
+    return _beeper_network_label(message_network, chat_network)
+
+
+def _messaging_policy(native_source: str | None) -> str:
+    if native_source:
+        return f"{native_source} native is canonical; Beeper is a mirror/backstop"
+    return "Beeper is canonical until a native collector exists"
+
+
+_LATEST_ACTIVITY_QUERIES = {
+    "telegram": ("SELECT max(collected_at) FROM telegram_messages", "telegram messages"),
+    "whatsapp": ("SELECT max(collected_at) FROM whatsapp_messages", "whatsapp messages"),
+    "beeper": ("SELECT max(ingested_at) FROM beeper_shadow_messages", "beeper messages"),
+    "instagram": ("SELECT max(collected_at) FROM instagram_posts", "instagram posts"),
+    "tiktok": ("SELECT max(collected_at) FROM tiktok_posts", "tiktok posts"),
+    "lemon8": ("SELECT max(collected_at) FROM lemon8_posts", "lemon8 posts"),
+    "threads": ("SELECT max(collected_at) FROM threads_posts", "threads posts"),
+    "facebook": ("SELECT max(collected_at) FROM facebook_posts", "facebook posts"),
+    "x": ("SELECT max(collected_at) FROM x_posts", "x posts"),
+    "youtube": ("SELECT max(collected_at) FROM youtube_videos", "youtube videos"),
+    "website": ("SELECT max(collected_at) FROM website_pages", "website pages"),
+    "github": (
+        """
+        SELECT max(ts)
+        FROM (
+            SELECT max(collected_at) AS ts FROM github_users
+            UNION ALL
+            SELECT max(collected_at) AS ts FROM github_repos
+            UNION ALL
+            SELECT max(collected_at) AS ts FROM github_commits
+            UNION ALL
+            SELECT max(collected_at) AS ts FROM github_issues
+            UNION ALL
+            SELECT max(collected_at) AS ts FROM github_issue_comments
+            UNION ALL
+            SELECT max(collected_at) AS ts FROM github_pr_reviews
+            UNION ALL
+            SELECT max(collected_at) AS ts FROM github_pr_review_comments
+            UNION ALL
+            SELECT max(collected_at) AS ts FROM github_edges
+        ) progress
+        """,
+        "GitHub profile, repo, commit, issue, PR review, comment, or edge rows",
+    ),
+    "strava": (
+        """
+        SELECT max(ts)
+        FROM (
+            SELECT max(collected_at) AS ts FROM strava_activities
+            UNION ALL
+            SELECT max(collected_at) AS ts FROM strava_gps_streams
+            UNION ALL
+            SELECT max(collected_at) AS ts FROM media_items WHERE source='strava'
+        ) progress
+        """,
+        "strava activity, GPS stream, or media rows",
+    ),
+    "search": ("SELECT max(collected_at) FROM search_results", "search results"),
+}
+
+
+# /platform/{name}/summary route extracted to api/accounts.py during
+# PERF-002 4A step 18 (cluster 6).
+
+# /social/follow-edges/stats route extracted to api/social.py during PERF-002
+# 4A step 15 (cluster 4).
+# Cookie-authenticated sources (session cookies under /app/credentials/<source>/).
+# Cookie-authenticated sources + their session-cookie name(s). lemon8 is dropped
+# (extension-based, no cookies); github uses a token, not cookies.
+_COOKIE_SOURCES = {
+    "instagram": ("sessionid",),
+    "tiktok": ("sessionid", "sessionid_ss"),
+    "strava": ("_strava4_session",),
+    "youtube": ("__Secure-3PSID", "SID", "LOGIN_INFO"),
+}
+
+
+def _audit_cookie_file(path: Path, session_keys) -> dict | None:
+    """Parse a Netscape cookie file: age, session-cookie presence, expiry."""
+    import time as _t
+    try:
+        size = path.stat().st_size
+        age_days = round((_t.time() - path.stat().st_mtime) / 86400, 1)
+    except Exception:
+        return None
+    if size == 0:
+        return {"file": path.name, "age_days": age_days, "has_session": False,
+                "expiry_days": None, "reason": "empty file"}
+    session_name = None
+    exp = None
+    try:
+        for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            if line.startswith("#") or "\t" not in line:
+                continue
+            parts = line.strip().split("\t")
+            if len(parts) >= 7 and parts[5] in session_keys and parts[6]:
+                session_name = parts[5]
+                try:
+                    exp = float(parts[4])
+                except Exception:
+                    exp = None
+                break
+    except Exception:
+        pass
+    if not session_name:
+        return {"file": path.name, "age_days": age_days, "has_session": False,
+                "expiry_days": None, "reason": "no session cookie"}
+    expiry_days = None
+    reason = None
+    if exp and exp > 0:
+        expiry_days = round((exp - _t.time()) / 86400, 1)
+        if expiry_days < 0:
+            reason = "cookie expired"
+    return {"file": path.name, "age_days": age_days, "has_session": True,
+            "expiry_days": expiry_days, "reason": reason}
+
+
+# /accounts route extracted to api/accounts.py during PERF-002 4A step 18
+# (cluster 6).
+
+async def _realtime_feed_status_from_redis() -> dict:
+    try:
+        import redis.asyncio as aioredis
+        from src.notifications import realtime_feed
+    except Exception as exc:  # noqa: BLE001 - Redis is optional for dashboard visibility.
+        return {"available": False, "error": exc.__class__.__name__}
+
+    client = None
+    try:
+        client = aioredis.from_url(
+            realtime_feed._redis_url(),  # noqa: SLF001 - shared env parsing, no secrets returned.
+            decode_responses=True,
+            socket_timeout=1.5,
+            socket_connect_timeout=1.5,
+        )
+        await client.ping()
+        queue_depth = int(await client.llen(realtime_feed._queue_key()) or 0)  # noqa: SLF001
+        deferred_burst = int(await client.get(realtime_feed.DEFERRED_KEY_DEFAULT) or 0)
+        failed_depth = int(await client.llen(realtime_feed.FAILED_KEY_DEFAULT) or 0)
+        local_fallback_total = int(await client.get(realtime_feed.LOCAL_FALLBACK_TOTAL_KEY) or 0)
+        raw_by_source = await client.hgetall(realtime_feed.LOCAL_FALLBACK_BY_SOURCE_KEY)
+        by_source = {
+            str(source): int(count or 0)
+            for source, count in (raw_by_source or {}).items()
+        }
+        raw_by_reason = await client.hgetall(realtime_feed.LOCAL_FALLBACK_BY_REASON_KEY)
+        by_reason = {
+            str(reason): int(count or 0)
+            for reason, count in (raw_by_reason or {}).items()
+        }
+        raw_by_source_reason = await client.hgetall(realtime_feed.LOCAL_FALLBACK_BY_SOURCE_REASON_KEY)
+        by_source_reason: dict[str, dict[str, int]] = {}
+        for field, count in (raw_by_source_reason or {}).items():
+            source_name, sep, reason = str(field or "").partition(":")
+            if not sep:
+                continue
+            by_source_reason.setdefault(source_name, {})[reason] = int(count or 0)
+        raw_source_counters = await client.hgetall(realtime_feed.SOURCE_COUNTER_TOTALS_KEY)
+        source_counters = realtime_feed.source_counters_from_hash(raw_source_counters)
+        last_raw = await client.get(realtime_feed.LOCAL_FALLBACK_LAST_KEY)
+        try:
+            last = json.loads(last_raw) if last_raw else None
+        except json.JSONDecodeError:
+            last = None
+        return {
+            "available": True,
+            "queue_depth": queue_depth,
+            "skipped_burst": deferred_burst,
+            "deferred_burst": deferred_burst,
+            "failed_depth": failed_depth,
+            "local_fallback_total": local_fallback_total,
+            "local_fallback_by_source": by_source,
+            "local_fallback_by_reason": by_reason,
+            "local_fallback_by_source_reason": by_source_reason,
+            "local_fallback_last": last,
+            "source_counters": source_counters,
+        }
+    except Exception as exc:  # noqa: BLE001 - dashboard should degrade, not fail.
+        return {"available": False, "error": exc.__class__.__name__}
+    finally:
+        if client is not None:
+            with contextlib.suppress(Exception):
+                await client.aclose()
+
+
+async def _realtime_delivery_ledger_status() -> dict:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        exists = await conn.fetchval("SELECT to_regclass('public.realtime_media_deliveries')")
+        if not exists:
+            return {"available": False, "reason": "table_missing"}
+        status_rows = await conn.fetch(
+            """
+            SELECT status, count(*)::int AS count
+            FROM realtime_media_deliveries
+            WHERE updated_at >= NOW() - INTERVAL '24 hours'
+            GROUP BY status
+            ORDER BY status
+            """,
+            timeout=3,
+        )
+        source_rows = await conn.fetch(
+            """
+            SELECT source,
+                   count(*)::int AS total,
+                   count(*) FILTER (WHERE status = 'enqueued')::int AS enqueued,
+                   count(*) FILTER (WHERE status = 'delivered')::int AS delivered,
+                   count(*) FILTER (WHERE status = 'skipped')::int AS skipped,
+                   count(*) FILTER (WHERE status = 'deduped')::int AS deduped,
+                   count(*) FILTER (WHERE status = 'too_large')::int AS too_large,
+                   count(*) FILTER (WHERE status = 'failed')::int AS failed,
+                   max(updated_at) AS latest_at
+            FROM realtime_media_deliveries
+            WHERE updated_at >= NOW() - INTERVAL '24 hours'
+            GROUP BY source
+            ORDER BY latest_at DESC NULLS LAST
+            LIMIT 30
+            """,
+            timeout=3,
+        )
+        latest_rows = await conn.fetch(
+            """
+            SELECT source, content_id, status, reason, file_size, content_type,
+                   target_name, updated_at
+            FROM realtime_media_deliveries
+            ORDER BY updated_at DESC
+            LIMIT 10
+            """,
+            timeout=3,
+        )
+        reason_rows = await conn.fetch(
+            """
+            SELECT COALESCE(telegram_result->>'fallback_bucket', reason, 'unknown') AS reason,
+                   count(*)::int AS count
+            FROM realtime_media_deliveries
+            WHERE updated_at >= NOW() - INTERVAL '24 hours'
+              AND (
+                telegram_result ? 'fallback_bucket'
+                OR reason IN ('local_media_text_fallback', 'telegram_too_large', 'telegram_send_failed')
+              )
+            GROUP BY 1
+            ORDER BY count DESC, reason
+            """,
+            timeout=3,
+        )
+    return {
+        "available": True,
+        "window_hours": 24,
+        "status_counts": {row["status"]: int(row["count"] or 0) for row in status_rows},
+        "reason_counts": {row["reason"]: int(row["count"] or 0) for row in reason_rows},
+        "by_source": [dict(row) for row in source_rows],
+        "latest": [dict(row) for row in latest_rows],
+    }
+# /instagram/health + /ingestion/hourly routes and their helpers extracted
+# to api/ingestion.py during PERF-002 4A step 19 (cluster 7).
+
+def _jsonish(value):
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except Exception:
+            return {}
+    return value if isinstance(value, dict) else {}
+
+
+# /domain-pacing/status and /api-quotas/status routes + their impl functions
+# extracted to api/ops.py during PERF-002 4A step 14 (cluster 8).
+
+
+# Social registry routes (/social/stats, /social/network, /social/users,
+# /social/scrape-config, /social HTML page) extracted to api/social.py
+# during PERF-002 4A step 15 (cluster 4).
+
+
+# /dlq route extracted to api/ops.py during PERF-002 4A step 14 (cluster 8).
+
+
+# TargetRequest, _target_already_known, POST/DELETE/GET /targets, PUT /schedules/{source}
+# and GET /runs/{run_id} extracted to api/targets.py + api/schedules.py during
+# PERF-002 4A step 17 (cluster 3).
+
+# /collectors/{source} route extracted to api/collectors_core.py during
+# PERF-002 4A step 21 (cluster 2).
+
+# /graph and /messaging/coverage routes extracted to api/misc.py during
+# PERF-002 4A step 20 (cluster 9).
+
+# ── Media browser ──
+
+
+# /stories/overview route extracted to api/misc.py during PERF-002 4A step 20.
+
+def _parse_media_uuid(media_id: str) -> _uuid.UUID:
+    """Validate the ``media_id`` path param as a UUID.
+
+    ``media_items.id`` is a UUID but the endpoint was previously typed ``int``,
+    so every ``Number(item.id)`` from the frontend turned into ``NaN`` and the
+    request got a 422 -- which is what the "broken image" tiles in the media
+    browser actually were.
+    """
+    try:
+        return _uuid.UUID(media_id)
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=404, detail="Invalid media id")
+
+
+def _is_relative_to_path(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _allowed_media_roots() -> list[Path]:
+    """Roots that are allowed to serve media_items.file_path values.
+
+    Legacy collectors store paths under COLLECTOR_DRIVE_PATH. New vault-backed
+    media blobs are keyed by sha256 under VAULT_ROOT/media. Both locations map
+    to the same external vault in production, but containers can see them as
+    distinct mount points.
+    """
+    from src.core.drive_check import DRIVE_PATH as _DRIVE_PATH
+
+    _vault_root = _p("VAULT_ROOT", VAULT_ROOT)
+    roots = [
+        Path(_DRIVE_PATH).resolve(),
+        (Path(_vault_root) / "media").resolve(),
+    ]
+    unique: list[Path] = []
+    for root in roots:
+        if root not in unique:
+            unique.append(root)
+    return unique
+
+
+def _resolve_media_path(file_path_str: str) -> Path:
+    """Resolve a media_items.file_path, constrained to configured media roots.
+
+    Raises HTTPException (403/404) on traversal or a missing file. Shared by the
+    thumbnail + file endpoints so a poisoned file_path can't serve host files.
+    """
+    if not file_path_str:
+        raise HTTPException(status_code=404, detail="Media path missing")
+    file_path = Path(file_path_str).resolve()
+    if not any(_is_relative_to_path(file_path, root) for root in _allowed_media_roots()):
+        raise HTTPException(status_code=403, detail="Path outside media roots")
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail="File not found on disk")
+    return file_path
+
+
+def _thumbnail_placeholder(label: str, detail: str = "") -> Response:
+    safe_label = html.escape((label or "media").upper()[:24])
+    safe_detail = html.escape((detail or "preview unavailable")[:64])
+    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="300" height="300" viewBox="0 0 300 300" role="img" aria-label="{safe_label}">
+<rect width="300" height="300" fill="#111827"/>
+<rect x="18" y="18" width="264" height="264" rx="10" fill="#1f2937" stroke="#374151" stroke-width="2"/>
+<circle cx="150" cy="122" r="34" fill="#4b5563"/>
+<path d="M142 104 L172 122 L142 140 Z" fill="#e5e7eb"/>
+<text x="150" y="190" text-anchor="middle" fill="#f9fafb" font-family="Arial, sans-serif" font-size="24" font-weight="700">{safe_label}</text>
+<text x="150" y="218" text-anchor="middle" fill="#9ca3af" font-family="Arial, sans-serif" font-size="13">{safe_detail}</text>
+</svg>"""
+    return Response(
+        content=svg,
+        media_type="image/svg+xml",
+        headers={"Cache-Control": "private, max-age=300"},
+    )
+
+
+
+
+# ── WhatsApp: Users ──
+
+
+
+# ── WhatsApp: Chats & messages (Baileys bridge → RabbitMQ → collector) ──
+#
+# Same two-pane pattern as /instagram/dms/threads + /instagram/dms/thread/{id}
+# but backed by whatsapp_chats + whatsapp_messages + whatsapp_users. The path
+# param on the message endpoint is the platform_chat_id (JID e.g.
+# 6591234567@s.whatsapp.net or 120363xxx@g.us) — chat_id in the DB is a uuid
+# so we look up by JID and rewrite to the fk before fetching messages.
+#
+# media_id is joined from media_items on file_path = media_url so the frontend
+# can reuse /media/{id}/thumbnail + /media/{id}/file (already drive-confined)
+# instead of a new WhatsApp-specific media proxy.
+
+
+
+# ── Instagram: DMs (captured ban-safely by the extension observing direct_v2) ──
+
+# DM routes (/instagram/dms/*, /tiktok/dms/*, /dm/telemetry) extracted to
+# api/dm.py during PERF-002 4A step 16 (cluster 5).
+
+# ── WhatsApp: Links ──
+
+
+
+
+
+# /worker/health route extracted to api/misc.py during PERF-002 4A step 20.
+
+# /schedules (GET/POST), /schedules/{source} DELETE, /targets GET, /runs GET
+# extracted to api/schedules.py + api/targets.py during PERF-002 4A step 17.
+
+# ── Strava following-feed endpoints ──
+#
+# Powers the dashboard /strava/feed page. All endpoints are read-only and
+# require viewer role. Backed by the strava_activities table, which is
+# populated by both the API path (collect_athlete_profile/_collect_activities_api)
+# and the cookie path (fetch_feed_for_date / backfill_feed_history).
