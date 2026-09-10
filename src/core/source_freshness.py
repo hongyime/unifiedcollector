@@ -451,7 +451,16 @@ async def compute_liveness(conn) -> list[dict]:
         _env_int("BROWSER_CONTENT_STALE_WARN_SECONDS", 3600, min_value=300),
         min_value=300,
     )
-    browser_content_stale_after = _env_int("BROWSER_CONTENT_STALE_WARN_SECONDS", 3600, min_value=300)
+    # Per-source browser_content_stale threshold — default 3600s, but FB/Threads/X
+    # legitimately go quiet for longer periods (rate-limit cooldowns, low-activity
+    # overnight windows). Allow per-source overrides via env vars so these sources
+    # don't fire browser_content_stale during normal quiet periods.
+    _browser_content_stale_defaults: dict[str, int] = {
+        "facebook": _env_int("BROWSER_CONTENT_STALE_FACEBOOK_SECONDS", 7200, min_value=300),
+        "threads":  _env_int("BROWSER_CONTENT_STALE_THREADS_SECONDS",  7200, min_value=300),
+        "x":        _env_int("BROWSER_CONTENT_STALE_X_SECONDS",        7200, min_value=300),
+    }
+    _browser_content_stale_global = _env_int("BROWSER_CONTENT_STALE_WARN_SECONDS", 3600, min_value=300)
     browser_media_zero_store_min_observed = _env_int(
         "BROWSER_MEDIA_ZERO_STORE_MIN_OBSERVED",
         100,
@@ -560,8 +569,15 @@ async def compute_liveness(conn) -> list[dict]:
                     detail = f"{detail}; browser capture warning: {browser_detail}"
             else:
                 detail = f"{detail}; {browser_detail}"
+        # Suppress browser_content_stale when auth_paused (e.g. Instagram 429
+        # cooldown): silence is expected, not a collection failure.
+        _auth_paused_or_rate_limited = hs in {"auth_paused"}
+        browser_content_stale_after = _browser_content_stale_defaults.get(
+            name, _browser_content_stale_global
+        )
         browser_content_stale = (
-            name in _BROWSER_CONTENT_PROGRESS_SOURCES
+            not _auth_paused_or_rate_limited
+            and name in _BROWSER_CONTENT_PROGRESS_SOURCES
             and (
                 browser_content_age > browser_content_stale_after
                 if browser_content_age is not None
