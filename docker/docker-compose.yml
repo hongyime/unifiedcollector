@@ -436,7 +436,13 @@ services:
       WATCHDOG_INTERVAL: "300"
       WATCHDOG_STALE_TELEGRAM: "3600"
       WATCHDOG_STALE_WHATSAPP: "14400"
-      WATCHDOG_STALE_BEEPER: "10800"
+      # Beeper threshold raised 2026-09-10 from 3h to 12h. Bryan's connected
+      # Beeper networks (Discord/Telegram bridging) go quiet overnight in
+      # single-tenant use, so 3h triggered 19 false-positive restarts in a
+      # 10h window. 12h aligns with the ig/tiktok/yt tier and still catches
+      # a truly-dead bridge (which manifests as bridge_unpaired 503s picked
+      # up separately by bridge_unpaired_alert scheduler tick).
+      WATCHDOG_STALE_BEEPER: "43200"
       X_SOURCE_MANUAL_MODE: "${X_SOURCE_MANUAL_MODE:-0}"
       # Notify-with-buttons instead of instant auto-restart. Grace window in
       # seconds; if operator does not press [Restart]/[Ignore] within grace,

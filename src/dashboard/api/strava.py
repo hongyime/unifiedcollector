@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 
 from src.db.connection import get_pool
+from src.core.strava_route_queue import fetch_strava_route_capture_queue
 from src.dashboard.api.auth import require_role
 from src.dashboard.api.helpers import (
     _acquire_dashboard_conn,
