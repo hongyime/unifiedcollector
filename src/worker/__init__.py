@@ -329,6 +329,38 @@ class WorkerService:
         except Exception:
             logger.warning("worker: could not install recoverable Telethon warning filter", exc_info=True)
 
+        # Silence asyncio's "Future exception was never retrieved" for known-
+        # noise reconnect-churn errors. Telethon spawns internal tasks whose
+        # exceptions bubble to asyncio's default handler when the task is
+        # discarded — for connection_lost / ConnectionResetError variants that
+        # the recoverable-warning filter already covers, log at DEBUG instead
+        # of ERROR. Preserves upstream handler for everything else.
+        try:
+            _loop = asyncio.get_running_loop()
+            _prior_handler = _loop.get_exception_handler()
+
+            def _suppress_reconnect_noise(loop, context):
+                exc = context.get("exception")
+                msg = str(context.get("message") or "")
+                exc_msg = str(exc) if exc else ""
+                if "Future exception was never retrieved" in msg or "connection_lost() call" in exc_msg:
+                    logger.debug(
+                        "asyncio suppressed reconnect noise: %s", exc_msg or msg,
+                    )
+                    return
+                if _prior_handler is not None:
+                    _prior_handler(loop, context)
+                else:
+                    loop.default_exception_handler(context)
+
+            _loop.set_exception_handler(_suppress_reconnect_noise)
+            logger.info("worker: asyncio reconnect-noise filter installed")
+        except Exception:
+            logger.warning(
+                "worker: could not install asyncio reconnect-noise filter",
+                exc_info=True,
+            )
+
         if not check_drive():
             logger.warning("Drive not available, waiting...")
             ok = await asyncio.get_event_loop().run_in_executor(
