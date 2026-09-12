@@ -597,8 +597,21 @@ def _default_docker_exe() -> str:
     return "docker"
 
 
+def _env_exclude_table_data() -> list[str]:
+    """Return --exclude-table-data values from env, defaulting to large TOAST tables."""
+    raw = os.getenv("COLLECTOR_DB_BACKUP_EXCLUDE_TABLE_DATA")
+    if raw is None:
+        # Default: skip website_pages row data — 2.2 GB TOAST table that OOMs pg_dump.
+        return ["public.website_pages"]
+    if not raw.strip():
+        return []
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
 def _run_pg_dump(tmp: Path, *, pg_dump_exe: str, database: str) -> None:
     cmd = [pg_dump_exe, "-Fc", "-Z", _env_dump_compression(), "-f", str(tmp)]
+    for table in _env_exclude_table_data():
+        cmd.extend(["--exclude-table-data", table])
     dsn = os.getenv("DATABASE_URL")
     # In Docker, ../.env may still contain a host-facing DATABASE_URL such as
     # localhost:5500. If PGHOST is explicitly set, trust libpq env instead.
