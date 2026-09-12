@@ -598,11 +598,25 @@ def _default_docker_exe() -> str:
 
 
 def _env_exclude_table_data() -> list[str]:
-    """Return --exclude-table-data values from env, defaulting to large TOAST tables."""
+    """Return --exclude-table-data values from env, defaulting to large TOAST tables.
+
+    These tables have heavy raw_payload/content JSONB/TEXT columns (2-5 GB each).
+    pg_dump stalls mid-COPY on their TOAST pages, hitting the 30-min stall timeout.
+    Schema + indexes are preserved; only row data is excluded.
+    Override via COLLECTOR_DB_BACKUP_EXCLUDE_TABLE_DATA=table1,table2 (empty = exclude nothing).
+    """
     raw = os.getenv("COLLECTOR_DB_BACKUP_EXCLUDE_TABLE_DATA")
     if raw is None:
-        # Default: skip website_pages row data — 2.2 GB TOAST table that OOMs pg_dump.
-        return ["public.website_pages"]
+        return [
+            "public.website_pages",        # 2.3 GB  — content_html/content_text TOAST
+            "public.github_edges",          # 3.7 GB  — raw_payload JSONB TOAST
+            "public.github_commits",        # 4.2 GB  — raw_payload JSONB TOAST
+            "public.telegram_messages",     # 4.3 GB  — content + media TOAST
+            "public.collector_domain_pacing_events",  # 3.6 GB — pacing event log
+            "public.media_items",           # 2.7 GB  — media blobs/metadata TOAST
+            "public.browser_ingest_events", # 2.1 GB  — raw browser event log
+            "public.browser_media_candidates",  # 2.1 GB — browser media log
+        ]
     if not raw.strip():
         return []
     return [part.strip() for part in raw.split(",") if part.strip()]
