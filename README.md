@@ -72,6 +72,8 @@ pwsh scripts/start-scraper-chrome-cdp.ps1
 # "Load unpacked" → select the extension/ directory. Copy the
 # extension ID that appears and set UC_EXTENSION_ID in .env.
 
+# Supply the existing restricted Telegram account allowlist from the private host environment.
+# Compose refuses to start if TELEGRAM_SPIDER_ACCOUNTS is unset or empty.
 # Bring up the stack
 docker compose -f docker/docker-compose.yml up -d
 
@@ -221,20 +223,31 @@ docker exec unifiedcollector_spiderfoot `
     python -m src.recon_maigret_fp_refresh --controls 10 --force
 ```
 
+Before updating an existing deployment, copy its current `TELEGRAM_SPIDER_ACCOUNTS`
+allowlist into the private host environment or an explicit Compose `--env-file`.
+A service-level `env_file` alone does not supply Compose interpolation. Preserve
+the same account names: an empty list in the collector means all accounts, so
+Compose requires a non-empty value and no longer hard-codes personal identities.
+See [Docker interpolation](https://docs.docker.com/compose/how-tos/environment-variables/variable-interpolation/).
+
 ## Testing
 
-**Python suite** (110 test files, ~4.5k asserts, tracked under
-`tests/`):
+**Python suite** (tracked under `tests/`):
 
 ```powershell
 docker exec unifiedcollector_collector sh -c `
     'cd /app && python -m pytest tests/ -q --ignore=tests/verify_clean_boot.py --ignore=tests/verify_production.py'
 ```
 
-CI runs a superset of this on every PR:
-`.github/workflows/python-ci.yml` executes ruff lint (F + E9), the
-above pytest command, and a clean-volume schema-boot verifier against
-`pgvector:pg16`.
+`.github/workflows/python-ci.yml` runs Ruff lint (F + E9), the full
+Python suite with external sockets blocked, and a clean-volume schema
+verifier against `pgvector:pg16`. Node 24 executes pure extension host
+validation fixtures without contacting the browser or upstream providers.
+The schema verifier checks an empty database and a second boot: existing
+row bytes and migration checksums must survive, and the media rollup
+trigger must keep its narrowed update columns. Migration prerequisites
+are declared in `src/db/migrate.py`; applied SQL files retain their names
+and checksums.
 
 **Frontend smoke test** (Vitest + jsdom, `AppShell` render):
 

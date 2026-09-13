@@ -1,7 +1,7 @@
 {
   "task": "Shared database recovery budgets",
   "base": "e96d920629d792e2a122da844745a84b00d3ddb1",
-  "stage": "Draft PR #30; connection regressions pass on hosted Linux/Windows; repository gates remain open",
+  "stage": "Draft remains unmerged; focused checks and PostPlan 74 verified; whole-repository and runtime requirements open",
   "tasks": [
     "Inspect current pool/retry and scheduler/storage boundaries with no live collection.",
     "Reproduce confirmed connection-budget failures and repair shared pool recovery.",
@@ -31,5 +31,31 @@
     "Resolve 229 repository lint findings, 37 failing broad-suite cases and clean-boot migration ordering before merge.",
     "Confirm and verify the running Collector deployment without launching collection or outbound messages.",
     "Supabase migration, run-history/vault/backup retention and all portfolio capacity requirements remain open."
-  ]
+  ],
+  "closeout": {
+    "at": "2026-09-13T03:59:35.433862+00:00",
+    "stage": "checked_draft_and_report_verified",
+    "review": "collector-db-budget-review.json",
+    "source": "6957e84d3464c96de0af4bc66e5ba4c3d8f06943",
+    "pr": "https://github.com/hongyime/unifiedcollector/pull/30",
+    "production_released": false,
+    "publication": {
+      "url": "https://aoo181uudk96.postplan.dev",
+      "version": 74,
+      "verified_at": "2026-09-13T03:58:26.408523+00:00",
+      "local_sha256": "0ccdc2a015da90422099377eeca259aba2b26c8505303e54f9f8abb9cdb54ff9",
+      "hosted_sha256": "0ccdc2a015da90422099377eeca259aba2b26c8505303e54f9f8abb9cdb54ff9",
+      "matches": true
+    },
+    "portfolio_complete": false,
+    "next_rotation": "SGCertWatch lossless storage integration and capacity proof",
+    "remaining": [
+      "Resolve 229 lint findings and 37 failures from the first complete broad Python run; current rerun is recorded separately",
+      "Repair fresh-database migration dependencies without editing applied SQL checksums",
+      "Validate and release to the actual Collector runtime; no Vercel project maps to this service",
+      "WhatsApp bridge sharp high-severity dependency alert",
+      "Lossless Supabase migration, run-history/vault/backup retention and monthly quota headroom"
+    ],
+    "runtime_location_question": "Asked where UnifiedCollector runs; no deployment target assumed."
+  }
 }

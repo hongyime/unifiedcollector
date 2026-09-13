@@ -22,7 +22,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.collectors import telegram as tg_mod
 from src.collectors.telegram import TelegramCollector, _parse_optional_int_env
 
 

@@ -56,6 +56,40 @@ SKIP: frozenset[str] = frozenset({
     "drop_wa_face_tables.sql",  # destructive DROP — archived; apply by hand if needed
 })
 
+# Dated and older descriptive filenames coexist. Preserve names/checksums in
+# existing ledgers; move only declared prerequisites ahead of their dependants.
+MIGRATION_DEPENDENCIES: dict[str, tuple[str, ...]] = {
+    "20260802_limit_media_rollup_trigger_updates.sql": ("add_media_source_rollups.sql",),
+}
+
+
+def _ordered_migrations(
+    directory: Path, dependencies: dict[str, tuple[str, ...]] | None = None,
+) -> list[Path]:
+    dependencies = MIGRATION_DEPENDENCIES if dependencies is None else dependencies
+    paths = {path.name: path for path in directory.glob("*.sql")}
+    ordered: list[Path] = []
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(name: str) -> None:
+        if name in visited:
+            return
+        if name in visiting:
+            raise RuntimeError(f"Migration dependency cycle at {name}")
+        visiting.add(name)
+        for prerequisite in dependencies.get(name, ()) if name not in SKIP else ():
+            if prerequisite not in paths or prerequisite in SKIP:
+                raise RuntimeError(f"Migration {name} requires unavailable prerequisite {prerequisite}")
+            visit(prerequisite)
+        visiting.remove(name)
+        visited.add(name)
+        ordered.append(paths[name])
+
+    for name in sorted(paths):
+        visit(name)
+    return ordered
+
 _LEDGER_DDL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
     filename    TEXT PRIMARY KEY,
@@ -75,6 +109,8 @@ async def apply_all(pool) -> dict:
     Idempotent and safe to call on every service startup.
     """
     summary = {"schemas": 0, "migrations_applied": [], "migrations_skipped": 0, "deferred": False}
+    # Validate the entire order before acquiring a connection or applying DDL.
+    migration_paths = _ordered_migrations(MIGRATIONS_DIR)
 
     async with pool.acquire() as conn:
         try:
@@ -143,7 +179,7 @@ async def apply_all(pool) -> dict:
             }
 
             if MIGRATIONS_DIR.is_dir():
-                for sql_file in sorted(MIGRATIONS_DIR.glob("*.sql")):
+                for sql_file in migration_paths:
                     name = sql_file.name
                     if name in SKIP:
                         summary["migrations_skipped"] += 1

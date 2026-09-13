@@ -50,3 +50,6 @@ google-auth-oauthlib==1.4.0
 pgvector==0.4.2
 matrix-nio[e2e]==0.25.2
 python-telegram-bot==22.7
+
+# Chrome DevTools connection used by browser maintenance commands.
+websocket-client==1.9.2

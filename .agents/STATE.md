@@ -1,3 +1,21 @@
+Portfolio CI repair — 2026-09-13
+
+- Draft PR #30 repairs migration dependency order, missing dashboard helpers and Telegram startup behavior.
+- Local validation: 229 lint findings resolved; 313 distinct focused cases pass. Full hosted suite and clean PostgreSQL replay remain pending.
+- Original checkout, SQL files, environment and application records are preserved. Runtime location remains pending; no production deployment.
+- Five-task list: .agents/handoffs/collector-ci-repair-20260913.json.
+
+Portfolio checkpoint — 2026-09-13
+
+- Draft PR #30: database recovery passes 16 Linux/Windows cases; 26 local related cases pass. Environment-template coverage passes all 26 services.
+- Whole-repository gates remain open: 229 lint findings, 37 unit failures, and fresh-database trigger/function ordering. No production deployment or database migration. Runtime location requested.
+- PostPlan 74 is published and verified; details are in .agents/handoffs/collector-db-budget-20260913.json. Original local edits are preserved.
+
+Portfolio maintenance — 2026-09-13
+
+- Investigating the shared database retry deadline and resource cleanup in isolated tests. Production collectors and application records remain unchanged.
+- Current task list is in .agents/handoffs/collector-db-budget-20260913.json.
+
 Updated: 2026-08-25 14:20 UTC / 22:20 SGT
 
 Current live update:

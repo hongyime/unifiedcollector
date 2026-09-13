@@ -52,7 +52,6 @@ import logging
 import os
 import sys
 import tempfile
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable

@@ -5,18 +5,12 @@ Routes registered on ``router`` (APIRouter) and included by ``__init__.py``.
 """
 from __future__ import annotations
 
-import asyncio
-import html
 import json
 import logging
-import os
-import re
 import time
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
+from fastapi import APIRouter, Depends
 
 from src.db.connection import get_pool
 from src.dashboard.api.auth import require_role
@@ -64,6 +58,7 @@ router = APIRouter()
 @router.get("/rate-limits/recent")
 async def recent_rate_limits(hours: int = 24, limit: int = 100,
                              _user: dict = Depends(require_role("viewer"))):
+    from src.dashboard import api as dashboard_api
     hours = max(1, min(hours, 168))
     limit = max(1, min(limit, 500))
     pool = await _get_pool()
@@ -131,7 +126,7 @@ async def recent_rate_limits(hours: int = 24, limit: int = 100,
                 """,
                 timeout=8,
             ):
-                d = _rate_limit_cursor_payload(r, now_utc)
+                d = dashboard_api._rate_limit_cursor_payload(r, now_utc)
                 cursor_history.append(d)
                 if d["active_now"] or (d.get("status") == "blocked" and not d.get("active_until")):
                     active.append(d)

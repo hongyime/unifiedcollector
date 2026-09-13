@@ -5,12 +5,15 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def _read(path: str) -> str:
-    return (ROOT / path).read_text(encoding="utf-8")
+    target = ROOT / path
+    if target.is_dir():
+        return "\n".join(file.read_text(encoding="utf-8") for file in sorted(target.rglob("*.py")))
+    return target.read_text(encoding="utf-8")
 
 
 def test_native_tier1_raw_payload_surfaces_have_rebuild_targets():
     expectations = {
-        "src/collectors/telegram/__init__.py": [
+        "src/collectors/telegram": [
             '"telegram_chats"',
             '"telegram_users"',
             '"telegram_messages"',
@@ -61,7 +64,7 @@ def test_native_tier1_raw_payload_surfaces_have_rebuild_targets():
 
 
 def test_browser_tier1_raw_capture_surfaces_have_rebuild_targets():
-    text = _read("src/bridges/ig_ingest.py")
+    text = _read("src/bridges/ig_ingest")
     for endpoint in (
         '"profile"',
         '"posts"',

@@ -73,12 +73,43 @@ async def main(dsn: str) -> int:
 
     pool = await asyncpg.create_pool(dsn, min_size=1, max_size=4)
     try:
+        assert not await pool.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM pg_tables WHERE schemaname='public')"
+        ), "Clean-boot verification requires an empty fixture database"
         summary = await apply_all(pool)
+        assert not summary["deferred"], "Fresh schema application was deferred"
         print(f"runner summary: {summary}")
         rows = await pool.fetch(
             "SELECT tablename FROM pg_tables WHERE schemaname='public'"
         )
         present = {r["tablename"] for r in rows}
+        # A table-only check misses a trigger migration applied in the wrong
+        # order, and replay can appear healthy while destroying existing rows.
+        trigger_columns_sql = """
+            SELECT array_agg(a.attname ORDER BY a.attname)
+            FROM pg_trigger t
+            CROSS JOIN LATERAL unnest(t.tgattr::smallint[]) n(attnum)
+            JOIN pg_attribute a ON a.attrelid=t.tgrelid AND a.attnum=n.attnum
+            WHERE t.tgrelid='public.media_items'::regclass AND t.tgname='trg_media_source_rollups'
+        """
+        trigger_columns = await pool.fetchval(trigger_columns_sql)
+        assert trigger_columns == ["collected_at", "file_size", "source"], trigger_columns
+        ledger_before = await pool.fetch("SELECT filename,checksum,applied_at FROM schema_migrations ORDER BY filename")
+        sample_id = await pool.fetchval("""
+            INSERT INTO media_items(source,entity_id,entity_name,content_type,content_id,filename,file_path,file_size,metadata)
+            VALUES ('fixture','fixture','Synthetic fixture','photo','clean-boot-fixture','fixture.jpg','/fixture/fixture.jpg',17,'{"preserved":true}'::jsonb)
+            RETURNING id
+        """)
+        sample_before = await pool.fetchval("SELECT row_to_json(m)::text FROM media_items m WHERE id=$1",sample_id)
+        replay = await apply_all(pool)
+        assert not replay["deferred"] and not replay["migrations_applied"], replay
+        assert await pool.fetchval(trigger_columns_sql) == trigger_columns
+        assert await pool.fetch("SELECT filename,checksum,applied_at FROM schema_migrations ORDER BY filename") == ledger_before
+        assert await pool.fetchval("SELECT row_to_json(m)::text FROM media_items m WHERE id=$1",sample_id) == sample_before
+        assert await pool.fetchval("SELECT total_media_bytes FROM media_source_rollups WHERE source='fixture'") == 17
+        await pool.execute("UPDATE media_items SET file_size=23 WHERE id=$1",sample_id)
+        assert await pool.fetchval("SELECT total_media_bytes FROM media_source_rollups WHERE source='fixture'") == 23
+        print("PASS second boot preserves row bytes and migration ledger; narrowed rollup trigger remains functional")
     finally:
         await pool.close()
 

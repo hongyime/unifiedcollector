@@ -20,7 +20,6 @@ import http.cookiejar
 import logging
 import os
 import random
-import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
