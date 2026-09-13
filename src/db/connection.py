@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import math
 import os
 import ssl as _ssl
 
@@ -45,6 +46,8 @@ def _env_float(name: str, default: float, *, min_value: float = 0.0) -> float:
         value = float(os.getenv(name, str(default)))
     except (TypeError, ValueError):
         return default
+    if not math.isfinite(value):
+        return default
     return max(min_value, value)
 
 
@@ -76,30 +79,76 @@ def _is_retryable_connect_error(exc: BaseException) -> bool:
 
 
 async def _create_pool_with_retry(kwargs: dict) -> asyncpg.Pool:
+    """Bound initialization and retry sleeps together; zero disables retries."""
     max_wait = _env_float("DB_CONNECT_RETRY_TIMEOUT_SECONDS", 180.0, min_value=0.0)
     delay = _env_float("DB_CONNECT_RETRY_INITIAL_SECONDS", 5.0, min_value=0.1)
     max_delay = _env_float("DB_CONNECT_RETRY_MAX_SECONDS", 30.0, min_value=0.1)
-    deadline = asyncio.get_running_loop().time() + max_wait
-    attempt = 0
+    delay = min(delay, max_delay)
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max_wait
 
-    while True:
+    async def connect() -> asyncpg.Pool:
+        initializing = True
+        pending: set[asyncio.Task] = set()
+        connector = kwargs.get("connect") or asyncpg.connect
+
+        async def connect_one(*args, **options):
+            task = asyncio.current_task()
+            tracked = initializing and task is not None
+            if tracked:
+                pending.add(task)
+            try:
+                return await connector(*args, **options)
+            finally:
+                if tracked:
+                    pending.discard(task)
+
+        pool = asyncpg.create_pool(_dsn(), **{**kwargs, "connect": connect_one})
         try:
-            return await asyncpg.create_pool(_dsn(), **kwargs)
-        except Exception as exc:
-            if not _is_retryable_connect_error(exc):
-                raise
-            now = asyncio.get_running_loop().time()
-            if attempt > 0 and now >= deadline:
-                raise
-            sleep_for = min(delay, max(0.1, deadline - now))
-            logger.warning(
-                "Database pool connect failed (%s); retrying in %.0fs",
-                exc,
-                sleep_for,
-            )
-            await asyncio.sleep(sleep_for)
-            delay = min(delay * 1.5, max_delay)
-            attempt += 1
+            ready = await pool
+            initializing = False
+            return ready
+        except BaseException:
+            # Retain ownership until initialization succeeds. In particular,
+            # cancellation must not abandon connections already initialized.
+            # asyncpg warms larger pools with gather(), which leaves siblings
+            # running if one connection fails. Settle them before termination.
+            siblings = pending - {asyncio.current_task()}
+            for task in siblings:
+                task.cancel()
+            try:
+                await asyncio.gather(*siblings, return_exceptions=True)
+            finally:
+                terminate = getattr(pool, "terminate", None)
+                if terminate is not None:
+                    terminate()
+            raise
+
+    if max_wait == 0:
+        return await connect()
+
+    # asyncpg's command_timeout limits queries, not complete pool creation.
+    # One deadline covers initialization and backoff across all attempts.
+    async with asyncio.timeout(max_wait):
+        while True:
+            try:
+                return await connect()
+            except Exception as exc:
+                if not _is_retryable_connect_error(exc):
+                    raise
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise
+                sleep_for = min(delay, remaining)
+                logger.warning(
+                    "Database pool connect failed (%s); retrying in %.1fs",
+                    type(exc).__name__,
+                    sleep_for,
+                )
+                await asyncio.sleep(sleep_for)
+                if loop.time() >= deadline:
+                    raise
+                delay = min(delay * 1.5, max_delay)
 
 
 async def get_pool() -> asyncpg.Pool:
