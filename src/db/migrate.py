@@ -116,7 +116,7 @@ async def _execute_migration(conn, name: str, body: str) -> None:
         # The base schema now includes this migration's composite constraint.
         # Keep its index intact, while still removing obsolete SHA-only keys.
         constraint = await conn.fetchrow("""
-            SELECT c.contype, c.convalidated, c.condeferrable,
+            SELECT c.contype::text AS contype, c.convalidated, c.condeferrable,
                    ARRAY(SELECT a.attname::text FROM unnest(c.conkey) WITH ORDINALITY k(attnum,pos)
                          JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=k.attnum
                          ORDER BY k.pos) AS columns
