@@ -61,6 +61,7 @@ SKIP: frozenset[str] = frozenset({
 MIGRATION_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     "20260802_limit_media_rollup_trigger_updates.sql": ("add_media_source_rollups.sql",),
     "20260906_backfill_telegram_is_bot_from_username.sql": ("add_telegram_is_bot.sql",),
+    "20260906_recreate_dashboard_matrix_aggregate_indexes.sql": ("add_media_items_ingest_path.sql",),
 }
 
 
@@ -220,6 +221,7 @@ async def apply_all(pool) -> dict:
                             )
                             summary["deferred"] = True
                             break  # defer remaining migrations; boot continues
+                        logger.error("Migration %s failed: %s", name, exc.__class__.__name__)
                         raise
                     summary["migrations_applied"].append(name)
                     logger.info("Applied migration: %s", name)
