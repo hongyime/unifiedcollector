@@ -249,6 +249,12 @@ trigger must keep its narrowed update columns. Migration prerequisites
 are declared in `src/db/migrate.py`; applied SQL files retain their names
 and checksums.
 
+**WhatsApp bridge**: from `src/bridges/whatsapp`, run `npm ci --ignore-scripts`,
+`npm run build`, `npm test`, and `npm audit --omit=dev --audit-level=high`.
+Hosted Node 20/24 checks exercise synthetic JPEG/PNG/AVIF decoding and invalid
+input without connecting to WhatsApp. Both Docker stages install the committed
+lockfile; the sharp 0.35.4 patch includes the upstream libheif security fix.
+
 **Frontend smoke test** (Vitest + jsdom, `AppShell` render):
 
 ```powershell

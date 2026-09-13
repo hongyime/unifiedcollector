@@ -96,8 +96,8 @@ async def main(dsn: str) -> int:
         assert trigger_columns == ["collected_at", "file_size", "source"], trigger_columns
         ledger_before = await pool.fetch("SELECT filename,checksum,applied_at FROM schema_migrations ORDER BY filename")
         sample_id = await pool.fetchval("""
-            INSERT INTO media_items(source,entity_id,entity_name,content_type,content_id,filename,file_path,file_size,metadata)
-            VALUES ('fixture','fixture','Synthetic fixture','photo','clean-boot-fixture','fixture.jpg','/fixture/fixture.jpg',17,'{"preserved":true}'::jsonb)
+            INSERT INTO media_items(source,entity_id,entity_name,content_type,content_id,filename,file_path,file_size,metadata,source_url)
+            VALUES ('fixture','fixture','Synthetic fixture','photo','clean-boot-fixture','fixture.jpg','/fixture/fixture.jpg',17,'{"preserved":true}'::jsonb,'https://example.invalid/fixture')
             RETURNING id
         """)
         sample_before = await pool.fetchval("SELECT row_to_json(m)::text FROM media_items m WHERE id=$1",sample_id)

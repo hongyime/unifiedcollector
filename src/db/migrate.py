@@ -60,6 +60,7 @@ SKIP: frozenset[str] = frozenset({
 # existing ledgers; move only declared prerequisites ahead of their dependants.
 MIGRATION_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     "20260802_limit_media_rollup_trigger_updates.sql": ("add_media_source_rollups.sql",),
+    "20260906_backfill_telegram_is_bot_from_username.sql": ("add_telegram_is_bot.sql",),
 }
 
 

@@ -2,6 +2,7 @@ Portfolio CI repair — 2026-09-13
 
 - Draft PR #30 repairs migration dependency order, missing dashboard helpers and Telegram startup behavior.
 - Local validation: 229 lint findings resolved; 313 distinct focused cases pass. Full hosted suite and clean PostgreSQL replay remain pending.
+- Hosted clean boot exposed a second prerequisite: Telegram bot backfill requires its column migration. Fixed in source; fresh CI is pending. WhatsApp sharp 0.35.4 passes TypeScript, four native image cases and zero production audit findings locally.
 - Original checkout, SQL files, environment and application records are preserved. Runtime location remains pending; no production deployment.
 - Five-task list: .agents/handoffs/collector-ci-repair-20260913.json.
 

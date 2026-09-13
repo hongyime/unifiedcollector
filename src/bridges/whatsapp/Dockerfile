@@ -7,10 +7,10 @@ WORKDIR /app
 
 RUN apk add --no-cache git python3 make g++
 
-COPY package.json ./
+COPY package.json package-lock.json ./
 RUN npm config set fetch-retry-mintimeout 20000 && \
     npm config set fetch-retry-maxtimeout 120000 && \
-    npm install --network-timeout=1000000
+    npm ci --network-timeout=1000000
 
 COPY tsconfig.json ./
 COPY src/ ./src/
@@ -23,10 +23,10 @@ WORKDIR /app
 RUN addgroup -S wac && adduser -S wac -G wac
 RUN apk add --no-cache git python3 make g++ wget
 
-COPY package.json ./
+COPY package.json package-lock.json ./
 RUN npm config set fetch-retry-mintimeout 20000 && \
     npm config set fetch-retry-maxtimeout 120000 && \
-    npm install --omit=dev --network-timeout=1000000
+    npm ci --omit=dev --network-timeout=1000000
 
 COPY --from=builder /app/build ./build
 
