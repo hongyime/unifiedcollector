@@ -128,6 +128,23 @@ async def main(dsn: str) -> int:
         await pool.execute("UPDATE media_items SET file_size=23 WHERE id=$1",sample_id)
         assert await pool.fetchval("SELECT total_media_bytes FROM media_source_rollups WHERE source='fixture'") == 23
         print("PASS second boot preserves row bytes and migration ledger; narrowed rollup trigger remains functional")
+        # A deployment may contain both the new composite key and an old
+        # SHA-only key, or just the old key. Neither upgrade may drop rows.
+        github_id = await pool.fetchval("INSERT INTO github_commits(sha,message) VALUES ('fixture-sha','Synthetic fixture') RETURNING id")
+        github_before = await pool.fetchval("SELECT row_to_json(c)::text FROM github_commits c WHERE id=$1", github_id)
+        constraint_oid = await pool.fetchval("SELECT conindid FROM pg_constraint WHERE conname='unique_commit_repo_github'")
+        for old_only in [False, True]:
+            if old_only:
+                await pool.execute("ALTER TABLE github_commits DROP CONSTRAINT unique_commit_repo_github")
+            await pool.execute("ALTER TABLE github_commits ADD CONSTRAINT github_commits_sha_key UNIQUE(sha)")
+            await pool.execute("DELETE FROM schema_migrations WHERE filename='fix_github_commits_unique_constraint.sql'")
+            upgraded = await apply_all(pool)
+            assert upgraded["migrations_applied"] == ["fix_github_commits_unique_constraint.sql"], upgraded
+            assert await pool.fetchval("SELECT row_to_json(c)::text FROM github_commits c WHERE id=$1", github_id) == github_before
+            assert not await pool.fetchval("SELECT EXISTS(SELECT 1 FROM pg_constraint WHERE conname='github_commits_sha_key')")
+            if not old_only:
+                assert await pool.fetchval("SELECT conindid FROM pg_constraint WHERE conname='unique_commit_repo_github'") == constraint_oid
+        print("PASS legacy and mixed GitHub constraints upgrade without changing rows; existing composite index is preserved")
     finally:
         await pool.close()
 
