@@ -69,8 +69,9 @@ MIGRATION_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     "add_browser_ingest_content_indexes.sql": ("add_browser_ingest_events.sql",),
     "add_hourly_ingestion_indexes.sql": ("add_media_kind_and_threads_fb_posts.sql", "add_x_and_community_posts.sql"),
     "add_media_items_instagram_tagged_indexes.sql": ("add_media_kind_and_threads_fb_posts.sql",),
-    "add_x_profiles.sql": ("add_social_users.sql", "add_x_and_community_posts.sql"),
-    "zz_add_facebook_profiles.sql": ("add_social_users.sql", "add_media_kind_and_threads_fb_posts.sql"),
+    "add_x_profiles.sql": ("add_x_and_community_posts.sql",),
+    "backfill_lemon8_tiktok_post_profile_stubs.sql": ("20260913_add_lemon8_post_owner_columns.sql",),
+    "zz_add_facebook_profiles.sql": ("add_media_kind_and_threads_fb_posts.sql",),
 }
 
 
