@@ -375,6 +375,18 @@ default `forks` pool doesn't work reliably on Windows/Docker Desktop.
 `src/dashboard/frontend/vite.config.ts` forces `pool: "threads"` which
 resolved this.
 
+**Database startup recovery limits.** `DB_CONNECT_RETRY_TIMEOUT_SECONDS`
+(default `180`) covers pool initialization and retry sleeps together. A stalled
+connection cannot extend a positive budget. Set it to `0` for one connection
+attempt without retries; the driver's connection timeout still applies.
+`DB_CONNECT_RETRY_INITIAL_SECONDS` defaults to `5` and
+`DB_CONNECT_RETRY_MAX_SECONDS` to `30`; the maximum also caps the first delay.
+Malformed or non-finite values use the defaults. Failed or cancelled pool
+initialization cancels unfinished sibling attempts and closes initialized
+connections before returning. Concurrent callers still share one pool.
+These controls change startup recovery, not query limits, pool size, collection
+cadence, retention or storage location.
+
 **7. TypeScript 7 rejects `moduleResolution: "node10"` in the WhatsApp
 bridge.** Dependabot bumped `typescript` from `^5.9.3` to `^7.0.2` in
 `src/bridges/whatsapp/package.json`. TS 7 hard-errors on CommonJS
