@@ -1,7 +1,7 @@
 {
   "task": "Shared database recovery budgets",
   "base": "e96d920629d792e2a122da844745a84b00d3ddb1",
-  "stage": "local connection checks passed; complete repository checks pending",
+  "stage": "Draft PR #30; connection regressions pass on hosted Linux/Windows; repository gates remain open",
   "tasks": [
     "Inspect current pool/retry and scheduler/storage boundaries with no live collection.",
     "Reproduce confirmed connection-budget failures and repair shared pool recovery.",
@@ -18,11 +18,18 @@
     "related_cases": 26,
     "external_network": "restricted to loopback in test commands",
     "real_driver": "stalled loopback handshake cancels and disconnects",
-    "full_lint_findings": 229
+    "full_lint_findings": 229,
+    "hosted_connection_cases_per_os": 16,
+    "hosted_platforms": [
+      "ubuntu-latest",
+      "windows-latest"
+    ],
+    "repository_failed_unit_cases": 37,
+    "env_template_coverage": "26 services pass after documenting existing defaults"
   },
   "remaining": [
-    "Repair and verify repository-wide Python CI; existing lint/import defects remain.",
-    "Verify deployment path and live runtime without starting collectors or outbound messaging.",
-    "Supabase migration, vault/backup retention and full portfolio capacity requirements remain open."
+    "Resolve 229 repository lint findings, 37 failing broad-suite cases and clean-boot migration ordering before merge.",
+    "Confirm and verify the running Collector deployment without launching collection or outbound messages.",
+    "Supabase migration, run-history/vault/backup retention and all portfolio capacity requirements remain open."
   ]
 }
