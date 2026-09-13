@@ -5,12 +5,12 @@
 - Commit analyzed: `a0f5ee56960ab4e07c52902bb37cd1e21cf3baf8`
 - Branch: `main`
 - Working tree: no modifications (0 modified, 0 untracked)
-- PR data source: gh (authenticated as `bryanseah234`)
+- PR data source: gh (authenticated as `repository maintainer`)
 - Agent capability: shell
 - Not analyzed: bytecode caches under `__pycache__/`, image binaries under `extension/icons/` and `src/dashboard/frontend/public/`, the `archive/` directory referenced in `README.md` but not tracked here, the two large sync/state markdowns (`2026-05-30-unifiedanalyzer-strategy.md`, `collector_audit.md`) beyond first pass. Deep-dive sections capped at MAX_MODULES_DEEP=10.
 
 ## 2. What this repository is
-A Python-plus-TypeScript ingestion service that collects public and semi-public content from 11 named source platforms (github, youtube, strava, search, website, tiktok, lemon8, whatsapp, telegram, instagram, beeper/matrix) and writes them into one shared Postgres database (`pgvector/pgvector:pg16`, `docker/docker-compose.yml:5`). Collection runs entirely inside Docker Compose services defined in `docker/docker-compose.yml` (24 services declared). The primary artifacts written are rows in `media_items`, `social_users`, and per-source tables under `src/db/schemas/` and `src/db/migrations/`, along with binary media files placed under the mounted `z:/unifiedcollector` vault. A React 19 + Vite operations dashboard (`src/dashboard/frontend/`, backend at `src/dashboard/api.py:8700`) surfaces status. An enrichment pipeline (`docker/Dockerfile.spiderfoot`, `src/recon_spiderfoot_service.py`, `src/core/recon_spiderfoot.py`) processes queued OSINT targets via SpiderFoot, maigret, and GHunt when enabled under compose profile `recon`. There is no outbound-messaging capability in this repo.
+A Python-plus-TypeScript ingestion service that collects public and semi-public content from 11 named source platforms (github, youtube, strava, search, website, tiktok, lemon8, whatsapp, telegram, instagram, beeper/matrix) and writes them into one shared Postgres database (`pgvector/pgvector:pg16`, `docker/docker-compose.yml:5`). Collection runs entirely inside Docker Compose services defined in `docker/docker-compose.yml` (24 services declared). The primary artifacts written are rows in `media_items`, `social_users`, and per-source tables under `src/db/schemas/` and `src/db/migrations/`, along with binary media files placed under the mounted `z:/unifiedcollector` vault. A React 19 + Vite operations dashboard (`src/dashboard/frontend/`, backend at `src/dashboard/api.py:8700`) surfaces status. An enrichment pipeline (`docker/Dockerfile.spiderfoot`, `src/recon_spiderfoot_service.py`, `src/core/recon_spiderfoot.py`) processes queued OSINT targets via SpiderFoot, maigret, and GHunt when enabled under compose profile `recon`. Collectors ingest source content; separate notification and onboarding services can send outbound Telegram messages. Those services are described in Flows A/B and the entry-point table below.
 
 ## 3. Quick facts
 | Field | Value |
@@ -535,12 +535,12 @@ Recently merged PRs (last 22 by merge order):
 | 27 | chore(deps): bump trufflesecurity/trufflehog from 3.97.0 to 3.97.1 | `app/dependabot` | trufflehog-3.97.1 |
 | 23 | chore(deps): bump actions/dependency-review-action from 4 to 5 | `app/dependabot` | dependency-review-action-5 |
 | 22 | chore(deps): bump python from 3.12-slim to 3.14-slim in /docker | `app/dependabot` | python-3.14-slim |
-| 21 | Sync General Configurations | `bryanseah234` | sync-31378691633-1 |
+| 21 | Sync General Configurations | `repository maintainer` | sync-31378691633-1 |
 | 20 | chore(deps-dev): bump typescript from 5.9.3 to 7.0.2 in whatsapp-bridge group | `app/dependabot` | whatsapp-bridge-b7ceb5d816 |
 | 19 | chore(deps): bump the dashboard-frontend group with 3 updates | `app/dependabot` | dashboard-frontend-bccfeb4619 |
 | 18 | chore(deps): bump the python-runtime group with 2 updates | `app/dependabot` | python-runtime-b6bd9c5d7d |
-| 17 | chore(shell): remove identity scanner hits | `bryanseah234` | shell/phase5-r5-cleanup |
-| 16 | chore(shell): standardise repository metadata | `bryanseah234` | shell/standardise |
+| 17 | chore(shell): remove identity scanner hits | `repository maintainer` | shell/phase5-r5-cleanup |
+| 16 | chore(shell): standardise repository metadata | `repository maintainer` | shell/standardise |
 | 14 | chore(deps): bump the python-runtime group with 28 updates | `app/dependabot` | python-runtime-0ef6b0b3b2 |
 | 13 | chore(deps): bump actions/labeler from 6 to 7 | `app/dependabot` | labeler-7 |
 | 12 | chore(deps): bump actions/setup-python from 5 to 7 | `app/dependabot` | setup-python-7 |

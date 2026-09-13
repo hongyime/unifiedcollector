@@ -97,3 +97,12 @@
 2026-08-21 21:20 UTC - Action queue cooldown resolution must trust explicit expiry/current state over stale last-complete pressure; patched expired rate-pressure handling and live queue is now zero open after sync.
 - 2026-08-21 21:38 UTC: Visible login/page-shell reports should be repaired with targeted canonical tab reloads while preserving the managed CDP profile; do not restart or replace the profile when cookie vault auth markers and browser ingest are healthy.
 2026-08-21 23:46 UTC - Normal Chrome login state is not Collector auth proof; CDP 9336 still has restorable vault auth while X try-again, Instagram page churn/429, and stale browser-content watchdogs are warning-level page/runtime problems, not cookie loss.
+
+- 2026-09-13: Review current remote source in an isolated checkout, preserving local handoff edits; reproduce database budget failures before changing connection behavior.
+
+- 2026-09-13: Keep draft PR #30 unmerged while full Python and clean-boot gates fail; preserve applied SQL checksums and all data. Connection recovery and template coverage pass on the final draft head; PostPlan 74 records both progress and remaining work.
+
+
+2026-09-13 — Portfolio CI repair, draft PR #30
+
+Restored missing split-route helpers, declared the browser WebSocket dependency, guarded first Telegram startup, and repaired migration ordering without editing SQL. Updated stale mocks and extension metadata while retaining security and delivery behavior. All 229 Ruff findings are resolved and 313 distinct focused tests pass. Full hosted CI and fresh-database replay must pass before release; no production runtime or data changes.

@@ -8,21 +8,12 @@ inside thin wrappers to preserve test monkey-patch semantics.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
-import os
-import time
-from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+from fastapi import APIRouter, Depends
 
 from src.db.connection import get_pool
 from src.dashboard.api.auth import require_role
-from src.dashboard.api.helpers import (
-    _acquire_dashboard_conn,
-    _release_dashboard_conn,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +35,8 @@ async def youtube_completeness(_user: dict = Depends(require_role("viewer"))):
     """YouTube collection completeness and discovery graph health."""
     pool = await get_pool()
     async with pool.acquire() as conn:
-        return await _youtube_completeness(conn)
+        from src.dashboard import api as dashboard_api
+        return await dashboard_api._youtube_completeness(conn)
 
 
 @router.get("/youtube/channels")

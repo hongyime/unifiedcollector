@@ -297,7 +297,8 @@ async def test_browser_only_source_degrades_when_extension_heartbeat_is_stale(mo
 
 
 @pytest.mark.asyncio
-async def test_browser_source_degrades_when_content_progress_is_stale(monkeypatch):
+@pytest.mark.parametrize("threshold, expected_status", [(3600, "degraded"), (7200, "live")])
+async def test_browser_source_degrades_when_content_progress_is_stale(monkeypatch, threshold, expected_status):
     from src.core import source_freshness
 
     class BrowserContentStaleConn:
@@ -325,6 +326,7 @@ async def test_browser_source_degrades_when_content_progress_is_stale(monkeypatc
             return None
 
     monkeypatch.setenv("BROWSER_CONTENT_STALE_WARN_SECONDS", "3600")
+    monkeypatch.setenv("BROWSER_CONTENT_STALE_FACEBOOK_SECONDS", str(threshold))
     monkeypatch.setenv("X_SOURCE_MANUAL_MODE", "0")
     monkeypatch.setattr(
         source_freshness,
@@ -334,12 +336,13 @@ async def test_browser_source_degrades_when_content_progress_is_stale(monkeypatc
 
     rows = await source_freshness.compute_liveness(BrowserContentStaleConn())
 
-    assert rows[0]["status"] == "degraded"
+    assert rows[0]["status"] == expected_status
     assert rows[0]["age_seconds"] == 7200
     assert rows[0]["browser_heartbeat_age_seconds"] == 45
-    assert rows[0]["browser_content_stale"] is True
-    assert rows[0]["browser_content_stale_after_seconds"] == 3600
-    assert "browser content progress is 7200s old" in rows[0]["detail"]
+    assert rows[0]["browser_content_stale"] is (expected_status == "degraded")
+    assert rows[0]["browser_content_stale_after_seconds"] == threshold
+    if expected_status == "degraded":
+        assert "browser content progress is 7200s old" in rows[0]["detail"]
 
 
 @pytest.mark.asyncio

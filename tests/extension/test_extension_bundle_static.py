@@ -1,5 +1,6 @@
 import json
 import re
+import subprocess
 from pathlib import Path
 
 
@@ -37,7 +38,10 @@ def _read(relpath: str) -> str:
         and not relpath.startswith("extension/dist/")
     ):
         relpath = "extension/dist/" + relpath[len("extension/"):]
-    content = (ROOT / relpath).read_text(encoding="utf-8")
+    target = ROOT / relpath
+    if target.is_dir():
+        return "\n".join(file.read_text(encoding="utf-8") for file in sorted(target.rglob("*.py")))
+    content = target.read_text(encoding="utf-8")
     if relpath.startswith("extension/dist/") and relpath.endswith(".js"):
         content = _normalize_bundle_output(content)
     return content
@@ -73,6 +77,9 @@ def test_extension_expected_version_matches_manifest():
 
     assert versions
     assert set(versions) == {manifest["version"]}
+    assert json.loads(_read("extension/package.json"))["version"] == manifest["version"]
+    lock = json.loads(_read("extension/package-lock.json"))
+    assert lock["version"] == lock["packages"][""]["version"] == manifest["version"]
 
 
 def test_content_script_has_install_guard_for_manifest_reload():
@@ -353,8 +360,17 @@ def test_tiktok_browser_upload_allows_webapp_prime_cdn_not_regular_pages():
         1,
     )[0]
 
-    assert "v16-webapp-prime.tiktok.com" in allow_block
-    assert "v\\d+-webapp" in allow_block
+    cases = {"v16-webapp-prime.tiktok.com": True, "v19-webapp.tiktok.com": True,
+             "v16.tiktokcdn.com": True, "www.tiktok.com": False, "tiktok.com": False,
+             "www.tiktok.com.evil.invalid": False, "v16-webapp-prime.tiktok.com.evil.invalid": False}
+    script = """const vm = require('node:vm');
+const [body, cases] = JSON.parse(process.argv[1]);
+const results = Object.fromEntries(Object.keys(cases).map(host =>
+  [host, vm.runInNewContext('(function tiktokBrowserUploadHostAllowed' + body + ')(host)', {host}, {timeout: 100})]));
+process.stdout.write(JSON.stringify(results));"""
+    result = subprocess.run(["node", "-e", script, json.dumps([allow_block, cases])],
+                            capture_output=True, text=True, check=True, timeout=10)
+    assert json.loads(result.stdout) == cases
     assert "if (platform === \"tiktok\") return tiktokBrowserUploadHostAllowed(host);" in background
     assert "www.tiktok.com" not in allow_block
 
@@ -459,14 +475,14 @@ def test_x_threads_following_feed_is_default_and_for_you_is_opt_in():
     assert "function allowForYouFeedPass" in content
     assert 'lsGet("uc_allow_for_you_feed", "0") === "1"' in content
     assert 'allowForYouFeedPass("x") && cycle % 4 === 0' in x_block
-    assert 'else feed = (await xSelectTab("Following")) ? "home/following" : "home";' in x_block
+    assert re.search(r'else feed = \(?await xSelectTab\("Following"\)\)? \? "home/following" : "home";', x_block)
     assert 'allowForYouFeedPass("threads") && c % 4 === 0' in threads_block
-    assert '((await threadsSelectFeed("Following")) ? "following" : "feed")' in threads_block
+    assert re.search(r'await threadsSelectFeed\("Following"\)\)? \? "following" : "feed"', threads_block)
 
 
 def test_x_threads_hard_recovery_returns_to_home_feed():
     background = _read("extension/background.js")
-    ingest = _read("src/bridges/ig_ingest.py")
+    ingest = _read("src/bridges/ig_ingest")
     hard_refresh_block = background.split("async function hardRefreshForcedCycleTab", 1)[1].split(
         "async function refreshTabForMissingContentScript",
         1,
@@ -611,7 +627,7 @@ def test_instagram_browser_media_detail_revisit_is_enabled():
     )[0]
     assert "collectIgDetailDomMedia" in helper_block
     assert 'markBrowserMediaRevisitItems("instagram", detailSink, activeMediaRevisit)' in helper_block
-    assert 'finishBrowserMediaRevisit(\n    "instagram",' in helper_block
+    assert re.search(r'finishBrowserMediaRevisit\(\s*"instagram",', helper_block)
 
 
 def test_instagram_tuning_knobs_are_bounded_and_explicit():
@@ -727,7 +743,7 @@ def test_browser_recovery_optional_writes_are_nonblocking():
     assert "Lemon8 ${entity} forced media write" in lemon8_block
     assert "X seen-user write" in x_block
     assert "Facebook seen-user write" in facebook_block
-    assert "forcedRecovery\n      ? (sendSideEffect(" in lemon8_block
+    assert re.search(r"forcedRecovery\s*\?\s*\(sendSideEffect\(", lemon8_block)
     assert "await send(ingestPayload, { timeoutMs: 45000 })" in lemon8_block
     assert "sendSideEffect(usersPayload, \"lemon8\"" in lemon8_block
     assert 'send({ type: "posts", platform: "x"' not in x_block

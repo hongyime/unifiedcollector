@@ -8,22 +8,15 @@ inside thin wrappers to preserve test monkey-patch semantics.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
-import os
-import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from src.db.connection import get_pool
+from src.dashboard.api.helpers import _jsonb_points, _encode_polyline, _strava_route_status
 from src.core.strava_route_queue import fetch_strava_route_capture_queue
 from src.dashboard.api.auth import require_role
-from src.dashboard.api.helpers import (
-    _acquire_dashboard_conn,
-    _release_dashboard_conn,
-)
 
 logger = logging.getLogger(__name__)
 

@@ -285,7 +285,6 @@ async def test_redis_persistence_survives_restart():
     for _ in range(10):
         rl1.record_success("instagram.com", "ig_acc1")
     saved_mult = rl1.get_stats("instagram.com", "ig_acc1")["aimd_multiplier"]
-    saved_tokens = rl1.get_stats("instagram.com", "ig_acc1")["tokens"]
     saved_acquires = rl1.get_stats("instagram.com", "ig_acc1")["total_acquires"]
     await rl1.flush_to_redis()
 
@@ -324,7 +323,7 @@ async def test_redis_unavailable_does_not_break():
 
 def test_legacy_human_rate_limiter_still_importable():
     """Wave 0 must NOT modify human_rate_limiter; verify still works."""
-    from src.core.human_rate_limiter import HumanLikeRateLimiter, OperationType
+    from src.core.human_rate_limiter import HumanLikeRateLimiter
     rl = HumanLikeRateLimiter()
     rl.trigger_emergency_cooldown("instagram.com", account="acc1")
     assert rl.is_in_cooldown("instagram.com", account="acc1")

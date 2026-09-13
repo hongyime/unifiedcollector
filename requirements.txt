@@ -69,3 +69,6 @@ python-telegram-bot>=22.8
 # for WhatsApp contacts — pure-Python, ships with an offline dataset, NO network.
 # Consumed by src/core/wa_phone_intel.py. Enrichment-only; NEVER used for identity linking.
 phonenumbers>=8.13.0
+
+# Chrome DevTools connection used by browser maintenance commands.
+websocket-client>=1.9.2

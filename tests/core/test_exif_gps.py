@@ -1,7 +1,6 @@
 """Tests for src/core/exif_gps.py — Tier 5 EXIF GPS extraction."""
 from __future__ import annotations
 
-import os
 
 import pytest
 

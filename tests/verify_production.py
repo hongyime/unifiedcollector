@@ -27,7 +27,6 @@ from src.collectors.website import WebsiteCollector
 from src.collectors.search import SearchCollector
 from src.collectors.lemon8 import Lemon8Collector
 from src.collectors.whatsapp import WhatsappCollector
-from src.core.health import health_check as _hc
 from src.db.connection import _ssl_context
 
 errors = []
