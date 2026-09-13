@@ -111,6 +111,31 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 """
 
 
+async def _execute_migration(conn, name: str, body: str) -> None:
+    if name == "fix_github_commits_unique_constraint.sql":
+        # The base schema now includes this migration's composite constraint.
+        # Keep its index intact, while still removing obsolete SHA-only keys.
+        constraint = await conn.fetchrow("""
+            SELECT c.contype, c.convalidated, c.condeferrable,
+                   ARRAY(SELECT a.attname::text FROM unnest(c.conkey) WITH ORDINALITY k(attnum,pos)
+                         JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=k.attnum
+                         ORDER BY k.pos) AS columns
+            FROM pg_constraint c
+            WHERE c.conrelid='public.github_commits'::regclass
+              AND c.conname='unique_commit_repo_github'
+        """)
+        if constraint is not None:
+            if (constraint["contype"] != "u" or not constraint["convalidated"]
+                    or constraint["condeferrable"] or list(constraint["columns"]) != ["sha", "repo_id"]):
+                raise RuntimeError("Existing unique_commit_repo_github has an unexpected definition")
+            await conn.execute("""
+                ALTER TABLE github_commits DROP CONSTRAINT IF EXISTS unique_platform_commit_github;
+                ALTER TABLE github_commits DROP CONSTRAINT IF EXISTS github_commits_sha_key;
+            """)
+            return
+    await conn.execute(body)
+
+
 def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -216,7 +241,7 @@ async def apply_all(pool) -> dict:
                     # rolls back cleanly and is not recorded as applied.
                     try:
                         async with conn.transaction():
-                            await conn.execute(body)
+                            await _execute_migration(conn, name, body)
                             await conn.execute(
                                 "INSERT INTO schema_migrations (filename, checksum) "
                                 "VALUES ($1, $2)",
