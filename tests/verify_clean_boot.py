@@ -112,11 +112,18 @@ async def main(dsn: str) -> int:
             RETURNING id
         """)
         sample_before = await pool.fetchval("SELECT row_to_json(m)::text FROM media_items m WHERE id=$1",sample_id)
+        lemon8_id = await pool.fetchval("""
+            INSERT INTO lemon8_posts(platform_post_id,username,post_url,metadata)
+            VALUES ('fixture','fixture_owner','https://example.invalid/post','{"preserved":true}'::jsonb)
+            RETURNING id
+        """)
+        lemon8_before = await pool.fetchval("SELECT row_to_json(p)::text FROM lemon8_posts p WHERE id=$1", lemon8_id)
         replay = await apply_all(pool)
         assert not replay["deferred"] and not replay["migrations_applied"], replay
         assert await pool.fetchval(trigger_columns_sql) == trigger_columns
         assert await pool.fetch("SELECT filename,checksum,applied_at FROM schema_migrations ORDER BY filename") == ledger_before
         assert await pool.fetchval("SELECT row_to_json(m)::text FROM media_items m WHERE id=$1",sample_id) == sample_before
+        assert await pool.fetchval("SELECT row_to_json(p)::text FROM lemon8_posts p WHERE id=$1", lemon8_id) == lemon8_before
         assert await pool.fetchval("SELECT total_media_bytes FROM media_source_rollups WHERE source='fixture'") == 17
         await pool.execute("UPDATE media_items SET file_size=23 WHERE id=$1",sample_id)
         assert await pool.fetchval("SELECT total_media_bytes FROM media_source_rollups WHERE source='fixture'") == 23
