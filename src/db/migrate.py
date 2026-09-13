@@ -59,9 +59,18 @@ SKIP: frozenset[str] = frozenset({
 # Dated and older descriptive filenames coexist. Preserve names/checksums in
 # existing ledgers; move only declared prerequisites ahead of their dependants.
 MIGRATION_DEPENDENCIES: dict[str, tuple[str, ...]] = {
+    "20260802_add_profile_progress_indexes.sql": ("add_x_profiles.sql", "zz_add_facebook_profiles.sql"),
     "20260802_limit_media_rollup_trigger_updates.sql": ("add_media_source_rollups.sql",),
     "20260906_backfill_telegram_is_bot_from_username.sql": ("add_telegram_is_bot.sql",),
     "20260906_recreate_dashboard_matrix_aggregate_indexes.sql": ("add_media_items_ingest_path.sql",),
+    "add_beeper_attachment_backfill_index.sql": ("add_beeper_shadow_tables.sql",),
+    "add_beeper_liveness_ingested_network_index.sql": ("add_beeper_shadow_tables.sql",),
+    "add_beeper_network_message_index.sql": ("add_beeper_shadow_tables.sql",),
+    "add_browser_ingest_content_indexes.sql": ("add_browser_ingest_events.sql",),
+    "add_hourly_ingestion_indexes.sql": ("add_media_kind_and_threads_fb_posts.sql", "add_x_and_community_posts.sql"),
+    "add_media_items_instagram_tagged_indexes.sql": ("add_media_kind_and_threads_fb_posts.sql",),
+    "add_x_profiles.sql": ("add_social_users.sql", "add_x_and_community_posts.sql"),
+    "zz_add_facebook_profiles.sql": ("add_social_users.sql", "add_media_kind_and_threads_fb_posts.sql"),
 }
 
 

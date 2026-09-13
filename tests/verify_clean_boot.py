@@ -83,6 +83,17 @@ async def main(dsn: str) -> int:
             "SELECT tablename FROM pg_tables WHERE schemaname='public'"
         )
         present = {r["tablename"] for r in rows}
+        expected_indexes = {
+            "idx_facebook_profiles_updated_at", "idx_x_profiles_updated_at",
+            "idx_beeper_shadow_attachment_chat_ts", "idx_beeper_messages_network_message",
+            "idx_beeper_shadow_ingested_network", "idx_browser_ingest_content_platform_created",
+            "idx_threads_posts_collected", "idx_facebook_posts_collected", "idx_x_posts_collected",
+            "idx_media_ig_tagged_entity_owner_media", "idx_media_ingest_path",
+        }
+        indexes = {r["indexname"] for r in await pool.fetch(
+            "SELECT indexname FROM pg_indexes WHERE schemaname='public'"
+        )}
+        assert not expected_indexes - indexes, expected_indexes - indexes
         # A table-only check misses a trigger migration applied in the wrong
         # order, and replay can appear healthy while destroying existing rows.
         trigger_columns_sql = """
