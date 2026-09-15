@@ -26,6 +26,7 @@ from .realtime_feed_alert import RealtimeFeedAlertHandler
 from .recon_seed import ReconSeedHandler
 from .reconcile_identities import ReconcileIdentitiesHandler
 from .status_delta import StatusDeltaHandler
+from .wa_staging_merge import WhatsappStagingMergeHandler
 from .watchdog_stale_alert import WatchdogStaleAlertHandler
 
 HANDLERS: list[PeriodicHandler] = [
@@ -41,6 +42,7 @@ HANDLERS: list[PeriodicHandler] = [
     RealtimeFeedAlertHandler(),
     WatchdogStaleAlertHandler(),
     PostgresIdleTxnAlertHandler(),
+    WhatsappStagingMergeHandler(),
 ]
 
 __all__ = [
@@ -59,4 +61,5 @@ __all__ = [
     "RealtimeFeedAlertHandler",
     "WatchdogStaleAlertHandler",
     "PostgresIdleTxnAlertHandler",
+    "WhatsappStagingMergeHandler",
 ]

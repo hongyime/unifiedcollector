@@ -63,6 +63,18 @@ from src.core.vault import VAULT_ROOT, write_atomic_artifact, write_raw_payload
 
 logger = logging.getLogger(__name__)
 
+
+def _wa_staging_enabled() -> bool:
+    """Sprint 5 opt-in flag. When set, contact events are COPY'd into the
+    UNLOGGED ``wa_staging_contacts`` staging table and later merged into
+    ``whatsapp_users`` + ``whatsapp_lid_map`` by
+    ``src.scheduler.handlers.wa_staging_merge.WhatsappStagingMergeHandler``.
+
+    Default 0 = fall through to the Sprint 4 ``_upsert_contacts_batch``
+    path unchanged (the rollback lever — no code revert required).
+    """
+    return os.getenv("WA_STAGING_ENABLED", "0").strip() in ("1", "true", "yes")
+
 MEDIA_EXTS = {"jpg", "jpeg", "png", "mp4", "opus", "webp", "gif", "pdf", "3gp", "m4a"}
 _MIME_EXT = {
     "application/pdf": "pdf",
@@ -526,7 +538,10 @@ class WhatsappCollector(BaseCollector):
                     events = [body for _, body in to_flush]
                     try:
                         async with asyncio.timeout(_handler_timeout):
-                            await self._upsert_contacts_batch(events)
+                            if _wa_staging_enabled():
+                                await self._stage_contacts_batch(events)
+                            else:
+                                await self._upsert_contacts_batch(events)
                         for msg, _ in to_flush:
                             try:
                                 await msg.ack()
@@ -980,6 +995,112 @@ class WhatsappCollector(BaseCollector):
                         """,
                         lids, jids, disps,
                     )
+
+    async def _stage_contacts_batch(self, events: list[dict]) -> None:
+        """Sprint-5 fast staging path — COPY events into ``wa_staging_contacts``.
+
+        Fills the UNLOGGED staging table via ``asyncpg.Connection.copy_records_to_table``,
+        the fastest bulk-write path Postgres offers. The
+        ``WhatsappStagingMergeHandler`` scheduler tick (default 5 s) drains
+        staging into ``whatsapp_users`` + ``whatsapp_lid_map`` via
+        ``INSERT ... SELECT DISTINCT ON (...) ON CONFLICT DO UPDATE``.
+
+        Rationale in
+        ``docs/plans/whatsapp-contact-architecture-alternatives.md`` §3, Option 5.
+
+        Contract preserved from the Sprint-4 ``_upsert_contacts_batch`` path:
+          * Skip events with no ``platform_user_id`` and no ``@lid`` / user JID.
+          * Skip events whose ``platform_user_id`` isn't a user JID or lid
+            **unless** both ``lid`` + ``jid`` are present (a lid → phone JID
+            mapping row that should still hit staging so the merger can
+            populate ``whatsapp_lid_map``).
+          * Derive ``phone_number`` from a numeric ``@s.whatsapp.net`` prefix
+            when the payload doesn't carry it explicitly.
+          * ``display_name`` follows the same ``_first_nonempty`` fallback
+            chain used by the Sprint-4 path.
+
+        Raw-payload archive is still skipped for the same reason as the
+        Sprint-4 path — the Z: fsync per event was the drain bottleneck.
+
+        A COPY failure re-raises so the caller (``_flusher._flush``) can nack
+        the batch and fall back per-event through ``_handle_contact_event``.
+        """
+        if not events or not self.pool:
+            return
+
+        records: list[tuple] = []
+        for event in events:
+            lid = event.get("lid")
+            jid = event.get("jid") or event.get("phone_jid")
+            platform_user_id = event.get("platform_user_id") or jid or lid
+            if not platform_user_id:
+                continue
+
+            valid_lid_mapping = (
+                isinstance(lid, str) and "@lid" in lid
+                and isinstance(jid, str) and "@s.whatsapp.net" in jid
+            )
+            is_user_jid = isinstance(platform_user_id, str) and (
+                "@s.whatsapp.net" in platform_user_id or "@lid" in platform_user_id
+            )
+            if not valid_lid_mapping and not is_user_jid:
+                continue
+
+            display_name = _first_nonempty(
+                event.get("display_name"),
+                event.get("name"),
+                event.get("notify"),
+                event.get("verified_name"),
+                event.get("verifiedBizName"),
+                event.get("pushName"),
+                event.get("push_name"),
+            )
+            push_name = _first_nonempty(
+                event.get("pushName"), event.get("push_name"),
+                event.get("notify"), display_name,
+            )
+            phone_number = event.get("phone_number")
+            user_jid_for_phone = (
+                jid if isinstance(jid, str) and "@s.whatsapp.net" in jid
+                else platform_user_id
+            )
+            if not phone_number and isinstance(user_jid_for_phone, str) and "@s.whatsapp.net" in user_jid_for_phone:
+                prefix = user_jid_for_phone.split("@")[0]
+                if re.fullmatch(r"\d{7,15}", prefix):
+                    phone_number = prefix
+            is_business = _coerce_bool(event.get("is_business"))
+
+            # Column order must match the ``columns=`` arg passed to
+            # copy_records_to_table below.
+            records.append((
+                platform_user_id,
+                display_name,
+                push_name,
+                phone_number,
+                bool(is_business) if is_business is not None else None,
+                lid if isinstance(lid, str) and "@lid" in lid else None,
+                jid if isinstance(jid, str) and "@s.whatsapp.net" in jid else None,
+                datetime.now(timezone.utc),
+            ))
+
+        if not records:
+            return
+
+        async with self.pool.acquire() as conn:
+            await conn.copy_records_to_table(
+                "wa_staging_contacts",
+                records=records,
+                columns=(
+                    "platform_user_id",
+                    "name",
+                    "pushname",
+                    "phone_number",
+                    "is_business",
+                    "lid",
+                    "phone_jid",
+                    "collected_at",
+                ),
+            )
 
     async def _handle_group_event(self, event: dict):
         """Upsert WhatsApp group metadata from groups.update bridge events."""
