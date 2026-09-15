@@ -612,10 +612,20 @@ def _env_exclude_table_data() -> list[str]:
             "public.github_edges",          # 3.7 GB  — raw_payload JSONB TOAST
             "public.github_commits",        # 4.2 GB  — raw_payload JSONB TOAST
             "public.telegram_messages",     # 4.3 GB  — content + media TOAST
-            "public.collector_domain_pacing_events",  # 3.6 GB — pacing event log
-            "public.media_items",           # 2.7 GB  — media blobs/metadata TOAST
-            "public.browser_ingest_events", # 2.1 GB  — raw browser event log
+            "public.collector_domain_pacing_events",  # 3.8 GB — pacing event log
+            "public.media_items",           # 2.8 GB  — media blobs/metadata TOAST
+            "public.browser_ingest_events", # 2.2 GB  — raw browser event log
             "public.browser_media_candidates",  # 2.1 GB — browser media log
+            "public.github_repos",          # 1.6 GB  — raw_payload JSONB TOAST
+            "public.exposure_findings",     # 1.5 GB  — raw findings JSONB
+            "public.search_results",        # 1.2 GB  — raw search JSONB TOAST
+            "public.beeper_shadow_messages",# 1.1 GB  — shadow message content
+            "public.beeper_shadow_chats",   # large   — shadow chat raw JSONB
+            "public.strava_gps_streams",    # 816 MB  — gps coordinate streams
+            "public.account_proximity_cache",  # 633 MB — computed proximity cache
+            "public.github_issues",         # 397 MB  — raw_payload JSONB
+            "public.github_spider_queue",   # 328 MB  — spider queue payloads
+            "public.collection_targets",    # 311 MB  — target config JSONB
         ]
     if not raw.strip():
         return []
