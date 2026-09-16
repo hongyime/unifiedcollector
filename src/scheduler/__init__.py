@@ -142,12 +142,24 @@ class Scheduler:
             get_env_int=env_int,
             get_env_float=env_float,
         )
-        for handler in HANDLERS:
+
+        # Concurrent dispatch: a slow handler (e.g. recon_seed with 1000+
+        # candidates or build_graph_edges) previously blocked every downstream
+        # handler in the same tick, so wa_staging_merge (last in the list)
+        # could stall for minutes and let the staging table balloon. asyncio
+        # tasks run all handlers in parallel; fault isolation stays intact via
+        # return_exceptions=True + per-handler try/except.
+        async def _dispatch_one(handler) -> None:
             try:
                 if await handler.should_run(ctx):
                     await handler.run(ctx)
             except Exception as e:
                 logger.warning("periodic handler %s failed: %s", handler.name, e)
+
+        await asyncio.gather(
+            *[_dispatch_one(h) for h in HANDLERS],
+            return_exceptions=True,
+        )
 
     async def add_schedule(self, source: str, interval_hours: int = 24):
         if self.pool is None:
