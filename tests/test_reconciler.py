@@ -221,7 +221,6 @@ async def test_redownload_writes_repair_as_vault_artifact(monkeypatch, tmp_path)
 @pytest.mark.asyncio
 async def test_update_repaired_media_item_points_row_at_canonical_blob():
     r = _make("website")
-    seen: dict[str, object] = {}
     executes = []
 
     class _Conn:

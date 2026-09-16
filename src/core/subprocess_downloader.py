@@ -57,9 +57,9 @@ import shutil
 import tempfile
 import time
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Awaitable, Callable, Iterable, Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 logger = logging.getLogger(__name__)
 

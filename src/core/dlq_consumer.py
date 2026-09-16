@@ -49,7 +49,7 @@ import asyncio
 import logging
 import os
 import random
-from typing import Any, Awaitable, Callable, Optional
+from typing import Awaitable, Callable
 
 import asyncpg
 

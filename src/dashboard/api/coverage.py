@@ -5,24 +5,15 @@ Routes registered on ``router`` (APIRouter) and included by ``__init__.py``.
 """
 from __future__ import annotations
 
-import asyncio
-import html
-import json
 import logging
-import os
-import re
-import time
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
+from fastapi import APIRouter, Depends
 
 from src.db.connection import get_pool
 from src.dashboard.api.auth import require_role
 from src.core.collection_coverage import build_collection_coverage_snapshot
-from src.core.seen_targets import seen_target_summary_by_source
-from src.dashboard.api.helpers import _row_get, _iso_or_none
+from src.dashboard.api.helpers import _row_get
 
 logger = logging.getLogger(__name__)
 

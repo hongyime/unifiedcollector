@@ -138,7 +138,8 @@ def telegram_stub(monkeypatch):
         return True, 0
 
     async def fake_send_photo_detailed(url_or_path: str, caption: str = "",
-                                       parse_mode: str = "HTML"):
+                                       parse_mode: str = "HTML", disable_notification: bool = False):
+        assert disable_notification is True
         ok, retry_after = await fake_send_photo(url_or_path, caption=caption, parse_mode=parse_mode)
         return ok, retry_after, "", ""
 
@@ -153,7 +154,8 @@ def telegram_stub(monkeypatch):
 
     async def fake_send_video_detailed(url_or_path: str, caption: str = "",
                                        parse_mode: str = "HTML",
-                                       thumbnail_path: str | None = None):
+                                       thumbnail_path: str | None = None, disable_notification: bool = False):
+        assert disable_notification is True
         ok, retry_after = await fake_send_video(
             url_or_path,
             caption=caption,
@@ -657,7 +659,8 @@ async def test_drain_falls_back_to_text_when_remote_source_url_media_fails(fake_
         )
         return False, 0
 
-    async def failing_send_video_detailed(target, caption="", parse_mode="HTML", thumbnail_path=None):
+    async def failing_send_video_detailed(target, caption="", parse_mode="HTML", thumbnail_path=None, disable_notification: bool = False):
+        assert disable_notification is True
         ok, retry_after = await failing_send_video(
             target,
             caption=caption,
@@ -713,7 +716,8 @@ async def test_drain_falls_back_to_text_when_local_media_upload_fails(
         )
         return False, 0
 
-    async def failing_send_video_detailed(target, caption="", parse_mode="HTML", thumbnail_path=None):
+    async def failing_send_video_detailed(target, caption="", parse_mode="HTML", thumbnail_path=None, disable_notification: bool = False):
+        assert disable_notification is True
         ok, retry_after = await failing_send_video(
             target,
             caption=caption,
@@ -766,7 +770,8 @@ async def test_drain_does_not_text_fallback_on_remote_source_url_429(fake_redis,
         )
         return False, 7
 
-    async def rate_limited_send_photo_detailed(target, caption="", parse_mode="HTML"):
+    async def rate_limited_send_photo_detailed(target, caption="", parse_mode="HTML", disable_notification: bool = False):
+        assert disable_notification is True
         ok, retry_after = await rate_limited_send_photo(target, caption=caption, parse_mode=parse_mode)
         return ok, retry_after, "429", "Too Many Requests"
 
@@ -1132,7 +1137,8 @@ async def test_drain_backs_off_on_429(fake_redis, telegram_stub, monkeypatch):
     async def flappy_send_photo(target, caption="", parse_mode="HTML"):
         return False, 5  # simulate 429 asking for 5s
 
-    async def flappy_send_photo_detailed(target, caption="", parse_mode="HTML"):
+    async def flappy_send_photo_detailed(target, caption="", parse_mode="HTML", disable_notification: bool = False):
+        assert disable_notification is True
         ok, retry_after = await flappy_send_photo(target, caption=caption, parse_mode=parse_mode)
         return ok, retry_after, "429", "Too Many Requests"
 
@@ -1174,7 +1180,8 @@ async def test_drain_retries_429_payload_without_dedupe_drop(fake_redis, telegra
         )
         return True, 0
 
-    async def flappy_send_photo_detailed(target, caption="", parse_mode="HTML"):
+    async def flappy_send_photo_detailed(target, caption="", parse_mode="HTML", disable_notification: bool = False):
+        assert disable_notification is True
         ok, retry_after = await flappy_send_photo(target, caption=caption, parse_mode=parse_mode)
         return ok, retry_after, "429" if retry_after else "", "Too Many Requests" if retry_after else ""
 
@@ -1214,7 +1221,8 @@ async def test_drain_preserves_non_429_delivery_failure(fake_redis, telegram_stu
     async def failed_send_photo(target, caption="", parse_mode="HTML"):
         return False, 0
 
-    async def failed_send_photo_detailed(target, caption="", parse_mode="HTML"):
+    async def failed_send_photo_detailed(target, caption="", parse_mode="HTML", disable_notification: bool = False):
+        assert disable_notification is True
         ok, retry_after = await failed_send_photo(target, caption=caption, parse_mode=parse_mode)
         return ok, retry_after, "HTTPError", "telegram send failed"
 

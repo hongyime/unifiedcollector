@@ -73,7 +73,7 @@ class WatchdogStaleAlertHandler:
         self._last_alert = _time.monotonic()
         try:
             from src.notifications import telegram as tg
-            lines = [f"⚠️ <b>Watchdog still-stale escalation</b>"]
+            lines = ["⚠️ <b>Watchdog still-stale escalation</b>"]
             for r in stale[:10]:
                 lines.append(
                     f"• <code>{r['source']}</code>: {r['status']} "

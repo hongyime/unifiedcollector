@@ -43,11 +43,11 @@ from aiohttp import web
 
 from src.db.connection import get_pool, close_pool
 from src.core.media_filter import inspect as inspect_media
-from src.core.priority_hints import refresh_collector_priority_hints
-from src.core.proximity import refresh_account_proximity_cache
+from src.core.priority_hints import refresh_collector_priority_hints as refresh_collector_priority_hints
+from src.core.proximity import refresh_account_proximity_cache as refresh_account_proximity_cache
 from src.core.rate_limit_events import record_rate_limit_event
 from src.core.dynamic_cooldown import record_dynamic_cooldown
-from src.core.strava_route_queue import fetch_strava_route_capture_queue
+from src.core.strava_route_queue import fetch_strava_route_capture_queue as fetch_strava_route_capture_queue
 from src.core.vault import (
     VAULT_ROOT,
     assert_media_write_allowed,
@@ -84,6 +84,30 @@ logger = logging.getLogger("social_ingest")
 # constant surface here so tests and downstream imports that still reach for
 # ``src.bridges.ig_ingest.<CONSTANT>`` keep working.
 from .constants import *  # noqa: E402,F401,F403 -- re-export
+from .constants import (
+    BROWSER_CONTENT_HINT_TTL_SECONDS,
+    BROWSER_CONTENT_STALE_SECONDS,
+    BROWSER_DIAGNOSTIC_PLATFORMS,
+    BROWSER_TELEMETRY_WRITE_TIMEOUT_SECONDS,
+    DL_CONCURRENCY,
+    KNOWN_PLATFORMS,
+    MEDIA_ROOT,
+    PORT,
+    SOCIAL_INGEST_DM_SAMPLE_CONCURRENCY,
+    SOCIAL_INGEST_HEARTBEAT_CONCURRENCY,
+    SOCIAL_INGEST_PREP_DB_ON_STARTUP,
+    SOCIAL_INGEST_REVISIT_CONCURRENCY,
+    SOCIAL_INGEST_STARTUP_DDL_TIMEOUT_SECONDS,
+    SOCIAL_INGEST_STRUCTURED_BACKGROUND_CONCURRENCY,
+    SOCIAL_INGEST_UPLOAD_CONCURRENCY,
+    SOCIAL_INGEST_WRITE_CONCURRENCY,
+    STRAVA_BROWSER_429_COOLDOWN_SECONDS,
+    STRAVA_BROWSER_429_MAX_COOLDOWN_SECONDS,
+    STRAVA_BROWSER_429_MEMORY_SECONDS,
+    TIKTOK_FOLLOW_OWNER_FALLBACK,
+    UC_EXTENSION_EXPECTED_VERSION,
+    X_ZERO_PROGRESS_PROBES,
+)
 from .constants import (  # noqa: E402  -- explicit for the private names not in *
     _SAFE,
     _THREADS_SYNTHETIC_MEDIA_ID,
@@ -4011,7 +4035,7 @@ async def _prepare_db_pool_and_schema(app):
             else:
                 app["pool"] = pool
             break
-        except TimeoutError as exc:
+        except TimeoutError:
             last_error = "db_pool_timeout"
             logger.warning("startup DB pool attempt timed out; retrying")
         except Exception as exc:

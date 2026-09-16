@@ -72,7 +72,7 @@ class PostgresIdleTxnAlertHandler:
         try:
             from src.notifications import telegram as tg
             lines = [
-                f"⚠️ <b>Postgres idle-in-transaction leak</b>",
+                "⚠️ <b>Postgres idle-in-transaction leak</b>",
                 f"{len(rows)} session(s) stuck idle-in-transaction >{age_minutes}m:",
             ]
             for r in rows[:8]:

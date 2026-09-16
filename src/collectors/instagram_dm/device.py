@@ -32,7 +32,7 @@ import json
 import logging
 import secrets
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 logger = logging.getLogger(__name__)

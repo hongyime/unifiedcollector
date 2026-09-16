@@ -24,9 +24,7 @@ import pytest
 
 from src.collectors import github as github_mod
 from src.collectors.github import (
-    AVATAR_CDN_BASE,
     GithubCollector,
-    GithubEdgeFetcher,
     _parse_iso,
 )
 from src.core.spider_discover import EdgeType

@@ -5,18 +5,12 @@ Routes registered on ``router`` (APIRouter) and included by ``__init__.py``.
 """
 from __future__ import annotations
 
-import asyncio
-import html
-import json
+import io
 import logging
-import os
-import re
-import time
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import FileResponse, StreamingResponse
 
 from src.db.connection import get_pool
 from src.dashboard.api.auth import require_role
@@ -85,11 +79,12 @@ async def list_media(source: str | None = None, limit: int = 50,
 
 @router.get("/media/stats")
 async def media_stats(_user: dict = Depends(require_role("viewer"))):
+    from src.dashboard import api as dashboard_api
     pool = await get_pool()
     async with pool.acquire() as conn:
         media_totals_error = None
         try:
-            media_totals = await _source_media_totals(conn)
+            media_totals = await dashboard_api._source_media_totals(conn)
         except Exception as exc:  # noqa: BLE001 - dashboard must degrade, not 500
             logger.warning("media stats totals failed: %s", exc)
             media_totals_error = exc.__class__.__name__
@@ -97,9 +92,9 @@ async def media_stats(_user: dict = Depends(require_role("viewer"))):
         try:
             from src.core.source_freshness import compute_liveness
             live_sources = await compute_liveness(conn)
-            live_sources, _whatsapp_bridge_health = await _with_bridge_overrides(live_sources)
+            live_sources, _whatsapp_bridge_health = await dashboard_api._with_bridge_overrides(live_sources)
             try:
-                live_sources = [*live_sources, *await _beeper_subsource_liveness(conn)]
+                live_sources = [*live_sources, *await dashboard_api._beeper_subsource_liveness(conn)]
             except Exception as exc:  # noqa: BLE001
                 logger.warning("media stats beeper sub-source liveness failed: %s", exc)
             live = {s["source"]: s for s in live_sources}
@@ -124,7 +119,7 @@ async def media_stats(_user: dict = Depends(require_role("viewer"))):
                 "stats_stale": bool(stats.get("stats_stale")),
                 "stats_error": media_totals_error,
             }
-            query_spec = _LATEST_ACTIVITY_QUERIES.get(source)
+            query_spec = dashboard_api._LATEST_ACTIVITY_QUERIES.get(source)
             cur = live.get(source)
             if cur:
                 d["display_name"] = d.get("display_name") or cur.get("display_name")
@@ -144,7 +139,7 @@ async def media_stats(_user: dict = Depends(require_role("viewer"))):
                     d["last_activity"] = d.get("last_collected")
             else:
                 d["last_activity"] = d.get("last_collected")
-            if source.startswith(_BEEPER_SUBSOURCE_PREFIX):
+            if source.startswith(dashboard_api._BEEPER_SUBSOURCE_PREFIX):
                 d["activity_basis"] = "beeper shadow network"
             else:
                 d["activity_basis"] = query_spec[1] if query_spec else "media"
@@ -311,7 +306,8 @@ async def browse_media(
 
 @router.get("/media/{media_id}/thumbnail")
 async def media_thumbnail(media_id: str, _user: dict = Depends(require_role("viewer"))):
-    mid = _parse_media_uuid(media_id)
+    from src.dashboard import api as dashboard_api
+    mid = dashboard_api._parse_media_uuid(media_id)
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -321,13 +317,13 @@ async def media_thumbnail(media_id: str, _user: dict = Depends(require_role("vie
         raise HTTPException(status_code=404, detail="Media not found")
 
     try:
-        file_path = _resolve_media_path(row["file_path"])
+        file_path = dashboard_api._resolve_media_path(row["file_path"])
     except HTTPException as exc:
         detail = "path blocked" if exc.status_code == 403 else "file not on disk"
-        return _thumbnail_placeholder("missing", detail)
+        return dashboard_api._thumbnail_placeholder("missing", detail)
 
     if row["content_type"] in ("video", "audio", "document"):
-        return _thumbnail_placeholder(row["content_type"], file_path.suffix.lstrip(".") or "stored file")
+        return dashboard_api._thumbnail_placeholder(row["content_type"], file_path.suffix.lstrip(".") or "stored file")
 
     try:
         from PIL import Image
@@ -349,7 +345,8 @@ async def media_file(media_id: str, _user: dict = Depends(require_role("viewer")
     thumbnail endpoint which is images-only. FileResponse adds Accept-Ranges +
     honours Range requests automatically, so <video>/<audio> seeking works.
     """
-    mid = _parse_media_uuid(media_id)
+    from src.dashboard import api as dashboard_api
+    mid = dashboard_api._parse_media_uuid(media_id)
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -358,7 +355,7 @@ async def media_file(media_id: str, _user: dict = Depends(require_role("viewer")
     if not row:
         raise HTTPException(status_code=404, detail="Media not found")
 
-    file_path = _resolve_media_path(row["file_path"])
+    file_path = dashboard_api._resolve_media_path(row["file_path"])
     import mimetypes
     media_type = mimetypes.guess_type(row["filename"] or file_path.name)[0] \
         or "application/octet-stream"

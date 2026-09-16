@@ -478,9 +478,12 @@ async def test_collect_bails_without_api_credentials(monkeypatch, caplog):
     monkeypatch.setenv("TELEGRAM_API_HASH", "")
     coll = TelegramCollector()
     coll.pool = _FakePool()
+    sleep = AsyncMock()
+    monkeypatch.setattr(tg_mod.asyncio, "sleep", sleep)
 
     with caplog.at_level("ERROR", logger="src.collectors.telegram"):
         out = await coll.collect(["@somechan"])
+    sleep.assert_not_awaited()
     assert out is None  # no return value, just an early-out
     assert any("API_ID" in r.getMessage() for r in caplog.records)
 
@@ -489,9 +492,13 @@ async def test_collect_bails_without_api_credentials(monkeypatch, caplog):
 async def test_collect_bails_when_no_workers_connect(monkeypatch, caplog):
     coll = _make_collector(monkeypatch)
     coll._spawn_workers = AsyncMock(return_value=[])
+    sleep = AsyncMock()
+    monkeypatch.setattr(tg_mod.asyncio, "sleep", sleep)
+    monkeypatch.setattr(tg_mod.asyncio, "get_event_loop", lambda: SimpleNamespace(time=lambda: 100.0))
     with caplog.at_level("ERROR", logger="src.collectors.telegram"):
         await coll.collect(["@a"])
     assert any("No Telegram workers" in r.getMessage() for r in caplog.records)
+    sleep.assert_awaited_once_with(30)
 
 
 # ── _handle_flood_wait ────────────────────────────────────────────────────
@@ -880,6 +887,9 @@ async def test_backfill_chat_handles_flood_wait_then_continues(monkeypatch):
 async def test_backfill_chat_bails_when_no_workers(monkeypatch, caplog):
     coll = _make_collector(monkeypatch)
     coll._spawn_workers = AsyncMock(return_value=[])
+    sleep = AsyncMock()
+    monkeypatch.setattr(tg_mod.asyncio, "sleep", sleep)
+    monkeypatch.setattr(tg_mod.asyncio, "get_event_loop", lambda: SimpleNamespace(time=lambda: 100.0))
     with caplog.at_level("ERROR", logger="src.collectors.telegram"):
         out = await coll.backfill_chat("1")
     assert out == 0
@@ -1316,6 +1326,9 @@ async def test_realtime_write_does_not_retry_non_transient_error(monkeypatch):
 async def test_download_message_media_bails_without_workers(monkeypatch, caplog):
     coll = _make_collector(monkeypatch)
     coll._spawn_workers = AsyncMock(return_value=[])
+    sleep = AsyncMock()
+    monkeypatch.setattr(tg_mod.asyncio, "sleep", sleep)
+    monkeypatch.setattr(tg_mod.asyncio, "get_event_loop", lambda: SimpleNamespace(time=lambda: 100.0))
     with caplog.at_level("ERROR", logger="src.collectors.telegram"):
         out = await coll.download_message_media(SimpleNamespace(media=None), chat_id=1)
     assert out is None
