@@ -6,6 +6,12 @@ Current live update:
 - Container state at 2026-09-16 02:24 SGT: collector_whatsapp startup blocked on `Base schema collector.sql deferred: lock_timeout` — pg_dump is holding table locks. Not caused by the staging flip; normal pg_dump concurrency behavior. Will unstick when the current backup pass finishes; migration runner is idempotent so next boot picks up cleanly.
 - Task A analyzer IIT pool leak: was already merged when the session started (f75f78f Fix A / e332aca Fix B / eebc6d1 Fix C / 36ca657 follow-up). pg_stat_activity idle-in-transaction ≥5min live = 0.
 
+# Active database recovery — 2026-09-16
+
+Deployed at 03:21 UTC: `postgres.init=true` and `pg_isready -d unifiedcollector`. PostgreSQL previously ran as PID 1, adopted orphan exec/monitoring clients, and treated their exit code 2/SIGPIPE as backend crashes. Same-image isolated test reproduced one global recovery without init and zero with init; both disposable containers removed. Configuration tests failed first, then passed 2/2. Live PostgreSQL now runs under `docker-init`, retains `unifiedcollector_pgdata`, and both application databases remain present. No post-repair exit-2/SIGPIPE/global-recovery events observed through 04:10 UTC.
+
+Residual load issue: Docker's 10s health-check execution budget temporarily expired even while direct `pg_isready` accepted connections; health later returned healthy. Analyzer readiness remains timeout-degraded (7 critical checks), so production-ready is not claimed. Instagram worker was restarted to release stale browser drivers (975 MiB/232 PIDs to 36.54 MiB/3 PIDs), and is healthy. Collector basic health returned HTTP 200. Sep-15 reduced dump passed archive-list validation; complete full-backup/restore proof is still pending. Await a quiet maintenance-window decision for further load isolation and full recovery validation; preserve other agents' ongoing feature/config edits.
+
 Updated: 2026-08-25 14:20 UTC / 22:20 SGT
 
 Current live update:
