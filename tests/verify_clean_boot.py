@@ -73,12 +73,78 @@ async def main(dsn: str) -> int:
 
     pool = await asyncpg.create_pool(dsn, min_size=1, max_size=4)
     try:
+        assert not await pool.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM pg_tables WHERE schemaname='public')"
+        ), "Clean-boot verification requires an empty fixture database"
         summary = await apply_all(pool)
+        assert not summary["deferred"], "Fresh schema application was deferred"
         print(f"runner summary: {summary}")
         rows = await pool.fetch(
             "SELECT tablename FROM pg_tables WHERE schemaname='public'"
         )
         present = {r["tablename"] for r in rows}
+        expected_indexes = {
+            "idx_facebook_profiles_updated_at", "idx_x_profiles_updated_at",
+            "idx_beeper_shadow_attachment_chat_ts", "idx_beeper_messages_network_message",
+            "idx_beeper_shadow_ingested_network", "idx_browser_ingest_content_platform_created",
+            "idx_threads_posts_collected", "idx_facebook_posts_collected", "idx_x_posts_collected",
+            "idx_media_ig_tagged_entity_owner_media", "idx_media_ingest_path",
+        }
+        indexes = {r["indexname"] for r in await pool.fetch(
+            "SELECT indexname FROM pg_indexes WHERE schemaname='public'"
+        )}
+        assert not expected_indexes - indexes, expected_indexes - indexes
+        # A table-only check misses a trigger migration applied in the wrong
+        # order, and replay can appear healthy while destroying existing rows.
+        trigger_columns_sql = """
+            SELECT array_agg(a.attname ORDER BY a.attname)
+            FROM pg_trigger t
+            CROSS JOIN LATERAL unnest(t.tgattr::smallint[]) n(attnum)
+            JOIN pg_attribute a ON a.attrelid=t.tgrelid AND a.attnum=n.attnum
+            WHERE t.tgrelid='public.media_items'::regclass AND t.tgname='trg_media_source_rollups'
+        """
+        trigger_columns = await pool.fetchval(trigger_columns_sql)
+        assert trigger_columns == ["collected_at", "file_size", "source"], trigger_columns
+        ledger_before = await pool.fetch("SELECT filename,checksum,applied_at FROM schema_migrations ORDER BY filename")
+        sample_id = await pool.fetchval("""
+            INSERT INTO media_items(source,entity_id,entity_name,content_type,content_id,filename,file_path,file_size,metadata,source_url)
+            VALUES ('fixture','fixture','Synthetic fixture','photo','clean-boot-fixture','fixture.jpg','/fixture/fixture.jpg',17,'{"preserved":true}'::jsonb,'https://example.invalid/fixture')
+            RETURNING id
+        """)
+        sample_before = await pool.fetchval("SELECT row_to_json(m)::text FROM media_items m WHERE id=$1",sample_id)
+        lemon8_id = await pool.fetchval("""
+            INSERT INTO lemon8_posts(platform_post_id,username,post_url,metadata)
+            VALUES ('fixture','fixture_owner','https://example.invalid/post','{"preserved":true}'::jsonb)
+            RETURNING id
+        """)
+        lemon8_before = await pool.fetchval("SELECT row_to_json(p)::text FROM lemon8_posts p WHERE id=$1", lemon8_id)
+        replay = await apply_all(pool)
+        assert not replay["deferred"] and not replay["migrations_applied"], replay
+        assert await pool.fetchval(trigger_columns_sql) == trigger_columns
+        assert await pool.fetch("SELECT filename,checksum,applied_at FROM schema_migrations ORDER BY filename") == ledger_before
+        assert await pool.fetchval("SELECT row_to_json(m)::text FROM media_items m WHERE id=$1",sample_id) == sample_before
+        assert await pool.fetchval("SELECT row_to_json(p)::text FROM lemon8_posts p WHERE id=$1", lemon8_id) == lemon8_before
+        assert await pool.fetchval("SELECT total_media_bytes FROM media_source_rollups WHERE source='fixture'") == 17
+        await pool.execute("UPDATE media_items SET file_size=23 WHERE id=$1",sample_id)
+        assert await pool.fetchval("SELECT total_media_bytes FROM media_source_rollups WHERE source='fixture'") == 23
+        print("PASS second boot preserves row bytes and migration ledger; narrowed rollup trigger remains functional")
+        # A deployment may contain both the new composite key and an old
+        # SHA-only key, or just the old key. Neither upgrade may drop rows.
+        github_id = await pool.fetchval("INSERT INTO github_commits(sha,message) VALUES ('fixture-sha','Synthetic fixture') RETURNING id")
+        github_before = await pool.fetchval("SELECT row_to_json(c)::text FROM github_commits c WHERE id=$1", github_id)
+        constraint_oid = await pool.fetchval("SELECT conindid FROM pg_constraint WHERE conname='unique_commit_repo_github'")
+        for old_only in [False, True]:
+            if old_only:
+                await pool.execute("ALTER TABLE github_commits DROP CONSTRAINT unique_commit_repo_github")
+            await pool.execute("ALTER TABLE github_commits ADD CONSTRAINT github_commits_sha_key UNIQUE(sha)")
+            await pool.execute("DELETE FROM schema_migrations WHERE filename='fix_github_commits_unique_constraint.sql'")
+            upgraded = await apply_all(pool)
+            assert upgraded["migrations_applied"] == ["fix_github_commits_unique_constraint.sql"], upgraded
+            assert await pool.fetchval("SELECT row_to_json(c)::text FROM github_commits c WHERE id=$1", github_id) == github_before
+            assert not await pool.fetchval("SELECT EXISTS(SELECT 1 FROM pg_constraint WHERE conname='github_commits_sha_key')")
+            if not old_only:
+                assert await pool.fetchval("SELECT conindid FROM pg_constraint WHERE conname='unique_commit_repo_github'") == constraint_oid
+        print("PASS legacy and mixed GitHub constraints upgrade without changing rows; existing composite index is preserved")
     finally:
         await pool.close()
 

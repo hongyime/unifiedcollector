@@ -654,7 +654,7 @@ services:
       TELEGRAM_AUTO_BACKFILL_NEW_ACCOUNTS: "false"
       # Only these lower-risk accounts may process spider/join work. Other
       # Telegram accounts still collect existing dialogs and realtime messages.
-      TELEGRAM_SPIDER_ACCOUNTS: "bryanseah234,shotsbyseah234,oopspwned,johnfriend101"
+      TELEGRAM_SPIDER_ACCOUNTS: "${TELEGRAM_SPIDER_ACCOUNTS:?Set the existing Telegram spider account allowlist before starting Compose}"
       # Discussion groups: 0 means read all available history, not just the old
       # 2,000-message recent window. Member collection is already full-list when
       # Telegram allows participant enumeration.

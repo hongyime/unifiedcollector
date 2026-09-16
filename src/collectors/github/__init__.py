@@ -109,7 +109,7 @@ from src.collectors.github.parse import (
     validate_pat_format as _parse_validate_pat_format,
 )
 from src.core.dedupe_hash import sha256_bytes as _sha256_bytes
-from src.core.file_naming import sanitize_name
+from src.core.file_naming import sanitize_name as sanitize_name
 from src.core.proximity import refresh_account_proximity_cache
 from src.core.profile_photo_tracker import ProfilePhotoTracker
 from src.core.spider_discover import Edge, EdgeType, SpiderDiscover

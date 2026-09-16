@@ -24,18 +24,10 @@ import time
 
 from aiohttp import web
 
-from src.core.priority_hints import refresh_collector_priority_hints
-from src.core.proximity import refresh_account_proximity_cache
 
 from .constants import (
     IG_SPIDER_MAX_HOP,
     IG_SPIDER_TARGETS_LIMIT,
-    SOCIAL_TARGET_CACHE_REFRESH_INLINE_BUDGET_SECONDS,
-    SOCIAL_TARGET_CACHE_REFRESH_ON_REQUEST,
-    SOCIAL_TARGET_CACHE_REFRESH_SECONDS,
-    SOCIAL_TARGET_QUERY_TIMEOUT_SECONDS,
-    SOCIAL_TARGET_RESPONSE_CACHE_SECONDS,
-    SOCIAL_TARGET_STALE_RESPONSE_SECONDS,
 )
 from .cors import _cors
 

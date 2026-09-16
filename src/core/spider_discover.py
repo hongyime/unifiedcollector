@@ -284,8 +284,8 @@ class SpiderDiscover:
         if not isinstance(fetcher, EdgeFetcher):
             # Protocol check — duck-typed; raise if it lacks the required attrs.
             raise TypeError(
-                f"fetcher does not implement EdgeFetcher protocol "
-                f"(missing supported_edge_types or fetch_edges)"
+                "fetcher does not implement EdgeFetcher protocol "
+                "(missing supported_edge_types or fetch_edges)"
             )
 
         self.platform = platform

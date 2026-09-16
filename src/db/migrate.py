@@ -56,6 +56,52 @@ SKIP: frozenset[str] = frozenset({
     "drop_wa_face_tables.sql",  # destructive DROP — archived; apply by hand if needed
 })
 
+# Dated and older descriptive filenames coexist. Preserve names/checksums in
+# existing ledgers; move only declared prerequisites ahead of their dependants.
+MIGRATION_DEPENDENCIES: dict[str, tuple[str, ...]] = {
+    "20260802_add_profile_progress_indexes.sql": ("add_x_profiles.sql", "zz_add_facebook_profiles.sql"),
+    "20260802_limit_media_rollup_trigger_updates.sql": ("add_media_source_rollups.sql",),
+    "20260906_backfill_telegram_is_bot_from_username.sql": ("add_telegram_is_bot.sql",),
+    "20260906_recreate_dashboard_matrix_aggregate_indexes.sql": ("add_media_items_ingest_path.sql",),
+    "add_beeper_attachment_backfill_index.sql": ("add_beeper_shadow_tables.sql",),
+    "add_beeper_liveness_ingested_network_index.sql": ("add_beeper_shadow_tables.sql",),
+    "add_beeper_network_message_index.sql": ("add_beeper_shadow_tables.sql",),
+    "add_browser_ingest_content_indexes.sql": ("add_browser_ingest_events.sql",),
+    "add_hourly_ingestion_indexes.sql": ("add_media_kind_and_threads_fb_posts.sql", "add_x_and_community_posts.sql"),
+    "add_media_items_instagram_tagged_indexes.sql": ("add_media_kind_and_threads_fb_posts.sql",),
+    "add_x_profiles.sql": ("add_x_and_community_posts.sql",),
+    "backfill_lemon8_tiktok_post_profile_stubs.sql": ("20260913_add_lemon8_post_owner_columns.sql",),
+    "zz_add_facebook_profiles.sql": ("add_media_kind_and_threads_fb_posts.sql",),
+}
+
+
+def _ordered_migrations(
+    directory: Path, dependencies: dict[str, tuple[str, ...]] | None = None,
+) -> list[Path]:
+    dependencies = MIGRATION_DEPENDENCIES if dependencies is None else dependencies
+    paths = {path.name: path for path in directory.glob("*.sql")}
+    ordered: list[Path] = []
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(name: str) -> None:
+        if name in visited:
+            return
+        if name in visiting:
+            raise RuntimeError(f"Migration dependency cycle at {name}")
+        visiting.add(name)
+        for prerequisite in dependencies.get(name, ()) if name not in SKIP else ():
+            if prerequisite not in paths or prerequisite in SKIP:
+                raise RuntimeError(f"Migration {name} requires unavailable prerequisite {prerequisite}")
+            visit(prerequisite)
+        visiting.remove(name)
+        visited.add(name)
+        ordered.append(paths[name])
+
+    for name in sorted(paths):
+        visit(name)
+    return ordered
+
 _LEDGER_DDL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
     filename    TEXT PRIMARY KEY,
@@ -63,6 +109,31 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
     applied_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 """
+
+
+async def _execute_migration(conn, name: str, body: str) -> None:
+    if name == "fix_github_commits_unique_constraint.sql":
+        # The base schema now includes this migration's composite constraint.
+        # Keep its index intact, while still removing obsolete SHA-only keys.
+        constraint = await conn.fetchrow("""
+            SELECT c.contype::text AS contype, c.convalidated, c.condeferrable,
+                   ARRAY(SELECT a.attname::text FROM unnest(c.conkey) WITH ORDINALITY k(attnum,pos)
+                         JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=k.attnum
+                         ORDER BY k.pos) AS columns
+            FROM pg_constraint c
+            WHERE c.conrelid='public.github_commits'::regclass
+              AND c.conname='unique_commit_repo_github'
+        """)
+        if constraint is not None:
+            if (constraint["contype"] != "u" or not constraint["convalidated"]
+                    or constraint["condeferrable"] or list(constraint["columns"]) != ["sha", "repo_id"]):
+                raise RuntimeError("Existing unique_commit_repo_github has an unexpected definition")
+            await conn.execute("""
+                ALTER TABLE github_commits DROP CONSTRAINT IF EXISTS unique_platform_commit_github;
+                ALTER TABLE github_commits DROP CONSTRAINT IF EXISTS github_commits_sha_key;
+            """)
+            return
+    await conn.execute(body)
 
 
 def _sha256(text: str) -> str:
@@ -75,6 +146,8 @@ async def apply_all(pool) -> dict:
     Idempotent and safe to call on every service startup.
     """
     summary = {"schemas": 0, "migrations_applied": [], "migrations_skipped": 0, "deferred": False}
+    # Validate the entire order before acquiring a connection or applying DDL.
+    migration_paths = _ordered_migrations(MIGRATIONS_DIR)
 
     async with pool.acquire() as conn:
         try:
@@ -143,7 +216,7 @@ async def apply_all(pool) -> dict:
             }
 
             if MIGRATIONS_DIR.is_dir():
-                for sql_file in sorted(MIGRATIONS_DIR.glob("*.sql")):
+                for sql_file in migration_paths:
                     name = sql_file.name
                     if name in SKIP:
                         summary["migrations_skipped"] += 1
@@ -168,7 +241,7 @@ async def apply_all(pool) -> dict:
                     # rolls back cleanly and is not recorded as applied.
                     try:
                         async with conn.transaction():
-                            await conn.execute(body)
+                            await _execute_migration(conn, name, body)
                             await conn.execute(
                                 "INSERT INTO schema_migrations (filename, checksum) "
                                 "VALUES ($1, $2)",
@@ -183,6 +256,7 @@ async def apply_all(pool) -> dict:
                             )
                             summary["deferred"] = True
                             break  # defer remaining migrations; boot continues
+                        logger.error("Migration %s failed: %s", name, exc.__class__.__name__)
                         raise
                     summary["migrations_applied"].append(name)
                     logger.info("Applied migration: %s", name)

@@ -20,7 +20,6 @@ import asyncio
 import logging
 import os
 import re
-from typing import Optional
 
 import asyncpg
 from telegram import Update, Message
@@ -43,7 +42,6 @@ from telethon.errors import (
     FloodWaitError,
 )
 from telethon.tl.functions.messages import DeleteHistoryRequest
-from telethon.tl.types import InputPeerUser
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",

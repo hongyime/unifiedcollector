@@ -9,23 +9,15 @@ inside thin wrappers to preserve test monkey-patch semantics.
 from __future__ import annotations
 
 import asyncio
-import html
 import json
 import logging
 import os
 import re
-import time
-from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from src.db.connection import get_pool
 from src.dashboard.api.auth import require_role
-from src.dashboard.api.helpers import (
-    _acquire_dashboard_conn,
-    _release_dashboard_conn,
-)
 
 logger = logging.getLogger(__name__)
 

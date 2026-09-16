@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import io
 import os
 import time
 import uuid
@@ -244,7 +243,7 @@ async def test_sha256_file_async_does_not_block_loop(tmp_path):
 def _db_available() -> bool:
     """Cheap check: try to open a pool synchronously. Skip if unavailable."""
     try:
-        from src.db.connection import get_pool, close_pool
+        from src.db.connection import get_pool
     except Exception:
         return False
 

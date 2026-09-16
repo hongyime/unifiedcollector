@@ -24,10 +24,6 @@ from datetime import datetime, timezone
 
 from aiohttp import web
 
-from .constants import (
-    TIKTOK_BROWSER_REVISIT_CLAIM_HOLD_SECONDS,
-    TIKTOK_BROWSER_REVISIT_CLAIM_TIMEOUT_SECONDS,
-)
 from .cors import _cors
 
 

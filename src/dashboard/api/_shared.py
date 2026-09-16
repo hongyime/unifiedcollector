@@ -12,8 +12,9 @@ through ``_lookup`` from the sibling modules that need them.
 from __future__ import annotations
 
 import asyncio
-import html
-import io
+import contextlib
+import html as html
+import io as io
 import json
 import logging
 import os
@@ -57,34 +58,24 @@ from src.dashboard.api.helpers import (
     _YOUTUBE_MEDIA_BACKLOG_CACHE,
     _YOUTUBE_MEDIA_BACKLOG_TTL_SECONDS,
     _YOUTUBE_COMPLETENESS_CACHE,
-    _YOUTUBE_COMPLETENESS_TTL_SECONDS,
-    _TELEGRAM_STATS_CACHE,
-    _TELEGRAM_STATS_TTL_SECONDS,
-    _COLLECTORS_LIVE_CACHE,
-    _COLLECTORS_LIVE_CACHE_TTL_SECONDS,
-    _COLLECTORS_LIVE_STALE_SECONDS,
-    _tiktok_revisit_claim_timeout_seconds,
-    _encode_polyline,
-    _jsonb_points,
-    _row_get,
-    _iso_or_none,
-    _safe_row,
-    _strava_route_status,
-    _estimated_table_rows,
-    _DASHBOARD_DB_ACQUIRE_TIMEOUT_SECONDS,
+    _YOUTUBE_COMPLETENESS_TTL_SECONDS as _YOUTUBE_COMPLETENESS_TTL_SECONDS,
+    _TELEGRAM_STATS_CACHE as _TELEGRAM_STATS_CACHE,
+    _TELEGRAM_STATS_TTL_SECONDS as _TELEGRAM_STATS_TTL_SECONDS,
+    _COLLECTORS_LIVE_CACHE as _COLLECTORS_LIVE_CACHE,
+    _COLLECTORS_LIVE_CACHE_TTL_SECONDS as _COLLECTORS_LIVE_CACHE_TTL_SECONDS,
+    _COLLECTORS_LIVE_STALE_SECONDS as _COLLECTORS_LIVE_STALE_SECONDS,
+    _tiktok_revisit_claim_timeout_seconds as _tiktok_revisit_claim_timeout_seconds,
+    _encode_polyline as _encode_polyline,
+    _jsonb_points as _jsonb_points,
+    _row_get as _row_get,
+    _iso_or_none as _iso_or_none,
+    _safe_row as _safe_row,
+    _strava_route_status as _strava_route_status,
+    _estimated_table_rows as _estimated_table_rows,
+    _DASHBOARD_DB_ACQUIRE_TIMEOUT_SECONDS as _DASHBOARD_DB_ACQUIRE_TIMEOUT_SECONDS,
     _acquire_dashboard_conn,
     _release_dashboard_conn,
     _dt_for_compare,
-    _copy_cache_value,
-    _copy_row_map,
-    _copy_row_list,
-)
-from src.dashboard.api.browser import (
-    _browser_extension_fallback_payload,
-    _browser_extension_fallback_payload_with_fast_ingest,
-    _browser_extension_apply_maintenance_ingest_fallback,
-    _browser_extension_payload,
-    _extension_issues_by_source,
 )
 
 logger = logging.getLogger(__name__)
@@ -2450,7 +2441,6 @@ def _source_matrix_blocker(source_row: dict, rate_row: dict | None, cursor_row: 
         }
     source_health_error_lc = str(source_health_error).lower()
     detail_lc = str(source_row.get("detail") or "").lower()
-    browser_stall_text = f"{source_health_error_lc}\n{detail_lc}"
     browser_stall_marker = source_health_error_lc.startswith("browser capture stalled:") or (
         "browser content progress is" in source_health_error_lc
     )

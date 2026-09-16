@@ -272,10 +272,10 @@ def _raw_payload_row_from_sidecar(
         "collected_at": nested_get(payload, ("timestamps", "collected_at")),
     }
     required = ("source", "artifact_id", "artifact_kind", "file_path", "file_size", "sha256")
-    for field in required:
-        value = row.get(field)
+    for field_name in required:
+        value = row.get(field_name)
         if value is None or (isinstance(value, str) and not value.strip()):
-            errors.append(f"missing_{field}")
+            errors.append(f"missing_{field_name}")
     if verify_files:
         errors.extend(file_reference_errors(payload, root, verify_checksums=True))
     if errors:

@@ -72,6 +72,8 @@ pwsh scripts/start-scraper-chrome-cdp.ps1
 # "Load unpacked" → select the extension/ directory. Copy the
 # extension ID that appears and set UC_EXTENSION_ID in .env.
 
+# Supply the existing restricted Telegram account allowlist from the private host environment.
+# Compose refuses to start if TELEGRAM_SPIDER_ACCOUNTS is unset or empty.
 # Bring up the stack
 docker compose -f docker/docker-compose.yml up -d
 
@@ -221,20 +223,37 @@ docker exec unifiedcollector_spiderfoot `
     python -m src.recon_maigret_fp_refresh --controls 10 --force
 ```
 
+Before updating an existing deployment, copy its current `TELEGRAM_SPIDER_ACCOUNTS`
+allowlist into the private host environment or an explicit Compose `--env-file`.
+A service-level `env_file` alone does not supply Compose interpolation. Preserve
+the same account names: an empty list in the collector means all accounts, so
+Compose requires a non-empty value and no longer hard-codes personal identities.
+See [Docker interpolation](https://docs.docker.com/compose/how-tos/environment-variables/variable-interpolation/).
+
 ## Testing
 
-**Python suite** (110 test files, ~4.5k asserts, tracked under
-`tests/`):
+**Python suite** (tracked under `tests/`):
 
 ```powershell
 docker exec unifiedcollector_collector sh -c `
     'cd /app && python -m pytest tests/ -q --ignore=tests/verify_clean_boot.py --ignore=tests/verify_production.py'
 ```
 
-CI runs a superset of this on every PR:
-`.github/workflows/python-ci.yml` executes ruff lint (F + E9), the
-above pytest command, and a clean-volume schema-boot verifier against
-`pgvector:pg16`.
+`.github/workflows/python-ci.yml` runs Ruff lint (F + E9), the full
+Python suite with external sockets blocked, and a clean-volume schema
+verifier against `pgvector:pg16`. Node 24 executes pure extension host
+validation fixtures without contacting the browser or upstream providers.
+The schema verifier checks an empty database and a second boot: existing
+row bytes and migration checksums must survive, and the media rollup
+trigger must keep its narrowed update columns. Migration prerequisites
+are declared in `src/db/migrate.py`; applied SQL files retain their names
+and checksums.
+
+**WhatsApp bridge**: from `src/bridges/whatsapp`, run `npm ci --ignore-scripts`,
+`npm run build`, `npm test`, and `npm audit --omit=dev --audit-level=high`.
+Hosted Node 20/24 checks exercise synthetic JPEG/PNG/AVIF decoding and invalid
+input without connecting to WhatsApp. Both Docker stages install the committed
+lockfile; the sharp 0.35.4 patch includes the upstream libheif security fix.
 
 **Frontend smoke test** (Vitest + jsdom, `AppShell` render):
 
@@ -374,6 +393,18 @@ analyzer PR.
 default `forks` pool doesn't work reliably on Windows/Docker Desktop.
 `src/dashboard/frontend/vite.config.ts` forces `pool: "threads"` which
 resolved this.
+
+**Database startup recovery limits.** `DB_CONNECT_RETRY_TIMEOUT_SECONDS`
+(default `180`) covers pool initialization and retry sleeps together. A stalled
+connection cannot extend a positive budget. Set it to `0` for one connection
+attempt without retries; the driver's connection timeout still applies.
+`DB_CONNECT_RETRY_INITIAL_SECONDS` defaults to `5` and
+`DB_CONNECT_RETRY_MAX_SECONDS` to `30`; the maximum also caps the first delay.
+Malformed or non-finite values use the defaults. Failed or cancelled pool
+initialization cancels unfinished sibling attempts and closes initialized
+connections before returning. Concurrent callers still share one pool.
+These controls change startup recovery, not query limits, pool size, collection
+cadence, retention or storage location.
 
 **7. TypeScript 7 rejects `moduleResolution: "node10"` in the WhatsApp
 bridge.** Dependabot bumped `typescript` from `^5.9.3` to `^7.0.2` in

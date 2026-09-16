@@ -6,7 +6,6 @@ exercised via a fake connection so no Postgres is needed.
 """
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, timedelta, timezone
 
 import pytest

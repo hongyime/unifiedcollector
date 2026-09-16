@@ -12,7 +12,6 @@ import asyncio
 import json
 import logging
 import os
-import re
 import time
 from collections import deque
 from datetime import datetime, timezone
@@ -36,7 +35,6 @@ from src.core.raw_archive import report_raw_archive_result
 from src.core.rate_limit_events import record_rate_limit_event
 from src.core.user_change_tracker import (
     UserChangeTracker,
-    TELEGRAM_TRACKED_FIELDS,
 )
 from src.core.vault import VAULT_ROOT, write_atomic_artifact, write_raw_payload
 
@@ -775,6 +773,10 @@ class TelegramCollector(
     # ------------------------------------------------------------------
 
     async def collect(self, targets: list[str]):
+        if not self._api_id or not self._api_hash:
+            logger.error("TELEGRAM_API_ID and TELEGRAM_API_HASH required")
+            return
+
         # Longer delay to let other collectors (instagram/tiktok) finish their
         # SYNC initialization that blocks the event loop. Without this, our
         # async connects never complete because instaloader's retry loops freeze
@@ -788,16 +790,13 @@ class TelegramCollector(
         now = asyncio.get_event_loop().time()
         last = getattr(self, "_last_connect_time", 0)
         min_interval = 300.0  # 5 minutes
-        if now - last < min_interval:
+        if last and now - last < min_interval:
             wait = min_interval - (now - last)
             logger.info("[telegram.collect] rate-limiting reconnect — waiting %.0fs", wait)
             await asyncio.sleep(wait)
         self._last_connect_time = asyncio.get_event_loop().time()
 
         logger.info("[telegram.collect] ENTER with %d targets", len(targets))
-        if not self._api_id or not self._api_hash:
-            logger.error("TELEGRAM_API_ID and TELEGRAM_API_HASH required")
-            return
 
         # Load accounts from DB (supplements env-based accounts) — item 4.5
         logger.info("[telegram.collect] calling _load_accounts_from_db")

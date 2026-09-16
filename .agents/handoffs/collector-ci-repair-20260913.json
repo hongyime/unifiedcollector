@@ -1,0 +1,67 @@
+{
+  "at": "2026-09-13T05:24:27.410299+00:00",
+  "tasks": [
+    {
+      "id": "reproduce_and_classify_current_ci_failures",
+      "done": true
+    },
+    {
+      "id": "repair_migration_order_without_changing_applied_sql",
+      "done": true
+    },
+    {
+      "id": "repair_lint_and_behavioral_contract_failures",
+      "done": true
+    },
+    {
+      "id": "verify_full_hosted_ci_and_preservation",
+      "done": false
+    },
+    {
+      "id": "refresh_portfolio_and_publish_report",
+      "done": false
+    }
+  ],
+  "draft_pr": 30,
+  "production_changed": false,
+  "constraints": [
+    "Preserve original checkout, all application records, SQL names/checksums and environment values.",
+    "No live providers, shared Docker, SG SHIOK changes, external notifications or source collection.",
+    "Runtime location remains pending; do not infer a deployment target."
+  ],
+  "next": "Push reviewed draft changes and require full Python CI including isolated PostgreSQL before any release; runtime location remains pending.",
+  "local_validation": {
+    "ruff_findings_before": 229,
+    "ruff_findings_after": 0,
+    "focused_unique_cases": 313,
+    "full_ci": "pending",
+    "production_changed": false
+  },
+  "changes": [
+    "Order migration prerequisites without altering applied SQL; verify empty and repeated boot with preserved row bytes and ledger.",
+    "Restore split-dashboard helper imports and first-start Telegram credential/backoff behavior.",
+    "Retain quiet notification contracts, align extension version metadata and exercise actual bundled host validation.",
+    "Declare missing websocket-client dependency; preserve public import aliases during lint cleanup."
+  ],
+  "deployment_gate": "Migrate the existing Telegram spider allowlist into private Compose interpolation configuration; required non-empty value prevents silently allowing all accounts. Runtime location remains pending.",
+  "commit_hook": "Existing hard-coded identity in changed Compose file was rejected. Replaced it with required environment configuration; hook remains enabled.",
+  "hosted_first_run": {
+    "id": 34740391012,
+    "head": "b39b35ddd50ec99d1928738ae10471fe74cd188a",
+    "ruff": "passed",
+    "schema": "second missing prerequisite reproduced: Telegram is_bot backfill before column creation",
+    "unit": "pending"
+  },
+  "sharp_patch": {
+    "version": "0.35.4",
+    "typescript_build": "passed",
+    "local_native_cases": 4,
+    "production_npm_audit_vulnerabilities": 0,
+    "docker": "Uses committed lockfile in both stages",
+    "hosted_node_versions": [
+      20,
+      24
+    ],
+    "release": "pending"
+  }
+}

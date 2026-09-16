@@ -43,7 +43,7 @@ import logging
 import random
 import time
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Optional
 from urllib.parse import urlparse
 
@@ -341,7 +341,7 @@ class RateLimiter:
         Prefer ``await wait(key)`` whenever possible.
         """
         try:
-            loop = asyncio.get_running_loop()
+            asyncio.get_running_loop()
         except RuntimeError:
             return asyncio.run(self.wait(key))
 

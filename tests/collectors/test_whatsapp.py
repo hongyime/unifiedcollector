@@ -477,6 +477,7 @@ async def test_handle_message_event_archives_raw_payload_before_duplicate(collec
 
 @pytest.mark.asyncio
 async def test_handle_contact_event_archives_raw_payload(collector, monkeypatch):
+    monkeypatch.setenv("WA_CONTACT_ARCHIVE_RAW", "1")
     monkeypatch.setenv("COLLECTOR_TIER1_RAW_PAYLOADS_ENABLED", "1")
     calls = []
 
