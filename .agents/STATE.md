@@ -1,3 +1,11 @@
+Updated: 2026-09-16 02:24 SGT / 2026-09-15 18:24 UTC
+
+Current live update:
+- Shipped Sprint 5 CDC-style contact staging (opt-in WA_STAGING_ENABLED). Commits b27355c1 (migration) + fe455827 (staging + async merge). Wired _stage_contacts_batch into collectors/whatsapp/__init__.py flusher; when the flag is on, contact events COPY into UNLOGGED wa_staging_contacts and the new WhatsappStagingMergeHandler drains oldest-first every 5s into whatsapp_users + whatsapp_lid_map with ON CONFLICT COALESCE-forward merges. Sprint 4 batching (_upsert_contacts_batch) stays as the WA_STAGING_ENABLED=0 rollback lever, byte-identical to pre-Task-B baseline. 20/20 tests pass (12 merger + 8 stager).
+- Discovered scheduler compose block does not use env_file: - env/whatsapp.env; added WA_STAGING_* env vars explicitly to the scheduler environment: block via ${WA_STAGING_ENABLED:-0} substitution so WhatsappStagingMergeHandler sees the same flag the collector reads. Added WA_STAGING_ENABLED=1 to docker/.env (compose variable substitution source) and to docker/env/whatsapp.env; force-recreated collector_whatsapp + scheduler with docker compose up -d --force-recreate. Both now expose WA_STAGING_ENABLED=1 in printenv.
+- Container state at 2026-09-16 02:24 SGT: collector_whatsapp startup blocked on `Base schema collector.sql deferred: lock_timeout` — pg_dump is holding table locks. Not caused by the staging flip; normal pg_dump concurrency behavior. Will unstick when the current backup pass finishes; migration runner is idempotent so next boot picks up cleanly.
+- Task A analyzer IIT pool leak: was already merged when the session started (f75f78f Fix A / e332aca Fix B / eebc6d1 Fix C / 36ca657 follow-up). pg_stat_activity idle-in-transaction ≥5min live = 0.
+
 Updated: 2026-08-25 14:20 UTC / 22:20 SGT
 
 Current live update:

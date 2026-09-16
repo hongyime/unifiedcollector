@@ -1038,6 +1038,12 @@ services:
       # Reduced-spam defaults (was 6h digest + 15min delta). See scheduler/__init__.py.
       STATUS_HEARTBEAT_INTERVAL_HOURS: "${STATUS_HEARTBEAT_INTERVAL_HOURS:-24}"
       STATUS_DELTA_INTERVAL_MINUTES: "${STATUS_DELTA_INTERVAL_MINUTES:-0}"
+      # Sprint 5: WhatsApp contact staging merge handler
+      # (WhatsappStagingMergeHandler lives here, so the scheduler needs to see
+      # the same flag the collector_whatsapp service reads from env/whatsapp.env).
+      WA_STAGING_ENABLED: "${WA_STAGING_ENABLED:-0}"
+      WA_STAGING_MERGE_INTERVAL_MS: "${WA_STAGING_MERGE_INTERVAL_MS:-5000}"
+      WA_STAGING_BATCH_MAX: "${WA_STAGING_BATCH_MAX:-1000}"
     volumes:
       - z:/unifiedcollector/media:/media
       - z:/unifiedcollector:/vault
