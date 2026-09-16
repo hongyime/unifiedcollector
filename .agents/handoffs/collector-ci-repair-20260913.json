@@ -44,5 +44,24 @@
     "Declare missing websocket-client dependency; preserve public import aliases during lint cleanup."
   ],
   "deployment_gate": "Migrate the existing Telegram spider allowlist into private Compose interpolation configuration; required non-empty value prevents silently allowing all accounts. Runtime location remains pending.",
-  "commit_hook": "Existing hard-coded identity in changed Compose file was rejected. Replaced it with required environment configuration; hook remains enabled."
+  "commit_hook": "Existing hard-coded identity in changed Compose file was rejected. Replaced it with required environment configuration; hook remains enabled.",
+  "hosted_first_run": {
+    "id": 34740391012,
+    "head": "b39b35ddd50ec99d1928738ae10471fe74cd188a",
+    "ruff": "passed",
+    "schema": "second missing prerequisite reproduced: Telegram is_bot backfill before column creation",
+    "unit": "pending"
+  },
+  "sharp_patch": {
+    "version": "0.35.4",
+    "typescript_build": "passed",
+    "local_native_cases": 4,
+    "production_npm_audit_vulnerabilities": 0,
+    "docker": "Uses committed lockfile in both stages",
+    "hosted_node_versions": [
+      20,
+      24
+    ],
+    "release": "pending"
+  }
 }

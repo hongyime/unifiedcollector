@@ -13,6 +13,7 @@ on:
       - "pyproject.toml"
       - "src/db/schemas/**"
       - "src/db/migrations/**"
+      - "src/bridges/whatsapp/**"
       - ".github/workflows/python-ci.yml"
 
 permissions:
@@ -53,6 +54,26 @@ jobs:
           node-version: "24"
       - run: python -m pip install -r requirements.lock pytest==9.0.3 pytest-asyncio==1.4.0 pytest-timeout==2.4.0 pytest-socket==0.7.0
       - run: python -m pytest -p pytest_asyncio.plugin -p pytest_timeout -p pytest_socket --allow-hosts=127.0.0.1,::1 --timeout=30 tests/ -q --ignore=tests/verify_clean_boot.py --ignore=tests/verify_production.py
+
+  whatsapp-bridge:
+    name: WhatsApp Bridge (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        node: [20, 24]
+    defaults:
+      run:
+        working-directory: src/bridges/whatsapp
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm ci --ignore-scripts --no-fund
+      - run: npm run build
+      - run: npm test
+      - run: npm audit --omit=dev --audit-level=high
 
   schema-boot:
     name: Clean Volume Boot
