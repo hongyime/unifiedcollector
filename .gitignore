@@ -134,5 +134,7 @@ coverage/
 !.deepsource.toml
 skills/
 skills-lock.json
-docs/
+docs/*
+!docs/plans/
+!docs/plans/*.md
 # End AI / editor dot directories (managed via sourcerepo)
