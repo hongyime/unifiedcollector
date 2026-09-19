@@ -128,7 +128,10 @@ from src.core.seen_targets import (  # noqa: F401 - re-export for tests
     seen_target_summary_by_source,
 )
 from src.core.optional_rollout import optional_rollout_report  # noqa: F401 - re-export for tests
-from src.backup.db_backup import backup_status  # noqa: F401 - re-export for tests
+# Backup subsystem removed 2026-09-19; keep a stable disabled shape so any
+# test that reaches for backup_status through this module still resolves.
+def backup_status():
+    return {"status": "backup_disabled", "reason": "backup subsystem removed 2026-09-19"}
 from src.dashboard.websocket import health_ws  # noqa: F401 - re-export for tests
 from src.db.connection import get_pool  # noqa: F401 - re-export for tests
 

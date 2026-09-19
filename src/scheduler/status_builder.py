@@ -25,7 +25,11 @@ import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from src.backup.db_backup import backup_status
+# Backup subsystem removed 2026-09-19; status_builder still emits a "backups"
+# section, so give it a stable disabled shape and let the "ok" check in this
+# module treat backup_disabled as neutral (not bad).
+def backup_status():
+    return {"status": "backup_disabled", "reason": "backup subsystem removed 2026-09-19"}
 from src.core.env import env_int
 from src.core.vault import VAULT_ROOT, vault_artifact_counts, vault_health
 
@@ -977,7 +981,9 @@ async def build_status(pool, freshness: list[tuple[str, str, int]]) -> dict:
         or int(vault.get("artifacts_partial") or 0) > 0
     )
     backups = snap.get("backups") or {}
-    backups_bad = bool(backups) and backups.get("status") not in {"ok", "refreshing"}
+    # Backup subsystem removed 2026-09-19 — "backup_disabled" is the new
+    # non-bad terminal state alongside the historical "ok" and "refreshing".
+    backups_bad = bool(backups) and backups.get("status") not in {"ok", "refreshing", "backup_disabled"}
     snap["ok"] = not (snap.get("dead_sources") or snap.get("stale_sources") or vault_bad or backups_bad)
     return snap
 

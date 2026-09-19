@@ -18,7 +18,13 @@ import traceback
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
-from src.backup.db_backup import backup_status
+from src.observability_health import health_report
+
+# Backup subsystem was removed 2026-09-19. Consumers still call backup_status()
+# to render the "backups" section in health payloads; give them a stable
+# disabled shape so downstream comparisons + assertions do not KeyError.
+def backup_status():
+    return {"status": "backup_disabled", "reason": "backup subsystem removed 2026-09-19"}
 from src.core.vault import vault_artifact_counts
 from src.db.connection import get_pool
 from src.dashboard.websocket import health_ws

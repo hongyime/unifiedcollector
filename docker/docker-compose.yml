@@ -16,10 +16,7 @@ name: unifiedcollector
 
 services:
   postgres:
-    build:
-      context: ./postgres
-      dockerfile: Dockerfile
-    image: unifiedcollector_postgres:pgbackrest
+    image: pgvector/pgvector:pg16
     container_name: unifiedcollector_postgres
     init: true
     environment:
@@ -36,46 +33,12 @@ services:
       - ./postgres/postgres.conf:/etc/postgresql/postgresql.conf
       - pgdata:/var/lib/postgresql/data
       - ./backups:/backups
-      # pgBackRest — archive_command in postgres.conf calls `pgbackrest
-      # archive-push` from inside this container, so the same repo + conf
-      # must be visible here. See docker/pgbackrest/README.md.
-      - ./pgbackrest/pgbackrest.conf:/etc/pgbackrest.conf:ro
-      - z:/unifiedcollector/backups/pgbackrest:/var/lib/pgbackrest
-      - pgbackrest_spool:/var/spool/pgbackrest
-      - pgbackrest_log:/var/log/pgbackrest
     command: postgres -c config_file=/etc/postgresql/postgresql.conf
     env_file:
       - ./env/common.env
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-collector} -d unifiedcollector"]
       interval: 30s
-      timeout: 10s
-      retries: 3
-    restart: unless-stopped
-
-  pgbackrest:
-    build:
-      context: ./pgbackrest
-      dockerfile: Dockerfile
-    image: unifiedcollector_pgbackrest:latest
-    container_name: unifiedcollector_pgbackrest
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      # pg1-password comes from the same POSTGRES_PASSWORD the postgres
-      # service uses; pgbackrest reads PGPASSWORD at runtime.
-      PGPASSWORD: ${POSTGRES_PASSWORD}
-    volumes:
-      - ./pgbackrest/pgbackrest.conf:/etc/pgbackrest.conf:ro
-      - z:/unifiedcollector/backups/pgbackrest:/var/lib/pgbackrest
-      - pgbackrest_spool:/var/spool/pgbackrest
-      - pgbackrest_log:/var/log/pgbackrest
-    healthcheck:
-      # Verifies the binary + config parse; no cluster round-trip so it
-      # doesn't churn the pg connection budget on every check.
-      test: ["CMD-SHELL", "pgbackrest --config=/etc/pgbackrest.conf --stanza=main help >/dev/null"]
-      interval: 60s
       timeout: 10s
       retries: 3
     restart: unless-stopped
@@ -1239,84 +1202,6 @@ services:
       start_period: 10s
     restart: unless-stopped
 
-  backup:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile.backup
-    image: unifiedcollector-backup:latest
-    container_name: unifiedcollector_backup
-    # Daily pg_dump -> Z:\unifiedcollector\backups\db with bounded retention:
-    # 7 daily, 4 weekly, 3 monthly. Restore: pg_restore -d <db> <file>.dump
-    # NOTE (2026-07-03): backups intentionally STAY on Z (user decision). The
-    # co-location risk (a Z event kills media AND backups together) is accepted;
-    # C: is space-crisis-prone and Z has 3.3TB free. The hardening below makes the
-    # WRITES safe even though the location is shared:
-    #   * dump to a temp name, then verify it is (a) non-empty AND (b) a valid,
-    #     readable archive via `pg_restore --list` BEFORE atomically renaming to
-    #     the final name. A reader/prune never sees a half-written or corrupt dump.
-    #   * prune ONLY runs after a verified-good dump exists — so N days of failures
-    #     can never delete the last good backup (the old code pruned unconditionally).
-    #   * on failure: keep old backups, remove the temp, and fire a Telegram alert
-    #     (previously `[backup] FAILED` went only to stdout that nobody reads).
-    environment:
-      PGUSER: ${POSTGRES_USER}
-      PGPASSWORD: ${POSTGRES_PASSWORD}
-      PGHOST: postgres
-      PGDATABASE: unifiedcollector
-      DATABASE_URL: ""
-      COLLECTOR_DB_BACKUP_DIR: /zbackups
-      COLLECTOR_DB_BACKUP_DAILY: "7"
-      COLLECTOR_DB_BACKUP_WEEKLY: "4"
-      COLLECTOR_DB_BACKUP_MONTHLY: "3"
-      COLLECTOR_DB_BACKUP_INTERVAL_SECONDS: ${COLLECTOR_DB_BACKUP_INTERVAL_SECONDS:-86400}
-      COLLECTOR_DB_BACKUP_RETRY_SECONDS: ${COLLECTOR_DB_BACKUP_RETRY_SECONDS:-3600}
-      # The collector DB is now large/hot enough that compressed custom-format
-      # dumps can exceed two hours during GitHub/Telegram backfill. Prefer a
-      # bigger Z-drive dump over a self-cancelled backup; the stall watchdog
-      # below still kills dumps that stop making file progress.
-      COLLECTOR_DB_BACKUP_TIMEOUT_SECONDS: "0"
-      COLLECTOR_DB_BACKUP_STALL_TIMEOUT_SECONDS: "1800"
-      COLLECTOR_DB_BACKUP_VALIDATE_TIMEOUT_SECONDS: "1200"
-      COLLECTOR_DB_BACKUP_COMPRESSION: ${COLLECTOR_DB_BACKUP_COMPRESSION:-1}
-      # Container restarts should not immediately create a second expensive
-      # dump when a verified backup was just produced. The outer loop still
-      # performs daily backups after this freshness window expires.
-      COLLECTOR_DB_BACKUP_SKIP_IF_FRESH_SECONDS: ${COLLECTOR_DB_BACKUP_SKIP_IF_FRESH_SECONDS:-82800}
-      COLLECTOR_DB_BACKUP_DATABASE: unifiedcollector
-      COLLECTOR_DB_BACKUP_VAULT_ROOT: /vault
-      COLLECTOR_DB_BACKUP_REQUIRE_VAULT_MIRROR: "1"
-    # Load ../.env for NOTIFY_TELEGRAM_BOT_TOKEN / TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID
-    # so the Python backup runner can send a best-effort failure alert.
-    env_file:
-      - ./env/common.env
-      - ./env/telegram_notify.env
-      - ./env/backup.env
-    volumes:
-      - z:/unifiedcollector/backups/db:/zbackups
-      - z:/unifiedcollector:/vault
-      - ../src/backup:/app/src/backup:ro
-    entrypoint: /bin/sh
-    command:
-      - -c
-      - |
-        while true; do
-          if python3 -m src.backup.db_backup run; then
-            sleep "$${COLLECTOR_DB_BACKUP_INTERVAL_SECONDS:-86400}"
-          else
-            sleep "$${COLLECTOR_DB_BACKUP_RETRY_SECONDS:-3600}"
-          fi
-        done
-    depends_on:
-      postgres:
-        condition: service_healthy
-    # `always` (not `unless-stopped`): after a SIGKILL (exit 137, OOM) the Docker
-    # daemon sometimes records the last state as "stopped" rather than "exited",
-    # which `unless-stopped` treats as "operator intent — don't restart". That
-    # left the backup container dead until manually restarted (2026-08 incident).
-    # `always` restarts regardless of prior state; safe here because backups are
-    # long-idle sleeps between short bursts, so restart churn cannot compound.
-    restart: always
-
   rabbitmq:
     image: rabbitmq:3.13-alpine
     container_name: unifiedcollector_rabbitmq
@@ -1490,6 +1375,4 @@ volumes:
   rabbitmq_data:
   redis_data:
   sessions_data:
-  pgbackrest_spool:
-  pgbackrest_log:
 
