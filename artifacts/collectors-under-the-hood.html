@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>unifiedcollector — collectors under the hood</title>
+<style>
+:root{--bg:#0d1117;--bg-elev:#161b22;--bg-hover:#1c232c;--border:#262d36;--border-strong:#364250;--text:#e6edf3;--text-dim:#9198a1;--text-fade:#6e7681;--accent:#22d3ee;--accent-dim:#0891a5;--ok:#3fb950;--warn:#d29922;--bad:#f85149;--code-bg:#010409;--code-text:#c9d1d9;--shadow:0 1px 0 0 rgba(255,255,255,.03),0 6px 24px -6px rgba(0,0,0,.5);--radius:10px;--mono:ui-monospace,"Cascadia Code","SF Mono",Consolas,"Roboto Mono",monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,"Helvetica Neue",Arial,sans-serif}
+*{box-sizing:border-box}html,body{background:var(--bg);color:var(--text);font-family:var(--sans)}body{margin:0;padding:32px 20px 96px;line-height:1.55;font-size:15px}
+main{max-width:1100px;margin:0 auto}
+h1{font-size:28px;letter-spacing:-.01em;margin:0 0 6px;font-weight:600}h1 .accent{color:var(--accent)}
+.sub{color:var(--text-dim);font-size:14px;margin:0 0 32px}
+h2{font-size:20px;margin:40px 0 12px;font-weight:600;letter-spacing:-.01em;padding-bottom:6px;border-bottom:1px solid var(--border)}h2 .id{color:var(--text-fade);font-family:var(--mono);font-size:14px;font-weight:400;margin-left:8px}
+h3{font-size:16px;margin:20px 0 8px;font-weight:600;color:var(--accent);font-family:var(--mono)}
+p{margin:0 0 12px}
+code{font-family:var(--mono);font-size:.9em;color:var(--code-text);background:var(--code-bg);padding:1px 5px;border-radius:4px;border:1px solid var(--border)}
+pre{font-family:var(--mono);font-size:13px;color:var(--code-text);background:var(--code-bg);padding:12px 14px;border-radius:var(--radius);border:1px solid var(--border);overflow-x:auto;margin:8px 0 12px}
+pre code{background:transparent;border:0;padding:0}
+a{color:var(--accent);text-decoration:none;border-bottom:1px dashed var(--accent-dim)}a:hover{color:#6ee7f3}
+.card{background:var(--bg-elev);border:1px solid var(--border);border-radius:var(--radius);padding:16px 20px;margin:12px 0 20px;box-shadow:var(--shadow)}
+.card h3:first-child{margin-top:0}
+.kv{display:grid;grid-template-columns:150px 1fr;gap:4px 16px;font-size:14px;margin:8px 0 12px}
+.kv dt{color:var(--text-dim);font-family:var(--mono);font-size:13px}
+.kv dd{margin:0}
+table{width:100%;border-collapse:collapse;font-size:14px;margin:8px 0 12px}
+th,td{padding:6px 10px;text-align:left;border-bottom:1px solid var(--border);vertical-align:top}
+th{color:var(--text-dim);font-weight:500;font-size:13px}
+tr:hover td{background:var(--bg-hover)}
+.pill{display:inline-block;padding:1px 8px;border-radius:12px;font-size:12px;font-family:var(--mono);border:1px solid var(--border-strong);color:var(--text-dim)}
+.pill.ok{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 40%,var(--border-strong))}
+.pill.warn{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 40%,var(--border-strong))}
+.pill.bad{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 40%,var(--border-strong))}
+.diagram{background:var(--bg-elev);border:1px solid var(--border);border-radius:var(--radius);padding:20px;margin:12px 0 24px;box-shadow:var(--shadow);overflow-x:auto}
+.diagram svg{display:block;max-width:100%;height:auto}
+ul.plain,ol.plain{padding-left:22px;margin:6px 0 12px}ul.plain li,ol.plain li{margin:3px 0}
+.toc{columns:2;column-gap:28px;padding-left:22px;font-size:14px;margin:12px 0 24px}
+.toc a{border-bottom:0}.toc a:hover{text-decoration:underline}
+.caption{color:var(--text-fade);font-size:13px;margin:4px 0 12px}
+.footer{margin-top:64px;padding-top:20px;border-top:1px solid var(--border);color:var(--text-fade);font-size:12px}
+@media(max-width:700px){.toc{columns:1}.kv{grid-template-columns:1fr;gap:2px 0}.kv dt{color:var(--accent)}}
+</style></head><body><main>
+
+<h1><span class="accent">unifiedcollector</span> — collectors under the hood</h1>
+<p class="sub">How each of the 16 collector services actually works — protocol, data flow, tables written, and failure modes. Snapshot 2026-09-19; source of truth <code>C:\unifiedcollector\docker\docker-compose.yml</code>.</p>
+
+
+<section><h2>Visual overview</h2>
+<div class="diagram" role="img" aria-label="Data flow from external sources through collectors into Postgres">
+<svg viewBox="0 0 1040 640" xmlns="http://www.w3.org/2000/svg" font-family="ui-monospace,Consolas,monospace" font-size="12">
+<defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="#22d3ee"/></marker></defs>
+<text x="120" y="30" fill="#9198a1">external source</text><text x="360" y="30" fill="#9198a1">transport</text><text x="600" y="30" fill="#9198a1">collector service</text><text x="880" y="30" fill="#9198a1">Postgres tables</text>
+
+<g><rect x="20" y="52" width="200" height="46" rx="6" fill="#161b22" stroke="#262d36"/><text x="30" y="76" fill="#e6edf3">WhatsApp phones</text><text x="30" y="90" fill="#6e7681">via Baileys bridges</text><rect x="260" y="52" width="200" height="46" rx="6" fill="#161b22" stroke="#262d36"/><text x="270" y="72" fill="#e6edf3">wa_bridge_1 / wa_bridge_2</text><text x="270" y="88" fill="#6e7681">-> RabbitMQ (4 queues)</text><rect x="500" y="52" width="220" height="46" rx="6" fill="#161b22" stroke="#22d3ee"/><text x="510" y="72" fill="#22d3ee">collector_whatsapp</text><text x="510" y="88" fill="#6e7681">Sprint 4 batching + Sprint 5 staging</text><rect x="760" y="52" width="260" height="46" rx="6" fill="#161b22" stroke="#262d36"/><text x="770" y="72" fill="#e6edf3">whatsapp_users / _messages / _chats</text><text x="770" y="88" fill="#6e7681">wa_lid_map, wa_staging_contacts</text><line x1="220" y1="75" x2="260" y2="75" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arr)"/><line x1="460" y1="75" x2="500" y2="75" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arr)"/><line x1="720" y1="75" x2="760" y2="75" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arr)"/></g>
+
+<g><rect x="20" y="112" width="200" height="46" rx="6" fill="#161b22" stroke="#262d36"/><text x="30" y="132" fill="#e6edf3">Telegram API</text><text x="30" y="148" fill="#6e7681">4 accounts, MTProto</text><rect x="260" y="112" width="200" height="46" rx="6" fill="#161b22" stroke="#262d36"/><text x="270" y="132" fill="#e6edf3">Telethon sessions</text><text x="270" y="148" fill="#6e7681">realtime + backfill</text><rect x="500" y="112" width="220" height="46" rx="6" fill="#161b22" stroke="#22d3ee"/><text x="510" y="132" fill="#22d3ee">collector_telegram</text><text x="510" y="148" fill="#6e7681">mixins: realtime, media, backfill</text><rect x="760" y="112" width="260" height="46" rx="6" fill="#161b22" stroke="#262d36"/><text x="770" y="132" fill="#e6edf3">telegram_messages, _users, _chats</text><text x="770" y="148" fill="#6e7681">_edges, _locations, _mentions</text><line x1="220" y1="135" x2="260" y2="135" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arr)"/><line x1="460" y1="135" x2="500" y2="135" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arr)"/><line x1="720" y1="135" x2="760" y2="135" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arr)"/></g>
+
+<g><rect x="20" y="172" width="200" height="72" rx="6" fill="#161b22" stroke="#262d36"/><text x="30" y="192" fill="#e6edf3">IG / Threads / TikTok /</text><text x="30" y="207" fill="#e6edf3">Facebook / X / Strava /</text><text x="30" y="222" fill="#e6edf3">Lemon8 web pages</text><text x="30" y="238" fill="#6e7681">host Chrome tabs, real sessions</text><rect x="260" y="172" width="200" height="72" rx="6" fill="#161b22" stroke="#262d36"/><text x="270" y="192" fill="#e6edf3">Chrome-for-Testing</text><text x="270" y="207" fill="#e6edf3">CDP :9336 + MV3 ext</text><text x="270" y="222" fill="#e6edf3">v1.23.103 content scripts</text><text x="270" y="238" fill="#6e7681">POST to ig_ingest :8765</text><rect x="500" y="172" width="220" height="72" rx="6" fill="#161b22" stroke="#22d3ee"/><text x="510" y="192" fill="#22d3ee">ig_ingest (:8765)</text><text x="510" y="207" fill="#6e7681">4 lanes: heartbeat, write,</text><text x="510" y="222" fill="#6e7681">revisit, dm_sample</text><text x="510" y="238" fill="#6e7681">+ collector_instagram, _tiktok</text><rect x="760" y="172" width="260" height="72" rx="6" fill="#161b22" stroke="#262d36"/><text x="770" y="192" fill="#e6edf3">browser_ingest_events (raw)</text><text x="770" y="207" fill="#e6edf3">instagram_profiles, tiktok_users,</text><text x="770" y="222" fill="#e6edf3">threads_posts, facebook_posts,</text><text x="770" y="238" fill="#e6edf3">x_profiles, strava_activities</text><line x1="220" y1="208" x2="260" y2="208" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arr)"/><line x1="460" y1="208" x2="500" y2="208" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arr)"/><line x1="720" y1="208" x2="760" y2="208" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arr)"/></g>
+
+<g><rect x="20" y="258" width="200" height="46" rx="6" fill="#161b22" stroke="#262d36"/><text x="30" y="278" fill="#e6edf3">GitHub / Strava / Search</text><text x="30" y="294" fill="#6e7681">HTTP APIs</text><rect x="500" y="258" width="220" height="46" rx="6" fill="#161b22" stroke="#22d3ee"/><text x="510" y="278" fill="#22d3ee">collector_lowrisk (2.5GB cap)</text><text x="510" y="294" fill="#6e7681">worker --source github,strava,search</text><rect x="760" y="258" width="260" height="46" rx="6" fill="#161b22" stroke="#262d36"/><text x="770" y="278" fill="#e6edf3">github_commits, strava_activities,</text><text x="770" y="294" fill="#e6edf3">search_results, follow_edges</text><line x1="220" y1="281" x2="500" y2="281" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arr)"/><line x1="720" y1="281" x2="760" y2="281" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arr)"/></g>
+
+<g><rect x="20" y="318" width="200" height="46" rx="6" fill="#161b22" stroke="#262d36"/><text x="30" y="338" fill="#e6edf3">YouTube Data API</text><text x="30" y="354" fill="#6e7681">+ headless cookies</text><rect x="500" y="318" width="220" height="46" rx="6" fill="#161b22" stroke="#22d3ee"/><text x="510" y="338" fill="#22d3ee">collector_youtube</text><text x="510" y="354" fill="#6e7681">quota-aware, yt-dlp subprocess</text><rect x="760" y="318" width="260" height="46" rx="6" fill="#161b22" stroke="#262d36"/><text x="770" y="338" fill="#e6edf3">youtube_videos, _channels,</text><text x="770" y="354" fill="#e6edf3">_user_changes, media_items</text><line x1="220" y1="341" x2="500" y2="341" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arr)"/><line x1="720" y1="341" x2="760" y2="341" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arr)"/></g>
+
+<g><rect x="20" y="378" width="200" height="46" rx="6" fill="#161b22" stroke="#262d36"/><text x="30" y="398" fill="#e6edf3">Beeper Cloud</text><text x="30" y="414" fill="#6e7681">Matrix HS</text><rect x="500" y="378" width="220" height="46" rx="6" fill="#161b22" stroke="#22d3ee"/><text x="510" y="398" fill="#22d3ee">collector_beeper</text><text x="510" y="414" fill="#6e7681">Matrix client SDK</text><rect x="760" y="378" width="260" height="46" rx="6" fill="#161b22" stroke="#262d36"/><text x="770" y="398" fill="#e6edf3">beeper_shadow_messages,</text><text x="770" y="414" fill="#e6edf3">beeper_liveness</text><line x1="220" y1="401" x2="500" y2="401" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arr)"/><line x1="720" y1="401" x2="760" y2="401" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arr)"/></g>
+
+<g><rect x="20" y="438" width="200" height="46" rx="6" fill="#161b22" stroke="#262d36"/><text x="30" y="458" fill="#e6edf3">Lemon8 backend</text><text x="30" y="474" fill="#6e7681">HTTP + optional ext probe</text><rect x="500" y="438" width="220" height="46" rx="6" fill="#161b22" stroke="#22d3ee"/><text x="510" y="458" fill="#22d3ee">collector_lemon8</text><rect x="760" y="438" width="260" height="46" rx="6" fill="#161b22" stroke="#262d36"/><text x="770" y="458" fill="#e6edf3">lemon8_profiles, media_items</text><line x1="220" y1="461" x2="500" y2="461" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arr)"/><line x1="720" y1="461" x2="500" y2="461" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arr)"/></g>
+
+<g><rect x="20" y="498" width="200" height="46" rx="6" fill="#161b22" stroke="#262d36"/><text x="30" y="518" fill="#e6edf3">arbitrary websites</text><text x="30" y="534" fill="#6e7681">Playwright headless</text><rect x="500" y="498" width="220" height="46" rx="6" fill="#161b22" stroke="#22d3ee"/><text x="510" y="518" fill="#22d3ee">collector_website</text><rect x="760" y="498" width="260" height="46" rx="6" fill="#161b22" stroke="#262d36"/><text x="770" y="518" fill="#e6edf3">website_pages, _snapshots</text><line x1="220" y1="521" x2="500" y2="521" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arr)"/><line x1="720" y1="521" x2="760" y2="521" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arr)"/></g>
+
+<g><rect x="20" y="558" width="200" height="46" rx="6" fill="#161b22" stroke="#262d36"/><text x="30" y="578" fill="#e6edf3">public web (OSINT)</text><text x="30" y="594" fill="#6e7681">for exposure surveillance</text><rect x="260" y="558" width="200" height="46" rx="6" fill="#161b22" stroke="#262d36"/><text x="270" y="578" fill="#e6edf3">SpiderFoot 4 + maigret</text><text x="270" y="594" fill="#6e7681">holehe, sherlock, wmn</text><rect x="500" y="558" width="220" height="46" rx="6" fill="#161b22" stroke="#22d3ee"/><text x="510" y="578" fill="#22d3ee">collector_exposure / spiderfoot</text><text x="510" y="594" fill="#6e7681">recon_targets driven</text><rect x="760" y="558" width="260" height="46" rx="6" fill="#161b22" stroke="#262d36"/><text x="770" y="578" fill="#e6edf3">exposure_findings,</text><text x="770" y="594" fill="#e6edf3">recon_observations</text><line x1="220" y1="581" x2="260" y2="581" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arr)"/><line x1="460" y1="581" x2="500" y2="581" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arr)"/><line x1="720" y1="581" x2="760" y2="581" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arr)"/></g>
+</svg></div>
+<p class="caption">Each row is one collector's end-to-end path. All arrows converge on the same Postgres cluster (<code>unifiedcollector_postgres</code>). RabbitMQ is used only by WhatsApp; Chrome CDP is used only by the browser-scraped platforms; everything else goes direct API -> asyncpg pool.</p>
+</section>
+
+<section><h2>Index<span class="id">14 sources + supporting services</span></h2>
+<div class="toc">
+<a href="#c-whatsapp">collector_whatsapp</a>
+<a href="#c-telegram">collector_telegram</a>
+<a href="#c-instagram">collector_instagram</a>
+<a href="#c-instagram-dm">collector_instagram_dm</a>
+<a href="#c-tiktok">collector_tiktok</a>
+<a href="#c-youtube">collector_youtube</a>
+<a href="#c-lemon8">collector_lemon8</a>
+<a href="#c-lowrisk">collector_lowrisk</a>
+<a href="#c-beeper">collector_beeper</a>
+<a href="#c-website">collector_website</a>
+<a href="#c-exposure">collector_exposure</a>
+<a href="#c-spiderfoot">collector_spiderfoot</a>
+<a href="#c-igingest">ig_ingest</a>
+<a href="#c-realtime">realtime_feed</a>
+<a href="#c-onboard">onboard_bot</a>
+<a href="#c-idle">collector (idle)</a>
+<a href="#supp">supporting services</a>
+</div></section>
+
+
+<section><h2 id="c-whatsapp">collector_whatsapp <span class="id">src/collectors/whatsapp/</span></h2>
+<div class="card"><h3>Purpose</h3><p>Ingest WhatsApp messages, contacts, groups, sessions from two paired phone accounts through a Baileys bridge fleet. Preserves the underlying network graph and history without touching the phone.</p>
+<h3>How it works</h3><p>Two Node/Baileys sidecars (<code>wa_bridge_1</code>, <code>wa_bridge_2</code>) run the WhatsApp Multi-Device protocol against a scanned session each. They emit domain events (<code>messages.upsert</code>, <code>contacts.set</code>, <code>groups.update</code>, <code>session</code>) onto four RabbitMQ queues. <code>collector_whatsapp</code> consumes with <code>aio_pika</code> and writes via <code>asyncpg</code>.</p>
+<h3>Two write paths (opt-in by env)</h3>
+<table><tr><th>Path</th><th>Env</th><th>Behavior</th></tr>
+<tr><td>Sprint 4 batching</td><td><code>WA_STAGING_ENABLED=0</code> default</td><td>Buffer up to <code>WA_CONTACT_BATCH_MAX</code> events, flush via array-parameterised UPSERT with <code>COALESCE</code> merge on <code>name/pushname/phone_number</code> + OR-merge on <code>is_business</code>.</td></tr>
+<tr><td>Sprint 5 staging</td><td><code>WA_STAGING_ENABLED=1</code></td><td><code>asyncpg.copy_records_to_table</code> into UNLOGGED <code>wa_staging_contacts</code>; scheduler-side <code>WhatsappStagingMergeHandler</code> drains it every 5s.</td></tr></table>
+<h3>Tables written</h3><ul class="plain"><li><code>whatsapp_users</code>, <code>whatsapp_messages</code>, <code>whatsapp_chats</code>, <code>whatsapp_lid_map</code>, <code>whatsapp_user_changes</code></li><li><code>wa_staging_contacts</code> (UNLOGGED, drained by scheduler)</li><li><code>media_items</code> (audio disabled by default)</li></ul>
+<h3>Failure modes</h3><ul class="plain"><li><span class="pill warn">bridge_unpaired</span> session revoked, needs manual QR scan on phone</li><li><span class="pill warn">rabbitmq_unavailable</span> falls back to HTTP polling</li><li><span class="pill warn">poison_row</span> batch upsert fails, falls back per-event to isolate the offending payload</li></ul></div></section>
+
+<section><h2 id="c-telegram">collector_telegram <span class="id">src/collectors/telegram/</span></h2>
+<div class="card"><h3>Purpose</h3><p>Real-time and historical Telegram capture across four seed accounts using Telethon (MTProto). Highest-volume live source (~78 msg/15 min).</p>
+<h3>How it works</h3><p>One <code>TelegramClient</code> per account inside a single asyncio loop. Accounts supplied via <code>TELEGRAM_SPIDER_ACCOUNTS</code>. Split into mixins:</p>
+<div class="kv"><dt>realtime</dt><dd>event-driven capture through <code>events.NewMessage</code></dd><dt>backfill</dt><dd>rate-limited paging of historical messages per chat</dd><dt>media</dt><dd>downloads via <code>iter_download</code>, deduped by SHA-256</dd><dt>helpers</dt><dd>MTProto entity resolution, invite links, admin events</dd><dt>parse</dt><dd>message text -> mentions, URLs, locations, replies</dd></div>
+<h3>Tables written</h3><ul class="plain"><li><code>telegram_messages</code>, <code>telegram_users</code>, <code>telegram_user_accounts</code>, <code>telegram_user_changes</code></li><li><code>telegram_admin_events</code>, <code>telegram_chat_members</code>, <code>telegram_pinned_events</code>, <code>telegram_poll_votes</code>, <code>telegram_invite_visits</code></li><li><code>telegram_message_mentions</code>, <code>telegram_message_locations</code>, <code>telegram_deletion_index</code></li><li><code>telegram_spider_queue</code> — chat discovery frontier</li></ul>
+<h3>Failure modes</h3><ul class="plain"><li><span class="pill warn">flood_wait</span> Telegram rate-limit; sleep + resume</li><li><span class="pill warn">session_migrate</span> MTProto DC hop; Telethon reconnects</li><li><span class="pill bad">auth_key_unregistered</span> session revoked; re-auth</li></ul></div></section>
+
+<section><h2 id="c-instagram">collector_instagram <span class="id">src/collectors/instagram/</span></h2>
+<div class="card"><h3>Purpose</h3><p>Ingest Instagram profiles, posts, media using the user's logged-in Chrome session — no username/password stored in the collector.</p>
+<h3>How it works</h3><p>Two hemispheres:</p>
+<ol class="plain"><li><b>Extension side (host)</b>: MV3 Chrome extension v1.23.103 injected into <code>instagram.com</code>. Content script scrapes <code>/explore/</code>, feed, profile pages and POSTs canonical events to <code>ig_ingest :8765</code>. CDP on <code>127.0.0.1:9336</code> lets host tooling audit/repair tabs without disturbing the user's session.</li><li><b>Container side</b>: <code>python -m src.main worker --source instagram</code>. Handles backend calls that don't need the browser (public profile lookups, graph_ql fallback).</li></ol>
+<h3>Tables written</h3><ul class="plain"><li><code>instagram_profiles</code>, <code>instagram_tls_state_table</code>, <code>instagram_user_changes</code></li><li><code>media_items</code> (source=instagram, partitioned)</li><li><code>browser_ingest_events</code> — raw extension deliveries</li></ul>
+<h3>Failure modes</h3><ul class="plain"><li><span class="pill warn">http_429</span> IG rate-limit; content script backs off, tab reload path</li><li><span class="pill warn">removed_post</span> page shell only; maintenance reopens tab to <code>/explore/</code></li><li><span class="pill bad">cdp_unavailable</span> Chrome launched without <code>--remote-debugging-port=9336</code>; repair via <code>scripts/start-scraper-chrome-cdp.ps1</code></li></ul></div></section>
+
+<section><h2 id="c-instagram-dm">collector_instagram_dm <span class="id">src/collectors/instagram_dm/</span></h2>
+<div class="card"><h3>Purpose</h3><p>DM-specific IG capture. Runs in its own container so the DM code path is rate-limited independently and aggressive DM anti-bot can't take down the whole IG collector.</p>
+<h3>How it works</h3><p>Same content-script pattern, scoped to DM inbox route. Uses the <code>dm_sample</code> lane in <code>ig_ingest</code> at concurrency 1 — deliberately slow.</p>
+<h3>Tables written</h3><ul class="plain"><li><code>instagram_dm</code>, <code>instagram_user_changes</code></li><li><code>dm_hook_heartbeat</code>, <code>dm_probe_log</code></li></ul></div></section>
+
+
+<section><h2 id="c-tiktok">collector_tiktok <span class="id">src/collectors/tiktok/</span></h2>
+<div class="card"><h3>Purpose</h3><p>TikTok profile + media capture through the extension mechanism.</p>
+<h3>How it works</h3><p>Content script scrapes <code>tiktok.com/following</code> + profile URLs, POSTs events. Container side hosts backfill via TikTok's <code>__NEXT_DATA__</code> hydration payloads. Media downloader uses <code>gallery-dl</code> when the page's JS isn't needed.</p>
+<h3>Tables written</h3><ul class="plain"><li><code>tiktok_users</code>, <code>tiktok_user_changes</code></li><li><code>tiktok_dm</code>, <code>tiktok_dm_media_url</code>, <code>tiktok_browser_media_diagnostics</code></li><li><code>media_items</code> (source=tiktok)</li></ul>
+<h3>Failure modes</h3><ul class="plain"><li><span class="pill warn">rate_limit_events</span> access pressure; queued action</li><li><span class="pill warn">browser_capture_stalled</span> dashboard flag; usually clears next tick</li></ul></div></section>
+
+<section><h2 id="c-youtube">collector_youtube <span class="id">src/collectors/youtube/</span></h2>
+<div class="card"><h3>Purpose</h3><p>Track a curated set of YouTube channels for uploads, metadata changes, and video assets. Own container because <code>yt-dlp</code> is a long-running subprocess that used to wedge the shared event loop when it lost SIGCHLD in WSL2.</p>
+<h3>How it works</h3><div class="kv"><dt>metadata</dt><dd>YouTube Data API v3, quota-aware</dd><dt>media</dt><dd><code>yt-dlp</code> subprocess with hard timeout</dd><dt>cookies</dt><dd>optional headless cookies for private-visible content</dd></div>
+<h3>Tables written</h3><ul class="plain"><li><code>youtube_videos</code>, <code>youtube_user_changes</code>, <code>youtube_video_retry_schedule</code></li><li><code>media_items</code> (source=youtube)</li></ul></div></section>
+
+<section><h2 id="c-lemon8">collector_lemon8 <span class="id">src/collectors/lemon8/</span></h2>
+<div class="card"><h3>Purpose</h3><p>Ingest Lemon8 topic feeds + profile metadata for tracked handles. Backend-primary; the extension is an optional secondary probe.</p>
+<h3>How it works</h3><p>Polls the Singapore-topic API on bounded schedule. When a profile is seen in a topic feed but has no browser-side confirmation, queues a tab-open request to the extension.</p>
+<h3>Tables written</h3><ul class="plain"><li><code>lemon8_profiles</code>, <code>lemon8_tiktok_post_profile_stubs</code></li><li><code>media_items</code> (source=lemon8)</li></ul></div></section>
+
+<section><h2 id="c-lowrisk">collector_lowrisk <span class="id">github + strava + search, 2560m cap</span></h2>
+<div class="card"><h3>Purpose</h3><p>Merged worker for three low-risk API-driven sources that don't need a browser. Merged to save a container slot; sized for the 7.76 GiB WSL2 VM.</p>
+<h3>Sources inside</h3><div class="kv"><dt>github</dt><dd>GitHub REST + GraphQL; commits, issues, PR reviews, edges. Comma-separated <code>GITHUB_TOKEN</code> rotation.</dd><dt>strava</dt><dd>Strava web routes via cookies (no public API); athlete profiles + activities + GPS streams. Page-scrape batch capped at 20/cycle.</dd><dt>search</dt><dd>Headless web search over seeded queries; feeds <code>search_results</code>. Uses <code>gallery-dl</code> for occasional image results.</dd></div>
+<h3>Tables written</h3><ul class="plain"><li><code>github_commits</code>, <code>github_repos</code>, <code>github_edges</code>, <code>github_user_changes</code></li><li><code>strava_activities</code>, <code>strava_profiles</code>, <code>strava_route_queue</code></li><li><code>search_results</code> (unique on query+url)</li><li><code>follow_edges</code> (cross-platform)</li></ul></div></section>
+
+<section><h2 id="c-beeper">collector_beeper <span class="id">src/collectors/beeper/</span></h2>
+<div class="card"><h3>Purpose</h3><p>Beeper Cloud is a Matrix-based multi-network chat aggregator. This collector shadow-mirrors messages from any network Beeper is bridging (Signal, Slack, iMessage, SMS, etc.) for cross-platform identity resolution.</p>
+<h3>How it works</h3><p>Matrix client SDK against Beeper Cloud homeserver (<code>chat.beeper.com</code>). Ingest is event-driven via /sync long-poll. Messages are shadowed — Beeper's bridge did the network-specific decoding.</p>
+<h3>Tables written</h3><ul class="plain"><li><code>beeper_shadow_messages</code>, <code>beeper_shadow_tables</code>, <code>beeper_user_changes</code></li><li><code>beeper_liveness_ingested_network_index</code>, <code>beeper_attachment_backfill</code>, <code>beeper_network_message_index</code></li></ul></div></section>
+
+<section><h2 id="c-website">collector_website <span class="id">src/collectors/website/</span></h2>
+<div class="card"><h3>Purpose</h3><p>Full-page snapshots + text extraction of arbitrary URLs added to a target list. Feeds link discovery from other collectors (e.g. a link seen in a Telegram message can be seeded here for capture).</p>
+<h3>How it works</h3><p>Playwright-driven headless Chromium (separate from the CDP scraper Chrome — no session overlap). Retrieves rendered DOM + a PDF/PNG snapshot, extracts text via readability-style pipeline.</p>
+<h3>Tables written</h3><ul class="plain"><li><code>website_pages</code> — one row per URL capture with rendered text</li><li><code>website_snapshots</code> — binary PDF/PNG references</li></ul></div></section>
+
+<section><h2 id="c-exposure">collector_exposure <span class="id">src/collectors/exposure/</span></h2>
+<div class="card"><h3>Purpose</h3><p>Continuous OSINT surveillance on tracked identities — surface fresh exposures (new accounts on other platforms, dumps, forum posts) so the analyzer can enrich its identity graph.</p>
+<h3>How it works</h3><p>Runs a rotating pool of enrichment collectors, each fed by <code>recon_targets</code>. Currently active:</p>
+<div class="kv"><dt>SpiderFoot</dt><dd>see below</dd><dt>Sherlock</dt><dd><code>handle_fanout.py</code>, 400 sites</dd><dt>maigret 0.5.0</dt><dd><code>recon_maigret_fp_refresh.py</code>, 3000+ sites</dd><dt>Holehe 1.61</dt><dd><code>email_recognition.py</code>, 120+ email-existence sites</dd><dt>WhatsMyName</dt><dd><code>wmn_fanout.py</code>, 716 sites vendored (Track-D)</dd><dt>GHunt</dt><dd>credential-gated scaffold, Google-account enrichment</dd></div>
+<h3>Tables written</h3><ul class="plain"><li><code>exposure_findings</code> — collector-produced raw evidence</li><li><code>handle_discoveries</code> — staged for operator review</li><li><code>recon_observations</code>, <code>recon_maigret_fp_sites</code></li></ul></div></section>
+
+<section><h2 id="c-spiderfoot">collector_spiderfoot <span class="id">docker/spiderfoot/</span></h2>
+<div class="card"><h3>Purpose</h3><p>Bounded, allowlist-gated SpiderFoot 4.0 recon. Separate slim image because it has a distinct dependency set and we want it blast-radius-isolated.</p>
+<h3>How it works</h3><p>Fed by <code>recon_targets</code> rows the analyzer marks as SpiderFoot-scope. Each run scoped by allowlisted modules (<code>RECON_USERNAME_MODULES=maigret</code> default routes username targets through maigret's HTTP-only fast path). Emits observations with SHA-256 <code>value_hash</code> unique index so re-runs dedupe.</p></div></section>
+
+
+<section><h2 id="c-igingest">ig_ingest <span class="id">src/ig_ingest/  port 8765</span></h2>
+<div class="card"><h3>Purpose</h3><p>HTTP endpoint the Chrome extension POSTs into. Absorbs the burstiness of seven browser platforms hitting the API at once, then serializes writes to Postgres.</p>
+<h3>How it works</h3><p>FastAPI service with four bounded concurrency lanes:</p>
+<div class="kv"><dt>heartbeat</dt><dd>16 — cheap presence pings</dd><dt>write</dt><dd>4 — profile/post writes</dd><dt>revisit</dt><dd>2 — profile/media revisits</dd><dt>dm_sample</dt><dd>1 — deliberately slow DM sampling</dd></div>
+<p>Every accepted request lands as a row in <code>browser_ingest_events</code>; the write lane peels those into typed platform tables (<code>instagram_profiles</code>, <code>tiktok_users</code>, <code>threads_posts</code>, <code>facebook_posts</code>, <code>x_profiles</code>, ...).</p>
+<h3>Live ingest snapshot (30-min window)</h3>
+<table><tr><th>platform</th><th>events</th></tr>
+<tr><td>instagram</td><td>205</td></tr><tr><td>x</td><td>187</td></tr><tr><td>tiktok</td><td>180</td></tr><tr><td>threads</td><td>115</td></tr><tr><td>facebook</td><td>104</td></tr><tr><td>strava</td><td>64</td></tr><tr><td>bridge</td><td>40</td></tr><tr><td>lemon8</td><td>19</td></tr></table></div></section>
+
+<section><h2 id="c-realtime">realtime_feed <span class="id">src/realtime/</span></h2>
+<div class="card"><h3>Purpose</h3><p>Fan-out of just-ingested media events to the operator's Telegram feed. New target post lands in <code>media_items</code>, feed publishes a notification with thumbnail + link within seconds.</p>
+<h3>How it works</h3><p>Postgres <code>LISTEN/NOTIFY</code> on a media-inserted channel. Delivery ledger (<code>realtime_media_deliveries</code>) so duplicates and retries are auditable rather than dropped. Poster-only video thumbnails are skipped by default to avoid flooding chat.</p></div></section>
+
+<section><h2 id="c-onboard">onboard_bot <span class="id">src/bots/onboard_bot.py</span></h2>
+<div class="card"><h3>Purpose</h3><p>Operator-facing Telegram bot. Adds new tracked identities (usernames, phone numbers, emails) to <code>tracked_entities</code>, sends periodic system digests, and receives 2-button merge decisions from the analyzer.</p>
+<h3>How it works</h3><p>Long-poll <code>getUpdates</code> against the collector bot token. Runs as a single asyncio task in the scheduler process — merged from its own container to save a slot.</p></div></section>
+
+<section><h2 id="c-idle">collector <span class="id">src/main.py worker --all</span></h2>
+<div class="card"><h3>Purpose</h3><p>The historical main worker. Kept as an idle safety-net + canonical image builder. All sources are DISABLED here via <code>COLLECTOR_DISABLED_SOURCES</code>; each real source runs in its own dedicated container to isolate memory + subprocess reaping.</p>
+<p>Re-enable a source in this container only if you also remove its dedicated container.</p></div></section>
+
+<section><h2 id="supp">Supporting services<span class="id">not sources but part of the flow</span></h2>
+<div class="card">
+<h3>watchdog</h3><p>Wall-clock health monitor. Reads <code>source_health</code> + <code>collection_runs</code> and re-launches stuck collectors via the docker socket. Escalates via Telegram after N failed self-heals.</p>
+<h3>scheduler</h3><p>Two loops: DB-driven <code>collection_schedules</code> tick (per-source cadence) and periodic-handler registry (13 handlers including <code>wa_staging_merge</code>, <code>recon_seed</code>, <code>phone_intel</code>, <code>watchdog_stale_alert</code>, ...). Handlers dispatch concurrently via <code>asyncio.gather(return_exceptions=True)</code> (commit <code>bf4a0f55</code>) so a slow one no longer starves the tail.</p>
+<h3>browser_cookie_vault</h3><p>HTTP service on :8790 that owns the cookie backup/restore state machine against the managed Chrome CDP profile. Vault snapshots survive a Chrome profile rebuild.</p>
+<h3>dashboard</h3><p>Read-mostly FastAPI web UI. 110 routes. Feeds the operator's status page + serves <code>/health</code> for k8s-style probes and the watchdog's freshness gates.</p>
+<h3>postgres / rabbitmq / redis</h3><p>Backing stores. Postgres is the source of truth for every collector. RabbitMQ is used only by the WhatsApp bridge fleet. Redis is used for per-source cursor + rate-limit state + inter-worker locks.</p>
+</div></section>
+
+<section><h2>Cross-cutting concerns</h2>
+<div class="card"><h3>Database pool</h3><p>Every collector uses <code>asyncpg.create_pool(max_size=10, command_timeout=300)</code> with <code>idle_in_transaction_session_timeout=5min</code> baked in. That timeout was added after a Sep-07 audit found the analyzer's <code>build_timeline</code> was leaking IIT sessions during long cross-pool executemany batches.</p>
+
+<h3>Health surface</h3><p>Every source writes to <code>source_health</code> (<code>status</code>, <code>last_success_at</code>, <code>last_error</code>, <code>crash_count</code>). Watchdog reads this + <code>collection_runs</code> and treats a source as stale when <code>last_success_at</code> exceeds a per-source freshness window.</p>
+
+<h3>Media pipeline</h3><p>All collectors that download media write into <code>media_items</code> (partitioned by <code>source</code>) with a SHA-256 unique constraint so cross-source dedup is automatic. Vault artifacts land on Z: at <code>Z:\unifiedcollector\media</code>.</p>
+
+<h3>Rate limiting</h3><p><code>rate_limit_events</code> table + <code>collection_action_queue</code> capture per-source pressure so the scheduler can back off automatically and surface durable operator actions instead of spinning.</p>
+
+<h3>DLQ</h3><p><code>dead_letter_queue</code> holds messages that failed processing after N retries. Read by the DLQ consumer + presented in the dashboard. Cleaned up manually or via retention.</p>
+</div></section>
+
+<section><h2>Next steps</h2>
+<ul class="plain">
+<li>The <code>x_posts</code> materialization from <code>browser_ingest_events</code> is behind — <code>source_health</code> says X is 5 days stale but <code>browser_ingest_events</code> has 187 X events in the last 30 min. Watchdog is looking at the wrong table.</li>
+<li>WhatsApp bridges need periodic QR-scan operator action; automate the notification via <code>bridge_unpaired_alert</code>.</li>
+<li>WMN + GHunt: WMN is default-off (network-heavy). Turn on when operator wants deeper enrichment. GHunt still credential-gated.</li>
+</ul>
+</section>
+
+<div class="footer">Generated 2026-09-19 from live docker-compose.yml + running system. Live counts from the collector Postgres at snapshot time.</div>
+
+</main></body></html>
