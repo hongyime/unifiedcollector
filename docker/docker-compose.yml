@@ -16,7 +16,10 @@ name: unifiedcollector
 
 services:
   postgres:
-    image: pgvector/pgvector:pg16
+    build:
+      context: ./postgres
+      dockerfile: Dockerfile
+    image: unifiedcollector_postgres:pgbackrest
     container_name: unifiedcollector_postgres
     init: true
     environment:
@@ -33,12 +36,46 @@ services:
       - ./postgres/postgres.conf:/etc/postgresql/postgresql.conf
       - pgdata:/var/lib/postgresql/data
       - ./backups:/backups
+      # pgBackRest — archive_command in postgres.conf calls `pgbackrest
+      # archive-push` from inside this container, so the same repo + conf
+      # must be visible here. See docker/pgbackrest/README.md.
+      - ./pgbackrest/pgbackrest.conf:/etc/pgbackrest.conf:ro
+      - z:/unifiedcollector/backups/pgbackrest:/var/lib/pgbackrest
+      - pgbackrest_spool:/var/spool/pgbackrest
+      - pgbackrest_log:/var/log/pgbackrest
     command: postgres -c config_file=/etc/postgresql/postgresql.conf
     env_file:
       - ./env/common.env
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-collector} -d unifiedcollector"]
       interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  pgbackrest:
+    build:
+      context: ./pgbackrest
+      dockerfile: Dockerfile
+    image: unifiedcollector_pgbackrest:latest
+    container_name: unifiedcollector_pgbackrest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # pg1-password comes from the same POSTGRES_PASSWORD the postgres
+      # service uses; pgbackrest reads PGPASSWORD at runtime.
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ./pgbackrest/pgbackrest.conf:/etc/pgbackrest.conf:ro
+      - z:/unifiedcollector/backups/pgbackrest:/var/lib/pgbackrest
+      - pgbackrest_spool:/var/spool/pgbackrest
+      - pgbackrest_log:/var/log/pgbackrest
+    healthcheck:
+      # Verifies the binary + config parse; no cluster round-trip so it
+      # doesn't churn the pg connection budget on every check.
+      test: ["CMD-SHELL", "pgbackrest --config=/etc/pgbackrest.conf --stanza=main help >/dev/null"]
+      interval: 60s
       timeout: 10s
       retries: 3
     restart: unless-stopped
@@ -1453,4 +1490,6 @@ volumes:
   rabbitmq_data:
   redis_data:
   sessions_data:
+  pgbackrest_spool:
+  pgbackrest_log:
 
