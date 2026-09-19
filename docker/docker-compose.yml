@@ -42,6 +42,10 @@ services:
       timeout: 10s
       retries: 3
     restart: unless-stopped
+# MEM-CAP: PostgreSQL is the shared database for 35+ containers. Without a cap
+    # it regularly consumed 3.5-4GB and starved the host (16GB total, 10GB WSL2).
+    # 4GB covers shared_buffers=1GB + work_mem headroom + OS cache.
+    mem_limit: 4g
 
   collector:
     build:
