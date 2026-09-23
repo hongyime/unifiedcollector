@@ -6,11 +6,21 @@ call site to a single function, explains the exact leak mechanism against the
 observed evidence, proposes the minimum-change fix, and adds a scheduler-side
 alert so the next occurrence surfaces in minutes instead of hours.
 
-- Status: proposed (2026-09-07)
+- Status: core remediation shipped; original proposal retained (updated 2026-09-19)
 - Owner: platform / collector
 - Blast radius of fix: analyzer container restart + collector scheduler restart
 - Code changes cross both repos: `unifiedanalyzer` (fix) + `unifiedcollector`
   (detection). Both are bind-mounted, so hot-reload works.
+
+## Current implementation status
+
+Collector timeout/application-name protection and the alert handler shipped in
+`1c1d532c`. Analyzer fixes A/C/B shipped in `f75f78f`, `eebc6d1`, and `e332aca`.
+The journal records a historical zero count of IIT sessions older than five
+minutes; this is not a new live measurement. Current pagination and alert
+settings differ from this proposal (timestamp-only pagination; hourly alert
+cooldown). Do not treat the proposed composite-cursor boundary checks, dedicated
+alert tests, or complete acceptance checklist below as already verified.
 
 ## Live-DB evidence recap
 

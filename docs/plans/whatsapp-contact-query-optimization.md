@@ -1,5 +1,15 @@
 # Plan: WhatsApp contact UPSERT latency (~300 ms live) — investigation and optimisation
 
+## Status — 2026-09-19
+
+**Measurement resolved; main tuning proposal superseded.** Commit `1c1d532c`
+recorded 26 ms asyncpg UPSERT p50 versus 1,137 ms archive fsync. The chosen fix was
+archive skipping plus batching, not `SET LOCAL synchronous_commit=off`.
+Synchronous commit remains enabled; the idle-lifetime/WAL tuning suggestions
+below are not an implementation checklist to rerun. In particular,
+`EXPLAIN ANALYZE INSERT` executes a write and is not a read-only probe.
+See [the master plan's current status](drain-acceleration-master.md).
+
 Focused perf plan for the `whatsapp_users` contact UPSERT at
 `src/collectors/whatsapp/__init__.py:672`. Measured live at **304 ms** for a
 single INSERT via `docker exec unifiedcollector_postgres psql`. Question: is

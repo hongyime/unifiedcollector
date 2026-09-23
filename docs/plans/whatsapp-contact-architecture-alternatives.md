@@ -1,5 +1,17 @@
 # Plan: WhatsApp contact-event ingest — architecture alternatives
 
+## Status — 2026-09-19
+
+**Options 1 and 5 implemented; other options remain alternatives.** Archive
+skipping/batching shipped in `1c1d532c`; optional `wa_staging_contacts` COPY and
+asynchronous merge shipped in `b27355c1` / `fe455827`. `WA_STAGING_ENABLED=0`
+retains direct batching. The actual table name differs from the illustrative
+schema below. Projected throughput and multi-day depth targets are not verified
+by code existence. Also, staged events are acknowledged after COPY: a crash can
+truncate UNLOGGED staging before merge, so automatic RabbitMQ recovery of all
+staged rows must not be assumed. No bridge-direct, Go/Rust, Kafka, Redis, or
+LISTEN/NOTIFY replacement was implemented by those commits.
+
 Evaluates seven architectural options for the WhatsApp `contacts.update` ingest
 path in response to the observed 2026-09-07 backlog (108k events, 0.26 events/s
 sustained, ~300 ms per `whatsapp_users` UPSERT). Companion plans cover batching

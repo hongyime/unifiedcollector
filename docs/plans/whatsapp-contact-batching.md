@@ -1,5 +1,16 @@
 # Plan: WhatsApp contact-event batching — asyncpg + Postgres
 
+## Status — 2026-09-19
+
+**Implemented and configured; retained as design history.** Commit `1c1d532c`
+added time-window batching, deduped array UPSERTs and per-event fallback.
+Compose selects 100 events / 250 ms; the code-only fallback remains 1 / 0.
+Later Sprint 5 optionally changes the batch destination to staging while
+retaining the direct batching path. Historical throughput evidence is recorded
+in the master plan; the exact proposed dedicated-equivalence and 24/48-hour
+soak checklist is not independently certified. The measurements below describe
+the pre-fix incident, not current live throughput.
+
 Addresses the contact-event drain bottleneck observed 2026-09-07:
 
 - 108,000-event backlog on `unifiedcollector.contacts` (RabbitMQ).

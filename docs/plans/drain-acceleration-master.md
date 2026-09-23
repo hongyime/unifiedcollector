@@ -1,5 +1,17 @@
 # Drain-rate acceleration — master plan
 
+## Status — 2026-09-19
+
+**Mostly implemented; retained as historical build rationale.** Pool protection,
+latency measurement, archive skipping and Sprint 4 batching shipped in
+`1c1d532c`. The recorded asyncpg UPSERT p50 was 26 ms versus 1,137 ms archive
+fsync, so the synchronous-commit tuning branch was skipped. Sprint 5 staging
+also shipped (`b27355c1`, `fe455827`), despite the older "reserve" wording below.
+Scheduler concurrency followed in `bf4a0f55`; the journal records historical
+staging drain from 10,684 to 186 rows. These observations do not certify the
+proposed multi-day soak or every projected throughput target. The current
+operational plan is [backup slow reintroduction](backup-slow-reintroduction.md).
+
 Synthesis of 4 parallel research plans. Ordered by build sequence.
 
 ## The plans
