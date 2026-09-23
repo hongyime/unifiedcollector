@@ -1,7 +1,50 @@
 # backup-slow-reintroduction.md
 
-Author: agent handoff, 2026-09-19. Status: proposed. Blast radius: none in Phase A
-(dry-run only). Phase B adds one nightly job that must not hinder collectors.
+Author: agent handoff, 2026-09-19, updated 2026-09-22. Status: Phase A shipped;
+Phase B's first live attempt is CONFIRMED CORRUPT (not merely unverified);
+Phase C gated on a fresh trial. Scheduling is Phase C.
+
+## Current status — 2026-09-22 update (supersedes the 2026-09-19 notes below)
+
+- **Phase A:** script committed in `a8da528f`; dry-run demonstrates command
+  construction only, not throughput or collector impact.
+- **Phase B — DEFINITIVE verdict: the orphan is corrupt, not just unverified.**
+  `uc-pgdump-raw2` is absent. Its only remaining artifact,
+  `20260919T0741.dump.tmp` (589,962,062 bytes), was restored into an isolated,
+  network-disconnected scratch PostgreSQL 16.13 container (`--network none`,
+  no bind mounts, destroyed immediately after). `pg_restore -U postgres
+  --no-owner --no-privileges --jobs=1 -d scratch` failed with:
+  ```
+  pg_restore: error: could not read from input file: end of file
+  ```
+  This is a genuine truncated-archive error, not an auth/tooling artifact —
+  the file was cut off mid-write when the original dump process died. The
+  earlier `pg_restore --list` success (992 TOC entries, header-only) was
+  consistent with this all along: a truncated custom-format archive can still
+  have a readable header. **This file cannot be used as a backup. Do not
+  rename it to `.dump`; delete it or leave it named `.tmp` so nothing mistakes
+  it for valid.** Phase B needs a genuinely fresh, completed dump attempt —
+  not a re-verification of this one.
+- **Phase C:** do not add a second scheduled task. Existing
+  `UnifiedCollectorBackup` is enabled at **03:30 SGT**, invokes `backup.bat`
+  and the deleted `src.backup.db_backup` module, and has a one-hour runtime limit.
+  Last task result was `0x41306` (terminated), not success. An attempt to disable
+  this obsolete task was denied by Windows permissions; it remains enabled.
+  An elevated operator can stop future obsolete launches with
+  `Disable-ScheduledTask -TaskName UnifiedCollectorBackup`.
+- **Phases D/E:** future work. This recovery did not start another dump, enable
+  a new schedule, or prune backups.
+
+## Original 2026-09-19 recovery notes (superseded above, retained for history)
+
+- Another session was running analyzer backup/restore drills during this check;
+  both exited cleanly (status 0) by 2026-09-22 and are no longer active.
+  Coordinate with any future concurrent session before a fresh trial.
+  Only after successful dump completion and accepted collection-impact evidence
+  should the existing task be replaced with the new wrapper at **04:00 SGT**.
+
+The proposal below is retained as design history; corrected guarantees and
+rollout instructions take precedence over its earlier estimates.
 
 ## What went wrong last time
 
@@ -64,38 +107,42 @@ every failure mode above:
 | Concern | pg_basebackup / pgBackRest | pg_dump |
 |---|---|---|
 | WAL sender timeout | Yes — the whole class of failure | Not applicable, no replication protocol |
-| Single long-lived connection | Yes | No — one COPY per table, each finishes |
+| Single long-lived connection | Yes | Yes — one database snapshot spans successive table COPY operations |
 | Throughput bottleneck | Whole-cluster physical pages | Row-serialized data, much smaller |
-| Locks on running writers | Access-share on every table (safe) | Same access-share + `--serializable-deferrable` for consistency |
+| Locks and workload impact | Mechanism-dependent; measure against the running workload | ACCESS SHARE normally permits row writes but conflicts with some DDL; snapshot and I/O impact still need measurement |
 | Output pattern | Thousands of small files (pgBackRest) | One `.dump` archive file |
 | SMB write penalty | Devastating (small-file random write) | Modest (one large sequential write) |
-| Restore | `pg_restore` from tar | `pg_restore` from custom-format dump |
+| Restore | Physical restore plus required WAL, using the matching backup tool | `pg_restore` from custom-format dump |
 | Point-in-time recovery | Yes (WAL replay after base) | No — restores at dump timestamp |
 | Cluster-wide dump | Everything including postgres system tables | Just the one database (unifiedcollector) |
-| Wall time on this cluster | 3-8+ hours | ~15-30 min at compression 1 (historic evidence: the src/backup/db_backup.py that ran daily until 2026-09-19 completed in that window) |
+| Wall time on this cluster | Historical attempts took multiple hours | No completed new-wrapper measurement yet; SMB output may also take multiple hours |
 
-**We give up point-in-time recovery.** The tradeoff is a backup mechanism that
-doesn't fight the collector. The daily dump loses at most 24 h if pg is
-destroyed, but the cluster snapshot at the last dump is fully restorable.
+**We give up point-in-time recovery.** The intended tradeoff is lower operational
+impact, to be measured. Recovery is limited to the last successful database
+snapshot; failures and multi-hour dump duration can make loss exceed 24 hours.
+A logical dump of one database is not a complete cluster/media backup.
 
 ## Proposed design
 
 ### Constraints (must-haves)
-1. **Never blocks a collector**: use `--serializable-deferrable` isolation,
-   read-only connection, no schema DDL locks.
-2. **Never spikes CPU on the pg container**: cap the dumper container at
-   `--cpus=0.5 --memory=256m`. pg_dump inside stays inside limits.
-3. **Never blocks a concurrent backup**: `pg_try_advisory_lock` on a fixed
-   key. Second invocation exits fast with a log line.
-4. **Never blocks under SMB write pressure**: single `.dump` file (sequential
-   write), compression level 1 (fast, less CPU on the pg side), `--jobs=1` (no
-   parallel connections, one COPY at a time).
+1. **Minimize collector interference**: use a read-only consistent snapshot;
+   `--serializable-deferrable` may wait for a safe snapshot and does not remove
+   ACCESS SHARE locks or the need to avoid concurrent DDL.
+2. **Constrain the client**: launch the dumper with
+   `--cpus=0.5 --memory=256m`. These limits do not cap PostgreSQL's server work;
+   measure server CPU and ingestion continuity separately.
+3. **Exclude cooperating backups**: `pg_try_advisory_lock` on a fixed key makes
+   a second wrapper invocation exit. Raw pg_dump and other tools do not honor
+   this lock automatically.
+4. **Prefer sequential SMB writes**: one `.dump` file, compression level 1,
+   `--jobs=1`. A slow or unavailable share can still block the client.
 5. **Runs at quiet hour**: 04:00 SGT default (post-peak-collection window).
    Env-configurable.
 6. **Skip if fresh**: default 20 h freshness window — a container restart
    after a successful dump does not immediately re-dump.
-7. **Kill switch**: `BACKUP_ENABLED=0` in `.env` fully disables the cron
-   without touching code.
+7. **Kill switch**: pass `BACKUP_ENABLED=0` in the invoked script's environment.
+   The script does not load `.env` itself; disabling the Windows task is the
+   separate control for future scheduled launches.
 
 ### Architecture (much smaller than last time)
 - One Python script: `scripts/pg_dump_backup.py`.
@@ -118,8 +165,8 @@ destroyed, but the cluster snapshot at the last dump is fully restorable.
 
 ### Verification without restore (fast)
 - After every successful dump: `pg_restore --list <dump>` — parses the archive
-  table-of-contents. Runs in seconds. If it succeeds, the dump is a valid
-  archive.
+  table-of-contents. This is a quick structural check, not a full data-integrity
+  check. Require pg_dump exit 0 as well; use a restore drill for recovery proof.
 - Weekly (Sunday): also load the dump into a scratch database, count rows on
   the top-5 tables, drop the scratch database. This is the slow drill but only
   weekly.
@@ -136,20 +183,23 @@ destroyed, but the cluster snapshot at the last dump is fully restorable.
 ### Phase A — dry-run today (no state change)
 - Land `scripts/pg_dump_backup.py` with `--dry-run` support.
 - Run it manually: `python scripts/pg_dump_backup.py --dry-run` from a
-  temporary docker container that has pg_dump. Measure:
-  - Wall time
-  - Peak Postgres CPU %
-  - Peak SMB write speed to Z:
-  - Peak dump file size
-- If wall time > 60 min OR Postgres CPU > 80% sustained → back off, don't
-  proceed to Phase B.
+  configured environment. It prints the intended arguments and may create the
+  output directory; it does not contact PostgreSQL or perform a dump. Resource
+  and collection-impact measurements belong to the live Phase B trial.
 
 ### Phase B — one live dump this week
-- Run once with `--dry-run=false` at a chosen quiet moment.
+- Run once with `python scripts/pg_dump_backup.py` at a chosen quiet moment,
+  with the required environment and matching PostgreSQL client installed.
+  Omit `--dry-run`; `--dry-run=false` is not a supported argument.
 - Confirm the output at `Z:/unifiedcollector/backups/db/*.dump`.
-- Confirm `pg_restore --list` verification.
+- Confirm pg_dump exit 0, TOC verification, and final manifest. Record actual
+  wall time, output growth, PostgreSQL CPU and ingestion before/during/after.
 - Confirm collectors kept ingesting during the dump (telegram_messages
   count / 15 min doesn't drop noticeably).
+- Multi-hour duration is acceptable only with continued progress and accepted
+  collector impact. Do not infer low server impact from a client resource cap.
+- Manifest live row counts are monitoring samples, not a comparison against the
+  archive's consistent snapshot and not a substitute for a restore drill.
 
 ### Phase C — nightly cron (opt-in via Task Scheduler entry)
 - Register a Windows Task Scheduler entry that runs the script at 04:00 SGT.
