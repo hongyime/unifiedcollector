@@ -7,17 +7,17 @@ worker, or two duplicate extension copies -- which silently stops ALL browser
 scraping (the "worker not fresh" / "browser tabs crashed" Telegram alerts).
 The in-container watchdog cannot fix this because the browser lives on the HOST.
 
-WHAT IT DOES: detects an unhealthy extension (CDP unreachable, no service_worker
-target, or duplicate extension IDs) and relaunches Chrome via the canonical
-launcher so the extension re-registers. Run on a schedule or with -Loop.
+WHAT IT DOES: detects unreachable CDP or no browser ingest in the last 25 minutes
+and relaunches Chrome via the canonical launcher. Unavailable database evidence
+never triggers a relaunch when CDP is reachable. Run on a schedule or with -Loop.
 
 USAGE:
   pwsh scripts\browser-autorecover.ps1                 # one check + recover
   pwsh scripts\browser-autorecover.ps1 -Loop           # continuous (every 10 min)
   pwsh scripts\browser-autorecover.ps1 -CheckOnly      # report health, no action
 
-SCHEDULE (recommended): Windows Task Scheduler, trigger "At log on" + "every 10
-minutes", action: pwsh -File C:\unifiedcollector\scripts\browser-autorecover.ps1
+SCHEDULE (recommended): Windows Task Scheduler, trigger "At log on", action:
+pwsh -File C:\unifiedcollector\scripts\browser-autorecover.ps1 -Loop
 #>
 param(
     [int]$IntervalMinutes = 10,
@@ -57,7 +57,14 @@ function Get-ExtHealth {
     try {
         $q = "SELECT count(*) FROM browser_ingest_events WHERE created_at > now() - interval '$staleMin minutes'"
         $out = docker exec unifiedcollector_postgres psql -U collector -d unifiedcollector -t -A -c $q 2>$null
-        $res.recent_events = [int](("$out" | Select-Object -First 1).Trim())
+        # Native failures need an explicit check; casting empty output would yield zero.
+        $countText = ("$out").Trim()
+        $recentEvents = 0
+        if ($LASTEXITCODE -ne 0 -or $countText -notmatch '^[0-9]+$' -or
+            -not [int]::TryParse($countText, [ref]$recentEvents)) {
+            throw "Database probe did not return a successful nonnegative integer count"
+        }
+        $res.recent_events = $recentEvents
     } catch {
         # Never relaunch Chrome on a DB blip - fail safe to healthy.
         $res.healthy = $true
@@ -116,7 +123,7 @@ function Invoke-Recovery {
 function Invoke-Cycle {
     $health = Get-ExtHealth
     if ($health.healthy) {
-        Log "OK: extension producing (recent_events=$($health.recent_events))"
+        Log "NO RECOVERY: $($health.reason) (recent_events=$($health.recent_events))"
         Write-Status $health "none"
         return
     }
@@ -126,10 +133,10 @@ function Invoke-Cycle {
     Start-Sleep 12
     $after = Get-ExtHealth
     if ($after.healthy) {
-        Log "RECOVERED: extension healthy after relaunch"
+        Log "POST-RECOVERY: $($after.reason) (recent_events=$($after.recent_events))"
         Write-Status $after "recovered"
     } else {
-        Log "INCOMPLETE: still $($after.reason). Chrome was relaunched but scraping is still stale -- the MV3 service worker may need a manual wake: chrome://extensions -> click the 'service worker' link (or the Reload arrow) on UnifiedCollector Bridge."
+        Log "INCOMPLETE: still $($after.reason). Chrome was relaunched; inspect CDP reachability and browser ingest before further recovery."
         Write-Status $after "incomplete"
     }
 }

@@ -76,10 +76,13 @@ try {
     }
     $cmdPath = Join-Path $startup "$TaskName.cmd"
     $hiddenRunner = Join-Path $repo "scripts\run_hidden.vbs"
+    # WScript must receive ONE command argument, with no nested executable/path quotes.
+    $launchCommand = "& '$($psExe.Replace("'", "''"))' -NoProfile -ExecutionPolicy Bypass -File '$($starter.Replace("'", "''"))' -IntervalMinutes $IntervalMinutes -InitialDelaySeconds 60; exit `$LASTEXITCODE"
+    $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($launchCommand))
     $cmd = @(
         "@echo off",
         "cd /d `"$repo`"",
-        "wscript.exe `"$hiddenRunner`" `"`"$psExe`" -NoProfile -ExecutionPolicy Bypass -File `"`"`"$starter`"`"`" -IntervalMinutes $IntervalMinutes -InitialDelaySeconds 60`""
+        "wscript.exe `"$hiddenRunner`" `"powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand $encodedCommand`""
     ) -join "`r`n"
     Set-Content -LiteralPath $cmdPath -Value $cmd -Encoding ASCII
     Write-Warning "Scheduled task registration was denied; installed current-user Startup fallback instead."

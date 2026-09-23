@@ -5,12 +5,12 @@ param(
 )
 
 # Registers Windows Task Scheduler entry for scripts/browser-autorecover.ps1.
-# The autorecover script (see its header) detects a dead MV3 service worker or
-# unreachable CDP and relaunches Chrome via start-scraper-chrome-cdp.ps1. When
+# The autorecover script detects stale browser ingest or unreachable CDP
+# and relaunches Chrome via start-scraper-chrome-cdp.ps1. When
 # this registrar is missing (as it was during the audit that surfaced REL-008),
 # there is no host-side safety net for a browser-extension outage.
 #
-# Trigger: AtLogOn + every $IntervalMinutes (default 10 min).
+# Trigger: AtLogOn, then an internal loop every $IntervalMinutes (default 10 min).
 # Fallback: current-user AtLogOn task, then Startup folder .cmd, matching the
 # same denial-tolerant pattern as register-browser-maintenance-task.ps1.
 
@@ -53,7 +53,7 @@ try {
         -Action $action `
         -Trigger $logonTrigger `
         -Settings $settings `
-        -Description "Detects dead extension service worker or CDP outage and relaunches managed Chrome. Rate-limited to 4 recoveries per hour." `
+        -Description "Detects stale browser ingest or CDP outage and relaunches managed Chrome. Rate-limited to 4 recoveries per hour." `
         -Force | Out-Null
 
     Write-Host "Registered scheduled task $TaskName (AtLogOn + internal Loop)."
@@ -71,10 +71,13 @@ try {
     }
     $cmdPath = Join-Path $startup "$TaskName.cmd"
     $hiddenRunner = Join-Path $repo "scripts\run_hidden.vbs"
+    # WScript must receive ONE command argument, with no nested executable/path quotes.
+    $launchCommand = "& '$($psExe.Replace("'", "''"))' -NoProfile -ExecutionPolicy Bypass -File '$($script.Replace("'", "''"))' -Loop -IntervalMinutes $IntervalMinutes -CdpPort $CdpPort; exit `$LASTEXITCODE"
+    $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($launchCommand))
     $cmd = @(
         "@echo off",
         "cd /d `"$repo`"",
-        "wscript.exe `"$hiddenRunner`" `"`"$psExe`" -NoProfile -ExecutionPolicy Bypass -File `"`"`"$script`"`"`" -Loop -IntervalMinutes $IntervalMinutes -CdpPort $CdpPort`""
+        "wscript.exe `"$hiddenRunner`" `"powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand $encodedCommand`""
     ) -join "`r`n"
     Set-Content -LiteralPath $cmdPath -Value $cmd -Encoding ASCII
     Write-Warning "Scheduled task registration was denied; installed current-user Startup fallback."
