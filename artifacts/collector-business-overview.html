@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="A business-level map of UnifiedCollector: source collection, shared browser support, stored evidence, optional enrichment and downstream analysis.">
+  <title>UnifiedCollector — the business overview</title>
+  <style>
+    :root{color-scheme:dark;--bg:#0d1117;--panel:#161b22;--hover:#1c232c;--border:#364250;--text:#e6edf3;--muted:#a1a9b5;--accent:#22d3ee;--accent-dim:#0891a5;--warning:#e3b341;--radius:10px;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;--mono:ui-monospace,"Cascadia Code",Consolas,monospace;--shadow:0 1px 0 rgba(255,255,255,.03),0 6px 24px -6px rgba(0,0,0,.5)}
+    *{box-sizing:border-box}html{scroll-padding-top:24px}body{margin:0;background:var(--bg);color:var(--text);font:16px/1.6 var(--sans)}
+    main,header,footer{width:min(1184px,calc(100% - 64px));margin-inline:auto}header{padding-block:44px 32px;border-bottom:1px solid var(--border)}
+    a{color:var(--accent);text-underline-offset:4px}a:hover{color:var(--text)}a:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:5px;border-radius:3px}
+    .skip{position:fixed;top:-80px;left:16px;background:var(--panel);padding:12px 20px;z-index:2}.skip:focus{top:12px}
+    .eyebrow{font:12px/1.5 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--accent);margin:0 0 20px}
+    h1{font-size:clamp(32px,4.2vw,52px);line-height:1.12;letter-spacing:-.035em;max-width:900px;margin:0 0 20px;font-weight:650}
+    h2{font-size:26px;line-height:1.25;letter-spacing:-.02em;margin:0 0 12px;font-weight:600}h3{font-size:18px;line-height:1.35;margin:0 0 12px;font-weight:600}
+    p{margin:0 0 16px}.intro{max-width:810px;font-size:18px;color:var(--muted)}.muted{color:var(--muted)}.small{font-size:14px}.meta{font-size:13px;color:var(--muted)}
+    nav{display:flex;gap:12px 28px;flex-wrap:wrap;margin-top:28px}nav a{font-size:14px;text-decoration:none;padding-block:4px;border-bottom:1px solid transparent}nav a:hover{border-color:var(--accent)}
+    section{padding-block:40px;border-bottom:1px solid var(--border)}.section-head{display:flex;align-items:baseline;justify-content:space-between;gap:24px;margin-bottom:24px}.section-head p{margin:0;max-width:520px;font-size:14px;color:var(--muted)}
+    .flow{display:grid;grid-template-columns:1.35fr 20px 1fr 20px 1.15fr 20px .85fr;gap:12px;align-items:stretch;margin-top:28px}
+    .node{min-width:0;background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);padding:20px 16px;box-shadow:var(--shadow)}
+    .node h3{font-size:20px;margin-bottom:16px}.node p,.node li{font-size:14px}.node p:last-child{margin-bottom:0}.step{font:12px/1.5 var(--mono);color:var(--accent);display:block;margin-bottom:12px;letter-spacing:.08em}
+    .node-enrich{border-color:var(--accent-dim)}.source-group+.source-group{padding-top:16px;margin-top:16px;border-top:1px solid var(--border)}.source-group strong{font-size:13px;font-weight:600;display:block;margin-bottom:6px}
+    .source-group p{margin:0;color:var(--muted);line-height:1.8}.arrow{display:flex;align-items:center;justify-content:center;color:var(--accent)}.arrow svg{width:20px;height:24px;overflow:visible;flex-shrink:0}
+    ul{padding-left:20px;margin:0 0 16px}li+li{margin-top:8px}.node ul{color:var(--muted)}.note{font-size:13px;color:var(--muted);padding-top:12px;border-top:1px solid var(--border)}
+    .flow-caption{padding:20px 0 0;max-width:980px;font-size:14px;color:var(--muted);margin:0}.flow-caption strong{color:var(--text);font-weight:550}
+    .support{margin-top:24px;padding:20px 24px;border:1px dashed var(--border);border-radius:var(--radius);display:grid;grid-template-columns:1fr 1.7fr;gap:12px 32px;align-items:center}
+    .support h3{margin-bottom:4px;font-size:16px}.support p{margin:0;font-size:14px;color:var(--muted)}.support-chain{display:flex;gap:12px;flex-wrap:wrap;align-items:center;font-size:14px}.support-chain b{font-weight:500}.support-chain span{color:var(--accent)}
+    .split{display:grid;grid-template-columns:1fr 1fr;gap:32px}.explanation{padding:24px;background:var(--panel);border:1px solid var(--border);border-radius:var(--radius)}.explanation p{font-size:15px;color:var(--muted)}.explanation p:last-child{margin-bottom:0}
+    .label{font:12px/1.5 var(--mono);text-transform:uppercase;letter-spacing:.08em;color:var(--accent);margin-bottom:12px}
+    .table-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:var(--radius)}table{width:100%;border-collapse:collapse;font-size:14px}th,td{padding:16px 20px;text-align:left;vertical-align:top;border-bottom:1px solid var(--border)}th{font-weight:500;color:var(--muted);background:var(--panel);font-size:13px}td:first-child{width:24%;font-weight:550}tr:last-child td{border-bottom:0}td p{margin:0}td .muted{display:block;margin-top:4px}
+    details{border-top:1px solid var(--border);margin-top:24px;padding-top:16px}summary{cursor:pointer;font-weight:550;font-size:14px;padding:4px 0;color:var(--text)}details[open] summary{margin-bottom:16px}details p,details li{font-size:14px;color:var(--muted)}code{font-family:var(--mono);font-size:.85em;overflow-wrap:anywhere;color:var(--text);background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:2px 5px}
+    .criteria{display:grid;grid-template-columns:repeat(3,1fr);gap:24px}.criterion{padding-left:20px;border-left:2px solid var(--accent-dim)}.criterion h3{font-size:16px;margin-bottom:8px}.criterion p{font-size:14px;color:var(--muted);margin:0}
+    .next-list{list-style:none;padding:0;margin:24px 0 0}.next-list li{display:grid;grid-template-columns:160px 1fr;gap:20px;padding:20px 0;border-top:1px solid var(--border);margin:0;font-size:15px}.next-list strong{font-weight:550}.next-list p{margin:0;color:var(--muted)}.status{display:inline-block;font:12px/1.5 var(--mono);color:var(--warning);margin-top:8px}
+    .sources{columns:2;column-gap:32px;list-style:none;padding:0}.sources li{break-inside:avoid;margin:0 0 12px}.sources a{overflow-wrap:anywhere}footer{padding-block:28px 48px;font-size:12px;color:var(--muted)}
+    @media(max-width:1000px){.flow{grid-template-columns:1fr}.arrow{height:24px}.arrow svg{transform:rotate(90deg)}.node{padding:24px}.node-sources .source-groups{display:grid;grid-template-columns:repeat(3,1fr);gap:24px}.source-group+.source-group{padding-top:0;margin-top:0;border-top:0}.node h3{font-size:22px}.node p,.node li{font-size:15px}.support{grid-template-columns:1fr}.section-head{display:block}.section-head p{margin-top:8px}}
+    @media(max-width:600px){main,header,footer{width:calc(100% - 32px)}header{padding-block:28px}section{padding-block:32px}.intro{font-size:16px}.split,.criteria{grid-template-columns:1fr;gap:20px}.node-sources .source-groups{grid-template-columns:1fr;gap:16px}.source-group+.source-group{padding-top:16px;border-top:1px solid var(--border)}.support{padding:20px}.support-chain{gap:8px;font-size:13px}th,td{padding:14px 12px;font-size:13px}td:first-child{width:30%}.next-list li{grid-template-columns:1fr;gap:8px}.status{margin-left:12px;margin-top:0}.sources{columns:1}nav{gap:8px 20px}h2{font-size:24px}}
+    @media print{body{background:white;color:#111}main,header,footer{width:100%}nav,.skip{display:none}.node,.explanation,.support{break-inside:avoid;box-shadow:none}.flow{display:block}.arrow{height:24px}.arrow svg{transform:rotate(90deg)}.muted,.node p,.node li,.intro,.flow-caption{color:#333}a{color:#075985}}
+  </style>
+</head>
+<body>
+<a class="skip" href="#overview">Skip to the overview</a>
+<header>
+  <p class="eyebrow">UnifiedCollector / Operating model</p>
+  <h1>From source activity<br>to connected evidence.</h1>
+  <p class="intro">Collectors capture messages, profiles, posts and media. Shared services preserve the evidence, follow up on useful leads, and make it available for identities, relationships and timelines.</p>
+  <p class="meta">Architecture checked 19 September 2026 · Business capabilities, not a container inventory</p>
+  <nav aria-label="Document sections"><a href="#overview">Overview</a><a href="#collection">Collection explained</a><a href="#enrichment">Enrichment controls</a><a href="#operations">Operational meaning</a><a href="#next-steps">Next steps</a></nav>
+</header>
+<main>
+  <section id="overview" aria-labelledby="overview-title">
+    <div class="section-head"><h2 id="overview-title">One connected collection system</h2><p>Read left to right. On a small screen, follow the same path from top to bottom.</p></div>
+    <div class="flow" role="group" aria-label="Collection to evidence to optional enrichment to analysis" aria-describedby="flow-caption">
+      <div class="node node-sources">
+        <span class="step">01 / COLLECT</span><h3>Source collection</h3>
+        <div class="source-groups">
+          <div class="source-group"><strong>Messages &amp; conversations</strong><p data-source-group="messaging">WhatsApp · Telegram · Beeper</p></div>
+          <div class="source-group"><strong>Social profiles &amp; media</strong><p data-source-group="social">Instagram · Threads · TikTok · Facebook · X · Strava · Lemon8</p></div>
+          <div class="source-group"><strong>Public content &amp; discovery</strong><p data-source-group="public">GitHub · YouTube · Search · Websites</p></div>
+        </div>
+      </div>
+      <div class="arrow" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M2 12h18m-6-6 6 6-6 6" fill="none" stroke="currentColor" stroke-width="1.5"/></svg></div>
+      <div class="node">
+        <span class="step">02 / PRESERVE</span><h3>Collected evidence</h3>
+        <p>Keep the original context and where each observation came from.</p>
+        <ul><li>Platform records</li><li>Images, video &amp; files</li><li>Source, time &amp; relationships</li></ul>
+        <p class="note">Observed usernames, domains, URLs and eligible emails become follow-up leads.</p>
+      </div>
+      <div class="arrow" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M2 12h18m-6-6 6 6-6 6" fill="none" stroke="currentColor" stroke-width="1.5"/></svg></div>
+      <div class="node node-enrich">
+        <span class="step">03 / FOLLOW UP</span><h3>Shared enrichment</h3>
+        <p>Public-web intelligence sits <strong>behind collection</strong>, using leads the collectors have already found.</p>
+        <ul><li>Account &amp; profile lookups</li><li>Domain and public-web checks</li><li>Exposure findings</li></ul>
+        <p class="note">Selected by scope, tool and operator settings. Findings return to the evidence store with their provenance.</p>
+      </div>
+      <div class="arrow" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M2 12h18m-6-6 6 6-6 6" fill="none" stroke="currentColor" stroke-width="1.5"/></svg></div>
+      <div class="node">
+        <span class="step">04 / UNDERSTAND</span><h3>Analysis</h3>
+        <p>The downstream Analyzer turns supported evidence into:</p>
+        <ul><li>Identity leads</li><li>Relationships</li><li>Activity timelines</li></ul>
+        <p class="note">A discovered account is a lead, not automatic proof that two identities are the same.</p>
+      </div>
+    </div>
+    <p class="flow-caption" id="flow-caption"><strong>Enrichment does not hold up collection.</strong> Stored source evidence is available to the Analyzer directly. Follow-up checks add findings asynchronously; supported findings can then contribute to analysis. Not every tool output is automatically linked to an identity.</p>
+    <aside class="support" aria-label="Shared browser support">
+      <div><h3>Browser collection support</h3><p>Shared infrastructure for sources that need a browser session.</p></div>
+      <div class="support-chain"><b>Managed browser</b><span aria-hidden="true">→</span><b>Page capture</b><span aria-hidden="true">→</span><b>Collection gateway</b></div>
+    </aside>
+  </section>
+
+  <section id="collection" aria-labelledby="collection-title">
+    <div class="section-head"><h2 id="collection-title">Capabilities first. Delivery methods second.</h2><p>A platform may need more than one collection method. That does not make it two business capabilities.</p></div>
+    <div class="split">
+      <article class="explanation">
+        <p class="label">The Lemon8 question</p><h3>One Lemon8 capability, two complementary methods</h3>
+        <p>The backend handles routine profile, feed and discovery work. Optional browser capture can contribute visible media and discover creators; those creators can be queued for backend follow-up.</p>
+        <p>Both methods produce Lemon8 evidence. Stable identifiers and media deduplication reduce repeated records. Some requests can still overlap—the overview should not pretend there are two independent Lemon8 products, or promise zero duplicate work.</p>
+      </article>
+      <article class="explanation">
+        <p class="label">The naming question</p><h3>“Browser collection gateway” says what it does</h3>
+        <p>The gateway receives captured content from multiple platforms, stores records and offers collection targets. It is shared browser infrastructure, not an Instagram-only collector.</p>
+        <p>The browser control channel lets maintenance inspect and repair Chrome. The extension extracts page content; the gateway receives that content. Control and capture are different responsibilities.</p>
+      </article>
+    </div>
+    <details id="technical-names"><summary>Show the technical names behind the business labels</summary>
+      <div class="table-wrap"><table><thead><tr><th scope="col">Business label</th><th scope="col">Existing implementation</th><th scope="col">Responsibility</th></tr></thead><tbody>
+        <tr><td>Managed browser</td><td>Chrome; CDP on <code>9336</code></td><td>Session, page control and inspection.</td></tr>
+        <tr><td>Page capture</td><td>UnifiedCollector Chrome extension</td><td>Extract page observations and send HTTP deliveries.</td></tr>
+        <tr><td>Browser collection gateway</td><td>Legacy name <code>ig_ingest</code>; HTTP on <code>8765</code></td><td>Multi-platform receipt, storage and work queues. The legacy service/package identifier is retained.</td></tr>
+        <tr><td>Delivery telemetry</td><td><code>browser_ingest_events</code></td><td>Counts, timestamps and diagnostics. Not the raw-content inbox or an analyzer materialization backlog.</td></tr>
+      </tbody></table></div>
+    </details>
+  </section>
+
+  <section id="enrichment" aria-labelledby="enrichment-title">
+    <div class="section-head"><h2 id="enrichment-title">Enrichment is a shared follow-up stage</h2><p>Collectors supply the leads. Configuration determines which checks run and how deeply they search.</p></div>
+    <div class="table-wrap"><table><thead><tr><th scope="col">Capability</th><th scope="col">What it adds</th><th scope="col">How it is controlled</th></tr></thead><tbody>
+      <tr><td>Account discovery<span class="muted small">Current Collector selection: Maigret</span></td><td>Possible accounts for observed usernames.</td><td>Bounded, configured username lookups. Seeders no longer force the SpiderFoot account module when no module was selected.</td></tr>
+      <tr><td>Deeper account checks<span class="muted small">WhatsMyName / WMN</span></td><td>A broader username search across public sites.</td><td>Default-off; operator opt-in for deeper checks. Collector module selection and Analyzer WMN fan-out are separate controls. An explicitly enabled deployment can differ from the default.</td></tr>
+      <tr><td>Google-account lookup<span class="muted small">GHunt</span></td><td>Google-account observations for eligible email leads.</td><td>Credential-gated. The current recon container detects the configured credential file and executable. Email seeding is an explicit helper; readiness alone is not proof of a successful lookup.</td></tr>
+      <tr><td>Public-web &amp; exposure checks</td><td>Domain context and exposure findings related to known scopes and collected leads.</td><td>Scope-controlled follow-up. Exposure searches use collected domains and configured scopes; account lookups use their own target queue.</td></tr>
+    </tbody></table></div>
+    <details id="enrichment-detail"><summary>Show what happens automatically today</summary>
+      <ul>
+        <li>The scheduled recon seeder periodically selects observed usernames. Domain/URL seeding exists but is not enabled in that default scheduled path.</li>
+        <li>Recon workers select a lookup engine for each target and store observations. Exposure searches are a related enrichment capability with a separate input path.</li>
+        <li>The Analyzer’s recon bridge turns supported username observations into weak identity signals where an existing platform link can be resolved.</li>
+        <li>GHunt email observations are stored, but that username-only bridge does not automatically attach them to identities.</li>
+        <li>Analyzer WMN fan-out starts from already known identity handles. It is an optional downstream check, not an additional source collector.</li>
+      </ul>
+      <p>Operator controls: <code>RECON_USERNAME_MODULES</code> and <code>RECON_USERNAME_ENGINE</code> select Collector username behavior; <code>WMN_FANOUT_ENABLED</code> controls Analyzer WMN. GHunt requires a resolvable <code>GHUNT_CREDS</code> file and executable, plus an email target routed to that engine. Existing queued selections are not rewritten by changing defaults.</p>
+    </details>
+  </section>
+
+  <section id="operations" aria-labelledby="operations-title">
+    <div class="section-head"><h2 id="operations-title">What “working” actually means</h2><p>A running process, a responding browser and fresh evidence answer different questions.</p></div>
+    <div class="criteria">
+      <article class="criterion"><h3>Collection is producing</h3><p>Useful recent content proves capture. Heartbeats prove the extension is alive; they do not prove new posts or media were stored. Unavailable checks must stay unknown.</p></article>
+      <article class="criterion"><h3>Recovery is available</h3><p>Browser maintenance belongs on the Windows host. Restarting a collector container cannot, by itself, restart Chrome or repair a broken browser session.</p></article>
+      <article class="criterion"><h3>Evidence is recoverable</h3><p>A completed backup and a successful restore drill are stronger proof than a partial file or a readable archive index. Schedule only after accepting the workload impact.</p></article>
+    </div>
+  </section>
+
+  <section id="next-steps" aria-labelledby="next-title">
+    <div class="section-head"><h2 id="next-title">Operational follow-through</h2><p>Observed during the 19 September recovery. These are explicit next actions, not an “all healthy” badge.</p></div>
+    <ol class="next-list">
+      <li><div><strong>Database backup</strong><span class="status">GATED</span></div><p>The first trial left an unverified partial archive. Resolve the obsolete scheduled task with administrator access, let concurrent backup/drill work finish, then run and measure one quiet-window trial. The intended nightly time is 04:00 SGT after acceptance.</p></li>
+      <li><div><strong>Browser recovery</strong><span class="status">REPAIR TRACK</span></div><p>Reuse the existing host recovery and maintenance scripts. Repair Startup argument handling and ensure failed database probes cannot trigger an unnecessary browser reset; verify persistence and the running recovery loop.</p></li>
+      <li><div><strong>WhatsApp sessions</strong><span class="status">CHECK CONNECTION</span></div><p>Both bridges reported not-ready during the current check, despite stored registered credentials. Reconcile connection/session recovery before resetting or re-pairing. An optional second slot can be linked through the WhatsApp linking screen when needed.</p></li>
+    </ol>
+    <details id="evidence-sources"><summary>Implementation references &amp; scope of this overview</summary>
+      <p>Repository-relative references below identify the implementation, not live service health. This page replaces the earlier container-by-container explanation; it does not rename deployed services or add collectors.</p>
+      <ul class="sources">
+        <li><code>src/bridges/ig_ingest/</code> — shared browser gateway, direct platform writes and delivery telemetry.</li>
+        <li><code>src/collectors/lemon8/</code> — routine collection and browser-discovered creator follow-up.</li>
+        <li><code>src/core/recon_seed.py</code> — observed-lead seeding and explicit Google-email helper.</li>
+        <li><code>src/core/recon_spiderfoot.py</code> — target policy, engine selection and observation storage.</li>
+        <li><code>src/collectors/exposure/</code> — scope-based public-web follow-ups.</li>
+        <li><code>src/core/ghunt_enrich.py</code> — credential and executable gate.</li>
+        <li><code>src/scheduler/handlers/recon_seed.py</code> — automatic seeding defaults.</li>
+        <li>Analyzer: <code>src/pipeline/recon_bridge.py</code>, <code>wmn_fanout.py</code> and <code>src/scheduler/scheduler.py</code> — supported downstream bridges and optional checks.</li>
+        <li><code>docs/plans/backup-slow-reintroduction.md</code> — current backup evidence and rollout gate.</li>
+      </ul>
+    </details>
+  </section>
+</main>
+<footer>UnifiedCollector · Capture → preserve → follow up → understand. No credentials, account identifiers or collected content are included in this document.</footer>
+</body>
+</html>
