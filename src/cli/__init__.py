@@ -23,7 +23,6 @@ from src.cli.commands import (
     realtime,
     rebuild,
     recon,
-    restore,
     schedule_target,
 )
 
@@ -36,7 +35,6 @@ _MODULES = [
     rebuild,
     media_repair,
     backfill_discovered_links,
-    restore,
     schedule_target,
 ]
 
