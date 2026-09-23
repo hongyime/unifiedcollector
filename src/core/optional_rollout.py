@@ -433,6 +433,15 @@ def _seen_to_recon_type(target_type: str) -> str | None:
     return None
 
 
+def _default_username_modules() -> list[str] | None:
+    """Read the operator's module selection for automatically queued usernames."""
+    raw = os.getenv("RECON_USERNAME_MODULES", "").strip()
+    if not raw:
+        return None
+    modules = [item.strip() for item in raw.split(",") if item.strip()]
+    return modules or None
+
+
 async def _queue_spiderfoot_seen_candidates(conn, candidates: list[Any], *, target_cap: int) -> dict[str, int]:
     from src.core.recon import queue_recon_target
 
@@ -453,7 +462,7 @@ async def _queue_spiderfoot_seen_candidates(conn, candidates: list[Any], *, targ
             "source_table": str(_row_get(row, "source_table") or "collector_seen_targets"),
             "source_record_id": str(_row_get(row, "source_record_id") or ""),
             "seen_target_status": str(_row_get(row, "status") or ""),
-            "modules": ["sfp_accounts"] if target_type == "username" else None,
+            "modules": _default_username_modules() if target_type == "username" else None,
         }
         scope = {key: value for key, value in scope.items() if value is not None and value != ""}
         try:

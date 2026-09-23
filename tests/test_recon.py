@@ -480,7 +480,11 @@ def test_recon_seed_dry_run_builds_collector_candidates():
     assert "target_hash" in report["sample"][0]
 
 
-def test_recon_seed_scopes_username_targets_to_account_module(monkeypatch):
+@pytest.mark.parametrize("configured_modules,expected", [
+    (None, None), ("", None), (" , ", None),
+    ("sfp_accounts", ["sfp_accounts"]), ("maigret", ["maigret"]),
+])
+def test_recon_seed_username_modules_are_operator_controlled(monkeypatch, configured_modules, expected):
     class Conn:
         def __init__(self):
             self.scopes = []
@@ -511,7 +515,10 @@ def test_recon_seed_scopes_username_targets_to_account_module(monkeypatch):
                 "status": "pending",
             }
 
-    monkeypatch.delenv("RECON_USERNAME_MODULES", raising=False)
+    if configured_modules is None:
+        monkeypatch.delenv("RECON_USERNAME_MODULES", raising=False)
+    else:
+        monkeypatch.setenv("RECON_USERNAME_MODULES", configured_modules)
     conn = Conn()
 
     report = asyncio.run(seed_recon_targets_from_collector(
@@ -523,7 +530,7 @@ def test_recon_seed_scopes_username_targets_to_account_module(monkeypatch):
     ))
 
     assert report["queued"] == 1
-    assert conn.scopes[0]["modules"] == ["sfp_accounts"]
+    assert conn.scopes[0].get("modules") == expected
 
 
 def test_run_spiderfoot_once_blocks_unscoped_target_by_default(monkeypatch):

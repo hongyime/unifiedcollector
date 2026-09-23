@@ -10,7 +10,8 @@ from src.core.recon import queue_recon_target
 
 DEFAULT_SOURCE_LIMIT = 25
 DEFAULT_TOTAL_LIMIT = 200
-DEFAULT_USERNAME_MODULES = ("sfp_accounts",)
+# Site-enumeration modules require operator selection via RECON_USERNAME_MODULES.
+DEFAULT_USERNAME_MODULES: tuple[str, ...] = ()
 
 
 async def _table_exists(conn, table: str) -> bool:
