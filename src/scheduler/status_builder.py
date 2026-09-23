@@ -423,6 +423,10 @@ async def build_status(pool, freshness: list[tuple[str, str, int]]) -> dict:
             try:
                 if await conn.fetchval("SELECT to_regclass('browser_ingest_events')", timeout=5) is not None:
                     snap["browser_ingest_events"] = [dict(r) for r in await conn.fetch(
+                    # Exclude heartbeat rows: they fire every few seconds with observed_count=0
+                    # and would otherwise dominate the top-8 ranking by sheer volume, crowding
+                    # out real content events (posts/media). Heartbeat liveness is tracked
+                    # separately via browser_ingest_health below; this query is content-only.
                         """
                         SELECT platform,
                                endpoint,
@@ -432,6 +436,7 @@ async def build_status(pool, freshness: list[tuple[str, str, int]]) -> dict:
                                max(created_at) AS last_seen_at
                         FROM browser_ingest_events
                         WHERE created_at >= date_trunc('hour', now())
+                          AND endpoint <> 'browser_heartbeat'
                         GROUP BY platform, endpoint
                         ORDER BY observed_count DESC, stored_count DESC, last_seen_at DESC
                         LIMIT 8
