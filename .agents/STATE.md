@@ -1,3 +1,35 @@
+## Live incident recovery — 2026-09-22 (resumed from 2026-09-19 Kiro session)
+
+Resumed Kiro session `sess_9a0008ef-c462-47bb-90f2-3677fb479f5e`. Found and fixed a live multi-day production outage in addition to the originally-requested work. All changes below are deployed live and verified against the running stack; nothing here is speculative.
+
+### Fixed and deployed
+
+1. **X/threads/facebook false-stale watchdog alarms** (originally requested) — `src/core/source_freshness.py` + `src/watchdog/freshness.py`. Root cause: a query-timeout (no evidence) was being treated as proof of staleness. Fix computes effective age from real browser-content evidence before classifying status, and the watchdog now skips (never alarms, never clears) on genuinely `unknown` evidence. 51 focused tests (`tests/core/test_browser_freshness_evidence.py`, `tests/test_watchdog_browser_evidence.py`, plus existing suites) pass. Oracle-reviewed: PASS, no regression blind spot (a truly dead source still has old native-table rows, so it correctly resolves to `stale`/`degraded`, never `unknown`).
+2. **WMN/sfp_accounts default-off** (originally requested) — `src/core/recon_seed.py` + `src/core/optional_rollout.py`. `DEFAULT_USERNAME_MODULES` changed from `("sfp_accounts",)` to `()`; operator now opts in via `RECON_USERNAME_MODULES`. GHunt routing untouched (separate, credential-gated). Oracle-reviewed: PASS.
+3. **CRITICAL — 3-day production outage, found live, not requested but blocking everything else.** `src/cli/__init__.py` had two dangling references to a `restore` module deleted by commit `f6853c9f` ("nuke backup subsystem entirely") but never removed from the import site. This broke `python -m src.main` — the entrypoint for every worker container — crash-looping `website`/`beeper`/`telegram`/`exposure`/`search`/`instagram_dm` for ~3 days (crash_count 650-677 each). New regression test `tests/cli/test_cli_entrypoint_imports.py` reproduces the exact live traceback (RED) and calls the real `register_all(subparsers)` the same way `src/main.py` does (GREEN after a 2-line fix). Fixed live via `docker restart` on all 6 affected containers (code is bind-mounted, no rebuild needed) — confirmed `crash_count` reset to 0 and real collection work resumed within ~1 minute (website: 3008 targets, exposure: 7 targets, strava: GPS backfill). One transient `ENOMEM` on telegram during the simultaneous 6-container restart burst self-healed via Docker's restart policy. Oracle-reviewed: PASS, zero other dangling references to the deleted `restore` command found.
+4. **Misleading "seen N stored 0" Telegram digest for Instagram/X** (reported live by operator, investigated and fixed). Real storage was NEVER broken — confirmed via direct query (`x_posts` got 10 genuine new rows in the reported hour). The bug was in `src/scheduler/status_builder.py`'s hourly digest query: it ranked the top-8 `browser_ingest_events` rows by raw `observed_count` without excluding `browser_heartbeat`, and heartbeats (which fire every few seconds with `observed_count>0, stored_count=0` by design) structurally dominated the ranking, crowding out the real `posts`/`media` rows. Fixed by adding `AND endpoint <> 'browser_heartbeat'` to that one query. Verified with a live RED/GREEN SQL A/B comparison against production data before deploying (RED: 6/8 slots were heartbeat noise; GREEN: all 8 slots real content). Strava's earlier "seen but stored 0" complaint is fully explained by finding #3 above (its backend, `collector_lowrisk`, was crash-looping on the same import bug) — already resolved as a side effect.
+5. **Self-caught bug**: while adding Oracle's suggested explanatory comment to the status_builder.py fix, an editing mistake put SQL-style `--` comment syntax directly into Python source (outside the SQL string), causing a `SyntaxError` that would have crashed the scheduler/watchdog on their next reboot. Caught via a full-repo `pytest --collect-only` sweep (1584 tests, checking for other debris from the same commit) before it could cause a live incident; fixed with a proper Python `#` comment; re-verified via direct import test and a second clean container restart.
+6. **Two more orphaned test files** from the same `f6853c9f` commit, found via that same collect-only sweep: `tests/core/test_restore_drill.py` and `tests/core/test_db_backup.py` both imported `src.backup.*` (a directory that no longer exists), causing hard collection errors on every CI run since the commit. Deleted both — they tested functionality that was deliberately and completely removed. Also removed two stale README.md references (a `restore-drill` usage example and a `src/backup/` line in the repo tree) that described the same deleted functionality.
+7. **Docs**: all six `docs/plans/*.md` files now have accurate "Status" sections distinguishing shipped-and-verified work from still-proposed/unverified acceptance criteria (backup Phase B/C, drain-acceleration, pool-leak-fix, and the three WhatsApp contact plans).
+8. **Business-level architecture overview**: `artifacts/collector-business-overview.html` replaces the old container-inventory-style artifact. One Lemon8 capability (not two), a "shared browser collection gateway" label for the legacy `ig_ingest` service, enrichment shown as a follow-up stage behind collectors (not a parallel lane), and accurate WMN/GHunt control descriptions. Verified structurally clean (`visual-explainer`'s `check_html.py`) and screenshot-inspected at 375/768/1280px via real headless Chrome — no overflow, all `<details>` and nav-anchor interactions work. **Published**: root cause of the earlier `npx postplan` hang was diagnosed (npm install for the package genuinely took ~4 minutes in this environment — disk I/O + AV scanning, not a real hang; my shell tool's timeouts were just shorter than that). Installed `postplan@0.0.4` globally, uploaded, and independently re-fetched the live URL to confirm the rendered content matches: **https://0j41xdpvr7tu.postplan.dev** (local source: `artifacts/collector-business-overview.html`).
+9. **Backup orphan — DEFINITIVE verdict, not just "unverified"**: restored `20260919T0741.dump.tmp` into an isolated, network-disconnected scratch PostgreSQL container (`--network none`, destroyed immediately after). `pg_restore` failed with `could not read from input file: end of file` — a genuine truncated-archive error. **This file is confirmed corrupt and cannot be used as a backup.** Full detail and next steps in `docs/plans/backup-slow-reintroduction.md`'s 2026-09-22 update.
+10. **Fresh full-stack live proof (post-fix, post-restart)**: `compute_liveness()` re-run against the live watchdog container shows telegram `live` (age=6s), beeper `live` (age=48s), and instagram/tiktok/threads/facebook/x all correctly `live` via the source_health-heartbeat fallback even while their heavier freshness queries were transiently timing out under real current load — proving the fix handles the actual production failure mode, not just the test mocks. WhatsApp correctly still shows genuine `stale` (untouched, real issue). `website`/`search` still show `unknown`/`dead` in their source_health rows because they haven't completed a fresh work cycle yet post-restart to self-clear the marker — not a new problem.
+11. **Docker hygiene**: zero rebuilds performed this session (every fix was bind-mount + `docker restart`, no image builds). Confirmed zero dangling images (`docker images -f dangling=true` returned empty). The one temporary scratch container (`uc-restore-verify`, for the backup verification above) was created with `--rm` and confirmed fully removed after use.
+
+### Confirmed NOT a bug (re-verify before acting on old assumptions)
+
+- Instagram/X real storage is fine — see #4 above. Do not re-open this as a data-loss investigation without new evidence.
+- WhatsApp: both bridges currently report `/ready` 503 `connecting_unpaired` despite `has_registered_creds=true` — this is a genuine session-reconnect issue, not the "optional second slot" framing used in older state notes. Needs its own investigation; not touched this session.
+- Telegram decision-card bot (button-press slowness complaint): code review of `src/notifications/collector_bot.py`'s long-poll loop found no obvious bug (standard `getUpdates` long-poll, offset-then-process pattern, correct ack-first-then-act ordering). The most likely explanation is the #3 crash-loop above starving the host's CPU/Docker daemon for 3 days. **Ask the operator to retest button responsiveness now that the crash-loop is fixed** before investigating further.
+
+### Independent CLI worker reports (still on disk, safe to delete after review)
+
+`C:\Users\bryan\AppData\Local\Temp\opencode\ulw-{backup,browser,overview,browser-fix}-report.txt` — detailed, evidence-heavy read-only investigation reports from delegated workers. All findings from them are now folded into the fixes above or the docs/plans status sections.
+
+
+
+### Previous state (retained)
+
 Updated: 2026-09-16 02:24 SGT / 2026-09-15 18:24 UTC
 
 Current live update:
@@ -465,3 +497,16 @@ Current live update:
 - Live tab repairs executed: threads wedged renderer hard-reopened to canonical /following; X verified on x.com/home; IG refreshed on explore.
 - Post-repair scrape proof (rolling 60m stored): facebook 176 (prior capture stall cleared), instagram 288, threads 127, x 12; open action queue count=0; cookie vault ok.
 - Final gate clean: dashboard/watchdog logs zero Tracebacks in post-change window; analyzer readiness consuming this proof is critical-green with only the honest warning-level data-quality ledger.
+
+<!-- MOLT_AUTO_START -->
+## Auto State
+
+- Updated: 2026-09-22 21:29:53 +08:00
+- Machine: PRAWN-L390
+- Harness: claude
+- Event: stop
+- Branch: main
+- HEAD: 84dcdef8
+- Dirty files: 25
+- Resume hint: Read .agents/STATE.md, then the latest file in .agents/handoffs/ if present.
+<!-- MOLT_AUTO_END -->
