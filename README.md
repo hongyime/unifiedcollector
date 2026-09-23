@@ -199,14 +199,6 @@ docker exec unifiedcollector_scheduler `
     python -m src.main recon-seed --limit 200
 ```
 
-**Restore the latest DB backup into a scratch DB and verify** (bounded,
-non-destructive):
-
-```powershell
-docker exec unifiedcollector_collector `
-    python -m src.main restore-drill --dry-run
-```
-
 **Run one WhatsApp phone-OSINT backfill batch** (offline
 `phonenumbers` library only, no network):
 
@@ -322,7 +314,6 @@ unifiedcollector/
 │   │   ├── migrate.py               Ledger-tracked migration runner
 │   │   ├── schemas/                 14 base schema files
 │   │   └── migrations/              124 migration files (+ _archive/ subdir)
-│   ├── backup/                      pg_dump wrapper + restore-drill
 │   ├── bots/onboard_bot.py          Telegram onboarding bot
 │   ├── tools/browser_cookie_vault.py CDP snapshot loop
 │   └── worker/__init__.py           WorkerService supervisor
