@@ -477,6 +477,23 @@ async def compute_liveness(conn) -> list[dict]:
             except Exception:
                 age = None
         data_age = age
+        browser_content = (
+            browser_content_progress.get(name)
+            if browser_content_progress is not None
+            else None
+        )
+        browser_content_age = (
+            int(browser_content["age_seconds"])
+            if browser_content and browser_content.get("age_seconds") is not None
+            else None
+        )
+        browser_progress_used = (
+            name in _BROWSER_CONTENT_PROGRESS_SOURCES
+            and browser_content_age is not None
+            and (age is None or browser_content_age < age)
+        )
+        if browser_progress_used:
+            age = browser_content_age
         h = health.get(name) or {}
         hs = h.get("status")
         h_error = h.get("last_error")
@@ -512,17 +529,9 @@ async def compute_liveness(conn) -> list[dict]:
                 detail = "newest row is inside the freshness window; watchdog marker ignored"
             else:
                 detail = "newest row is inside the freshness window"
+        if browser_progress_used and status == "live":
+            detail = "fresh browser content/probe event is inside the freshness window"
         browser_heartbeat = browser_heartbeats.get(name) if browser_heartbeats is not None else None
-        browser_content = (
-            browser_content_progress.get(name)
-            if browser_content_progress is not None
-            else None
-        )
-        browser_content_age = (
-            int(browser_content["age_seconds"])
-            if browser_content and browser_content.get("age_seconds") is not None
-            else None
-        )
         media_yield = (
             browser_media_yield.get(name)
             if browser_media_yield is not None
@@ -540,13 +549,6 @@ async def compute_liveness(conn) -> list[dict]:
             and media_unresolved_count >= browser_media_zero_store_min_observed
             and media_stored_count == 0
         )
-        if (
-            name in _BROWSER_CONTENT_PROGRESS_SOURCES
-            and browser_content_age is not None
-            and (age is None or browser_content_age < age)
-        ):
-            age = browser_content_age
-            detail = "fresh browser content/probe event is inside the freshness window"
         browser_age = (
             int(browser_heartbeat["age_seconds"])
             if browser_heartbeat and browser_heartbeat.get("age_seconds") is not None
@@ -575,14 +577,12 @@ async def compute_liveness(conn) -> list[dict]:
         browser_content_stale_after = _browser_content_stale_defaults.get(
             name, _browser_content_stale_global
         )
+        content_age = browser_content_age if browser_content_age is not None else data_age
         browser_content_stale = (
             not _auth_paused_or_rate_limited
             and name in _BROWSER_CONTENT_PROGRESS_SOURCES
-            and (
-                browser_content_age > browser_content_stale_after
-                if browser_content_age is not None
-                else (data_age is None or data_age > browser_content_stale_after)
-            )
+            and content_age is not None
+            and content_age > browser_content_stale_after
         )
         if browser_content_stale:
             stale_age = browser_content_age if browser_content_age is not None else data_age

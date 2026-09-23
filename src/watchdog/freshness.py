@@ -792,9 +792,12 @@ async def _browser_source_tick(db: asyncpg.Connection) -> None:
             log.info("%s browser source rotator-paused; skipping stall check", source)
             continue
         status = row.get("status")
+        if status == "unknown":
+            log.info("%s browser freshness unavailable; retaining prior health", source)
+            continue
         heartbeat_age = row.get("browser_heartbeat_age_seconds")
         content_stale = bool(row.get("browser_content_stale"))
-        if status in {"degraded", "stale", "dead", "unknown"} and (
+        if status in {"degraded", "stale", "dead"} and (
             heartbeat_age is not None or content_stale
         ):
             detail = _clean_browser_source_detail(row.get("detail"))
