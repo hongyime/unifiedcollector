@@ -18,7 +18,6 @@ import traceback
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
-from src.observability_health import health_report
 
 # Backup subsystem was removed 2026-09-19. Consumers still call backup_status()
 # to render the "backups" section in health payloads; give them a stable
