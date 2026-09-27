@@ -79,6 +79,8 @@ ENV SPIDERFOOT_CLI="/usr/local/bin/spiderfoot-cli" \
     PYTHONDONTWRITEBYTECODE=1
 FROM runtime-dependencies AS dev
 RUN pip install --no-cache-dir watchfiles==1.3.0
+COPY src/ /app/src/
+COPY config/ /app/config/
 CMD ["watchfiles", "--target-type", "command", "python -m src.recon_spiderfoot_service", "/app/src"]
 FROM runtime-dependencies AS production
 COPY src/ src/

@@ -5,6 +5,8 @@ COPY package.json package-lock.json ./
 RUN npm ci --network-timeout=1000000
 
 FROM dependencies AS dev
+COPY --chown=node:node src/ /app/src/
+COPY --chown=node:node tsconfig.json /app/tsconfig.json
 RUN mkdir -p /app/build /app/auth_info /data/media \
     && chown -R node:node /app /data/media
 USER node

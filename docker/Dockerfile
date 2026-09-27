@@ -3,6 +3,7 @@ WORKDIR /app/frontend
 COPY src/dashboard/frontend/package*.json ./
 RUN npm ci
 FROM frontend-dependencies AS frontend-dev
+COPY --chown=node:node src/dashboard/frontend/ /app/frontend/
 RUN chown -R node:node /app/frontend
 USER node
 CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
@@ -48,6 +49,8 @@ RUN useradd -u 1001 -m collector \
 
 FROM runtime-dependencies AS dev
 RUN pip install --no-cache-dir watchfiles==1.3.0
+COPY --chown=collector:collector src/ /app/src/
+COPY --chown=collector:collector config/ /app/config/
 USER collector
 CMD ["uvicorn", "src.dashboard.api:app", "--host", "0.0.0.0", "--port", "8700", "--reload", "--reload-dir", "/app/src"]
 
