@@ -13,7 +13,7 @@ Surfaced mid-conversation while discussing collector data types/speed with the o
 **Full ranked remediation reference (for next recurrence):** `.agents/docker-desktop-stuck-engine-remediation.md` — steps 0-2 (restart layers) are safe to auto-execute; steps 7-9 (Clean/Purge data, Reset to factory defaults, uninstall/reinstall) **delete all container data** despite Docker's own UI implying otherwise (confirmed via `docker/for-mac#6758`) and must never run without explicit human sign-off.
 
 **Still open (lower priority, not blocking):**
-- `docker exec` hangs on this host even though `docker ps`/`docker start`/`docker logs`/`inspect` all work fine post-fix — **root-caused**: those all use plain request/response, but `exec` opens an HTTP-hijacked bidirectional stream through the Windows npipe↔hvsock proxy (`docker.exe` → `\\.\pipe\dockerDesktopLinuxEngine` → `com.docker.backend.exe` → hvsock → dockerd), and that hijack-proxy's half-close state machine came up degraded after the engine recovery cycle — same failure class as `rancher-sandbox/rancher-desktop#2094` (identical npipe↔hvsock↔dockerd architecture). Confirmed by zero backend-log activity during a hung exec (request never reaches dockerd) plus every exec being slow (4-6s) even when it "succeeds" — not container-specific. No safe fix exists without another full Docker Desktop restart (would disrupt 30+ live containers); `nsenter` via `wsl -d docker-desktop -- nsenter -t <pid> -a -- <cmd>` isn't just a workaround, it bypasses the broken layer entirely and is architecturally cleaner right now. Schedule a clean Docker Desktop restart (same kill-com.docker.*-then-`wsl --terminate docker-desktop`-then-relaunch sequence used during recovery) at the next maintenance window to clear it.
+- `docker exec` hangs on this host even though `docker ps`/`docker start`/`docker logs`/`inspect` all work fine — **root-caused, but a Docker Desktop restart does NOT durably fix it (tested)**: those all use plain request/response, but `exec` opens an HTTP-hijacked bidirectional stream through the Windows npipe↔hvsock proxy (`docker.exe` → `\\.\pipe\dockerDesktopLinuxEngine` → `com.docker.backend.exe` → hvsock → dockerd), same failure class as `rancher-sandbox/rancher-desktop#2094`. **2026-09-27 correction**: performed the recommended clean restart (kill com.docker.*/Docker Desktop.exe → `wsl --terminate docker-desktop` → relaunch, all 37 containers verified back with zero data loss). Exec worked once immediately post-restart (4.65s) but degraded again within 6 minutes — 5 consecutive attempts afterward: 4 hung, 1 succeeded at 7.5s. Revised theory: NOT a one-time artifact from the original incident, but an ongoing degradation under normal operational load — this host runs ~20+ containers with periodic healthchecks, and Docker's healthcheck mechanism executes its check command through this same hijacked-exec pathway, which is why postgres/dashboard intermittently show `unhealthy` even though the containers themselves are fine (data pipeline independently verified live via `nsenter` both times). **Do not recommend another restart as a fix** — it demonstrably does not hold. `nsenter` via `wsl -d docker-desktop -- nsenter -t <pid> -a -- <cmd>` is the durable answer here, not a stopgap; treat `docker exec` as unreliable on this host until Docker Desktop itself patches the proxy (worth a `docker/for-win` bug report with this session's evidence if it keeps mattering).
 - WhatsApp bridge-2's `HistorySync 0/166` stall (found by a diagnostic subagent this session) — unrelated pre-existing issue, separate from this incident.
 - The recurring WSL memory-cap tuning cycle itself is unaddressed — `.wslconfig`'s own notes say the durable fix is "prune containers" alongside any cap change, not just another cap bump.
 
@@ -522,12 +522,12 @@ Current live update:
 <!-- MOLT_AUTO_START -->
 ## Auto State
 
-- Updated: 2026-09-27 14:21:32 +08:00
-- Machine: dev-host-3.example
+- Updated: 2026-09-27 15:56:37 +08:00
+- Machine: PRAWN-L390
 - Harness: claude
 - Event: stop
 - Branch: main
-- HEAD: d207433c
+- HEAD: 7c98c8ca
 - Dirty files: 0
 - Resume hint: Read .agents/STATE.md, then the latest file in .agents/handoffs/ if present.
 <!-- MOLT_AUTO_END -->
