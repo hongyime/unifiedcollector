@@ -24,7 +24,7 @@ Resumed Kiro session `sess_9a0008ef-c462-47bb-90f2-3677fb479f5e`. Found and fixe
 
 ### Independent CLI worker reports (still on disk, safe to delete after review)
 
-`C:\Users\bryan\AppData\Local\Temp\opencode\ulw-{backup,browser,overview,browser-fix}-report.txt` — detailed, evidence-heavy read-only investigation reports from delegated workers. All findings from them are now folded into the fixes above or the docs/plans status sections.
+`%USERPROFILE%\AppData\Local\Temp\opencode\ulw-{backup,browser,overview,browser-fix}-report.txt` — detailed, evidence-heavy read-only investigation reports from delegated workers. All findings from them are now folded into the fixes above or the docs/plans status sections.
 
 
 
