@@ -5,6 +5,9 @@ COPY package.json package-lock.json ./
 RUN npm ci --network-timeout=1000000
 
 FROM dependencies AS dev
+RUN mkdir -p /app/build /app/auth_info /data/media \
+    && chown -R node:node /app /data/media
+USER node
 ENV TSC_WATCHFILE=PriorityPollingInterval \
     TSC_WATCHDIRECTORY=RecursiveDirectoryUsingFsWatchFile
 CMD ["sh", "-ec", "npm run build\nnode node_modules/typescript/bin/tsc --watch --preserveWatchOutput &\nexec node --watch build/index.js"]
