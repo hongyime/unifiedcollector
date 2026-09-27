@@ -134,3 +134,5 @@ Machine-specific values in this document use privacy placeholders.
 2026-09-27: Applied reviewed development Compose, Docker and GHCR publishing changes across 13 files, with explicit local startup and dependency rebuild guidance. Personal host-path defaults were removed. Configuration/static checks were performed; image builds, full runtime, and live CI publication remain unverified. Existing unrelated changes were preserved; no commit or push.
 
 2026-09-27: Current upstream changes are preserved in the publication branch. Initial CI, bounded runtime validation and resource teardown are in progress under the user-approved maintenance release.
+
+- 2026-09-27: Replace remaining private host and home identifiers in newer upstream handoffs while preserving recovery instructions.
