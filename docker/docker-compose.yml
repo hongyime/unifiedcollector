@@ -46,6 +46,11 @@ services:
     # it regularly consumed 3.5-4GB and starved the host (16GB total, 10GB WSL2).
     # 4GB covers shared_buffers=1GB + work_mem headroom + OS cache.
     mem_limit: 4g
+    # Deprioritize as an OOM-kill target relative to worker containers (default 0) —
+    # if the host runs low again, sacrifice something else first. Paired with a
+    # soft memory floor so the scheduler tries to keep this much genuinely free for it.
+    oom_score_adj: -500
+    mem_reservation: 2g
 
   collector:
     build:
@@ -190,7 +195,7 @@ services:
     container_name: unifiedcollector_collector_youtube
     init: true  # reap yt-dlp/ffmpeg zombies so recreate can't wedge on a defunct PID
     command: python -m src.main worker --source youtube
-    mem_limit: 1300m
+    mem_limit: 384m
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
@@ -258,7 +263,7 @@ services:
     container_name: unifiedcollector_collector_tiktok
     init: true  # reap gallery-dl/yt-dlp zombies so recreate can't wedge on a defunct PID
     command: python -m src.main worker --source tiktok
-    mem_limit: 1300m
+    mem_limit: 384m
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
@@ -434,6 +439,7 @@ services:
   watchdog:
     image: unifiedcollector-collector:latest
     container_name: unifiedcollector_watchdog
+    mem_limit: 128m
     command: python -m src.watchdog.freshness
     restart: unless-stopped
     environment:
@@ -482,7 +488,7 @@ services:
     container_name: unifiedcollector_collector_website
     init: true  # reap subprocess zombies so recreate can't wedge
     command: python -m src.main worker --source website
-    mem_limit: 1g
+    mem_limit: 384m
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_HANG_TIMEOUT_SECONDS: "7200"
@@ -598,7 +604,7 @@ services:
     container_name: unifiedcollector_collector_lemon8
     init: true  # reap subprocess zombies so recreate can't wedge
     command: python -m src.main worker --source lemon8
-    mem_limit: 1g
+    mem_limit: 384m
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
@@ -639,7 +645,7 @@ services:
     container_name: unifiedcollector_collector_telegram
     init: true  # reap subprocess zombies so recreate can't wedge
     command: python -m src.main worker --source telegram
-    mem_limit: 1g
+    mem_limit: 384m
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
@@ -784,7 +790,7 @@ services:
     container_name: unifiedcollector_collector_whatsapp
     init: true  # reap subprocess zombies so recreate can't wedge
     command: python -m src.main worker --source whatsapp
-    mem_limit: 768m
+    mem_limit: 384m
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
       COLLECTOR_DRIVE_PATH: /media
@@ -1077,6 +1083,7 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     container_name: unifiedcollector_onboard_bot
+    mem_limit: 256m
     command: python -m src.bots.onboard_bot
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/unifiedcollector
@@ -1160,6 +1167,7 @@ services:
       dockerfile: docker/Dockerfile
       target: dashboard
     container_name: unifiedcollector_dashboard
+    mem_limit: 256m
     ports:
       # Keep the original local dashboard URL alive while 8700 remains the
       # canonical service port.
@@ -1210,6 +1218,7 @@ services:
   rabbitmq:
     image: rabbitmq:3.13-alpine
     container_name: unifiedcollector_rabbitmq
+    mem_limit: 512m
     hostname: rabbitmq
     init: true
     restart: unless-stopped
@@ -1239,6 +1248,7 @@ services:
   redis:
     image: redis:7-alpine
     container_name: unifiedcollector_redis
+    mem_limit: 256m
     init: true
     restart: unless-stopped
     command: redis-server --requirepass ${REDIS_PASSWORD:-localdevredis123} --appendonly yes --appendfsync everysec
@@ -1257,6 +1267,7 @@ services:
     build:
       context: ../src/bridges/whatsapp
     container_name: unifiedcollector_wa_bridge_1
+    mem_limit: 384m
     init: true
     restart: unless-stopped
     environment:
@@ -1298,6 +1309,7 @@ services:
     build:
       context: ../src/bridges/whatsapp
     container_name: unifiedcollector_wa_bridge_2
+    mem_limit: 384m
     init: true
     restart: unless-stopped
     environment:
