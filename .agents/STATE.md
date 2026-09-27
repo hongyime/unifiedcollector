@@ -1,3 +1,24 @@
+## Host memory exhaustion + shared Postgres outage — 2026-09-27 (multi-day, cross-repo)
+
+Surfaced mid-conversation while discussing collector data types/speed with the operator, then confirmed as a live P0 via 5 parallel diagnostic subagents (WhatsApp/Instagram/Beeper all showed zero throughput) plus an inbound report from the unifiedanalyzer-side agent (`unifiedcollector_postgres` unhealthy 38h+, cascading into their readiness checks and 7-11h scheduler runs).
+
+**Root cause (confirmed by direct measurement, not inference):** host RAM hit 99.7% utilization (0.05GB free / 15.79GB total) — NOT a disk-space issue (227GB free on C:, ruling out the analyzer agent's secondary hypothesis). This explained everything downstream: Postgres OOM-killed (exit 137) ~46h before discovery, Docker Desktop's own engine API returning 502/hanging on every `docker ps`/`docker exec`, and the alternating pass/fail healthcheck pattern the analyzer agent logged. `.wslconfig` history shows this exact symptom recurring since May 2026 (5 prior memory-cap adjustments, 8GB→12GB→10GB) — a known, unresolved recurring pressure point from running unifiedcollector + unifiedanalyzer + musicstream in one shared 10GB-capped WSL2 VM on a 16GB host.
+
+**Fix sequence (all non-destructive, no data loss):**
+1. `wsl --shutdown` relieved host memory (0.10%→12.7% free) but left Docker Desktop's own engine/init-control-API layer stuck for 6+ min post-restart — a known Docker Desktop bug (stranded AF_UNIX sockets from an unclean backend exit, matches `docker/for-win#15052` exactly). Waiting longer does not resolve this per community reports.
+2. Fix: kill lingering `Docker Desktop.exe`/`com.docker.*` processes, then `wsl --terminate docker-desktop` (the surgical, single-distro command — NOT the blunt `--shutdown`), then relaunch Docker Desktop cleanly. This is what actually unstuck the engine.
+3. `docker ps -a` then revealed the real state: `68f0e3d40a37_unifiedcollector_postgres` was `Exited (137) 46 hours ago` — it was never crash-looping, just sitting stopped the whole time while every OTHER container (including musicstream's own separate postgres) had auto-restarted fine. `docker start 68f0e3d40a37_unifiedcollector_postgres` brought it back.
+4. Verified via `ps aux` inside the WSL VM (bypassing a still-broken `docker exec`, which hangs on this host for reasons not yet root-caused): dozens of live `collector unifiedcollector` connections mid-INSERT/PARSE/BIND, plus `collector unifiedanalyzer` actively running SELECTs — the whole shared pipeline is confirmed live, not just "listening."
+
+**Full ranked remediation reference (for next recurrence):** `.agents/docker-desktop-stuck-engine-remediation.md` — steps 0-2 (restart layers) are safe to auto-execute; steps 7-9 (Clean/Purge data, Reset to factory defaults, uninstall/reinstall) **delete all container data** despite Docker's own UI implying otherwise (confirmed via `docker/for-mac#6758`) and must never run without explicit human sign-off.
+
+**Still open (lower priority, not blocking):**
+- `docker exec` hangs on this host even though `docker ps`/`docker start`/`docker logs` all work fine post-fix — narrower residual issue, not yet root-caused. Use `wsl -d docker-desktop -- nsenter -t <postgres_pid> -a -- <cmd>` as a working substitute if `docker exec` is needed again.
+- WhatsApp bridge-2's `HistorySync 0/166` stall (found by a diagnostic subagent this session) — unrelated pre-existing issue, separate from this incident.
+- The recurring WSL memory-cap tuning cycle itself is unaddressed — `.wslconfig`'s own notes say the durable fix is "prune containers" alongside any cap change, not just another cap bump.
+
+**Cross-repo note for the unifiedanalyzer agent (if reading this):** Postgres is confirmed healthy and actively serving both repos as of this write. Your readiness checks and scheduler runs should recover on their own now — nothing further needed from this side. Disk space on this host is fine; the OOM/RAM-pressure symptom you saw was real and host-wide, not analyzer-specific.
+
 ## Live incident recovery — 2026-09-22 (resumed from 2026-09-19 Kiro session)
 
 Resumed Kiro session `sess_9a0008ef-c462-47bb-90f2-3677fb479f5e`. Found and fixed a live multi-day production outage in addition to the originally-requested work. All changes below are deployed live and verified against the running stack; nothing here is speculative.
@@ -501,13 +522,13 @@ Current live update:
 <!-- MOLT_AUTO_START -->
 ## Auto State
 
-- Updated: 2026-09-22 21:29:53 +08:00
+- Updated: 2026-09-27 14:21:32 +08:00
 - Machine: dev-host-3.example
 - Harness: claude
 - Event: stop
 - Branch: main
-- HEAD: 84dcdef8
-- Dirty files: 25
+- HEAD: d207433c
+- Dirty files: 0
 - Resume hint: Read .agents/STATE.md, then the latest file in .agents/handoffs/ if present.
 <!-- MOLT_AUTO_END -->
 

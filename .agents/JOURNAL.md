@@ -1,4 +1,6 @@
 # UnifiedCollector Agent Journal
+- 2026-09-27: Host hit 99.7% RAM exhaustion (confirmed by direct measurement — not disk space, which was fine), OOM-killing the shared unifiedcollector_postgres container 46h before discovery; it never restarted (sat `Exited (137)`) while every other container on the host auto-recovered fine, and every `docker ps`/`docker exec` hang everyone hit chasing this — including 3 parallel diagnostic subagents and an inbound report from the unifiedanalyzer-side agent — was Docker Desktop's own engine proxy being stuck, not the database. Invariant learned: after any host-level WSL2 disruption, `wsl --shutdown` can leave Docker Desktop's engine/init-control-API wedged (stranded AF_UNIX sockets, matches docker/for-win#15052) even after the VM itself comes back healthy — `wsl --terminate <distro>` + a clean Docker Desktop relaunch is the fix, not more waiting. Second invariant: `docker ps` (running-only) after a Docker Desktop recovery is not sufficient proof a container came back — always check `docker ps -a` explicitly for `Exited` containers that `restart: unless-stopped` failed to revive silently. Full ranked remediation checklist (including which Docker Desktop Troubleshoot menu options silently delete volumes despite their UI text) written to `.agents/docker-desktop-stuck-engine-remediation.md` for next time.
+
 - 2026-09-22: Found and fixed a 3-day live production outage while resuming Kiro's session: a dangling `restore` import (leftover from the backup-nuke commit f6853c9f) broke `python -m src.main` for every worker container, crash-looping website/beeper/telegram/exposure/search/instagram_dm (crash_count 650-677 each). Root cause: tests import modules directly and never exercised the real `src.main` CLI entrypoint, so the break was invisible to CI. Invariant: any change to `src/cli/commands/__init__.py`'s exported names must be paired with a test that calls the real `register_all(subparsers)`, not just direct module imports — added `tests/cli/test_cli_entrypoint_imports.py` to close this gap. Same commit left two more orphaned test files (`test_restore_drill.py`, `test_db_backup.py`) importing a deleted `src.backup` package — deleted both after confirming via `pytest --collect-only` that they'd errored on every CI run since. Separately found and fixed a misleading Telegram digest bug in `src/scheduler/status_builder.py`: ranking browser_ingest_events by raw observed_count let heartbeat rows (observed>0, stored=0 by design) crowd out real content rows, making healthy platforms falsely look like they were losing data. Also self-caught and fixed a SyntaxError I introduced mid-session (SQL-comment syntax placed outside a Python string) via a full-repo collection sweep before it reached a live container.
 
 - 2026-09-19: Recovery diagnosis reproduced four failing regressions: browser content changed the displayed age after liveness status had already been classified, while the watchdog treated unknown freshness as either a stall or recovery depending on heartbeat presence. Invariant: classify capture from the newest affirmative content evidence; unknown observations must neither manufacture a stall nor clear prior health. Preserve explicit source failures and genuine stale-content/zero-store warnings. No root SPEC.md exists; recurrence guards live in focused tests and this journal.
@@ -126,8 +128,16 @@
 - 2026-09-19 21:54:47 +08:00 [dev-host-3.example/claude/stop] branch=main head=84dcdef8 dirty=19
 - 2026-09-22 11:53:24 +08:00 [dev-host-3.example/claude/stop] branch=main head=84dcdef8 dirty=25
 - 2026-09-22 21:29:53 +08:00 [dev-host-3.example/claude/stop] branch=main head=84dcdef8 dirty=25
-- 2026-09-22 21:29:53 +08:00 [dev-host-3.example/claude/stop] branch=main head=84dcdef8 dirty=25
-
+- 2026-09-23 23:40:02 +08:00 [dev-host-3.example/claude/stop] branch=main head=d207433c dirty=0
+- 2026-09-24 00:03:18 +08:00 [dev-host-3.example/claude/stop] branch=main head=d207433c dirty=0
+- 2026-09-24 17:43:44 +08:00 [dev-host-3.example/claude/stop] branch=main head=d207433c dirty=0
+- 2026-09-25 14:12:01 +08:00 [dev-host-3.example/claude/stop] branch=main head=d207433c dirty=0
+- 2026-09-25 21:28:09 +08:00 [dev-host-3.example/claude/stop] branch=main head=d207433c dirty=0
+- 2026-09-25 21:53:58 +08:00 [dev-host-3.example/claude/stop] branch=main head=d207433c dirty=0
+- 2026-09-25 22:25:52 +08:00 [dev-host-3.example/claude/stop] branch=main head=d207433c dirty=0
+- 2026-09-27 13:40:00 +08:00 [dev-host-3.example/claude/stop] branch=main head=d207433c dirty=0
+- 2026-09-27 14:09:52 +08:00 [dev-host-3.example/claude/stop] branch=main head=d207433c dirty=0
+- 2026-09-27 14:21:32 +08:00 [dev-host-3.example/claude/stop] branch=main head=d207433c dirty=0
 
 Machine-specific values in this document use privacy placeholders.
 
